@@ -1,0 +1,48 @@
+#usda 1.0
+(
+    doc = "batchplan USD scene fixture: static colliders with unauthored sizes, Y-up, centimeters."
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "scene"
+{
+    def Cube "floor" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        double3 xformOp:translate = (0, -1, 0)
+        float3 xformOp:scale = (100, 1, 100)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Sphere "ball" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        double3 xformOp:translate = (50, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cylinder "post" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        uniform token axis = "Y"
+        double3 xformOp:translate = (0, 1, 50)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Capsule "pill" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        double3 xformOp:translate = (-50, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "visual_only"
+    {
+        double radius = 30
+    }
+}

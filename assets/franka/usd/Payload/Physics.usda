@@ -1,0 +1,450 @@
+#usda 1.0
+(
+    "Converted from batchplan assets/franka/franka_panda.urdf"
+    customLayerData = {
+        string creator = "URDF USD Converter v0.3.3"
+    }
+    defaultPrim = "panda"
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "panda"
+{
+    def Scope "Physics"
+    {
+        def PhysicsFixedJoint "panda_fixed"
+        {
+            rel physics:body0 = </panda>
+            rel physics:body1 = </panda/Geometry/base_link/panda_link0>
+            point3f physics:localPos0 = (0, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+        }
+
+        def PhysicsRevoluteJoint "panda_joint1" (
+            prepend apiSchemas = ["NewtonJointAPI"]
+        )
+        {
+            float newton:damping = 0.17453292
+            float newton:velocityLimit = 124.61832
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </panda/Geometry/base_link/panda_link0>
+            rel physics:body1 = </panda/Geometry/base_link/panda_link0/panda_link1>
+            point3f physics:localPos0 = (0, 0, 0.333)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            float physics:lowerLimit = -166.00307
+            float physics:upperLimit = 166.00307
+            custom float urdf:limit:effort = 87
+            custom float urdf:safety_controller:k_position = 100
+            custom float urdf:safety_controller:k_velocity = 40
+            custom float urdf:safety_controller:soft_lower_limit = -2.8973
+            custom float urdf:safety_controller:soft_upper_limit = 2.8973
+        }
+
+        def PhysicsRevoluteJoint "panda_joint2" (
+            prepend apiSchemas = ["NewtonJointAPI"]
+        )
+        {
+            float newton:damping = 0.17453292
+            float newton:velocityLimit = 124.61832
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </panda/Geometry/base_link/panda_link0/panda_link1>
+            rel physics:body1 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2>
+            point3f physics:localPos0 = (0, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (-0.70710677, 0.70710677, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            float physics:lowerLimit = -101.001
+            float physics:upperLimit = 101.001
+            custom float urdf:limit:effort = 87
+            custom float urdf:safety_controller:k_position = 100
+            custom float urdf:safety_controller:k_velocity = 40
+            custom float urdf:safety_controller:soft_lower_limit = -1.7628
+            custom float urdf:safety_controller:soft_upper_limit = 1.7628
+        }
+
+        def PhysicsRevoluteJoint "panda_joint3" (
+            prepend apiSchemas = ["NewtonJointAPI"]
+        )
+        {
+            float newton:damping = 0.17453292
+            float newton:velocityLimit = 124.61832
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2>
+            rel physics:body1 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3>
+            point3f physics:localPos0 = (0, -0.316, 1.6543612e-24)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (-0.70710677, -0.70710677, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            float physics:lowerLimit = -166.00307
+            float physics:upperLimit = 166.00307
+            custom float urdf:limit:effort = 87
+            custom float urdf:safety_controller:k_position = 100
+            custom float urdf:safety_controller:k_velocity = 40
+            custom float urdf:safety_controller:soft_lower_limit = -2.8973
+            custom float urdf:safety_controller:soft_upper_limit = 2.8973
+        }
+
+        def PhysicsRevoluteJoint "panda_joint4" (
+            prepend apiSchemas = ["NewtonJointAPI"]
+        )
+        {
+            float newton:damping = 0.17453292
+            float newton:velocityLimit = 124.61832
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3>
+            rel physics:body1 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4>
+            point3f physics:localPos0 = (0.0825, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (0.70710677, 0.70710677, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            float physics:lowerLimit = -176.00117
+            float physics:upperLimit = -3.9992454
+            custom float urdf:limit:effort = 87
+            custom float urdf:safety_controller:k_position = 100
+            custom float urdf:safety_controller:k_velocity = 40
+            custom float urdf:safety_controller:soft_lower_limit = -3.0718
+            custom float urdf:safety_controller:soft_upper_limit = -0.0698
+        }
+
+        def PhysicsRevoluteJoint "panda_joint5" (
+            prepend apiSchemas = ["NewtonJointAPI"]
+        )
+        {
+            float newton:damping = 0.17453292
+            float newton:velocityLimit = 149.54198
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4>
+            rel physics:body1 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4/panda_link5>
+            point3f physics:localPos0 = (-0.0825, 0.384, 6.617445e-24)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (0.70710677, -0.70710677, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            float physics:lowerLimit = -166.00307
+            float physics:upperLimit = 166.00307
+            custom float urdf:limit:effort = 12
+            custom float urdf:safety_controller:k_position = 100
+            custom float urdf:safety_controller:k_velocity = 40
+            custom float urdf:safety_controller:soft_lower_limit = -2.8973
+            custom float urdf:safety_controller:soft_upper_limit = 2.8973
+        }
+
+        def PhysicsRevoluteJoint "panda_joint6" (
+            prepend apiSchemas = ["NewtonJointAPI"]
+        )
+        {
+            float newton:damping = 0.17453292
+            float newton:velocityLimit = 149.54198
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4/panda_link5>
+            rel physics:body1 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4/panda_link5/panda_link6>
+            point3f physics:localPos0 = (0, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (0.70710677, 0.70710677, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            float physics:lowerLimit = -1.0026761
+            float physics:upperLimit = 215.00241
+            custom float urdf:limit:effort = 12
+            custom float urdf:safety_controller:k_position = 100
+            custom float urdf:safety_controller:k_velocity = 40
+            custom float urdf:safety_controller:soft_lower_limit = -0.0175
+            custom float urdf:safety_controller:soft_upper_limit = 3.7525
+        }
+
+        def PhysicsRevoluteJoint "panda_joint7" (
+            prepend apiSchemas = ["NewtonJointAPI"]
+        )
+        {
+            float newton:damping = 0.17453292
+            float newton:velocityLimit = 149.54198
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4/panda_link5/panda_link6>
+            rel physics:body1 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4/panda_link5/panda_link6/panda_link7>
+            point3f physics:localPos0 = (0.088, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (0.70710677, 0.70710677, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            float physics:lowerLimit = -166.00307
+            float physics:upperLimit = 166.00307
+            custom float urdf:limit:effort = 12
+            custom float urdf:safety_controller:k_position = 100
+            custom float urdf:safety_controller:k_velocity = 40
+            custom float urdf:safety_controller:soft_lower_limit = -2.8973
+            custom float urdf:safety_controller:soft_upper_limit = 2.8973
+        }
+
+        def PhysicsFixedJoint "panda_hand_joint"
+        {
+            rel physics:body0 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4/panda_link5/panda_link6/panda_link7>
+            rel physics:body1 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4/panda_link5/panda_link6/panda_link7/panda_link8/panda_hand>
+            point3f physics:localPos0 = (0, 1.323489e-23, 0.107)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (0.9238795, -4.9638083e-17, 2.3432612e-17, -0.38268352)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+        }
+
+        def PhysicsPrismaticJoint "panda_finger_joint1" (
+            prepend apiSchemas = ["NewtonJointAPI"]
+        )
+        {
+            float newton:damping = 10
+            float newton:velocityLimit = 0.2
+            uniform token physics:axis = "Y"
+            rel physics:body0 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4/panda_link5/panda_link6/panda_link7/panda_link8/panda_hand>
+            rel physics:body1 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4/panda_link5/panda_link6/panda_link7/panda_link8/panda_hand/panda_leftfinger>
+            point3f physics:localPos0 = (0, 6.938894e-18, 0.0584)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 0.04
+            custom float urdf:limit:effort = 20
+        }
+
+        def PhysicsPrismaticJoint "panda_finger_joint2" (
+            prepend apiSchemas = ["NewtonJointAPI"]
+        )
+        {
+            float newton:damping = 10
+            float newton:velocityLimit = 0.2
+            uniform token physics:axis = "Y"
+            rel physics:body0 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4/panda_link5/panda_link6/panda_link7/panda_link8/panda_hand>
+            rel physics:body1 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4/panda_link5/panda_link6/panda_link7/panda_link8/panda_hand/panda_rightfinger>
+            point3f physics:localPos0 = (0, 6.938894e-18, 0.0584)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (0, -1, 0, 0)
+            quatf physics:localRot1 = (0, -1, 0, 0)
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 0.04
+            custom float urdf:limit:effort = 20
+        }
+
+        def PhysicsFixedJoint "right_gripper"
+        {
+            rel physics:body0 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4/panda_link5/panda_link6/panda_link7>
+            rel physics:body1 = </panda/Geometry/base_link/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4/panda_link5/panda_link6/panda_link7/right_gripper>
+            point3f physics:localPos0 = (0, 0, 0.207)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (-0.38268343, 8.4498865e-18, 5.6571325e-17, -0.92387956)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+        }
+    }
+
+    over "Geometry"
+    {
+        over "base_link"
+        {
+            over "panda_link0" (
+                prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsArticulationRootAPI", "NewtonArticulationRootAPI", "PhysicsMassAPI", "NewtonMassAPI"]
+            )
+            {
+                double[] newton:inertia = [0, 0.0115, 0.0085, 0, 0.002, 0]
+                point3f physics:centerOfMass = (-0.0172, 0.0004, 0.0745)
+                float3 physics:diagonalInertia = (-0.00044707354, 0.0089470735, 0.0115)
+                float physics:mass = 2.3966
+                quatf physics:principalAxes = (0.70283616, 0.70283616, 0.07759732, -0.07759732)
+
+                over "link0_1" (
+                    prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+                )
+                {
+                    uniform token physics:approximation = "convexHull"
+                }
+
+                over "panda_link1" (
+                    prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "NewtonMassAPI"]
+                )
+                {
+                    double[] newton:inertia = [0.0156, 0.01439, 0.005, 0, 0, -0.0024]
+                    point3f physics:centerOfMass = (0.00033, -0.02204, -0.04762)
+                    float3 physics:diagonalInertia = (0.0044221426, 0.014967857, 0.0156)
+                    float physics:mass = 2.797
+                    quatf physics:principalAxes = (-0.7021781, 0.08334222, 0.7021781, -0.08334222)
+
+                    over "link1_1" (
+                        prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+                    )
+                    {
+                        uniform token physics:approximation = "convexHull"
+                    }
+
+                    over "panda_link2" (
+                        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "NewtonMassAPI"]
+                    )
+                    {
+                        double[] newton:inertia = [0.0166, 0.0046, 0.015, 0, 0, 0.0035]
+                        point3f physics:centerOfMass = (0.00038, -0.09211, 0.01908)
+                        float3 physics:diagonalInertia = (0.0035318264, 0.016068174, 0.0166)
+                        float physics:mass = 2.542
+                        quatf physics:principalAxes = (0.56830907, 0.42074314, 0.56830907, 0.42074314)
+
+                        over "link2_1" (
+                            prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+                        )
+                        {
+                            uniform token physics:approximation = "convexHull"
+                        }
+
+                        over "panda_link3" (
+                            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "NewtonMassAPI"]
+                        )
+                        {
+                            double[] newton:inertia = [0.006, 0.0086, 0.0065, 0.009, 0.003, 0.009]
+                            point3f physics:centerOfMass = (0.05152, 0.01696, -0.02971)
+                            float3 physics:diagonalInertia = (-0.003811384, 0.0032525724, 0.021658812)
+                            float physics:mass = 2.2513
+                            quatf physics:principalAxes = (0.49440837, 0.008185287, 0.4932744, 0.71566314)
+
+                            over "link3_1" (
+                                prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+                            )
+                            {
+                                uniform token physics:approximation = "convexHull"
+                            }
+
+                            over "panda_link4" (
+                                prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "NewtonMassAPI"]
+                            )
+                            {
+                                double[] newton:inertia = [0.0156, 0.01439, 0.005, 0, 0, -0.0024]
+                                point3f physics:centerOfMass = (-0.05113, 0.05825, 0.01698)
+                                float3 physics:diagonalInertia = (0.0044221426, 0.014967857, 0.0156)
+                                float physics:mass = 2.2037
+                                quatf physics:principalAxes = (-0.7021781, 0.08334222, 0.7021781, -0.08334222)
+
+                                over "link4_1" (
+                                    prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+                                )
+                                {
+                                    uniform token physics:approximation = "convexHull"
+                                }
+
+                                over "panda_link5" (
+                                    prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "NewtonMassAPI"]
+                                )
+                                {
+                                    double[] newton:inertia = [0.02297014781, 0.02095060919, 0.00430606551, 0, 0, 0.00382345782]
+                                    point3f physics:centerOfMass = (-0.00005, 0.0373, -0.0928)
+                                    float3 physics:diagonalInertia = (0.0034697873, 0.021786887, 0.022970147)
+                                    float physics:mass = 2.2855
+                                    quatf physics:principalAxes = (-0.70301235, -0.07598434, 0.70301235, 0.07598434)
+
+                                    over "link5_1" (
+                                        prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+                                    )
+                                    {
+                                        uniform token physics:approximation = "convexHull"
+                                    }
+
+                                    over "panda_link6" (
+                                        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "NewtonMassAPI"]
+                                    )
+                                    {
+                                        double[] newton:inertia = [0.00087964522, 0.00277796968, 0.00286701969, -0.00021487814, -0.00011911662, 0.00001274322]
+                                        point3f physics:centerOfMass = (0.06572, -0.00371, 0.00153)
+                                        float3 physics:diagonalInertia = (0.00084884645, 0.0027936504, 0.002882138)
+                                        float physics:mass = 1.353
+                                        quatf physics:principalAxes = (0.98618406, -0.15347978, -0.037130516, 0.05006223)
+
+                                        over "link6_1" (
+                                            prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+                                        )
+                                        {
+                                            uniform token physics:approximation = "convexHull"
+                                        }
+
+                                        over "panda_link7" (
+                                            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "NewtonMassAPI"]
+                                        )
+                                        {
+                                            double[] newton:inertia = [0.00019541063, 0.00019210361, 0.00017936256, 0.00000165231, 0.00000148826, -0.00000131132]
+                                            point3f physics:centerOfMass = (0.00089, -0.00044, 0.05491)
+                                            float3 physics:diagonalInertia = (0.00017906114, 0.00019167361, 0.00019614205)
+                                            float physics:mass = 0.35973
+                                            quatf physics:principalAxes = (-0.66512084, -0.083383545, 0.72119, -0.17477538)
+
+                                            over "link7_1" (
+                                                prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+                                            )
+                                            {
+                                                uniform token physics:approximation = "convexHull"
+                                            }
+
+                                            over "panda_link8"
+                                            {
+                                                over "panda_hand" (
+                                                    prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "NewtonMassAPI"]
+                                                )
+                                                {
+                                                    double[] newton:inertia = [0.00019541063, 0.00019210361, 0.00017936256, 0.00000165231, 0.00000148826, -0.00000131132]
+                                                    point3f physics:centerOfMass = (0.00089, 0, 0.05)
+                                                    float3 physics:diagonalInertia = (0.00017906114, 0.00019167361, 0.00019614205)
+                                                    float physics:mass = 1
+                                                    quatf physics:principalAxes = (-0.66512084, -0.083383545, 0.72119, -0.17477538)
+
+                                                    over "hand_1" (
+                                                        prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+                                                    )
+                                                    {
+                                                        uniform token physics:approximation = "convexHull"
+                                                    }
+
+                                                    over "panda_leftfinger" (
+                                                        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+                                                    )
+                                                    {
+                                                        over "finger_1" (
+                                                            prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+                                                        )
+                                                        {
+                                                            uniform token physics:approximation = "convexHull"
+                                                        }
+                                                    }
+
+                                                    over "panda_rightfinger" (
+                                                        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+                                                    )
+                                                    {
+                                                        over "finger_1" (
+                                                            prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+                                                        )
+                                                        {
+                                                            uniform token physics:approximation = "convexHull"
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            over "right_gripper" (
+                                                prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "NewtonMassAPI"]
+                                            )
+                                            {
+                                                double[] newton:inertia = [0.0001, 0.0001, 0.0001, 0, 0, 0]
+                                                point3f physics:centerOfMass = (0, 0, 0)
+                                                float3 physics:diagonalInertia = (0.0001, 0.0001, 0.0001)
+                                                float physics:mass = 0.01
+                                                quatf physics:principalAxes = (1, 0, 0, 0)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+def PhysicsScene "PhysicsScene" (
+    prepend apiSchemas = ["NewtonSceneAPI"]
+)
+{
+}
+

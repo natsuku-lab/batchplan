@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets
+      - run: cargo clippy --all-targets --features lerobot,usd
+      - run: cargo clippy --all-targets --no-default-features
+      - run: cargo doc --no-deps --features lerobot,usd
+
+  # The Rerun demos, a crate of their own.
+  demos:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: demos
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: demos
+      - run: cargo fmt --check
+      - run: cargo clippy --release --all-targets
+
+  # The WGSL kernels run on Mesa's llvmpipe, a Vulkan driver on the CPU, so the GPU tests run too.
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release --features lerobot,usd
+        env:
+          BATCHPLAN_REQUIRE_GPU: 1
+      - run: cargo test --release --no-default-features
+
+  # Robot computers without a usable GPU: the CPU-only build.
+  aarch64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup target add aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --lib --target aarch64-unknown-linux-gnu --no-default-features
+
+  build:
+    strategy:
+      matrix:
+        os: [macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --all-targets --features lerobot,usd

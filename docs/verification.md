@@ -1,0 +1,103 @@
+# Verification
+
+What the test suite pins down, so you know what to rely on. Every new test was first shown to fail on code with the bug it guards against planted in it ("planting ... fails a test" below).
+
+`BATCHPLAN_REQUIRE_GPU=1 cargo test --release` runs 127 tests, counting the code in these guides, which compiles as doctests. `--features lerobot` adds 5 export tests and the README's and training-data guide's code, and `--features usd` adds 7 OpenUSD tests; without default features (CPU only), 119 tests run. All configurations pass on a Ryzen AI Max+ 395 with a Radeon 8060S (Vulkan) and on an M4 Pro (Metal), and CI runs them on Linux with the kernels on Mesa's llvmpipe. An earlier version of the suite (14 tests) also passed on an NVIDIA T4 (Vulkan).
+- **FK:** URDF forward kinematics matches Franka's published DH parameters to 1e-5.
+- **Collision gradients:** analytic gradients match finite differences.
+- **Trajectory optimization:**
+  - The first L-BFGS step has no history, so it is steepest descent. Its direction, scaled to its largest entry, matches finite differences of the smoothness cost and of the full cost on every device.
+  - GPU and CPU step directions agree to 3e-5 at the first step and to 2e-4 at the fourth, which comes from the two-loop recursion over three remembered steps. Both devices lower the full trajectory cost of 240 paths alike: from 13,161 to 972 and 974 on the M4 Pro, from 13,949 to 961 and 962 on the Radeon.
+  - The two-loop recursion equals an explicitly built BFGS inverse Hessian, and a line search that finds nothing cheaper resets the history.
+  - Planting a swapped weight in the GPU parameter packing, steepest ascent, an ignored step size, a reversed recursion loop, a stuck history ring or a wrong scaling fails a test.
+- **GPU vs CPU, 20,000 configurations:** clearances agree to 3e-7 m, and gradients agree to 3e-4 relative.
+- **GPU vs CPU IK:** the two agree on all 2,048 seeds.
+- **GPU plans under an independent check:** every GPU plan reported valid was re-checked on the CPU at 4× denser interpolation. None penetrates; the worst clearance is +0.1 mm.
+- **Every device behaves the same:**
+  - Malformed batches (wrong array lengths, a world index past the end, worlds uploaded to another device) are an `Err` on both CPU and GPU.
+  - Obstacle-free worlds plan on both.
+  - Plans keep the worlds of their problems when one world holds several targets.
+- **CPU IK and retiming:** IK solves targets taken from collision-free configurations; retiming respects velocity limits and keeps the endpoints.
+- **SIMD collision checks:**
+  - Eight configurations at a time in lanes, and the scalar twin of the GPU kernels, give the same world and self clearances to 2e-5 m. This holds over 3,000 random configurations against every obstacle kind, on the Panda (fingers locked or sliding), the Panda holding a box, MuJoCo Menagerie's 2F-85 (quartic mimic joints) and the UR5e. Runs of worlds cross the groups of eight.
+  - Their yes-or-no check (`keeps`), at the CPU's best SIMD level and the baseline, agrees with the scalar twin's exact clearances away from the boundary, keeping a 1 cm margin.
+  - Planting ignored link-bound gating, a flipped sine, a dropped quartic term, a dropped self buffer, an ignored prismatic offset, a cylinder's missing corner, a flipped planar rotation for upright boxes, a box's surrounding sphere of zero radius or a self-collision sphere of zero reach fails the test.
+- **Edge checks:**
+  - On every device, 400 queries over random edges answer as checking every state one by one does, and CPU and GPU answers are identical. Queries ask how many edges from the first are free, or which is the first free one.
+  - An edge 5–10 mm from an obstacle is free, fails to keep a 1 cm clearance, and keeps it where its ends are near the path's ends.
+  - Planting a skipped pass of the rake, skipped self-collision, link bounds without their radius, an inverted answer, an ignored clearance or an ignored ramp fails a test.
+- **RRT-Connect and shortcutting:**
+  - Every edge RRT-Connect returns is collision-free under a CPU check four times denser, on both devices. Paths start at the start and end at a goal, and only straight or bent lines (at most four waypoints) have edges longer than the range.
+  - A straight line a small ball blocks halfway is bent around it: at most four waypoints and within 10% of the straight length. Planting a search that skips bending fails the test.
+  - The k-d tree finds exactly the node and distance a scan of all nodes finds, the lowest node among equals, as a tree grows to 3,000 nodes; planting pruning that never searches the far side, or a wrong node per lane, fails the test.
+  - Splines pass through the path's ends and every pinned waypoint, run along the path when every waypoint is pinned, and spread their control points evenly along it when none is. Planting ignored pins or an uneven spread fails the test.
+  - A blended pin draws the curve in around its corner without stopping it, closer at each level, and only an exact pin stops it there. Splines are checked at samples no farther apart than the edge resolution, however long a span, and at least as densely as before where spans are short; planting a fixed count per span fails the test. After a change, a check starts no later than the first sample that changed and runs to the end; planting a start at the changed control point's own span, rather than the first span it reaches, fails the test.
+  - Across 512 pick-and-place tasks with a wall, posts, an arch or a cluster of boxes across the carry, the arm never touches the scene, and at most 20 carries stop on their way (2 on an M4 Pro, at corners no blend clears). Planting splines that keep every stop the fitting pinned (43) fails the test.
+  - Shortcutting never lengthens a path or moves its ends, and every new edge passes the same denser check.
+  - On a detour over a ball, with the wrist turned 1.5 rad out and back, straightening leaves the wrist with no turn (0.84 rad without it) and the path clear.
+  - Fixed seeds give identical paths; changing the seed changes them.
+  - `plan` solves every UR5e problem RRT-Connect can reach (at least 20 of 24 far reaches), its timed plans clear the CPU check, and the CPU and the GPU plan identically.
+  - Continuous joints turn the short way, the long way round only when the short way is blocked, and RRT-Connect finds the way through π.
+- **Exporters:** the `.npy` export round-trips trajectories, padding, labels, grippers, carried poses and tasks, and the LeRobot export writes consistent v3.0 metadata. A 1,500-episode export with 1 MB files spreads frames and episode metadata over several files, each episode row naming its own file and the file holding its frames, and its statistics match the frames. Tasks are indexed per frame, the gripper is the last state dimension, and a carried box moves in the environment state frame by frame. Both refuse to overwrite an existing dataset. Planting rows that all claim the first metadata file, episodes weighted equally in the statistics, a carried box left in place, one task index, or an unpadded gripper fails a test.
+- **Several hands:** two UR5e arms assemble into one 12-joint robot with two hands on disjoint joints, each hand where the arm alone puts it moved to its base. IK toward both hands' targets at once solves at least 28 of 32 problems on every device, each hand within tolerance and the arms clear of each other. With one hand targeted and the other not, every seed of every problem, successful or not, leaves the other arm exactly where the seed has it, on every device. Planting a collision push on the held joints (CPU), a GPU that marks every hand's joints as moving, seeds drawn for held joints, or a step that solves only the first hand fails a test.
+  - With the right arm held, RRT-Connect carries the left hand over a wall (most paths needing waypoints) and every waypoint keeps the right arm where it starts; plans with two optimized seeds keep it in every control point of every valid seed and, up to rounding, in every timed sample, on every device. No direction a bend can take moves a held joint, and no goal variant a turn away turns one. Planting RRT samples drawn for held joints, optimized seeds left as optimized, bends along held joints, or goal variants that turn them fails a test.
+- **Handovers:** on each device, at least 6 of 8 handovers between two Pandas succeed, the giver reaching past a post. Each gripper closes once and opens once, giver then taker; the block rides without slipping in the giver's hand and then the taker's and ends within 3 mm of its place; the right arm waits until the left has the block and the left waits once it is set down; and no arm touches the scene or the other. Planting the block left with the giver after the handover fails the test. Exported, two hands lay the state out arm by arm with each arm's gripper named after it, `meta/batchplan.json` describes the parts and hands, and `gripper.npy` holds both grippers; planting the state in joint order, or every gripper read from the first hand, fails the test.
+- **Pick-and-place:** on each device, 6 of 6 tabletop tasks succeed. The gripper closes once and moves gradually, the box is set down within 3 mm of the place pose, held at the grasp point without slipping, closed on across its narrower side, the arm never touches the scene, the lifted box clears it, and velocities agree with positions. Seeded IK stays on the branch it starts from. Planting a grasp across the wider side, unreversed velocities, a box left behind, a grasp above the box, a gripper that never reopens, lowering to the wrong pose, or a seed that IK ignores fails a test. Over 64 tasks, the joints travel under 13.5 rad in the median episode (11.3 on an M4 Pro); taking the most-clearance IK solution above the box instead (15.8) fails it.
+- **Obstacle distances:** every obstacle kind returns unit gradients that match finite differences, stepping back along the gradient lands on the surface, and cylinder and capsule distances match closed forms. The GPU agrees with the CPU for each kind.
+- **Distance grids:**
+  - Gradients match finite differences inside the grid and beyond its box, away from cell faces; so do collision gradients through a grid.
+  - The GPU agrees with the CPU to 3e-7 m (Metal and RADV), including two grids in one world, one of them shared with another world and stored after a grid with an odd number of points.
+  - Mesh grids never read farther than the true distance and at most a voxel diagonal nearer. Point grids never read beyond their solid voxels. Open and non-manifold meshes are refused.
+  - On every device: depth images from an 8×8 time-of-flight array and from a 640×480 camera both reproduce the table under them, follow both occlusion rules, and leave unobserved space free. A fused map keeps the table, holds a ball seen through twice and clears it the third time, leaves space never observed to the rule given, and takes no hits from readings beyond its edge. Masked out of a camera's image, the Panda's spheres read free in grids and maps alike while a box in front of the arm stays solid. What only the arm hides is solid under `Occlusion::Occupied` and free under `OccupiedExceptRobotShadow`, in one image and in a map, while what the box hides stays solid; the table hides what is below it under both. Planting a shadow treated as hidden in images, shadowed voxels treated as never observed in maps, or a GPU map that never marks shadow fails a test.
+  - The GPU builds exactly the CPU's grids from point clouds and maps (under every occlusion rule), and classifies a 640×480 image's voxels and fuses it into a map with at most 0.05% of voxels apart. The CPU's integer transform reproduces the earlier floating-point one bit for bit.
+  - MJCF scene meshes collide as their convex hulls; USD ones as `physics:approximation` says. Exports write each grid once, and LeRobot's environment state describes a grid by its box.
+  - Planting a wrong grid offset or half-float order in the kernel, a wrong gradient axis, a missing conservative offset, a depth builder that only marks pixel points, ignored hull semantics, a map that never clears, readings clamped onto a map's edge, or a mask that ignores the arm or drops what is in front of it fails a test. So do a wrongly rounded parabola intersection or a late switch between parabolas in either device's transform, and, in the GPU's kernels, hits or classification that ignore the robot, misses that never clear, a half-pixel projection error, surfaces thinner than a voxel, free hidden space, and a log-odds byte written to the wrong place.
+- **Trajectories:**
+  - Planned trajectories stay within velocity, acceleration and jerk limits along their whole length, reach the binding limit, and start and end exactly at rest.
+  - The analytic velocity and acceleration match finite differences.
+  - `at` makes no allocations. `check` refuses a NaN, running too fast, a jerk spike, a moving start, leaving a joint range and the wrong joint count. It measures a joint's range on the curve itself, span by span, so a moving start's first control point, which lies behind the start, does not count.
+  - Stopped 20% and 50% of the way through planned full-speed reaches, 20 or more of 24 stops start in exactly the state they leave, keep every limit, stay on the path, come to rest, and take less time than going on; the rest find the path ends first. A trajectory at rest stops where it is. Planting a wrong sign in the stop's start encoding fails the test.
+  - A robot loaded with its velocity, acceleration and jerk limits scaled by 1/2, 1/4 and 1/8 has exactly those limits, and times every planned path at twice the duration within them; a scale outside (0, 1] fails to load. Ignoring the jerk scale fails the test.
+  - Reaches replanned partway through, at full speed (a joint above 1.5 rad/s), to their own goals: at least three in five succeed on each device (18 of 24 on an M4 Pro, 17 on CI's x86-64), and each times from exactly the state it starts in. Planting the old start knot interval, sized for a start at rest, drops it to none.
+  - The trajectory gradient (smoothness plus collision sampled along the spline) matches finite differences of the full cost on every device. Planting a wrong basis weight in either device's gather, a wrong jerk exponent in the timing, or an allocation in `at` fails a test.
+- **Robots from URDF:**
+  - The 2F-85's link poses match an independent composition of its URDF with mimic joints applied. Its collision gradient matches finite differences, and the GPU agrees with the CPU. Planting a dropped multiplier in the CPU kinematics, the CPU gradient or the GPU gradient fails a test.
+  - Mimic limits intersect into the leader's range and velocity.
+  - Fitted spheres contain independently sampled link surfaces, and fitting is deterministic.
+  - Collision-model files round-trip, SRDF pairs stop being checked, and `package://` paths resolve.
+  - The UR5e, SO-101 and Panda (with fitted spheres) each plan 12 of 12 tabletop motions on the CPU and the GPU.
+  - A Panda with fitted spheres, whose base spheres reach into the table it stands on, is collision-free on it and plans on every device, while a pin through its elbow still collides. Planting the base back into either device's world check fails the test.
+- **Mesh clearances:**
+  - Distances to every obstacle kind match closed forms to 0.1 mm, follow the joints, stay exact among several obstacles in any order, and read zero across a surface. Self clearance between links matches too, and a concave link is measured on its surface, not its hull.
+  - Against a grid of a cube, clearance stays within the grid's documented slack. Held objects are checked as part of the robot, and the Panda's meshes load and read clear of its own table.
+  - Fitted spheres never read farther than the meshes over 300 random configurations.
+  - Planting cylinders along the wrong axis, unturned link poses, grid points left in the link frame, dropped self pairs, vertex-only grid checks, dropped held shapes, an unsorted search, a search that stops at the hulls, or hulls in place of meshes fails a test.
+- **MJCF:**
+  - Menagerie's Panda matches our URDF Panda link for link to 1e-5.
+  - Menagerie's UR5e matches the UR5e URDF up to constant per-link frame offsets (within 3 mm; Menagerie rounds a few dimensions), and plans like the others.
+  - A handwritten model pins MuJoCo's conventions against hand-composed transforms: degrees by default, intrinsic Euler sequences, `axisangle`, `xyaxes`, `zaxis`, joint anchors, several joints per body, includes, default classes and `fromto`. Planting radians as the default, extrinsic Euler composition, ignored anchors, or static bodies in the robot fails a test.
+- **OpenUSD:**
+  - Handwritten fixtures pin UsdPhysics conventions against hand-composed transforms:
+    - Y-up centimeters, a payload and a variant fallback;
+    - flat and nested bodies, `localPos1` ≠ 0, a joint authored child to parent;
+    - both mimic schemas, an instanced collider, and unauthored primitive sizes.
+  - Planting a wrong up-axis rotation, ignored units, an unflipped swapped joint, an ignored `localPos1`, mimic offsets left in degrees, a wrong PhysX gearing sign, skipped instance proxies or a wrong default cube size fails a test.
+  - newton-assets' UR5e matches the Menagerie MJCF it was converted from exactly. Their 2F-85 mimics its driver and fits spheres to mesh colliders read from a binary layer.
+  - The Franka converted from our URDF matches it to 1e-5, with identical self-collision results under the same collision model.
+  - `scripts/validate_usd.py` rebuilds every fixture's kinematics with Pixar's `usd-core` and agrees with batchplan to within 6e-6.
+- **Adapter errors:** adapters below the required limits are rejected with the reason, and an unknown adapter name is a clear error.
+- **Embedding:**
+  - A one-thread CPU device starts exactly one thread and no others while it plans; planting one use of rayon's global pool fails the test.
+  - A 1 ms time budget returns within one more chunk of work than the budget, on the CPU and the GPU, and searches stop at the budget too. Without a budget, two runs give identical paths. Planting a backend or a search that ignores the deadline fails a test.
+  - Errors have the documented kinds: a malformed batch is `Input`, an unknown adapter `Gpu`, a bad file `Load` with its path, an unsafe trajectory `Unsafe`.
+  - An attached box moves with the hand, collides with an obstacle between the fingers that the bare hand misses, and collides with the fingers unless they are touch links. Collision gradients through it match finite differences. Detaching restores the robot exactly. Devices made with `with_robot` plan around the box in worlds uploaded to the original device, and see it exactly as a device made for the held robot does, on the CPU and the GPU. Attaching outside a rayon pool leaves the calling thread out of rayon. A held box is covered without fitting: every sampled point of it lies in a sphere, no sphere reaches past it by more than the tolerance, the budget holds, and a held ball is exactly one sphere; spheres 5% too small, or overhang measured from the wrong side of a cell, fail the test. Planting ignored touch links, a wrong kinematic chain, a GPU device that keeps the old robot, a detach that keeps the spheres, or fitting in a one-thread pool on the calling thread (which rayon never unregisters) fails a test.
+
+## Running the tests
+
+```bash
+BATCHPLAN_REQUIRE_GPU=1 cargo test --release                       # fail instead of skipping GPU tests without a GPU
+BATCHPLAN_REQUIRE_GPU=1 cargo test --release --features lerobot,usd
+cargo test --release --no-default-features                         # the CPU-only build
+```
+
+Without `BATCHPLAN_REQUIRE_GPU`, tests that need a GPU skip silently when no adapter exists. `scripts/validate_lerobot.py` and `scripts/validate_usd.py` check exports and USD loading against the reference Python packages (`lerobot`, Pixar's `usd-core`) in a virtual environment; the first also loads datasets with the camera videos `scripts/replay_mujoco.py` renders.

@@ -1,0 +1,19 @@
+# Visual demos in Rerun, a crate of their own so the library never depends on the viewer.
+[package]
+name = "batchplan-demos"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+batchplan = { path = ".." }
+rayon = "1"
+rerun = { version = "=0.38.1", default-features = false, features = ["sdk"] }
+urdf-rs = "0.10"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+debug = 1

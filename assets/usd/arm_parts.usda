@@ -1,0 +1,138 @@
+#usda 1.0
+(
+    doc = "Payload of arm.usda. Flat and nested rigid bodies, a fixed joint to the world, localPos1 != 0, a prismatic joint authored child to parent, NewtonMimicAPI and PhysxMimicJointAPI, an instanced collider and unauthored primitive defaults."
+    defaultPrim = "arm"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "arm" (
+    prepend apiSchemas = ["PhysicsArticulationRootAPI"]
+)
+{
+    def Xform "base" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+        double3 xformOp:translate = (0, 10, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "box" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            float3 xformOp:scale = (5, 2, 5)
+            uniform token[] xformOpOrder = ["xformOp:scale"]
+        }
+    }
+
+    def PhysicsFixedJoint "anchor"
+    {
+        rel physics:body1 = </arm/base>
+        point3f physics:localPos0 = (0, 10, 0)
+    }
+
+    def Xform "upper" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+        double3 xformOp:translate = (10, 15, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Capsule "rod" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            float3 xformOp:scale = (4, 4, 10)
+            uniform token[] xformOpOrder = ["xformOp:scale"]
+        }
+
+        def Xform "forearm" (
+            prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+        )
+        {
+            double3 xformOp:translate = (25, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+
+            def Xform "ball" (
+                instanceable = true
+                prepend references = </BallPrototype>
+            )
+            {
+            }
+        }
+    }
+
+    def PhysicsRevoluteJoint "shoulder"
+    {
+        rel physics:body0 = </arm/base>
+        rel physics:body1 = </arm/upper>
+        uniform token physics:axis = "Y"
+        point3f physics:localPos0 = (0, 5, 0)
+        point3f physics:localPos1 = (-10, 0, 0)
+        float physics:lowerLimit = -90
+        float physics:upperLimit = 90
+    }
+
+    def PhysicsPrismaticJoint "elbow"
+    {
+        rel physics:body0 = </arm/upper/forearm>
+        rel physics:body1 = </arm/upper>
+        uniform token physics:axis = "X"
+        point3f physics:localPos1 = (25, 0, 0)
+        float physics:lowerLimit = 0
+        float physics:upperLimit = 5
+    }
+
+    def Xform "finger" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+    }
+
+    def PhysicsRevoluteJoint "finger_joint" (
+        prepend apiSchemas = ["NewtonMimicAPI"]
+    )
+    {
+        rel physics:body0 = </arm/upper/forearm>
+        rel physics:body1 = </arm/finger>
+        uniform token physics:axis = "Z"
+        point3f physics:localPos0 = (5, 0, 0)
+        float physics:lowerLimit = -200
+        float physics:upperLimit = 200
+        rel newton:mimicJoint = </arm/shoulder>
+        float newton:mimicCoef0 = 10
+        float newton:mimicCoef1 = 2
+    }
+
+    def Xform "thumb" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+    }
+
+    def PhysicsRevoluteJoint "thumb_joint" (
+        prepend apiSchemas = ["PhysxMimicJointAPI:rotZ"]
+    )
+    {
+        rel physics:body0 = </arm/upper/forearm>
+        rel physics:body1 = </arm/thumb>
+        uniform token physics:axis = "Z"
+        point3f physics:localPos0 = (5, 0, 2)
+        float physics:lowerLimit = -120
+        float physics:upperLimit = 120
+        rel physxMimicJoint:rotZ:referenceJoint = </arm/shoulder>
+        float physxMimicJoint:rotZ:gearing = -1
+        float physxMimicJoint:rotZ:offset = 0
+    }
+}
+
+class Xform "BallPrototype"
+{
+    def Sphere "ball" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        double radius = 2
+    }
+}

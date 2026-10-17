@@ -1,0 +1,593 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "MuJoCo USD Converter v0.5.0"
+    }
+    defaultPrim = "Dual_wrist_camera"
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "Dual_wrist_camera"
+{
+    def Scope "Physics"
+    {
+        def Material "PhysicsMaterial" (
+            prepend apiSchemas = ["PhysicsMaterialAPI", "NewtonMaterialAPI"]
+        )
+        {
+            float newton:contactDamping = 100
+            float newton:contactStiffness = 2500
+            float newton:rollingFriction = 0.0001
+            float newton:torsionalFriction = 0.005
+            float physics:dynamicFriction = 1
+            float physics:staticFriction = 1
+        }
+
+        def Material "PhysicsMaterial_1" (
+            prepend apiSchemas = ["PhysicsMaterialAPI", "NewtonMaterialAPI"]
+        )
+        {
+            float newton:contactDamping = 500
+            float newton:contactStiffness = 62500
+            float newton:rollingFriction = 0.0001
+            float newton:torsionalFriction = 0.005
+            float physics:dynamicFriction = 0.7
+            float physics:staticFriction = 0.7
+        }
+
+        def Material "PhysicsMaterial_2" (
+            prepend apiSchemas = ["PhysicsMaterialAPI", "NewtonMaterialAPI"]
+        )
+        {
+            float newton:contactDamping = 500
+            float newton:contactStiffness = 62500
+            float newton:rollingFriction = 0.0001
+            float newton:torsionalFriction = 0.005
+            float physics:dynamicFriction = 0.6
+            float physics:staticFriction = 0.6
+        }
+
+        def MjcTendon "split"
+        {
+            uniform token mjc:actuatorfrclimited = "false"
+            prepend rel mjc:path = [
+                </Dual_wrist_camera/Geometry/base/right_driver/right_driver_joint>,
+                </Dual_wrist_camera/Geometry/base/left_driver/left_driver_joint>,
+            ]
+            uniform double[] mjc:path:coef = [0.485, 0.485]
+            uniform int[] mjc:path:indices = [0, 1]
+            uniform token mjc:type = "fixed"
+        }
+
+        def MjcActuator "fingers_actuator"
+        {
+            uniform double[] mjc:biasPrm = [0, -100, -10, 0, 0, 0, 0, 0, 0, 0]
+            uniform token mjc:biasType = "affine"
+            uniform double mjc:ctrlRange:max = 255
+            uniform double mjc:forceRange:max = 5
+            uniform double mjc:forceRange:min = -5
+            uniform double[] mjc:gainPrm = [0.3137255, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            rel mjc:target = </Dual_wrist_camera/Physics/split>
+        }
+
+        def PhysicsSphericalJoint "Equality" (
+            prepend apiSchemas = ["MjcEqualityConnectAPI"]
+        )
+        {
+            uniform double[] mjc:solimp = [0.95, 0.99, 0.001, 0.5, 2]
+            uniform double[] mjc:solref = [0.005, 1]
+            uniform token physics:axis = "X"
+            rel physics:body0 = </Dual_wrist_camera/Geometry/base/right_spring_link/right_follower>
+            rel physics:body1 = </Dual_wrist_camera/Geometry/base/right_driver/right_coupler>
+            uniform bool physics:excludeFromArticulation = 1
+            point3f physics:localPos0 = (-0.0179014, -0.00651468, 0.0044)
+            point3f physics:localPos1 = (0.0067833, 0.04703335, -0.008)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (3.8983825e-17, -1.0884412e-16, 1, -2.7755576e-16)
+        }
+
+        def PhysicsSphericalJoint "Equality_1" (
+            prepend apiSchemas = ["MjcEqualityConnectAPI"]
+            displayName = "Equality"
+        )
+        {
+            uniform double[] mjc:solimp = [0.95, 0.99, 0.001, 0.5, 2]
+            uniform double[] mjc:solref = [0.005, 1]
+            uniform token physics:axis = "X"
+            rel physics:body0 = </Dual_wrist_camera/Geometry/base/left_spring_link/left_follower>
+            rel physics:body1 = </Dual_wrist_camera/Geometry/base/left_driver/left_coupler>
+            uniform bool physics:excludeFromArticulation = 1
+            point3f physics:localPos0 = (-0.0179014, -0.00651468, 0.0044)
+            point3f physics:localPos1 = (0.006783548, 0.04703403, -0.008)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1.2677563e-17, 0.0000190231, -1, 2.220446e-16)
+        }
+    }
+
+    def "Geometry"
+    {
+        def "base" (
+            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysicsArticulationRootAPI", "NewtonArticulationRootAPI", "PhysicsFilteredPairsAPI"]
+        )
+        {
+            uniform bool newton:jointsAddMobility = 1
+            point3f physics:centerOfMass = (0.0000777116, 0.0000842713, 0.0311656)
+            float3 physics:diagonalInertia = (0.000260285, 0.000225381, 0.000152708)
+            prepend rel physics:filteredPairs = [
+                </Dual_wrist_camera/Geometry/base/left_driver>,
+                </Dual_wrist_camera/Geometry/base/right_driver>,
+                </Dual_wrist_camera/Geometry/base/left_spring_link>,
+                </Dual_wrist_camera/Geometry/base/right_spring_link>,
+            ]
+            float physics:mass = 0.777441
+            quatf physics:principalAxes = (0.704758, -0.00373684, -0.00570287, 0.709415)
+
+            over "base_1" (
+                prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "MjcCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI", "PhysicsMassAPI", "MaterialBindingAPI"]
+            )
+            {
+                rel material:binding:physics = </Dual_wrist_camera/Physics/PhysicsMaterial>
+                uniform int mjc:group = 3
+                uniform double[] mjc:solref = [0.02, 1]
+                float newton:contactGap = 0
+                uniform token physics:approximation = "convexHull"
+                float physics:density = 1000
+            }
+
+            def PhysicsFixedJoint "PhysicsFixedJoint"
+            {
+                rel physics:body0 = </Dual_wrist_camera>
+                rel physics:body1 = </Dual_wrist_camera/Geometry/base>
+                point3f physics:localPos0 = (0, 0, 0)
+                point3f physics:localPos1 = (0, 0, 0)
+                quatf physics:localRot0 = (1, 0, 0, 0)
+                quatf physics:localRot1 = (1, 0, 0, 0)
+            }
+
+            def "left_driver" (
+                prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+            )
+            {
+                point3f physics:centerOfMass = (-0.0175297, 0.00165308, -0.00469625)
+                float3 physics:diagonalInertia = (0.00000172352, 0.00000160906, 3.22006e-7)
+                float physics:mass = 0.00899563
+                quatf physics:principalAxes = (-0.46964222, 0.46964222, -0.52861726, 0.52861726)
+
+                over "driver_1" (
+                    prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "MjcCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI", "PhysicsMassAPI", "MaterialBindingAPI"]
+                )
+                {
+                    rel material:binding:physics = </Dual_wrist_camera/Physics/PhysicsMaterial>
+                    uniform int mjc:group = 3
+                    uniform double[] mjc:solref = [0.02, 1]
+                    float newton:contactGap = 0
+                    uniform token physics:approximation = "convexHull"
+                    float physics:density = 1000
+                }
+
+                def PhysicsRevoluteJoint "left_driver_joint" (
+                    prepend apiSchemas = ["MjcJointAPI", "NewtonJointAPI"]
+                )
+                {
+                    uniform double mjc:armature = 0.005
+                    uniform double mjc:damping = 0.1
+                    uniform double[] mjc:solimplimit = [0.95, 0.99, 0.001, 0.5, 2]
+                    uniform double[] mjc:solreflimit = [0.005, 1]
+                    float newton:armature = 0.005
+                    float newton:damping = 0.0017453292
+                    uniform token physics:axis = "Z"
+                    rel physics:body0 = </Dual_wrist_camera/Geometry/base>
+                    rel physics:body1 = </Dual_wrist_camera/Geometry/base/left_driver>
+                    point3f physics:localPos0 = (-0.0306011, 0.00475, 0.0657045)
+                    point3f physics:localPos1 = (0, 0, 0)
+                    quatf physics:localRot0 = (-0.70710677, 0.70710677, 0, 0)
+                    quatf physics:localRot1 = (1, 0, 0, 0)
+                    float physics:lowerLimit = 0
+                    float physics:upperLimit = 51.5662
+                }
+
+                def "left_coupler" (
+                    prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysicsFilteredPairsAPI"]
+                )
+                {
+                    point3f physics:centerOfMass = (0.00367747, 0.01986, 0.0055)
+                    float3 physics:diagonalInertia = (0.00000416206, 0.00000352216, 8.88131e-7)
+                    prepend rel physics:filteredPairs = </Dual_wrist_camera/Geometry/base/left_spring_link/left_follower>
+                    float physics:mass = 0.0140974
+                    quatf physics:principalAxes = (0.70144683, -0.70144683, 0.089288376, -0.089288376)
+
+                    over "coupler_1" (
+                        prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "MjcCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI", "PhysicsMassAPI", "MaterialBindingAPI"]
+                    )
+                    {
+                        rel material:binding:physics = </Dual_wrist_camera/Physics/PhysicsMaterial>
+                        uniform int mjc:group = 3
+                        uniform double[] mjc:solref = [0.02, 1]
+                        float newton:contactGap = 0
+                        uniform token physics:approximation = "convexHull"
+                        float physics:density = 1000
+                    }
+
+                    def PhysicsFixedJoint "PhysicsFixedJoint"
+                    {
+                        rel physics:body0 = </Dual_wrist_camera/Geometry/base/left_driver>
+                        rel physics:body1 = </Dual_wrist_camera/Geometry/base/left_driver/left_coupler>
+                        point3f physics:localPos0 = (-0.0314249, 0.00453223, -0.0102)
+                        point3f physics:localPos1 = (0, 0, 0)
+                        quatf physics:localRot0 = (-7.3913974e-17, -1.2681633e-17, 1.110223e-16, -1)
+                        quatf physics:localRot1 = (1, 0, 0, 0)
+                    }
+                }
+            }
+
+            def "left_spring_link" (
+                prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+            )
+            {
+                point3f physics:centerOfMass = (-0.0183, -0.0205732, 0.01205)
+                float3 physics:diagonalInertia = (0.00000896853, 0.00000671733, 0.00000263931)
+                float physics:mass = 0.0221642
+                quatf physics:principalAxes = (0.66094154, 0.66094154, -0.25130922, -0.25130922)
+
+                over "spring_link_1" (
+                    prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "MjcCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI", "PhysicsMassAPI", "MaterialBindingAPI"]
+                )
+                {
+                    rel material:binding:physics = </Dual_wrist_camera/Physics/PhysicsMaterial>
+                    uniform int mjc:group = 3
+                    uniform double[] mjc:solref = [0.02, 1]
+                    float newton:contactGap = 0
+                    uniform token physics:approximation = "convexHull"
+                    float physics:density = 1000
+                }
+
+                def PhysicsRevoluteJoint "left_spring_link_joint" (
+                    prepend apiSchemas = ["MjcJointAPI", "NewtonJointAPI"]
+                )
+                {
+                    uniform double mjc:armature = 0.001
+                    uniform double mjc:damping = 0.00125
+                    uniform double mjc:springref = 2.62
+                    uniform double mjc:stiffness = 0.05
+                    float newton:armature = 0.001
+                    float newton:damping = 0.000021816615
+                    uniform token physics:axis = "Z"
+                    rel physics:body0 = </Dual_wrist_camera/Geometry/base>
+                    rel physics:body1 = </Dual_wrist_camera/Geometry/base/left_spring_link>
+                    point3f physics:localPos0 = (-0.0127, -0.012, 0.07222)
+                    point3f physics:localPos1 = (0, 0, 0)
+                    quatf physics:localRot0 = (-0.70710677, 0.70710677, 0, 0)
+                    quatf physics:localRot1 = (1, 0, 0, 0)
+                    float physics:lowerLimit = -17
+                    float physics:upperLimit = 51.5662
+                }
+
+                def "left_follower" (
+                    prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+                )
+                {
+                    point3f physics:centerOfMass = (-0.00852976, -0.0014822, -0.00910001)
+                    float3 physics:diagonalInertia = (0.00000267415, 0.0000024559, 6.02031e-7)
+                    float physics:mass = 0.0125222
+                    quatf physics:principalAxes = (0.35943872, 0.35943872, 0.6089366, 0.6089366)
+
+                    over "follower_1" (
+                        prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "MjcCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI", "PhysicsMassAPI", "MaterialBindingAPI"]
+                    )
+                    {
+                        rel material:binding:physics = </Dual_wrist_camera/Physics/PhysicsMaterial>
+                        uniform int mjc:group = 3
+                        uniform double[] mjc:solref = [0.02, 1]
+                        float newton:contactGap = 0
+                        uniform token physics:approximation = "convexHull"
+                        float physics:density = 1000
+                    }
+
+                    over "tongue_1" (
+                        prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "MjcCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI", "PhysicsMassAPI", "MaterialBindingAPI"]
+                    )
+                    {
+                        rel material:binding:physics = </Dual_wrist_camera/Physics/PhysicsMaterial>
+                        uniform int mjc:group = 3
+                        uniform double[] mjc:solref = [0.02, 1]
+                        float newton:contactGap = 0
+                        uniform token physics:approximation = "convexHull"
+                        float physics:density = 1000
+                    }
+
+                    def PhysicsRevoluteJoint "left_follower" (
+                        prepend apiSchemas = ["MjcJointAPI", "NewtonJointAPI"]
+                    )
+                    {
+                        uniform double mjc:armature = 0.001
+                        uniform double[] mjc:solimplimit = [0.95, 0.99, 0.001, 0.5, 2]
+                        uniform double[] mjc:solreflimit = [0.005, 1]
+                        float newton:armature = 0.001
+                        uniform token physics:axis = "Z"
+                        rel physics:body0 = </Dual_wrist_camera/Geometry/base/left_spring_link>
+                        rel physics:body1 = </Dual_wrist_camera/Geometry/base/left_spring_link/left_follower>
+                        point3f physics:localPos0 = (-0.0382079, -0.0425003, 0.00295)
+                        point3f physics:localPos1 = (0, 0, 0)
+                        quatf physics:localRot0 = (2.7755576e-16, -1, -0.0000190231, 1.6940659e-21)
+                        quatf physics:localRot1 = (1, 0, 0, 0)
+                        float physics:lowerLimit = -49.999966
+                        float physics:upperLimit = 51.5662
+                    }
+
+                    def "left_pad" (
+                        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+                    )
+                    {
+                        over "left_pad1" (
+                            prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "MjcCollisionAPI", "PhysicsMassAPI", "MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding:physics = </Dual_wrist_camera/Physics/PhysicsMaterial_1>
+                            uniform int mjc:group = 3
+                            uniform int mjc:priority = 1
+                            uniform double[] mjc:solimp = [0.95, 0.99, 0.001, 0.5, 2]
+                            uniform double[] mjc:solref = [0.004, 1]
+                            float newton:contactGap = 0
+                            float physics:mass = 0.00175
+                        }
+
+                        over "left_pad2" (
+                            prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "MjcCollisionAPI", "PhysicsMassAPI", "MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding:physics = </Dual_wrist_camera/Physics/PhysicsMaterial_2>
+                            uniform int mjc:group = 3
+                            uniform int mjc:priority = 1
+                            uniform double[] mjc:solimp = [0.95, 0.99, 0.001, 0.5, 2]
+                            uniform double[] mjc:solref = [0.004, 1]
+                            float newton:contactGap = 0
+                            float physics:mass = 0.00175
+                        }
+
+                        def PhysicsFixedJoint "PhysicsFixedJoint"
+                        {
+                            rel physics:body0 = </Dual_wrist_camera/Geometry/base/left_spring_link/left_follower>
+                            rel physics:body1 = </Dual_wrist_camera/Geometry/base/left_spring_link/left_follower/left_pad>
+                            point3f physics:localPos0 = (-0.0377897, -0.103916, -0.0091)
+                            point3f physics:localPos1 = (0, 0, 0)
+                            quatf physics:localRot0 = (0.70710677, -0.70710677, 2.230713e-12, -2.2307132e-12)
+                            quatf physics:localRot1 = (1, 0, 0, 0)
+                        }
+                    }
+                }
+            }
+
+            def "right_driver" (
+                prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+            )
+            {
+                point3f physics:centerOfMass = (-0.0175297, 0.00165308, -0.00469625)
+                float3 physics:diagonalInertia = (0.00000172352, 0.00000160906, 3.22006e-7)
+                float physics:mass = 0.00899563
+                quatf physics:principalAxes = (-0.46964222, 0.46964222, -0.52861726, 0.52861726)
+
+                over "driver_1" (
+                    prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "MjcCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI", "PhysicsMassAPI", "MaterialBindingAPI"]
+                )
+                {
+                    rel material:binding:physics = </Dual_wrist_camera/Physics/PhysicsMaterial>
+                    uniform int mjc:group = 3
+                    uniform double[] mjc:solref = [0.02, 1]
+                    float newton:contactGap = 0
+                    uniform token physics:approximation = "convexHull"
+                    float physics:density = 1000
+                }
+
+                def PhysicsRevoluteJoint "right_driver_joint" (
+                    prepend apiSchemas = ["MjcJointAPI", "NewtonJointAPI", "NewtonMimicAPI", "MjcEqualityJointAPI"]
+                )
+                {
+                    uniform double mjc:armature = 0.005
+                    uniform double mjc:damping = 0.1
+                    uniform double[] mjc:solimp = [0.95, 0.99, 0.001, 0.5, 2]
+                    uniform double[] mjc:solimplimit = [0.95, 0.99, 0.001, 0.5, 2]
+                    uniform double[] mjc:solref = [0.005, 1]
+                    uniform double[] mjc:solreflimit = [0.005, 1]
+                    float newton:armature = 0.005
+                    float newton:damping = 0.0017453292
+                    rel newton:mimicJoint = </Dual_wrist_camera/Geometry/base/left_driver/left_driver_joint>
+                    uniform token physics:axis = "Z"
+                    rel physics:body0 = </Dual_wrist_camera/Geometry/base>
+                    rel physics:body1 = </Dual_wrist_camera/Geometry/base/right_driver>
+                    point3f physics:localPos0 = (0.0306011, -0.00475, 0.0657045)
+                    point3f physics:localPos1 = (0, 0, 0)
+                    quatf physics:localRot0 = (6.123234e-17, -4.5986944e-17, -0.70710677, 0.70710677)
+                    quatf physics:localRot1 = (1, 0, 0, 0)
+                    float physics:lowerLimit = 0
+                    float physics:upperLimit = 51.5662
+                }
+
+                def "right_coupler" (
+                    prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysicsFilteredPairsAPI"]
+                )
+                {
+                    point3f physics:centerOfMass = (0.00367747, 0.01986, 0.0055)
+                    float3 physics:diagonalInertia = (0.00000416206, 0.00000352216, 8.88131e-7)
+                    prepend rel physics:filteredPairs = </Dual_wrist_camera/Geometry/base/right_spring_link/right_follower>
+                    float physics:mass = 0.0140974
+                    quatf physics:principalAxes = (0.70144683, -0.70144683, 0.089288376, -0.089288376)
+
+                    over "coupler_1" (
+                        prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "MjcCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI", "PhysicsMassAPI", "MaterialBindingAPI"]
+                    )
+                    {
+                        rel material:binding:physics = </Dual_wrist_camera/Physics/PhysicsMaterial>
+                        uniform int mjc:group = 3
+                        uniform double[] mjc:solref = [0.02, 1]
+                        float newton:contactGap = 0
+                        uniform token physics:approximation = "convexHull"
+                        float physics:density = 1000
+                    }
+
+                    def PhysicsFixedJoint "PhysicsFixedJoint"
+                    {
+                        rel physics:body0 = </Dual_wrist_camera/Geometry/base/right_driver>
+                        rel physics:body1 = </Dual_wrist_camera/Geometry/base/right_driver/right_coupler>
+                        point3f physics:localPos0 = (-0.0314249, 0.00453223, -0.0102)
+                        point3f physics:localPos1 = (0, 0, 0)
+                        quatf physics:localRot0 = (-1.0478393e-16, 2.1483766e-17, -2.220446e-16, -1)
+                        quatf physics:localRot1 = (1, 0, 0, 0)
+                    }
+                }
+            }
+
+            def "right_spring_link" (
+                prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+            )
+            {
+                point3f physics:centerOfMass = (-0.0183, -0.0205732, 0.01205)
+                float3 physics:diagonalInertia = (0.00000896853, 0.00000671733, 0.00000263931)
+                float physics:mass = 0.0221642
+                quatf physics:principalAxes = (0.66094154, 0.66094154, -0.25130922, -0.25130922)
+
+                over "spring_link_1" (
+                    prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "MjcCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI", "PhysicsMassAPI", "MaterialBindingAPI"]
+                )
+                {
+                    rel material:binding:physics = </Dual_wrist_camera/Physics/PhysicsMaterial>
+                    uniform int mjc:group = 3
+                    uniform double[] mjc:solref = [0.02, 1]
+                    float newton:contactGap = 0
+                    uniform token physics:approximation = "convexHull"
+                    float physics:density = 1000
+                }
+
+                def PhysicsRevoluteJoint "right_spring_link_joint" (
+                    prepend apiSchemas = ["MjcJointAPI", "NewtonJointAPI"]
+                )
+                {
+                    uniform double mjc:armature = 0.001
+                    uniform double mjc:damping = 0.00125
+                    uniform double mjc:springref = 2.62
+                    uniform double mjc:stiffness = 0.05
+                    float newton:armature = 0.001
+                    float newton:damping = 0.000021816615
+                    uniform token physics:axis = "Z"
+                    rel physics:body0 = </Dual_wrist_camera/Geometry/base>
+                    rel physics:body1 = </Dual_wrist_camera/Geometry/base/right_spring_link>
+                    point3f physics:localPos0 = (0.0127, 0.012, 0.07222)
+                    point3f physics:localPos1 = (0, 0, 0)
+                    quatf physics:localRot0 = (6.123234e-17, -4.5986944e-17, -0.70710677, 0.70710677)
+                    quatf physics:localRot1 = (1, 0, 0, 0)
+                    float physics:lowerLimit = -17
+                    float physics:upperLimit = 51.5662
+                }
+
+                def "right_follower" (
+                    prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+                )
+                {
+                    point3f physics:centerOfMass = (-0.00852976, -0.0014822, -0.00910001)
+                    float3 physics:diagonalInertia = (0.00000267415, 0.0000024559, 6.02031e-7)
+                    float physics:mass = 0.0125222
+                    quatf physics:principalAxes = (0.35943872, 0.35943872, 0.6089366, 0.6089366)
+
+                    over "tongue_1" (
+                        prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "MjcCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI", "PhysicsMassAPI", "MaterialBindingAPI"]
+                    )
+                    {
+                        rel material:binding:physics = </Dual_wrist_camera/Physics/PhysicsMaterial>
+                        uniform int mjc:group = 3
+                        uniform double[] mjc:solref = [0.02, 1]
+                        float newton:contactGap = 0
+                        uniform token physics:approximation = "convexHull"
+                        float physics:density = 1000
+                    }
+
+                    over "follower_1" (
+                        prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "MjcCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI", "PhysicsMassAPI", "MaterialBindingAPI"]
+                    )
+                    {
+                        rel material:binding:physics = </Dual_wrist_camera/Physics/PhysicsMaterial>
+                        uniform int mjc:group = 3
+                        uniform double[] mjc:solref = [0.02, 1]
+                        float newton:contactGap = 0
+                        uniform token physics:approximation = "convexHull"
+                        float physics:density = 1000
+                    }
+
+                    def PhysicsRevoluteJoint "right_follower_joint" (
+                        prepend apiSchemas = ["MjcJointAPI", "NewtonJointAPI"]
+                    )
+                    {
+                        uniform double mjc:armature = 0.001
+                        uniform double[] mjc:solimplimit = [0.95, 0.99, 0.001, 0.5, 2]
+                        uniform double[] mjc:solreflimit = [0.005, 1]
+                        float newton:armature = 0.001
+                        uniform token physics:axis = "Z"
+                        rel physics:body0 = </Dual_wrist_camera/Geometry/base/right_spring_link>
+                        rel physics:body1 = </Dual_wrist_camera/Geometry/base/right_spring_link/right_follower>
+                        point3f physics:localPos0 = (-0.0382079, -0.0425003, 0.00295)
+                        point3f physics:localPos1 = (0, 0, 0)
+                        quatf physics:localRot0 = (-2.220446e-16, 1, 4.0601883e-18, -1.7500058e-17)
+                        quatf physics:localRot1 = (1, 0, 0, 0)
+                        float physics:lowerLimit = -49.999966
+                        float physics:upperLimit = 51.5662
+                    }
+
+                    def "right_pad" (
+                        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+                    )
+                    {
+                        over "right_pad1" (
+                            prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "MjcCollisionAPI", "PhysicsMassAPI", "MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding:physics = </Dual_wrist_camera/Physics/PhysicsMaterial_1>
+                            uniform int mjc:group = 3
+                            uniform int mjc:priority = 1
+                            uniform double[] mjc:solimp = [0.95, 0.99, 0.001, 0.5, 2]
+                            uniform double[] mjc:solref = [0.004, 1]
+                            float newton:contactGap = 0
+                            float physics:mass = 0.00175
+                        }
+
+                        over "right_pad2" (
+                            prepend apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "MjcCollisionAPI", "PhysicsMassAPI", "MaterialBindingAPI"]
+                        )
+                        {
+                            rel material:binding:physics = </Dual_wrist_camera/Physics/PhysicsMaterial_2>
+                            uniform int mjc:group = 3
+                            uniform int mjc:priority = 1
+                            uniform double[] mjc:solimp = [0.95, 0.99, 0.001, 0.5, 2]
+                            uniform double[] mjc:solref = [0.004, 1]
+                            float newton:contactGap = 0
+                            float physics:mass = 0.00175
+                        }
+
+                        def PhysicsFixedJoint "PhysicsFixedJoint"
+                        {
+                            rel physics:body0 = </Dual_wrist_camera/Geometry/base/right_spring_link/right_follower>
+                            rel physics:body1 = </Dual_wrist_camera/Geometry/base/right_spring_link/right_follower/right_pad>
+                            point3f physics:localPos0 = (-0.0377897, -0.103916, -0.0091)
+                            point3f physics:localPos1 = (0, 0, 0)
+                            quatf physics:localRot0 = (0.70710677, -0.70710677, 8.318525e-18, 3.7053972e-17)
+                            quatf physics:localRot1 = (1, 0, 0, 0)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+def PhysicsScene "PhysicsScene" (
+    prepend apiSchemas = ["NewtonSceneAPI", "MjcSceneAPI"]
+)
+{
+    uniform token mjc:compiler:angle = "radian"
+    uniform token mjc:option:cone = "elliptic"
+    uniform double mjc:option:impratio = 10
+    uniform int newton:maxSolverIterations = 100
+    uniform int newton:timeStepsPerSecond = 500
+    vector3f physics:gravityDirection = (0, 0, -1)
+    float physics:gravityMagnitude = 9.81
+}
+

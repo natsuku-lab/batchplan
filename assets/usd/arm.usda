@@ -1,0 +1,28 @@
+#usda 1.0
+(
+    doc = "batchplan USD conventions fixture: Y-up, centimeters, the robot in a payload, a variant set with no authored selection."
+    defaultPrim = "arm"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "arm" (
+    prepend payload = @./arm_parts.usda@
+    prepend variantSets = "reach"
+)
+{
+    variantSet "reach" = {
+        "short" {
+            over "elbow"
+            {
+                point3f physics:localPos1 = (20, 0, 0)
+            }
+        }
+        "long" {
+            over "elbow"
+            {
+                point3f physics:localPos1 = (30, 0, 0)
+            }
+        }
+    }
+}
