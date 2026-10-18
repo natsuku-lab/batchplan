@@ -266,16 +266,14 @@ fn collision_models_round_trip_through_files() {
 
 #[test]
 fn srdf_disabled_pairs_are_not_checked() {
-    let dir = scratch("srdf");
     let pairs = ["panda_link5", "panda_link6", "panda_link7", "panda_hand"];
     let mut srdf = String::from("<robot name=\"panda\">\n");
     for link in pairs {
         srdf += &format!("  <disable_collisions link1=\"panda_link0\" link2=\"{link}\" reason=\"Never\"/>\n");
     }
     srdf += "</robot>\n";
-    std::fs::write(dir.join("panda.srdf"), srdf).unwrap();
     let plain = common::panda().unwrap();
-    let options = RobotOptions { srdf: Some(dir.join("panda.srdf")), ..common::panda_options() };
+    let options = RobotOptions { srdf: Some(srdf), ..common::panda_options() };
     let with_srdf = Robot::load(common::asset("franka/franka_panda.urdf"), &options).unwrap();
     assert!(with_srdf.collision_model().self_collision_ignore["panda_link0"].contains(&"panda_hand".to_string()));
     let mut rng = Rng::new(8);
@@ -309,6 +307,90 @@ fn packages_resolve_from_package_dirs_or_by_searching_upward() {
     assert!(format!("{err:#}").contains("package 'robotiq_description'"), "{err:#}");
     let options = RobotOptions { package_dirs: vec![common::asset("robotiq_2f85").into()], ..Default::default() };
     assert_eq!(Robot::load(dir.join("gripper.urdf"), &options).unwrap().dof(), 1);
+}
+
+#[test]
+fn a_urdf_given_as_text_loads_the_robot_its_file_does() {
+    let spheres = SphereOptions { self_collision_samples: 500, ..Default::default() };
+    let options = RobotOptions { package_dirs: vec![common::asset("ur5e").into()], spheres, ..Default::default() };
+    let file = Robot::load(common::asset(UR5E), &options).unwrap();
+    let text = Robot::from_urdf(&std::fs::read_to_string(common::asset(UR5E)).unwrap(), &options).unwrap();
+    assert_eq!(text.joint_names(), file.joint_names());
+    assert_eq!((text.lower(), text.upper(), text.max_velocity()), (file.lower(), file.upper(), file.max_velocity()));
+    // Spheres fitted to the same meshes: the packages resolved to the same files.
+    assert!(!file.collision_model().spheres.is_empty());
+    assert_eq!(text.collision_model(), file.collision_model());
+    let mut rng = Rng::new(3);
+    for _ in 0..20 {
+        let q = random_q(&file, &mut rng);
+        assert_eq!(text.ee_pose(&q, 0), file.ee_pose(&q, 0));
+    }
+
+    // Text has no directory to search upward from or to resolve relative paths against.
+    let ur5e = std::fs::read_to_string(common::asset(UR5E)).unwrap();
+    let err = Robot::from_urdf(&ur5e, &RobotOptions::default()).unwrap_err();
+    assert!(matches!(err, Error::Input(_)) && format!("{err}").contains("package 'ur_description'"), "{err}");
+    let so101 = std::fs::read_to_string(common::asset(SO101)).unwrap();
+    let err = Robot::from_urdf(&so101, &RobotOptions::default()).unwrap_err().to_string();
+    assert!(err.contains("relative"), "{err}");
+}
+
+#[test]
+fn joint_limits_replace_the_descriptions_motion_limits() {
+    let panda = common::asset("franka/franka_panda.urdf");
+    let plain = Robot::load(&panda, &common::panda_options()).unwrap();
+    let given = |entries: Vec<(&str, JointLimits)>| -> HashMap<String, JointLimits> {
+        entries.into_iter().map(|(n, l)| (n.to_string(), l)).collect()
+    };
+    let limits = given(vec![
+        ("panda_joint1", JointLimits { velocity: Some(0.5), ..Default::default() }),
+        ("panda_joint2", JointLimits { acceleration: Some(1.0), jerk: Some(4.0), ..Default::default() }),
+    ]);
+    let scaled = RobotOptions { joint_limits: limits.clone(), velocity_scale: 0.5, ..common::panda_options() };
+    let robot = Robot::load(&panda, &scaled).unwrap();
+    // Replaced, then scaled like every other limit.
+    assert_eq!(robot.max_velocity()[0], 0.25);
+    assert_eq!((robot.max_acceleration()[1], robot.max_jerk()[1]), (1.0, 4.0));
+    for j in 1..7 {
+        assert_eq!(robot.max_velocity()[j], plain.max_velocity()[j] * 0.5, "joint {j}");
+    }
+    for j in (0..7).filter(|&j| j != 1) {
+        assert_eq!(robot.max_acceleration()[j], plain.max_acceleration()[j], "joint {j}");
+        assert_eq!(robot.max_jerk()[j], plain.max_jerk()[j], "joint {j}");
+    }
+
+    // A move of the slowed joint takes at least as long as its limit allows.
+    let slow = Robot::load(&panda, &RobotOptions { joint_limits: limits, ..common::panda_options() }).unwrap();
+    let (start, mut goal) = (plain.default_q().to_vec(), plain.default_q().to_vec());
+    goal[0] += 1.0;
+    // Three equal control points at each end: the path starts and ends at rest.
+    let line: Vec<f32> = [0.0, 0.0, 0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0]
+        .into_iter()
+        .flat_map(|s| start.iter().zip(&goal).map(move |(a, b)| a + (b - a) * s))
+        .collect();
+    let duration = |r: &Robot| Trajectory::new(r, &line, 1.0).unwrap().duration();
+    assert!(duration(&plain) < 1.0 / 0.5, "{}", duration(&plain));
+    assert!(duration(&slow) >= 1.0 / 0.5, "{}", duration(&slow));
+
+    // A mimic joint's limits bound its leader through the mimic's multiplier.
+    let gripper = |joint_limits: HashMap<String, JointLimits>| {
+        Robot::load(common::asset(GRIPPER), &RobotOptions { joint_limits, ..Default::default() }).unwrap()
+    };
+    assert_eq!(gripper(HashMap::new()).max_velocity(), [0.5]);
+    let mimic = given(vec![(
+        "robotiq_85_right_inner_knuckle_joint",
+        JointLimits { position: Some([-0.5, 0.0]), velocity: Some(0.2), ..Default::default() },
+    )]);
+    let limited = gripper(mimic);
+    assert_eq!((limited.max_velocity(), limited.upper()), ([0.2].as_slice(), [0.5].as_slice()));
+
+    let err = |joint_limits| {
+        format!("{:#}", Robot::load(&panda, &RobotOptions { joint_limits, ..common::panda_options() }).unwrap_err())
+    };
+    let message = err(given(vec![("panda_joint3", JointLimits { velocity: Some(0.0), ..Default::default() })]));
+    assert!(message.contains("'panda_joint3' a velocity limit of 0"), "{message}");
+    let message = err(given(vec![("panda_joint3", JointLimits { position: Some([1.0, -1.0]), ..Default::default() })]));
+    assert!(message.contains("'panda_joint3' the range [1, -1]"), "{message}");
 }
 
 #[test]
@@ -483,7 +565,7 @@ fn floating_and_planar_joints_become_one_axis_joints() {
         let joint_limits = ["mount_x", "mount_y", "mount_z"]
             .into_iter()
             .filter(|n| joints.contains(n))
-            .map(|n| (n.to_string(), [-1.0, 1.0]))
+            .map(|n| (n.to_string(), JointLimits { position: Some([-1.0, 1.0]), ..Default::default() }))
             .collect();
         let options = RobotOptions { joint_limits, ee_links: vec!["arm".into()], ..Default::default() };
         let robot = Robot::load(&path, &options).unwrap();

@@ -317,7 +317,8 @@ fn main() -> Result<()> {
         "curobo" => {}
         "vamp" => {
             options.collision_model = Some(vamp_spheres(&Robot::load(&urdf, &options)?, &args.data)?);
-            options.srdf = Some(args.data.join("vamp_panda.srdf"));
+            let srdf = args.data.join("vamp_panda.srdf");
+            options.srdf = Some(std::fs::read_to_string(&srdf).with_context(|| format!("reading {}", srdf.display()))?);
         }
         "fitted" => options.collision_model = None,
         s => bail!("unknown spheres {s}"),

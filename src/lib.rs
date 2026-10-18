@@ -59,7 +59,7 @@ pub use device::{CollisionWeights, Device, Evaluation, Worlds};
 pub use error::Error;
 pub use ik::{IkOptions, IkProblem, IkResult, solve_ik};
 pub use meshes::MeshModel;
-pub use robot::{AttachedObject, CollisionModel, Part, Robot, RobotOptions};
+pub use robot::{AttachedObject, CollisionModel, JointLimits, Part, Robot, RobotOptions};
 pub use rrt::{RrtOptions, RrtProblem, RrtResult};
 pub use sdf::{DepthImage, Intrinsics, Occlusion, OccupancyMap, RobotMask, SdfGrid, SdfOptions};
 pub use shortcut::ShortcutOptions;

@@ -9,8 +9,14 @@ use crate::description::{Curve, Geometry, JointDesc, JointType, LinkDesc, Mimic,
 use crate::robot::Transform;
 
 pub(crate) fn load(path: &Path, package_dirs: &[PathBuf]) -> Result<RobotDescription> {
-    let urdf = urdf_rs::read_file(path).with_context(|| format!("parsing {}", path.display()))?;
-    let dir = path.parent().unwrap_or(Path::new("."));
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    from_text(&text, Some(path.parent().unwrap_or(Path::new("."))), package_dirs)
+}
+
+/// A URDF given as text. Relative mesh paths resolve against `dir`, the URDF's directory, and
+/// packages are also searched for above it; without one, only `package_dirs` are searched.
+pub(crate) fn from_text(text: &str, dir: Option<&Path>, package_dirs: &[PathBuf]) -> Result<RobotDescription> {
+    let urdf = urdf_rs::read_from_string(text).context("parsing the URDF")?;
     let shapes = |elements: Vec<(&urdf_rs::Pose, &urdf_rs::Geometry)>| -> Result<Vec<Shape>> {
         elements
             .into_iter()
@@ -78,7 +84,7 @@ fn pose(p: &urdf_rs::Pose) -> Transform {
     Transform::from_xyz_rpy(p.xyz.0, p.rpy.0)
 }
 
-fn geometry_of(g: &urdf_rs::Geometry, dir: &Path, package_dirs: &[PathBuf]) -> Result<Geometry> {
+fn geometry_of(g: &urdf_rs::Geometry, dir: Option<&Path>, package_dirs: &[PathBuf]) -> Result<Geometry> {
     use urdf_rs::Geometry as G;
     Ok(match *g {
         G::Box { size } => Geometry::Box { half: Vec3::from_array(size.0.map(|v| v as f32)) * 0.5 },
@@ -97,13 +103,17 @@ fn geometry_of(g: &urdf_rs::Geometry, dir: &Path, package_dirs: &[PathBuf]) -> R
 /// Resolves a mesh reference: `package://name/rest` through `package_dirs` (each either the
 /// package itself or a directory holding it) and then the directories above the URDF;
 /// `file://` and absolute paths as given; anything else relative to the URDF.
-fn resolve(filename: &str, dir: &Path, package_dirs: &[PathBuf]) -> Result<PathBuf> {
+fn resolve(filename: &str, dir: Option<&Path>, package_dirs: &[PathBuf]) -> Result<PathBuf> {
     let Some(rest) = filename.strip_prefix("package://") else {
         let path = Path::new(filename.strip_prefix("file://").unwrap_or(filename));
-        return Ok(if path.is_absolute() { path.to_path_buf() } else { dir.join(path) });
+        return match dir {
+            _ if path.is_absolute() => Ok(path.to_path_buf()),
+            Some(dir) => Ok(dir.join(path)),
+            None => bail!("mesh path {filename} is relative, and a URDF given as text has no directory"),
+        };
     };
     let (package, relative) = rest.split_once('/').with_context(|| format!("malformed mesh path {filename}"))?;
-    let candidates = package_dirs.iter().map(PathBuf::as_path).chain(dir.ancestors());
+    let candidates = package_dirs.iter().map(PathBuf::as_path).chain(dir.into_iter().flat_map(Path::ancestors));
     for base in candidates {
         for root in [base.to_path_buf(), base.join(package)] {
             if package_name(&root).as_deref() == Some(package) {
@@ -123,17 +133,14 @@ fn package_name(dir: &Path) -> Option<String> {
 }
 
 /// Link pairs an SRDF disables for collision checking (`<disable_collisions link1 link2>`).
-pub(crate) fn srdf_disabled_pairs(path: &Path) -> Result<Vec<(String, String)>> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let doc = roxmltree::Document::parse(&text).with_context(|| format!("parsing {}", path.display()))?;
+pub(crate) fn srdf_disabled_pairs(text: &str) -> Result<Vec<(String, String)>> {
+    let doc = roxmltree::Document::parse(text).context("parsing the SRDF")?;
     doc.root_element()
         .children()
         .filter(|n| n.has_tag_name("disable_collisions"))
         .map(|n| {
             let link = |attr: &str| {
-                n.attribute(attr)
-                    .map(str::to_string)
-                    .with_context(|| format!("{}: disable_collisions without {attr}", path.display()))
+                n.attribute(attr).map(str::to_string).with_context(|| format!("SRDF disable_collisions without {attr}"))
             };
             Ok((link("link1")?, link("link2")?))
         })

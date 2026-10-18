@@ -24,7 +24,7 @@ fn main() -> Result<(), Error> {
 
 `Robot::load` picks a loader by extension. Each loader only translates its format into one internal description; kinematics, spheres and self-collision analysis never see the format.
 
-- **URDF.** `package://` paths resolve through `RobotOptions::package_dirs`, then through the directories above the file. URDF 1.2's `acceleration` and `jerk` limits are read when present.
+- **URDF.** `package://` paths resolve through `RobotOptions::package_dirs`, then through the directories above the file. URDF 1.2's `acceleration` and `jerk` limits are read when present. `Robot::from_urdf(text, &options)` loads a URDF from its text, as ROS publishes it on `/robot_description`; with no file to start from, its `package://` paths resolve through `package_dirs` alone, and relative mesh paths are an error.
 - **MJCF (`.xml`, `.mjcf`).** A native parser for what kinematics and collision need: `<include>`, `<default>` classes and `childclass`, the compiler's angle units (degrees unless told otherwise), mesh directory and Euler sequence, every orientation form, bodies with several joints, `fromto`, and `<equality><joint>` as mimic joints with their full polynomial. Body subtrees with a joint are the robot; jointless bodies and world geoms are the scene (see [`World::load`](perception.md#scenes)). MJCF has no velocity limits, so `RobotOptions::max_velocity` (2 rad/s) applies.
 - **OpenUSD (`.usd`, `.usda`, `.usdc`, `.usdz`; cargo feature `usd`).** Built on the pure-Rust `openusd` crates (0.7.0, pinned).
   - UsdPhysics rigid bodies are links. The tree grows from the world over revolute, prismatic, spherical and fixed joints, using `localPos`/`localRot` on both sides; joints authored from child to parent are flipped.
@@ -39,6 +39,7 @@ fn main() -> Result<(), Error> {
 - **Mimic joints** follow their leader by a polynomial of degree up to four (URDF and USD mimics are linear, MJCF joint equalities quartic). The leader's range and velocity limit shrink so that every mimic joint stays within its own limits.
 - **Closed loops** (MJCF `connect`, USD joints that close a loop) are solved when loading. Each loop's passive joints follow its one actuated joint at their static equilibrium (the least spring energy that closes the loop within their limits, what MuJoCo settles to without contact), fitted by quartics. MuJoCo Menagerie's Robotiq 2F-85 loads as one joint whose pads track MuJoCo's settled positions within 0.2 mm. A loop must have exactly one actuated joint and close within 0.5 mm.
 - **Locked joints.** `RobotOptions::lock_joints` fixes joints at a value, such as a gripper's fingers.
+- **Per-joint limits.** `RobotOptions::joint_limits` replaces any joint's position, velocity, acceleration or jerk limit by name (`JointLimits`, each optional, as in MoveIt's `joint_limits.yaml`), mimic joints included.
 - **Slower limits.** `RobotOptions::velocity_scale`, `acceleration_scale` and `jerk_scale` (each in (0, 1], like MoveIt's scaling factors) scale every joint's limits when the robot loads. Planning, timing and checks all keep to the scaled limits, so a robot slowed this way also replans mid-motion at its own pace. Scaling velocity by `s`, acceleration by `s²` and jerk by `s³` makes every motion `1/s` times as long.
 - **Size.** Robots have no fixed size limit; a 40-joint, 41-link, 130-sphere test robot runs on both devices.
 
@@ -77,7 +78,7 @@ Planning checks collisions between spheres: the robot as a few dozen spheres, ob
 
   The model's `source` records how far its spheres reach beyond the geometry: with 64 spheres, 3.0 cm on the UR5e and the Panda, 1.9 cm on the SO-101 and 1.2 cm on the 2F-85. Fresh surface samples land at most 0.8 mm outside the UR5e's spheres.
 - **Collision-model files.** `robot.collision_model().save(path)` writes the spheres, self-collision buffers and ignored pairs as JSON. Commit it, tune it by hand if needed, and load it through `RobotOptions::collision_model`. The repository's Panda uses cuRobo's hand-tuned spheres this way (`assets/franka/panda_collision.json`).
-- **Self-collision pairs** follow MoveIt's setup assistant: adjacent links are skipped, and so are pairs whose spheres already overlap at the default configuration and pairs whose meshes never touch across 10,000 random configurations. `RobotOptions::srdf` adds a MoveIt SRDF's disabled pairs.
+- **Self-collision pairs** follow MoveIt's setup assistant: adjacent links are skipped, and so are pairs whose spheres already overlap at the default configuration and pairs whose meshes never touch across 10,000 random configurations. `RobotOptions::srdf` adds the disabled pairs of a MoveIt SRDF, given as text.
 - **Mounted robots.** Links that no joint moves (the base and anything fixed to it) are not checked against the world: they touch it the same way in every configuration, so a robot standing on its table is not in collision with it. They still collide with the robot's moving links.
 
 How tight the spheres are is a trade-off you can measure: see [Spheres and meshes](benchmarks.md#spheres-and-meshes).

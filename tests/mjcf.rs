@@ -239,7 +239,8 @@ fn free_and_ball_joints_become_one_axis_joints() {
 </mujoco>"#,
     )
     .unwrap();
-    let limits = ["free_x", "free_y", "free_z"].map(|n| (n.to_string(), [-1.0f32, 1.0]));
+    let limits = ["free_x", "free_y", "free_z"]
+        .map(|n| (n.to_string(), JointLimits { position: Some([-1.0, 1.0]), ..Default::default() }));
     let options =
         RobotOptions { joint_limits: limits.into_iter().collect(), ee_links: vec!["arm".into()], ..no_spheres() };
     let robot = Robot::load(&path, &options).unwrap();

@@ -141,6 +141,20 @@ impl CollisionModel {
     }
 }
 
+/// Limits replacing a joint's own: its description's, or the defaults in [`RobotOptions`] where
+/// the description gives none. Each is optional, as in MoveIt's `joint_limits.yaml`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct JointLimits {
+    /// `[lower, upper]`; giving them makes a continuous joint an ordinary one.
+    pub position: Option<[f32; 2]>,
+    /// rad/s or m/s.
+    pub velocity: Option<f32>,
+    /// rad/s² or m/s².
+    pub acceleration: Option<f32>,
+    /// rad/s³ or m/s³.
+    pub jerk: Option<f32>,
+}
+
 #[derive(Clone, Debug)]
 pub struct RobotOptions {
     /// Root of the planned tree; defaults to the description's root link.
@@ -153,18 +167,19 @@ pub struct RobotOptions {
     pub default_q: Option<Vec<f32>>,
     /// Joints held at a value and removed from planning (mimics of a locked joint follow it).
     pub lock_joints: HashMap<String, f32>,
-    /// Position limits `[lower, upper]` by joint name, replacing the description's. Planar, ball and
-    /// floating joints become joints named `<joint>_x`, `_y`, `_z` (translations, which need limits
-    /// from here) and `_theta` or `_rx`, `_ry`, `_rz` (rotations).
-    pub joint_limits: HashMap<String, [f32; 2]>,
+    /// Limits by joint name, replacing the description's; mimic joints may be named too. The scales
+    /// below apply on top. Planar, ball and floating joints become joints named `<joint>_x`, `_y`,
+    /// `_z` (translations, which need position limits from here) and `_theta` or `_rx`, `_ry`,
+    /// `_rz` (rotations).
+    pub joint_limits: HashMap<String, JointLimits>,
     /// Directories searched for `package://` packages: each is a package or holds packages.
     /// Directories above the description file are searched after these.
     pub package_dirs: Vec<PathBuf>,
     /// Collision spheres; fitted to the description's geometry with `spheres` when `None`.
     pub collision_model: Option<CollisionModel>,
     pub spheres: SphereOptions,
-    /// A MoveIt SRDF whose disabled collision pairs are added to the collision model's.
-    pub srdf: Option<PathBuf>,
+    /// A MoveIt SRDF's text, whose disabled collision pairs are added to the collision model's.
+    pub srdf: Option<String>,
     /// OpenUSD variant selections, as (variant set, variant), used where the file authors none.
     pub variants: Vec<(String, String)>,
     /// Velocity limit (rad/s or m/s) for joints whose description gives none (MJCF has none).
@@ -314,6 +329,15 @@ impl Robot {
             .and_then(|description| Self::from_description(&description, o))
             .map(|robot| Robot { parts: vec![part], ..robot })
             .map_err(|e| Error::Load { path: path.to_path_buf(), message: format!("{e:#}") })
+    }
+
+    /// Loads a robot from a URDF's text, as ROS publishes it on `/robot_description`. Its mesh
+    /// paths must be `package://` (found through [`RobotOptions::package_dirs`]), `file://` or
+    /// absolute.
+    pub fn from_urdf(urdf: &str, o: &RobotOptions) -> error::Result<Self> {
+        crate::urdf::from_text(urdf, None, &o.package_dirs)
+            .and_then(|description| Self::from_description(&description, o))
+            .map_err(|e| Error::Input(format!("URDF: {e:#}")))
     }
 
     /// A robot made of several descriptions, such as two arms at a table: each part's link and
@@ -821,9 +845,23 @@ fn within(curve: &Curve, range: (f32, f32), limits: (f32, f32)) -> Option<(f32, 
 fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
     let expanded = expand_compound_joints(desc)?;
     let desc = &expanded;
-    if let Some(name) = o.joint_limits.keys().find(|n| !desc.joints.iter().any(|j| &j.name == *n)) {
-        bail!("joint_limits names '{name}', which is not a joint of the robot");
+    for (name, limits) in &o.joint_limits {
+        ensure!(
+            desc.joints.iter().any(|j| &j.name == name),
+            "joint_limits names '{name}', which is not a joint of the robot"
+        );
+        if let Some([lo, hi]) = limits.position {
+            ensure!(lo.is_finite() && hi.is_finite() && lo <= hi, "joint_limits gives '{name}' the range [{lo}, {hi}]");
+        }
+        for (what, limit) in
+            [("velocity", limits.velocity), ("acceleration", limits.acceleration), ("jerk", limits.jerk)]
+        {
+            if let Some(limit) = limit {
+                ensure!(limit.is_finite() && limit > 0.0, "joint_limits gives '{name}' a {what} limit of {limit}");
+            }
+        }
     }
+    let given = |joint: &JointDesc| o.joint_limits.get(&joint.name).copied().unwrap_or_default();
     let joint_index: HashMap<&str, usize> = desc.joints.iter().enumerate().map(|(i, j)| (j.name.as_str(), i)).collect();
     let base = match &o.base_link {
         Some(b) => {
@@ -888,13 +926,13 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
         }
         dof_of.insert(j, dof_names.len());
         dof_names.push(joint.name.clone());
-        let (lo, hi) = match (o.joint_limits.get(&joint.name), joint.kind) {
-            (Some(&[lo, hi]), _) => (lo, hi),
+        let limits = given(joint);
+        let (lo, hi) = match (limits.position, joint.kind) {
+            (Some([lo, hi]), _) => (lo, hi),
             (None, JointType::Continuous) => (-std::f32::consts::PI, std::f32::consts::PI),
             (None, _) => (joint.lower, joint.upper),
         };
-        // Limits given in the options make a continuous joint an ordinary one.
-        continuous.push(joint.kind == JointType::Continuous && !o.joint_limits.contains_key(&joint.name));
+        continuous.push(joint.kind == JointType::Continuous && limits.position.is_none());
         ensure!(
             lo.is_finite() && hi.is_finite(),
             "joint '{}' has no position limits; give them in RobotOptions::joint_limits",
@@ -902,9 +940,9 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
         );
         lower.push(lo);
         upper.push(hi);
-        max_velocity.push(or_default(joint.max_velocity, o.max_velocity));
-        max_acceleration.push(or_default(joint.max_acceleration, o.max_acceleration));
-        max_jerk.push(or_default(joint.max_jerk, o.max_jerk));
+        max_velocity.push(limits.velocity.unwrap_or(or_default(joint.max_velocity, o.max_velocity)));
+        max_acceleration.push(limits.acceleration.unwrap_or(or_default(joint.max_acceleration, o.max_acceleration)));
+        max_jerk.push(limits.jerk.unwrap_or(or_default(joint.max_jerk, o.max_jerk)));
     }
     ensure!(!dof_names.is_empty(), "the robot has no actuated joints to plan with");
 
@@ -942,10 +980,12 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
                     )
                 })?;
                 if leader != j {
+                    let limits = given(joint);
                     // The leader's range keeps the mimic joint within its own limits too.
-                    if joint.kind != JointType::Continuous {
-                        (lower[dof], upper[dof]) = within(&curve, (lower[dof], upper[dof]), (joint.lower, joint.upper))
-                            .with_context(|| {
+                    if joint.kind != JointType::Continuous || limits.position.is_some() {
+                        let own = limits.position.map_or((joint.lower, joint.upper), |[lo, hi]| (lo, hi));
+                        (lower[dof], upper[dof]) =
+                            within(&curve, (lower[dof], upper[dof]), own).with_context(|| {
                                 format!(
                                     "joint '{}' leaves its limits for every value of '{}'",
                                     joint.name, desc.joints[leader].name
@@ -957,9 +997,10 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
                     let steepest = (0..=64)
                         .map(|k| curve.slope(lower[dof] + (upper[dof] - lower[dof]) * k as f32 / 64.0).abs())
                         .fold(0.0f32, f32::max);
-                    max_velocity[dof] = max_velocity[dof].min(joint.max_velocity / steepest);
-                    max_acceleration[dof] = max_acceleration[dof].min(joint.max_acceleration / steepest);
-                    max_jerk[dof] = max_jerk[dof].min(joint.max_jerk / steepest);
+                    max_velocity[dof] = max_velocity[dof].min(limits.velocity.unwrap_or(joint.max_velocity) / steepest);
+                    max_acceleration[dof] =
+                        max_acceleration[dof].min(limits.acceleration.unwrap_or(joint.max_acceleration) / steepest);
+                    max_jerk[dof] = max_jerk[dof].min(limits.jerk.unwrap_or(joint.max_jerk) / steepest);
                 }
                 let axis = joint.axis;
                 if prismatic {
