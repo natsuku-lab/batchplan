@@ -280,14 +280,6 @@ pub struct Carried {
     pub poses: Vec<Pose>,
 }
 
-/// Planning for demonstrations: their paths become training data, so joints are straightened too
-/// (see [`crate::ShortcutOptions::straighten`]).
-fn demo_plan() -> PlanOptions {
-    let mut o = PlanOptions::default();
-    o.shortcut.straighten = true;
-    o
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct DemoOptions {
     pub ik: IkOptions,
@@ -308,7 +300,7 @@ impl Default for DemoOptions {
     fn default() -> Self {
         Self {
             ik: IkOptions::default(),
-            plan: demo_plan(),
+            plan: PlanOptions::default(),
             recovery: RecoveryOptions::default(),
             start_noise: 0.3,
             speed_scale: (0.6, 1.0),
@@ -468,7 +460,7 @@ impl Default for PickPlaceOptions {
     fn default() -> Self {
         Self {
             ik: IkOptions::default(),
-            plan: demo_plan(),
+            plan: PlanOptions::default(),
             approach: 0.1,
             grasp_depth: 0.02,
             max_width: 0.08,

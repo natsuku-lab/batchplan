@@ -376,7 +376,7 @@ fn shortcutting_straightens_a_joint_that_swings_back() {
     let mut paths = vec![detour];
     shortcut(&cpu, &worlds, &[0], &mut paths, &o).unwrap();
     let wrist = travel(&paths[0], n)[n - 1];
-    // None; 0.84 rad without straightening (the default), smoothing alone.
+    // None; 0.84 rad without straightening, smoothing alone.
     assert!(wrist < 0.1, "the wrist turns {wrist} rad, for none from start to goal");
     assert!(
         worst_clearance(&cpu, &worlds, &[(0, &paths[0])], o.resolution / 4.0) > -1e-3,
@@ -405,4 +405,43 @@ fn a_grazed_straight_line_is_bent_around_the_obstacle() {
     let straight = length(&[start, goal].concat(), n);
     assert!(path.len() / n <= 4, "{} waypoints", path.len() / n);
     assert!(length(path, n) < 1.1 * straight, "{} rad against {straight} straight", length(path, n));
+}
+
+/// Random Panda reaches with a ball where the hand passes halfway along the straight line: samples
+/// drawn near the line first keep the planned paths near it (3.8% longer on average, two more than
+/// 10% longer, against 7.3% and nine when samples come from the joint ranges at once).
+#[test]
+fn plans_around_a_ball_on_the_straight_line_stay_near_it() {
+    let robot = common::panda().unwrap();
+    let cpu = Device::cpu(&robot).unwrap();
+    let n = robot.dof();
+    let mut rng = Rng::new(3);
+    let (mut scene, mut problems) = (vec![], vec![]);
+    while problems.len() < 48 {
+        let start: Vec<f32> = (0..n).map(|j| rng.range(robot.lower()[j], robot.upper()[j])).collect();
+        let goal: Vec<f32> = (0..n).map(|j| rng.range(robot.lower()[j], robot.upper()[j])).collect();
+        let middle: Vec<f32> = start.iter().zip(&goal).map(|(a, b)| 0.5 * (a + b)).collect();
+        let ball = Obstacle::Sphere { center: robot.ee_pose(&middle, 0).position, radius: 0.2 };
+        let world = World { obstacles: vec![ball] };
+        let one = cpu.upload(std::slice::from_ref(&world)).unwrap();
+        let ends = cpu.evaluate(&one, &[0, 0], &[&start[..], &goal[..]].concat(), &CollisionWeights::NONE).unwrap();
+        if ends.collision_free(0) && ends.collision_free(1) {
+            problems.push(PlanProblem { world: scene.len() as u32, start, goal, start_motion: None, hold: vec![] });
+            scene.push(world);
+        }
+    }
+    let result = plan(&cpu, &cpu.upload(&scene).unwrap(), &problems, &PlanOptions::default()).unwrap();
+    let excess: Vec<f32> = result
+        .solved()
+        .map(|s| {
+            let straight = length(&[&s.problem.start[..], &s.problem.goal[..]].concat(), n);
+            let dense = Trajectory::new(&robot, s.solution, 1.0).unwrap().sample(100.0).unwrap().positions;
+            length(&dense, n) / straight - 1.0
+        })
+        .collect();
+    assert_eq!(excess.len(), problems.len(), "every reach has a path");
+    let mean = excess.iter().sum::<f32>() / excess.len() as f32;
+    let far = excess.iter().filter(|&&e| e > 0.1).count();
+    assert!(mean < 0.055, "paths are {:.1}% longer than straight on average", 100.0 * mean);
+    assert!(far <= 5, "{far} paths are more than 10% longer than straight");
 }

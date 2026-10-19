@@ -255,9 +255,12 @@ fn trajopt_smoothness_gradient_matches_its_cost() {
     let mut goal = robot.default_q().to_vec();
     goal[0] += 1.0;
     goal[2] -= 0.7;
+    // A ball on the straight line, so the searched path detours and the problem is optimized.
+    let middle: Vec<f32> = robot.default_q().iter().zip(&goal).map(|(a, b)| 0.5 * (a + b)).collect();
+    let ball = Obstacle::Sphere { center: robot.ee_pose(&middle, 0).position, radius: 0.05 };
     let problems =
         vec![PlanProblem { world: 0, start: robot.default_q().to_vec(), goal, start_motion: None, hold: vec![] }];
-    let scene = vec![World::default()];
+    let scene = vec![World { obstacles: vec![ball] }];
     let o = PlanOptions { collision: CollisionWeights::NONE, seeds: 8, ..Default::default() };
     let cost = |path: &[f64]| {
         let t_count = path.len() / n;
@@ -277,10 +280,10 @@ fn trajopt_smoothness_gradient_matches_its_cost() {
         let worlds = d.upload(&scene).unwrap();
         let seed = plan(&d, &worlds, &problems, &PlanOptions { iterations: 0, ..o }).unwrap().paths.positions;
         let stepped = plan(&d, &worlds, &problems, &PlanOptions { iterations: 1, ..o }).unwrap().paths.positions;
-        // Optimized seed 1's path (seed 0 is the searched straight line, where the smoothness
-        // gradient vanishes), after the searched path. Only control points 3..points - 3 move.
+        // Optimized seed 2's path, bent through a via point (seed 0 is the searched path, seed 1
+        // the straight line), after the searched path. Only control points 3..points - 3 move.
         let points = o.control_points;
-        let offset = 2 * points * n;
+        let offset = 3 * points * n;
         let path: Vec<f64> = seed[offset..offset + points * n].iter().map(|&v| v as f64).collect();
         let free = 3 * n..(points - 3) * n;
         let fd: Vec<f64> = free
@@ -436,10 +439,30 @@ fn reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
     (scene, problems)
 }
 
+/// `reaches` with a ball where each hand passes halfway along its straight line, so every search
+/// detours and optimization has work to do; problems whose ends the ball touches are dropped.
+fn blocked_reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
+    let (mut scene, problems) = reaches(robot);
+    for p in &problems {
+        let middle: Vec<f32> = p.start.iter().zip(&p.goal).map(|(a, b)| 0.5 * (a + b)).collect();
+        let center = robot.ee_pose(&middle, 0).position;
+        scene[p.world as usize].obstacles.push(Obstacle::Sphere { center, radius: 0.1 });
+    }
+    let cpu = Device::cpu(robot).unwrap();
+    let worlds = cpu.upload(&scene).unwrap();
+    let free = |p: &PlanProblem| {
+        let ends = [&p.start[..], &p.goal[..]].concat();
+        let e = cpu.evaluate(&worlds, &[p.world, p.world], &ends, &CollisionWeights::NONE).unwrap();
+        e.collision_free(0) && e.collision_free(1)
+    };
+    let problems = problems.into_iter().filter(free).collect();
+    (scene, problems)
+}
+
 #[test]
 fn a_tiny_time_budget_returns_after_at_most_one_more_chunk() {
     let robot = panda();
-    let (scene, problems) = reaches(&robot);
+    let (scene, problems) = blocked_reaches(&robot);
     // Enough rounds (20 chunks) that a fast GPU's plan still lasts well beyond one chunk.
     let o = PlanOptions { seeds: 8, iterations: 160, ..Default::default() };
     for d in devices(&robot) {
@@ -616,4 +639,101 @@ fn seeded_ik_stays_on_the_branch_it_starts_from() {
         let elsewhere = ik.solution(0).iter().zip(&here).map(|(a, b)| (a - b).powi(2)).sum::<f32>().sqrt();
         assert!(elsewhere > 0.5, "{}: from the default it lands {elsewhere} rad away", d.name());
     }
+}
+
+/// Optimization starts from the searched path's spline, then the straight line to the goal: with no
+/// steps taken, seeds 0 and 1 are those.
+#[test]
+fn optimization_seeds_start_with_the_searched_path_and_the_straight_line() {
+    let robot = panda();
+    let n = robot.dof();
+    let (scene, problems) = blocked_reaches(&robot);
+    let o = PlanOptions { seeds: 2, iterations: 0, ..Default::default() };
+    let (points, per_path) = (o.control_points, o.control_points * n);
+    for d in devices(&robot) {
+        let result = plan(&d, &d.upload(&scene).unwrap(), &problems, &o).unwrap();
+        let mut seeded = 0;
+        for (pi, p) in problems.iter().enumerate() {
+            let path = |k: usize| result.paths.path(pi * 3 + k);
+            if path(1).iter().all(|&v| v == 0.0) {
+                continue;
+            }
+            seeded += 1;
+            assert_eq!(path(1), path(0), "{}: problem {pi}'s first seed is not its searched spline", d.name());
+            for (t, q) in path(2).chunks(n).enumerate() {
+                let u = (t.saturating_sub(2) as f32 / (points - 5) as f32).min(1.0);
+                let off =
+                    (0..n).map(|j| (q[j] - (p.start[j] + u * (p.goal[j] - p.start[j]))).abs()).fold(0.0, f32::max);
+                assert!(off < 1e-5, "{}: problem {pi}'s second seed leaves the straight line by {off}", d.name());
+            }
+        }
+        assert!(seeded * 3 >= problems.len(), "{}: only {seeded} of {} problems seeded", d.name(), problems.len());
+        assert_eq!(result.paths.positions.len(), problems.len() * 3 * per_path);
+    }
+}
+
+/// A problem searched to its straight line is not optimized: no seed could be shorter.
+#[test]
+fn problems_searched_straight_are_not_optimized() {
+    let robot = panda();
+    let (_, reaches) = reaches(&robot);
+    let scene = vec![World::default()];
+    let problems: Vec<PlanProblem> = reaches.into_iter().take(8).map(|p| PlanProblem { world: 0, ..p }).collect();
+    let o = PlanOptions { seeds: 4, ..Default::default() };
+    for d in devices(&robot) {
+        let result = plan(&d, &d.upload(&scene).unwrap(), &problems, &o).unwrap();
+        for pi in 0..problems.len() {
+            assert!(result.valid[pi * 5], "{}: problem {pi} has no searched path", d.name());
+            assert!(
+                (1..5).all(|k| !result.valid[pi * 5 + k]),
+                "{}: problem {pi}'s straight path was optimized",
+                d.name()
+            );
+        }
+    }
+}
+
+/// A budget spent while searching leaves optimization unstarted.
+#[test]
+fn a_spent_budget_starts_no_optimization() {
+    let robot = panda();
+    let (_, reaches) = reaches(&robot);
+    let scene = vec![World::default()];
+    let problems: Vec<PlanProblem> = reaches.into_iter().take(8).map(|p| PlanProblem { world: 0, ..p }).collect();
+    let o = PlanOptions { seeds: 4, time_budget: Some(std::time::Duration::ZERO), ..Default::default() };
+    for d in devices(&robot) {
+        let result = plan(&d, &d.upload(&scene).unwrap(), &problems, &o).unwrap();
+        assert!(result.valid.iter().all(|&v| !v), "{}: a seed was planned or optimized", d.name());
+    }
+}
+
+/// Repairs keep their own weights: without optimization seeds, plans do not depend on the
+/// optimization's.
+#[test]
+fn plans_without_seeds_ignore_the_optimization_weights() {
+    let robot = panda();
+    let n = robot.dof();
+    let (scene, problems) = reaches(&robot);
+    let cpu = Device::cpu(&robot).unwrap();
+    let worlds = cpu.upload(&scene).unwrap();
+    let rest = plan(&cpu, &worlds, &problems, &PlanOptions::default()).unwrap();
+    let mut state = JointState::new(n);
+    let moving: Vec<PlanProblem> = rest
+        .solved()
+        .map(|s| {
+            let trajectory = Trajectory::new(&robot, s.solution, 1.0).unwrap();
+            trajectory.at(0.4 * trajectory.duration(), &mut state);
+            let motion = StartMotion { velocity: state.velocity.clone(), acceleration: state.acceleration.clone() };
+            PlanProblem { start: state.position.clone(), start_motion: Some(motion), ..s.problem.clone() }
+        })
+        .collect();
+    let weighed = PlanOptions {
+        w_acc: 0.5,
+        w_vel: 40.0,
+        collision: CollisionWeights { margin: 0.003, ..PlanOptions::default().collision },
+        ..Default::default()
+    };
+    let a = plan(&cpu, &worlds, &moving, &PlanOptions::default()).unwrap();
+    let b = plan(&cpu, &worlds, &moving, &weighed).unwrap();
+    assert_eq!(a.paths.positions, b.paths.positions, "the optimization's weights changed plans without seeds");
 }

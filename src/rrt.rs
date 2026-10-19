@@ -4,7 +4,9 @@
 //! first and last collides), which keeps the straight route when an obstacle only grazes it. Then
 //! one tree grows from the start and
 //! one from the goal set, in turn (the smaller one alone while the other is at least twice its
-//! size), toward Halton samples. An extension steps at most `range` from the nearest node and is
+//! size), toward Halton samples: first from a tube around the straight line that widens until it
+//! spans the joint ranges, as cuRobo's roadmap samples an ellipsoid around it, so the route found
+//! stays near the line where one does; then from every joint's range. An extension steps at most `range` from the nearest node and is
 //! checked as an edge. The other tree then connects toward the new node in equal steps of at most
 //! `range`, each checked in order, inserting every valid one. Dynamic domains skip samples farther
 //! from their nearest node than its radius, which shrinks when extending from the node fails.
@@ -30,7 +32,8 @@ pub struct RrtOptions {
     pub range: f32,
     /// Spacing of collision checks along edges (joint-space distance).
     pub resolution: f32,
-    /// Samples a problem draws before it gives up.
+    /// Samples a problem draws from the joint ranges before it gives up; the tube's (see the
+    /// module docs) come on top. 0 tries only the straight lines and their bends.
     pub max_iterations: usize,
     /// Where in the Halton sequence samples start.
     pub rng_seed: u64,
@@ -84,6 +87,11 @@ pub(crate) fn distance(a: &[f32], b: &[f32]) -> f32 {
 /// How far (joint-space distance) a bent straight line's via points move off the line, nearest
 /// first, along each joint's axis both ways (across the line).
 const BEND_RADII: [f32; 4] = [0.05, 0.1, 0.2, 0.4];
+
+/// How far across the straight line (joint-space distance, along each axis across it) and past
+/// its ends the first samples lie, and how many samples the tube takes before it doubles.
+const TUBE_RADIUS: f32 = 0.4;
+const TUBE_DOUBLING: usize = 64;
 
 /// A dynamic domain's radius after a failed extension from a node without one.
 const DOMAIN_RADIUS: f32 = 4.0;
@@ -459,7 +467,9 @@ pub(crate) struct Connect<'r> {
     trees: [Tree; 2],
     start_first: bool,
     halton: Halton,
+    /// Samples drawn from the joint ranges, and from the tube.
     iterations: usize,
+    tube_samples: usize,
     stage: Stage,
     keep: Option<Arc<Keep>>,
     /// Working configurations, reused from one iteration to the next: the sample (then the node a
@@ -474,6 +484,9 @@ pub(crate) struct Connect<'r> {
     collides: [f32; 2],
     directions: Vec<f32>,
     vias: Vec<f32>,
+    /// An orthonormal basis across the line the tube follows (`[k, dof]`), set when the straight
+    /// line first collides.
+    across: Vec<f32>,
     /// The path found, once the search is over.
     pub(crate) path: Option<Vec<f32>>,
 }
@@ -495,6 +508,7 @@ impl<'r> Connect<'r> {
             start_first: true,
             halton: Halton::new(n, o.rng_seed),
             iterations: 0,
+            tube_samples: 0,
             stage: if p.goals.is_empty() { Stage::Done } else { Stage::Start },
             keep: (o.clearance > 0.0).then(|| {
                 let ends = std::iter::once(&p.start).chain(&p.goals).cloned().collect();
@@ -507,6 +521,7 @@ impl<'r> Connect<'r> {
             collides: [0.5; 2],
             directions: vec![],
             vias: Vec::with_capacity(2 * n),
+            across: vec![],
             path: None,
         }
     }
@@ -555,6 +570,35 @@ impl<'r> Connect<'r> {
                 self.directions.extend(d.iter().map(|v| v / norm));
             }
         }
+        // The tube follows the first line that collides: Gram-Schmidt on the free joints' axes.
+        if !self.across.is_empty() || length == 0.0 {
+            return;
+        }
+        for j in (0..n).filter(|&j| !self.held[j]) {
+            d.fill(0.0);
+            d[j] = 1.0;
+            let dot = along[j] / (length * length);
+            d.iter_mut().zip(&along).for_each(|(v, a)| *v -= dot * a);
+            for b in self.across.chunks(n) {
+                let dot: f32 = d.iter().zip(b).map(|(x, y)| x * y).sum();
+                d.iter_mut().zip(b).for_each(|(v, y)| *v -= dot * y);
+            }
+            let norm = d.iter().map(|v| v * v).sum::<f32>().sqrt();
+            if norm > 1e-3 {
+                self.across.extend(d.iter().map(|v| v / norm));
+            }
+        }
+    }
+
+    /// The tube's radius for the next sample, while it is narrower than the widest joint range.
+    fn tube(&self) -> Option<f32> {
+        if self.across.is_empty() || self.max_iterations == 0 {
+            return None;
+        }
+        let doublings = (self.tube_samples / TUBE_DOUBLING).min(31) as i32;
+        let r = TUBE_RADIUS * 2f32.powi(doublings);
+        let widest = self.robot.lower.iter().zip(&self.robot.upper).map(|(l, u)| u - l).fold(0.0, f32::max);
+        (r < widest).then_some(r)
     }
 
     /// The free goal nearest the start.
@@ -689,11 +733,15 @@ impl Search for Connect<'_> {
                     return self.query(edges, Wanted::Prefix);
                 }
                 Stage::Sample => {
-                    if self.iterations >= self.max_iterations {
+                    let tube = self.tube();
+                    if tube.is_some() {
+                        self.tube_samples += 1;
+                    } else if self.iterations >= self.max_iterations {
                         self.stage = Stage::Done;
                         continue;
+                    } else {
+                        self.iterations += 1;
                     }
-                    self.iterations += 1;
                     let (a, b) = (self.trees[0].len() as f32, self.trees[1].len() as f32);
                     if (a - b).abs() / a < 1.0 {
                         self.trees.swap(0, 1);
@@ -701,11 +749,29 @@ impl Search for Connect<'_> {
                     }
                     let target = &mut self.sample;
                     self.halton.next(target);
+                    if let Some(r) = tube {
+                        // Along the line, past either end by the radius, then across it in a box.
+                        self.new.clear();
+                        self.new.extend_from_slice(target);
+                        let past = r / distance(&self.start, &self.line_goal);
+                        let t = -past + (1.0 + 2.0 * past) * self.new[0];
+                        for (j, q) in target.iter_mut().enumerate() {
+                            *q = self.start[j] + (self.line_goal[j] - self.start[j]) * t;
+                        }
+                        for (b, u) in self.across.chunks(n).zip(&self.new[1..]) {
+                            let c = r * (2.0 * u - 1.0);
+                            target.iter_mut().zip(b).for_each(|(q, y)| *q += c * y);
+                        }
+                    }
                     for (j, t) in target.iter_mut().enumerate() {
                         *t = if self.held[j] {
                             self.start[j]
-                        } else {
+                        } else if tube.is_none() {
                             self.robot.lower[j] + *t * (self.robot.upper[j] - self.robot.lower[j])
+                        } else if self.robot.continuous[j] {
+                            *t
+                        } else {
+                            t.clamp(self.robot.lower[j], self.robot.upper[j])
                         };
                     }
                     let tree = &mut self.trees[0];

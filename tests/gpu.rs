@@ -229,6 +229,25 @@ fn gpu_plans_are_collision_free_under_cpu_check() {
 /// search only scales it). The first step has no history, so it is the negative gradient; later
 /// ones come from the two-loop recursion. Also returns a mask of values a joint limit clamped
 /// (those carry no direction information).
+/// A ball where each problem's hand passes halfway along its straight line, so every search
+/// detours and the problem is optimized; problems whose ends the ball touches are dropped. Each
+/// problem has a world of its own.
+fn block_straight_lines(robot: &Robot, scene: &mut [World], problems: Vec<PlanProblem>) -> Vec<PlanProblem> {
+    for p in &problems {
+        let middle: Vec<f32> = p.start.iter().zip(&p.goal).map(|(a, b)| 0.5 * (a + b)).collect();
+        let center = robot.ee_pose(&middle, 0).position;
+        scene[p.world as usize].obstacles.push(Obstacle::Sphere { center, radius: 0.1 });
+    }
+    let cpu = Device::cpu(robot).unwrap();
+    let worlds = cpu.upload(scene).unwrap();
+    let free = |p: &PlanProblem| {
+        let ends = [&p.start[..], &p.goal[..]].concat();
+        let e = cpu.evaluate(&worlds, &[p.world, p.world], &ends, &CollisionWeights::NONE).unwrap();
+        e.collision_free(0) && e.collision_free(1)
+    };
+    problems.into_iter().filter(free).collect()
+}
+
 fn step_directions(
     d: &Device,
     worlds: &[World],
@@ -257,9 +276,9 @@ fn step_directions(
 fn trajopt_directions_match_cpu_element_wise() {
     let Some((robot, gpu, cpu)) = setup() else { return };
     let n = robot.dof();
-    let worlds = worlds(32, 8);
+    let mut worlds = worlds(64, 8);
     let ik = solve_ik(&cpu, &cpu.upload(&worlds).unwrap(), &ik_problems(&worlds, 9), &IkOptions::default()).unwrap();
-    let problems: Vec<PlanProblem> = ik
+    let reaches: Vec<PlanProblem> = ik
         .solved()
         .map(|s| PlanProblem {
             world: s.problem.world,
@@ -269,6 +288,7 @@ fn trajopt_directions_match_cpu_element_wise() {
             hold: vec![],
         })
         .collect();
+    let problems = block_straight_lines(&robot, &mut worlds, reaches);
     let o = PlanOptions { seeds: 8, ..Default::default() };
     let per_path = o.control_points * n;
     // Step 1 follows the gradient; step 4 the two-loop recursion over three remembered steps.
@@ -276,19 +296,22 @@ fn trajopt_directions_match_cpu_element_wise() {
         let (a, clamped_a) = step_directions(&cpu, &worlds, &problems, &o, step);
         let (b, clamped_b) = step_directions(&gpu, &worlds, &problems, &o, step);
         let (mut worst, mut compared) = (0.0f32, 0);
+        let moved = |g: &[f32]| g.iter().any(|&v| v != 0.0);
         for (p, (ga, gb)) in a.chunks(per_path).zip(b.chunks(per_path)).enumerate() {
-            let moved = |g: &[f32]| g.iter().any(|&v| v != 0.0);
             if (0..per_path).any(|i| clamped_a[p * per_path + i] || clamped_b[p * per_path + i]) || !moved(ga) {
                 continue;
             }
             worst = ga.iter().zip(gb).fold(worst, |m, (x, y)| m.max((x - y).abs()));
             compared += 1;
         }
-        let paths = a.len() / per_path;
+        // Problems searched to within a few percent of the straight line are not optimized.
+        let optimized = a.chunks(per_path).filter(|g| moved(g)).count();
         eprintln!(
-            "step {step}: worst |cpu-gpu| of directions scaled to their largest entry, {compared} paths: {worst:.2e}"
+            "step {step}: worst |cpu-gpu| of directions scaled to their largest entry, {compared} of {optimized} \
+             optimized paths: {worst:.2e}"
         );
-        assert!(compared > paths / 2, "step {step}: only {compared} of {paths} paths moved without clamping");
+        assert!(optimized >= 48, "step {step}: only {optimized} paths optimized");
+        assert!(compared > optimized / 2, "step {step}: only {compared} of {optimized} paths moved without clamping");
         assert!(worst < 1e-2, "step {step}: directions differ by {worst} of their largest entry");
     }
 }
@@ -310,10 +333,9 @@ fn trajopt_lowers_the_cost_as_far_as_the_cpu() {
     // trajectory cost after optimization, computed independently on the CPU.
     let Some((robot, gpu, cpu)) = setup() else { return };
     let n = robot.dof();
-    let scene = worlds(32, 12);
-    let on_cpu = cpu.upload(&scene).unwrap();
-    let ik = solve_ik(&cpu, &on_cpu, &ik_problems(&scene, 13), &IkOptions::default()).unwrap();
-    let problems: Vec<PlanProblem> = ik
+    let mut scene = worlds(32, 12);
+    let ik = solve_ik(&cpu, &cpu.upload(&scene).unwrap(), &ik_problems(&scene, 13), &IkOptions::default()).unwrap();
+    let reaches: Vec<PlanProblem> = ik
         .solved()
         .map(|s| PlanProblem {
             world: s.problem.world,
@@ -323,6 +345,8 @@ fn trajopt_lowers_the_cost_as_far_as_the_cpu() {
             hold: vec![],
         })
         .collect();
+    let problems = block_straight_lines(&robot, &mut scene, reaches);
+    let on_cpu = cpu.upload(&scene).unwrap();
     let o = PlanOptions { seeds: 8, ..Default::default() };
     let (points, k) = (o.control_points, o.samples_per_span);
     let cost = |paths: &[f32]| -> f64 {

@@ -28,9 +28,8 @@ pub struct ShortcutOptions {
     /// Smoothing moves a waypoint, and straightening a joint shortens the path, only by at least
     /// this much (joint-space distance); infinity turns both off.
     pub min_change: f32,
-    /// Straighten each joint in turn after the first pass's shortcuts (see the module docs). Paths
-    /// get shorter, by about 1% on the Panda benchmark and 13-18% on pick-and-place carries, at
-    /// about a sixth of batched planning throughput. Off by default; demonstrations turn it on.
+    /// Straighten each joint in turn after the first pass's shortcuts (see the module docs): about
+    /// 1% shorter paths on the Panda benchmark, and 13-18% on pick-and-place carries.
     pub straighten: bool,
     /// Clearance new edges keep from the world (meters), so the path does not pull taut against
     /// obstacles. It shrinks to zero within `clearance_ramp` (joint-space distance) of the path's
@@ -47,7 +46,7 @@ impl Default for ShortcutOptions {
             min_change: 0.1,
             clearance: 0.01,
             clearance_ramp: 0.5,
-            straighten: false,
+            straighten: true,
         }
     }
 }

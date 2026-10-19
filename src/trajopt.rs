@@ -27,8 +27,10 @@ use crate::types::{JointPaths, Solved, StartMotion};
 
 #[derive(Clone, Copy, Debug)]
 pub struct PlanOptions {
-    /// Seeds trajectory optimization runs per problem, besides the searched path (whose spline
-    /// is its first seed); 0 keeps the searched path as it is.
+    /// Seeds trajectory optimization runs per problem, besides the searched path: its spline, the
+    /// straight lines to the goal and its equivalents, then bends through random via points.
+    /// Problems searched to within 2% of the straight line are not optimized (their seeds stay
+    /// invalid). 0 keeps the searched path as it is.
     pub seeds: usize,
     /// B-spline control points per path, including the three pinned at each end (at least 7).
     pub control_points: usize,
@@ -44,6 +46,8 @@ pub struct PlanOptions {
     pub w_acc: f32,
     /// Weight of squared differences of control points (path length).
     pub w_vel: f32,
+    /// Collision cost of the optimization. Repairs of stuck splines keep their own weights and a
+    /// 2 cm margin.
     pub collision: CollisionWeights,
     /// Samples per span used to validate the result.
     pub validate_substeps: usize,
@@ -54,8 +58,9 @@ pub struct PlanOptions {
     pub shortcut: ShortcutOptions,
     /// Stop optimizing and searching once this much time has passed, and return the best valid
     /// paths so far. The budget is checked between rounds (on a GPU, between submissions of
-    /// several rounds), and validation still runs after it. Results then depend on machine
-    /// speed; without a budget they are the same on every run.
+    /// several rounds), and validation still runs after it; optimization does not start once it
+    /// has passed. Results then depend on machine speed; without a budget they are the same on
+    /// every run.
     pub time_budget: Option<Duration>,
 }
 
@@ -70,12 +75,12 @@ impl Default for PlanOptions {
             seeds: 0,
             control_points: 24,
             samples_per_span: 3,
-            iterations: 40,
+            iterations: 100,
             history: 6,
             initial_step: 0.1,
-            w_acc: 50.0,
-            w_vel: 2.0,
-            collision: CollisionWeights { world: 1000.0, self_collision: 1000.0, margin: 0.02, self_margin: 0.01 },
+            w_acc: 5.0,
+            w_vel: 10.0,
+            collision: CollisionWeights { world: 1000.0, self_collision: 1000.0, margin: 0.012, self_margin: 0.01 },
             validate_substeps: 8,
             rng_seed: 2,
             rrt: RrtOptions { clearance: 0.015, ..RrtOptions::default() },
@@ -104,7 +109,7 @@ pub struct PlanProblem {
 }
 
 /// Per-seed results for `problems`; paths are problem-major (`item = problem * seeds + seed`).
-/// Seed 0 is the searched path; optimized seeds follow.
+/// Seed 0 is the searched path; optimized seeds follow, invalid where a problem was not optimized.
 #[derive(Clone, Debug)]
 pub struct PlanResult {
     pub problems: Vec<PlanProblem>,
@@ -190,7 +195,7 @@ pub fn plan(device: &Device, worlds: &Worlds, problems: &[PlanProblem], o: &Plan
         }
         searched.push(planning.start);
     }
-    if o.seeds > 0 {
+    if o.seeds > 0 && deadline.is_none_or(|d| Instant::now() < d) {
         optimize(device, worlds, &mut result, &searched, o, deadline)?;
     }
     Ok(result)
@@ -545,8 +550,7 @@ impl Search for Planning<'_> {
     fn optimize(&mut self) -> Option<Optimize<'_>> {
         let Phase::Repair(spline, optimized @ false) = &mut self.phase else { return None };
         *optimized = true;
-        let options = PlanOptions { iterations: REPAIR_ITERATIONS, ..*self.o };
-        Some(Optimize { world: self.problem.world, path: spline, options })
+        Some(Optimize { world: self.problem.world, path: spline, options: repairing(self.o) })
     }
 }
 
@@ -554,9 +558,21 @@ impl Search for Planning<'_> {
 /// that clearance back for length, leaving fewer valid.
 const REPAIR_ITERATIONS: u32 = 10;
 
+/// Repairs weigh smoothness over length and keep a 2 cm margin whatever the options say: their
+/// job is a spline clear of the obstacles, which `PlanOptions`' weights for shortening seeds solve
+/// fewer of.
+fn repairing(o: &PlanOptions) -> PlanOptions {
+    let collision = CollisionWeights { margin: 0.02, ..o.collision };
+    PlanOptions { iterations: REPAIR_ITERATIONS, w_acc: 50.0, w_vel: 2.0, collision, ..*o }
+}
+
+/// Searched paths within this fraction of the straight line between their ends are not optimized:
+/// no seed could be much shorter.
+const OPTIMIZE_SLACK: f32 = 0.02;
+
 /// Trajectory optimization of `o.seeds` seeds per problem into seeds 1 onward: the searched
-/// spline where there is one, straight lines to the goal's equivalents, and bends through random
-/// via points.
+/// spline where there is one, straight lines to the goal and its equivalents, and bends through
+/// random via points. Problems whose searched path is within `OPTIMIZE_SLACK` of straight keep it.
 fn optimize(
     device: &Device,
     worlds: &Worlds,
@@ -571,21 +587,28 @@ fn optimize(
     ensure_input!((1..=MAX_HISTORY).contains(&o.history), "L-BFGS history must be 1 to {MAX_HISTORY} steps");
     ensure_input!(o.initial_step > 0.0, "the initial step must be positive");
     let mut rng = Rng::new(o.rng_seed);
-    let mut paths = JointPaths::zeros(result.problems.len() * o.seeds, points, n);
+    let near_straight = |pi: usize| {
+        let item = pi * result.seeds;
+        let searched = result.paths.path(item);
+        let straight = distance(&searched[..n], &searched[searched.len() - n..]);
+        result.valid[item] && result.length[item] <= straight * (1.0 + OPTIMIZE_SLACK)
+    };
+    let wanted: Vec<usize> = (0..result.problems.len()).filter(|&pi| !near_straight(pi)).collect();
+    let mut paths = JointPaths::zeros(wanted.len() * o.seeds, points, n);
     let mut item_world = Vec::with_capacity(paths.len());
-    for (pi, p) in result.problems.iter().enumerate() {
-        // The searched spline first; then odd seeds run straight to the goal's other equivalents
-        // while they last, the rest straight to the nearest or bent through random via points.
+    for (w, &pi) in wanted.iter().enumerate() {
+        let p = &result.problems[pi];
         let goals = robot.goal_variants(&p.start, &p.goal);
+        let lines_from = usize::from(searched[pi].is_some());
         for s in 0..o.seeds {
-            let path = paths.path_mut(pi * o.seeds + s);
-            match (&searched[pi], s) {
-                (Some(spline), 0) => path.copy_from_slice(spline),
+            let path = paths.path_mut(w * o.seeds + s);
+            match &searched[pi] {
+                Some(spline) if s == 0 => path.copy_from_slice(spline),
                 _ => {
-                    let (goal, straight) = match s {
-                        0 => (&goals[0], true),
-                        s if s % 2 == 1 && s.div_ceil(2) < goals.len() => (&goals[s.div_ceil(2)], true),
-                        _ => (&goals[0], false),
+                    let line = s - lines_from;
+                    let (goal, straight) = match goals.get(line) {
+                        Some(goal) => (goal, true),
+                        None => (&goals[0], false),
                     };
                     seed_path(robot, &p.start, goal, straight, &mut rng, path);
                     if let Some(m) = &p.start_motion {
@@ -597,15 +620,15 @@ fn optimize(
         }
     }
     device.trajopt(worlds, &item_world, &mut paths, o, deadline)?;
-    for (pi, p) in result.problems.iter().enumerate() {
+    for (w, &pi) in wanted.iter().enumerate() {
         for s in 0..o.seeds {
-            hold_still(paths.path_mut(pi * o.seeds + s), &p.start, &p.hold);
+            hold_still(paths.path_mut(w * o.seeds + s), &result.problems[pi].start, &result.problems[pi].hold);
         }
     }
     let (clearance, lengths) = validate(device, worlds, &paths, &item_world, o)?;
-    for p in 0..result.problems.len() {
+    for (w, &pi) in wanted.iter().enumerate() {
         for s in 0..o.seeds {
-            let (from, to) = (p * o.seeds + s, p * result.seeds + 1 + s);
+            let (from, to) = (w * o.seeds + s, pi * result.seeds + 1 + s);
             result.paths.path_mut(to).copy_from_slice(paths.path(from));
             result.valid[to] = clearance[from] >= 0.0;
             result.length[to] = lengths[from];

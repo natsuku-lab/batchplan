@@ -6,6 +6,7 @@
 //!     [--optimize S]               (also run trajectory optimization on S seeds per problem)
 //!     [--clearance M] [--ramp R]   (clearance paths keep, and how far from their ends it ramps up)
 //!     [--passes N] [--min-change D] (shortcut and smoothing passes, smallest smoothing move)
+//!     [--rrt-seed N]               (where RRT-Connect's Halton samples start)
 //!     [--search-clearance M] [--shortcut-clearance M] (either clearance alone)
 //!     [--meshes]                   (also check successful plans against the Panda's meshes)
 //!     [--spheres curobo|vamp|fitted] (the Panda's collision spheres: cuRobo's hand-tuned ones, VAMP's,
@@ -187,6 +188,7 @@ fn args() -> Result<Args> {
                 (a.plan.rrt.clearance, a.plan.shortcut.clearance) = (m, m);
             }
             "--passes" => a.plan.shortcut.passes = it.next().context("--passes N")?.parse()?,
+            "--rrt-seed" => a.plan.rrt.rng_seed = it.next().context("--rrt-seed N")?.parse()?,
             "--substeps" => a.plan.validate_substeps = it.next().context("--substeps K")?.parse()?,
             "--search-clearance" => a.plan.rrt.clearance = it.next().context("--search-clearance M")?.parse()?,
             "--shortcut-clearance" => {
