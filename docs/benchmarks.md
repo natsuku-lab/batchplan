@@ -60,15 +60,13 @@ batchplan's and VAMP's rows are three alternating rounds of one session; OMPL's 
 
 **Against MoveIt 2 and RoboPlan**, which plan on the Panda's meshes, on the Ryzen. batchplan plans on cuRobo's spheres, which ship with it; every path is judged on the meshes.
 
-| Planner | Solved, on the meshes | Path length (median, 1,337 problems all three solve) | Time per problem (median) | In batches |
+| Planner | Solved, on the meshes | Path length (median, 1,334 problems all three solve) | Time per problem (median) | In batches |
 |---|---|---|---|---|
-| batchplan | **93.1%** | **3.22 rad** | **0.18 ms**¹ | **14,719 /s**¹ |
-| RoboPlan | 73.7% | 3.78 rad | 10.3 ms | 174 /s |
-| MoveIt 2 | 63.2% | 3.81 rad | 59.4 ms | 82 /s |
+| batchplan | **93.1%** | **3.23 rad** | **0.12 ms** | **17,865 /s** |
+| RoboPlan | 73.8% | 3.78 rad | 10.3 ms | 174 /s |
+| MoveIt 2 | 63.1% | 3.80 rad | 59.4 ms | 82 /s |
 
-¹ On the M4 Pro: the Ryzen was busy when this version was measured. There, batchplan's previous version planned in 0.12 ms and 21,726 problems/s.
-
-On the M4 Pro, RoboPlan plans in 6.28 ms and 176 problems/s, with as many of its paths clear. MoveIt 2 ran only on the Ryzen, in Docker. VAMP built with GCC 15 on the Ryzen crashed, so VAMP and OMPL ran only on the M4 Pro.
+On the M4 Pro, batchplan plans in 0.18 ms and 14,719 problems/s, and RoboPlan in 6.28 ms and 176/s, with as many of its paths clear. MoveIt 2 ran only on the Ryzen, in Docker. VAMP built with GCC 15 on the Ryzen crashed, so VAMP and OMPL ran only on the M4 Pro.
 
 **Against cuRobo**, both on cuRobo's spheres, cuRobo on the T4 machine. The run loaded every obstacle as an oriented box, as cuRobo's own benchmark does. A cylinder made a box closes the gap between the fingers at the goals that grasp it, so cuRobo is compared on the 1,300 problems whose scenes have no cylinders: `cage_panda` and the `cubby`, `dresser` and `merged_cubby` sets. (`scripts/compare_planners.py` now loads cylinders as meshes, `get_collision_check_world`, for a run over all 2,600; the boxes are the same.) *In batches* is each set over its wall time: batchplan's set in one call, cuRobo's in calls of 32.
 
@@ -144,9 +142,9 @@ By their own checks, VAMP solved 98.6% (98.5% with 2 rad steps), OMPL 90.5%, Rob
 ### Reading the results
 
 - **On the same spheres, batchplan solves the most, with the shortest paths.** On VAMP's spheres, 9.3% of the problems start or end in collision, so no planner can solve more than 90.7% on them; batchplan solves 2,351 of the 2,358 others. VAMP counts 98.6% solved because it checks neither the start nor the goal, and it checks edges 1/32 rad apart, where the judge's denser samples find grazes. OMPL's paths graze most often: its own motion validator checks edges at 1% of the joint space's extent, about 0.13 rad. Over the problems all seven runs solve, batchplan's median path is 3.40 rad, 3.37 without clearance, against VAMP's 3.53: its searches start near the straight line ([below](#closing-the-path-length-gap)).
-- **batchplan plans faster than VAMP.** Both run RRT-Connect on SIMD collision checks. On VAMP's spheres, a typical problem takes batchplan 0.17 ms and VAMP 0.26–0.27 ms. VAMP searches its few unsolvable problems up to 100,000 samples, so all 2,600 take it 2.44 s on one core. Stopped at 10,000, as batchplan's searches are, VAMP takes 1.06 s against batchplan's 0.95 s, and plans 15,703 problems/s in batches against 16,836. Their slowest problems take about as long: VAMP's 98th percentile is 1.76 ms against batchplan's 1.70, which moves by ±0.3 ms with where batchplan's Halton samples start (`--rrt-seed`). In batches on the M4 Pro, batchplan plans about 85 times as many problems per second as RoboPlan and 560 times as many as OMPL; MoveIt 2 plans 82 per second on the Ryzen.
+- **batchplan plans faster than VAMP.** Both run RRT-Connect on SIMD collision checks. On VAMP's spheres, a typical problem takes batchplan 0.17 ms and VAMP 0.26–0.27 ms. VAMP searches its few unsolvable problems up to 100,000 samples, so all 2,600 take it 2.44 s on one core. Stopped at 10,000, as batchplan's searches are, VAMP takes 1.06 s against batchplan's 0.95 s, and plans 15,703 problems/s in batches against 16,836. Their slowest problems take about as long: VAMP's 98th percentile is 1.76 ms against batchplan's 1.70, which moves by ±0.3 ms with where batchplan's Halton samples start (`--rrt-seed`). In batches, batchplan plans about 100 times as many problems per second as RoboPlan and 220 times as many as MoveIt 2 (on the Ryzen), and 560 times as many as OMPL (on the M4 Pro).
 - **The clearance costs a sixth of the speed, and buys the clear paths.** Without it (`--clearance 0`), batchplan plans 22% more problems per second, but only 70.8% of its paths clear the meshes, against 85.2% with it and 71.5–75.3% for VAMP.
-- **Judged on the real robot, batchplan's paths clear it most often.** On the spheres that ship with it, 93.1% of its paths clear the Panda's meshes, against 73.7% for RoboPlan and 63.2% for MoveIt 2, which plan on the meshes but check them only at intervals along each edge. Over the 1,337 problems all three solve, its paths are also the shortest, 3.22 rad against 3.78–3.81. On the scenes of boxes, it clears 92.8% against cuRobo's 81.6%. cuRobo's hand-tuned spheres are smaller around the hand than VAMP's: 98.1% of the problems have a free start and goal on them, and batchplan solves 98.0%.
+- **Judged on the real robot, batchplan's paths clear it most often.** On the spheres that ship with it, 93.1% of its paths clear the Panda's meshes, against 73.8% for RoboPlan and 63.1% for MoveIt 2, which plan on the meshes but check them only at intervals along each edge. Over the 1,334 problems all three solve, its paths are also the shortest, 3.23 rad against 3.78–3.80. On the scenes of boxes, it clears 92.8% against cuRobo's 81.6%. cuRobo's hand-tuned spheres are smaller around the hand than VAMP's: 98.1% of the problems have a free start and goal on them, and batchplan solves 98.0%.
 - **With two optimization seeds, batchplan's paths are the shortest.** Optimizing the searched path and the straight line (`PlanOptions::seeds = 2`) gives 3.137 rad where all solve, against cuRobo's 3.144, and the shorter path on 78% of the problems, at 15.9 ms per problem on 14 CPU threads or 734 problems/s in batches on the M4 Pro's GPU. cuRobo's mean stays 1% shorter (0.2% against four seeds), from a few long problems. Without optimization, batchplan's paths are 3% longer than cuRobo's (3.243 rad), from searches that stay near the straight line ([below](#closing-the-path-length-gap)), at a sixtieth of the optimized time. cuRobo takes 197 ms per problem on the T4 and solves 85.2% against batchplan's 98.8–98.9%.
 - **The outputs differ.** VAMP, OMPL and RoboPlan return waypoints joined by straight lines, so a controller must stop at every corner, or smooth the path and check it again. MoveIt 2 and cuRobo return timed trajectories. batchplan returns a smooth cubic B-spline that starts and ends at rest, which `Trajectory::new` times within velocity, acceleration and jerk limits in about 0.5 ms.
 - **The time per problem is measured as each library is used.** batchplan's covers a whole `plan` call. VAMP's and OMPL's cover building the scene, planning and simplifying, from C++. cuRobo's covers loading the world and `plan_cspace`, with the GPU synchronized. RoboPlan's and MoveIt 2's cover their planning calls from Python.
@@ -164,10 +162,10 @@ It checks success as above, on cuRobo's spheres, the Panda model that ships with
 |---|---|---|---|---|---|---|---|---|
 | M4 Pro CPU, 14 threads | 98.1% | 98.0% | 97.0% | 89.8% | 15,345 | 0.2 / 2.0 ms | 2,354 | **1 / 3 ms** |
 | M4 Pro GPU | 98.1% | 98.0% | 97.0% | 90.0% | 15,238 | 0.2 / 2.0 ms | 2,076 | 10 / 25 ms |
-| Ryzen AI Max+ 395, 32 threads¹ | 98.1% | 97.9% | 96.9% | 89.5% | **22,308** | **0.1 / 1.4 ms** | **2,858** | **1 / 3 ms** |
-| Radeon 8060S¹ | 98.1% | 97.9% | 97.0% | 89.8% | 19,927 | 0.2 / 1.4 ms | 1,986 | 11 / 36 ms |
+| Ryzen AI Max+ 395, 32 threads | 98.1% | 98.0% | 97.0% | 89.8% | **18,222** | **0.1 / 1.6 ms** | **2,711** | **1 / 3 ms** |
+| Radeon 8060S | 98.1% | 98.0% | 97.0% | 89.7% | 17,981 | 0.2 / 1.7 ms | 1,836 | 11 / 37 ms |
 
-¹ batchplan's previous version: the Ryzen was busy when this one was measured. On the M4 Pro, the current version plans 14% fewer problems per second in batches on these spheres than the previous one (three alternating rounds: 14,666 against 17,003), the cost of searching near the straight line and straightening, with paths 4% shorter and one more problem solved; on VAMP's spheres it plans as fast.
+Searching near the straight line and straightening cost batched throughput on these spheres: in three alternating rounds against the previous version, 7% on the Ryzen (17,865 against 19,267 problems/s) and 14% on the M4 Pro (14,666 against 17,003), for paths 4% shorter and one more problem solved. On VAMP's spheres the cost is 5% on the Ryzen and none measurable on the M4 Pro. Single problems plan as fast as before on both (0.12 and 0.18 ms at the median), and the slowest 2% faster on the Ryzen (1.38 against 1.41 ms; on VAMP's spheres 1.45 against 1.65).
 
 Planning runs on CPU threads on either device, each device's own, so the devices plan alike. IK runs on the device, where the GPU pays a fixed cost per call (about 10 ms for one problem) that the CPU does not.
 
@@ -225,14 +223,14 @@ cuRobo's hand-tuned Panda spheres leave parts of its meshes uncovered, by up to 
 
 | Clearance, searching / shortcutting | Plan | Clear on the meshes | Path length (median) | Planning, problems/s |
 |---|---|---|---|---|
-| none | 94.9% | 55.1% | 3.52 rad | 26,223 |
-| 1 cm / 1 cm | 97.9% | 92.5% | 3.59 rad | 21,726 |
-| 1.5 cm / 1 cm (the default) | 97.9% | 92.8% | 3.60 rad | 22,052 |
-| 2 cm / 0.75 cm | 97.9% | 91.7% | 3.60 rad | 22,165 |
-| 2 cm / 1.25 cm | 97.9% | 92.9% | 3.62 rad | 21,926 |
-| 2 cm / 2 cm | 97.8% | 93.1% | 3.65 rad | 22,128 |
+| none | 95.5% | 56.8% | 3.43 rad | 21,737 |
+| 1 cm / 1 cm | 98.0% | 92.7% | 3.46 rad | 19,076 |
+| 1.5 cm / 1 cm (the default) | 98.0% | 93.1% | 3.46 rad | 18,174 |
+| 2 cm / 0.75 cm | 98.0% | 92.2% | 3.46 rad | 17,590 |
+| 2 cm / 1.25 cm | 98.0% | 93.5% | 3.46 rad | 18,792 |
+| 2 cm / 2 cm | 98.0% | 93.9% | 3.50 rad | 18,093 |
 
-Without clearance, paths pull taut against the spheres. They are the shortest, but the judge's denser samples find some of them touching, and 4 in 10 problems end with a path that touches the meshes. A wider clearance while searching finds routes through open space, which clear the meshes more often; a narrower one while shortcutting lets paths pull tight. Below 1 cm in shortcuts, paths get shorter but graze the meshes more often. How wide the clearance is barely changes planning throughput; without one, batches plan about a fifth more problems per second.
+Without clearance, paths pull taut against the spheres. They are the shortest, but the judge's denser samples find some of them touching, and 4 in 10 problems end with a path that touches the meshes. A wider clearance while searching finds routes through open space, which clear the meshes more often; a narrower one while shortcutting lets paths pull tight. Below 1 cm in shortcuts, paths get no shorter but graze the meshes more often. How wide the clearance is barely changes planning throughput; without one, batches plan about a fifth more problems per second.
 
 Spheres fitted to the meshes (`--spheres fitted`) cover them completely. But their 3 cm overhang already puts most of these tight scenes' starts or goals in collision: 40% of the problems have free ends on them.
 

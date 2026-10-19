@@ -178,15 +178,15 @@ cuRobo on an NVIDIA T4 GPU with 8 Xeon threads; batchplan on the M4 Pro². The 1
 
 ### Against MoveIt 2 and RoboPlan, which plan on the meshes
 
-AMD Ryzen AI Max+ 395 CPU, 32 threads; batchplan on the M4 Pro². batchplan plans on the spheres it ships with; every path is judged on the meshes.
+AMD Ryzen AI Max+ 395 CPU, 32 threads. batchplan plans on the spheres it ships with; every path is judged on the meshes.
 
 | Planner | Solved, on the meshes | Path length¹ | Time per problem (median) | Batched |
 |---|---|---|---|---|
-| **batchplan** | **93.1%** | **3.22 rad** | **0.18 ms** | **14,719 /s** |
-| [RoboPlan](https://github.com/open-planning/roboplan) 0.7 | 73.7% | 3.78 rad | 10.3 ms | 174 /s |
-| [MoveIt 2](https://moveit.ai) Jazzy (OMPL, FCL) | 63.2% | 3.81 rad | 59.4 ms | 82 /s |
+| **batchplan** | **93.1%** | **3.23 rad** | **0.12 ms** | **17,865 /s** |
+| [RoboPlan](https://github.com/open-planning/roboplan) 0.7 | 73.8% | 3.78 rad | 10.3 ms | 174 /s |
+| [MoveIt 2](https://moveit.ai) Jazzy (OMPL, FCL) | 63.1% | 3.80 rad | 59.4 ms | 82 /s |
 
-¹ Median over the 1,337 problems all three solve. ² The Ryzen was busy when this version was measured; there the previous version planned in 0.12 ms and 21,726 problems/s. On the M4 Pro, RoboPlan plans in 6.28 ms and 176 problems/s.
+¹ Median over the 1,334 problems all three solve.
 
 ### Batches and the GPU
 
