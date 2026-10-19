@@ -22,33 +22,6 @@ fn devices(robot: &Robot) -> Vec<Device> {
     devices
 }
 
-/// UR5e motions from the default pose (arm straight out over the table) to far goals in tabletop
-/// worlds; `above_table` keeps the shoulder within the half turn above the table.
-fn far_reaches(robot: &Robot, cpu: &Device, count: usize, above_table: bool) -> (Vec<World>, Vec<PlanProblem>) {
-    let mut rng = Rng::new(14);
-    let scene: Vec<World> = (0..4).map(|_| common::tabletop_for(robot, cpu, &mut rng)).collect();
-    let worlds = cpu.upload(&scene).unwrap();
-    let mut problems = vec![];
-    while problems.len() < count {
-        let world = problems.len() as u32 % 4;
-        let mut goal: Vec<f32> = (0..robot.dof()).map(|j| rng.range(robot.lower()[j], robot.upper()[j])).collect();
-        if above_table {
-            goal[1] = rng.range(-3.0, -0.1);
-        }
-        let far = goal.iter().zip(robot.default_q()).map(|(a, b)| (a - b).powi(2)).sum::<f32>().sqrt() > 4.0;
-        if far && cpu.evaluate(&worlds, &[world], &goal, &CollisionWeights::NONE).unwrap().collision_free(0) {
-            problems.push(PlanProblem {
-                world,
-                start: robot.default_q().to_vec(),
-                goal,
-                start_motion: None,
-                hold: vec![],
-            });
-        }
-    }
-    (scene, problems)
-}
-
 fn searches(problems: &[PlanProblem]) -> Vec<RrtProblem> {
     problems
         .iter()
@@ -87,7 +60,7 @@ fn rrt_paths_are_collision_free_under_a_denser_check() {
     let robot = Robot::load(common::asset(UR5E), &RobotOptions::default()).unwrap();
     let cpu = Device::cpu(&robot).unwrap();
     let n = robot.dof();
-    let (scene, problems) = far_reaches(&robot, &cpu, 12, true);
+    let (scene, problems) = common::far_reaches(&robot, &cpu, 12, true);
     let on_cpu = cpu.upload(&scene).unwrap();
     let o = RrtOptions::default();
     for d in devices(&robot) {
@@ -118,7 +91,7 @@ fn shortcutting_never_lengthens_a_path() {
     let robot = Robot::load(common::asset(UR5E), &RobotOptions::default()).unwrap();
     let cpu = Device::cpu(&robot).unwrap();
     let n = robot.dof();
-    let (scene, problems) = far_reaches(&robot, &cpu, 12, true);
+    let (scene, problems) = common::far_reaches(&robot, &cpu, 12, true);
     let worlds = cpu.upload(&scene).unwrap();
     let found = connect(&cpu, &worlds, &searches(&problems), &RrtOptions::default()).unwrap();
     let (world, raw): (Vec<u32>, Vec<Vec<f32>>) =
@@ -145,7 +118,7 @@ fn shortcutting_never_lengthens_a_path() {
 fn fixed_seeds_give_fixed_results() {
     let robot = Robot::load(common::asset(UR5E), &RobotOptions::default()).unwrap();
     let cpu = Device::cpu(&robot).unwrap();
-    let (scene, problems) = far_reaches(&robot, &cpu, 6, true);
+    let (scene, problems) = common::far_reaches(&robot, &cpu, 6, true);
     let worlds = cpu.upload(&scene).unwrap();
     let run = |rrt: RrtOptions| {
         let found = connect(&cpu, &worlds, &searches(&problems), &rrt).unwrap();
@@ -166,7 +139,7 @@ fn plan_solves_every_problem_rrt_connect_reaches() {
     let robot = Robot::load(common::asset(UR5E), &RobotOptions::default()).unwrap();
     let cpu = Device::cpu(&robot).unwrap();
     let n = robot.dof();
-    let (scene, problems) = far_reaches(&robot, &cpu, 24, false);
+    let (scene, problems) = common::far_reaches(&robot, &cpu, 24, false);
     let on_cpu = cpu.upload(&scene).unwrap();
     let mut solved = vec![];
     for d in devices(&robot) {
@@ -209,33 +182,6 @@ fn plan_solves_every_problem_rrt_connect_reaches() {
     // Searches run on the CPU's checks on either device, so the plans are the same.
     if let [cpu, gpu] = &solved[..] {
         assert_eq!(cpu, gpu, "the devices plan differently");
-    }
-}
-
-#[test]
-fn the_search_keeps_the_time_budget() {
-    // Fine steps make the search long enough to cut.
-    let robot = Robot::load(common::asset(UR5E), &RobotOptions::default()).unwrap();
-    let cpu = Device::cpu(&robot).unwrap();
-    let (scene, problems) = far_reaches(&robot, &cpu, 48, false);
-    let slow = PlanOptions { rrt: RrtOptions { range: 0.02, ..Default::default() }, ..Default::default() };
-    for d in devices(&robot) {
-        let worlds = d.upload(&scene).unwrap();
-        let timed = |o: &PlanOptions| {
-            let t = std::time::Instant::now();
-            plan(&d, &worlds, &problems, o).unwrap();
-            t.elapsed()
-        };
-        let full = timed(&slow);
-        let budget = full / 4;
-        let spent = timed(&PlanOptions { time_budget: Some(budget), ..slow });
-        eprintln!("{}: full {full:?}, budget {budget:?} -> {spent:?}", d.name());
-        assert!(
-            full > std::time::Duration::from_millis(100),
-            "{}: the search is too short to cut ({full:?})",
-            d.name()
-        );
-        assert!(spent < budget + full / 8, "{}: took {spent:?} of a {budget:?} budget", d.name());
     }
 }
 
@@ -444,4 +390,53 @@ fn plans_around_a_ball_on_the_straight_line_stay_near_it() {
     let far = excess.iter().filter(|&&e| e > 0.1).count();
     assert!(mean < 0.055, "paths are {:.1}% longer than straight on average", 100.0 * mean);
     assert!(far <= 5, "{far} paths are more than 10% longer than straight");
+}
+
+/// MotionBenchMaker's `bookshelf_tall_panda` problem 1, as robometrics packages it: the search near
+/// the straight line finds a path that no spline follows, and the problem is searched again over
+/// the joint ranges, which finds one that does.
+#[test]
+fn a_path_no_spline_follows_is_searched_again() {
+    let robot = common::panda().unwrap();
+    let cpu = Device::cpu(&robot).unwrap();
+    let pose = |p: [f32; 7]| (Vec3::new(p[0], p[1], p[2]), glam::Quat::from_xyzw(p[4], p[5], p[6], p[3]).normalize());
+    let shelf = [0.4287125, 1.1404362, 0.0, 0.83603096, 0.0, 0.0, 0.5486823];
+    let mut obstacles = vec![];
+    for (dims, at) in [
+        ([1.2, 1.0, 0.04], [0.0, 0.0, 0.0]),
+        ([1.2, 1.0, 0.04], [0.0, 0.0, 0.3]),
+        ([1.2, 1.0, 0.04], [0.0, 0.0, 0.6]),
+        ([1.2, 1.0, 0.04], [0.0, 0.0, 0.9]),
+        ([1.3, 0.04, 1.64], [0.4587154, -0.1989478, 0.12]),
+        ([1.3, 0.04, 1.64], [-0.4587153, 0.1989478, 0.12]),
+    ] {
+        let (center, rotation) = pose([shelf[0] + at[0], shelf[1] + at[1], at[2], shelf[3], 0.0, 0.0, shelf[6]]);
+        obstacles.push(Obstacle::Cuboid { center, half_extents: Vec3::from(dims) * 0.5, rotation });
+    }
+    let (center, rotation) = pose([-0.05, 0.0, -0.4, 1.0, 0.0, 0.0, 0.0]);
+    obstacles.push(Obstacle::Cuboid { center, half_extents: Vec3::new(0.15, 0.125, 0.4), rotation });
+    for at in [
+        [0.71416974, 0.9076316, 0.68],
+        [0.4019689, 0.8250349, 0.68],
+        [0.63633084, 0.5053906, 0.68],
+        [0.5747014, 0.96811984, 0.08],
+        [0.61309785, 0.733467, 0.08],
+        [0.0788708, 0.7471645, 0.08],
+        [0.12357195, 1.1637776, 0.38],
+        [0.31628948, 0.86219464, 0.38],
+        [0.08531671, 0.7443689, 0.38],
+    ] {
+        let (center, rotation) = pose([at[0], at[1], at[2], shelf[3], 0.0, 0.0, shelf[6]]);
+        obstacles.push(Obstacle::Cylinder { center, rotation, radius: 0.01, half_height: 0.07 });
+    }
+    let problem = PlanProblem {
+        world: 0,
+        start: vec![0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785],
+        goal: vec![-1.9269282, -1.358336, 1.0875098, -0.10738423, -0.6509739, 3.3858628, 0.35020632],
+        start_motion: None,
+        hold: vec![],
+    };
+    let worlds = cpu.upload(&[World { obstacles }]).unwrap();
+    let result = plan(&cpu, &worlds, &[problem], &PlanOptions::default()).unwrap();
+    assert!(result.best(0).is_some(), "no path");
 }

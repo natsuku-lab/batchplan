@@ -6,7 +6,10 @@ use std::f32::consts::PI;
 use std::collections::HashMap;
 
 use batchplan::rng::Rng;
-use batchplan::{CollisionModel, CollisionWeights, Device, Obstacle, Pose, Robot, RobotOptions, World};
+use batchplan::{
+    CollisionModel, CollisionWeights, Device, IkOptions, IkProblem, Obstacle, PlanProblem, Pose, Robot, RobotOptions,
+    World, solve_ik,
+};
 use glam::{Quat, Vec3};
 
 pub fn asset(path: &str) -> String {
@@ -158,4 +161,75 @@ pub fn pick_place_scene(world: u32, rng: &mut Rng) -> (World, batchplan::datagen
     let place = Pose { position: spot(rng, -side), rotation: Quat::from_rotation_z(rng.range(-1.2, 1.2)) };
     let object = obstacles.len() - 1;
     (World { obstacles }, batchplan::datagen::PickPlace { world, object, place })
+}
+
+/// UR5e motions from the default pose (arm straight out over the table) to far goals in tabletop
+/// worlds; `above_table` keeps the shoulder within the half turn above the table.
+pub fn far_reaches(robot: &Robot, cpu: &Device, count: usize, above_table: bool) -> (Vec<World>, Vec<PlanProblem>) {
+    let mut rng = Rng::new(14);
+    let scene: Vec<World> = (0..4).map(|_| tabletop_for(robot, cpu, &mut rng)).collect();
+    let worlds = cpu.upload(&scene).unwrap();
+    let mut problems = vec![];
+    while problems.len() < count {
+        let world = problems.len() as u32 % 4;
+        let mut goal: Vec<f32> = (0..robot.dof()).map(|j| rng.range(robot.lower()[j], robot.upper()[j])).collect();
+        if above_table {
+            goal[1] = rng.range(-3.0, -0.1);
+        }
+        let far = goal.iter().zip(robot.default_q()).map(|(a, b)| (a - b).powi(2)).sum::<f32>().sqrt() > 4.0;
+        if far && cpu.evaluate(&worlds, &[world], &goal, &CollisionWeights::NONE).unwrap().collision_free(0) {
+            problems.push(PlanProblem {
+                world,
+                start: robot.default_q().to_vec(),
+                goal,
+                start_motion: None,
+                hold: vec![],
+            });
+        }
+    }
+    (scene, problems)
+}
+
+/// 64 tabletop reaches from the default pose, the worlds they live in, and their IK goals.
+pub fn reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
+    let mut rng = batchplan::rng::Rng::new(41);
+    let scene: Vec<World> = (0..64).map(|_| tabletop(&mut rng)).collect();
+    let cpu = Device::cpu(robot).unwrap();
+    let goals: Vec<IkProblem> = scene
+        .iter()
+        .enumerate()
+        .map(|(i, w)| IkProblem { world: i as u32, targets: vec![Some(grasp_target(w, &mut rng))], seed: None })
+        .collect();
+    let ik = solve_ik(&cpu, &cpu.upload(&scene).unwrap(), &goals, &IkOptions::default()).unwrap();
+    let problems = ik
+        .solved()
+        .map(|s| PlanProblem {
+            world: s.problem.world,
+            start: robot.default_q().to_vec(),
+            goal: s.solution.to_vec(),
+            start_motion: None,
+            hold: vec![],
+        })
+        .collect();
+    (scene, problems)
+}
+
+/// `reaches` with a ball where each hand passes halfway along its straight line, so every search
+/// detours and optimization has work to do; problems whose ends the ball touches are dropped.
+pub fn blocked_reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
+    let (mut scene, problems) = reaches(robot);
+    for p in &problems {
+        let middle: Vec<f32> = p.start.iter().zip(&p.goal).map(|(a, b)| 0.5 * (a + b)).collect();
+        let center = robot.ee_pose(&middle, 0).position;
+        scene[p.world as usize].obstacles.push(Obstacle::Sphere { center, radius: 0.1 });
+    }
+    let cpu = Device::cpu(robot).unwrap();
+    let worlds = cpu.upload(&scene).unwrap();
+    let free = |p: &PlanProblem| {
+        let ends = [&p.start[..], &p.goal[..]].concat();
+        let e = cpu.evaluate(&worlds, &[p.world, p.world], &ends, &CollisionWeights::NONE).unwrap();
+        e.collision_free(0) && e.collision_free(1)
+    };
+    let problems = problems.into_iter().filter(free).collect();
+    (scene, problems)
 }

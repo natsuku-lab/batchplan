@@ -415,81 +415,10 @@ fn trajopt_collision_gradient_matches_its_cost() {
     }
 }
 
-/// 64 tabletop reaches from the default pose, the worlds they live in, and their IK goals.
-fn reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
-    let mut rng = batchplan::rng::Rng::new(41);
-    let scene: Vec<World> = (0..64).map(|_| common::tabletop(&mut rng)).collect();
-    let cpu = Device::cpu(robot).unwrap();
-    let goals: Vec<IkProblem> = scene
-        .iter()
-        .enumerate()
-        .map(|(i, w)| IkProblem { world: i as u32, targets: vec![Some(common::grasp_target(w, &mut rng))], seed: None })
-        .collect();
-    let ik = solve_ik(&cpu, &cpu.upload(&scene).unwrap(), &goals, &IkOptions::default()).unwrap();
-    let problems = ik
-        .solved()
-        .map(|s| PlanProblem {
-            world: s.problem.world,
-            start: robot.default_q().to_vec(),
-            goal: s.solution.to_vec(),
-            start_motion: None,
-            hold: vec![],
-        })
-        .collect();
-    (scene, problems)
-}
-
-/// `reaches` with a ball where each hand passes halfway along its straight line, so every search
-/// detours and optimization has work to do; problems whose ends the ball touches are dropped.
-fn blocked_reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
-    let (mut scene, problems) = reaches(robot);
-    for p in &problems {
-        let middle: Vec<f32> = p.start.iter().zip(&p.goal).map(|(a, b)| 0.5 * (a + b)).collect();
-        let center = robot.ee_pose(&middle, 0).position;
-        scene[p.world as usize].obstacles.push(Obstacle::Sphere { center, radius: 0.1 });
-    }
-    let cpu = Device::cpu(robot).unwrap();
-    let worlds = cpu.upload(&scene).unwrap();
-    let free = |p: &PlanProblem| {
-        let ends = [&p.start[..], &p.goal[..]].concat();
-        let e = cpu.evaluate(&worlds, &[p.world, p.world], &ends, &CollisionWeights::NONE).unwrap();
-        e.collision_free(0) && e.collision_free(1)
-    };
-    let problems = problems.into_iter().filter(free).collect();
-    (scene, problems)
-}
-
-#[test]
-fn a_tiny_time_budget_returns_after_at_most_one_more_chunk() {
-    let robot = panda();
-    let (scene, problems) = blocked_reaches(&robot);
-    // Enough rounds (20 chunks) that a fast GPU's plan still lasts well beyond one chunk.
-    let o = PlanOptions { seeds: 8, iterations: 160, ..Default::default() };
-    for d in devices(&robot) {
-        let worlds = d.upload(&scene).unwrap();
-        let timed = |o: &PlanOptions| {
-            let t = std::time::Instant::now();
-            let result = plan(&d, &worlds, &problems, o).unwrap();
-            (t.elapsed(), result)
-        };
-        timed(&o); // warm up
-        let (full, _) = timed(&o);
-        // A GPU checks the budget between submissions of 8 rounds; time one such chunk, with
-        // seeding and validation.
-        let (chunk, _) = timed(&PlanOptions { iterations: 8, ..o });
-        let budget = std::time::Duration::from_millis(1);
-        let (spent, result) = timed(&PlanOptions { time_budget: Some(budget), ..o });
-        eprintln!("{}: full {full:?}, one chunk {chunk:?}, budget {budget:?} -> {spent:?}", d.name());
-        assert!(spent < budget + 2 * chunk + std::time::Duration::from_millis(20), "{}: took {spent:?}", d.name());
-        assert!(spent < full / 2, "{}: the budget saved little ({spent:?} of {full:?})", d.name());
-        assert_eq!(result.valid.len(), problems.len() * (1 + o.seeds));
-    }
-}
-
 #[test]
 fn planning_without_a_budget_gives_the_same_result_every_run() {
     let robot = panda();
-    let (scene, problems) = reaches(&robot);
+    let (scene, problems) = common::reaches(&robot);
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let a = plan(&d, &worlds, &problems, &PlanOptions::default()).unwrap();
@@ -503,7 +432,7 @@ fn planning_without_a_budget_gives_the_same_result_every_run() {
 fn plans_from_a_moving_start_continue_its_motion() {
     let robot = panda();
     let n = robot.dof();
-    let (scene, problems) = reaches(&robot);
+    let (scene, problems) = common::reaches(&robot);
     let motion = StartMotion {
         velocity: vec![0.5, -0.3, 0.2, 0.4, 0.0, 0.3, 0.0],
         acceleration: vec![1.0, 0.0, -0.5, 0.0, 0.0, 0.0, 0.5],
@@ -541,7 +470,7 @@ fn reaches_replan_mid_motion_at_full_speed() {
     // show that paths exist.
     let robot = panda();
     let n = robot.dof();
-    let (scene, problems) = reaches(&robot);
+    let (scene, problems) = common::reaches(&robot);
     let cpu = Device::cpu(&robot).unwrap();
     let rest = plan(&cpu, &cpu.upload(&scene).unwrap(), &problems[..24], &PlanOptions::default()).unwrap();
     let mut state = JointState::new(n);
@@ -647,7 +576,7 @@ fn seeded_ik_stays_on_the_branch_it_starts_from() {
 fn optimization_seeds_start_with_the_searched_path_and_the_straight_line() {
     let robot = panda();
     let n = robot.dof();
-    let (scene, problems) = blocked_reaches(&robot);
+    let (scene, problems) = common::blocked_reaches(&robot);
     let o = PlanOptions { seeds: 2, iterations: 0, ..Default::default() };
     let (points, per_path) = (o.control_points, o.control_points * n);
     for d in devices(&robot) {
@@ -676,7 +605,7 @@ fn optimization_seeds_start_with_the_searched_path_and_the_straight_line() {
 #[test]
 fn problems_searched_straight_are_not_optimized() {
     let robot = panda();
-    let (_, reaches) = reaches(&robot);
+    let (_, reaches) = common::reaches(&robot);
     let scene = vec![World::default()];
     let problems: Vec<PlanProblem> = reaches.into_iter().take(8).map(|p| PlanProblem { world: 0, ..p }).collect();
     let o = PlanOptions { seeds: 4, ..Default::default() };
@@ -697,7 +626,7 @@ fn problems_searched_straight_are_not_optimized() {
 #[test]
 fn a_spent_budget_starts_no_optimization() {
     let robot = panda();
-    let (_, reaches) = reaches(&robot);
+    let (_, reaches) = common::reaches(&robot);
     let scene = vec![World::default()];
     let problems: Vec<PlanProblem> = reaches.into_iter().take(8).map(|p| PlanProblem { world: 0, ..p }).collect();
     let o = PlanOptions { seeds: 4, time_budget: Some(std::time::Duration::ZERO), ..Default::default() };
@@ -713,7 +642,7 @@ fn a_spent_budget_starts_no_optimization() {
 fn plans_without_seeds_ignore_the_optimization_weights() {
     let robot = panda();
     let n = robot.dof();
-    let (scene, problems) = reaches(&robot);
+    let (scene, problems) = common::reaches(&robot);
     let cpu = Device::cpu(&robot).unwrap();
     let worlds = cpu.upload(&scene).unwrap();
     let rest = plan(&cpu, &worlds, &problems, &PlanOptions::default()).unwrap();

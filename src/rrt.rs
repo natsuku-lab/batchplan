@@ -100,6 +100,15 @@ const DOMAIN_ALPHA: f32 = 1e-4;
 /// The smallest radius.
 const DOMAIN_MIN: f32 = 1.0;
 
+/// Where a search's samples come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Sampling {
+    /// First from the tube around the straight line, then from the joint ranges.
+    NearLine,
+    /// From the joint ranges alone.
+    JointRanges,
+}
+
 /// Finds a collision-free waypoint path from each problem's start to one of its goals. Starts and
 /// goals in collision are skipped; a problem without a free start or goal has no path.
 pub fn connect(device: &Device, worlds: &Worlds, problems: &[RrtProblem], o: &RrtOptions) -> Result<RrtResult> {
@@ -139,7 +148,7 @@ pub(crate) fn connect_until(
             "problem {i}: held joints must be joints of the robot, with the start's values in every goal"
         );
     }
-    let mut searches: Vec<Connect> = problems.iter().map(|p| Connect::new(robot, p, o)).collect();
+    let mut searches: Vec<Connect> = problems.iter().map(|p| Connect::new(robot, p, o, Sampling::NearLine)).collect();
     let mut running: Vec<&mut dyn Search> = searches.iter_mut().map(|s| s as &mut dyn Search).collect();
     device.search(worlds, &mut running, deadline)?;
     Ok(RrtResult { problems: problems.to_vec(), paths: searches.into_iter().map(|s| s.path).collect() })
@@ -467,6 +476,7 @@ pub(crate) struct Connect<'r> {
     trees: [Tree; 2],
     start_first: bool,
     halton: Halton,
+    sampling: Sampling,
     /// Samples drawn from the joint ranges, and from the tube.
     iterations: usize,
     tube_samples: usize,
@@ -492,7 +502,7 @@ pub(crate) struct Connect<'r> {
 }
 
 impl<'r> Connect<'r> {
-    pub(crate) fn new(robot: &'r Robot, p: &RrtProblem, o: &RrtOptions) -> Self {
+    pub(crate) fn new(robot: &'r Robot, p: &RrtProblem, o: &RrtOptions, sampling: Sampling) -> Self {
         let n = robot.dof();
         Self {
             robot,
@@ -507,6 +517,7 @@ impl<'r> Connect<'r> {
             trees: [Tree::new(&robot.continuous), Tree::new(&robot.continuous)],
             start_first: true,
             halton: Halton::new(n, o.rng_seed),
+            sampling,
             iterations: 0,
             tube_samples: 0,
             stage: if p.goals.is_empty() { Stage::Done } else { Stage::Start },
@@ -571,7 +582,7 @@ impl<'r> Connect<'r> {
             }
         }
         // The tube follows the first line that collides: Gram-Schmidt on the free joints' axes.
-        if !self.across.is_empty() || length == 0.0 {
+        if self.sampling == Sampling::JointRanges || !self.across.is_empty() || length == 0.0 {
             return;
         }
         for j in (0..n).filter(|&j| !self.held[j]) {
@@ -599,6 +610,11 @@ impl<'r> Connect<'r> {
         let r = TUBE_RADIUS * 2f32.powi(doublings);
         let widest = self.robot.lower.iter().zip(&self.robot.upper).map(|(l, u)| u - l).fold(0.0, f32::max);
         (r < widest).then_some(r)
+    }
+
+    /// Whether any sample came from the tube.
+    pub(crate) fn sampled_tube(&self) -> bool {
+        self.tube_samples > 0
     }
 
     /// The free goal nearest the start.
@@ -917,7 +933,7 @@ mod tests {
         let goal = vec![0.5, 0.0, -0.4, 0.0, 0.3, 0.0];
         let hold = vec![1, 3, 5];
         let problem = RrtProblem { world: 0, start, goals: vec![goal], hold: hold.clone() };
-        let mut connect = Connect::new(&robot, &problem, &RrtOptions::default());
+        let mut connect = Connect::new(&robot, &problem, &RrtOptions::default(), Sampling::NearLine);
         connect.line_to(0);
         let directions: Vec<&[f32]> = connect.directions.chunks(6).collect();
         assert!(directions.len() >= 4, "{} directions", directions.len());

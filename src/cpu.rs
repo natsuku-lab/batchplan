@@ -750,6 +750,33 @@ pub(crate) fn optimize_path(
     }
 }
 
+/// Runs every search to its end, or to `deadline`, on `pool`'s threads: each takes the next search
+/// until none is left, as VAMP's batches run, so no thread waits on another's share and each keeps
+/// one scratch. A search alone runs on the calling thread, outside the pool, so its optimizations
+/// do too.
+pub(crate) fn run_searches(
+    pool: &rayon::ThreadPool,
+    searches: &mut [&mut dyn Search],
+    robot: &Robot,
+    lanes: &Lanes,
+    worlds: &[Vec<Prepared>],
+    deadline: Option<Instant>,
+) {
+    let spread = searches.len() > 1;
+    if let [search] = searches {
+        return edges::run(&mut **search, robot, lanes, worlds, deadline, spread, &mut EdgeScratch::new(lanes));
+    }
+    let next = AtomicUsize::new(0);
+    let searches: Vec<Mutex<&mut &mut dyn Search>> = searches.iter_mut().map(Mutex::new).collect();
+    pool.broadcast(|_| {
+        let mut scratch = EdgeScratch::new(lanes);
+        while let Some(search) = searches.get(next.fetch_add(1, Ordering::Relaxed)) {
+            let mut search = search.lock().expect("a search panicked");
+            edges::run(&mut ***search, robot, lanes, worlds, deadline, spread, &mut scratch);
+        }
+    });
+}
+
 impl Backend for CpuBackend {
     fn name(&self) -> String {
         format!("cpu ({} threads)", self.pool.current_num_threads())
@@ -824,24 +851,7 @@ impl Backend for CpuBackend {
 
     fn search(&self, worlds: &Worlds, searches: &mut [&mut dyn Search], deadline: Option<Instant>) {
         let prepared: &CpuWorlds = worlds.prepared();
-        // A search alone runs on the calling thread, outside the pool, so its optimizations do too.
-        let spread = searches.len() > 1;
-        let run = |scratch: &mut EdgeScratch, search: &mut &mut dyn Search| {
-            edges::run(&mut **search, &self.robot, &self.lanes, prepared, deadline, spread, scratch)
-        };
-        if let [search] = searches {
-            return run(&mut EdgeScratch::new(&self.lanes), search);
-        }
-        // Every thread takes the next search until none is left, as VAMP's batches run: no
-        // thread waits on another's share, and each keeps one scratch.
-        let next = AtomicUsize::new(0);
-        let searches: Vec<Mutex<&mut &mut dyn Search>> = searches.iter_mut().map(Mutex::new).collect();
-        self.pool.broadcast(|_| {
-            let mut scratch = EdgeScratch::new(&self.lanes);
-            while let Some(search) = searches.get(next.fetch_add(1, Ordering::Relaxed)) {
-                run(&mut scratch, &mut search.lock().expect("a search panicked"));
-            }
-        });
+        run_searches(&self.pool, searches, &self.robot, &self.lanes, prepared, deadline);
     }
 
     fn ik(

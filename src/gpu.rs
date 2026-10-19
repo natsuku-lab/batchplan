@@ -13,7 +13,7 @@ use wgpu::util::DeviceExt;
 
 use crate::cpu::{CpuWorlds, prepare};
 use crate::device::{Backend, CollisionWeights, Evaluation, Worlds};
-use crate::edges::{self, EdgeScratch, Search};
+use crate::edges::Search;
 use crate::ik::IkOptions;
 use crate::lanes::Lanes;
 use crate::robot::{JointKind, Robot};
@@ -434,6 +434,9 @@ pub(crate) struct GpuBackend {
     grid_buffers: Arc<Mutex<GridBuffers>>,
     /// The robot prepared for the CPU's SIMD collision checks, which answer searches' edge checks.
     lanes: Arc<Lanes>,
+    /// The device's CPU work (searches, preparing depth images) runs here, never on rayon's global
+    /// pool, so a host's own parallel work cannot hold it past a time budget.
+    pool: Arc<rayon::ThreadPool>,
 }
 
 /// Building distance grids (grids.wgsl), which needs no robot.
@@ -808,7 +811,24 @@ impl GpuBackend {
         let buffers = RobotBuffers::new(&device, robot);
         let (grids, grid_buffers) = Default::default();
         let lanes = Arc::new(Lanes::new(robot));
-        Ok(Self { robot: robot.clone(), info, device, queue, kernels, built, buffers, grids, grid_buffers, lanes })
+        let pool = rayon::ThreadPoolBuilder::new()
+            .thread_name(|i| format!("batchplan-gpu-{i}"))
+            .build()
+            .map_err(|e| Error::Threads(format!("starting the GPU device's threads: {e}")))?;
+        let pool = Arc::new(pool);
+        Ok(Self {
+            robot: robot.clone(),
+            info,
+            device,
+            queue,
+            kernels,
+            built,
+            buffers,
+            grids,
+            grid_buffers,
+            lanes,
+            pool,
+        })
     }
 
     fn params(&self, n_items: usize, w: &CollisionWeights) -> GpuParams {
@@ -1145,10 +1165,7 @@ impl Backend for GpuBackend {
 
     fn search(&self, worlds: &Worlds, searches: &mut [&mut dyn Search], deadline: Option<Instant>) {
         let cpu = &worlds.prepared::<GpuWorlds>().cpu;
-        let run = |scratch: &mut EdgeScratch, search: &mut &mut dyn Search| {
-            edges::run(&mut **search, &self.robot, &self.lanes, cpu, deadline, true, scratch)
-        };
-        searches.par_iter_mut().for_each_init(|| EdgeScratch::new(&self.lanes), run);
+        crate::cpu::run_searches(&self.pool, searches, &self.robot, &self.lanes, cpu, deadline);
     }
 
     fn integrate(
@@ -1192,11 +1209,12 @@ impl GpuBackend {
     /// Uploads an image's readings (0 for pixels without one) and its robot mask: depths (huge
     /// where the robot is not seen), then the grown spheres.
     fn upload_image(&self, bindings: &[&wgpu::Buffer; 10], image: &DepthImage, robot: Option<&RobotMask>) {
-        let readings: Vec<f32> =
-            image.depth.par_iter().map(|&z| if z.is_finite() && z > 0.0 { z } else { 0.0 }).collect();
+        let readings: Vec<f32> = self
+            .pool
+            .install(|| image.depth.par_iter().map(|&z| if z.is_finite() && z > 0.0 { z } else { 0.0 }).collect());
         self.queue.write_buffer(bindings[0], 0, bytemuck::cast_slice(&readings));
         if let Some(robot) = robot {
-            let mut words: Vec<f32> = robot.depth.par_iter().map(|&r| r.min(f32::MAX)).collect();
+            let mut words: Vec<f32> = self.pool.install(|| robot.depth.par_iter().map(|&r| r.min(f32::MAX)).collect());
             words.extend(robot.spheres.iter().flat_map(|s| s.to_array()));
             self.queue.write_buffer(bindings[1], 0, bytemuck::cast_slice(&words));
         }
