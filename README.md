@@ -145,9 +145,9 @@ To fuse frames over time, use an `OccupancyMap` ([Worlds and perception](docs/pe
 
 Each library planned the same 2,600 Panda problems from MotionBenchMaker and MπNets, and one checker judged every path, batchplan's included. *Solved* means the path reaches the goal within the joint limits without touching the model it was planned on; *clear on the meshes* checks it against the Panda's meshes, the real robot. [Setup and per-set results](docs/benchmarks.md#against-other-planners) · [Run them yourself](docs/benchmarks.md#reproducing)
 
-- **The fastest of these planners:** 0.17 ms per problem and 17,191 problems/s on an M4 Pro CPU, ahead of VAMP on the same spheres.
+- **The fastest of these planners:** 0.17 ms per problem and 16,836 problems/s on an M4 Pro CPU, ahead of VAMP on the same spheres.
 - **Clear of the real robot most often:** 85–93% of its paths clear the Panda's meshes; no other planner's reach 82%.
-- **Solves the most** in every comparison, with shorter paths than every other sampling-based planner.
+- **Solves the most** in every comparison, with shorter paths than every other sampling-based planner, and, with two optimization seeds, than cuRobo.
 
 ### Against VAMP and OMPL, on VAMP's spheres
 
@@ -155,38 +155,38 @@ Apple M4 Pro CPU, 14 cores.
 
 | Planner | Solved | Clear on the meshes | Path length¹ | Time per problem (median) | All 2,600, one core | Batched |
 |---|---|---|---|---|---|---|
-| **batchplan** | **90.3%** | **85.3%** | **3.49 rad** | **0.17 ms** | **0.90 s** | **17,191 /s** |
-| [VAMP](https://github.com/KavrakiLab/vamp) 0.6.4 | 86.1% | 71.7% | 3.56 rad | 0.27 ms | 2.49 s | 2,613 /s |
-| VAMP, stopped at 10,000 samples² | 86.1% | 71.5% | 3.56 rad | 0.26 ms | 1.07 s | 15,367 /s |
-| VAMP, 2 rad steps³ | 86.4% | 75.3% | 3.56 rad | 0.28 ms | 2.80 s | 2,638 /s |
-| [OMPL](https://ompl.kavrakilab.org) 2.0, RRT-Connect⁴ | 63.9% | 63.5% | 4.01 rad | 2.75 ms | 631 s | 30 /s |
+| **batchplan** | **90.4%** | **85.2%** | **3.41 rad** | **0.17 ms** | **0.95 s** | **16,836 /s** |
+| [VAMP](https://github.com/KavrakiLab/vamp) 0.6.4 | 86.1% | 71.6% | 3.56 rad | 0.26 ms | 2.44 s | 2,677 /s |
+| VAMP, stopped at 10,000 samples² | 86.1% | 71.5% | 3.56 rad | 0.26 ms | 1.06 s | 15,703 /s |
+| VAMP, 2 rad steps³ | 86.4% | 75.3% | 3.56 rad | 0.27 ms | 2.72 s | 2,703 /s |
+| [OMPL](https://ompl.kavrakilab.org) 2.0, RRT-Connect⁴ | 63.9% | 63.5% | 4.02 rad | 2.75 ms | 631 s | 30 /s |
 
-¹ Median over the 1,555 problems all five solve. ² As batchplan's searches do; VAMP's default is 100,000. ³ VAMP's library default; the other rows step 1 rad, its Panda setting. ⁴ With VAMP's collision checker and a 5 s limit.
+¹ Median over the 1,557 problems all five solve. ² As batchplan's searches do; VAMP's default is 100,000. ³ VAMP's library default; the other rows step 1 rad, its Panda setting. ⁴ With VAMP's collision checker and a 5 s limit.
 
 ### Against cuRobo, on cuRobo's spheres
 
-NVIDIA T4 GPU with 8 Xeon threads. The 1,300 problems whose scenes are only boxes, which both libraries load exactly.
+cuRobo on an NVIDIA T4 GPU with 8 Xeon threads; batchplan on the M4 Pro². The 1,300 problems whose scenes are only boxes, which both libraries load exactly.
 
 | Planner | Solved | Clear on the meshes | Path length¹ | Time per problem (median) | Batched |
 |---|---|---|---|---|---|
-| **batchplan** | **98.8%** | 92.2% | 3.53 rad | **0.64 ms**² | **2,152 /s**² |
-| batchplan, optimizing 4 seeds³ | **98.8%** | **93.2%** | 3.31 rad | 8.9 ms⁴ | 137 /s⁴ |
-| [cuRobo](https://github.com/NVlabs/curobo) 0.8 | 85.2% | 81.6% | **3.14 rad** | 197 ms | 3.0 /s |
-| cuRobo, 32 problems per call | 85.0% | 81.9% | 3.15 rad | 660 ms⁵ | 1.4 /s |
+| **batchplan** | **98.9%** | 92.8% | 3.243 rad | **0.24 ms** | **9,494 /s** |
+| batchplan, optimizing 2 seeds³ | 98.8% | **92.9%** | **3.137 rad** | 15.9 ms | 141 /s, 734 /s on its GPU |
+| [cuRobo](https://github.com/NVlabs/curobo) 0.8 | 85.2% | 81.6% | 3.144 rad | 197 ms | 3.0 /s |
+| cuRobo, 32 problems per call | 85.0% | 81.9% | 3.154 rad | 660 ms⁴ | 1.4 /s |
 
-¹ Median over the 1,092 problems all four solve. ² batchplan's previous version; the current one plans 1.5 times as fast on the M4 Pro. ³ `PlanOptions::seeds`, off by default. ⁴ On a Ryzen AI Max+ 395 CPU. ⁵ Each call's time over its problems.
+¹ Median over the 1,092 problems all four solve. ² The T4 machine has not been available since batchplan's previous version, which planned there in 0.64 ms and 2,152 problems/s. ³ `PlanOptions::seeds`, off by default: the searched path and the straight line, optimized. ⁴ Each call's time over its problems.
 
 ### Against MoveIt 2 and RoboPlan, which plan on the meshes
 
-AMD Ryzen AI Max+ 395 CPU, 32 threads. batchplan plans on the spheres it ships with; every path is judged on the meshes.
+AMD Ryzen AI Max+ 395 CPU, 32 threads; batchplan on the M4 Pro². batchplan plans on the spheres it ships with; every path is judged on the meshes.
 
 | Planner | Solved, on the meshes | Path length¹ | Time per problem (median) | Batched |
 |---|---|---|---|---|
-| **batchplan** | **92.8%** | **3.30 rad** | **0.12 ms** | **21,726 /s** |
-| [RoboPlan](https://github.com/open-planning/roboplan) 0.7 | 73.8% | 3.77 rad | 10.3 ms | 174 /s |
-| [MoveIt 2](https://moveit.ai) Jazzy (OMPL, FCL) | 63.1% | 3.79 rad | 59.4 ms | 82 /s |
+| **batchplan** | **93.1%** | **3.22 rad** | **0.18 ms** | **14,719 /s** |
+| [RoboPlan](https://github.com/open-planning/roboplan) 0.7 | 73.7% | 3.78 rad | 10.3 ms | 174 /s |
+| [MoveIt 2](https://moveit.ai) Jazzy (OMPL, FCL) | 63.2% | 3.81 rad | 59.4 ms | 82 /s |
 
-¹ Median over the 1,329 problems all three solve.
+¹ Median over the 1,337 problems all three solve. ² The Ryzen was busy when this version was measured; there the previous version planned in 0.12 ms and 21,726 problems/s. On the M4 Pro, RoboPlan plans in 6.28 ms and 176 problems/s.
 
 ### Batches and the GPU
 
@@ -205,7 +205,7 @@ A GPU call costs about 10 ms, so one problem at a time runs 11–13 times faster
 ### When another library fits better
 
 - **VAMP**, from Python, or for its asymptotically optimal planners (AORRTC, FCIT*) and roadmaps (PRM) on the same fast checks.
-- **cuRobo**, for the shortest paths, from whole-trajectory optimization, if you have an NVIDIA GPU and a fifth of a second per problem.
+- **cuRobo**, for model-predictive control and NVIDIA's perception stack (nvblox), if you have an NVIDIA GPU.
 - **MoveIt 2**, for ROS 2: perception, controllers, grasping and the rest of a robot's stack around the planner.
 - **OMPL**, for its range of planners, such as asymptotically optimal and kinodynamic ones.
 
@@ -251,7 +251,7 @@ A GPU call costs about 10 ms, so one problem at a time runs 11–13 times faster
 - **Timing.** Trajectories end at rest. Time-optimal timing respects jerk limits but does not minimize jerk.
 - **Small batches on a GPU.** A GPU call costs about as much for one problem as for a small batch: IK for one target takes about 10 ms on an M4 Pro's GPU and 1 ms on its CPU. Planning itself runs on CPU threads on either device.
 - **Pick-and-place and handovers.** Episodes grasp upright boxes from above and have no recoveries. Camera videos come from replaying them in MuJoCo, kinematically: no physics checks the grasps.
-- **Maturity.** batchplan is at version 0.1 and not on crates.io. Its interface may change. It is verified on AMD (Vulkan) and Apple (Metal) GPUs. On NVIDIA, the comparison with cuRobo ran on a T4 at the previous version, and the tests at an early one.
+- **Maturity.** batchplan is at version 0.1 and not on crates.io. Its interface may change. It is verified on AMD (Vulkan) and Apple (Metal) GPUs. On NVIDIA, batchplan was timed against cuRobo on a T4 at the previous version, and the tests ran at an early one.
 
 ## License
 

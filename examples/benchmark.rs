@@ -671,7 +671,7 @@ fn check(
         println!("median length over the {} problems every planner solves {judge}:", common.len());
         for (planner, verdicts) in &judged {
             let lengths: Vec<f32> = common.iter().map(|&i| verdicts[i].as_ref().expect("common").length).collect();
-            println!("  {planner:<10} {:.2}", median(&lengths));
+            println!("  {planner:<10} {:.3}", median(&lengths));
         }
     }
     Ok(())

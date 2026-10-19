@@ -2,7 +2,7 @@
 
 batchplan turns planning into datasets for robot learning: reaches with recoveries from mistakes, pick-and-place episodes with a gripper, carried objects and task strings, and handovers between two arms. Datasets export as plain NumPy arrays or as LeRobot v3.0 datasets that `lerobot` loads and trains on directly.
 
-Both kinds plan as [`plan`](planning.md) does, with one difference: they straighten joints (`ShortcutOptions::straighten`), so a joint does not swing one way and back on its way, as a wrist can on a searched path. Across 512 pick-and-place tasks with obstacles across the carry, carries move their joints 13% less in the median and 18% less at the 90th percentile. It costs about a sixth of batched planning throughput, which matters less for datasets than for planning online.
+Both kinds plan as [`plan`](planning.md) does, which straightens joints (`ShortcutOptions::straighten`), so a joint does not swing one way and back on its way, as a wrist can on a searched path. Across 512 pick-and-place tasks with obstacles across the carry, carries move their joints 13% less in the median and 18% less at the 90th percentile.
 
 ## Reaches and recoveries
 
