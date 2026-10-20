@@ -145,7 +145,7 @@ To fuse frames over time, use an `OccupancyMap` ([Worlds and perception](docs/pe
 
 Each library planned the same 2,600 Panda problems from MotionBenchMaker and MπNets, and one checker judged every path, batchplan's included. *Solved* means the path reaches the goal within the joint limits without touching the model it was planned on; *clear on the meshes* checks it against the Panda's meshes, the real robot. [Setup and per-set results](docs/benchmarks.md#against-other-planners) · [Run them yourself](docs/benchmarks.md#reproducing)
 
-- **The fastest of these planners:** 0.17 ms per problem and 16,836 problems/s on an M4 Pro CPU, ahead of VAMP on the same spheres.
+- **The fastest of these planners:** 0.17 ms per problem and 20,287 problems/s on an M4 Pro CPU, ahead of VAMP on the same spheres.
 - **Clear of the real robot most often:** 85–93% of its paths clear the Panda's meshes; no other planner's reach 82%.
 - **Solves the most** in every comparison, with shorter paths than every other sampling-based planner, and, with two optimization seeds, than cuRobo.
 
@@ -155,10 +155,10 @@ Apple M4 Pro CPU, 14 cores.
 
 | Planner | Solved | Clear on the meshes | Path length¹ | Time per problem (median) | All 2,600, one core | Batched |
 |---|---|---|---|---|---|---|
-| **batchplan** | **90.4%** | **85.2%** | **3.41 rad** | **0.17 ms** | **0.95 s** | **16,836 /s** |
-| [VAMP](https://github.com/KavrakiLab/vamp) 0.6.4 | 86.1% | 71.6% | 3.56 rad | 0.26 ms | 2.44 s | 2,677 /s |
-| VAMP, stopped at 10,000 samples² | 86.1% | 71.5% | 3.56 rad | 0.26 ms | 1.06 s | 15,703 /s |
-| VAMP, 2 rad steps³ | 86.4% | 75.3% | 3.56 rad | 0.27 ms | 2.72 s | 2,703 /s |
+| **batchplan** | **90.4%** | **85.2%** | **3.41 rad** | **0.17 ms** | **0.88 s** | **20,287 /s** |
+| [VAMP](https://github.com/KavrakiLab/vamp) 0.6.4 | 86.1% | 71.6% | 3.56 rad | 0.26 ms | 2.43 s | 2,704 /s |
+| VAMP, stopped at 10,000 samples² | 86.1% | 71.5% | 3.56 rad | 0.26 ms | 1.05 s | 15,396 /s |
+| VAMP, 2 rad steps³ | 86.4% | 75.3% | 3.56 rad | 0.27 ms | 2.71 s | 2,705 /s |
 | [OMPL](https://ompl.kavrakilab.org) 2.0, RRT-Connect⁴ | 63.9% | 63.5% | 4.02 rad | 2.75 ms | 631 s | 30 /s |
 
 ¹ Median over the 1,557 problems all five solve. ² As batchplan's searches do; VAMP's default is 100,000. ³ VAMP's library default; the other rows step 1 rad, its Panda setting. ⁴ With VAMP's collision checker and a 5 s limit.
@@ -169,8 +169,8 @@ cuRobo on an NVIDIA T4 GPU with 8 Xeon threads; batchplan on the M4 Pro². The 1
 
 | Planner | Solved | Clear on the meshes | Path length¹ | Time per problem (median) | Batched |
 |---|---|---|---|---|---|
-| **batchplan** | **98.9%** | 92.8% | 3.243 rad | **0.24 ms** | **9,494 /s** |
-| batchplan, optimizing 2 seeds³ | 98.8% | **92.9%** | **3.137 rad** | 15.9 ms | 141 /s, 734 /s on its GPU |
+| **batchplan** | **98.9%** | 92.8% | 3.243 rad | **0.22 ms** | **13,384 /s** |
+| batchplan, optimizing 2 seeds³ | 98.8% | **92.9%** | **3.137 rad** | 16.8 ms | 138 /s, 769 /s on its GPU |
 | [cuRobo](https://github.com/NVlabs/curobo) 0.8 | 85.2% | 81.6% | 3.144 rad | 197 ms | 3.0 /s |
 | cuRobo, 32 problems per call | 85.0% | 81.9% | 3.154 rad | 660 ms⁴ | 1.4 /s |
 
@@ -182,7 +182,7 @@ AMD Ryzen AI Max+ 395 CPU, 32 threads. batchplan plans on the spheres it ships w
 
 | Planner | Solved, on the meshes | Path length¹ | Time per problem (median) | Batched |
 |---|---|---|---|---|
-| **batchplan** | **93.1%** | **3.23 rad** | **0.12 ms** | **17,865 /s** |
+| **batchplan** | **93.1%** | **3.23 rad** | **0.12 ms** | **22,685 /s** |
 | [RoboPlan](https://github.com/open-planning/roboplan) 0.7 | 73.8% | 3.78 rad | 10.3 ms | 174 /s |
 | [MoveIt 2](https://moveit.ai) Jazzy (OMPL, FCL) | 63.1% | 3.80 rad | 59.4 ms | 82 /s |
 
