@@ -511,7 +511,8 @@ mod tests {
     }
 
     /// Helpers change how fast a search runs, never what it finds: a long search grows the same
-    /// trees with three helping as alone, though helpers answer most of its queries.
+    /// trees with three helping as alone, though helpers answer many of its queries (half as many
+    /// as it draws samples on 32 threads, a fifth with two cores for all four threads).
     #[test]
     fn a_helped_search_grows_the_trees_it_would_alone() {
         let robot = panda();
@@ -520,6 +521,6 @@ mod tests {
         let (helped, _, answered) = search(&robot, &world, &problem, 3);
         assert!(samples > 3000, "the search drew only {samples} samples");
         assert!(alone == helped, "helpers changed the search");
-        assert!(answered > samples / 2, "helpers answered {answered} queries over {samples} samples");
+        assert!(answered > samples / 10, "helpers answered {answered} queries over {samples} samples");
     }
 }
