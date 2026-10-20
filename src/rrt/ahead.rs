@@ -650,7 +650,9 @@ mod tests {
     }
 
     /// Runs `search` on `ahead`, then ends its help, beside `threads` threads that help it whenever
-    /// it lets them, as a batch's threads would.
+    /// it lets them, as a batch's threads would. Like a pool's, they are running before the search
+    /// starts: a new thread can take longer to start than the search takes, as on a CI runner's
+    /// first run, while other tests load the Vulkan driver.
     fn beside_helpers(
         threads: usize,
         ahead: &Arc<Ahead>,
@@ -659,9 +661,11 @@ mod tests {
         worlds: &[Vec<Prepared>],
         search: impl FnOnce(),
     ) {
+        let started = &std::sync::Barrier::new(threads + 1);
         std::thread::scope(|s| {
             for _ in 0..threads {
                 s.spawn(move || {
+                    started.wait();
                     while ahead.sampling() {
                         match ahead.helper(robot, None) {
                             Some(mut helper) => {
@@ -673,6 +677,7 @@ mod tests {
                     }
                 });
             }
+            started.wait();
             search();
             ahead.finish();
         });
