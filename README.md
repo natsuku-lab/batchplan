@@ -182,7 +182,7 @@ AMD Ryzen AI Max+ 395 CPU, 32 threads. batchplan plans on the spheres it ships w
 
 | Planner | Solved, on the meshes | Path length¹ | Time per problem (median) | Batched |
 |---|---|---|---|---|
-| **batchplan** | **93.1%** | **3.23 rad** | **0.12 ms** | **22,685 /s** |
+| **batchplan** | **93.1%** | **3.23 rad** | **0.13 ms** | **21,796 /s** |
 | [RoboPlan](https://github.com/open-planning/roboplan) 0.7 | 73.8% | 3.78 rad | 10.3 ms | 174 /s |
 | [MoveIt 2](https://moveit.ai) Jazzy (OMPL, FCL) | 63.1% | 3.80 rad | 59.4 ms | 82 /s |
 
