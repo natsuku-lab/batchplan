@@ -64,22 +64,20 @@ fn main() -> Result<(), Error> {
     let device = Device::gpu(&robot).or_else(|_| Device::cpu(&robot))?;
 
     // Scenes are uploaded once. Problems name their scene by index.
-    let table = Obstacle::Cuboid { center: Vec3::new(0.0, 0.0, -0.02), half_extents: Vec3::new(1.0, 1.0, 0.02), rotation: Quat::IDENTITY };
+    let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.02), Vec3::new(1.0, 1.0, 0.02));
     let worlds = device.upload(&[World { obstacles: vec![table] }])?;
 
     // IK for a batch of gripper poses...
     let down = Quat::from_rotation_x(std::f32::consts::PI);
     let goals: Vec<IkProblem> = [Vec3::new(0.4, 0.2, 0.3), Vec3::new(0.3, -0.3, 0.4)]
         .into_iter()
-        .map(|position| IkProblem { world: 0, targets: vec![Some(Pose { position, rotation: down })], seed: None })
+        .map(|position| IkProblem::new(0, Pose::new(position, down)))
         .collect();
     let ik = solve_ik(&device, &worlds, &goals, &IkOptions::default())?;
 
     // ...then a collision-free motion to every solution, in one call.
-    let problems: Vec<PlanProblem> = ik
-        .solved()
-        .map(|s| PlanProblem { world: s.problem.world, start: robot.default_q().to_vec(), goal: s.solution.to_vec(), start_motion: None, hold: vec![] })
-        .collect();
+    let problems: Vec<PlanProblem> =
+        ik.solved().map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution)).collect();
     let plans = plan(&device, &worlds, &problems, &PlanOptions::default())?;
 
     // Time each path within the robot's velocity, acceleration and jerk limits.
@@ -109,12 +107,12 @@ fn main() -> Result<(), Error> {
     let down = Quat::from_rotation_x(std::f32::consts::PI);
     let goals: Vec<IkProblem> = (0..64)
         .map(|i| Vec3::new(0.3 + 0.03 * (i % 8) as f32, -0.25 + 0.06 * (i / 8) as f32, 0.3))
-        .map(|position| IkProblem { world: 0, targets: vec![Some(Pose { position, rotation: down })], seed: None })
+        .map(|position| IkProblem::new(0, Pose::new(position, down)))
         .collect();
     let demos = demonstrations(&device, &worlds, &goals, &DemoOptions::default())?;
 
     // A LeRobot v3.0 dataset (cargo feature `lerobot`), ready for `lerobot-train`.
-    export("data/reaches".as_ref(), &robot, worlds.as_slice(), &demos, &ExportOptions::default())
+    export("data/reaches", &robot, &worlds, &demos, &ExportOptions::default())
 }
 ```
 
@@ -123,7 +121,6 @@ fn main() -> Result<(), Error> {
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
 use batchplan::*;
-use std::sync::Arc;
 
 /// Turns one depth frame into a world to plan in, leaving the arm itself out.
 fn world_from_camera(device: &Device, robot: &Robot, depth: &[f32], q: &[f32]) -> Result<Worlds, Error> {
@@ -132,13 +129,13 @@ fn world_from_camera(device: &Device, robot: &Robot, depth: &[f32], q: &[f32]) -
         width: 640,
         intrinsics: Intrinsics { fx: 525.0, fy: 525.0, cx: 319.5, cy: 239.5 },
         // 1.5 m above the table, looking down (OpenCV axes: z forward, y down).
-        camera: Pose { position: Vec3::new(0.5, 0.0, 1.5), rotation: Quat::from_rotation_x(std::f32::consts::PI) },
+        camera: Pose::new(Vec3::new(0.5, 0.0, 1.5), Quat::from_rotation_x(std::f32::consts::PI)),
     };
     let arm = image.robot_mask(robot, q, 0.04)?; // the arm is not an obstacle to itself
     // What objects hide is solid; what only the arm hides is free, or it would wall the arm in.
     let behind = Occlusion::OccupiedExceptRobotShadow;
     let grid = SdfGrid::from_depth(device, &image, Some(&arm), behind, &SdfOptions::default())?;
-    device.upload(&[World { obstacles: vec![Obstacle::Sdf { grid: Arc::new(grid), center: Vec3::ZERO, rotation: Quat::IDENTITY }] }])
+    device.upload(&[World { obstacles: vec![Obstacle::from(grid)] }])
 }
 ```
 

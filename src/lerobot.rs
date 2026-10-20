@@ -69,7 +69,14 @@ impl Default for ExportOptions {
 /// already hold one. All demonstrations must share a sample period that is a whole number of
 /// frames per second. Frames and episodes are written as they are converted, so the dataset can
 /// exceed memory. It holds no camera images: for those, replay the episodes in a simulator.
-pub fn export(root: &Path, robot: &Robot, worlds: &[World], demos: &[Demonstration], o: &ExportOptions) -> Result<()> {
+pub fn export(
+    root: impl AsRef<Path>,
+    robot: &Robot,
+    worlds: &[World],
+    demos: &[Demonstration],
+    o: &ExportOptions,
+) -> Result<()> {
+    let root = root.as_ref();
     let dt = check_demos(robot, worlds, demos)?;
     ensure_input!(!root.join("meta/info.json").exists(), "{} already holds a LeRobot dataset", root.display());
     ensure_input!(o.data_files_size_in_mb > 0, "data files need a positive size limit");

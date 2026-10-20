@@ -697,7 +697,7 @@ impl Robot {
     }
 
     fn pose_of(&self, fk: &Fk, link: usize) -> Pose {
-        Pose { position: fk.pos[link], rotation: Quat::from_mat3(&fk.rot[link]) }
+        Pose::new(fk.pos[link], Quat::from_mat3(&fk.rot[link]))
     }
 
     /// The moving joints at or above `link`, root first: (link index, actuated joint).

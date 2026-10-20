@@ -40,7 +40,7 @@ pub fn two_pandas() -> Result<Robot, batchplan::Error> {
     let arm = |prefix: &str, y: f32| batchplan::Part {
         path: asset("franka/franka_panda.urdf").into(),
         prefix: prefix.into(),
-        base: Pose { position: Vec3::new(0.0, y, 0.0), rotation: Quat::IDENTITY },
+        base: Pose::new(Vec3::new(0.0, y, 0.0), Quat::IDENTITY),
     };
     let parts = [arm("left_", 0.35), arm("right_", -0.35)];
     let spheres = one.collision_model.as_ref().expect("Panda spheres");
@@ -66,11 +66,7 @@ pub fn two_pandas() -> Result<Robot, batchplan::Error> {
 
 /// A table at z = 0 (the robot base height) with 2-6 random boxes in front of the robot.
 pub fn tabletop(rng: &mut Rng) -> World {
-    let mut obstacles = vec![Obstacle::Cuboid {
-        center: Vec3::new(0.4, 0.0, -0.02),
-        half_extents: Vec3::new(0.7, 0.8, 0.02),
-        rotation: Quat::IDENTITY,
-    }];
+    let mut obstacles = vec![Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02))];
     let boxes = 2 + (rng.uniform() * 5.0) as usize;
     for _ in 0..boxes {
         let half = Vec3::new(rng.range(0.02, 0.08), rng.range(0.02, 0.08), rng.range(0.03, 0.2));
@@ -110,11 +106,10 @@ pub fn tabletop_for(robot: &Robot, cpu: &Device, rng: &mut Rng) -> World {
             spheres.iter().map(move |s| (pose.position + pose.rotation * Vec3::new(s[0], s[1], s[2])).z - s[3])
         })
         .fold(f32::INFINITY, f32::min);
-    let table = Obstacle::Cuboid {
-        center: Vec3::new(0.0, 0.0, floor - 0.01 - reach * 0.05),
-        half_extents: Vec3::new(2.0 * reach, 2.0 * reach, reach * 0.05),
-        rotation: Quat::IDENTITY,
-    };
+    let table = Obstacle::cuboid(
+        Vec3::new(0.0, 0.0, floor - 0.01 - reach * 0.05),
+        Vec3::new(2.0 * reach, 2.0 * reach, reach * 0.05),
+    );
     let mut world = World { obstacles: vec![table] };
     while world.obstacles.len() < 4 {
         let (angle, radius) = (rng.range(-3.1, 3.1), rng.range(0.4, 0.8) * reach);
@@ -137,11 +132,7 @@ pub fn tabletop_for(robot: &Robot, cpu: &Device, rng: &mut Rng) -> World {
 /// A table with its top at z = 0, two tall boxes, and a small box to move across the table: the
 /// world and the task. The small box is the world's last obstacle.
 pub fn pick_place_scene(world: u32, rng: &mut Rng) -> (World, batchplan::datagen::PickPlace) {
-    let table = Obstacle::Cuboid {
-        center: Vec3::new(0.4, 0.0, -0.02),
-        half_extents: Vec3::new(0.7, 0.8, 0.02),
-        rotation: Quat::IDENTITY,
-    };
+    let table = Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02));
     let mut obstacles = vec![table];
     for side in [-1.0, 1.0] {
         obstacles.push(Obstacle::Cuboid {
@@ -158,7 +149,7 @@ pub fn pick_place_scene(world: u32, rng: &mut Rng) -> (World, batchplan::datagen
         half_extents: half,
         rotation: Quat::from_rotation_z(rng.range(-1.2, 1.2)),
     });
-    let place = Pose { position: spot(rng, -side), rotation: Quat::from_rotation_z(rng.range(-1.2, 1.2)) };
+    let place = Pose::new(spot(rng, -side), Quat::from_rotation_z(rng.range(-1.2, 1.2)));
     let object = obstacles.len() - 1;
     (World { obstacles }, batchplan::datagen::PickPlace { world, object, place })
 }
@@ -178,13 +169,7 @@ pub fn far_reaches(robot: &Robot, cpu: &Device, count: usize, above_table: bool)
         }
         let far = goal.iter().zip(robot.default_q()).map(|(a, b)| (a - b).powi(2)).sum::<f32>().sqrt() > 4.0;
         if far && cpu.evaluate(&worlds, &[world], &goal, &CollisionWeights::NONE).unwrap().collision_free(0) {
-            problems.push(PlanProblem {
-                world,
-                start: robot.default_q().to_vec(),
-                goal,
-                start_motion: None,
-                hold: vec![],
-            });
+            problems.push(PlanProblem::new(world, robot.default_q(), goal));
         }
     }
     (scene, problems)
@@ -195,22 +180,10 @@ pub fn reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
     let mut rng = batchplan::rng::Rng::new(41);
     let scene: Vec<World> = (0..64).map(|_| tabletop(&mut rng)).collect();
     let cpu = Device::cpu(robot).unwrap();
-    let goals: Vec<IkProblem> = scene
-        .iter()
-        .enumerate()
-        .map(|(i, w)| IkProblem { world: i as u32, targets: vec![Some(grasp_target(w, &mut rng))], seed: None })
-        .collect();
+    let goals: Vec<IkProblem> =
+        scene.iter().enumerate().map(|(i, w)| IkProblem::new(i as u32, grasp_target(w, &mut rng))).collect();
     let ik = solve_ik(&cpu, &cpu.upload(&scene).unwrap(), &goals, &IkOptions::default()).unwrap();
-    let problems = ik
-        .solved()
-        .map(|s| PlanProblem {
-            world: s.problem.world,
-            start: robot.default_q().to_vec(),
-            goal: s.solution.to_vec(),
-            start_motion: None,
-            hold: vec![],
-        })
-        .collect();
+    let problems = ik.solved().map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution)).collect();
     (scene, problems)
 }
 
@@ -221,7 +194,7 @@ pub fn blocked_reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
     for p in &problems {
         let middle: Vec<f32> = p.start.iter().zip(&p.goal).map(|(a, b)| 0.5 * (a + b)).collect();
         let center = robot.ee_pose(&middle, 0).position;
-        scene[p.world as usize].obstacles.push(Obstacle::Sphere { center, radius: 0.1 });
+        scene[p.world as usize].obstacles.push(Obstacle::sphere(center, 0.1));
     }
     let cpu = Device::cpu(robot).unwrap();
     let worlds = cpu.upload(&scene).unwrap();

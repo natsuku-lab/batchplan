@@ -17,7 +17,7 @@
 //! let device = Device::gpu(&robot)?;
 //! let worlds = device.upload(&[World::default()])?;
 //! let goal = vec![0.5, -1.2, 1.0, -1.4, -1.5, 0.3];
-//! let problems = vec![PlanProblem { world: 0, start: robot.default_q().to_vec(), goal, start_motion: None, hold: vec![] }];
+//! let problems = vec![PlanProblem::new(0, robot.default_q(), goal)];
 //! let result = plan(&device, &worlds, &problems, &PlanOptions::default())?;
 //! println!("solved: {}", result.best(0).is_some());
 //! # anyhow::Ok(())

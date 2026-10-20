@@ -8,6 +8,7 @@
 //! both rather than a panic on one and a plausible wrong answer on the other.
 
 use std::any::Any;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -74,26 +75,23 @@ pub struct Device {
 }
 
 /// Worlds prepared for one [`Device`] by [`Device::upload`]. On a GPU their obstacles and distance
-/// grids stay in device memory, so every call that takes them reuses one upload.
+/// grids stay in device memory, so every call that takes them reuses one upload. They deref to the
+/// worlds uploaded, as `&[World]`.
 pub struct Worlds {
     device: u64,
     worlds: Vec<World>,
     prepared: Box<dyn Any + Send + Sync>,
 }
 
-impl Worlds {
-    pub fn len(&self) -> usize {
-        self.worlds.len()
-    }
+impl Deref for Worlds {
+    type Target = [World];
 
-    pub fn is_empty(&self) -> bool {
-        self.worlds.is_empty()
-    }
-
-    pub fn as_slice(&self) -> &[World] {
+    fn deref(&self) -> &[World] {
         &self.worlds
     }
+}
 
+impl Worlds {
     /// The backend's form of the worlds; `Device` checks they were prepared by that backend.
     pub(crate) fn prepared<T: 'static>(&self) -> &T {
         self.prepared.downcast_ref().expect("Device checks that worlds were uploaded to it")

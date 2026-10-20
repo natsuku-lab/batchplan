@@ -56,6 +56,14 @@ pub struct IkProblem {
     pub seed: Option<Vec<f32>>,
 }
 
+impl IkProblem {
+    /// A one-handed robot's hand at `target` in world `world`, seeded from its default
+    /// configuration.
+    pub fn new(world: u32, target: Pose) -> Self {
+        Self { world, targets: vec![Some(target)], seed: None }
+    }
+}
+
 /// Per-seed results for `problems`; items are problem-major (`item = problem * seeds + seed`).
 #[derive(Clone, Debug)]
 pub struct IkResult {

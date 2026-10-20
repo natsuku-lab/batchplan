@@ -25,7 +25,7 @@ fn devices(robot: &Robot) -> Vec<Device> {
 fn malformed_batches_are_errors_on_every_device() {
     let robot = panda();
     let q = robot.default_q().to_vec();
-    let scene = vec![World { obstacles: vec![Obstacle::Sphere { center: Vec3::new(2.0, 0.0, 0.0), radius: 0.1 }] }];
+    let scene = vec![World { obstacles: vec![Obstacle::sphere(Vec3::new(2.0, 0.0, 0.0), 0.1)] }];
     let none = CollisionWeights::NONE;
     for d in devices(&robot) {
         let name = d.name();
@@ -37,39 +37,25 @@ fn malformed_batches_are_errors_on_every_device() {
         assert!(d.evaluate(&worlds, &[0], &q[..6], &none).is_err(), "{name}: configuration missing a joint");
         assert!(d.evaluate(&worlds, &[1], &q, &none).is_err(), "{name}: world index past the end");
         let target = robot.ee_pose(&q, 0);
-        assert!(
-            solve_ik(
-                &d,
-                &worlds,
-                &[IkProblem { world: 1, targets: vec![Some(target)], seed: None }],
-                &IkOptions::default()
-            )
-            .is_err(),
-            "{name}: IK"
-        );
-        let problem = PlanProblem { world: 1, start: q.clone(), goal: q.clone(), start_motion: None, hold: vec![] };
+        assert!(solve_ik(&d, &worlds, &[IkProblem::new(1, target)], &IkOptions::default()).is_err(), "{name}: IK");
+        let problem = PlanProblem::new(1, q.clone(), q.clone());
         assert!(plan(&d, &worlds, &[problem], &PlanOptions::default()).is_err(), "{name}: plan");
         // Inputs no device could check consistently are refused before any work.
         let input = |r: Result<_, Error>| matches!(r, Err(Error::Input(_)));
         let mut beyond = q.clone();
         beyond[3] = robot.upper()[3] + 0.5;
-        let past_limits = PlanProblem { world: 0, start: q.clone(), goal: beyond, start_motion: None, hold: vec![] };
+        let past_limits = PlanProblem::new(0, q.clone(), beyond);
         assert!(
             input(plan(&d, &worlds, &[past_limits], &PlanOptions::default()).map(|_| ())),
             "{name}: goal past limits"
         );
         let skewed = Pose { rotation: glam::Quat::from_xyzw(0.0, 0.0, 0.0, 2.0), ..target };
-        let ik = solve_ik(
-            &d,
-            &worlds,
-            &[IkProblem { world: 0, targets: vec![Some(skewed)], seed: None }],
-            &IkOptions::default(),
-        );
+        let ik = solve_ik(&d, &worlds, &[IkProblem::new(0, skewed)], &IkOptions::default());
         assert!(input(ik.map(|_| ())), "{name}: a non-unit target rotation");
         let rotated = |rotation| Obstacle::Cuboid { center: Vec3::ZERO, half_extents: Vec3::ONE, rotation };
         for bad in [
-            Obstacle::Sphere { center: Vec3::new(f32::NAN, 0.0, 0.0), radius: 0.1 },
-            Obstacle::Sphere { center: Vec3::ZERO, radius: -0.1 },
+            Obstacle::sphere(Vec3::new(f32::NAN, 0.0, 0.0), 0.1),
+            Obstacle::sphere(Vec3::ZERO, -0.1),
             rotated(glam::Quat::from_xyzw(0.0, 0.0, 0.0, 0.5)),
         ] {
             let err = d.upload(&[World { obstacles: vec![bad.clone()] }]).map(|_| ());
@@ -119,9 +105,8 @@ fn ik_reports_the_clearances_evaluate_finds() {
     let robot = panda();
     let scene = [common::tabletop(&mut batchplan::rng::Rng::new(4))];
     let mut rng = batchplan::rng::Rng::new(9);
-    let problems: Vec<IkProblem> = (0..16)
-        .map(|_| IkProblem { world: 0, targets: vec![Some(common::grasp_target(&scene[0], &mut rng))], seed: None })
-        .collect();
+    let problems: Vec<IkProblem> =
+        (0..16).map(|_| IkProblem::new(0, common::grasp_target(&scene[0], &mut rng))).collect();
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let ik = solve_ik(&d, &worlds, &problems, &IkOptions::default()).unwrap();
@@ -171,21 +156,9 @@ fn obstacle_free_worlds_work_on_every_device() {
         let worlds = d.upload(&[World::default()]).unwrap();
         let e = d.evaluate(&worlds, &[0], &start, &CollisionWeights::NONE).unwrap();
         assert!(e.world_clearance[0] > 1e29, "{name}: an empty world has nothing to hit");
-        let ik = solve_ik(
-            &d,
-            &worlds,
-            &[IkProblem { world: 0, targets: vec![Some(target)], seed: None }],
-            &IkOptions::default(),
-        )
-        .unwrap();
+        let ik = solve_ik(&d, &worlds, &[IkProblem::new(0, target)], &IkOptions::default()).unwrap();
         let goal = ik.best(0).unwrap_or_else(|| panic!("{name}: reachable target unsolved")).to_vec();
-        let result = plan(
-            &d,
-            &worlds,
-            &[PlanProblem { world: 0, start: start.clone(), goal, start_motion: None, hold: vec![] }],
-            &PlanOptions::default(),
-        )
-        .unwrap();
+        let result = plan(&d, &worlds, &[PlanProblem::new(0, start.clone(), goal)], &PlanOptions::default()).unwrap();
         assert!(result.best(0).is_some(), "{name}: no valid plan in an empty world");
     }
 }
@@ -196,30 +169,16 @@ fn results_keep_the_worlds_of_their_problems() {
     let robot = panda();
     let mut rng = batchplan::rng::Rng::new(21);
     let scene: Vec<World> = (0..2).map(|_| common::tabletop(&mut rng)).collect();
-    let goals: Vec<IkProblem> = [1u32, 1, 0]
-        .iter()
-        .map(|&w| IkProblem {
-            world: w,
-            targets: vec![Some(common::grasp_target(&scene[w as usize], &mut rng))],
-            seed: None,
-        })
-        .collect();
+    let goals: Vec<IkProblem> =
+        [1u32, 1, 0].iter().map(|&w| IkProblem::new(w, common::grasp_target(&scene[w as usize], &mut rng))).collect();
     let cpu = Device::cpu(&robot).unwrap();
     let on_cpu = cpu.upload(&scene).unwrap();
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let ik = solve_ik(&d, &worlds, &goals, &IkOptions::default()).unwrap();
         assert_eq!(ik.problems.len(), goals.len());
-        let problems: Vec<PlanProblem> = ik
-            .solved()
-            .map(|s| PlanProblem {
-                world: s.problem.world,
-                start: robot.default_q().to_vec(),
-                goal: s.solution.to_vec(),
-                start_motion: None,
-                hold: vec![],
-            })
-            .collect();
+        let problems: Vec<PlanProblem> =
+            ik.solved().map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution)).collect();
         assert!(problems.len() >= 2, "{}: too few IK solutions to test", d.name());
         let result = plan(&d, &worlds, &problems, &PlanOptions::default()).unwrap();
         assert!(
@@ -257,9 +216,8 @@ fn trajopt_smoothness_gradient_matches_its_cost() {
     goal[2] -= 0.7;
     // A ball on the straight line, so the searched path detours and the problem is optimized.
     let middle: Vec<f32> = robot.default_q().iter().zip(&goal).map(|(a, b)| 0.5 * (a + b)).collect();
-    let ball = Obstacle::Sphere { center: robot.ee_pose(&middle, 0).position, radius: 0.05 };
-    let problems =
-        vec![PlanProblem { world: 0, start: robot.default_q().to_vec(), goal, start_motion: None, hold: vec![] }];
+    let ball = Obstacle::sphere(robot.ee_pose(&middle, 0).position, 0.05);
+    let problems = vec![PlanProblem::new(0, robot.default_q(), goal)];
     let scene = vec![World { obstacles: vec![ball] }];
     let o = PlanOptions { collision: CollisionWeights::NONE, seeds: 8, ..Default::default() };
     let cost = |path: &[f64]| {
@@ -332,7 +290,7 @@ fn trajopt_collision_gradient_matches_its_cost() {
     let center = robot.ee_pose(&middle, 0).position;
     let post = Obstacle::Cylinder { center, rotation: glam::Quat::IDENTITY, radius: 0.05, half_height: 0.3 };
     let scene = vec![World { obstacles: vec![post] }];
-    let problems = vec![PlanProblem { world: 0, start, goal, start_motion: None, hold: vec![] }];
+    let problems = vec![PlanProblem::new(0, start, goal)];
     // No search beyond the straight line, which the post blocks, so optimized seed 0 is that line.
     let o = PlanOptions { seeds: 8, rrt: RrtOptions { max_iterations: 0, ..Default::default() }, ..Default::default() };
     let (points, k) = (o.control_points, o.samples_per_span);
@@ -533,13 +491,7 @@ fn a_robot_mounted_on_a_table_is_not_in_collision_with_it() {
         let e = d.evaluate(&worlds, &[0, 1], &q, &CollisionWeights::NONE).unwrap();
         assert!(e.collision_free(0), "{}: on its table, world clearance {}", d.name(), e.world_clearance[0]);
         assert!(!e.collision_free(1), "{}: the pin should collide", d.name());
-        let problem = PlanProblem {
-            world: 0,
-            start: robot.default_q().to_vec(),
-            goal: goal.clone(),
-            start_motion: None,
-            hold: vec![],
-        };
+        let problem = PlanProblem::new(0, robot.default_q(), goal.clone());
         let result = plan(&d, &worlds, &[problem], &PlanOptions::default()).unwrap();
         assert!(result.best(0).is_some(), "{}: no plan on the table", d.name());
     }
@@ -563,8 +515,7 @@ fn seeded_ik_stays_on_the_branch_it_starts_from() {
         let moved: f32 = q.iter().zip(&here).map(|(a, b)| (a - b).powi(2)).sum::<f32>().sqrt();
         assert!(moved < 0.2, "{}: moved {moved} rad from the seed", d.name());
         // Unseeded, the one seed starts from the default configuration and ends elsewhere.
-        let ik = solve_ik(&d, &worlds, &[IkProblem { world: 0, targets: vec![Some(target)], seed: None }], &one_seed)
-            .unwrap();
+        let ik = solve_ik(&d, &worlds, &[IkProblem::new(0, target)], &one_seed).unwrap();
         let elsewhere = ik.solution(0).iter().zip(&here).map(|(a, b)| (a - b).powi(2)).sum::<f32>().sqrt();
         assert!(elsewhere > 0.5, "{}: from the default it lands {elsewhere} rad away", d.name());
     }

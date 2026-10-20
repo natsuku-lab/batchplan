@@ -128,7 +128,7 @@ fn between_the_fingers(robot: &Robot) -> World {
     let tip =
         |side: &str, q: f32| robot.link_pose(&[q], &format!("robotiq_85_{side}_finger_tip_link")).unwrap().position;
     let center = 0.5 * (tip("left", 0.4) + tip("right", 0.4));
-    World { obstacles: vec![Obstacle::Sphere { center: center + Vec3::new(0.0, 0.0, 0.02), radius: 0.015 }] }
+    World { obstacles: vec![Obstacle::sphere(center + Vec3::new(0.0, 0.0, 0.02), 0.015)] }
 }
 
 #[test]
@@ -450,13 +450,7 @@ fn every_test_arm_loads_spherizes_and_plans() {
                 .collect();
             let far: f32 = goal.iter().zip(robot.default_q()).map(|(a, b)| (a - b).powi(2)).sum::<f32>().sqrt();
             if far > 1.0 && cpu.evaluate(&worlds, &[world], &goal, &CollisionWeights::NONE).unwrap().collision_free(0) {
-                problems.push(PlanProblem {
-                    world,
-                    start: robot.default_q().to_vec(),
-                    goal,
-                    start_motion: None,
-                    hold: vec![],
-                });
+                problems.push(PlanProblem::new(world, robot.default_q(), goal));
             }
         }
         for d in devices(&robot) {
@@ -520,19 +514,13 @@ fn robots_past_the_old_kernel_limits_work_on_every_device() {
     let robot = Robot::load(dir.join("snake.urdf"), &options).unwrap();
     let spheres: usize = robot.collision_model().spheres.values().map(Vec::len).sum();
     assert!(robot.dof() == 40 && spheres > 128, "{} joints, {spheres} spheres", robot.dof());
-    let scene = [World {
-        obstacles: vec![Obstacle::Cuboid {
-            center: Vec3::new(0.6, 0.0, 1.2),
-            half_extents: Vec3::splat(0.3),
-            rotation: Quat::IDENTITY,
-        }],
-    }];
+    let scene = [World { obstacles: vec![Obstacle::cuboid(Vec3::new(0.6, 0.0, 1.2), Vec3::splat(0.3))] }];
     for d in devices_agree(&robot, &scene) {
         let worlds = d.upload(&scene).unwrap();
         let start = vec![0.0; 40];
         let mut goal = vec![0.0; 40];
         goal[0] = 1.0;
-        let problem = PlanProblem { world: 0, start, goal, start_motion: None, hold: vec![] };
+        let problem = PlanProblem::new(0, start, goal);
         let result = plan(&d, &worlds, &[problem], &PlanOptions::default()).unwrap();
         assert!(result.best(0).is_some(), "{}: no plan for the snake", d.name());
     }
@@ -585,19 +573,12 @@ fn floating_and_planar_joints_become_one_axis_joints() {
             (Mat3::from_quat(turned.rotation) - expected).to_cols_array().iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(off < 1e-5, "{kind}: rotation off by {off}");
         // Every device sees the same robot and can move its base.
-        let scene = [World {
-            obstacles: vec![Obstacle::Cuboid {
-                center: Vec3::new(0.0, 0.0, 0.5),
-                half_extents: Vec3::splat(0.6),
-                rotation: Quat::IDENTITY,
-            }],
-        }];
+        let scene = [World { obstacles: vec![Obstacle::cuboid(Vec3::new(0.0, 0.0, 0.5), Vec3::splat(0.6))] }];
         for d in devices_agree(&robot, &scene) {
             let worlds = d.upload(&[World::default()]).unwrap();
             let mut goal = vec![0.0; robot.dof()];
             goal[0] = 0.8;
-            let problem =
-                PlanProblem { world: 0, start: vec![0.0; robot.dof()], goal, start_motion: None, hold: vec![] };
+            let problem = PlanProblem::new(0, vec![0.0; robot.dof()], goal);
             let result = plan(&d, &worlds, &[problem], &PlanOptions::default()).unwrap();
             assert!(result.best(0).is_some(), "{}: no plan for the {kind} base", d.name());
         }

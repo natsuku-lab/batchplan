@@ -57,7 +57,7 @@ pub fn two_rebots(dir: &Path) -> Result<Robot> {
     let part = |prefix: &str, y: f32| Part {
         path: urdf.clone(),
         prefix: prefix.into(),
-        base: Pose { position: Vec3::new(0.0, y, 0.0), rotation: Quat::IDENTITY },
+        base: Pose::new(Vec3::new(0.0, y, 0.0), Quat::IDENTITY),
     };
     let parts = [part("left_", BASE_Y), part("right_", -BASE_Y)];
     let (left, right) = (arm("left_"), arm("right_"));
@@ -83,25 +83,16 @@ pub fn two_rebots(dir: &Path) -> Result<Robot> {
 pub fn scene(world: u32, rng: &mut Rng) -> (World, Handover) {
     let (from, to, side) = if world.is_multiple_of(2) { (0, 1, 1.0) } else { (1, 0, -1.0) };
     let across = |rng: &mut Rng, spread: f32| Quat::from_rotation_z(FRAC_PI_2 + rng.range(-spread, spread));
-    let table = Obstacle::Cuboid {
-        center: Vec3::new(0.25, 0.0, -0.02),
-        half_extents: Vec3::new(0.45, 0.6, 0.02),
-        rotation: Quat::IDENTITY,
-    };
+    let table = Obstacle::cuboid(Vec3::new(0.25, 0.0, -0.02), Vec3::new(0.45, 0.6, 0.02));
     let half = BLOCKS[(rng.uniform() * BLOCKS.len() as f32) as usize % BLOCKS.len()];
     let block = Obstacle::Cuboid {
         center: Vec3::new(rng.range(0.2, 0.3), side * rng.range(0.18, 0.28), half.z),
         half_extents: half,
         rotation: across(rng, 0.4),
     };
-    let meet = Pose {
-        position: Vec3::new(rng.range(0.24, 0.28), rng.range(-0.03, 0.03), rng.range(0.09, 0.12)),
-        rotation: across(rng, 0.2),
-    };
-    let place = Pose {
-        position: Vec3::new(rng.range(0.2, 0.3), -side * rng.range(0.18, 0.28), half.z),
-        rotation: across(rng, 0.4),
-    };
+    let meet =
+        Pose::new(Vec3::new(rng.range(0.24, 0.28), rng.range(-0.03, 0.03), rng.range(0.09, 0.12)), across(rng, 0.2));
+    let place = Pose::new(Vec3::new(rng.range(0.2, 0.3), -side * rng.range(0.18, 0.28), half.z), across(rng, 0.4));
     let mut obstacles = vec![table, block];
     // Clutter beyond the blocks' reach, clear of where the hands work.
     for _ in 0..(rng.uniform() * 3.0) as usize {

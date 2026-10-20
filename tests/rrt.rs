@@ -208,8 +208,7 @@ fn continuous_joints_turn_the_short_way_unless_it_is_blocked() {
     let robot = Robot::load(dir.join("turntable.urdf"), &RobotOptions::default()).unwrap();
     assert_eq!(robot.continuous(), [true, false]);
     // From 2.6 rad to -2.6 rad is 1.08 rad through pi, or 5.2 rad the long way.
-    let problem =
-        PlanProblem { world: 0, start: vec![2.6, 0.0], goal: vec![-2.6, 0.0], start_motion: None, hold: vec![] };
+    let problem = PlanProblem::new(0, vec![2.6, 0.0], vec![-2.6, 0.0]);
     let short = std::f32::consts::TAU - 5.2;
     // A fin along -x, beyond the turntable but within the arm's reach: across the short way only
     // (the arm points along -x at pi).
@@ -276,8 +275,7 @@ fn ur5e_reaches_a_goal_a_turn_away_the_other_way_round() {
     };
     for d in devices(&robot) {
         let worlds = d.upload(std::slice::from_ref(&wall)).unwrap();
-        let problem =
-            PlanProblem { world: 0, start: start.clone(), goal: goal.clone(), start_motion: None, hold: vec![] };
+        let problem = PlanProblem::new(0, start.clone(), goal.clone());
         let result = plan(&d, &worlds, &[problem], &PlanOptions::default()).unwrap();
         let path = result.best(0).unwrap_or_else(|| panic!("{}: no plan", d.name()));
         let n = robot.dof();
@@ -306,7 +304,7 @@ fn shortcutting_straightens_a_joint_that_swings_back() {
     // A small ball where the hand passes halfway along the straight line, and a detour over it on
     // which the wrist turns 1.5 rad out and back.
     let middle: Vec<f32> = start.iter().zip(&goal).map(|(a, b)| 0.5 * (a + b)).collect();
-    let ball = Obstacle::Sphere { center: robot.ee_pose(&middle, 0).position, radius: 0.02 };
+    let ball = Obstacle::sphere(robot.ee_pose(&middle, 0).position, 0.02);
     let worlds = cpu.upload(&[World { obstacles: vec![ball] }]).unwrap();
     let mut over = middle.clone();
     over[1] -= 0.4;
@@ -341,7 +339,7 @@ fn a_grazed_straight_line_is_bent_around_the_obstacle() {
     goal[2] -= 0.8;
     // A small ball where the hand passes halfway along the line.
     let middle: Vec<f32> = start.iter().zip(&goal).map(|(a, b)| 0.5 * (a + b)).collect();
-    let ball = Obstacle::Sphere { center: robot.ee_pose(&middle, 0).position, radius: 0.02 };
+    let ball = Obstacle::sphere(robot.ee_pose(&middle, 0).position, 0.02);
     let worlds = cpu.upload(&[World { obstacles: vec![ball] }]).unwrap();
     let blocked = cpu.evaluate(&worlds, &[0], &middle, &CollisionWeights::NONE).unwrap();
     assert!(!blocked.collision_free(0), "the straight line must collide");
@@ -367,12 +365,12 @@ fn plans_around_a_ball_on_the_straight_line_stay_near_it() {
         let start: Vec<f32> = (0..n).map(|j| rng.range(robot.lower()[j], robot.upper()[j])).collect();
         let goal: Vec<f32> = (0..n).map(|j| rng.range(robot.lower()[j], robot.upper()[j])).collect();
         let middle: Vec<f32> = start.iter().zip(&goal).map(|(a, b)| 0.5 * (a + b)).collect();
-        let ball = Obstacle::Sphere { center: robot.ee_pose(&middle, 0).position, radius: 0.2 };
+        let ball = Obstacle::sphere(robot.ee_pose(&middle, 0).position, 0.2);
         let world = World { obstacles: vec![ball] };
         let one = cpu.upload(std::slice::from_ref(&world)).unwrap();
         let ends = cpu.evaluate(&one, &[0, 0], &[&start[..], &goal[..]].concat(), &CollisionWeights::NONE).unwrap();
         if ends.collision_free(0) && ends.collision_free(1) {
-            problems.push(PlanProblem { world: scene.len() as u32, start, goal, start_motion: None, hold: vec![] });
+            problems.push(PlanProblem::new(scene.len() as u32, start, goal));
             scene.push(world);
         }
     }
@@ -429,13 +427,11 @@ fn a_path_no_spline_follows_is_searched_again() {
         let (center, rotation) = pose([at[0], at[1], at[2], shelf[3], 0.0, 0.0, shelf[6]]);
         obstacles.push(Obstacle::Cylinder { center, rotation, radius: 0.01, half_height: 0.07 });
     }
-    let problem = PlanProblem {
-        world: 0,
-        start: vec![0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785],
-        goal: vec![-1.9269282, -1.358336, 1.0875098, -0.10738423, -0.6509739, 3.3858628, 0.35020632],
-        start_motion: None,
-        hold: vec![],
-    };
+    let problem = PlanProblem::new(
+        0,
+        vec![0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785],
+        vec![-1.9269282, -1.358336, 1.0875098, -0.10738423, -0.6509739, 3.3858628, 0.35020632],
+    );
     let worlds = cpu.upload(&[World { obstacles }]).unwrap();
     let result = plan(&cpu, &worlds, &[problem], &PlanOptions::default()).unwrap();
     assert!(result.best(0).is_some(), "no path");

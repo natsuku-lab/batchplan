@@ -38,11 +38,7 @@ fn worlds(n: usize, seed: u64) -> Vec<World> {
 
 fn ik_problems(worlds: &[World], seed: u64) -> Vec<IkProblem> {
     let mut rng = Rng::new(seed);
-    worlds
-        .iter()
-        .enumerate()
-        .map(|(i, s)| IkProblem { world: i as u32, targets: vec![Some(common::grasp_target(s, &mut rng))], seed: None })
-        .collect()
+    worlds.iter().enumerate().map(|(i, s)| IkProblem::new(i as u32, common::grasp_target(s, &mut rng))).collect()
 }
 
 #[test]
@@ -113,7 +109,7 @@ fn evaluate_matches_cpu_for_every_obstacle_kind() {
         |grid: &std::sync::Arc<SdfGrid>, center: glam::Vec3| Obstacle::Sdf { grid: grid.clone(), center, rotation };
     let worlds: Vec<World> = [
         vec![Obstacle::Cuboid { center, half_extents: glam::Vec3::new(0.1, 0.2, 0.08), rotation }],
-        vec![Obstacle::Sphere { center, radius: 0.15 }],
+        vec![Obstacle::sphere(center, 0.15)],
         vec![Obstacle::Cylinder { center, rotation, radius: 0.1, half_height: 0.2 }],
         vec![Obstacle::Capsule { center, rotation, radius: 0.08, half_length: 0.15 }],
         vec![grid(&torus, center)],
@@ -184,16 +180,8 @@ fn gpu_plans_are_collision_free_under_cpu_check() {
     let problems = ik_problems(&scene, 7);
     let (on_cpu, on_gpu) = (cpu.upload(&scene).unwrap(), gpu.upload(&scene).unwrap());
     let ik = solve_ik(&gpu, &on_gpu, &problems, &IkOptions::default()).unwrap();
-    let plan_problems: Vec<PlanProblem> = ik
-        .solved()
-        .map(|s| PlanProblem {
-            world: s.problem.world,
-            start: robot.default_q().to_vec(),
-            goal: s.solution.to_vec(),
-            start_motion: None,
-            hold: vec![],
-        })
-        .collect();
+    let plan_problems: Vec<PlanProblem> =
+        ik.solved().map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution)).collect();
     let o = PlanOptions::default();
     let result = plan(&gpu, &on_gpu, &plan_problems, &o).unwrap();
     let solved = result.solved().count();
@@ -236,7 +224,7 @@ fn block_straight_lines(robot: &Robot, scene: &mut [World], problems: Vec<PlanPr
     for p in &problems {
         let middle: Vec<f32> = p.start.iter().zip(&p.goal).map(|(a, b)| 0.5 * (a + b)).collect();
         let center = robot.ee_pose(&middle, 0).position;
-        scene[p.world as usize].obstacles.push(Obstacle::Sphere { center, radius: 0.1 });
+        scene[p.world as usize].obstacles.push(Obstacle::sphere(center, 0.1));
     }
     let cpu = Device::cpu(robot).unwrap();
     let worlds = cpu.upload(scene).unwrap();
@@ -278,16 +266,8 @@ fn trajopt_directions_match_cpu_element_wise() {
     let n = robot.dof();
     let mut worlds = worlds(64, 8);
     let ik = solve_ik(&cpu, &cpu.upload(&worlds).unwrap(), &ik_problems(&worlds, 9), &IkOptions::default()).unwrap();
-    let reaches: Vec<PlanProblem> = ik
-        .solved()
-        .map(|s| PlanProblem {
-            world: s.problem.world,
-            start: robot.default_q().to_vec(),
-            goal: s.solution.to_vec(),
-            start_motion: None,
-            hold: vec![],
-        })
-        .collect();
+    let reaches: Vec<PlanProblem> =
+        ik.solved().map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution)).collect();
     let problems = block_straight_lines(&robot, &mut worlds, reaches);
     let o = PlanOptions { seeds: 8, ..Default::default() };
     let per_path = o.control_points * n;
@@ -335,16 +315,8 @@ fn trajopt_lowers_the_cost_as_far_as_the_cpu() {
     let n = robot.dof();
     let mut scene = worlds(32, 12);
     let ik = solve_ik(&cpu, &cpu.upload(&scene).unwrap(), &ik_problems(&scene, 13), &IkOptions::default()).unwrap();
-    let reaches: Vec<PlanProblem> = ik
-        .solved()
-        .map(|s| PlanProblem {
-            world: s.problem.world,
-            start: robot.default_q().to_vec(),
-            goal: s.solution.to_vec(),
-            start_motion: None,
-            hold: vec![],
-        })
-        .collect();
+    let reaches: Vec<PlanProblem> =
+        ik.solved().map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution)).collect();
     let problems = block_straight_lines(&robot, &mut scene, reaches);
     let on_cpu = cpu.upload(&scene).unwrap();
     let o = PlanOptions { seeds: 8, ..Default::default() };

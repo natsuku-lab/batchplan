@@ -36,23 +36,12 @@ fn planned(robot: &Robot, count: usize) -> Vec<Vec<f32>> {
     let cpu = Device::cpu(robot).unwrap();
     let mut rng = Rng::new(31);
     let worlds: Vec<World> = (0..count).map(|_| common::tabletop(&mut rng)).collect();
-    let goals: Vec<IkProblem> = worlds
-        .iter()
-        .enumerate()
-        .map(|(i, w)| IkProblem { world: i as u32, targets: vec![Some(common::grasp_target(w, &mut rng))], seed: None })
-        .collect();
+    let goals: Vec<IkProblem> =
+        worlds.iter().enumerate().map(|(i, w)| IkProblem::new(i as u32, common::grasp_target(w, &mut rng))).collect();
     let worlds = cpu.upload(&worlds).unwrap();
     let ik = solve_ik(&cpu, &worlds, &goals, &IkOptions::default()).unwrap();
-    let problems: Vec<PlanProblem> = ik
-        .solved()
-        .map(|s| PlanProblem {
-            world: s.problem.world,
-            start: robot.default_q().to_vec(),
-            goal: s.solution.to_vec(),
-            start_motion: None,
-            hold: vec![],
-        })
-        .collect();
+    let problems: Vec<PlanProblem> =
+        ik.solved().map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution)).collect();
     let result = plan(&cpu, &worlds, &problems, &PlanOptions::default()).unwrap();
     let paths: Vec<Vec<f32>> = result.solved().map(|s| s.solution.to_vec()).collect();
     assert!(paths.len() >= count * 3 / 4, "only {} of {count} problems planned", paths.len());

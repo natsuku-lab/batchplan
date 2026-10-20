@@ -52,7 +52,7 @@ fn add_box(mesh: &mut (Vec<Vec3>, Vec<[u32; 3]>), lo: Vec3, hi: Vec3) {
 
 fn box_distance(lo: Vec3, hi: Vec3, p: Vec3) -> f32 {
     let (center, half) = (0.5 * (lo + hi), 0.5 * (hi - lo));
-    Obstacle::Cuboid { center, half_extents: half, rotation: Quat::IDENTITY }.distance(p).0
+    Obstacle::cuboid(center, half).distance(p).0
 }
 
 /// Half a voxel diagonal: how much built grids lower distances.
@@ -291,7 +291,7 @@ struct TableScene {
 
 impl TableScene {
     fn new() -> Self {
-        let camera = Pose { position: Vec3::new(0.0, 0.0, 1.0), rotation: Quat::from_rotation_x(PI) };
+        let camera = Pose::new(Vec3::new(0.0, 0.0, 1.0), Quat::from_rotation_x(PI));
         Self { camera, ball: (Vec3::new(0.05, 0.1, 0.1), 0.1) }
     }
 
@@ -378,6 +378,9 @@ fn depth_images_become_grids_on(device: &Device) {
         assert!(above <= 0.05 + 2e-3 && above > 0.05 - occupancy_slack(o.voxel), "{above} above the ball");
         let center = grid.distance(c).0;
         assert!(center.signum() == f32::signum(inside), "{center} at the ball's center under {behind:?}");
+        // As an obstacle, the grid is where the camera saw it.
+        let obstacle = Obstacle::from(grid);
+        assert_eq!([obstacle.distance(c).0, obstacle.distance(c + Vec3::new(0.0, 0.0, r + 0.05)).0], [center, above]);
     }
     // Pixels without a reading observe nothing. Below the table, zone (4, 4) is centered at
     // x = 0.054 and zone (5, 4) at x = 0.163 (y = -0.054 for both; the camera's y axis points
@@ -601,7 +604,7 @@ fn look_at(eye: Vec3, target: Vec3) -> Pose {
     let forward = (target - eye).normalize();
     let right = forward.cross(Vec3::Z).normalize();
     let down = forward.cross(right);
-    Pose { position: eye, rotation: Quat::from_mat3(&glam::Mat3::from_cols(right, down, forward)) }
+    Pose::new(eye, Quat::from_mat3(&glam::Mat3::from_cols(right, down, forward)))
 }
 
 #[test]

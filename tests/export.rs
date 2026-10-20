@@ -16,11 +16,8 @@ fn demos(dt: f32) -> (Robot, Vec<World>, Vec<Demonstration>) {
     let device = Device::cpu(&robot).unwrap();
     let mut rng = Rng::new(3);
     let worlds: Vec<World> = (0..6).map(|_| common::tabletop(&mut rng)).collect();
-    let goals: Vec<IkProblem> = worlds
-        .iter()
-        .enumerate()
-        .map(|(i, w)| IkProblem { world: i as u32, targets: vec![Some(common::grasp_target(w, &mut rng))], seed: None })
-        .collect();
+    let goals: Vec<IkProblem> =
+        worlds.iter().enumerate().map(|(i, w)| IkProblem::new(i as u32, common::grasp_target(w, &mut rng))).collect();
     let uploaded = device.upload(&worlds).unwrap();
     let demos = demonstrations(&device, &uploaded, &goals, &DemoOptions { dt, ..Default::default() }).unwrap();
     assert!(demos.iter().any(|d| d.origin.parent().is_some()), "fixture should include recoveries");
@@ -32,7 +29,7 @@ fn demonstration_options_are_checked_before_any_work() {
     let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::default()]).unwrap();
-    let goals = [IkProblem { world: 0, targets: vec![Some(robot.ee_pose(robot.default_q(), 0))], seed: None }];
+    let goals = [IkProblem::new(0, robot.ee_pose(robot.default_q(), 0))];
     for o in [
         DemoOptions { speed_scale: (0.0, 1.0), ..Default::default() },
         DemoOptions { speed_scale: (0.5, 1.5), ..Default::default() },

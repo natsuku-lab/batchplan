@@ -42,10 +42,10 @@ fn main() -> Result<(), Error> {
     };
     let robot = Robot::load("assets/franka/franka_panda.urdf", &options)?;
     let device = Device::gpu(&robot).or_else(|_| Device::cpu(&robot))?;
-    let table = Obstacle::Cuboid { center: Vec3::new(0.4, 0.0, -0.02), half_extents: Vec3::new(0.7, 0.8, 0.02), rotation: Quat::IDENTITY };
-    let block = Obstacle::Cuboid { center: Vec3::new(0.45, 0.2, 0.03), half_extents: Vec3::new(0.02, 0.03, 0.03), rotation: Quat::IDENTITY };
+    let table = Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02));
+    let block = Obstacle::cuboid(Vec3::new(0.45, 0.2, 0.03), Vec3::new(0.02, 0.03, 0.03));
     let worlds = vec![World { obstacles: vec![table, block] }];
-    let place = Pose { position: Vec3::new(0.45, -0.2, 0.03), rotation: Quat::from_rotation_z(0.5) };
+    let place = Pose::new(Vec3::new(0.45, -0.2, 0.03), Quat::from_rotation_z(0.5));
     let tasks = [PickPlace { world: 0, object: 1, place }];
     let demos = pick_and_place(&device, &worlds, &tasks, &PickPlaceOptions::default())?;
     for d in &demos {
@@ -79,8 +79,8 @@ use batchplan::*;
 /// Hands a 22 cm block lying in front of the left arm (obstacle 1 of world 0) to the right arm.
 fn pass_it(device: &Device, worlds: &[World]) -> Result<Vec<datagen::Demonstration>, Error> {
     let across = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
-    let meet = Pose { position: Vec3::new(0.5, 0.0, 0.3), rotation: across };
-    let place = Pose { position: Vec3::new(0.45, -0.3, 0.025), rotation: across };
+    let meet = Pose::new(Vec3::new(0.5, 0.0, 0.3), across);
+    let place = Pose::new(Vec3::new(0.45, -0.3, 0.025), across);
     let task = Handover { world: 0, object: 1, from: 0, to: 1, meet, place };
     handover(device, worlds, &[task], &PickPlaceOptions::default())
 }
@@ -168,10 +168,10 @@ fn main() -> Result<(), Error> {
     let device = Device::gpu(&robot).or_else(|_| Device::cpu(&robot))?;
     let worlds = device.upload(&[World::default()])?;
     let down = Quat::from_rotation_x(std::f32::consts::PI);
-    let goals = vec![IkProblem { world: 0, targets: vec![Some(Pose { position: Vec3::new(0.4, 0.2, 0.3), rotation: down })], seed: None }];
+    let goals = vec![IkProblem::new(0, Pose::new(Vec3::new(0.4, 0.2, 0.3), down))];
     let demos = demonstrations(&device, &worlds, &goals, &DemoOptions::default())?;
     let options = ExportOptions { data_files_size_in_mb: 100, ..Default::default() };
-    export(std::path::Path::new("data/my_dataset"), &robot, worlds.as_slice(), &demos, &options)
+    export("data/my_dataset", &robot, &worlds, &demos, &options)
 }
 ```
 

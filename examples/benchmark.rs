@@ -95,7 +95,7 @@ impl Problem {
 
     fn hand_goal(&self) -> Pose {
         let [w, x, y, z] = self.goal_pose.quaternion_wxyz;
-        Pose { position: Vec3::from(self.goal_pose.position_xyz), rotation: Quat::from_xyzw(x, y, z, w).normalize() }
+        Pose::new(Vec3::from(self.goal_pose.position_xyz), Quat::from_xyzw(x, y, z, w).normalize())
     }
 }
 
@@ -120,10 +120,7 @@ fn vamp_spheres(robot: &Robot, data: &std::path::Path) -> Result<CollisionModel>
     let urdf = urdf_rs::read_file(data.join("vamp_panda_spherized.urdf"))?;
     let pose = |o: &urdf_rs::Pose| {
         let [r, p, y] = o.rpy.0.map(|v| v as f32);
-        Pose {
-            position: Vec3::from(o.xyz.0.map(|v| v as f32)),
-            rotation: Quat::from_euler(glam::EulerRot::ZYX, y, p, r),
-        }
+        Pose::new(Vec3::from(o.xyz.0.map(|v| v as f32)), Quat::from_euler(glam::EulerRot::ZYX, y, p, r))
     };
     let at = |link: &str| robot.link_pose(robot.default_q(), link).with_context(|| format!("no link {link}"));
     let source = "Collision spheres of KavrakiLab/vamp resources/panda/panda_spherized.urdf (Apache-2.0).";
@@ -140,7 +137,7 @@ fn vamp_spheres(robot: &Robot, data: &std::path::Path) -> Result<CollisionModel>
         if spheres.is_empty() {
             continue;
         }
-        let mut to_ours = Pose { position: Vec3::ZERO, rotation: Quat::IDENTITY };
+        let mut to_ours = Pose::IDENTITY;
         if let Some(j) = urdf.joints.iter().find(|j| j.child.link == link.name)
             && matches!(j.joint_type, urdf_rs::JointType::Fixed)
         {
@@ -253,7 +250,7 @@ fn score(
         }
         out.success += 1;
         if let Some(meshes) = meshes {
-            let clear = meshes.clearance(worlds.as_slice(), &vec![s.problem.world; items], &dense)?;
+            let clear = meshes.clearance(worlds, &vec![s.problem.world; items], &dense)?;
             out.on_meshes +=
                 usize::from(clear.iter().all(|&[world, self_collision]| world > 0.0 && self_collision > 0.0));
         }
@@ -289,11 +286,7 @@ fn percentile(v: &mut [f64], p: f64) -> f64 {
 }
 
 fn ik_problems(problems: &[Problem]) -> Vec<IkProblem> {
-    problems
-        .iter()
-        .enumerate()
-        .map(|(i, p)| IkProblem { world: i as u32, targets: vec![Some(p.hand_goal())], seed: None })
-        .collect()
+    problems.iter().enumerate().map(|(i, p)| IkProblem::new(i as u32, p.hand_goal())).collect()
 }
 
 /// IK for every goal, then a plan from each start to its best IK solution.
@@ -301,13 +294,7 @@ fn ik_and_plan(device: &Device, worlds: &Worlds, problems: &[Problem], o: &PlanO
     let ik = solve_ik(device, worlds, &ik_problems(problems), &IkOptions::default())?;
     let plans: Vec<PlanProblem> = ik
         .solved()
-        .map(|s| PlanProblem {
-            world: s.problem.world,
-            start: problems[s.problem.world as usize].start.clone(),
-            goal: s.solution.to_vec(),
-            start_motion: None,
-            hold: vec![],
-        })
+        .map(|s| PlanProblem::new(s.problem.world, problems[s.problem.world as usize].start.clone(), s.solution))
         .collect();
     Ok(plan(device, worlds, &plans, o)?)
 }
@@ -382,7 +369,7 @@ fn main() -> Result<()> {
         solve_ik(
             device,
             &device.upload(&[World::default()])?,
-            &[IkProblem { world: 0, targets: vec![Some(robot.ee_pose(robot.default_q(), 0))], seed: None }],
+            &[IkProblem::new(0, robot.ee_pose(robot.default_q(), 0))],
             &IkOptions::default(),
         )?;
         for (name, problems) in &sets {
@@ -392,13 +379,7 @@ fn main() -> Result<()> {
             let to_ik: Vec<PlanProblem> = problems
                 .iter()
                 .enumerate()
-                .map(|(i, p)| PlanProblem {
-                    world: i as u32,
-                    start: p.start.clone(),
-                    goal: p.goal_ik[0].clone(),
-                    start_motion: None,
-                    hold: vec![],
-                })
+                .map(|(i, p)| PlanProblem::new(i as u32, p.start.clone(), p.goal_ik[0].clone()))
                 .collect();
             let t = Instant::now();
             let planned = plan(device, &device.upload(&scene)?, &to_ik, &args.plan)?;

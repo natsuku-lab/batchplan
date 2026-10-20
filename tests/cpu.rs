@@ -61,7 +61,7 @@ fn every_obstacle_kind() -> Vec<Obstacle> {
     let center = Vec3::new(0.1, -0.2, 0.3);
     vec![
         Obstacle::Cuboid { center, half_extents: Vec3::new(0.1, 0.2, 0.05), rotation },
-        Obstacle::Sphere { center, radius: 0.15 },
+        Obstacle::sphere(center, 0.15),
         Obstacle::Cylinder { center, rotation, radius: 0.12, half_height: 0.2 },
         Obstacle::Capsule { center, rotation, radius: 0.08, half_length: 0.15 },
     ]
@@ -100,8 +100,8 @@ fn obstacle_distances_are_exact_and_differentiable() {
 #[test]
 fn round_obstacle_distances_match_closed_forms() {
     let center = Vec3::new(1.0, 2.0, 3.0);
-    let cylinder = Obstacle::Cylinder { center, rotation: Quat::IDENTITY, radius: 0.5, half_height: 1.0 };
-    let capsule = Obstacle::Capsule { center, rotation: Quat::IDENTITY, radius: 0.5, half_length: 1.0 };
+    let cylinder = Obstacle::cylinder(center, 0.5, 1.0);
+    let capsule = Obstacle::capsule(center, 0.5, 1.0);
     let cases = [
         (&cylinder, Vec3::new(0.8, 0.0, 0.2), 0.3), // beside the side wall
         (&cylinder, Vec3::new(0.0, 0.0, 1.4), 0.4), // above the cap
@@ -185,7 +185,7 @@ fn ik_reaches_targets_from_collision_free_configurations() {
     while problems.len() < 64 {
         let q = random_q(&robot, &mut rng);
         if cpu.evaluate(&empty, &[0], &q, &CollisionWeights::NONE).unwrap().collision_free(0) {
-            problems.push(IkProblem { world: 0, targets: vec![Some(robot.ee_pose(&q, 0))], seed: None });
+            problems.push(IkProblem::new(0, robot.ee_pose(&q, 0)));
         }
     }
     let o = IkOptions { seeds: 16, ..Default::default() };

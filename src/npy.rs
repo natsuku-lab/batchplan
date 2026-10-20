@@ -33,7 +33,14 @@ pub struct ExportOptions {
 /// - `worlds.json` (the obstacles of every world, each distance grid written once) and `meta.json`.
 ///
 /// All demonstrations must share one sample period.
-pub fn export(root: &Path, robot: &Robot, worlds: &[World], demos: &[Demonstration], o: &ExportOptions) -> Result<()> {
+pub fn export(
+    root: impl AsRef<Path>,
+    robot: &Robot,
+    worlds: &[World],
+    demos: &[Demonstration],
+    o: &ExportOptions,
+) -> Result<()> {
+    let root = root.as_ref();
     let dt = check_demos(robot, worlds, demos)?;
     ensure_input!(!root.join("meta.json").exists(), "{} already holds a dataset", root.display());
     std::fs::create_dir_all(root)?;

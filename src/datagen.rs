@@ -63,13 +63,7 @@ pub fn recovery_problems(
             let start: Vec<f32> = (0..n)
                 .map(|j| (on_path[j] + o.sigma * rng.normal()).clamp(robot.bounds(j).0, robot.bounds(j).1))
                 .collect();
-            let next = PlanProblem {
-                world: problem.world,
-                start,
-                goal: problem.goal.clone(),
-                start_motion: None,
-                hold: vec![],
-            };
+            let next = PlanProblem::new(problem.world, start, problem.goal.clone());
             candidates.push(Recovery { parent, phase, problem: next });
         }
     }
@@ -349,16 +343,7 @@ pub fn demonstrations(
         .solved()
         .map(|s| {
             let start = starts[s.index * n..(s.index + 1) * n].to_vec();
-            (
-                s.index,
-                PlanProblem {
-                    world: s.problem.world,
-                    start,
-                    goal: s.solution.to_vec(),
-                    start_motion: None,
-                    hold: vec![],
-                },
-            )
+            (s.index, PlanProblem::new(s.problem.world, start, s.solution))
         })
         .unzip();
     let nominal = plan(device, worlds, &problems, &o.plan)?;
@@ -544,7 +529,7 @@ pub fn pick_and_place(
     let uploaded = device.upload(&scene)?;
     let clear = |i: usize| (tasks.len() + i) as u32;
     let up = Vec3::Z * o.approach;
-    let at = |p: Pose, lift: Vec3| Pose { position: p.position + lift, rotation: p.rotation };
+    let at = |p: Pose, lift: Vec3| Pose::new(p.position + lift, p.rotation);
     let place_tool: Vec<Pose> = tasks.iter().zip(&grasps).map(|(t, g)| g.tool_for(t.place)).collect();
 
     // Above the object, then the grasp from there.
@@ -821,7 +806,7 @@ pub fn handover(
     let uploaded = device.upload(&scene)?;
     let clear = |i: usize| (tasks.len() + i) as u32;
     let up = Vec3::Z * o.approach;
-    let at = |p: Pose| Pose { position: p.position + up, rotation: p.rotation };
+    let at = |p: Pose| Pose::new(p.position + up, p.rotation);
     let only = |h: usize, pose: Pose| -> Vec<Option<Pose>> { (0..hands).map(|k| (k == h).then_some(pose)).collect() };
     // The joints only hand `h` moves, which wait while the other hand works.
     let own = |h: usize| -> Vec<usize> {

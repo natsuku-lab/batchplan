@@ -841,7 +841,7 @@ mod tests {
 
     /// A 640x480 depth image of a table at z = 0 with a ball on it, from 1 m above the robot.
     fn table_image() -> (Vec<f32>, Intrinsics, Pose) {
-        let camera = Pose { position: Vec3::new(0.0, 0.0, 1.0), rotation: Quat::from_rotation_x(std::f32::consts::PI) };
+        let camera = Pose::new(Vec3::new(0.0, 0.0, 1.0), Quat::from_rotation_x(std::f32::consts::PI));
         let k = Intrinsics { fx: 525.0, fy: 525.0, cx: 319.5, cy: 239.5 };
         let (c, r) = (Vec3::new(0.05, 0.1, 0.1), 0.1);
         let depth = (0..640 * 480)

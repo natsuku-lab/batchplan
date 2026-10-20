@@ -79,7 +79,7 @@ fn main() -> Result<()> {
         npy::export(&episodes, &robot, &worlds, &demos, &Default::default())?;
         let metadata = serde_json::json!({"parents": "../episodes, which parent.npy indexes"});
         let metadata = metadata.as_object().expect("an object").clone();
-        npy::export(&out.join("resets"), &robot, &worlds, &states, &npy::ExportOptions { metadata })?;
+        npy::export(out.join("resets"), &robot, &worlds, &states, &npy::ExportOptions { metadata })?;
         println!("wrote {} and {}", episodes.display(), out.join("resets").display());
     }
     if let Some(out) = lerobot {

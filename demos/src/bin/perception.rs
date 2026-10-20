@@ -32,13 +32,8 @@ fn main() -> Result<()> {
     let device = args.device(&robot, true)?;
     let mut rng = Rng::new(args.count.unwrap_or(4) as u64);
     let mut truth = tabletop(&mut rng);
-    truth.obstacles.push(Obstacle::Sphere { center: Vec3::new(0.55, 0.25, 0.08), radius: 0.08 });
-    truth.obstacles.push(Obstacle::Cylinder {
-        center: Vec3::new(0.45, -0.3, 0.12),
-        rotation: Quat::IDENTITY,
-        radius: 0.05,
-        half_height: 0.12,
-    });
+    truth.obstacles.push(Obstacle::sphere(Vec3::new(0.55, 0.25, 0.08), 0.08));
+    truth.obstacles.push(Obstacle::cylinder(Vec3::new(0.45, -0.3, 0.12), 0.05, 0.12));
 
     // What the cameras see, the robot in view at its start.
     let intrinsics = Intrinsics { fx: 525.0, fy: 525.0, cx: 319.5, cy: 239.5 };
@@ -52,10 +47,11 @@ fn main() -> Result<()> {
     let mut seen = truth.clone();
     for (link, spheres) in &robot.collision_model().spheres {
         let pose = robot.link_pose(&q0, link).context("a robot link")?;
-        seen.obstacles.extend(spheres.iter().map(|&[x, y, z, radius]| Obstacle::Sphere {
-            center: pose.position + pose.rotation * Vec3::new(x, y, z),
-            radius,
-        }));
+        seen.obstacles.extend(
+            spheres
+                .iter()
+                .map(|&[x, y, z, radius]| Obstacle::sphere(pose.position + pose.rotation * Vec3::new(x, y, z), radius)),
+        );
     }
     let views: Vec<Vec<f32>> = cameras.iter().map(|(_, pose)| depth_image(&seen, *pose, intrinsics)).collect();
 
@@ -77,22 +73,14 @@ fn main() -> Result<()> {
     // A run of reaches to targets clear of the true scene, planned against the grid alone.
     let t = Instant::now();
     let worlds = device.upload(std::slice::from_ref(&observed))?;
-    let targets: Vec<IkProblem> = (0..REACHES * 3)
-        .map(|_| IkProblem { world: 0, targets: vec![Some(grasp_target(&truth, &mut rng))], seed: None })
-        .collect();
+    let targets: Vec<IkProblem> = (0..REACHES * 3).map(|_| IkProblem::new(0, grasp_target(&truth, &mut rng))).collect();
     let ik = solve_ik(&device, &worlds, &targets, &IkOptions::default())?;
     let goals: Vec<Vec<f32>> =
         (0..targets.len()).filter_map(|k| ik.best(k).map(<[f32]>::to_vec)).take(REACHES).collect();
     let problems: Vec<PlanProblem> = goals
         .iter()
         .enumerate()
-        .map(|(k, goal)| PlanProblem {
-            world: 0,
-            start: if k == 0 { q0.clone() } else { goals[k - 1].clone() },
-            goal: goal.clone(),
-            start_motion: None,
-            hold: vec![],
-        })
+        .map(|(k, goal)| PlanProblem::new(0, if k == 0 { q0.clone() } else { goals[k - 1].clone() }, goal.clone()))
         .collect();
     let planned = plan(&device, &worlds, &problems, &PlanOptions::default())?;
     let planning = t.elapsed().as_secs_f64() * 1e3;
@@ -222,7 +210,7 @@ fn look_at(eye: Vec3, target: Vec3) -> Pose {
     let forward = (target - eye).normalize();
     let right = forward.cross(Vec3::Z).normalize();
     let down = forward.cross(right);
-    Pose { position: eye, rotation: Quat::from_mat3(&Mat3::from_cols(right, down, forward)) }
+    Pose::new(eye, Quat::from_mat3(&Mat3::from_cols(right, down, forward)))
 }
 
 /// z depth per pixel by sphere tracing `scene` from `camera`; 0 where a ray hits nothing.

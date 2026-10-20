@@ -108,6 +108,13 @@ pub struct PlanProblem {
     pub hold: Vec<usize>,
 }
 
+impl PlanProblem {
+    /// From `start` at rest to `goal` in world `world`, every joint free to move.
+    pub fn new(world: u32, start: impl Into<Vec<f32>>, goal: impl Into<Vec<f32>>) -> Self {
+        Self { world, start: start.into(), goal: goal.into(), start_motion: None, hold: Vec::new() }
+    }
+}
+
 /// Per-seed results for `problems`; paths are problem-major (`item = problem * seeds + seed`).
 /// Seed 0 is the searched path; optimized seeds follow, invalid where a problem was not optimized.
 #[derive(Clone, Debug)]
@@ -911,7 +918,7 @@ mod tests {
         let path: Vec<f32> =
             (0..6).flat_map(|w| (0..n).map(move |j| 0.5 * ((j + 1) as f32 * w as f32 * 0.5).sin())).collect();
         let (start, goal) = (path[..n].to_vec(), path[path.len() - n..].to_vec());
-        let problem = PlanProblem { world: 0, start, goal, start_motion: None, hold: vec![] };
+        let problem = PlanProblem::new(0, start, goal);
         let o = PlanOptions::default();
         let keep = Arc::new(Keep { clearance: 0.0, ramp: 1.0, ends: vec![] });
         let points = o.control_points;

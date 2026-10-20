@@ -325,12 +325,8 @@ mod tests {
         let n = robot.dof();
         let world = World {
             obstacles: vec![
-                Obstacle::Cuboid {
-                    center: Vec3::new(0.5, 0.0, 0.4),
-                    half_extents: Vec3::new(0.05, 0.3, 0.2),
-                    rotation: Quat::IDENTITY,
-                },
-                Obstacle::Sphere { center: Vec3::new(0.0, 0.5, 0.5), radius: 0.15 },
+                Obstacle::cuboid(Vec3::new(0.5, 0.0, 0.4), Vec3::new(0.05, 0.3, 0.2)),
+                Obstacle::sphere(Vec3::new(0.0, 0.5, 0.5), 0.15),
                 Obstacle::Capsule {
                     center: Vec3::new(-0.3, -0.3, 0.6),
                     rotation: Quat::from_rotation_x(1.0),
@@ -398,9 +394,7 @@ mod tests {
         let q = robot.default_q().to_vec();
         let hand = robot.link_pose(&q, "panda_hand").unwrap().position;
         // A ball 8 mm from the hand's spheres, measured on the device.
-        let ball = |gap: f32| World {
-            obstacles: vec![Obstacle::Sphere { center: hand + Vec3::new(0.0, 0.0, 0.2 + gap), radius: 0.1 }],
-        };
+        let ball = |gap: f32| World { obstacles: vec![Obstacle::sphere(hand + Vec3::new(0.0, 0.0, 0.2 + gap), 0.1)] };
         let cpu = Device::cpu(&robot).unwrap();
         let probe = cpu.upload(&[ball(0.0)]).unwrap();
         let touching = cpu.clearance(&probe, &[0], &q).unwrap()[0][0];

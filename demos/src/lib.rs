@@ -181,10 +181,7 @@ impl RobotMeshes {
                     .iter()
                     .map(|(offset, poses)| {
                         let p = poses[l];
-                        Pose {
-                            position: *offset + p.position + p.rotation * m.pose.position,
-                            rotation: p.rotation * m.pose.rotation,
-                        }
+                        Pose::new(*offset + p.position + p.rotation * m.pose.position, p.rotation * m.pose.rotation)
                     })
                     .collect();
                 rec.log(
@@ -263,11 +260,7 @@ pub fn quaternion(q: Quat) -> rerun::Quaternion {
 
 /// A table at the robot's base height with 2-6 random boxes on it, in front of the robot.
 pub fn tabletop(rng: &mut Rng) -> World {
-    let mut obstacles = vec![Obstacle::Cuboid {
-        center: Vec3::new(0.4, 0.0, -0.02),
-        half_extents: Vec3::new(0.7, 0.8, 0.02),
-        rotation: Quat::IDENTITY,
-    }];
+    let mut obstacles = vec![Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02))];
     for _ in 0..2 + (rng.uniform() * 5.0) as usize {
         let half = Vec3::new(rng.range(0.02, 0.08), rng.range(0.02, 0.08), rng.range(0.03, 0.2));
         obstacles.push(Obstacle::Cuboid {

@@ -17,11 +17,8 @@ fn main() -> Result<()> {
     let robot = common::panda()?;
     let mut rng = Rng::new(42);
     let worlds: Vec<World> = (0..count).map(|_| common::tabletop(&mut rng)).collect();
-    let ik_problems: Vec<IkProblem> = worlds
-        .iter()
-        .enumerate()
-        .map(|(i, w)| IkProblem { world: i as u32, targets: vec![Some(common::grasp_target(w, &mut rng))], seed: None })
-        .collect();
+    let ik_problems: Vec<IkProblem> =
+        worlds.iter().enumerate().map(|(i, w)| IkProblem::new(i as u32, common::grasp_target(w, &mut rng))).collect();
 
     let mut devices = vec![];
     match Device::gpu(&robot) {
@@ -47,16 +44,8 @@ fn main() -> Result<()> {
         let t = Instant::now();
         let ik = solve_ik(device, &worlds, &ik_problems, &ik_opts)?;
         let ik_time = t.elapsed().as_secs_f64();
-        let problems: Vec<PlanProblem> = ik
-            .solved()
-            .map(|s| PlanProblem {
-                world: s.problem.world,
-                start: robot.default_q().to_vec(),
-                goal: s.solution.to_vec(),
-                start_motion: None,
-                hold: vec![],
-            })
-            .collect();
+        let problems: Vec<PlanProblem> =
+            ik.solved().map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution)).collect();
 
         let t = Instant::now();
         let result = plan(device, &worlds, &problems, &plan_opts)?;

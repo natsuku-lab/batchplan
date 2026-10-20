@@ -104,11 +104,7 @@ enum Between {
 /// between the two spots (see [`Between`]), and 2-4 more boxes of clutter, none touching either
 /// spot. The box is of a random size.
 fn pick_place_scene(world: u32, rng: &mut Rng) -> (World, PickPlace) {
-    let table = Obstacle::Cuboid {
-        center: Vec3::new(0.4, 0.0, -0.02),
-        half_extents: Vec3::new(0.7, 0.8, 0.02),
-        rotation: Quat::IDENTITY,
-    };
+    let table = Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02));
     let half = Vec3::new(rng.range(0.015, 0.03), rng.range(0.025, 0.04), rng.range(0.02, 0.04));
     let side = if rng.uniform() < 0.5 { -1.0 } else { 1.0 };
     let spot = |rng: &mut Rng, side: f32| Vec3::new(rng.range(0.35, 0.6), side * rng.range(0.2, 0.38), half.z);
@@ -174,7 +170,7 @@ fn pick_place_scene(world: u32, rng: &mut Rng) -> (World, PickPlace) {
         half_extents: half,
         rotation: Quat::from_rotation_z(rng.range(-1.2, 1.2)),
     });
-    let place = Pose { position: place, rotation: Quat::from_rotation_z(rng.range(-1.2, 1.2)) };
+    let place = Pose::new(place, Quat::from_rotation_z(rng.range(-1.2, 1.2)));
     let object = obstacles.len() - 1;
     (World { obstacles }, PickPlace { world, object, place })
 }

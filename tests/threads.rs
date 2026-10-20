@@ -34,24 +34,11 @@ fn a_one_thread_device_works_on_its_one_thread() {
     let mut rng = Rng::new(3);
     let scene: Vec<World> = (0..2).map(|_| common::tabletop(&mut rng)).collect();
     let worlds = device.upload(&scene).unwrap();
-    let goals: Vec<IkProblem> = (0..2)
-        .map(|w| IkProblem {
-            world: w,
-            targets: vec![Some(common::grasp_target(&scene[w as usize], &mut rng))],
-            seed: None,
-        })
-        .collect();
+    let goals: Vec<IkProblem> =
+        (0..2).map(|w| IkProblem::new(w, common::grasp_target(&scene[w as usize], &mut rng))).collect();
     let ik = solve_ik(&device, &worlds, &goals, &IkOptions::default()).unwrap();
-    let problems: Vec<PlanProblem> = ik
-        .solved()
-        .map(|s| PlanProblem {
-            world: s.problem.world,
-            start: robot.default_q().to_vec(),
-            goal: s.solution.to_vec(),
-            start_motion: None,
-            hold: vec![],
-        })
-        .collect();
+    let problems: Vec<PlanProblem> =
+        ik.solved().map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution)).collect();
     assert!(!problems.is_empty());
     assert!(plan(&device, &worlds, &problems, &PlanOptions::default()).unwrap().solved().count() > 0);
     let searches: Vec<RrtProblem> = problems
@@ -68,7 +55,7 @@ fn a_one_thread_device_works_on_its_one_thread() {
         .attach(&AttachedObject {
             name: "box".into(),
             link: "panda_hand".into(),
-            shapes: vec![Obstacle::Sphere { center: glam::Vec3::new(0.0, 0.0, 0.1), radius: 0.03 }],
+            shapes: vec![Obstacle::sphere(glam::Vec3::new(0.0, 0.0, 0.1), 0.03)],
             touch_links: vec!["panda_leftfinger".into(), "panda_rightfinger".into()],
             spheres: SphereOptions { budget: 4, ..Default::default() },
         })

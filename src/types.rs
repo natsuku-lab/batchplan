@@ -14,6 +14,10 @@ impl Pose {
     /// No translation, no rotation.
     pub const IDENTITY: Pose = Pose { position: Vec3::ZERO, rotation: Quat::IDENTITY };
 
+    pub const fn new(position: Vec3, rotation: Quat) -> Pose {
+        Pose { position, rotation }
+    }
+
     /// `other`, given in this pose's frame, in the frame this pose is given in.
     pub fn mul_pose(self, other: Pose) -> Pose {
         Pose { position: self.position + self.rotation * other.position, rotation: self.rotation * other.rotation }

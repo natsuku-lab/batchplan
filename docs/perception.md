@@ -12,6 +12,8 @@ A `World` is a list of obstacles. Worlds are uploaded to a [`Device`](devices.md
 | `Capsule { center, rotation, radius, half_length }` | a capsule around its local z segment |
 | `Sdf { grid, center, rotation }` | a signed distance grid, for any other shape |
 
+`Obstacle::cuboid(center, half_extents)`, `sphere`, `cylinder` and `capsule` build the primitives axis-aligned, and `.placed(pose)` moves and turns one. `Obstacle::from(grid)` puts a grid in world coordinates, where grids built from points and depth images belong.
+
 Primitives are exact. Distance grids hold anything else: meshes, point clouds, depth images and fused maps.
 
 ## Scenes
@@ -53,14 +55,13 @@ Grids from depth images grow toward collision by about three voxels, so pad by m
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
 use batchplan::*;
-use std::sync::Arc;
 
 fn main() -> Result<(), Error> {
     let robot = Robot::load("assets/franka/franka_panda.urdf", &RobotOptions::default())?;
     let device = Device::gpu(&robot).or_else(|_| Device::cpu(&robot))?;
     let mut map = OccupancyMap::new(Vec3::new(-0.2, -0.8, -0.1), Vec3::new(1.2, 0.8, 1.0), 0.01)?;
     // Your camera's pose in OpenCV axes (z forward, y down): here 1.5 m up, looking down.
-    let camera = Pose { position: Vec3::new(0.5, 0.0, 1.5), rotation: Quat::from_rotation_x(std::f32::consts::PI) };
+    let camera = Pose::new(Vec3::new(0.5, 0.0, 1.5), Quat::from_rotation_x(std::f32::consts::PI));
     let intrinsics = Intrinsics { fx: 525.0, fy: 525.0, cx: 319.5, cy: 239.5 };
     let q = robot.default_q().to_vec();                                                 // the arm's current state
     for depth in frames() {
@@ -68,8 +69,8 @@ fn main() -> Result<(), Error> {
         let mask = image.robot_mask(&robot, &q, 0.04)?;                                 // the arm is not an obstacle
         map.integrate(&device, &image, Some(&mask))?;
     }
-    let grid = Arc::new(map.grid(&device, Occlusion::Occupied)?);                       // never-seen space is solid
-    let world = World { obstacles: vec![Obstacle::Sdf { grid, center: Vec3::ZERO, rotation: Quat::IDENTITY }] };
+    let grid = map.grid(&device, Occlusion::Occupied)?;                                 // never-seen space is solid
+    let world = World { obstacles: vec![Obstacle::from(grid)] };
     let _worlds = device.upload(&[world])?;
     Ok(())
 }

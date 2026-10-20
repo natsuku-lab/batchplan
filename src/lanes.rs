@@ -716,7 +716,7 @@ mod tests {
                     half_extents: v(0.15, 0.05, 0.2),
                     rotation: Quat::from_rotation_z(0.7),
                 },
-                Obstacle::Sphere { center: v(0.0, 0.5, 0.5), radius: 0.1 * s },
+                Obstacle::sphere(v(0.0, 0.5, 0.5), 0.1 * s),
                 Obstacle::Cylinder {
                     center: v(-0.4, 0.0, 0.4),
                     rotation: tilt,
@@ -827,11 +827,7 @@ mod tests {
             .attach(&AttachedObject {
                 name: "box".into(),
                 link: "panda_hand".into(),
-                shapes: vec![Obstacle::Cuboid {
-                    center: Vec3::new(0.0, 0.0, 0.15),
-                    half_extents: Vec3::new(0.04, 0.04, 0.06),
-                    rotation: Quat::IDENTITY,
-                }],
+                shapes: vec![Obstacle::cuboid(Vec3::new(0.0, 0.0, 0.15), Vec3::new(0.04, 0.04, 0.06))],
                 touch_links: vec!["panda_leftfinger".into(), "panda_rightfinger".into()],
                 spheres: SphereOptions::default(),
             })

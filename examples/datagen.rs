@@ -63,11 +63,7 @@ fn main() -> Result<()> {
         let goals: Vec<IkProblem> = worlds
             .iter()
             .enumerate()
-            .map(|(i, w)| IkProblem {
-                world: i as u32,
-                targets: vec![Some(common::grasp_target(w, &mut rng))],
-                seed: None,
-            })
+            .map(|(i, w)| IkProblem::new(i as u32, common::grasp_target(w, &mut rng)))
             .collect();
         let options = DemoOptions { dt: 1.0 / fps as f32, ..Default::default() };
         let demos = demonstrations(&device, &device.upload(&worlds)?, &goals, &options)?;

@@ -20,15 +20,12 @@ fn main() -> Result<(), Error> {
     // Several targets in one call; each problem names its world.
     let down = Quat::from_rotation_x(std::f32::consts::PI);
     let targets = [Vec3::new(0.4, 0.2, 0.3), Vec3::new(0.3, -0.3, 0.4)];
-    let goals: Vec<IkProblem> =
-        targets.iter().map(|&p| IkProblem { world: 0, targets: vec![Some(Pose { position: p, rotation: down })], seed: None }).collect();
+    let goals: Vec<IkProblem> = targets.iter().map(|&p| IkProblem::new(0, Pose::new(p, down))).collect();
     let ik = solve_ik(&device, &worlds, &goals, &IkOptions::default())?;
 
     // `solved()` yields each problem that has a solution, with its world, so they cannot be mixed up.
-    let problems: Vec<PlanProblem> = ik
-        .solved()
-        .map(|s| PlanProblem { world: s.problem.world, start: robot.default_q().to_vec(), goal: s.solution.to_vec(), start_motion: None, hold: vec![] })
-        .collect();
+    let problems: Vec<PlanProblem> =
+        ik.solved().map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution)).collect();
     let result = plan(&device, &worlds, &problems, &PlanOptions::default())?;
     for s in result.solved() {
         let trajectory = Trajectory::new(&robot, s.solution, 1.0)?;
@@ -42,11 +39,14 @@ fn main() -> Result<(), Error> {
 
 `solve_ik` runs damped least squares from many seeds per target (32 by default), with the collision gradient projected into the Jacobian's null space so seeds slide away from obstacles without leaving the target. A seed succeeds when it is within `position_tolerance` (1 mm) and `rotation_tolerance` (0.01 rad) of the target and collision-free.
 
+- `IkProblem::new(world, target)` targets a one-handed robot's hand from the default pose; the fields below cover the rest.
 - `ik.best(problem)` is the successful seed with the most obstacle clearance; `ik.solved()` yields every solved problem with that configuration.
 - `IkProblem::seed` starts seed 0 from a configuration you give (the robot's current state, say) instead of the default pose, and `ik.nearest(problem, &q)` returns the successful seed nearest `q`. Together they keep short moves on the same IK branch, as pick-and-place does for its descents.
 - `IkProblem::targets` gives each of the robot's hands (`RobotOptions::ee_links`) a target pose, or `None`. Each step solves every targeted hand's damped least squares and pushes the collision gradient out of every targeted hand's Jacobian row space, which is exact for hands on separate arms. A hand without a target holds its arm: the joints only it moves stay where the seed has them in every seed, so one arm can reach while the other waits, or both can reach at once and keep clear of each other.
 
 ## Planning a path
+
+`PlanProblem::new(world, start, goal)` plans from rest with every joint free to move; set the other fields on top of it (`PlanProblem { hold, ..PlanProblem::new(world, start, goal) }`).
 
 `PlanProblem::hold` lists joints that stay where `start` has them, such as the other arm of a two-armed robot while one arm moves (`robot.hand_joints(hand)` lists an arm's); `goal` must have the same values there. Search samples and bends only the other joints, no goal turns a held joint, and optimized paths are put back on the held values before they are checked, so every control point keeps them. Without it, a plan moves every joint at once.
 
@@ -116,7 +116,7 @@ fn main() -> Result<(), Error> {
     let now = JointState { position: robot.default_q().to_vec(), velocity: vec![0.2; robot.dof()], acceleration: vec![0.0; robot.dof()] };
     let motion = StartMotion { velocity: now.velocity.clone(), acceleration: now.acceleration.clone() };
     let goal = vec![0.5, -1.2, 1.0, -1.4, -1.5, 0.3];
-    let problem = PlanProblem { world: 0, start: now.position.clone(), goal, start_motion: Some(motion.clone()), hold: vec![] };
+    let problem = PlanProblem { start_motion: Some(motion.clone()), ..PlanProblem::new(0, now.position.clone(), goal) };
     let result = plan(&device, &worlds, &[problem], &PlanOptions::default())?;
     if let Some(path) = result.best(0) {
         let trajectory = Trajectory::moving(&robot, path, &motion)?;

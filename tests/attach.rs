@@ -24,11 +24,7 @@ fn held_box(touch_links: &[&str]) -> AttachedObject {
     AttachedObject {
         name: "box".into(),
         link: "panda_hand".into(),
-        shapes: vec![Obstacle::Cuboid {
-            center: Vec3::new(0.0, 0.0, 0.1),
-            half_extents: Vec3::new(0.02, 0.045, 0.03),
-            rotation: Quat::IDENTITY,
-        }],
+        shapes: vec![Obstacle::cuboid(Vec3::new(0.0, 0.0, 0.1), Vec3::new(0.02, 0.045, 0.03))],
         touch_links: touch_links.iter().map(|s| s.to_string()).collect(),
         spheres: SphereOptions { budget: 12, ..Default::default() },
     }
@@ -53,12 +49,8 @@ fn attached_objects_move_with_their_link_and_skip_touch_links() {
     let pose = robot.default_q();
     // An obstacle between the open fingers misses the bare hand but hits the box.
     let hand = robot.link_pose(pose, "panda_hand").unwrap();
-    let between = World {
-        obstacles: vec![Obstacle::Sphere {
-            center: hand.position + hand.rotation * Vec3::new(0.0, 0.0, 0.1),
-            radius: 0.01,
-        }],
-    };
+    let between =
+        World { obstacles: vec![Obstacle::sphere(hand.position + hand.rotation * Vec3::new(0.0, 0.0, 0.1), 0.01)] };
     let worlds = cpu.upload(&[between]).unwrap();
     let evaluate = |d: &Device| d.evaluate(&worlds, &[0], pose, &CollisionWeights::NONE).unwrap();
     let (bare, holding) = (evaluate(&cpu), evaluate(&cpu.with_robot(&held).unwrap()));
@@ -126,29 +118,16 @@ fn devices_for_an_attached_robot_plan_in_worlds_already_uploaded() {
     let held = robot.attach(&held_box(&FINGERS)).unwrap();
     let mut rng = Rng::new(5);
     let scene: Vec<World> = (0..8).map(|_| common::tabletop(&mut rng)).collect();
-    let goals: Vec<IkProblem> = (0..8)
-        .map(|w| IkProblem {
-            world: w,
-            targets: vec![Some(common::grasp_target(&scene[w as usize], &mut rng))],
-            seed: None,
-        })
-        .collect();
+    let goals: Vec<IkProblem> =
+        (0..8).map(|w| IkProblem::new(w, common::grasp_target(&scene[w as usize], &mut rng))).collect();
     let checker = Device::cpu(&held).unwrap();
     let on_checker = checker.upload(&scene).unwrap();
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let holding = d.with_robot(&held).unwrap();
         let ik = solve_ik(&holding, &worlds, &goals, &IkOptions::default()).unwrap();
-        let problems: Vec<PlanProblem> = ik
-            .solved()
-            .map(|s| PlanProblem {
-                world: s.problem.world,
-                start: held.default_q().to_vec(),
-                goal: s.solution.to_vec(),
-                start_motion: None,
-                hold: vec![],
-            })
-            .collect();
+        let problems: Vec<PlanProblem> =
+            ik.solved().map(|s| PlanProblem::new(s.problem.world, held.default_q(), s.solution)).collect();
         let result = plan(&holding, &worlds, &problems, &PlanOptions::default()).unwrap();
         assert!(result.solved().count() >= 6, "{}: planned {} of 8", d.name(), result.solved().count());
         // Every plan keeps the box clear of the tables, checked independently.
@@ -205,8 +184,7 @@ fn held_boxes_and_balls_are_covered_without_fitting() {
         }
     }
     // A ball is its own sphere.
-    let ball = robot
-        .attach(&AttachedObject { shapes: vec![Obstacle::Sphere { center, radius: 0.03 }], ..held_box(&FINGERS) })
-        .unwrap();
+    let ball =
+        robot.attach(&AttachedObject { shapes: vec![Obstacle::sphere(center, 0.03)], ..held_box(&FINGERS) }).unwrap();
     assert_eq!(ball.collision_model().spheres["box"], vec![[center.x, center.y, center.z, 0.03]]);
 }

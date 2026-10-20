@@ -13,7 +13,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use batchplan::glam::{Quat, Vec3};
+use batchplan::glam::Vec3;
 use batchplan::rng::Rng;
 use batchplan::*;
 use batchplan_demos::*;
@@ -53,7 +53,7 @@ fn main() -> Result<()> {
     let mut worlds: Vec<World> = (0..count)
         .map(|_| {
             let mut w = tabletop(&mut rng);
-            w.obstacles.push(Obstacle::Cuboid { center: PARKED, half_extents: BOX, rotation: Quat::IDENTITY });
+            w.obstacles.push(Obstacle::cuboid(PARKED, BOX));
             w
         })
         .collect();
@@ -119,14 +119,8 @@ fn main() -> Result<()> {
 
         // Robots at rest reach for a new target, all in one IK call and one plan call.
         if !arrived.is_empty() {
-            let goals: Vec<IkProblem> = arrived
-                .iter()
-                .map(|&i| IkProblem {
-                    world: i as u32,
-                    targets: vec![Some(grasp_target(&worlds[i], &mut rng))],
-                    seed: None,
-                })
-                .collect();
+            let goals: Vec<IkProblem> =
+                arrived.iter().map(|&i| IkProblem::new(i as u32, grasp_target(&worlds[i], &mut rng))).collect();
             let ik = solve_ik(&device, &uploaded, &goals, &IkOptions::default())?;
             let reaches: Vec<(usize, PlanProblem)> = arrived
                 .iter()
@@ -136,16 +130,7 @@ fn main() -> Result<()> {
                         Some(goal) => goal,
                         None => ik.best(k)?.to_vec(),
                     };
-                    Some((
-                        i,
-                        PlanProblem {
-                            world: i as u32,
-                            start: now[i].position.clone(),
-                            goal,
-                            start_motion: None,
-                            hold: vec![],
-                        },
-                    ))
+                    Some((i, PlanProblem::new(i as u32, now[i].position.clone(), goal)))
                 })
                 .collect();
             let problems: Vec<PlanProblem> = reaches.iter().map(|(_, p)| p.clone()).collect();
@@ -184,7 +169,7 @@ fn main() -> Result<()> {
                 let center = robot.ee_pose(&state.position, 0).position;
                 let last = worlds[i].obstacles.len() - 1;
                 let previous = worlds[i].obstacles[last].clone();
-                worlds[i].obstacles[last] = Obstacle::Cuboid { center, half_extents: BOX, rotation: Quat::IDENTITY };
+                worlds[i].obstacles[last] = Obstacle::cuboid(center, BOX);
                 uploaded = device.upload(&worlds)?;
                 let ends = device.evaluate(
                     &uploaded,

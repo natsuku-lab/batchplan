@@ -145,7 +145,34 @@ impl World {
     }
 }
 
+impl From<SdfGrid> for Obstacle {
+    /// The grid in world coordinates (its frame the world's), where grids built from points and
+    /// depth images belong.
+    fn from(grid: SdfGrid) -> Self {
+        Obstacle::Sdf { grid: Arc::new(grid), center: Vec3::ZERO, rotation: Quat::IDENTITY }
+    }
+}
+
 impl Obstacle {
+    /// An axis-aligned box; [`Obstacle::placed`] moves and turns it.
+    pub fn cuboid(center: Vec3, half_extents: Vec3) -> Obstacle {
+        Obstacle::Cuboid { center, half_extents, rotation: Quat::IDENTITY }
+    }
+
+    pub fn sphere(center: Vec3, radius: f32) -> Obstacle {
+        Obstacle::Sphere { center, radius }
+    }
+
+    /// A cylinder along the z axis; [`Obstacle::placed`] moves and turns it.
+    pub fn cylinder(center: Vec3, radius: f32, half_height: f32) -> Obstacle {
+        Obstacle::Cylinder { center, rotation: Quat::IDENTITY, radius, half_height }
+    }
+
+    /// A capsule along the z axis; [`Obstacle::placed`] moves and turns it.
+    pub fn capsule(center: Vec3, radius: f32, half_length: f32) -> Obstacle {
+        Obstacle::Capsule { center, rotation: Quat::IDENTITY, radius, half_length }
+    }
+
     fn check(&self) -> Result<()> {
         let size = |v: f32| v.is_finite() && v >= 0.0;
         let pose = |center: Vec3, rotation: Quat| {

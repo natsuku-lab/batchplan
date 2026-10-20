@@ -10,7 +10,6 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -27,7 +26,7 @@ fn look_at(eye: Vec3, target: Vec3) -> Pose {
     let forward = (target - eye).normalize();
     let right = forward.cross(Vec3::Z).normalize();
     let down = forward.cross(right);
-    Pose { position: eye, rotation: Quat::from_mat3(&Mat3::from_cols(right, down, forward)) }
+    Pose::new(eye, Quat::from_mat3(&Mat3::from_cols(right, down, forward)))
 }
 
 /// z depth per pixel by sphere tracing the scene's distance functions; 0 where a ray hits nothing.
@@ -69,26 +68,14 @@ fn main() -> Result<()> {
     let grid = SdfGrid::from_depth(&device, &image, None, Occlusion::Occupied, &SdfOptions::default())?;
     let [nx, ny, nz] = grid.dims();
     println!("grid {nx}x{ny}x{nz} at {} m in {:.0} ms", grid.voxel(), t.elapsed().as_secs_f64() * 1e3);
-    let observed =
-        World { obstacles: vec![Obstacle::Sdf { grid: Arc::new(grid), center: Vec3::ZERO, rotation: Quat::IDENTITY }] };
+    let observed = World { obstacles: vec![Obstacle::from(grid)] };
 
     let t = Instant::now();
     let worlds = device.upload(&[observed])?;
     // Grasp targets clear of the true scene; some lie in space the camera cannot see.
-    let goals: Vec<IkProblem> = (0..64)
-        .map(|_| IkProblem { world: 0, targets: vec![Some(common::grasp_target(&scene, &mut rng))], seed: None })
-        .collect();
+    let goals: Vec<IkProblem> = (0..64).map(|_| IkProblem::new(0, common::grasp_target(&scene, &mut rng))).collect();
     let ik = solve_ik(&device, &worlds, &goals, &IkOptions::default())?;
-    let problems: Vec<PlanProblem> = ik
-        .solved()
-        .map(|s| PlanProblem {
-            world: 0,
-            start: robot.default_q().to_vec(),
-            goal: s.solution.to_vec(),
-            start_motion: None,
-            hold: vec![],
-        })
-        .collect();
+    let problems: Vec<PlanProblem> = ik.solved().map(|s| PlanProblem::new(0, robot.default_q(), s.solution)).collect();
     let result = plan(&device, &worlds, &problems, &PlanOptions::default())?;
     println!(
         "IK reached {} of {} targets, planned {} in {:.0} ms",

@@ -55,7 +55,7 @@ fn main() -> Result<(), Error> {
     let arm = |prefix: &str, y: f32| Part {
         path: "assets/ur5e/ur_description/urdf/ur5e.urdf".into(),
         prefix: prefix.into(),
-        base: Pose { position: Vec3::new(0.0, y, 0.0), rotation: Quat::IDENTITY },
+        base: Pose::new(Vec3::new(0.0, y, 0.0), Quat::IDENTITY),
     };
     let options = RobotOptions { ee_links: vec!["left_tool0".into(), "right_tool0".into()], ..Default::default() };
     let robot = Robot::assemble(&[arm("left_", 0.5), arm("right_", -0.5)], &options)?;
@@ -88,7 +88,7 @@ How tight the spheres are is a trade-off you can measure: see [Spheres and meshe
 `robot.attach(&AttachedObject)` follows MoveIt: the object becomes a frame fixed to a link, with spheres fitted to its shapes. Boxes and spheres are covered directly instead, in microseconds: a sphere is itself, and a box splits into a grid of cells whose corner spheres keep within the tolerance (or the least overhang the budget allows). It collides with the world and with the rest of the robot, never with its link or the `touch_links` that hold it. `detach` takes it off. `device.with_robot(&held)` gives a device for the new robot that shares the old one's GPU or threads and its uploaded worlds, so picking something up needs no new device and no new upload.
 
 ```rust,no_run
-use batchplan::glam::{Quat, Vec3};
+use batchplan::glam::Vec3;
 use batchplan::*;
 
 fn main() -> Result<(), Error> {
@@ -98,7 +98,7 @@ fn main() -> Result<(), Error> {
     let held = robot.attach(&AttachedObject {
         name: "box".into(),
         link: "panda_hand".into(),
-        shapes: vec![Obstacle::Cuboid { center: Vec3::new(0.0, 0.0, 0.1), half_extents: Vec3::splat(0.03), rotation: Quat::IDENTITY }],
+        shapes: vec![Obstacle::cuboid(Vec3::new(0.0, 0.0, 0.1), Vec3::splat(0.03))],
         touch_links: vec!["panda_leftfinger".into(), "panda_rightfinger".into()],
         spheres: SphereOptions::default(),
     })?;
@@ -118,13 +118,13 @@ Spheres only approximate the links. `MeshModel::new(&robot)` loads each link's c
 - Held objects are checked as part of the robot, and links no joint moves are skipped against the world, as in planning.
 
 ```rust,no_run
-use batchplan::glam::{Quat, Vec3};
+use batchplan::glam::Vec3;
 use batchplan::*;
 
 fn main() -> Result<(), Error> {
     let robot = Robot::load("assets/ur5e/ur_description/urdf/ur5e.urdf", &RobotOptions::default())?;
     let meshes = MeshModel::new(&robot)?;
-    let wall = Obstacle::Cuboid { center: Vec3::new(1.0, 0.0, 0.4), half_extents: Vec3::new(0.02, 0.5, 0.4), rotation: Quat::IDENTITY };
+    let wall = Obstacle::cuboid(Vec3::new(1.0, 0.0, 0.4), Vec3::new(0.02, 0.5, 0.4));
     let worlds = vec![World { obstacles: vec![wall] }];
     let q = robot.default_q().to_vec(); // one configuration; pass a trajectory's samples to check it all
     let [world, self_collision] = meshes.clearance(&worlds, &[0], &q)?[0];
