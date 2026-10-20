@@ -116,6 +116,11 @@ impl Ahead {
         self.reached.load(Ordering::Relaxed) >= 2 && !self.summoned.swap(true, Ordering::Relaxed)
     }
 
+    /// Whether the search has summoned helpers.
+    pub(crate) fn summoned(&self) -> bool {
+        self.summoned.load(Ordering::Relaxed)
+    }
+
     /// Whether a helper has joined, so the search should share.
     pub(super) fn joined(&self) -> bool {
         self.joined.load(Ordering::Relaxed)

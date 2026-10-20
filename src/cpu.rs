@@ -770,11 +770,10 @@ pub(crate) fn run_searches(
         let Some(ahead) = search.help() else {
             return edges::run(&mut **search, robot, lanes, worlds, deadline, spread, None, scratch);
         };
-        return pool.in_place_scope(|scope| {
-            let summon = || {
-                if !ahead.summon() {
-                    return;
-                }
+        // The search stops once it should summon helpers, and goes on beside them.
+        edges::run(&mut **search, robot, lanes, worlds, deadline, spread, Some(&|| ahead.summon()), scratch);
+        if ahead.summoned() {
+            pool.in_place_scope(|scope| {
                 for _ in 0..HELPERS {
                     let ahead = ahead.clone();
                     scope.spawn(move |_| {
@@ -784,10 +783,11 @@ pub(crate) fn run_searches(
                         }
                     });
                 }
-            };
-            edges::run(&mut **search, robot, lanes, worlds, deadline, spread, Some(&summon), scratch);
-            ahead.finish();
-        });
+                edges::run(&mut **search, robot, lanes, worlds, deadline, spread, None, scratch);
+                ahead.finish();
+            });
+        }
+        return ahead.finish();
     }
     let next = AtomicUsize::new(0);
     let helped: Vec<_> = searches.iter().map(|s| s.help()).collect();
