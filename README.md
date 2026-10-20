@@ -244,6 +244,10 @@ A GPU call costs about 10 ms, so one problem at a time runs 11–13 times faster
 
 [`demos/`](demos/) shows four of them live in [Rerun](https://rerun.io): two reBot arms handing blocks over, Panda pick-and-place around obstacles, planning around what depth cameras see, and replanning mid-motion.
 
+### With ROS 2
+
+[batchplan-ros](https://github.com/natsuku-lab/batchplan-ros) is a ROS 2 Jazzy node that plans with batchplan and speaks MoveIt's messages without needing MoveIt: a `MoveGroup` action and an IK service, with the scene in each request. Several goals in one request are planned in one batched call, and the shortest path wins. It comes with a browser demo of a simulated Panda (`pixi run demo`, on Linux or macOS) and an optional MoveIt planner plugin, through which batchplan plans the stock Panda demo's requests in 4–5 ms, against OMPL's 14–15 ms.
+
 ## Limitations
 
 - **Spheres.** Planning sees the robot as spheres. `MeshModel` checks finished plans against its meshes on the CPU, as a filter.
