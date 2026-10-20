@@ -18,6 +18,7 @@ use crate::edges::{self, EdgeScratch, Search};
 use crate::ik::IkOptions;
 use crate::lanes::{LANES, LaneScratch, Lanes};
 use crate::robot::{Fk, JointKind, Robot};
+use crate::rrt::HELPERS;
 use crate::sdf::{self, DepthImage, Layout, Occupancy, RobotMask, SdfGrid};
 use crate::spline;
 use crate::trajopt::{LINE_SEARCH, MAX_HISTORY, PlanOptions};
@@ -752,9 +753,9 @@ pub(crate) fn optimize_path(
 
 /// Runs every search to its end, or to `deadline`, on `pool`'s threads: each takes the next search
 /// until none is left, as VAMP's batches run, so no thread waits on another's share and each keeps
-/// one scratch. Then threads help the searches still running, checking their edges ahead of them
-/// (see `rrt::Ahead`). A search alone runs on the calling thread, outside the pool, so its
-/// optimizations do too.
+/// one scratch. Then threads help the searches still running long, checking their edges ahead of
+/// them (see `rrt::Ahead`). A search alone runs on the calling thread, outside the pool, so its
+/// optimizations do too; once it has run long, it summons helpers into the pool.
 pub(crate) fn run_searches(
     pool: &rayon::ThreadPool,
     searches: &mut [&mut dyn Search],
@@ -765,7 +766,28 @@ pub(crate) fn run_searches(
 ) {
     let spread = searches.len() > 1;
     if let [search] = searches {
-        return edges::run(&mut **search, robot, lanes, worlds, deadline, spread, &mut EdgeScratch::new(lanes));
+        let scratch = &mut EdgeScratch::new(lanes);
+        let Some(ahead) = search.help() else {
+            return edges::run(&mut **search, robot, lanes, worlds, deadline, spread, None, scratch);
+        };
+        return pool.in_place_scope(|scope| {
+            let summon = || {
+                if !ahead.summon() {
+                    return;
+                }
+                for _ in 0..HELPERS {
+                    let ahead = ahead.clone();
+                    scope.spawn(move |_| {
+                        if let Some(mut helper) = ahead.helper(robot, false) {
+                            let scratch = &mut EdgeScratch::new(lanes);
+                            edges::run(&mut helper, robot, lanes, worlds, deadline, false, None, scratch);
+                        }
+                    });
+                }
+            };
+            edges::run(&mut **search, robot, lanes, worlds, deadline, spread, Some(&summon), scratch);
+            ahead.finish();
+        });
     }
     let next = AtomicUsize::new(0);
     let helped: Vec<_> = searches.iter().map(|s| s.help()).collect();
@@ -776,19 +798,19 @@ pub(crate) fn run_searches(
             let i = next.fetch_add(1, Ordering::Relaxed);
             let Some(search) = searches.get(i) else { break };
             let mut search = search.lock().expect("a search panicked");
-            edges::run(&mut ***search, robot, lanes, worlds, deadline, spread, &mut scratch);
+            edges::run(&mut ***search, robot, lanes, worlds, deadline, spread, None, &mut scratch);
             if let Some(ahead) = &helped[i] {
                 ahead.finish();
             }
         }
-        // Threads spread over the searches still running, each helping one until it is done.
+        // Threads spread over the searches still running long, each helping one until it is done.
         let count = helped.len();
         loop {
             let mut helping = false;
             for k in 0..count {
                 let Some(ahead) = &helped[(context.index() + k) % count] else { continue };
-                if let Some(mut helper) = ahead.helper(robot) {
-                    edges::run(&mut helper, robot, lanes, worlds, deadline, false, &mut scratch);
+                if let Some(mut helper) = ahead.helper(robot, true) {
+                    edges::run(&mut helper, robot, lanes, worlds, deadline, false, None, &mut scratch);
                     helping = true;
                 }
             }

@@ -130,9 +130,14 @@ impl EdgeScratch {
     }
 }
 
+/// Queries between the driver's calls to `poll`.
+const POLL: usize = 64;
+
 /// Runs `search` to its end, or to `deadline`, checking its edges in `worlds` and optimizing the
 /// paths it asks to on this thread. With `spread`, an optimization also hands its samples to the
-/// current pool's idle threads.
+/// current pool's idle threads. `poll`, if given, runs every `POLL` queries: where a search alone
+/// summons help (see `cpu::run_searches`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     search: &mut dyn Search,
     robot: &Robot,
@@ -140,10 +145,11 @@ pub(crate) fn run(
     worlds: &[Vec<Prepared>],
     deadline: Option<Instant>,
     spread: bool,
+    poll: Option<&dyn Fn()>,
     scratch: &mut EdgeScratch,
 ) {
     // One dispatch for the whole search, so the checks inline at the CPU's SIMD level.
-    dispatch!(lanes.level(), simd => run_at(simd, search, robot, lanes, worlds, deadline, spread, scratch))
+    dispatch!(lanes.level(), simd => run_at(simd, search, robot, lanes, worlds, deadline, spread, poll, scratch))
 }
 
 #[inline(always)]
@@ -156,9 +162,15 @@ fn run_at<S: Simd>(
     worlds: &[Vec<Prepared>],
     deadline: Option<Instant>,
     spread: bool,
+    poll: Option<&dyn Fn()>,
     scratch: &mut EdgeScratch,
 ) {
+    let mut asked = 0usize;
     while deadline.is_none_or(|d| Instant::now() < d) {
+        asked += 1;
+        if let Some(poll) = poll.filter(|_| asked.is_multiple_of(POLL)) {
+            poll();
+        }
         let Some(query) = search.request(&mut scratch.buffer) else {
             let Some(o) = search.optimize() else { return };
             cpu::optimize_path(robot, &worlds[o.world as usize], o.path, &o.options, deadline, spread);

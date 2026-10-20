@@ -3,8 +3,10 @@
 //! A search is sequential: each sample extends trees that every earlier sample grew. Yet most
 //! samples extend from the node they would have a few dozen samples earlier (98% of them, 32
 //! samples ahead, in the Panda benchmark's longest searches), so once a batch has no searches left
-//! to start, its idle threads forecast the extension each coming sample makes, and the connection
-//! that follows it, on copies of the search's trees, and check them. Which tree a sample extends
+//! to start, its idle threads help those that have drawn `JOIN_AFTER` samples, and a search alone
+//! summons helpers into the pool once it has drawn `ALONE_AFTER`. Helpers forecast the extension
+//! each coming sample makes, and the connection that follows it, on copies of the search's trees,
+//! and check them. Which tree a sample extends
 //! depends on the trees' sizes when they are near the ratio that decides it, so a forecast then
 //! covers both. The search takes a forecast's answer only for the very query it would have asked
 //! (the same edges, bit for bit, keeping the same clearance), so it finds what it would alone.
@@ -22,11 +24,23 @@ const LOOKAHEAD: usize = 64;
 /// Forecasts kept, one per sample: room for every sample helpers may be forecasting.
 const SLOTS: usize = 2 * LOOKAHEAD;
 /// Helpers per search, at most.
-const HELPERS: usize = 8;
+pub(crate) const HELPERS: usize = 8;
+/// Samples a search of a batch draws before helpers join it. Most end sooner, and helpers that
+/// would only wait beside them, spinning, slow them down: from 250 samples, short batches planned
+/// 5% slower on an M4 Pro. From 1,000, the Ryzen's 32 threads ran out of searches to start while
+/// the batch's unsolvable search was short of it, and left it unhelped.
+const JOIN_AFTER: usize = 500;
+/// Samples a search alone draws before it summons helpers: they start on sleeping threads, and the
+/// call waits for them to end, which costs a search that ends soon after.
+const ALONE_AFTER: usize = 4000;
 
 /// What a search shares with the threads helping it, and their forecasts.
 #[derive(Default)]
 pub(crate) struct Ahead {
+    /// Whether the search has drawn `JOIN_AFTER` samples (1) or `ALONE_AFTER` (2), and whether it has
+    /// summoned helpers.
+    reached: AtomicUsize,
+    summoned: AtomicBool,
     /// Set when the first helper joins: until then the search shares nothing.
     joined: AtomicBool,
     helpers: AtomicUsize,
@@ -87,6 +101,21 @@ struct Slot {
 }
 
 impl Ahead {
+    /// The search draws sample `sample`.
+    pub(super) fn sample(&self, sample: usize) {
+        if sample == JOIN_AFTER {
+            self.reached.store(1, Ordering::Relaxed);
+        } else if sample == ALONE_AFTER {
+            self.reached.store(2, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether a search alone summons helpers now: it has drawn `ALONE_AFTER` samples, and has not
+    /// summoned them yet.
+    pub(crate) fn summon(&self) -> bool {
+        self.reached.load(Ordering::Relaxed) >= 2 && !self.summoned.swap(true, Ordering::Relaxed)
+    }
+
     /// Whether a helper has joined, so the search should share.
     pub(super) fn joined(&self) -> bool {
         self.joined.load(Ordering::Relaxed)
@@ -135,9 +164,12 @@ impl Ahead {
         self.over.store(true, Ordering::Release);
     }
 
-    /// A helper for the search, unless it is done sampling or has helpers enough.
-    pub(crate) fn helper<'a>(self: &Arc<Self>, robot: &'a Robot) -> Option<Helper<'a>> {
-        if self.over.load(Ordering::Acquire) {
+    /// A helper for the search, unless it is done sampling, has drawn fewer than `JOIN_AFTER`
+    /// samples, or has helpers enough. With `yields`, it runs the pool's other work every so often
+    /// and while it waits, such as a repair's samples: a pool thread that helps one search of a
+    /// batch should not hold up another.
+    pub(crate) fn helper<'a>(self: &Arc<Self>, robot: &'a Robot, yields: bool) -> Option<Helper<'a>> {
+        if self.over.load(Ordering::Acquire) || self.reached.load(Ordering::Relaxed) == 0 {
             return None;
         }
         if self.helpers.fetch_add(1, Ordering::AcqRel) >= HELPERS {
@@ -164,6 +196,7 @@ impl Ahead {
             todo: [None; 2],
             from_start: true,
             asked: Asked::Nothing,
+            yields,
             rounds: 0,
             forecasts: Default::default(),
             new: Vec::with_capacity(n),
@@ -202,7 +235,9 @@ pub(crate) struct Helper<'a> {
     todo: [Option<bool>; 2],
     from_start: bool,
     asked: Asked,
-    /// Rounds of looking for a sample to forecast.
+    /// Whether it runs the pool's other work (see `Ahead::helper`), and its rounds of looking for a
+    /// sample to forecast.
+    yields: bool,
     rounds: usize,
     forecasts: [Forecast; 2],
     new: Vec<f32>,
@@ -340,7 +375,7 @@ impl Search for Helper<'_> {
             }
             // Every so often, other work in the pool first.
             self.rounds += 1;
-            if self.rounds.is_multiple_of(16) {
+            if self.yields && self.rounds.is_multiple_of(16) {
                 while rayon::yield_now() == Some(rayon::Yield::Executed) {}
             }
             if self.sync() && self.claim() {
@@ -348,7 +383,7 @@ impl Search for Helper<'_> {
             }
             // The search is behind, or shares nothing yet: other work in the pool first, such as
             // the samples of a search's repair.
-            if rayon::yield_now() == Some(rayon::Yield::Executed) {
+            if self.yields && rayon::yield_now() == Some(rayon::Yield::Executed) {
                 continue;
             }
             waited += 1;
@@ -487,18 +522,24 @@ mod tests {
         let ahead = Arc::new(Ahead::default());
         let mut connect = Connect::new(robot, problem, &keeping, Sampling::NearLine, ahead.clone());
         std::thread::scope(|s| {
-            for mut helper in (0..helpers).map(|_| ahead.helper(robot).expect("room for helpers")) {
+            ahead.reached.store(1, Ordering::Relaxed);
+            for mut helper in (0..helpers).map(|_| ahead.helper(robot, false).expect("room for helpers")) {
                 let (lanes, worlds) = (&lanes, &worlds);
                 s.spawn(move || {
-                    edges::run(&mut helper, robot, lanes, worlds, None, false, &mut EdgeScratch::new(lanes))
+                    edges::run(&mut helper, robot, lanes, worlds, None, false, None, &mut EdgeScratch::new(lanes))
                 });
             }
             let mut scratch = EdgeScratch::new(&lanes);
-            edges::run(&mut connect, robot, &lanes, &worlds, None, false, &mut scratch);
+            edges::run(&mut connect, robot, &lanes, &worlds, None, false, None, &mut scratch);
             connect.relax(3000);
-            edges::run(&mut connect, robot, &lanes, &worlds, None, false, &mut scratch);
+            edges::run(&mut connect, robot, &lanes, &worlds, None, false, None, &mut scratch);
             ahead.finish();
         });
+        (fingerprint(&connect), connect.tube_samples + connect.iterations, connect.forecast_answers)
+    }
+
+    /// A search's trees (the start's, then the goals') and path, bit for bit.
+    fn fingerprint(connect: &Connect) -> Vec<u32> {
         let [a, b] = &connect.trees;
         let trees = if connect.start_first { [a, b] } else { [b, a] };
         let mut bits: Vec<u32> = vec![];
@@ -507,20 +548,56 @@ mod tests {
             bits.extend(tree.parent.iter().map(|p| p.map_or(u32::MAX, |p| p as u32)));
         }
         bits.extend(connect.path.iter().flatten().map(|v| v.to_bits()));
-        (bits, connect.tube_samples + connect.iterations, connect.forecast_answers)
+        bits
     }
+
+    /// The tests that keep threads busy run one at a time, so each has the machine's cores.
+    static ALONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Helpers change how fast a search runs, never what it finds: a long search grows the same
     /// trees with three helping as alone, though helpers answer many of its queries (half as many
-    /// as it draws samples on 32 threads, a fifth with two cores for all four threads).
+    /// as it draws samples on 32 threads, a twentieth with two cores shared with other tests).
     #[test]
     fn a_helped_search_grows_the_trees_it_would_alone() {
+        let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
         let robot = panda();
         let (world, problem) = dresser();
         let (alone, samples, _) = search(&robot, &world, &problem, 0);
         let (helped, _, answered) = search(&robot, &world, &problem, 3);
         assert!(samples > 3000, "the search drew only {samples} samples");
         assert!(alone == helped, "helpers changed the search");
-        assert!(answered > samples / 10, "helpers answered {answered} queries over {samples} samples");
+        assert!(answered > samples / 50, "helpers answered {answered} queries over {samples} samples");
+    }
+
+    /// The scheduler's helpers change nothing either. A long search grows the trees it grows
+    /// unhelped when the scheduler runs it in a batch, whose threads help it once the other
+    /// searches end (shorter, so it has drawn `JOIN_AFTER` samples by then), and when it runs alone,
+    /// summoning helpers after `ALONE_AFTER` samples; helpers answer queries both times.
+    #[test]
+    fn the_scheduler_helps_long_searches_in_batches_and_alone() {
+        let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+        let robot = panda();
+        let (world, problem) = dresser();
+        let (lanes, worlds) = (Lanes::new(&robot), cpu::prepare(std::slice::from_ref(&world)));
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        let long = RrtOptions { max_iterations: 6000, ..RrtOptions::default() };
+        let short = RrtOptions { max_iterations: 1000, ..RrtOptions::default() };
+        let connect = |o: &RrtOptions| Connect::new(&robot, &problem, o, Sampling::NearLine, Arc::default());
+        let mut alone = connect(&long);
+        edges::run(&mut alone, &robot, &lanes, &worlds, None, false, None, &mut EdgeScratch::new(&lanes));
+        let unhelped = fingerprint(&alone);
+        assert_eq!(alone.forecast_answers, 0);
+        assert!(alone.tube_samples + alone.iterations > ALONE_AFTER + 1000, "the search ends too soon");
+
+        let mut batch = [connect(&long), connect(&short), connect(&short), connect(&short)];
+        let mut searches: Vec<&mut dyn Search> = batch.iter_mut().map(|c| c as &mut dyn Search).collect();
+        cpu::run_searches(&pool, &mut searches, &robot, &lanes, &worlds, None);
+        assert!(fingerprint(&batch[0]) == unhelped, "helpers in a batch changed the search");
+        assert!(batch[0].forecast_answers > 0, "no helper answered in the batch");
+
+        let mut one = connect(&long);
+        cpu::run_searches(&pool, &mut [&mut one as &mut dyn Search], &robot, &lanes, &worlds, None);
+        assert!(fingerprint(&one) == unhelped, "helpers of a search alone changed it");
+        assert!(one.forecast_answers > 0, "no helper answered the search alone");
     }
 }

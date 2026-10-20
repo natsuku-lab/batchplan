@@ -29,7 +29,7 @@ use crate::lanes::LANES;
 use crate::robot::Robot;
 
 mod ahead;
-pub(crate) use ahead::Ahead;
+pub(crate) use ahead::{Ahead, HELPERS};
 
 #[derive(Clone, Copy, Debug)]
 pub struct RrtOptions {
@@ -938,9 +938,12 @@ impl Search for Connect<'_> {
                         self.trees.swap(0, 1);
                         self.start_first = !self.start_first;
                     }
-                    self.ahead.at(sample, self.start_first);
-                    if !self.shared && self.ahead.joined() {
-                        self.share(sample);
+                    self.ahead.sample(sample);
+                    if self.ahead.joined() {
+                        if !self.shared {
+                            self.share(sample);
+                        }
+                        self.ahead.at(sample, self.start_first);
                     }
                     let target = &mut self.sample;
                     self.halton.next(target);
