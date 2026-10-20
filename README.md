@@ -4,6 +4,9 @@
   <em>Thousands of robot motions at once, a fraction of a millisecond each.</em>
 </p>
 
+<img width="1135" height="654" alt="Screenshot 2026-10-20 at 5 13 25 PM" src="https://github.com/user-attachments/assets/a6ae642a-2319-4655-b791-4c6c13d48e40" />
+
+
 <p align="center">
   <a href="#quick-start"><b>Quick start</b></a> ·
   <a href="docs/README.md">Docs</a> ·
