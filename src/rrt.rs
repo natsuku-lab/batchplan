@@ -891,7 +891,6 @@ impl Search for Connect<'_> {
                         self.trees.swap(0, 1);
                         self.start_first = !self.start_first;
                     }
-                    self.report_sample(sample);
                     let target = &mut self.sample;
                     self.halton.next(target);
                     place(
@@ -904,12 +903,12 @@ impl Search for Connect<'_> {
                         target,
                         &mut self.new,
                     );
-                    let tree = &mut self.trees[0];
-                    let (near, d) = tree.nearest(target, &self.robot.continuous);
-                    if tree.radius[near] < d {
+                    let (near, d) = self.trees[0].nearest(target, &self.robot.continuous);
+                    if self.trees[0].radius[near] < d {
                         continue;
                     }
-                    reach(self.robot, self.range, tree, near, d, target, &mut self.new);
+                    self.report_sample(sample);
+                    reach(self.robot, self.range, &self.trees[0], near, d, &mut self.sample, &mut self.new);
                     self.stage = Stage::Extend { near };
                 }
                 &Stage::Extend { near } => {
@@ -998,7 +997,6 @@ impl Search for Connect<'_> {
                     tree.radius[near] *= 1.0 + DOMAIN_ALPHA;
                 }
                 let from = tree.add(&self.new, Some(near));
-                self.report_node(from);
                 let (other, d) = self.trees[1].nearest(&self.new, &self.robot.continuous);
                 steps_to(
                     self.robot,
@@ -1017,7 +1015,6 @@ impl Search for Connect<'_> {
                 let mut last = from;
                 for step in self.steps.chunks(n).take(answer.min(count - 1)) {
                     last = self.trees[0].add(step, Some(last));
-                    self.report_node(last);
                 }
                 if answer == count {
                     self.finish(last, other);

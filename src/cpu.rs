@@ -7,7 +7,7 @@
 use std::any::Any;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 use glam::{Mat3, Vec3};
@@ -751,6 +751,9 @@ pub(crate) fn optimize_path(
     }
 }
 
+/// How long a thread of a batch with no search to help sleeps before it looks again.
+const WAIT: Duration = Duration::from_micros(100);
+
 /// Runs every search to its end, or to `deadline`, on `pool`'s threads: each takes the next search
 /// until none is left, as VAMP's batches run, so no thread waits on another's share and each keeps
 /// one scratch. Then threads help the searches still running long, checking their edges ahead of
@@ -803,7 +806,9 @@ pub(crate) fn run_searches(
                 ahead.finish();
             }
         }
-        // Threads spread over the searches still running long, each helping one until it is done.
+        // Threads spread over the searches running long, each helping one until it is done. While
+        // others are still sampling, they may yet run long: threads wait, running the pool's other
+        // work first.
         let count = helped.len();
         loop {
             let mut helping = false;
@@ -815,7 +820,11 @@ pub(crate) fn run_searches(
                 }
             }
             if !helping {
-                break;
+                if !helped.iter().flatten().any(|ahead| ahead.sampling()) {
+                    break;
+                }
+                while rayon::yield_now() == Some(rayon::Yield::Executed) {}
+                std::thread::sleep(WAIT);
             }
         }
     });
