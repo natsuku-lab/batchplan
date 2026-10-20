@@ -14,6 +14,8 @@
 //!
 //! Each problem is its own search: device threads run searches whole, checking their edges with
 //! the CPU's SIMD collision checks (see `edges`), so results do not depend on the batch or device.
+//! Threads a batch has no more searches for check the edges a long search will ask about next
+//! (`ahead`), which speeds it without changing what it finds.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -25,6 +27,9 @@ use crate::edges::{self, EdgeQuery, Keep, Search, Wanted};
 use crate::error::{Result, ensure_input};
 use crate::lanes::LANES;
 use crate::robot::Robot;
+
+mod ahead;
+pub(crate) use ahead::Ahead;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RrtOptions {
@@ -148,7 +153,8 @@ pub(crate) fn connect_until(
             "problem {i}: held joints must be joints of the robot, with the start's values in every goal"
         );
     }
-    let mut searches: Vec<Connect> = problems.iter().map(|p| Connect::new(robot, p, o, Sampling::NearLine)).collect();
+    let mut searches: Vec<Connect> =
+        problems.iter().map(|p| Connect::new(robot, p, o, Sampling::NearLine, Arc::default())).collect();
     let mut running: Vec<&mut dyn Search> = searches.iter_mut().map(|s| s as &mut dyn Search).collect();
     device.search(worlds, &mut running, deadline)?;
     Ok(RrtResult { problems: problems.to_vec(), paths: searches.into_iter().map(|s| s.path).collect() })
@@ -158,6 +164,7 @@ pub(crate) fn connect_until(
 /// (`coords[j][node]`), padded with NaN to whole groups of eight. Nearest neighbours come from a
 /// k-d tree, or, for robots with continuous joints, whose distances wrap, from a scan of eight
 /// nodes per instruction, both at the CPU's SIMD level.
+#[derive(Clone)]
 struct Tree {
     coords: Vec<Vec<f32>>,
     parent: Vec<Option<usize>>,
@@ -256,13 +263,14 @@ const LEAF: usize = 128;
 /// leaf that outgrows `LEAF` nodes splits at the median of its widest axis. Leaves keep their own
 /// copy of their nodes' coordinates, eight nodes to a group, so a leaf is measured eight nodes per
 /// instruction from memory of its own.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct KdTree {
     cells: Vec<Cell>,
     /// Cells still to search and their gap to the query, squared.
     pending: Vec<(usize, f32)>,
 }
 
+#[derive(Clone)]
 enum Cell {
     Leaf(Leaf),
     /// Nodes below `value` on `axis` are under `low`, the rest under `high`.
@@ -276,7 +284,7 @@ enum Cell {
 
 /// A leaf's nodes, and their coordinates in groups of eight nodes per joint
 /// (`coords[(group * dof + joint) * 8 + lane]`), padded with NaN.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Leaf {
     nodes: Vec<usize>,
     coords: Vec<f32>,
@@ -403,6 +411,7 @@ impl KdTree {
 }
 
 /// Halton points in the unit cube, in prime bases from 3.
+#[derive(Clone)]
 struct Halton {
     bases: Vec<u32>,
     index: u64,
@@ -423,8 +432,13 @@ impl Halton {
 
     fn next(&mut self, out: &mut [f32]) {
         self.index += 1;
+        self.point(self.index, out);
+    }
+
+    /// Point `index` of the sequence.
+    fn point(&self, index: u64, out: &mut [f32]) {
         for (o, &b) in out.iter_mut().zip(&self.bases) {
-            let (mut i, mut f, mut r) = (self.index, 1.0f64, 0.0f64);
+            let (mut i, mut f, mut r) = (index, 1.0f64, 0.0f64);
             while i > 0 {
                 f /= f64::from(b);
                 r += f * (i % u64::from(b)) as f64;
@@ -499,10 +513,16 @@ pub(crate) struct Connect<'r> {
     across: Vec<f32>,
     /// The path found, once the search is over.
     pub(crate) path: Option<Vec<f32>>,
+    /// What threads helping the search share with it, and whether it has shared its trees since it
+    /// last changed what its queries keep.
+    ahead: Arc<Ahead>,
+    shared: bool,
+    /// Queries a helper answered.
+    forecast_answers: usize,
 }
 
 impl<'r> Connect<'r> {
-    pub(crate) fn new(robot: &'r Robot, p: &RrtProblem, o: &RrtOptions, sampling: Sampling) -> Self {
+    pub(crate) fn new(robot: &'r Robot, p: &RrtProblem, o: &RrtOptions, sampling: Sampling, ahead: Arc<Ahead>) -> Self {
         let n = robot.dof();
         Self {
             robot,
@@ -534,6 +554,9 @@ impl<'r> Connect<'r> {
             vias: Vec::with_capacity(2 * n),
             across: vec![],
             path: None,
+            ahead,
+            shared: false,
+            forecast_answers: 0,
         }
     }
 
@@ -544,6 +567,7 @@ impl<'r> Connect<'r> {
     /// or every goal in collision) stays over.
     pub(crate) fn relax(&mut self, samples: usize) {
         self.keep = None;
+        self.shared = false;
         if self.path.is_some() || self.trees.iter().any(|t| t.len() == 0) {
             return;
         }
@@ -603,13 +627,7 @@ impl<'r> Connect<'r> {
 
     /// The tube's radius for the next sample, while it is narrower than the widest joint range.
     fn tube(&self) -> Option<f32> {
-        if self.across.is_empty() || self.max_iterations == 0 {
-            return None;
-        }
-        let doublings = (self.tube_samples / TUBE_DOUBLING).min(31) as i32;
-        let r = TUBE_RADIUS * 2f32.powi(doublings);
-        let widest = self.robot.lower.iter().zip(&self.robot.upper).map(|(l, u)| u - l).fold(0.0, f32::max);
-        (r < widest).then_some(r)
+        tube_radius(self.robot, &self.across, self.max_iterations, self.tube_samples)
     }
 
     /// Whether any sample came from the tube.
@@ -658,9 +676,165 @@ impl<'r> Connect<'r> {
         self.path = Some(path);
         self.stage = Stage::Done;
     }
+
+    /// Shares the search with the threads helping it, before sample `sample`: its trees and what
+    /// places and checks its samples.
+    fn share(&mut self, sample: usize) {
+        self.shared = true;
+        let [a, b] = &self.trees;
+        let trees = if self.start_first { [a.clone(), b.clone()] } else { [b.clone(), a.clone()] };
+        let mut halton = self.halton.clone();
+        halton.index -= sample as u64;
+        self.ahead.publish(ahead::Base {
+            trees,
+            halton,
+            world: self.world,
+            range: self.range,
+            resolution: self.resolution,
+            max_iterations: self.max_iterations,
+            keep: self.keep.clone(),
+            start: self.start.clone(),
+            line_goal: self.line_goal.clone(),
+            across: self.across.clone(),
+            held: self.held.clone(),
+        });
+    }
+
+    /// Hands node `i` of the extending tree to the helpers, once the search shares.
+    fn log(&self, i: usize) {
+        if self.shared {
+            self.ahead.add(self.start_first, &self.trees[0], i);
+        }
+    }
+
+    /// A helper's answer to the query of `edges` this sample asks, the extension's or (`connect`)
+    /// the connection's, if one checked that very query.
+    fn forecast(&mut self, edges: &[f32], connect: bool) -> Option<usize> {
+        if !self.shared {
+            return None;
+        }
+        let answer = self.ahead.answer(self.tube_samples + self.iterations - 1, self.start_first, edges, connect);
+        self.forecast_answers += usize::from(answer.is_some());
+        answer
+    }
+}
+
+/// Whether the trees swap before a sample, given the extending tree's size `a` and the other's
+/// `b`: they take turns, unless the other is at least twice the extending one's size.
+fn swaps(a: f32, b: f32) -> bool {
+    (a - b).abs() / a < 1.0
+}
+
+/// The tube's radius for a sample after `tube_samples` from it, while it is narrower than the
+/// widest joint range (see `Connect::tube`).
+fn tube_radius(robot: &Robot, across: &[f32], max_iterations: usize, tube_samples: usize) -> Option<f32> {
+    if across.is_empty() || max_iterations == 0 {
+        return None;
+    }
+    let doublings = (tube_samples / TUBE_DOUBLING).min(31) as i32;
+    let r = TUBE_RADIUS * 2f32.powi(doublings);
+    let widest = robot.lower.iter().zip(&robot.upper).map(|(l, u)| u - l).fold(0.0, f32::max);
+    (r < widest).then_some(r)
+}
+
+/// Turns `target`, a Halton point in the unit cube, into a sample: in the tube of radius `tube`
+/// around the line from `start` to `line_goal` (`across` spanning the directions across it), or in
+/// the joint ranges, with held joints at the start. `unit` is working memory.
+#[allow(clippy::too_many_arguments)]
+fn place(
+    robot: &Robot,
+    start: &[f32],
+    line_goal: &[f32],
+    across: &[f32],
+    held: &[bool],
+    tube: Option<f32>,
+    target: &mut [f32],
+    unit: &mut Vec<f32>,
+) {
+    let n = robot.dof();
+    if let Some(r) = tube {
+        // Along the line, past either end by the radius, then across it in a box.
+        unit.clear();
+        unit.extend_from_slice(target);
+        let past = r / distance(start, line_goal);
+        let t = -past + (1.0 + 2.0 * past) * unit[0];
+        for (j, q) in target.iter_mut().enumerate() {
+            *q = start[j] + (line_goal[j] - start[j]) * t;
+        }
+        for (b, u) in across.chunks(n).zip(&unit[1..]) {
+            let c = r * (2.0 * u - 1.0);
+            target.iter_mut().zip(b).for_each(|(q, y)| *q += c * y);
+        }
+    }
+    for (j, t) in target.iter_mut().enumerate() {
+        *t = if held[j] {
+            start[j]
+        } else if tube.is_none() {
+            robot.lower[j] + *t * (robot.upper[j] - robot.lower[j])
+        } else if robot.continuous[j] {
+            *t
+        } else {
+            t.clamp(robot.lower[j], robot.upper[j])
+        };
+    }
+}
+
+/// Into `new`, where an extension from node `near` of `tree` toward `target`, `d` away, reaches: at
+/// most `range` along the way, `target` turned toward the node first.
+fn reach(robot: &Robot, range: f32, tree: &Tree, near: usize, d: f32, target: &mut [f32], new: &mut Vec<f32>) {
+    new.clear();
+    tree.push_node(near, new);
+    robot.turn_toward(new, target);
+    if d > range {
+        for (a, b) in new.iter_mut().zip(target.iter()) {
+            *a += (b - *a) * (range / d);
+        }
+    } else {
+        new.copy_from_slice(target);
+    }
+}
+
+/// Into `steps`, a connection's steps from `new` to node `other` of `tree`, `d` away: equal, at most
+/// `range` long, the last at the node turned toward `new` (into `target`).
+#[allow(clippy::too_many_arguments)]
+fn steps_to(
+    robot: &Robot,
+    range: f32,
+    new: &[f32],
+    tree: &Tree,
+    other: usize,
+    d: f32,
+    target: &mut Vec<f32>,
+    steps: &mut Vec<f32>,
+) {
+    target.clear();
+    tree.push_node(other, target);
+    robot.turn_toward(new, target);
+    let count = (d / range).ceil().max(1.0) as usize;
+    steps.clear();
+    for k in 1..count {
+        let t = k as f32 / count as f32;
+        steps.extend(new.iter().zip(target.iter()).map(|(a, b)| a + (b - a) * t));
+    }
+    steps.extend_from_slice(target);
+}
+
+/// Appends the edges between a connection's steps (`[k, dof]`) to `edges`, which holds the node
+/// it starts from.
+fn connect_edges(steps: &[f32], n: usize, edges: &mut Vec<f32>) {
+    for (k, step) in steps.chunks(n).enumerate() {
+        if k > 0 {
+            edges.extend_from_slice(&steps[(k - 1) * n..k * n]);
+        }
+        edges.extend_from_slice(step);
+    }
 }
 
 impl Search for Connect<'_> {
+    fn help(&self) -> Option<Arc<Ahead>> {
+        Some(self.ahead.clone())
+    }
+
     fn request(&mut self, buffer: &mut Vec<f32>) -> Option<EdgeQuery> {
         let n = self.robot.dof();
         loop {
@@ -749,6 +923,7 @@ impl Search for Connect<'_> {
                     return self.query(edges, Wanted::Prefix);
                 }
                 Stage::Sample => {
+                    let sample = self.tube_samples + self.iterations;
                     let tube = self.tube();
                     if tube.is_some() {
                         self.tube_samples += 1;
@@ -759,68 +934,53 @@ impl Search for Connect<'_> {
                         self.iterations += 1;
                     }
                     let (a, b) = (self.trees[0].len() as f32, self.trees[1].len() as f32);
-                    if (a - b).abs() / a < 1.0 {
+                    if swaps(a, b) {
                         self.trees.swap(0, 1);
                         self.start_first = !self.start_first;
                     }
+                    self.ahead.at(sample, self.start_first);
+                    if !self.shared && self.ahead.joined() {
+                        self.share(sample);
+                    }
                     let target = &mut self.sample;
                     self.halton.next(target);
-                    if let Some(r) = tube {
-                        // Along the line, past either end by the radius, then across it in a box.
-                        self.new.clear();
-                        self.new.extend_from_slice(target);
-                        let past = r / distance(&self.start, &self.line_goal);
-                        let t = -past + (1.0 + 2.0 * past) * self.new[0];
-                        for (j, q) in target.iter_mut().enumerate() {
-                            *q = self.start[j] + (self.line_goal[j] - self.start[j]) * t;
-                        }
-                        for (b, u) in self.across.chunks(n).zip(&self.new[1..]) {
-                            let c = r * (2.0 * u - 1.0);
-                            target.iter_mut().zip(b).for_each(|(q, y)| *q += c * y);
-                        }
-                    }
-                    for (j, t) in target.iter_mut().enumerate() {
-                        *t = if self.held[j] {
-                            self.start[j]
-                        } else if tube.is_none() {
-                            self.robot.lower[j] + *t * (self.robot.upper[j] - self.robot.lower[j])
-                        } else if self.robot.continuous[j] {
-                            *t
-                        } else {
-                            t.clamp(self.robot.lower[j], self.robot.upper[j])
-                        };
-                    }
+                    place(
+                        self.robot,
+                        &self.start,
+                        &self.line_goal,
+                        &self.across,
+                        &self.held,
+                        tube,
+                        target,
+                        &mut self.new,
+                    );
                     let tree = &mut self.trees[0];
                     let (near, d) = tree.nearest(target, &self.robot.continuous);
                     if tree.radius[near] < d {
                         continue;
                     }
-                    self.new.clear();
-                    tree.push_node(near, &mut self.new);
-                    self.robot.turn_toward(&self.new, target);
-                    if d > self.range {
-                        for (a, b) in self.new.iter_mut().zip(target.iter()) {
-                            *a += (b - *a) * (self.range / d);
-                        }
-                    } else {
-                        self.new.copy_from_slice(target);
-                    }
+                    reach(self.robot, self.range, tree, near, d, target, &mut self.new);
                     self.stage = Stage::Extend { near };
                 }
                 &Stage::Extend { near } => {
                     let mut edges = edges::reuse(buffer);
                     self.trees[0].push_node(near, &mut edges);
                     edges.extend_from_slice(&self.new);
+                    if let Some(answer) = self.forecast(&edges, false) {
+                        *buffer = edges;
+                        self.answer(answer);
+                        continue;
+                    }
                     return self.query(edges, Wanted::Prefix);
                 }
                 &Stage::Connect { from, .. } => {
                     let mut edges = edges::reuse(buffer);
                     self.trees[0].push_node(from, &mut edges);
-                    for (k, step) in self.steps.chunks(n).enumerate() {
-                        if k > 0 {
-                            edges.extend_from_slice(&self.steps[(k - 1) * n..k * n]);
-                        }
-                        edges.extend_from_slice(step);
+                    connect_edges(&self.steps, n, &mut edges);
+                    if let Some(answer) = self.forecast(&edges, true) {
+                        *buffer = edges;
+                        self.answer(answer);
+                        continue;
                     }
                     return self.query(edges, Wanted::Prefix);
                 }
@@ -888,18 +1048,18 @@ impl Search for Connect<'_> {
                     tree.radius[near] *= 1.0 + DOMAIN_ALPHA;
                 }
                 let from = tree.add(&self.new, Some(near));
+                self.log(from);
                 let (other, d) = self.trees[1].nearest(&self.new, &self.robot.continuous);
-                let target = &mut self.sample;
-                target.clear();
-                self.trees[1].push_node(other, target);
-                self.robot.turn_toward(&self.new, target);
-                let count = (d / self.range).ceil().max(1.0) as usize;
-                self.steps.clear();
-                for k in 1..count {
-                    let t = k as f32 / count as f32;
-                    self.steps.extend(self.new.iter().zip(target.iter()).map(|(a, b)| a + (b - a) * t));
-                }
-                self.steps.extend_from_slice(target);
+                steps_to(
+                    self.robot,
+                    self.range,
+                    &self.new,
+                    &self.trees[1],
+                    other,
+                    d,
+                    &mut self.sample,
+                    &mut self.steps,
+                );
                 self.stage = Stage::Connect { from, other };
             }
             Stage::Connect { from, other } => {
@@ -907,6 +1067,7 @@ impl Search for Connect<'_> {
                 let mut last = from;
                 for step in self.steps.chunks(n).take(answer.min(count - 1)) {
                     last = self.trees[0].add(step, Some(last));
+                    self.log(last);
                 }
                 if answer == count {
                     self.finish(last, other);
@@ -933,7 +1094,7 @@ mod tests {
         let goal = vec![0.5, 0.0, -0.4, 0.0, 0.3, 0.0];
         let hold = vec![1, 3, 5];
         let problem = RrtProblem { world: 0, start, goals: vec![goal], hold: hold.clone() };
-        let mut connect = Connect::new(&robot, &problem, &RrtOptions::default(), Sampling::NearLine);
+        let mut connect = Connect::new(&robot, &problem, &RrtOptions::default(), Sampling::NearLine, Arc::default());
         connect.line_to(0);
         let directions: Vec<&[f32]> = connect.directions.chunks(6).collect();
         assert!(directions.len() >= 4, "{} directions", directions.len());

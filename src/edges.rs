@@ -5,8 +5,9 @@
 //! `R = LANES` and `n` the fewest passes that keep them `spacing` apart. They are visited as VAMP's
 //! rake does, `R` states spread over the edge at a time, each pass stepping back, and the first
 //! collision ends the check. Searches are sequential, so each runs to its end on one thread of the
-//! CPU, with the robot's SIMD collision checks (`lanes`), on either device. A search can also ask
-//! for a path to be optimized, on that thread, before it checks it.
+//! CPU, with the robot's SIMD collision checks (`lanes`), on either device; threads with no search
+//! left to start may check a long one's next edges before it asks (`rrt::Ahead`). A search can also
+//! ask for a path to be optimized, on that thread, before it checks it.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,7 +17,7 @@ use fearless_simd::{Simd, dispatch};
 use crate::cpu::{self, Prepared};
 use crate::lanes::{LANES, LaneScratch, Lanes};
 use crate::robot::Robot;
-use crate::rrt::distance;
+use crate::rrt::{Ahead, distance};
 use crate::trajopt::PlanOptions;
 
 /// What a query asks of its edges, checked in order.
@@ -90,6 +91,11 @@ pub(crate) trait Search: Send {
     fn answer(&mut self, answer: usize);
     /// A path to optimize in place before the next request, asked when `request` has none.
     fn optimize(&mut self) -> Option<Optimize<'_>> {
+        None
+    }
+    /// What the search shares with threads that would help it along (see `rrt::Ahead`), asked
+    /// before it runs.
+    fn help(&self) -> Option<Arc<Ahead>> {
         None
     }
 }

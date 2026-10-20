@@ -752,8 +752,9 @@ pub(crate) fn optimize_path(
 
 /// Runs every search to its end, or to `deadline`, on `pool`'s threads: each takes the next search
 /// until none is left, as VAMP's batches run, so no thread waits on another's share and each keeps
-/// one scratch. A search alone runs on the calling thread, outside the pool, so its optimizations
-/// do too.
+/// one scratch. Then threads help the searches still running, checking their edges ahead of them
+/// (see `rrt::Ahead`). A search alone runs on the calling thread, outside the pool, so its
+/// optimizations do too.
 pub(crate) fn run_searches(
     pool: &rayon::ThreadPool,
     searches: &mut [&mut dyn Search],
@@ -767,12 +768,33 @@ pub(crate) fn run_searches(
         return edges::run(&mut **search, robot, lanes, worlds, deadline, spread, &mut EdgeScratch::new(lanes));
     }
     let next = AtomicUsize::new(0);
+    let helped: Vec<_> = searches.iter().map(|s| s.help()).collect();
     let searches: Vec<Mutex<&mut &mut dyn Search>> = searches.iter_mut().map(Mutex::new).collect();
-    pool.broadcast(|_| {
+    pool.broadcast(|context| {
         let mut scratch = EdgeScratch::new(lanes);
-        while let Some(search) = searches.get(next.fetch_add(1, Ordering::Relaxed)) {
+        loop {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            let Some(search) = searches.get(i) else { break };
             let mut search = search.lock().expect("a search panicked");
             edges::run(&mut ***search, robot, lanes, worlds, deadline, spread, &mut scratch);
+            if let Some(ahead) = &helped[i] {
+                ahead.finish();
+            }
+        }
+        // Threads spread over the searches still running, each helping one until it is done.
+        let count = helped.len();
+        loop {
+            let mut helping = false;
+            for k in 0..count {
+                let Some(ahead) = &helped[(context.index() + k) % count] else { continue };
+                if let Some(mut helper) = ahead.helper(robot) {
+                    edges::run(&mut helper, robot, lanes, worlds, deadline, false, &mut scratch);
+                    helping = true;
+                }
+            }
+            if !helping {
+                break;
+            }
         }
     });
 }

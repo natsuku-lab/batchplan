@@ -19,7 +19,7 @@ use crate::device::{CollisionWeights, Device, Worlds};
 use crate::edges::{self, EdgeQuery, Keep, Optimize, Search};
 use crate::rng::Rng;
 use crate::robot::Robot;
-use crate::rrt::{Connect, RrtOptions, RrtProblem, Sampling, distance};
+use crate::rrt::{Ahead, Connect, RrtOptions, RrtProblem, Sampling, distance};
 use crate::shortcut::{ShortcutOptions, Simplify, length, locate};
 use crate::spline;
 use crate::timing::Trajectory;
@@ -220,6 +220,8 @@ struct Planning<'r> {
     /// Whether the search found its path after sampling the tube around the straight line; if no
     /// spline follows that path, the problem is searched again without the tube.
     near_line: bool,
+    /// What its searches share with threads that help them along.
+    ahead: Arc<Ahead>,
 }
 
 enum Phase<'r> {
@@ -236,19 +238,27 @@ enum Phase<'r> {
 
 impl<'r> Planning<'r> {
     fn new(robot: &'r Robot, problem: &'r PlanProblem, o: &'r PlanOptions) -> Self {
-        let phase = searching(robot, problem, o, Sampling::NearLine);
-        Self { robot, problem, o, phase, chosen: None, start: None, near_line: false }
+        let ahead = Arc::default();
+        let phase = searching(robot, problem, o, Sampling::NearLine, &ahead);
+        Self { robot, problem, o, phase, chosen: None, start: None, near_line: false, ahead }
     }
 }
 
 /// RRT-Connect for `problem`. Keeping the clearance can make narrow passages impassable, so that
 /// search is short; it continues without the clearance if it fails.
-fn searching<'r>(robot: &'r Robot, problem: &PlanProblem, o: &'r PlanOptions, sampling: Sampling) -> Phase<'r> {
+fn searching<'r>(
+    robot: &'r Robot,
+    problem: &PlanProblem,
+    o: &'r PlanOptions,
+    sampling: Sampling,
+    ahead: &Arc<Ahead>,
+) -> Phase<'r> {
     let goals = search_goals(robot, problem);
     let search = RrtProblem { world: problem.world, start: problem.start.clone(), goals, hold: problem.hold.clone() };
     let keeping = o.rrt.clearance > 0.0;
     let first = RrtOptions { max_iterations: o.rrt.max_iterations.min(KEEP_ITERATIONS), ..o.rrt };
-    Phase::Search(Box::new(Connect::new(robot, &search, if keeping { &first } else { &o.rrt }, sampling)), keeping)
+    let options = if keeping { &first } else { &o.rrt };
+    Phase::Search(Box::new(Connect::new(robot, &search, options, sampling, ahead.clone())), keeping)
 }
 
 /// Every equivalent of `problem`'s goal a whole turn away (`Robot::goal_variants`) that leaves its
@@ -430,6 +440,10 @@ impl Fitting {
 }
 
 impl Search for Planning<'_> {
+    fn help(&self) -> Option<Arc<Ahead>> {
+        Some(self.ahead.clone())
+    }
+
     fn request(&mut self, buffer: &mut Vec<f32>) -> Option<EdgeQuery> {
         loop {
             match &mut self.phase {
@@ -443,6 +457,7 @@ impl Search for Planning<'_> {
                         continue;
                     }
                     self.near_line = connect.path.is_some() && connect.sampled_tube();
+                    self.ahead.finish();
                     self.phase = match connect.path.take() {
                         Some(path) => {
                             Phase::Simplify(Simplify::new(self.problem.world, self.robot.dof(), path, &self.o.shortcut))
@@ -517,7 +532,7 @@ impl Search for Planning<'_> {
                 // without the tube would run.
                 Phase::Done if self.chosen.is_none() && self.near_line => {
                     self.near_line = false;
-                    self.phase = searching(self.robot, self.problem, self.o, Sampling::JointRanges);
+                    self.phase = searching(self.robot, self.problem, self.o, Sampling::JointRanges, &self.ahead);
                 }
                 Phase::Check(..) | Phase::Done => return None,
             }
