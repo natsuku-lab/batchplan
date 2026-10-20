@@ -35,7 +35,7 @@ It is built for robot learning at scale. It turns planning into training data: r
 
 ```toml
 [dependencies]
-batchplan = { git = "https://github.com/natsuku-lab/batchplan" }
+batchplan = "0.1"
 ```
 
 | Cargo feature | Default | Adds |
@@ -44,7 +44,7 @@ batchplan = { git = "https://github.com/natsuku-lab/batchplan" }
 | `lerobot` | off | LeRobot v3.0 export (Arrow, Parquet). |
 | `usd` | off | Robots and scenes from OpenUSD. |
 
-batchplan builds on stable Rust (edition 2024), with no build flags to set: its collision checks use the widest SIMD instructions the CPU has, chosen when the program runs (SSE2 up to AVX-512 on x86-64, NEON on ARM).
+batchplan builds on stable Rust 1.90 or later (1.96 with `usd`), with no build flags to set: its collision checks use the widest SIMD instructions the CPU has, chosen when the program runs (SSE2 up to AVX-512 on x86-64, NEON on ARM).
 
 On Linux, a faster allocator helps: glibc's slows down when many threads allocate at once, and [mimalloc](https://crates.io/crates/mimalloc) as your program's global allocator plans about 10% more problems per second on 32 threads.
 
@@ -255,7 +255,7 @@ A GPU call costs about 10 ms, so one problem at a time runs 11–13 times faster
 - **Timing.** Trajectories end at rest. Time-optimal timing respects jerk limits but does not minimize jerk.
 - **Small batches on a GPU.** A GPU call costs about as much for one problem as for a small batch: IK for one target takes about 10 ms on an M4 Pro's GPU and 1 ms on its CPU. Planning itself runs on CPU threads on either device.
 - **Pick-and-place and handovers.** Episodes grasp upright boxes from above and have no recoveries. Camera videos come from replaying them in MuJoCo, kinematically: no physics checks the grasps.
-- **Maturity.** batchplan is at version 0.1 and not on crates.io. Its interface may change. It is verified on AMD (Vulkan) and Apple (Metal) GPUs. On NVIDIA, batchplan was timed against cuRobo on a T4 at the previous version, and the tests ran at an early one.
+- **Maturity.** batchplan is at version 0.1, and its interface may change. It is verified on AMD (Vulkan) and Apple (Metal) GPUs. On NVIDIA, batchplan was timed against cuRobo on a T4 at the previous version, and the tests ran at an early one.
 
 ## License
 

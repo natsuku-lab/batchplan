@@ -2,10 +2,16 @@
 name = "batchplan"
 version = "0.1.0"
 edition = "2024"
-description = "Batched collision-aware IK and trajectory optimization on any GPU (wgpu: Vulkan/Metal/DX12) with a CPU reference backend."
+rust-version = "1.90"
+description = "Batched, collision-aware robot motion generation: IK, motion planning and training data for thousands of problems at once, on any GPU (wgpu) or CPU threads"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/natsuku-lab/batchplan"
-publish = false
+keywords = ["robotics", "motion-planning", "inverse-kinematics", "gpu", "lerobot"]
+categories = ["science::robotics", "algorithms"]
+exclude = [".github/", "CLAUDE.md", "rust-toolchain.toml"]
+
+[package.metadata.docs.rs]
+features = ["lerobot", "usd"]
 
 [dependencies]
 anyhow = "1"
@@ -35,7 +41,7 @@ default = ["gpu"]
 gpu = ["dep:wgpu", "dep:pollster"]
 # Export demonstrations as LeRobot v3.0 datasets (adds the Arrow/Parquet dependencies).
 lerobot = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
-# Load robots and scenes from OpenUSD (adds the pure-Rust openusd crates).
+# Load robots and scenes from OpenUSD (adds the pure-Rust openusd crates, which need Rust 1.96).
 usd = ["dep:openusd", "dep:openusd-schemas"]
 
 # Every build warns on these; CI denies warnings.
