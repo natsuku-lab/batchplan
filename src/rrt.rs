@@ -513,12 +513,8 @@ pub(crate) struct Connect<'r> {
     across: Vec<f32>,
     /// The path found, once the search is over.
     pub(crate) path: Option<Vec<f32>>,
-    /// What threads helping the search share with it, and whether it has shared its trees since it
-    /// last changed what its queries keep.
-    ahead: Arc<Ahead>,
-    shared: bool,
-    /// Queries a helper answered.
-    forecast_answers: usize,
+    /// What the search shares with threads that help it (see `ahead`).
+    sharing: ahead::Sharing,
 }
 
 impl<'r> Connect<'r> {
@@ -554,9 +550,7 @@ impl<'r> Connect<'r> {
             vias: Vec::with_capacity(2 * n),
             across: vec![],
             path: None,
-            ahead,
-            shared: false,
-            forecast_answers: 0,
+            sharing: ahead::Sharing::new(ahead),
         }
     }
 
@@ -567,7 +561,7 @@ impl<'r> Connect<'r> {
     /// or every goal in collision) stays over.
     pub(crate) fn relax(&mut self, samples: usize) {
         self.keep = None;
-        self.shared = false;
+        self.sharing.restart();
         if self.path.is_some() || self.trees.iter().any(|t| t.len() == 0) {
             return;
         }
@@ -675,47 +669,6 @@ impl<'r> Connect<'r> {
         }
         self.path = Some(path);
         self.stage = Stage::Done;
-    }
-
-    /// Shares the search with the threads helping it, before sample `sample`: its trees and what
-    /// places and checks its samples.
-    fn share(&mut self, sample: usize) {
-        self.shared = true;
-        let [a, b] = &self.trees;
-        let trees = if self.start_first { [a.clone(), b.clone()] } else { [b.clone(), a.clone()] };
-        let mut halton = self.halton.clone();
-        halton.index -= sample as u64;
-        self.ahead.publish(ahead::Base {
-            trees,
-            halton,
-            world: self.world,
-            range: self.range,
-            resolution: self.resolution,
-            max_iterations: self.max_iterations,
-            keep: self.keep.clone(),
-            start: self.start.clone(),
-            line_goal: self.line_goal.clone(),
-            across: self.across.clone(),
-            held: self.held.clone(),
-        });
-    }
-
-    /// Hands node `i` of the extending tree to the helpers, once the search shares.
-    fn log(&self, i: usize) {
-        if self.shared {
-            self.ahead.add(self.start_first, &self.trees[0], i);
-        }
-    }
-
-    /// A helper's answer to the query of `edges` this sample asks, the extension's or (`connect`)
-    /// the connection's, if one checked that very query.
-    fn forecast(&mut self, edges: &[f32], connect: bool) -> Option<usize> {
-        if !self.shared {
-            return None;
-        }
-        let answer = self.ahead.answer(self.tube_samples + self.iterations - 1, self.start_first, edges, connect);
-        self.forecast_answers += usize::from(answer.is_some());
-        answer
     }
 }
 
@@ -832,7 +785,7 @@ fn connect_edges(steps: &[f32], n: usize, edges: &mut Vec<f32>) {
 
 impl Search for Connect<'_> {
     fn help(&self) -> Option<Arc<Ahead>> {
-        Some(self.ahead.clone())
+        Some(self.sharing.ahead())
     }
 
     fn request(&mut self, buffer: &mut Vec<f32>) -> Option<EdgeQuery> {
@@ -938,13 +891,7 @@ impl Search for Connect<'_> {
                         self.trees.swap(0, 1);
                         self.start_first = !self.start_first;
                     }
-                    self.ahead.sample(sample);
-                    if self.ahead.joined() {
-                        if !self.shared {
-                            self.share(sample);
-                        }
-                        self.ahead.at(sample, self.start_first);
-                    }
+                    self.report_sample(sample);
                     let target = &mut self.sample;
                     self.halton.next(target);
                     place(
@@ -1051,7 +998,7 @@ impl Search for Connect<'_> {
                     tree.radius[near] *= 1.0 + DOMAIN_ALPHA;
                 }
                 let from = tree.add(&self.new, Some(near));
-                self.log(from);
+                self.report_node(from);
                 let (other, d) = self.trees[1].nearest(&self.new, &self.robot.continuous);
                 steps_to(
                     self.robot,
@@ -1070,7 +1017,7 @@ impl Search for Connect<'_> {
                 let mut last = from;
                 for step in self.steps.chunks(n).take(answer.min(count - 1)) {
                     last = self.trees[0].add(step, Some(last));
-                    self.log(last);
+                    self.report_node(last);
                 }
                 if answer == count {
                     self.finish(last, other);

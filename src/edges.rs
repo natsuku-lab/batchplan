@@ -10,6 +10,7 @@
 //! ask for a path to be optimized, on that thread, before it checks it.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use fearless_simd::{Simd, dispatch};
@@ -135,9 +136,10 @@ const POLL: usize = 64;
 
 /// Runs `search` to its end, or to `deadline`, checking its edges in `worlds` and optimizing the
 /// paths it asks to on this thread. With `spread`, an optimization also hands its samples to the
-/// current pool's idle threads. `pause`, if given, is asked every `POLL` queries whether to return
-/// early, between queries, so a later call goes on with the search: where a search alone stops to
-/// summon help (see `cpu::run_searches`).
+/// current pool's idle threads, counted in `spread` while it runs so that threads helping other
+/// searches take its samples first (see `rrt::Ahead::helper`). `pause`, if given, is asked every
+/// `POLL` queries whether to return early, between queries; true if it did, and a later call goes
+/// on with the search (where a search alone stops to summon help, see `cpu::run_searches`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     search: &mut dyn Search,
@@ -145,10 +147,10 @@ pub(crate) fn run(
     lanes: &Lanes,
     worlds: &[Vec<Prepared>],
     deadline: Option<Instant>,
-    spread: bool,
+    spread: Option<&AtomicUsize>,
     pause: Option<&dyn Fn() -> bool>,
     scratch: &mut EdgeScratch,
-) {
+) -> bool {
     // One dispatch for the whole search, so the checks inline at the CPU's SIMD level.
     dispatch!(lanes.level(), simd => run_at(simd, search, robot, lanes, worlds, deadline, spread, pause, scratch))
 }
@@ -162,19 +164,25 @@ fn run_at<S: Simd>(
     lanes: &Lanes,
     worlds: &[Vec<Prepared>],
     deadline: Option<Instant>,
-    spread: bool,
+    spread: Option<&AtomicUsize>,
     pause: Option<&dyn Fn() -> bool>,
     scratch: &mut EdgeScratch,
-) {
+) -> bool {
     let mut asked = 0usize;
     while deadline.is_none_or(|d| Instant::now() < d) {
         asked += 1;
         if pause.is_some_and(|pause| asked.is_multiple_of(POLL) && pause()) {
-            return;
+            return true;
         }
         let Some(query) = search.request(&mut scratch.buffer) else {
-            let Some(o) = search.optimize() else { return };
-            cpu::optimize_path(robot, &worlds[o.world as usize], o.path, &o.options, deadline, spread);
+            let Some(o) = search.optimize() else { return false };
+            if let Some(optimizing) = spread {
+                optimizing.fetch_add(1, Ordering::Relaxed);
+            }
+            cpu::optimize_path(robot, &worlds[o.world as usize], o.path, &o.options, deadline, spread.is_some());
+            if let Some(optimizing) = spread {
+                optimizing.fetch_sub(1, Ordering::Relaxed);
+            }
             continue;
         };
         let world = &worlds[query.world as usize];
@@ -217,6 +225,7 @@ fn run_at<S: Simd>(
         search.answer(answer);
         scratch.buffer = query.edges;
     }
+    false
 }
 
 /// Whether the edge from `a` to `b` is collision-free at its states `query.spacing` apart, and

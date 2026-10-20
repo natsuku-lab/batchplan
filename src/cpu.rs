@@ -764,32 +764,32 @@ pub(crate) fn run_searches(
     worlds: &[Vec<Prepared>],
     deadline: Option<Instant>,
 ) {
-    let spread = searches.len() > 1;
     if let [search] = searches {
         let scratch = &mut EdgeScratch::new(lanes);
         let Some(ahead) = search.help() else {
-            return edges::run(&mut **search, robot, lanes, worlds, deadline, spread, None, scratch);
+            edges::run(&mut **search, robot, lanes, worlds, deadline, None, None, scratch);
+            return;
         };
         // The search stops once it should summon helpers, and goes on beside them.
-        edges::run(&mut **search, robot, lanes, worlds, deadline, spread, Some(&|| ahead.summon()), scratch);
-        if ahead.summoned() {
+        if edges::run(&mut **search, robot, lanes, worlds, deadline, None, Some(&|| ahead.summon()), scratch) {
             pool.in_place_scope(|scope| {
                 for _ in 0..HELPERS {
                     let ahead = ahead.clone();
                     scope.spawn(move |_| {
-                        if let Some(mut helper) = ahead.helper(robot, false) {
+                        if let Some(mut helper) = ahead.helper(robot, None) {
                             let scratch = &mut EdgeScratch::new(lanes);
-                            edges::run(&mut helper, robot, lanes, worlds, deadline, false, None, scratch);
+                            edges::run(&mut helper, robot, lanes, worlds, deadline, None, None, scratch);
                         }
                     });
                 }
-                edges::run(&mut **search, robot, lanes, worlds, deadline, spread, None, scratch);
+                edges::run(&mut **search, robot, lanes, worlds, deadline, None, None, scratch);
                 ahead.finish();
             });
         }
         return ahead.finish();
     }
-    let next = AtomicUsize::new(0);
+    // Optimizations under way, spread over the pool's threads.
+    let (next, optimizing) = (AtomicUsize::new(0), AtomicUsize::new(0));
     let helped: Vec<_> = searches.iter().map(|s| s.help()).collect();
     let searches: Vec<Mutex<&mut &mut dyn Search>> = searches.iter_mut().map(Mutex::new).collect();
     pool.broadcast(|context| {
@@ -798,7 +798,7 @@ pub(crate) fn run_searches(
             let i = next.fetch_add(1, Ordering::Relaxed);
             let Some(search) = searches.get(i) else { break };
             let mut search = search.lock().expect("a search panicked");
-            edges::run(&mut ***search, robot, lanes, worlds, deadline, spread, None, &mut scratch);
+            edges::run(&mut ***search, robot, lanes, worlds, deadline, Some(&optimizing), None, &mut scratch);
             if let Some(ahead) = &helped[i] {
                 ahead.finish();
             }
@@ -809,8 +809,8 @@ pub(crate) fn run_searches(
             let mut helping = false;
             for k in 0..count {
                 let Some(ahead) = &helped[(context.index() + k) % count] else { continue };
-                if let Some(mut helper) = ahead.helper(robot, true) {
-                    edges::run(&mut helper, robot, lanes, worlds, deadline, false, None, &mut scratch);
+                if let Some(mut helper) = ahead.helper(robot, Some(&optimizing)) {
+                    edges::run(&mut helper, robot, lanes, worlds, deadline, None, None, &mut scratch);
                     helping = true;
                 }
             }

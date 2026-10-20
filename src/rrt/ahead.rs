@@ -2,19 +2,24 @@
 //!
 //! A search is sequential: each sample extends trees that every earlier sample grew. Yet most
 //! samples extend from the node they would have a few dozen samples earlier (98% of them, 32
-//! samples ahead, in the Panda benchmark's longest searches), so once a batch has no searches left
+//! samples ahead, in the Panda benchmark's longest searches). So once a batch has no searches left
 //! to start, its idle threads help those that have drawn `JOIN_AFTER` samples, and a search alone
 //! summons helpers into the pool once it has drawn `ALONE_AFTER`. Helpers forecast the extension
 //! each coming sample makes, and the connection that follows it, on copies of the search's trees,
-//! and check them. Which tree a sample extends
-//! depends on the trees' sizes when they are near the ratio that decides it, so a forecast then
-//! covers both. The search takes a forecast's answer only for the very query it would have asked
-//! (the same edges, bit for bit, keeping the same clearance), so it finds what it would alone.
+//! and check them; near the ratio of the trees' sizes that decides which one a sample extends, a
+//! forecast covers both. The search takes a forecast's answer only for the very query it would
+//! have asked (the same edges, bit for bit, keeping the same clearance), so it finds what it would
+//! alone. A batch's helpers run the pool's other work while they wait, and before each sample
+//! while another search's repair spreads its samples over the pool, which needs the threads.
+//!
+//! The search's side is `Sharing` and three calls on `Connect`: `report_sample`, `report_node` and
+//! `forecast`. The scheduler's is `Ahead`: it ends a search's help (`finish`), tells a search alone
+//! when to summon helpers (`summon`), and makes them (`helper`), each run as a search of its own.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use super::{Halton, Tree, connect_edges, place, reach, steps_to, swaps, tube_radius};
+use super::{Connect, Halton, Tree, connect_edges, place, reach, steps_to, swaps, tube_radius};
 use crate::edges::{self, EdgeQuery, Keep, Search, Wanted};
 use crate::robot::Robot;
 
@@ -25,10 +30,10 @@ const LOOKAHEAD: usize = 64;
 const SLOTS: usize = 2 * LOOKAHEAD;
 /// Helpers per search, at most.
 pub(crate) const HELPERS: usize = 8;
-/// Samples a search of a batch draws before helpers join it. Most end sooner, and helpers that
-/// would only wait beside them, spinning, slow them down: from 250 samples, short batches planned
-/// 5% slower on an M4 Pro. From 1,000, the Ryzen's 32 threads ran out of searches to start while
-/// the batch's unsolvable search was short of it, and left it unhelped.
+/// Samples a search of a batch draws before helpers join it. Most end sooner, and joining a search
+/// about to end costs it more than it saves: on the Ryzen, searches helped within a millisecond of
+/// their end took up to twice as long. From 1,000, the Ryzen's 32 threads ran out of searches to
+/// start while the batch's unsolvable search was short of it, and left it unhelped.
 const JOIN_AFTER: usize = 500;
 /// Samples a search alone draws before it summons helpers: they start on sleeping threads, and the
 /// call waits for them to end, which costs a search that ends soon after.
@@ -68,18 +73,96 @@ struct Shared {
 
 /// The search as helpers start from it: its trees, the start's then the goals', and what places
 /// and checks its samples. `halton` is where it was before the first sample.
-pub(super) struct Base {
-    pub(super) trees: [Tree; 2],
-    pub(super) halton: Halton,
-    pub(super) world: u32,
-    pub(super) range: f32,
-    pub(super) resolution: f32,
-    pub(super) max_iterations: usize,
-    pub(super) keep: Option<Arc<Keep>>,
-    pub(super) start: Vec<f32>,
-    pub(super) line_goal: Vec<f32>,
-    pub(super) across: Vec<f32>,
-    pub(super) held: Vec<bool>,
+struct Base {
+    trees: [Tree; 2],
+    halton: Halton,
+    world: u32,
+    range: f32,
+    resolution: f32,
+    max_iterations: usize,
+    keep: Option<Arc<Keep>>,
+    start: Vec<f32>,
+    line_goal: Vec<f32>,
+    across: Vec<f32>,
+    held: Vec<bool>,
+}
+
+/// A search's side of its helpers: the `Ahead` it shares, whether it has shared its trees since it
+/// last changed what its queries keep, and how many of its queries helpers answered. The search
+/// reports each sample it draws and each node it adds, and asks for a forecast before each
+/// extension and connection it checks; the rest is this module's.
+pub(super) struct Sharing {
+    ahead: Arc<Ahead>,
+    shared: bool,
+    answered: usize,
+}
+
+impl Sharing {
+    pub(super) fn new(ahead: Arc<Ahead>) -> Self {
+        Self { ahead, shared: false, answered: 0 }
+    }
+
+    /// The search's queries keep something else from now on (it dropped its clearance): helpers
+    /// start over from its trees as they are then.
+    pub(super) fn restart(&mut self) {
+        self.shared = false;
+    }
+
+    pub(super) fn ahead(&self) -> Arc<Ahead> {
+        self.ahead.clone()
+    }
+}
+
+impl Connect<'_> {
+    /// Before drawing sample `sample`, with the trees taking their turns for it: shares the search
+    /// with helpers once they have joined, and tells them where it is.
+    pub(super) fn report_sample(&mut self, sample: usize) {
+        let ahead = &self.sharing.ahead;
+        ahead.sample(sample);
+        if !ahead.joined() {
+            return;
+        }
+        if !self.sharing.shared {
+            self.sharing.shared = true;
+            let [a, b] = &self.trees;
+            let trees = if self.start_first { [a.clone(), b.clone()] } else { [b.clone(), a.clone()] };
+            let mut halton = self.halton.clone();
+            halton.index -= sample as u64;
+            ahead.publish(Base {
+                trees,
+                halton,
+                world: self.world,
+                range: self.range,
+                resolution: self.resolution,
+                max_iterations: self.max_iterations,
+                keep: self.keep.clone(),
+                start: self.start.clone(),
+                line_goal: self.line_goal.clone(),
+                across: self.across.clone(),
+                held: self.held.clone(),
+            });
+        }
+        ahead.at(sample, self.start_first);
+    }
+
+    /// The extending tree gained node `i`.
+    pub(super) fn report_node(&self, i: usize) {
+        if self.sharing.shared {
+            self.sharing.ahead.add(self.start_first, &self.trees[0], i);
+        }
+    }
+
+    /// A helper's answer to the query of `edges` the current sample asks, its extension's or
+    /// (`connect`) its connection's, if one checked that very query.
+    pub(super) fn forecast(&mut self, edges: &[f32], connect: bool) -> Option<usize> {
+        if !self.sharing.shared {
+            return None;
+        }
+        let sample = self.tube_samples + self.iterations - 1;
+        let answer = self.sharing.ahead.answer(sample, self.start_first, edges, connect);
+        self.sharing.answered += usize::from(answer.is_some());
+        answer
+    }
 }
 
 /// One tree's forecast for a sample: its extension's edges and answer, then, if the extension is
@@ -102,7 +185,7 @@ struct Slot {
 
 impl Ahead {
     /// The search draws sample `sample`.
-    pub(super) fn sample(&self, sample: usize) {
+    fn sample(&self, sample: usize) {
         if sample == JOIN_AFTER {
             self.reached.store(1, Ordering::Relaxed);
         } else if sample == ALONE_AFTER {
@@ -116,18 +199,13 @@ impl Ahead {
         self.reached.load(Ordering::Relaxed) >= 2 && !self.summoned.swap(true, Ordering::Relaxed)
     }
 
-    /// Whether the search has summoned helpers.
-    pub(crate) fn summoned(&self) -> bool {
-        self.summoned.load(Ordering::Relaxed)
-    }
-
     /// Whether a helper has joined, so the search should share.
-    pub(super) fn joined(&self) -> bool {
+    fn joined(&self) -> bool {
         self.joined.load(Ordering::Relaxed)
     }
 
     /// Starts helpers over from `base`.
-    pub(super) fn publish(&self, base: Base) {
+    fn publish(&self, base: Base) {
         let mut shared = self.shared.lock().expect("a helper panicked");
         shared.base = Some(Arc::new(base));
         shared.added.clear();
@@ -138,12 +216,12 @@ impl Ahead {
     }
 
     /// The search is at `sample`, extending the start's tree if `start_first`.
-    pub(super) fn at(&self, sample: usize, start_first: bool) {
+    fn at(&self, sample: usize, start_first: bool) {
         self.at.store(sample << 1 | usize::from(start_first), Ordering::Release);
     }
 
     /// Node `i` of `tree`, the start's if `start_tree`, was added.
-    pub(super) fn add(&self, start_tree: bool, tree: &Tree, i: usize) {
+    fn add(&self, start_tree: bool, tree: &Tree, i: usize) {
         let mut shared = self.shared.lock().expect("a helper panicked");
         shared.added.push((start_tree, tree.parent[i]));
         tree.push_node(i, &mut shared.coords);
@@ -152,7 +230,7 @@ impl Ahead {
 
     /// The forecast answer to `sample`'s extension of the start's tree (if `start_first`) or the
     /// goals', or (`connect`) its connection, if a helper asked exactly `edges`.
-    pub(super) fn answer(&self, sample: usize, start_first: bool, edges: &[f32], connect: bool) -> Option<usize> {
+    fn answer(&self, sample: usize, start_first: bool, edges: &[f32], connect: bool) -> Option<usize> {
         let slot = self.slots.get()?[sample % SLOTS].lock().expect("a helper panicked");
         let forecast = &slot.forecasts[usize::from(!start_first)];
         if slot.sample != sample || slot.epoch != self.epoch.load(Ordering::Acquire) || !forecast.made {
@@ -170,10 +248,15 @@ impl Ahead {
     }
 
     /// A helper for the search, unless it is done sampling, has drawn fewer than `JOIN_AFTER`
-    /// samples, or has helpers enough. With `yields`, it runs the pool's other work every so often
-    /// and while it waits, such as a repair's samples: a pool thread that helps one search of a
-    /// batch should not hold up another.
-    pub(crate) fn helper<'a>(self: &Arc<Self>, robot: &'a Robot, yields: bool) -> Option<Helper<'a>> {
+    /// samples, or has helpers enough. With `optimizing`, the batch's count of optimizations
+    /// spread over the pool, it runs the pool's other work while it waits, every so often, and
+    /// before each sample while one is under way: a pool thread that helps one search of a batch
+    /// should not hold up another's repair.
+    pub(crate) fn helper<'a>(
+        self: &Arc<Self>,
+        robot: &'a Robot,
+        optimizing: Option<&'a AtomicUsize>,
+    ) -> Option<Helper<'a>> {
         if self.over.load(Ordering::Acquire) || self.reached.load(Ordering::Relaxed) == 0 {
             return None;
         }
@@ -201,7 +284,7 @@ impl Ahead {
             todo: [None; 2],
             from_start: true,
             asked: Asked::Nothing,
-            yields,
+            optimizing,
             rounds: 0,
             forecasts: Default::default(),
             new: Vec::with_capacity(n),
@@ -240,9 +323,9 @@ pub(crate) struct Helper<'a> {
     todo: [Option<bool>; 2],
     from_start: bool,
     asked: Asked,
-    /// Whether it runs the pool's other work (see `Ahead::helper`), and its rounds of looking for a
-    /// sample to forecast.
-    yields: bool,
+    /// The batch's optimizations under way, if it runs the pool's other work (see `Ahead::helper`),
+    /// and its rounds of looking for a sample to forecast.
+    optimizing: Option<&'a AtomicUsize>,
     rounds: usize,
     forecasts: [Forecast; 2],
     new: Vec<f32>,
@@ -378,17 +461,20 @@ impl Search for Helper<'_> {
             if self.ahead.over.load(Ordering::Acquire) {
                 return None;
             }
-            // Every so often, other work in the pool first.
-            self.rounds += 1;
-            if self.yields && self.rounds.is_multiple_of(16) {
-                while rayon::yield_now() == Some(rayon::Yield::Executed) {}
+            // Other work in the pool first: every round while an optimization spreads its samples
+            // over the pool, every so often otherwise.
+            if let Some(optimizing) = self.optimizing {
+                self.rounds += 1;
+                if optimizing.load(Ordering::Relaxed) > 0 || self.rounds.is_multiple_of(16) {
+                    while rayon::yield_now() == Some(rayon::Yield::Executed) {}
+                }
             }
             if self.sync() && self.claim() {
                 return self.extend(buffer);
             }
             // The search is behind, or shares nothing yet: other work in the pool first, such as
             // the samples of a search's repair.
-            if self.yields && rayon::yield_now() == Some(rayon::Yield::Executed) {
+            if self.optimizing.is_some() && rayon::yield_now() == Some(rayon::Yield::Executed) {
                 continue;
             }
             waited += 1;
@@ -528,19 +614,19 @@ mod tests {
         let mut connect = Connect::new(robot, problem, &keeping, Sampling::NearLine, ahead.clone());
         std::thread::scope(|s| {
             ahead.reached.store(1, Ordering::Relaxed);
-            for mut helper in (0..helpers).map(|_| ahead.helper(robot, false).expect("room for helpers")) {
+            for mut helper in (0..helpers).map(|_| ahead.helper(robot, None).expect("room for helpers")) {
                 let (lanes, worlds) = (&lanes, &worlds);
                 s.spawn(move || {
-                    edges::run(&mut helper, robot, lanes, worlds, None, false, None, &mut EdgeScratch::new(lanes))
+                    edges::run(&mut helper, robot, lanes, worlds, None, None, None, &mut EdgeScratch::new(lanes))
                 });
             }
             let mut scratch = EdgeScratch::new(&lanes);
-            edges::run(&mut connect, robot, &lanes, &worlds, None, false, None, &mut scratch);
+            edges::run(&mut connect, robot, &lanes, &worlds, None, None, None, &mut scratch);
             connect.relax(3000);
-            edges::run(&mut connect, robot, &lanes, &worlds, None, false, None, &mut scratch);
+            edges::run(&mut connect, robot, &lanes, &worlds, None, None, None, &mut scratch);
             ahead.finish();
         });
-        (fingerprint(&connect), connect.tube_samples + connect.iterations, connect.forecast_answers)
+        (fingerprint(&connect), connect.tube_samples + connect.iterations, connect.sharing.answered)
     }
 
     /// A search's trees (the start's, then the goals') and path, bit for bit.
@@ -589,20 +675,20 @@ mod tests {
         let short = RrtOptions { max_iterations: 1000, ..RrtOptions::default() };
         let connect = |o: &RrtOptions| Connect::new(&robot, &problem, o, Sampling::NearLine, Arc::default());
         let mut alone = connect(&long);
-        edges::run(&mut alone, &robot, &lanes, &worlds, None, false, None, &mut EdgeScratch::new(&lanes));
+        edges::run(&mut alone, &robot, &lanes, &worlds, None, None, None, &mut EdgeScratch::new(&lanes));
         let unhelped = fingerprint(&alone);
-        assert_eq!(alone.forecast_answers, 0);
+        assert_eq!(alone.sharing.answered, 0);
         assert!(alone.tube_samples + alone.iterations > ALONE_AFTER + 1000, "the search ends too soon");
 
         let mut batch = [connect(&long), connect(&short), connect(&short), connect(&short)];
         let mut searches: Vec<&mut dyn Search> = batch.iter_mut().map(|c| c as &mut dyn Search).collect();
         cpu::run_searches(&pool, &mut searches, &robot, &lanes, &worlds, None);
         assert!(fingerprint(&batch[0]) == unhelped, "helpers in a batch changed the search");
-        assert!(batch[0].forecast_answers > 0, "no helper answered in the batch");
+        assert!(batch[0].sharing.answered > 0, "no helper answered in the batch");
 
         let mut one = connect(&long);
         cpu::run_searches(&pool, &mut [&mut one as &mut dyn Search], &robot, &lanes, &worlds, None);
         assert!(fingerprint(&one) == unhelped, "helpers of a search alone changed it");
-        assert!(one.forecast_answers > 0, "no helper answered the search alone");
+        assert!(one.sharing.answered > 0, "no helper answered the search alone");
     }
 }
