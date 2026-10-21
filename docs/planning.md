@@ -73,7 +73,7 @@ fn main() -> Result<(), Error> {
 
 Repairing a stuck spline (above) uses the same optimizer with its own settings, whatever these options say: ten steps, smoothness weighted over length (`w_acc` 50, `w_vel` 2) and a 2 cm margin. These repair more splines than the length-favouring weights do.
 
-Optimized seeds are validated like the searched path, and `best` picks the shortest valid one of all. On the benchmark's box-only problems, two seeds give 3.137 rad paths at the median, against 3.243 without and cuRobo's 3.144 ([benchmarks](benchmarks.md#results)). Optimization costs milliseconds per problem (16.8 ms on 14 CPU threads; 769 problems/s in batches on an M4 Pro's GPU), against a fraction of a millisecond for the search.
+Optimized seeds are validated like the searched path, and `best` picks the shortest valid one of all. On the benchmark's box-only problems, two seeds give 3.137 rad paths at the median, against 3.243 without and cuRobo's 3.144 ([benchmarks](benchmarks.md#results)). Optimization costs milliseconds per problem (15.1 ms on 14 CPU threads; 746 problems/s in batches on an M4 Pro's GPU), against a fraction of a millisecond for the search.
 
 ### Goals a turn away
 

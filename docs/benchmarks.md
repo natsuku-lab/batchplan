@@ -6,7 +6,7 @@ The numbers on this page come from three machines:
 - an **AMD Ryzen AI Max+ 395** CPU (16 cores, 32 threads) with a **Radeon 8060S** GPU, on Vulkan through Mesa's RADV driver, under Ubuntu 26.04;
 - an **NVIDIA T4** GPU with 8 threads of a 2.5 GHz Xeon (an AWS g4dn.2xlarge), for cuRobo, which needs CUDA, under Ubuntu 24.04.
 
-The load was checked before each run. Every command to reproduce them is [at the end](#reproducing). The M4 Pro's rows predate [searches built on the threads that run them](#how-the-speed-came), which planned the Ryzen's batches up to six times faster; they are yet to be measured again.
+The load was checked before each run. Every command to reproduce them is [at the end](#reproducing).
 
 ## Against other planners
 
@@ -48,12 +48,12 @@ The meshes are the neutral judge: three of the planners plan on spheres, and Rob
 
 | Planner | Solved | Clear on the meshes | Path length (median, 1,526 problems all seven solve) | Time per problem (median / p98) | All 2,600, one core | In batches |
 |---|---|---|---|---|---|---|
-| batchplan | **90.4%** | **85.2%** | 3.40 rad | 0.17 / 1.65 ms | 0.88 s | 20,287 /s |
-| batchplan without clearance (`--clearance 0`) | 88.2% | 70.8% | **3.37 rad** | **0.15** / **0.88** ms | **0.65 s** | **26,874 /s** |
-| VAMP, 1 rad steps | 86.1% | 71.6% | 3.53 rad | 0.26 / 2.12 ms | 2.43 s | 2,704 /s |
-| VAMP, 1 rad steps, stopping at 10,000 samples | 86.1% | 71.5% | 3.53 rad | 0.26 / 1.76 ms | 1.05 s | 15,396 /s |
-| VAMP, 2 rad steps | 86.4% | 75.3% | 3.53 rad | 0.27 / 3.23 ms | 2.71 s | 2,705 /s |
-| VAMP, 2 rad steps, stopping at 10,000 samples | 86.1% | 75.0% | 3.53 rad | 0.27 / 2.22 ms | 1.20 s | 14,078 /s |
+| batchplan | **90.4%** | **85.2%** | 3.40 rad | 0.17 / 1.68 ms | 0.91 s | 19,902 /s |
+| batchplan without clearance (`--clearance 0`) | 88.2% | 70.8% | **3.37 rad** | **0.15** / **0.88** ms | **0.66 s** | **26,011 /s** |
+| VAMP, 1 rad steps | 86.1% | 71.6% | 3.53 rad | 0.26 / 2.13 ms | 2.43 s | 2,689 /s |
+| VAMP, 1 rad steps, stopping at 10,000 samples | 86.1% | 71.5% | 3.53 rad | 0.26 / 1.75 ms | 1.06 s | 16,111 /s |
+| VAMP, 2 rad steps | 86.4% | 75.3% | 3.53 rad | 0.27 / 3.23 ms | 2.72 s | 2,697 /s |
+| VAMP, 2 rad steps, stopping at 10,000 samples | 86.1% | 75.0% | 3.53 rad | 0.27 / 2.22 ms | 1.20 s | 13,494 /s |
 | OMPL | 63.9% | 63.5% | 3.99 rad | 2.75 / 5,049 ms | 631 s | 30 /s |
 
 batchplan's and VAMP's rows are three alternating rounds of one session; OMPL's are from an earlier one. From Python, with 2 rad steps, VAMP's bindings plan the same paths in 0.31 ms (median) and 2,409 problems/s in worker processes. OMPL, calling VAMP's checker back from Python, takes 3.34 ms and plans 30 problems/s. OMPL's totals are set by its 5 s limit, which about 120 problems run out.
@@ -66,16 +66,16 @@ batchplan's and VAMP's rows are three alternating rounds of one session; OMPL's 
 | RoboPlan | 73.8% | 3.78 rad | 10.3 ms | 174 /s |
 | MoveIt 2 | 63.1% | 3.80 rad | 59.4 ms | 82 /s |
 
-On the M4 Pro, batchplan plans in 0.16 ms and 19,451 problems/s, and RoboPlan in 6.28 ms and 176/s, with as many of its paths clear as on the Ryzen. MoveIt 2 ran only on the Ryzen, in Docker. VAMP built with GCC 15 crashed on the Ryzen, so VAMP and OMPL ran only on the M4 Pro.
+On the M4 Pro, batchplan plans in 0.18 ms and 19,194 problems/s, and RoboPlan in 6.28 ms and 176/s, with as many of its paths clear as on the Ryzen. MoveIt 2 ran only on the Ryzen, in Docker. VAMP built with GCC 15 crashed on the Ryzen, so VAMP and OMPL ran only on the M4 Pro.
 
 **Against cuRobo**, both on cuRobo's spheres, cuRobo on the T4 machine. That run loaded every obstacle as an oriented box, as cuRobo's own benchmark does. A cylinder loaded as a box closes the gap between the fingers at the goals that grasp it, so cuRobo is compared on the 1,300 problems whose scenes have no cylinders: `cage_panda` and the `cubby`, `dresser` and `merged_cubby` sets. (`scripts/compare_planners.py` now loads cylinders as meshes, with `get_collision_check_world`, so a run can cover all 2,600; boxes load as before.) *In batches* is each set over its wall time: batchplan's set in one call, cuRobo's in calls of 32.
 
 | Planner | Solved | Clear on the meshes | Path length (median, 1,092 problems all six solve) | Time per problem (median) | In batches |
 |---|---|---|---|---|---|
-| batchplan, CPU device | **98.9%** | 92.8% | 3.243 rad | **0.22 ms**¹ | **13,384 /s**¹ |
-| batchplan, GPU device | **98.9%** | 92.8% | 3.243 rad | 0.24 ms¹ | 13,038 /s¹ |
-| batchplan, optimizing 2 seeds (`--optimize 2`) | 98.8% | **92.9%** | **3.137 rad** | 16.8 ms¹ | 138 /s¹, 769 /s on the GPU |
-| batchplan, optimizing 4 seeds (`--optimize 4`) | 98.8% | 92.8% | **3.137 rad** | 29.1 ms¹ | 69 /s¹, 463 /s on the GPU |
+| batchplan, CPU device | **98.9%** | 92.8% | 3.243 rad | **0.24 ms**¹ | 13,167 /s¹ |
+| batchplan, GPU device | **98.9%** | 92.8% | 3.243 rad | 0.25 ms¹ | **13,613 /s**¹ |
+| batchplan, optimizing 2 seeds (`--optimize 2`) | 98.8% | **92.9%** | **3.137 rad** | 15.1 ms¹ | 142 /s¹, 746 /s on the GPU |
+| batchplan, optimizing 4 seeds (`--optimize 4`) | 98.8% | 92.8% | **3.137 rad** | 24.1 ms¹ | 71 /s¹, 454 /s on the GPU |
 | cuRobo, one at a time | 85.2% | 81.6% | 3.144 rad | 197 ms | 3.0 /s |
 | cuRobo, 32 problems per call | 85.0% | 81.9% | 3.154 rad | 660 ms | 1.4 /s |
 
@@ -142,10 +142,10 @@ By their own checks, VAMP solved 98.6% (98.5% with 2 rad steps), OMPL 90.5%, Rob
 ### Reading the results
 
 - **On the same spheres, batchplan solves the most, with the shortest paths.** On VAMP's spheres, 9.3% of the problems start or end in collision, so no planner can solve more than 90.7% on them; batchplan solves 2,351 of the 2,358 others. VAMP counts 98.6% solved because it checks neither the start nor the goal, and checks edges 1/32 rad apart, where the judge's denser samples find grazes. OMPL's paths graze most often: its own motion validator checks edges at 1% of the joint space's extent, about 0.13 rad. batchplan's paths are the shortest because its searches start near the straight line ([below](#closing-the-path-length-gap)).
-- **batchplan plans faster than VAMP.** Both run RRT-Connect on SIMD collision checks. VAMP searches its few unsolvable problems up to 100,000 samples, so all 2,600 take it 2.43 s on one core. Stopped at 10,000, as batchplan's searches are, VAMP is still slower on one core and in batches. A batch lasts as long as its few unsolvable problems, and batchplan's idle threads help those along ([below](#how-the-speed-came)). The slowest problems take about as long: VAMP's 98th percentile is 1.76 ms against batchplan's 1.65, which moves by ±0.3 ms with where batchplan's Halton samples start (`--rrt-seed`). In batches, batchplan plans about 180 times as many problems per second as RoboPlan and 380 times as many as MoveIt 2 (on the Ryzen), and 680 times as many as OMPL (on the M4 Pro).
-- **The clearance costs a quarter of the speed, and buys the clear paths.** Without it (`--clearance 0`), batchplan plans 32% more problems per second on VAMP's spheres, but only 70.8% of its paths clear the meshes, against 85.2% with it and 71.5–75.3% for VAMP.
+- **batchplan plans faster than VAMP.** Both run RRT-Connect on SIMD collision checks. VAMP searches its few unsolvable problems up to 100,000 samples, so all 2,600 take it 2.43 s on one core. Stopped at 10,000, as batchplan's searches are, VAMP is still slower on one core and in batches. A batch lasts as long as its few unsolvable problems, and batchplan's idle threads help those along ([below](#how-the-speed-came)). The slowest problems take about as long: VAMP's 98th percentile is 1.75 ms against batchplan's 1.68, which moves by ±0.3 ms with where batchplan's Halton samples start (`--rrt-seed`). In batches, batchplan plans about 180 times as many problems per second as RoboPlan and 380 times as many as MoveIt 2 (on the Ryzen), and 660 times as many as OMPL (on the M4 Pro).
+- **The clearance costs a quarter of the speed, and buys the clear paths.** Without it (`--clearance 0`), batchplan plans 31% more problems per second on VAMP's spheres, but only 70.8% of its paths clear the meshes, against 85.2% with it and 71.5–75.3% for VAMP.
 - **Judged on the real robot, batchplan's paths clear it most often.** On the spheres that ship with it, 93.1% of its paths clear the Panda's meshes, against 73.8% for RoboPlan and 63.1% for MoveIt 2, which plan on the meshes. Over the 1,334 problems all three solve, its paths are also the shortest: 3.23 rad against 3.78–3.80. On the scenes of boxes, it clears 92.8% against cuRobo's 81.6%. cuRobo's hand-tuned spheres are smaller around the hand than VAMP's: 98.1% of the problems have a free start and goal on them, and batchplan solves 98.0%.
-- **With two optimization seeds, batchplan's paths are the shortest.** Optimizing the searched path and the straight line (`PlanOptions::seeds = 2`) gives 3.137 rad where all solve, against cuRobo's 3.144, and the shorter path on 78% of the problems. It costs 16.8 ms per problem on 14 CPU threads, or 769 problems/s in batches on the M4 Pro's GPU. cuRobo's mean stays 1% shorter (0.2% against four seeds), from a few long problems. Without optimization, batchplan's paths are 3% longer than cuRobo's (3.243 rad), from searches that stay near the straight line ([below](#closing-the-path-length-gap)), at a seventieth of the optimized time.
+- **With two optimization seeds, batchplan's paths are the shortest.** Optimizing the searched path and the straight line (`PlanOptions::seeds = 2`) gives 3.137 rad where all solve, against cuRobo's 3.144, and the shorter path on 78% of the problems. It costs 15.1 ms per problem on 14 CPU threads, or 746 problems/s in batches on the M4 Pro's GPU. cuRobo's mean stays 1% shorter (0.2% against four seeds), from a few long problems. Without optimization, batchplan's paths are 3% longer than cuRobo's (3.243 rad), from searches that stay near the straight line ([below](#closing-the-path-length-gap)), at a sixtieth of the optimized time.
 - **The outputs differ.** VAMP, OMPL and RoboPlan return waypoints joined by straight lines, so a controller must stop at every corner, or smooth the path and check it again. MoveIt 2 and cuRobo return timed trajectories. batchplan returns a smooth cubic B-spline that starts and ends at rest, which `Trajectory::new` times within velocity, acceleration and jerk limits in about 0.5 ms.
 - **The time per problem is measured as each library is used.** batchplan's covers a whole `plan` call. VAMP's and OMPL's cover building the scene, planning and simplifying, from C++. cuRobo's covers loading the world and `plan_cspace`, with the GPU synchronized. RoboPlan's and MoveIt 2's cover their planning calls from Python.
 
@@ -160,8 +160,8 @@ It checks success as above, on cuRobo's spheres, which ship with batchplan. Timi
 
 | Device | Free ends | Plan | IK + plan | IK + plan, clear on meshes | Plan, problems/s | Plan, time per problem (median / p98) | IK + plan, problems/s | IK + plan, time per problem (mean / p98) |
 |---|---|---|---|---|---|---|---|---|
-| M4 Pro CPU, 14 threads | 98.1% | 98.0% | 97.0% | 89.8% | 20,766 | 0.2 / 1.9 ms | 2,504 | **1 / 3 ms** |
-| M4 Pro GPU | 98.1% | 98.0% | 97.0% | 90.0% | 19,313 | 0.2 / 2.0 ms | 2,152 | 10 / 24 ms |
+| M4 Pro CPU, 14 threads | 98.1% | 98.0% | 97.0% | 89.8% | 21,098 | 0.2 / 1.9 ms | 2,557 | **1 / 3 ms** |
+| M4 Pro GPU | 98.1% | 98.0% | 97.0% | 90.0% | 19,444 | 0.2 / 2.0 ms | 2,046 | 10 / 28 ms |
 | Ryzen AI Max+ 395, 32 threads | 98.1% | 98.0% | 97.0% | 89.8% | **31,196** | **0.1 / 1.7 ms** | **2,956** | **1 / 3 ms** |
 | Radeon 8060S | 98.1% | 98.0% | 97.0% | 89.7% | 28,362 | 0.2 / 1.5 ms | 1,948 | 11 / 37 ms |
 
@@ -185,7 +185,7 @@ Every device solves the same 484 of 512 targets and plans all 484.
 | Machine | IK seeds/s, GPU / CPU | Planning, problems/s | End to end, GPU | End to end, CPU |
 |---|---|---|---|---|
 | Ryzen AI Max+ 395 and Radeon 8060S | 579,000–622,000 / 210,000–214,000 | 200,000–314,000 | **15,988–16,910 problems/s** | 6,070–6,187 problems/s (32 threads) |
-| M4 Pro | 313,000–319,000 / 151,000–168,000 | 152,000–185,000 | **8,735–8,872 problems/s** | 4,359–4,825 problems/s (14 threads) |
+| M4 Pro | 291,000–321,000 / 168,000–171,000 | 108,000–181,000 | **8,046–8,782 problems/s** | 4,845–4,913 problems/s (14 threads) |
 
 Ranges cover runs after a warm-up run. The first run after the GPU idles is up to 30% slower, and the M4 Pro's GPU, which also drives its display, varies with what is on screen.
 
@@ -193,13 +193,13 @@ By batch size, end to end, in solved problems per second (medians of three runs)
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU | Radeon 8060S | Ryzen CPU |
 |---|---|---|---|---|
-| 1 | 129 | **1,658** | 139 | **1,315** |
-| 8 | 949 | **3,850** | 1,036 | **4,183** |
-| 64 | 2,771 | **4,236** | 3,895 | **5,834** |
-| 512 | **8,883** | 4,705 | **16,661** | 6,148 |
-| 4,096 | **10,815** | 4,713 | **20,996** | 6,214 |
+| 1 | 114 | **1,752** | 139 | **1,315** |
+| 8 | 878 | **2,835** | 1,036 | **4,183** |
+| 64 | 2,577 | **4,149** | 3,895 | **5,834** |
+| 512 | **8,611** | 4,882 | **16,661** | 6,148 |
+| 4,096 | **10,763** | 4,643 | **20,996** | 6,214 |
 
-A GPU call costs about 10 ms, so one problem at a time runs 9–13 times faster on the CPU. The CPU fills its cores by 64 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.3 (M4 Pro) to 3.4 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 2 to 3 times.
+A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster on the CPU. On the M4 Pro that cost varies from run to run: one problem's IK took 8 to 20 ms within one session, on batchplan 0.1.0 as on this version. The CPU fills its cores by 64 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.3 (M4 Pro) to 3.4 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 1.8 to 2.8 times.
 
 ## Bimanual handovers
 
@@ -208,10 +208,10 @@ A GPU call costs about 10 ms, so one problem at a time runs 9–13 times faster 
 | 512 tasks | M4 Pro GPU | M4 Pro CPU (14 threads) | Radeon 8060S | Ryzen CPU (32 threads) |
 |---|---|---|---|---|
 | Handovers | 504 of 512 | 504 of 512 | 504 of 512 | 504 of 512 |
-| Time | 1.35–1.37 s | 1.43–1.46 s | 1.25–1.26 s | 1.17–1.20 s |
-| Episodes/s | 368–373 | 344–353 | 400–405 | 420–429 |
+| Time | 1.37–1.38 s | 1.47–1.52 s | 1.25–1.26 s | 1.17–1.20 s |
+| Episodes/s | 366–368 | 331–343 | 400–405 | 420–429 |
 
-The 504 episodes hold 104 minutes of motion at 30 fps, 12.4 s each at the median. Times are three runs each after a warm-up, on the Ryzen and Radeon with the current version, and on the M4 Pro with other applications open; the previous version, alternated with these, took 1.35–1.39 s on the GPU and 1.42–1.49 s on the CPU. Four of the IK batches are seeded with the configuration before them (each grasp with the one just above it), so they keep 4 of the 32 seeds: that seed nearly always converges, and fewer seeds took the GPU run from 2.17 to 1.56 s with the same 504 handovers. The blocks come in four sizes because each size needs its own carried spheres and so plans in batches of its own: sizes drawn from a continuous range took 3.67 s.
+The 504 episodes hold 104 minutes of motion at 30 fps, 12.4 s each at the median. Times are three runs each after a warm-up, alternated with batchplan 0.1.0's, which took 1.30–1.32 s on the Radeon, 1.22–1.23 s on the Ryzen, 1.37–1.38 s on the M4 Pro's GPU and 1.45–1.50 s on its CPU. Four of the IK batches are seeded with the configuration before them (each grasp with the one just above it), so they keep 4 of the 32 seeds: that seed nearly always converges, and fewer seeds took the GPU run from 2.17 to 1.56 s with the same 504 handovers. The blocks come in four sizes because each size needs its own carried spheres and so plans in batches of its own: sizes drawn from a continuous range took 3.67 s.
 
 Rendering the episodes' camera videos in MuJoCo (`scripts/replay_mujoco.py`, three 640×480 cameras) takes about 15 ms a frame on the same machine, 50 times longer than generating them.
 
@@ -257,7 +257,7 @@ batchplan's paths were 12% longer than cuRobo's at the median where both solved 
 - **Repairing in few steps.** A problem whose every spline collides is repaired by trajectory optimization. Ten L-BFGS steps rather than forty took batched throughput on all 14 threads from about 9,200 to 10,400 problems/s, and repaired all 13 such problems rather than 12.
 - **Repairing inside the search.** Each set's one to three stuck problems used to be optimized after all of its searches had ended, which cost 3.5% (Ryzen) to 5% (M4 Pro) of throughput. Repairing on the thread that searched the problem, with idle threads helping, made repair free: on the Ryzen, 9,793 problems/s became 10,128, against 10,138 with no repair at all, which solves 10 fewer problems. Both devices now repair on CPU threads, so they repair alike.
 - **Reusing the searches' buffers.** RRT-Connect allocated its sample, the nearest node, the step and the edges to check anew on every iteration: about 2,100 small allocations per problem, which glibc's allocator serializes across the Ryzen's 32 threads. The driver now lends each search its thread's edge buffer (`edges::reuse`), and the searches keep their working configurations: 368 allocations per problem, the same paths, and 14,237 → 15,700 problems/s on the Ryzen (alternating runs), 4.6% more on the M4 Pro.
-- **Searches built on the threads that run them.** `plan`, `rrt::connect` and `shortcut::shortcut` built every problem's search on the calling thread. The memory a search grew as it ran then belonged to the caller's allocator arena, and every thread of a batch waited for that arena's lock: on the Ryzen, adding threads beyond four made a batch of easy reaches slower. Each search is now built by the thread that runs it (`edges::Deferred`). In alternating runs on the Ryzen, with the same paths, `bench.rs`'s 484 reaches plan at 226,000–310,000 problems/s rather than about 67,000, and the 2,600 problems at 31,196 rather than 23,014 (28,362 rather than 21,997 on the Radeon's device).
+- **Searches built on the threads that run them.** `plan`, `rrt::connect` and `shortcut::shortcut` built every problem's search on the calling thread. The memory a search grew as it ran then belonged to the caller's allocator arena, and every thread of a batch waited for that arena's lock: on the Ryzen, adding threads beyond four made a batch of easy reaches slower. Each search is now built by the thread that runs it (`edges::Deferred`). In alternating runs on the Ryzen, with the same paths, `bench.rs`'s 484 reaches plan at 226,000–310,000 problems/s rather than about 67,000, and the 2,600 problems at 31,196 rather than 23,014 (28,362 rather than 21,997 on the Radeon's device). On the M4 Pro, in three alternating rounds, nothing moved beyond the runs' spread, and every path stayed the same: the 2,600 plan at 20,244 against 19,619 problems/s on VAMP's spheres and 19,194 against 19,603 on cuRobo's.
 - **Bun's build practices, measured.** Bun, now mostly Rust, builds with one codegen unit, `panic = "abort"`, ThinLTO, profile-guided optimization and mimalloc. In CPU planning on the Ryzen, one codegen unit and abort changed nothing, fat LTO cost 5%, and PGO, trained on other scenes, gained 1%. mimalloc as the allocator gained 18% before the buffer reuse and 10% after it (3.5% on the M4 Pro). With searches built on the threads that run them, it no longer does: 34,939 against 33,895 problems/s at the median of three alternating runs, within their spread, so the README no longer suggests it.
 - **The CPU's SIMD instructions, chosen when it runs.** The collision checks used `wide`, which picks its instructions at compile time, and Rust's x86-64 builds target SSE2 unless told otherwise. So the Ryzen planned about 10,500 problems/s by default, and 15,900 only when built for x86-64-v3 (AVX2, FMA), which every user would have had to ask for. They now use [`fearless_simd`](https://github.com/linebender/fearless_simd), which picks the CPU's widest level at run time, as Bun does for its hot loops, without `unsafe` in batchplan. A default build plans 16,200 problems/s in alternating runs, 2% more than the x86-64-v3 build of `wide`, with the same paths. Choosing the level on every check rather than once per search cost 11%. SIMD code left inside closures, which do not take on the chosen level, ran seven times slower. CPU IK, which is scalar code, is 4% slower than an x86-64-v3 build.
 

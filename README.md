@@ -143,7 +143,7 @@ To fuse frames over time, use an `OccupancyMap` ([Worlds and perception](docs/pe
 
 Each library planned the same 2,600 Panda problems from MotionBenchMaker and MπNets, and one checker judged every path, batchplan's included. *Solved* means the path reaches the goal within the joint limits without touching the model it was planned on; *clear on the meshes* checks it against the Panda's meshes, the real robot. [Setup and per-set results](docs/benchmarks.md#against-other-planners) · [Run them yourself](docs/benchmarks.md#reproducing)
 
-- **The fastest of these planners:** 0.17 ms per problem and 20,287 problems/s on an M4 Pro CPU, ahead of VAMP on the same spheres.
+- **The fastest of these planners:** 0.17 ms per problem and 19,902 problems/s on an M4 Pro CPU, ahead of VAMP on the same spheres.
 - **Clear of the real robot most often:** 85–93% of its paths clear the Panda's meshes; no other planner's reach 82%.
 - **Solves the most** in every comparison, with shorter paths than every other sampling-based planner, and, with two optimization seeds, than cuRobo.
 
@@ -153,10 +153,10 @@ Apple M4 Pro CPU, 14 cores.
 
 | Planner | Solved | Clear on the meshes | Path length¹ | Time per problem (median) | All 2,600, one core | Batched |
 |---|---|---|---|---|---|---|
-| **batchplan** | **90.4%** | **85.2%** | **3.41 rad** | **0.17 ms** | **0.88 s** | **20,287 /s** |
-| [VAMP](https://github.com/KavrakiLab/vamp) 0.6.4 | 86.1% | 71.6% | 3.56 rad | 0.26 ms | 2.43 s | 2,704 /s |
-| VAMP, stopped at 10,000 samples² | 86.1% | 71.5% | 3.56 rad | 0.26 ms | 1.05 s | 15,396 /s |
-| VAMP, 2 rad steps³ | 86.4% | 75.3% | 3.56 rad | 0.27 ms | 2.71 s | 2,705 /s |
+| **batchplan** | **90.4%** | **85.2%** | **3.41 rad** | **0.17 ms** | **0.91 s** | **19,902 /s** |
+| [VAMP](https://github.com/KavrakiLab/vamp) 0.6.4 | 86.1% | 71.6% | 3.56 rad | 0.26 ms | 2.43 s | 2,689 /s |
+| VAMP, stopped at 10,000 samples² | 86.1% | 71.5% | 3.56 rad | 0.26 ms | 1.06 s | 16,111 /s |
+| VAMP, 2 rad steps³ | 86.4% | 75.3% | 3.56 rad | 0.27 ms | 2.72 s | 2,697 /s |
 | [OMPL](https://ompl.kavrakilab.org) 2.0, RRT-Connect⁴ | 63.9% | 63.5% | 4.02 rad | 2.75 ms | 631 s | 30 /s |
 
 ¹ Median over the 1,557 problems all five solve. ² As batchplan's searches do; VAMP's default is 100,000. ³ VAMP's library default; the other rows step 1 rad, its Panda setting. ⁴ With VAMP's collision checker and a 5 s limit.
@@ -167,8 +167,8 @@ cuRobo on an NVIDIA T4 GPU with 8 Xeon threads; batchplan on the M4 Pro². The 1
 
 | Planner | Solved | Clear on the meshes | Path length¹ | Time per problem (median) | Batched |
 |---|---|---|---|---|---|
-| **batchplan** | **98.9%** | 92.8% | 3.243 rad | **0.22 ms** | **13,384 /s** |
-| batchplan, optimizing 2 seeds³ | 98.8% | **92.9%** | **3.137 rad** | 16.8 ms | 138 /s, 769 /s on its GPU |
+| **batchplan** | **98.9%** | 92.8% | 3.243 rad | **0.24 ms** | **13,167 /s** |
+| batchplan, optimizing 2 seeds³ | 98.8% | **92.9%** | **3.137 rad** | 15.1 ms | 142 /s, 746 /s on its GPU |
 | [cuRobo](https://github.com/NVlabs/curobo) 0.8 | 85.2% | 81.6% | 3.144 rad | 197 ms | 3.0 /s |
 | cuRobo, 32 problems per call | 85.0% | 81.9% | 3.154 rad | 660 ms⁴ | 1.4 /s |
 
@@ -192,13 +192,13 @@ Planning runs on CPU threads on either device; IK and trajectory optimization al
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU (14 cores) | Radeon 8060S GPU | Ryzen AI Max+ 395 CPU (16 cores) |
 |---|---|---|---|---|
-| 1 | 129 | **1,658** | 139 | **1,315** |
-| 8 | 949 | **3,850** | 1,036 | **4,183** |
-| 64 | 2,771 | **4,236** | 3,895 | **5,834** |
-| 512 | **8,883** | 4,705 | **16,661** | 6,148 |
-| 4,096 | **10,815** | 4,713 | **20,996** | 6,214 |
+| 1 | 114 | **1,752** | 139 | **1,315** |
+| 8 | 878 | **2,835** | 1,036 | **4,183** |
+| 64 | 2,577 | **4,149** | 3,895 | **5,834** |
+| 512 | **8,611** | 4,882 | **16,661** | 6,148 |
+| 4,096 | **10,763** | 4,643 | **20,996** | 6,214 |
 
-A GPU call costs about 10 ms, so one problem at a time runs 9–13 times faster on the CPU; from a few hundred problems per call the GPU overtakes it, and at 4,096 it solves 2.3–3.4 times as many.
+A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster on the CPU; from a few hundred problems per call the GPU overtakes it, and at 4,096 it solves 2.3–3.4 times as many.
 
 ### When another library fits better
 
