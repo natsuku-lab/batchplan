@@ -1,8 +1,8 @@
 # Training data
 
-batchplan turns planning into datasets for robot learning: reaches with recoveries from mistakes, pick-and-place episodes with a gripper, carried objects and task strings, and handovers between two arms. Datasets export as plain NumPy arrays or as LeRobot v3.0 datasets that `lerobot` loads and trains on directly.
+batchplan turns plans into datasets for robot learning: reaches with recoveries from mistakes, pick-and-place episodes, and handovers between two arms, with grippers, carried objects and task strings. They export as NumPy arrays or as LeRobot v3.0 datasets that `lerobot` loads and trains on directly.
 
-Both kinds plan as [`plan`](planning.md) does, which straightens joints (`ShortcutOptions::straighten`), so a joint does not swing one way and back on its way, as a wrist can on a searched path. Across 512 pick-and-place tasks with obstacles across the carry, carries move their joints 13% less in the median and 18% less at the 90th percentile.
+Every episode plans as [`plan`](planning.md) does, straightening each joint (`ShortcutOptions::straighten`) so it does not swing one way and back, as a wrist can on a searched path. On 512 pick-and-place tasks with obstacles across the carry, that cuts the carries' joint travel by 13% at the median and 18% at the 90th percentile.
 
 ## Reaches and recoveries
 
@@ -10,21 +10,23 @@ Both kinds plan as [`plan`](planning.md) does, which straightens joints (`Shortc
 
 1. **IK** for each goal with many seeds, keeping the collision-free solution with the most clearance.
 2. **Nominal reaches** from the default pose plus joint noise (a collision-free sample) to the IK goal.
-3. **Recoveries**: each solved path is perturbed partway along it (20–80% by default), the collision-free perturbed states are kept, and they are replanned to the same goal. These are the examples of getting back on track that raw planner data lacks.
+3. **Recoveries**: each solved path is perturbed partway along (20–80% by default), and the collision-free perturbed states are replanned to the same goal. Raw planner data has no such examples of getting back on track.
 4. **Timing** within the robot's limits at a random fraction of full speed (60–100% by default), sampled every `dt`.
 
-`datagen::recovery_problems` exposes step 3 on its own for your own plans.
+`datagen::recovery_problems` runs step 3 alone, on your own plans.
 
 ## Pick-and-place
 
 `datagen::pick_and_place(&device, &worlds, &tasks, &PickPlaceOptions)` turns tasks (a box in a world and the pose to set it down at) into episodes. Each chains segments planned in batches, all from rest to rest:
 
 1. **Approach** a pose 10 cm above the box from the default configuration, with the box an obstacle.
-2. **Descend** to a top-down grasp across the box's narrower side, the box no longer an obstacle as the fingers close around it; **close** the gripper over half a second.
+2. **Descend** to a top-down grasp across the box's narrower side, with the box no longer an obstacle, since the fingers close around it. **Close** the gripper over half a second.
 3. **Lift** back up and **transfer** to above the place pose holding the box (`Robot::attach`, touching only the links fixed to the wrist).
 4. **Lower** it, **open** the gripper and **retreat**.
 
-IK for the configuration above the box takes the solution nearest the start, and IK for the grasp and the place pose starts from the configuration above them and takes the solution nearest it, so the arm stays on one configuration and short moves stay short. The robot's IK frame must be the grasp point, its z axis pointing out of the gripper and its y axis along the fingers' closing direction (as the Panda's `ee_link`). Each episode records the gripper's opening, where the box is at every sample, and a task such as "Pick up the box and put it 20 cm to the left." `examples/datagen.rs --pick-place` completes 492 of 512 random tabletop tasks, boxes of 512 different sizes, in 0.5 s on an M4 Pro's GPU. The IK for every task runs in three batches whatever the sizes; only the transfers, which hold the box, plan per box size, on CPU threads.
+IK above the box takes the solution nearest the start. IK for the grasp and the place pose is seeded from the configuration above each and takes the solution nearest it, so the arm keeps to one IK branch and short moves stay short. The robot's IK frame must be the grasp point, its z axis pointing out of the gripper and its y axis along the fingers' closing direction (as the Panda's `ee_link`). Each episode records the gripper's opening, where the box is at every sample, and a task such as "Pick up the box and put it 20 cm to the left."
+
+`examples/datagen.rs --pick-place` completes 492 of 512 random tabletop tasks, with boxes of 512 different sizes, in 0.5 s on an M4 Pro's GPU. IK runs in three batches however many sizes there are; only the transfers, which hold the box, plan per box size, on CPU threads.
 
 ```rust,no_run
 use batchplan::datagen::{PickPlace, PickPlaceOptions, pick_and_place};
@@ -55,21 +57,21 @@ fn main() -> Result<(), Error> {
 }
 ```
 
-On a robot with several hands, `pick_and_place` works with the first and holds the joints only the others move.
+On a robot with several hands, `pick_and_place` uses the first and holds the joints that only the others move.
 
 ## Handovers
 
-`datagen::handover(&device, &worlds, &tasks, &PickPlaceOptions)` passes a box between the two hands of a robot made of two arms (see [Robots](robots.md#several-arms-several-hands)). A `Handover` names the box, the hand that picks it up (`from`), the hand that sets it down (`to`), the pose where the hands meet, and the place pose. Each hand holds one end of the box's longer side from above, the end toward its own arm where they meet. Every segment is planned in one batch over the tasks:
+`datagen::handover(&device, &worlds, &tasks, &PickPlaceOptions)` passes a box between the two hands of a two-arm robot (see [Robots](robots.md#several-arms-several-hands)). A `Handover` names the box, the hand that picks it up (`from`), the hand that sets it down (`to`), the pose where the hands meet, and the place pose. Each hand holds the box from above by one end of its longer side, the end nearer its own arm at the meeting pose. Every segment is planned in one batch over the tasks:
 
-1. **The giver picks the box up**: approach, descend, close, lift. The taker waits: its joints are held (`PlanProblem::hold`).
+1. **The giver picks the box up**: approach, descend, close, lift, while the taker waits with its joints held (`PlanProblem::hold`).
 2. **Both arms move at once**: the giver carries the box to the meeting pose while the taker comes above its end. One plan moves every joint, so they arrive together.
-3. **The taker takes it**: it descends onto its end and closes while the giver waits; the giver opens and lifts off while the taker waits.
+3. **The taker takes it**: it descends onto its end and closes while the giver waits, then the giver opens and lifts off while the taker waits.
 4. **Both arms move at once again**: the giver returns to the default configuration while the taker carries the box above the place pose.
 5. **The taker sets it down**: lower, open, retreat, while the giver waits.
 
-`examples/handover/` runs this on two [reBot B601](https://github.com/Seeed-Projects/reBot-DevArm) arms facing a table, half the tasks passing left to right and half right to left; see [Benchmarks](benchmarks.md#bimanual-handovers) for its speed.
+`examples/handover/` runs this on two [reBot B601](https://github.com/Seeed-Projects/reBot-DevArm) arms facing a table, half the tasks passing left to right and half right to left. [Benchmarks](benchmarks.md#bimanual-handovers) gives its speed.
 
-These are DexMimicGen's subtask kinds: sequential (one arm waits for the other), parallel (both move, each on its own errand) and coordinated (both must arrive together). IK solves both hands at once where they meet, and every plan holds the box in the hand that has it, with both wrists allowed to touch it. The episode records both grippers, where the box is at every sample, and a task such as "Pass the box from the left hand to the right hand and put it down."
+The segments cover DexMimicGen's subtask kinds: sequential (one arm waits for the other), parallel (both move, each on its own errand) and coordinated (both must arrive together). IK solves both hands at once at the meeting pose. Every plan holds the box in the hand that has it, and both wrists may touch it. The episode records both grippers, where the box is at every sample, and a task such as "Pass the box from the left hand to the right hand and put it down."
 
 ```rust,no_run
 use batchplan::datagen::{Handover, PickPlaceOptions, handover};
@@ -90,11 +92,11 @@ fn pass_it(device: &Device, worlds: &[World]) -> Result<Vec<datagen::Demonstrati
 
 Reinforcement learning that starts episodes from many states along a task, as [OmniReset](https://arxiv.org/abs/2603.15789) and [AlphaNIST](https://alpha-nist.github.io/) do, needs a bank of valid states: reaching, the object in hand, the object nearly placed. `datagen::reset_states(&device, &worlds, &demos, &RecoveryOptions)` makes one from any demonstrations:
 
-1. **Samples** of each demonstration, `per_trajectory` of them at random fractions of the way along it (within `phase`), with joint noise (`sigma`), at rest.
-2. **The carried object** moves with a hand whose gripper is closed on it, in the grip that hand last holds it in alone. Samples where both hands hold it are skipped, since noise would pull the hands apart.
-3. **A check** on the device keeps the collision-free states: an object no hand holds is an obstacle where it is, and a held one is attached to its hand, one batch per hand and grip. The check is conservative. Fingers about to close around an object collide with it, and a held object must clear the table, so states right at a grasp, a handover or a set-down are rare.
+1. **Samples**: `per_trajectory` per demonstration, at random fractions of the way along it (within `phase`), with joint noise (`sigma`), at rest.
+2. **The carried object** moves with the hand whose gripper is closed on it, in the grip that hand had when it last held the object alone. Samples where both hands hold it are skipped, since noise would pull the hands apart.
+3. **A check** on the device keeps the collision-free states. An object no hand holds is an obstacle where it is; a held one is attached to its hand. The check is conservative: fingers about to close around an object collide with it, and a held object must clear the table, so states right at a grasp, a handover or a set-down are rare.
 
-Each state is a one-sample `Demonstration` whose origin is a recovery from its sample, `parent` indexing `demos`, so `npy::export` writes them as it writes episodes (`positions.npy` is `[states, 1, dof]`). The episodes' own samples are valid states too. `cargo run --release --example handover -- 512 --resets <dir>` writes both, to `episodes/` and `resets/`. From 504 handovers, 8 states each at the default 0.15 rad of noise, 2,305 of 4,032 are collision-free: 691 with the block in the left hand, 746 in the right and 868 with it on the table. The check takes under 0.1 s on an M4 Pro, GPU or CPU.
+Each state is a one-sample `Demonstration` whose origin is a recovery from its sample, with `parent` indexing `demos`, so `npy::export` writes states as it writes episodes (`positions.npy` is `[states, 1, dof]`). The episodes' own samples are valid states too; `cargo run --release --example handover -- 512 --resets <dir>` writes both, to `episodes/` and `resets/`. From 504 handovers, 8 states each at the default 0.15 rad of noise, 2,305 of 4,032 are collision-free: 691 with the block in the left hand, 746 in the right and 868 on the table. The check takes under 0.1 s on an M4 Pro, GPU or CPU.
 
 ## Demonstrations
 
@@ -107,14 +109,14 @@ Each `Demonstration` holds:
 
 ## Camera images
 
-batchplan makes the motions and renders no images: policies that learn from cameras need realistic ones, which simulators render. Both exports carry what a simulator needs to replay an episode and render it: every world's obstacles (`worlds.json`, or `meta/batchplan.json`), and each episode's joint positions, gripper opening and carried object's pose at every frame.
+batchplan renders no images: policies that learn from cameras need realistic ones, which simulators render. Both exports carry what a simulator needs to replay and render an episode: every world's obstacles (`worlds.json`, or `meta/batchplan.json`), and each episode's joint positions, gripper opening and carried object's pose at every frame.
 
-`scripts/replay_mujoco.py` renders them with [MuJoCo](https://mujoco.org). It replays each LeRobot frame kinematically and writes a new dataset, the same frames plus a video per camera:
+`scripts/replay_mujoco.py` renders them with [MuJoCo](https://mujoco.org), writing a new dataset: the same frames plus a video per camera. It replays each LeRobot frame kinematically, with:
 - the robot's parts (`meta/batchplan.json`), from their URDF or MJCF, at their bases;
 - each obstacle where `observation.environment_state` has it, the carried one moving with the hand;
 - the fingers following each gripper's opening, closing until they touch the carried object.
 
-What batchplan cannot know comes from `meta/replay.json`, which the exporting program writes: which finger joints each gripper drives, and where the cameras are, in the world or on a hand's frame. `examples/handover/` writes one for two reBot arms, with an overhead camera and one on each wrist, as ALOHA has:
+What batchplan cannot know comes from `meta/replay.json`, which the exporting program writes: which finger joints each gripper drives, and where the cameras are, in the world or on a hand's frame. `examples/handover/` writes one for two reBot arms with an overhead camera and one on each wrist, as ALOHA has:
 
 ```json
 {
@@ -126,7 +128,7 @@ What batchplan cannot know comes from `meta/replay.json`, which the exporting pr
 }
 ```
 
-Visual meshes are simplified to 2,000 triangles each as they load: the reBot's CAD exports carry 860,000, which made rendering three times slower without changing what a 640×480 image shows. On an M4 Pro it renders three 640×480 cameras at about 15 ms a frame, 16 handover episodes (5,779 frames) in 85 s.
+Visual meshes are simplified to 2,000 triangles each as they load. The reBot's CAD exports carry 860,000, which made rendering three times slower with no visible difference at 640×480. On an M4 Pro, three 640×480 cameras render at about 15 ms a frame: 16 handover episodes (5,779 frames) in 85 s.
 
 ## Exporting
 
@@ -147,7 +149,7 @@ Visual meshes are simplified to 2,000 triangles each as they load: the reBot's C
 
 ### LeRobot v3.0: `lerobot::export` (feature `lerobot`)
 
-`lerobot::export(root, &robot, &worlds, &demos, &ExportOptions)` writes a dataset that `LeRobotDataset(repo_id, root=path)` loads directly: frames, episode metadata and tasks as parquet, plus `info.json` and normalization `stats.json`. Frames and episode metadata are written as they are converted, each starting a new file past `data_files_size_in_mb` (100 MB, LeRobot's default), so datasets can exceed memory. Statistics combine per-episode statistics as LeRobot does. Each demonstration is one episode:
+`lerobot::export(root, &robot, &worlds, &demos, &ExportOptions)` writes a dataset that `LeRobotDataset(repo_id, root=path)` loads directly: frames, episode metadata and tasks as parquet, plus `info.json` and normalization `stats.json`. Frames and episode metadata are written as they are converted, starting a new file past `data_files_size_in_mb` (100 MB, LeRobot's default), so datasets can exceed memory. Statistics combine per-episode statistics as LeRobot does. Each demonstration is one episode:
 
 | Feature | Contents |
 |---|---|
@@ -186,7 +188,7 @@ uv venv .venv --python 3.12 && uv pip install --python .venv/bin/python "lerobot
   --policy.device=cpu --policy.push_to_hub=false --steps=50 --batch_size=16 --num_workers=0
 ```
 
-It passes on reach exports (5,693 episodes across 6 episode-metadata files with 1 MB files), pick-and-place exports (18 tasks), and two-arm handovers before and after `replay_mujoco.py` adds their videos. LeRobot's ACT policy trains on each: a 50-step CPU run cut the loss from 44 to 5.8 on reaches and from 45 to 5.8 on pick-and-place, and a 40-step run on 16 rendered handovers, from the three cameras and both arms' states, from 58 to 6.5.
+It passes on reach exports (5,693 episodes, split over 6 episode-metadata files at a 1 MB limit), pick-and-place exports (18 tasks), and two-arm handovers before and after `replay_mujoco.py` adds their videos. LeRobot's ACT policy trains on each. A 50-step CPU run cut the loss from 44 to 5.8 on reaches and from 45 to 5.8 on pick-and-place; a 40-step run on 16 rendered handovers, from the three cameras and both arms' states, cut it from 58 to 6.5.
 
 ## `examples/datagen.rs`
 
@@ -196,4 +198,4 @@ cargo run --release --features lerobot --example datagen -- --lerobot data/lerob
 cargo run --release --features lerobot --example datagen -- --pick-place --lerobot data/pick 512 20
 ```
 
-`--file-mb N` starts new files sooner.
+`--file-mb N` starts new files past N MB instead of 100.

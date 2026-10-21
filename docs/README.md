@@ -6,6 +6,7 @@ The [README](../README.md) is the front door: what batchplan is, how to install 
 
 | | |
 |---|---|
+| [`api.md`](api.md) | Every type and function a program uses, by task, with the guide for each. |
 | [`planning.md`](planning.md) | IK, searching and smoothing paths with SIMD collision checks, keeping clear of obstacles, optional trajectory optimization, goals a turn away, time-optimal timing, replanning from a moving state, and the options worth knowing. |
 | [`robots.md`](robots.md) | Loading URDF, MJCF and OpenUSD; joint types, mimic joints and closed loops; fitted collision spheres and collision-model files; holding objects; checking plans against meshes. |
 | [`perception.md`](perception.md) | Obstacles and scenes; distance grids from meshes, point clouds and depth images; masking the robot out of a camera's view; fusing frames into an occupancy map; building grids on the GPU. |

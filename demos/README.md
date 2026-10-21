@@ -4,12 +4,12 @@ batchplan planning live in [Rerun](https://rerun.io). This is a crate of its own
 
 | Demo | What it shows |
 |---|---|
-| `handover` | Two reBot B601 arms hand blocks to each other in 16 scenes at once: one `datagen::handover` call plans every episode (the scenes of [`examples/handover/`](../examples/handover/)). |
+| `handover` | Two reBot B601 arms hand blocks to each other in 16 scenes at once, those of [`examples/handover/`](../examples/handover/). One `datagen::handover` call plans every episode. |
 | `pick` | Pick-and-place on the Franka Panda in 16 scenes, each with a wall, posts, an arch or a cluster of boxes across the straight carry. |
 | `perception` | Three simulated depth cameras, the robot masked out of their images, fused into a distance grid that the robot then plans around. |
-| `replan` | Robots replanning mid-motion when boxes appear in their path, from their current velocity and acceleration, or stopping on their path first. |
+| `replan` | Robots replanning mid-motion from their current velocity and acceleration when boxes appear in their path, or first stopping on their path. |
 
-Run them from this directory. Each opens the viewer, which needs the `rerun` command at the version of the crate (0.38.1):
+Run them from this directory. Each opens the viewer, which needs the `rerun` command at the Rust crate's version (0.38.1):
 
 ```bash
 uv venv .venv --python 3.12 && uv pip install --python .venv/bin/python rerun-sdk==0.38.1

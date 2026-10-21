@@ -1,15 +1,15 @@
 <h1 align="center">batchplan</h1>
 
 <p align="center">
-  <em>Thousands of robot motions at once, a fraction of a millisecond each.</em>
+  <em>The fastest motion planning in the West.</em>
 </p>
 
-<img width="1135" height="654" alt="Screenshot 2026-10-20 at 5 13 25 PM" src="https://github.com/user-attachments/assets/a6ae642a-2319-4655-b791-4c6c13d48e40" />
-
+<img width="1135" height="654" alt="Dozens of tables, each with two reBot arms handing a block over, all planned in one batch" src="https://github.com/user-attachments/assets/a6ae642a-2319-4655-b791-4c6c13d48e40" />
 
 <p align="center">
   <a href="#quick-start"><b>Quick start</b></a> ·
   <a href="docs/README.md">Docs</a> ·
+  <a href="docs/api.md">API</a> ·
   <a href="docs/benchmarks.md">Benchmarks</a> ·
   <a href="examples/">Examples</a> ·
   <a href="docs/architecture.md">How it works</a>
@@ -23,12 +23,12 @@
 
 **batchplan is a Rust library for collision-aware motion planning, in batches.** One call plans thousands of motions, each in its own scene: IK, a collision-free path, and a trajectory timed within the robot's limits. A typical problem plans in 0.17 ms on one CPU core, faster than [VAMP](#how-it-compares), with paths that keep clear of the real geometry more often than any planner we compared. IK, trajectory optimization and distance grids run on any GPU that [wgpu](https://wgpu.rs) supports (Vulkan, Metal or DX12), with no CUDA, no ROCm and no ROS, or on the CPU with the same results.
 
-It is built for robot learning at scale. It turns planning into training data: reaches with recoveries from mistakes, pick-and-place episodes, and handovers between two arms, with grippers and task strings. These are written as [LeRobot](https://github.com/huggingface/lerobot) datasets that train as they are, and a MuJoCo script renders camera videos into them. Two reBot arms hand blocks to each other in 512 scenes in 1.6 s on a laptop's GPU, or 1.9 s on its CPU.
+It is built for robot learning at scale: planned motions become [LeRobot](https://github.com/huggingface/lerobot) datasets that train as they are. Two reBot arms hand blocks to each other in 512 scenes in 1.6 s on a laptop's GPU, or 1.9 s on its CPU.
 
-- **Plan:** batched IK; RRT-Connect, shortcutting and smoothing on SIMD collision checks, a fraction of a millisecond per problem; smooth B-spline paths, optionally optimized with L-BFGS; time-optimal timing within velocity, acceleration and jerk limits; replanning from a moving state; and controlled stops along the path.
+- **Plan:** batched IK; RRT-Connect, shortcutting and smoothing on SIMD collision checks; smooth B-spline paths, optionally optimized with L-BFGS; time-optimal timing within velocity, acceleration and jerk limits; replanning from a moving state; and controlled stops along the path.
 - **Robots:** load from URDF, MJCF or OpenUSD, including mimic joints, closed loops, continuous joints and ball or floating joints, or assemble several, such as two arms. Collision spheres are fitted automatically. IK takes a target for each hand at once, and plans can hold one arm still while another moves.
-- **Worlds:** boxes, spheres, cylinders, capsules and signed distance grids. Grids are built from meshes, point clouds and depth images, or from frames fused over time, on the GPU.
-- **Data:** demonstrations with recoveries, pick-and-place episodes and handovers between two arms, and states perturbed from them to start reinforcement learning from, exported as LeRobot v3.0 datasets (arm by arm, as ALOHA's) or NumPy arrays. `scripts/replay_mujoco.py` replays them in MuJoCo and adds camera videos.
+- **Worlds:** boxes, spheres, cylinders, capsules and signed distance grids, built from meshes, point clouds, depth images or frames fused over time.
+- **Data:** reaches with recoveries from mistakes, pick-and-place episodes and handovers between two arms, with grippers and task strings, plus states perturbed from them to start reinforcement learning from. They export as LeRobot v3.0 datasets (arm by arm, as ALOHA's) or NumPy arrays; `scripts/replay_mujoco.py` replays them in MuJoCo and adds camera videos.
 - **Embeddable:** CPU-only builds, threads you own, time budgets, allocation-free sampling and typed errors, for use inside a robot's control process.
 
 ## Install
@@ -50,7 +50,7 @@ On Linux, a faster allocator helps: glibc's slows down when many threads allocat
 
 ## Quick start
 
-The robot paths below point at the test robots in this repository's `assets/`. Use your own robot's file in their place.
+The paths below point at test robots in this repository's `assets/`; use your own robot's file instead.
 
 ### Plan a batch of motions
 
@@ -215,6 +215,7 @@ A GPU call costs about 10 ms, so one problem at a time runs 11–13 times faster
 
 | | |
 |---|---|
+| [API](docs/api.md) | Every type and function, by task, with the guide for each. |
 | [Planning](docs/planning.md) | IK, searching and smoothing paths, keeping clear of obstacles, optional trajectory optimization, goals a turn away, timing, replanning mid-motion, and the options worth knowing. |
 | [Robots](docs/robots.md) | URDF, MJCF and OpenUSD; joint types, mimic joints and closed loops; collision spheres; holding objects; checking against meshes. |
 | [Worlds and perception](docs/perception.md) | Obstacles, scenes, distance grids, depth images, masking the robot, and fused occupancy maps. |
@@ -246,16 +247,16 @@ A GPU call costs about 10 ms, so one problem at a time runs 11–13 times faster
 
 ### With ROS 2
 
-[batchplan-ros](https://github.com/natsuku-lab/batchplan-ros) is a ROS 2 Jazzy node that plans with batchplan and speaks MoveIt's messages without needing MoveIt: a `MoveGroup` action and an IK service, with the scene in each request. Several goals in one request are planned in one batched call, and the shortest path wins. It comes with a browser demo of a simulated Panda (`pixi run demo`, on Linux or macOS) and an optional MoveIt planner plugin, through which batchplan plans the stock Panda demo's requests in 4–5 ms, against OMPL's 14–15 ms.
+[batchplan-ros](https://github.com/natsuku-lab/batchplan-ros) is a ROS 2 Jazzy node that speaks MoveIt's messages without needing MoveIt: a `MoveGroup` action and an IK service, with the scene in each request. Several goals in one request are planned in one batched call, and the shortest path wins. It comes with a browser demo of a simulated Panda (`pixi run demo`, on Linux or macOS) and an optional MoveIt planner plugin, through which batchplan plans the stock Panda demo's requests in 4–5 ms, against OMPL's 14–15 ms.
 
 ## Limitations
 
 - **Spheres.** Planning sees the robot as spheres. `MeshModel` checks finished plans against its meshes on the CPU, as a filter.
 - **Joints.** Each closed loop must have exactly one actuated joint. Ball and floating joints are expanded into Euler angles, which lose a direction of motion where the middle angle reaches ±90°.
 - **Timing.** Trajectories end at rest. Time-optimal timing respects jerk limits but does not minimize jerk.
-- **Small batches on a GPU.** A GPU call costs about as much for one problem as for a small batch: IK for one target takes about 10 ms on an M4 Pro's GPU and 1 ms on its CPU. Planning itself runs on CPU threads on either device.
+- **Small batches on a GPU.** A GPU call costs about 10 ms however small the batch, so below a few hundred problems per call the CPU is faster ([Batches and the GPU](#batches-and-the-gpu)). Planning itself runs on CPU threads on either device.
 - **Pick-and-place and handovers.** Episodes grasp upright boxes from above and have no recoveries. Camera videos come from replaying them in MuJoCo, kinematically: no physics checks the grasps.
-- **Maturity.** batchplan is at version 0.1, and its interface may change. It is verified on AMD (Vulkan) and Apple (Metal) GPUs. On NVIDIA, batchplan was timed against cuRobo on a T4 at the previous version, and the tests ran at an early one.
+- **Maturity.** batchplan is at version 0.1, and its interface may change. It is tested on AMD (Vulkan) and Apple (Metal) GPUs; on NVIDIA, only earlier versions ran (on a T4).
 
 ## License
 

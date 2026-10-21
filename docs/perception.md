@@ -1,6 +1,6 @@
 # Worlds and perception
 
-A `World` is a list of obstacles. Worlds are uploaded to a [`Device`](devices.md) once (`device.upload(&worlds)`) and stay there; every IK and planning call takes the uploaded `Worlds` and problems name the world they are in by index.
+A `World` is a list of obstacles. Worlds are uploaded to a [`Device`](devices.md) once (`device.upload(&worlds)`) and stay there. Every IK and planning call takes the uploaded `Worlds`, and each problem names its world by index.
 
 ## Obstacles
 
@@ -12,9 +12,7 @@ A `World` is a list of obstacles. Worlds are uploaded to a [`Device`](devices.md
 | `Capsule { center, rotation, radius, half_length }` | a capsule around its local z segment |
 | `Sdf { grid, center, rotation }` | a signed distance grid, for any other shape |
 
-`Obstacle::cuboid(center, half_extents)`, `sphere`, `cylinder` and `capsule` build the primitives axis-aligned, and `.placed(pose)` moves and turns one. `Obstacle::from(grid)` puts a grid in world coordinates, where grids built from points and depth images belong.
-
-Primitives are exact. Distance grids hold anything else: meshes, point clouds, depth images and fused maps.
+`Obstacle::cuboid(center, half_extents)`, `sphere`, `cylinder` and `capsule` build the primitives axis-aligned, and `.placed(pose)` moves and turns one. `Obstacle::from(grid)` puts a grid in world coordinates, where grids built from points and depth images belong. Primitives are exact.
 
 ## Scenes
 
@@ -22,35 +20,35 @@ Primitives are exact. Distance grids hold anything else: meshes, point clouds, d
 
 ## Distance grids
 
-An `SdfGrid` holds signed distances on a regular grid (stored as half floats, interpolated trilinearly on both devices). Worlds can share a grid through its `Arc`; a device stores each grid once, and exporters write each once. `SdfOptions` lays grids out (1 cm voxels and 15 cm padding by default).
+An `SdfGrid` holds signed distances on a regular grid, stored as half floats and interpolated trilinearly on both devices. Worlds can share a grid through its `Arc`, and devices and exporters then store it once. `SdfOptions` lays grids out (1 cm voxels and 15 cm padding by default).
 
 - **`SdfGrid::from_mesh(&vertices, &triangles, &options)`**: exact signed distances of a closed triangle mesh, inside and outside decided by parry3d's pseudo-normals. Open or non-manifold meshes have no inside and are refused with the reason.
 - **`SdfGrid::from_points(&device, &points, &options)`**: voxels holding a point are solid. A closed surface's inside reads as free beyond its shell.
 - **`SdfGrid::from_depth(&device, &image, robot_mask, behind, &options)`**: one depth image (below).
 - **`OccupancyMap`**: depth images fused over time (below).
 
-**Grids err toward collision.** Each grid point holds at most the true signed distance (for points and depth images, the distance to the solid voxels as cubes), lowered by half a voxel diagonal, the most trilinear interpolation can overestimate by. A built grid therefore never reads farther from an obstacle than its geometry, and a wall thinner than a voxel still blocks. The price is growth: up to a voxel diagonal for meshes, about three voxels for points and depth images.
+**Grids err toward collision.** Each grid point holds at most the true signed distance (for points and depth images, the distance to the solid voxels as cubes), lowered by half a voxel diagonal: the most trilinear interpolation can overestimate by. A built grid therefore never reads farther from an obstacle than its geometry, and a wall thinner than a voxel still blocks. In return, obstacles grow: by up to a voxel diagonal for meshes, and about three voxels for points and depth images.
 
-**Padding.** Outside its box, a grid reads the value at the nearest box point plus the distance to it. That is exact for collision checking when the box reaches at least the collision margin plus the robot's largest sphere radius beyond every surface, which is what `SdfOptions::padding` is for. A grid's diagonal is limited to 4,096 voxels.
+**Padding.** Outside its box, a grid reads the value at the nearest box point plus the distance to it. That is exact for collision checking when the box reaches beyond every surface by at least the collision margin plus the robot's largest sphere radius, which `SdfOptions::padding` sets. A grid's diagonal is limited to 4,096 voxels.
 
 ## Depth images
 
-A `DepthImage` is one frame: z distances in meters row by row (zero, negative or non-finite where a pixel has no reading), its width, pinhole `Intrinsics`, and the camera's pose (OpenCV axes: x right, y down, z forward). `from_depth` classifies each voxel by projecting its centre into the image, so an 8×8 time-of-flight array gives solid surfaces rather than 64 points, and dense images also mark the voxel of every pixel. Unobserved space follows one rule:
-- space outside the image and along pixels without a reading is free;
-- space behind observed surfaces is free or solid as `Occlusion` says (`Occlusion::Occupied` is the safe choice for a single view that does not see the robot).
+A `DepthImage` is one frame: z distances in meters row by row (zero, negative or non-finite where a pixel has no reading), its width, pinhole `Intrinsics`, and the camera's pose (OpenCV axes: x right, y down, z forward). `from_depth` classifies each voxel by projecting its centre into the image, so an 8×8 time-of-flight array gives solid surfaces rather than 64 points. Dense images also mark the voxel of every pixel. Unobserved space is:
+- free outside the image and along pixels without a reading;
+- free or solid behind observed surfaces, as `Occlusion` says (`Occlusion::Occupied` is the safe choice for a single view that does not see the robot).
 
 ### Masking the robot
 
-A camera that sees the arm would make it an obstacle to itself. `image.robot_mask(&robot, &q, padding)` says where the robot is in the image at configuration `q`, its collision spheres grown by `padding`. Passed to `from_depth` or `OccupancyMap::integrate`:
+A camera that sees the arm would make it an obstacle to itself. `image.robot_mask(&robot, &q, padding)` says where the robot is in the image at configuration `q`, its collision spheres grown by `padding`. With the mask passed to `from_depth` or `OccupancyMap::integrate`:
 - readings on the robot are not obstacles, and anything between the camera and the arm stays one;
 - the space in front of the arm and the space it fills are free, even with `Occlusion::Occupied`: nothing else can be where the robot is;
-- the space only the arm hides, its shadow, is solid under `Occlusion::Occupied` and free under `Occlusion::OccupiedExceptRobotShadow`, which keeps what other surfaces hide solid. No camera sees behind the arm, so under `Occupied` its shadow walls in the space it reaches through next: in a test with three cameras fused into a map, IK found none of 24 targets. What the shadow holds is unknown either way; `OccupiedExceptRobotShadow` trades that for being able to move. In maps, a voxel only the robot has hidden stays shadow until an image observes it.
+- the space only the arm hides (its shadow) is solid under `Occlusion::Occupied` and free under `Occlusion::OccupiedExceptRobotShadow`, which keeps what other surfaces hide solid. No camera sees behind the arm, so under `Occupied` its shadow walls in the space the arm reaches through next: in a test with three cameras fused into a map, IK found none of 24 targets. What the shadow holds is unknown either way; `OccupiedExceptRobotShadow` accepts that so the arm can move. In maps, a voxel only the robot has hidden stays shadow until an image observes it.
 
-Grids from depth images grow toward collision by about three voxels, so pad by more than that (4 cm for 1 cm voxels); otherwise the robot's surface touches the space it hides.
+Grids from depth images grow toward collision by about three voxels, so set the mask's `padding` above that (4 cm for 1 cm voxels); otherwise the robot's surface touches the space it hides.
 
 ## Fused maps
 
-`OccupancyMap::new(lo, hi, voxel)` is a fixed grid in the world frame that fuses frames as OctoMap does: each voxel holds the log-odds that it is occupied; a hit adds 0.85 and a miss subtracts 0.4, clamped to [−2, 3.5]. Something seen once and then seen through three times is free again. Voxels behind readings, outside the image or beyond the map are not updated.
+`OccupancyMap::new(lo, hi, voxel)` is a fixed grid in the world frame that fuses frames as OctoMap does. Each voxel holds the log-odds that it is occupied: a hit adds 0.85 and a miss subtracts 0.4, clamped to [−2, 3.5]. Something seen once and then seen through three times is free again. Voxels behind readings, outside the image or beyond the map are not updated.
 
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
@@ -85,7 +83,7 @@ fn frames() -> Vec<Vec<f32>> {
 
 ## Building grids on the GPU
 
-Point clouds, depth images and maps become grids on the device they are given. On a GPU, every step after the host computes a depth image's bounds runs in compute kernels: classifying voxels against the image, marking the voxels that hold readings, a map's log-odds update, the distance transform, and finishing each value as a half float. The CPU device runs the same steps on its threads.
+Point clouds, depth images and maps become grids on the device they are given. On a GPU, everything after the host computes a depth image's bounds runs in compute kernels; the CPU device runs the same steps on its threads.
 
 - **The distance transform is exact on both devices**: Felzenszwalb and Huttenlocher's separable transform in integers, so GPUs and CPUs build identical grids from the same occupancy.
 - **Classification projects voxel centres in floating point**, so a voxel within rounding of a pixel's edge may land either way: 2 of 600,000 voxels on Metal, 51 on Mesa's RADV, in a 640×480 image with the arm masked out.
