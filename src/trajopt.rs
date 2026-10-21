@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use crate::error::{Result, ensure_input};
 
 use crate::device::{CollisionWeights, Device, Worlds};
-use crate::edges::{self, EdgeQuery, Keep, Optimize, Search};
+use crate::edges::{self, Deferred, EdgeQuery, Keep, Optimize, Search};
 use crate::rng::Rng;
 use crate::robot::Robot;
 use crate::rrt::{Ahead, Connect, RrtOptions, RrtProblem, Sampling, distance};
@@ -189,11 +189,17 @@ pub fn plan(device: &Device, worlds: &Worlds, problems: &[PlanProblem], o: &Plan
         valid: vec![false; problems.len() * seeds],
         length: vec![f32::INFINITY; problems.len() * seeds],
     };
-    let mut plannings: Vec<Planning> = problems.iter().map(|p| Planning::new(robot, p, o)).collect();
+    let mut plannings: Vec<_> = problems
+        .iter()
+        .map(|p| {
+            let ahead = Arc::<Ahead>::default();
+            Deferred::new(Some(ahead.clone()), move || Planning::new(robot, p, o, ahead))
+        })
+        .collect();
     let mut running: Vec<&mut dyn Search> = plannings.iter_mut().map(|p| p as &mut dyn Search).collect();
     device.search(worlds, &mut running, deadline)?;
     let mut searched = Vec::with_capacity(problems.len());
-    for (pi, planning) in plannings.into_iter().enumerate() {
+    for (pi, planning) in plannings.into_iter().map(Deferred::into_inner).enumerate() {
         if let Some((spline, length)) = &planning.chosen {
             let item = pi * seeds;
             result.paths.path_mut(item).copy_from_slice(spline);
@@ -244,8 +250,7 @@ enum Phase<'r> {
 }
 
 impl<'r> Planning<'r> {
-    fn new(robot: &'r Robot, problem: &'r PlanProblem, o: &'r PlanOptions) -> Self {
-        let ahead = Arc::default();
+    fn new(robot: &'r Robot, problem: &'r PlanProblem, o: &'r PlanOptions, ahead: Arc<Ahead>) -> Self {
         let phase = searching(robot, problem, o, Sampling::NearLine, &ahead);
         Self { robot, problem, o, phase, chosen: None, start: None, near_line: false, ahead }
     }

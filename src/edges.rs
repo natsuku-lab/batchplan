@@ -101,6 +101,52 @@ pub(crate) trait Search: Send {
     }
 }
 
+/// A search built by the thread that runs it, at its first request. Searches grow memory as they
+/// run (trees, paths, buffers); built on the calling thread, that memory belongs to the caller's
+/// allocator arena, and every thread of a batch growing or freeing it waits for that arena's lock.
+/// With glibc's malloc, 32 threads planned a batch of easy reaches six times slower than this way.
+/// `help` is given up front, since the driver asks for it before any search runs.
+pub(crate) struct Deferred<S, F> {
+    build: Option<F>,
+    search: Option<S>,
+    help: Option<Arc<Ahead>>,
+}
+
+impl<S: Search, F: FnOnce() -> S + Send> Deferred<S, F> {
+    pub(crate) fn new(help: Option<Arc<Ahead>>, build: F) -> Self {
+        Self { build: Some(build), search: None, help }
+    }
+
+    /// The search, built here if no thread ran it (its deadline passed first).
+    pub(crate) fn into_inner(mut self) -> S {
+        self.built();
+        self.search.expect("built above")
+    }
+
+    fn built(&mut self) -> &mut S {
+        let build = &mut self.build;
+        self.search.get_or_insert_with(|| build.take().expect("a search is built once")())
+    }
+}
+
+impl<S: Search, F: FnOnce() -> S + Send> Search for Deferred<S, F> {
+    fn request(&mut self, buffer: &mut Vec<f32>) -> Option<EdgeQuery> {
+        self.built().request(buffer)
+    }
+
+    fn answer(&mut self, answer: usize) {
+        self.built().answer(answer);
+    }
+
+    fn optimize(&mut self) -> Option<Optimize<'_>> {
+        self.built().optimize()
+    }
+
+    fn help(&self) -> Option<Arc<Ahead>> {
+        self.help.clone()
+    }
+}
+
 /// A path's B-spline control points to improve with `options.iterations` steps of trajectory
 /// optimization in `world`.
 pub(crate) struct Optimize<'a> {

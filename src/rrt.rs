@@ -23,7 +23,7 @@ use std::time::Instant;
 use fearless_simd::{Level, Simd, dispatch, f32x8, prelude::*};
 
 use crate::device::{Device, Worlds};
-use crate::edges::{self, EdgeQuery, Keep, Search, Wanted};
+use crate::edges::{self, Deferred, EdgeQuery, Keep, Search, Wanted};
 use crate::error::{Result, ensure_input};
 use crate::lanes::LANES;
 use crate::robot::Robot;
@@ -153,11 +153,16 @@ pub(crate) fn connect_until(
             "problem {i}: held joints must be joints of the robot, with the start's values in every goal"
         );
     }
-    let mut searches: Vec<Connect> =
-        problems.iter().map(|p| Connect::new(robot, p, o, Sampling::NearLine, Arc::default())).collect();
+    let mut searches: Vec<_> = problems
+        .iter()
+        .map(|p| {
+            let ahead = Arc::<Ahead>::default();
+            Deferred::new(Some(ahead.clone()), move || Connect::new(robot, p, o, Sampling::NearLine, ahead))
+        })
+        .collect();
     let mut running: Vec<&mut dyn Search> = searches.iter_mut().map(|s| s as &mut dyn Search).collect();
     device.search(worlds, &mut running, deadline)?;
-    Ok(RrtResult { problems: problems.to_vec(), paths: searches.into_iter().map(|s| s.path).collect() })
+    Ok(RrtResult { problems: problems.to_vec(), paths: searches.into_iter().map(|s| s.into_inner().path).collect() })
 }
 
 /// Nodes with parents, and each node's dynamic-domain radius. Coordinates are stored per joint

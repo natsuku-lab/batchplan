@@ -10,10 +10,10 @@ batchplan is a Rust library for batched, collision-aware robot motion generation
 
 ```bash
 cargo build --release --all-targets [--features lerobot] [--no-default-features]   # without `gpu`: CPU only, no wgpu
-BATCHPLAN_REQUIRE_GPU=1 cargo test --release                    # 140 tests, guides' code included; without the env var, GPU tests skip silently when no adapter exists
+BATCHPLAN_REQUIRE_GPU=1 cargo test --release                    # 141 tests, guides' code included; without the env var, GPU tests skip silently when no adapter exists
 BATCHPLAN_REQUIRE_GPU=1 cargo test --release --features lerobot # + 6 export tests and the README's and training-data guide's code
 BATCHPLAN_REQUIRE_GPU=1 cargo test --release --features usd     # + 7 OpenUSD tests
-cargo test --release --test gpu trajopt_directions_match_cpu_element_wise   # one test (test files: cpu, gpu, device, budget, export, pick_place, robot, hands, trajectory, mjcf, usd, sdf, meshes, rrt, attach, threads)
+cargo test --release --test gpu trajopt_directions_match_cpu_element_wise   # one test (test files: cpu, gpu, device, budget, export, pick_place, robot, hands, trajectory, mjcf, usd, sdf, meshes, rrt, attach, threads, allocations)
 cargo fmt --check                                               # rustfmt.toml: max_width 120
 cargo clippy --release --all-targets [--features lerobot,usd | --no-default-features]   # zero warnings everywhere; CI denies them (lints in Cargo.toml)
 cargo build --release --lib --target aarch64-unknown-linux-gnu --no-default-features     # the CPU-only robot build CI checks
@@ -145,6 +145,7 @@ These decisions are settled. Keep to them unless the user decides otherwise.
 
 **Searches.** `edges.rs`: a `Search` (RRT-Connect, simplification, planning) asks for `EdgeQuery`s and takes answers.
 - `request(buffer)` writes a query's edges into the thread's buffer (`edges::reuse`), which the driver hands back after the answer, and searches keep their working configurations as fields. A search allocates nothing per query, since glibc's allocator serializes small allocations across a batch's threads.
+- Batched calls build each search on the thread that runs it (`edges::Deferred`, in `plan`, `rrt::connect` and `shortcut::shortcut`). Built on the calling thread, the memory a search grows belongs to the caller's malloc arena, and every thread of a batch waits for that arena's lock: 32 threads planned easy reaches slower than 4. `tests/allocations.rs` counts the calling thread's allocations per problem.
 - Answers are how many edges from the first are free (`Wanted::Prefix`), the first free one (`FirstValid`), or how many configurations from the first are free, in groups of `LANES` (`wanted: None`).
 - `Device::search` → `Backend::search` runs every search to its end on CPU threads (`edges::run`, which also runs the optimizations a search asks for), answering at once with `lanes.rs`: each edge's `LANES * n` states `spacing` apart, in rake order (spread over the edge, each pass stepping back), stopping at the first collision. `Keep` adds a clearance per lane that ramps to zero toward a path's ends (an edge beyond the ramp, `Keep::beyond_ramp`, takes the full clearance without a distance per state). The GPU backend keeps the CPU form of its worlds (`GpuWorlds::cpu`) and a `Lanes` for this, so searches give the same answers on both devices.
 - On either device (the GPU backend also plans through `cpu::run_searches`), each pool thread takes the next search from a shared counter (`ThreadPool::broadcast`), then helps the searches still running that have checked `ahead::JOIN_AFTER` samples. While none has and some still sample, it sleeps (`cpu::WAIT`, after the pool's other work). `Search::help` hands `cpu::run_searches` an `rrt::Ahead`, and `rrt/ahead.rs`'s helpers check the extensions and connections RRT-Connect's next samples will ask about, on trees replayed from its log. A search takes an answer only for a query equal to its own bit for bit, so results stay the same.

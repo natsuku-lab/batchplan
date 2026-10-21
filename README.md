@@ -46,8 +46,6 @@ batchplan = "0.1"
 
 batchplan builds on stable Rust 1.90 or later (1.96 with `usd`), with no build flags to set: its collision checks use the widest SIMD instructions the CPU has, chosen when the program runs (SSE2 up to AVX-512 on x86-64, NEON on ARM).
 
-On Linux, a faster allocator helps: glibc's slows down when many threads allocate at once, and [mimalloc](https://crates.io/crates/mimalloc) as your program's global allocator plans about 10% more problems per second on 32 threads.
-
 ## Quick start
 
 The paths below point at test robots in this repository's `assets/`; use your own robot's file instead.
@@ -182,7 +180,7 @@ AMD Ryzen AI Max+ 395 CPU, 32 threads. batchplan plans on the spheres it ships w
 
 | Planner | Solved, on the meshes | Path length¹ | Time per problem (median) | Batched |
 |---|---|---|---|---|
-| **batchplan** | **93.1%** | **3.23 rad** | **0.13 ms** | **21,796 /s** |
+| **batchplan** | **93.1%** | **3.23 rad** | **0.13 ms** | **31,196 /s** |
 | [RoboPlan](https://github.com/open-planning/roboplan) 0.7 | 73.8% | 3.78 rad | 10.3 ms | 174 /s |
 | [MoveIt 2](https://moveit.ai) Jazzy (OMPL, FCL) | 63.1% | 3.80 rad | 59.4 ms | 82 /s |
 
@@ -194,13 +192,13 @@ Planning runs on CPU threads on either device; IK and trajectory optimization al
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU (14 cores) | Radeon 8060S GPU | Ryzen AI Max+ 395 CPU (16 cores) |
 |---|---|---|---|---|
-| 1 | 129 | **1,658** | 141 | **1,293** |
-| 8 | 949 | **3,850** | 1,058 | **4,221** |
-| 64 | 2,771 | **4,236** | 3,802 | **5,638** |
-| 512 | **8,883** | 4,705 | **13,922** | 5,762 |
-| 4,096 | **10,815** | 4,713 | **16,424** | 5,773 |
+| 1 | 129 | **1,658** | 139 | **1,315** |
+| 8 | 949 | **3,850** | 1,036 | **4,183** |
+| 64 | 2,771 | **4,236** | 3,895 | **5,834** |
+| 512 | **8,883** | 4,705 | **16,661** | 6,148 |
+| 4,096 | **10,815** | 4,713 | **20,996** | 6,214 |
 
-A GPU call costs about 10 ms, so one problem at a time runs 9–13 times faster on the CPU; from a few hundred problems per call the GPU overtakes it, and at 4,096 it solves 2.3–2.8 times as many.
+A GPU call costs about 10 ms, so one problem at a time runs 9–13 times faster on the CPU; from a few hundred problems per call the GPU overtakes it, and at 4,096 it solves 2.3–3.4 times as many.
 
 ### When another library fits better
 

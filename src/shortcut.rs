@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::device::{Device, Worlds};
-use crate::edges::{self, EdgeQuery, Keep, Search, Wanted};
+use crate::edges::{self, Deferred, EdgeQuery, Keep, Search, Wanted};
 use crate::error::{Result, ensure_input};
 use crate::rrt::distance;
 
@@ -83,13 +83,19 @@ pub(crate) fn shortcut_until(
     ensure_input!(world.len() == paths.len(), "{} worlds for {} paths", world.len(), paths.len());
     ensure_input!(paths.iter().all(|p| !p.is_empty() && p.len() % n == 0), "paths must hold whole waypoints");
     ensure_input!(world.iter().all(|&w| (w as usize) < worlds.len()), "a path references a world that was not given");
-    let mut searches: Vec<Simplify> =
-        paths.iter_mut().zip(world).map(|(path, &world)| Simplify::new(world, n, std::mem::take(path), o)).collect();
+    let mut searches: Vec<_> = paths
+        .iter_mut()
+        .zip(world)
+        .map(|(path, &world)| {
+            let path = std::mem::take(path);
+            Deferred::new(None, move || Simplify::new(world, n, path, o))
+        })
+        .collect();
     let mut running: Vec<&mut dyn Search> = searches.iter_mut().map(|s| s as &mut dyn Search).collect();
     device.search(worlds, &mut running, deadline)?;
     let mut shortcut = Vec::with_capacity(paths.len());
     for (path, s) in paths.iter_mut().zip(searches) {
-        let (simplified, short) = s.into_paths();
+        let (simplified, short) = s.into_inner().into_paths();
         *path = simplified;
         shortcut.push(short);
     }
