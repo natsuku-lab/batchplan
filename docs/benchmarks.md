@@ -162,8 +162,8 @@ It checks success as above, on cuRobo's spheres, which ship with batchplan. Timi
 |---|---|---|---|---|---|---|---|---|
 | M4 Pro CPU, 14 threads | 98.1% | 98.0% | 97.0% | 89.8% | 20,766 | 0.2 / 1.9 ms | 2,504 | **1 / 3 ms** |
 | M4 Pro GPU | 98.1% | 98.0% | 97.0% | 90.0% | 19,313 | 0.2 / 2.0 ms | 2,152 | 10 / 24 ms |
-| Ryzen AI Max+ 395, 32 threads | 98.1% | 98.0% | 97.0% | 89.8% | **23,305** | **0.1 / 1.7 ms** | **2,894** | **1 / 3 ms** |
-| Radeon 8060S | 98.1% | 98.0% | 97.0% | 89.7% | 22,134 | 0.2 / 1.7 ms | 1,885 | 11 / 37 ms |
+| Ryzen AI Max+ 395, 32 threads | 98.1% | 98.0% | 97.0% | 89.8% | **22,733** | **0.1 / 1.7 ms** | **2,885** | **1 / 3 ms** |
+| Radeon 8060S | 98.1% | 98.0% | 97.0% | 89.7% | 21,985 | 0.2 / 1.7 ms | 1,861 | 11 / 37 ms |
 
 Searching near the straight line and straightening cost 7% of batched throughput on the Ryzen and 14% on the M4 Pro. Idle threads now help the longest searches along ([below](#how-the-speed-came)), which more than pays it back. In three alternating rounds against the version before helpers, the Ryzen's batches plan 21,796 against 18,116 problems/s (22,806 against 17,869 on VAMP's spheres), with every path the same. On the M4 Pro they plan 19,898 against 15,779 in three rotating rounds; in six rotating rounds of 15 batches of each set, all the sets' batches take 122.1 ms against 154.4. Single problems plan as fast as before at the median (0.126 against 0.126 ms on the Ryzen, 0.172 against 0.173 on the M4 Pro) and within 3% at the 98th percentile (1.39 against 1.39 ms on the Ryzen, 1.48 against 1.46 on VAMP's spheres, 1.69 against 1.74 on the M4 Pro). The slowest plans in 21.2 ms against 30.9 on the Ryzen, and 26 against 46 on the M4 Pro.
 
@@ -184,7 +184,7 @@ Every device solves the same 484 of 512 targets and plans all 484.
 
 | Machine | IK seeds/s, GPU / CPU | Planning, problems/s | End to end, GPU | End to end, CPU |
 |---|---|---|---|---|
-| Ryzen AI Max+ 395 and Radeon 8060S | 581,000–616,000 / 181,000–212,000 | 90,000–135,000 | **14,539–15,280 problems/s** | 5,098–5,973 problems/s (32 threads) |
+| Ryzen AI Max+ 395 and Radeon 8060S | 599,000–622,000 / 195,000–210,000 | 57,000–76,000 | **14,121–14,542 problems/s** | 5,258–5,671 problems/s (32 threads) |
 | M4 Pro | 313,000–319,000 / 151,000–168,000 | 152,000–185,000 | **8,735–8,872 problems/s** | 4,359–4,825 problems/s (14 threads) |
 
 Ranges cover runs after a warm-up run. The first run after the GPU idles is up to 30% slower, and the M4 Pro's GPU, which also drives its display, varies with what is on screen.
@@ -193,25 +193,25 @@ By batch size, end to end, in solved problems per second (medians of three runs)
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU | Radeon 8060S | Ryzen CPU |
 |---|---|---|---|---|
-| 1 | 129 | **1,658** | 125 | **1,345** |
-| 8 | 949 | **3,850** | 930 | **4,879** |
-| 64 | 2,771 | **4,236** | 3,614 | **5,864** |
-| 512 | **8,883** | 4,705 | **15,119** | 5,784 |
-| 4,096 | **10,815** | 4,713 | **18,886** | 6,041 |
+| 1 | 129 | **1,658** | 141 | **1,293** |
+| 8 | 949 | **3,850** | 1,058 | **4,221** |
+| 64 | 2,771 | **4,236** | 3,802 | **5,638** |
+| 512 | **8,883** | 4,705 | **13,922** | 5,762 |
+| 4,096 | **10,815** | 4,713 | **16,424** | 5,773 |
 
-A GPU call costs about 10 ms, so one problem at a time runs 11–13 times faster on the CPU. The CPU fills its cores by 64 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.3 (M4 Pro) to 3.1 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 2 to 3 times.
+A GPU call costs about 10 ms, so one problem at a time runs 9–13 times faster on the CPU. The CPU fills its cores by 64 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.3 (M4 Pro) to 2.8 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 2 to 3 times.
 
 ## Bimanual handovers
 
 `examples/handover/` generates the [handover episodes](training-data.md#handovers) for two reBot B601-DM arms 44 cm apart at a table. In each task one arm picks up a block lying in front of it and hands it over between the arms, and the other arm sets it down in front of itself. The blocks are 24–28 cm long, in four sizes; the block, meeting and place poses vary in position and yaw, and 0–2 small boxes stand elsewhere on the table. Half the tasks go left to right. Every step is batched over all the tasks: six IK batches (the meeting pose solves both hands at once), seven planned segments, two of them moving both arms, then timing and the episodes.
 
-| 512 tasks, M4 Pro | GPU | CPU (14 threads) |
-|---|---|---|
-| Handovers | 504 of 512 | 504 of 512 |
-| Time | 1.35–1.37 s | 1.43–1.46 s |
-| Episodes/s | 368–373 | 344–353 |
+| 512 tasks | M4 Pro GPU | M4 Pro CPU (14 threads) | Radeon 8060S | Ryzen CPU (32 threads) |
+|---|---|---|---|---|
+| Handovers | 504 of 512 | 504 of 512 | 504 of 512 | 504 of 512 |
+| Time | 1.35–1.37 s | 1.43–1.46 s | 1.29–1.32 s | 1.23–1.25 s |
+| Episodes/s | 368–373 | 344–353 | 380–391 | 404–411 |
 
-The 504 episodes hold 104 minutes of motion at 30 fps, 12.4 s each at the median. Times are three runs each, with other applications open; the previous version, alternated with these, took 1.35–1.39 s on the GPU and 1.42–1.49 s on the CPU. Four of the IK batches are seeded with the configuration before them (each grasp with the one just above it), so they keep 4 of the 32 seeds: that seed nearly always converges, and fewer seeds took the GPU run from 2.17 to 1.56 s with the same 504 handovers. The blocks come in four sizes because each size needs its own carried spheres and so plans in batches of its own: sizes drawn from a continuous range took 3.67 s.
+The 504 episodes hold 104 minutes of motion at 30 fps, 12.4 s each at the median. Times are three runs each after a warm-up, on the Ryzen and Radeon at version 0.1.0, and on the M4 Pro with other applications open; the previous version, alternated with these, took 1.35–1.39 s on the GPU and 1.42–1.49 s on the CPU. Four of the IK batches are seeded with the configuration before them (each grasp with the one just above it), so they keep 4 of the 32 seeds: that seed nearly always converges, and fewer seeds took the GPU run from 2.17 to 1.56 s with the same 504 handovers. The blocks come in four sizes because each size needs its own carried spheres and so plans in batches of its own: sizes drawn from a continuous range took 3.67 s.
 
 Rendering the episodes' camera videos in MuJoCo (`scripts/replay_mujoco.py`, three 640×480 cameras) takes about 15 ms a frame on the same machine, 50 times longer than generating them.
 

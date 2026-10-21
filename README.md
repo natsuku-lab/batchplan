@@ -23,7 +23,7 @@
 
 **batchplan is a Rust library for collision-aware motion planning, in batches.** One call plans thousands of motions, each in its own scene: IK, a collision-free path, and a trajectory timed within the robot's limits. A typical problem plans in 0.17 ms on one CPU core, faster than [VAMP](#how-it-compares), with paths that keep clear of the real geometry more often than any planner we compared. IK, trajectory optimization and distance grids run on any GPU that [wgpu](https://wgpu.rs) supports (Vulkan, Metal or DX12), with no CUDA, no ROCm and no ROS, or on the CPU with the same results.
 
-It is built for robot learning at scale: planned motions become [LeRobot](https://github.com/huggingface/lerobot) datasets that train as they are. Two reBot arms hand blocks to each other in 512 scenes in 1.6 s on a laptop's GPU, or 1.9 s on its CPU.
+It is built for robot learning at scale: planned motions become [LeRobot](https://github.com/huggingface/lerobot) datasets that train as they are. Two reBot arms hand blocks to each other in 512 scenes in 1.2–1.5 s on an M4 Pro or a Ryzen AI Max+ 395, on the GPU or the CPU.
 
 - **Plan:** batched IK; RRT-Connect, shortcutting and smoothing on SIMD collision checks; smooth B-spline paths, optionally optimized with L-BFGS; time-optimal timing within velocity, acceleration and jerk limits; replanning from a moving state; and controlled stops along the path.
 - **Robots:** load from URDF, MJCF or OpenUSD, including mimic joints, closed loops, continuous joints and ball or floating joints, or assemble several, such as two arms. Collision spheres are fitted automatically. IK takes a target for each hand at once, and plans can hold one arm still while another moves.
@@ -194,13 +194,13 @@ Planning runs on CPU threads on either device; IK and trajectory optimization al
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU (14 cores) | Radeon 8060S GPU | Ryzen AI Max+ 395 CPU (16 cores) |
 |---|---|---|---|---|
-| 1 | 129 | **1,658** | 125 | **1,345** |
-| 8 | 949 | **3,850** | 930 | **4,879** |
-| 64 | 2,771 | **4,236** | 3,614 | **5,864** |
-| 512 | **8,883** | 4,705 | **15,119** | 5,784 |
-| 4,096 | **10,815** | 4,713 | **18,886** | 6,041 |
+| 1 | 129 | **1,658** | 141 | **1,293** |
+| 8 | 949 | **3,850** | 1,058 | **4,221** |
+| 64 | 2,771 | **4,236** | 3,802 | **5,638** |
+| 512 | **8,883** | 4,705 | **13,922** | 5,762 |
+| 4,096 | **10,815** | 4,713 | **16,424** | 5,773 |
 
-A GPU call costs about 10 ms, so one problem at a time runs 11–13 times faster on the CPU; from a few hundred problems per call the GPU overtakes it, and at 4,096 it solves 2.3–3.1 times as many.
+A GPU call costs about 10 ms, so one problem at a time runs 9–13 times faster on the CPU; from a few hundred problems per call the GPU overtakes it, and at 4,096 it solves 2.3–2.8 times as many.
 
 ### When another library fits better
 
