@@ -1,6 +1,6 @@
 # Planning
 
-Planning in batchplan is three steps, each a batched call on a [`Device`](devices.md):
+Planning in batchplan is three steps. IK and planning are batched calls on a [`Device`](devices.md); timing runs on each path:
 
 1. **IK** (`solve_ik`) turns target poses into joint configurations.
 2. **Planning** (`plan`) finds a collision-free path from a start to a goal configuration (the straight line, bent if an obstacle only grazes it, else RRT-Connect), then shortens and smooths it into a B-spline. Trajectory optimization can polish it further.
@@ -54,7 +54,7 @@ fn main() -> Result<(), Error> {
 
 1. **The straight line** to each of the goal's equivalents (below) is tried first.
 2. **A bent line.** If every straight line collides, the one to the nearest goal is bent: the stretch from where it first collides to where it last does moves 0.05 rad aside, across the line along each joint's axis in turn, both ways, then 0.1, 0.2 and 0.4 rad. The first bend whose edges are free is the path. So a line that an obstacle only grazes keeps its route instead of taking the detour a search would find. Bending costs no measurable time.
-3. **RRT-Connect** grows a tree from the start and one from the goals, in turn, toward Halton samples. The first samples lie in a tube around the straight line to the nearest goal: 0.4 rad across it (along each axis across it) and past its ends, doubling every 64 samples until it spans the joint ranges. So the route found stays near the straight line where such a route exists, as cuRobo's roadmap does by sampling an ellipsoid around it; samples from the whole space find detours that shortcuts cannot undo. Extensions step at most `rrt.range` (1 rad), and dynamic domains skip samples far from any node that recently failed. A search gives up after `rrt.max_iterations` (10,000) samples from the joint ranges; the tube's samples come on top.
+3. **RRT-Connect** grows a tree from the start and one from the goals, in turn, toward Halton samples. The first samples lie in a tube around the straight line to the nearest goal: 0.4 rad across it (along each axis across it) and past its ends, doubling every 64 samples until it spans the joint ranges. So the route found stays near the straight line where such a route exists, as cuRobo's roadmap does by sampling an ellipsoid around it; samples from the whole space find detours that shortcuts cannot undo. Extensions step at most `rrt.range` (1 rad), and dynamic domains skip samples far from any node that recently failed. A search gives up after up to 2,000 samples from the joint ranges keeping its clearance and `rrt.max_iterations` (10,000) more without it (see Clearance, below); the tube's samples come on top.
 4. **Shortcutting and smoothing** run for up to `shortcut.passes` passes (3). Each pass replaces waypoints with the longest free edge, splits every edge, and moves each waypoint a quarter of the way toward its neighbours where both new edges stay free. With `shortcut.straighten` (on), after the first pass's shortcuts each joint in turn is straightened where that shortens the path by at least `shortcut.min_change`: it changes at one rate along the whole path while the other joints keep theirs, as in HPP's partial shortcut. That removes a joint's swing out and back (a wrist's, say), which shortcuts between whole configurations keep.
 5. **A B-spline** follows the path, with `control_points` control points (24). The first and last three are pinned to the start and goal, so it starts and ends at rest. The others first spread along the smoothed path by arc length, so the curve is smooth and cuts the path's corners. It is checked at samples no farther apart than `shortcut.resolution`, as edges are. Where it fails, the waypoint nearest the failure is pinned: three control points sit on it, so the curve passes through it, stopping there. After up to six pins, the fit starts over on the shortcut path; with every waypoint pinned, the curve runs exactly along the checked path. The first spline that validates is the result, once its stops are eased (as in OpenRAVE's smoother): each stop's three control points spread into the widest blend around the corner that keeps the curve valid. Blends are the smaller of the free control points' spacing and half the shorter edge at the corner, then a quarter and a sixteenth of that; a corner no blend clears keeps its stop. If no spline validates, ten steps of trajectory optimization push the first one off the obstacles, and the result is checked like any other spline.
 
@@ -68,12 +68,12 @@ fn main() -> Result<(), Error> {
 
 `PlanOptions::seeds` (0 by default) adds trajectory optimization of that many seeds per problem, batched on the device:
 - **Seeds.** The first starts from the searched spline, the second from the straight line to the goal, as cuRobo's first attempt does. Further seeds run straight to the goal's equivalents, or bend through random via points. Problems searched to within 2% of the straight line are not optimized, since no seed could be much shorter; their seeds stay invalid.
-- **Cost.** Length and smoothness, as squared differences of the control points (weighted `w_vel`, 10) and squared second differences (`w_acc`, 5), plus a collision cost for the world and for self-collision, sampled along the curve (`samples_per_span` points per span) and active within `collision.margin` (1.2 cm) of an obstacle.
+- **Cost.** Length and smoothness, as squared differences of the control points (weighted `w_vel`, 10) and squared second differences (`w_acc`, 5), plus a collision cost for the world and for self-collision, sampled along the curve (`samples_per_span` points per span) and active within `collision.margin` (1.2 cm) of an obstacle and `collision.self_margin` (1 cm) between links.
 - **Optimizer.** L-BFGS (`iterations`, 100, remembering `history` steps). Each iteration prices four step sizes along the L-BFGS direction in one batched pass and keeps the cheapest.
 
 Repairing a stuck spline (above) uses the same optimizer with its own settings, whatever these options say: ten steps, smoothness weighted over length (`w_acc` 50, `w_vel` 2) and a 2 cm margin. These repair more splines than the length-favouring weights do.
 
-Optimized seeds are validated like the searched path, and `best` picks the shortest valid one of all. On the benchmark's box-only problems, two seeds give 3.137 rad paths at the median, against 3.243 without and cuRobo's 3.144 ([benchmarks](benchmarks.md#results)). Optimization costs milliseconds per problem (16 ms on 14 CPU threads; 734 problems/s in batches on an M4 Pro's GPU), against a fraction of a millisecond for the search.
+Optimized seeds are validated like the searched path, and `best` picks the shortest valid one of all. On the benchmark's box-only problems, two seeds give 3.137 rad paths at the median, against 3.243 without and cuRobo's 3.144 ([benchmarks](benchmarks.md#results)). Optimization costs milliseconds per problem (16.8 ms on 14 CPU threads; 769 problems/s in batches on an M4 Pro's GPU), against a fraction of a millisecond for the search.
 
 ### Goals a turn away
 
@@ -102,7 +102,7 @@ Either is slowed by `speed_scale` (1.0 is as fast as the limits allow). Limits c
 To replan mid-motion, give `PlanProblem::start_motion` the robot's current velocity and acceleration. The spline's first control points then continue that motion, and `Trajectory::moving(&robot, path, &start_motion)` times it from exactly that state, as fast as the limits allow.
 - `plan` only returns splines that can be timed this way.
 - The spline's first spans last as long as the robot needs to change its velocity (about |v| / a). Where it still cannot follow the motion, longer spans are tried, and then trajectory optimization smooths the spline until it can.
-- When reaches are replanned to the same goal from partway through, plans succeed every time with joints moving at up to 1.5 rad/s, and four times in five at the Panda's full speed (2 rad/s). In the rest, momentum carries a joint out of its range or into the scene, or no timing keeps the limits.
+- When reaches are replanned to the same goal from partway through, plans succeed every time with every joint below 1.5 rad/s, and three times in four with one faster, near the Panda's full speed. In the rest, momentum carries a joint out of its range or into the scene, or no timing keeps the limits.
 - A path that cannot brake in time is refused with `Error::Unsafe`.
 - `trajectory.check_from(&robot, &state)` verifies that a trajectory starts at a given state.
 
@@ -132,7 +132,7 @@ fn main() -> Result<(), Error> {
 | Option | Default | What it trades |
 |---|---|---|
 | `IkOptions::seeds` | 32 | More seeds find more and better-cleared solutions, at proportional cost. |
-| `PlanOptions::rrt.max_iterations` | 10,000 | Samples before a search gives up: more solve rarer problems, and unsolvable ones take longer to give up. |
+| `PlanOptions::rrt.max_iterations` | 10,000 | Samples a search draws without its clearance before it gives up, after up to 2,000 with it: more solve rarer problems, and unsolvable ones take longer to give up. |
 | `PlanOptions::rrt.clearance`, `shortcut.clearance` | 1.5 cm, 1 cm | Distance searches and shortcuts keep from obstacles, away from the path's ends. More in shortcuts keeps paths clear of geometry the spheres miss, but makes them longer. |
 | `PlanOptions::shortcut.passes` | 3 | Shortcut and smoothing passes: more give shorter paths, at some time. |
 | `PlanOptions::shortcut.straighten` | on | Straighten each joint along the path: about 1% shorter paths on the Panda benchmark and 13–18% less joint travel on pick-and-place carries, for about 3% of batched throughput. |

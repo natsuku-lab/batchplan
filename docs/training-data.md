@@ -19,7 +19,7 @@ Every episode plans as [`plan`](planning.md) does, straightening each joint (`Sh
 
 `datagen::pick_and_place(&device, &worlds, &tasks, &PickPlaceOptions)` turns tasks (a box in a world and the pose to set it down at) into episodes. Each chains segments planned in batches, all from rest to rest:
 
-1. **Approach** a pose 10 cm above the box from the default configuration, with the box an obstacle.
+1. **Approach** a pose 10 cm above the grasp, which is 2 cm below the box's top, from the default configuration, with the box an obstacle.
 2. **Descend** to a top-down grasp across the box's narrower side, with the box no longer an obstacle, since the fingers close around it. **Close** the gripper over half a second.
 3. **Lift** back up and **transfer** to above the place pose holding the box (`Robot::attach`, touching only the links fixed to the wrist).
 4. **Lower** it, **open** the gripper and **retreat**.
@@ -61,7 +61,7 @@ On a robot with several hands, `pick_and_place` uses the first and holds the joi
 
 ## Handovers
 
-`datagen::handover(&device, &worlds, &tasks, &PickPlaceOptions)` passes a box between the two hands of a two-arm robot (see [Robots](robots.md#several-arms-several-hands)). A `Handover` names the box, the hand that picks it up (`from`), the hand that sets it down (`to`), the pose where the hands meet, and the place pose. Each hand holds the box from above by one end of its longer side, the end nearer its own arm at the meeting pose. Every segment is planned in one batch over the tasks:
+`datagen::handover(&device, &worlds, &tasks, &PickPlaceOptions)` passes a box between the two hands of a two-arm robot (see [Robots](robots.md#several-arms-several-hands)). A `Handover` names the box, the hand that picks it up (`from`), the hand that sets it down (`to`), the pose where the hands meet, and the place pose. Each hand holds the box from above by one end of its longer side, the end nearer its own arm at the meeting pose. Every segment is batched over the tasks, one batch per box size and hand while a hand holds the box:
 
 1. **The giver picks the box up**: approach, descend, close, lift, while the taker waits with its joints held (`PlanProblem::hold`).
 2. **Both arms move at once**: the giver carries the box to the meeting pose while the taker comes above its end. One plan moves every joint, so they arrive together.
@@ -71,7 +71,7 @@ On a robot with several hands, `pick_and_place` uses the first and holds the joi
 
 `examples/handover/` runs this on two [reBot B601](https://github.com/Seeed-Projects/reBot-DevArm) arms facing a table, half the tasks passing left to right and half right to left. [Benchmarks](benchmarks.md#bimanual-handovers) gives its speed.
 
-The segments cover DexMimicGen's subtask kinds: sequential (one arm waits for the other), parallel (both move, each on its own errand) and coordinated (both must arrive together). IK solves both hands at once at the meeting pose. Every plan holds the box in the hand that has it, and both wrists may touch it. The episode records both grippers, where the box is at every sample, and a task such as "Pass the box from the left hand to the right hand and put it down."
+The segments cover DexMimicGen's subtask kinds: sequential (one arm waits for the other), parallel (both move, each on its own errand) and coordinated (both must arrive together). IK solves both hands at once at the meeting pose. Plans hold the box in the hand that has it, and both wrists may touch it; the final lowering plans without it, as pick-and-place's does. The episode records both grippers, where the box is at every sample, and a task such as "Pass the box from the left hand to the right hand and put it down."
 
 ```rust,no_run
 use batchplan::datagen::{Handover, PickPlaceOptions, handover};

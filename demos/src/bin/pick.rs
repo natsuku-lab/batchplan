@@ -1,6 +1,7 @@
 //! Pick-and-place episodes from batchplan, played back in Rerun.
 //!
-//! Each scene is a table with two posts and a box to move to the other side. One
+//! Each scene is a table with a box to move to the other side, and a wall, posts, an arch or a
+//! cluster of boxes standing between the two spots. One
 //! `datagen::pick_and_place` call plans every episode: IK for the grasp and the place pose, then
 //! approach, descend, close, lift, carry, lower, open and retreat, each segment planned for every
 //! scene in one batch and timed within the Panda's limits. The viewer shows every scene at once,

@@ -3,7 +3,7 @@
 A `Device` runs batched work: forward kinematics, collision costs and gradients, IK, trajectory optimization and grid building. There are two kinds, with one interface:
 
 - `Device::gpu(&robot)` runs WGSL compute kernels through [wgpu](https://wgpu.rs) on Vulkan, Metal or DX12.
-- `Device::cpu(&robot)` runs the same math on all CPU cores; `Device::cpu_threads(&robot, n)` on exactly `n` threads it owns.
+- `Device::cpu(&robot)` runs the same math on all CPU cores; `Device::cpu_threads(&robot, n)` on `n` threads it owns (0: one per core).
 
 The two produce the same results (the test suite compares them throughout), so code written for one runs on the other. To prefer the GPU and fall back to the CPU:
 
@@ -24,7 +24,7 @@ A device is bound to its robot. `device.with_robot(&other)` gives a device for a
 
 ## Which GPUs
 
-The kernels use only core features: 32-bit floats, and no subgroups, float atomics or extensions. Any adapter wgpu exposes through Vulkan, Metal or DX12 should work if it allows 12 storage buffers per shader stage. Desktop drivers allow far more; browser WebGPU and some embedded GPUs do not. `Device::gpu` skips adapters that fall short; if none qualifies, its error names each adapter and what it lacks. OpenGL adapters are not used. `Device::gpu_named(&robot, "radeon")` picks an adapter by name.
+The kernels use only core features: 32-bit floats, and no subgroups, float atomics or extensions. Any adapter wgpu exposes through Vulkan, Metal or DX12 should work if it allows 12 storage buffers per shader stage and 64-wide compute workgroups. Desktop drivers allow far more; browser WebGPU and some embedded GPUs do not. `Device::gpu` skips adapters that fall short; if none qualifies, its error names each adapter and what it lacks. OpenGL adapters are not used. `Device::gpu_named(&robot, "radeon")` picks an adapter by name.
 
 | Adapter | Status |
 |---|---|
@@ -46,7 +46,7 @@ See [Benchmarks](benchmarks.md).
 batchplan can run inside a robot's own controller process, next to a fixed-rate control loop.
 
 - **CPU-only builds.** `default-features = false` drops the `gpu` feature and wgpu with it (CI builds that for `aarch64-unknown-linux-gnu`). `Device::gpu` then returns an error.
-- **Threads you control.** `Device::cpu_threads(&robot, n)` starts `n` workers and runs every batch on them, never on rayon's global pool. Some work runs on the current rayon pool instead: loading a robot that needs sphere fitting, building mesh grids, the host's share of grid building, and timing `datagen`'s episodes. Call these inside your own pool's `install` to keep them there. `Robot::attach` fits its spheres on your pool if called inside one, otherwise on the calling thread alone.
+- **Threads you control.** `Device::cpu_threads(&robot, n)` starts `n` workers and runs every batch on them, never on rayon's global pool. Some work runs on the current rayon pool instead: loading a robot that needs sphere fitting, building mesh grids, the host's share of grid building, and timing `datagen`'s episodes. Call these inside your own pool's `install` to keep them there. `Robot::attach` covers boxes and spheres directly and fits other shapes on your pool if called inside one, otherwise on the calling thread alone.
 - **Time budgets.** `PlanOptions::time_budget` returns the valid paths found within the budget ([Planning](planning.md#time-budgets-and-determinism)). Searches check it before every edge check; optimization checks it between rounds (on a GPU, between submissions of several rounds).
 - **Allocation-free sampling.** `trajectory.at(t, &mut state)` writes position, velocity and acceleration without allocating.
 - **Typed errors.** Every public function returns `batchplan::Error`, whose kind a host can act on: `Input` (shapes, indices, options, geometry), `Load` (a robot or scene file, with its path), `Gpu`, `Threads`, `Unsafe` (a trajectory that breaks a limit) and `Write`.

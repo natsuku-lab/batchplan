@@ -28,7 +28,7 @@ pub enum SphereGeometry {
 
 #[derive(Clone, Copy, Debug)]
 pub struct SphereOptions {
-    /// Spheres for the whole robot (at most 128).
+    /// Spheres for the whole robot.
     pub budget: usize,
     /// How far spheres may reach beyond the geometry (meters) before the fit spends more of the
     /// budget. When the budget cannot reach it, the fit uses the smallest overhang it can.

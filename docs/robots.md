@@ -41,7 +41,7 @@ fn main() -> Result<(), Error> {
 - **Locked joints.** `RobotOptions::lock_joints` fixes joints at a value, such as a gripper's fingers.
 - **Per-joint limits.** `RobotOptions::joint_limits` replaces any joint's position, velocity, acceleration or jerk limit by name (`JointLimits`, each optional, as in MoveIt's `joint_limits.yaml`), mimic joints included.
 - **Slower limits.** `RobotOptions::velocity_scale`, `acceleration_scale` and `jerk_scale` (each in (0, 1], like MoveIt's scaling factors) scale every joint's limits when the robot loads. Planning, timing and checks keep to the scaled limits, so a robot slowed this way also replans mid-motion at its own pace. Scaling velocity by `s`, acceleration by `s²` and jerk by `s³` makes every motion `1/s` times as long.
-- **Size.** Robots have no fixed size limit; a 40-joint, 41-link, 130-sphere test robot runs on both devices.
+- **Size.** Robots have no fixed size limit; a 40-joint, 41-link test robot with more than 128 spheres runs on both devices.
 
 ## Several arms, several hands
 

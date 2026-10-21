@@ -1,13 +1,13 @@
 # Architecture
 
-This page is for contributors: how the code is organised and why. `CLAUDE.md` holds the same rules in more detail for coding agents.
+This page is for contributors: how the code is organised and why. `CLAUDE.md` holds the same rules in more detail, for people and coding agents alike.
 
 ## Design rules
 
 - **Batch-first.** Every call covers many items, and items reference worlds by index (`IkProblem::world`, `PlanProblem::world`, `item_world`), so one call spans many scenes.
 - **Worlds live on the device.** `Device::upload(&[World]) -> Worlds` prepares worlds once (GPU buffers, CPU rotation matrices); every algorithm takes `&Worlds`. A device checks that worlds were uploaded to it.
 - **One public handle, two hidden implementations.** `Device` is the only way to run batched work. The CPU and GPU implementations sit behind a crate-private `Backend` trait and are tested against each other through `Device`. `Device` validates every batch before either sees it.
-- **Algorithms are plain functions over shared types.** `ik`, `trajopt`, `rrt`, `timing`, `datagen` and the exporters take a `Device`, `Worlds` and the `types`. There are no planner plugins and no runtime configuration. Algorithm modules own seeding (one shared random generator), validation and selection, so both devices see bit-identical inputs.
+- **Algorithms are plain functions over shared types.** `ik`, `trajopt`, `rrt` and `datagen` take a `Device` and its worlds, `timing` and the exporters take the `Robot`, and all of them exchange the `types`. There are no planner plugins and no runtime configuration. Algorithm modules own seeding (one shared random generator), validation and selection, so both devices see bit-identical inputs.
 - **Results carry their problems.** `solved()` yields each problem with its solution; the world comes from the problem, never from its position in a list.
 - **Loaders stay thin.** URDF, MJCF and USD loaders only translate a file into one internal description. Kinematics, sphere fitting and self-collision analysis never see a format.
 - **Errors are typed at the surface.** Public functions return `batchplan::Error`; its kind is what a host matches on.
@@ -18,7 +18,7 @@ The GPU kernels (`src/kernels.wgsl`, plus the per-robot code `gpu.rs` generates)
 
 Every struct the GPU reads (parameters, links, spheres, obstacles) and every shared constant is declared once in Rust with `shader_struct!`; its WGSL declaration is generated from that, so host and shader layouts cannot drift.
 
-The CPU also checks collisions eight configurations at a time in SIMD lanes (`lanes.rs`, `fearless_simd::f32x8` on stable Rust): forward kinematics, then world and self clearance. The lanes answer the CPU device's clearances and every search's edge checks. `cpu.rs` stays the line-by-line twin of the kernels, and a test holds the lanes to it on four robots and every obstacle kind. The lanes run at the CPU's widest SIMD level, found at run time (SSE2 up to AVX-512 on x86-64, NEON on ARM), so a default build needs no target flags. The level is chosen once around each search and each batch of clearances; the code between that choice and the vector operations is inlined and has no closures.
+The CPU also checks collisions eight configurations at a time in SIMD lanes (`lanes.rs`, `fearless_simd::f32x8` on stable Rust): forward kinematics, then world and self clearance. The lanes answer the CPU device's clearances and every search's edge checks. `cpu.rs` stays the line-by-line twin of the kernels, and a test holds the lanes to it on four robots and every obstacle kind. The lanes run at the CPU's widest SIMD level, found at run time (SSE2 up to AVX-512 on x86-64, NEON on ARM), so a default build needs no target flags. Code enters that level once per search and once per run of up to eight clearances that share a world; the code between that choice and the vector operations is inlined and has no closures.
 
 ## Searches
 
