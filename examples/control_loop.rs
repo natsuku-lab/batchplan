@@ -9,6 +9,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -25,7 +26,7 @@ const PERIOD: Duration = Duration::from_millis(20);
 fn planner(
     robot: Robot,
     scene: World,
-    starts: mpsc::Receiver<Vec<f32>>,
+    starts: Receiver<Vec<f32>>,
     latest: Arc<Mutex<Option<Trajectory>>>,
 ) -> Result<()> {
     let device = Device::cpu_threads(&robot, 2)?;

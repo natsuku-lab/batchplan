@@ -5,11 +5,11 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
-use batchplan::rng::Rng;
-use batchplan::{CollisionWeights, Device, Pose, Robot, RobotOptions, SdfOptions, World};
 use std::f32::consts::{FRAC_PI_2, PI};
 
-use glam::{DAffine3, DMat3, DVec3, Vec3};
+use batchplan::rng::Rng;
+use batchplan::{CollisionWeights, Device, Pose, Robot, RobotOptions, SdfOptions, World};
+use glam::{DAffine3, DMat3, DVec3, Quat, Vec3};
 
 fn affine(p: Pose) -> DAffine3 {
     DAffine3::from_rotation_translation(p.rotation.as_dquat(), p.position.as_dvec3())
@@ -376,7 +376,7 @@ def Xform "robot" (
             "{head:?}"
         );
         assert!(
-            head.rotation.dot(glam::Quat::from_rotation_z(0.5)).abs() > 1.0 - 1e-6,
+            head.rotation.dot(Quat::from_rotation_z(0.5)).abs() > 1.0 - 1e-6,
             "{head:?}"
         );
     }

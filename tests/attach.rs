@@ -10,7 +10,7 @@ use batchplan::{
     AttachedObject, CollisionWeights, Device, Error, IkOptions, IkProblem, Obstacle, PlanOptions,
     PlanProblem, Robot, SphereOptions, Trajectory, World,
 };
-use glam::{Quat, Vec3};
+use glam::{Mat3, Quat, Vec3};
 
 fn devices(robot: &Robot) -> Vec<Device> {
     let mut devices = vec![Device::cpu(robot).unwrap()];
@@ -54,8 +54,7 @@ fn attached_objects_move_with_their_link_and_skip_touch_links() {
             held.link_pose(&q, "box").unwrap(),
             robot.link_pose(&q, "panda_hand").unwrap(),
         );
-        let rotation =
-            (glam::Mat3::from_quat(object.rotation) - glam::Mat3::from_quat(hand.rotation)).abs();
+        let rotation = (Mat3::from_quat(object.rotation) - Mat3::from_quat(hand.rotation)).abs();
         assert!(
             (object.position - hand.position).length() < 1e-6
                 && rotation.to_cols_array().iter().all(|&v| v < 1e-6)

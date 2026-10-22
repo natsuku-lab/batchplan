@@ -1,9 +1,10 @@
 //! Robot model: a kinematic tree with collision spheres, built from a robot description file.
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Result, bail, ensure};
 use glam::{Mat3, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +14,7 @@ use crate::description::{
 use crate::error::{self, Error, ensure_input, input};
 use crate::spheres::{self, SphereGeometry, SphereOptions};
 use crate::types::Pose;
+use crate::world::Obstacle;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Transform {
@@ -304,7 +306,7 @@ pub struct AttachedObject {
     pub name: String,
     pub link: String,
     /// The object's shapes, placed in `link`'s frame. Distance grids are not supported.
-    pub shapes: Vec<crate::world::Obstacle>,
+    pub shapes: Vec<Obstacle>,
     pub touch_links: Vec<String>,
     /// How spheres are fitted to the shapes; a held object rarely needs more than 8 to 16.
     pub spheres: SphereOptions,
@@ -1025,6 +1027,8 @@ fn within(curve: &Curve, range: (f32, f32), limits: (f32, f32)) -> Option<(f32, 
 
 /// The kinematic tree below the base link, with actuated joints numbered in breadth-first order.
 fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
+    use anyhow::Context;
+
     let expanded = expand_compound_joints(desc)?;
     let desc = &expanded;
     for (name, limits) in &o.joint_limits {
@@ -1301,7 +1305,7 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
         }
         vec![
             (0..links.len())
-                .max_by_key(|&i| (depth[i], std::cmp::Reverse(i)))
+                .max_by_key(|&i| (depth[i], Reverse(i)))
                 .expect("the base link"),
         ]
     } else {
@@ -1383,7 +1387,7 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
 }
 
 /// An attached object's shape, placed in its link's frame.
-fn attached_shape(shape: &crate::world::Obstacle) -> error::Result<Shape> {
+fn attached_shape(shape: &Obstacle) -> error::Result<Shape> {
     use crate::world::Obstacle;
     let placed = |center: Vec3, rotation: Quat, geometry: Geometry| Shape {
         origin: Transform {

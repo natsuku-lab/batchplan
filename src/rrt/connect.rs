@@ -6,7 +6,7 @@ use std::time::Instant;
 use fearless_simd::prelude::*;
 use fearless_simd::{Level, Simd, dispatch, f32x8};
 
-use super::ahead::{self, Ahead};
+use super::ahead::{Ahead, Sharing};
 use crate::device::{Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Keep, Search, Wanted};
 use crate::error::{Result, ensure_input};
@@ -568,7 +568,7 @@ pub(crate) struct Connect<'r> {
     /// The path found, once the search is over.
     pub(crate) path: Option<Vec<f32>>,
     /// What the search shares with threads that help it (see `ahead`).
-    pub(super) sharing: ahead::Sharing,
+    pub(super) sharing: Sharing,
 }
 
 impl<'r> Connect<'r> {
@@ -618,7 +618,7 @@ impl<'r> Connect<'r> {
             vias: Vec::with_capacity(2 * n),
             across: vec![],
             path: None,
-            sharing: ahead::Sharing::new(ahead),
+            sharing: Sharing::new(ahead),
         }
     }
 

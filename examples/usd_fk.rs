@@ -6,12 +6,14 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use batchplan::rng::Rng;
 use batchplan::{CollisionModel, Robot, RobotOptions};
 use serde_json::{Value, json};
 
 fn main() -> Result<()> {
+    use anyhow::Context;
+
     let input: Value = serde_json::from_reader(std::io::stdin())?;
     let file = input["file"].as_str().context("file")?;
     let links: Vec<String> = serde_json::from_value(input["links"].clone())?;

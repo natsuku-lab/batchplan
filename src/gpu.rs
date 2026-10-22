@@ -5,15 +5,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-use crate::error::{Error, Result};
 use bytemuck::{Pod, Zeroable};
-use glam::Mat3;
+use glam::{Mat3, Quat, Vec3};
 use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use wgpu::util::DeviceExt;
 
 use crate::cpu::{self, CpuWorlds};
 use crate::device::{Backend, CollisionWeights, Evaluation, Worlds};
 use crate::edges::Search;
+use crate::error::{Error, Result};
 use crate::ik::IkOptions;
 use crate::lanes::Lanes;
 use crate::robot::{JointKind, Robot};
@@ -485,7 +486,7 @@ fn collision(
     w
 }
 
-fn v4(v: glam::Vec3, w: f32) -> [f32; 4] {
+fn v4(v: Vec3, w: f32) -> [f32; 4] {
     [v.x, v.y, v.z, w]
 }
 
@@ -507,7 +508,7 @@ pub(crate) struct GpuBackend {
     lanes: Arc<Lanes>,
     /// The device's CPU work (searches, preparing depth images) runs here, never on rayon's global
     /// pool, so a host's own parallel work cannot hold it past a time budget.
-    pool: Arc<rayon::ThreadPool>,
+    pool: Arc<ThreadPool>,
 }
 
 /// Building distance grids (grids.wgsl), which needs no robot.
@@ -687,7 +688,7 @@ impl RobotBuffers {
             .enumerate()
             .map(|(i, l)| {
                 let (axis, c) = match l.joint {
-                    JointKind::Fixed => (glam::Vec3::ZERO, [0.0; 5]),
+                    JointKind::Fixed => (Vec3::ZERO, [0.0; 5]),
                     JointKind::Revolute { axis, curve, .. }
                     | JointKind::Prismatic { axis, curve, .. } => (axis, curve.0),
                 };
@@ -953,7 +954,7 @@ impl GpuBackend {
         let buffers = RobotBuffers::new(&device, robot);
         let (grids, grid_buffers) = Default::default();
         let lanes = Arc::new(Lanes::new(robot));
-        let pool = rayon::ThreadPoolBuilder::new()
+        let pool = ThreadPoolBuilder::new()
             .thread_name(|i| format!("batchplan-gpu-{i}"))
             .build()
             .map_err(|e| Error::Threads(format!("starting the GPU device's threads: {e}")))?;
@@ -993,30 +994,26 @@ impl GpuBackend {
         for s in worlds {
             ranges.push([obstacles.len() as u32, s.obstacles.len() as u32]);
             for o in &s.obstacles {
-                let rotated =
-                    |kind: u32, center: glam::Vec3, half: [f32; 4], rotation: glam::Quat| {
-                        let r = Mat3::from_quat(rotation);
-                        GpuObstacle {
-                            center: v4(center, kind as f32),
-                            half,
-                            r0: v4(r.x_axis, 0.0),
-                            r1: v4(r.y_axis, 0.0),
-                            r2: v4(r.z_axis, 0.0),
-                            ..Default::default()
-                        }
-                    };
+                let rotated = |kind: u32, center: Vec3, half: [f32; 4], rotation: Quat| {
+                    let r = Mat3::from_quat(rotation);
+                    GpuObstacle {
+                        center: v4(center, kind as f32),
+                        half,
+                        r0: v4(r.x_axis, 0.0),
+                        r1: v4(r.y_axis, 0.0),
+                        r2: v4(r.z_axis, 0.0),
+                        ..Default::default()
+                    }
+                };
                 obstacles.push(match *o {
                     Obstacle::Cuboid {
                         center,
                         half_extents,
                         rotation,
                     } => rotated(CUBOID, center, v4(half_extents, 0.0), rotation),
-                    Obstacle::Sphere { center, radius } => rotated(
-                        SPHERE,
-                        center,
-                        [radius, 0.0, 0.0, 0.0],
-                        glam::Quat::IDENTITY,
-                    ),
+                    Obstacle::Sphere { center, radius } => {
+                        rotated(SPHERE, center, [radius, 0.0, 0.0, 0.0], Quat::IDENTITY)
+                    }
                     Obstacle::Cylinder {
                         center,
                         rotation,

@@ -4,6 +4,8 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
+use std::ops::Range;
+
 use batchplan::datagen::{self, Handover, Origin, PickPlace, PickPlaceOptions, RecoveryOptions};
 use batchplan::rng::Rng;
 use batchplan::{CollisionWeights, Device, Obstacle, Pose, Robot, World};
@@ -578,7 +580,7 @@ fn blocks_are_handed_from_one_hand_to_the_other() {
             // The right arm waits until the left has picked the block up; the left waits from the
             // time the block is set down.
             // (Timed samples blend equal control points, exact up to rounding.)
-            let still = |joints: &[usize], frames: std::ops::Range<usize>, at: usize| {
+            let still = |joints: &[usize], frames: Range<usize>, at: usize| {
                 frames
                     .into_iter()
                     .all(|f| joints.iter().all(|&j| (q(f)[j] - q(at)[j]).abs() < 1e-5))

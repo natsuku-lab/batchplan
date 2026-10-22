@@ -21,7 +21,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
-use glam::{DAffine3, DQuat, DVec3, Mat3, Vec3};
+use glam::{DAffine3, DMat4, DQuat, DVec3, Mat3, Vec3};
+use openusd::pcp::VariantFallbackMap;
 use openusd::sdf::Value;
 use openusd::usd::{Prim, PrimPredicate, SchemaBase, SchemaKind, Stage, TimeCode};
 use openusd_schemas::geom::{Imageable, Xformable};
@@ -165,7 +166,7 @@ impl Loader {
             .map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
         // gf matrices are row-vector (translation in the last row): read as columns, they are
         // the column-vector transform.
-        let local = DAffine3::from_mat4(glam::DMat4::from_cols_array(&m.0));
+        let local = DAffine3::from_mat4(DMat4::from_cols_array(&m.0));
         let parent = match path.rsplit_once('/') {
             Some(("", _)) | None => DAffine3::from_quat(self.up),
             Some((parent, _)) if !node.resets_xform_stack()? => self.world(parent)?,
@@ -322,7 +323,7 @@ struct JointPrim {
 }
 
 pub(crate) fn load(path: &Path, variants: &[(String, String)]) -> Result<Model> {
-    let mut fallbacks = openusd::pcp::VariantFallbackMap::new();
+    let mut fallbacks = VariantFallbackMap::new();
     for (set, selection) in variants {
         fallbacks = fallbacks.add(set.clone(), [selection.clone()]);
     }

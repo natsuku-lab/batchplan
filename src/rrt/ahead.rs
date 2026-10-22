@@ -21,6 +21,8 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use rayon::Yield;
+
 use super::connect::{self, Connect, Halton, Tree};
 use crate::edges::{self, EdgeQuery, Keep, Search, Wanted};
 use crate::robot::Robot;
@@ -563,7 +565,7 @@ impl Search for Helper<'_> {
             if let Some(optimizing) = self.optimizing {
                 self.rounds += 1;
                 if optimizing.load(Ordering::Relaxed) > 0 || self.rounds.is_multiple_of(16) {
-                    while rayon::yield_now() == Some(rayon::Yield::Executed) {}
+                    while rayon::yield_now() == Some(Yield::Executed) {}
                 }
             }
             if self.claim() {
@@ -571,7 +573,7 @@ impl Search for Helper<'_> {
             }
             // The search is behind, or shares nothing yet: other work in the pool first, such as
             // the samples of a search's repair.
-            if self.optimizing.is_some() && rayon::yield_now() == Some(rayon::Yield::Executed) {
+            if self.optimizing.is_some() && rayon::yield_now() == Some(Yield::Executed) {
                 continue;
             }
             waited += 1;
@@ -631,6 +633,12 @@ fn query(base: &Base, edges: Vec<f32>) -> EdgeQuery {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Barrier, Mutex};
+
+    use glam::{Quat, Vec3};
+    use rayon::ThreadPoolBuilder;
+
     use super::*;
     use crate::cpu::{self, Prepared};
     use crate::edges::EdgeScratch;
@@ -638,8 +646,6 @@ mod tests {
     use crate::robot::{CollisionModel, RobotOptions};
     use crate::rrt::{Connect, RrtOptions, RrtProblem, Sampling};
     use crate::world::{Obstacle, World};
-    use glam::{Quat, Vec3};
-    use std::collections::HashMap;
 
     fn panda() -> Robot {
         let fingers = [
@@ -915,7 +921,7 @@ mod tests {
         worlds: &[Vec<Prepared>],
         search: impl FnOnce(),
     ) {
-        let started = &std::sync::Barrier::new(threads + 1);
+        let started = &Barrier::new(threads + 1);
         std::thread::scope(|s| {
             for _ in 0..threads {
                 s.spawn(move || {
@@ -960,7 +966,7 @@ mod tests {
     }
 
     /// The tests that keep threads busy run one at a time, so each has the machine's cores.
-    static ALONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static ALONE: Mutex<()> = Mutex::new(());
 
     /// Helpers change how fast a search runs, never what it finds: a long search grows the same
     /// trees with three helping as alone, though helpers answer many of its queries (half as many
@@ -1041,10 +1047,7 @@ mod tests {
             Lanes::new(&robot),
             cpu::prepare(std::slice::from_ref(&world)),
         );
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(4)
-            .build()
-            .unwrap();
+        let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
         let long = RrtOptions {
             max_iterations: 6000,
             ..RrtOptions::default()

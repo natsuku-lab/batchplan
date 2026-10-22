@@ -7,6 +7,7 @@
 mod common;
 
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use batchplan::{Device, PlanOptions, Robot, RobotOptions, RrtOptions};
 
@@ -42,7 +43,7 @@ fn the_search_keeps_the_time_budget() {
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let timed = |o: &PlanOptions| {
-            let t = std::time::Instant::now();
+            let t = Instant::now();
             batchplan::plan(&d, &worlds, &problems, o).unwrap();
             t.elapsed()
         };
@@ -57,7 +58,7 @@ fn the_search_keeps_the_time_budget() {
             d.name()
         );
         assert!(
-            full > std::time::Duration::from_millis(100),
+            full > Duration::from_millis(100),
             "{}: the search is too short to cut ({full:?})",
             d.name()
         );
@@ -83,7 +84,7 @@ fn a_tiny_time_budget_returns_after_at_most_one_more_chunk() {
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let timed = |o: &PlanOptions| {
-            let t = std::time::Instant::now();
+            let t = Instant::now();
             let result = batchplan::plan(&d, &worlds, &problems, o).unwrap();
             (t.elapsed(), result)
         };
@@ -92,7 +93,7 @@ fn a_tiny_time_budget_returns_after_at_most_one_more_chunk() {
         // A GPU checks the budget between submissions of 8 rounds; time one such chunk, with
         // seeding and validation.
         let (chunk, _) = timed(&PlanOptions { iterations: 8, ..o });
-        let budget = std::time::Duration::from_millis(1);
+        let budget = Duration::from_millis(1);
         let (spent, result) = timed(&PlanOptions {
             time_budget: Some(budget),
             ..o
@@ -102,7 +103,7 @@ fn a_tiny_time_budget_returns_after_at_most_one_more_chunk() {
             d.name()
         );
         assert!(
-            spent < budget + 2 * chunk + std::time::Duration::from_millis(20),
+            spent < budget + 2 * chunk + Duration::from_millis(20),
             "{}: took {spent:?}",
             d.name()
         );
@@ -131,8 +132,8 @@ fn a_busy_global_pool_does_not_hold_up_gpu_plans() {
     let (scene, problems) = common::reaches(&robot);
     let worlds = gpu.upload(&scene).unwrap();
     batchplan::plan(&gpu, &worlds, &problems, &PlanOptions::default()).unwrap();
-    let busy = std::time::Duration::from_secs(1);
-    let started = std::time::Instant::now();
+    let busy = Duration::from_secs(1);
+    let started = Instant::now();
     for _ in 0..rayon::current_num_threads() {
         rayon::spawn(move || std::thread::sleep(busy));
     }

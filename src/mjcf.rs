@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use glam::{Mat3, Quat, Vec3};
+use roxmltree::{Document, Node};
 
 use crate::description::{
     Curve, Geometry, JointDesc, JointType, LinkDesc, LoopClosure, Mimic, Model, RobotDescription,
@@ -50,12 +51,11 @@ fn read(path: &Path, root_dir: &Path, depth: usize) -> Result<Element> {
     ensure!(depth < 16, "includes nest too deeply at {}", path.display());
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let doc =
-        roxmltree::Document::parse(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let doc = Document::parse(&text).with_context(|| format!("parsing {}", path.display()))?;
     convert(doc.root_element(), root_dir, depth)
 }
 
-fn convert(node: roxmltree::Node, root_dir: &Path, depth: usize) -> Result<Element> {
+fn convert(node: Node, root_dir: &Path, depth: usize) -> Result<Element> {
     let mut children = vec![];
     for c in node.children().filter(|c| c.is_element()) {
         if c.has_tag_name("include") {

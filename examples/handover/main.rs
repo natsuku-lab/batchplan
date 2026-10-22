@@ -17,7 +17,7 @@ mod rebot;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use batchplan::datagen::{self, Demonstration, Handover, RecoveryOptions};
 use batchplan::rng::Rng;
 use batchplan::{Device, Robot, World, npy};
@@ -26,6 +26,8 @@ use batchplan::{Device, Robot, World, npy};
 const REBOT: &str = "data/rebot";
 
 fn main() -> Result<()> {
+    use anyhow::Context;
+
     let (mut cpu, mut lerobot, mut resets, mut positional) = (false, None, None, vec![]);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {

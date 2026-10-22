@@ -6,7 +6,7 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use batchplan::datagen::{self, DemoOptions, Demonstration};
+use batchplan::datagen::{self, Carried, DemoOptions, Demonstration};
 use batchplan::rng::Rng;
 use batchplan::{Device, Error, IkProblem, Pose, Robot, World};
 use glam::Vec3;
@@ -113,7 +113,7 @@ fn npy_export_round_trips_the_demonstrations() {
     demos[0].gripper = (0..frames)
         .map(|f| 1.0 - f as f32 / (frames - 1) as f32)
         .collect();
-    demos[0].carried = Some(batchplan::datagen::Carried {
+    demos[0].carried = Some(Carried {
         obstacle: 1,
         poses: (0..frames)
             .map(|f| Pose {
@@ -194,6 +194,7 @@ fn npy_export_round_trips_the_demonstrations() {
 
 #[cfg(feature = "lerobot")]
 mod lerobot {
+    use std::collections::BTreeSet;
     use std::fs::File;
 
     use arrow_array::{Array, FixedSizeListArray, Float32Array, Int64Array, RecordBatch};
@@ -313,7 +314,7 @@ mod lerobot {
         let files = |rows: &[(usize, usize, RecordBatch)]| {
             rows.iter()
                 .map(|r| (r.0, r.1))
-                .collect::<std::collections::BTreeSet<_>>()
+                .collect::<BTreeSet<_>>()
                 .len()
         };
         assert!(

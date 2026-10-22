@@ -14,12 +14,14 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use batchplan::datagen::{self, DemoOptions, Demonstration, Origin, PickPlaceOptions};
 use batchplan::rng::Rng;
 use batchplan::{Device, IkProblem, Robot, World};
 
 fn main() -> Result<()> {
+    use anyhow::Context;
+
     let (mut lerobot, mut pick_place, mut file_mb, mut positional) = (false, false, 100, vec![]);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {

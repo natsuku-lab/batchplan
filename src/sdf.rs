@@ -11,16 +11,17 @@
 //! Point clouds, depth images and occupancy maps become grids through an exact distance transform
 //! of their solid voxels, which runs on the [`Device`] the builder is given.
 
-use crate::error::{Error, Result, ensure_input, input};
+use std::num::FpCategory;
+
 use glam::{UVec3, Vec3, Vec4};
 use half::f16;
-use parry3d::query::PointQuery;
 use parry3d::shape::{TriMesh as ParryMesh, TriMeshFlags};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::description::TriMesh;
 use crate::device::Device;
+use crate::error::{Error, Result, ensure_input, input};
 use crate::robot::Robot;
 use crate::types::Pose;
 
@@ -579,6 +580,8 @@ impl SdfGrid {
     /// The distance field of a closed triangle mesh, in the mesh's frame. Triangles may face in
     /// or out, consistently; meshes that are open or not manifold have no inside and are refused.
     pub fn from_mesh(vertices: &[Vec3], triangles: &[[u32; 3]], o: &SdfOptions) -> Result<Self> {
+        use parry3d::query::PointQuery;
+
         ensure_input!(!triangles.is_empty(), "the mesh has no triangles");
         ensure_input!(
             triangles
@@ -757,7 +760,7 @@ impl SdfGrid {
 }
 
 fn subnormal(h: f16) -> bool {
-    h.classify() == std::num::FpCategory::Subnormal
+    h.classify() == FpCategory::Subnormal
 }
 
 /// GPUs may flush subnormal halves to zero; storing them as zero keeps devices equal.
@@ -1060,10 +1063,12 @@ impl OccupancyMap {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use glam::Quat;
+
     use super::*;
     use crate::{CollisionModel, RobotOptions};
-    use glam::Quat;
-    use std::collections::HashMap;
 
     /// The Panda as the examples hold it.
     fn panda() -> Robot {

@@ -5,11 +5,14 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
+use std::sync::Arc;
+
 use batchplan::rng::Rng;
 use batchplan::{
     CollisionWeights, Device, Error, IkOptions, IkProblem, Obstacle, PlanOptions, PlanProblem,
     Robot, SdfGrid, Solved, Trajectory, World,
 };
+use glam::{EulerRot, Quat, Vec2, Vec3};
 
 fn setup() -> Option<(Robot, Device, Device)> {
     let robot = common::panda().unwrap();
@@ -114,35 +117,33 @@ fn evaluate_matches_cpu_for_every_obstacle_kind() {
         return;
     };
     let n = robot.dof();
-    let rotation = glam::Quat::from_euler(glam::EulerRot::XYZ, 0.4, -0.7, 1.1);
-    let center = glam::Vec3::new(0.45, 0.0, 0.4);
+    let rotation = Quat::from_euler(EulerRot::XYZ, 0.4, -0.7, 1.1);
+    let center = Vec3::new(0.45, 0.0, 0.4);
     // Distance grids: a torus with an odd number of points (its last word holds one value) and a
     // box after it in the grid buffer; the last world places both, one grid shared with world 4.
-    let sampled = |dims: [u32; 3], origin: glam::Vec3, f: &dyn Fn(glam::Vec3) -> f32| {
+    let sampled = |dims: [u32; 3], origin: Vec3, f: &dyn Fn(Vec3) -> f32| {
         let mut values = vec![];
         for k in 0..dims[2] {
             for j in 0..dims[1] {
                 for i in 0..dims[0] {
-                    values.push(f(
-                        origin + glam::Vec3::new(i as f32, j as f32, k as f32) * 0.01
-                    ));
+                    values.push(f(origin + Vec3::new(i as f32, j as f32, k as f32) * 0.01));
                 }
             }
         }
-        std::sync::Arc::new(SdfGrid::new(dims, 0.01, origin, &values).unwrap())
+        Arc::new(SdfGrid::new(dims, 0.01, origin, &values).unwrap())
     };
-    let torus = sampled([41, 41, 21], glam::Vec3::new(-0.2, -0.2, -0.1), &|p| {
-        glam::Vec2::new(p.truncate().length() - 0.15, p.z).length() - 0.05
+    let torus = sampled([41, 41, 21], Vec3::new(-0.2, -0.2, -0.1), &|p| {
+        Vec2::new(p.truncate().length() - 0.15, p.z).length() - 0.05
     });
     let block = Obstacle::Cuboid {
-        center: glam::Vec3::ZERO,
-        half_extents: glam::Vec3::new(0.1, 0.05, 0.04),
-        rotation: glam::Quat::IDENTITY,
+        center: Vec3::ZERO,
+        half_extents: Vec3::new(0.1, 0.05, 0.04),
+        rotation: Quat::IDENTITY,
     };
-    let boxed = sampled([30, 20, 16], glam::Vec3::new(-0.15, -0.1, -0.08), &|p| {
+    let boxed = sampled([30, 20, 16], Vec3::new(-0.15, -0.1, -0.08), &|p| {
         block.distance(p).0
     });
-    let grid = |grid: &std::sync::Arc<SdfGrid>, center: glam::Vec3| Obstacle::Sdf {
+    let grid = |grid: &Arc<SdfGrid>, center: Vec3| Obstacle::Sdf {
         grid: grid.clone(),
         center,
         rotation,
@@ -150,7 +151,7 @@ fn evaluate_matches_cpu_for_every_obstacle_kind() {
     let worlds: Vec<World> = [
         vec![Obstacle::Cuboid {
             center,
-            half_extents: glam::Vec3::new(0.1, 0.2, 0.08),
+            half_extents: Vec3::new(0.1, 0.2, 0.08),
             rotation,
         }],
         vec![Obstacle::sphere(center, 0.15)],
@@ -169,7 +170,7 @@ fn evaluate_matches_cpu_for_every_obstacle_kind() {
         vec![grid(&torus, center)],
         vec![
             grid(&boxed, center),
-            grid(&torus, center + glam::Vec3::new(0.0, 0.3, 0.1)),
+            grid(&torus, center + Vec3::new(0.0, 0.3, 0.1)),
         ],
     ]
     .into_iter()

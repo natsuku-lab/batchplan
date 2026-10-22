@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use glam::Vec3;
+use mesh_loader::Loader;
 
 use crate::robot::Transform;
 
@@ -410,7 +411,7 @@ fn sign(bit: u32) -> f32 {
 }
 
 fn load_mesh(path: &Path, scale: Vec3) -> Result<TriMesh> {
-    let scene = mesh_loader::Loader::default()
+    let scene = Loader::default()
         .load(path)
         .with_context(|| format!("loading mesh {}", path.display()))?;
     let mut mesh = TriMesh::default();

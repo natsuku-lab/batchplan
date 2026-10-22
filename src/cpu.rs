@@ -9,12 +9,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::error::{Error, Result};
+use fearless_simd::dispatch;
 use glam::{Mat3, Vec3};
 use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder, Yield};
 
 use crate::device::{Backend, CollisionWeights, Evaluation, Worlds};
 use crate::edges::{self, EdgeScratch, Search};
+use crate::error::{Error, Result};
 use crate::ik::IkOptions;
 use crate::lanes::{LANES, LaneScratch, Lanes};
 use crate::robot::{Fk, JointKind, Robot};
@@ -24,7 +26,6 @@ use crate::spline;
 use crate::trajopt::{LINE_SEARCH, MAX_HISTORY, PlanOptions};
 use crate::types::{JointPaths, Pose};
 use crate::world::{self, FAR, Obstacle, World};
-use fearless_simd::dispatch;
 
 /// Up to eight clearances out, their configurations and their worlds.
 type Lanes8<'a> = (&'a mut [[f32; 2]], (&'a [f32], &'a [u32]));
@@ -37,13 +38,13 @@ pub(crate) struct CpuBackend {
     /// The robot prepared for checking eight configurations at a time.
     lanes: Arc<Lanes>,
     /// All batched work runs here, never on rayon's global pool.
-    pool: Arc<rayon::ThreadPool>,
+    pool: Arc<ThreadPool>,
 }
 
 impl CpuBackend {
     /// `threads` workers; 0 means one per core.
     pub(crate) fn new(robot: &Robot, threads: usize) -> Result<Self> {
-        let pool = rayon::ThreadPoolBuilder::new()
+        let pool = ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|i| format!("batchplan-cpu-{i}"))
             .build()
@@ -962,7 +963,7 @@ const WAIT: Duration = Duration::from_micros(100);
 /// them (see `rrt::Ahead`). A search alone runs on the calling thread, outside the pool, so its
 /// optimizations do too; once it has run long, it summons helpers into the pool.
 pub(crate) fn run_searches(
-    pool: &rayon::ThreadPool,
+    pool: &ThreadPool,
     searches: &mut [&mut dyn Search],
     robot: &Robot,
     lanes: &Lanes,
@@ -1081,7 +1082,7 @@ pub(crate) fn run_searches(
                 if !helped.iter().flatten().any(|ahead| ahead.sampling()) {
                     break;
                 }
-                while rayon::yield_now() == Some(rayon::Yield::Executed) {}
+                while rayon::yield_now() == Some(Yield::Executed) {}
                 std::thread::sleep(WAIT);
             }
         }
@@ -1323,6 +1324,7 @@ impl Backend for CpuBackend {
 mod tests {
     use super::*;
     use crate::rng::Rng;
+    use crate::robot::{CollisionModel, RobotOptions};
 
     #[test]
     fn lbfgs_direction_applies_the_bfgs_inverse_hessian() {
@@ -1403,9 +1405,8 @@ mod tests {
     #[test]
     fn a_failed_line_search_resets_the_history() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/franka");
-        let spheres =
-            crate::robot::CollisionModel::load(format!("{dir}/panda_collision.json")).unwrap();
-        let options = crate::robot::RobotOptions {
+        let spheres = CollisionModel::load(format!("{dir}/panda_collision.json")).unwrap();
+        let options = RobotOptions {
             collision_model: Some(spheres),
             ..Default::default()
         };

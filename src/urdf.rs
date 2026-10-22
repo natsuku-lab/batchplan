@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use glam::Vec3;
+use roxmltree::Document;
 
 use crate::description::{
     Curve, Geometry, JointDesc, JointType, LinkDesc, Mimic, RobotDescription, Shape,
@@ -186,7 +187,7 @@ fn resolve(filename: &str, dir: Option<&Path>, package_dirs: &[PathBuf]) -> Resu
 /// The `<name>` declared in `dir/package.xml`, if there is one.
 fn package_name(dir: &Path) -> Option<String> {
     let text = std::fs::read_to_string(dir.join("package.xml")).ok()?;
-    let doc = roxmltree::Document::parse(&text).ok()?;
+    let doc = Document::parse(&text).ok()?;
     let name = doc
         .root_element()
         .children()
@@ -196,7 +197,7 @@ fn package_name(dir: &Path) -> Option<String> {
 
 /// Link pairs an SRDF disables for collision checking (`<disable_collisions link1 link2>`).
 pub(crate) fn srdf_disabled_pairs(text: &str) -> Result<Vec<(String, String)>> {
-    let doc = roxmltree::Document::parse(text).context("parsing the SRDF")?;
+    let doc = Document::parse(text).context("parsing the SRDF")?;
     doc.root_element()
         .children()
         .filter(|n| n.has_tag_name("disable_collisions"))

@@ -15,7 +15,7 @@ use std::f32::consts::PI;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use batchplan::datagen::{PickPlace, PickPlaceOptions};
+use batchplan::datagen::{Demonstration, PickPlace, PickPlaceOptions};
 use batchplan::glam::{Quat, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{Obstacle, Pose, Robot, World, datagen};
@@ -263,7 +263,7 @@ struct PickScenes<'a> {
     worlds: &'a [World],
     tasks: &'a [PickPlace],
     /// Each scene's episode, if its task succeeded.
-    episodes: Vec<Option<&'a datagen::Demonstration>>,
+    episodes: Vec<Option<&'a Demonstration>>,
     offsets: Vec<Vec3>,
     meshes: RobotMeshes,
 }
@@ -276,7 +276,7 @@ impl<'a> PickScenes<'a> {
         robot: &'a Robot,
         worlds: &'a [World],
         tasks: &'a [PickPlace],
-        demos: &'a [datagen::Demonstration],
+        demos: &'a [Demonstration],
         spacing: f32,
     ) -> Result<Self> {
         let mut episodes = vec![None; tasks.len()];
@@ -322,7 +322,7 @@ impl<'a> PickScenes<'a> {
                     .with_fill_mode(rerun::FillMode::Solid),
             )?;
             // A carried box's pose is logged at every sample; static data would hide it.
-            let episode: Option<&datagen::Demonstration> = episodes[i];
+            let episode: Option<&Demonstration> = episodes[i];
             if !episode.is_some_and(|d| d.carried.is_some()) {
                 rec.log_static(
                     format!("{scene}/object"),

@@ -33,7 +33,7 @@
 mod common;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -41,7 +41,7 @@ use batchplan::{
     CollisionModel, CollisionWeights, Device, IkOptions, IkProblem, MeshModel, Obstacle,
     PlanOptions, PlanProblem, PlanResult, Pose, Robot, RobotOptions, Trajectory, World, Worlds,
 };
-use glam::{Quat, Vec3};
+use glam::{EulerRot, Quat, Vec3};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -143,13 +143,13 @@ fn load(path: &PathBuf) -> Result<BTreeMap<String, Vec<Problem>>> {
 /// `scripts/fetch_benchmark.sh`), on this URDF's links. VAMP fixes the fingers 6.5 cm from the
 /// hand's axis, where this URDF holds them 4 cm out, so the spheres of every link VAMP fixes are
 /// placed where VAMP places them relative to the link's parent.
-fn vamp_spheres(robot: &Robot, data: &std::path::Path) -> Result<CollisionModel> {
+fn vamp_spheres(robot: &Robot, data: &Path) -> Result<CollisionModel> {
     let urdf = urdf_rs::read_file(data.join("vamp_panda_spherized.urdf"))?;
     let pose = |o: &urdf_rs::Pose| {
         let [r, p, y] = o.rpy.0.map(|v| v as f32);
         Pose::new(
             Vec3::from(o.xyz.0.map(|v| v as f32)),
-            Quat::from_euler(glam::EulerRot::ZYX, y, p, r),
+            Quat::from_euler(EulerRot::ZYX, y, p, r),
         )
     };
     let at = |link: &str| {

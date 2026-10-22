@@ -9,12 +9,13 @@ use std::f32::consts::PI;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
+use batchplan::datagen::{Demonstration, Origin};
 use batchplan::rng::Rng;
 use batchplan::{
     CollisionWeights, DepthImage, Device, Intrinsics, JointTrajectory, Obstacle, Occlusion,
     OccupancyMap, Pose, Robot, SdfGrid, SdfOptions, World,
 };
-use glam::{Quat, Vec3};
+use glam::{BVec3, EulerRot, Mat3, Quat, Vec3};
 
 /// A CPU device for the builders' distance transform, which needs no particular robot.
 fn cpu() -> &'static Device {
@@ -50,7 +51,7 @@ fn add_box(mesh: &mut (Vec<Vec3>, Vec<[u32; 3]>), lo: Vec3, hi: Vec3) {
     let base = mesh.0.len() as u32;
     // Vertex i takes the `hi` coordinate where bit (x, y, z) = (1, 2, 4) of i is set.
     mesh.0.extend(
-        (0..8).map(|i| Vec3::select(glam::BVec3::new(i & 1 != 0, i & 2 != 0, i & 4 != 0), hi, lo)),
+        (0..8).map(|i| Vec3::select(BVec3::new(i & 1 != 0, i & 2 != 0, i & 4 != 0), hi, lo)),
     );
     let faces = [
         [0, 4, 6],
@@ -97,7 +98,7 @@ fn grid_gradients_match_finite_differences() {
         padding: 0.05,
     };
     let grid = Arc::new(SdfGrid::from_mesh(&mesh.0, &mesh.1, &o).unwrap());
-    let rotation = Quat::from_euler(glam::EulerRot::XYZ, 0.3, -0.5, 0.9);
+    let rotation = Quat::from_euler(EulerRot::XYZ, 0.3, -0.5, 0.9);
     let center = Vec3::new(0.4, -0.2, 0.3);
     let obstacle = Obstacle::Sdf {
         grid: grid.clone(),
@@ -732,7 +733,7 @@ fn usd_scene_meshes_load_as_grids_honoring_the_approximation() {
 }
 
 /// A two-frame demonstration in `world` that stays at the default pose.
-fn still_demo(robot: &Robot, world: u32) -> batchplan::datagen::Demonstration {
+fn still_demo(robot: &Robot, world: u32) -> Demonstration {
     let q = robot.default_q();
     let trajectory = JointTrajectory {
         dof: q.len(),
@@ -742,8 +743,8 @@ fn still_demo(robot: &Robot, world: u32) -> batchplan::datagen::Demonstration {
         velocities: vec![0.0; 2 * q.len()],
         accelerations: vec![0.0; 2 * q.len()],
     };
-    batchplan::datagen::Demonstration {
-        origin: batchplan::datagen::Origin::Nominal,
+    Demonstration {
+        origin: Origin::Nominal,
         world,
         task: batchplan::datagen::REACH_TASK.into(),
         goal: robot.ee_pose(q, 0),
@@ -793,6 +794,8 @@ fn exports_write_each_grid_once() {
 #[cfg(feature = "lerobot")]
 #[test]
 fn lerobot_exports_describe_grids_by_their_boxes() {
+    use std::fs::File;
+
     use arrow_array::{Array, FixedSizeListArray, Float32Array};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -817,7 +820,7 @@ fn lerobot_exports_describe_grids_by_their_boxes() {
         &Default::default(),
     )
     .unwrap();
-    let file = std::fs::File::open(root.join("data/chunk-000/file-000.parquet")).unwrap();
+    let file = File::open(root.join("data/chunk-000/file-000.parquet")).unwrap();
     let batch = ParquetRecordBatchReaderBuilder::try_new(file)
         .unwrap()
         .build()
@@ -956,10 +959,7 @@ fn look_at(eye: Vec3, target: Vec3) -> Pose {
     let forward = (target - eye).normalize();
     let right = forward.cross(Vec3::Z).normalize();
     let down = forward.cross(right);
-    Pose::new(
-        eye,
-        Quat::from_mat3(&glam::Mat3::from_cols(right, down, forward)),
-    )
+    Pose::new(eye, Quat::from_mat3(&Mat3::from_cols(right, down, forward)))
 }
 
 #[test]

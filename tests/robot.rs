@@ -14,6 +14,7 @@ use batchplan::{
     PlanProblem, Robot, RobotOptions, SphereOptions, Trajectory, World,
 };
 use glam::{DMat3, DVec3, Mat3, Quat, Vec3};
+use mesh_loader::Loader;
 
 const UR5E: &str = "ur5e/ur_description/urdf/ur5e.urdf";
 const SO101: &str = "so101/so101_new_calib.urdf";
@@ -266,7 +267,7 @@ fn link_triangles(path: &str, package_root: &Path) -> HashMap<String, Vec<[Vec3;
             let rot =
                 Mat3::from_rotation_z(y) * Mat3::from_rotation_y(p) * Mat3::from_rotation_x(r);
             let trans = Vec3::from_array(c.origin.xyz.0.map(|v| v as f32));
-            for m in mesh_loader::Loader::default().load(&file).unwrap().meshes {
+            for m in Loader::default().load(&file).unwrap().meshes {
                 let v: Vec<Vec3> = m
                     .vertices
                     .iter()

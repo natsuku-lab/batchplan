@@ -4,11 +4,14 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
+use std::time::Duration;
+
+use batchplan::rng::Rng;
 use batchplan::{
     CollisionWeights, Device, Error, IkOptions, IkProblem, JointState, Obstacle, PlanOptions,
     PlanProblem, Pose, Robot, RobotOptions, RrtOptions, StartMotion, Trajectory, World,
 };
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 fn panda() -> Robot {
     common::panda().unwrap()
@@ -81,7 +84,7 @@ fn malformed_batches_are_errors_on_every_device() {
             "{name}: goal past limits"
         );
         let skewed = Pose {
-            rotation: glam::Quat::from_xyzw(0.0, 0.0, 0.0, 2.0),
+            rotation: Quat::from_xyzw(0.0, 0.0, 0.0, 2.0),
             ..target
         };
         let ik = batchplan::solve_ik(
@@ -99,7 +102,7 @@ fn malformed_batches_are_errors_on_every_device() {
         for bad in [
             Obstacle::sphere(Vec3::new(f32::NAN, 0.0, 0.0), 0.1),
             Obstacle::sphere(Vec3::ZERO, -0.1),
-            rotated(glam::Quat::from_xyzw(0.0, 0.0, 0.0, 0.5)),
+            rotated(Quat::from_xyzw(0.0, 0.0, 0.0, 0.5)),
         ] {
             let err = d
                 .upload(&[World {
@@ -115,12 +118,12 @@ fn malformed_batches_are_errors_on_every_device() {
 fn clearances_are_exact_up_to_the_margins() {
     let robot = panda();
     let (n, items) = (robot.dof(), 4000);
-    let mut rng = batchplan::rng::Rng::new(5);
+    let mut rng = Rng::new(5);
     let q: Vec<f32> = (0..items * n)
         .map(|i| rng.range(robot.lower()[i % n], robot.upper()[i % n]))
         .collect();
     let item_world = vec![0; items];
-    let scene = [common::tabletop(&mut batchplan::rng::Rng::new(4))];
+    let scene = [common::tabletop(&mut Rng::new(4))];
     let margin = 0.05;
     let near = CollisionWeights {
         world: 1.0,
@@ -169,8 +172,8 @@ fn clearances_are_exact_up_to_the_margins() {
 #[test]
 fn ik_reports_the_clearances_evaluate_finds() {
     let robot = panda();
-    let scene = [common::tabletop(&mut batchplan::rng::Rng::new(4))];
-    let mut rng = batchplan::rng::Rng::new(9);
+    let scene = [common::tabletop(&mut Rng::new(4))];
+    let mut rng = Rng::new(9);
     let problems: Vec<IkProblem> = (0..16)
         .map(|_| IkProblem::new(0, common::grasp_target(&scene[0], &mut rng)))
         .collect();
@@ -205,11 +208,11 @@ fn evaluation_does_not_depend_on_the_batch() {
     // large ones give it one; the results must agree.
     let robot = panda();
     let n = robot.dof();
-    let mut rng = batchplan::rng::Rng::new(13);
+    let mut rng = Rng::new(13);
     let q: Vec<f32> = (0..40_000 * n)
         .map(|i| rng.range(robot.lower()[i % n], robot.upper()[i % n]))
         .collect();
-    let scene = [common::tabletop(&mut batchplan::rng::Rng::new(4))];
+    let scene = [common::tabletop(&mut Rng::new(4))];
     let w = CollisionWeights {
         world: 1.0,
         self_collision: 1.0,
@@ -302,7 +305,7 @@ fn obstacle_free_worlds_work_on_every_device() {
 fn results_keep_the_worlds_of_their_problems() {
     // Two targets in world 1 and one in world 0: problem index != world index.
     let robot = panda();
-    let mut rng = batchplan::rng::Rng::new(21);
+    let mut rng = Rng::new(21);
     let scene: Vec<World> = (0..2).map(|_| common::tabletop(&mut rng)).collect();
     let goals: Vec<IkProblem> = [1u32, 1, 0]
         .iter()
@@ -480,7 +483,7 @@ fn trajopt_collision_gradient_matches_its_cost() {
     let center = robot.ee_pose(&middle, 0).position;
     let post = Obstacle::Cylinder {
         center,
-        rotation: glam::Quat::IDENTITY,
+        rotation: Quat::IDENTITY,
         radius: 0.05,
         half_height: 0.3,
     };
@@ -765,7 +768,7 @@ fn a_robot_mounted_on_a_table_is_not_in_collision_with_it() {
     let table = Obstacle::Cuboid {
         center: Vec3::new(0.4, 0.0, -0.02),
         half_extents: Vec3::new(0.7, 0.8, 0.02),
-        rotation: glam::Quat::IDENTITY,
+        rotation: Quat::IDENTITY,
     };
     let mounted = World {
         obstacles: vec![table.clone()],
@@ -778,7 +781,7 @@ fn a_robot_mounted_on_a_table_is_not_in_collision_with_it() {
     let pin = Obstacle::Cuboid {
         center: elbow,
         half_extents: Vec3::new(0.3, 0.005, 0.005),
-        rotation: glam::Quat::IDENTITY,
+        rotation: Quat::IDENTITY,
     };
     let pinned = World {
         obstacles: vec![table, pin],
@@ -963,7 +966,7 @@ fn a_spent_budget_starts_no_optimization() {
         .collect();
     let o = PlanOptions {
         seeds: 4,
-        time_budget: Some(std::time::Duration::ZERO),
+        time_budget: Some(Duration::ZERO),
         ..Default::default()
     };
     for d in devices(&robot) {

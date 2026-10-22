@@ -857,16 +857,18 @@ fn distance<S: Simd>(o: &Prepared, p: V3<S>) -> F<S> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use glam::Quat;
+
     use super::*;
-    use crate::device::Device;
+    use crate::device::{CollisionWeights, Device};
     use crate::rng::Rng;
     use crate::robot::{AttachedObject, CollisionModel, RobotOptions};
     use crate::sdf::SdfGrid;
     use crate::spheres::SphereOptions;
     use crate::world::{Obstacle, World};
-    use glam::Quat;
-    use std::collections::HashMap;
-    use std::sync::Arc;
 
     fn panda() -> Robot {
         let fingers = [
@@ -956,12 +958,7 @@ mod tests {
         let item_world: Vec<u32> = (0..items as u32).map(|i| i / 3 % 3).collect();
         let lanes = device.clearance(&worlds, &item_world, &q).unwrap();
         let scalar = device
-            .evaluate(
-                &worlds,
-                &item_world,
-                &q,
-                &crate::device::CollisionWeights::NONE,
-            )
+            .evaluate(&worlds, &item_world, &q, &CollisionWeights::NONE)
             .unwrap();
         // The baseline SIMD level too (SSE2 on x86-64), one configuration at a time.
         let mut baseline = Lanes::new(robot);
@@ -1004,10 +1001,10 @@ mod tests {
         // from letting a link's bounding sphere stand in for its spheres, which `keeps`
         // always checks.
         let margin = 0.01;
-        let exact = crate::device::CollisionWeights {
+        let exact = CollisionWeights {
             margin: 10.0,
             self_margin: 10.0,
-            ..crate::device::CollisionWeights::NONE
+            ..CollisionWeights::NONE
         };
         let scalar = device.evaluate(&worlds, &item_world, &q, &exact).unwrap();
         for level in [Level::new(), Level::baseline()] {

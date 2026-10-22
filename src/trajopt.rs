@@ -13,10 +13,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::error::{Result, ensure_input};
-
 use crate::device::{CollisionWeights, Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Keep, Optimize, Search};
+use crate::error::{Result, ensure_input};
 use crate::rng::Rng;
 use crate::robot::Robot;
 use crate::rrt::{self, Ahead, Connect, RrtOptions, RrtProblem, Sampling};
@@ -1047,7 +1046,10 @@ fn seed_path(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
+    use crate::robot::RobotOptions;
 
     /// The control points pass through the ends and every pinned waypoint, and with every
     /// waypoint pinned the curve runs along the path; without pins they spread evenly along it.
@@ -1113,7 +1115,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/assets/ur5e/ur_description/urdf/ur5e.urdf"
         );
-        let robot = Robot::load(ur5e, &crate::robot::RobotOptions::default()).unwrap();
+        let robot = Robot::load(ur5e, &RobotOptions::default()).unwrap();
         let start = vec![0.2; 6];
         let goal = vec![1.0, 0.2, 0.5, 0.2, -1.0, 0.2];
         let hold = vec![1, 3, 5];
@@ -1154,7 +1156,7 @@ mod tests {
             ("panda_finger_joint2".to_string(), 0.04),
         ];
         let options = RobotOptions {
-            lock_joints: std::collections::HashMap::from(fingers),
+            lock_joints: HashMap::from(fingers),
             collision_model: Some(
                 CollisionModel::load("assets/franka/panda_collision.json").unwrap(),
             ),

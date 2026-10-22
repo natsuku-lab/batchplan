@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::f32::consts::FRAC_PI_2;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use batchplan::datagen::{Handover, PickPlaceOptions};
 use batchplan::glam::{Quat, Vec3};
 use batchplan::rng::Rng;
@@ -30,6 +30,8 @@ const BLOCKS: [Vec3; 4] = [
 /// The two arms as one robot, `left_` and `right_`, each with its grasp point (`tcp`) as a hand.
 /// Spheres are fitted to one arm once and kept in `spheres.json` beside it.
 pub fn two_rebots(dir: &Path) -> Result<Robot> {
+    use anyhow::Context;
+
     let urdf = dir.join("DM/urdf/ReBot_Arm_DM_tcp.urdf");
     anyhow::ensure!(
         urdf.exists(),

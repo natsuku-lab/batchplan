@@ -10,6 +10,7 @@ use batchplan::{
     AttachedObject, Device, IkOptions, IkProblem, Obstacle, PlanOptions, PlanProblem, RrtOptions,
     RrtProblem, ShortcutOptions, SphereOptions, World, rrt, shortcut,
 };
+use glam::Vec3;
 
 #[cfg(target_os = "linux")]
 fn threads() -> usize {
@@ -87,7 +88,7 @@ fn a_one_thread_device_works_on_its_one_thread() {
         .attach(&AttachedObject {
             name: "box".into(),
             link: "panda_hand".into(),
-            shapes: vec![Obstacle::sphere(glam::Vec3::new(0.0, 0.0, 0.1), 0.03)],
+            shapes: vec![Obstacle::sphere(Vec3::new(0.0, 0.0, 0.1), 0.03)],
             touch_links: vec!["panda_leftfinger".into(), "panda_rightfinger".into()],
             spheres: SphereOptions {
                 budget: 4,

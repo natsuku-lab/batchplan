@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use batchplan::glam::{Mat3, Quat, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{
@@ -31,6 +31,8 @@ const HZ: f32 = 30.0;
 const SPEED: f32 = 0.6;
 
 fn main() -> Result<()> {
+    use anyhow::Context;
+
     let args = Args::parse()?;
     let robot = batchplan_demos::panda()?;
     let device = args.device(&robot, true)?;

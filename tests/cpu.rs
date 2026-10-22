@@ -8,7 +8,7 @@ use std::f64::consts::FRAC_PI_2;
 
 use batchplan::rng::Rng;
 use batchplan::{CollisionWeights, Device, IkOptions, IkProblem, Obstacle, Robot, World};
-use glam::{DMat3, DVec3, Quat, Vec3};
+use glam::{DMat3, DVec3, EulerRot, Quat, Vec3};
 
 fn panda() -> Robot {
     common::panda().unwrap()
@@ -65,7 +65,7 @@ fn fk_matches_franka_dh_parameters() {
 
 /// One obstacle of every kind, rotated off the world axes.
 fn every_obstacle_kind() -> Vec<Obstacle> {
-    let rotation = Quat::from_euler(glam::EulerRot::XYZ, 0.4, -0.7, 1.1);
+    let rotation = Quat::from_euler(EulerRot::XYZ, 0.4, -0.7, 1.1);
     let center = Vec3::new(0.1, -0.2, 0.3);
     vec![
         Obstacle::Cuboid {

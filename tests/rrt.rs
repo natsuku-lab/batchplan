@@ -9,7 +9,7 @@ use batchplan::{
     CollisionWeights, Device, Obstacle, PlanOptions, PlanProblem, Robot, RobotOptions, RrtOptions,
     RrtProblem, ShortcutOptions, Trajectory, World, Worlds, rrt, shortcut,
 };
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 const UR5E: &str = "ur5e/ur_description/urdf/ur5e.urdf";
 
@@ -332,7 +332,7 @@ fn continuous_joints_turn_the_short_way_unless_it_is_blocked() {
         obstacles: vec![Obstacle::Cuboid {
             center: Vec3::new(-0.55, 0.0, 0.15),
             half_extents: Vec3::new(0.1, 0.01, 0.25),
-            rotation: glam::Quat::IDENTITY,
+            rotation: Quat::IDENTITY,
         }],
     };
     for d in devices(&robot) {
@@ -390,7 +390,7 @@ fn continuous_joints_turn_the_short_way_unless_it_is_blocked() {
             obstacles: vec![Obstacle::Cuboid {
                 center: Vec3::new(x, 0.0, 0.15),
                 half_extents: Vec3::new(0.1, 0.01, 0.25),
-                rotation: glam::Quat::IDENTITY,
+                rotation: Quat::IDENTITY,
             }],
         };
         let worlds = d.upload(&[fin(0.55)]).unwrap();
@@ -426,7 +426,7 @@ fn ur5e_reaches_a_goal_a_turn_away_the_other_way_round() {
         obstacles: vec![Obstacle::Cuboid {
             center: Vec3::new(0.0, 0.6, 0.3),
             half_extents: Vec3::new(0.05, 0.3, 0.6),
-            rotation: glam::Quat::IDENTITY,
+            rotation: Quat::IDENTITY,
         }],
     };
     for d in devices(&robot) {
@@ -640,7 +640,7 @@ fn a_path_no_spline_follows_is_searched_again() {
     let pose = |p: [f32; 7]| {
         (
             Vec3::new(p[0], p[1], p[2]),
-            glam::Quat::from_xyzw(p[4], p[5], p[6], p[3]).normalize(),
+            Quat::from_xyzw(p[4], p[5], p[6], p[3]).normalize(),
         )
     };
     let shelf = [0.4287125, 1.1404362, 0.0, 0.83603096, 0.0, 0.0, 0.5486823];

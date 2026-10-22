@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use glam::{Quat, UVec3, Vec3};
 use parry3d::math::Pose;
-use parry3d::query::{self, PointQuery};
+use parry3d::query;
 use parry3d::shape::{TriMesh as ParryMesh, TriMeshFlags};
 use rayon::prelude::*;
 
@@ -106,6 +106,8 @@ fn surface_samples(meshes: &[TriMesh], count: usize, rng: &mut Rng) -> Vec<Vec3>
 
 /// The largest sphere centered at `p` inside any of `solids`, if `p` is inside one.
 fn inscribed(solids: &[ParryMesh], p: Vec3) -> Option<(Vec3, f32)> {
+    use parry3d::query::PointQuery;
+
     solids
         .iter()
         .filter_map(|s| {

@@ -1,14 +1,14 @@
 //! Random tabletop worlds shared by the examples and tests.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::f32::consts::PI;
 
-use std::collections::HashMap;
-
+use batchplan::datagen::PickPlace;
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionModel, CollisionWeights, Device, IkOptions, IkProblem, Obstacle, PlanProblem, Pose,
-    Robot, RobotOptions, World,
+    CollisionModel, CollisionWeights, Device, IkOptions, IkProblem, Obstacle, Part, PlanProblem,
+    Pose, Robot, RobotOptions, World,
 };
 use glam::{Quat, Vec3};
 
@@ -42,7 +42,7 @@ pub fn panda() -> Result<Robot, batchplan::Error> {
 /// at its ready pose with its fingers held open.
 pub fn two_pandas() -> Result<Robot, batchplan::Error> {
     let one = panda_options();
-    let arm = |prefix: &str, y: f32| batchplan::Part {
+    let arm = |prefix: &str, y: f32| Part {
         path: asset("franka/franka_panda.urdf").into(),
         prefix: prefix.into(),
         base: Pose::new(Vec3::new(0.0, y, 0.0), Quat::IDENTITY),
@@ -182,7 +182,7 @@ pub fn tabletop_for(robot: &Robot, cpu: &Device, rng: &mut Rng) -> World {
 
 /// A table with its top at z = 0, two tall boxes, and a small box to move across the table: the
 /// world and the task. The small box is the world's last obstacle.
-pub fn pick_place_scene(world: u32, rng: &mut Rng) -> (World, batchplan::datagen::PickPlace) {
+pub fn pick_place_scene(world: u32, rng: &mut Rng) -> (World, PickPlace) {
     let table = Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02));
     let mut obstacles = vec![table];
     for side in [-1.0, 1.0] {
@@ -213,7 +213,7 @@ pub fn pick_place_scene(world: u32, rng: &mut Rng) -> (World, batchplan::datagen
     let object = obstacles.len() - 1;
     (
         World { obstacles },
-        batchplan::datagen::PickPlace {
+        PickPlace {
             world,
             object,
             place,
@@ -262,7 +262,7 @@ pub fn far_reaches(
 
 /// 64 tabletop reaches from the default pose, the worlds they live in, and their IK goals.
 pub fn reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
-    let mut rng = batchplan::rng::Rng::new(41);
+    let mut rng = Rng::new(41);
     let scene: Vec<World> = (0..64).map(|_| tabletop(&mut rng)).collect();
     let cpu = Device::cpu(robot).unwrap();
     let goals: Vec<IkProblem> = scene

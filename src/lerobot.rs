@@ -27,18 +27,20 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::error::{Error, Result, ensure_input};
 use arrow_array::builder::{Float64Builder, Int64Builder, ListBuilder, StringBuilder};
 use arrow_array::{
     ArrayRef, FixedSizeListArray, Float32Array, Int64Array, RecordBatch, StringArray,
 };
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{ArrowError, DataType, Field, Schema};
+use glam::{Quat, Vec3};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
+use parquet::errors::ParquetError;
 use parquet::file::properties::WriterProperties;
 use serde_json::{Map, Value, json};
 
 use crate::datagen::{self, Demonstration, Origin};
+use crate::error::{Error, Result, ensure_input};
 use crate::robot::Robot;
 use crate::types::Pose;
 use crate::world::{self, Obstacle, World};
@@ -569,7 +571,7 @@ fn environment_state(
     carried: Option<(usize, Pose)>,
     max_obstacles: usize,
 ) -> Vec<f32> {
-    let canonical = |q: glam::Quat| if q.w < 0.0 { -q } else { q };
+    let canonical = |q: Quat| if q.w < 0.0 { -q } else { q };
     let (p, q) = (goal.position, canonical(goal.rotation));
     let mut env = vec![p.x, p.y, p.z, q.x, q.y, q.z, q.w];
     for (k, o) in world.obstacles.iter().enumerate() {
@@ -577,7 +579,7 @@ fn environment_state(
             Some((c, pose)) if c == k => o.placed(pose),
             _ => o.clone(),
         };
-        let round = |radius: f32, half: f32| glam::Vec3::new(radius, radius, half);
+        let round = |radius: f32, half: f32| Vec3::new(radius, radius, half);
         let (kind, center, size, rot) = match o {
             Obstacle::Cuboid {
                 center,
@@ -585,7 +587,7 @@ fn environment_state(
                 rotation,
             } => (0.0, center, half_extents, rotation),
             Obstacle::Sphere { center, radius } => {
-                (1.0, center, glam::Vec3::splat(radius), glam::Quat::IDENTITY)
+                (1.0, center, Vec3::splat(radius), Quat::IDENTITY)
             }
             Obstacle::Cylinder {
                 center,
@@ -841,14 +843,14 @@ impl Files {
     }
 }
 
-impl From<parquet::errors::ParquetError> for Error {
-    fn from(e: parquet::errors::ParquetError) -> Self {
+impl From<ParquetError> for Error {
+    fn from(e: ParquetError) -> Self {
         Error::Write(e.to_string())
     }
 }
 
-impl From<arrow_schema::ArrowError> for Error {
-    fn from(e: arrow_schema::ArrowError) -> Self {
+impl From<ArrowError> for Error {
+    fn from(e: ArrowError) -> Self {
         Error::Write(e.to_string())
     }
 }

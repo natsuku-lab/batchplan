@@ -1,7 +1,7 @@
 //! Planner output as policy-training demonstrations: nominal reaches plus recoveries from
 //! perturbed states, timed within the robot's limits at randomized speeds.
 
-use glam::{Quat, Vec3};
+use glam::{Mat3, Quat, Vec3};
 use rayon::prelude::*;
 
 use crate::device::{self, Device, Worlds};
@@ -1394,7 +1394,7 @@ impl Grasp {
         if (y.cross(z).dot((object.position - arm.base).with_z(0.0)) >= 0.0) != arm.outward {
             y = -y;
         }
-        let rotation = Quat::from_mat3(&glam::Mat3::from_cols(y.cross(z), y, z));
+        let rotation = Quat::from_mat3(&Mat3::from_cols(y.cross(z), y, z));
         let position = object.position
             + object.rotation * (long * along)
             + Vec3::Z * (half.z - depth.min(half.z));

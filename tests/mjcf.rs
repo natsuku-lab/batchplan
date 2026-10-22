@@ -13,7 +13,7 @@ use batchplan::{
     CollisionModel, CollisionWeights, Device, JointLimits, Obstacle, Pose, Robot, RobotOptions,
     SdfOptions, World,
 };
-use glam::{DAffine3, DMat3, DQuat, DVec3, Vec3};
+use glam::{DAffine3, DMat3, DQuat, DVec3, Quat, Vec3};
 
 /// Kinematics only: these Menagerie models reference meshes that are not bundled.
 fn no_spheres() -> RobotOptions {
@@ -425,7 +425,7 @@ fn nonlinear_joint_equalities_follow_their_polynomial_on_every_device() {
         obstacles: vec![Obstacle::Cuboid {
             center: Vec3::new(0.55, 0.0, 0.1),
             half_extents: Vec3::new(0.2, 0.2, 0.05),
-            rotation: glam::Quat::IDENTITY,
+            rotation: Quat::IDENTITY,
         }],
     }];
     let w = CollisionWeights {

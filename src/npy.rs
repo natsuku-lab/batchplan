@@ -1,13 +1,15 @@
 //! Demonstrations as plain NumPy arrays: one `.npy` file per field, loadable with `numpy.load`
 //! and nothing else. The dependency-free counterpart of [`crate::lerobot`].
 
-use std::io::Write;
+use std::fs::File;
+use std::io::BufWriter;
 use std::path::Path;
 
-use crate::error::{Result, ensure_input};
+use bytemuck::Pod;
 use serde_json::{Map, Value, json};
 
 use crate::datagen::{self, Demonstration};
+use crate::error::{Result, ensure_input};
 use crate::robot::Robot;
 use crate::world::{self, World};
 
@@ -159,7 +161,7 @@ pub fn export(
     Ok(())
 }
 
-trait Element: bytemuck::Pod {
+trait Element: Pod {
     const DESCR: &'static str;
 }
 
@@ -177,6 +179,8 @@ impl Element for u8 {
 
 /// One `.npy` file (format version 1.0, little-endian, C order).
 fn write<T: Element>(path: impl AsRef<Path>, shape: &[usize], data: &[T]) -> Result<()> {
+    use std::io::Write;
+
     ensure_input!(
         shape.iter().product::<usize>() == data.len(),
         "shape {shape:?} does not match {} elements",
@@ -198,7 +202,7 @@ fn write<T: Element>(path: impl AsRef<Path>, shape: &[usize], data: &[T]) -> Res
     let pad = (64 - (10 + header.len() + 1) % 64) % 64;
     header.push_str(&" ".repeat(pad));
     header.push('\n');
-    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut f = BufWriter::new(File::create(path)?);
     f.write_all(b"\x93NUMPY\x01\x00")?;
     f.write_all(&(header.len() as u16).to_le_bytes())?;
     f.write_all(header.as_bytes())?;

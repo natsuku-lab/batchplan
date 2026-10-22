@@ -4,13 +4,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Context;
-
-use crate::error::{Error, Result};
 use glam::{Mat3, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::description::Geometry;
+use crate::error::{Error, Result};
 use crate::sdf::{self, SdfGrid, SdfOptions};
 use crate::types::Pose;
 
@@ -78,6 +76,8 @@ impl World {
     }
 
     fn read(path: &Path, grids: &SdfOptions) -> anyhow::Result<World> {
+        use anyhow::Context;
+
         let scene = crate::description::load_scene(path)?;
         let obstacles = scene
             .iter()

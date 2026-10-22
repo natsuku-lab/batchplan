@@ -18,7 +18,7 @@ mod rebot;
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use batchplan::datagen::{self, Demonstration, Handover};
 use batchplan::glam::Vec3;
 use batchplan::rng::Rng;
@@ -36,6 +36,8 @@ const SPACING: f32 = 1.5;
 const HZ: f32 = 30.0;
 
 fn main() -> Result<()> {
+    use anyhow::Context;
+
     let args = Args::parse()?;
     let count = args.count.unwrap_or(16);
     let robot = rebot::two_rebots(Path::new(REBOT))?;
