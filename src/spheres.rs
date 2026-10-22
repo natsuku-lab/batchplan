@@ -9,11 +9,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use glam::{Quat, UVec3, Vec3};
 use parry3d::math::Pose;
-use parry3d::query::{PointQuery, intersection_test};
+use parry3d::query::{self, PointQuery};
 use parry3d::shape::{TriMesh as ParryMesh, TriMeshFlags};
 use rayon::prelude::*;
 
-use crate::description::{TriMesh, triangle_area};
+use crate::description::{self, TriMesh};
 use crate::rng::Rng;
 use crate::robot::Robot;
 use crate::world::Obstacle;
@@ -86,7 +86,7 @@ fn surface_samples(meshes: &[TriMesh], count: usize, rng: &mut Rng) -> Vec<Vec3>
     let mut cumulative = Vec::with_capacity(triangles.len());
     let mut total = 0.0;
     for &t in &triangles {
-        total += triangle_area(t);
+        total += description::triangle_area(t);
         cumulative.push(total);
     }
     if total <= 0.0 {
@@ -479,7 +479,8 @@ pub(crate) fn ignore_pairs(
                     solids[a].as_ref().expect("filtered"),
                     solids[b].as_ref().expect("filtered"),
                 );
-                intersection_test(&pose(a), sa, &pose(b), sb).is_ok_and(|hit| hit.intersecting)
+                query::intersection_test(&pose(a), sa, &pose(b), sb)
+                    .is_ok_and(|hit| hit.intersecting)
             })
             .collect()
     };

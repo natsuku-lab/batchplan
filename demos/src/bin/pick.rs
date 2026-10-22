@@ -15,7 +15,7 @@ use std::f32::consts::PI;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use batchplan::datagen::{PickPlace, PickPlaceOptions, pick_and_place};
+use batchplan::datagen::{PickPlace, PickPlaceOptions};
 use batchplan::glam::{Quat, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{Obstacle, Pose, Robot, World, datagen};
@@ -44,9 +44,9 @@ fn main() -> Result<()> {
     // it, about one carry in six stops at a corner of its searched path.
     options.plan.seeds = 2;
     // The first call on a GPU compiles its kernels; time the second.
-    pick_and_place(&device, &worlds[..1], &tasks[..1], &options)?;
+    datagen::pick_and_place(&device, &worlds[..1], &tasks[..1], &options)?;
     let t = Instant::now();
-    let demos = pick_and_place(&device, &worlds, &tasks, &options)?;
+    let demos = datagen::pick_and_place(&device, &worlds, &tasks, &options)?;
     let planned = t.elapsed();
 
     let featured = demos.first().context("no task succeeded")?;

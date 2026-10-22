@@ -19,12 +19,12 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use batchplan::datagen::{Demonstration, Handover, handover};
+use batchplan::datagen::{self, Demonstration, Handover};
 use batchplan::glam::Vec3;
 use batchplan::rng::Rng;
 use batchplan::{Obstacle, Pose, Robot, World};
 use batchplan_demos::{Args, RobotMeshes};
-use rebot::{FINGERS_OPEN, scene, two_rebots};
+use rebot::FINGERS_OPEN;
 
 /// Where `scripts/fetch_rebot.sh` puts the arm.
 const REBOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../data/rebot");
@@ -38,17 +38,17 @@ const HZ: f32 = 30.0;
 fn main() -> Result<()> {
     let args = Args::parse()?;
     let count = args.count.unwrap_or(16);
-    let robot = two_rebots(Path::new(REBOT))?;
+    let robot = rebot::two_rebots(Path::new(REBOT))?;
     // Small batches plan sooner on the CPU, which pays no per-call GPU cost.
     let device = args.device(&robot, false)?;
     let mut rng = Rng::new(5);
     let (worlds, tasks): (Vec<World>, Vec<Handover>) =
-        (0..count).map(|i| scene(i as u32, &mut rng)).unzip();
+        (0..count).map(|i| rebot::scene(i as u32, &mut rng)).unzip();
     let options = rebot::options(HZ);
     // The first call on a GPU compiles its kernels; time the second.
-    handover(&device, &worlds[..1], &tasks[..1], &options)?;
+    datagen::handover(&device, &worlds[..1], &tasks[..1], &options)?;
     let t = Instant::now();
-    let demos = handover(&device, &worlds, &tasks, &options)?;
+    let demos = datagen::handover(&device, &worlds, &tasks, &options)?;
     let planned = t.elapsed();
 
     let featured = demos.first().context("no handover succeeded")?;

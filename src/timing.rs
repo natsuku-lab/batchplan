@@ -15,7 +15,7 @@ use crate::error::{Error, Result, ensure_input};
 use serde::{Deserialize, Serialize};
 
 use crate::robot::Robot;
-use crate::spline::{BASIS_D3, basis, basis_d1, basis_d2, blend};
+use crate::spline::{self, BASIS_D3};
 use crate::topp::{self, CHECK_SAMPLES};
 use crate::types::{JointTrajectory, StartMotion};
 
@@ -155,9 +155,9 @@ impl Trajectory {
         let span = (s as usize).min(spans - 1);
         let v = s - span as f32;
         let cp = &self.control_points;
-        blend(cp, n, span, basis(v), &mut out.position);
-        blend(cp, n, span, basis_d1(v), &mut out.velocity);
-        blend(cp, n, span, basis_d2(v), &mut out.acceleration);
+        spline::blend(cp, n, span, spline::basis(v), &mut out.position);
+        spline::blend(cp, n, span, spline::basis_d1(v), &mut out.velocity);
+        spline::blend(cp, n, span, spline::basis_d2(v), &mut out.acceleration);
         for j in 0..n {
             let (p1, p2) = (out.velocity[j], out.acceleration[j]);
             out.velocity[j] = p1 * sd;
@@ -197,9 +197,13 @@ impl Trajectory {
         let tp = &self.time_points;
         let at = |w: [f32; 4]| (0..4).map(|i| w[i] * tp[m + i]).sum::<f32>();
         if h > 0.0 {
-            (at(basis(u)), at(basis_d1(u)) / h, at(basis_d2(u)) / (h * h))
+            (
+                at(spline::basis(u)),
+                at(spline::basis_d1(u)) / h,
+                at(spline::basis_d2(u)) / (h * h),
+            )
         } else {
-            (at(basis(u)), 0.0, 0.0)
+            (at(spline::basis(u)), 0.0, 0.0)
         }
     }
 
@@ -573,7 +577,13 @@ const RANGE_SLACK: f32 = 1e-5;
 /// derivative, a quadratic in u, is zero inside it. NaN anywhere makes both NaN.
 fn span_range(cp: &[f32], n: usize, j: usize, k: usize) -> (f32, f32) {
     let p = [0, 1, 2, 3].map(|w| cp[(k + w) * n + j]);
-    let at = |u: f32| basis(u).iter().zip(&p).map(|(w, x)| w * x).sum::<f32>();
+    let at = |u: f32| {
+        spline::basis(u)
+            .iter()
+            .zip(&p)
+            .map(|(w, x)| w * x)
+            .sum::<f32>()
+    };
     // Six times the derivative: a u² + b u + c.
     let (a, b, c) = (
         -3.0 * p[0] + 9.0 * p[1] - 9.0 * p[2] + 3.0 * p[3],

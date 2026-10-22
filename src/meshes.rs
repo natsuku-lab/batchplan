@@ -11,14 +11,14 @@ use std::sync::Arc;
 
 use glam::{Quat, Vec3};
 use parry3d::math::Pose;
-use parry3d::query::distance;
+use parry3d::query;
 use parry3d::shape::{SharedShape, TriMesh as ParryMesh, TriMeshFlags};
 use rayon::prelude::*;
 
 use crate::description::{Geometry, TriMesh};
 use crate::error::{Error, Result, ensure_input, input};
 use crate::robot::Robot;
-use crate::sdf::{SdfGrid, grid_distance};
+use crate::sdf::{self, SdfGrid};
 use crate::world::{FAR, Obstacle, World};
 
 /// Points cover each link's surface for checks against distance grids: every surface point lies
@@ -155,7 +155,7 @@ impl MeshModel {
         let bound = |i: usize, m: &LinkMesh| (fk.rot[i] * m.bound.0 + fk.pos[i], m.bound.1);
         let gap = |(a, ra): (Vec3, f32), (b, rb): (Vec3, f32)| a.distance(b) - ra - rb;
         let apart = |p1: &Pose, s1: &SharedShape, p2: &Pose, s2: &SharedShape| {
-            distance(p1, s1.as_ref(), p2, s2.as_ref()).map_or(0.0, |d| d.distance)
+            query::distance(p1, s1.as_ref(), p2, s2.as_ref()).map_or(0.0, |d| d.distance)
         };
         let nearest = |mut pairs: Vec<(f32, usize, usize)>,
                        exact: &dyn Fn(usize, usize, f32) -> f32| {
@@ -204,7 +204,11 @@ impl MeshModel {
                         .surface
                         .iter()
                         .map(|&p| {
-                            grid_distance(grid, to_grid * (fk.rot[i] * p + fk.pos[i] - *centre)).0
+                            sdf::grid_distance(
+                                grid,
+                                to_grid * (fk.rot[i] * p + fk.pos[i] - *centre),
+                            )
+                            .0
                         })
                         .fold(f32::INFINITY, f32::min);
                     (nearest - SURFACE_SPACING).max(0.0)

@@ -6,7 +6,7 @@
 
 use crate::error::{Result, ensure_input};
 
-use crate::device::{CollisionWeights, Device, Worlds, collision_free};
+use crate::device::{self, CollisionWeights, Device, Worlds};
 use crate::rng::Rng;
 use crate::types::{Pose, Solved};
 
@@ -205,7 +205,7 @@ pub fn solve_ik(
         .map(|i| {
             err[i][0] < o.position_tolerance
                 && err[i][1] < o.rotation_tolerance
-                && collision_free(clear[i])
+                && device::collision_free(clear[i])
         })
         .collect();
     Ok(IkResult {

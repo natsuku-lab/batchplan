@@ -4,10 +4,7 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
-use batchplan::datagen::{
-    Handover, Origin, PickPlace, PickPlaceOptions, RecoveryOptions, handover, pick_and_place,
-    reset_states,
-};
+use batchplan::datagen::{self, Handover, Origin, PickPlace, PickPlaceOptions, RecoveryOptions};
 use batchplan::rng::Rng;
 use batchplan::{CollisionWeights, Device, Obstacle, Pose, Robot, World};
 use glam::{Quat, Vec3};
@@ -62,7 +59,8 @@ fn boxes_are_picked_up_carried_and_set_down_where_asked() {
     let n = robot.dof();
     let (worlds, tasks) = scenes(6);
     for d in devices(&robot) {
-        let demos = pick_and_place(&d, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
+        let demos =
+            datagen::pick_and_place(&d, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
         assert!(
             demos.len() >= 4,
             "{}: {} of {} tasks done",
@@ -252,8 +250,9 @@ fn pick_and_place_tasks_are_checked() {
     let robot = common::panda().unwrap();
     let d = Device::cpu(&robot).unwrap();
     let (worlds, tasks) = scenes(1);
-    let wrong =
-        |t: PickPlace| pick_and_place(&d, &worlds, &[t], &PickPlaceOptions::default()).is_err();
+    let wrong = |t: PickPlace| {
+        datagen::pick_and_place(&d, &worlds, &[t], &PickPlaceOptions::default()).is_err()
+    };
     assert!(
         wrong(PickPlace {
             world: 1,
@@ -289,7 +288,8 @@ fn episodes_stay_on_one_arm_configuration() {
     let n = robot.dof();
     let cpu = Device::cpu(&robot).unwrap();
     let (worlds, tasks) = scenes(64);
-    let demos = pick_and_place(&cpu, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
+    let demos =
+        datagen::pick_and_place(&cpu, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
     assert!(demos.len() >= 56, "{} of 64 episodes", demos.len());
     let mut travel: Vec<f32> = demos
         .iter()
@@ -399,7 +399,8 @@ fn carries_keep_moving_around_obstacles() {
     let n = robot.dof();
     let cpu = Device::cpu(&robot).unwrap();
     let (worlds, tasks) = walled(512);
-    let demos = pick_and_place(&cpu, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
+    let demos =
+        datagen::pick_and_place(&cpu, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
     assert!(demos.len() >= 480, "{} of 512 episodes", demos.len());
     // The lift, the carry and the lowering each end at rest while the gripper holds the box; any
     // more rests stop the carry on its way.
@@ -513,7 +514,7 @@ fn blocks_are_handed_from_one_hand_to_the_other() {
     let (left, right) = (robot.hand_joints(0), robot.hand_joints(1));
     let (worlds, tasks) = handovers(8);
     for d in devices(&robot) {
-        let demos = handover(&d, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
+        let demos = datagen::handover(&d, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
         eprintln!("{}: {} of {} handovers", d.name(), demos.len(), tasks.len());
         assert!(
             demos.len() >= 6,
@@ -648,14 +649,14 @@ fn reset_states_carry_the_block_in_the_hand_holding_it() {
     let n = robot.dof();
     let (worlds, tasks) = handovers(4);
     let cpu = Device::cpu(&robot).unwrap();
-    let demos = handover(&cpu, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
+    let demos = datagen::handover(&cpu, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
     let options = RecoveryOptions {
         per_trajectory: 64,
         phase: (0.0, 1.0),
         ..Default::default()
     };
     for d in devices(&robot) {
-        let states = reset_states(&d, &worlds, &demos, &options).unwrap();
+        let states = datagen::reset_states(&d, &worlds, &demos, &options).unwrap();
         let (mut in_hand, mut loose, mut moved) = ([0; 2], 0, 0);
         for s in &states {
             let Origin::Recovery { parent, phase } = s.origin else {
@@ -741,7 +742,9 @@ fn reset_states_carry_the_block_in_the_hand_holding_it() {
         let held_by = |hands: [f32; 2]| {
             let mut demo = demos[0].clone();
             demo.gripper = hands.repeat(demo.trajectory.len());
-            reset_states(&d, &worlds, &[demo], &options).unwrap().len()
+            datagen::reset_states(&d, &worlds, &[demo], &options)
+                .unwrap()
+                .len()
         };
         let (one, both) = (held_by([0.0, 1.0]), held_by([0.0, 0.0]));
         assert!(

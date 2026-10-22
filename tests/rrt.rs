@@ -5,11 +5,9 @@
 mod common;
 
 use batchplan::rng::Rng;
-use batchplan::rrt::connect;
-use batchplan::shortcut::shortcut;
 use batchplan::{
     CollisionWeights, Device, Obstacle, PlanOptions, PlanProblem, Robot, RobotOptions, RrtOptions,
-    RrtProblem, ShortcutOptions, Trajectory, World, Worlds,
+    RrtProblem, ShortcutOptions, Trajectory, World, Worlds, rrt, shortcut,
 };
 use glam::Vec3;
 
@@ -88,7 +86,7 @@ fn rrt_paths_are_collision_free_under_a_denser_check() {
     let on_cpu = cpu.upload(&scene).unwrap();
     let o = RrtOptions::default();
     for d in devices(&robot) {
-        let found = connect(&d, &d.upload(&scene).unwrap(), &searches(&problems), &o).unwrap();
+        let found = rrt::connect(&d, &d.upload(&scene).unwrap(), &searches(&problems), &o).unwrap();
         let mut paths = vec![];
         for (p, path) in problems.iter().zip(&found.paths) {
             let Some(path) = path else { continue };
@@ -141,7 +139,7 @@ fn shortcutting_never_lengthens_a_path() {
     let n = robot.dof();
     let (scene, problems) = common::far_reaches(&robot, &cpu, 12, true);
     let worlds = cpu.upload(&scene).unwrap();
-    let found = connect(&cpu, &worlds, &searches(&problems), &RrtOptions::default()).unwrap();
+    let found = rrt::connect(&cpu, &worlds, &searches(&problems), &RrtOptions::default()).unwrap();
     let (world, raw): (Vec<u32>, Vec<Vec<f32>>) = problems
         .iter()
         .zip(found.paths)
@@ -149,7 +147,7 @@ fn shortcutting_never_lengthens_a_path() {
         .unzip();
     let mut short = raw.clone();
     let o = ShortcutOptions::default();
-    shortcut(&cpu, &worlds, &world, &mut short, &o).unwrap();
+    shortcut::shortcut(&cpu, &worlds, &world, &mut short, &o).unwrap();
     let (mut before, mut after) = (0.0, 0.0);
     for (a, b) in raw.iter().zip(&short) {
         assert!(
@@ -193,13 +191,13 @@ fn fixed_seeds_give_fixed_results() {
     let (scene, problems) = common::far_reaches(&robot, &cpu, 6, true);
     let worlds = cpu.upload(&scene).unwrap();
     let run = |rrt: RrtOptions| {
-        let found = connect(&cpu, &worlds, &searches(&problems), &rrt).unwrap();
+        let found = rrt::connect(&cpu, &worlds, &searches(&problems), &rrt).unwrap();
         let (world, mut paths): (Vec<u32>, Vec<Vec<f32>>) = problems
             .iter()
             .zip(found.paths)
             .filter_map(|(p, path)| Some((p.world, path?)))
             .unzip();
-        shortcut(
+        shortcut::shortcut(
             &cpu,
             &worlds,
             &world,
@@ -234,7 +232,8 @@ fn plan_solves_every_problem_rrt_connect_reaches() {
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let result = batchplan::plan(&d, &worlds, &problems, &PlanOptions::default()).unwrap();
-        let reachable = connect(&d, &worlds, &searches(&problems), &RrtOptions::default()).unwrap();
+        let reachable =
+            rrt::connect(&d, &worlds, &searches(&problems), &RrtOptions::default()).unwrap();
         let rrt = reachable.paths.iter().flatten().count();
         eprintln!(
             "{}: planned {}/24, RRT-Connect {rrt}/24",
@@ -401,7 +400,7 @@ fn continuous_joints_turn_the_short_way_unless_it_is_blocked() {
             goals: vec![problem.goal.clone()],
             hold: vec![],
         };
-        let found = connect(&d, &worlds, &[search], &RrtOptions::default()).unwrap();
+        let found = rrt::connect(&d, &worlds, &[search], &RrtOptions::default()).unwrap();
         let path = found.paths[0]
             .as_ref()
             .unwrap_or_else(|| panic!("{}: RRT-Connect found no way through pi", d.name()));
@@ -503,7 +502,7 @@ fn shortcutting_straightens_a_joint_that_swings_back() {
         "the detour must be clear"
     );
     let mut paths = vec![detour];
-    shortcut(&cpu, &worlds, &[0], &mut paths, &o).unwrap();
+    shortcut::shortcut(&cpu, &worlds, &[0], &mut paths, &o).unwrap();
     let wrist = travel(&paths[0], n)[n - 1];
     // None; 0.84 rad without straightening, smoothing alone.
     assert!(
@@ -547,7 +546,7 @@ fn a_grazed_straight_line_is_bent_around_the_obstacle() {
         goals: vec![goal.clone()],
         hold: vec![],
     };
-    let result = connect(&cpu, &worlds, &[problem], &RrtOptions::default()).unwrap();
+    let result = rrt::connect(&cpu, &worlds, &[problem], &RrtOptions::default()).unwrap();
     let path = result.paths[0].as_ref().expect("a path");
     let straight = length(&[start, goal].concat(), n);
     assert!(path.len() / n <= 4, "{} waypoints", path.len() / n);

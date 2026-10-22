@@ -11,7 +11,7 @@ use glam::{Mat3, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::description::Geometry;
-use crate::sdf::{SdfGrid, SdfOptions, grid_distance};
+use crate::sdf::{self, SdfGrid, SdfOptions};
 use crate::types::Pose;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -428,7 +428,7 @@ pub(crate) fn cylinder_distance(
 /// Must stay in sync with `obstacle_distance` in kernels.wgsl.
 #[inline]
 pub(crate) fn sdf_distance(r: Mat3, center: Vec3, grid: &SdfGrid, p: Vec3) -> (f32, Vec3) {
-    let (d, g) = grid_distance(grid, r.transpose() * (p - center));
+    let (d, g) = sdf::grid_distance(grid, r.transpose() * (p - center));
     (d, r * g)
 }
 

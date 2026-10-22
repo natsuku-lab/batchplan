@@ -16,7 +16,7 @@
 //! velocity, acceleration and jerk, sampled densely, keep their limits.
 
 use crate::robot::Robot;
-use crate::spline::{BASIS_D3, basis, basis_d1, basis_d2, blend};
+use crate::spline::{self, BASIS_D3};
 
 /// TOPP grid stages per path span.
 const STAGES_PER_SPAN: usize = 12;
@@ -50,14 +50,14 @@ pub(crate) fn time_map(
     let derivative = |s: f64, weights: fn(f32) -> [f32; 4]| -> Vec<f64> {
         let span = (s as usize).min(spans - 1);
         let mut out = vec![0.0f32; n];
-        blend(cp, n, span, weights((s - span as f64) as f32), &mut out);
+        spline::blend(cp, n, span, weights((s - span as f64) as f32), &mut out);
         out.into_iter().map(f64::from).collect()
     };
     let first: Vec<Vec<f64>> = (0..=stages)
-        .map(|i| derivative(i as f64 * step, basis_d1))
+        .map(|i| derivative(i as f64 * step, spline::basis_d1))
         .collect();
     let second: Vec<Vec<f64>> = (0..=stages)
-        .map(|i| derivative(i as f64 * step, basis_d2))
+        .map(|i| derivative(i as f64 * step, spline::basis_d2))
         .collect();
     // The path's third derivative is constant along each span; the stage takes the larger of the
     // spans it touches.
@@ -323,13 +323,16 @@ pub(crate) fn derivatives(
     let spans = cp.len() / n - 3;
     let at = |w: [f32; 4]| (0..4).map(|i| w[i] * points[m + i]).sum::<f32>();
     let (s, sd, sdd, sddd) = (
-        at(basis(u)),
-        at(basis_d1(u)) / knot,
-        at(basis_d2(u)) / (knot * knot),
+        at(spline::basis(u)),
+        at(spline::basis_d1(u)) / knot,
+        at(spline::basis_d2(u)) / (knot * knot),
         at(BASIS_D3) / (knot * knot * knot),
     );
     let span = (s.max(0.0) as usize).min(spans - 1);
-    let (w1, w2) = (basis_d1(s - span as f32), basis_d2(s - span as f32));
+    let (w1, w2) = (
+        spline::basis_d1(s - span as f32),
+        spline::basis_d2(s - span as f32),
+    );
     for (j, o) in out.iter_mut().enumerate().take(n) {
         let path = |w: [f32; 4]| (0..4).map(|i| w[i] * cp[(span + i) * n + j]).sum::<f32>();
         let (p1, p2, p3) = (path(w1), path(w2), path(BASIS_D3));
@@ -390,7 +393,9 @@ fn assess(
                 }
             }
             if factor < 1.0 {
-                let s = (0..4).map(|i| basis(u)[i] * points[m + i]).sum::<f32>();
+                let s = (0..4)
+                    .map(|i| spline::basis(u)[i] * points[m + i])
+                    .sum::<f32>();
                 overshoots.push((s, factor * 0.98));
             }
         }

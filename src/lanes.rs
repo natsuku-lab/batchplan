@@ -11,7 +11,7 @@ use glam::{Mat3, Vec3};
 
 use crate::cpu::Prepared;
 use crate::robot::{JointKind, Robot};
-use crate::world::{FAR, sdf_distance};
+use crate::world::{self, FAR};
 
 /// Configurations per call.
 pub(crate) const LANES: usize = 8;
@@ -848,7 +848,7 @@ fn distance<S: Simd>(o: &Prepared, p: V3<S>) -> F<S> {
             F::simd_from(
                 simd,
                 std::array::from_fn::<f32, LANES, _>(|l| {
-                    sdf_distance(rot, center, grid, Vec3::new(x[l], y[l], z[l])).0
+                    world::sdf_distance(rot, center, grid, Vec3::new(x[l], y[l], z[l])).0
                 }),
             )
         }

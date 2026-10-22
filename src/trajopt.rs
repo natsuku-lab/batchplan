@@ -19,8 +19,8 @@ use crate::device::{CollisionWeights, Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Keep, Optimize, Search};
 use crate::rng::Rng;
 use crate::robot::Robot;
-use crate::rrt::{Ahead, Connect, RrtOptions, RrtProblem, Sampling, distance};
-use crate::shortcut::{ShortcutOptions, Simplify, length, locate};
+use crate::rrt::{self, Ahead, Connect, RrtOptions, RrtProblem, Sampling};
+use crate::shortcut::{self, ShortcutOptions, Simplify};
 use crate::spline;
 use crate::timing::Trajectory;
 use crate::types::{JointPaths, Solved, StartMotion};
@@ -503,7 +503,7 @@ impl Fitting {
         let mut nearest = None;
         for (w, pair) in path.chunks(n).zip(path.chunks(n).skip(1)).enumerate() {
             let w = w + 1;
-            walked += distance(pair.0, pair.1);
+            walked += rrt::distance(pair.0, pair.1);
             if w + 1 < self.pins.len() && self.pins[w] == 0 {
                 let gap = (walked - along).abs();
                 if nearest.is_none_or(|(_, g)| gap < g) {
@@ -696,7 +696,7 @@ impl Search for Planning<'_> {
                 fit.clear = answer;
                 if passed {
                     self.start = Some(fit.spline.clone());
-                    self.chosen = Some((fit.spline.clone(), length(&fit.dense, n)));
+                    self.chosen = Some((fit.spline.clone(), shortcut::length(&fit.dense, n)));
                 }
                 if passed || fit.relaxing.is_some() {
                     // A moving start keeps its stops: its first spans are fitted to the motion.
@@ -714,7 +714,7 @@ impl Search for Planning<'_> {
                 if answer == dense.len() / n
                     && self.problem.start_motion.as_ref().is_none_or(follows)
                 {
-                    self.chosen = Some((std::mem::take(spline), length(dense, n)));
+                    self.chosen = Some((std::mem::take(spline), shortcut::length(dense, n)));
                 }
                 self.phase = Phase::Done;
             }
@@ -786,7 +786,7 @@ fn optimize(
     let near_straight = |pi: usize| {
         let item = pi * result.seeds;
         let searched = result.paths.path(item);
-        let straight = distance(&searched[..n], &searched[searched.len() - n..]);
+        let straight = rrt::distance(&searched[..n], &searched[searched.len() - n..]);
         result.valid[item] && result.length[item] <= straight * (1.0 + OPTIMIZE_SLACK)
     };
     let wanted: Vec<usize> = (0..result.problems.len())
@@ -874,7 +874,7 @@ fn validate(
         })
         .collect();
     let lengths = (0..items)
-        .map(|item| length(&dense[item * samples * n..(item + 1) * samples * n], n))
+        .map(|item| shortcut::length(&dense[item * samples * n..(item + 1) * samples * n], n))
         .collect();
     Ok((min_clearance, lengths))
 }
@@ -904,7 +904,7 @@ fn fit_spline(path: &[f32], n: usize, pinned: &[u8], out: &mut [f32], at: &mut [
     let point = |w: usize| &path[w * n..(w + 1) * n];
     let mut along = vec![0.0; waypoints];
     for w in 1..waypoints {
-        along[w] = along[w - 1] + distance(point(w - 1), point(w));
+        along[w] = along[w - 1] + rrt::distance(point(w - 1), point(w));
     }
     let last = waypoints - 1;
     let spacing = along[last] / count.saturating_sub(5).max(1) as f32;
@@ -950,13 +950,13 @@ fn fit_spline(path: &[f32], n: usize, pinned: &[u8], out: &mut [f32], at: &mut [
             if offset == 0.0 {
                 put(point(pin), along[pin], &mut t);
             } else {
-                locate(path, n, along[pin] + offset, &mut q);
+                shortcut::locate(path, n, along[pin] + offset, &mut q);
                 put(&q, along[pin] + offset, &mut t);
             }
         }
         for c in 1..=counts.get(i).copied().unwrap_or(0) {
             let s = along[pin] + blend + stretch[i] * c as f32 / (counts[i] + 1) as f32;
-            locate(path, n, s, &mut q);
+            shortcut::locate(path, n, s, &mut q);
             put(&q, s, &mut t);
         }
     }
@@ -1058,7 +1058,7 @@ mod tests {
         let (mut out, mut at) = (vec![0.0; 24 * n], vec![0.0; 24]);
         let k = 16;
         let mut dense = vec![0.0; (21 * k + 1) * n];
-        let near = |dense: &[f32], q: &[f32]| dense.chunks(n).any(|d| distance(d, q) < 1e-4);
+        let near = |dense: &[f32], q: &[f32]| dense.chunks(n).any(|d| rrt::distance(d, q) < 1e-4);
         for pinned in [[0, EXACT, 0, EXACT, 0], [0, 0, EXACT, 0, 0]] {
             assert!(fit_spline(&path, n, &pinned, &mut out, &mut at));
             spline::dense(&out, n, k, &mut dense);
@@ -1241,7 +1241,7 @@ mod tests {
             gaps.push(
                 dense
                     .chunks(n)
-                    .map(|d| distance(d, &path[2..4]))
+                    .map(|d| rrt::distance(d, &path[2..4]))
                     .fold(f32::INFINITY, f32::min),
             );
             // The curve stops where three control points in a row coincide: at both ends, and at

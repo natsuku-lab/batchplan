@@ -4,14 +4,14 @@
 use glam::{Quat, Vec3};
 use rayon::prelude::*;
 
-use crate::device::{Device, Worlds, collision_free};
+use crate::device::{self, Device, Worlds};
 use crate::error::{Result, ensure_input, input};
-use crate::ik::{IkOptions, IkProblem, IkResult, solve_ik};
+use crate::ik::{self, IkOptions, IkProblem, IkResult};
 use crate::rng::Rng;
 use crate::robot::{AttachedObject, Robot};
 use crate::spline;
 use crate::timing::Trajectory;
-use crate::trajopt::{PlanOptions, PlanProblem, PlanResult, plan};
+use crate::trajopt::{self, PlanOptions, PlanProblem, PlanResult};
 use crate::types::{JointTrajectory, Pose, Solved};
 use crate::world::{Obstacle, World};
 
@@ -92,7 +92,7 @@ pub fn recovery_problems(
     Ok(candidates
         .into_iter()
         .enumerate()
-        .filter(|&(i, _)| collision_free(clear[i]))
+        .filter(|&(i, _)| device::collision_free(clear[i]))
         .map(|(_, c)| c)
         .collect())
 }
@@ -245,7 +245,7 @@ pub fn reset_states(
             .collect();
         let clear = checker.clearance(&uploaded, &item_world, &q)?;
         for (k, &i) in members.iter().enumerate() {
-            free[i] = collision_free(clear[k]);
+            free[i] = device::collision_free(clear[k]);
         }
     }
     Ok(states
@@ -378,7 +378,7 @@ pub fn demonstrations(
         o.dt
     );
     let mut rng = Rng::new(o.rng_seed);
-    let ik = solve_ik(device, worlds, goals, &o.ik)?;
+    let ik = ik::solve_ik(device, worlds, goals, &o.ik)?;
 
     let mut starts: Vec<f32> = (0..goals.len())
         .flat_map(|_| {
@@ -392,7 +392,7 @@ pub fn demonstrations(
         .collect();
     let item_world: Vec<u32> = goals.iter().map(|g| g.world).collect();
     let start_clear = device.clearance(worlds, &item_world, &starts)?;
-    for g in (0..goals.len()).filter(|&g| !collision_free(start_clear[g])) {
+    for g in (0..goals.len()).filter(|&g| !device::collision_free(start_clear[g])) {
         starts[g * n..(g + 1) * n].copy_from_slice(&robot.default_q);
     }
     // Nominal plan problem p reaches the target of IK problem goal_of[p].
@@ -406,10 +406,10 @@ pub fn demonstrations(
             )
         })
         .unzip();
-    let nominal = plan(device, worlds, &problems, &o.plan)?;
+    let nominal = trajopt::plan(device, worlds, &problems, &o.plan)?;
     let recoveries = recovery_problems(device, worlds, &nominal, &o.recovery)?;
     let recovery_plans: Vec<PlanProblem> = recoveries.iter().map(|r| r.problem.clone()).collect();
-    let recovered = plan(device, worlds, &recovery_plans, &o.plan)?;
+    let recovered = trajopt::plan(device, worlds, &recovery_plans, &o.plan)?;
 
     // Speed scales are drawn in order, then the paths are timed in parallel (see `timed`).
     let mut scale = || rng.range(o.speed_scale.0, o.speed_scale.1);
@@ -668,7 +668,7 @@ pub fn pick_and_place(
             seed: None,
         })
         .collect();
-    let above = solve_ik(device, &uploaded, &above, &o.ik)?;
+    let above = ik::solve_ik(device, &uploaded, &above, &o.ik)?;
     // The solution nearest the start, not the one with the most clearance: every later pose is
     // seeded from this one, and a far branch (joints near opposite limits) makes the arm swing
     // around for moves of a few centimetres.
@@ -695,7 +695,7 @@ pub fn pick_and_place(
             seed: above[i].clone(),
         }))
         .collect();
-    let grasp = solve_ik(device, &uploaded, &grasp_and_above_place, &o.ik)?;
+    let grasp = ik::solve_ik(device, &uploaded, &grasp_and_above_place, &o.ik)?;
     let above_place: Vec<Option<Vec<f32>>> = (0..tasks.len())
         .map(|i| {
             above[i]
@@ -738,7 +738,7 @@ pub fn pick_and_place(
             seed: above_place[i].clone(),
         })
         .collect();
-    let place = solve_ik(device, &uploaded, &place, &o.ik)?;
+    let place = ik::solve_ik(device, &uploaded, &place, &o.ik)?;
     for i in 0..tasks.len() {
         let q1 = above[i].clone();
         let q2 = q1.as_deref().and_then(|q1| seeded(&grasp, i, q1));
@@ -798,7 +798,7 @@ pub fn pick_and_place(
                     }
                 })
                 .collect();
-            for solved in plan(d, &uploaded, &problems, &o.plan)?.solved() {
+            for solved in trajopt::plan(d, &uploaded, &problems, &o.plan)?.solved() {
                 segment[group[solved.index]] = solved.solution.to_vec();
                 next.push(group[solved.index]);
             }
@@ -1027,8 +1027,9 @@ pub fn handover(
         seeds: o.ik.seeds.min(NEAR_SEEDS),
         ..o.ik
     };
-    let ik = |problems: Vec<IkProblem>| solve_ik(device, &uploaded, &problems, &o.ik);
-    let ik_near = |problems: Vec<IkProblem>| solve_ik(device, &uploaded, &problems, &near_options);
+    let ik = |problems: Vec<IkProblem>| ik::solve_ik(device, &uploaded, &problems, &o.ik);
+    let ik_near =
+        |problems: Vec<IkProblem>| ik::solve_ik(device, &uploaded, &problems, &near_options);
     let above = ik((0..n_tasks)
         .map(|i| IkProblem {
             world: i as u32,
@@ -1233,7 +1234,7 @@ pub fn handover(
                     }
                 })
                 .collect();
-            for solved in plan(d, &uploaded, &problems, &o.plan)?.solved() {
+            for solved in trajopt::plan(d, &uploaded, &problems, &o.plan)?.solved() {
                 paths[s][group[solved.index]] = solved.solution.to_vec();
                 next.push(group[solved.index]);
             }

@@ -21,7 +21,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use super::{Connect, Halton, Tree, connect_edges, place, reach, steps_to, swaps, tube_radius};
+use super::connect::{self, Connect, Halton, Tree};
 use crate::edges::{self, EdgeQuery, Keep, Search, Wanted};
 use crate::robot::Robot;
 
@@ -478,7 +478,7 @@ impl Helper<'_> {
             } else {
                 (goal, start)
             };
-            if swaps(a, b) {
+            if connect::swaps(a, b) {
                 from_start = !from_start;
             }
         }
@@ -502,8 +502,8 @@ impl Helper<'_> {
             .point(base.halton.index + self.sample as u64 + 1, target);
         // The tube's samples come first: while it lasts, as many were drawn before as this one's
         // index.
-        let tube = tube_radius(robot, &base.across, base.max_iterations, self.sample);
-        place(
+        let tube = connect::tube_radius(robot, &base.across, base.max_iterations, self.sample);
+        connect::place(
             robot,
             &base.start,
             &base.line_goal,
@@ -515,7 +515,7 @@ impl Helper<'_> {
         );
         let tree = &mut self.trees[usize::from(!from_start)];
         let (near, d) = tree.nearest(target, &robot.continuous);
-        reach(robot, base.range, tree, near, d, target, &mut self.new);
+        connect::reach(robot, base.range, tree, near, d, target, &mut self.new);
         let forecast = &mut self.forecasts[usize::from(!from_start)];
         forecast.extend.clear();
         tree.push_node(near, &mut forecast.extend);
@@ -591,7 +591,7 @@ impl Search for Helper<'_> {
                 let base = self.base.as_ref().expect("synced");
                 let other = &mut self.trees[usize::from(self.from_start)];
                 let (node, d) = other.nearest(&self.new, &robot.continuous);
-                steps_to(
+                connect::steps_to(
                     robot,
                     base.range,
                     &self.new,
@@ -603,7 +603,7 @@ impl Search for Helper<'_> {
                 );
                 forecast.connect.clear();
                 forecast.connect.extend_from_slice(&self.new);
-                connect_edges(&self.steps, robot.dof(), &mut forecast.connect);
+                connect::connect_edges(&self.steps, robot.dof(), &mut forecast.connect);
                 forecast.extended = answer;
                 self.asked = Asked::Valid;
             }

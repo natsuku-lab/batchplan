@@ -7,9 +7,9 @@ use std::path::Path;
 use crate::error::{Result, ensure_input};
 use serde_json::{Map, Value, json};
 
-use crate::datagen::{Demonstration, check_demos};
+use crate::datagen::{self, Demonstration};
 use crate::robot::Robot;
-use crate::world::{World, worlds_json};
+use crate::world::{self, World};
 
 #[derive(Clone, Debug, Default)]
 pub struct ExportOptions {
@@ -40,7 +40,7 @@ pub fn export(
     o: &ExportOptions,
 ) -> Result<()> {
     let root = root.as_ref();
-    let dt = check_demos(robot, worlds, demos)?;
+    let dt = datagen::check_demos(robot, worlds, demos)?;
     ensure_input!(
         !root.join("meta.json").exists(),
         "{} already holds a dataset",
@@ -137,7 +137,7 @@ pub fn export(
     write(root.join("goal_pose.npy"), &[m, 7], &poses)?;
     std::fs::write(
         root.join("worlds.json"),
-        serde_json::to_string(&worlds_json(worlds)?)?,
+        serde_json::to_string(&world::worlds_json(worlds)?)?,
     )?;
 
     let recoveries = kinds.iter().filter(|&&k| k == 1).count();

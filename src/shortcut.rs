@@ -17,7 +17,7 @@ use std::time::Instant;
 use crate::device::{Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Keep, Search, Wanted};
 use crate::error::{Result, ensure_input};
-use crate::rrt::distance;
+use crate::rrt;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ShortcutOptions {
@@ -224,7 +224,7 @@ impl Simplify {
         self.line.push(from);
         let (mut along, mut after) = (0.0, 0.0);
         for (k, (a, b)) in path.chunks(n).zip(path.chunks(n).skip(1)).enumerate() {
-            along += distance(a, b);
+            along += rrt::distance(a, b);
             let x = if k + 1 == last {
                 to
             } else {
@@ -364,7 +364,7 @@ impl Search for Simplify {
                         for (j, to) in self.to.iter_mut().enumerate() {
                             *to = 0.25 * before[j] + 0.5 * at[j] + 0.25 * after[j];
                         }
-                        if distance(&self.to, at) >= self.o.min_change {
+                        if rrt::distance(&self.to, at) >= self.o.min_change {
                             break true;
                         }
                         v += 2;
@@ -440,7 +440,7 @@ impl Search for Simplify {
 pub(crate) fn length(path: &[f32], n: usize) -> f32 {
     path.chunks(n)
         .zip(path.chunks(n).skip(1))
-        .map(|(a, b)| distance(a, b))
+        .map(|(a, b)| rrt::distance(a, b))
         .sum()
 }
 
@@ -450,7 +450,7 @@ pub(crate) fn locate(path: &[f32], n: usize, along: f32, out: &mut [f32]) {
     let edges = path.len() / n - 1;
     for e in 0..edges {
         let (a, b) = (&path[e * n..(e + 1) * n], &path[(e + 1) * n..(e + 2) * n]);
-        let d = distance(a, b);
+        let d = rrt::distance(a, b);
         if walked + d >= along || e + 1 == edges {
             let t = if d > 0.0 {
                 ((along - walked) / d).clamp(0.0, 1.0)

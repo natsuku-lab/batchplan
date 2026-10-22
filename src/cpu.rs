@@ -23,10 +23,7 @@ use crate::sdf::{self, DepthImage, Layout, Occupancy, RobotMask, SdfGrid};
 use crate::spline;
 use crate::trajopt::{LINE_SEARCH, MAX_HISTORY, PlanOptions};
 use crate::types::{JointPaths, Pose};
-use crate::world::{
-    FAR, Obstacle, World, box_distance, capsule_distance, cylinder_distance, sdf_distance,
-    sphere_distance,
-};
+use crate::world::{self, FAR, Obstacle, World};
 use fearless_simd::dispatch;
 
 /// Up to eight clearances out, their configurations and their worlds.
@@ -214,25 +211,25 @@ fn obstacle_distance(o: &Prepared, p: Vec3) -> (f32, Vec3) {
     match *o {
         Prepared::Cuboid {
             rot, center, half, ..
-        } => box_distance(rot, center, half, p),
-        Prepared::Sphere { center, radius } => sphere_distance(center, radius, p),
+        } => world::box_distance(rot, center, half, p),
+        Prepared::Sphere { center, radius } => world::sphere_distance(center, radius, p),
         Prepared::Cylinder {
             rot,
             center,
             radius,
             half_height,
-        } => cylinder_distance(rot, center, radius, half_height, p),
+        } => world::cylinder_distance(rot, center, radius, half_height, p),
         Prepared::Capsule {
             rot,
             center,
             radius,
             half_length,
-        } => capsule_distance(rot, center, radius, half_length, p),
+        } => world::capsule_distance(rot, center, radius, half_length, p),
         Prepared::Sdf {
             rot,
             center,
             ref grid,
-        } => sdf_distance(rot, center, grid, p),
+        } => world::sdf_distance(rot, center, grid, p),
     }
 }
 

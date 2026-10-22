@@ -18,10 +18,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use batchplan::datagen::{Demonstration, Handover, RecoveryOptions, handover, reset_states};
+use batchplan::datagen::{self, Demonstration, Handover, RecoveryOptions};
 use batchplan::rng::Rng;
 use batchplan::{Device, Robot, World, npy};
-use rebot::{scene, two_rebots};
 
 /// Where `scripts/fetch_rebot.sh` puts the arm.
 const REBOT: &str = "data/rebot";
@@ -41,7 +40,7 @@ fn main() -> Result<()> {
     }
     let count: usize = positional.first().map_or(Ok(512), |a| a.parse())?;
 
-    let robot = two_rebots(Path::new(REBOT))?;
+    let robot = rebot::two_rebots(Path::new(REBOT))?;
     let device = if cpu {
         Device::cpu(&robot)?
     } else {
@@ -55,17 +54,17 @@ fn main() -> Result<()> {
 
     let mut rng = Rng::new(5);
     let (worlds, tasks): (Vec<World>, Vec<Handover>) =
-        (0..count).map(|i| scene(i as u32, &mut rng)).unzip();
+        (0..count).map(|i| rebot::scene(i as u32, &mut rng)).unzip();
     let options = rebot::options(30.0);
     // The first call on a GPU compiles its kernels; time the second.
-    handover(
+    datagen::handover(
         &device,
         &worlds[..8.min(count)],
         &tasks[..8.min(count)],
         &options,
     )?;
     let started = Instant::now();
-    let demos = handover(&device, &worlds, &tasks, &options)?;
+    let demos = datagen::handover(&device, &worlds, &tasks, &options)?;
     let seconds = started.elapsed().as_secs_f64();
     let durations: Vec<f32> = demos.iter().map(|d| d.trajectory.duration).collect();
     let motion: f32 = durations.iter().sum();
@@ -88,7 +87,7 @@ fn main() -> Result<()> {
             ..Default::default()
         };
         let started = Instant::now();
-        let states = reset_states(&device, &worlds, &demos, &options)?;
+        let states = datagen::reset_states(&device, &worlds, &demos, &options)?;
         println!(
             "{} of {} perturbed states collision-free in {:.2} s",
             states.len(),

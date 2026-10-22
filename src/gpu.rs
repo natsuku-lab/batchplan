@@ -11,15 +11,13 @@ use glam::Mat3;
 use rayon::prelude::*;
 use wgpu::util::DeviceExt;
 
-use crate::cpu::{CpuWorlds, prepare};
+use crate::cpu::{self, CpuWorlds};
 use crate::device::{Backend, CollisionWeights, Evaluation, Worlds};
 use crate::edges::Search;
 use crate::ik::IkOptions;
 use crate::lanes::Lanes;
 use crate::robot::{JointKind, Robot};
-use crate::sdf::{
-    DepthImage, FAR, Layout, Occlusion, Occupancy, RobotMask, SdfGrid, finishing_table, one_kind,
-};
+use crate::sdf::{self, DepthImage, FAR, Layout, Occlusion, Occupancy, RobotMask, SdfGrid};
 use crate::trajopt::{LINE_SEARCH, MAX_HISTORY, PlanOptions};
 use crate::types::{JointPaths, Pose};
 use crate::world::{Obstacle, World};
@@ -1073,7 +1071,7 @@ impl GpuBackend {
             obstacles: storage(&self.device, "obstacles", &obstacles),
             ranges: storage(&self.device, "world ranges", &ranges),
             grids: storage(&self.device, "distance grids", &grid_words),
-            cpu: prepare(worlds),
+            cpu: cpu::prepare(worlds),
         })
     }
 
@@ -1380,7 +1378,7 @@ impl Backend for GpuBackend {
         steps.extend(transform_steps(kernels, grid, &params));
         self.run_grid(kernels, &bindings, &steps);
         // The table is built while the transform runs.
-        let table = finishing_table(grid.voxel, grid.diagonal());
+        let table = sdf::finishing_table(grid.voxel, grid.diagonal());
         self.queue
             .write_buffer(bindings[9], 0, bytemuck::cast_slice(&table));
         self.run_grid(
@@ -1390,7 +1388,7 @@ impl Backend for GpuBackend {
         );
         let words: Vec<u32> = self.read(bindings[4], points.div_ceil(2))?;
         if self.read::<u32>(bindings[3], 1)?[0] == FAR {
-            return Err(one_kind(self.read::<u32>(bindings[2], 1)?[0] & 1 == 1));
+            return Err(sdf::one_kind(self.read::<u32>(bindings[2], 1)?[0] & 1 == 1));
         }
         Ok(bytemuck::cast_slice::<u32, u16>(&words)[..points].to_vec())
     }

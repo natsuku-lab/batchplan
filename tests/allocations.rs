@@ -9,9 +9,8 @@ mod common;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use batchplan::rrt::{RrtOptions, RrtProblem, connect};
-use batchplan::shortcut::shortcut;
-use batchplan::{Device, PlanOptions};
+use batchplan::rrt::{self, RrtOptions, RrtProblem};
+use batchplan::{Device, PlanOptions, shortcut};
 
 struct Counting;
 
@@ -73,13 +72,14 @@ fn batches_build_their_searches_on_the_threads_that_run_them() {
         })
         .collect();
     let small = allocations(|| {
-        drop(connect(&device, &worlds, &searches[..few], &RrtOptions::default()).unwrap())
+        drop(rrt::connect(&device, &worlds, &searches[..few], &RrtOptions::default()).unwrap())
     });
-    let large =
-        allocations(|| drop(connect(&device, &worlds, &searches, &RrtOptions::default()).unwrap()));
+    let large = allocations(|| {
+        drop(rrt::connect(&device, &worlds, &searches, &RrtOptions::default()).unwrap())
+    });
     let searched = per_problem(small, large);
 
-    let found = connect(&device, &worlds, &searches, &RrtOptions::default()).unwrap();
+    let found = rrt::connect(&device, &worlds, &searches, &RrtOptions::default()).unwrap();
     let (world, paths): (Vec<u32>, Vec<Vec<f32>>) = searches
         .iter()
         .zip(found.paths)
@@ -93,7 +93,7 @@ fn batches_build_their_searches_on_the_threads_that_run_them() {
     let shortcuts = |k: usize| {
         let mut paths = paths[..k].to_vec();
         allocations(|| {
-            shortcut(
+            shortcut::shortcut(
                 &device,
                 &worlds,
                 &world[..k],

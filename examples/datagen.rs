@@ -15,9 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use batchplan::datagen::{
-    DemoOptions, Demonstration, Origin, PickPlaceOptions, demonstrations, pick_and_place,
-};
+use batchplan::datagen::{self, DemoOptions, Demonstration, Origin, PickPlaceOptions};
 use batchplan::rng::Rng;
 use batchplan::{Device, IkProblem, Robot, World};
 
@@ -58,7 +56,7 @@ fn main() -> Result<()> {
             dt: 1.0 / fps as f32,
             ..Default::default()
         };
-        let demos = pick_and_place(&device, &worlds, &tasks, &options)?;
+        let demos = datagen::pick_and_place(&device, &worlds, &tasks, &options)?;
         println!(
             "{episodes} tasks -> {} pick-and-place demonstrations in {:.2} s",
             demos.len(),
@@ -76,7 +74,7 @@ fn main() -> Result<()> {
             dt: 1.0 / fps as f32,
             ..Default::default()
         };
-        let demos = demonstrations(&device, &device.upload(&worlds)?, &goals, &options)?;
+        let demos = datagen::demonstrations(&device, &device.upload(&worlds)?, &goals, &options)?;
         let recoveries = demos
             .iter()
             .filter(|d| matches!(d.origin, Origin::Recovery { .. }))

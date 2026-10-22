@@ -38,10 +38,10 @@ use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use serde_json::{Map, Value, json};
 
-use crate::datagen::{Demonstration, Origin, check_demos};
+use crate::datagen::{self, Demonstration, Origin};
 use crate::robot::Robot;
 use crate::types::Pose;
-use crate::world::{Obstacle, World, worlds_json};
+use crate::world::{self, Obstacle, World};
 
 const CODEBASE_VERSION: &str = "v3.0";
 const CHUNKS_SIZE: usize = 1000;
@@ -89,7 +89,7 @@ pub fn export(
     o: &ExportOptions,
 ) -> Result<()> {
     let root = root.as_ref();
-    let dt = check_demos(robot, worlds, demos)?;
+    let dt = datagen::check_demos(robot, worlds, demos)?;
     ensure_input!(
         !root.join("meta/info.json").exists(),
         "{} already holds a LeRobot dataset",
@@ -214,7 +214,7 @@ pub fn export(
             }
             e
         }).collect::<Vec<_>>(),
-        "worlds": worlds_json(worlds)?,
+        "worlds": world::worlds_json(worlds)?,
         "robot": robot_json(robot),
     });
     fs::write(meta.join("info.json"), serde_json::to_string_pretty(&info)?)?;

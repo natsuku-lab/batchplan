@@ -18,7 +18,7 @@ use fearless_simd::{Simd, dispatch};
 use crate::cpu::{self, Prepared};
 use crate::lanes::{LANES, LaneScratch, Lanes};
 use crate::robot::Robot;
-use crate::rrt::{Ahead, distance};
+use crate::rrt::{self, Ahead};
 use crate::trajopt::PlanOptions;
 
 /// What a query asks of its edges, checked in order.
@@ -58,7 +58,7 @@ impl Keep {
         let nearest = self
             .ends
             .iter()
-            .map(|end| distance(q, end))
+            .map(|end| rrt::distance(q, end))
             .fold(f32::INFINITY, f32::min);
         self.clearance * (nearest / self.ramp).min(1.0)
     }
@@ -350,7 +350,7 @@ fn edge_free<S: Simd>(
 
 /// The passes an edge from `a` to `b` takes: `LANES` states each.
 pub(crate) fn passes(a: &[f32], b: &[f32], spacing: f32) -> usize {
-    ((distance(a, b) / (LANES as f32 * spacing)).ceil() as usize).max(1)
+    ((rrt::distance(a, b) / (LANES as f32 * spacing)).ceil() as usize).max(1)
 }
 
 /// State `m` of `total` along the edge from `a` to `b`, into `out`.
@@ -365,7 +365,7 @@ pub(crate) fn state(a: &[f32], b: &[f32], m: usize, total: usize, out: &mut [f32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::{Device, collision_free};
+    use crate::device::{self, Device};
     use crate::rng::Rng;
     use crate::robot::{CollisionModel, Robot, RobotOptions};
     use crate::world::{Obstacle, World};
@@ -485,7 +485,7 @@ mod tests {
                         let clear = device
                             .clearance(&worlds, &vec![query.world; total], &q)
                             .unwrap();
-                        clear.into_iter().all(collision_free)
+                        clear.into_iter().all(device::collision_free)
                     })
                     .collect();
                 valid_edges += valid.iter().filter(|&&v| v).count();

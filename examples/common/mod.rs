@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use batchplan::rng::Rng;
 use batchplan::{
     CollisionModel, CollisionWeights, Device, IkOptions, IkProblem, Obstacle, PlanProblem, Pose,
-    Robot, RobotOptions, World, solve_ik,
+    Robot, RobotOptions, World,
 };
 use glam::{Quat, Vec3};
 
@@ -270,7 +270,7 @@ pub fn reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
         .enumerate()
         .map(|(i, w)| IkProblem::new(i as u32, grasp_target(w, &mut rng)))
         .collect();
-    let ik = solve_ik(
+    let ik = batchplan::solve_ik(
         &cpu,
         &cpu.upload(&scene).unwrap(),
         &goals,

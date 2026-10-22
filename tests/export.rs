@@ -6,7 +6,7 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use batchplan::datagen::{DemoOptions, Demonstration, demonstrations};
+use batchplan::datagen::{self, DemoOptions, Demonstration};
 use batchplan::rng::Rng;
 use batchplan::{Device, Error, IkProblem, Pose, Robot, World};
 use glam::Vec3;
@@ -22,7 +22,7 @@ fn demos(dt: f32) -> (Robot, Vec<World>, Vec<Demonstration>) {
         .map(|(i, w)| IkProblem::new(i as u32, common::grasp_target(w, &mut rng)))
         .collect();
     let uploaded = device.upload(&worlds).unwrap();
-    let demos = demonstrations(
+    let demos = datagen::demonstrations(
         &device,
         &uploaded,
         &goals,
@@ -59,7 +59,7 @@ fn demonstration_options_are_checked_before_any_work() {
             ..Default::default()
         },
     ] {
-        let err = demonstrations(&device, &worlds, &goals, &o).unwrap_err();
+        let err = datagen::demonstrations(&device, &worlds, &goals, &o).unwrap_err();
         assert!(matches!(err, Error::Input(_)), "{err:?}");
     }
 }
@@ -199,7 +199,7 @@ mod lerobot {
     use arrow_array::{Array, FixedSizeListArray, Float32Array, Int64Array, RecordBatch};
     use batchplan::JointTrajectory;
     use batchplan::datagen::{Carried, Origin};
-    use batchplan::lerobot::{ExportOptions, export};
+    use batchplan::lerobot::{self, ExportOptions};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::file::reader::{FileReader, SerializedFileReader};
 
@@ -212,7 +212,7 @@ mod lerobot {
         demos: &[Demonstration],
         o: &ExportOptions,
     ) -> batchplan::error::Result<()> {
-        export(root, robot, worlds, demos, o)
+        lerobot::export(root, robot, worlds, demos, o)
     }
 
     /// Every row of every parquet file under `dir`, in file order, with the file's (chunk, file).
