@@ -4,7 +4,7 @@
   <em>The fastest motion planning in the West.</em>
 </p>
 
-<img width="1135" height="654" alt="Dozens of tables, each with two reBot arms handing a block over, all planned in one batch" src="https://github.com/user-attachments/assets/a6ae642a-2319-4655-b791-4c6c13d48e40" />
+<img width="1135" height="654" alt="Two reBot arms at each of many tables handing a block over, every handover planned in one batch" src="https://raw.githubusercontent.com/natsuku-lab/batchplan/main/docs/handover.gif" />
 
 <p align="center">
   <a href="#quick-start"><b>Quick start</b></a> ·
@@ -35,7 +35,7 @@ It is built for robot learning at scale: planned motions become [LeRobot](https:
 
 ```toml
 [dependencies]
-batchplan = "0.1"
+batchplan = "0.2"
 ```
 
 | Cargo feature | Default | Adds |
@@ -273,6 +273,7 @@ A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster 
 
 | | |
 |---|---|
+| [Contributing](CONTRIBUTING.md) | Building and testing, the style guide the code follows, and what a change needs. |
 | [How it works](docs/architecture.md) | The design rules, the CPU/GPU twin, collision, per-robot kernels, and how the optimizer runs on the device. |
 | [Verification](docs/verification.md) | Running the tests, and what each one pins down. |
 | [CLAUDE.md](CLAUDE.md) | Working rules and the architecture in full detail, for people and coding agents. |
@@ -302,7 +303,7 @@ A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster 
 - **Timing.** Trajectories end at rest. Time-optimal timing respects jerk limits but does not minimize jerk.
 - **Small batches on a GPU.** A GPU call costs about 10 ms however small the batch, so below a few hundred problems per call the CPU is faster ([Batches and the GPU](#batches-and-the-gpu)). Planning itself runs on CPU threads on either device.
 - **Pick-and-place and handovers.** Episodes grasp upright boxes from above and have no recoveries. Camera videos come from replaying them in MuJoCo, kinematically: no physics checks the grasps.
-- **Maturity.** batchplan is at version 0.1, and its interface may change. It is tested on AMD (Vulkan) and Apple (Metal) GPUs; on NVIDIA, only earlier versions ran (on a T4).
+- **Maturity.** batchplan is at version 0.2, and its interface may change. It is tested on AMD (Vulkan) and Apple (Metal) GPUs; on NVIDIA, only earlier versions ran (on a T4).
 
 ## License
 

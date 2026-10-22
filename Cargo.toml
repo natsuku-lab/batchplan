@@ -1,6 +1,6 @@
 [package]
 name = "batchplan"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.90"
 description = "Batched, collision-aware robot motion generation: IK, motion planning and training data for thousands of problems at once, on any GPU (wgpu) or CPU threads"
@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/natsuku-lab/batchplan"
 keywords = ["robotics", "motion-planning", "inverse-kinematics", "gpu", "lerobot"]
 categories = ["science::robotics", "algorithms"]
-exclude = [".github/", "CLAUDE.md", "rust-toolchain.toml"]
+exclude = [".github/", "CLAUDE.md", "rust-toolchain.toml", "docs/*.gif"]
 
 [package.metadata.docs.rs]
 features = ["lerobot", "usd"]
