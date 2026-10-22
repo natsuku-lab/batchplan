@@ -100,7 +100,8 @@ pub struct IkResult {
     pub position_error: Vec<f32>,
     /// Per item: radians from the target, the worst over the targeted hands.
     pub rotation_error: Vec<f32>,
-    /// Per item: meters from the nearest obstacle (see [`Evaluation::world_clearance`]).
+    /// Per item: meters from the nearest obstacle (see
+    /// [`Evaluation::world_clearance`](crate::Evaluation::world_clearance)).
     pub world_clearance: Vec<f32>,
     /// Per item: meters between the nearest checked pair of the robot's links.
     pub self_clearance: Vec<f32>,

@@ -10,11 +10,11 @@ batchplan is a Rust library for batched, collision-aware robot motion generation
 
 ```bash
 cargo build --release --all-targets [--features lerobot] [--no-default-features]   # without `gpu`: CPU only, no wgpu
-BATCHPLAN_REQUIRE_GPU=1 cargo test --release                    # 141 tests, guides' code included; without the env var, GPU tests skip silently when no adapter exists
+BATCHPLAN_REQUIRE_GPU=1 cargo test --release                    # 142 tests, guides' code included; without the env var, GPU tests skip silently when no adapter exists
 BATCHPLAN_REQUIRE_GPU=1 cargo test --release --features lerobot # + 6 export tests and the README's and training-data guide's code
 BATCHPLAN_REQUIRE_GPU=1 cargo test --release --features usd     # + 7 OpenUSD tests
 cargo test --release --test gpu trajopt_directions_match_cpu_element_wise   # one test (test files: cpu, gpu, device, budget, export, pick_place, robot, hands, trajectory, mjcf, usd, sdf, meshes, rrt, attach, threads, allocations)
-cargo fmt --check                                               # rustfmt.toml: max_width 120
+cargo fmt --check && cargo +nightly fmt --check -- --config imports_granularity=Module,hex_literal_case=Lower,format_macro_matchers=true   # 100 columns; the second checks the style guide's nightly-only options (CI runs both)
 cargo clippy --release --all-targets [--features lerobot,usd | --no-default-features]   # zero warnings everywhere; CI denies them (lints in Cargo.toml)
 cargo build --release --lib --target aarch64-unknown-linux-gnu --no-default-features     # the CPU-only robot build CI checks
 cargo doc --no-deps --features lerobot,usd                      # keep at zero warnings
@@ -204,6 +204,15 @@ These decisions are settled. Keep to them unless the user decides otherwise.
 - `README.md` is for people who use the library: the pitch, install, three quick-start snippets, the comparison, links and limitations. Everything else lives in `docs/`, one page per topic (`docs/README.md` indexes them). A page owns its topic; others link to it rather than repeat it.
 - Every Rust block in the README and the guides compiles as a doctest (`lib.rs`, `mod guides`; the README and `training-data.md` need `--features lerobot`). Mark them `rust,no_run` and run each once by hand when it changes.
 - Numbers in the docs come from runs you can name: `docs/benchmarks.md` says how each was measured and how to reproduce it. When a change moves a number, rerun it and update every page that quotes it.
+
+## Style
+
+The code follows [Google's Rust style guide](https://google.github.io/styleguide/rustguide.html). Lints check what they can: `[lints]` in `Cargo.toml` and `demos/Cargo.toml` for every target, and `lib.rs`'s attributes for the library alone (`missing_docs`, `missing_debug_implementations`, `must_use_candidate`, `unwrap_used` outside tests). Decisions the guide leaves to the codebase:
+- **Formatting.** rustfmt's defaults at 100 columns. Comments wrap at 100 too; the examples' hand-aligned usage blocks stay aligned. Long string literals are left as rustfmt leaves them.
+- **Imports.** No globs, except `use super::*` in test modules and the rayon and fearless_simd preludes. Free functions are called through their module (`world::box_distance`, `datagen::handover`, `batchplan::plan`). Types are imported by name, except wgpu's and rerun's and names that would clash (`urdf_rs::Pose` beside `Pose`, `npy::ExportOptions` beside `lerobot::ExportOptions`, `Result`, `Error`, `Value`). A trait whose methods one function calls is imported in that function. Groups: std, external crates, then the crate.
+- **Modules.** A module with children only declares and re-exports them: `rrt.rs` holds `rrt/connect.rs` (the search, its trees and samples) and `rrt/ahead.rs`, and what the helpers read of `Connect` is `pub(super)`.
+- **API.** Constructors that return a `Result` are `try_new`. Public returns use named fields, not tuples (`Distance`, `Clearance`, `lower_corner`/`upper_corner`). Names are spelled out (`rotation_weight`, `acceleration_weight`, `gradient`), except terms of the field (`dof`, `ee_links`, `q`, `fx`, `dt`). `#[non_exhaustive]` marks what callers read but never build (results, `Trajectory`, `Recovery`) and the enums that may grow (`Obstacle`, `Occlusion`, `Origin`, `Error`); options, problems and value types (`Pose`, `JointState`, `PickPlace`, `Demonstration`, which exporters take from callers too) keep struct literals, under the guide's exceptions for struct update syntax and fixed structures. Options structs implement `Default`.
+- **Implementation.** `expect` says why it cannot fail. Iterator chains are named before a `for` loop rather than built in its header, and sequential `for_each` is a `for` loop (rayon's parallel `for_each` stays). Assertions say why they hold. Tests never read through a poisoned mutex. Bare `bool` arguments carry a comment (`/* parallel */ true`).
 
 ## Working rules
 

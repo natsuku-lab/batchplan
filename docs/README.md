@@ -18,6 +18,7 @@ The [README](../README.md) is the front door: what batchplan is, how to install 
 
 | | |
 |---|---|
+| [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | Building and testing, the style guide the code follows, and what a change needs. |
 | [`architecture.md`](architecture.md) | The design rules, the CPU/GPU twin, collision, the kernels written per robot, and trajectory optimization on the device. |
 | [`verification.md`](verification.md) | Running the tests, and what each test pins down. |
 | [`../CLAUDE.md`](../CLAUDE.md) | The working rules and the architecture in full detail, for people and coding agents alike. |
