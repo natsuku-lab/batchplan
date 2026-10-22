@@ -102,9 +102,25 @@ pub fn two_rebots(dir: &Path) -> Result<Robot> {
     Ok(Robot::assemble(&parts, &options)?)
 }
 
-/// A table, a block lying across the arms in front of one, where the hands meet between them, the
-/// place in front of the other arm, and a few small boxes elsewhere. Even tasks go left to right.
-pub fn scene(world: u32, rng: &mut Rng) -> (World, Handover) {
+/// What divides the table down its centre line, between the arms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Divider {
+    /// Nothing: the arms meet over an open table.
+    None,
+    /// A low wall, which the block is lifted over.
+    Wall,
+    /// A screen too tall to lift the block over, with an opening the arms hand it through.
+    Opening,
+    /// A row of posts too tall to lift the block over, the block handed between two of them.
+    Posts,
+}
+
+/// A handover task: the block lying in front of one arm, the pose where the other takes it, and
+/// where that arm sets it down. Three tables in four are divided down the middle (see
+/// [`Divider`]). Past a tall divider, the hands meet at one end of their reach and the block lies,
+/// and is set down, toward the other, so it is carried along the divider to the gap and back.
+/// 0-2 small boxes stand at the far edge. Even worlds go left to right.
+pub fn scene(world: u32, rng: &mut Rng) -> (World, Handover, Divider) {
     let (from, to, side) = if world.is_multiple_of(2) {
         (0, 1, 1.0)
     } else {
@@ -112,26 +128,100 @@ pub fn scene(world: u32, rng: &mut Rng) -> (World, Handover) {
     };
     let across =
         |rng: &mut Rng, spread: f32| Quat::from_rotation_z(FRAC_PI_2 + rng.range(-spread, spread));
+    let upright = |center: Vec3, half_extents: Vec3, yaw: f32| Obstacle::Cuboid {
+        center,
+        half_extents,
+        rotation: Quat::from_rotation_z(yaw),
+    };
+    let divider = [
+        Divider::None,
+        Divider::Wall,
+        Divider::Opening,
+        Divider::Posts,
+    ][(rng.uniform() * 4.0) as usize % 4];
+    // Where along the table the hands meet, and where the block lies and is set down.
+    let tall = matches!(divider, Divider::Opening | Divider::Posts);
+    let (meet_x, ends) = if !tall {
+        (rng.range(0.24, 0.28), (0.21, 0.3))
+    } else if rng.uniform() < 0.5 {
+        (rng.range(0.18, 0.21), (0.27, 0.3))
+    } else {
+        (rng.range(0.29, 0.32), (0.21, 0.24))
+    };
     let table = Obstacle::cuboid(Vec3::new(0.25, 0.0, -0.02), Vec3::new(0.45, 0.6, 0.02));
     let half = BLOCKS[(rng.uniform() * BLOCKS.len() as f32) as usize % BLOCKS.len()];
     let block = Obstacle::Cuboid {
-        center: Vec3::new(rng.range(0.2, 0.3), side * rng.range(0.18, 0.28), half.z),
-        half_extents: half,
-        rotation: across(rng, 0.4),
-    };
-    let meet = Pose::new(
-        Vec3::new(
-            rng.range(0.24, 0.28),
-            rng.range(-0.03, 0.03),
-            rng.range(0.09, 0.12),
+        center: Vec3::new(
+            rng.range(ends.0, ends.1),
+            side * rng.range(0.18, 0.28),
+            half.z,
         ),
+        half_extents: half,
+        rotation: across(rng, 0.3),
+    };
+    let wall_top = rng.range(0.06, 0.08);
+    // Higher than the block can be lifted, lower than the arms reaching over it to meet.
+    let height = rng.range(0.16, 0.18);
+    let mut dividing = match divider {
+        Divider::None => vec![],
+        Divider::Wall => vec![upright(
+            Vec3::new(0.25, rng.range(-0.01, 0.01), wall_top / 2.0),
+            Vec3::new(0.25, 0.012, wall_top / 2.0),
+            rng.range(-0.05, 0.05),
+        )],
+        Divider::Opening => {
+            let width = rng.range(0.085, 0.105);
+            // Panels from near the bases to the opening, and from the opening to x = 0.55.
+            let panel = |lower: f32, upper: f32| {
+                upright(
+                    Vec3::new((lower + upper) / 2.0, 0.0, height / 2.0),
+                    Vec3::new((upper - lower) / 2.0, 0.01, height / 2.0),
+                    0.0,
+                )
+            };
+            vec![
+                panel(0.0, meet_x - width / 2.0),
+                panel(meet_x + width / 2.0, 0.55),
+            ]
+        }
+        Divider::Posts => {
+            let spacing = rng.range(0.11, 0.13);
+            let width = rng.range(0.015, 0.018);
+            (-3..3)
+                .map(|k| {
+                    let top = rng.range(0.8, 1.0) * height;
+                    upright(
+                        Vec3::new(meet_x + (k as f32 + 0.5) * spacing, 0.0, top / 2.0),
+                        Vec3::new(width, width, top / 2.0),
+                        0.0,
+                    )
+                })
+                .collect()
+        }
+    };
+    // Over the low wall, the block's underside clears its top by 2-3 cm, and the hands meet no
+    // higher than the 14 cm they reach pointing down.
+    let meet_height = match divider {
+        Divider::Wall => wall_top + half.z + rng.range(0.02, 0.03),
+        Divider::None | Divider::Opening | Divider::Posts => rng.range(0.09, 0.12),
+    };
+    // Beside a tall divider, the hands meet within 1 cm of the centre line: farther toward one
+    // arm, the other reaches into the divider.
+    let offset = if tall { 0.01 } else { 0.03 };
+    let meet = Pose::new(
+        Vec3::new(meet_x, rng.range(-offset, offset), meet_height),
         across(rng, 0.2),
     );
     let place = Pose::new(
-        Vec3::new(rng.range(0.2, 0.3), -side * rng.range(0.18, 0.28), half.z),
-        across(rng, 0.4),
+        Vec3::new(
+            rng.range(ends.0, ends.1),
+            -side * rng.range(0.18, 0.28),
+            half.z,
+        ),
+        across(rng, 0.3),
     );
     let mut obstacles = vec![table, block];
+    obstacles.append(&mut dividing);
     // Clutter beyond the blocks' reach, clear of where the hands work.
     for _ in 0..(rng.uniform() * 3.0) as usize {
         let h = Vec3::new(
@@ -140,11 +230,7 @@ pub fn scene(world: u32, rng: &mut Rng) -> (World, Handover) {
             rng.range(0.02, 0.06),
         );
         let center = Vec3::new(rng.range(0.4, 0.5), rng.range(-0.35, 0.35), h.z);
-        obstacles.push(Obstacle::Cuboid {
-            center,
-            half_extents: h,
-            rotation: Quat::from_rotation_z(rng.range(0.0, 3.0)),
-        });
+        obstacles.push(upright(center, h, rng.range(0.0, 3.0)));
     }
     (
         World { obstacles },
@@ -156,6 +242,7 @@ pub fn scene(world: u32, rng: &mut Rng) -> (World, Handover) {
             meet,
             place,
         },
+        divider,
     )
 }
 

@@ -44,8 +44,12 @@ fn main() -> Result<()> {
     // Small batches plan sooner on the CPU, which pays no per-call GPU cost.
     let device = args.device(&robot, false)?;
     let mut rng = Rng::new(5);
-    let (worlds, tasks): (Vec<World>, Vec<Handover>) =
-        (0..count).map(|i| rebot::scene(i as u32, &mut rng)).unzip();
+    let (worlds, tasks): (Vec<World>, Vec<Handover>) = (0..count)
+        .map(|i| {
+            let (world, task, _) = rebot::scene(i as u32, &mut rng);
+            (world, task)
+        })
+        .unzip();
     let options = rebot::options(HZ);
     // The first call on a GPU compiles its kernels; time the second.
     datagen::handover(&device, &worlds[..1], &tasks[..1], &options)?;

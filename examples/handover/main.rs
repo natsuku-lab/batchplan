@@ -2,7 +2,8 @@
 //!
 //! One arm picks a block up, both arms move at once to where they meet, the other takes it and
 //! sets it down, every step batched over all the tasks (`datagen::handover`). Half the tasks go
-//! left to right and half right to left. It prints how many succeed and how fast, and can write a
+//! left to right and half right to left; three tables in four are divided down the middle
+//! (`rebot::Divider`). It prints how many succeed, by divider, and how fast, and can write a
 //! LeRobot dataset laid out arm by arm, which `scripts/replay_mujoco.py` renders camera videos for,
 //! or the episodes and states perturbed from them as `.npy` arrays, a reset bank for reinforcement
 //! learning (`datagen::reset_states`).
@@ -18,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Result;
-use batchplan::datagen::{self, Demonstration, Handover, RecoveryOptions};
+use batchplan::datagen::{self, Demonstration, RecoveryOptions};
 use batchplan::rng::Rng;
 use batchplan::{Device, Robot, World, npy};
 
@@ -55,8 +56,15 @@ fn main() -> Result<()> {
     );
 
     let mut rng = Rng::new(5);
-    let (worlds, tasks): (Vec<World>, Vec<Handover>) =
-        (0..count).map(|i| rebot::scene(i as u32, &mut rng)).unzip();
+    let mut worlds = vec![];
+    let mut tasks = vec![];
+    let mut dividers = vec![];
+    for i in 0..count {
+        let (world, task, divider) = rebot::scene(i as u32, &mut rng);
+        worlds.push(world);
+        tasks.push(task);
+        dividers.push(divider);
+    }
     let options = rebot::options(30.0);
     // The first call on a GPU compiles its kernels; time the second.
     datagen::handover(
@@ -82,6 +90,24 @@ fn main() -> Result<()> {
         sorted.get(sorted.len() / 2).copied().unwrap_or(0.0),
         sorted.last().copied().unwrap_or(0.0),
     );
+    let kinds = [
+        rebot::Divider::None,
+        rebot::Divider::Wall,
+        rebot::Divider::Opening,
+        rebot::Divider::Posts,
+    ];
+    let by_kind: Vec<String> = kinds
+        .iter()
+        .map(|&kind| {
+            let tables = dividers.iter().filter(|&&d| d == kind).count();
+            let done = demos
+                .iter()
+                .filter(|d| dividers[d.world as usize] == kind)
+                .count();
+            format!("{kind:?} {done} of {tables}")
+        })
+        .collect();
+    println!("by divider: {}", by_kind.join(", "));
     if let Some(out) = resets {
         let options = RecoveryOptions {
             per_trajectory: 8,

@@ -203,17 +203,17 @@ A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster 
 
 ## Bimanual handovers
 
-`examples/handover/` generates the [handover episodes](training-data.md#handovers) for two reBot B601-DM arms 44 cm apart at a table. In each task one arm picks up a block lying in front of it and hands it over between the arms, and the other arm sets it down in front of itself. The blocks are 24–28 cm long, in four sizes; the block, meeting and place poses vary in position and yaw, and 0–2 small boxes stand elsewhere on the table. Half the tasks go left to right. Every step is batched over all the tasks: six IK batches (the meeting pose solves both hands at once), seven planned segments, two of them moving both arms, then timing and the episodes.
+`examples/handover/` generates the [handover episodes](training-data.md#handovers) for two reBot B601-DM arms 44 cm apart at a table. In each task one arm picks up a block lying in front of it and hands it over between the arms, and the other arm sets it down in front of itself. The blocks are 24–28 cm long, in four sizes; the block, meeting and place poses vary in position and yaw, and 0–2 small boxes stand elsewhere on the table. Three tables in four are divided down the middle, a quarter each by a low wall (6–8 cm) that the block is lifted over, a screen 16–18 cm tall with an opening 8.5–10.5 cm wide, and a row of posts as tall. The block cannot be lifted over the tall ones, so the hands meet at one end of their reach and the block lies, and is set down, toward the other: it is carried along the divider to the gap and back. Planned without its divider, the block alone would pass through it on 267 of the 372 divided tables (79 of 120 walls, 82 of 118 screens, 106 of 134 rows of posts). Half the tasks go left to right. Every step is batched over all the tasks: six IK batches (the meeting pose solves both hands at once), seven planned segments, two of them moving both arms, then timing and the episodes.
 
 | 512 tasks | M4 Pro GPU | M4 Pro CPU (14 threads) | Radeon 8060S | Ryzen CPU (32 threads) |
 |---|---|---|---|---|
-| Handovers | 504 of 512 | 504 of 512 | 504 of 512 | 504 of 512 |
-| Time | 1.37–1.38 s | 1.47–1.52 s | 1.25–1.26 s | 1.17–1.20 s |
-| Episodes/s | 366–368 | 331–343 | 400–405 | 420–429 |
+| Handovers | 510 of 512 | 510 of 512 | 510 of 512 | 510 of 512 |
+| Time | 1.52–1.53 s | 1.65–1.67 s | 1.40–1.41 s | 1.43 s |
+| Episodes/s | 333–336 | 305–308 | 362–364 | 357 |
 
-The 504 episodes hold 104 minutes of motion at 30 fps, 12.4 s each at the median. Times are three runs each after a warm-up, alternated with batchplan 0.1.0's, which took 1.30–1.32 s on the Radeon, 1.22–1.23 s on the Ryzen, 1.37–1.38 s on the M4 Pro's GPU and 1.45–1.50 s on its CPU. Four of the IK batches are seeded with the configuration before them (each grasp with the one just above it), so they keep 4 of the 32 seeds: that seed nearly always converges, and fewer seeds took the GPU run from 2.17 to 1.56 s with the same 504 handovers. The blocks come in four sizes because each size needs its own carried spheres and so plans in batches of its own: sizes drawn from a continuous range took 3.67 s.
+The 510 episodes hold 110 minutes of motion at 30 fps, 12.8 s each at the median, and every planned segment succeeds: the two tasks lost fail IK. Times are three runs each after a warm-up. Four of the IK batches are seeded with the configuration before them (each grasp with the one just above it), so they keep 4 of the 32 seeds: that seed nearly always converges, and fewer seeds take the M4 Pro's GPU run from 2.25 to 1.52 s with the same 510 handovers. The blocks come in four sizes because each size needs its own carried spheres and so plans in batches of its own: sizes drawn from a continuous range take 3.65–3.67 s.
 
-Rendering the episodes' camera videos in MuJoCo (`scripts/replay_mujoco.py`, three 640×480 cameras) takes about 15 ms a frame on the same machine, 50 times longer than generating them.
+Rendering the episodes' camera videos in MuJoCo (`scripts/replay_mujoco.py`, three 640×480 cameras) takes about 15 ms a frame on the same machine: 91 s for 16 episodes that take 0.22 s to generate.
 
 ## Spheres and meshes
 

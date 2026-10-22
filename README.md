@@ -4,7 +4,7 @@
   <em>The fastest motion planning in the West.</em>
 </p>
 
-<img width="1135" height="654" alt="Two reBot arms at each of many tables handing a block over, every handover planned in one batch" src="https://raw.githubusercontent.com/natsuku-lab/batchplan/main/docs/handover.gif" />
+<img width="1135" height="654" alt="Two reBot arms at each of many tables, seen from the front, handing a block over and around posts, screens and low walls, every handover planned in one batch" src="https://raw.githubusercontent.com/natsuku-lab/batchplan/main/docs/handover.gif" />
 
 <p align="center">
   <a href="#quick-start"><b>Quick start</b></a> ·
@@ -23,7 +23,7 @@
 
 **batchplan is a Rust library for collision-aware motion planning, in batches.** One call plans thousands of motions, each in its own scene: IK, a collision-free path, and a trajectory timed within the robot's limits. A typical problem plans in 0.17 ms on one CPU core, faster than [VAMP](#how-it-compares), with paths that keep clear of the real geometry more often than any planner we compared. IK, trajectory optimization and distance grids run on any GPU that [wgpu](https://wgpu.rs) supports (Vulkan, Metal or DX12), with no CUDA, no ROCm and no ROS, or on the CPU with the same results.
 
-It is built for robot learning at scale: planned motions become [LeRobot](https://github.com/huggingface/lerobot) datasets that train as they are. Two reBot arms hand blocks to each other in 512 scenes in 1.2–1.5 s on an M4 Pro or a Ryzen AI Max+ 395, on the GPU or the CPU.
+It is built for robot learning at scale: planned motions become [LeRobot](https://github.com/huggingface/lerobot) datasets that train as they are. Two reBot arms hand blocks to each other over and around dividers in 512 scenes in 1.4–1.7 s on an M4 Pro or a Ryzen AI Max+ 395, on the GPU or the CPU.
 
 - **Plan:** batched IK; RRT-Connect, shortcutting and smoothing on SIMD collision checks; smooth B-spline paths, optionally optimized with L-BFGS; time-optimal timing within velocity, acceleration and jerk limits; replanning from a moving state; and controlled stops along the path.
 - **Robots:** load from URDF, MJCF or OpenUSD, including mimic joints, closed loops, continuous joints and ball or floating joints, or assemble several, such as two arms. Collision spheres are fitted automatically. IK takes a target for each hand at once, and plans can hold one arm still while another moves.
@@ -282,7 +282,7 @@ A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster 
 
 | Command | What it does |
 |---|---|
-| `scripts/fetch_rebot.sh && cargo run --release --example handover` | Two reBot B601 arms hand blocks to each other in 512 scenes: the bimanual benchmark. `--features lerobot` and `-- 16 --lerobot data/handover` write a LeRobot dataset, and `scripts/replay_mujoco.py data/handover data/handover_video` adds three camera videos. |
+| `scripts/fetch_rebot.sh && cargo run --release --example handover` | Two reBot B601 arms hand blocks to each other in 512 scenes, three in four divided down the middle: the bimanual benchmark. `--features lerobot` and `-- 16 --lerobot data/handover` write a LeRobot dataset, and `scripts/replay_mujoco.py data/handover data/handover_video` adds three camera videos. |
 | `cargo run --release --example bench -- 512` | IK and planning for 512 cluttered tabletop scenes, GPU against CPU. |
 | `cargo run --release --example datagen -- data/demo 512 20` | Reaches and recoveries in 512 scenes, as `.npy` arrays at 20 fps. |
 | `cargo run --release --features lerobot --example datagen -- --pick-place --lerobot data/pick 512 20` | Pick-and-place episodes as a LeRobot dataset. |

@@ -80,7 +80,7 @@ On a robot with several hands, `pick_and_place` uses the first and holds the joi
 4. **Both arms move at once again**: the giver returns to the default configuration while the taker carries the box above the place pose.
 5. **The taker sets it down**: lower, open, retreat, while the giver waits.
 
-`examples/handover/` runs this on two [reBot B601](https://github.com/Seeed-Projects/reBot-DevArm) arms facing a table, half the tasks passing left to right and half right to left. [Benchmarks](benchmarks.md#bimanual-handovers) gives its speed.
+`examples/handover/` runs this on two [reBot B601](https://github.com/Seeed-Projects/reBot-DevArm) arms facing a table, half the tasks passing left to right and half right to left. Three tables in four are divided down the middle, by a low wall, a screen with an opening or a row of posts, which the arms plan over or around. [Benchmarks](benchmarks.md#bimanual-handovers) gives its speed.
 
 The segments cover DexMimicGen's subtask kinds: sequential (one arm waits for the other), parallel (both move, each on its own errand) and coordinated (both must arrive together). IK solves both hands at once at the meeting pose. Plans hold the box in the hand that has it, and both wrists may touch it; the final lowering plans without it, as pick-and-place's does. The episode records both grippers, where the box is at every sample, and a task such as "Pass the box from the left hand to the right hand and put it down."
 
@@ -114,7 +114,7 @@ Reinforcement learning that starts episodes from many states along a task, as [O
 2. **The carried object** moves with the hand whose gripper is closed on it, in the grip that hand had when it last held the object alone. Samples where both hands hold it are skipped, since noise would pull the hands apart.
 3. **A check** on the device keeps the collision-free states. An object no hand holds is an obstacle where it is; a held one is attached to its hand. The check is conservative: fingers about to close around an object collide with it, and a held object must clear the table, so states right at a grasp, a handover or a set-down are rare.
 
-Each state is a one-sample `Demonstration` whose origin is a recovery from its sample, with `parent` indexing `demos`, so `npy::export` writes states as it writes episodes (`positions.npy` is `[states, 1, dof]`). The episodes' own samples are valid states too; `cargo run --release --example handover -- 512 --resets <dir>` writes both, to `episodes/` and `resets/`. From 504 handovers, 8 states each at the default 0.15 rad of noise, 2,305 of 4,032 are collision-free: 691 with the block in the left hand, 746 in the right and 868 on the table. The check takes under 0.1 s on an M4 Pro, GPU or CPU.
+Each state is a one-sample `Demonstration` whose origin is a recovery from its sample, with `parent` indexing `demos`, so `npy::export` writes states as it writes episodes (`positions.npy` is `[states, 1, dof]`). The episodes' own samples are valid states too; `cargo run --release --example handover -- 512 --resets <dir>` writes both, to `episodes/` and `resets/`. From 510 handovers, 8 states each at the default 0.15 rad of noise, 2,008 of 4,080 are collision-free: 574 with the block in the left hand, 585 in the right and 849 on the table. The check takes under 0.1 s on an M4 Pro, GPU or CPU.
 
 ## Demonstrations
 
@@ -146,7 +146,7 @@ What batchplan cannot know comes from `meta/replay.json`, which the exporting pr
 }
 ```
 
-Visual meshes are simplified to 2,000 triangles each as they load. The reBot's CAD exports carry 860,000, which made rendering three times slower with no visible difference at 640×480. On an M4 Pro, three 640×480 cameras render at about 15 ms a frame: 16 handover episodes (5,779 frames) in 85 s.
+Visual meshes are simplified to 2,000 triangles each as they load. The reBot's CAD exports carry 860,000, which made rendering three times slower with no visible difference at 640×480. On an M4 Pro, three 640×480 cameras render at about 15 ms a frame: 16 handover episodes (6,002 frames) in 91 s.
 
 ## Exporting
 
@@ -212,7 +212,7 @@ uv venv .venv --python 3.12 && uv pip install --python .venv/bin/python "lerobot
   --policy.device=cpu --policy.push_to_hub=false --steps=50 --batch_size=16 --num_workers=0
 ```
 
-It passes on reach exports (5,693 episodes, split over 6 episode-metadata files at a 1 MB limit), pick-and-place exports (18 tasks), and two-arm handovers before and after `replay_mujoco.py` adds their videos. LeRobot's ACT policy trains on each. A 50-step CPU run cut the loss from 44 to 5.8 on reaches and from 45 to 5.8 on pick-and-place; a 40-step run on 16 rendered handovers, from the three cameras and both arms' states, cut it from 58 to 6.5.
+It passes on reach exports (5,693 episodes, split over 6 episode-metadata files at a 1 MB limit), pick-and-place exports (18 tasks), and two-arm handovers before and after `replay_mujoco.py` adds their videos. LeRobot's ACT policy trains on each. A 50-step CPU run cut the loss from 44 to 5.8 on reaches and from 45 to 5.8 on pick-and-place; a 40-step run on 16 rendered handovers, from the three cameras and both arms' states, cut it from 58 to 7.4.
 
 ## `examples/datagen.rs`
 
