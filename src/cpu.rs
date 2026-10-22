@@ -547,7 +547,8 @@ fn ik_step(
         grad.fill(0.0);
         collision::<true>(robot, world, fk, &o.collision, grad, buffers);
         push.fill(0.0);
-        for (h, _) in targets.iter().enumerate().filter(|(_, t)| t.is_some()) {
+        let targeted = targets.iter().enumerate().filter(|(_, t)| t.is_some());
+        for (h, _) in targeted {
             if Some(h) != last {
                 hand_system(robot, fk, h, o, jac, &mut a);
             }
@@ -879,9 +880,9 @@ fn each_chunk<T: Send>(
             .enumerate()
             .for_each_init(|| Scratch::new(robot), |s, (i, chunk)| f(s, i, chunk));
     } else {
-        data.chunks_mut(size)
-            .enumerate()
-            .for_each(|(i, chunk)| f(scratch, i, chunk));
+        for (i, chunk) in data.chunks_mut(size).enumerate() {
+            f(scratch, i, chunk);
+        }
     }
 }
 
@@ -1181,7 +1182,9 @@ impl Backend for CpuBackend {
             let chunks = out
                 .chunks_mut(LANES)
                 .zip(q.chunks(n * LANES).zip(item_world.chunks(LANES)));
-            chunks.for_each(|c| chunk(&mut scratch, c));
+            for c in chunks {
+                chunk(&mut scratch, c);
+            }
         } else {
             let chunks = out
                 .par_chunks_mut(LANES)
@@ -1226,9 +1229,9 @@ impl Backend for CpuBackend {
                         for (h, (goal, target)) in goals.iter_mut().zip(item_targets).enumerate() {
                             *goal = target.map(|t| (t.position, Mat3::from_quat(t.rotation)));
                             if goal.is_some() {
-                                hand_joints[h]
-                                    .iter()
-                                    .for_each(|&j| scratch.moving[j] = true);
+                                for &j in &hand_joints[h] {
+                                    scratch.moving[j] = true;
+                                }
                             }
                         }
                         for _ in 0..o.iterations {

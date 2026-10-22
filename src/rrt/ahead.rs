@@ -490,7 +490,9 @@ impl Helper<'_> {
         let sure = large >= 2.0 * (small + margin) || large + margin < 2.0 * small;
         self.sample = sample;
         self.todo = [Some(from_start), (!sure).then_some(!from_start)];
-        self.forecasts.iter_mut().for_each(|f| f.made = false);
+        for f in &mut self.forecasts {
+            f.made = false;
+        }
         true
     }
 
@@ -974,7 +976,9 @@ mod tests {
     /// tests).
     #[test]
     fn a_helped_search_grows_the_trees_it_would_alone() {
-        let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+        let _alone = ALONE
+            .lock()
+            .expect("another test that keeps threads busy panicked");
         let robot = panda();
         let (world, problem) = dresser();
         let (alone, samples, _) = search(&robot, &world, &problem, 0);
@@ -991,7 +995,9 @@ mod tests {
     /// numbers its samples from 0 again, and helpers forecast them from there.
     #[test]
     fn helpers_follow_a_search_planned_again() {
-        let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+        let _alone = ALONE
+            .lock()
+            .expect("another test that keeps threads busy panicked");
         let robot = panda();
         let (world, problem) = dresser();
         let (lanes, worlds) = (
@@ -1040,7 +1046,9 @@ mod tests {
     /// alone, summoning helpers after `ALONE_AFTER` samples; helpers answer queries both times.
     #[test]
     fn the_scheduler_helps_long_searches_in_batches_and_alone() {
-        let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+        let _alone = ALONE
+            .lock()
+            .expect("another test that keeps threads busy panicked");
         let robot = panda();
         let (world, problem) = dresser();
         let (lanes, worlds) = (

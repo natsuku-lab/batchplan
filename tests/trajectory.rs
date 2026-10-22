@@ -20,13 +20,16 @@ thread_local! {
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
+// SAFETY: every call goes to the system allocator unchanged; only a thread-local count is added.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCATIONS.with(|a| a.set(a.get() + 1));
+        // SAFETY: forwarded unchanged; the caller meets the system allocator's requirements.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: forwarded unchanged; the caller meets the system allocator's requirements.
         unsafe { System.dealloc(ptr, layout) }
     }
 }
@@ -252,12 +255,7 @@ fn check_rejects_unsafe_trajectories() {
     out_of_range.control_points[(points / 2) * n + 3] = robot.upper()[3] + 0.1;
     rejects(out_of_range, "leaving a joint range");
 
-    let err = Trajectory {
-        dof: n - 1,
-        ..good.clone()
-    }
-    .check(&robot)
-    .unwrap_err();
+    let err = Trajectory { dof: n - 1, ..good }.check(&robot).unwrap_err();
     assert!(
         matches!(&err, Error::Input(m) if m.contains("joints")),
         "{err:?}"

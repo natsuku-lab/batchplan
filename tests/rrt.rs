@@ -488,7 +488,7 @@ fn shortcutting_straightens_a_joint_that_swings_back() {
     let mut over = middle.clone();
     over[1] -= 0.4;
     over[n - 1] += 1.5;
-    let detour = [start.clone(), over, goal.clone()].concat();
+    let detour = [start, over, goal.clone()].concat();
     let o = ShortcutOptions {
         straighten: true,
         ..Default::default()

@@ -19,6 +19,7 @@ fn threads() -> usize {
 
 #[cfg(target_os = "macos")]
 fn threads() -> usize {
+    // SAFETY: `proc_taskinfo` is a C struct of integers, for which all zero bytes are a value.
     let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_taskinfo>() as i32;
     let pid = std::process::id() as i32;

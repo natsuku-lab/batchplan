@@ -493,11 +493,11 @@ impl Trajectory {
                 )));
             }
             let joint_limits = limits.map(|l| l[j]);
-            for (order, &(width, weights)) in DIFFERENCES
+            let orders = DIFFERENCES
                 .iter()
                 .enumerate()
-                .filter(|_| h > 0.0 && uniform)
-            {
+                .filter(|_| h > 0.0 && uniform);
+            for (order, &(width, weights)) in orders {
                 let peak = largest_difference(cp, n, j, width, weights) / h.powi(order as i32 + 1);
                 let limit = joint_limits[order];
                 if peak > limit * (1.0 + 1e-4) {

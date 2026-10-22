@@ -576,14 +576,17 @@ fn depth_images_become_grids_on(device: &Device) {
                 obstacle.distance(c).0,
                 obstacle.distance(c + Vec3::new(0.0, 0.0, r + 0.05)).0
             ],
-            [center, above]
+            [center, above],
+            "an obstacle made from the grid measures it as the grid does"
         );
     }
     // Pixels without a reading observe nothing. Below the table, zone (4, 4) is centered at
     // x = 0.054 and zone (5, 4) at x = 0.163 (y = -0.054 for both; the camera's y axis points
     // along the world's -y).
     let mut holes = scene.render(8, 8, tof, false);
-    holes.iter_mut().step_by(2).for_each(|z| *z = 0.0);
+    for z in holes.iter_mut().step_by(2) {
+        *z = 0.0;
+    }
     let grid = SdfGrid::from_depth(
         device,
         &scene.image(&holes, 8, tof),
@@ -609,7 +612,8 @@ fn depth_images_become_grids_on(device: &Device) {
             Occlusion::Free,
             &o
         )
-        .is_err()
+        .is_err(),
+        "an image without a single reading is refused"
     );
     assert!(
         SdfGrid::from_depth(
@@ -626,6 +630,8 @@ fn depth_images_become_grids_on(device: &Device) {
 
 /// An L-shaped prism 10 cm tall whose convex hull also fills the notch at x, y in (0.1, 0.2).
 fn l_prism_obj() -> String {
+    use std::fmt::Write;
+
     let outline = [
         (0.0, 0.0),
         (0.2, 0.0),
@@ -637,19 +643,19 @@ fn l_prism_obj() -> String {
     let mut obj = String::new();
     for z in [0.0, 0.1] {
         for (x, y) in outline {
-            obj += &format!("v {x} {y} {z}\n");
+            writeln!(obj, "v {x} {y} {z}").unwrap();
         }
     }
     // Bottom faces down, top faces up (OBJ indices start at 1).
     for f in [[1, 4, 2], [2, 4, 3], [1, 6, 5], [1, 5, 4]] {
-        obj += &format!("f {} {} {}\n", f[0], f[1], f[2]);
+        writeln!(obj, "f {} {} {}", f[0], f[1], f[2]).unwrap();
     }
     for f in [[7, 8, 10], [8, 9, 10], [7, 11, 12], [7, 10, 11]] {
-        obj += &format!("f {} {} {}\n", f[0], f[1], f[2]);
+        writeln!(obj, "f {} {} {}", f[0], f[1], f[2]).unwrap();
     }
     for i in 1..=6 {
         let j = i % 6 + 1;
-        obj += &format!("f {i} {j} {}\nf {i} {} {}\n", j + 6, j + 6, i + 6);
+        writeln!(obj, "f {i} {j} {}\nf {i} {} {}", j + 6, j + 6, i + 6).unwrap();
     }
     obj
 }
@@ -929,15 +935,23 @@ fn fused_maps_on(device: &Device) {
         "the table"
     );
     let below = Vec3::new(0.1, 0.1, -0.05);
-    assert_eq!(map.occupancy(below), None);
+    assert_eq!(
+        map.occupancy(below),
+        None,
+        "nothing was observed below the table"
+    );
     assert!(
         map.grid(device, Occlusion::Occupied)
             .unwrap()
             .distance(below)
             .0
-            < 0.0
+            < 0.0,
+        "unobserved space is solid under Occlusion::Occupied"
     );
-    assert!(map.grid(device, Occlusion::Free).unwrap().distance(below).0 > 0.0);
+    assert!(
+        map.grid(device, Occlusion::Free).unwrap().distance(below).0 > 0.0,
+        "unobserved space is free under Occlusion::Free"
+    );
     // A map ending inside the ball (its last voxels at x = 0) takes no hits from the readings
     // beyond its edge.
     let mut part = OccupancyMap::new(

@@ -153,7 +153,9 @@ pub fn export(
                 .collect();
             totals = stats.iter().map(|_| Aggregate::default()).collect();
         }
-        totals.iter_mut().zip(&stats).for_each(|(t, s)| t.add(s));
+        for (t, s) in totals.iter_mut().zip(&stats) {
+            t.add(s);
+        }
         let length = demo.trajectory.len();
         rows.push(EpisodeRow {
             length,

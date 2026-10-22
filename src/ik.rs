@@ -179,8 +179,11 @@ pub fn solve_ik(
     let mut moved = vec![false; n];
     for p in problems {
         moved.fill(false);
-        for (h, _) in p.targets.iter().enumerate().filter(|(_, t)| t.is_some()) {
-            hand_joints[h].iter().for_each(|&j| moved[j] = true);
+        let targeted = p.targets.iter().enumerate().filter(|(_, t)| t.is_some());
+        for (h, _) in targeted {
+            for &j in &hand_joints[h] {
+                moved[j] = true;
+            }
         }
         let start = p.seed.as_deref().unwrap_or(&robot.default_q);
         for s in 0..o.seeds {

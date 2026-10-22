@@ -660,13 +660,16 @@ impl<'r> Connect<'r> {
         let length = distance(&self.line_goal, &self.start);
         let mut d = vec![0.0; n];
         self.directions.clear();
-        for k in (0..2 * n).filter(|k| !self.held[k / 2]) {
+        let free = (0..2 * n).filter(|k| !self.held[k / 2]);
+        for k in free {
             d.fill(0.0);
             d[k / 2] = if k % 2 == 0 { 1.0 } else { -1.0 };
             if length > 0.0 {
                 let dot: f32 =
                     d.iter().zip(&along).map(|(a, b)| a * b).sum::<f32>() / (length * length);
-                d.iter_mut().zip(&along).for_each(|(v, a)| *v -= dot * a);
+                for (v, a) in d.iter_mut().zip(&along) {
+                    *v -= dot * a;
+                }
             }
             let norm = d.iter().map(|v| v * v).sum::<f32>().sqrt();
             if norm > 1e-3 {
@@ -677,14 +680,19 @@ impl<'r> Connect<'r> {
         if self.sampling == Sampling::JointRanges || !self.across.is_empty() || length == 0.0 {
             return;
         }
-        for j in (0..n).filter(|&j| !self.held[j]) {
+        let free = (0..n).filter(|&j| !self.held[j]);
+        for j in free {
             d.fill(0.0);
             d[j] = 1.0;
             let dot = along[j] / (length * length);
-            d.iter_mut().zip(&along).for_each(|(v, a)| *v -= dot * a);
+            for (v, a) in d.iter_mut().zip(&along) {
+                *v -= dot * a;
+            }
             for b in self.across.chunks(n) {
                 let dot: f32 = d.iter().zip(b).map(|(x, y)| x * y).sum();
-                d.iter_mut().zip(b).for_each(|(v, y)| *v -= dot * y);
+                for (v, y) in d.iter_mut().zip(b) {
+                    *v -= dot * y;
+                }
             }
             let norm = d.iter().map(|v| v * v).sum::<f32>().sqrt();
             if norm > 1e-3 {
@@ -812,7 +820,9 @@ pub(super) fn place(
         }
         for (b, u) in across.chunks(n).zip(&unit[1..]) {
             let c = r * (2.0 * u - 1.0);
-            target.iter_mut().zip(b).for_each(|(q, y)| *q += c * y);
+            for (q, y) in target.iter_mut().zip(b) {
+                *q += c * y;
+            }
         }
     }
     for (j, t) in target.iter_mut().enumerate() {

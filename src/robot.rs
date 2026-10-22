@@ -711,11 +711,11 @@ impl Robot {
     /// `q` with each continuous joint turned by whole turns to lie within half a turn of `from`.
     pub(crate) fn turn_toward(&self, from: &[f32], q: &mut [f32]) {
         use std::f32::consts::{PI, TAU};
-        for (j, v) in q
+        let continuous = q
             .iter_mut()
             .enumerate()
-            .filter(|&(j, _)| self.continuous[j])
-        {
+            .filter(|&(j, _)| self.continuous[j]);
+        for (j, v) in continuous {
             *v = from[j] + (*v - from[j] + PI).rem_euclid(TAU) - PI;
         }
     }
@@ -1129,12 +1129,12 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
     let mut queue = VecDeque::from([base.clone()]);
     let mut seen = HashSet::from([base.clone()]);
     while let Some(link) = queue.pop_front() {
-        for (j, joint) in desc
+        let children = desc
             .joints
             .iter()
             .enumerate()
-            .filter(|(_, j)| j.parent == link)
-        {
+            .filter(|(_, j)| j.parent == link);
+        for (j, joint) in children {
             ensure!(
                 seen.insert(joint.child.clone()),
                 "link '{}' is reached twice; the description is not a tree",
@@ -1149,10 +1149,10 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
     let (mut dof_names, mut lower, mut upper, mut continuous) = (vec![], vec![], vec![], vec![]);
     let (mut max_velocity, mut max_acceleration, mut max_jerk) = (vec![], vec![], vec![]);
     let or_default = |v: f32, default: f32| if v.is_finite() { v } else { default };
-    for &j in order
+    let actuated = order
         .iter()
-        .filter(|&&j| moving(j) && desc.joints[j].mimic.is_none())
-    {
+        .filter(|&&j| moving(j) && desc.joints[j].mimic.is_none());
+    for &j in actuated {
         let joint = &desc.joints[j];
         if o.lock_joints.contains_key(&joint.name) {
             continue;
@@ -1361,7 +1361,9 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
             scale > 0.0 && scale <= 1.0,
             "RobotOptions::{what} must be in (0, 1], got {scale}"
         );
-        limits.iter_mut().for_each(|l| *l *= scale);
+        for l in limits.iter_mut() {
+            *l *= scale;
+        }
     }
     Ok(Robot {
         name: desc.name.clone(),

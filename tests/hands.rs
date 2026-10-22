@@ -175,7 +175,8 @@ fn a_hand_without_a_target_holds_its_arm() {
             let seed = problem.seed.as_ref().unwrap();
             for s in 0..ik.seeds {
                 let q = ik.solution(p * ik.seeds + s);
-                for j in (0..robot.dof()).filter(|j| !left.contains(j)) {
+                let right = (0..robot.dof()).filter(|j| !left.contains(j));
+                for j in right {
                     assert_eq!(
                         q[j],
                         seed[j],
@@ -276,7 +277,8 @@ fn searches_hold_an_arm_still() {
         paths.len()
     );
     for (path, problem) in found.paths.iter().zip(&problems) {
-        for q in path.iter().flat_map(|p| p.chunks(n)) {
+        let configurations = path.iter().flat_map(|p| p.chunks(n));
+        for q in configurations {
             assert!(
                 problem.hold.iter().all(|&j| q[j] == problem.start[j]),
                 "a waypoint moves the held arm"
@@ -311,7 +313,8 @@ fn plans_hold_an_arm_still() {
         );
         let mut optimized = 0;
         for (p, problem) in problems.iter().enumerate() {
-            for s in (0..result.seeds).filter(|&s| result.valid[p * result.seeds + s]) {
+            let valid = (0..result.seeds).filter(|&s| result.valid[p * result.seeds + s]);
+            for s in valid {
                 optimized += usize::from(s > 0);
                 for q in result.paths.path(p * result.seeds + s).chunks(n) {
                     assert!(

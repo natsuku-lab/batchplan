@@ -57,7 +57,8 @@ fn read(path: &Path, root_dir: &Path, depth: usize) -> Result<Element> {
 
 fn convert(node: Node, root_dir: &Path, depth: usize) -> Result<Element> {
     let mut children = vec![];
-    for c in node.children().filter(|c| c.is_element()) {
+    let elements = node.children().filter(|c| c.is_element());
+    for c in elements {
         if c.has_tag_name("include") {
             let file = c.attribute("file").context("<include> without file")?;
             children.extend(read(&root_dir.join(file), root_dir, depth + 1)?.children);

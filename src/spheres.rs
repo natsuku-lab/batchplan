@@ -234,10 +234,9 @@ impl LinkFit {
                 break;
             }
             picks.push(best);
-            uncovered
-                .iter_mut()
-                .zip(&cover[best])
-                .for_each(|(u, c)| *u &= !c);
+            for (u, c) in uncovered.iter_mut().zip(&cover[best]) {
+                *u &= !c;
+            }
         }
         let complete = uncovered.iter().all(|&u| u == 0);
         (picks, complete)
@@ -457,7 +456,8 @@ pub(crate) fn ignore_pairs(
         .collect();
     // Pairs as (lower index, higher index); a link's parent always has the lower index.
     let mut ignore = BTreeSet::new();
-    for l in (0..links).filter(|&l| solids[l].is_some()) {
+    let solid_links = (0..links).filter(|&l| solids[l].is_some());
+    for l in solid_links {
         let mut p = robot.links[l].parent;
         while let Some(i) = p {
             if solids[i].is_some() {

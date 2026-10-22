@@ -22,15 +22,18 @@ thread_local! {
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let _ = ALLOCATIONS.try_with(|a| a.set(a.get() + 1));
+        // SAFETY: forwarded unchanged; the caller meets the system allocator's requirements.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: forwarded unchanged; the caller meets the system allocator's requirements.
         unsafe { System.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         let _ = ALLOCATIONS.try_with(|a| a.set(a.get() + 1));
+        // SAFETY: forwarded unchanged; the caller meets the system allocator's requirements.
         unsafe { System.realloc(ptr, layout, size) }
     }
 }

@@ -358,12 +358,16 @@ fn collision_models_round_trip_through_files() {
 
 #[test]
 fn srdf_disabled_pairs_are_not_checked() {
+    use std::fmt::Write;
+
     let pairs = ["panda_link5", "panda_link6", "panda_link7", "panda_hand"];
     let mut srdf = String::from("<robot name=\"panda\">\n");
     for link in pairs {
-        srdf += &format!(
-            "  <disable_collisions link1=\"panda_link0\" link2=\"{link}\" reason=\"Never\"/>\n"
-        );
+        writeln!(
+            srdf,
+            "  <disable_collisions link1=\"panda_link0\" link2=\"{link}\" reason=\"Never\"/>"
+        )
+        .unwrap();
     }
     srdf += "</robot>\n";
     let plain = common::panda().unwrap();
@@ -525,7 +529,8 @@ fn joint_limits_replace_the_descriptions_motion_limits() {
             "joint {j}"
         );
     }
-    for j in (0..7).filter(|&j| j != 1) {
+    let others = (0..7).filter(|&j| j != 1);
+    for j in others {
         assert_eq!(
             robot.max_acceleration()[j],
             plain.max_acceleration()[j],
@@ -826,6 +831,8 @@ fn devices_agree(robot: &Robot, scene: &[World]) -> Vec<Device> {
 /// A planar-ish snake: `joints` revolute joints, alternating between two axes, each carrying a
 /// 10 cm capsule-like cylinder.
 fn snake_urdf(joints: usize) -> String {
+    use std::fmt::Write;
+
     let mut urdf = String::from("<robot name=\"snake\">\n  <link name=\"base\"/>\n");
     for i in 0..joints {
         let (parent, axis) = (
@@ -836,12 +843,14 @@ fn snake_urdf(joints: usize) -> String {
             },
             ["0 1 0", "0 0 1"][i % 2],
         );
-        urdf += &format!(
+        writeln!(
+            urdf,
             "  <link name=\"l{i}\"><collision><origin xyz=\"0 0 0.05\"/><geometry><cylinder radius=\"0.02\" length=\"0.1\"/></geometry></collision></link>\n\
              <joint name=\"j{i}\" type=\"revolute\"><parent link=\"{parent}\"/><child link=\"l{i}\"/>\
-             <origin xyz=\"0 0 {}\"/><axis xyz=\"{axis}\"/><limit lower=\"-1.5\" upper=\"1.5\" velocity=\"2\" effort=\"1\"/></joint>\n",
+             <origin xyz=\"0 0 {}\"/><axis xyz=\"{axis}\"/><limit lower=\"-1.5\" upper=\"1.5\" velocity=\"2\" effort=\"1\"/></joint>",
             if i == 0 { 0.0 } else { 0.1 }
-        );
+        )
+        .unwrap();
     }
     urdf + "</robot>\n"
 }

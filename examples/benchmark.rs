@@ -90,7 +90,8 @@ fn pose(p: &[f32; 7]) -> (Vec3, Quat) {
 impl Problem {
     fn world(&self) -> World {
         let mut obstacles = vec![];
-        for c in self.obstacles.cuboid.iter().flat_map(|m| m.values()) {
+        let cuboids = self.obstacles.cuboid.iter().flat_map(|m| m.values());
+        for c in cuboids {
             let (center, rotation) = pose(&c.pose);
             obstacles.push(Obstacle::Cuboid {
                 center,
@@ -98,7 +99,8 @@ impl Problem {
                 rotation,
             });
         }
-        for c in self.obstacles.cylinder.iter().flat_map(|m| m.values()) {
+        let cylinders = self.obstacles.cylinder.iter().flat_map(|m| m.values());
+        for c in cylinders {
             let (center, rotation) = pose(&c.pose);
             obstacles.push(Obstacle::Cylinder {
                 center,

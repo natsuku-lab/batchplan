@@ -70,7 +70,7 @@ fn main() -> Result<()> {
     let seconds = started.elapsed().as_secs_f64();
     let durations: Vec<f32> = demos.iter().map(|d| d.trajectory.duration).collect();
     let motion: f32 = durations.iter().sum();
-    let mut sorted = durations.clone();
+    let mut sorted = durations;
     sorted.sort_by(f32::total_cmp);
     println!(
         "{} of {count} handovers in {seconds:.2} s ({:.0} episodes/s, {:.1} ms each): {:.0} minutes of motion, \

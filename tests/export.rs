@@ -73,7 +73,12 @@ fn scratch(name: &str) -> PathBuf {
 /// Reads a `.npy` file written by the exporter: (shape, raw little-endian data).
 fn read_npy(path: &Path) -> (Vec<usize>, Vec<u8>) {
     let bytes = std::fs::read(path).unwrap();
-    assert_eq!(&bytes[..8], b"\x93NUMPY\x01\x00");
+    assert_eq!(
+        &bytes[..8],
+        b"\x93NUMPY\x01\x00",
+        "{} is not a version 1.0 .npy file",
+        path.display()
+    );
     let header_len = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
     assert_eq!((10 + header_len) % 64, 0, "header must be 64-byte aligned");
     let header = std::str::from_utf8(&bytes[10..10 + header_len]).unwrap();
@@ -219,11 +224,12 @@ mod lerobot {
     /// Every row of every parquet file under `dir`, in file order, with the file's (chunk, file).
     fn read_all(dir: &Path) -> Vec<(usize, usize, RecordBatch)> {
         let mut files = vec![];
-        for chunk in std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()) {
-            for file in std::fs::read_dir(&chunk)
+        let chunks = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path());
+        for chunk in chunks {
+            let in_chunk = std::fs::read_dir(&chunk)
                 .unwrap()
-                .map(|e| e.unwrap().path())
-            {
+                .map(|e| e.unwrap().path());
+            for file in in_chunk {
                 files.push(file);
             }
         }

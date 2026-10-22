@@ -456,7 +456,11 @@ impl Lanes {
         s.bounded.fill(false);
         let n = self.dof;
         let k = q.len() / n;
-        debug_assert!((1..=LANES).contains(&k) && q.len() == k * n);
+        debug_assert!(
+            (1..=LANES).contains(&k) && q.len() == k * n,
+            "lanes load 1 to {LANES} whole configurations, not {} values for {n} joints",
+            q.len()
+        );
         for j in 0..n {
             s.q[j] = Stored(std::array::from_fn(|l| q[l.min(k - 1) * n + j]));
         }

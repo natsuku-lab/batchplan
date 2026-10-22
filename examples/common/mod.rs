@@ -141,7 +141,9 @@ pub fn tabletop_for(robot: &Robot, cpu: &Device, rng: &mut Rng) -> World {
         .spheres
         .iter()
         .flat_map(|(link, spheres)| {
-            let pose = robot.link_pose(robot.default_q(), link).unwrap();
+            let pose = robot
+                .link_pose(robot.default_q(), link)
+                .expect("the collision model's links are the robot's");
             spheres.iter().map(move |s| {
                 (pose.position + pose.rotation * Vec3::new(s[0], s[1], s[2])).z - s[3]
             })
@@ -168,10 +170,12 @@ pub fn tabletop_for(robot: &Robot, cpu: &Device, rng: &mut Rng) -> World {
         };
         let mut trial = world.clone();
         trial.obstacles.push(candidate);
-        let uploaded = cpu.upload(std::slice::from_ref(&trial)).unwrap();
+        let uploaded = cpu
+            .upload(std::slice::from_ref(&trial))
+            .expect("boxes upload");
         if cpu
             .evaluate(&uploaded, &[0], robot.default_q(), &CollisionWeights::NONE)
-            .unwrap()
+            .expect("one configuration in one world")
             .collision_free(0)
         {
             world = trial;
@@ -231,7 +235,7 @@ pub fn far_reaches(
 ) -> (Vec<World>, Vec<PlanProblem>) {
     let mut rng = Rng::new(14);
     let scene: Vec<World> = (0..4).map(|_| tabletop_for(robot, cpu, &mut rng)).collect();
-    let worlds = cpu.upload(&scene).unwrap();
+    let worlds = cpu.upload(&scene).expect("boxes upload");
     let mut problems = vec![];
     while problems.len() < count {
         let world = problems.len() as u32 % 4;
@@ -251,7 +255,7 @@ pub fn far_reaches(
         if far
             && cpu
                 .evaluate(&worlds, &[world], &goal, &CollisionWeights::NONE)
-                .unwrap()
+                .expect("one configuration in one world")
                 .collision_free(0)
         {
             problems.push(PlanProblem::new(world, robot.default_q(), goal));
@@ -264,7 +268,7 @@ pub fn far_reaches(
 pub fn reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
     let mut rng = Rng::new(41);
     let scene: Vec<World> = (0..64).map(|_| tabletop(&mut rng)).collect();
-    let cpu = Device::cpu(robot).unwrap();
+    let cpu = Device::cpu(robot).expect("the CPU device starts");
     let goals: Vec<IkProblem> = scene
         .iter()
         .enumerate()
@@ -272,11 +276,11 @@ pub fn reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
         .collect();
     let ik = batchplan::solve_ik(
         &cpu,
-        &cpu.upload(&scene).unwrap(),
+        &cpu.upload(&scene).expect("boxes upload"),
         &goals,
         &IkOptions::default(),
     )
-    .unwrap();
+    .expect("IK takes tabletop targets");
     let problems = ik
         .solved()
         .map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution))
@@ -300,13 +304,13 @@ pub fn blocked_reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
             .obstacles
             .push(Obstacle::sphere(center, 0.1));
     }
-    let cpu = Device::cpu(robot).unwrap();
-    let worlds = cpu.upload(&scene).unwrap();
+    let cpu = Device::cpu(robot).expect("the CPU device starts");
+    let worlds = cpu.upload(&scene).expect("boxes and balls upload");
     let free = |p: &PlanProblem| {
         let ends = [&p.start[..], &p.goal[..]].concat();
         let e = cpu
             .evaluate(&worlds, &[p.world, p.world], &ends, &CollisionWeights::NONE)
-            .unwrap();
+            .expect("two configurations in one world");
         e.collision_free(0) && e.collision_free(1)
     };
     let problems = problems.into_iter().filter(free).collect();

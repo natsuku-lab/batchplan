@@ -392,7 +392,8 @@ pub fn demonstrations(
         .collect();
     let item_world: Vec<u32> = goals.iter().map(|g| g.world).collect();
     let start_clear = device.clearance(worlds, &item_world, &starts)?;
-    for g in (0..goals.len()).filter(|&g| !device::collision_free(start_clear[g])) {
+    let colliding = (0..goals.len()).filter(|&g| !device::collision_free(start_clear[g]));
+    for g in colliding {
         starts[g * n..(g + 1) * n].copy_from_slice(&robot.default_q);
     }
     // Nominal plan problem p reaches the target of IK problem goal_of[p].
@@ -1014,7 +1015,9 @@ pub fn handover(
     // The giver's configuration with the waiting taker's joints from `taker`.
     let with_taker = |t: &Handover, q: &[f32], taker: &[f32]| -> Vec<f32> {
         let mut out = q.to_vec();
-        own(t.to).iter().for_each(|&j| out[j] = taker[j]);
+        for &j in &own(t.to) {
+            out[j] = taker[j];
+        }
         out
     };
 

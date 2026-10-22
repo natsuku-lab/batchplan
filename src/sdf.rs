@@ -893,7 +893,9 @@ pub(crate) fn squared_edt(occupied: &[bool], [nx, ny, nz]: [usize; 3]) -> Vec<u3
                 }
                 for x in 0..nx {
                     line.transform((0..ny).map(|y| s[x + nx * y]));
-                    (0..ny).for_each(|y| s[x + nx * y] = line.out[y]);
+                    for y in 0..ny {
+                        s[x + nx * y] = line.out[y];
+                    }
                 }
             });
         d
@@ -906,15 +908,18 @@ pub(crate) fn squared_edt(occupied: &[bool], [nx, ny, nz]: [usize; 3]) -> Vec<u3
         .for_each_init(Line::default, |line, (c, column)| {
             for (site, plane) in [true, false].into_iter().zip(&planes) {
                 line.transform((0..nz).map(|z| plane[c + slab * z]));
-                (0..nz)
-                    .filter(|&z| occupied[c + slab * z] != site)
-                    .for_each(|z| column[z] = line.out[z]);
+                let other_kind = (0..nz).filter(|&z| occupied[c + slab * z] != site);
+                for z in other_kind {
+                    column[z] = line.out[z];
+                }
             }
         });
     let [mut out, _] = planes;
-    out.par_chunks_mut(slab)
-        .enumerate()
-        .for_each(|(z, s)| (0..slab).for_each(|c| s[c] = columns[c * nz + z]));
+    out.par_chunks_mut(slab).enumerate().for_each(|(z, s)| {
+        for (c, v) in s.iter_mut().enumerate() {
+            *v = columns[c * nz + z];
+        }
+    });
     out
 }
 
@@ -940,7 +945,8 @@ impl Line {
         let (f, roots, starts) = (&self.f, &mut self.roots, &mut self.starts);
         roots.clear();
         starts.clear();
-        for q in (0..f.len()).filter(|&q| f[q] != FAR) {
+        let sites = (0..f.len()).filter(|&q| f[q] != FAR);
+        for q in sites {
             let mut s = 0;
             while let Some(&p) = roots.last() {
                 s = meet(p, f[p], q, f[q]).clamp(0, f.len() as i32) as u32;

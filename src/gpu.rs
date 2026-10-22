@@ -24,8 +24,10 @@ use crate::types::{JointPaths, Pose};
 use crate::world::{Obstacle, World};
 
 const WORKGROUP: u32 = 64;
-// traj_search prices the line-search steps in the components of one vec4.
-const _: () = assert!(LINE_SEARCH.len() <= 4);
+const _: () = assert!(
+    LINE_SEARCH.len() <= 4,
+    "traj_search prices the line-search steps in the components of one vec4"
+);
 /// Robots with at most this many pairs of links checked for self-collision get one block of
 /// generated code per pair, with every frame in registers; more pairs loop at run time over frames
 /// copied into arrays, so the code grows with links rather than pairs.
@@ -319,9 +321,9 @@ fn collision(
     w += "    // interpolated, not exact, so their spheres are always checked. Links no joint moves are not\n";
     w += "    // checked against the world (see `collision` in cpu.rs).\n";
     w += "    let world_gate = max(margin, 0.0);\n";
-    for i in (0..links.len())
-        .filter(|&i| robot.sphere_ranges[i][1] > 0 && !robot.links[i].chain.is_empty())
-    {
+    let checked = (0..links.len())
+        .filter(|&i| robot.sphere_ranges[i][1] > 0 && !robot.links[i].chain.is_empty());
+    for i in checked {
         let _ = write!(
             w,
             r"    {{
@@ -942,7 +944,7 @@ impl GpuBackend {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("batchplan"),
             required_features: wgpu::Features::empty(),
-            required_limits: adapter_limits.clone(),
+            required_limits: adapter_limits,
             experimental_features: wgpu::ExperimentalFeatures::default(),
             memory_hints: wgpu::MemoryHints::Performance,
             trace: wgpu::Trace::Off,
@@ -1277,11 +1279,11 @@ impl Backend for GpuBackend {
         let worlds: &GpuWorlds = worlds.prepared();
         let (n, hands) = (self.robot.dof(), self.robot.hands());
         let mut errors = Vec::with_capacity(item_world.len());
-        for ((chunk_world, chunk_targets), chunk_q) in item_world
+        let chunks = item_world
             .chunks(IK_CHUNK)
             .zip(targets.chunks(IK_CHUNK * hands))
-            .zip(q.chunks_mut(IK_CHUNK * n))
-        {
+            .zip(q.chunks_mut(IK_CHUNK * n));
+        for ((chunk_world, chunk_targets), chunk_q) in chunks {
             errors.extend(self.ik_chunk(worlds, chunk_world, chunk_targets, chunk_q, o)?);
         }
         Ok(errors)

@@ -28,7 +28,7 @@ fn devices(robot: &Robot) -> Vec<Device> {
 
 #[test]
 fn the_search_keeps_the_time_budget() {
-    let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+    let _alone = ALONE.lock().expect("another timed test panicked");
     // Fine steps make the search long enough to cut.
     let robot = Robot::load(common::asset(UR5E), &RobotOptions::default()).unwrap();
     let cpu = Device::cpu(&robot).unwrap();
@@ -72,7 +72,7 @@ fn the_search_keeps_the_time_budget() {
 
 #[test]
 fn a_tiny_time_budget_returns_after_at_most_one_more_chunk() {
-    let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+    let _alone = ALONE.lock().expect("another timed test panicked");
     let robot = common::panda().unwrap();
     let (scene, problems) = common::blocked_reaches(&robot);
     // Enough rounds (20 chunks) that a fast GPU's plan still lasts well beyond one chunk.
@@ -120,7 +120,7 @@ fn a_tiny_time_budget_returns_after_at_most_one_more_chunk() {
 /// hold up its plans.
 #[test]
 fn a_busy_global_pool_does_not_hold_up_gpu_plans() {
-    let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+    let _alone = ALONE.lock().expect("another timed test panicked");
     let robot = common::panda().unwrap();
     let gpu = match Device::gpu(&robot) {
         Ok(gpu) => gpu,

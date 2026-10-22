@@ -244,7 +244,9 @@ impl TriMesh {
     /// Flips the triangles if they face inward.
     pub(crate) fn orient_outward(&mut self) {
         if self.signed_volume6() < 0.0 {
-            self.triangles.iter_mut().for_each(|t| t.swap(1, 2));
+            for t in &mut self.triangles {
+                t.swap(1, 2);
+            }
         }
     }
 
@@ -325,7 +327,9 @@ fn sphere_mesh(radii: Vec3) -> TriMesh {
         .map(|k| polar(1.0, PI * k as f32 / 12.0, 0.0))
         .collect();
     let mut mesh = lathe(&profile);
-    mesh.vertices.iter_mut().for_each(|v| *v *= radii);
+    for v in &mut mesh.vertices {
+        *v *= radii;
+    }
     mesh
 }
 

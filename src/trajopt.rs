@@ -235,7 +235,8 @@ pub fn plan(
         plannings.iter_mut().map(|p| p as &mut dyn Search).collect();
     device.search(worlds, &mut running, deadline)?;
     let mut searched = Vec::with_capacity(problems.len());
-    for (pi, planning) in plannings.into_iter().map(Deferred::into_inner).enumerate() {
+    let built = plannings.into_iter().map(Deferred::into_inner);
+    for (pi, planning) in built.enumerate() {
         if let Some((spline, length)) = &planning.chosen {
             let item = pi * seeds;
             result.paths.path_mut(item).copy_from_slice(spline);
@@ -977,9 +978,9 @@ fn continue_motion(
     let mut straight = vec![0.0; path.len()];
     for (t, q) in straight.chunks_mut(n).enumerate() {
         let u = (t.saturating_sub(2) as f32 / (path.len() / n - 5) as f32).min(1.0);
-        q.iter_mut()
-            .enumerate()
-            .for_each(|(j, v)| *v = start[j] + (goal[j] - start[j]) * u);
+        for (j, v) in q.iter_mut().enumerate() {
+            *v = start[j] + (goal[j] - start[j]) * u;
+        }
     }
     // A quarter slower than the straight path allows, leaving room for the bends optimization adds;
     // a straight path that does not move still needs a time scale to leave its start with. A fast

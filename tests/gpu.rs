@@ -273,7 +273,8 @@ fn ik_matches_cpu() {
             &CollisionWeights::NONE,
         )
         .unwrap();
-    for i in (0..b.success.len()).filter(|&i| b.success[i]) {
+    let succeeded = (0..b.success.len()).filter(|&i| b.success[i]);
+    for i in succeeded {
         let target = problems[i / o.seeds].targets[0].expect("one hand");
         assert!(
             (robot.ee_pose(b.solution(i), 0).position - target.position).length()
@@ -434,7 +435,9 @@ fn step_directions(
     for path in gradients.chunks_mut(o.control_points * n) {
         let largest = path.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         if largest > 0.0 {
-            path.iter_mut().for_each(|v| *v /= largest);
+            for v in path.iter_mut() {
+                *v /= largest;
+            }
         }
     }
     (gradients, clamped)
