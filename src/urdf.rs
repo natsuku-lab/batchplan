@@ -5,23 +5,37 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use glam::Vec3;
 
-use crate::description::{Curve, Geometry, JointDesc, JointType, LinkDesc, Mimic, RobotDescription, Shape};
+use crate::description::{
+    Curve, Geometry, JointDesc, JointType, LinkDesc, Mimic, RobotDescription, Shape,
+};
 use crate::robot::Transform;
 
 pub(crate) fn load(path: &Path, package_dirs: &[PathBuf]) -> Result<RobotDescription> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    from_text(&text, Some(path.parent().unwrap_or(Path::new("."))), package_dirs)
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    from_text(
+        &text,
+        Some(path.parent().unwrap_or(Path::new("."))),
+        package_dirs,
+    )
 }
 
 /// A URDF given as text. Relative mesh paths resolve against `dir`, the URDF's directory, and
 /// packages are also searched for above it; without one, only `package_dirs` are searched.
-pub(crate) fn from_text(text: &str, dir: Option<&Path>, package_dirs: &[PathBuf]) -> Result<RobotDescription> {
+pub(crate) fn from_text(
+    text: &str,
+    dir: Option<&Path>,
+    package_dirs: &[PathBuf],
+) -> Result<RobotDescription> {
     let urdf = urdf_rs::read_from_string(text).context("parsing the URDF")?;
     let shapes = |elements: Vec<(&urdf_rs::Pose, &urdf_rs::Geometry)>| -> Result<Vec<Shape>> {
         elements
             .into_iter()
             .map(|(origin, geometry)| {
-                Ok(Shape { origin: pose(origin), geometry: geometry_of(geometry, dir, package_dirs)? })
+                Ok(Shape {
+                    origin: pose(origin),
+                    geometry: geometry_of(geometry, dir, package_dirs)?,
+                })
             })
             .collect()
     };
@@ -31,7 +45,12 @@ pub(crate) fn from_text(text: &str, dir: Option<&Path>, package_dirs: &[PathBuf]
         .map(|l| {
             Ok(LinkDesc {
                 name: l.name.clone(),
-                collision: shapes(l.collision.iter().map(|c| (&c.origin, &c.geometry)).collect())?,
+                collision: shapes(
+                    l.collision
+                        .iter()
+                        .map(|c| (&c.origin, &c.geometry))
+                        .collect(),
+                )?,
                 visual: shapes(l.visual.iter().map(|v| (&v.origin, &v.geometry)).collect())?,
             })
         })
@@ -51,10 +70,18 @@ pub(crate) fn from_text(text: &str, dir: Option<&Path>, package_dirs: &[PathBuf]
                 ref other => bail!("joint '{}' has unsupported type {other:?}", j.name),
             };
             let (lower, upper) = (j.limit.lower as f32, j.limit.upper as f32);
-            if matches!(kind, JointType::Revolute | JointType::Prismatic) && !(lower.is_finite() && upper.is_finite()) {
+            if matches!(kind, JointType::Revolute | JointType::Prismatic)
+                && !(lower.is_finite() && upper.is_finite())
+            {
                 bail!("joint '{}' needs finite position limits", j.name);
             }
-            let limit = |v: f64| if v.is_finite() && v > 0.0 { v as f32 } else { f32::INFINITY };
+            let limit = |v: f64| {
+                if v.is_finite() && v > 0.0 {
+                    v as f32
+                } else {
+                    f32::INFINITY
+                }
+            };
             Ok(JointDesc {
                 name: j.name.clone(),
                 kind,
@@ -69,7 +96,10 @@ pub(crate) fn from_text(text: &str, dir: Option<&Path>, package_dirs: &[PathBuf]
                 max_jerk: limit(j.limit.jerk),
                 mimic: j.mimic.as_ref().map(|m| Mimic {
                     joint: m.joint.clone(),
-                    curve: Curve::linear(m.multiplier.unwrap_or(1.0) as f32, m.offset.unwrap_or(0.0) as f32),
+                    curve: Curve::linear(
+                        m.multiplier.unwrap_or(1.0) as f32,
+                        m.offset.unwrap_or(0.0) as f32,
+                    ),
                 }),
                 actuated: true,
                 stiffness: 0.0,
@@ -77,23 +107,43 @@ pub(crate) fn from_text(text: &str, dir: Option<&Path>, package_dirs: &[PathBuf]
             })
         })
         .collect::<Result<_>>()?;
-    Ok(RobotDescription { name: urdf.name, links, joints, loops: vec![] })
+    Ok(RobotDescription {
+        name: urdf.name,
+        links,
+        joints,
+        loops: vec![],
+    })
 }
 
 fn pose(p: &urdf_rs::Pose) -> Transform {
     Transform::from_xyz_rpy(p.xyz.0, p.rpy.0)
 }
 
-fn geometry_of(g: &urdf_rs::Geometry, dir: Option<&Path>, package_dirs: &[PathBuf]) -> Result<Geometry> {
+fn geometry_of(
+    g: &urdf_rs::Geometry,
+    dir: Option<&Path>,
+    package_dirs: &[PathBuf],
+) -> Result<Geometry> {
     use urdf_rs::Geometry as G;
     Ok(match *g {
-        G::Box { size } => Geometry::Box { half: Vec3::from_array(size.0.map(|v| v as f32)) * 0.5 },
-        G::Sphere { radius } => Geometry::Sphere { radius: radius as f32 },
-        G::Cylinder { radius, length } => {
-            Geometry::Cylinder { radius: radius as f32, half_length: length as f32 * 0.5 }
-        }
-        G::Capsule { radius, length } => Geometry::Capsule { radius: radius as f32, half_length: length as f32 * 0.5 },
-        G::Mesh { ref filename, scale } => Geometry::Mesh {
+        G::Box { size } => Geometry::Box {
+            half: Vec3::from_array(size.0.map(|v| v as f32)) * 0.5,
+        },
+        G::Sphere { radius } => Geometry::Sphere {
+            radius: radius as f32,
+        },
+        G::Cylinder { radius, length } => Geometry::Cylinder {
+            radius: radius as f32,
+            half_length: length as f32 * 0.5,
+        },
+        G::Capsule { radius, length } => Geometry::Capsule {
+            radius: radius as f32,
+            half_length: length as f32 * 0.5,
+        },
+        G::Mesh {
+            ref filename,
+            scale,
+        } => Geometry::Mesh {
             path: resolve(filename, dir, package_dirs)?,
             scale: scale.map_or(Vec3::ONE, |s| Vec3::from_array(s.0.map(|v| v as f32))),
         },
@@ -109,11 +159,18 @@ fn resolve(filename: &str, dir: Option<&Path>, package_dirs: &[PathBuf]) -> Resu
         return match dir {
             _ if path.is_absolute() => Ok(path.to_path_buf()),
             Some(dir) => Ok(dir.join(path)),
-            None => bail!("mesh path {filename} is relative, and a URDF given as text has no directory"),
+            None => {
+                bail!("mesh path {filename} is relative, and a URDF given as text has no directory")
+            }
         };
     };
-    let (package, relative) = rest.split_once('/').with_context(|| format!("malformed mesh path {filename}"))?;
-    let candidates = package_dirs.iter().map(PathBuf::as_path).chain(dir.into_iter().flat_map(Path::ancestors));
+    let (package, relative) = rest
+        .split_once('/')
+        .with_context(|| format!("malformed mesh path {filename}"))?;
+    let candidates = package_dirs
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(dir.into_iter().flat_map(Path::ancestors));
     for base in candidates {
         for root in [base.to_path_buf(), base.join(package)] {
             if package_name(&root).as_deref() == Some(package) {
@@ -121,14 +178,19 @@ fn resolve(filename: &str, dir: Option<&Path>, package_dirs: &[PathBuf]) -> Resu
             }
         }
     }
-    bail!("package '{package}' (for {filename}) not found; add the directory holding it to RobotOptions::package_dirs")
+    bail!(
+        "package '{package}' (for {filename}) not found; add the directory holding it to RobotOptions::package_dirs"
+    )
 }
 
 /// The `<name>` declared in `dir/package.xml`, if there is one.
 fn package_name(dir: &Path) -> Option<String> {
     let text = std::fs::read_to_string(dir.join("package.xml")).ok()?;
     let doc = roxmltree::Document::parse(&text).ok()?;
-    let name = doc.root_element().children().find(|n| n.has_tag_name("name"))?;
+    let name = doc
+        .root_element()
+        .children()
+        .find(|n| n.has_tag_name("name"))?;
     Some(name.text()?.trim().to_string())
 }
 
@@ -140,7 +202,9 @@ pub(crate) fn srdf_disabled_pairs(text: &str) -> Result<Vec<(String, String)>> {
         .filter(|n| n.has_tag_name("disable_collisions"))
         .map(|n| {
             let link = |attr: &str| {
-                n.attribute(attr).map(str::to_string).with_context(|| format!("SRDF disable_collisions without {attr}"))
+                n.attribute(attr)
+                    .map(str::to_string)
+                    .with_context(|| format!("SRDF disable_collisions without {attr}"))
             };
             Ok((link("link1")?, link("link2")?))
         })

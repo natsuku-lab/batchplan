@@ -9,8 +9,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -33,17 +32,31 @@ fn planner(
     for start in starts {
         let t = Instant::now();
         let target = common::grasp_target(&scene, &mut rng);
-        let ik = solve_ik(&device, &worlds, &[IkProblem::new(0, target)], &IkOptions::default())?;
+        let ik = solve_ik(
+            &device,
+            &worlds,
+            &[IkProblem::new(0, target)],
+            &IkOptions::default(),
+        )?;
         let Some(goal) = ik.best(0) else { continue };
         let problem = PlanProblem::new(0, start, goal);
-        let options = PlanOptions { time_budget: Some(Duration::from_millis(500)), ..Default::default() };
+        let options = PlanOptions {
+            time_budget: Some(Duration::from_millis(500)),
+            ..Default::default()
+        };
         let result = plan(&device, &worlds, &[problem], &options)?;
         let Some(path) = result.best(0) else { continue };
         let trajectory = Trajectory::new(&robot, path, 0.8)?;
         // The controller only ever receives trajectories that pass the safety check.
         trajectory.check(&robot)?;
-        println!("planner: {:.2} s reach planned in {:.0} ms", trajectory.duration(), t.elapsed().as_secs_f64() * 1e3);
-        *latest.lock().expect("the controller never panics holding the slot") = Some(trajectory);
+        println!(
+            "planner: {:.2} s reach planned in {:.0} ms",
+            trajectory.duration(),
+            t.elapsed().as_secs_f64() * 1e3
+        );
+        *latest
+            .lock()
+            .expect("the controller never panics holding the slot") = Some(trajectory);
     }
     Ok(())
 }

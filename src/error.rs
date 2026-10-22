@@ -58,4 +58,5 @@ macro_rules! input {
     };
 }
 
-pub(crate) use {ensure_input, input};
+pub(crate) use ensure_input;
+pub(crate) use input;

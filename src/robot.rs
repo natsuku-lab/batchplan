@@ -7,7 +7,9 @@ use anyhow::{Context, Result, bail, ensure};
 use glam::{Mat3, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
-use crate::description::{self, Curve, Geometry, JointDesc, JointType, LinkDesc, RobotDescription, Shape, TriMesh};
+use crate::description::{
+    self, Curve, Geometry, JointDesc, JointType, LinkDesc, RobotDescription, Shape, TriMesh,
+};
 use crate::error::{self, Error, ensure_input, input};
 use crate::spheres::{self, SphereGeometry, SphereOptions};
 use crate::types::Pose;
@@ -19,7 +21,10 @@ pub(crate) struct Transform {
 }
 
 impl Transform {
-    pub(crate) const IDENTITY: Self = Self { rot: Mat3::IDENTITY, trans: Vec3::ZERO };
+    pub(crate) const IDENTITY: Self = Self {
+        rot: Mat3::IDENTITY,
+        trans: Vec3::ZERO,
+    };
 
     /// URDF convention: R = Rz(yaw) * Ry(pitch) * Rx(roll).
     pub(crate) fn from_xyz_rpy(xyz: [f64; 3], rpy: [f64; 3]) -> Self {
@@ -31,7 +36,10 @@ impl Transform {
     }
 
     pub(crate) fn mul(&self, other: &Self) -> Self {
-        Self { rot: self.rot * other.rot, trans: self.rot * other.trans + self.trans }
+        Self {
+            rot: self.rot * other.rot,
+            trans: self.rot * other.trans + self.trans,
+        }
     }
 }
 
@@ -40,8 +48,16 @@ impl Transform {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum JointKind {
     Fixed,
-    Revolute { dof: usize, axis: Vec3, curve: Curve },
-    Prismatic { dof: usize, axis: Vec3, curve: Curve },
+    Revolute {
+        dof: usize,
+        axis: Vec3,
+        curve: Curve,
+    },
+    Prismatic {
+        dof: usize,
+        axis: Vec3,
+        curve: Curve,
+    },
 }
 
 impl JointKind {
@@ -50,7 +66,9 @@ impl JointKind {
     pub(crate) fn actuation(&self) -> Option<(usize, Curve)> {
         match *self {
             JointKind::Fixed => None,
-            JointKind::Revolute { dof, curve, .. } | JointKind::Prismatic { dof, curve, .. } => Some((dof, curve)),
+            JointKind::Revolute { dof, curve, .. } | JointKind::Prismatic { dof, curve, .. } => {
+                Some((dof, curve))
+            }
         }
     }
 }
@@ -110,7 +128,10 @@ pub struct CollisionModel {
 impl CollisionModel {
     pub fn load(path: impl AsRef<Path>) -> error::Result<Self> {
         let path = path.as_ref();
-        let load = |message: String| Error::Load { path: path.to_path_buf(), message };
+        let load = |message: String| Error::Load {
+            path: path.to_path_buf(),
+            message,
+        };
         let text = std::fs::read_to_string(path).map_err(|e| load(e.to_string()))?;
         serde_json::from_str(&text).map_err(|e| load(e.to_string()))
     }
@@ -126,15 +147,24 @@ impl CollisionModel {
     /// always checked against each other.
     pub fn assemble(parts: &[(&str, &CollisionModel)]) -> CollisionModel {
         let mut out = CollisionModel::default();
-        let sources: Vec<String> =
-            parts.iter().filter_map(|(prefix, m)| m.source.as_ref().map(|s| format!("{prefix}: {s}"))).collect();
+        let sources: Vec<String> = parts
+            .iter()
+            .filter_map(|(prefix, m)| m.source.as_ref().map(|s| format!("{prefix}: {s}")))
+            .collect();
         out.source = (!sources.is_empty()).then(|| sources.join("; "));
         for (prefix, m) in parts {
             let named = |link: &String| format!("{prefix}{link}");
-            out.spheres.extend(m.spheres.iter().map(|(link, s)| (named(link), s.clone())));
-            out.self_collision_buffer.extend(m.self_collision_buffer.iter().map(|(link, b)| (named(link), *b)));
+            out.spheres
+                .extend(m.spheres.iter().map(|(link, s)| (named(link), s.clone())));
+            out.self_collision_buffer.extend(
+                m.self_collision_buffer
+                    .iter()
+                    .map(|(link, b)| (named(link), *b)),
+            );
             out.self_collision_ignore.extend(
-                m.self_collision_ignore.iter().map(|(link, others)| (named(link), others.iter().map(named).collect())),
+                m.self_collision_ignore
+                    .iter()
+                    .map(|(link, others)| (named(link), others.iter().map(named).collect())),
             );
         }
         out
@@ -167,10 +197,10 @@ pub struct RobotOptions {
     pub default_q: Option<Vec<f32>>,
     /// Joints held at a value and removed from planning (mimics of a locked joint follow it).
     pub lock_joints: HashMap<String, f32>,
-    /// Limits by joint name, replacing the description's; mimic joints may be named too. The scales
-    /// below apply on top. Planar, ball and floating joints become joints named `<joint>_x`, `_y`,
-    /// `_z` (translations, which need position limits from here) and `_theta` or `_rx`, `_ry`,
-    /// `_rz` (rotations).
+    /// Limits by joint name, replacing the description's; mimic joints may be named too. The
+    /// scales below apply on top. Planar, ball and floating joints become joints named
+    /// `<joint>_x`, `_y`, `_z` (translations, which need position limits from here) and
+    /// `_theta` or `_rx`, `_ry`, `_rz` (rotations).
     pub joint_limits: HashMap<String, JointLimits>,
     /// Directories searched for `package://` packages: each is a package or holds packages.
     /// Directories above the description file are searched after these.
@@ -191,8 +221,8 @@ pub struct RobotOptions {
     /// Scales every joint's velocity limit, its description's or `max_velocity`, in (0, 1], as
     /// MoveIt's velocity scaling factor does. Plans, timings and checks all keep within the scaled
     /// limits, so a robot slowed here replans mid-motion at its own pace. To slow every motion by
-    /// `s`, as `Trajectory::new`'s speed scale does, scale velocity by `s`, acceleration by `s²` and
-    /// jerk by `s³`.
+    /// `s`, as `Trajectory::new`'s speed scale does, scale velocity by `s`, acceleration by `s²`
+    /// and jerk by `s³`.
     pub velocity_scale: f32,
     /// Scales every joint's acceleration limit, in (0, 1].
     pub acceleration_scale: f32,
@@ -306,17 +336,26 @@ impl Fk {
         }
     }
 
-    /// Link `i`'s joint motion per unit of its actuated joint: the multiplier of a linear curve, the
-    /// slope at this configuration for others (only those are recorded).
+    /// Link `i`'s joint motion per unit of its actuated joint: the multiplier of a linear curve,
+    /// the slope at this configuration for others (only those are recorded).
     #[inline]
     pub(crate) fn rate(&self, i: usize, curve: &Curve) -> f32 {
-        if curve.is_linear() { curve.0[1] } else { self.rate[i] }
+        if curve.is_linear() {
+            curve.0[1]
+        } else {
+            self.rate[i]
+        }
     }
 
-    /// Derivative of a point rigidly attached downstream of link `i`'s joint, per unit of joint motion.
+    /// Derivative of a point rigidly attached downstream of link `i`'s joint, per unit of joint
+    /// motion.
     #[inline]
     pub(crate) fn dpoint(&self, i: usize, p: Vec3) -> Vec3 {
-        if self.slides[i] { self.axis[i] } else { self.axis[i].cross(p - self.pos[i]) }
+        if self.slides[i] {
+            self.axis[i]
+        } else {
+            self.axis[i].cross(p - self.pos[i])
+        }
     }
 }
 
@@ -324,11 +363,21 @@ impl Robot {
     /// Loads a robot from URDF, MJCF (`.xml`, `.mjcf`) or OpenUSD (`.usd*`, feature `usd`).
     pub fn load(path: impl AsRef<Path>, o: &RobotOptions) -> error::Result<Self> {
         let path = path.as_ref();
-        let part = Part { path: path.to_path_buf(), prefix: String::new(), base: Pose::IDENTITY };
+        let part = Part {
+            path: path.to_path_buf(),
+            prefix: String::new(),
+            base: Pose::IDENTITY,
+        };
         description::load_robot(path, &o.package_dirs, &o.variants)
             .and_then(|description| Self::from_description(&description, o))
-            .map(|robot| Robot { parts: vec![part], ..robot })
-            .map_err(|e| Error::Load { path: path.to_path_buf(), message: format!("{e:#}") })
+            .map(|robot| Robot {
+                parts: vec![part],
+                ..robot
+            })
+            .map_err(|e| Error::Load {
+                path: path.to_path_buf(),
+                message: format!("{e:#}"),
+            })
     }
 
     /// Loads a robot from a URDF's text, as ROS publishes it on `/robot_description`. Its mesh
@@ -345,19 +394,27 @@ impl Robot {
     /// root link, `world`. The options name links and joints with their prefixes; give each arm's
     /// hand in `ee_links`.
     pub fn assemble(parts: &[Part], o: &RobotOptions) -> error::Result<Self> {
-        let load_error =
-            |path: &Path, e: anyhow::Error| Error::Load { path: path.to_path_buf(), message: format!("{e:#}") };
+        let load_error = |path: &Path, e: anyhow::Error| Error::Load {
+            path: path.to_path_buf(),
+            message: format!("{e:#}"),
+        };
         let mut descriptions = vec![];
         for part in parts {
             let description = description::load_robot(&part.path, &o.package_dirs, &o.variants)
                 .map_err(|e| load_error(&part.path, e))?;
-            let base = Transform { rot: Mat3::from_quat(part.base.rotation), trans: part.base.position };
+            let base = Transform {
+                rot: Mat3::from_quat(part.base.rotation),
+                trans: part.base.position,
+            };
             descriptions.push((description, part.prefix.clone(), base));
         }
         let first = parts.first().map_or_else(PathBuf::new, |p| p.path.clone());
         description::assemble(descriptions)
             .and_then(|description| Self::from_description(&description, o))
-            .map(|robot| Robot { parts: parts.to_vec(), ..robot })
+            .map(|robot| Robot {
+                parts: parts.to_vec(),
+                ..robot
+            })
             .map_err(|e| load_error(&first, e))
     }
 
@@ -373,7 +430,11 @@ impl Robot {
             desc
         } else {
             // Loops are solved on the tree they leave open, with every joint planned.
-            let open = RobotOptions { lock_joints: HashMap::new(), default_q: None, ..o.clone() };
+            let open = RobotOptions {
+                lock_joints: HashMap::new(),
+                default_q: None,
+                ..o.clone()
+            };
             closed = crate::loops::close_loops(desc, &kinematics(desc, &open)?)?;
             &closed
         };
@@ -401,8 +462,11 @@ impl Robot {
 
     /// Fits spheres to every link's geometry, then finds the link pairs not worth checking.
     fn fit_collision_model(&mut self, o: &SphereOptions) -> Result<CollisionModel> {
-        let meshes: Vec<Vec<TriMesh>> =
-            self.links.iter().map(|link| link.shapes.iter().map(|s| s.mesh()).collect()).collect::<Result<_>>()?;
+        let meshes: Vec<Vec<TriMesh>> = self
+            .links
+            .iter()
+            .map(|link| link.shapes.iter().map(|s| s.mesh()).collect())
+            .collect::<Result<_>>()?;
         o.check().map_err(anyhow::Error::msg)?;
         let with_geometry = meshes.iter().filter(|m| !m.is_empty()).count();
         ensure!(
@@ -411,8 +475,14 @@ impl Robot {
             o.budget
         );
         let (fitted, overhang) = spheres::fit(&meshes, o, true);
-        let source = format!("fitted by batchplan: spheres reach up to {:.1} mm beyond the geometry", overhang * 1e3);
-        let mut model = CollisionModel { source: Some(source), ..Default::default() };
+        let source = format!(
+            "fitted by batchplan: spheres reach up to {:.1} mm beyond the geometry",
+            overhang * 1e3
+        );
+        let mut model = CollisionModel {
+            source: Some(source),
+            ..Default::default()
+        };
         for (link, fitted) in self.links.iter().zip(fitted) {
             if !fitted.is_empty() {
                 model.spheres.insert(link.name.clone(), fitted);
@@ -424,13 +494,26 @@ impl Robot {
     }
 
     fn set_collision_model(&mut self, model: CollisionModel) -> Result<()> {
-        let index: HashMap<&str, usize> = self.links.iter().enumerate().map(|(i, l)| (l.name.as_str(), i)).collect();
-        if let Some(name) = model.spheres.keys().find(|n| !index.contains_key(n.as_str())) {
+        let index: HashMap<&str, usize> = self
+            .links
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (l.name.as_str(), i))
+            .collect();
+        if let Some(name) = model
+            .spheres
+            .keys()
+            .find(|n| !index.contains_key(n.as_str()))
+        {
             bail!("collision spheres given for link '{name}', which is not part of the robot");
         }
         let mut spheres = vec![];
         for (li, link) in self.links.iter().enumerate() {
-            let buffer = model.self_collision_buffer.get(&link.name).copied().unwrap_or(0.0);
+            let buffer = model
+                .self_collision_buffer
+                .get(&link.name)
+                .copied()
+                .unwrap_or(0.0);
             for s in model.spheres.get(&link.name).into_iter().flatten() {
                 spheres.push(CollisionSphere {
                     link: li,
@@ -464,7 +547,12 @@ impl Robot {
                 }
                 if self_pairs.len() > first {
                     let count = (self_pairs.len() - first) as u32;
-                    self_link_pairs.push(LinkPair { a: la as u32, b: lb as u32, first: first as u32, count });
+                    self_link_pairs.push(LinkPair {
+                        a: la as u32,
+                        b: lb as u32,
+                        first: first as u32,
+                        count,
+                    });
                 }
             }
         }
@@ -472,13 +560,16 @@ impl Robot {
             .map(|link| {
                 let own: Vec<&CollisionSphere> = on(link).map(|s| &held[s]).collect();
                 let center = own.iter().map(|s| s.center).sum::<Vec3>() / own.len().max(1) as f32;
-                let radius =
-                    own.iter().map(|s| (s.center - center).length() + s.radius + s.self_buffer).fold(0.0, f32::max);
+                let radius = own
+                    .iter()
+                    .map(|s| (s.center - center).length() + s.radius + s.self_buffer)
+                    .fold(0.0, f32::max);
                 [center.x, center.y, center.z, radius]
             })
             .collect();
-        self.sphere_ranges =
-            (0..self.links.len()).map(|link| [on(link).next().unwrap_or(0) as u32, on(link).count() as u32]).collect();
+        self.sphere_ranges = (0..self.links.len())
+            .map(|link| [on(link).next().unwrap_or(0) as u32, on(link).count() as u32])
+            .collect();
         self.spheres = spheres;
         self.self_pairs = self_pairs;
         self.self_link_pairs = self_link_pairs;
@@ -491,13 +582,25 @@ impl Robot {
     pub fn attach(&self, object: &AttachedObject) -> error::Result<Robot> {
         let link = |name: &str| self.links.iter().position(|l| l.name == name);
         let parent = link(&object.link).ok_or_else(|| input!("unknown link '{}'", object.link))?;
-        ensure_input!(!self.attached.contains(&object.link), "objects attach to robot links, not to '{}'", object.link);
-        ensure_input!(link(&object.name).is_none(), "'{}' already names a link", object.name);
+        ensure_input!(
+            !self.attached.contains(&object.link),
+            "objects attach to robot links, not to '{}'",
+            object.link
+        );
+        ensure_input!(
+            link(&object.name).is_none(),
+            "'{}' already names a link",
+            object.name
+        );
         if let Some(t) = object.touch_links.iter().find(|t| link(t).is_none()) {
             return Err(input!("unknown touch link '{t}'"));
         }
         object.spheres.check().map_err(Error::Input)?;
-        let shapes = object.shapes.iter().map(attached_shape).collect::<error::Result<Vec<Shape>>>()?;
+        let shapes = object
+            .shapes
+            .iter()
+            .map(attached_shape)
+            .collect::<error::Result<Vec<Shape>>>()?;
         ensure_input!(!shapes.is_empty(), "'{}' has no shapes", object.name);
         // Boxes and spheres are covered directly; other shapes are fitted. Attaching happens inside
         // control processes: fit on the caller's rayon pool if it has one, otherwise on the calling
@@ -511,7 +614,11 @@ impl Robot {
                     .iter()
                     .map(|shape| shape.mesh().map_err(|e| input!("{e:#}")))
                     .collect::<error::Result<Vec<TriMesh>>>()?;
-                let (fitted, _) = spheres::fit(&[meshes], &object.spheres, rayon::current_thread_index().is_some());
+                let (fitted, _) = spheres::fit(
+                    &[meshes],
+                    &object.spheres,
+                    rayon::current_thread_index().is_some(),
+                );
                 fitted.into_iter().flatten().collect()
             }
         };
@@ -528,17 +635,25 @@ impl Robot {
         robot.attached.push(object.name.clone());
         let mut model = self.collision_model.clone();
         model.spheres.insert(object.name.clone(), fitted);
-        let ignored = model.self_collision_ignore.entry(object.name.clone()).or_default();
+        let ignored = model
+            .self_collision_ignore
+            .entry(object.name.clone())
+            .or_default();
         ignored.push(object.link.clone());
         ignored.extend(object.touch_links.iter().cloned());
-        robot.set_collision_model(model).map_err(|e| input!("{e:#}"))?;
+        robot
+            .set_collision_model(model)
+            .map_err(|e| input!("{e:#}"))?;
         Ok(robot)
     }
 
     /// This robot without the attached object `name`.
     pub fn detach(&self, name: &str) -> error::Result<Robot> {
-        let index =
-            self.attached.iter().position(|a| a == name).ok_or_else(|| input!("nothing named '{name}' is attached"))?;
+        let index = self
+            .attached
+            .iter()
+            .position(|a| a == name)
+            .ok_or_else(|| input!("nothing named '{name}' is attached"))?;
         let mut robot = self.clone();
         robot.attached.remove(index);
         // Attached objects are leaves after every robot link, so no other link refers to this one.
@@ -546,7 +661,9 @@ impl Robot {
         let mut model = self.collision_model.clone();
         model.spheres.remove(name);
         model.self_collision_ignore.remove(name);
-        robot.set_collision_model(model).map_err(|e| input!("{e:#}"))?;
+        robot
+            .set_collision_model(model)
+            .map_err(|e| input!("{e:#}"))?;
         Ok(robot)
     }
 
@@ -582,13 +699,21 @@ impl Robot {
     /// Joint `j`'s position limits; unbounded for continuous joints.
     #[inline]
     pub(crate) fn bounds(&self, j: usize) -> (f32, f32) {
-        if self.continuous[j] { (f32::NEG_INFINITY, f32::INFINITY) } else { (self.lower[j], self.upper[j]) }
+        if self.continuous[j] {
+            (f32::NEG_INFINITY, f32::INFINITY)
+        } else {
+            (self.lower[j], self.upper[j])
+        }
     }
 
     /// `q` with each continuous joint turned by whole turns to lie within half a turn of `from`.
     pub(crate) fn turn_toward(&self, from: &[f32], q: &mut [f32]) {
         use std::f32::consts::{PI, TAU};
-        for (j, v) in q.iter_mut().enumerate().filter(|&(j, _)| self.continuous[j]) {
+        for (j, v) in q
+            .iter_mut()
+            .enumerate()
+            .filter(|&(j, _)| self.continuous[j])
+        {
             *v = from[j] + (*v - from[j] + PI).rem_euclid(TAU) - PI;
         }
     }
@@ -619,7 +744,12 @@ impl Robot {
             base[j] = t[0];
         }
         let mut variants = vec![base.clone()];
-        let distance = |q: &[f32]| q.iter().zip(start).map(|(a, b)| (a - b) * (a - b)).sum::<f32>();
+        let distance = |q: &[f32]| {
+            q.iter()
+                .zip(start)
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f32>()
+        };
         let mut flips = vec![];
         for (j, t) in turns.iter().enumerate() {
             for &v in &t[1..] {
@@ -675,7 +805,10 @@ impl Robot {
     /// The prefix of the part hand `hand`'s frame belongs to (`left_`), on a robot made of parts.
     pub(crate) fn hand_prefix(&self, hand: usize) -> Option<&str> {
         let link = &self.links[self.ee_links[hand]].name;
-        self.parts.iter().map(|p| p.prefix.as_str()).find(|prefix| !prefix.is_empty() && link.starts_with(prefix))
+        self.parts
+            .iter()
+            .map(|p| p.prefix.as_str())
+            .find(|prefix| !prefix.is_empty() && link.starts_with(prefix))
     }
 
     /// The joints that move hand `hand`, root first: the actuated joints of its chain (a mimic
@@ -704,7 +837,10 @@ impl Robot {
     #[inline]
     pub(crate) fn chain(&self, link: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
         self.links[link].chain.iter().map(|&i| {
-            let (dof, _) = self.links[i].joint.actuation().expect("chain links have moving joints");
+            let (dof, _) = self.links[i]
+                .joint
+                .actuation()
+                .expect("chain links have moving joints");
             (i, dof)
         })
     }
@@ -723,14 +859,22 @@ impl Robot {
         let (rot, pos, axes) = (&mut fk.rot[..], &mut fk.pos[..], &mut fk.axis[..]);
         let (slides, rates) = (&mut fk.slides[..], &mut fk.rate[..]);
         for (i, link) in self.links.iter().enumerate() {
-            let (prot, ppos) = link.parent.map_or((Mat3::IDENTITY, Vec3::ZERO), |p| (rot[p], pos[p]));
+            let (prot, ppos) = link
+                .parent
+                .map_or((Mat3::IDENTITY, Vec3::ZERO), |p| (rot[p], pos[p]));
             let jrot = prot * link.origin.rot;
             let jpos = prot * link.origin.trans + ppos;
             (rot[i], pos[i], axes[i], slides[i], rates[i]) = match link.joint {
                 JointKind::Fixed => (jrot, jpos, Vec3::ZERO, false, 0.0),
                 JointKind::Revolute { dof, axis, curve } => {
                     let (angle, rate) = curve.value_and_slope(q[dof]);
-                    (jrot * Mat3::from_axis_angle(axis, angle), jpos, jrot * axis, false, rate)
+                    (
+                        jrot * Mat3::from_axis_angle(axis, angle),
+                        jpos,
+                        jrot * axis,
+                        false,
+                        rate,
+                    )
                 }
                 JointKind::Prismatic { dof, axis, curve } => {
                     let a = jrot * axis;
@@ -749,7 +893,8 @@ impl Robot {
 /// - ball: `<joint>_rx`, `<joint>_ry`, `<joint>_rz` turn about the joint frame's axes in that order
 ///   (intrinsic x-y-z angles), which reach every rotation with `_ry` in [-π/2, π/2] and lose a
 ///   direction of motion (gimbal lock) at its ends;
-/// - floating: `<joint>_x`, `<joint>_y`, `<joint>_z` slide along the joint frame's axes, then a ball.
+/// - floating: `<joint>_x`, `<joint>_y`, `<joint>_z` slide along the joint frame's axes, then a
+///   ball.
 ///
 /// Translations get no limits here: they come from `RobotOptions::joint_limits`.
 fn expand_compound_joints(desc: &RobotDescription) -> Result<RobotDescription> {
@@ -762,36 +907,72 @@ fn expand_compound_joints(desc: &RobotDescription) -> Result<RobotDescription> {
     };
     for j in &desc.joints {
         let ball = |range: f32| {
-            let r = if range.is_finite() && range > 0.0 { range.min(PI) } else { PI };
-            [("rx", Vec3::X, r), ("ry", Vec3::Y, r.min(FRAC_PI_2)), ("rz", Vec3::Z, r)]
-                .map(|(name, axis, r)| (name, JointType::Revolute, axis, -r, r))
+            let r = if range.is_finite() && range > 0.0 {
+                range.min(PI)
+            } else {
+                PI
+            };
+            [
+                ("rx", Vec3::X, r),
+                ("ry", Vec3::Y, r.min(FRAC_PI_2)),
+                ("rz", Vec3::Z, r),
+            ]
+            .map(|(name, axis, r)| (name, JointType::Revolute, axis, -r, r))
         };
         let slide = |name, axis| (name, JointType::Prismatic, axis, f32::NAN, f32::NAN);
         let parts: Vec<(&str, JointType, Vec3, f32, f32)> = match j.kind {
             JointType::Planar => {
-                // `_x` follows the joint frame's x axis, projected into the plane (y if x is normal).
+                // `_x` follows the joint frame's x axis, projected into the plane (y if x is
+                // normal).
                 let inplane = |v: Vec3| v - j.axis * j.axis.dot(v);
-                let u = inplane(Vec3::X).try_normalize().unwrap_or_else(|| inplane(Vec3::Y).normalize());
-                vec![slide("x", u), slide("y", j.axis.cross(u)), ("theta", JointType::Continuous, j.axis, 0.0, 0.0)]
+                let u = inplane(Vec3::X)
+                    .try_normalize()
+                    .unwrap_or_else(|| inplane(Vec3::Y).normalize());
+                vec![
+                    slide("x", u),
+                    slide("y", j.axis.cross(u)),
+                    ("theta", JointType::Continuous, j.axis, 0.0, 0.0),
+                ]
             }
             JointType::Ball => ball(j.upper).to_vec(),
-            JointType::Floating => {
-                [slide("x", Vec3::X), slide("y", Vec3::Y), slide("z", Vec3::Z)].into_iter().chain(ball(PI)).collect()
-            }
+            JointType::Floating => [
+                slide("x", Vec3::X),
+                slide("y", Vec3::Y),
+                slide("z", Vec3::Z),
+            ]
+            .into_iter()
+            .chain(ball(PI))
+            .collect(),
             _ => {
                 out.joints.push(j.clone());
                 continue;
             }
         };
-        ensure!(j.mimic.is_none(), "{:?} joint '{}' cannot mimic another joint", j.kind, j.name);
+        ensure!(
+            j.mimic.is_none(),
+            "{:?} joint '{}' cannot mimic another joint",
+            j.kind,
+            j.name
+        );
         let mut parent = j.parent.clone();
         for (k, &(suffix, kind, axis, lower, upper)) in parts.iter().enumerate() {
             let name = format!("{}_{suffix}", j.name);
-            let child = if k + 1 == parts.len() { j.child.clone() } else { format!("{}/{name}", j.child) };
+            let child = if k + 1 == parts.len() {
+                j.child.clone()
+            } else {
+                format!("{}/{name}", j.child)
+            };
             if child != j.child {
-                out.links.push(LinkDesc { name: child.clone(), ..Default::default() });
+                out.links.push(LinkDesc {
+                    name: child.clone(),
+                    ..Default::default()
+                });
             }
-            let origin = if k == 0 { j.origin } else { Transform::IDENTITY };
+            let origin = if k == 0 {
+                j.origin
+            } else {
+                Transform::IDENTITY
+            };
             out.joints.push(JointDesc {
                 name,
                 kind,
@@ -810,7 +991,8 @@ fn expand_compound_joints(desc: &RobotDescription) -> Result<RobotDescription> {
 }
 
 /// The part of `range` (a leader's) over which `curve` stays within `limits` (a mimic's): exact for
-/// linear curves; for others, the longest such stretch among 1,024 samples. `None` if there is none.
+/// linear curves; for others, the longest such stretch among 1,024 samples. `None` if there is
+/// none.
 fn within(curve: &Curve, range: (f32, f32), limits: (f32, f32)) -> Option<(f32, f32)> {
     if curve.is_linear() {
         let (m, off) = (curve.0[1], curve.0[0]);
@@ -851,52 +1033,91 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
             "joint_limits names '{name}', which is not a joint of the robot"
         );
         if let Some([lo, hi]) = limits.position {
-            ensure!(lo.is_finite() && hi.is_finite() && lo <= hi, "joint_limits gives '{name}' the range [{lo}, {hi}]");
+            ensure!(
+                lo.is_finite() && hi.is_finite() && lo <= hi,
+                "joint_limits gives '{name}' the range [{lo}, {hi}]"
+            );
         }
-        for (what, limit) in
-            [("velocity", limits.velocity), ("acceleration", limits.acceleration), ("jerk", limits.jerk)]
-        {
+        for (what, limit) in [
+            ("velocity", limits.velocity),
+            ("acceleration", limits.acceleration),
+            ("jerk", limits.jerk),
+        ] {
             if let Some(limit) = limit {
-                ensure!(limit.is_finite() && limit > 0.0, "joint_limits gives '{name}' a {what} limit of {limit}");
+                ensure!(
+                    limit.is_finite() && limit > 0.0,
+                    "joint_limits gives '{name}' a {what} limit of {limit}"
+                );
             }
         }
     }
     let given = |joint: &JointDesc| o.joint_limits.get(&joint.name).copied().unwrap_or_default();
-    let joint_index: HashMap<&str, usize> = desc.joints.iter().enumerate().map(|(i, j)| (j.name.as_str(), i)).collect();
+    let joint_index: HashMap<&str, usize> = desc
+        .joints
+        .iter()
+        .enumerate()
+        .map(|(i, j)| (j.name.as_str(), i))
+        .collect();
     let base = match &o.base_link {
         Some(b) => {
-            ensure!(desc.links.iter().any(|l| &l.name == b), "unknown base_link '{b}'");
+            ensure!(
+                desc.links.iter().any(|l| &l.name == b),
+                "unknown base_link '{b}'"
+            );
             b.clone()
         }
         None => {
             let children: HashSet<&str> = desc.joints.iter().map(|j| j.child.as_str()).collect();
-            let roots: Vec<&str> =
-                desc.links.iter().map(|l| l.name.as_str()).filter(|n| !children.contains(n)).collect();
+            let roots: Vec<&str> = desc
+                .links
+                .iter()
+                .map(|l| l.name.as_str())
+                .filter(|n| !children.contains(n))
+                .collect();
             match roots[..] {
                 [root] => root.to_string(),
-                _ => bail!("the description has {} root links {roots:?}; set RobotOptions::base_link", roots.len()),
+                _ => bail!(
+                    "the description has {} root links {roots:?}; set RobotOptions::base_link",
+                    roots.len()
+                ),
             }
         }
     };
     for name in o.lock_joints.keys() {
-        let j = joint_index.get(name.as_str()).with_context(|| format!("cannot lock unknown joint '{name}'"))?;
-        ensure!(desc.joints[*j].kind != JointType::Fixed, "cannot lock fixed joint '{name}'");
+        let j = joint_index
+            .get(name.as_str())
+            .with_context(|| format!("cannot lock unknown joint '{name}'"))?;
+        ensure!(
+            desc.joints[*j].kind != JointType::Fixed,
+            "cannot lock fixed joint '{name}'"
+        );
     }
     // Each moving joint resolved to the joint that drives it, and the curve from that joint's value
     // to its own.
     let driver = |start: usize| -> Result<(usize, Curve)> {
         let (mut j, mut curve) = (start, Curve::IDENTITY);
         for _ in 0..desc.joints.len() {
-            let Some(mimic) = &desc.joints[j].mimic else { return Ok((j, curve)) };
-            let leader = *joint_index
-                .get(mimic.joint.as_str())
-                .with_context(|| format!("joint '{}' mimics unknown joint '{}'", desc.joints[j].name, mimic.joint))?;
+            let Some(mimic) = &desc.joints[j].mimic else {
+                return Ok((j, curve));
+            };
+            let leader = *joint_index.get(mimic.joint.as_str()).with_context(|| {
+                format!(
+                    "joint '{}' mimics unknown joint '{}'",
+                    desc.joints[j].name, mimic.joint
+                )
+            })?;
             curve = curve.after(&mimic.curve).with_context(|| {
-                format!("joint '{}' follows its driver by a polynomial of degree above four", desc.joints[start].name)
+                format!(
+                    "joint '{}' follows its driver by a polynomial of degree above four",
+                    desc.joints[start].name
+                )
             })?;
             j = leader;
         }
-        bail!("mimic joints form a cycle through '{}'", desc.joints[start].name)
+        bail!(
+            "mimic joints form a cycle through '{}'",
+            desc.joints[start].name
+        )
     };
 
     // Breadth-first so parents precede children.
@@ -904,7 +1125,12 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
     let mut queue = VecDeque::from([base.clone()]);
     let mut seen = HashSet::from([base.clone()]);
     while let Some(link) = queue.pop_front() {
-        for (j, joint) in desc.joints.iter().enumerate().filter(|(_, j)| j.parent == link) {
+        for (j, joint) in desc
+            .joints
+            .iter()
+            .enumerate()
+            .filter(|(_, j)| j.parent == link)
+        {
             ensure!(
                 seen.insert(joint.child.clone()),
                 "link '{}' is reached twice; the description is not a tree",
@@ -919,7 +1145,10 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
     let (mut dof_names, mut lower, mut upper, mut continuous) = (vec![], vec![], vec![], vec![]);
     let (mut max_velocity, mut max_acceleration, mut max_jerk) = (vec![], vec![], vec![]);
     let or_default = |v: f32, default: f32| if v.is_finite() { v } else { default };
-    for &j in order.iter().filter(|&&j| moving(j) && desc.joints[j].mimic.is_none()) {
+    for &j in order
+        .iter()
+        .filter(|&&j| moving(j) && desc.joints[j].mimic.is_none())
+    {
         let joint = &desc.joints[j];
         if o.lock_joints.contains_key(&joint.name) {
             continue;
@@ -940,11 +1169,26 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
         );
         lower.push(lo);
         upper.push(hi);
-        max_velocity.push(limits.velocity.unwrap_or(or_default(joint.max_velocity, o.max_velocity)));
-        max_acceleration.push(limits.acceleration.unwrap_or(or_default(joint.max_acceleration, o.max_acceleration)));
-        max_jerk.push(limits.jerk.unwrap_or(or_default(joint.max_jerk, o.max_jerk)));
+        max_velocity.push(
+            limits
+                .velocity
+                .unwrap_or(or_default(joint.max_velocity, o.max_velocity)),
+        );
+        max_acceleration.push(
+            limits
+                .acceleration
+                .unwrap_or(or_default(joint.max_acceleration, o.max_acceleration)),
+        );
+        max_jerk.push(
+            limits
+                .jerk
+                .unwrap_or(or_default(joint.max_jerk, o.max_jerk)),
+        );
     }
-    ensure!(!dof_names.is_empty(), "the robot has no actuated joints to plan with");
+    ensure!(
+        !dof_names.is_empty(),
+        "the robot has no actuated joints to plan with"
+    );
 
     let root = Link {
         name: base.clone(),
@@ -966,9 +1210,15 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
             if let Some(&locked) = o.lock_joints.get(&desc.joints[leader].name) {
                 let value = curve.value(locked);
                 let motion = if prismatic {
-                    Transform { rot: Mat3::IDENTITY, trans: joint.axis * value }
+                    Transform {
+                        rot: Mat3::IDENTITY,
+                        trans: joint.axis * value,
+                    }
                 } else {
-                    Transform { rot: Mat3::from_axis_angle(joint.axis, value), trans: Vec3::ZERO }
+                    Transform {
+                        rot: Mat3::from_axis_angle(joint.axis, value),
+                        trans: Vec3::ZERO,
+                    }
                 };
                 origin = origin.mul(&motion);
                 JointKind::Fixed
@@ -983,9 +1233,11 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
                     let limits = given(joint);
                     // The leader's range keeps the mimic joint within its own limits too.
                     if joint.kind != JointType::Continuous || limits.position.is_some() {
-                        let own = limits.position.map_or((joint.lower, joint.upper), |[lo, hi]| (lo, hi));
-                        (lower[dof], upper[dof]) =
-                            within(&curve, (lower[dof], upper[dof]), own).with_context(|| {
+                        let own = limits
+                            .position
+                            .map_or((joint.lower, joint.upper), |[lo, hi]| (lo, hi));
+                        (lower[dof], upper[dof]) = within(&curve, (lower[dof], upper[dof]), own)
+                            .with_context(|| {
                                 format!(
                                     "joint '{}' leaves its limits for every value of '{}'",
                                     joint.name, desc.joints[leader].name
@@ -995,12 +1247,18 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
                     // Its derivatives scale by the curve's steepest slope over the leader's range
                     // (exactly, for linear mimics; acceleration ignores the curvature term).
                     let steepest = (0..=64)
-                        .map(|k| curve.slope(lower[dof] + (upper[dof] - lower[dof]) * k as f32 / 64.0).abs())
+                        .map(|k| {
+                            curve
+                                .slope(lower[dof] + (upper[dof] - lower[dof]) * k as f32 / 64.0)
+                                .abs()
+                        })
                         .fold(0.0f32, f32::max);
-                    max_velocity[dof] = max_velocity[dof].min(limits.velocity.unwrap_or(joint.max_velocity) / steepest);
-                    max_acceleration[dof] =
-                        max_acceleration[dof].min(limits.acceleration.unwrap_or(joint.max_acceleration) / steepest);
-                    max_jerk[dof] = max_jerk[dof].min(limits.jerk.unwrap_or(joint.max_jerk) / steepest);
+                    max_velocity[dof] = max_velocity[dof]
+                        .min(limits.velocity.unwrap_or(joint.max_velocity) / steepest);
+                    max_acceleration[dof] = max_acceleration[dof]
+                        .min(limits.acceleration.unwrap_or(joint.max_acceleration) / steepest);
+                    max_jerk[dof] =
+                        max_jerk[dof].min(limits.jerk.unwrap_or(joint.max_jerk) / steepest);
                 }
                 let axis = joint.axis;
                 if prismatic {
@@ -1026,10 +1284,13 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
             shapes: vec![],
         });
     }
-    if let Some(dof) =
-        (0..dof_names.len()).find(|&d| lower[d] > upper[d] || !(lower[d].is_finite() && upper[d].is_finite()))
+    if let Some(dof) = (0..dof_names.len())
+        .find(|&d| lower[d] > upper[d] || !(lower[d].is_finite() && upper[d].is_finite()))
     {
-        bail!("joint '{}' has an empty range once its mimic joints' limits apply", dof_names[dof]);
+        bail!(
+            "joint '{}' has an empty range once its mimic joints' limits apply",
+            dof_names[dof]
+        );
     }
 
     let ee_links = if o.ee_links.is_empty() {
@@ -1038,11 +1299,20 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
             let p = links[i].parent.expect("non-root links have parents");
             depth[i] = depth[p] + usize::from(links[i].joint.actuation().is_some());
         }
-        vec![(0..links.len()).max_by_key(|&i| (depth[i], std::cmp::Reverse(i))).expect("the base link")]
+        vec![
+            (0..links.len())
+                .max_by_key(|&i| (depth[i], std::cmp::Reverse(i)))
+                .expect("the base link"),
+        ]
     } else {
         o.ee_links
             .iter()
-            .map(|name| link_index.get(name).copied().with_context(|| format!("unknown ee_link '{name}'")))
+            .map(|name| {
+                link_index
+                    .get(name)
+                    .copied()
+                    .with_context(|| format!("unknown ee_link '{name}'"))
+            })
             .collect::<anyhow::Result<_>>()?
     };
     let default_q = match &o.default_q {
@@ -1054,20 +1324,39 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
                 dof_names.len()
             );
             if let Some(j) = (0..q.len()).find(|&j| !(lower[j]..=upper[j]).contains(&q[j])) {
-                bail!("default_q puts joint '{}' at {} outside [{}, {}]", dof_names[j], q[j], lower[j], upper[j]);
+                bail!(
+                    "default_q puts joint '{}' at {} outside [{}, {}]",
+                    dof_names[j],
+                    q[j],
+                    lower[j],
+                    upper[j]
+                );
             }
             q.clone()
         }
         None => (0..dof_names.len())
-            .map(|j| if (lower[j]..=upper[j]).contains(&0.0) { 0.0 } else { 0.5 * (lower[j] + upper[j]) })
+            .map(|j| {
+                if (lower[j]..=upper[j]).contains(&0.0) {
+                    0.0
+                } else {
+                    0.5 * (lower[j] + upper[j])
+                }
+            })
             .collect(),
     };
     for (limits, scale, what) in [
         (&mut max_velocity, o.velocity_scale, "velocity_scale"),
-        (&mut max_acceleration, o.acceleration_scale, "acceleration_scale"),
+        (
+            &mut max_acceleration,
+            o.acceleration_scale,
+            "acceleration_scale",
+        ),
         (&mut max_jerk, o.jerk_scale, "jerk_scale"),
     ] {
-        ensure!(scale > 0.0 && scale <= 1.0, "RobotOptions::{what} must be in (0, 1], got {scale}");
+        ensure!(
+            scale > 0.0 && scale <= 1.0,
+            "RobotOptions::{what} must be in (0, 1], got {scale}"
+        );
         limits.iter_mut().for_each(|l| *l *= scale);
     }
     Ok(Robot {
@@ -1097,20 +1386,47 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
 fn attached_shape(shape: &crate::world::Obstacle) -> error::Result<Shape> {
     use crate::world::Obstacle;
     let placed = |center: Vec3, rotation: Quat, geometry: Geometry| Shape {
-        origin: Transform { rot: Mat3::from_quat(rotation), trans: center },
+        origin: Transform {
+            rot: Mat3::from_quat(rotation),
+            trans: center,
+        },
         geometry,
     };
     Ok(match *shape {
-        Obstacle::Cuboid { center, half_extents, rotation } => {
-            placed(center, rotation, Geometry::Box { half: half_extents })
+        Obstacle::Cuboid {
+            center,
+            half_extents,
+            rotation,
+        } => placed(center, rotation, Geometry::Box { half: half_extents }),
+        Obstacle::Sphere { center, radius } => {
+            placed(center, Quat::IDENTITY, Geometry::Sphere { radius })
         }
-        Obstacle::Sphere { center, radius } => placed(center, Quat::IDENTITY, Geometry::Sphere { radius }),
-        Obstacle::Cylinder { center, rotation, radius, half_height } => {
-            placed(center, rotation, Geometry::Cylinder { radius, half_length: half_height })
-        }
-        Obstacle::Capsule { center, rotation, radius, half_length } => {
-            placed(center, rotation, Geometry::Capsule { radius, half_length })
-        }
+        Obstacle::Cylinder {
+            center,
+            rotation,
+            radius,
+            half_height,
+        } => placed(
+            center,
+            rotation,
+            Geometry::Cylinder {
+                radius,
+                half_length: half_height,
+            },
+        ),
+        Obstacle::Capsule {
+            center,
+            rotation,
+            radius,
+            half_length,
+        } => placed(
+            center,
+            rotation,
+            Geometry::Capsule {
+                radius,
+                half_length,
+            },
+        ),
         Obstacle::Sdf { .. } => return Err(input!("attached objects cannot be distance grids")),
     })
 }
@@ -1123,8 +1439,13 @@ mod tests {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/franka");
         let options = RobotOptions {
             ee_links: vec!["ee_link".into()],
-            lock_joints: HashMap::from([("panda_finger_joint1".into(), 0.04), ("panda_finger_joint2".into(), 0.04)]),
-            collision_model: Some(CollisionModel::load(format!("{dir}/panda_collision.json")).unwrap()),
+            lock_joints: HashMap::from([
+                ("panda_finger_joint1".into(), 0.04),
+                ("panda_finger_joint2".into(), 0.04),
+            ]),
+            collision_model: Some(
+                CollisionModel::load(format!("{dir}/panda_collision.json")).unwrap(),
+            ),
             ..Default::default()
         };
         Robot::load(format!("{dir}/franka_panda.urdf"), &options).unwrap()
@@ -1140,15 +1461,24 @@ mod tests {
                 .self_pairs
                 .iter()
                 .filter(|&&[x, y]| {
-                    let (lx, ly) = (robot.spheres[x as usize].link, robot.spheres[y as usize].link);
+                    let (lx, ly) = (
+                        robot.spheres[x as usize].link,
+                        robot.spheres[y as usize].link,
+                    );
                     (lx, ly) == (a, b) || (lx, ly) == (b, a)
                 })
                 .count()
         };
         assert_eq!(pairs_between(link("panda_link1"), link("panda_link2")), 0);
-        assert_eq!(pairs_between(link("panda_link0"), link("panda_link5")), 2 * 13);
+        assert_eq!(
+            pairs_between(link("panda_link0"), link("panda_link5")),
+            2 * 13
+        );
         assert!(
-            robot.self_pairs.iter().all(|&[a, b]| robot.spheres[a as usize].link != robot.spheres[b as usize].link)
+            robot
+                .self_pairs
+                .iter()
+                .all(|&[a, b]| robot.spheres[a as usize].link != robot.spheres[b as usize].link)
         );
     }
 }

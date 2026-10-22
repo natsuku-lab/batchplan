@@ -5,7 +5,8 @@
 //! here. `cpu::collision` stays the line-by-line twin of the GPU kernels, and tests hold the two
 //! together.
 
-use fearless_simd::{Level, Simd, f32x8, prelude::*};
+use fearless_simd::prelude::*;
+use fearless_simd::{Level, Simd, f32x8};
 use glam::{Mat3, Vec3};
 
 use crate::cpu::Prepared;
@@ -44,12 +45,20 @@ struct V3<S: Simd> {
 impl<S: Simd> V3<S> {
     #[inline(always)]
     fn splat(simd: S, v: Vec3) -> Self {
-        Self { x: F::splat(simd, v.x), y: F::splat(simd, v.y), z: F::splat(simd, v.z) }
+        Self {
+            x: F::splat(simd, v.x),
+            y: F::splat(simd, v.y),
+            z: F::splat(simd, v.z),
+        }
     }
 
     #[inline(always)]
     fn load(simd: S, v: &[Stored; 3]) -> Self {
-        Self { x: load(simd, &v[0]), y: load(simd, &v[1]), z: load(simd, &v[2]) }
+        Self {
+            x: load(simd, &v[0]),
+            y: load(simd, &v[1]),
+            z: load(simd, &v[2]),
+        }
     }
 
     #[inline(always)]
@@ -59,17 +68,29 @@ impl<S: Simd> V3<S> {
 
     #[inline(always)]
     fn add(self, o: Self) -> Self {
-        Self { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z }
+        Self {
+            x: self.x + o.x,
+            y: self.y + o.y,
+            z: self.z + o.z,
+        }
     }
 
     #[inline(always)]
     fn sub(self, o: Self) -> Self {
-        Self { x: self.x - o.x, y: self.y - o.y, z: self.z - o.z }
+        Self {
+            x: self.x - o.x,
+            y: self.y - o.y,
+            z: self.z - o.z,
+        }
     }
 
     #[inline(always)]
     fn scale(self, s: F<S>) -> Self {
-        Self { x: self.x * s, y: self.y * s, z: self.z * s }
+        Self {
+            x: self.x * s,
+            y: self.y * s,
+            z: self.z * s,
+        }
     }
 
     #[inline(always)]
@@ -86,7 +107,11 @@ impl<S: Simd> V3<S> {
     #[inline(always)]
     fn into_frame(self, r: &Mat3, c: Vec3) -> Self {
         let d = self.sub(V3::splat(self.x.simd, c));
-        Self { x: d.dot(r.x_axis), y: d.dot(r.y_axis), z: d.dot(r.z_axis) }
+        Self {
+            x: d.dot(r.x_axis),
+            y: d.dot(r.y_axis),
+            z: d.dot(r.z_axis),
+        }
     }
 
     /// `into_frame` for a frame turned about z only (`Prepared::Cuboid::upright`): the terms with
@@ -94,7 +119,11 @@ impl<S: Simd> V3<S> {
     #[inline(always)]
     fn into_upright_frame(self, r: &Mat3, c: Vec3) -> Self {
         let d = self.sub(V3::splat(self.x.simd, c));
-        Self { x: d.x * r.x_axis.x + d.y * r.x_axis.y, y: d.x * r.y_axis.x + d.y * r.y_axis.y, z: d.z }
+        Self {
+            x: d.x * r.x_axis.x + d.y * r.x_axis.y,
+            y: d.x * r.y_axis.x + d.y * r.y_axis.y,
+            z: d.z,
+        }
     }
 
     /// `self · a` for a constant `a`.
@@ -111,12 +140,20 @@ struct M3<S: Simd>([V3<S>; 3]);
 impl<S: Simd> M3<S> {
     #[inline(always)]
     fn splat(simd: S, m: Mat3) -> Self {
-        Self([V3::splat(simd, m.x_axis), V3::splat(simd, m.y_axis), V3::splat(simd, m.z_axis)])
+        Self([
+            V3::splat(simd, m.x_axis),
+            V3::splat(simd, m.y_axis),
+            V3::splat(simd, m.z_axis),
+        ])
     }
 
     #[inline(always)]
     fn load(simd: S, m: &[[Stored; 3]; 3]) -> Self {
-        Self([V3::load(simd, &m[0]), V3::load(simd, &m[1]), V3::load(simd, &m[2])])
+        Self([
+            V3::load(simd, &m[0]),
+            V3::load(simd, &m[1]),
+            V3::load(simd, &m[2]),
+        ])
     }
 
     #[inline(always)]
@@ -129,7 +166,9 @@ impl<S: Simd> M3<S> {
     fn times(&self, v: Vec3) -> V3<S> {
         let [a, b, c] = self.0;
         let simd = a.x.simd;
-        a.scale(F::splat(simd, v.x)).add(b.scale(F::splat(simd, v.y))).add(c.scale(F::splat(simd, v.z)))
+        a.scale(F::splat(simd, v.x))
+            .add(b.scale(F::splat(simd, v.y)))
+            .add(c.scale(F::splat(simd, v.z)))
     }
 
     #[inline(always)]
@@ -140,12 +179,20 @@ impl<S: Simd> M3<S> {
 
     #[inline(always)]
     fn times_matrix(&self, m: Mat3) -> Self {
-        Self([self.times(m.x_axis), self.times(m.y_axis), self.times(m.z_axis)])
+        Self([
+            self.times(m.x_axis),
+            self.times(m.y_axis),
+            self.times(m.z_axis),
+        ])
     }
 
     #[inline(always)]
     fn times_lanes_matrix(&self, m: &M3<S>) -> Self {
-        Self([self.times_lanes(m.0[0]), self.times_lanes(m.0[1]), self.times_lanes(m.0[2])])
+        Self([
+            self.times_lanes(m.0[0]),
+            self.times_lanes(m.0[1]),
+            self.times_lanes(m.0[2]),
+        ])
     }
 }
 
@@ -217,7 +264,8 @@ pub(crate) struct LaneScratch {
     centers: Vec<[Stored; 3]>,
     /// Whether each link's sphere centres are in `centers` for the configurations loaded.
     placed: Vec<bool>,
-    /// Each link's bounding sphere's centre, and whether it is there for the configurations loaded.
+    /// Each link's bounding sphere's centre, and whether it is there for the configurations
+    /// loaded.
     bound: Vec<[Stored; 3]>,
     bounded: Vec<bool>,
 }
@@ -231,7 +279,11 @@ impl Lanes {
                 let (o, trans) = (l.origin.rot, l.origin.trans);
                 let joint = match l.joint {
                     JointKind::Fixed => Joint::Fixed { rot: o, trans },
-                    JointKind::Revolute { dof, axis: a, curve } => {
+                    JointKind::Revolute {
+                        dof,
+                        axis: a,
+                        curve,
+                    } => {
                         let outer = Mat3::from_cols(a * a.x, a * a.y, a * a.z);
                         let cross = Mat3::from_cols(
                             Vec3::new(0.0, a.z, -a.y),
@@ -247,11 +299,18 @@ impl Lanes {
                             sin: o * cross,
                         }
                     }
-                    JointKind::Prismatic { dof, axis, curve } => {
-                        Joint::Prismatic { dof, curve: curve.0, rot: o, trans, axis: o * axis }
-                    }
+                    JointKind::Prismatic { dof, axis, curve } => Joint::Prismatic {
+                        dof,
+                        curve: curve.0,
+                        rot: o,
+                        trans,
+                        axis: o * axis,
+                    },
                 };
-                LaneLink { parent: l.parent, joint }
+                LaneLink {
+                    parent: l.parent,
+                    joint,
+                }
             })
             .collect();
         let world_links = robot
@@ -259,21 +318,39 @@ impl Lanes {
             .iter()
             .enumerate()
             .filter(|&(link, &[_, count])| count > 0 && !robot.links[link].chain.is_empty())
-            .map(|(link, &[first, count])| (link, first as usize, (first + count) as usize, robot.link_bounds[link]))
+            .map(|(link, &[first, count])| {
+                (
+                    link,
+                    first as usize,
+                    (first + count) as usize,
+                    robot.link_bounds[link],
+                )
+            })
             .collect();
         let pairs: Vec<(usize, usize, Vec<[usize; 2]>)> = robot
             .self_link_pairs
             .iter()
             .map(|lp| {
                 let spheres = &robot.self_pairs[lp.first as usize..(lp.first + lp.count) as usize];
-                (lp.a as usize, lp.b as usize, spheres.iter().map(|&[a, b]| [a as usize, b as usize]).collect())
+                (
+                    lp.a as usize,
+                    lp.b as usize,
+                    spheres
+                        .iter()
+                        .map(|&[a, b]| [a as usize, b as usize])
+                        .collect(),
+                )
             })
             .collect();
         let pair_groups = pairs
             .iter()
             .map(|(a, b, spheres)| {
                 let (a, b) = (*a, *b);
-                let tight = if robot.link_bounds[a][3] < robot.link_bounds[b][3] { a } else { b };
+                let tight = if robot.link_bounds[a][3] < robot.link_bounds[b][3] {
+                    a
+                } else {
+                    b
+                };
                 let mut groups: Vec<(usize, Vec<usize>)> = vec![];
                 for &[i, j] in spheres {
                     // `i` on `a`, `j` on `b`; grouped by the sphere not on the tighter link.
@@ -297,7 +374,11 @@ impl Lanes {
                 .map(|&[first, count]| (first as usize, (first + count) as usize))
                 .collect(),
             radius: robot.spheres.iter().map(|s| s.radius).collect(),
-            self_radius: robot.spheres.iter().map(|s| s.radius + s.self_buffer).collect(),
+            self_radius: robot
+                .spheres
+                .iter()
+                .map(|s| s.radius + s.self_buffer)
+                .collect(),
             pairs,
             pair_groups,
             bounds: robot.link_bounds.clone(),
@@ -345,7 +426,9 @@ impl Lanes {
         if !s.bounded[link] {
             s.bounded[link] = true;
             let b = self.bounds[link];
-            let c = M3::load(simd, &s.rot[link]).times(Vec3::new(b[0], b[1], b[2])).add(V3::load(simd, &s.pos[link]));
+            let c = M3::load(simd, &s.rot[link])
+                .times(Vec3::new(b[0], b[1], b[2]))
+                .add(V3::load(simd, &s.pos[link]));
             s.bound[link] = c.store();
         }
         V3::load(simd, &s.bound[link])
@@ -386,7 +469,14 @@ impl Lanes {
                         (pr.times_matrix(rot), pr.times(trans).add(pp))
                     }
                 },
-                Joint::Revolute { dof, curve, trans, fixed, cos, sin } => {
+                Joint::Revolute {
+                    dof,
+                    curve,
+                    trans,
+                    fixed,
+                    cos,
+                    sin,
+                } => {
                     let (sn, cs) = sin_cos(horner(&curve, load(simd, &s.q[dof])));
                     let m = M3([
                         rotation_column(fixed.x_axis, cos.x_axis, sin.x_axis, cs, sn),
@@ -401,9 +491,15 @@ impl Lanes {
                         }
                     }
                 }
-                Joint::Prismatic { dof, curve, rot, trans, axis } => {
-                    let local =
-                        V3::splat(simd, trans).add(V3::splat(simd, axis).scale(horner(&curve, load(simd, &s.q[dof]))));
+                Joint::Prismatic {
+                    dof,
+                    curve,
+                    rot,
+                    trans,
+                    axis,
+                } => {
+                    let local = V3::splat(simd, trans)
+                        .add(V3::splat(simd, axis).scale(horner(&curve, load(simd, &s.q[dof]))));
                     match link.parent {
                         None => (M3::splat(simd, rot), local),
                         Some(p) => {
@@ -434,7 +530,9 @@ impl Lanes {
         let far = F::splat(simd, FAR);
         let mut wmin = far;
         for &(link, first, end, b) in &self.world_links {
-            let bc = M3::load(simd, &s.rot[link]).times(Vec3::new(b[0], b[1], b[2])).add(V3::load(simd, &s.pos[link]));
+            let bc = M3::load(simd, &s.rot[link])
+                .times(Vec3::new(b[0], b[1], b[2]))
+                .add(V3::load(simd, &s.pos[link]));
             for o in world {
                 if matches!(o, Prepared::Sdf { .. }) {
                     wmin = wmin.min(self.spheres_clearance(simd, o, first, end, s));
@@ -443,7 +541,8 @@ impl Lanes {
                 let gap = distance(o, bc) - b[3];
                 let near = gap.simd_le(zero);
                 if near.any_true() {
-                    wmin = wmin.min(near.select(self.spheres_clearance(simd, o, first, end, s), gap));
+                    wmin =
+                        wmin.min(near.select(self.spheres_clearance(simd, o, first, end, s), gap));
                 } else {
                     wmin = wmin.min(gap);
                 }
@@ -452,8 +551,12 @@ impl Lanes {
         let mut smin = far;
         for (a, b, spheres) in &self.pairs {
             let (ba, bb) = (self.bounds[*a], self.bounds[*b]);
-            let ca = M3::load(simd, &s.rot[*a]).times(Vec3::new(ba[0], ba[1], ba[2])).add(V3::load(simd, &s.pos[*a]));
-            let cb = M3::load(simd, &s.rot[*b]).times(Vec3::new(bb[0], bb[1], bb[2])).add(V3::load(simd, &s.pos[*b]));
+            let ca = M3::load(simd, &s.rot[*a])
+                .times(Vec3::new(ba[0], ba[1], ba[2]))
+                .add(V3::load(simd, &s.pos[*a]));
+            let cb = M3::load(simd, &s.rot[*b])
+                .times(Vec3::new(bb[0], bb[1], bb[2]))
+                .add(V3::load(simd, &s.pos[*b]));
             let gap = ca.sub(cb).length() - (ba[3] + bb[3]);
             let near = gap.simd_le(zero);
             if !near.any_true() {
@@ -475,7 +578,14 @@ impl Lanes {
 
     /// The least clearance from `o` of spheres `first..end`.
     #[inline(always)]
-    fn spheres_clearance<S: Simd>(&self, simd: S, o: &Prepared, first: usize, end: usize, s: &LaneScratch) -> F<S> {
+    fn spheres_clearance<S: Simd>(
+        &self,
+        simd: S,
+        o: &Prepared,
+        first: usize,
+        end: usize,
+        s: &LaneScratch,
+    ) -> F<S> {
         let mut least = F::splat(simd, FAR);
         for i in first..end {
             least = least.min(distance(o, V3::load(simd, &s.centers[i])) - self.radius[i]);
@@ -506,7 +616,12 @@ impl Lanes {
                 // the exact test, which follows.
                 if let Prepared::Cuboid { center, radius, .. } = *o {
                     let r = reach + radius;
-                    if !bc.sub(V3::splat(simd, center)).length_squared().simd_lt(r * r).any_true() {
+                    if !bc
+                        .sub(V3::splat(simd, center))
+                        .length_squared()
+                        .simd_lt(r * r)
+                        .any_true()
+                    {
                         continue;
                     }
                 }
@@ -516,7 +631,8 @@ impl Lanes {
                 }
                 self.place(simd, link, s);
                 for i in first..end {
-                    if within(o, V3::load(simd, &s.centers[i]), margin + self.radius[i]).any_true() {
+                    if within(o, V3::load(simd, &s.centers[i]), margin + self.radius[i]).any_true()
+                    {
                         return false;
                     }
                 }
@@ -524,9 +640,17 @@ impl Lanes {
         }
         for ((a, b, _), (tight, groups)) in self.pairs.iter().zip(&self.pair_groups) {
             let (ba, bb) = (self.bounds[*a], self.bounds[*b]);
-            let (ca, cb) = (self.bound_center(simd, *a, s), self.bound_center(simd, *b, s));
+            let (ca, cb) = (
+                self.bound_center(simd, *a, s),
+                self.bound_center(simd, *b, s),
+            );
             let reach = ba[3] + bb[3];
-            if !ca.sub(cb).length_squared().simd_lt(F::splat(simd, reach * reach)).any_true() {
+            if !ca
+                .sub(cb)
+                .length_squared()
+                .simd_lt(F::splat(simd, reach * reach))
+                .any_true()
+            {
                 continue;
             }
             self.place(simd, *a, s);
@@ -537,7 +661,12 @@ impl Lanes {
                 // Out of reach of the tighter link's bounding sphere, out of reach of its spheres;
                 // a hair wide, so it never rules out what the exact test would not.
                 let near = (self.self_radius[*i] + radius) * 1.0001 + 1e-6;
-                if !ci.sub(bound).length_squared().simd_lt(F::splat(simd, near * near)).any_true() {
+                if !ci
+                    .sub(bound)
+                    .length_squared()
+                    .simd_lt(F::splat(simd, near * near))
+                    .any_true()
+                {
                     continue;
                 }
                 for &j in js {
@@ -560,8 +689,18 @@ fn within<S: Simd>(o: &Prepared, p: V3<S>, r: F<S>) -> fearless_simd::mask32x8<S
     let simd = p.x.simd;
     let zero = F::splat(simd, 0.0);
     match *o {
-        Prepared::Cuboid { rot, center, half, upright, .. } => {
-            let l = if upright { p.into_upright_frame(&rot, center) } else { p.into_frame(&rot, center) };
+        Prepared::Cuboid {
+            rot,
+            center,
+            half,
+            upright,
+            ..
+        } => {
+            let l = if upright {
+                p.into_upright_frame(&rot, center)
+            } else {
+                p.into_frame(&rot, center)
+            };
             let outside = V3 {
                 x: (l.x.abs() - half.x).max(zero),
                 y: (l.y.abs() - half.y).max(zero),
@@ -571,9 +710,16 @@ fn within<S: Simd>(o: &Prepared, p: V3<S>, r: F<S>) -> fearless_simd::mask32x8<S
         }
         Prepared::Sphere { center, radius } => {
             let reach = r + radius;
-            p.sub(V3::splat(simd, center)).length_squared().simd_lt(reach * reach)
+            p.sub(V3::splat(simd, center))
+                .length_squared()
+                .simd_lt(reach * reach)
         }
-        Prepared::Capsule { rot, center, radius, half_length } => {
+        Prepared::Capsule {
+            rot,
+            center,
+            radius,
+            half_length,
+        } => {
             let l = p.into_frame(&rot, center);
             let h = F::splat(simd, half_length);
             let z = l.z - l.z.max(-h).min(h);
@@ -588,12 +734,18 @@ fn within<S: Simd>(o: &Prepared, p: V3<S>, r: F<S>) -> fearless_simd::mask32x8<S
 #[inline(always)]
 fn horner<S: Simd>(c: &[f32; 5], x: F<S>) -> F<S> {
     let simd = x.simd;
-    let (c0, c1, c2, c3, c4) =
-        (F::splat(simd, c[0]), F::splat(simd, c[1]), F::splat(simd, c[2]), F::splat(simd, c[3]), F::splat(simd, c[4]));
+    let (c0, c1, c2, c3, c4) = (
+        F::splat(simd, c[0]),
+        F::splat(simd, c[1]),
+        F::splat(simd, c[2]),
+        F::splat(simd, c[3]),
+        F::splat(simd, c[4]),
+    );
     c0 + x * (c1 + x * (c2 + x * (c3 + x * c4)))
 }
 
-/// Column of a revolute joint's rotation (`Joint::Revolute`): `fixed + cos(angle) * cos + sin(angle) * sin`.
+/// Column of a revolute joint's rotation (`Joint::Revolute`): `fixed + cos(angle) * cos +
+/// sin(angle) * sin`.
 #[inline(always)]
 fn rotation_column<S: Simd>(fixed: Vec3, cos: Vec3, sin: Vec3, cs: F<S>, sn: F<S>) -> V3<S> {
     let simd = cs.simd;
@@ -629,7 +781,10 @@ fn sin_cos<S: Simd>(x: F<S>) -> (F<S>, F<S>) {
     let (sin, cos) = (odd.select(c, s), odd.select(s, c));
     let sin_negative = quadrant.simd_ge(2.0) ^ x.simd_lt(0.0);
     let cos_negative = quadrant.simd_eq(1.0) | quadrant.simd_eq(2.0);
-    (sin_negative.select(-sin, sin), cos_negative.select(-cos, cos))
+    (
+        sin_negative.select(-sin, sin),
+        cos_negative.select(-cos, cos),
+    )
 }
 
 /// Signed distance from `o` to `p` in every lane (the distances of `cpu::obstacle_distance`).
@@ -638,28 +793,58 @@ fn distance<S: Simd>(o: &Prepared, p: V3<S>) -> F<S> {
     let simd = p.x.simd;
     let zero = F::splat(simd, 0.0);
     match *o {
-        Prepared::Cuboid { rot, center, half, upright, .. } => {
-            let l = if upright { p.into_upright_frame(&rot, center) } else { p.into_frame(&rot, center) };
+        Prepared::Cuboid {
+            rot,
+            center,
+            half,
+            upright,
+            ..
+        } => {
+            let l = if upright {
+                p.into_upright_frame(&rot, center)
+            } else {
+                p.into_frame(&rot, center)
+            };
             let (qx, qy, qz) = (l.x.abs() - half.x, l.y.abs() - half.y, l.z.abs() - half.z);
-            let outside = V3 { x: qx.max(zero), y: qy.max(zero), z: qz.max(zero) }.length();
+            let outside = V3 {
+                x: qx.max(zero),
+                y: qy.max(zero),
+                z: qz.max(zero),
+            }
+            .length();
             outside.simd_gt(zero).select(outside, qx.max(qy).max(qz))
         }
         Prepared::Sphere { center, radius } => p.sub(V3::splat(simd, center)).length() - radius,
-        Prepared::Cylinder { rot, center, radius, half_height } => {
+        Prepared::Cylinder {
+            rot,
+            center,
+            radius,
+            half_height,
+        } => {
             let l = p.into_frame(&rot, center);
             let dr = (l.x * l.x + l.y * l.y).sqrt() - radius;
             let dz = l.z.abs() - half_height;
             let corner = (dr * dr + dz * dz).sqrt();
             (dr.simd_gt(zero) & dz.simd_gt(zero)).select(corner, dr.max(dz))
         }
-        Prepared::Capsule { rot, center, radius, half_length } => {
+        Prepared::Capsule {
+            rot,
+            center,
+            radius,
+            half_length,
+        } => {
             let l = p.into_frame(&rot, center);
             let h = F::splat(simd, half_length);
             let z = l.z - l.z.max(-h).min(h);
             (l.x * l.x + l.y * l.y + z * z).sqrt() - radius
         }
-        Prepared::Sdf { rot, center, ref grid } => {
-            let (x, y, z): ([f32; LANES], [f32; LANES], [f32; LANES]) = (p.x.into(), p.y.into(), p.z.into());
+        Prepared::Sdf {
+            rot,
+            center,
+            ref grid,
+        } => {
+            let (x, y, z): ([f32; LANES], [f32; LANES], [f32; LANES]) =
+                (p.x.into(), p.y.into(), p.z.into());
             F::simd_from(
                 simd,
                 std::array::from_fn::<f32, LANES, _>(|l| {
@@ -684,10 +869,15 @@ mod tests {
     use std::sync::Arc;
 
     fn panda() -> Robot {
-        let fingers = [("panda_finger_joint1".to_string(), 0.04), ("panda_finger_joint2".to_string(), 0.04)];
+        let fingers = [
+            ("panda_finger_joint1".to_string(), 0.04),
+            ("panda_finger_joint2".to_string(), 0.04),
+        ];
         let options = RobotOptions {
             lock_joints: HashMap::from(fingers),
-            collision_model: Some(CollisionModel::load("assets/franka/panda_collision.json").unwrap()),
+            collision_model: Some(
+                CollisionModel::load("assets/franka/panda_collision.json").unwrap(),
+            ),
             ..Default::default()
         };
         Robot::load("assets/franka/franka_panda.urdf", &options).unwrap()
@@ -701,7 +891,8 @@ mod tests {
         let ball = Vec3::new(0.3, -0.3, 0.3) * s;
         let distances: Vec<f32> = (0..8000)
             .map(|i| {
-                let p = origin + Vec3::new((i % 20) as f32, (i / 20 % 20) as f32, (i / 400) as f32) * voxel;
+                let p = origin
+                    + Vec3::new((i % 20) as f32, (i / 20 % 20) as f32, (i / 400) as f32) * voxel;
                 p.distance(ball) - 0.08 * s
             })
             .collect();
@@ -709,7 +900,11 @@ mod tests {
         let v = |x: f32, y: f32, z: f32| Vec3::new(x, y, z) * s;
         World {
             obstacles: vec![
-                Obstacle::Cuboid { center: v(0.5, 0.0, 0.3), half_extents: v(0.05, 0.2, 0.1), rotation: tilt },
+                Obstacle::Cuboid {
+                    center: v(0.5, 0.0, 0.3),
+                    half_extents: v(0.05, 0.2, 0.1),
+                    rotation: tilt,
+                },
                 // Upright: turned about z only.
                 Obstacle::Cuboid {
                     center: v(0.1, -0.5, 0.2),
@@ -723,8 +918,17 @@ mod tests {
                     radius: 0.06 * s,
                     half_height: 0.2 * s,
                 },
-                Obstacle::Capsule { center: v(0.2, 0.4, 0.1), rotation: tilt, radius: 0.05 * s, half_length: 0.15 * s },
-                Obstacle::Sdf { grid, center: Vec3::ZERO, rotation: Quat::IDENTITY },
+                Obstacle::Capsule {
+                    center: v(0.2, 0.4, 0.1),
+                    rotation: tilt,
+                    radius: 0.05 * s,
+                    half_length: 0.15 * s,
+                },
+                Obstacle::Sdf {
+                    grid,
+                    center: Vec3::ZERO,
+                    rotation: Quat::IDENTITY,
+                },
             ],
         }
     }
@@ -735,19 +939,30 @@ mod tests {
     /// still follow the configuration.
     fn lanes_match_the_scalar_twin(robot: &Robot, arm: bool) {
         let device = Device::cpu(robot).unwrap();
-        let worlds = device.upload(&[scene(1.0), World::default(), scene(1.0)]).unwrap();
+        let worlds = device
+            .upload(&[scene(1.0), World::default(), scene(1.0)])
+            .unwrap();
         let n = robot.dof();
         let mut rng = Rng::new(7);
         let items = 3000;
         let q: Vec<f32> = (0..items)
             .flat_map(|_| {
-                (0..n).map(|j| rng.range(robot.lower[j].max(-3.2), robot.upper[j].min(3.2))).collect::<Vec<_>>()
+                (0..n)
+                    .map(|j| rng.range(robot.lower[j].max(-3.2), robot.upper[j].min(3.2)))
+                    .collect::<Vec<_>>()
             })
             .collect();
         // Runs of three, so runs and chunks of eight cross.
         let item_world: Vec<u32> = (0..items as u32).map(|i| i / 3 % 3).collect();
         let lanes = device.clearance(&worlds, &item_world, &q).unwrap();
-        let scalar = device.evaluate(&worlds, &item_world, &q, &crate::device::CollisionWeights::NONE).unwrap();
+        let scalar = device
+            .evaluate(
+                &worlds,
+                &item_world,
+                &q,
+                &crate::device::CollisionWeights::NONE,
+            )
+            .unwrap();
         // The baseline SIMD level too (SSE2 on x86-64), one configuration at a time.
         let mut baseline = Lanes::new(robot);
         baseline.level = Level::baseline();
@@ -757,7 +972,9 @@ mod tests {
         let lanes_baseline: Vec<[f32; 2]> = (0..items)
             .map(|i| {
                 let (world, q) = (&prepared[item_world[i] as usize], &q[i * n..(i + 1) * n]);
-                fearless_simd::dispatch!(baseline.level, simd => baseline.clearance(simd, world, q, &mut out, &mut scratch));
+                fearless_simd::dispatch!(baseline.level, simd => {
+                    baseline.clearance(simd, world, q, &mut out, &mut scratch)
+                });
                 out[0]
             })
             .collect();
@@ -768,7 +985,11 @@ mod tests {
             for k in 0..2 {
                 for (level, lanes) in [("best", &lanes), ("baseline", &lanes_baseline)] {
                     let (a, b) = (lanes[i][k], expected[k]);
-                    assert!((a - b).abs() <= 2e-5, "{} ({level}): item {i} clearance {k}: {a} vs {b}", robot.name());
+                    assert!(
+                        (a - b).abs() <= 2e-5,
+                        "{} ({level}): item {i} clearance {k}: {a} vs {b}",
+                        robot.name()
+                    );
                 }
             }
             hits += usize::from(expected[0] < 0.0);
@@ -779,8 +1000,9 @@ mod tests {
             }
         }
         // `keeps`, at the best level and the baseline, agrees with the clearances away from the
-        // boundary: the world kept at a margin, no self-collision. A wide margin keeps the twin from
-        // letting a link's bounding sphere stand in for its spheres, which `keeps` always checks.
+        // boundary: the world kept at a margin, no self-collision. A wide margin keeps the twin
+        // from letting a link's bounding sphere stand in for its spheres, which `keeps`
+        // always checks.
         let margin = 0.01;
         let exact = crate::device::CollisionWeights {
             margin: 10.0,
@@ -799,19 +1021,32 @@ mod tests {
                     continue;
                 }
                 let (world, q) = (&prepared[item_world[i] as usize], &q[i * n..(i + 1) * n]);
-                let keeps =
-                    fearless_simd::dispatch!(level, simd => lanes.keeps(simd, world, q, [margin; LANES], &mut scratch));
-                assert_eq!(keeps, w > margin && sc > 0.0, "{}: item {i} keeps {keeps}: {w}, self {sc}", robot.name());
+                let keeps = fearless_simd::dispatch!(level, simd => {
+                    lanes.keeps(simd, world, q, [margin; LANES], &mut scratch)
+                });
+                assert_eq!(
+                    keeps,
+                    w > margin && sc > 0.0,
+                    "{}: item {i} keeps {keeps}: {w}, self {sc}",
+                    robot.name()
+                );
                 if keeps { kept += 1 } else { not += 1 }
             }
-            assert!(!arm || (kept > 50 && not > 50), "{}: {kept} kept, {not} not", robot.name());
+            assert!(
+                !arm || (kept > 50 && not > 50),
+                "{}: {kept} kept, {not} not",
+                robot.name()
+            );
         }
         let name = robot.name();
         assert!(
             !arm || (hits > 50 && misses > 50 && self_hits > 10),
             "{name}: {hits} hits, {misses} misses, {self_hits} self"
         );
-        assert!(hi - lo > 1e-3, "{name}: world clearances should follow the configuration");
+        assert!(
+            hi - lo > 1e-3,
+            "{name}: world clearances should follow the configuration"
+        );
     }
 
     #[test]
@@ -820,34 +1055,65 @@ mod tests {
         lanes_match_the_scalar_twin(&panda, true);
         // Its fingers slide on prismatic joints.
         let model = CollisionModel::load("assets/franka/panda_collision.json").unwrap();
-        let options = RobotOptions { collision_model: Some(model), ..Default::default() };
+        let options = RobotOptions {
+            collision_model: Some(model),
+            ..Default::default()
+        };
         let fingers = Robot::load("assets/franka/franka_panda.urdf", &options).unwrap();
         lanes_match_the_scalar_twin(&fingers, true);
         let held = panda
             .attach(&AttachedObject {
                 name: "box".into(),
                 link: "panda_hand".into(),
-                shapes: vec![Obstacle::cuboid(Vec3::new(0.0, 0.0, 0.15), Vec3::new(0.04, 0.04, 0.06))],
+                shapes: vec![Obstacle::cuboid(
+                    Vec3::new(0.0, 0.0, 0.15),
+                    Vec3::new(0.04, 0.04, 0.06),
+                )],
                 touch_links: vec!["panda_leftfinger".into(), "panda_rightfinger".into()],
                 spheres: SphereOptions::default(),
             })
             .unwrap();
         lanes_match_the_scalar_twin(&held, true);
-        // Quartic mimic joints closing a loop, and a prismatic-free arm with joints wider than a turn.
-        // Its meshes are not in the repository; a sphere at each link's origin and one off it.
+        // Quartic mimic joints closing a loop, and a prismatic-free arm with joints wider than a
+        // turn. Its meshes are not in the repository; a sphere at each link's origin and
+        // one off it.
         let path = "assets/menagerie/robotiq_2f85/2f85.xml";
-        let bare =
-            Robot::load(path, &RobotOptions { collision_model: Some(CollisionModel::default()), ..Default::default() });
+        let bare = Robot::load(
+            path,
+            &RobotOptions {
+                collision_model: Some(CollisionModel::default()),
+                ..Default::default()
+            },
+        );
         let spheres = bare
             .unwrap()
             .links
             .iter()
-            .map(|l| (l.name.clone(), vec![[0.0, 0.0, 0.0, 0.01], [0.0, 0.02, 0.03, 0.01]]))
+            .map(|l| {
+                (
+                    l.name.clone(),
+                    vec![[0.0, 0.0, 0.0, 0.01], [0.0, 0.02, 0.03, 0.01]],
+                )
+            })
             .collect();
-        let model = CollisionModel { spheres, ..Default::default() };
-        let gripper = Robot::load(path, &RobotOptions { collision_model: Some(model), ..Default::default() }).unwrap();
+        let model = CollisionModel {
+            spheres,
+            ..Default::default()
+        };
+        let gripper = Robot::load(
+            path,
+            &RobotOptions {
+                collision_model: Some(model),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         lanes_match_the_scalar_twin(&gripper, false);
-        let ur5e = Robot::load("assets/ur5e/ur_description/urdf/ur5e.urdf", &RobotOptions::default()).unwrap();
+        let ur5e = Robot::load(
+            "assets/ur5e/ur_description/urdf/ur5e.urdf",
+            &RobotOptions::default(),
+        )
+        .unwrap();
         lanes_match_the_scalar_twin(&ur5e, true);
     }
 }

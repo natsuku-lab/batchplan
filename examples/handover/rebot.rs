@@ -31,7 +31,11 @@ const BLOCKS: [Vec3; 4] = [
 /// Spheres are fitted to one arm once and kept in `spheres.json` beside it.
 pub fn two_rebots(dir: &Path) -> Result<Robot> {
     let urdf = dir.join("DM/urdf/ReBot_Arm_DM_tcp.urdf");
-    anyhow::ensure!(urdf.exists(), "{} is missing: run scripts/fetch_rebot.sh", urdf.display());
+    anyhow::ensure!(
+        urdf.exists(),
+        "{} is missing: run scripts/fetch_rebot.sh",
+        urdf.display()
+    );
     let arm = |prefix: &str| -> RobotOptions {
         RobotOptions {
             ee_links: vec![format!("{prefix}tcp")],
@@ -46,7 +50,11 @@ pub fn two_rebots(dir: &Path) -> Result<Robot> {
         Ok(spheres) => spheres,
         Err(_) => {
             let fit = RobotOptions {
-                spheres: SphereOptions { budget: 128, voxel_size: 0.005, ..Default::default() },
+                spheres: SphereOptions {
+                    budget: 128,
+                    voxel_size: 0.005,
+                    ..Default::default()
+                },
                 ..arm("")
             };
             let spheres = Robot::load(&urdf, &fit)?.collision_model().clone();
@@ -63,26 +71,45 @@ pub fn two_rebots(dir: &Path) -> Result<Robot> {
     let (left, right) = (arm("left_"), arm("right_"));
     let mut options = RobotOptions {
         ee_links: [left.ee_links, right.ee_links].concat(),
-        lock_joints: left.lock_joints.into_iter().chain(right.lock_joints).collect(),
-        collision_model: Some(CollisionModel::assemble(&[("left_", &spheres), ("right_", &spheres)])),
+        lock_joints: left
+            .lock_joints
+            .into_iter()
+            .chain(right.lock_joints)
+            .collect(),
+        collision_model: Some(CollisionModel::assemble(&[
+            ("left_", &spheres),
+            ("right_", &spheres),
+        ])),
         ..arm("")
     };
     // Joints come breadth first, the arms interleaved: each takes its ready pose by name.
     let names = Robot::assemble(&parts, &options)?.joint_names().to_vec();
     let ready = |name: &str| -> Option<f32> {
-        let joint = name.trim_start_matches("left_").trim_start_matches("right_");
+        let joint = name
+            .trim_start_matches("left_")
+            .trim_start_matches("right_");
         let k: usize = joint.strip_prefix("joint")?.parse().ok()?;
         READY.get(k.checked_sub(1)?).copied()
     };
-    options.default_q = Some(names.iter().map(|n| ready(n).context("a reBot joint")).collect::<Result<_>>()?);
+    options.default_q = Some(
+        names
+            .iter()
+            .map(|n| ready(n).context("a reBot joint"))
+            .collect::<Result<_>>()?,
+    );
     Ok(Robot::assemble(&parts, &options)?)
 }
 
 /// A table, a block lying across the arms in front of one, where the hands meet between them, the
 /// place in front of the other arm, and a few small boxes elsewhere. Even tasks go left to right.
 pub fn scene(world: u32, rng: &mut Rng) -> (World, Handover) {
-    let (from, to, side) = if world.is_multiple_of(2) { (0, 1, 1.0) } else { (1, 0, -1.0) };
-    let across = |rng: &mut Rng, spread: f32| Quat::from_rotation_z(FRAC_PI_2 + rng.range(-spread, spread));
+    let (from, to, side) = if world.is_multiple_of(2) {
+        (0, 1, 1.0)
+    } else {
+        (1, 0, -1.0)
+    };
+    let across =
+        |rng: &mut Rng, spread: f32| Quat::from_rotation_z(FRAC_PI_2 + rng.range(-spread, spread));
     let table = Obstacle::cuboid(Vec3::new(0.25, 0.0, -0.02), Vec3::new(0.45, 0.6, 0.02));
     let half = BLOCKS[(rng.uniform() * BLOCKS.len() as f32) as usize % BLOCKS.len()];
     let block = Obstacle::Cuboid {
@@ -90,13 +117,26 @@ pub fn scene(world: u32, rng: &mut Rng) -> (World, Handover) {
         half_extents: half,
         rotation: across(rng, 0.4),
     };
-    let meet =
-        Pose::new(Vec3::new(rng.range(0.24, 0.28), rng.range(-0.03, 0.03), rng.range(0.09, 0.12)), across(rng, 0.2));
-    let place = Pose::new(Vec3::new(rng.range(0.2, 0.3), -side * rng.range(0.18, 0.28), half.z), across(rng, 0.4));
+    let meet = Pose::new(
+        Vec3::new(
+            rng.range(0.24, 0.28),
+            rng.range(-0.03, 0.03),
+            rng.range(0.09, 0.12),
+        ),
+        across(rng, 0.2),
+    );
+    let place = Pose::new(
+        Vec3::new(rng.range(0.2, 0.3), -side * rng.range(0.18, 0.28), half.z),
+        across(rng, 0.4),
+    );
     let mut obstacles = vec![table, block];
     // Clutter beyond the blocks' reach, clear of where the hands work.
     for _ in 0..(rng.uniform() * 3.0) as usize {
-        let h = Vec3::new(rng.range(0.015, 0.03), rng.range(0.015, 0.03), rng.range(0.02, 0.06));
+        let h = Vec3::new(
+            rng.range(0.015, 0.03),
+            rng.range(0.015, 0.03),
+            rng.range(0.02, 0.06),
+        );
         let center = Vec3::new(rng.range(0.4, 0.5), rng.range(-0.35, 0.35), h.z);
         obstacles.push(Obstacle::Cuboid {
             center,
@@ -104,7 +144,17 @@ pub fn scene(world: u32, rng: &mut Rng) -> (World, Handover) {
             rotation: Quat::from_rotation_z(rng.range(0.0, 3.0)),
         });
     }
-    (World { obstacles }, Handover { world, object: 1, from, to, meet, place })
+    (
+        World { obstacles },
+        Handover {
+            world,
+            object: 1,
+            from,
+            to,
+            meet,
+            place,
+        },
+    )
 }
 
 /// The options both arms plan with: they approach from 5 cm above, hold blocks 1 cm below their

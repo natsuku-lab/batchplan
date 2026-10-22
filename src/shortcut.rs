@@ -75,14 +75,28 @@ pub(crate) fn shortcut_until(
     deadline: Option<Instant>,
 ) -> Result<Vec<Vec<f32>>> {
     let n = device.robot().dof();
-    ensure_input!(o.resolution > 0.0 && o.min_change > 0.0, "the resolution and smallest change must be positive");
+    ensure_input!(
+        o.resolution > 0.0 && o.min_change > 0.0,
+        "the resolution and smallest change must be positive"
+    );
     ensure_input!(
         o.clearance >= 0.0 && o.clearance_ramp > 0.0,
         "the clearance must not be negative, and its ramp positive"
     );
-    ensure_input!(world.len() == paths.len(), "{} worlds for {} paths", world.len(), paths.len());
-    ensure_input!(paths.iter().all(|p| !p.is_empty() && p.len() % n == 0), "paths must hold whole waypoints");
-    ensure_input!(world.iter().all(|&w| (w as usize) < worlds.len()), "a path references a world that was not given");
+    ensure_input!(
+        world.len() == paths.len(),
+        "{} worlds for {} paths",
+        world.len(),
+        paths.len()
+    );
+    ensure_input!(
+        paths.iter().all(|p| !p.is_empty() && p.len() % n == 0),
+        "paths must hold whole waypoints"
+    );
+    ensure_input!(
+        world.iter().all(|&w| (w as usize) < worlds.len()),
+        "a path references a world that was not given"
+    );
     let mut searches: Vec<_> = paths
         .iter_mut()
         .zip(world)
@@ -91,7 +105,8 @@ pub(crate) fn shortcut_until(
             Deferred::new(None, move || Simplify::new(world, n, path, o))
         })
         .collect();
-    let mut running: Vec<&mut dyn Search> = searches.iter_mut().map(|s| s as &mut dyn Search).collect();
+    let mut running: Vec<&mut dyn Search> =
+        searches.iter_mut().map(|s| s as &mut dyn Search).collect();
     device.search(worlds, &mut running, deadline)?;
     let mut shortcut = Vec::with_capacity(paths.len());
     for (path, s) in paths.iter_mut().zip(searches) {
@@ -107,9 +122,9 @@ enum Step {
     Straight,
     /// Checking shortcuts from waypoint `i`, the farthest first.
     Shortcut(usize),
-    /// Checking joint `j` straightened (`Simplify::line`), from joint `j` on: first at the waypoints
-    /// it moves and the middle of every edge, a batch of configurations that rules out most joints
-    /// before their edges are checked.
+    /// Checking joint `j` straightened (`Simplify::line`), from joint `j` on: first at the
+    /// waypoints it moves and the middle of every edge, a batch of configurations that rules
+    /// out most joints before their edges are checked.
     Joint(usize),
     /// Checking the edges of the path with joint `j` straightened.
     JointEdges(usize),
@@ -139,9 +154,27 @@ pub(crate) struct Simplify {
 impl Simplify {
     pub(crate) fn new(world: u32, n: usize, path: Vec<f32>, o: &ShortcutOptions) -> Self {
         let ends = vec![path[..n].to_vec(), path[path.len() - n..].to_vec()];
-        let keep = (o.clearance > 0.0).then(|| Arc::new(Keep { clearance: o.clearance, ramp: o.clearance_ramp, ends }));
+        let keep = (o.clearance > 0.0).then(|| {
+            Arc::new(Keep {
+                clearance: o.clearance,
+                ramp: o.clearance_ramp,
+                ends,
+            })
+        });
         let (to, line) = (vec![0.0; n], Vec::with_capacity(path.len() / n));
-        Self { world, n, path, o: *o, pass: 0, changed: false, step: Step::Straight, shortcut: None, keep, to, line }
+        Self {
+            world,
+            n,
+            path,
+            o: *o,
+            pass: 0,
+            changed: false,
+            step: Step::Straight,
+            shortcut: None,
+            keep,
+            to,
+            line,
+        }
     }
 
     /// The simplified path, and the path as the first pass's shortcuts left it.
@@ -192,10 +225,21 @@ impl Simplify {
         let (mut along, mut after) = (0.0, 0.0);
         for (k, (a, b)) in path.chunks(n).zip(path.chunks(n).skip(1)).enumerate() {
             along += distance(a, b);
-            let x = if k + 1 == last { to } else { from + (to - from) * along / total };
+            let x = if k + 1 == last {
+                to
+            } else {
+                from + (to - from) * along / total
+            };
             let y = self.line[k];
-            let moved: f32 =
-                (0..n).map(|i| if i == j { (x - y) * (x - y) } else { (b[i] - a[i]) * (b[i] - a[i]) }).sum();
+            let moved: f32 = (0..n)
+                .map(|i| {
+                    if i == j {
+                        (x - y) * (x - y)
+                    } else {
+                        (b[i] - a[i]) * (b[i] - a[i])
+                    }
+                })
+                .sum();
             after += moved.sqrt();
             self.line.push(x);
         }
@@ -219,7 +263,11 @@ impl Simplify {
     /// Ends a pass: another one if this one changed the path and passes remain.
     fn next_pass(&mut self) {
         self.pass += 1;
-        self.step = if self.changed && self.pass < self.o.passes { Step::Shortcut(0) } else { Step::Done };
+        self.step = if self.changed && self.pass < self.o.passes {
+            Step::Shortcut(0)
+        } else {
+            Step::Done
+        };
         self.changed = false;
     }
 }
@@ -271,12 +319,23 @@ impl Search for Simplify {
                     }
                     for w in 0..last {
                         let at = moved.len();
-                        moved.extend(self.waypoint(w).iter().zip(self.waypoint(w + 1)).map(|(x, y)| 0.5 * (x + y)));
+                        moved.extend(
+                            self.waypoint(w)
+                                .iter()
+                                .zip(self.waypoint(w + 1))
+                                .map(|(x, y)| 0.5 * (x + y)),
+                        );
                         moved[at + j] = 0.5 * (self.line[w] + self.line[w + 1]);
                     }
                     self.step = Step::Joint(j);
                     let keep = self.keep.clone();
-                    return Some(EdgeQuery { world: self.world, edges: moved, wanted: None, spacing: 0.0, keep });
+                    return Some(EdgeQuery {
+                        world: self.world,
+                        edges: moved,
+                        wanted: None,
+                        spacing: 0.0,
+                        keep,
+                    });
                 }
                 &Step::JointEdges(j) => {
                     let mut edges = edges::reuse(buffer);
@@ -297,8 +356,11 @@ impl Search for Simplify {
                             break false;
                         }
                         let p = &self.path;
-                        let (before, at, after) =
-                            (&p[(v - 1) * n..v * n], &p[v * n..(v + 1) * n], &p[(v + 1) * n..(v + 2) * n]);
+                        let (before, at, after) = (
+                            &p[(v - 1) * n..v * n],
+                            &p[v * n..(v + 1) * n],
+                            &p[(v + 1) * n..(v + 2) * n],
+                        );
                         for (j, to) in self.to.iter_mut().enumerate() {
                             *to = 0.25 * before[j] + 0.5 * at[j] + 0.25 * after[j];
                         }
@@ -347,7 +409,11 @@ impl Search for Simplify {
             }
             Step::Joint(j) => {
                 let checked = 2 * self.count() - 3;
-                self.step = if answer == checked { Step::JointEdges(j) } else { Step::Joint(j + 1) };
+                self.step = if answer == checked {
+                    Step::JointEdges(j)
+                } else {
+                    Step::Joint(j + 1)
+                };
             }
             Step::JointEdges(j) => {
                 let last = self.count() - 1;
@@ -372,7 +438,10 @@ impl Search for Simplify {
 }
 
 pub(crate) fn length(path: &[f32], n: usize) -> f32 {
-    path.chunks(n).zip(path.chunks(n).skip(1)).map(|(a, b)| distance(a, b)).sum()
+    path.chunks(n)
+        .zip(path.chunks(n).skip(1))
+        .map(|(a, b)| distance(a, b))
+        .sum()
 }
 
 /// The point `along` the path (by joint-space distance), into `out`.
@@ -383,7 +452,11 @@ pub(crate) fn locate(path: &[f32], n: usize, along: f32, out: &mut [f32]) {
         let (a, b) = (&path[e * n..(e + 1) * n], &path[(e + 1) * n..(e + 2) * n]);
         let d = distance(a, b);
         if walked + d >= along || e + 1 == edges {
-            let t = if d > 0.0 { ((along - walked) / d).clamp(0.0, 1.0) } else { 0.0 };
+            let t = if d > 0.0 {
+                ((along - walked) / d).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             for ((o, x), y) in out.iter_mut().zip(a).zip(b) {
                 *o = x + (y - x) * t;
             }

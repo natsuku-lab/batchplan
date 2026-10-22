@@ -55,7 +55,11 @@ pub(crate) struct Keep {
 
 impl Keep {
     fn margin(&self, q: &[f32]) -> f32 {
-        let nearest = self.ends.iter().map(|end| distance(q, end)).fold(f32::INFINITY, f32::min);
+        let nearest = self
+            .ends
+            .iter()
+            .map(|end| distance(q, end))
+            .fold(f32::INFINITY, f32::min);
         self.clearance * (nearest / self.ramp).min(1.0)
     }
 
@@ -64,9 +68,23 @@ impl Keep {
     fn beyond_ramp(&self, a: &[f32], b: &[f32]) -> bool {
         let span: f32 = a.iter().zip(b).map(|(x, y)| (y - x) * (y - x)).sum();
         self.ends.iter().all(|end| {
-            let along: f32 = a.iter().zip(b).zip(end).map(|((x, y), e)| (e - x) * (y - x)).sum();
-            let t = if span > 0.0 { (along / span).clamp(0.0, 1.0) } else { 0.0 };
-            let gap: f32 = a.iter().zip(b).zip(end).map(|((x, y), e)| (x + (y - x) * t - e).powi(2)).sum();
+            let along: f32 = a
+                .iter()
+                .zip(b)
+                .zip(end)
+                .map(|((x, y), e)| (e - x) * (y - x))
+                .sum();
+            let t = if span > 0.0 {
+                (along / span).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let gap: f32 = a
+                .iter()
+                .zip(b)
+                .zip(end)
+                .map(|((x, y), e)| (x + (y - x) * t - e).powi(2))
+                .sum();
             gap.sqrt() >= self.ramp * 1.001
         })
     }
@@ -86,7 +104,8 @@ impl EdgeQuery {
 /// A search that needs edges checked: RRT-Connect or simplification of one problem.
 pub(crate) trait Search: Send {
     /// The edges to check next, written into `buffer`'s allocation (see `reuse`), which the driver
-    /// hands back once they are answered; `None` once the search is over, or wants a path optimized.
+    /// hands back once they are answered; `None` once the search is over, or wants a path
+    /// optimized.
     fn request(&mut self, buffer: &mut Vec<f32>) -> Option<EdgeQuery>;
     /// The answer to the last request.
     fn answer(&mut self, answer: usize);
@@ -114,7 +133,11 @@ pub(crate) struct Deferred<S, F> {
 
 impl<S: Search, F: FnOnce() -> S + Send> Deferred<S, F> {
     pub(crate) fn new(help: Option<Arc<Ahead>>, build: F) -> Self {
-        Self { build: Some(build), search: None, help }
+        Self {
+            build: Some(build),
+            search: None,
+            help,
+        }
     }
 
     /// The search, built here if no thread ran it (its deadline passed first).
@@ -125,7 +148,8 @@ impl<S: Search, F: FnOnce() -> S + Send> Deferred<S, F> {
 
     fn built(&mut self) -> &mut S {
         let build = &mut self.build;
-        self.search.get_or_insert_with(|| build.take().expect("a search is built once")())
+        self.search
+            .get_or_insert_with(|| build.take().expect("a search is built once")())
     }
 }
 
@@ -173,7 +197,11 @@ pub(crate) struct EdgeScratch {
 
 impl EdgeScratch {
     pub(crate) fn new(lanes: &Lanes) -> Self {
-        Self { lanes: lanes.scratch(), states: vec![0.0; LANES * lanes.dof()], buffer: vec![] }
+        Self {
+            lanes: lanes.scratch(),
+            states: vec![0.0; LANES * lanes.dof()],
+            buffer: vec![],
+        }
     }
 }
 
@@ -198,7 +226,9 @@ pub(crate) fn run(
     scratch: &mut EdgeScratch,
 ) -> bool {
     // One dispatch for the whole search, so the checks inline at the CPU's SIMD level.
-    dispatch!(lanes.level(), simd => run_at(simd, search, robot, lanes, worlds, deadline, spread, pause, scratch))
+    dispatch!(lanes.level(), simd => {
+        run_at(simd, search, robot, lanes, worlds, deadline, spread, pause, scratch)
+    })
 }
 
 #[inline(always)]
@@ -221,11 +251,20 @@ fn run_at<S: Simd>(
             return true;
         }
         let Some(query) = search.request(&mut scratch.buffer) else {
-            let Some(o) = search.optimize() else { return false };
+            let Some(o) = search.optimize() else {
+                return false;
+            };
             if let Some(optimizing) = spread {
                 optimizing.fetch_add(1, Ordering::Relaxed);
             }
-            cpu::optimize_path(robot, &worlds[o.world as usize], o.path, &o.options, deadline, spread.is_some());
+            cpu::optimize_path(
+                robot,
+                &worlds[o.world as usize],
+                o.path,
+                &o.options,
+                deadline,
+                spread.is_some(),
+            );
             if let Some(optimizing) = spread {
                 optimizing.fetch_sub(1, Ordering::Relaxed);
             }
@@ -289,7 +328,11 @@ fn edge_free<S: Simd>(
     let passes = passes(a, b, query.spacing);
     let total = LANES * passes;
     // Away from the path's ends, every state keeps the full clearance.
-    let full = query.keep.as_ref().filter(|k| k.beyond_ramp(a, b)).map(|k| k.clearance);
+    let full = query
+        .keep
+        .as_ref()
+        .filter(|k| k.beyond_ramp(a, b))
+        .map(|k| k.clearance);
     for p in 0..passes {
         let mut margin = [full.unwrap_or(0.0); LANES];
         for (l, out) in s.states.chunks_mut(n).enumerate() {
@@ -330,10 +373,15 @@ mod tests {
     use std::collections::HashMap;
 
     fn panda() -> Robot {
-        let fingers = [("panda_finger_joint1".to_string(), 0.04), ("panda_finger_joint2".to_string(), 0.04)];
+        let fingers = [
+            ("panda_finger_joint1".to_string(), 0.04),
+            ("panda_finger_joint2".to_string(), 0.04),
+        ];
         let options = RobotOptions {
             lock_joints: HashMap::from(fingers),
-            collision_model: Some(CollisionModel::load("assets/franka/panda_collision.json").unwrap()),
+            collision_model: Some(
+                CollisionModel::load("assets/franka/panda_collision.json").unwrap(),
+            ),
             ..Default::default()
         };
         Robot::load("assets/franka/franka_panda.urdf", &options).unwrap()
@@ -343,7 +391,9 @@ mod tests {
         let mut out = vec![Device::cpu(robot).unwrap()];
         match Device::gpu(robot) {
             Ok(gpu) => out.push(gpu),
-            Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
+            Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => {
+                eprintln!("skipping GPU: {e}")
+            }
             Err(e) => panic!("no GPU: {e}"),
         }
         out
@@ -383,22 +433,42 @@ mod tests {
         };
         let spacing = 0.03;
         let mut rng = Rng::new(9);
-        let mut random = || -> Vec<f32> { (0..n).map(|j| rng.range(robot.lower[j], robot.upper[j])).collect() };
+        let mut random = || -> Vec<f32> {
+            (0..n)
+                .map(|j| rng.range(robot.lower[j], robot.upper[j]))
+                .collect()
+        };
         let queries: Vec<EdgeQuery> = (0..400)
             .map(|i| {
                 let k = 1 + i % 4;
                 let edges: Vec<f32> = (0..k).flat_map(|_| [random(), random()].concat()).collect();
-                let wanted = if i % 2 == 0 { Wanted::Prefix } else { Wanted::FirstValid };
-                EdgeQuery { world: (i % 2) as u32, edges, wanted: Some(wanted), spacing, keep: None }
+                let wanted = if i % 2 == 0 {
+                    Wanted::Prefix
+                } else {
+                    Wanted::FirstValid
+                };
+                EdgeQuery {
+                    world: (i % 2) as u32,
+                    edges,
+                    wanted: Some(wanted),
+                    spacing,
+                    keep: None,
+                }
             })
             .collect();
         let mut answers = vec![];
         for device in devices(&robot) {
             let worlds = device.upload(&[world.clone(), World::default()]).unwrap();
             // Four searches asking their queries in turn, run at once.
-            let mut askers: Vec<Asker> =
-                queries.chunks(100).map(|q| Asker { queries: q.to_vec(), answers: vec![] }).collect();
-            let mut searches: Vec<&mut dyn Search> = askers.iter_mut().map(|a| a as &mut dyn Search).collect();
+            let mut askers: Vec<Asker> = queries
+                .chunks(100)
+                .map(|q| Asker {
+                    queries: q.to_vec(),
+                    answers: vec![],
+                })
+                .collect();
+            let mut searches: Vec<&mut dyn Search> =
+                askers.iter_mut().map(|a| a as &mut dyn Search).collect();
             device.search(&worlds, &mut searches, None).unwrap();
             let got: Vec<usize> = askers.into_iter().flat_map(|a| a.answers).collect();
             // Every state of every edge, checked one by one.
@@ -412,7 +482,9 @@ mod tests {
                         for (m, out) in q.chunks_mut(n).enumerate() {
                             state(a, b, m + 1, total, out);
                         }
-                        let clear = device.clearance(&worlds, &vec![query.world; total], &q).unwrap();
+                        let clear = device
+                            .clearance(&worlds, &vec![query.world; total], &q)
+                            .unwrap();
                         clear.into_iter().all(collision_free)
                     })
                     .collect();
@@ -424,7 +496,10 @@ mod tests {
                 };
                 assert_eq!(answer, expected, "{}: {query:?}", device.name());
             }
-            assert!(valid_edges > 50 && invalid_edges > 50, "{valid_edges} valid and {invalid_edges} invalid edges");
+            assert!(
+                valid_edges > 50 && invalid_edges > 50,
+                "{valid_edges} valid and {invalid_edges} invalid edges"
+            );
             answers.push(got);
         }
         if let [cpu, gpu] = &answers[..] {
@@ -440,14 +515,22 @@ mod tests {
         let q = robot.default_q().to_vec();
         let hand = robot.link_pose(&q, "panda_hand").unwrap().position;
         // A ball 8 mm from the hand's spheres, measured on the device.
-        let ball = |gap: f32| World { obstacles: vec![Obstacle::sphere(hand + Vec3::new(0.0, 0.0, 0.2 + gap), 0.1)] };
+        let ball = |gap: f32| World {
+            obstacles: vec![Obstacle::sphere(hand + Vec3::new(0.0, 0.0, 0.2 + gap), 0.1)],
+        };
         let cpu = Device::cpu(&robot).unwrap();
         let probe = cpu.upload(&[ball(0.0)]).unwrap();
         let touching = cpu.clearance(&probe, &[0], &q).unwrap()[0][0];
         let world = ball(0.008 - touching);
         let near: Vec<f32> = q.iter().map(|v| v + 1e-3).collect();
         let far: Vec<f32> = q.iter().map(|v| v + 2.0).collect();
-        let keep = |ends: Vec<Vec<f32>>| Some(Arc::new(Keep { clearance: 0.01, ramp: 0.5, ends }));
+        let keep = |ends: Vec<Vec<f32>>| {
+            Some(Arc::new(Keep {
+                clearance: 0.01,
+                ramp: 0.5,
+                ends,
+            }))
+        };
         let query = |keep| EdgeQuery {
             world: 0,
             edges: [&q[..], &near].concat(),
@@ -455,7 +538,11 @@ mod tests {
             spacing: 0.01,
             keep,
         };
-        let queries = vec![query(None), query(keep(vec![far.clone()])), query(keep(vec![q.clone(), far]))];
+        let queries = vec![
+            query(None),
+            query(keep(vec![far.clone()])),
+            query(keep(vec![q.clone(), far])),
+        ];
         for device in devices(&robot) {
             let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
             let clear = device.clearance(&worlds, &[0], &q).unwrap()[0][0];
@@ -464,9 +551,19 @@ mod tests {
                 "{}: the edge should pass 5-10 mm from the ball, not {clear}",
                 device.name()
             );
-            let mut asker = Asker { queries: queries.clone(), answers: vec![] };
-            device.search(&worlds, &mut [&mut asker as &mut dyn Search], None).unwrap();
-            assert_eq!(asker.answers, [1, 0, 1], "{}: free, too close, near an end", device.name());
+            let mut asker = Asker {
+                queries: queries.clone(),
+                answers: vec![],
+            };
+            device
+                .search(&worlds, &mut [&mut asker as &mut dyn Search], None)
+                .unwrap();
+            assert_eq!(
+                asker.answers,
+                [1, 0, 1],
+                "{}: free, too close, near an end",
+                device.name()
+            );
         }
     }
 }

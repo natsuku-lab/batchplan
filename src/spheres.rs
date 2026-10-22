@@ -79,7 +79,10 @@ const SEARCH_STEPS: usize = 24;
 
 /// Area-weighted random points on the surface of `meshes`.
 fn surface_samples(meshes: &[TriMesh], count: usize, rng: &mut Rng) -> Vec<Vec3> {
-    let triangles: Vec<[Vec3; 3]> = meshes.iter().flat_map(|m| m.triangles.iter().map(|&t| m.corners(t))).collect();
+    let triangles: Vec<[Vec3; 3]> = meshes
+        .iter()
+        .flat_map(|m| m.triangles.iter().map(|&t| m.corners(t)))
+        .collect();
     let mut cumulative = Vec::with_capacity(triangles.len());
     let mut total = 0.0;
     for &t in &triangles {
@@ -92,7 +95,9 @@ fn surface_samples(meshes: &[TriMesh], count: usize, rng: &mut Rng) -> Vec<Vec3>
     (0..count)
         .map(|_| {
             let pick = rng.uniform() * total;
-            let [a, b, c] = triangles[cumulative.partition_point(|&x| x < pick).min(triangles.len() - 1)];
+            let [a, b, c] = triangles[cumulative
+                .partition_point(|&x| x < pick)
+                .min(triangles.len() - 1)];
             let (r1, r2) = (rng.uniform().sqrt(), rng.uniform());
             a * (1.0 - r1) + b * (r1 * (1.0 - r2)) + c * (r1 * r2)
         })
@@ -124,7 +129,10 @@ struct LinkFit {
 
 impl LinkFit {
     fn new(meshes: &[TriMesh], o: &SphereOptions, rng: &mut Rng, parallel: bool) -> Option<Self> {
-        let vertices: Vec<Vec3> = meshes.iter().flat_map(|m| m.vertices.iter().copied()).collect();
+        let vertices: Vec<Vec3> = meshes
+            .iter()
+            .flat_map(|m| m.vertices.iter().copied())
+            .collect();
         let stride = vertices.len().div_ceil(MAX_VERTEX_SAMPLES).max(1);
         let mut samples: Vec<Vec3> = vertices.into_iter().step_by(stride).collect();
         samples.extend(surface_samples(meshes, SURFACE_SAMPLES, rng));
@@ -132,13 +140,20 @@ impl LinkFit {
             return None;
         }
         let dense = surface_samples(meshes, DENSE_SAMPLES, rng);
-        let flags =
-            TriMeshFlags::MERGE_DUPLICATE_VERTICES | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES | TriMeshFlags::ORIENTED;
+        let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
+            | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
+            | TriMeshFlags::ORIENTED;
         let solids: Vec<ParryMesh> = meshes
             .iter()
-            .filter_map(|m| ParryMesh::with_flags(m.vertices.clone(), m.triangles.clone(), flags).ok())
+            .filter_map(|m| {
+                ParryMesh::with_flags(m.vertices.clone(), m.triangles.clone(), flags).ok()
+            })
             .collect();
-        let (lo, hi) = samples.iter().fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), &p| (lo.min(p), hi.max(p)));
+        let (lo, hi) = samples
+            .iter()
+            .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), &p| {
+                (lo.min(p), hi.max(p))
+            });
         let extent = (hi - lo).max(Vec3::splat(1e-4));
         let mut voxel = o.voxel_size.min(extent.min_element() / 4.0).max(1e-3);
         let cells = |voxel: f32| (extent / voxel).ceil().max(Vec3::ONE).as_uvec3();
@@ -148,17 +163,28 @@ impl LinkFit {
         let n = cells(voxel);
         let cell = |i: u32| {
             let (x, y, z) = (i % n.x, i / n.x % n.y, i / (n.x * n.y));
-            inscribed(&solids, lo + (Vec3::new(x as f32, y as f32, z as f32) + 0.5) * voxel)
+            inscribed(
+                &solids,
+                lo + (Vec3::new(x as f32, y as f32, z as f32) + 0.5) * voxel,
+            )
         };
         let cells = 0..n.element_product();
-        let mut candidates: Vec<(Vec3, f32)> =
-            if parallel { cells.into_par_iter().filter_map(cell).collect() } else { cells.filter_map(cell).collect() };
+        let mut candidates: Vec<(Vec3, f32)> = if parallel {
+            cells.into_par_iter().filter_map(cell).collect()
+        } else {
+            cells.filter_map(cell).collect()
+        };
         if candidates.is_empty() {
             // Open or degenerate geometry has no interior; grow spheres from the surface instead.
             candidates = samples.iter().map(|&p| (p, 0.0)).collect();
         }
         let stride = candidates.len().div_ceil(MAX_CANDIDATES).max(1);
-        Some(Self { samples, dense, candidates: candidates.into_iter().step_by(stride).collect(), parallel })
+        Some(Self {
+            samples,
+            dense,
+            candidates: candidates.into_iter().step_by(stride).collect(),
+            parallel,
+        })
     }
 
     /// Greedy cover: candidates reaching each sample within `overhang` beyond their radius,
@@ -186,19 +212,30 @@ impl LinkFit {
         }
         let mut picks = vec![];
         while picks.len() < limit && uncovered.iter().any(|&u| u != 0) {
-            let gain = |i: usize| cover[i].iter().zip(&uncovered).map(|(c, u)| (c & u).count_ones()).sum::<u32>();
+            let gain = |i: usize| {
+                cover[i]
+                    .iter()
+                    .zip(&uncovered)
+                    .map(|(c, u)| (c & u).count_ones())
+                    .sum::<u32>()
+            };
             let (best, best_gain) = (0..self.candidates.len())
                 .map(|i| (i, gain(i)))
                 .max_by(|a, b| {
                     let radius = |i: usize| self.candidates[i].1;
-                    a.1.cmp(&b.1).then(radius(a.0).total_cmp(&radius(b.0))).then(b.0.cmp(&a.0))
+                    a.1.cmp(&b.1)
+                        .then(radius(a.0).total_cmp(&radius(b.0)))
+                        .then(b.0.cmp(&a.0))
                 })
                 .expect("at least one candidate");
             if best_gain == 0 {
                 break;
             }
             picks.push(best);
-            uncovered.iter_mut().zip(&cover[best]).for_each(|(u, c)| *u &= !c);
+            uncovered
+                .iter_mut()
+                .zip(&cover[best])
+                .for_each(|(u, c)| *u &= !c);
         }
         let complete = uncovered.iter().all(|&u| u == 0);
         (picks, complete)
@@ -209,19 +246,36 @@ impl LinkFit {
     /// picks' original radii so growth cannot snowball onto one sphere.
     fn spheres(&self, picks: &[usize]) -> (Vec<[f32; 4]>, f32) {
         // A cover that picked nothing still needs one sphere to grow: the largest candidate.
-        let largest = (0..self.candidates.len()).max_by(|&a, &b| self.candidates[a].1.total_cmp(&self.candidates[b].1));
-        let picks: Vec<usize> = if picks.is_empty() { largest.into_iter().collect() } else { picks.to_vec() };
+        let largest = (0..self.candidates.len())
+            .max_by(|&a, &b| self.candidates[a].1.total_cmp(&self.candidates[b].1));
+        let picks: Vec<usize> = if picks.is_empty() {
+            largest.into_iter().collect()
+        } else {
+            picks.to_vec()
+        };
         let mut spheres: Vec<(Vec3, f32)> = picks.iter().map(|&i| self.candidates[i]).collect();
         for &s in self.samples.iter().chain(&self.dense) {
             if spheres.iter().any(|&(c, r)| (s - c).length() <= r) {
                 continue;
             }
             let overhang = |a: usize| (s - spheres[a].0).length() - self.candidates[picks[a]].1;
-            let j = (0..spheres.len()).min_by(|&a, &b| overhang(a).total_cmp(&overhang(b))).expect("a sphere");
+            let j = (0..spheres.len())
+                .min_by(|&a, &b| overhang(a).total_cmp(&overhang(b)))
+                .expect("a sphere");
             spheres[j].1 = (s - spheres[j].0).length();
         }
-        let growth = picks.iter().zip(&spheres).map(|(&i, s)| s.1 - self.candidates[i].1).fold(0.0, f32::max);
-        (spheres.into_iter().map(|(c, r)| [c.x, c.y, c.z, r]).collect(), growth)
+        let growth = picks
+            .iter()
+            .zip(&spheres)
+            .map(|(&i, s)| s.1 - self.candidates[i].1)
+            .fold(0.0, f32::max);
+        (
+            spheres
+                .into_iter()
+                .map(|(c, r)| [c.x, c.y, c.z, r])
+                .collect(),
+            growth,
+        )
     }
 }
 
@@ -245,13 +299,21 @@ fn search_overhang(fits: &[Option<LinkFit>], o: &SphereOptions) -> f32 {
     // Bisect between the tolerance and an overhang at which one sphere covers any link.
     let (mut lo, mut hi) = (o.tolerance, 0.0f32);
     for f in fits.iter().flatten() {
-        let (lo_corner, hi_corner) =
-            f.samples.iter().fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(a, b), &p| (a.min(p), b.max(p)));
+        let (lo_corner, hi_corner) = f
+            .samples
+            .iter()
+            .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(a, b), &p| {
+                (a.min(p), b.max(p))
+            });
         hi = hi.max((hi_corner - lo_corner).length());
     }
     for _ in 0..SEARCH_STEPS {
         let mid = 0.5 * (lo + hi);
-        if needed(mid) <= o.budget { hi = mid } else { lo = mid }
+        if needed(mid) <= o.budget {
+            hi = mid
+        } else {
+            lo = mid
+        }
     }
     hi
 }
@@ -261,14 +323,25 @@ fn search_overhang(fits: &[Option<LinkFit>], o: &SphereOptions) -> f32 {
 /// one overhang: `o.tolerance` when the budget allows, otherwise the smallest the budget can
 /// achieve. With `parallel`, the work runs on the current rayon pool; without, on the calling
 /// thread alone, without registering it with any pool.
-pub(crate) fn fit(links: &[Vec<TriMesh>], o: &SphereOptions, parallel: bool) -> (Vec<Vec<[f32; 4]>>, f32) {
+pub(crate) fn fit(
+    links: &[Vec<TriMesh>],
+    o: &SphereOptions,
+    parallel: bool,
+) -> (Vec<Vec<[f32; 4]>>, f32) {
     debug_assert!(o.check().is_ok(), "callers check the options");
     let mut rng = Rng::new(o.rng_seed);
-    let fits: Vec<Option<LinkFit>> = links.iter().map(|m| LinkFit::new(m, o, &mut rng, parallel)).collect();
+    let fits: Vec<Option<LinkFit>> = links
+        .iter()
+        .map(|m| LinkFit::new(m, o, &mut rng, parallel))
+        .collect();
     let overhang = search_overhang(&fits, o);
     let fitted: Vec<(Vec<[f32; 4]>, f32)> = fits
         .iter()
-        .map(|f| f.as_ref().map_or((vec![], 0.0), |f| f.spheres(&f.greedy(overhang, usize::MAX).0)))
+        .map(|f| {
+            f.as_ref().map_or((vec![], 0.0), |f| {
+                f.spheres(&f.greedy(overhang, usize::MAX).0)
+            })
+        })
         .collect();
     let reach = fitted.iter().map(|f| f.1).fold(0.0, f32::max);
     (fitted.into_iter().map(|f| f.0).collect(), reach)
@@ -281,19 +354,35 @@ pub(crate) fn fit(links: &[Vec<TriMesh>], o: &SphereOptions, parallel: bool) -> 
 /// where the budget cannot reach it, the least overhang the budget can. Boxes share the budget the
 /// spheres leave. Microseconds, where fitting a box takes milliseconds.
 pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option<Vec<[f32; 4]>> {
-    if shapes.iter().any(|s| !matches!(s, Obstacle::Cuboid { .. } | Obstacle::Sphere { .. })) {
+    if shapes
+        .iter()
+        .any(|s| !matches!(s, Obstacle::Cuboid { .. } | Obstacle::Sphere { .. }))
+    {
         return None;
     }
-    let boxes = shapes.iter().filter(|s| matches!(s, Obstacle::Cuboid { .. })).count();
-    let per_box = o.budget.checked_sub(shapes.len() - boxes)?.checked_div(boxes).unwrap_or(0);
+    let boxes = shapes
+        .iter()
+        .filter(|s| matches!(s, Obstacle::Cuboid { .. }))
+        .count();
+    let per_box = o
+        .budget
+        .checked_sub(shapes.len() - boxes)?
+        .checked_div(boxes)
+        .unwrap_or(0);
     if boxes > 0 && per_box == 0 {
         return None;
     }
     let mut spheres = vec![];
     for shape in shapes {
         match *shape {
-            Obstacle::Sphere { center, radius } => spheres.push([center.x, center.y, center.z, radius]),
-            Obstacle::Cuboid { center, half_extents, rotation } => {
+            Obstacle::Sphere { center, radius } => {
+                spheres.push([center.x, center.y, center.z, radius])
+            }
+            Obstacle::Cuboid {
+                center,
+                half_extents,
+                rotation,
+            } => {
                 let cells = box_cells(half_extents, o.tolerance, per_box);
                 let cell = half_extents / cells.as_vec3();
                 // A hair wide, so rounding never leaves a corner uncovered.
@@ -301,7 +390,8 @@ pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option
                 for i in 0..cells.x {
                     for j in 0..cells.y {
                         for k in 0..cells.z {
-                            let at = (UVec3::new(2 * i + 1, 2 * j + 1, 2 * k + 1).as_vec3() * cell) - half_extents;
+                            let at = (UVec3::new(2 * i + 1, 2 * j + 1, 2 * k + 1).as_vec3() * cell)
+                                - half_extents;
                             let p = center + rotation * at;
                             spheres.push([p.x, p.y, p.z, radius]);
                         }
@@ -385,13 +475,20 @@ pub(crate) fn ignore_pairs(
         pairs
             .iter()
             .map(|&(a, b)| {
-                let (sa, sb) = (solids[a].as_ref().expect("filtered"), solids[b].as_ref().expect("filtered"));
+                let (sa, sb) = (
+                    solids[a].as_ref().expect("filtered"),
+                    solids[b].as_ref().expect("filtered"),
+                );
                 intersection_test(&pose(a), sa, &pose(b), sb).is_ok_and(|hit| hit.intersecting)
             })
             .collect()
     };
     let fk = robot.fk(&robot.default_q);
-    let centers: Vec<Vec3> = robot.spheres.iter().map(|s| fk.rot[s.link] * s.center + fk.pos[s.link]).collect();
+    let centers: Vec<Vec3> = robot
+        .spheres
+        .iter()
+        .map(|s| fk.rot[s.link] * s.center + fk.pos[s.link])
+        .collect();
     let mut at_default = BTreeSet::new();
     for (a, sa) in robot.spheres.iter().enumerate() {
         for (b, sb) in robot.spheres.iter().enumerate().skip(a + 1) {
@@ -404,11 +501,19 @@ pub(crate) fn ignore_pairs(
     let ever = (0..o.self_collision_samples as u64)
         .into_par_iter()
         .map(|k| {
-            let mut rng = Rng::new(o.rng_seed.wrapping_add(k.wrapping_mul(0x9E37_79B9_7F4A_7C15)));
-            let q: Vec<f32> = (0..robot.dof()).map(|j| rng.range(robot.lower[j], robot.upper[j])).collect();
+            let mut rng = Rng::new(
+                o.rng_seed
+                    .wrapping_add(k.wrapping_mul(0x9e37_79b9_7f4a_7c15)),
+            );
+            let q: Vec<f32> = (0..robot.dof())
+                .map(|j| rng.range(robot.lower[j], robot.upper[j]))
+                .collect();
             touching(&q)
         })
-        .reduce(|| vec![false; pairs.len()], |a, b| a.iter().zip(&b).map(|(x, y)| x | y).collect());
+        .reduce(
+            || vec![false; pairs.len()],
+            |a, b| a.iter().zip(&b).map(|(x, y)| x | y).collect(),
+        );
     for (k, &pair) in pairs.iter().enumerate() {
         if at_default.contains(&pair) || !ever[k] {
             ignore.insert(pair);
@@ -416,7 +521,9 @@ pub(crate) fn ignore_pairs(
     }
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (a, b) in ignore {
-        out.entry(robot.links[a].name.clone()).or_default().push(robot.links[b].name.clone());
+        out.entry(robot.links[a].name.clone())
+            .or_default()
+            .push(robot.links[b].name.clone());
     }
     out
 }

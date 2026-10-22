@@ -4,8 +4,8 @@
 //! box (red) appears in the path ahead of one to three moving robots. Every robot whose remaining
 //! motion now collides replans from where it is, at its current velocity and acceleration, in one
 //! batched `plan` call; its old path turns grey and the new one green. When it is moving too fast
-//! to get around, it stops on its path (yellow, `Trajectory::stop`) and replans from rest. The event log lists
-//! each replan and how long it took.
+//! to get around, it stops on its path (yellow, `Trajectory::stop`) and replans from rest. The
+//! event log lists each replan and how long it took.
 //!
 //!   cargo run --release --bin replan             # 4 robots, 40 s
 //!   cargo run --release --bin replan -- 16
@@ -49,7 +49,12 @@ fn main() -> Result<()> {
     let robot = panda()?;
     // Replanning is a few problems at a time, where the CPU answers soonest.
     let device = args.device(&robot, false)?;
-    let mut rng = Rng::new(std::env::var("SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(21));
+    let mut rng = Rng::new(
+        std::env::var("SEED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(21),
+    );
     let mut worlds: Vec<World> = (0..count)
         .map(|_| {
             let mut w = tabletop(&mut rng);
@@ -64,9 +69,13 @@ fn main() -> Result<()> {
     rec.log_static(
         "summary",
         &rerun::TextDocument::from_markdown(format!(
-            "## Replanning mid-motion\n\n{count} robots on {}, at full speed. Every 2-3 s a red box appears in the path ahead of \
-             one to three of them; each robot whose motion now collides replans from its current position, velocity and \
-             acceleration, all of them in one `plan` call. Red dot: where its old path (grey) would have hit the box. Green: the new path. Yellow: when no way around exists at its speed, a controlled stop on the path it is on, before it replans from rest.",
+            "## Replanning mid-motion\n\n\
+             {count} robots on {}, at full speed. Every 2-3 s a red box appears in the path ahead \
+             of one to three of them; each robot whose motion now collides replans from its \
+             current position, velocity and acceleration, all of them in one `plan` call. Red dot: \
+             where its old path (grey) would have hit the box. Green: the new path. Yellow: when \
+             no way around exists at its speed, a controlled stop on the path it is on, before it \
+             replans from rest.",
             device.name()
         )),
     )?;
@@ -74,9 +83,20 @@ fn main() -> Result<()> {
     let offsets = grid(count, SPACING);
     for (i, w) in worlds.iter().enumerate() {
         let scene = format!("world/scene_{i}");
-        rec.log_static(scene.as_str(), &rerun::Transform3D::from_translation(offsets[i].to_array()))?;
-        let fixed: Vec<(usize, &Obstacle)> = w.obstacles.iter().enumerate().take(w.obstacles.len() - 1).collect();
-        rec.log_static(format!("{scene}/obstacles"), &boxes(&fixed, |k| if k == 0 { wood() } else { slate() }))?;
+        rec.log_static(
+            scene.as_str(),
+            &rerun::Transform3D::from_translation(offsets[i].to_array()),
+        )?;
+        let fixed: Vec<(usize, &Obstacle)> = w
+            .obstacles
+            .iter()
+            .enumerate()
+            .take(w.obstacles.len() - 1)
+            .collect();
+        rec.log_static(
+            format!("{scene}/obstacles"),
+            &boxes(&fixed, |k| if k == 0 { wood() } else { slate() }),
+        )?;
     }
 
     let mut motions: Vec<Motion> = (0..count)
@@ -111,7 +131,10 @@ fn main() -> Result<()> {
                         tr.at(tr.duration(), &mut state);
                         m.hold = state.position.clone();
                     }
-                    now.push(JointState { position: m.hold.clone(), ..JointState::new(n) });
+                    now.push(JointState {
+                        position: m.hold.clone(),
+                        ..JointState::new(n)
+                    });
                     arrived.push(i);
                 }
             }
@@ -119,8 +142,10 @@ fn main() -> Result<()> {
 
         // Robots at rest reach for a new target, all in one IK call and one plan call.
         if !arrived.is_empty() {
-            let goals: Vec<IkProblem> =
-                arrived.iter().map(|&i| IkProblem::new(i as u32, grasp_target(&worlds[i], &mut rng))).collect();
+            let goals: Vec<IkProblem> = arrived
+                .iter()
+                .map(|&i| IkProblem::new(i as u32, grasp_target(&worlds[i], &mut rng)))
+                .collect();
             let ik = solve_ik(&device, &uploaded, &goals, &IkOptions::default())?;
             let reaches: Vec<(usize, PlanProblem)> = arrived
                 .iter()
@@ -146,7 +171,15 @@ fn main() -> Result<()> {
                     hold: p.start.clone(),
                     resume: None,
                 };
-                log_path(&rec, &robot, *i, "path", motions[*i].trajectory.as_ref(), 0.0, [40, 200, 90])?;
+                log_path(
+                    &rec,
+                    &robot,
+                    *i,
+                    "path",
+                    motions[*i].trajectory.as_ref(),
+                    0.0,
+                    [40, 200, 90],
+                )?;
                 log_path(&rec, &robot, *i, "old_path", None, 0.0, [0, 0, 0])?;
             }
         }
@@ -156,12 +189,16 @@ fn main() -> Result<()> {
         if t >= next_push {
             let mut moving: Vec<usize> = (0..count)
                 .filter(|&i| {
-                    motions[i].trajectory.as_ref().is_some_and(|tr| tr.duration() - (t - motions[i].began) > 1.0)
+                    motions[i]
+                        .trajectory
+                        .as_ref()
+                        .is_some_and(|tr| tr.duration() - (t - motions[i].began) > 1.0)
                 })
                 .collect();
             let mut blocked = vec![];
             while !moving.is_empty() && blocked.is_empty() {
-                let i = moving.swap_remove((rng.uniform() * moving.len() as f32) as usize % moving.len());
+                let i = moving
+                    .swap_remove((rng.uniform() * moving.len() as f32) as usize % moving.len());
                 let m = &motions[i];
                 let tr = m.trajectory.as_ref().expect("a moving robot");
                 let left = tr.duration() - (t - m.began);
@@ -186,9 +223,12 @@ fn main() -> Result<()> {
                     Some(hit) => {
                         rec.log(
                             format!("world/scene_{i}/pushed"),
-                            &rerun::Boxes3D::from_centers_and_half_sizes([center.to_array()], [BOX.to_array()])
-                                .with_colors([rerun::Color::from_rgb(230, 50, 50)])
-                                .with_fill_mode(rerun::FillMode::Solid),
+                            &rerun::Boxes3D::from_centers_and_half_sizes(
+                                [center.to_array()],
+                                [BOX.to_array()],
+                            )
+                            .with_colors([rerun::Color::from_rgb(230, 50, 50)])
+                            .with_fill_mode(rerun::FillMode::Solid),
                         )?;
                         // Where the old path would have hit the box.
                         rec.log(
@@ -220,7 +260,10 @@ fn main() -> Result<()> {
                         hold: vec![],
                     })
                     .collect();
-                let options = PlanOptions { time_budget: Some(Duration::from_millis(100)), ..Default::default() };
+                let options = PlanOptions {
+                    time_budget: Some(Duration::from_millis(100)),
+                    ..Default::default()
+                };
                 let started = Instant::now();
                 let replanned = plan(&device, &uploaded, &problems, &options)?;
                 let mut done = 0;
@@ -237,13 +280,26 @@ fn main() -> Result<()> {
                         t - old_began,
                         [150, 150, 150],
                     )?;
-                    let motion =
-                        StartMotion { velocity: now[i].velocity.clone(), acceleration: now[i].acceleration.clone() };
-                    match replanned.best(k).map(|path| Trajectory::moving(&robot, path, &motion)) {
+                    let motion = StartMotion {
+                        velocity: now[i].velocity.clone(),
+                        acceleration: now[i].acceleration.clone(),
+                    };
+                    match replanned
+                        .best(k)
+                        .map(|path| Trajectory::moving(&robot, path, &motion))
+                    {
                         Some(Ok(trajectory)) => {
                             motions[i].trajectory = Some(trajectory);
                             motions[i].began = t;
-                            log_path(&rec, &robot, i, "path", motions[i].trajectory.as_ref(), 0.0, [40, 200, 90])?;
+                            log_path(
+                                &rec,
+                                &robot,
+                                i,
+                                "path",
+                                motions[i].trajectory.as_ref(),
+                                0.0,
+                                [40, 200, 90],
+                            )?;
                             labels.push((i, "replanned around it".to_string()));
                             done += 1;
                         }
@@ -254,14 +310,28 @@ fn main() -> Result<()> {
                 // (`Trajectory::stop`), then the goal again from rest.
                 let mut braking = 0;
                 for &i in &stuck {
-                    let stop = motions[i].trajectory.as_ref().and_then(|tr| tr.stop(&robot, t - motions[i].began).ok());
+                    let stop = motions[i]
+                        .trajectory
+                        .as_ref()
+                        .and_then(|tr| tr.stop(&robot, t - motions[i].began).ok());
                     motions[i].resume = Some(motions[i].goal.clone());
                     match stop {
                         Some(trajectory) => {
                             motions[i].trajectory = Some(trajectory);
                             motions[i].began = t;
-                            log_path(&rec, &robot, i, "path", motions[i].trajectory.as_ref(), 0.0, [240, 180, 40])?;
-                            labels.push((i, "too fast to get around: stopping on its path".to_string()));
+                            log_path(
+                                &rec,
+                                &robot,
+                                i,
+                                "path",
+                                motions[i].trajectory.as_ref(),
+                                0.0,
+                                [240, 180, 40],
+                            )?;
+                            labels.push((
+                                i,
+                                "too fast to get around: stopping on its path".to_string(),
+                            ));
                             braking += 1;
                         }
                         None => {
@@ -272,8 +342,11 @@ fn main() -> Result<()> {
                 }
                 let took = started.elapsed().as_secs_f64() * 1e3;
                 let scenes: Vec<String> = blocked.iter().map(|i| i.to_string()).collect();
-                let braked =
-                    if stuck.is_empty() { String::new() } else { format!("; {braking} braking to replan from rest") };
+                let braked = if stuck.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {braking} braking to replan from rest")
+                };
                 let event = format!(
                     "{t:.2} s: box in the path of robot {}: {done} of {} replanned mid-motion{braked}, in {took:.2} ms",
                     scenes.join(", "),
@@ -298,16 +371,29 @@ fn main() -> Result<()> {
         for (i, until) in label_until.iter_mut().enumerate() {
             if *until > 0.0 && t >= *until {
                 *until = 0.0;
-                rec.log(format!("world/scene_{i}/label"), &rerun::Points3D::new(Vec::<[f32; 3]>::new()))?;
-                rec.log(format!("world/scene_{i}/would_hit"), &rerun::Points3D::new(Vec::<[f32; 3]>::new()))?;
-                rec.log(format!("world/scene_{i}/old_path"), &rerun::LineStrips3D::new(Vec::<Vec<[f32; 3]>>::new()))?;
+                rec.log(
+                    format!("world/scene_{i}/label"),
+                    &rerun::Points3D::new(Vec::<[f32; 3]>::new()),
+                )?;
+                rec.log(
+                    format!("world/scene_{i}/would_hit"),
+                    &rerun::Points3D::new(Vec::<[f32; 3]>::new()),
+                )?;
+                rec.log(
+                    format!("world/scene_{i}/old_path"),
+                    &rerun::LineStrips3D::new(Vec::<Vec<[f32; 3]>>::new()),
+                )?;
             }
         }
         let robots: Vec<(Vec3, Vec<Pose>)> = (0..count)
             .map(|i| {
                 Ok((
                     offsets[i],
-                    meshes.link_poses(&robot, &now[i].position, panda_fingers(&robot, &now[i].position, OPEN)?)?,
+                    meshes.link_poses(
+                        &robot,
+                        &now[i].position,
+                        panda_fingers(&robot, &now[i].position, OPEN)?,
+                    )?,
                 ))
             })
             .collect::<Result<_>>()?;
@@ -323,7 +409,14 @@ fn main() -> Result<()> {
 
 /// Where robot `i`'s hand is when its motion first collides ahead of time `t` (checked every
 /// 10 ms), if it does.
-fn collides_ahead(device: &Device, worlds: &Worlds, robot: &Robot, m: &Motion, i: usize, t: f32) -> Option<Vec3> {
+fn collides_ahead(
+    device: &Device,
+    worlds: &Worlds,
+    robot: &Robot,
+    m: &Motion,
+    i: usize,
+    t: f32,
+) -> Option<Vec3> {
     let tr = m.trajectory.as_ref()?;
     let mut state = JointState::new(robot.dof());
     let mut q = vec![];
@@ -334,9 +427,15 @@ fn collides_ahead(device: &Device, worlds: &Worlds, robot: &Robot, m: &Motion, i
         s += 0.01;
     }
     let items = q.len() / robot.dof();
-    let eval = device.evaluate(worlds, &vec![i as u32; items], &q, &CollisionWeights::NONE).expect("a valid batch");
+    let eval = device
+        .evaluate(worlds, &vec![i as u32; items], &q, &CollisionWeights::NONE)
+        .expect("a valid batch");
     let hit = (0..items).find(|&k| !eval.collision_free(k))?;
-    Some(robot.ee_pose(&q[hit * robot.dof()..][..robot.dof()], 0).position)
+    Some(
+        robot
+            .ee_pose(&q[hit * robot.dof()..][..robot.dof()], 0)
+            .position,
+    )
 }
 
 /// The hand's path along `trajectory` from time `from`, or nothing.
@@ -359,7 +458,11 @@ fn log_path(
             s += 1.0 / 30.0;
         }
     }
-    let strips = if points.is_empty() { vec![] } else { vec![points] };
+    let strips = if points.is_empty() {
+        vec![]
+    } else {
+        vec![points]
+    };
     rec.log(
         format!("world/scene_{i}/{name}"),
         &rerun::LineStrips3D::new(strips)

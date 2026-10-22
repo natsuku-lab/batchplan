@@ -40,7 +40,11 @@ fn render(scene: &World, camera: Pose, k: Intrinsics) -> Vec<f32> {
             let mut t = 0.0;
             while t < 4.0 {
                 let p = camera.position + dir * t;
-                let d = scene.obstacles.iter().map(|o| o.distance(p).0).fold(f32::INFINITY, f32::min);
+                let d = scene
+                    .obstacles
+                    .iter()
+                    .map(|o| o.distance(p).0)
+                    .fold(f32::INFINITY, f32::min);
                 if d < 1e-4 {
                     return t * ray.normalize().z;
                 }
@@ -53,29 +57,60 @@ fn render(scene: &World, camera: Pose, k: Intrinsics) -> Vec<f32> {
 
 fn main() -> Result<()> {
     let robot = common::panda()?;
-    let device = if std::env::args().any(|a| a == "--cpu") { Device::cpu(&robot)? } else { Device::gpu(&robot)? };
+    let device = if std::env::args().any(|a| a == "--cpu") {
+        Device::cpu(&robot)?
+    } else {
+        Device::gpu(&robot)?
+    };
     println!("device: {}", device.name());
     let mut rng = Rng::new(3);
     let scene = common::tabletop(&mut rng);
     let camera = look_at(Vec3::new(1.6, 0.4, 1.0), Vec3::new(0.5, 0.0, 0.0));
-    let k = Intrinsics { fx: 525.0, fy: 525.0, cx: 319.5, cy: 239.5 };
+    let k = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
     let depth = render(&scene, camera, k);
     let seen = depth.iter().filter(|&&z| z > 0.0).count();
     println!("rendered {WIDTH}x{HEIGHT} depth, {seen} pixels hit the scene");
 
     let t = Instant::now();
-    let image = DepthImage { depth: &depth, width: WIDTH, intrinsics: k, camera };
-    let grid = SdfGrid::from_depth(&device, &image, None, Occlusion::Occupied, &SdfOptions::default())?;
+    let image = DepthImage {
+        depth: &depth,
+        width: WIDTH,
+        intrinsics: k,
+        camera,
+    };
+    let grid = SdfGrid::from_depth(
+        &device,
+        &image,
+        None,
+        Occlusion::Occupied,
+        &SdfOptions::default(),
+    )?;
     let [nx, ny, nz] = grid.dims();
-    println!("grid {nx}x{ny}x{nz} at {} m in {:.0} ms", grid.voxel(), t.elapsed().as_secs_f64() * 1e3);
-    let observed = World { obstacles: vec![Obstacle::from(grid)] };
+    println!(
+        "grid {nx}x{ny}x{nz} at {} m in {:.0} ms",
+        grid.voxel(),
+        t.elapsed().as_secs_f64() * 1e3
+    );
+    let observed = World {
+        obstacles: vec![Obstacle::from(grid)],
+    };
 
     let t = Instant::now();
     let worlds = device.upload(&[observed])?;
     // Grasp targets clear of the true scene; some lie in space the camera cannot see.
-    let goals: Vec<IkProblem> = (0..64).map(|_| IkProblem::new(0, common::grasp_target(&scene, &mut rng))).collect();
+    let goals: Vec<IkProblem> = (0..64)
+        .map(|_| IkProblem::new(0, common::grasp_target(&scene, &mut rng)))
+        .collect();
     let ik = solve_ik(&device, &worlds, &goals, &IkOptions::default())?;
-    let problems: Vec<PlanProblem> = ik.solved().map(|s| PlanProblem::new(0, robot.default_q(), s.solution)).collect();
+    let problems: Vec<PlanProblem> = ik
+        .solved()
+        .map(|s| PlanProblem::new(0, robot.default_q(), s.solution))
+        .collect();
     let result = plan(&device, &worlds, &problems, &PlanOptions::default())?;
     println!(
         "IK reached {} of {} targets, planned {} in {:.0} ms",
@@ -91,15 +126,25 @@ fn main() -> Result<()> {
     let (mut samples, mut worst) = (vec![], f32::INFINITY);
     for s in result.solved() {
         let trajectory = Trajectory::new(&robot, s.solution, 1.0)?;
-        samples.extend(trajectory.sample(32.0 / trajectory.knot_interval)?.positions);
+        samples.extend(
+            trajectory
+                .sample(32.0 / trajectory.knot_interval)?
+                .positions,
+        );
     }
     let items = samples.len() / robot.dof();
     // Clearances are exact up to the margin.
-    let exact = CollisionWeights { margin: 1.0, ..CollisionWeights::NONE };
+    let exact = CollisionWeights {
+        margin: 1.0,
+        ..CollisionWeights::NONE
+    };
     let eval = cpu.evaluate(&truth, &vec![0; items], &samples, &exact)?;
     for i in 0..items {
         worst = worst.min(eval.world_clearance[i]);
     }
-    println!("closest approach to the true scene over {items} samples: {:.1} mm", worst * 1e3);
+    println!(
+        "closest approach to the true scene over {items} samples: {:.1} mm",
+        worst * 1e3
+    );
     Ok(())
 }

@@ -12,7 +12,10 @@ pub struct Pose {
 
 impl Pose {
     /// No translation, no rotation.
-    pub const IDENTITY: Pose = Pose { position: Vec3::ZERO, rotation: Quat::IDENTITY };
+    pub const IDENTITY: Pose = Pose {
+        position: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+    };
 
     pub const fn new(position: Vec3, rotation: Quat) -> Pose {
         Pose { position, rotation }
@@ -20,18 +23,25 @@ impl Pose {
 
     /// `other`, given in this pose's frame, in the frame this pose is given in.
     pub fn mul_pose(self, other: Pose) -> Pose {
-        Pose { position: self.position + self.rotation * other.position, rotation: self.rotation * other.rotation }
+        Pose {
+            position: self.position + self.rotation * other.position,
+            rotation: self.rotation * other.rotation,
+        }
     }
 
     /// The frame this pose is given in, in this pose's frame.
     pub fn inverse(self) -> Pose {
         let rotation = self.rotation.inverse();
-        Pose { position: rotation * -self.position, rotation }
+        Pose {
+            position: rotation * -self.position,
+            rotation,
+        }
     }
 }
 
 /// A problem that has a solution: its position in the batch, the problem itself and its best
-/// solution (a configuration for IK, a path's `[points, dof]` B-spline control points for planning).
+/// solution (a configuration for IK, a path's `[points, dof]` B-spline control points for
+/// planning).
 #[derive(Clone, Copy, Debug)]
 pub struct Solved<'a, P> {
     pub index: usize,
@@ -50,7 +60,11 @@ pub struct JointPaths {
 
 impl JointPaths {
     pub(crate) fn zeros(len: usize, points: usize, dof: usize) -> Self {
-        Self { dof, points, positions: vec![0.0; len * points * dof] }
+        Self {
+            dof,
+            points,
+            positions: vec![0.0; len * points * dof],
+        }
     }
 
     pub fn len(&self) -> usize {

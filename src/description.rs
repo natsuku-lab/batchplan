@@ -77,8 +77,8 @@ pub(crate) struct JointDesc {
     pub(crate) max_acceleration: f32,
     pub(crate) max_jerk: f32,
     pub(crate) mimic: Option<Mimic>,
-    /// Whether a motor drives the joint. Loops are driven by their actuated joints; elsewhere every
-    /// joint is planned.
+    /// Whether a motor drives the joint. Loops are driven by their actuated joints; elsewhere
+    /// every joint is planned.
     pub(crate) actuated: bool,
     /// A spring toward `spring_ref` (MJCF `stiffness`, `springref`): what holds a loop's passive
     /// joints where closure alone does not.
@@ -144,7 +144,11 @@ impl Curve {
     #[inline]
     pub(crate) fn value_and_slope(&self, x: f32) -> (f32, f32) {
         let c = self.0;
-        if c[2] == 0.0 && c[3] == 0.0 && c[4] == 0.0 { (c[1] * x + c[0], c[1]) } else { (self.value(x), self.slope(x)) }
+        if c[2] == 0.0 && c[3] == 0.0 && c[4] == 0.0 {
+            (c[1] * x + c[0], c[1])
+        } else {
+            (self.value(x), self.slope(x))
+        }
     }
 
     pub(crate) fn is_linear(&self) -> bool {
@@ -170,7 +174,10 @@ impl Curve {
             }
             power = mul(&power, &inner);
         }
-        sum[5..].iter().all(|&c| c == 0.0).then(|| Curve(std::array::from_fn(|i| sum[i] as f32)))
+        sum[5..]
+            .iter()
+            .all(|&c| c == 0.0)
+            .then(|| Curve(std::array::from_fn(|i| sum[i] as f32)))
     }
 }
 
@@ -225,7 +232,8 @@ impl TriMesh {
     pub(crate) fn append(&mut self, other: TriMesh) {
         let base = self.vertices.len() as u32;
         self.vertices.extend(other.vertices);
-        self.triangles.extend(other.triangles.iter().map(|t| t.map(|i| i + base)));
+        self.triangles
+            .extend(other.triangles.iter().map(|t| t.map(|i| i + base)));
     }
 
     pub(crate) fn corners(&self, t: [u32; 3]) -> [Vec3; 3] {
@@ -274,21 +282,36 @@ impl Geometry {
             Geometry::Sphere { radius } => sphere_mesh(Vec3::splat(*radius)),
             Geometry::Ellipsoid { radii } => sphere_mesh(*radii),
             Geometry::Plane => bail!("a plane has no finite surface to fit spheres to"),
-            Geometry::Cylinder { radius, half_length } => {
-                lathe(&[(0.0, -half_length), (*radius, -half_length), (*radius, *half_length), (0.0, *half_length)])
-            }
-            Geometry::Capsule { radius, half_length } => {
-                let mut profile: Vec<(f32, f32)> =
-                    (0..=6).map(|k| polar(*radius, PI * k as f32 / 12.0, -half_length)).collect();
-                profile.extend((6..=12).map(|k| polar(*radius, PI * k as f32 / 12.0, *half_length)));
+            Geometry::Cylinder {
+                radius,
+                half_length,
+            } => lathe(&[
+                (0.0, -half_length),
+                (*radius, -half_length),
+                (*radius, *half_length),
+                (0.0, *half_length),
+            ]),
+            Geometry::Capsule {
+                radius,
+                half_length,
+            } => {
+                let mut profile: Vec<(f32, f32)> = (0..=6)
+                    .map(|k| polar(*radius, PI * k as f32 / 12.0, -half_length))
+                    .collect();
+                profile
+                    .extend((6..=12).map(|k| polar(*radius, PI * k as f32 / 12.0, *half_length)));
                 lathe(&profile)
             }
             Geometry::Mesh { path, scale } => load_mesh(path, *scale)?,
             Geometry::TriMesh(mesh) => mesh.clone(),
             Geometry::ConvexHull(inner) => {
-                let (vertices, triangles) = parry3d::transformation::try_convex_hull(&inner.mesh()?.vertices)
-                    .map_err(|e| anyhow!("no convex hull: {e}"))?;
-                TriMesh { vertices, triangles }
+                let (vertices, triangles) =
+                    parry3d::transformation::try_convex_hull(&inner.mesh()?.vertices)
+                        .map_err(|e| anyhow!("no convex hull: {e}"))?;
+                TriMesh {
+                    vertices,
+                    triangles,
+                }
             }
         };
         mesh.orient_outward();
@@ -297,7 +320,9 @@ impl Geometry {
 }
 
 fn sphere_mesh(radii: Vec3) -> TriMesh {
-    let profile: Vec<(f32, f32)> = (0..=12).map(|k| polar(1.0, PI * k as f32 / 12.0, 0.0)).collect();
+    let profile: Vec<(f32, f32)> = (0..=12)
+        .map(|k| polar(1.0, PI * k as f32 / 12.0, 0.0))
+        .collect();
     let mut mesh = lathe(&profile);
     mesh.vertices.iter_mut().for_each(|v| *v *= radii);
     mesh
@@ -307,7 +332,10 @@ fn sphere_mesh(radii: Vec3) -> TriMesh {
 /// as (radius, z).
 fn polar(radius: f32, angle: f32, z_offset: f32) -> (f32, f32) {
     let s = angle.sin();
-    (if s.abs() < 1e-6 { 0.0 } else { radius * s }, -radius * angle.cos() + z_offset)
+    (
+        if s.abs() < 1e-6 { 0.0 } else { radius * s },
+        -radius * angle.cos() + z_offset,
+    )
 }
 
 /// Revolves a (radius, z) profile from bottom to top about the z axis. Profile points with zero
@@ -348,8 +376,15 @@ fn lathe(profile: &[(f32, f32)]) -> TriMesh {
 
 fn box_mesh(half: Vec3) -> TriMesh {
     // Vertex i has coordinate +half where bit (x, y, z) = (1, 2, 4) of i is set.
-    let vertices =
-        (0..8).map(|i| Vec3::new(sign(i & 1) * half.x, sign(i & 2) * half.y, sign(i & 4) * half.z)).collect();
+    let vertices = (0..8)
+        .map(|i| {
+            Vec3::new(
+                sign(i & 1) * half.x,
+                sign(i & 2) * half.y,
+                sign(i & 4) * half.z,
+            )
+        })
+        .collect();
     let triangles = vec![
         [0, 4, 6],
         [0, 6, 2],
@@ -364,7 +399,10 @@ fn box_mesh(half: Vec3) -> TriMesh {
         [4, 5, 7],
         [4, 7, 6], // -z, +z
     ];
-    TriMesh { vertices, triangles }
+    TriMesh {
+        vertices,
+        triangles,
+    }
 }
 
 fn sign(bit: u32) -> f32 {
@@ -372,8 +410,9 @@ fn sign(bit: u32) -> f32 {
 }
 
 fn load_mesh(path: &Path, scale: Vec3) -> Result<TriMesh> {
-    let scene =
-        mesh_loader::Loader::default().load(path).with_context(|| format!("loading mesh {}", path.display()))?;
+    let scene = mesh_loader::Loader::default()
+        .load(path)
+        .with_context(|| format!("loading mesh {}", path.display()))?;
     let mut mesh = TriMesh::default();
     for m in scene.meshes {
         mesh.append(TriMesh {
@@ -390,10 +429,19 @@ fn load_mesh(path: &Path, scale: Vec3) -> Result<TriMesh> {
 /// Loads a robot description, choosing the format by file extension.
 /// One description of several: each part's link and joint names get its prefix, its root link
 /// hangs from `world` at its base, and its loops come along.
-pub(crate) fn assemble(parts: Vec<(RobotDescription, String, Transform)>) -> Result<RobotDescription> {
+pub(crate) fn assemble(
+    parts: Vec<(RobotDescription, String, Transform)>,
+) -> Result<RobotDescription> {
     let mut out = RobotDescription {
-        name: parts.iter().map(|(d, prefix, _)| format!("{prefix}{}", d.name)).collect::<Vec<_>>().join("+"),
-        links: vec![LinkDesc { name: "world".into(), ..Default::default() }],
+        name: parts
+            .iter()
+            .map(|(d, prefix, _)| format!("{prefix}{}", d.name))
+            .collect::<Vec<_>>()
+            .join("+"),
+        links: vec![LinkDesc {
+            name: "world".into(),
+            ..Default::default()
+        }],
         joints: vec![],
         loops: vec![],
     };
@@ -404,25 +452,41 @@ pub(crate) fn assemble(parts: Vec<(RobotDescription, String, Transform)>) -> Res
             .iter()
             .find(|l| desc.joints.iter().all(|j| j.child != l.name))
             .with_context(|| format!("description '{}' has no root link", desc.name))?;
-        out.joints.push(JointDesc::fixed(&named("base"), "world", &named(&root.name), base));
-        out.links.extend(desc.links.into_iter().map(|l| LinkDesc { name: named(&l.name), ..l }));
-        out.joints.extend(desc.joints.into_iter().map(|j| JointDesc {
-            name: named(&j.name),
-            parent: named(&j.parent),
-            child: named(&j.child),
-            mimic: j.mimic.map(|m| Mimic { joint: named(&m.joint), ..m }),
-            ..j
-        }));
-        out.loops.extend(desc.loops.into_iter().map(|l| LoopClosure {
+        out.joints.push(JointDesc::fixed(
+            &named("base"),
+            "world",
+            &named(&root.name),
+            base,
+        ));
+        out.links.extend(desc.links.into_iter().map(|l| LinkDesc {
             name: named(&l.name),
-            links: l.links.map(|link| named(&link)),
             ..l
         }));
+        out.joints
+            .extend(desc.joints.into_iter().map(|j| JointDesc {
+                name: named(&j.name),
+                parent: named(&j.parent),
+                child: named(&j.child),
+                mimic: j.mimic.map(|m| Mimic {
+                    joint: named(&m.joint),
+                    ..m
+                }),
+                ..j
+            }));
+        out.loops
+            .extend(desc.loops.into_iter().map(|l| LoopClosure {
+                name: named(&l.name),
+                links: l.links.map(|link| named(&link)),
+                ..l
+            }));
     }
     let mut names: Vec<&str> = out.links.iter().map(|l| l.name.as_str()).collect();
     names.sort_unstable();
     if let Some(w) = names.windows(2).find(|w| w[0] == w[1]) {
-        bail!("two parts name a link '{}': give them different prefixes", w[0]);
+        bail!(
+            "two parts name a link '{}': give them different prefixes",
+            w[0]
+        );
     }
     Ok(out)
 }
@@ -436,7 +500,10 @@ pub(crate) fn load_robot(
         Some("urdf") => crate::urdf::load(path, package_dirs),
         Some("xml" | "mjcf") => Ok(crate::mjcf::load(path)?.robot),
         Some("usd" | "usda" | "usdc" | "usdz") => Ok(load_usd(path, variants)?.robot),
-        _ => bail!("{}: unsupported robot description format (expected .urdf, .xml, .mjcf or .usd*)", path.display()),
+        _ => bail!(
+            "{}: unsupported robot description format (expected .urdf, .xml, .mjcf or .usd*)",
+            path.display()
+        ),
     }
 }
 
@@ -445,12 +512,17 @@ pub(crate) fn load_scene(path: &Path) -> Result<Vec<Shape>> {
     match extension(path).as_deref() {
         Some("xml" | "mjcf") => Ok(crate::mjcf::load(path)?.scene),
         Some("usd" | "usda" | "usdc" | "usdz") => Ok(load_usd(path, &[])?.scene),
-        _ => bail!("{}: unsupported scene format (expected .xml, .mjcf or .usd*)", path.display()),
+        _ => bail!(
+            "{}: unsupported scene format (expected .xml, .mjcf or .usd*)",
+            path.display()
+        ),
     }
 }
 
 fn extension(path: &Path) -> Option<String> {
-    path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase)
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
 }
 
 #[cfg(feature = "usd")]
@@ -460,5 +532,8 @@ fn load_usd(path: &Path, variants: &[(String, String)]) -> Result<Model> {
 
 #[cfg(not(feature = "usd"))]
 fn load_usd(path: &Path, _: &[(String, String)]) -> Result<Model> {
-    bail!("{}: rebuild with `--features usd` to load OpenUSD files", path.display())
+    bail!(
+        "{}: rebuild with `--features usd` to load OpenUSD files",
+        path.display()
+    )
 }

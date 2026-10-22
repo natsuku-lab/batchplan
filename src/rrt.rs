@@ -6,11 +6,11 @@
 //! one from the goal set, in turn (the smaller one alone while the other is at least twice its
 //! size), toward Halton samples: first from a tube around the straight line that widens until it
 //! spans the joint ranges, as cuRobo's roadmap samples an ellipsoid around it, so the route found
-//! stays near the line where one does; then from every joint's range. An extension steps at most `range` from the nearest node and is
-//! checked as an edge. The other tree then connects toward the new node in equal steps of at most
-//! `range`, each checked in order, inserting every valid one. Dynamic domains skip samples farther
-//! from their nearest node than its radius, which shrinks when extending from the node fails.
-//! Continuous joints step and measure the short way round.
+//! stays near the line where one does; then from every joint's range. An extension steps at most
+//! `range` from the nearest node and is checked as an edge. The other tree then connects toward the
+//! new node in equal steps of at most `range`, each checked in order, inserting every valid one.
+//! Dynamic domains skip samples farther from their nearest node than its radius, which shrinks when
+//! extending from the node fails. Continuous joints step and measure the short way round.
 //!
 //! Each problem is its own search: device threads run searches whole, checking their edges with
 //! the CPU's SIMD collision checks (see `edges`), so results do not depend on the batch or device.
@@ -20,7 +20,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use fearless_simd::{Level, Simd, dispatch, f32x8, prelude::*};
+use fearless_simd::prelude::*;
+use fearless_simd::{Level, Simd, dispatch, f32x8};
 
 use crate::device::{Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Keep, Search, Wanted};
@@ -86,7 +87,11 @@ pub struct RrtResult {
 }
 
 pub(crate) fn distance(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f32>().sqrt()
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y) * (x - y))
+        .sum::<f32>()
+        .sqrt()
 }
 
 /// How far (joint-space distance) a bent straight line's via points move off the line, nearest
@@ -116,7 +121,12 @@ pub(crate) enum Sampling {
 
 /// Finds a collision-free waypoint path from each problem's start to one of its goals. Starts and
 /// goals in collision are skipped; a problem without a free start or goal has no path.
-pub fn connect(device: &Device, worlds: &Worlds, problems: &[RrtProblem], o: &RrtOptions) -> Result<RrtResult> {
+pub fn connect(
+    device: &Device,
+    worlds: &Worlds,
+    problems: &[RrtProblem],
+    o: &RrtOptions,
+) -> Result<RrtResult> {
     connect_until(device, worlds, problems, o, None)
 }
 
@@ -130,7 +140,10 @@ pub(crate) fn connect_until(
 ) -> Result<RrtResult> {
     let robot = device.robot();
     let n = robot.dof();
-    ensure_input!(o.range > 0.0 && o.resolution > 0.0, "the range and resolution must be positive");
+    ensure_input!(
+        o.range > 0.0 && o.resolution > 0.0,
+        "the range and resolution must be positive"
+    );
     ensure_input!(
         o.clearance >= 0.0 && o.clearance_ramp > 0.0,
         "the clearance must not be negative, and its ramp positive"
@@ -142,8 +155,14 @@ pub(crate) fn connect_until(
             p.world,
             worlds.len()
         );
-        ensure_input!(p.start.len() == n, "problem {i}: the start must have {n} values");
-        ensure_input!(p.goals.iter().all(|g| g.len() == n), "problem {i}: goals must have {n} values");
+        ensure_input!(
+            p.start.len() == n,
+            "problem {i}: the start must have {n} values"
+        );
+        ensure_input!(
+            p.goals.iter().all(|g| g.len() == n),
+            "problem {i}: goals must have {n} values"
+        );
         ensure_input!(
             robot.within(&p.start) && p.goals.iter().all(|g| robot.within(g)),
             "problem {i}: the start and goals must be within the joint limits"
@@ -157,12 +176,18 @@ pub(crate) fn connect_until(
         .iter()
         .map(|p| {
             let ahead = Arc::<Ahead>::default();
-            Deferred::new(Some(ahead.clone()), move || Connect::new(robot, p, o, Sampling::NearLine, ahead))
+            Deferred::new(Some(ahead.clone()), move || {
+                Connect::new(robot, p, o, Sampling::NearLine, ahead)
+            })
         })
         .collect();
-    let mut running: Vec<&mut dyn Search> = searches.iter_mut().map(|s| s as &mut dyn Search).collect();
+    let mut running: Vec<&mut dyn Search> =
+        searches.iter_mut().map(|s| s as &mut dyn Search).collect();
     device.search(worlds, &mut running, deadline)?;
-    Ok(RrtResult { problems: problems.to_vec(), paths: searches.into_iter().map(|s| s.into_inner().path).collect() })
+    Ok(RrtResult {
+        problems: problems.to_vec(),
+        paths: searches.into_iter().map(|s| s.into_inner().path).collect(),
+    })
 }
 
 /// Nodes with parents, and each node's dynamic-domain radius. Coordinates are stored per joint
@@ -181,7 +206,13 @@ struct Tree {
 impl Tree {
     fn new(wrap: &[bool]) -> Self {
         let kd = (!wrap.contains(&true)).then(KdTree::default);
-        Self { coords: vec![vec![]; wrap.len()], parent: vec![], radius: vec![], kd, level: Level::new() }
+        Self {
+            coords: vec![vec![]; wrap.len()],
+            parent: vec![],
+            radius: vec![],
+            kd,
+            level: Level::new(),
+        }
     }
 
     fn len(&self) -> usize {
@@ -244,7 +275,11 @@ impl Tree {
         }
         let (least, group): ([f32; 8], [f32; 8]) = (least.into(), group.into());
         let lane = (0..8)
-            .min_by(|&a, &b| least[a].total_cmp(&least[b]).then(group[a].total_cmp(&group[b])))
+            .min_by(|&a, &b| {
+                least[a]
+                    .total_cmp(&least[b])
+                    .then(group[a].total_cmp(&group[b]))
+            })
             .expect("eight lanes");
         (8 * group[lane] as usize + lane, least[lane].sqrt())
     }
@@ -344,10 +379,18 @@ impl KdTree {
             self.cells.push(Cell::Leaf(Leaf::default()));
         }
         let mut cell = 0;
-        while let Cell::Split { axis, value, low, high } = self.cells[cell] {
+        while let Cell::Split {
+            axis,
+            value,
+            low,
+            high,
+        } = self.cells[cell]
+        {
             cell = if q[axis] < value { low } else { high };
         }
-        let Cell::Leaf(leaf) = &mut self.cells[cell] else { unreachable!() };
+        let Cell::Leaf(leaf) = &mut self.cells[cell] else {
+            unreachable!()
+        };
         leaf.push(node, q);
         if leaf.nodes.len() <= LEAF {
             return;
@@ -361,7 +404,9 @@ impl KdTree {
             });
             hi - lo
         };
-        let axis = (0..n).max_by(|&a, &b| spread(a).total_cmp(&spread(b))).expect("a joint");
+        let axis = (0..n)
+            .max_by(|&a, &b| spread(a).total_cmp(&spread(b)))
+            .expect("a joint");
         let mut values: Vec<f32> = (0..count).map(|k| leaf.coord(k, axis, n)).collect();
         let middle = values.len() / 2;
         let value = *values.select_nth_unstable_by(middle, f32::total_cmp).1;
@@ -371,14 +416,24 @@ impl KdTree {
             for (j, p) in point.iter_mut().enumerate() {
                 *p = leaf.coord(k, j, n);
             }
-            if point[axis] < value { &mut low } else { &mut high }.push(leaf.nodes[k], &point);
+            if point[axis] < value {
+                &mut low
+            } else {
+                &mut high
+            }
+            .push(leaf.nodes[k], &point);
         }
         // Nodes all equal on the widest axis cannot be split; the leaf grows instead.
         if low.nodes.is_empty() || high.nodes.is_empty() {
             return;
         }
         let (l, h) = (self.cells.len(), self.cells.len() + 1);
-        self.cells[cell] = Cell::Split { axis, value, low: l, high: h };
+        self.cells[cell] = Cell::Split {
+            axis,
+            value,
+            low: l,
+            high: h,
+        };
         self.cells.push(Cell::Leaf(low));
         self.cells.push(Cell::Leaf(high));
     }
@@ -398,7 +453,12 @@ impl KdTree {
             }
             loop {
                 match &cells[cell] {
-                    &Cell::Split { axis, value, low, high } => {
+                    &Cell::Split {
+                        axis,
+                        value,
+                        low,
+                        high,
+                    } => {
                         let d = q[axis] - value;
                         let (near, far) = if d < 0.0 { (low, high) } else { (high, low) };
                         pending.push((far, d * d));
@@ -427,12 +487,19 @@ impl Halton {
         let mut bases = vec![];
         let mut k = 3;
         while bases.len() < dims {
-            if (3..k).step_by(2).take_while(|d| d * d <= k).all(|d| k % d != 0) {
+            if (3..k)
+                .step_by(2)
+                .take_while(|d| d * d <= k)
+                .all(|d| k % d != 0)
+            {
                 bases.push(k);
             }
             k += 2;
         }
-        Self { bases, index: start }
+        Self {
+            bases,
+            index: start,
+        }
     }
 
     fn next(&mut self, out: &mut [f32]) {
@@ -471,7 +538,8 @@ enum Stage {
     Extend {
         near: usize,
     },
-    /// Checking `Connect::steps`, from node `from` of the extending tree to node `other` of the other.
+    /// Checking `Connect::steps`, from node `from` of the extending tree to node `other` of the
+    /// other.
     Connect {
         from: usize,
         other: usize,
@@ -523,7 +591,13 @@ pub(crate) struct Connect<'r> {
 }
 
 impl<'r> Connect<'r> {
-    pub(crate) fn new(robot: &'r Robot, p: &RrtProblem, o: &RrtOptions, sampling: Sampling, ahead: Arc<Ahead>) -> Self {
+    pub(crate) fn new(
+        robot: &'r Robot,
+        p: &RrtProblem,
+        o: &RrtOptions,
+        sampling: Sampling,
+        ahead: Arc<Ahead>,
+    ) -> Self {
         let n = robot.dof();
         Self {
             robot,
@@ -541,10 +615,18 @@ impl<'r> Connect<'r> {
             sampling,
             iterations: 0,
             tube_samples: 0,
-            stage: if p.goals.is_empty() { Stage::Done } else { Stage::Start },
+            stage: if p.goals.is_empty() {
+                Stage::Done
+            } else {
+                Stage::Start
+            },
             keep: (o.clearance > 0.0).then(|| {
                 let ends = std::iter::once(&p.start).chain(&p.goals).cloned().collect();
-                Arc::new(Keep { clearance: o.clearance, ramp: o.clearance_ramp, ends })
+                Arc::new(Keep {
+                    clearance: o.clearance,
+                    ramp: o.clearance_ramp,
+                    ends,
+                })
             }),
             sample: vec![0.0; n],
             new: Vec::with_capacity(n),
@@ -588,7 +670,12 @@ impl<'r> Connect<'r> {
         let n = self.robot.dof();
         self.line_goal.copy_from_slice(&self.goals[goal]);
         self.robot.turn_toward(&self.start, &mut self.line_goal);
-        let along: Vec<f32> = self.line_goal.iter().zip(&self.start).map(|(g, s)| g - s).collect();
+        let along: Vec<f32> = self
+            .line_goal
+            .iter()
+            .zip(&self.start)
+            .map(|(g, s)| g - s)
+            .collect();
         let length = distance(&self.line_goal, &self.start);
         let mut d = vec![0.0; n];
         self.directions.clear();
@@ -596,7 +683,8 @@ impl<'r> Connect<'r> {
             d.fill(0.0);
             d[k / 2] = if k % 2 == 0 { 1.0 } else { -1.0 };
             if length > 0.0 {
-                let dot: f32 = d.iter().zip(&along).map(|(a, b)| a * b).sum::<f32>() / (length * length);
+                let dot: f32 =
+                    d.iter().zip(&along).map(|(a, b)| a * b).sum::<f32>() / (length * length);
                 d.iter_mut().zip(&along).for_each(|(v, a)| *v -= dot * a);
             }
             let norm = d.iter().map(|v| v * v).sum::<f32>().sqrt();
@@ -626,7 +714,12 @@ impl<'r> Connect<'r> {
 
     /// The tube's radius for the next sample, while it is narrower than the widest joint range.
     fn tube(&self) -> Option<f32> {
-        tube_radius(self.robot, &self.across, self.max_iterations, self.tube_samples)
+        tube_radius(
+            self.robot,
+            &self.across,
+            self.max_iterations,
+            self.tube_samples,
+        )
     }
 
     /// Whether any sample came from the tube.
@@ -662,7 +755,13 @@ impl<'r> Connect<'r> {
     /// The path from the start through the extending tree's node `a` and the other's node `b`.
     fn finish(&mut self, a: usize, b: usize) {
         let n = self.robot.dof();
-        let mut path: Vec<f32> = self.trees[0].branch(a).chunks(n).rev().flatten().copied().collect();
+        let mut path: Vec<f32> = self.trees[0]
+            .branch(a)
+            .chunks(n)
+            .rev()
+            .flatten()
+            .copied()
+            .collect();
         path.extend(self.trees[1].branch(b));
         if !self.start_first {
             path = path.chunks(n).rev().flatten().copied().collect();
@@ -670,7 +769,8 @@ impl<'r> Connect<'r> {
         // The trees may hold a continuous joint a turn apart where they meet.
         for k in 1..path.len() / n {
             let (before, after) = path.split_at_mut(k * n);
-            self.robot.turn_toward(&before[(k - 1) * n..], &mut after[..n]);
+            self.robot
+                .turn_toward(&before[(k - 1) * n..], &mut after[..n]);
         }
         self.path = Some(path);
         self.stage = Stage::Done;
@@ -685,13 +785,23 @@ fn swaps(a: f32, b: f32) -> bool {
 
 /// The tube's radius for a sample after `tube_samples` from it, while it is narrower than the
 /// widest joint range (see `Connect::tube`).
-fn tube_radius(robot: &Robot, across: &[f32], max_iterations: usize, tube_samples: usize) -> Option<f32> {
+fn tube_radius(
+    robot: &Robot,
+    across: &[f32],
+    max_iterations: usize,
+    tube_samples: usize,
+) -> Option<f32> {
     if across.is_empty() || max_iterations == 0 {
         return None;
     }
     let doublings = (tube_samples / TUBE_DOUBLING).min(31) as i32;
     let r = TUBE_RADIUS * 2f32.powi(doublings);
-    let widest = robot.lower.iter().zip(&robot.upper).map(|(l, u)| u - l).fold(0.0, f32::max);
+    let widest = robot
+        .lower
+        .iter()
+        .zip(&robot.upper)
+        .map(|(l, u)| u - l)
+        .fold(0.0, f32::max);
     (r < widest).then_some(r)
 }
 
@@ -739,7 +849,15 @@ fn place(
 
 /// Into `new`, where an extension from node `near` of `tree` toward `target`, `d` away, reaches: at
 /// most `range` along the way, `target` turned toward the node first.
-fn reach(robot: &Robot, range: f32, tree: &Tree, near: usize, d: f32, target: &mut [f32], new: &mut Vec<f32>) {
+fn reach(
+    robot: &Robot,
+    range: f32,
+    tree: &Tree,
+    near: usize,
+    d: f32,
+    target: &mut [f32],
+    new: &mut Vec<f32>,
+) {
     new.clear();
     tree.push_node(near, new);
     robot.turn_toward(new, target);
@@ -752,8 +870,8 @@ fn reach(robot: &Robot, range: f32, tree: &Tree, near: usize, d: f32, target: &m
     }
 }
 
-/// Into `steps`, a connection's steps from `new` to node `other` of `tree`, `d` away: equal, at most
-/// `range` long, the last at the node turned toward `new` (into `target`).
+/// Into `steps`, a connection's steps from `new` to node `other` of `tree`, `d` away: equal, at
+/// most `range` long, the last at the node turned toward `new` (into `target`).
 #[allow(clippy::too_many_arguments)]
 fn steps_to(
     robot: &Robot,
@@ -822,12 +940,20 @@ impl Search for Connect<'_> {
                     return self.query(edges, Wanted::FirstValid);
                 }
                 &Stage::Locate(forward) => {
-                    // The line's states `resolution` apart, ends excluded, from the start or the goal.
-                    let count = ((distance(&self.start, &self.line_goal) / self.resolution).ceil() as usize).max(2);
+                    // The line's states `resolution` apart, ends excluded, from the start or the
+                    // goal.
+                    let count = ((distance(&self.start, &self.line_goal) / self.resolution).ceil()
+                        as usize)
+                        .max(2);
                     let mut edges = edges::reuse(buffer);
                     for m in 1..count {
                         let t = if forward { m } else { count - m } as f32 / count as f32;
-                        edges.extend(self.start.iter().zip(&self.line_goal).map(|(s, g)| s + (g - s) * t));
+                        edges.extend(
+                            self.start
+                                .iter()
+                                .zip(&self.line_goal)
+                                .map(|(s, g)| s + (g - s) * t),
+                        );
                     }
                     if edges.is_empty() {
                         self.stage = Stage::Sample;
@@ -842,21 +968,32 @@ impl Search for Connect<'_> {
                     });
                 }
                 &Stage::Bend(k) => {
-                    // Per radius and direction, the colliding stretch moved aside: two via points, or
-                    // one where the line collides at a point.
+                    // Per radius and direction, the colliding stretch moved aside: two via points,
+                    // or one where the line collides at a point.
                     let directions = self.directions.len() / n;
                     if directions == 0 || k >= BEND_RADII.len() * directions {
                         self.stage = Stage::Sample;
                         continue;
                     }
-                    let (r, d) = (BEND_RADII[k / directions], &self.directions[(k % directions) * n..][..n]);
+                    let (r, d) = (
+                        BEND_RADII[k / directions],
+                        &self.directions[(k % directions) * n..][..n],
+                    );
                     let [first, last] = self.collides;
-                    let at: &[f32] = if last > first { &[first, last] } else { &[first] };
+                    let at: &[f32] = if last > first {
+                        &[first, last]
+                    } else {
+                        &[first]
+                    };
                     self.vias.clear();
                     for &t in at {
                         let start = self.vias.len();
                         self.vias.extend(
-                            self.start.iter().zip(&self.line_goal).zip(d).map(|((s, g), d)| s + (g - s) * t + r * d),
+                            self.start
+                                .iter()
+                                .zip(&self.line_goal)
+                                .zip(d)
+                                .map(|((s, g), d)| s + (g - s) * t + r * d),
                         );
                         if !self.robot.within(&self.vias[start..]) {
                             self.vias.clear();
@@ -868,7 +1005,8 @@ impl Search for Connect<'_> {
                         continue;
                     }
                     // The moved stretch first, where a bend most often still collides; the answer
-                    // counts the edges free in this order, so all of them are free when it is their count.
+                    // counts the edges free in this order, so all of them are free when it is their
+                    // count.
                     let mut edges = edges::reuse(buffer);
                     let last = self.vias.len() - n;
                     if last > 0 {
@@ -913,7 +1051,15 @@ impl Search for Connect<'_> {
                         continue;
                     }
                     self.report_sample(sample);
-                    reach(self.robot, self.range, &self.trees[0], near, d, &mut self.sample, &mut self.new);
+                    reach(
+                        self.robot,
+                        self.range,
+                        &self.trees[0],
+                        near,
+                        d,
+                        &mut self.sample,
+                        &mut self.new,
+                    );
                     self.stage = Stage::Extend { near };
                 }
                 &Stage::Extend { near } => {
@@ -959,11 +1105,19 @@ impl Search for Connect<'_> {
                     self.trees[1].add(&self.goals[i], None);
                     self.free_goals.push(i);
                 }
-                self.stage = if i + 1 < self.goals.len() { Stage::Goal(i + 1) } else { Stage::Straight };
+                self.stage = if i + 1 < self.goals.len() {
+                    Stage::Goal(i + 1)
+                } else {
+                    Stage::Straight
+                };
             }
             Stage::Straight => {
                 if let Some(&g) = self.free_goals.get(answer) {
-                    let goal = self.free_goals.iter().position(|&f| f == g).expect("a free goal");
+                    let goal = self
+                        .free_goals
+                        .iter()
+                        .position(|&f| f == g)
+                        .expect("a free goal");
                     self.finish(0, goal);
                 } else if !self.free_goals.is_empty() {
                     self.line_to(self.nearest_goal());
@@ -972,7 +1126,9 @@ impl Search for Connect<'_> {
             }
             Stage::Locate(forward) => {
                 // Free states come in groups of eight; the first collision is in the next group.
-                let count = ((distance(&self.start, &self.line_goal) / self.resolution).ceil() as usize).max(2);
+                let count = ((distance(&self.start, &self.line_goal) / self.resolution).ceil()
+                    as usize)
+                    .max(2);
                 let m = (answer + LANES / 2 + 1).min(count - 1);
                 if forward {
                     self.collides[0] = m as f32 / count as f32;
@@ -995,7 +1151,11 @@ impl Search for Connect<'_> {
                 let tree = &mut self.trees[0];
                 if answer == 0 {
                     let r = &mut tree.radius[near];
-                    *r = if r.is_infinite() { DOMAIN_RADIUS } else { (*r * (1.0 - DOMAIN_ALPHA)).max(DOMAIN_MIN) };
+                    *r = if r.is_infinite() {
+                        DOMAIN_RADIUS
+                    } else {
+                        (*r * (1.0 - DOMAIN_ALPHA)).max(DOMAIN_MIN)
+                    };
                     return;
                 }
                 if tree.radius[near].is_finite() {
@@ -1040,18 +1200,35 @@ mod tests {
     #[test]
     fn bends_leave_held_joints_alone() {
         use crate::robot::RobotOptions;
-        let ur5e = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ur5e/ur_description/urdf/ur5e.urdf");
+        let ur5e = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/ur5e/ur_description/urdf/ur5e.urdf"
+        );
         let robot = Robot::load(ur5e, &RobotOptions::default()).unwrap();
         let start = vec![0.0; 6];
         let goal = vec![0.5, 0.0, -0.4, 0.0, 0.3, 0.0];
         let hold = vec![1, 3, 5];
-        let problem = RrtProblem { world: 0, start, goals: vec![goal], hold: hold.clone() };
-        let mut connect = Connect::new(&robot, &problem, &RrtOptions::default(), Sampling::NearLine, Arc::default());
+        let problem = RrtProblem {
+            world: 0,
+            start,
+            goals: vec![goal],
+            hold: hold.clone(),
+        };
+        let mut connect = Connect::new(
+            &robot,
+            &problem,
+            &RrtOptions::default(),
+            Sampling::NearLine,
+            Arc::default(),
+        );
         connect.line_to(0);
         let directions: Vec<&[f32]> = connect.directions.chunks(6).collect();
         assert!(directions.len() >= 4, "{} directions", directions.len());
         for d in directions {
-            assert!(hold.iter().all(|&j| d[j] == 0.0), "a bend moves a held joint: {d:?}");
+            assert!(
+                hold.iter().all(|&j| d[j] == 0.0),
+                "a bend moves a held joint: {d:?}"
+            );
         }
     }
 

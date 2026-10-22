@@ -70,7 +70,10 @@ impl MeshModel {
                             Geometry::Mesh { path, .. } => path.clone(),
                             _ => PathBuf::from(&link.name),
                         };
-                        Error::Load { path, message: format!("{e:#}") }
+                        Error::Load {
+                            path,
+                            message: format!("{e:#}"),
+                        }
                     })?;
                     all.append(mesh);
                 }
@@ -80,26 +83,47 @@ impl MeshModel {
                 let (lo, hi) = all
                     .vertices
                     .iter()
-                    .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+                    .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), &v| {
+                        (lo.min(v), hi.max(v))
+                    });
                 let centre = (lo + hi) / 2.0;
-                let radius = all.vertices.iter().map(|v| v.distance(centre)).fold(0.0, f32::max);
+                let radius = all
+                    .vertices
+                    .iter()
+                    .map(|v| v.distance(centre))
+                    .fold(0.0, f32::max);
                 let surface = cover(&all, SURFACE_SPACING);
-                let hull = SharedShape::convex_hull(&all.vertices)
-                    .ok_or_else(|| input!("link '{}' has a flat mesh with no convex hull", link.name))?;
-                let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES;
+                let hull = SharedShape::convex_hull(&all.vertices).ok_or_else(|| {
+                    input!("link '{}' has a flat mesh with no convex hull", link.name)
+                })?;
+                let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
+                    | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES;
                 let mesh = ParryMesh::with_flags(all.vertices, all.triangles, flags)
                     .map_err(|e| input!("link '{}' has no usable mesh: {e}", link.name))?;
-                Ok(Some(LinkMesh { mesh: SharedShape::new(mesh), hull, bound: (centre, radius), surface }))
+                Ok(Some(LinkMesh {
+                    mesh: SharedShape::new(mesh),
+                    hull,
+                    bound: (centre, radius),
+                    surface,
+                }))
             })
             .collect::<Result<_>>()?;
-        Ok(Self { robot: robot.clone(), links })
+        Ok(Self {
+            robot: robot.clone(),
+            links,
+        })
     }
 
     /// World and self clearance (meters) of each configuration (`[items, dof]`): from the links'
     /// meshes to the obstacles of `worlds[item_world[i]]`, and between the meshes of the link
     /// pairs checked for self-collision. Zero where they touch or overlap; `1e30` where there is
     /// nothing to measure. Runs on the current rayon pool.
-    pub fn clearance(&self, worlds: &[World], item_world: &[u32], q: &[f32]) -> Result<Vec<[f32; 2]>> {
+    pub fn clearance(
+        &self,
+        worlds: &[World],
+        item_world: &[u32],
+        q: &[f32],
+    ) -> Result<Vec<[f32; 2]>> {
         let n = self.robot.dof();
         ensure_input!(
             q.len() == item_world.len() * n,
@@ -113,8 +137,14 @@ impl MeshModel {
         for (i, w) in worlds.iter().enumerate() {
             w.check().map_err(|e| input!("world {i}: {e}"))?;
         }
-        let placed: Vec<Vec<Placed>> = worlds.iter().map(|w| w.obstacles.iter().map(place).collect()).collect();
-        Ok(q.par_chunks(n).zip(item_world).map(|(q, &w)| self.clearances(&placed[w as usize], q)).collect())
+        let placed: Vec<Vec<Placed>> = worlds
+            .iter()
+            .map(|w| w.obstacles.iter().map(place).collect())
+            .collect();
+        Ok(q.par_chunks(n)
+            .zip(item_world)
+            .map(|(q, &w)| self.clearances(&placed[w as usize], q))
+            .collect())
     }
 
     /// Branch and bound: pairs in order of their bounding spheres' gap, which stops the search
@@ -127,7 +157,8 @@ impl MeshModel {
         let apart = |p1: &Pose, s1: &SharedShape, p2: &Pose, s2: &SharedShape| {
             distance(p1, s1.as_ref(), p2, s2.as_ref()).map_or(0.0, |d| d.distance)
         };
-        let nearest = |mut pairs: Vec<(f32, usize, usize)>, exact: &dyn Fn(usize, usize, f32) -> f32| {
+        let nearest = |mut pairs: Vec<(f32, usize, usize)>,
+                       exact: &dyn Fn(usize, usize, f32) -> f32| {
             pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
             let mut best = FAR;
             for (lower, a, b) in pairs {
@@ -172,7 +203,9 @@ impl MeshModel {
                     let nearest = link
                         .surface
                         .iter()
-                        .map(|&p| grid_distance(grid, to_grid * (fk.rot[i] * p + fk.pos[i] - *centre)).0)
+                        .map(|&p| {
+                            grid_distance(grid, to_grid * (fk.rot[i] * p + fk.pos[i] - *centre)).0
+                        })
                         .fold(f32::INFINITY, f32::min);
                     (nearest - SURFACE_SPACING).max(0.0)
                 }
@@ -185,12 +218,17 @@ impl MeshModel {
             .iter()
             .filter_map(|pair| {
                 let (a, b) = (pair.a as usize, pair.b as usize);
-                let (Some(ma), Some(mb)) = (&self.links[a], &self.links[b]) else { return None };
+                let (Some(ma), Some(mb)) = (&self.links[a], &self.links[b]) else {
+                    return None;
+                };
                 Some((gap(bound(a, ma), bound(b, mb)), a, b))
             })
             .collect();
         let self_collision = nearest(self_pairs, &|a, b, best| {
-            let (ma, mb) = (self.links[a].as_ref().expect("paired"), self.links[b].as_ref().expect("paired"));
+            let (ma, mb) = (
+                self.links[a].as_ref().expect("paired"),
+                self.links[b].as_ref().expect("paired"),
+            );
             if apart(&pose(a), &ma.hull, &pose(b), &mb.hull) >= best {
                 return best;
             }
@@ -205,23 +243,52 @@ fn place(obstacle: &Obstacle) -> Placed {
         Placed::Solid(Pose::from_parts(centre, rotation), shape, (centre, radius))
     };
     match *obstacle {
-        Obstacle::Cuboid { center, half_extents: h, rotation } => {
-            solid(center, rotation, SharedShape::cuboid(h.x, h.y, h.z), h.length())
+        Obstacle::Cuboid {
+            center,
+            half_extents: h,
+            rotation,
+        } => solid(
+            center,
+            rotation,
+            SharedShape::cuboid(h.x, h.y, h.z),
+            h.length(),
+        ),
+        Obstacle::Sphere { center, radius } => {
+            solid(center, Quat::IDENTITY, SharedShape::ball(radius), radius)
         }
-        Obstacle::Sphere { center, radius } => solid(center, Quat::IDENTITY, SharedShape::ball(radius), radius),
         // parry's cylinders run along their y axis, ours along z.
-        Obstacle::Cylinder { center, rotation, radius, half_height } => solid(
+        Obstacle::Cylinder {
+            center,
+            rotation,
+            radius,
+            half_height,
+        } => solid(
             center,
             rotation * Quat::from_rotation_x(FRAC_PI_2),
             SharedShape::cylinder(half_height, radius),
             radius.hypot(half_height),
         ),
-        Obstacle::Capsule { center, rotation, radius, half_length } => {
-            solid(center, rotation, SharedShape::capsule_z(half_length, radius), radius + half_length)
-        }
-        Obstacle::Sdf { ref grid, center, rotation } => {
+        Obstacle::Capsule {
+            center,
+            rotation,
+            radius,
+            half_length,
+        } => solid(
+            center,
+            rotation,
+            SharedShape::capsule_z(half_length, radius),
+            radius + half_length,
+        ),
+        Obstacle::Sdf {
+            ref grid,
+            center,
+            rotation,
+        } => {
             let (lo, hi) = grid.bounds();
-            let around = (center + rotation * ((lo + hi) / 2.0), (hi - lo).length() / 2.0);
+            let around = (
+                center + rotation * ((lo + hi) / 2.0),
+                (hi - lo).length() / 2.0,
+            );
             Placed::Grid(grid.clone(), center, rotation, around)
         }
     }

@@ -17,8 +17,11 @@ fn main() -> Result<()> {
     let robot = common::panda()?;
     let mut rng = Rng::new(42);
     let worlds: Vec<World> = (0..count).map(|_| common::tabletop(&mut rng)).collect();
-    let ik_problems: Vec<IkProblem> =
-        worlds.iter().enumerate().map(|(i, w)| IkProblem::new(i as u32, common::grasp_target(w, &mut rng))).collect();
+    let ik_problems: Vec<IkProblem> = worlds
+        .iter()
+        .enumerate()
+        .map(|(i, w)| IkProblem::new(i as u32, common::grasp_target(w, &mut rng)))
+        .collect();
 
     let mut devices = vec![];
     match Device::gpu(&robot) {
@@ -39,13 +42,23 @@ fn main() -> Result<()> {
     for device in &devices {
         let worlds = device.upload(&worlds)?;
         // Warm up (pipeline compilation, thread pool).
-        solve_ik(device, &worlds, &ik_problems[..1], &IkOptions { iterations: 1, ..ik_opts })?;
+        solve_ik(
+            device,
+            &worlds,
+            &ik_problems[..1],
+            &IkOptions {
+                iterations: 1,
+                ..ik_opts
+            },
+        )?;
 
         let t = Instant::now();
         let ik = solve_ik(device, &worlds, &ik_problems, &ik_opts)?;
         let ik_time = t.elapsed().as_secs_f64();
-        let problems: Vec<PlanProblem> =
-            ik.solved().map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution)).collect();
+        let problems: Vec<PlanProblem> = ik
+            .solved()
+            .map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution))
+            .collect();
 
         let t = Instant::now();
         let result = plan(device, &worlds, &problems, &plan_opts)?;
@@ -65,7 +78,10 @@ fn main() -> Result<()> {
             problems.len() as f64 / plan_time,
             problems.len()
         );
-        println!("  end-to-end {:.1} solved problems/s\n", solved as f64 / (ik_time + plan_time));
+        println!(
+            "  end-to-end {:.1} solved problems/s\n",
+            solved as f64 / (ik_time + plan_time)
+        );
     }
     Ok(())
 }

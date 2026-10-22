@@ -1,4 +1,5 @@
-//! CPU device checks: kinematics against published parameters, obstacle distances, analytic gradients, IK.
+//! CPU device checks: kinematics against published parameters, obstacle distances, analytic
+//! gradients, IK.
 
 #[path = "../examples/common/mod.rs"]
 mod common;
@@ -14,7 +15,9 @@ fn panda() -> Robot {
 }
 
 fn random_q(robot: &Robot, rng: &mut Rng) -> Vec<f32> {
-    (0..robot.dof()).map(|j| rng.range(robot.lower()[j], robot.upper()[j])).collect()
+    (0..robot.dof())
+        .map(|j| rng.range(robot.lower()[j], robot.upper()[j]))
+        .collect()
 }
 
 /// Flange pose from Franka's published modified-DH table, independent of the URDF parser.
@@ -48,9 +51,14 @@ fn fk_matches_franka_dh_parameters() {
         let q = random_q(&robot, &mut rng);
         let pose = robot.link_pose(&q, "panda_link8").unwrap();
         let (r, p) = franka_dh_flange(&q);
-        assert!((pose.position.as_dvec3() - p).length() < 1e-5, "position mismatch at {q:?}");
-        let r_err =
-            (DMat3::from_quat(pose.rotation.as_dquat()) - r).to_cols_array().iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        assert!(
+            (pose.position.as_dvec3() - p).length() < 1e-5,
+            "position mismatch at {q:?}"
+        );
+        let r_err = (DMat3::from_quat(pose.rotation.as_dquat()) - r)
+            .to_cols_array()
+            .iter()
+            .fold(0.0f64, |m, v| m.max(v.abs()));
         assert!(r_err < 1e-5, "rotation mismatch {r_err} at {q:?}");
     }
 }
@@ -60,10 +68,24 @@ fn every_obstacle_kind() -> Vec<Obstacle> {
     let rotation = Quat::from_euler(glam::EulerRot::XYZ, 0.4, -0.7, 1.1);
     let center = Vec3::new(0.1, -0.2, 0.3);
     vec![
-        Obstacle::Cuboid { center, half_extents: Vec3::new(0.1, 0.2, 0.05), rotation },
+        Obstacle::Cuboid {
+            center,
+            half_extents: Vec3::new(0.1, 0.2, 0.05),
+            rotation,
+        },
         Obstacle::sphere(center, 0.15),
-        Obstacle::Cylinder { center, rotation, radius: 0.12, half_height: 0.2 },
-        Obstacle::Capsule { center, rotation, radius: 0.08, half_length: 0.15 },
+        Obstacle::Cylinder {
+            center,
+            rotation,
+            radius: 0.12,
+            half_height: 0.2,
+        },
+        Obstacle::Capsule {
+            center,
+            rotation,
+            radius: 0.08,
+            half_length: 0.15,
+        },
     ]
 }
 
@@ -73,12 +95,22 @@ fn obstacle_distances_are_exact_and_differentiable() {
     for o in every_obstacle_kind() {
         let (mut outside, mut inside) = (0, 0);
         for _ in 0..2000 {
-            let p = Vec3::new(rng.range(-0.3, 0.5), rng.range(-0.6, 0.2), rng.range(-0.1, 0.7));
+            let p = Vec3::new(
+                rng.range(-0.3, 0.5),
+                rng.range(-0.6, 0.2),
+                rng.range(-0.1, 0.7),
+            );
             let (d, g) = o.distance(p);
-            assert!((g.length() - 1.0).abs() < 1e-4, "{o:?}: gradient {g} at {p} is not a unit vector");
+            assert!(
+                (g.length() - 1.0).abs() < 1e-4,
+                "{o:?}: gradient {g} at {p} is not a unit vector"
+            );
             // Stepping back along the gradient by the distance lands on the surface.
             let (on_surface, _) = o.distance(p - d * g);
-            assert!(on_surface.abs() < 1e-4, "{o:?}: {p} - {d} * {g} is {on_surface} from the surface");
+            assert!(
+                on_surface.abs() < 1e-4,
+                "{o:?}: {p} - {d} * {g} is {on_surface} from the surface"
+            );
             // The distance is only piecewise smooth (edges, the medial axis inside), so accept
             // agreement with finite differences at either of two step sizes.
             let fd_error = |h: f32| {
@@ -90,10 +122,16 @@ fn obstacle_distances_are_exact_and_differentiable() {
                 (fd - g).length()
             };
             let err = fd_error(1e-3).min(fd_error(1e-4));
-            assert!(err < 2e-2 || d < 0.0, "{o:?}: gradient {g} off by {err} at {p}");
+            assert!(
+                err < 2e-2 || d < 0.0,
+                "{o:?}: gradient {g} off by {err} at {p}"
+            );
             if d > 0.0 { outside += 1 } else { inside += 1 }
         }
-        assert!(outside > 100 && inside > 20, "{o:?}: {outside} samples outside, {inside} inside");
+        assert!(
+            outside > 100 && inside > 20,
+            "{o:?}: {outside} samples outside, {inside} inside"
+        );
     }
 }
 
@@ -113,11 +151,19 @@ fn round_obstacle_distances_match_closed_forms() {
     ];
     for (o, offset, expected) in cases {
         let (d, _) = o.distance(center + offset);
-        assert!((d - expected).abs() < 1e-5, "{o:?} at offset {offset}: {d}, expected {expected}");
+        assert!(
+            (d - expected).abs() < 1e-5,
+            "{o:?} at offset {offset}: {d}, expected {expected}"
+        );
     }
     // Rotating the obstacle and the query point together leaves the distance unchanged.
     let r = Quat::from_rotation_y(0.9);
-    let rotated = Obstacle::Cylinder { center, rotation: r, radius: 0.5, half_height: 1.0 };
+    let rotated = Obstacle::Cylinder {
+        center,
+        rotation: r,
+        radius: 0.5,
+        half_height: 1.0,
+    };
     assert!((rotated.distance(center + r * Vec3::new(0.8, 0.0, 1.4)).0 - 0.5).abs() < 1e-5);
 }
 
@@ -126,12 +172,33 @@ fn default_pose_is_collision_free_on_table() {
     let robot = panda();
     let cpu = Device::cpu(&robot).unwrap();
     let world = common::tabletop(&mut Rng::new(1));
-    let table_only = World { obstacles: world.obstacles[..1].to_vec() };
+    let table_only = World {
+        obstacles: world.obstacles[..1].to_vec(),
+    };
     // Clearances are exact up to the margins.
-    let w = CollisionWeights { margin: 0.1, self_margin: 0.1, ..CollisionWeights::NONE };
-    let e = cpu.evaluate(&cpu.upload(&[table_only]).unwrap(), &[0], robot.default_q(), &w).unwrap();
-    assert!(e.world_clearance[0] > 0.05, "world clearance {}", e.world_clearance[0]);
-    assert!(e.self_clearance[0] > 0.0, "self clearance {}", e.self_clearance[0]);
+    let w = CollisionWeights {
+        margin: 0.1,
+        self_margin: 0.1,
+        ..CollisionWeights::NONE
+    };
+    let e = cpu
+        .evaluate(
+            &cpu.upload(&[table_only]).unwrap(),
+            &[0],
+            robot.default_q(),
+            &w,
+        )
+        .unwrap();
+    assert!(
+        e.world_clearance[0] > 0.05,
+        "world clearance {}",
+        e.world_clearance[0]
+    );
+    assert!(
+        e.self_clearance[0] > 0.0,
+        "self clearance {}",
+        e.self_clearance[0]
+    );
 }
 
 #[test]
@@ -139,7 +206,12 @@ fn collision_gradient_matches_finite_differences() {
     let robot = panda();
     let cpu = Device::cpu(&robot).unwrap();
     let n = robot.dof();
-    let w = CollisionWeights { world: 1000.0, self_collision: 1000.0, margin: 0.05, self_margin: 0.02 };
+    let w = CollisionWeights {
+        world: 1000.0,
+        self_collision: 1000.0,
+        margin: 0.05,
+        self_margin: 0.02,
+    };
     let mut rng = Rng::new(11);
     let worlds: Vec<World> = (0..8).map(|_| common::tabletop(&mut rng)).collect();
     let worlds = cpu.upload(&worlds).unwrap();
@@ -169,7 +241,10 @@ fn collision_gradient_matches_finite_differences() {
             (0..n).map(|j| (fd[j] - g[j]).powi(2)).sum::<f32>().sqrt() / norm
         };
         let err = rel_err(2e-4).min(rel_err(5e-5));
-        assert!(err < 2e-2, "gradient mismatch {err} (|g| = {norm}) at {q:?}, grad {g:?}");
+        assert!(
+            err < 2e-2,
+            "gradient mismatch {err} (|g| = {norm}) at {q:?}, grad {g:?}"
+        );
         checked += 1;
     }
     assert!(checked > 50, "only {checked} colliding samples");
@@ -184,18 +259,28 @@ fn ik_reaches_targets_from_collision_free_configurations() {
     let mut problems = vec![];
     while problems.len() < 64 {
         let q = random_q(&robot, &mut rng);
-        if cpu.evaluate(&empty, &[0], &q, &CollisionWeights::NONE).unwrap().collision_free(0) {
+        if cpu
+            .evaluate(&empty, &[0], &q, &CollisionWeights::NONE)
+            .unwrap()
+            .collision_free(0)
+        {
             problems.push(IkProblem::new(0, robot.ee_pose(&q, 0)));
         }
     }
-    let o = IkOptions { seeds: 16, ..Default::default() };
+    let o = IkOptions {
+        seeds: 16,
+        ..Default::default()
+    };
     let result = solve_ik(&cpu, &empty, &problems, &o).unwrap();
-    let solved = (0..problems.len()).filter(|&p| result.best(p).is_some()).count();
+    let solved = (0..problems.len())
+        .filter(|&p| result.best(p).is_some())
+        .count();
     assert!(solved >= 60, "solved {solved}/64");
     for (p, problem) in problems.iter().enumerate() {
         if let Some(q) = result.best(p) {
             assert!(
-                (robot.ee_pose(q, 0).position - problem.targets[0].unwrap().position).length() < o.position_tolerance
+                (robot.ee_pose(q, 0).position - problem.targets[0].unwrap().position).length()
+                    < o.position_tolerance
             );
         }
     }

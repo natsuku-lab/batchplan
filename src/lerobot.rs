@@ -6,7 +6,8 @@
 //! - `observation.state`: joint positions and each hand's gripper opening (1 open, 0 closed), in
 //!   per-arm groups as ALOHA lays out two arms: the joints no hand moves, then for each hand the
 //!   joints that move it and its gripper. One arm's state is its joints, then its gripper. Grippers
-//!   are named `gripper`, or after their part's prefix (`left_gripper`) on a robot with several hands.
+//!   are named `gripper`, or after their part's prefix (`left_gripper`) on a robot with several
+//!   hands.
 //! - `action`: the state at the next frame (the last frame repeats its own).
 //! - `observation.environment_state`: the goal pose (position xyz, quaternion xyzw with w >= 0),
 //!   then every obstacle of the episode's world, where it is at that frame, as `[present, kind,
@@ -28,7 +29,9 @@ use std::sync::Arc;
 
 use crate::error::{Error, Result, ensure_input};
 use arrow_array::builder::{Float64Builder, Int64Builder, ListBuilder, StringBuilder};
-use arrow_array::{ArrayRef, FixedSizeListArray, Float32Array, Int64Array, RecordBatch, StringArray};
+use arrow_array::{
+    ArrayRef, FixedSizeListArray, Float32Array, Int64Array, RecordBatch, StringArray,
+};
 use arrow_schema::{DataType, Field, Schema};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
@@ -46,7 +49,13 @@ const VIDEO_FILE_SIZE_IN_MB: usize = 200;
 /// Episode-metadata rows written at a time.
 const EPISODES_PER_WRITE: usize = 1000;
 const DATA_PATH: &str = "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet";
-const QUANTILES: [(f64, &str); 5] = [(0.01, "q01"), (0.10, "q10"), (0.50, "q50"), (0.90, "q90"), (0.99, "q99")];
+const QUANTILES: [(f64, &str); 5] = [
+    (0.01, "q01"),
+    (0.10, "q10"),
+    (0.50, "q50"),
+    (0.90, "q90"),
+    (0.99, "q99"),
+];
 const GOAL_WIDTH: usize = 7;
 const OBSTACLE_WIDTH: usize = 12;
 
@@ -61,7 +70,10 @@ pub struct ExportOptions {
 
 impl Default for ExportOptions {
     fn default() -> Self {
-        Self { robot_type: None, data_files_size_in_mb: 100 }
+        Self {
+            robot_type: None,
+            data_files_size_in_mb: 100,
+        }
     }
 }
 
@@ -78,8 +90,15 @@ pub fn export(
 ) -> Result<()> {
     let root = root.as_ref();
     let dt = check_demos(robot, worlds, demos)?;
-    ensure_input!(!root.join("meta/info.json").exists(), "{} already holds a LeRobot dataset", root.display());
-    ensure_input!(o.data_files_size_in_mb > 0, "data files need a positive size limit");
+    ensure_input!(
+        !root.join("meta/info.json").exists(),
+        "{} already holds a LeRobot dataset",
+        root.display()
+    );
+    ensure_input!(
+        o.data_files_size_in_mb > 0,
+        "data files need a positive size limit"
+    );
     let fps = (1.0 / dt).round();
     ensure_input!(
         fps >= 1.0 && (fps * dt - 1.0).abs() < 1e-4,
@@ -87,7 +106,11 @@ pub fn export(
         1.0 / dt
     );
     let fps = fps as u32;
-    let max_obstacles = demos.iter().map(|d| worlds[d.world as usize].obstacles.len()).max().unwrap_or(0);
+    let max_obstacles = demos
+        .iter()
+        .map(|d| worlds[d.world as usize].obstacles.len())
+        .max()
+        .unwrap_or(0);
     // Tasks in order of first appearance.
     let mut tasks: Vec<&str> = vec![];
     let mut task_index: HashMap<&str, usize> = HashMap::new();
@@ -106,19 +129,38 @@ pub fn export(
     let mut index = 0usize;
     for (e, demo) in demos.iter().enumerate() {
         let world = &worlds[demo.world as usize];
-        let columns = episode_columns(robot, world, demo, e, index, fps, max_obstacles, task_index[demo.task.as_str()]);
+        let columns = episode_columns(
+            robot,
+            world,
+            demo,
+            e,
+            index,
+            fps,
+            max_obstacles,
+            task_index[demo.task.as_str()],
+        );
         let batch = record_batch(&columns)?;
         let (chunk, file) = data.place(batch.get_array_memory_size())?;
         data.write(&batch)?;
         let stats: Vec<Stats> = columns.iter().map(Column::stats).collect();
         if e == 0 {
             names = columns.iter().map(|c| c.name.clone()).collect();
-            features = columns.iter().map(|c| (c.name.clone(), c.feature())).collect();
+            features = columns
+                .iter()
+                .map(|c| (c.name.clone(), c.feature()))
+                .collect();
             totals = stats.iter().map(|_| Aggregate::default()).collect();
         }
         totals.iter_mut().zip(&stats).for_each(|(t, s)| t.add(s));
         let length = demo.trajectory.len();
-        rows.push(EpisodeRow { length, chunk, file, from: index, task: demo.task.clone(), stats });
+        rows.push(EpisodeRow {
+            length,
+            chunk,
+            file,
+            from: index,
+            task: demo.task.clone(),
+            stats,
+        });
         if rows.len() == EPISODES_PER_WRITE {
             write_episodes(&mut episode_files, e + 1 - rows.len(), &rows, &names)?;
             rows.clear();
@@ -148,8 +190,11 @@ pub fn export(
         "video_path": null,
         "features": features,
     });
-    let stats: Map<String, Value> =
-        names.iter().zip(&totals).map(|(name, t)| (name.clone(), t.stats().to_json())).collect();
+    let stats: Map<String, Value> = names
+        .iter()
+        .zip(&totals)
+        .map(|(name, t)| (name.clone(), t.stats().to_json()))
+        .collect();
     let extension = json!({
         "generator": "batchplan",
         "environment_state": {
@@ -173,8 +218,14 @@ pub fn export(
         "robot": robot_json(robot),
     });
     fs::write(meta.join("info.json"), serde_json::to_string_pretty(&info)?)?;
-    fs::write(meta.join("stats.json"), serde_json::to_string_pretty(&stats)?)?;
-    fs::write(meta.join("batchplan.json"), serde_json::to_string(&extension)?)?;
+    fs::write(
+        meta.join("stats.json"),
+        serde_json::to_string_pretty(&stats)?,
+    )?;
+    fs::write(
+        meta.join("batchplan.json"),
+        serde_json::to_string(&extension)?,
+    )?;
     Ok(())
 }
 
@@ -193,11 +244,21 @@ struct Column {
 
 impl Column {
     fn f32(name: &str, width: usize, names: Option<Vec<String>>, values: Vec<f32>) -> Self {
-        Self { name: name.into(), width, names, data: Data::F32(values) }
+        Self {
+            name: name.into(),
+            width,
+            names,
+            data: Data::F32(values),
+        }
     }
 
     fn i64(name: &str, values: Vec<i64>) -> Self {
-        Self { name: name.into(), width: 1, names: None, data: Data::I64(values) }
+        Self {
+            name: name.into(),
+            width: 1,
+            names: None,
+            data: Data::I64(values),
+        }
     }
 
     fn feature(&self) -> Value {
@@ -217,15 +278,26 @@ impl Column {
 
     fn arrow(&self) -> (Field, ArrayRef) {
         match (&self.data, self.width) {
-            (Data::F32(v), 1) => {
-                (Field::new(&self.name, DataType::Float32, true), Arc::new(Float32Array::from(v.clone())))
-            }
-            (Data::I64(v), _) => (Field::new(&self.name, DataType::Int64, true), Arc::new(Int64Array::from(v.clone()))),
+            (Data::F32(v), 1) => (
+                Field::new(&self.name, DataType::Float32, true),
+                Arc::new(Float32Array::from(v.clone())),
+            ),
+            (Data::I64(v), _) => (
+                Field::new(&self.name, DataType::Int64, true),
+                Arc::new(Int64Array::from(v.clone())),
+            ),
             (Data::F32(v), w) => {
                 let item = Arc::new(Field::new_list_field(DataType::Float32, true));
-                let array =
-                    FixedSizeListArray::new(item.clone(), w as i32, Arc::new(Float32Array::from(v.clone())), None);
-                (Field::new(&self.name, DataType::FixedSizeList(item, w as i32), true), Arc::new(array))
+                let array = FixedSizeListArray::new(
+                    item.clone(),
+                    w as i32,
+                    Arc::new(Float32Array::from(v.clone())),
+                    None,
+                );
+                (
+                    Field::new(&self.name, DataType::FixedSizeList(item, w as i32), true),
+                    Arc::new(array),
+                )
             }
         }
     }
@@ -234,7 +306,10 @@ impl Column {
     fn stats(&self) -> Stats {
         let values = self.values();
         let frames = values.len() / self.width;
-        let mut s = Stats { count: frames, ..Default::default() };
+        let mut s = Stats {
+            count: frames,
+            ..Default::default()
+        };
         for d in 0..self.width {
             let mut x: Vec<f64> = (0..frames).map(|f| values[f * self.width + d]).collect();
             let mean = x.iter().sum::<f64>() / frames as f64;
@@ -291,14 +366,22 @@ impl Aggregate {
 
     fn stats(&self) -> Stats {
         let mean: Vec<f64> = self.mean.iter().map(|m| m / self.count).collect();
-        let std = self.second.iter().zip(&mean).map(|(s, m)| (s / self.count - m * m).max(0.0).sqrt()).collect();
+        let std = self
+            .second
+            .iter()
+            .zip(&mean)
+            .map(|(s, m)| (s / self.count - m * m).max(0.0).sqrt())
+            .collect();
         Stats {
             min: self.min.clone(),
             max: self.max.clone(),
             mean,
             std,
             count: self.count as usize,
-            quantiles: self.quantiles.clone().map(|q| q.iter().map(|v| v / self.count).collect()),
+            quantiles: self
+                .quantiles
+                .clone()
+                .map(|q| q.iter().map(|v| v / self.count).collect()),
         }
     }
 }
@@ -316,14 +399,27 @@ struct Stats {
 impl Stats {
     /// `(name, values)` in LeRobot's order; `count` is reported separately.
     fn vectors(&self) -> Vec<(&'static str, &[f64])> {
-        let mut v =
-            vec![("min", &self.min[..]), ("max", &self.max[..]), ("mean", &self.mean[..]), ("std", &self.std[..])];
-        v.extend(QUANTILES.iter().zip(&self.quantiles).map(|((_, name), q)| (*name, &q[..])));
+        let mut v = vec![
+            ("min", &self.min[..]),
+            ("max", &self.max[..]),
+            ("mean", &self.mean[..]),
+            ("std", &self.std[..]),
+        ];
+        v.extend(
+            QUANTILES
+                .iter()
+                .zip(&self.quantiles)
+                .map(|((_, name), q)| (*name, &q[..])),
+        );
         v
     }
 
     fn to_json(&self) -> Value {
-        let mut m: Map<String, Value> = self.vectors().into_iter().map(|(k, v)| (k.to_string(), json!(v))).collect();
+        let mut m: Map<String, Value> = self
+            .vectors()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), json!(v)))
+            .collect();
         m.insert("count".into(), json!([self.count]));
         Value::Object(m)
     }
@@ -338,8 +434,10 @@ enum Slot {
 /// The state's entries: the joints no hand moves, then each hand's joints and its gripper.
 fn state_layout(robot: &Robot) -> Vec<Slot> {
     let hands: Vec<Vec<usize>> = (0..robot.hands()).map(|h| robot.hand_joints(h)).collect();
-    let mut layout: Vec<Slot> =
-        (0..robot.dof()).filter(|j| hands.iter().all(|joints| !joints.contains(j))).map(Slot::Joint).collect();
+    let mut layout: Vec<Slot> = (0..robot.dof())
+        .filter(|j| hands.iter().all(|joints| !joints.contains(j)))
+        .map(Slot::Joint)
+        .collect();
     let mut placed = vec![false; robot.dof()];
     for (h, joints) in hands.iter().enumerate() {
         // A joint two hands share (a torso) goes with the first.
@@ -429,28 +527,48 @@ fn episode_columns(
             environment_state(world, demo.goal, carried, max_obstacles)
         })
         .collect();
-    let (is_recovery, parent) =
-        (i64::from(demo.origin.parent().is_some()), demo.origin.parent().map_or(-1, |p| p as i64));
+    let (is_recovery, parent) = (
+        i64::from(demo.origin.parent().is_some()),
+        demo.origin.parent().map_or(-1, |p| p as i64),
+    );
     let names = state_names(robot);
     let per_frame = |v: i64| vec![v; frames];
     vec![
         Column::f32("observation.state", width, Some(names.clone()), state),
-        Column::f32("observation.environment_state", env.len() / frames, Some(environment_names(max_obstacles)), env),
+        Column::f32(
+            "observation.environment_state",
+            env.len() / frames,
+            Some(environment_names(max_obstacles)),
+            env,
+        ),
         Column::f32("action", width, Some(names), action),
         Column::i64("is_recovery", per_frame(is_recovery)),
         Column::i64("parent_episode_index", per_frame(parent)),
         Column::i64("world_index", per_frame(demo.world as i64)),
-        Column::f32("timestamp", 1, None, (0..frames).map(|f| f as f32 / fps as f32).collect()),
+        Column::f32(
+            "timestamp",
+            1,
+            None,
+            (0..frames).map(|f| f as f32 / fps as f32).collect(),
+        ),
         Column::i64("frame_index", (0..frames as i64).collect()),
         Column::i64("episode_index", per_frame(episode as i64)),
-        Column::i64("index", (first_index as i64..(first_index + frames) as i64).collect()),
+        Column::i64(
+            "index",
+            (first_index as i64..(first_index + frames) as i64).collect(),
+        ),
         Column::i64("task_index", per_frame(task as i64)),
     ]
 }
 
 /// The goal, then every obstacle of `world`, `carried` (an obstacle's index and pose) where it
 /// is now.
-fn environment_state(world: &World, goal: Pose, carried: Option<(usize, Pose)>, max_obstacles: usize) -> Vec<f32> {
+fn environment_state(
+    world: &World,
+    goal: Pose,
+    carried: Option<(usize, Pose)>,
+    max_obstacles: usize,
+) -> Vec<f32> {
     let canonical = |q: glam::Quat| if q.w < 0.0 { -q } else { q };
     let (p, q) = (goal.position, canonical(goal.rotation));
     let mut env = vec![p.x, p.y, p.z, q.x, q.y, q.z, q.w];
@@ -461,30 +579,59 @@ fn environment_state(world: &World, goal: Pose, carried: Option<(usize, Pose)>, 
         };
         let round = |radius: f32, half: f32| glam::Vec3::new(radius, radius, half);
         let (kind, center, size, rot) = match o {
-            Obstacle::Cuboid { center, half_extents, rotation } => (0.0, center, half_extents, rotation),
-            Obstacle::Sphere { center, radius } => (1.0, center, glam::Vec3::splat(radius), glam::Quat::IDENTITY),
-            Obstacle::Cylinder { center, rotation, radius, half_height } => {
-                (2.0, center, round(radius, half_height), rotation)
+            Obstacle::Cuboid {
+                center,
+                half_extents,
+                rotation,
+            } => (0.0, center, half_extents, rotation),
+            Obstacle::Sphere { center, radius } => {
+                (1.0, center, glam::Vec3::splat(radius), glam::Quat::IDENTITY)
             }
-            Obstacle::Capsule { center, rotation, radius, half_length } => {
-                (3.0, center, round(radius, half_length), rotation)
-            }
-            Obstacle::Sdf { ref grid, center, rotation } => {
+            Obstacle::Cylinder {
+                center,
+                rotation,
+                radius,
+                half_height,
+            } => (2.0, center, round(radius, half_height), rotation),
+            Obstacle::Capsule {
+                center,
+                rotation,
+                radius,
+                half_length,
+            } => (3.0, center, round(radius, half_length), rotation),
+            Obstacle::Sdf {
+                ref grid,
+                center,
+                rotation,
+            } => {
                 let (lo, hi) = grid.bounds();
-                (4.0, center + rotation * (0.5 * (lo + hi)), 0.5 * (hi - lo), rotation)
+                (
+                    4.0,
+                    center + rotation * (0.5 * (lo + hi)),
+                    0.5 * (hi - lo),
+                    rotation,
+                )
             }
         };
         let rot = canonical(rot);
-        env.extend([1.0, kind, center.x, center.y, center.z, size.x, size.y, size.z, rot.x, rot.y, rot.z, rot.w]);
+        env.extend([
+            1.0, kind, center.x, center.y, center.z, size.x, size.y, size.z, rot.x, rot.y, rot.z,
+            rot.w,
+        ]);
     }
     env.resize(GOAL_WIDTH + OBSTACLE_WIDTH * max_obstacles, 0.0);
     env
 }
 
 fn environment_names(max_obstacles: usize) -> Vec<String> {
-    let mut names: Vec<String> = ["x", "y", "z", "qx", "qy", "qz", "qw"].iter().map(|s| format!("goal.{s}")).collect();
+    let mut names: Vec<String> = ["x", "y", "z", "qx", "qy", "qz", "qw"]
+        .iter()
+        .map(|s| format!("goal.{s}"))
+        .collect();
     for k in 0..max_obstacles {
-        let fields = ["present", "kind", "x", "y", "z", "sx", "sy", "sz", "qx", "qy", "qz", "qw"];
+        let fields = [
+            "present", "kind", "x", "y", "z", "sx", "sy", "sz", "qx", "qy", "qz", "qw",
+        ];
         names.extend(fields.iter().map(|f| format!("obstacle{k}.{f}")));
     }
     names
@@ -506,7 +653,12 @@ struct EpisodeRow {
 
 /// Appends `rows`, episodes `first..`, to the episode-metadata files, each row recording the file
 /// it lands in.
-fn write_episodes(files: &mut Files, first: usize, rows: &[EpisodeRow], features: &[String]) -> Result<()> {
+fn write_episodes(
+    files: &mut Files,
+    first: usize,
+    rows: &[EpisodeRow],
+    features: &[String],
+) -> Result<()> {
     let size = episodes_batch(first, rows, features, (0, 0))?.get_array_memory_size();
     let at = files.place(size)?;
     files.write(&episodes_batch(first, rows, features, at)?)
@@ -521,7 +673,13 @@ fn episodes_batch(
     at: (usize, usize),
 ) -> Result<RecordBatch> {
     let int_column = |f: &dyn Fn(usize, &EpisodeRow) -> usize| -> ArrayRef {
-        Arc::new(Int64Array::from(episodes.iter().enumerate().map(|(i, e)| f(i, e) as i64).collect::<Vec<_>>()))
+        Arc::new(Int64Array::from(
+            episodes
+                .iter()
+                .enumerate()
+                .map(|(i, e)| f(i, e) as i64)
+                .collect::<Vec<_>>(),
+        ))
     };
     let mut tasks = ListBuilder::new(StringBuilder::new());
     for e in episodes {
@@ -535,12 +693,19 @@ fn episodes_batch(
         ("data/chunk_index".into(), int_column(&|_, e| e.chunk)),
         ("data/file_index".into(), int_column(&|_, e| e.file)),
         ("dataset_from_index".into(), int_column(&|_, e| e.from)),
-        ("dataset_to_index".into(), int_column(&|_, e| e.from + e.length)),
+        (
+            "dataset_to_index".into(),
+            int_column(&|_, e| e.from + e.length),
+        ),
         ("meta/episodes/chunk_index".into(), int_column(&|_, _| at.0)),
         ("meta/episodes/file_index".into(), int_column(&|_, _| at.1)),
     ];
     for (f, feature) in features.iter().enumerate() {
-        let names: Vec<&str> = episodes[0].stats[f].vectors().iter().map(|(n, _)| *n).collect();
+        let names: Vec<&str> = episodes[0].stats[f]
+            .vectors()
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
         for (s, stat) in names.iter().enumerate() {
             let mut b = ListBuilder::new(Float64Builder::new());
             for e in episodes {
@@ -557,8 +722,14 @@ fn episodes_batch(
         }
         columns.push((format!("stats/{feature}/count"), Arc::new(count.finish())));
     }
-    let fields: Vec<Field> = columns.iter().map(|(n, a)| Field::new(n, a.data_type().clone(), true)).collect();
-    Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), columns.into_iter().map(|(_, a)| a).collect())?)
+    let fields: Vec<Field> = columns
+        .iter()
+        .map(|(n, a)| Field::new(n, a.data_type().clone(), true))
+        .collect();
+    Ok(RecordBatch::try_new(
+        Arc::new(Schema::new(fields)),
+        columns.into_iter().map(|(_, a)| a).collect(),
+    )?)
 }
 
 /// `meta/tasks.parquet` as pandas writes it: a `task_index` column indexed by the task string.
@@ -573,18 +744,24 @@ fn tasks_batch(tasks: &[&str]) -> Result<RecordBatch> {
         "creator": {"library": "batchplan", "version": env!("CARGO_PKG_VERSION")},
         "pandas_version": "2.2.3",
     });
-    let schema =
-        Schema::new(vec![Field::new("task_index", DataType::Int64, true), Field::new("task", DataType::Utf8, true)])
-            .with_metadata(HashMap::from([("pandas".to_string(), pandas.to_string())]));
+    let schema = Schema::new(vec![
+        Field::new("task_index", DataType::Int64, true),
+        Field::new("task", DataType::Utf8, true),
+    ])
+    .with_metadata(HashMap::from([("pandas".to_string(), pandas.to_string())]));
     let arrays: Vec<ArrayRef> = vec![
-        Arc::new(Int64Array::from((0..tasks.len() as i64).collect::<Vec<_>>())),
+        Arc::new(Int64Array::from(
+            (0..tasks.len() as i64).collect::<Vec<_>>(),
+        )),
         Arc::new(StringArray::from(tasks.to_vec())),
     ];
     Ok(RecordBatch::try_new(Arc::new(schema), arrays)?)
 }
 
 fn properties() -> WriterProperties {
-    WriterProperties::builder().set_compression(Compression::SNAPPY).build()
+    WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .build()
 }
 
 fn write_parquet(path: &Path, batch: &RecordBatch) -> Result<()> {
@@ -610,7 +787,15 @@ struct Files {
 
 impl Files {
     fn new(dir: PathBuf, limit: usize) -> Self {
-        Self { dir, limit, chunk: 0, file: 0, bytes: 0, writer: None, pending: 0 }
+        Self {
+            dir,
+            limit,
+            chunk: 0,
+            file: 0,
+            bytes: 0,
+            writer: None,
+            pending: 0,
+        }
     }
 
     /// The (chunk, file) the next write of `size` bytes lands in, starting a new file if needed.
@@ -632,8 +817,13 @@ impl Files {
             let dir = self.dir.join(format!("chunk-{:03}", self.chunk));
             fs::create_dir_all(&dir)?;
             let path = dir.join(format!("file-{:03}.parquet", self.file));
-            let file = File::create(&path).map_err(|e| Error::Write(format!("creating {}: {e}", path.display())))?;
-            self.writer = Some(ArrowWriter::try_new(file, batch.schema(), Some(properties()))?);
+            let file = File::create(&path)
+                .map_err(|e| Error::Write(format!("creating {}: {e}", path.display())))?;
+            self.writer = Some(ArrowWriter::try_new(
+                file,
+                batch.schema(),
+                Some(properties()),
+            )?);
             self.bytes = 0;
         }
         let w = self.writer.as_mut().expect("writer opened above");

@@ -1,5 +1,5 @@
-//! CPU reference backend (rayon over items, on a pool it owns). Every function here has a WGSL twin in
-//! `kernels.wgsl`; the GPU parity tests compare the two.
+//! CPU reference backend (rayon over items, on a pool it owns). Every function here has a WGSL twin
+//! in `kernels.wgsl`; the GPU parity tests compare the two.
 
 // Index loops here mirror kernels.wgsl line for line, which keeps the two easy to compare.
 #![allow(clippy::needless_range_loop)]
@@ -24,7 +24,8 @@ use crate::spline;
 use crate::trajopt::{LINE_SEARCH, MAX_HISTORY, PlanOptions};
 use crate::types::{JointPaths, Pose};
 use crate::world::{
-    FAR, Obstacle, World, box_distance, capsule_distance, cylinder_distance, sdf_distance, sphere_distance,
+    FAR, Obstacle, World, box_distance, capsule_distance, cylinder_distance, sdf_distance,
+    sphere_distance,
 };
 use fearless_simd::dispatch;
 
@@ -50,7 +51,11 @@ impl CpuBackend {
             .thread_name(|i| format!("batchplan-cpu-{i}"))
             .build()
             .map_err(|e| Error::Threads(format!("starting the CPU device's threads: {e}")))?;
-        Ok(Self { robot: robot.clone(), lanes: Arc::new(Lanes::new(robot)), pool: Arc::new(pool) })
+        Ok(Self {
+            robot: robot.clone(),
+            lanes: Arc::new(Lanes::new(robot)),
+            pool: Arc::new(pool),
+        })
     }
 }
 
@@ -59,11 +64,34 @@ impl CpuBackend {
 /// `radius` is that of a sphere about its centre around it, a hair wide, so a test against the
 /// sphere never rules out what the exact test would not.
 pub(crate) enum Prepared {
-    Cuboid { rot: Mat3, center: Vec3, half: Vec3, upright: bool, radius: f32 },
-    Sphere { center: Vec3, radius: f32 },
-    Cylinder { rot: Mat3, center: Vec3, radius: f32, half_height: f32 },
-    Capsule { rot: Mat3, center: Vec3, radius: f32, half_length: f32 },
-    Sdf { rot: Mat3, center: Vec3, grid: Arc<SdfGrid> },
+    Cuboid {
+        rot: Mat3,
+        center: Vec3,
+        half: Vec3,
+        upright: bool,
+        radius: f32,
+    },
+    Sphere {
+        center: Vec3,
+        radius: f32,
+    },
+    Cylinder {
+        rot: Mat3,
+        center: Vec3,
+        radius: f32,
+        half_height: f32,
+    },
+    Capsule {
+        rot: Mat3,
+        center: Vec3,
+        radius: f32,
+        half_length: f32,
+    },
+    Sdf {
+        rot: Mat3,
+        center: Vec3,
+        grid: Arc<SdfGrid>,
+    },
 }
 
 /// The obstacles of each world, prepared.
@@ -76,22 +104,55 @@ pub(crate) fn prepare(worlds: &[World]) -> CpuWorlds {
             s.obstacles
                 .iter()
                 .map(|o| match *o {
-                    Obstacle::Cuboid { center, half_extents, rotation } => {
+                    Obstacle::Cuboid {
+                        center,
+                        half_extents,
+                        rotation,
+                    } => {
                         let rot = Mat3::from_quat(rotation);
-                        let upright = rot.z_axis == Vec3::Z && rot.x_axis.z == 0.0 && rot.y_axis.z == 0.0;
+                        let upright =
+                            rot.z_axis == Vec3::Z && rot.x_axis.z == 0.0 && rot.y_axis.z == 0.0;
                         let radius = half_extents.length() * 1.0001 + 1e-6;
-                        Prepared::Cuboid { rot, center, half: half_extents, upright, radius }
+                        Prepared::Cuboid {
+                            rot,
+                            center,
+                            half: half_extents,
+                            upright,
+                            radius,
+                        }
                     }
                     Obstacle::Sphere { center, radius } => Prepared::Sphere { center, radius },
-                    Obstacle::Cylinder { center, rotation, radius, half_height } => {
-                        Prepared::Cylinder { rot: Mat3::from_quat(rotation), center, radius, half_height }
-                    }
-                    Obstacle::Capsule { center, rotation, radius, half_length } => {
-                        Prepared::Capsule { rot: Mat3::from_quat(rotation), center, radius, half_length }
-                    }
-                    Obstacle::Sdf { ref grid, center, rotation } => {
-                        Prepared::Sdf { rot: Mat3::from_quat(rotation), center, grid: grid.clone() }
-                    }
+                    Obstacle::Cylinder {
+                        center,
+                        rotation,
+                        radius,
+                        half_height,
+                    } => Prepared::Cylinder {
+                        rot: Mat3::from_quat(rotation),
+                        center,
+                        radius,
+                        half_height,
+                    },
+                    Obstacle::Capsule {
+                        center,
+                        rotation,
+                        radius,
+                        half_length,
+                    } => Prepared::Capsule {
+                        rot: Mat3::from_quat(rotation),
+                        center,
+                        radius,
+                        half_length,
+                    },
+                    Obstacle::Sdf {
+                        ref grid,
+                        center,
+                        rotation,
+                    } => Prepared::Sdf {
+                        rot: Mat3::from_quat(rotation),
+                        center,
+                        grid: grid.clone(),
+                    },
                 })
                 .collect()
         })
@@ -151,13 +212,27 @@ impl Scratch {
 #[inline]
 fn obstacle_distance(o: &Prepared, p: Vec3) -> (f32, Vec3) {
     match *o {
-        Prepared::Cuboid { rot, center, half, .. } => box_distance(rot, center, half, p),
+        Prepared::Cuboid {
+            rot, center, half, ..
+        } => box_distance(rot, center, half, p),
         Prepared::Sphere { center, radius } => sphere_distance(center, radius, p),
-        Prepared::Cylinder { rot, center, radius, half_height } => {
-            cylinder_distance(rot, center, radius, half_height, p)
-        }
-        Prepared::Capsule { rot, center, radius, half_length } => capsule_distance(rot, center, radius, half_length, p),
-        Prepared::Sdf { rot, center, ref grid } => sdf_distance(rot, center, grid, p),
+        Prepared::Cylinder {
+            rot,
+            center,
+            radius,
+            half_height,
+        } => cylinder_distance(rot, center, radius, half_height, p),
+        Prepared::Capsule {
+            rot,
+            center,
+            radius,
+            half_length,
+        } => capsule_distance(rot, center, radius, half_length, p),
+        Prepared::Sdf {
+            rot,
+            center,
+            ref grid,
+        } => sdf_distance(rot, center, grid, p),
     }
 }
 
@@ -175,7 +250,11 @@ fn collision<const GRADIENT: bool>(
     buffers: &mut CollisionBuffers,
 ) -> CollisionOut {
     let (rot, pos) = (&fk.rot[..], &fk.pos[..]);
-    let CollisionBuffers { centers: sc, force, moment } = buffers;
+    let CollisionBuffers {
+        centers: sc,
+        force,
+        moment,
+    } = buffers;
     for (c, sp) in sc.iter_mut().zip(&robot.spheres) {
         *c = rot[sp.link] * sp.center + pos[sp.link];
     }
@@ -226,8 +305,13 @@ fn collision<const GRADIENT: bool>(
     // Likewise for link pairs whose bounding spheres are farther apart than the self margin.
     let gate = w.self_margin.max(0.0);
     for lp in &robot.self_link_pairs {
-        let (ba, bb) = (robot.link_bounds[lp.a as usize], robot.link_bounds[lp.b as usize]);
-        let at = |link: u32, b: [f32; 4]| rot[link as usize] * Vec3::new(b[0], b[1], b[2]) + pos[link as usize];
+        let (ba, bb) = (
+            robot.link_bounds[lp.a as usize],
+            robot.link_bounds[lp.b as usize],
+        );
+        let at = |link: u32, b: [f32; 4]| {
+            rot[link as usize] * Vec3::new(b[0], b[1], b[2]) + pos[link as usize]
+        };
         let gap = (at(lp.a, ba) - at(lp.b, bb)).length() - ba[3] - bb[3];
         if gap > gate {
             smin = smin.min(gap);
@@ -257,16 +341,23 @@ fn collision<const GRADIENT: bool>(
         }
     }
     if !GRADIENT || !touched {
-        return CollisionOut { cost, world_clearance: wmin, self_clearance: smin };
+        return CollisionOut {
+            cost,
+            world_clearance: wmin,
+            self_clearance: smin,
+        };
     }
     // Each link's wrench reaches the joints at and above it, leaves first.
     for i in (0..robot.links.len()).rev() {
         let link = &robot.links[i];
         match link.joint {
             JointKind::Revolute { dof, curve, .. } => {
-                grad[dof] += fk.rate(i, &curve) * fk.axis[i].dot(moment[i] - pos[i].cross(force[i]));
+                grad[dof] +=
+                    fk.rate(i, &curve) * fk.axis[i].dot(moment[i] - pos[i].cross(force[i]));
             }
-            JointKind::Prismatic { dof, curve, .. } => grad[dof] += fk.rate(i, &curve) * fk.axis[i].dot(force[i]),
+            JointKind::Prismatic { dof, curve, .. } => {
+                grad[dof] += fk.rate(i, &curve) * fk.axis[i].dot(force[i])
+            }
             JointKind::Fixed => {}
         }
         if let Some(p) = link.parent {
@@ -275,7 +366,11 @@ fn collision<const GRADIENT: bool>(
             moment[p] += m;
         }
     }
-    CollisionOut { cost, world_clearance: wmin, self_clearance: smin }
+    CollisionOut {
+        cost,
+        world_clearance: wmin,
+        self_clearance: smin,
+    }
 }
 
 /// Rotation vector (axis * angle) of `r`. Must stay in sync with `rot_log` in kernels.wgsl.
@@ -310,7 +405,11 @@ fn chol6(a: &mut [f32; 36]) {
             for k in 0..j {
                 s -= a[i * 6 + k] * a[j * 6 + k];
             }
-            a[i * 6 + j] = if i == j { s.max(1e-12).sqrt() } else { s / a[j * 6 + j] };
+            a[i * 6 + j] = if i == j {
+                s.max(1e-12).sqrt()
+            } else {
+                s / a[j * 6 + j]
+            };
         }
     }
 }
@@ -347,13 +446,31 @@ fn pose_error(fk: &Fk, ee: usize, target: &(Vec3, Mat3), rot_weight: f32) -> ([f
 /// Hand `h`'s Jacobian into `jac` (6 x dof, row-major) and its damped normal matrix, factored, into
 /// `a`. Mirrors `hand_system` in kernels.wgsl.
 #[inline]
-fn hand_system(robot: &Robot, fk: &Fk, h: usize, o: &IkOptions, jac: &mut [f32], a: &mut [f32; 36]) {
+fn hand_system(
+    robot: &Robot,
+    fk: &Fk,
+    h: usize,
+    o: &IkOptions,
+    jac: &mut [f32],
+    a: &mut [f32; 36],
+) {
     let (n, ee) = (robot.dof(), robot.ee_links[h]);
     jac.fill(0.0);
     for (i, dof) in robot.chain(ee) {
-        let m = fk.rate(i, &robot.links[i].joint.actuation().expect("chain links have moving joints").1);
+        let m = fk.rate(
+            i,
+            &robot.links[i]
+                .joint
+                .actuation()
+                .expect("chain links have moving joints")
+                .1,
+        );
         let jp = m * fk.dpoint(i, fk.pos[ee]);
-        let jo = if fk.slides[i] { Vec3::ZERO } else { m * fk.axis[i] * o.rot_weight };
+        let jo = if fk.slides[i] {
+            Vec3::ZERO
+        } else {
+            m * fk.axis[i] * o.rot_weight
+        };
         for (r, v) in [jp.x, jp.y, jp.z, jo.x, jo.y, jo.z].into_iter().enumerate() {
             jac[r * n + dof] += v;
         }
@@ -401,8 +518,23 @@ fn ik_step(
 ) {
     let n = q.len();
     robot.fk_into(q, &mut s.fk);
-    let Scratch { fk, collision: buffers, jac, dq, grad, push, moving, .. } = s;
-    let (jac, dq, grad, push, moving) = (&mut jac[..], &mut dq[..n], &mut grad[..n], &mut push[..n], &moving[..n]);
+    let Scratch {
+        fk,
+        collision: buffers,
+        jac,
+        dq,
+        grad,
+        push,
+        moving,
+        ..
+    } = s;
+    let (jac, dq, grad, push, moving) = (
+        &mut jac[..],
+        &mut dq[..n],
+        &mut grad[..n],
+        &mut push[..n],
+        &moving[..n],
+    );
     let mut a = [0.0f32; 36];
     dq.fill(0.0);
     let mut last = None;
@@ -436,7 +568,11 @@ fn ik_step(
         }
     }
     let largest = dq.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-    let scale = if largest > o.max_step { o.max_step / largest } else { 1.0 };
+    let scale = if largest > o.max_step {
+        o.max_step / largest
+    } else {
+        1.0
+    };
     for j in 0..n {
         let (lo, hi) = robot.bounds(j);
         q[j] = (q[j] + dq[j] * scale).clamp(lo, hi);
@@ -457,16 +593,36 @@ fn traj_sample_grad(
     scratch: &mut Scratch,
 ) {
     let n = robot.dof();
-    spline::blend(cp, n, span, spline::basis(spline::sample_u(s, o.samples_per_span)), &mut scratch.q);
+    spline::blend(
+        cp,
+        n,
+        span,
+        spline::basis(spline::sample_u(s, o.samples_per_span)),
+        &mut scratch.q,
+    );
     robot.fk_into(&scratch.q, &mut scratch.fk);
     out.fill(0.0);
-    collision::<true>(robot, world, &scratch.fk, &o.collision, out, &mut scratch.collision);
+    collision::<true>(
+        robot,
+        world,
+        &scratch.fk,
+        &o.collision,
+        out,
+        &mut scratch.collision,
+    );
 }
 
 /// Gradient of the trajectory cost w.r.t. free control point `t`: the collision gradients of the
 /// samples it shapes, each weighted by its basis value there, plus smoothness on the control
 /// points. Must match `traj_grad` in kernels.wgsl.
-fn traj_grad(cp: &[f32], sample_grad: &[f32], n: usize, t: usize, o: &PlanOptions, out: &mut [f32]) {
+fn traj_grad(
+    cp: &[f32],
+    sample_grad: &[f32],
+    n: usize,
+    t: usize,
+    o: &PlanOptions,
+    out: &mut [f32],
+) {
     let t_count = cp.len() / n;
     let (spans, k) = (t_count - 3, o.samples_per_span);
     let q = |i: usize, j: usize| cp[i * n + j];
@@ -532,7 +688,15 @@ fn traj_cost(
         scratch.q[j] = w[0] * c(0) + w[1] * c(1) + w[2] * c(2) + w[3] * c(3);
     }
     robot.fk_into(&scratch.q, &mut scratch.fk);
-    collision::<false>(robot, world, &scratch.fk, &o.collision, &mut [], &mut scratch.collision).cost
+    collision::<false>(
+        robot,
+        world,
+        &scratch.fk,
+        &o.collision,
+        &mut [],
+        &mut scratch.collision,
+    )
+    .cost
 }
 
 /// One path's L-BFGS state, as kernels.wgsl keeps it in `aux`.
@@ -635,7 +799,11 @@ fn lbfgs_direction(st: &mut Lbfgs, n: usize, o: &PlanOptions) {
             sy += st.pending_step[i] * (st.grad[i] - st.prev_grad[i]);
         }
         if sy > 1e-10 {
-            let slot = if st.count == 0 { 0 } else { (st.newest + 1) % m };
+            let slot = if st.count == 0 {
+                0
+            } else {
+                (st.newest + 1) % m
+            };
             for i in free.clone() {
                 st.steps[slot * tn + i] = st.pending_step[i];
                 st.changes[slot * tn + i] = st.grad[i] - st.prev_grad[i];
@@ -655,7 +823,10 @@ fn lbfgs_direction(st: &mut Lbfgs, n: usize, o: &PlanOptions) {
     let mut alpha = [0.0f32; MAX_HISTORY];
     for a in 0..st.count {
         let slot = (st.newest + m - a) % m;
-        let (s, y) = (&st.steps[slot * tn..(slot + 1) * tn], &st.changes[slot * tn..(slot + 1) * tn]);
+        let (s, y) = (
+            &st.steps[slot * tn..(slot + 1) * tn],
+            &st.changes[slot * tn..(slot + 1) * tn],
+        );
         alpha[a] = dot(s, &st.dir) / dot(y, s);
         for i in free.clone() {
             st.dir[i] -= alpha[a] * y[i];
@@ -663,7 +834,10 @@ fn lbfgs_direction(st: &mut Lbfgs, n: usize, o: &PlanOptions) {
     }
     let gamma = if st.count > 0 {
         let slot = st.newest;
-        let (s, y) = (&st.steps[slot * tn..(slot + 1) * tn], &st.changes[slot * tn..(slot + 1) * tn]);
+        let (s, y) = (
+            &st.steps[slot * tn..(slot + 1) * tn],
+            &st.changes[slot * tn..(slot + 1) * tn],
+        );
         dot(s, y) / dot(y, y)
     } else if largest > 0.0 {
         o.initial_step / largest
@@ -675,7 +849,10 @@ fn lbfgs_direction(st: &mut Lbfgs, n: usize, o: &PlanOptions) {
     }
     for a in (0..st.count).rev() {
         let slot = (st.newest + m - a) % m;
-        let (s, y) = (&st.steps[slot * tn..(slot + 1) * tn], &st.changes[slot * tn..(slot + 1) * tn]);
+        let (s, y) = (
+            &st.steps[slot * tn..(slot + 1) * tn],
+            &st.changes[slot * tn..(slot + 1) * tn],
+        );
         let beta = dot(y, &st.dir) / dot(y, s);
         for i in free.clone() {
             st.dir[i] += (alpha[a] - beta) * s[i];
@@ -700,9 +877,13 @@ fn each_chunk<T: Send>(
     f: impl Fn(&mut Scratch, usize, &mut [T]) + Sync,
 ) {
     if parallel {
-        data.par_chunks_mut(size).enumerate().for_each_init(|| Scratch::new(robot), |s, (i, chunk)| f(s, i, chunk));
+        data.par_chunks_mut(size)
+            .enumerate()
+            .for_each_init(|| Scratch::new(robot), |s, (i, chunk)| f(s, i, chunk));
     } else {
-        data.chunks_mut(size).enumerate().for_each(|(i, chunk)| f(scratch, i, chunk));
+        data.chunks_mut(size)
+            .enumerate()
+            .for_each(|(i, chunk)| f(scratch, i, chunk));
     }
 }
 
@@ -730,10 +911,27 @@ pub(crate) fn optimize_path(
         }
         let tr_ref = &*tr;
         let dir = &st.dir;
-        each_chunk(parallel, robot, &mut scratch, &mut st.costs, 1, |s, i, cost| {
-            let (c, i) = (i / samples, i % samples);
-            cost[0] = traj_cost(robot, world, tr_ref, dir, LINE_SEARCH[c], i / k, i % k, o, s);
-        });
+        each_chunk(
+            parallel,
+            robot,
+            &mut scratch,
+            &mut st.costs,
+            1,
+            |s, i, cost| {
+                let (c, i) = (i / samples, i % samples);
+                cost[0] = traj_cost(
+                    robot,
+                    world,
+                    tr_ref,
+                    dir,
+                    LINE_SEARCH[c],
+                    i / k,
+                    i % k,
+                    o,
+                    s,
+                );
+            },
+        );
         let steepest = st.count == 0;
         traj_search(robot, tr, &mut st, o);
         // A failed steepest-descent search leaves nothing to change in later rounds.
@@ -741,9 +939,16 @@ pub(crate) fn optimize_path(
             break;
         }
         let tr_ref = &*tr;
-        each_chunk(parallel, robot, &mut scratch, &mut sample_grad, n, |s, i, g| {
-            traj_sample_grad(robot, world, tr_ref, i / k, i % k, o, g, s);
-        });
+        each_chunk(
+            parallel,
+            robot,
+            &mut scratch,
+            &mut sample_grad,
+            n,
+            |s, i, g| {
+                traj_sample_grad(robot, world, tr_ref, i / k, i % k, o, g, s);
+            },
+        );
         for t in 3..t_count - 3 {
             traj_grad(tr, &sample_grad, n, t, o, &mut st.grad[t * n..(t + 1) * n]);
         }
@@ -770,22 +975,58 @@ pub(crate) fn run_searches(
     if let [search] = searches {
         let scratch = &mut EdgeScratch::new(lanes);
         let Some(ahead) = search.help() else {
-            edges::run(&mut **search, robot, lanes, worlds, deadline, None, None, scratch);
+            edges::run(
+                &mut **search,
+                robot,
+                lanes,
+                worlds,
+                deadline,
+                None,
+                None,
+                scratch,
+            );
             return;
         };
         // The search stops once it should summon helpers, and goes on beside them.
-        if edges::run(&mut **search, robot, lanes, worlds, deadline, None, Some(&|| ahead.summon()), scratch) {
+        if edges::run(
+            &mut **search,
+            robot,
+            lanes,
+            worlds,
+            deadline,
+            None,
+            Some(&|| ahead.summon()),
+            scratch,
+        ) {
             pool.in_place_scope(|scope| {
                 for _ in 0..HELPERS {
                     let ahead = ahead.clone();
                     scope.spawn(move |_| {
                         if let Some(mut helper) = ahead.helper(robot, None) {
                             let scratch = &mut EdgeScratch::new(lanes);
-                            edges::run(&mut helper, robot, lanes, worlds, deadline, None, None, scratch);
+                            edges::run(
+                                &mut helper,
+                                robot,
+                                lanes,
+                                worlds,
+                                deadline,
+                                None,
+                                None,
+                                scratch,
+                            );
                         }
                     });
                 }
-                edges::run(&mut **search, robot, lanes, worlds, deadline, None, None, scratch);
+                edges::run(
+                    &mut **search,
+                    robot,
+                    lanes,
+                    worlds,
+                    deadline,
+                    None,
+                    None,
+                    scratch,
+                );
                 ahead.finish();
             });
         }
@@ -801,7 +1042,16 @@ pub(crate) fn run_searches(
             let i = next.fetch_add(1, Ordering::Relaxed);
             let Some(search) = searches.get(i) else { break };
             let mut search = search.lock().expect("a search panicked");
-            edges::run(&mut ***search, robot, lanes, worlds, deadline, Some(&optimizing), None, &mut scratch);
+            edges::run(
+                &mut ***search,
+                robot,
+                lanes,
+                worlds,
+                deadline,
+                Some(&optimizing),
+                None,
+                &mut scratch,
+            );
             if let Some(ahead) = &helped[i] {
                 ahead.finish();
             }
@@ -813,9 +1063,20 @@ pub(crate) fn run_searches(
         loop {
             let mut helping = false;
             for k in 0..count {
-                let Some(ahead) = &helped[(context.index() + k) % count] else { continue };
+                let Some(ahead) = &helped[(context.index() + k) % count] else {
+                    continue;
+                };
                 if let Some(mut helper) = ahead.helper(robot, Some(&optimizing)) {
-                    edges::run(&mut helper, robot, lanes, worlds, deadline, None, None, &mut scratch);
+                    edges::run(
+                        &mut helper,
+                        robot,
+                        lanes,
+                        worlds,
+                        deadline,
+                        None,
+                        None,
+                        &mut scratch,
+                    );
                     helping = true;
                 }
             }
@@ -844,10 +1105,20 @@ impl Backend for CpuBackend {
     }
 
     fn with_robot(&self, robot: &Robot) -> Result<Box<dyn Backend>> {
-        Ok(Box::new(Self { robot: robot.clone(), lanes: Arc::new(Lanes::new(robot)), pool: self.pool.clone() }))
+        Ok(Box::new(Self {
+            robot: robot.clone(),
+            lanes: Arc::new(Lanes::new(robot)),
+            pool: self.pool.clone(),
+        }))
     }
 
-    fn evaluate(&self, worlds: &Worlds, item_world: &[u32], q: &[f32], w: &CollisionWeights) -> Result<Evaluation> {
+    fn evaluate(
+        &self,
+        worlds: &Worlds,
+        item_world: &[u32],
+        q: &[f32],
+        w: &CollisionWeights,
+    ) -> Result<Evaluation> {
         let n = self.robot.dof();
         let prepared: &CpuWorlds = worlds.prepared();
         let items = item_world.len();
@@ -857,18 +1128,30 @@ impl Backend for CpuBackend {
             cost: vec![0.0; items],
             grad: vec![0.0; items * n],
         };
-        let rows =
-            out.world_clearance.par_iter_mut().zip(out.self_clearance.par_iter_mut()).zip(out.cost.par_iter_mut());
+        let rows = out
+            .world_clearance
+            .par_iter_mut()
+            .zip(out.self_clearance.par_iter_mut())
+            .zip(out.cost.par_iter_mut());
         self.pool.install(|| {
-            rows.zip(out.grad.par_chunks_mut(n)).zip(q.par_chunks(n).zip(item_world.par_iter())).for_each_init(
-                || Scratch::new(&self.robot),
-                |scratch, ((((wc, sc), cost), g), (qi, &s))| {
-                    self.robot.fk_into(qi, &mut scratch.fk);
-                    let world = &prepared[s as usize];
-                    let c = collision::<true>(&self.robot, world, &scratch.fk, w, g, &mut scratch.collision);
-                    (*wc, *sc, *cost) = (c.world_clearance, c.self_clearance, c.cost);
-                },
-            )
+            rows.zip(out.grad.par_chunks_mut(n))
+                .zip(q.par_chunks(n).zip(item_world.par_iter()))
+                .for_each_init(
+                    || Scratch::new(&self.robot),
+                    |scratch, ((((wc, sc), cost), g), (qi, &s))| {
+                        self.robot.fk_into(qi, &mut scratch.fk);
+                        let world = &prepared[s as usize];
+                        let c = collision::<true>(
+                            &self.robot,
+                            world,
+                            &scratch.fk,
+                            w,
+                            g,
+                            &mut scratch.collision,
+                        );
+                        (*wc, *sc, *cost) = (c.world_clearance, c.self_clearance, c.cost);
+                    },
+                )
         });
         Ok(out)
     }
@@ -885,7 +1168,11 @@ impl Backend for CpuBackend {
             while start < worlds.len() {
                 let w = worlds[start];
                 let end = start + worlds[start..].iter().take_while(|&&x| x == w).count();
-                let (world, q, c) = (&prepared[w as usize], &q[start * n..end * n], &mut c[start..end]);
+                let (world, q, c) = (
+                    &prepared[w as usize],
+                    &q[start * n..end * n],
+                    &mut c[start..end],
+                );
                 dispatch!(level, simd => self.lanes.clearance(simd, world, q, c, scratch));
                 start = end;
             }
@@ -893,18 +1180,30 @@ impl Backend for CpuBackend {
         if item_world.len() <= SMALL_BATCH {
             // Handing a batch this small to the pool's threads costs more than checking it here.
             let mut scratch = self.lanes.scratch();
-            let chunks = out.chunks_mut(LANES).zip(q.chunks(n * LANES).zip(item_world.chunks(LANES)));
+            let chunks = out
+                .chunks_mut(LANES)
+                .zip(q.chunks(n * LANES).zip(item_world.chunks(LANES)));
             chunks.for_each(|c| chunk(&mut scratch, c));
         } else {
-            let chunks = out.par_chunks_mut(LANES).zip(q.par_chunks(n * LANES).zip(item_world.par_chunks(LANES)));
-            self.pool.install(|| chunks.for_each_init(|| self.lanes.scratch(), chunk));
+            let chunks = out
+                .par_chunks_mut(LANES)
+                .zip(q.par_chunks(n * LANES).zip(item_world.par_chunks(LANES)));
+            self.pool
+                .install(|| chunks.for_each_init(|| self.lanes.scratch(), chunk));
         }
         Ok(out)
     }
 
     fn search(&self, worlds: &Worlds, searches: &mut [&mut dyn Search], deadline: Option<Instant>) {
         let prepared: &CpuWorlds = worlds.prepared();
-        run_searches(&self.pool, searches, &self.robot, &self.lanes, prepared, deadline);
+        run_searches(
+            &self.pool,
+            searches,
+            &self.robot,
+            &self.lanes,
+            prepared,
+            deadline,
+        );
     }
 
     fn ik(
@@ -929,7 +1228,9 @@ impl Backend for CpuBackend {
                         for (h, (goal, target)) in goals.iter_mut().zip(item_targets).enumerate() {
                             *goal = target.map(|t| (t.position, Mat3::from_quat(t.rotation)));
                             if goal.is_some() {
-                                hand_joints[h].iter().for_each(|&j| scratch.moving[j] = true);
+                                hand_joints[h]
+                                    .iter()
+                                    .for_each(|&j| scratch.moving[j] = true);
                             }
                         }
                         for _ in 0..o.iterations {
@@ -939,8 +1240,12 @@ impl Backend for CpuBackend {
                         let mut worst = [0.0f32; 2];
                         for (h, goal) in goals.iter().enumerate() {
                             if let Some(goal) = goal {
-                                let (_, pos_err, rot_err) =
-                                    pose_error(&scratch.fk, self.robot.ee_links[h], goal, o.rot_weight);
+                                let (_, pos_err, rot_err) = pose_error(
+                                    &scratch.fk,
+                                    self.robot.ee_links[h],
+                                    goal,
+                                    o.rot_weight,
+                                );
                                 worst = [worst[0].max(pos_err), worst[1].max(rot_err)];
                             }
                         }
@@ -971,7 +1276,16 @@ impl Backend for CpuBackend {
                 .positions
                 .par_chunks_mut(points)
                 .zip(item_world.par_iter())
-                .for_each(|(tr, &s)| optimize_path(&self.robot, &prepared[s as usize], tr, o, deadline, per_sample))
+                .for_each(|(tr, &s)| {
+                    optimize_path(
+                        &self.robot,
+                        &prepared[s as usize],
+                        tr,
+                        o,
+                        deadline,
+                        per_sample,
+                    )
+                })
         });
         Ok(())
     }
@@ -981,7 +1295,11 @@ impl Backend for CpuBackend {
             let seen;
             let occupied = match occupancy {
                 Occupancy::Given(occupied) => occupied,
-                Occupancy::Seen { image, robot, behind } => {
+                Occupancy::Seen {
+                    image,
+                    robot,
+                    behind,
+                } => {
                     seen = sdf::depth_occupancy(grid, image, robot, behind);
                     &seen
                 }
@@ -998,7 +1316,8 @@ impl Backend for CpuBackend {
         image: &DepthImage,
         robot: Option<&RobotMask>,
     ) -> Result<()> {
-        self.pool.install(|| sdf::integrate(grid, log_odds, image, robot));
+        self.pool
+            .install(|| sdf::integrate(grid, log_odds, image, robot));
         Ok(())
     }
 }
@@ -1013,16 +1332,31 @@ mod tests {
         // Three remembered steps in a ring of four, newest in slot 0 after wrapping around; the
         // two-loop recursion must equal -H g with H built by explicit BFGS updates.
         let (n, points) = (2, 10);
-        let o = PlanOptions { history: 4, ..Default::default() };
+        let o = PlanOptions {
+            history: 4,
+            ..Default::default()
+        };
         let mut st = Lbfgs::new(points, n, 1, &o);
         let free: Vec<usize> = (3 * n..(points - 3) * n).collect();
         let mut rng = Rng::new(1);
         let tn = points * n;
         let mut pairs = vec![];
         for (age, slot) in [(0, 2), (1, 3), (2, 0)] {
-            let s: Vec<f32> = (0..tn).map(|i| if free.contains(&i) { rng.range(-1.0, 1.0) } else { 0.0 }).collect();
+            let s: Vec<f32> = (0..tn)
+                .map(|i| {
+                    if free.contains(&i) {
+                        rng.range(-1.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
             // y = A s for a fixed positive diagonal A, so s.y > 0.
-            let y: Vec<f32> = s.iter().enumerate().map(|(i, v)| v * (1.0 + i as f32 * 0.1)).collect();
+            let y: Vec<f32> = s
+                .iter()
+                .enumerate()
+                .map(|(i, v)| v * (1.0 + i as f32 * 0.1))
+                .collect();
             st.steps[slot * tn..(slot + 1) * tn].copy_from_slice(&s);
             st.changes[slot * tn..(slot + 1) * tn].copy_from_slice(&y);
             pairs.push((age, s, y));
@@ -1038,13 +1372,19 @@ mod tests {
         let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
         let pick = |v: &[f32]| free.iter().map(|&i| v[i] as f64).collect::<Vec<f64>>();
         let gamma = dot(&pick(s_new), &pick(y_new)) / dot(&pick(y_new), &pick(y_new));
-        let mut h: Vec<f64> = (0..k * k).map(|i| if i % (k + 1) == 0 { gamma } else { 0.0 }).collect();
+        let mut h: Vec<f64> = (0..k * k)
+            .map(|i| if i % (k + 1) == 0 { gamma } else { 0.0 })
+            .collect();
         for (_, s, y) in &pairs {
             let (s, y) = (pick(s), pick(y));
             let r = 1.0 / dot(&s, &y);
-            let left: Vec<f64> = (0..k * k).map(|i| f64::from(i / k == i % k) - r * s[i / k] * y[i % k]).collect();
+            let left: Vec<f64> = (0..k * k)
+                .map(|i| f64::from(i / k == i % k) - r * s[i / k] * y[i % k])
+                .collect();
             let mul = |a: &[f64], b: &[f64]| -> Vec<f64> {
-                (0..k * k).map(|i| (0..k).map(|m| a[i / k * k + m] * b[m * k + i % k]).sum()).collect()
+                (0..k * k)
+                    .map(|i| (0..k).map(|m| a[i / k * k + m] * b[m * k + i % k]).sum())
+                    .collect()
             };
             let right: Vec<f64> = (0..k * k).map(|i| left[i % k * k + i / k]).collect();
             h = mul(&mul(&left, &h), &right);
@@ -1066,21 +1406,35 @@ mod tests {
     #[test]
     fn a_failed_line_search_resets_the_history() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/franka");
-        let spheres = crate::robot::CollisionModel::load(format!("{dir}/panda_collision.json")).unwrap();
-        let options = crate::robot::RobotOptions { collision_model: Some(spheres), ..Default::default() };
+        let spheres =
+            crate::robot::CollisionModel::load(format!("{dir}/panda_collision.json")).unwrap();
+        let options = crate::robot::RobotOptions {
+            collision_model: Some(spheres),
+            ..Default::default()
+        };
         let robot = Robot::load(format!("{dir}/franka_panda.urdf"), &options).unwrap();
         let (n, points) = (robot.dof(), 10);
-        let o = PlanOptions { control_points: points, ..Default::default() };
+        let o = PlanOptions {
+            control_points: points,
+            ..Default::default()
+        };
         let mut st = Lbfgs::new(points, n, 1, &o);
         let mut x = vec![0.0; points * n];
         (st.started, st.cost, st.count) = (true, 1.0, 3);
         st.costs.fill(2.0);
         traj_search(&robot, &mut x, &mut st, &o);
-        assert_eq!((st.count, st.pending), (0, false), "a step that raises the cost must not be taken");
+        assert_eq!(
+            (st.count, st.pending),
+            (0, false),
+            "a step that raises the cost must not be taken"
+        );
         assert!(x.iter().all(|&v| v == 0.0));
         st.costs.fill(0.0);
         st.count = 3;
         traj_search(&robot, &mut x, &mut st, &o);
-        assert!(st.pending && st.count == 3 && st.cost < 1.0, "a cheaper step must be taken");
+        assert!(
+            st.pending && st.count == 3 && st.cost < 1.0,
+            "a cheaper step must be taken"
+        );
     }
 }

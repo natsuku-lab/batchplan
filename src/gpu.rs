@@ -17,7 +17,9 @@ use crate::edges::Search;
 use crate::ik::IkOptions;
 use crate::lanes::Lanes;
 use crate::robot::{JointKind, Robot};
-use crate::sdf::{DepthImage, FAR, Layout, Occlusion, Occupancy, RobotMask, SdfGrid, finishing_table, one_kind};
+use crate::sdf::{
+    DepthImage, FAR, Layout, Occlusion, Occupancy, RobotMask, SdfGrid, finishing_table, one_kind,
+};
 use crate::trajopt::{LINE_SEARCH, MAX_HISTORY, PlanOptions};
 use crate::types::{JointPaths, Pose};
 use crate::world::{Obstacle, World};
@@ -38,9 +40,14 @@ const LANE_TARGET: usize = 1 << 15;
 
 /// Lanes per configuration for a dispatch of `configurations`.
 fn lanes_for(configurations: usize) -> u32 {
-    if configurations * (SHARED_LANES as usize) <= LANE_TARGET { SHARED_LANES } else { 1 }
+    if configurations * (SHARED_LANES as usize) <= LANE_TARGET {
+        SHARED_LANES
+    } else {
+        1
+    }
 }
-/// Storage buffers in bind group 0: bindings 1..=9 are read-only, 10..=12 read-write (see kernels.wgsl).
+/// Storage buffers in bind group 0: bindings 1..=9 are read-only, 10..=12 read-write (see
+/// kernels.wgsl).
 const READ_ONLY_STORAGE: u32 = 9;
 const READ_WRITE_STORAGE: u32 = 3;
 /// Upper bounds on work per queue submission, to stay clear of driver watchdogs.
@@ -88,7 +95,8 @@ shader_struct! {
     /// joint's value is its curve of `q[dof]`, `trans.w + axis.w x + curve.x x² + curve.y x³ +
     /// curve.z x⁴` (`x` itself unless it mimics another joint).
     /// `bound` is the sphere (center in the link frame, radius) around the link's collision spheres
-    /// and their self-collision buffers, which are spheres `first_sphere..first_sphere + n_spheres`.
+    /// and their self-collision buffers, which are spheres
+    /// `first_sphere..first_sphere + n_spheres`.
     /// The tree itself is written into the generated kernels (`robot_wgsl`).
     GpuLink => Link {
         c0: Vec4, c1: Vec4, c2: Vec4, trans: Vec4, axis: Vec4, curve: Vec4, bound: Vec4,
@@ -145,14 +153,34 @@ fn robot_wgsl(robot: &Robot) -> String {
     use std::fmt::Write;
     let links = &robot.links;
     let dof = robot.dof();
-    let mut w = format!("const MAX_DOF: u32 = {dof}u;\nconst JAC_LEN: u32 = {}u;\n", 6 * dof);
+    let mut w = format!(
+        "const MAX_DOF: u32 = {dof}u;\nconst JAC_LEN: u32 = {}u;\n",
+        6 * dof
+    );
     // Joint motion per unit of the actuated joint: the multiplier for a linear curve, the curve's
     // slope at the current configuration (computed by fk) for others.
-    let nonlinear = |i: usize| links[i].joint.actuation().is_some_and(|(_, c)| !c.is_linear());
-    let rate = |i: usize| if nonlinear(i) { format!("rate_{i}") } else { format!("links[{i}u].axis.w") };
+    let nonlinear = |i: usize| {
+        links[i]
+            .joint
+            .actuation()
+            .is_some_and(|(_, c)| !c.is_linear())
+    };
+    let rate = |i: usize| {
+        if nonlinear(i) {
+            format!("rate_{i}")
+        } else {
+            format!("links[{i}u].axis.w")
+        }
+    };
     for i in 0..links.len() {
-        let _ = writeln!(w, "var<private> rot_{i}: mat3x3<f32>;\nvar<private> pos_{i}: vec3<f32>;");
-        let _ = writeln!(w, "var<private> force_{i}: vec3<f32>;\nvar<private> moment_{i}: vec3<f32>;");
+        let _ = writeln!(
+            w,
+            "var<private> rot_{i}: mat3x3<f32>;\nvar<private> pos_{i}: vec3<f32>;"
+        );
+        let _ = writeln!(
+            w,
+            "var<private> force_{i}: vec3<f32>;\nvar<private> moment_{i}: vec3<f32>;"
+        );
         if nonlinear(i) {
             let _ = writeln!(w, "var<private> rate_{i}: f32;");
         }
@@ -160,16 +188,19 @@ fn robot_wgsl(robot: &Robot) -> String {
 
     w += "\n// Every link's frame, root first.\nfn fk() {\n";
     for (i, l) in links.iter().enumerate() {
-        let (prot, ppos) =
-            l.parent.map_or((String::new(), String::new()), |p| (format!("rot_{p} * "), format!(" + pos_{p}")));
+        let (prot, ppos) = l.parent.map_or((String::new(), String::new()), |p| {
+            (format!("rot_{p} * "), format!(" + pos_{p}"))
+        });
         let _ = writeln!(w, "    {{\n        let l = links[{i}u];");
-        let _ = writeln!(w, "        let jrot = {prot}mat3x3<f32>(l.c0.xyz, l.c1.xyz, l.c2.xyz);");
+        let _ = writeln!(
+            w,
+            "        let jrot = {prot}mat3x3<f32>(l.c0.xyz, l.c1.xyz, l.c2.xyz);"
+        );
         let _ = writeln!(w, "        let jpos = {prot}l.trans.xyz{ppos};");
         if let Some((dof, _)) = l.joint.actuation() {
             if nonlinear(i) {
                 let _ = writeln!(w, "        let x = q[{dof}u];");
-                w +=
-                    "        let v = l.trans.w + x * (l.axis.w + x * (l.curve.x + x * (l.curve.y + x * l.curve.z)));\n";
+                w += "        let v = l.trans.w + x * (l.axis.w + x * (l.curve.x + x * (l.curve.y + x * l.curve.z)));\n";
                 let _ = writeln!(
                     w,
                     "        rate_{i} = l.axis.w + x * (2.0 * l.curve.x + x * (3.0 * l.curve.y + x * 4.0 * l.curve.z));"
@@ -180,10 +211,16 @@ fn robot_wgsl(robot: &Robot) -> String {
         }
         let _ = match l.joint {
             JointKind::Revolute { .. } => {
-                writeln!(w, "        rot_{i} = jrot * rodrigues(l.axis.xyz, v);\n        pos_{i} = jpos;")
+                writeln!(
+                    w,
+                    "        rot_{i} = jrot * rodrigues(l.axis.xyz, v);\n        pos_{i} = jpos;"
+                )
             }
             JointKind::Prismatic { .. } => {
-                writeln!(w, "        rot_{i} = jrot;\n        pos_{i} = jpos + jrot * l.axis.xyz * v;")
+                writeln!(
+                    w,
+                    "        rot_{i} = jrot;\n        pos_{i} = jpos + jrot * l.axis.xyz * v;"
+                )
             }
             JointKind::Fixed => writeln!(w, "        rot_{i} = jrot;\n        pos_{i} = jpos;"),
         };
@@ -231,7 +268,10 @@ fn robot_wgsl(robot: &Robot) -> String {
                     "            let jp = m * cross(a, pos_{ee} - pos_{i});\n            let jo = m * a * P.rot_weight;"
                 );
             }
-            for (r, c) in ["jp.x", "jp.y", "jp.z", "jo.x", "jo.y", "jo.z"].iter().enumerate() {
+            for (r, c) in ["jp.x", "jp.y", "jp.z", "jo.x", "jo.y", "jo.z"]
+                .iter()
+                .enumerate()
+            {
                 let _ = writeln!(w, "            jac[{r}u * MAX_DOF + {d}u] += {c};");
             }
             w.push_str("            }\n");
@@ -269,7 +309,10 @@ fn collision(
     if (gradient) {
 ";
     for i in 0..links.len() {
-        let _ = writeln!(w, "        force_{i} = vec3<f32>(0.0);\n        moment_{i} = vec3<f32>(0.0);");
+        let _ = writeln!(
+            w,
+            "        force_{i} = vec3<f32>(0.0);\n        moment_{i} = vec3<f32>(0.0);"
+        );
     }
     w += "    }\n";
     w += "    // An obstacle farther from a link's bounding sphere than the margin cannot add cost through\n";
@@ -277,7 +320,9 @@ fn collision(
     w += "    // interpolated, not exact, so their spheres are always checked. Links no joint moves are not\n";
     w += "    // checked against the world (see `collision` in cpu.rs).\n";
     w += "    let world_gate = max(margin, 0.0);\n";
-    for i in (0..links.len()).filter(|&i| robot.sphere_ranges[i][1] > 0 && !robot.links[i].chain.is_empty()) {
+    for i in (0..links.len())
+        .filter(|&i| robot.sphere_ranges[i][1] > 0 && !robot.links[i].chain.is_empty())
+    {
         let _ = write!(
             w,
             r"    {{
@@ -369,26 +414,47 @@ fn collision(
             let link = [lp.a, lp.b];
             let frame = |e: usize| (format!("rot_{}", link[e]), format!("pos_{}", link[e]));
             let wrench = |e: usize| (format!("force_{}", link[e]), format!("moment_{}", link[e]));
-            let body = pair(&format!("{l}u"), [&format!("{}u", lp.a), &format!("{}u", lp.b)], &frame, &wrench);
+            let body = pair(
+                &format!("{l}u"),
+                [&format!("{}u", lp.a), &format!("{}u", lp.b)],
+                &frame,
+                &wrench,
+            );
             let _ = write!(w, "    {{\n{body}    }}\n");
         }
     } else {
         // Too many pairs to write out: frames go into arrays indexed at run time.
         let nl = links.len();
-        let _ = writeln!(w, "    var frot: array<mat3x3<f32>, {nl}>;\n    var fpos: array<vec3<f32>, {nl}>;");
-        let _ = writeln!(w, "    var fforce: array<vec3<f32>, {nl}>;\n    var fmoment: array<vec3<f32>, {nl}>;");
+        let _ = writeln!(
+            w,
+            "    var frot: array<mat3x3<f32>, {nl}>;\n    var fpos: array<vec3<f32>, {nl}>;"
+        );
+        let _ = writeln!(
+            w,
+            "    var fforce: array<vec3<f32>, {nl}>;\n    var fmoment: array<vec3<f32>, {nl}>;"
+        );
         for i in 0..nl {
             let _ = writeln!(w, "    frot[{i}u] = rot_{i};\n    fpos[{i}u] = pos_{i};");
         }
         let end = ["ab.x", "ab.y"];
         let frame = |e: usize| (format!("frot[{}]", end[e]), format!("fpos[{}]", end[e]));
-        let wrench = |e: usize| (format!("fforce[{}]", end[e]), format!("fmoment[{}]", end[e]));
+        let wrench = |e: usize| {
+            (
+                format!("fforce[{}]", end[e]),
+                format!("fmoment[{}]", end[e]),
+            )
+        };
         let body = pair("l", end, &frame, &wrench);
-        let _ =
-            write!(w, "    for (var l = 0u; l < {pairs}u; l++) {{\n        let ab = pairs[2u * l];\n{body}    }}\n");
+        let _ = write!(
+            w,
+            "    for (var l = 0u; l < {pairs}u; l++) {{\n        let ab = pairs[2u * l];\n{body}    }}\n"
+        );
         w += "    if (gradient) {\n";
         for i in 0..nl {
-            let _ = writeln!(w, "        force_{i} += fforce[{i}u];\n        moment_{i} += fmoment[{i}u];");
+            let _ = writeln!(
+                w,
+                "        force_{i} += fforce[{i}u];\n        moment_{i} += fmoment[{i}u];"
+            );
         }
         w += "    }\n";
     }
@@ -402,12 +468,19 @@ fn collision(
                 rate(i)
             ),
             JointKind::Prismatic { dof, .. } => {
-                writeln!(w, "        grad[{dof}u] += {} * dot(rot_{i} * links[{i}u].axis.xyz, force_{i});", rate(i))
+                writeln!(
+                    w,
+                    "        grad[{dof}u] += {} * dot(rot_{i} * links[{i}u].axis.xyz, force_{i});",
+                    rate(i)
+                )
             }
             JointKind::Fixed => Ok(()),
         };
         if let Some(p) = l.parent {
-            let _ = writeln!(w, "        force_{p} += force_{i};\n        moment_{p} += moment_{i};");
+            let _ = writeln!(
+                w,
+                "        force_{p} += force_{i};\n        moment_{p} += moment_{i};"
+            );
         }
     }
     w += "    }\n    return vec3<f32>(cost, wmin, smin);\n}\n";
@@ -471,15 +544,28 @@ impl GridKernels {
         let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None },
+            ty: wgpu::BindingType::Buffer {
+                ty,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
             count: None,
         };
         let mut entries = vec![entry(0, wgpu::BufferBindingType::Uniform)];
-        entries.extend((1..=2).map(|b| entry(b, wgpu::BufferBindingType::Storage { read_only: true })));
-        entries.extend((3..=9).map(|b| entry(b, wgpu::BufferBindingType::Storage { read_only: false })));
-        entries.push(entry(10, wgpu::BufferBindingType::Storage { read_only: true }));
-        let layout = device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("grids"), entries: &entries });
+        entries.extend(
+            (1..=2).map(|b| entry(b, wgpu::BufferBindingType::Storage { read_only: true })),
+        );
+        entries.extend(
+            (3..=9).map(|b| entry(b, wgpu::BufferBindingType::Storage { read_only: false })),
+        );
+        entries.push(entry(
+            10,
+            wgpu::BufferBindingType::Storage { read_only: true },
+        ));
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("grids"),
+            entries: &entries,
+        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[Some(&layout)],
@@ -504,7 +590,10 @@ impl GridKernels {
             layout,
         };
         if let Some(e) = pollster::block_on(scope.pop()) {
-            return Err(Error::Gpu(format!("{} ({:?}) cannot build the grid kernels: {e}", info.name, info.backend)));
+            return Err(Error::Gpu(format!(
+                "{} ({:?}) cannot build the grid kernels: {e}",
+                info.name, info.backend
+            )));
         }
         Ok(kernels)
     }
@@ -539,7 +628,11 @@ impl GridBuffers {
             ("finishing table", table),
         ];
         for (name, len) in words {
-            if self.0.get(name).is_none_or(|b| b.size() < (len.max(4) * 4) as u64) {
+            if self
+                .0
+                .get(name)
+                .is_none_or(|b| b.size() < (len.max(4) * 4) as u64)
+            {
                 self.0.insert(name, storage_zeroed(device, name, len));
             }
         }
@@ -571,7 +664,11 @@ struct CollisionKernels {
 impl Kernels {
     /// The collision kernels for `lanes` (from `lanes_for`).
     fn collision(&self, lanes: u32) -> &CollisionKernels {
-        if lanes == 1 { &self.single } else { &self.shared }
+        if lanes == 1 {
+            &self.single
+        } else {
+            &self.shared
+        }
     }
 }
 
@@ -593,9 +690,8 @@ impl RobotBuffers {
             .map(|(i, l)| {
                 let (axis, c) = match l.joint {
                     JointKind::Fixed => (glam::Vec3::ZERO, [0.0; 5]),
-                    JointKind::Revolute { axis, curve, .. } | JointKind::Prismatic { axis, curve, .. } => {
-                        (axis, curve.0)
-                    }
+                    JointKind::Revolute { axis, curve, .. }
+                    | JointKind::Prismatic { axis, curve, .. } => (axis, curve.0),
                 };
                 GpuLink {
                     c0: v4(l.origin.rot.x_axis, 0.0),
@@ -614,7 +710,11 @@ impl RobotBuffers {
         let gpu_spheres: Vec<GpuSphere> = robot
             .spheres
             .iter()
-            .map(|s| GpuSphere { c: v4(s.center, s.radius), self_buf: s.self_buffer, ..Default::default() })
+            .map(|s| GpuSphere {
+                c: v4(s.center, s.radius),
+                self_buf: s.self_buffer,
+                ..Default::default()
+            })
             .collect();
         // Each link pair as (a, b), then (first, count) of the sphere pairs that follow.
         let skip = 2 * robot.self_link_pairs.len() as u32;
@@ -644,7 +744,9 @@ fn kernels_for(
     robot: &Robot,
 ) -> Result<Arc<Kernels>> {
     let robot_source = robot_wgsl(robot);
-    let mut built = built.lock().expect("no thread panics while holding the kernel cache");
+    let mut built = built
+        .lock()
+        .expect("no thread panics while holding the kernel cache");
     if let Some(kernels) = built.get(&robot_source) {
         return Ok(kernels.clone());
     }
@@ -653,7 +755,11 @@ fn kernels_for(
     Ok(kernels)
 }
 
-fn build_kernels(device: &wgpu::Device, info: &wgpu::AdapterInfo, robot_source: &str) -> Result<Kernels> {
+fn build_kernels(
+    device: &wgpu::Device,
+    info: &wgpu::AdapterInfo,
+    robot_source: &str,
+) -> Result<Kernels> {
     // Constants and shared structs are generated from their Rust definitions.
     let source = [
         "alias Vec4 = vec4<f32>;\n",
@@ -686,15 +792,26 @@ fn build_kernels(device: &wgpu::Device, info: &wgpu::AdapterInfo, robot_source: 
     let buffer_entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None },
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
         count: None,
     };
     let mut entries = vec![buffer_entry(0, wgpu::BufferBindingType::Uniform)];
-    let (ro, rw) = (1..=READ_ONLY_STORAGE, READ_ONLY_STORAGE + 1..=READ_ONLY_STORAGE + READ_WRITE_STORAGE);
-    entries.extend(ro.map(|b| buffer_entry(b, wgpu::BufferBindingType::Storage { read_only: true })));
-    entries.extend(rw.map(|b| buffer_entry(b, wgpu::BufferBindingType::Storage { read_only: false })));
-    let layout0 =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("main"), entries: &entries });
+    let (ro, rw) = (
+        1..=READ_ONLY_STORAGE,
+        READ_ONLY_STORAGE + 1..=READ_ONLY_STORAGE + READ_WRITE_STORAGE,
+    );
+    entries
+        .extend(ro.map(|b| buffer_entry(b, wgpu::BufferBindingType::Storage { read_only: true })));
+    entries
+        .extend(rw.map(|b| buffer_entry(b, wgpu::BufferBindingType::Storage { read_only: false })));
+    let layout0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("main"),
+        entries: &entries,
+    });
     let pl_main = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
         bind_group_layouts: &[Some(&layout0)],
@@ -724,16 +841,29 @@ fn build_kernels(device: &wgpu::Device, info: &wgpu::AdapterInfo, robot_source: 
     // Drivers compile each pipeline on the calling thread; the two sets compile side by side.
     let (single, shared) = std::thread::scope(|s| {
         let shared = s.spawn(|| collision(SHARED_LANES));
-        (collision(1), shared.join().expect("pipeline creation does not panic"))
+        (
+            collision(1),
+            shared.join().expect("pipeline creation does not panic"),
+        )
     });
     let traj_search = pipeline("traj_search", 1);
     let traj_grad = pipeline("traj_grad", 1);
     let lbfgs_direction = pipeline("lbfgs_direction", 1);
     if let Some(e) = pollster::block_on(scope.pop()) {
-        return Err(Error::Gpu(format!("{} ({:?}) cannot build the kernels: {e}", info.name, info.backend)));
+        return Err(Error::Gpu(format!(
+            "{} ({:?}) cannot build the kernels: {e}",
+            info.name, info.backend
+        )));
     }
 
-    Ok(Kernels { layout0, single, shared, traj_search, traj_grad, lbfgs_direction })
+    Ok(Kernels {
+        layout0,
+        single,
+        shared,
+        traj_search,
+        traj_grad,
+        lbfgs_direction,
+    })
 }
 
 /// Worlds in device memory: every world's obstacles, each world's `[first, count]` range of them,
@@ -763,7 +893,10 @@ impl GpuBackend {
     pub(crate) fn new(robot: &Robot, name: Option<&str>) -> Result<Self> {
         let wanted = name.map(str::to_lowercase);
         let accept = |info: &wgpu::AdapterInfo| {
-            info.backend != wgpu::Backend::Gl && wanted.as_ref().is_none_or(|w| info.name.to_lowercase().contains(w))
+            info.backend != wgpu::Backend::Gl
+                && wanted
+                    .as_ref()
+                    .is_none_or(|w| info.name.to_lowercase().contains(w))
         };
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let rank = |t: wgpu::DeviceType| match t {
@@ -773,10 +906,11 @@ impl GpuBackend {
             wgpu::DeviceType::Cpu => 3,
             wgpu::DeviceType::Other => 4,
         };
-        let mut adapters: Vec<_> = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
-            .into_iter()
-            .filter(|a| accept(&a.get_info()))
-            .collect();
+        let mut adapters: Vec<_> =
+            pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
+                .into_iter()
+                .filter(|a| accept(&a.get_info()))
+                .collect();
         adapters.sort_by_key(|a| rank(a.get_info().device_type));
         let mut rejected = vec![];
         let adapter = adapters
@@ -785,14 +919,24 @@ impl GpuBackend {
                 let unmet = unmet_limits(&a.limits());
                 if !unmet.is_empty() {
                     let info = a.get_info();
-                    rejected.push(format!("{} ({:?}) lacks {}", info.name, info.backend, unmet.join(", ")));
+                    rejected.push(format!(
+                        "{} ({:?}) lacks {}",
+                        info.name,
+                        info.backend,
+                        unmet.join(", ")
+                    ));
                 }
                 unmet.is_empty()
             })
             .ok_or_else(|| match (&rejected[..], name) {
-                ([], Some(name)) => Error::Gpu(format!("no Vulkan, Metal or DX12 adapter named like '{name}'")),
+                ([], Some(name)) => Error::Gpu(format!(
+                    "no Vulkan, Metal or DX12 adapter named like '{name}'"
+                )),
                 ([], None) => Error::Gpu("no Vulkan, Metal or DX12 adapter found".into()),
-                _ => Error::Gpu(format!("no GPU adapter can run the kernels:\n  {}", rejected.join("\n  "))),
+                _ => Error::Gpu(format!(
+                    "no GPU adapter can run the kernels:\n  {}",
+                    rejected.join("\n  ")
+                )),
             })?;
         let info = adapter.get_info();
         let adapter_limits = adapter.limits();
@@ -851,39 +995,55 @@ impl GpuBackend {
         for s in worlds {
             ranges.push([obstacles.len() as u32, s.obstacles.len() as u32]);
             for o in &s.obstacles {
-                let rotated = |kind: u32, center: glam::Vec3, half: [f32; 4], rotation: glam::Quat| {
-                    let r = Mat3::from_quat(rotation);
-                    GpuObstacle {
-                        center: v4(center, kind as f32),
-                        half,
-                        r0: v4(r.x_axis, 0.0),
-                        r1: v4(r.y_axis, 0.0),
-                        r2: v4(r.z_axis, 0.0),
-                        ..Default::default()
-                    }
-                };
+                let rotated =
+                    |kind: u32, center: glam::Vec3, half: [f32; 4], rotation: glam::Quat| {
+                        let r = Mat3::from_quat(rotation);
+                        GpuObstacle {
+                            center: v4(center, kind as f32),
+                            half,
+                            r0: v4(r.x_axis, 0.0),
+                            r1: v4(r.y_axis, 0.0),
+                            r2: v4(r.z_axis, 0.0),
+                            ..Default::default()
+                        }
+                    };
                 obstacles.push(match *o {
-                    Obstacle::Cuboid { center, half_extents, rotation } => {
-                        rotated(CUBOID, center, v4(half_extents, 0.0), rotation)
-                    }
-                    Obstacle::Sphere { center, radius } => {
-                        rotated(SPHERE, center, [radius, 0.0, 0.0, 0.0], glam::Quat::IDENTITY)
-                    }
-                    Obstacle::Cylinder { center, rotation, radius, half_height } => {
-                        rotated(CYLINDER, center, [radius, half_height, 0.0, 0.0], rotation)
-                    }
-                    Obstacle::Capsule { center, rotation, radius, half_length } => {
-                        rotated(CAPSULE, center, [radius, half_length, 0.0, 0.0], rotation)
-                    }
-                    Obstacle::Sdf { ref grid, center, rotation } => {
-                        let offset =
-                            *grid_offsets.entry(Arc::as_ptr(grid)).or_insert_with(|| {
-                                let offset = grid_words.len() as u32;
-                                grid_words.extend(grid.values.chunks(2).map(|pair| {
-                                    u32::from(pair[0]) | u32::from(pair.get(1).copied().unwrap_or(0)) << 16
-                                }));
-                                offset
-                            });
+                    Obstacle::Cuboid {
+                        center,
+                        half_extents,
+                        rotation,
+                    } => rotated(CUBOID, center, v4(half_extents, 0.0), rotation),
+                    Obstacle::Sphere { center, radius } => rotated(
+                        SPHERE,
+                        center,
+                        [radius, 0.0, 0.0, 0.0],
+                        glam::Quat::IDENTITY,
+                    ),
+                    Obstacle::Cylinder {
+                        center,
+                        rotation,
+                        radius,
+                        half_height,
+                    } => rotated(CYLINDER, center, [radius, half_height, 0.0, 0.0], rotation),
+                    Obstacle::Capsule {
+                        center,
+                        rotation,
+                        radius,
+                        half_length,
+                    } => rotated(CAPSULE, center, [radius, half_length, 0.0, 0.0], rotation),
+                    Obstacle::Sdf {
+                        ref grid,
+                        center,
+                        rotation,
+                    } => {
+                        let offset = *grid_offsets.entry(Arc::as_ptr(grid)).or_insert_with(|| {
+                            let offset = grid_words.len() as u32;
+                            grid_words.extend(grid.values.chunks(2).map(|pair| {
+                                u32::from(pair[0])
+                                    | u32::from(pair.get(1).copied().unwrap_or(0)) << 16
+                            }));
+                            offset
+                        });
                         let [nx, ny, nz] = grid.dims;
                         GpuObstacle {
                             nx,
@@ -898,7 +1058,11 @@ impl GpuBackend {
         }
         let limits = self.device.limits();
         let bytes = (grid_words.len() * 4) as u64;
-        if bytes > limits.max_storage_buffer_binding_size.min(limits.max_buffer_size) {
+        if bytes
+            > limits
+                .max_storage_buffer_binding_size
+                .min(limits.max_buffer_size)
+        {
             return Err(Error::Gpu(format!(
                 "the distance grids take {} MiB, more than {} can bind",
                 bytes >> 20,
@@ -914,11 +1078,12 @@ impl GpuBackend {
     }
 
     fn uniform(&self, params: &GpuParams) -> wgpu::Buffer {
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("params"),
-            contents: bytemuck::bytes_of(params),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        })
+        self.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("params"),
+                contents: bytemuck::bytes_of(params),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            })
     }
 
     fn bind_main(&self, b: &CallBuffers) -> wgpu::BindGroup {
@@ -940,7 +1105,10 @@ impl GpuBackend {
         let entries: Vec<_> = buffers
             .iter()
             .enumerate()
-            .map(|(i, buf)| wgpu::BindGroupEntry { binding: i as u32, resource: buf.as_entire_binding() })
+            .map(|(i, buf)| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: buf.as_entire_binding(),
+            })
             .collect();
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
@@ -960,7 +1128,10 @@ impl GpuBackend {
 
     /// Blocks until the GPU has finished all submitted work.
     fn wait(&self) -> Result<()> {
-        self.device.poll(wgpu::PollType::wait_indefinitely()).map(|_| ()).map_err(|e| Error::Gpu(e.to_string()))
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map(|_| ())
+            .map_err(|e| Error::Gpu(e.to_string()))
     }
 
     fn read<T: Pod>(&self, buf: &wgpu::Buffer, len: usize) -> Result<Vec<T>> {
@@ -979,8 +1150,13 @@ impl GpuBackend {
             let _ = tx.send(r);
         });
         self.wait()?;
-        rx.recv().map_err(|e| Error::Gpu(e.to_string()))?.map_err(|e| Error::Gpu(e.to_string()))?;
-        let mapped = staging.slice(..).get_mapped_range().map_err(|e| Error::Gpu(e.to_string()))?;
+        rx.recv()
+            .map_err(|e| Error::Gpu(e.to_string()))?
+            .map_err(|e| Error::Gpu(e.to_string()))?;
+        let mapped = staging
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|e| Error::Gpu(e.to_string()))?;
         let out = bytemuck::cast_slice(&mapped).to_vec();
         drop(mapped);
         staging.unmap();
@@ -1026,7 +1202,10 @@ impl GpuBackend {
 
 impl Backend for GpuBackend {
     fn name(&self) -> String {
-        format!("gpu ({}, {:?}, {})", self.info.name, self.info.backend, self.info.driver_info)
+        format!(
+            "gpu ({}, {:?}, {})",
+            self.info.name, self.info.backend, self.info.driver_info
+        )
     }
 
     fn robot(&self) -> &Robot {
@@ -1041,16 +1220,29 @@ impl Backend for GpuBackend {
         let kernels = kernels_for(&self.device, &self.info, &self.built, robot)?;
         let buffers = RobotBuffers::new(&self.device, robot);
         let lanes = Arc::new(Lanes::new(robot));
-        Ok(Box::new(Self { robot: robot.clone(), kernels, buffers, lanes, ..self.clone() }))
+        Ok(Box::new(Self {
+            robot: robot.clone(),
+            kernels,
+            buffers,
+            lanes,
+            ..self.clone()
+        }))
     }
 
-    fn evaluate(&self, worlds: &Worlds, item_world: &[u32], q: &[f32], w: &CollisionWeights) -> Result<Evaluation> {
+    fn evaluate(
+        &self,
+        worlds: &Worlds,
+        item_world: &[u32],
+        q: &[f32],
+        w: &CollisionWeights,
+    ) -> Result<Evaluation> {
         let worlds: &GpuWorlds = worlds.prepared();
         let n = self.robot.dof();
         let stride = 3 + n;
         let mut out = Evaluation::default();
         for (chunk_world, chunk_q) in item_world.chunks(EVAL_CHUNK).zip(q.chunks(EVAL_CHUNK * n)) {
-            let raw = self.per_configuration(|k| &k.evaluate, stride, worlds, chunk_world, chunk_q, w)?;
+            let raw =
+                self.per_configuration(|k| &k.evaluate, stride, worlds, chunk_world, chunk_q, w)?;
             for row in raw.chunks(stride) {
                 out.world_clearance.push(row[0]);
                 out.self_clearance.push(row[1]);
@@ -1066,8 +1258,14 @@ impl Backend for GpuBackend {
         let n = self.robot.dof();
         let mut out = Vec::with_capacity(item_world.len());
         for (chunk_world, chunk_q) in item_world.chunks(EVAL_CHUNK).zip(q.chunks(EVAL_CHUNK * n)) {
-            let raw =
-                self.per_configuration(|k| &k.clearance, 2, worlds, chunk_world, chunk_q, &CollisionWeights::NONE)?;
+            let raw = self.per_configuration(
+                |k| &k.clearance,
+                2,
+                worlds,
+                chunk_world,
+                chunk_q,
+                &CollisionWeights::NONE,
+            )?;
             out.extend(raw.chunks(2).map(|c| [c[0], c[1]]));
         }
         Ok(out)
@@ -1084,8 +1282,10 @@ impl Backend for GpuBackend {
         let worlds: &GpuWorlds = worlds.prepared();
         let (n, hands) = (self.robot.dof(), self.robot.hands());
         let mut errors = Vec::with_capacity(item_world.len());
-        for ((chunk_world, chunk_targets), chunk_q) in
-            item_world.chunks(IK_CHUNK).zip(targets.chunks(IK_CHUNK * hands)).zip(q.chunks_mut(IK_CHUNK * n))
+        for ((chunk_world, chunk_targets), chunk_q) in item_world
+            .chunks(IK_CHUNK)
+            .zip(targets.chunks(IK_CHUNK * hands))
+            .zip(q.chunks_mut(IK_CHUNK * n))
         {
             errors.extend(self.ik_chunk(worlds, chunk_world, chunk_targets, chunk_q, o)?);
         }
@@ -1109,9 +1309,16 @@ impl Backend for GpuBackend {
         // submission stays well under driver watchdogs.
         let limits = self.device.limits();
         let bytes = 4 * lbfgs_stride(points, n, o) as u64;
-        let fits = (limits.max_storage_buffer_binding_size.min(limits.max_buffer_size) / bytes).max(1) as usize;
+        let fits = (limits
+            .max_storage_buffer_binding_size
+            .min(limits.max_buffer_size)
+            / bytes)
+            .max(1) as usize;
         let chunk = fits.min(TRAJ_CHUNK);
-        for (chunk_world, chunk_paths) in item_world.chunks(chunk).zip(paths.positions.chunks_mut(chunk * points * n)) {
+        for (chunk_world, chunk_paths) in item_world
+            .chunks(chunk)
+            .zip(paths.positions.chunks_mut(chunk * points * n))
+        {
             if deadline.is_some_and(|d| Instant::now() >= d) {
                 break;
             }
@@ -1122,23 +1329,43 @@ impl Backend for GpuBackend {
 
     fn grid_values(&self, grid: &Layout, occupancy: Occupancy) -> Result<Vec<u16>> {
         let kernels = self.grid_kernels()?;
-        let mut buffers = self.grid_buffers.lock().expect("no thread panics while holding the grid buffers");
+        let mut buffers = self
+            .grid_buffers
+            .lock()
+            .expect("no thread panics while holding the grid buffers");
         let points = grid.points();
         let (pixels, robot) = match occupancy {
-            Occupancy::Seen { image, robot, .. } => (image.depth.len(), robot.map_or(0, mask_words)),
+            Occupancy::Seen { image, robot, .. } => {
+                (image.depth.len(), robot.map_or(0, mask_words))
+            }
             Occupancy::Given(_) => (0, 0),
         };
-        let bindings = buffers.bindings(&self.device, points, pixels, robot, grid.diagonal() as usize + 1);
+        let bindings = buffers.bindings(
+            &self.device,
+            points,
+            pixels,
+            robot,
+            grid.diagonal() as usize + 1,
+        );
         let (params, mut steps) = match occupancy {
             Occupancy::Given(occupied) => {
                 let bits: Vec<u32> = occupied
                     .par_chunks(32)
-                    .map(|word| word.iter().enumerate().fold(0, |w, (b, &o)| w | u32::from(o) << b))
+                    .map(|word| {
+                        word.iter()
+                            .enumerate()
+                            .fold(0, |w, (b, &o)| w | u32::from(o) << b)
+                    })
                     .collect();
-                self.queue.write_buffer(bindings[2], 0, bytemuck::cast_slice(&bits));
+                self.queue
+                    .write_buffer(bindings[2], 0, bytemuck::cast_slice(&bits));
                 (grid_params(grid, None, None, Occlusion::Free), vec![])
             }
-            Occupancy::Seen { image, robot, behind } => {
+            Occupancy::Seen {
+                image,
+                robot,
+                behind,
+            } => {
                 self.upload_image(&bindings, image, robot);
                 let params = grid_params(grid, Some(image), robot, behind);
                 (
@@ -1154,8 +1381,13 @@ impl Backend for GpuBackend {
         self.run_grid(kernels, &bindings, &steps);
         // The table is built while the transform runs.
         let table = finishing_table(grid.voxel, grid.diagonal());
-        self.queue.write_buffer(bindings[9], 0, bytemuck::cast_slice(&table));
-        self.run_grid(kernels, &bindings, &[(&kernels.finish, params, points.div_ceil(2))]);
+        self.queue
+            .write_buffer(bindings[9], 0, bytemuck::cast_slice(&table));
+        self.run_grid(
+            kernels,
+            &bindings,
+            &[(&kernels.finish, params, points.div_ceil(2))],
+        );
         let words: Vec<u32> = self.read(bindings[4], points.div_ceil(2))?;
         if self.read::<u32>(bindings[3], 1)?[0] == FAR {
             return Err(one_kind(self.read::<u32>(bindings[2], 1)?[0] & 1 == 1));
@@ -1165,7 +1397,14 @@ impl Backend for GpuBackend {
 
     fn search(&self, worlds: &Worlds, searches: &mut [&mut dyn Search], deadline: Option<Instant>) {
         let cpu = &worlds.prepared::<GpuWorlds>().cpu;
-        crate::cpu::run_searches(&self.pool, searches, &self.robot, &self.lanes, cpu, deadline);
+        crate::cpu::run_searches(
+            &self.pool,
+            searches,
+            &self.robot,
+            &self.lanes,
+            cpu,
+            deadline,
+        );
     }
 
     fn integrate(
@@ -1176,8 +1415,17 @@ impl Backend for GpuBackend {
         robot: Option<&RobotMask>,
     ) -> Result<()> {
         let kernels = self.grid_kernels()?;
-        let mut buffers = self.grid_buffers.lock().expect("no thread panics while holding the grid buffers");
-        let bindings = buffers.bindings(&self.device, grid.points(), image.depth.len(), robot.map_or(0, mask_words), 0);
+        let mut buffers = self
+            .grid_buffers
+            .lock()
+            .expect("no thread panics while holding the grid buffers");
+        let bindings = buffers.bindings(
+            &self.device,
+            grid.points(),
+            image.depth.len(),
+            robot.map_or(0, mask_words),
+            0,
+        );
         self.upload_image(&bindings, image, robot);
         let mut words = bytemuck::cast_slice::<i8, u8>(log_odds).to_vec();
         words.resize(log_odds.len().next_multiple_of(4), 0);
@@ -1185,7 +1433,10 @@ impl Backend for GpuBackend {
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.clear_buffer(bindings[2], 0, None);
         self.queue.submit([enc.finish()]);
-        let params = GpuGridParams { map: 1, ..grid_params(grid, Some(image), robot, Occlusion::Free) };
+        let params = GpuGridParams {
+            map: 1,
+            ..grid_params(grid, Some(image), robot, Occlusion::Free)
+        };
         let steps = [
             (&kernels.depth_hits, params, image.depth.len()),
             (&kernels.map_update, params, grid.points().div_ceil(4)),
@@ -1208,15 +1459,28 @@ impl GpuBackend {
 
     /// Uploads an image's readings (0 for pixels without one) and its robot mask: depths (huge
     /// where the robot is not seen), then the grown spheres.
-    fn upload_image(&self, bindings: &[&wgpu::Buffer; 10], image: &DepthImage, robot: Option<&RobotMask>) {
-        let readings: Vec<f32> = self
-            .pool
-            .install(|| image.depth.par_iter().map(|&z| if z.is_finite() && z > 0.0 { z } else { 0.0 }).collect());
-        self.queue.write_buffer(bindings[0], 0, bytemuck::cast_slice(&readings));
+    fn upload_image(
+        &self,
+        bindings: &[&wgpu::Buffer; 10],
+        image: &DepthImage,
+        robot: Option<&RobotMask>,
+    ) {
+        let readings: Vec<f32> = self.pool.install(|| {
+            image
+                .depth
+                .par_iter()
+                .map(|&z| if z.is_finite() && z > 0.0 { z } else { 0.0 })
+                .collect()
+        });
+        self.queue
+            .write_buffer(bindings[0], 0, bytemuck::cast_slice(&readings));
         if let Some(robot) = robot {
-            let mut words: Vec<f32> = self.pool.install(|| robot.depth.par_iter().map(|&r| r.min(f32::MAX)).collect());
+            let mut words: Vec<f32> = self
+                .pool
+                .install(|| robot.depth.par_iter().map(|&r| r.min(f32::MAX)).collect());
             words.extend(robot.spheres.iter().flat_map(|s| s.to_array()));
-            self.queue.write_buffer(bindings[1], 0, bytemuck::cast_slice(&words));
+            self.queue
+                .write_buffer(bindings[1], 0, bytemuck::cast_slice(&words));
         }
     }
 
@@ -1234,7 +1498,10 @@ impl GpuBackend {
                 let entries: Vec<_> = std::iter::once(&params)
                     .chain(bindings.iter().copied())
                     .enumerate()
-                    .map(|(i, buf)| wgpu::BindGroupEntry { binding: i as u32, resource: buf.as_entire_binding() })
+                    .map(|(i, buf)| wgpu::BindGroupEntry {
+                        binding: i as u32,
+                        resource: buf.as_entire_binding(),
+                    })
                     .collect();
                 self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: None,
@@ -1253,11 +1520,12 @@ impl GpuBackend {
     }
 
     fn uniform_of<T: Pod>(&self, value: &T) -> wgpu::Buffer {
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("grid params"),
-            contents: bytemuck::bytes_of(value),
-            usage: wgpu::BufferUsages::UNIFORM,
-        })
+        self.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("grid params"),
+                contents: bytemuck::bytes_of(value),
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
     }
 }
 
@@ -1295,9 +1563,13 @@ fn grid_params(
         let k = image.intrinsics;
         params.camera = v4(image.camera.position, 0.0);
         params.intrinsics = [k.fx, k.fy, k.cx, k.cy];
-        [params.to_camera0, params.to_camera1, params.to_camera2] = [0, 1, 2].map(|i| v4(to_camera.row(i), 0.0));
-        [params.from_camera0, params.from_camera1, params.from_camera2] =
-            [0, 1, 2].map(|i| v4(from_camera.col(i), 0.0));
+        [params.to_camera0, params.to_camera1, params.to_camera2] =
+            [0, 1, 2].map(|i| v4(to_camera.row(i), 0.0));
+        [
+            params.from_camera0,
+            params.from_camera1,
+            params.from_camera2,
+        ] = [0, 1, 2].map(|i| v4(from_camera.col(i), 0.0));
         params.width = image.width as u32;
         params.height = (image.depth.len() / image.width) as u32;
     }
@@ -1313,7 +1585,15 @@ fn transform_steps<'a>(
     let dims = grid.dims.to_array();
     [0, 1, 2].map(|axis| {
         let lines = grid.points() / dims[axis] as usize;
-        (&kernels.edt_pass, GpuGridParams { axis: axis as u32, lines: lines as u32, ..*params }, lines)
+        (
+            &kernels.edt_pass,
+            GpuGridParams {
+                axis: axis as u32,
+                lines: lines as u32,
+                ..*params
+            },
+            lines,
+        )
     })
 }
 
@@ -1344,14 +1624,19 @@ impl GpuBackend {
         params.collision_step = o.collision_step;
         let params_buf = self.uniform(&params);
         let world_buf = storage(&self.device, "item world", item_world);
-        // Per item and hand: the position with w = 1 when the hand has a target, then the rotation's
-        // columns.
+        // Per item and hand: the position with w = 1 when the hand has a target, then the
+        // rotation's columns.
         let target_data: Vec<[f32; 4]> = targets
             .iter()
             .flat_map(|t| match t {
                 Some(t) => {
                     let r = Mat3::from_quat(t.rotation);
-                    [v4(t.position, 1.0), v4(r.x_axis, 0.0), v4(r.y_axis, 0.0), v4(r.z_axis, 0.0)]
+                    [
+                        v4(t.position, 1.0),
+                        v4(r.x_axis, 0.0),
+                        v4(r.y_axis, 0.0),
+                        v4(r.z_axis, 0.0),
+                    ]
                 }
                 None => [[0.0; 4]; 4],
             })
@@ -1372,7 +1657,8 @@ impl GpuBackend {
         let mut done = 0;
         while done < o.iterations {
             params.iterations = IK_ITERS_PER_SUBMIT.min(o.iterations - done);
-            self.queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&params));
+            self.queue
+                .write_buffer(&params_buf, 0, bytemuck::bytes_of(&params));
             self.submit_pass(|pass| {
                 pass.set_pipeline(&self.kernels.collision(lanes).ik);
                 pass.set_bind_group(0, &bg, &[]);
@@ -1382,7 +1668,8 @@ impl GpuBackend {
         }
         if o.iterations == 0 {
             params.iterations = 0;
-            self.queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&params));
+            self.queue
+                .write_buffer(&params_buf, 0, bytemuck::bytes_of(&params));
             self.submit_pass(|pass| {
                 pass.set_pipeline(&self.kernels.collision(lanes).ik);
                 pass.set_bind_group(0, &bg, &[]);
@@ -1390,7 +1677,11 @@ impl GpuBackend {
             });
         }
         q.copy_from_slice(&self.read(&q_buf, q.len())?);
-        Ok(self.read::<f32>(&out, items * 2)?.chunks(2).map(|e| [e[0], e[1]]).collect())
+        Ok(self
+            .read::<f32>(&out, items * 2)?
+            .chunks(2)
+            .map(|e| [e[0], e[1]])
+            .collect())
     }
 
     fn trajopt_chunk(
@@ -1417,7 +1708,11 @@ impl GpuBackend {
         let world_buf = storage(&self.device, "item world", item_world);
         let dummy = storage::<f32>(&self.device, "unused", &[]);
         let q_buf = storage(&self.device, "trajectories", traj);
-        let aux = storage_zeroed(&self.device, "L-BFGS state", items * lbfgs_stride(points, self.robot.dof(), o));
+        let aux = storage_zeroed(
+            &self.device,
+            "L-BFGS state",
+            items * lbfgs_stride(points, self.robot.dof(), o),
+        );
         let out = storage::<f32>(&self.device, "unused out", &[]);
         let bg = self.bind_main(&CallBuffers {
             params: &params_buf,
@@ -1475,7 +1770,9 @@ fn unmet_limits(l: &wgpu::Limits) -> Vec<String> {
             l.max_storage_buffers_per_shader_stage
         ));
     }
-    if l.max_compute_workgroup_size_x < WORKGROUP || l.max_compute_invocations_per_workgroup < WORKGROUP {
+    if l.max_compute_workgroup_size_x < WORKGROUP
+        || l.max_compute_invocations_per_workgroup < WORKGROUP
+    {
         unmet.push(format!("{WORKGROUP}-wide compute workgroups"));
     }
     unmet
@@ -1496,14 +1793,17 @@ fn dispatch_groups(pass: &mut wgpu::ComputePass, groups: usize) {
 }
 
 /// A storage buffer holding `data`, padded to at least one element: WGSL requires a binding to
-/// hold one element of its array type even when the batch has none (e.g. a world with no obstacles).
+/// hold one element of its array type even when the batch has none (e.g. a world with no
+/// obstacles).
 fn storage<T: Pod>(device: &wgpu::Device, label: &str, data: &[T]) -> wgpu::Buffer {
     let mut bytes = bytemuck::cast_slice(data).to_vec();
     bytes.resize(bytes.len().max(std::mem::size_of::<T>()).max(16), 0);
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some(label),
         contents: &bytes,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
     })
 }
 
@@ -1511,7 +1811,9 @@ fn storage_zeroed(device: &wgpu::Device, label: &str, floats: usize) -> wgpu::Bu
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: (floats.max(4) * 4) as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
 }

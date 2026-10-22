@@ -6,14 +6,24 @@
 #[inline]
 pub(crate) fn basis(u: f32) -> [f32; 4] {
     let (u2, u3, v) = (u * u, u * u * u, 1.0 - u);
-    [v * v * v / 6.0, (3.0 * u3 - 6.0 * u2 + 4.0) / 6.0, (-3.0 * u3 + 3.0 * u2 + 3.0 * u + 1.0) / 6.0, u3 / 6.0]
+    [
+        v * v * v / 6.0,
+        (3.0 * u3 - 6.0 * u2 + 4.0) / 6.0,
+        (-3.0 * u3 + 3.0 * u2 + 3.0 * u + 1.0) / 6.0,
+        u3 / 6.0,
+    ]
 }
 
 /// Weights for the first derivative with respect to `u`.
 #[inline]
 pub(crate) fn basis_d1(u: f32) -> [f32; 4] {
     let v = 1.0 - u;
-    [-0.5 * v * v, 0.5 * (3.0 * u * u - 4.0 * u), 0.5 * (-3.0 * u * u + 2.0 * u + 1.0), 0.5 * u * u]
+    [
+        -0.5 * v * v,
+        0.5 * (3.0 * u * u - 4.0 * u),
+        0.5 * (-3.0 * u * u + 2.0 * u + 1.0),
+        0.5 * u * u,
+    ]
 }
 
 /// Weights for the second derivative with respect to `u`.
@@ -46,7 +56,13 @@ pub(crate) fn dense(cp: &[f32], dof: usize, per_span: usize, out: &mut [f32]) {
     for span in 0..spans {
         for s in 0..per_span {
             let row = (span * per_span + s) * dof;
-            blend(cp, dof, span, basis(s as f32 / per_span as f32), &mut out[row..row + dof]);
+            blend(
+                cp,
+                dof,
+                span,
+                basis(s as f32 / per_span as f32),
+                &mut out[row..row + dof],
+            );
         }
     }
     out[spans * per_span * dof..].copy_from_slice(&cp[cp.len() - dof..]);
@@ -65,19 +81,32 @@ pub(crate) fn checked(
     starts: &mut Vec<usize>,
 ) {
     let spans = cp.len() / dof - 3;
-    let gap = |a: usize, b: usize| (0..dof).map(|j| (cp[b * dof + j] - cp[a * dof + j]).powi(2)).sum::<f32>().sqrt();
+    let gap = |a: usize, b: usize| {
+        (0..dof)
+            .map(|j| (cp[b * dof + j] - cp[a * dof + j]).powi(2))
+            .sum::<f32>()
+            .sqrt()
+    };
     out.clear();
     starts.clear();
     for span in 0..spans {
         // A span moves at most three times its Bezier control polygon's longest edge per unit of
         // its parameter: |P2 - P0| / 2, |P2 - P1| or |P3 - P1| / 2.
-        let speed = (0.5 * gap(span, span + 2)).max(gap(span + 1, span + 2)).max(0.5 * gap(span + 1, span + 3));
+        let speed = (0.5 * gap(span, span + 2))
+            .max(gap(span + 1, span + 2))
+            .max(0.5 * gap(span + 1, span + 3));
         let count = per_span.max((speed / spacing).ceil() as usize);
         starts.push(out.len() / dof);
         for s in 0..count {
             let row = out.len();
             out.resize(row + dof, 0.0);
-            blend(cp, dof, span, basis(s as f32 / count as f32), &mut out[row..]);
+            blend(
+                cp,
+                dof,
+                span,
+                basis(s as f32 / count as f32),
+                &mut out[row..],
+            );
         }
     }
     starts.push(out.len() / dof);
@@ -102,8 +131,11 @@ mod tests {
     fn checked_samples_are_spaced_as_edges_are() {
         let dof = 2;
         // Spans from 1 cm to 3 rad long, with sharp turns between them.
-        let cp: Vec<f32> =
-            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 3.0, 0.0, 3.0, 2.0, 0.5, 2.5, 0.5, 2.5, 0.5, 2.5].to_vec();
+        let cp: Vec<f32> = [
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 3.0, 0.0, 3.0, 2.0, 0.5, 2.5, 0.5, 2.5, 0.5,
+            2.5,
+        ]
+        .to_vec();
         let (per_span, spacing) = (8, 1.0 / 32.0);
         let (mut out, mut starts) = (vec![], vec![]);
         checked(&cp, dof, per_span, spacing, &mut out, &mut starts);
@@ -112,14 +144,20 @@ mod tests {
         assert_eq!(starts.len(), spans + 1);
         assert_eq!(*samples.last().unwrap(), &cp[cp.len() - dof..]);
         let gap = |a: &[f32], b: &[f32]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt();
-        let widest = samples.windows(2).map(|w| gap(w[0], w[1])).fold(0.0, f32::max);
+        let widest = samples
+            .windows(2)
+            .map(|w| gap(w[0], w[1]))
+            .fold(0.0, f32::max);
         assert!(widest <= spacing * 1.0001, "samples {widest} apart");
         for span in 0..spans {
             let count = starts[span + 1] - starts[span];
             assert!(count >= per_span, "span {span} has {count} samples");
             let mut at = [0.0; 2];
             blend(&cp, dof, span, basis(0.0), &mut at);
-            assert!(gap(samples[starts[span]], &at) < 1e-6, "span {span} starts elsewhere");
+            assert!(
+                gap(samples[starts[span]], &at) < 1e-6,
+                "span {span} starts elsewhere"
+            );
         }
         // Short spans keep the fixed count: the first span moves 1 cm.
         assert_eq!(starts[1] - starts[0], per_span);

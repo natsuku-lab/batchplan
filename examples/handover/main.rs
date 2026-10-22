@@ -32,7 +32,9 @@ fn main() -> Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--cpu" => cpu = true,
-            "--lerobot" => lerobot = Some(PathBuf::from(args.next().context("--lerobot <out_dir>")?)),
+            "--lerobot" => {
+                lerobot = Some(PathBuf::from(args.next().context("--lerobot <out_dir>")?))
+            }
             "--resets" => resets = Some(PathBuf::from(args.next().context("--resets <out_dir>")?)),
             _ => positional.push(arg),
         }
@@ -40,14 +42,28 @@ fn main() -> Result<()> {
     let count: usize = positional.first().map_or(Ok(512), |a| a.parse())?;
 
     let robot = two_rebots(Path::new(REBOT))?;
-    let device = if cpu { Device::cpu(&robot)? } else { Device::gpu(&robot).or_else(|_| Device::cpu(&robot))? };
-    println!("two reBot B601-DM arms, {} joints; {}", robot.dof(), device.name());
+    let device = if cpu {
+        Device::cpu(&robot)?
+    } else {
+        Device::gpu(&robot).or_else(|_| Device::cpu(&robot))?
+    };
+    println!(
+        "two reBot B601-DM arms, {} joints; {}",
+        robot.dof(),
+        device.name()
+    );
 
     let mut rng = Rng::new(5);
-    let (worlds, tasks): (Vec<World>, Vec<Handover>) = (0..count).map(|i| scene(i as u32, &mut rng)).unzip();
+    let (worlds, tasks): (Vec<World>, Vec<Handover>) =
+        (0..count).map(|i| scene(i as u32, &mut rng)).unzip();
     let options = rebot::options(30.0);
     // The first call on a GPU compiles its kernels; time the second.
-    handover(&device, &worlds[..8.min(count)], &tasks[..8.min(count)], &options)?;
+    handover(
+        &device,
+        &worlds[..8.min(count)],
+        &tasks[..8.min(count)],
+        &options,
+    )?;
     let started = Instant::now();
     let demos = handover(&device, &worlds, &tasks, &options)?;
     let seconds = started.elapsed().as_secs_f64();
@@ -66,7 +82,11 @@ fn main() -> Result<()> {
         sorted.last().copied().unwrap_or(0.0),
     );
     if let Some(out) = resets {
-        let options = RecoveryOptions { per_trajectory: 8, phase: (0.0, 1.0), ..Default::default() };
+        let options = RecoveryOptions {
+            per_trajectory: 8,
+            phase: (0.0, 1.0),
+            ..Default::default()
+        };
         let started = Instant::now();
         let states = reset_states(&device, &worlds, &demos, &options)?;
         println!(
@@ -79,8 +99,18 @@ fn main() -> Result<()> {
         npy::export(&episodes, &robot, &worlds, &demos, &Default::default())?;
         let metadata = serde_json::json!({"parents": "../episodes, which parent.npy indexes"});
         let metadata = metadata.as_object().expect("an object").clone();
-        npy::export(out.join("resets"), &robot, &worlds, &states, &npy::ExportOptions { metadata })?;
-        println!("wrote {} and {}", episodes.display(), out.join("resets").display());
+        npy::export(
+            out.join("resets"),
+            &robot,
+            &worlds,
+            &states,
+            &npy::ExportOptions { metadata },
+        )?;
+        println!(
+            "wrote {} and {}",
+            episodes.display(),
+            out.join("resets").display()
+        );
     }
     if let Some(out) = lerobot {
         export(&out, &robot, &worlds, &demos)?;
@@ -99,8 +129,10 @@ fn main() -> Result<()> {
 #[cfg(feature = "lerobot")]
 fn export(out: &Path, robot: &Robot, worlds: &[World], demos: &[Demonstration]) -> Result<()> {
     use serde_json::json;
-    let options =
-        batchplan::lerobot::ExportOptions { robot_type: Some("rebot_b601_dm_bimanual".into()), ..Default::default() };
+    let options = batchplan::lerobot::ExportOptions {
+        robot_type: Some("rebot_b601_dm_bimanual".into()),
+        ..Default::default()
+    };
     batchplan::lerobot::export(out, robot, worlds, demos, &options)?;
     // The right finger mirrors the left one.
     let fingers = |prefix: &str| {
@@ -128,7 +160,10 @@ fn export(out: &Path, robot: &Robot, worlds: &[World], demos: &[Demonstration]) 
             "cam_right_wrist": wrist("right_"),
         },
     });
-    std::fs::write(out.join("meta/replay.json"), serde_json::to_string_pretty(&replay)?)?;
+    std::fs::write(
+        out.join("meta/replay.json"),
+        serde_json::to_string_pretty(&replay)?,
+    )?;
     Ok(())
 }
 

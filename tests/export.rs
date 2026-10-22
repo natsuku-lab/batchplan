@@ -16,11 +16,26 @@ fn demos(dt: f32) -> (Robot, Vec<World>, Vec<Demonstration>) {
     let device = Device::cpu(&robot).unwrap();
     let mut rng = Rng::new(3);
     let worlds: Vec<World> = (0..6).map(|_| common::tabletop(&mut rng)).collect();
-    let goals: Vec<IkProblem> =
-        worlds.iter().enumerate().map(|(i, w)| IkProblem::new(i as u32, common::grasp_target(w, &mut rng))).collect();
+    let goals: Vec<IkProblem> = worlds
+        .iter()
+        .enumerate()
+        .map(|(i, w)| IkProblem::new(i as u32, common::grasp_target(w, &mut rng)))
+        .collect();
     let uploaded = device.upload(&worlds).unwrap();
-    let demos = demonstrations(&device, &uploaded, &goals, &DemoOptions { dt, ..Default::default() }).unwrap();
-    assert!(demos.iter().any(|d| d.origin.parent().is_some()), "fixture should include recoveries");
+    let demos = demonstrations(
+        &device,
+        &uploaded,
+        &goals,
+        &DemoOptions {
+            dt,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        demos.iter().any(|d| d.origin.parent().is_some()),
+        "fixture should include recoveries"
+    );
     (robot, worlds, demos)
 }
 
@@ -31,9 +46,18 @@ fn demonstration_options_are_checked_before_any_work() {
     let worlds = device.upload(&[World::default()]).unwrap();
     let goals = [IkProblem::new(0, robot.ee_pose(robot.default_q(), 0))];
     for o in [
-        DemoOptions { speed_scale: (0.0, 1.0), ..Default::default() },
-        DemoOptions { speed_scale: (0.5, 1.5), ..Default::default() },
-        DemoOptions { dt: 0.0, ..Default::default() },
+        DemoOptions {
+            speed_scale: (0.0, 1.0),
+            ..Default::default()
+        },
+        DemoOptions {
+            speed_scale: (0.5, 1.5),
+            ..Default::default()
+        },
+        DemoOptions {
+            dt: 0.0,
+            ..Default::default()
+        },
     ] {
         let err = demonstrations(&device, &worlds, &goals, &o).unwrap_err();
         assert!(matches!(err, Error::Input(_)), "{err:?}");
@@ -53,17 +77,30 @@ fn read_npy(path: &Path) -> (Vec<usize>, Vec<u8>) {
     let header_len = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
     assert_eq!((10 + header_len) % 64, 0, "header must be 64-byte aligned");
     let header = std::str::from_utf8(&bytes[10..10 + header_len]).unwrap();
-    let shape = header.split("'shape': (").nth(1).unwrap().split(')').next().unwrap();
-    let shape = shape.split(',').filter_map(|d| d.trim().parse().ok()).collect();
+    let shape = header
+        .split("'shape': (")
+        .nth(1)
+        .unwrap()
+        .split(')')
+        .next()
+        .unwrap();
+    let shape = shape
+        .split(',')
+        .filter_map(|d| d.trim().parse().ok())
+        .collect();
     (shape, bytes[10 + header_len..].to_vec())
 }
 
 fn as_f32(data: &[u8]) -> Vec<f32> {
-    data.chunks(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
+    data.chunks(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
 fn as_i32(data: &[u8]) -> Vec<i32> {
-    data.chunks(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect()
+    data.chunks(4)
+        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
 #[test]
@@ -73,10 +110,17 @@ fn npy_export_round_trips_the_demonstrations() {
     let frames = demos[0].trajectory.len();
     let start = worlds[demos[0].world as usize].obstacles[1].pose();
     demos[0].task = "Lift the box.".into();
-    demos[0].gripper = (0..frames).map(|f| 1.0 - f as f32 / (frames - 1) as f32).collect();
+    demos[0].gripper = (0..frames)
+        .map(|f| 1.0 - f as f32 / (frames - 1) as f32)
+        .collect();
     demos[0].carried = Some(batchplan::datagen::Carried {
         obstacle: 1,
-        poses: (0..frames).map(|f| Pose { position: start.position + Vec3::Z * 0.01 * f as f32, ..start }).collect(),
+        poses: (0..frames)
+            .map(|f| Pose {
+                position: start.position + Vec3::Z * 0.01 * f as f32,
+                ..start
+            })
+            .collect(),
     });
     let root = scratch("npy");
     batchplan::npy::export(&root, &robot, &worlds, &demos, &Default::default()).unwrap();
@@ -96,8 +140,12 @@ fn npy_export_round_trips_the_demonstrations() {
     let carried = as_i32(&read_npy(&root.join("carried.npy")).1);
     let carried_pose = as_f32(&read_npy(&root.join("carried_pose.npy")).1);
     let task = as_i32(&read_npy(&root.join("task.npy")).1);
-    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("meta.json")).unwrap()).unwrap();
-    assert_eq!(meta["tasks"], serde_json::json!(["Lift the box.", batchplan::datagen::REACH_TASK]));
+    let meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("meta.json")).unwrap()).unwrap();
+    assert_eq!(
+        meta["tasks"],
+        serde_json::json!(["Lift the box.", batchplan::datagen::REACH_TASK])
+    );
     for (i, d) in demos.iter().enumerate() {
         let t = &d.trajectory;
         assert_eq!(lengths[i] as usize, t.len());
@@ -105,22 +153,41 @@ fn npy_export_round_trips_the_demonstrations() {
         assert_eq!(kinds[i], u8::from(d.origin.parent().is_some()));
         assert_eq!(worlds_column[i], d.world as i32);
         let row = &positions[i * horizon * n..(i + 1) * horizon * n];
-        assert_eq!(&row[..t.positions.len()], &t.positions[..], "episode {i} positions");
+        assert_eq!(
+            &row[..t.positions.len()],
+            &t.positions[..],
+            "episode {i} positions"
+        );
         // Padding repeats the final position.
-        assert!(row[t.positions.len()..].chunks(n).all(|q| q == &t.positions[t.positions.len() - n..]));
-        assert_eq!(&gripper[i * horizon..i * horizon + t.len()], &d.gripper[..], "episode {i} gripper");
+        assert!(
+            row[t.positions.len()..]
+                .chunks(n)
+                .all(|q| q == &t.positions[t.positions.len() - n..])
+        );
+        assert_eq!(
+            &gripper[i * horizon..i * horizon + t.len()],
+            &d.gripper[..],
+            "episode {i} gripper"
+        );
         assert_eq!(task[i], i32::from(i > 0), "episode {i} task");
         assert_eq!(carried[i], if i == 0 { 1 } else { -1 });
         let z = carried_pose[(i * horizon + t.len() - 1) * 7 + 2];
-        let expected = d.carried.as_ref().map_or(0.0, |c| c.poses[t.len() - 1].position.z);
+        let expected = d
+            .carried
+            .as_ref()
+            .map_or(0.0, |c| c.poses[t.len() - 1].position.z);
         assert_eq!(z, expected, "episode {i}'s last carried pose");
     }
     // Exporting over an existing dataset is refused.
     assert!(batchplan::npy::export(&root, &robot, &worlds, &demos, &Default::default()).is_err());
     // Demonstrations must belong to the worlds given and match the robot.
     let elsewhere = scratch("npy-elsewhere");
-    let lost = vec![Demonstration { world: worlds.len() as u32, ..demos[0].clone() }];
-    let err = batchplan::npy::export(&elsewhere, &robot, &worlds, &lost, &Default::default()).unwrap_err();
+    let lost = vec![Demonstration {
+        world: worlds.len() as u32,
+        ..demos[0].clone()
+    }];
+    let err = batchplan::npy::export(&elsewhere, &robot, &worlds, &lost, &Default::default())
+        .unwrap_err();
     assert!(matches!(err, Error::Input(_)), "{err:?}");
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -151,7 +218,10 @@ mod lerobot {
     fn read_all(dir: &Path) -> Vec<(usize, usize, RecordBatch)> {
         let mut files = vec![];
         for chunk in std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()) {
-            for file in std::fs::read_dir(&chunk).unwrap().map(|e| e.unwrap().path()) {
+            for file in std::fs::read_dir(&chunk)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+            {
                 files.push(file);
             }
         }
@@ -159,28 +229,64 @@ mod lerobot {
         files
             .into_iter()
             .flat_map(|path| {
-                let index =
-                    |s: &str| s.split('-').nth(1).unwrap().trim_end_matches(".parquet").parse::<usize>().unwrap();
+                let index = |s: &str| {
+                    s.split('-')
+                        .nth(1)
+                        .unwrap()
+                        .trim_end_matches(".parquet")
+                        .parse::<usize>()
+                        .unwrap()
+                };
                 let (chunk, file) = (
-                    index(path.parent().unwrap().file_name().unwrap().to_str().unwrap()),
+                    index(
+                        path.parent()
+                            .unwrap()
+                            .file_name()
+                            .unwrap()
+                            .to_str()
+                            .unwrap(),
+                    ),
                     index(path.file_name().unwrap().to_str().unwrap()),
                 );
-                let reader =
-                    ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap().build().unwrap();
-                reader.map(move |b| (chunk, file, b.unwrap())).collect::<Vec<_>>()
+                let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap())
+                    .unwrap()
+                    .build()
+                    .unwrap();
+                reader
+                    .map(move |b| (chunk, file, b.unwrap()))
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
 
     fn ints(batch: &RecordBatch, name: &str) -> Vec<i64> {
-        batch.column_by_name(name).unwrap().as_any().downcast_ref::<Int64Array>().unwrap().values().to_vec()
+        batch
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values()
+            .to_vec()
     }
 
     /// Each frame's values of a vector feature.
     fn vectors(batch: &RecordBatch, name: &str) -> Vec<Vec<f32>> {
-        let list = batch.column_by_name(name).unwrap().as_any().downcast_ref::<FixedSizeListArray>().unwrap();
+        let list = batch
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .unwrap();
         (0..list.len())
-            .map(|i| list.value(i).as_any().downcast_ref::<Float32Array>().unwrap().values().to_vec())
+            .map(|i| {
+                list.value(i)
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec()
+            })
             .collect()
     }
 
@@ -190,12 +296,24 @@ mod lerobot {
         // Enough episodes to pass 1 MB of frames and of episode metadata several times over.
         let demos: Vec<Demonstration> = fixture.iter().cycle().take(1500).cloned().collect();
         let root = scratch("lerobot-large");
-        write(&root, &robot, &worlds, &demos, &ExportOptions { data_files_size_in_mb: 1, ..Default::default() })
-            .unwrap();
+        write(
+            &root,
+            &robot,
+            &worlds,
+            &demos,
+            &ExportOptions {
+                data_files_size_in_mb: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let episodes = read_all(&root.join("meta/episodes"));
         let data = read_all(&root.join("data"));
         let files = |rows: &[(usize, usize, RecordBatch)]| {
-            rows.iter().map(|r| (r.0, r.1)).collect::<std::collections::BTreeSet<_>>().len()
+            rows.iter()
+                .map(|r| (r.0, r.1))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
         };
         assert!(
             files(&episodes) > 1 && files(&data) > 1,
@@ -206,7 +324,11 @@ mod lerobot {
         let mut next = 0;
         let frames: Vec<(usize, usize, i64)> = data
             .iter()
-            .flat_map(|(chunk, file, b)| ints(b, "episode_index").into_iter().map(move |e| (*chunk, *file, e)))
+            .flat_map(|(chunk, file, b)| {
+                ints(b, "episode_index")
+                    .into_iter()
+                    .map(move |e| (*chunk, *file, e))
+            })
             .collect();
         for (chunk, file, batch) in &episodes {
             for (row, &e) in ints(batch, "episode_index").iter().enumerate() {
@@ -214,13 +336,26 @@ mod lerobot {
                 next += 1;
                 // Each row names the metadata file it is in and the data file holding its frames.
                 assert_eq!(
-                    (ints(batch, "meta/episodes/chunk_index")[row], ints(batch, "meta/episodes/file_index")[row]),
+                    (
+                        ints(batch, "meta/episodes/chunk_index")[row],
+                        ints(batch, "meta/episodes/file_index")[row]
+                    ),
                     (*chunk as i64, *file as i64)
                 );
-                let (from, to) =
-                    (ints(batch, "dataset_from_index")[row] as usize, ints(batch, "dataset_to_index")[row] as usize);
-                let at = (ints(batch, "data/chunk_index")[row] as usize, ints(batch, "data/file_index")[row] as usize);
-                assert!(frames[from..to].iter().all(|&(c, f, fe)| (c, f) == at && fe == e), "episode {e}'s frames");
+                let (from, to) = (
+                    ints(batch, "dataset_from_index")[row] as usize,
+                    ints(batch, "dataset_to_index")[row] as usize,
+                );
+                let at = (
+                    ints(batch, "data/chunk_index")[row] as usize,
+                    ints(batch, "data/file_index")[row] as usize,
+                );
+                assert!(
+                    frames[from..to]
+                        .iter()
+                        .all(|&(c, f, fe)| (c, f) == at && fe == e),
+                    "episode {e}'s frames"
+                );
             }
         }
         assert_eq!(next as usize, demos.len());
@@ -230,14 +365,26 @@ mod lerobot {
         let n = robot.dof();
         let total: usize = demos.iter().map(|d| d.trajectory.len()).sum();
         for j in 0..n {
-            let values = demos.iter().flat_map(|d| d.trajectory.positions.chunks(n).map(move |q| q[j] as f64));
+            let values = demos
+                .iter()
+                .flat_map(|d| d.trajectory.positions.chunks(n).map(move |q| q[j] as f64));
             let mean = values.clone().sum::<f64>() / total as f64;
-            let std = (values.clone().map(|v| (v - mean).powi(2)).sum::<f64>() / total as f64).sqrt();
+            let std =
+                (values.clone().map(|v| (v - mean).powi(2)).sum::<f64>() / total as f64).sqrt();
             let min = values.fold(f64::INFINITY, f64::min);
             let s = &stats["observation.state"];
-            assert!((s["mean"][j].as_f64().unwrap() - mean).abs() < 1e-5, "joint {j} mean");
-            assert!((s["std"][j].as_f64().unwrap() - std).abs() < 1e-5, "joint {j} std");
-            assert!((s["min"][j].as_f64().unwrap() - min).abs() < 1e-6, "joint {j} min");
+            assert!(
+                (s["mean"][j].as_f64().unwrap() - mean).abs() < 1e-5,
+                "joint {j} mean"
+            );
+            assert!(
+                (s["std"][j].as_f64().unwrap() - std).abs() < 1e-5,
+                "joint {j} std"
+            );
+            assert!(
+                (s["min"][j].as_f64().unwrap() - min).abs() < 1e-6,
+                "joint {j} min"
+            );
         }
         assert_eq!(stats["observation.state"]["count"][0], total);
         std::fs::remove_dir_all(&root).unwrap();
@@ -247,21 +394,34 @@ mod lerobot {
     fn tasks_grippers_and_carried_objects_are_exported_per_frame() {
         let (robot, worlds, fixture) = demos(0.05);
         let n = robot.dof();
-        let mut demos: Vec<Demonstration> =
-            fixture.into_iter().filter(|d| d.origin == Origin::Nominal).take(3).collect();
+        let mut demos: Vec<Demonstration> = fixture
+            .into_iter()
+            .filter(|d| d.origin == Origin::Nominal)
+            .take(3)
+            .collect();
         assert_eq!(demos.len(), 3);
         // The second episode closes the gripper and carries its world's obstacle 1 upward.
         let frames = demos[1].trajectory.len();
         let start = worlds[demos[1].world as usize].obstacles[1].pose();
         demos[1].task = "Lift the box.".into();
-        demos[1].gripper = (0..frames).map(|f| 1.0 - f as f32 / (frames - 1) as f32).collect();
+        demos[1].gripper = (0..frames)
+            .map(|f| 1.0 - f as f32 / (frames - 1) as f32)
+            .collect();
         demos[1].carried = Some(Carried {
             obstacle: 1,
             poses: (0..frames)
-                .map(|f| Pose { position: start.position + Vec3::Z * 0.01 * f as f32, ..start })
+                .map(|f| Pose {
+                    position: start.position + Vec3::Z * 0.01 * f as f32,
+                    ..start
+                })
                 .collect(),
         });
-        let start_of = |e: usize| worlds[demos[e].world as usize].obstacles[1].pose().position.z;
+        let start_of = |e: usize| {
+            worlds[demos[e].world as usize].obstacles[1]
+                .pose()
+                .position
+                .z
+        };
         let root = scratch("lerobot-tasks");
         write(&root, &robot, &worlds, &demos, &ExportOptions::default()).unwrap();
         let tasks = read_parquet_rows(&root.join("meta/tasks.parquet"));
@@ -274,27 +434,46 @@ mod lerobot {
                 vectors(&batch, "observation.environment_state"),
                 ints(&batch, "task_index"),
             );
-            let (episode, frame_index) = (ints(&batch, "episode_index"), ints(&batch, "frame_index"));
+            let (episode, frame_index) =
+                (ints(&batch, "episode_index"), ints(&batch, "frame_index"));
             for row in 0..batch.num_rows() {
                 let (e, frame) = (episode[row] as usize, frame_index[row] as usize);
                 seen[e] += 1;
-                assert_eq!(state[row][n], demos[e].gripper[frame], "episode {e} frame {frame}: the gripper last");
+                assert_eq!(
+                    state[row][n], demos[e].gripper[frame],
+                    "episode {e} frame {frame}: the gripper last"
+                );
                 assert_eq!(task[row], i64::from(e == 1), "episode {e}'s task");
                 // Obstacle 1's centre in the environment state: 7 goal values, 12 per obstacle,
                 // then present and kind.
                 let z = env[row][7 + 12 + 4];
-                let expected = demos[e].carried.as_ref().map_or(start_of(e), |c| c.poses[frame].position.z);
-                assert!((z - expected).abs() < 1e-6, "episode {e} frame {frame}: obstacle 1 at {z}, not {expected}");
+                let expected = demos[e]
+                    .carried
+                    .as_ref()
+                    .map_or(start_of(e), |c| c.poses[frame].position.z);
+                assert!(
+                    (z - expected).abs() < 1e-6,
+                    "episode {e} frame {frame}: obstacle 1 at {z}, not {expected}"
+                );
                 f += 1;
             }
         }
-        assert!(seen.iter().zip(&demos).all(|(&s, d)| s == d.trajectory.len()), "every frame once");
+        assert!(
+            seen.iter()
+                .zip(&demos)
+                .all(|(&s, d)| s == d.trajectory.len()),
+            "every frame once"
+        );
         assert!(f > 0);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     fn read_parquet_rows(path: &Path) -> usize {
-        SerializedFileReader::new(File::open(path).unwrap()).unwrap().metadata().file_metadata().num_rows() as usize
+        SerializedFileReader::new(File::open(path).unwrap())
+            .unwrap()
+            .metadata()
+            .file_metadata()
+            .num_rows() as usize
     }
 
     #[test]
@@ -310,16 +489,31 @@ mod lerobot {
         assert_eq!(info["fps"], 20);
         assert_eq!(info["total_episodes"], demos.len());
         assert_eq!(info["total_frames"], frames);
-        assert_eq!(info["features"]["observation.state"]["shape"][0], robot.dof() + 1, "joints, then the gripper");
-        assert_eq!(info["features"]["observation.state"]["names"][robot.dof()], "gripper");
+        assert_eq!(
+            info["features"]["observation.state"]["shape"][0],
+            robot.dof() + 1,
+            "joints, then the gripper"
+        );
+        assert_eq!(
+            info["features"]["observation.state"]["names"][robot.dof()],
+            "gripper"
+        );
 
-        let reader = |path: &str| SerializedFileReader::new(File::open(root.join(path)).unwrap()).unwrap();
+        let reader =
+            |path: &str| SerializedFileReader::new(File::open(root.join(path)).unwrap()).unwrap();
         let rows = |path: &str| reader(path).metadata().file_metadata().num_rows() as usize;
         assert_eq!(rows("data/chunk-000/file-000.parquet"), frames);
-        assert_eq!(rows("meta/episodes/chunk-000/file-000.parquet"), demos.len());
+        assert_eq!(
+            rows("meta/episodes/chunk-000/file-000.parquet"),
+            demos.len()
+        );
         assert_eq!(rows("meta/tasks.parquet"), 1);
         let data = reader("data/chunk-000/file-000.parquet");
-        assert_eq!(data.metadata().num_row_groups(), demos.len(), "one row group per episode");
+        assert_eq!(
+            data.metadata().num_row_groups(),
+            demos.len(),
+            "one row group per episode"
+        );
 
         // Exporting over an existing dataset is refused.
         assert!(write(&root, &robot, &worlds, &demos, &ExportOptions::default()).is_err());
@@ -334,7 +528,9 @@ mod lerobot {
         let n = robot.dof();
         let frames = 4;
         // Each joint's value names it (joint j at frame f is j + f / 10), each gripper its hand.
-        let positions: Vec<f32> = (0..frames).flat_map(|f| (0..n).map(move |j| j as f32 + f as f32 / 10.0)).collect();
+        let positions: Vec<f32> = (0..frames)
+            .flat_map(|f| (0..n).map(move |j| j as f32 + f as f32 / 10.0))
+            .collect();
         let trajectory = JointTrajectory {
             dof: n,
             dt: 0.05,
@@ -354,7 +550,14 @@ mod lerobot {
         };
         let worlds = [World::default()];
         let root = scratch("two-hands");
-        write(&root, &robot, &worlds, std::slice::from_ref(&demo), &ExportOptions::default()).unwrap();
+        write(
+            &root,
+            &robot,
+            &worlds,
+            std::slice::from_ref(&demo),
+            &ExportOptions::default(),
+        )
+        .unwrap();
 
         let (left, right) = (robot.hand_joints(0), robot.hand_joints(1));
         let names = robot.joint_names();
@@ -374,7 +577,12 @@ mod lerobot {
         let state = &info["features"]["observation.state"];
         assert_eq!(state["shape"][0], n + 2);
         assert_eq!(
-            state["names"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>(),
+            state["names"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect::<Vec<_>>(),
             expected
         );
         let rows = vectors(&read_all(&root.join("data"))[0].2, "observation.state");
@@ -409,7 +617,14 @@ mod lerobot {
     #[test]
     fn export_rejects_fractional_frame_rates() {
         let (robot, worlds, demos) = demos(0.03);
-        let err = write(&scratch("lerobot-fps"), &robot, &worlds, &demos, &ExportOptions::default()).unwrap_err();
+        let err = write(
+            &scratch("lerobot-fps"),
+            &robot,
+            &worlds,
+            &demos,
+            &ExportOptions::default(),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("frames per second"), "{err}");
     }
 }

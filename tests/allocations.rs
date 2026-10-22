@@ -63,25 +63,58 @@ fn batches_build_their_searches_on_the_threads_that_run_them() {
 
     let searches: Vec<RrtProblem> = problems[..many]
         .iter()
-        .map(|p| RrtProblem { world: p.world, start: p.start.clone(), goals: vec![p.goal.clone()], hold: vec![] })
+        .map(|p| RrtProblem {
+            world: p.world,
+            start: p.start.clone(),
+            goals: vec![p.goal.clone()],
+            hold: vec![],
+        })
         .collect();
-    let small = allocations(|| drop(connect(&device, &worlds, &searches[..few], &RrtOptions::default()).unwrap()));
-    let large = allocations(|| drop(connect(&device, &worlds, &searches, &RrtOptions::default()).unwrap()));
+    let small = allocations(|| {
+        drop(connect(&device, &worlds, &searches[..few], &RrtOptions::default()).unwrap())
+    });
+    let large =
+        allocations(|| drop(connect(&device, &worlds, &searches, &RrtOptions::default()).unwrap()));
     let searched = per_problem(small, large);
 
     let found = connect(&device, &worlds, &searches, &RrtOptions::default()).unwrap();
-    let (world, paths): (Vec<u32>, Vec<Vec<f32>>) =
-        searches.iter().zip(found.paths).filter_map(|(p, path)| Some((p.world, path?))).unzip();
-    assert!(paths.len() >= many - 4, "{} of {many} searches found a path", paths.len());
+    let (world, paths): (Vec<u32>, Vec<Vec<f32>>) = searches
+        .iter()
+        .zip(found.paths)
+        .filter_map(|(p, path)| Some((p.world, path?)))
+        .unzip();
+    assert!(
+        paths.len() >= many - 4,
+        "{} of {many} searches found a path",
+        paths.len()
+    );
     let shortcuts = |k: usize| {
         let mut paths = paths[..k].to_vec();
-        allocations(|| shortcut(&device, &worlds, &world[..k], &mut paths, &Default::default()).unwrap())
+        allocations(|| {
+            shortcut(
+                &device,
+                &worlds,
+                &world[..k],
+                &mut paths,
+                &Default::default(),
+            )
+            .unwrap()
+        })
     };
     let shortened = (shortcuts(paths.len()) - shortcuts(few)) as f64 / (paths.len() - few) as f64;
 
     // Built on their threads: 3, 4 and 1, the results' copies of the problems; built on the
     // calling thread: 32, 16 and 7.
-    assert!(plans <= 8.0, "plan allocates {plans:.1} per problem on the calling thread");
-    assert!(searched <= 8.0, "connect allocates {searched:.1} per problem on the calling thread");
-    assert!(shortened <= 3.0, "shortcut allocates {shortened:.1} per path on the calling thread");
+    assert!(
+        plans <= 8.0,
+        "plan allocates {plans:.1} per problem on the calling thread"
+    );
+    assert!(
+        searched <= 8.0,
+        "connect allocates {searched:.1} per problem on the calling thread"
+    );
+    assert!(
+        shortened <= 3.0,
+        "shortcut allocates {shortened:.1} per path on the calling thread"
+    );
 }

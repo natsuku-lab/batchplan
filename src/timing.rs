@@ -2,13 +2,14 @@
 //! and jerk stay within the robot's limits.
 //!
 //! A trajectory is the planned path `P(s)`, a uniform cubic B-spline over `s` in spans, and a time
-//! map `s = σ(t)`, a uniform cubic B-spline over time. Two timings are computed and the faster kept:
+//! map `s = σ(t)`, a uniform cubic B-spline over time. Two timings are computed and the faster
+//! kept:
 //! - Uniform: `σ(t) = t / h`. On the path, velocity is a quadratic B-spline over the control-point
 //!   differences, acceleration a linear one over the second differences, and jerk is constant per
 //!   span, so `h` chosen from those differences bounds the whole curve exactly.
-//! - Time-optimal (TOPP-RA, Pham & Pham 2018): the fastest velocity- and acceleration-limited timing of the
-//!   same path, smoothed and stretched until velocity, acceleration and jerk, sampled densely
-//!   along it, keep their limits.
+//! - Time-optimal (TOPP-RA, Pham & Pham 2018): the fastest velocity- and acceleration-limited
+//!   timing of the same path, smoothed and stretched until velocity, acceleration and jerk, sampled
+//!   densely along it, keep their limits.
 
 use crate::error::{Error, Result, ensure_input};
 use serde::{Deserialize, Serialize};
@@ -28,7 +29,11 @@ pub struct JointState {
 
 impl JointState {
     pub fn new(dof: usize) -> Self {
-        Self { position: vec![0.0; dof], velocity: vec![0.0; dof], acceleration: vec![0.0; dof] }
+        Self {
+            position: vec![0.0; dof],
+            velocity: vec![0.0; dof],
+            acceleration: vec![0.0; dof],
+        }
     }
 }
 
@@ -51,14 +56,18 @@ pub struct Trajectory {
 }
 
 /// The values of `d`-th differences of control points: (width, weights).
-const DIFFERENCES: [(usize, &[f32]); 3] = [(2, &[-1.0, 1.0]), (3, &[1.0, -2.0, 1.0]), (4, &BASIS_D3)];
+const DIFFERENCES: [(usize, &[f32]); 3] =
+    [(2, &[-1.0, 1.0]), (3, &[1.0, -2.0, 1.0]), (4, &BASIS_D3)];
 
 impl Trajectory {
     /// Times a planned path (`[points, dof]` control points, at least 7) as fast as the robot's
     /// velocity, acceleration and jerk limits allow, then slows it by `speed_scale` in (0, 1].
     pub fn new(robot: &Robot, control_points: &[f32], speed_scale: f32) -> Result<Self> {
         let n = robot.dof();
-        ensure_input!(speed_scale > 0.0 && speed_scale <= 1.0, "speed_scale must be in (0, 1], got {speed_scale}");
+        ensure_input!(
+            speed_scale > 0.0 && speed_scale <= 1.0,
+            "speed_scale must be in (0, 1], got {speed_scale}"
+        );
         check_path(control_points, n)?;
         let h = uniform_knot(robot, control_points);
         let spans = control_points.len() / n - 3;
@@ -93,7 +102,9 @@ impl Trajectory {
             "a start motion needs {n} velocities and accelerations"
         );
         check_path(control_points, n)?;
-        let Some(h0) = start_knot(control_points, n, motion)? else { return Self::new(robot, control_points, 1.0) };
+        let Some(h0) = start_knot(control_points, n, motion)? else {
+            return Self::new(robot, control_points, 1.0);
+        };
         let spans = control_points.len() / n - 3;
         // Uniform timing at exactly h0, when that is no faster than the differences allow.
         let at = |knot_interval: f32, time_points: Vec<f32>| Self {
@@ -103,12 +114,17 @@ impl Trajectory {
             time_points,
         };
         let uniform = (uniform_knot(robot, control_points) <= h0).then(|| at(h0, linear(spans)));
-        let optimal = topp::time_map(robot, control_points, Some(1.0 / h0 as f64)).map(|(knot, map)| at(knot, map));
+        let optimal = topp::time_map(robot, control_points, Some(1.0 / h0 as f64))
+            .map(|(knot, map)| at(knot, map));
         [uniform, optimal]
             .into_iter()
             .flatten()
             .min_by(|a, b| a.duration().total_cmp(&b.duration()))
-            .ok_or_else(|| Error::Unsafe("no timing of this path from its start motion keeps the limits".into()))
+            .ok_or_else(|| {
+                Error::Unsafe(
+                    "no timing of this path from its start motion keeps the limits".into(),
+                )
+            })
     }
 
     fn spans(&self) -> usize {
@@ -180,23 +196,37 @@ impl Trajectory {
         let u = x - m as f32;
         let tp = &self.time_points;
         let at = |w: [f32; 4]| (0..4).map(|i| w[i] * tp[m + i]).sum::<f32>();
-        if h > 0.0 { (at(basis(u)), at(basis_d1(u)) / h, at(basis_d2(u)) / (h * h)) } else { (at(basis(u)), 0.0, 0.0) }
+        if h > 0.0 {
+            (at(basis(u)), at(basis_d1(u)) / h, at(basis_d2(u)) / (h * h))
+        } else {
+            (at(basis(u)), 0.0, 0.0)
+        }
     }
 
     /// This trajectory from time `t` on, braking to rest along its path: a controlled stop, on a
     /// path already checked, for when the motion must not go on (an obstacle appeared, a replan
-    /// failed). It starts in exactly the state at `t` and stops as soon along the path as a time map
-    /// braking at an even rate within the limits allows; verify it with [`Trajectory::check_from`].
-    /// Errors with [`Error::Unsafe`] if no such stop ends before the path does, where this
-    /// trajectory comes to rest anyway.
+    /// failed). It starts in exactly the state at `t` and stops as soon along the path as a time
+    /// map braking at an even rate within the limits allows; verify it with
+    /// [`Trajectory::check_from`]. Errors with [`Error::Unsafe`] if no such stop ends before
+    /// the path does, where this trajectory comes to rest anyway.
     pub fn stop(&self, robot: &Robot, t: f32) -> Result<Self> {
-        ensure_input!(self.dof == robot.dof(), "trajectory has {} joints, the robot has {}", self.dof, robot.dof());
+        ensure_input!(
+            self.dof == robot.dof(),
+            "trajectory has {} joints, the robot has {}",
+            self.dof,
+            robot.dof()
+        );
         let (s0, v0, a0) = self.map_at(t);
         // At rest already (as where a path ends at rest under a uniform map that does not slow):
         // nothing to brake, so the map stands still.
         let mut state = JointState::new(self.dof);
         self.at(t, &mut state);
-        let (v0, a0) = if state.velocity.iter().chain(&state.acceleration).all(|x| x.abs() < 1e-6) {
+        let (v0, a0) = if state
+            .velocity
+            .iter()
+            .chain(&state.acceleration)
+            .all(|x| x.abs() < 1e-6)
+        {
             (0.0, 0.0)
         } else {
             (v0, a0)
@@ -214,7 +244,12 @@ impl Trajectory {
         let mut best: Option<(f32, f32, usize)> = None;
         let fits = |tau: f32, m: usize, map: &mut [f32]| {
             let end = stop_map(s0, v0, a0, m, tau, map);
-            (end, end <= spans + 1e-4 * spans.max(1.0) && runs_forward(map) && topp::within_limits(robot, cp, tau, map))
+            (
+                end,
+                end <= spans + 1e-4 * spans.max(1.0)
+                    && runs_forward(map)
+                    && topp::within_limits(robot, cp, tau, map),
+            )
         };
         for m in STOP_SPANS {
             let map = &mut points[..m + 3];
@@ -233,8 +268,16 @@ impl Trajectory {
                 continue;
             }
             for _ in 0..STOP_BISECTIONS {
-                let middle = if fail > 0.0 { (fail * tau).sqrt() } else { 0.5 * tau };
-                if fits(middle, m, map).1 { tau = middle } else { fail = middle }
+                let middle = if fail > 0.0 {
+                    (fail * tau).sqrt()
+                } else {
+                    0.5 * tau
+                };
+                if fits(middle, m, map).1 {
+                    tau = middle
+                } else {
+                    fail = middle
+                }
             }
             let end = stop_map(s0, v0, a0, m, tau, map);
             if best.is_none_or(|(e, ..)| end < e) {
@@ -248,7 +291,12 @@ impl Trajectory {
         };
         let mut map = vec![0.0f32; m + 3];
         stop_map(s0, v0, a0, m, tau, &mut map);
-        Ok(Self { dof: n, control_points: cp.to_vec(), knot_interval: tau, time_points: map })
+        Ok(Self {
+            dof: n,
+            control_points: cp.to_vec(),
+            knot_interval: tau,
+            time_points: map,
+        })
     }
 
     /// The trajectory sampled `hz` times per second, from its start to its exact end.
@@ -271,7 +319,14 @@ impl Trajectory {
         };
         for k in 0..samples {
             // The last sample lands exactly on the end, whatever the rounding of k * dt.
-            self.at(if k + 1 == samples { duration } else { (k as f32 * dt).min(duration) }, &mut state);
+            self.at(
+                if k + 1 == samples {
+                    duration
+                } else {
+                    (k as f32 * dt).min(duration)
+                },
+                &mut state,
+            );
             out.positions.extend_from_slice(&state.position);
             out.velocities.extend_from_slice(&state.velocity);
             out.accelerations.extend_from_slice(&state.acceleration);
@@ -279,9 +334,9 @@ impl Trajectory {
         Ok(out)
     }
 
-    /// Verifies the trajectory is safe to run on `robot`: finite, at rest at both ends, within every
-    /// position limit, and within every velocity, acceleration and jerk limit: exactly for uniform
-    /// timing, at 64 points per time-map span otherwise.
+    /// Verifies the trajectory is safe to run on `robot`: finite, at rest at both ends, within
+    /// every position limit, and within every velocity, acceleration and jerk limit: exactly
+    /// for uniform timing, at 64 points per time-map span otherwise.
     pub fn check(&self, robot: &Robot) -> Result<()> {
         self.verify(robot, None)
     }
@@ -295,7 +350,11 @@ impl Trajectory {
     fn verify(&self, robot: &Robot, start: Option<&JointState>) -> Result<()> {
         let n = robot.dof();
         let cp = &self.control_points;
-        ensure_input!(self.dof == n, "trajectory has {} joints, the robot has {n}", self.dof);
+        ensure_input!(
+            self.dof == n,
+            "trajectory has {} joints, the robot has {n}",
+            self.dof
+        );
         ensure_input!(
             cp.len().is_multiple_of(n) && cp.len() / n >= 7,
             "need a whole number of at least 7 control points"
@@ -307,12 +366,21 @@ impl Trajectory {
                 }
             };
         }
-        ensure_safe!(cp.iter().all(|v| v.is_finite()), "control points must be finite");
+        ensure_safe!(
+            cp.iter().all(|v| v.is_finite()),
+            "control points must be finite"
+        );
         let h = self.knot_interval;
-        ensure_safe!(h.is_finite() && h >= 0.0, "knot interval must be finite and non-negative, got {h}");
+        ensure_safe!(
+            h.is_finite() && h >= 0.0,
+            "knot interval must be finite and non-negative, got {h}"
+        );
         let points = cp.len() / n;
         if h == 0.0 {
-            ensure_safe!(cp.chunks(n).all(|p| p == &cp[..n]), "a trajectory that takes no time must not move");
+            ensure_safe!(
+                cp.chunks(n).all(|p| p == &cp[..n]),
+                "a trajectory that takes no time must not move"
+            );
         }
         let tp = &self.time_points;
         ensure_safe!(
@@ -320,8 +388,10 @@ impl Trajectory {
             "the time map needs at least 4 finite control points"
         );
         ensure_safe!(runs_forward(tp), "the time map must not run backward");
-        let ends =
-            [(tp[0] + 4.0 * tp[1] + tp[2]) / 6.0, (tp[tp.len() - 3] + 4.0 * tp[tp.len() - 2] + tp[tp.len() - 1]) / 6.0];
+        let ends = [
+            (tp[0] + 4.0 * tp[1] + tp[2]) / 6.0,
+            (tp[tp.len() - 3] + 4.0 * tp[tp.len() - 2] + tp[tp.len() - 1]) / 6.0,
+        ];
         let spans = (points - 3) as f32;
         let slack = 1e-4 * spans.max(1.0);
         ensure_safe!(
@@ -330,7 +400,9 @@ impl Trajectory {
             ends[0],
             ends[1]
         );
-        let rests = |end: usize| (end..end + 3).all(|i| cp[i * n..(i + 1) * n] == cp[end * n..(end + 1) * n]);
+        let rests = |end: usize| {
+            (end..end + 3).all(|i| cp[i * n..(i + 1) * n] == cp[end * n..(end + 1) * n])
+        };
         // At rest at the end: the path ends there, or the time map stops (a controlled stop).
         let stops = tp[tp.len() - 3..].iter().all(|&p| p == tp[tp.len() - 1]);
         let at_path_end = (ends[1] - spans).abs() < slack;
@@ -345,13 +417,22 @@ impl Trajectory {
             ),
             Some(expected) => {
                 ensure_input!(
-                    [&expected.position, &expected.velocity, &expected.acceleration].iter().all(|v| v.len() == n),
+                    [
+                        &expected.position,
+                        &expected.velocity,
+                        &expected.acceleration
+                    ]
+                    .iter()
+                    .all(|v| v.len() == n),
                     "a start state needs {n} positions, velocities and accelerations"
                 );
                 let mut first = JointState::new(n);
                 self.at(0.0, &mut first);
-                let close =
-                    |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-4 * (1.0 + y.abs()));
+                let close = |a: &[f32], b: &[f32]| {
+                    a.iter()
+                        .zip(b)
+                        .all(|(x, y)| (x - y).abs() <= 1e-4 * (1.0 + y.abs()))
+                };
                 ensure_safe!(
                     close(&first.position, &expected.position)
                         && close(&first.velocity, &expected.velocity)
@@ -360,20 +441,36 @@ impl Trajectory {
                 );
             }
         }
-        let limits = [robot.max_velocity(), robot.max_acceleration(), robot.max_jerk()];
+        let limits = [
+            robot.max_velocity(),
+            robot.max_acceleration(),
+            robot.max_jerk(),
+        ];
         let names = ["velocity", "acceleration", "jerk"];
         let uniform = *tp == linear(points - 3);
         if !uniform && h > 0.0 {
             let mut out = vec![[0.0f32; 3]; n];
             for m in 0..tp.len() - 3 {
                 for sample in 0..=CHECK_SAMPLES {
-                    topp::derivatives(cp, n, h, tp, m, sample as f32 / CHECK_SAMPLES as f32, &mut out);
+                    topp::derivatives(
+                        cp,
+                        n,
+                        h,
+                        tp,
+                        m,
+                        sample as f32 / CHECK_SAMPLES as f32,
+                        &mut out,
+                    );
                     for (j, d) in out.iter().enumerate() {
                         for order in 0..3 {
                             let (peak, limit) = (d[order].abs(), limits[order][j]);
                             // False for NaN too.
                             let within = peak <= limit * (1.0 + 1e-3);
-                            ensure_safe!(within, "joint {j} reaches {} {peak}, over its limit {limit}", names[order]);
+                            ensure_safe!(
+                                within,
+                                "joint {j} reaches {} {peak}, over its limit {limit}",
+                                names[order]
+                            );
                         }
                     }
                 }
@@ -392,7 +489,11 @@ impl Trajectory {
                 )));
             }
             let joint_limits = limits.map(|l| l[j]);
-            for (order, &(width, weights)) in DIFFERENCES.iter().enumerate().filter(|_| h > 0.0 && uniform) {
+            for (order, &(width, weights)) in DIFFERENCES
+                .iter()
+                .enumerate()
+                .filter(|_| h > 0.0 && uniform)
+            {
                 let peak = largest_difference(cp, n, j, width, weights) / h.powi(order as i32 + 1);
                 let limit = joint_limits[order];
                 if peak > limit * (1.0 + 1e-4) {
@@ -413,7 +514,10 @@ fn check_path(cp: &[f32], n: usize) -> Result<()> {
         cp.len().is_multiple_of(n) && cp.len() / n >= 7,
         "a path needs a whole number of at least 7 control points of {n} joints"
     );
-    ensure_input!(cp.iter().all(|v| v.is_finite()), "control points must be finite");
+    ensure_input!(
+        cp.iter().all(|v| v.is_finite()),
+        "control points must be finite"
+    );
     Ok(())
 }
 
@@ -428,8 +532,12 @@ fn runs_forward(tp: &[f32]) -> bool {
         // Twice the rate: a u² + b u + c.
         let (a, b, c) = (d[0] - 2.0 * d[1] + d[2], 2.0 * (d[1] - d[0]), d[0] + d[1]);
         let tolerance = -1e-6 * d.iter().fold(1.0f32, |m, x| m.max(x.abs()));
-        let vertex = (a > 0.0).then(|| -b / (2.0 * a)).filter(|u| *u > 0.0 && *u < 1.0);
-        c >= tolerance && a + b + c >= tolerance && vertex.is_none_or(|u| a * u * u + b * u + c >= tolerance)
+        let vertex = (a > 0.0)
+            .then(|| -b / (2.0 * a))
+            .filter(|u| *u > 0.0 && *u < 1.0);
+        c >= tolerance
+            && a + b + c >= tolerance
+            && vertex.is_none_or(|u| a * u * u + b * u + c >= tolerance)
     })
 }
 
@@ -467,8 +575,11 @@ fn span_range(cp: &[f32], n: usize, j: usize, k: usize) -> (f32, f32) {
     let p = [0, 1, 2, 3].map(|w| cp[(k + w) * n + j]);
     let at = |u: f32| basis(u).iter().zip(&p).map(|(w, x)| w * x).sum::<f32>();
     // Six times the derivative: a u² + b u + c.
-    let (a, b, c) =
-        (-3.0 * p[0] + 9.0 * p[1] - 9.0 * p[2] + 3.0 * p[3], 6.0 * (p[0] - 2.0 * p[1] + p[2]), 3.0 * (p[2] - p[0]));
+    let (a, b, c) = (
+        -3.0 * p[0] + 9.0 * p[1] - 9.0 * p[2] + 3.0 * p[3],
+        6.0 * (p[0] - 2.0 * p[1] + p[2]),
+        3.0 * (p[2] - p[0]),
+    );
     // The ends, and up to two roots inside: a fixed array, since `check` may run in a control loop.
     let (mut candidates, mut count) = ([0.0, 1.0, 0.0, 0.0], 2);
     let mut root = |u: f32| {
@@ -499,7 +610,11 @@ fn span_range(cp: &[f32], n: usize, j: usize, k: usize) -> (f32, f32) {
 
 pub(crate) fn uniform_knot(robot: &Robot, cp: &[f32]) -> f32 {
     let n = robot.dof();
-    let limits = [robot.max_velocity(), robot.max_acceleration(), robot.max_jerk()];
+    let limits = [
+        robot.max_velocity(),
+        robot.max_acceleration(),
+        robot.max_jerk(),
+    ];
     let mut h = 0.0f32;
     for (order, &(width, weights)) in DIFFERENCES.iter().enumerate() {
         for (j, &limit) in limits[order].iter().enumerate() {
@@ -514,7 +629,10 @@ pub(crate) fn uniform_knot(robot: &Robot, cp: &[f32]) -> f32 {
 /// `q0 - v0 h0 + a0 h0²/3`, `q0 - a0 h0²/6`, `q0 + v0 h0 + a0 h0²/3`. `None` for a start at rest.
 fn start_knot(cp: &[f32], n: usize, motion: &StartMotion) -> Result<Option<f32>> {
     let (v, a) = (&motion.velocity, &motion.acceleration);
-    ensure_input!(v.iter().chain(a).all(|x| x.is_finite()), "the start motion must be finite");
+    ensure_input!(
+        v.iter().chain(a).all(|x| x.is_finite()),
+        "the start motion must be finite"
+    );
     let dot = |x: &[f32], y: &[f32]| x.iter().zip(y).map(|(p, q)| p * q).sum::<f32>();
     let (p0, p1, p2) = (&cp[..n], &cp[n..2 * n], &cp[2 * n..3 * n]);
     let first: Vec<f32> = (0..n).map(|j| (p2[j] - p0[j]) / 2.0).collect();
@@ -530,7 +648,10 @@ fn start_knot(cp: &[f32], n: usize, motion: &StartMotion) -> Result<Option<f32>>
         (first[j] - v[j] * h0).abs() <= 1e-4 * (1.0 + first[j].abs())
             && (second[j] - a[j] * h0 * h0).abs() <= 1e-4 * (1.0 + second[j].abs())
     });
-    ensure_input!(h0 > 0.0 && matches, "the path's first control points do not continue this start motion");
+    ensure_input!(
+        h0 > 0.0 && matches,
+        "the path's first control points do not continue this start motion"
+    );
     Ok(Some(h0))
 }
 
@@ -543,6 +664,13 @@ fn linear(spans: usize) -> Vec<f32> {
 fn largest_difference(cp: &[f32], n: usize, j: usize, width: usize, weights: &[f32]) -> f32 {
     let points = cp.len() / n;
     (0..points + 1 - width)
-        .map(|k| weights.iter().enumerate().map(|(i, w)| w * cp[(k + i) * n + j]).sum::<f32>().abs())
+        .map(|k| {
+            weights
+                .iter()
+                .enumerate()
+                .map(|(i, w)| w * cp[(k + i) * n + j])
+                .sum::<f32>()
+                .abs()
+        })
         .fold(0.0, f32::max)
 }

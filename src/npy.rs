@@ -7,8 +7,7 @@ use std::path::Path;
 use crate::error::{Result, ensure_input};
 use serde_json::{Map, Value, json};
 
-use crate::datagen::Demonstration;
-use crate::datagen::check_demos;
+use crate::datagen::{Demonstration, check_demos};
 use crate::robot::Robot;
 use crate::world::{World, worlds_json};
 
@@ -24,8 +23,8 @@ pub struct ExportOptions {
 /// - `gripper.npy`: `[episodes, steps, hands]` float32, each hand's gripper opening (1 open, 0
 ///   closed), padded with its final value.
 /// - `carried.npy` (int32: the obstacle of the episode's world it moves, -1 if none) and
-///   `carried_pose.npy`: `[episodes, steps, 7]` float32, that obstacle's position xyz +
-///   quaternion xyzw, padded with its final pose (zero where nothing is carried).
+///   `carried_pose.npy`: `[episodes, steps, 7]` float32, that obstacle's position xyz + quaternion
+///   xyzw, padded with its final pose (zero where nothing is carried).
 /// - `task.npy` (int32, `[episodes]`): each episode's index into `meta.json`'s `tasks`.
 /// - `length.npy` (int32), `kind.npy` (uint8: 0 nominal, 1 recovery), `parent.npy` (int32: the
 ///   episode a recovery branches from, -1 otherwise), `world.npy` (int32): `[episodes]`.
@@ -42,7 +41,11 @@ pub fn export(
 ) -> Result<()> {
     let root = root.as_ref();
     let dt = check_demos(robot, worlds, demos)?;
-    ensure_input!(!root.join("meta.json").exists(), "{} already holds a dataset", root.display());
+    ensure_input!(
+        !root.join("meta.json").exists(),
+        "{} already holds a dataset",
+        root.display()
+    );
     std::fs::create_dir_all(root)?;
 
     let (n, m) = (robot.dof(), demos.len());
@@ -73,7 +76,10 @@ pub fn export(
         .flat_map(|i| {
             (0..horizon).flat_map(move |h| {
                 demos[i].carried.as_ref().map_or([0.0; 7], |c| {
-                    let (p, q) = (c.poses[padded(i, h)].position, c.poses[padded(i, h)].rotation);
+                    let (p, q) = (
+                        c.poses[padded(i, h)].position,
+                        c.poses[padded(i, h)].rotation,
+                    );
                     [p.x, p.y, p.z, q.x, q.y, q.z, q.w]
                 })
             })
@@ -93,14 +99,33 @@ pub fn export(
     let column = |f: &dyn Fn(&Demonstration) -> i32| demos.iter().map(f).collect::<Vec<i32>>();
     write(root.join("positions.npy"), &[m, horizon, n], &positions)?;
     write(root.join("gripper.npy"), &[m, horizon, hands], &gripper)?;
-    write(root.join("carried.npy"), &[m], &column(&|d| d.carried.as_ref().map_or(-1, |c| c.obstacle as i32)))?;
-    write(root.join("carried_pose.npy"), &[m, horizon, 7], &carried_pose)?;
+    write(
+        root.join("carried.npy"),
+        &[m],
+        &column(&|d| d.carried.as_ref().map_or(-1, |c| c.obstacle as i32)),
+    )?;
+    write(
+        root.join("carried_pose.npy"),
+        &[m, horizon, 7],
+        &carried_pose,
+    )?;
     write(root.join("task.npy"), &[m], &task)?;
     write(root.join("velocities.npy"), &[m, horizon, n], &velocities)?;
-    write(root.join("length.npy"), &[m], &column(&|d| d.trajectory.len() as i32))?;
-    write(root.join("parent.npy"), &[m], &column(&|d| d.origin.parent().map_or(-1, |p| p as i32)))?;
+    write(
+        root.join("length.npy"),
+        &[m],
+        &column(&|d| d.trajectory.len() as i32),
+    )?;
+    write(
+        root.join("parent.npy"),
+        &[m],
+        &column(&|d| d.origin.parent().map_or(-1, |p| p as i32)),
+    )?;
     write(root.join("world.npy"), &[m], &column(&|d| d.world as i32))?;
-    let kinds: Vec<u8> = demos.iter().map(|d| u8::from(d.origin.parent().is_some())).collect();
+    let kinds: Vec<u8> = demos
+        .iter()
+        .map(|d| u8::from(d.origin.parent().is_some()))
+        .collect();
     write(root.join("kind.npy"), &[m], &kinds)?;
     let poses: Vec<f32> = demos
         .iter()
@@ -110,7 +135,10 @@ pub fn export(
         })
         .collect();
     write(root.join("goal_pose.npy"), &[m, 7], &poses)?;
-    std::fs::write(root.join("worlds.json"), serde_json::to_string(&worlds_json(worlds)?)?)?;
+    std::fs::write(
+        root.join("worlds.json"),
+        serde_json::to_string(&worlds_json(worlds)?)?,
+    )?;
 
     let recoveries = kinds.iter().filter(|&&k| k == 1).count();
     let mut meta = json!({
@@ -124,7 +152,9 @@ pub fn export(
         "goal_pose": "the pose the episode drives toward (the IK frame's for a reach, the object's for pick-and-place): position xyz + quaternion xyzw",
         "tasks": tasks,
     });
-    meta.as_object_mut().expect("meta is an object").extend(o.metadata.clone());
+    meta.as_object_mut()
+        .expect("meta is an object")
+        .extend(o.metadata.clone());
     std::fs::write(root.join("meta.json"), serde_json::to_string_pretty(&meta)?)?;
     Ok(())
 }
@@ -154,9 +184,16 @@ fn write<T: Element>(path: impl AsRef<Path>, shape: &[usize], data: &[T]) -> Res
     );
     let dims = match shape {
         [n] => format!("{n},"),
-        _ => shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "),
+        _ => shape
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
     };
-    let mut header = format!("{{'descr': '{}', 'fortran_order': False, 'shape': ({dims}), }}", T::DESCR);
+    let mut header = format!(
+        "{{'descr': '{}', 'fortran_order': False, 'shape': ({dims}), }}",
+        T::DESCR
+    );
     // Magic (6) + version (2) + header length (2) + header must be a multiple of 64.
     let pad = (64 - (10 + header.len() + 1) % 64) % 64;
     header.push_str(&" ".repeat(pad));

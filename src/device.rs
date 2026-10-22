@@ -37,7 +37,12 @@ pub struct CollisionWeights {
 
 impl CollisionWeights {
     /// Zero weights: evaluate clearances only.
-    pub const NONE: Self = Self { world: 0.0, self_collision: 0.0, margin: 0.0, self_margin: 0.0 };
+    pub const NONE: Self = Self {
+        world: 0.0,
+        self_collision: 0.0,
+        margin: 0.0,
+        self_margin: 0.0,
+    };
 }
 
 /// Per-configuration collision evaluation, indexed by item. Clearances are 1e30 when there is
@@ -45,9 +50,9 @@ impl CollisionWeights {
 #[derive(Clone, Debug, Default)]
 pub struct Evaluation {
     /// Signed distance from the robot spheres to the nearest obstacle (negative = penetrating).
-    /// Exact up to the margin (or zero, if larger); above it, a lower bound that is still above it,
-    /// because a link whose bounding sphere is that far from an obstacle is not checked sphere by
-    /// sphere.
+    /// Exact up to the margin (or zero, if larger); above it, a lower bound that is still above
+    /// it, because a link whose bounding sphere is that far from an obstacle is not checked
+    /// sphere by sphere.
     pub world_clearance: Vec<f32>,
     /// Signed distance between the closest checked pair of robot spheres. Exact up to the self
     /// margin (or zero, if larger); above it, a lower bound that is still above it, as for
@@ -94,7 +99,9 @@ impl Deref for Worlds {
 impl Worlds {
     /// The backend's form of the worlds; `Device` checks they were prepared by that backend.
     pub(crate) fn prepared<T: 'static>(&self) -> &T {
-        self.prepared.downcast_ref().expect("Device checks that worlds were uploaded to it")
+        self.prepared
+            .downcast_ref()
+            .expect("Device checks that worlds were uploaded to it")
     }
 }
 
@@ -116,7 +123,8 @@ impl Device {
         Self::gpu_adapter(robot, None)
     }
 
-    /// The first adapter whose name contains `name` (case-insensitive), e.g. `"radv"` or `"llvmpipe"`.
+    /// The first adapter whose name contains `name` (case-insensitive), e.g. `"radv"` or
+    /// `"llvmpipe"`.
     pub fn gpu_named(robot: &Robot, name: &str) -> Result<Self> {
         Self::gpu_adapter(robot, Some(name))
     }
@@ -128,19 +136,27 @@ impl Device {
 
     #[cfg(not(feature = "gpu"))]
     fn gpu_adapter(_: &Robot, _: Option<&str>) -> Result<Self> {
-        Err(crate::error::Error::Gpu("batchplan was built without the `gpu` feature".into()))
+        Err(crate::error::Error::Gpu(
+            "batchplan was built without the `gpu` feature".into(),
+        ))
     }
 
     fn new(backend: Box<dyn Backend>) -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-        Self { id: NEXT_ID.fetch_add(1, Ordering::Relaxed), backend }
+        Self {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            backend,
+        }
     }
 
     /// A device for `robot` on the same hardware: it shares this device's GPU or threads, and
     /// worlds uploaded to either work on both. Use it when the robot changes, as when it picks up
     /// an object ([`Robot::attach`]), without starting a device or uploading worlds again.
     pub fn with_robot(&self, robot: &Robot) -> Result<Self> {
-        Ok(Self { id: self.id, backend: self.backend.with_robot(robot)? })
+        Ok(Self {
+            id: self.id,
+            backend: self.backend.with_robot(robot)?,
+        })
     }
 
     /// Prepares `worlds` for this device. Calls on other devices refuse the result. Errors if an
@@ -150,7 +166,11 @@ impl Device {
         for (i, w) in worlds.iter().enumerate() {
             w.check().map_err(|e| input!("world {i}: {e}"))?;
         }
-        Ok(Worlds { device: self.id, worlds: worlds.to_vec(), prepared: self.backend.upload(worlds)? })
+        Ok(Worlds {
+            device: self.id,
+            worlds: worlds.to_vec(),
+            prepared: self.backend.upload(worlds)?,
+        })
     }
 
     pub fn name(&self) -> String {
@@ -164,7 +184,13 @@ impl Device {
     /// Collision cost, its gradient and clearances for each configuration in `q` (`[items, dof]`)
     /// against `worlds[item_world[item]]`. Errors if `q` does not hold `dof` values per item, an
     /// item names a world outside `worlds`, or `worlds` were uploaded to another device.
-    pub fn evaluate(&self, worlds: &Worlds, item_world: &[u32], q: &[f32], w: &CollisionWeights) -> Result<Evaluation> {
+    pub fn evaluate(
+        &self,
+        worlds: &Worlds,
+        item_world: &[u32],
+        q: &[f32],
+        w: &CollisionWeights,
+    ) -> Result<Evaluation> {
         self.check_batch(worlds, item_world, q.len(), self.robot().dof())?;
         self.backend.evaluate(worlds, item_world, q, w)
     }
@@ -176,14 +202,22 @@ impl Device {
         searches: &mut [&mut dyn Search],
         deadline: Option<Instant>,
     ) -> Result<()> {
-        ensure_input!(worlds.device == self.id, "these worlds were uploaded to a different device");
+        ensure_input!(
+            worlds.device == self.id,
+            "these worlds were uploaded to a different device"
+        );
         self.backend.search(worlds, searches, deadline);
         Ok(())
     }
 
     /// World and self clearance of each configuration (`[items, dof]`), without cost or gradient:
     /// what validity checks need. Exact up to zero (see [`Evaluation`]).
-    pub(crate) fn clearance(&self, worlds: &Worlds, item_world: &[u32], q: &[f32]) -> Result<Vec<[f32; 2]>> {
+    pub(crate) fn clearance(
+        &self,
+        worlds: &Worlds,
+        item_world: &[u32],
+        q: &[f32],
+    ) -> Result<Vec<[f32; 2]>> {
         self.check_batch(worlds, item_world, q.len(), self.robot().dof())?;
         self.backend.clearance(worlds, item_world, q)
     }
@@ -210,7 +244,12 @@ impl Device {
         image: &DepthImage,
         robot: Option<&RobotMask>,
     ) -> Result<()> {
-        ensure_input!(log_odds.len() == grid.points(), "{} log-odds for {} points", log_odds.len(), grid.points());
+        ensure_input!(
+            log_odds.len() == grid.points(),
+            "{} log-odds for {} points",
+            log_odds.len(),
+            grid.points()
+        );
         self.backend.integrate(grid, log_odds, image, robot)
     }
 
@@ -249,21 +288,42 @@ impl Device {
             self.robot().dof()
         );
         ensure_input!(paths.points >= 7, "paths need at least 7 control points");
-        self.check_batch(worlds, item_world, paths.positions.len(), paths.points * paths.dof)?;
+        self.check_batch(
+            worlds,
+            item_world,
+            paths.positions.len(),
+            paths.points * paths.dof,
+        )?;
         self.backend.trajopt(worlds, item_world, paths, o, deadline)
     }
 
     /// The device, shape and index invariants every batch must satisfy before it reaches a backend.
-    fn check_batch(&self, worlds: &Worlds, item_world: &[u32], values: usize, per_item: usize) -> Result<()> {
-        ensure_input!(worlds.device == self.id, "these worlds were uploaded to a different device");
+    fn check_batch(
+        &self,
+        worlds: &Worlds,
+        item_world: &[u32],
+        values: usize,
+        per_item: usize,
+    ) -> Result<()> {
+        ensure_input!(
+            worlds.device == self.id,
+            "these worlds were uploaded to a different device"
+        );
         let items = item_world.len();
         ensure_input!(
             values == items * per_item,
             "{items} items need {} values ({per_item} each), got {values}",
             items * per_item
         );
-        if let Some((item, &world)) = item_world.iter().enumerate().find(|&(_, &w)| w as usize >= worlds.len()) {
-            return Err(input!("item {item} references world {world}, but only {} worlds were given", worlds.len()));
+        if let Some((item, &world)) = item_world
+            .iter()
+            .enumerate()
+            .find(|&(_, &w)| w as usize >= worlds.len())
+        {
+            return Err(input!(
+                "item {item} references world {world}, but only {} worlds were given",
+                worlds.len()
+            ));
         }
         Ok(())
     }
@@ -278,7 +338,13 @@ pub(crate) trait Backend: Send + Sync {
     fn upload(&self, worlds: &[World]) -> Result<Box<dyn Any + Send + Sync>>;
     /// The same backend for another robot, sharing the hardware and the form of worlds.
     fn with_robot(&self, robot: &Robot) -> Result<Box<dyn Backend>>;
-    fn evaluate(&self, worlds: &Worlds, item_world: &[u32], q: &[f32], w: &CollisionWeights) -> Result<Evaluation>;
+    fn evaluate(
+        &self,
+        worlds: &Worlds,
+        item_world: &[u32],
+        q: &[f32],
+        w: &CollisionWeights,
+    ) -> Result<Evaluation>;
     /// `[world, self]` clearance per configuration, computed as `evaluate` does with zero weights
     /// and margins, without the gradient.
     fn clearance(&self, worlds: &Worlds, item_world: &[u32], q: &[f32]) -> Result<Vec<[f32; 2]>>;

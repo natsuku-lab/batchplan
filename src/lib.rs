@@ -66,8 +66,7 @@ pub use shortcut::ShortcutOptions;
 pub use spheres::{SphereGeometry, SphereOptions};
 pub use timing::{JointState, Trajectory};
 pub use trajopt::{PlanOptions, PlanProblem, PlanResult, plan};
-pub use types::StartMotion;
-pub use types::{JointPaths, JointTrajectory, Pose, Solved};
+pub use types::{JointPaths, JointTrajectory, Pose, Solved, StartMotion};
 pub use world::{Obstacle, World};
 
 /// The math types in batchplan's interface (`Vec3`, `Quat`), so callers use the same version.

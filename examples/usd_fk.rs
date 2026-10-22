@@ -16,7 +16,8 @@ fn main() -> Result<()> {
     let file = input["file"].as_str().context("file")?;
     let links: Vec<String> = serde_json::from_value(input["links"].clone())?;
     let samples = input["samples"].as_u64().unwrap_or(20) as usize;
-    let variants: HashMap<String, String> = serde_json::from_value(input["variants"].clone()).unwrap_or_default();
+    let variants: HashMap<String, String> =
+        serde_json::from_value(input["variants"].clone()).unwrap_or_default();
     // Kinematics only: no collision model to fit.
     let options = RobotOptions {
         collision_model: Some(CollisionModel::default()),
@@ -28,7 +29,9 @@ fn main() -> Result<()> {
     let mut qs = vec![];
     let mut poses = vec![];
     for _ in 0..samples {
-        let q: Vec<f32> = (0..robot.dof()).map(|j| rng.range(robot.lower()[j], robot.upper()[j])).collect();
+        let q: Vec<f32> = (0..robot.dof())
+            .map(|j| rng.range(robot.lower()[j], robot.upper()[j]))
+            .collect();
         let at: Vec<Value> = links
             .iter()
             .map(|l| {
@@ -48,6 +51,9 @@ fn main() -> Result<()> {
         poses.push(at);
         qs.push(q);
     }
-    println!("{}", json!({"joints": robot.joint_names(), "q": qs, "poses": poses}));
+    println!(
+        "{}",
+        json!({"joints": robot.joint_names(), "q": qs, "poses": poses})
+    );
     Ok(())
 }

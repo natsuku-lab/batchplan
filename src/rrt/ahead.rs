@@ -34,8 +34,8 @@ const SLOTS: usize = 2 * LOOKAHEAD;
 pub(crate) const HELPERS: usize = 8;
 /// Samples a search of a batch checks before helpers join it. Forecasts match where trees are large
 /// and grow slowly: helpers answered most queries of the Panda benchmark's unsolvable searches,
-/// which check 8,000 samples and more, and mostly fewer than one in thirty of those of searches that
-/// check 500 to 5,000, which they slowed by keeping every core busy as the batch drained.
+/// which check 8,000 samples and more, and mostly fewer than one in thirty of those of searches
+/// that check 500 to 5,000, which they slowed by keeping every core busy as the batch drained.
 const JOIN_AFTER: usize = 2000;
 /// Samples a search alone checks before it summons helpers: they start on sleeping threads, and the
 /// call waits for them to end, which costs a search that ends soon after.
@@ -111,7 +111,12 @@ impl Sharing {
     pub(super) fn new(ahead: Arc<Ahead>) -> Self {
         ahead.reached.store(0, Ordering::Relaxed);
         ahead.done.store(false, Ordering::Release);
-        Self { ahead, sent: None, checked: 0, answered: 0 }
+        Self {
+            ahead,
+            sent: None,
+            checked: 0,
+            answered: 0,
+        }
     }
 
     /// The search's queries keep something else from now on (it dropped its clearance): helpers
@@ -132,10 +137,17 @@ impl Connect<'_> {
     /// checking anything come and go unreported: most samples of some long searches, at a tenth of
     /// a microsecond each.
     pub(super) fn report_sample(&mut self, sample: usize) {
-        let Sharing { ahead, sent, checked, .. } = &mut self.sharing;
+        let Sharing {
+            ahead,
+            sent,
+            checked,
+            ..
+        } = &mut self.sharing;
         *checked += 1;
         ahead.checked(*checked);
-        let Some(shared) = ahead.shared.get() else { return };
+        let Some(shared) = ahead.shared.get() else {
+            return;
+        };
         shared.at(sample, self.start_first);
         let [a, b] = &self.trees;
         let trees = if self.start_first { [a, b] } else { [b, a] };
@@ -166,7 +178,10 @@ impl Connect<'_> {
     pub(super) fn forecast(&mut self, edges: &[f32], connect: bool) -> Option<usize> {
         self.sharing.sent?;
         let sample = self.tube_samples + self.iterations - 1;
-        let answer = self.sharing.ahead.answer(sample, self.start_first, edges, connect);
+        let answer = self
+            .sharing
+            .ahead
+            .answer(sample, self.start_first, edges, connect);
         self.sharing.answered += usize::from(answer.is_some());
         answer
     }
@@ -194,7 +209,8 @@ impl Ahead {
     /// The search has checked `checked` samples.
     fn checked(&self, checked: usize) {
         if checked == JOIN_AFTER || checked == ALONE_AFTER {
-            self.reached.store(1 + usize::from(checked == ALONE_AFTER), Ordering::Relaxed);
+            self.reached
+                .store(1 + usize::from(checked == ALONE_AFTER), Ordering::Relaxed);
         }
     }
 
@@ -224,16 +240,34 @@ impl Ahead {
 
     /// The forecast answer to `sample`'s extension of the start's tree (if `start_first`) or the
     /// goals', or (`connect`) its connection, if a helper asked exactly `edges`.
-    fn answer(&self, sample: usize, start_first: bool, edges: &[f32], connect: bool) -> Option<usize> {
+    fn answer(
+        &self,
+        sample: usize,
+        start_first: bool,
+        edges: &[f32],
+        connect: bool,
+    ) -> Option<usize> {
         let shared = self.shared.get()?;
-        let slot = shared.slots[sample % SLOTS].lock().expect("a helper panicked");
+        let slot = shared.slots[sample % SLOTS]
+            .lock()
+            .expect("a helper panicked");
         let forecast = &slot.forecasts[usize::from(!start_first)];
-        if slot.sample != sample || slot.epoch != shared.epoch.load(Ordering::Acquire) || !forecast.made {
+        if slot.sample != sample
+            || slot.epoch != shared.epoch.load(Ordering::Acquire)
+            || !forecast.made
+        {
             return None;
         }
-        let (asked, answer) =
-            if connect { (&forecast.connect, forecast.connected) } else { (&forecast.extend, forecast.extended) };
-        let same = asked.len() == edges.len() && asked.iter().zip(edges).all(|(a, b)| a.to_bits() == b.to_bits());
+        let (asked, answer) = if connect {
+            (&forecast.connect, forecast.connected)
+        } else {
+            (&forecast.extend, forecast.extended)
+        };
+        let same = asked.len() == edges.len()
+            && asked
+                .iter()
+                .zip(edges)
+                .all(|(a, b)| a.to_bits() == b.to_bits());
         same.then_some(answer)
     }
 
@@ -267,7 +301,13 @@ impl Ahead {
                 logged: Default::default(),
                 log: Default::default(),
                 slots: (0..SLOTS)
-                    .map(|_| Mutex::new(Slot { sample: usize::MAX, epoch: 0, forecasts: Default::default() }))
+                    .map(|_| {
+                        Mutex::new(Slot {
+                            sample: usize::MAX,
+                            epoch: 0,
+                            forecasts: Default::default(),
+                        })
+                    })
                     .collect(),
             })
         });
@@ -299,17 +339,23 @@ impl Ahead {
 impl Shared {
     /// The search is at `sample`, extending the start's tree if `start_first`.
     fn at(&self, sample: usize, start_first: bool) {
-        self.at.store(sample << 1 | usize::from(start_first), Ordering::Release);
+        self.at
+            .store(sample << 1 | usize::from(start_first), Ordering::Release);
     }
 
     /// Logs the nodes `trees` (the start's, then the goals') gained since helpers had `sent`.
     fn log(&self, trees: [&Tree; 2], sent: &mut [usize; 2]) {
-        if trees.iter().zip(&*sent).all(|(tree, &sent)| tree.len() == sent) {
+        if trees
+            .iter()
+            .zip(&*sent)
+            .all(|(tree, &sent)| tree.len() == sent)
+        {
             return;
         }
         let mut log = self.log.lock().expect("a helper panicked");
         let log = &mut *log;
-        for (start_tree, (tree, sent)) in [true, false].into_iter().zip(trees.into_iter().zip(sent)) {
+        for (start_tree, (tree, sent)) in [true, false].into_iter().zip(trees.into_iter().zip(sent))
+        {
             for i in *sent..tree.len() {
                 log.added.push((start_tree, tree.parent[i]));
                 tree.push_node(i, &mut log.coords);
@@ -348,8 +394,8 @@ pub(crate) struct Helper<'a> {
     todo: [Option<bool>; 2],
     from_start: bool,
     asked: Asked,
-    /// The batch's optimizations under way, if it runs the pool's other work (see `Ahead::helper`),
-    /// and its rounds of looking for a sample to forecast.
+    /// The batch's optimizations under way, if it runs the pool's other work (see
+    /// `Ahead::helper`), and its rounds of looking for a sample to forecast.
     optimizing: Option<&'a AtomicUsize>,
     rounds: usize,
     forecasts: [Forecast; 2],
@@ -387,7 +433,8 @@ impl Helper<'_> {
         self.added.clear();
         self.added.extend_from_slice(&log.added[self.replayed..]);
         self.coords.clear();
-        self.coords.extend_from_slice(&log.coords[self.replayed * n..]);
+        self.coords
+            .extend_from_slice(&log.coords[self.replayed * n..]);
         drop(log);
         for (&(start_tree, parent), q) in self.added.iter().zip(self.coords.chunks(n)) {
             self.trees[usize::from(!start_tree)].add(q, parent);
@@ -413,7 +460,12 @@ impl Helper<'_> {
             if sample > current + LOOKAHEAD {
                 return false;
             }
-            match shared.next.compare_exchange_weak(next, sample + 1, Ordering::Relaxed, Ordering::Relaxed) {
+            match shared.next.compare_exchange_weak(
+                next,
+                sample + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => break sample,
                 Err(now) => next = now,
             }
@@ -421,7 +473,11 @@ impl Helper<'_> {
         self.sync();
         let (start, goal) = (self.trees[0].len() as f32, self.trees[1].len() as f32);
         for _ in current + 1..=sample {
-            let (a, b) = if from_start { (start, goal) } else { (goal, start) };
+            let (a, b) = if from_start {
+                (start, goal)
+            } else {
+                (goal, start)
+            };
             if swaps(a, b) {
                 from_start = !from_start;
             }
@@ -442,10 +498,21 @@ impl Helper<'_> {
         self.from_start = from_start;
         let (robot, base) = (self.robot, self.base.as_ref().expect("synced"));
         let target = &mut self.target;
-        base.halton.point(base.halton.index + self.sample as u64 + 1, target);
-        // The tube's samples come first: while it lasts, as many were drawn before as this one's index.
+        base.halton
+            .point(base.halton.index + self.sample as u64 + 1, target);
+        // The tube's samples come first: while it lasts, as many were drawn before as this one's
+        // index.
         let tube = tube_radius(robot, &base.across, base.max_iterations, self.sample);
-        place(robot, &base.start, &base.line_goal, &base.across, &base.held, tube, target, &mut self.unit);
+        place(
+            robot,
+            &base.start,
+            &base.line_goal,
+            &base.across,
+            &base.held,
+            tube,
+            target,
+            &mut self.unit,
+        );
         let tree = &mut self.trees[usize::from(!from_start)];
         let (near, d) = tree.nearest(target, &robot.continuous);
         reach(robot, base.range, tree, near, d, target, &mut self.new);
@@ -462,7 +529,9 @@ impl Helper<'_> {
     /// Hands the sample's forecasts to the search.
     fn record(&self) {
         let shared = self.ahead.shared.get().expect("made for the first helper");
-        let mut slot = shared.slots[self.sample % SLOTS].lock().expect("a search panicked");
+        let mut slot = shared.slots[self.sample % SLOTS]
+            .lock()
+            .expect("a search panicked");
         slot.sample = self.sample;
         slot.epoch = self.epoch;
         slot.forecasts.clone_from(&self.forecasts);
@@ -522,7 +591,16 @@ impl Search for Helper<'_> {
                 let base = self.base.as_ref().expect("synced");
                 let other = &mut self.trees[usize::from(self.from_start)];
                 let (node, d) = other.nearest(&self.new, &robot.continuous);
-                steps_to(robot, base.range, &self.new, other, node, d, &mut self.target, &mut self.steps);
+                steps_to(
+                    robot,
+                    base.range,
+                    &self.new,
+                    other,
+                    node,
+                    d,
+                    &mut self.target,
+                    &mut self.steps,
+                );
                 forecast.connect.clear();
                 forecast.connect.extend_from_slice(&self.new);
                 connect_edges(&self.steps, robot.dof(), &mut forecast.connect);
@@ -564,10 +642,15 @@ mod tests {
     use std::collections::HashMap;
 
     fn panda() -> Robot {
-        let fingers = [("panda_finger_joint1".to_string(), 0.04), ("panda_finger_joint2".to_string(), 0.04)];
+        let fingers = [
+            ("panda_finger_joint1".to_string(), 0.04),
+            ("panda_finger_joint2".to_string(), 0.04),
+        ];
         let options = RobotOptions {
             lock_joints: HashMap::from(fingers),
-            collision_model: Some(CollisionModel::load("assets/franka/panda_collision.json").unwrap()),
+            collision_model: Some(
+                CollisionModel::load("assets/franka/panda_collision.json").unwrap(),
+            ),
             ..Default::default()
         };
         Robot::load("assets/franka/franka_panda.urdf", &options).unwrap()
@@ -579,40 +662,176 @@ mod tests {
     fn dresser() -> (World, RrtProblem) {
         // Box sizes, centres and turns about z (the quaternion's w and z).
         let boxes: [([f32; 3], [f32; 3], [f32; 2]); 35] = [
-            ([1.1726693, 0.3247525, 0.01], [0.6136891, 0.0490191, 0.005], [0.8007928, 0.5989415]),
-            ([1.1726693, 0.3247525, 0.01], [0.6136891, 0.0490191, 0.7995072], [0.8007928, 0.5989415]),
-            ([0.5813346, 0.004, 0.7845072], [0.8199162, 0.2965029, 0.4022536], [0.8007928, 0.5989415]),
-            ([0.5813346, 0.3247525, 0.01], [0.5301518, -0.2346015, 0.4022536], [0.8007928, 0.5989415]),
-            ([0.5813346, 0.019, 0.3872536], [0.3652785, -0.1860399, 0.6008804], [0.8007928, 0.5989415]),
-            ([0.5733346, 0.2882773, 0.004], [0.5126573, -0.2294487, 0.4092536], [0.8007928, 0.5989415]),
-            ([0.004, 0.2882773, 0.3872536], [0.5942168, 0.0474572, 0.6008804], [0.8007928, 0.5989415]),
-            ([0.004, 0.2882773, 0.3872536], [0.4310978, -0.5063546, 0.6008804], [0.8007928, 0.5989415]),
-            ([0.5813346, 0.004, 0.3872536], [0.6528416, -0.2707384, 0.6008804], [0.8007928, 0.5989415]),
-            ([0.01, 0.3247525, 0.3872536], [0.5301518, -0.2346015, 0.2036268], [0.8007928, 0.5989415]),
-            ([0.2856673, 0.3247525, 0.01], [0.5719205, -0.0927912, 0.2036268], [0.8007928, 0.5989415]),
-            ([0.2856673, 0.019, 0.1886268], [0.1547153, 0.0300919, 0.3029402], [0.8007928, 0.5989415]),
-            ([0.01, 0.3247525, 0.8045072], [0.7807637, 0.6162605, 0.4022536], [0.8007928, 0.5989415]),
-            ([0.2776673, 0.2882773, 0.004], [0.3020941, -0.0133169, 0.2106268], [0.8007928, 0.5989415]),
-            ([0.004, 0.2882773, 0.1886268], [0.3418849, 0.1217787, 0.3029402], [0.8007928, 0.5989415]),
-            ([0.004, 0.2882773, 0.1886268], [0.2623032, -0.1484124, 0.3029402], [0.8007928, 0.5989415]),
-            ([0.2856673, 0.004, 0.1886268], [0.4422784, -0.0546066, 0.3029402], [0.8007928, 0.5989415]),
-            ([0.2856673, 0.019, 0.1886268], [0.4070471, -0.0442296, 0.1043134], [0.8007928, 0.5989415]),
-            ([0.2776673, 0.2882773, 0.004], [0.5544259, -0.0876384, 0.012], [0.8007928, 0.5989415]),
-            ([0.004, 0.2882773, 0.1886268], [0.5942168, 0.0474572, 0.1043134], [0.8007928, 0.5989415]),
-            ([0.004, 0.2882773, 0.1886268], [0.514635, -0.2227339, 0.1043134], [0.8007928, 0.5989415]),
-            ([0.2856673, 0.004, 0.1886268], [0.6946103, -0.1289281, 0.1043134], [0.8007928, 0.5989415]),
-            ([0.2856673, 0.019, 0.3872536], [0.071178, -0.2535288, 0.2036268], [0.8007928, 0.5989415]),
-            ([0.01, 0.3247525, 0.8045072], [0.4466146, -0.5182222, 0.4022536], [0.8007928, 0.5989415]),
-            ([0.2776673, 0.2882773, 0.004], [0.2185568, -0.2969375, 0.012], [0.8007928, 0.5989415]),
-            ([0.004, 0.2882773, 0.3872536], [0.2583477, -0.161842, 0.2036268], [0.8007928, 0.5989415]),
-            ([0.004, 0.2882773, 0.3872536], [0.1787659, -0.4320331, 0.2036268], [0.8007928, 0.5989415]),
-            ([0.2856673, 0.004, 0.3872536], [0.3587411, -0.3382273, 0.2036268], [0.8007928, 0.5989415]),
-            ([1.1926693, 0.01, 0.8045072], [0.7646532, 0.0045544, 0.4022536], [0.8007928, 0.5989415]),
-            ([0.01, 0.3247525, 0.7845072], [0.6136891, 0.0490191, 0.4022536], [0.8007928, 0.5989415]),
-            ([0.5813346, 0.019, 0.7845072], [0.5323531, 0.3812014, 0.4022536], [0.8007928, 0.5989415]),
-            ([0.5733346, 0.2882773, 0.004], [0.6797318, 0.3377927, 0.012], [0.8007928, 0.5989415]),
-            ([0.004, 0.2882773, 0.7845072], [0.7612914, 0.6146985, 0.4022536], [0.8007928, 0.5989415]),
-            ([0.004, 0.2882773, 0.7845072], [0.5981723, 0.0608868, 0.4022536], [0.8007928, 0.5989415]),
+            (
+                [1.1726693, 0.3247525, 0.01],
+                [0.6136891, 0.0490191, 0.005],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [1.1726693, 0.3247525, 0.01],
+                [0.6136891, 0.0490191, 0.7995072],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.5813346, 0.004, 0.7845072],
+                [0.8199162, 0.2965029, 0.4022536],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.5813346, 0.3247525, 0.01],
+                [0.5301518, -0.2346015, 0.4022536],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.5813346, 0.019, 0.3872536],
+                [0.3652785, -0.1860399, 0.6008804],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.5733346, 0.2882773, 0.004],
+                [0.5126573, -0.2294487, 0.4092536],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.004, 0.2882773, 0.3872536],
+                [0.5942168, 0.0474572, 0.6008804],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.004, 0.2882773, 0.3872536],
+                [0.4310978, -0.5063546, 0.6008804],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.5813346, 0.004, 0.3872536],
+                [0.6528416, -0.2707384, 0.6008804],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.01, 0.3247525, 0.3872536],
+                [0.5301518, -0.2346015, 0.2036268],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.2856673, 0.3247525, 0.01],
+                [0.5719205, -0.0927912, 0.2036268],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.2856673, 0.019, 0.1886268],
+                [0.1547153, 0.0300919, 0.3029402],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.01, 0.3247525, 0.8045072],
+                [0.7807637, 0.6162605, 0.4022536],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.2776673, 0.2882773, 0.004],
+                [0.3020941, -0.0133169, 0.2106268],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.004, 0.2882773, 0.1886268],
+                [0.3418849, 0.1217787, 0.3029402],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.004, 0.2882773, 0.1886268],
+                [0.2623032, -0.1484124, 0.3029402],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.2856673, 0.004, 0.1886268],
+                [0.4422784, -0.0546066, 0.3029402],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.2856673, 0.019, 0.1886268],
+                [0.4070471, -0.0442296, 0.1043134],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.2776673, 0.2882773, 0.004],
+                [0.5544259, -0.0876384, 0.012],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.004, 0.2882773, 0.1886268],
+                [0.5942168, 0.0474572, 0.1043134],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.004, 0.2882773, 0.1886268],
+                [0.514635, -0.2227339, 0.1043134],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.2856673, 0.004, 0.1886268],
+                [0.6946103, -0.1289281, 0.1043134],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.2856673, 0.019, 0.3872536],
+                [0.071178, -0.2535288, 0.2036268],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.01, 0.3247525, 0.8045072],
+                [0.4466146, -0.5182222, 0.4022536],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.2776673, 0.2882773, 0.004],
+                [0.2185568, -0.2969375, 0.012],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.004, 0.2882773, 0.3872536],
+                [0.2583477, -0.161842, 0.2036268],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.004, 0.2882773, 0.3872536],
+                [0.1787659, -0.4320331, 0.2036268],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.2856673, 0.004, 0.3872536],
+                [0.3587411, -0.3382273, 0.2036268],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [1.1926693, 0.01, 0.8045072],
+                [0.7646532, 0.0045544, 0.4022536],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.01, 0.3247525, 0.7845072],
+                [0.6136891, 0.0490191, 0.4022536],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.5813346, 0.019, 0.7845072],
+                [0.5323531, 0.3812014, 0.4022536],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.5733346, 0.2882773, 0.004],
+                [0.6797318, 0.3377927, 0.012],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.004, 0.2882773, 0.7845072],
+                [0.7612914, 0.6146985, 0.4022536],
+                [0.8007928, 0.5989415],
+            ),
+            (
+                [0.004, 0.2882773, 0.7845072],
+                [0.5981723, 0.0608868, 0.4022536],
+                [0.8007928, 0.5989415],
+            ),
             ([0.3, 0.25, 0.8], [-0.05, 0.0, -0.4], [1.0, 0.0]),
         ];
         let obstacles = boxes
@@ -625,8 +844,12 @@ mod tests {
             .collect();
         let problem = RrtProblem {
             world: 0,
-            start: vec![2.6544309, 0.9331489, 2.5985923, -2.8740572, -0.468277, 1.9738969, -2.3363396],
-            goals: vec![vec![0.1406762, -0.7326517, 0.1564918, -2.1809819, 0.1102163, 1.5412756, 0.9102062]],
+            start: vec![
+                2.6544309, 0.9331489, 2.5985923, -2.8740572, -0.468277, 1.9738969, -2.3363396,
+            ],
+            goals: vec![vec![
+                0.1406762, -0.7326517, 0.1564918, -2.1809819, 0.1102163, 1.5412756, 0.9102062,
+            ]],
             hold: vec![],
         };
         (World { obstacles }, problem)
@@ -635,18 +858,49 @@ mod tests {
     /// The search as `Planning` runs it, keeping a clearance and then without it, alone or with
     /// `helpers` threads helping: its trees (the start's, then the goals') and path, bit for bit,
     /// with the samples it drew and the queries helpers answered.
-    fn search(robot: &Robot, world: &World, problem: &RrtProblem, helpers: usize) -> (Vec<u32>, usize, usize) {
+    fn search(
+        robot: &Robot,
+        world: &World,
+        problem: &RrtProblem,
+        helpers: usize,
+    ) -> (Vec<u32>, usize, usize) {
         let (lanes, worlds) = (Lanes::new(robot), cpu::prepare(std::slice::from_ref(world)));
-        let keeping = RrtOptions { clearance: 0.015, max_iterations: 1000, ..RrtOptions::default() };
+        let keeping = RrtOptions {
+            clearance: 0.015,
+            max_iterations: 1000,
+            ..RrtOptions::default()
+        };
         let ahead = Arc::new(Ahead::default());
         let mut connect = Connect::new(robot, problem, &keeping, Sampling::NearLine, ahead.clone());
         beside_helpers(helpers, &ahead, robot, &lanes, &worlds, || {
             let mut scratch = EdgeScratch::new(&lanes);
-            edges::run(&mut connect, robot, &lanes, &worlds, None, None, None, &mut scratch);
+            edges::run(
+                &mut connect,
+                robot,
+                &lanes,
+                &worlds,
+                None,
+                None,
+                None,
+                &mut scratch,
+            );
             connect.relax(6000);
-            edges::run(&mut connect, robot, &lanes, &worlds, None, None, None, &mut scratch);
+            edges::run(
+                &mut connect,
+                robot,
+                &lanes,
+                &worlds,
+                None,
+                None,
+                None,
+                &mut scratch,
+            );
         });
-        (fingerprint(&connect), connect.tube_samples + connect.iterations, connect.sharing.answered)
+        (
+            fingerprint(&connect),
+            connect.tube_samples + connect.iterations,
+            connect.sharing.answered,
+        )
     }
 
     /// Runs `search` on `ahead`, then ends its help, beside `threads` threads that help it whenever
@@ -670,7 +924,16 @@ mod tests {
                         match ahead.helper(robot, None) {
                             Some(mut helper) => {
                                 let scratch = &mut EdgeScratch::new(lanes);
-                                edges::run(&mut helper, robot, lanes, worlds, None, None, None, scratch);
+                                edges::run(
+                                    &mut helper,
+                                    robot,
+                                    lanes,
+                                    worlds,
+                                    None,
+                                    None,
+                                    None,
+                                    scratch,
+                                );
                             }
                             None => std::thread::yield_now(),
                         }
@@ -712,7 +975,10 @@ mod tests {
         let (helped, _, answered) = search(&robot, &world, &problem, 3);
         assert!(samples > 3000, "the search drew only {samples} samples");
         assert!(alone == helped, "helpers changed the search");
-        assert!(answered > samples / 100, "helpers answered {answered} queries over {samples} samples");
+        assert!(
+            answered > samples / 100,
+            "helpers answered {answered} queries over {samples} samples"
+        );
     }
 
     /// A search planned again on the same `Ahead`, as `Planning` does with `Sampling::JointRanges`,
@@ -722,51 +988,125 @@ mod tests {
         let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
         let robot = panda();
         let (world, problem) = dresser();
-        let (lanes, worlds) = (Lanes::new(&robot), cpu::prepare(std::slice::from_ref(&world)));
+        let (lanes, worlds) = (
+            Lanes::new(&robot),
+            cpu::prepare(std::slice::from_ref(&world)),
+        );
         let (robot, lanes, worlds) = (&robot, &lanes, &worlds);
-        let o = RrtOptions { max_iterations: 5000, ..RrtOptions::default() };
+        let o = RrtOptions {
+            max_iterations: 5000,
+            ..RrtOptions::default()
+        };
         let ahead = Arc::new(Ahead::default());
         let [first, again] = [Sampling::NearLine, Sampling::JointRanges].map(|sampling| {
             let mut connect = Connect::new(robot, &problem, &o, sampling, ahead.clone());
             beside_helpers(3, &ahead, robot, lanes, worlds, || {
-                edges::run(&mut connect, robot, lanes, worlds, None, None, None, &mut EdgeScratch::new(lanes));
+                edges::run(
+                    &mut connect,
+                    robot,
+                    lanes,
+                    worlds,
+                    None,
+                    None,
+                    None,
+                    &mut EdgeScratch::new(lanes),
+                );
             });
             assert!(connect.path.is_none(), "the search ends too soon");
-            (connect.tube_samples + connect.iterations, connect.sharing.answered)
+            (
+                connect.tube_samples + connect.iterations,
+                connect.sharing.answered,
+            )
         });
-        assert!(first.0 > again.0, "the first search drew fewer samples than the second");
-        assert!(first.1 > 0 && again.1 > again.0 / 100, "helpers answered {first:?} then {again:?}");
+        assert!(
+            first.0 > again.0,
+            "the first search drew fewer samples than the second"
+        );
+        assert!(
+            first.1 > 0 && again.1 > again.0 / 100,
+            "helpers answered {first:?} then {again:?}"
+        );
     }
 
     /// The scheduler's helpers change nothing either. A long search grows the trees it grows
     /// unhelped when the scheduler runs it in a batch, whose threads help it once the other
-    /// searches end (shorter, so it has drawn `JOIN_AFTER` samples by then), and when it runs alone,
-    /// summoning helpers after `ALONE_AFTER` samples; helpers answer queries both times.
+    /// searches end (shorter, so it has drawn `JOIN_AFTER` samples by then), and when it runs
+    /// alone, summoning helpers after `ALONE_AFTER` samples; helpers answer queries both times.
     #[test]
     fn the_scheduler_helps_long_searches_in_batches_and_alone() {
         let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
         let robot = panda();
         let (world, problem) = dresser();
-        let (lanes, worlds) = (Lanes::new(&robot), cpu::prepare(std::slice::from_ref(&world)));
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
-        let long = RrtOptions { max_iterations: 6000, ..RrtOptions::default() };
-        let short = RrtOptions { max_iterations: 1000, ..RrtOptions::default() };
-        let connect = |o: &RrtOptions| Connect::new(&robot, &problem, o, Sampling::NearLine, Arc::default());
+        let (lanes, worlds) = (
+            Lanes::new(&robot),
+            cpu::prepare(std::slice::from_ref(&world)),
+        );
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let long = RrtOptions {
+            max_iterations: 6000,
+            ..RrtOptions::default()
+        };
+        let short = RrtOptions {
+            max_iterations: 1000,
+            ..RrtOptions::default()
+        };
+        let connect =
+            |o: &RrtOptions| Connect::new(&robot, &problem, o, Sampling::NearLine, Arc::default());
         let mut alone = connect(&long);
-        edges::run(&mut alone, &robot, &lanes, &worlds, None, None, None, &mut EdgeScratch::new(&lanes));
+        edges::run(
+            &mut alone,
+            &robot,
+            &lanes,
+            &worlds,
+            None,
+            None,
+            None,
+            &mut EdgeScratch::new(&lanes),
+        );
         let unhelped = fingerprint(&alone);
         assert_eq!(alone.sharing.answered, 0);
-        assert!(alone.tube_samples + alone.iterations > ALONE_AFTER + 1000, "the search ends too soon");
+        assert!(
+            alone.tube_samples + alone.iterations > ALONE_AFTER + 1000,
+            "the search ends too soon"
+        );
 
-        let mut batch = [connect(&long), connect(&short), connect(&short), connect(&short)];
-        let mut searches: Vec<&mut dyn Search> = batch.iter_mut().map(|c| c as &mut dyn Search).collect();
+        let mut batch = [
+            connect(&long),
+            connect(&short),
+            connect(&short),
+            connect(&short),
+        ];
+        let mut searches: Vec<&mut dyn Search> =
+            batch.iter_mut().map(|c| c as &mut dyn Search).collect();
         cpu::run_searches(&pool, &mut searches, &robot, &lanes, &worlds, None);
-        assert!(fingerprint(&batch[0]) == unhelped, "helpers in a batch changed the search");
-        assert!(batch[0].sharing.answered > 0, "no helper answered in the batch");
+        assert!(
+            fingerprint(&batch[0]) == unhelped,
+            "helpers in a batch changed the search"
+        );
+        assert!(
+            batch[0].sharing.answered > 0,
+            "no helper answered in the batch"
+        );
 
         let mut one = connect(&long);
-        cpu::run_searches(&pool, &mut [&mut one as &mut dyn Search], &robot, &lanes, &worlds, None);
-        assert!(fingerprint(&one) == unhelped, "helpers of a search alone changed it");
-        assert!(one.sharing.answered > 0, "no helper answered the search alone");
+        cpu::run_searches(
+            &pool,
+            &mut [&mut one as &mut dyn Search],
+            &robot,
+            &lanes,
+            &worlds,
+            None,
+        );
+        assert!(
+            fingerprint(&one) == unhelped,
+            "helpers of a search alone changed it"
+        );
+        assert!(
+            one.sharing.answered > 0,
+            "no helper answered the search alone"
+        );
     }
 }

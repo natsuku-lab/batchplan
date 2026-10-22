@@ -8,8 +8,7 @@ use crate::device::{Device, Worlds, collision_free};
 use crate::error::{Result, ensure_input, input};
 use crate::ik::{IkOptions, IkProblem, IkResult, solve_ik};
 use crate::rng::Rng;
-use crate::robot::AttachedObject;
-use crate::robot::Robot;
+use crate::robot::{AttachedObject, Robot};
 use crate::spline;
 use crate::timing::Trajectory;
 use crate::trajopt::{PlanOptions, PlanProblem, PlanResult, plan};
@@ -28,7 +27,12 @@ pub struct RecoveryOptions {
 
 impl Default for RecoveryOptions {
     fn default() -> Self {
-        Self { per_trajectory: 2, sigma: 0.15, phase: (0.2, 0.8), rng_seed: 3 }
+        Self {
+            per_trajectory: 2,
+            sigma: 0.15,
+            phase: (0.2, 0.8),
+            rng_seed: 3,
+        }
     }
 }
 
@@ -56,21 +60,41 @@ pub fn recovery_problems(
     let mut rng = Rng::new(o.rng_seed);
     let mut candidates = vec![];
     let mut on_path = vec![0.0; n];
-    for Solved { index: parent, problem, solution: path } in result.solved() {
+    for Solved {
+        index: parent,
+        problem,
+        solution: path,
+    } in result.solved()
+    {
         for _ in 0..o.per_trajectory {
             let phase = rng.range(o.phase.0, o.phase.1);
             spline::at_phase(path, n, phase, &mut on_path);
             let start: Vec<f32> = (0..n)
-                .map(|j| (on_path[j] + o.sigma * rng.normal()).clamp(robot.bounds(j).0, robot.bounds(j).1))
+                .map(|j| {
+                    (on_path[j] + o.sigma * rng.normal())
+                        .clamp(robot.bounds(j).0, robot.bounds(j).1)
+                })
                 .collect();
             let next = PlanProblem::new(problem.world, start, problem.goal.clone());
-            candidates.push(Recovery { parent, phase, problem: next });
+            candidates.push(Recovery {
+                parent,
+                phase,
+                problem: next,
+            });
         }
     }
-    let starts: Vec<f32> = candidates.iter().flat_map(|c| c.problem.start.iter().copied()).collect();
+    let starts: Vec<f32> = candidates
+        .iter()
+        .flat_map(|c| c.problem.start.iter().copied())
+        .collect();
     let item_world: Vec<u32> = candidates.iter().map(|c| c.problem.world).collect();
     let clear = device.clearance(worlds, &item_world, &starts)?;
-    Ok(candidates.into_iter().enumerate().filter(|&(i, _)| collision_free(clear[i])).map(|(_, c)| c).collect())
+    Ok(candidates
+        .into_iter()
+        .enumerate()
+        .filter(|&(i, _)| collision_free(clear[i]))
+        .map(|(_, c)| c)
+        .collect())
 }
 
 /// States to start episodes from, such as a reinforcement learner's reset bank: samples of
@@ -80,9 +104,9 @@ pub fn recovery_problems(
 ///
 /// Each state is a one-sample demonstration with its sample's world, task, goal and grippers,
 /// whose origin is `Origin::Recovery` with `parent` an index into `demos`; `npy::export` writes
-/// them as it writes demonstrations. The check is conservative: an object no hand holds is an obstacle
-/// even to fingers about to close around it, and a held one must clear the scene, so states at a
-/// grasp or a set-down are rare.
+/// them as it writes demonstrations. The check is conservative: an object no hand holds is an
+/// obstacle even to fingers about to close around it, and a held one must clear the scene, so
+/// states at a grasp or a set-down are rare.
 pub fn reset_states(
     device: &Device,
     worlds: &[World],
@@ -108,22 +132,34 @@ pub fn reset_states(
     let (mut states, mut scenes) = (vec![], vec![]);
     for (parent, d) in demos.iter().enumerate() {
         let t = &d.trajectory;
-        let holding = |f: usize| -> Vec<usize> { (0..hands).filter(|&h| d.gripper[f * hands + h] == 0.0).collect() };
-        // Each hand's grip from its last sample holding the object alone: where its gripper has just
-        // closed, the object still sits where it was.
+        let holding = |f: usize| -> Vec<usize> {
+            (0..hands)
+                .filter(|&h| d.gripper[f * hands + h] == 0.0)
+                .collect()
+        };
+        // Each hand's grip from its last sample holding the object alone: where its gripper has
+        // just closed, the object still sits where it was.
         let grips: Vec<Option<Pose>> = (0..hands)
             .map(|h| {
                 let c = d.carried.as_ref()?;
                 let f = (0..t.len()).rev().find(|&f| holding(f) == [h])?;
-                Some(robot.ee_pose(&t.positions[f * n..(f + 1) * n], h).inverse().mul_pose(c.poses[f]))
+                Some(
+                    robot
+                        .ee_pose(&t.positions[f * n..(f + 1) * n], h)
+                        .inverse()
+                        .mul_pose(c.poses[f]),
+                )
             })
             .collect();
         for _ in 0..o.per_trajectory {
             let phase = rng.range(lo, hi);
             let f = (phase * (t.len() - 1) as f32).round() as usize;
             let at = &t.positions[f * n..(f + 1) * n];
-            let q: Vec<f32> =
-                (0..n).map(|j| (at[j] + o.sigma * rng.normal()).clamp(robot.bounds(j).0, robot.bounds(j).1)).collect();
+            let q: Vec<f32> = (0..n)
+                .map(|j| {
+                    (at[j] + o.sigma * rng.normal()).clamp(robot.bounds(j).0, robot.bounds(j).1)
+                })
+                .collect();
             let mut world = worlds[d.world as usize].clone();
             let mut held = None;
             let carried = match &d.carried {
@@ -131,7 +167,8 @@ pub fn reset_states(
                 Some(c) => {
                     let pose = match holding(f)[..] {
                         [] => {
-                            world.obstacles[c.obstacle] = world.obstacles[c.obstacle].placed(c.poses[f]);
+                            world.obstacles[c.obstacle] =
+                                world.obstacles[c.obstacle].placed(c.poses[f]);
                             c.poses[f]
                         }
                         [h] => {
@@ -141,7 +178,10 @@ pub fn reset_states(
                         }
                         _ => continue,
                     };
-                    Some(Carried { obstacle: c.obstacle, poses: vec![pose] })
+                    Some(Carried {
+                        obstacle: c.obstacle,
+                        poses: vec![pose],
+                    })
                 }
             };
             let trajectory = JointTrajectory {
@@ -182,8 +222,12 @@ pub fn reset_states(
             None => device,
             Some((h, object)) => {
                 let ee = robot.ee_links[h];
-                let touch_links =
-                    robot.links.iter().filter(|l| l.chain == robot.links[ee].chain).map(|l| l.name.clone()).collect();
+                let touch_links = robot
+                    .links
+                    .iter()
+                    .filter(|l| l.chain == robot.links[ee].chain)
+                    .map(|l| l.name.clone())
+                    .collect();
                 holder = device.with_robot(&robot.attach(&AttachedObject {
                     name: "held object".into(),
                     link: robot.links[ee].name.clone(),
@@ -195,13 +239,21 @@ pub fn reset_states(
             }
         };
         let item_world: Vec<u32> = members.iter().map(|&i| i as u32).collect();
-        let q: Vec<f32> = members.iter().flat_map(|&i| states[i].0.trajectory.positions.iter().copied()).collect();
+        let q: Vec<f32> = members
+            .iter()
+            .flat_map(|&i| states[i].0.trajectory.positions.iter().copied())
+            .collect();
         let clear = checker.clearance(&uploaded, &item_world, &q)?;
         for (k, &i) in members.iter().enumerate() {
             free[i] = collision_free(clear[k]);
         }
     }
-    Ok(states.into_iter().zip(free).filter(|&(_, free)| free).map(|((state, _), _)| state).collect())
+    Ok(states
+        .into_iter()
+        .zip(free)
+        .filter(|&(_, free)| free)
+        .map(|((state, _), _)| state)
+        .collect())
 }
 
 /// A hand and the object it holds, placed in the hand's frame; `None` when nothing is held.
@@ -320,7 +372,11 @@ pub fn demonstrations(
         "speed scales must satisfy 0 < slowest <= fastest <= 1, got {:?}",
         o.speed_scale
     );
-    ensure_input!(o.dt.is_finite() && o.dt > 0.0, "dt must be positive, got {}", o.dt);
+    ensure_input!(
+        o.dt.is_finite() && o.dt > 0.0,
+        "dt must be positive, got {}",
+        o.dt
+    );
     let mut rng = Rng::new(o.rng_seed);
     let ik = solve_ik(device, worlds, goals, &o.ik)?;
 
@@ -328,7 +384,8 @@ pub fn demonstrations(
         .flat_map(|_| {
             (0..n)
                 .map(|j| {
-                    (robot.default_q[j] + o.start_noise * rng.normal()).clamp(robot.bounds(j).0, robot.bounds(j).1)
+                    (robot.default_q[j] + o.start_noise * rng.normal())
+                        .clamp(robot.bounds(j).0, robot.bounds(j).1)
                 })
                 .collect::<Vec<_>>()
         })
@@ -343,7 +400,10 @@ pub fn demonstrations(
         .solved()
         .map(|s| {
             let start = starts[s.index * n..(s.index + 1) * n].to_vec();
-            (s.index, PlanProblem::new(s.problem.world, start, s.solution))
+            (
+                s.index,
+                PlanProblem::new(s.problem.world, start, s.solution),
+            )
         })
         .unzip();
     let nominal = plan(device, worlds, &problems, &o.plan)?;
@@ -353,8 +413,10 @@ pub fn demonstrations(
 
     // Speed scales are drawn in order, then the paths are timed in parallel (see `timed`).
     let mut scale = || rng.range(o.speed_scale.0, o.speed_scale.1);
-    let nominal_paths: Vec<(&[f32], f32)> = nominal.solved().map(|s| (s.solution, scale())).collect();
-    let recovery_paths: Vec<(&[f32], f32)> = recovered.solved().map(|s| (s.solution, scale())).collect();
+    let nominal_paths: Vec<(&[f32], f32)> =
+        nominal.solved().map(|s| (s.solution, scale())).collect();
+    let recovery_paths: Vec<(&[f32], f32)> =
+        recovered.solved().map(|s| (s.solution, scale())).collect();
     let mut nominal_timed = timed(robot, &nominal_paths, o.dt)?.into_iter();
     let mut recovery_timed = timed(robot, &recovery_paths, o.dt)?.into_iter();
     let reach = |origin, world, goal, trajectory: JointTrajectory| Demonstration {
@@ -372,14 +434,27 @@ pub fn demonstrations(
     for s in nominal.solved() {
         demo_of[s.index] = demos.len();
         let goal = goals[goal_of[s.index]].targets[0].expect("reach goals target the first hand");
-        demos.push(reach(Origin::Nominal, s.problem.world, goal, nominal_timed.next().expect("one per path")));
+        demos.push(reach(
+            Origin::Nominal,
+            s.problem.world,
+            goal,
+            nominal_timed.next().expect("one per path"),
+        ));
     }
     for s in recovered.solved() {
         let rec = &recoveries[s.index];
         let parent = demo_of[rec.parent];
         let goal = demos[parent].goal;
         let trajectory = recovery_timed.next().expect("one per path");
-        demos.push(reach(Origin::Recovery { parent, phase: rec.phase }, s.problem.world, goal, trajectory));
+        demos.push(reach(
+            Origin::Recovery {
+                parent,
+                phase: rec.phase,
+            },
+            s.problem.world,
+            goal,
+            trajectory,
+        ));
     }
     Ok(demos)
 }
@@ -392,21 +467,40 @@ pub(crate) fn check_demos(robot: &Robot, worlds: &[World], demos: &[Demonstratio
     let dt = demos[0].trajectory.dt;
     for (i, d) in demos.iter().enumerate() {
         let t = &d.trajectory;
-        ensure_input!((d.world as usize) < worlds.len(), "demonstration {i} is in world {}, past the end", d.world);
-        ensure_input!(t.dof == robot.dof(), "demonstration {i} has {} joints, the robot has {}", t.dof, robot.dof());
         ensure_input!(
-            !t.positions.is_empty() && t.positions.len() == t.velocities.len() && t.positions.len() % t.dof == 0,
+            (d.world as usize) < worlds.len(),
+            "demonstration {i} is in world {}, past the end",
+            d.world
+        );
+        ensure_input!(
+            t.dof == robot.dof(),
+            "demonstration {i} has {} joints, the robot has {}",
+            t.dof,
+            robot.dof()
+        );
+        ensure_input!(
+            !t.positions.is_empty()
+                && t.positions.len() == t.velocities.len()
+                && t.positions.len() % t.dof == 0,
             "demonstration {i} does not hold whole samples"
         );
         ensure_input!(t.dt == dt, "all demonstrations must share one dt");
         ensure_input!(
-            d.gripper.len() == t.len() * robot.hands() && d.gripper.iter().all(|g| (0.0..=1.0).contains(g)),
+            d.gripper.len() == t.len() * robot.hands()
+                && d.gripper.iter().all(|g| (0.0..=1.0).contains(g)),
             "demonstration {i} needs a gripper opening in [0, 1] per hand per sample"
         );
         if let Some(c) = &d.carried {
             let obstacles = worlds[d.world as usize].obstacles.len();
-            ensure_input!(c.obstacle < obstacles, "demonstration {i} carries obstacle {} of {obstacles}", c.obstacle);
-            ensure_input!(c.poses.len() == t.len(), "demonstration {i} needs one carried pose per sample");
+            ensure_input!(
+                c.obstacle < obstacles,
+                "demonstration {i} carries obstacle {} of {obstacles}",
+                c.obstacle
+            );
+            ensure_input!(
+                c.poses.len() == t.len(),
+                "demonstration {i} needs one carried pose per sample"
+            );
         }
     }
     Ok(dt)
@@ -477,11 +571,15 @@ pub fn pick_and_place(
     let robot = device.robot();
     let (n, hands) = (robot.dof(), robot.hands());
     // The first hand does the work; the joints only the others move stay put.
-    let first = |pose: Pose| -> Vec<Option<Pose>> { (0..hands).map(|h| (h == 0).then_some(pose)).collect() };
+    let first = |pose: Pose| -> Vec<Option<Pose>> {
+        (0..hands).map(|h| (h == 0).then_some(pose)).collect()
+    };
     let hold: Vec<usize> = {
         let mine = robot.hand_joints(0);
-        let mut others: Vec<usize> =
-            (1..hands).flat_map(|h| robot.hand_joints(h)).filter(|j| !mine.contains(j)).collect();
+        let mut others: Vec<usize> = (1..hands)
+            .flat_map(|h| robot.hand_joints(h))
+            .filter(|j| !mine.contains(j))
+            .collect();
         others.sort_unstable();
         others.dedup();
         others
@@ -505,17 +603,38 @@ pub fn pick_and_place(
     let arm = Arm::of(robot, 0);
     let mut grasps = vec![];
     for (i, t) in tasks.iter().enumerate() {
-        let world =
-            worlds.get(t.world as usize).ok_or_else(|| input!("task {i}: world {} of {}", t.world, worlds.len()))?;
-        let Some(&Obstacle::Cuboid { center, half_extents: half, rotation }) = world.obstacles.get(t.object) else {
-            return Err(input!("task {i}: obstacle {} of world {} is not a cuboid", t.object, t.world));
+        let world = worlds
+            .get(t.world as usize)
+            .ok_or_else(|| input!("task {i}: world {} of {}", t.world, worlds.len()))?;
+        let Some(&Obstacle::Cuboid {
+            center,
+            half_extents: half,
+            rotation,
+        }) = world.obstacles.get(t.object)
+        else {
+            return Err(input!(
+                "task {i}: obstacle {} of world {} is not a cuboid",
+                t.object,
+                t.world
+            ));
         };
         ensure_input!(
             upright(rotation) && upright(t.place.rotation),
             "task {i}: the object and the place pose must be upright"
         );
-        ensure_input!(2.0 * half.x.min(half.y) <= o.max_width, "task {i}: the object is wider than the gripper opens");
-        grasps.push(Grasp::new(Pose { position: center, rotation }, half, o.grasp_depth, &arm));
+        ensure_input!(
+            2.0 * half.x.min(half.y) <= o.max_width,
+            "task {i}: the object is wider than the gripper opens"
+        );
+        grasps.push(Grasp::new(
+            Pose {
+                position: center,
+                rotation,
+            },
+            half,
+            o.grasp_depth,
+            &arm,
+        ));
     }
 
     // Each task's world as given (index i) and without its object (index tasks + i).
@@ -524,26 +643,38 @@ pub fn pick_and_place(
         w.obstacles.remove(t.object);
         w
     };
-    let scene: Vec<World> =
-        tasks.iter().map(|t| worlds[t.world as usize].clone()).chain(tasks.iter().map(without)).collect();
+    let scene: Vec<World> = tasks
+        .iter()
+        .map(|t| worlds[t.world as usize].clone())
+        .chain(tasks.iter().map(without))
+        .collect();
     let uploaded = device.upload(&scene)?;
     let clear = |i: usize| (tasks.len() + i) as u32;
     let up = Vec3::Z * o.approach;
     let at = |p: Pose, lift: Vec3| Pose::new(p.position + lift, p.rotation);
-    let place_tool: Vec<Pose> = tasks.iter().zip(&grasps).map(|(t, g)| g.tool_for(t.place)).collect();
+    let place_tool: Vec<Pose> = tasks
+        .iter()
+        .zip(&grasps)
+        .map(|(t, g)| g.tool_for(t.place))
+        .collect();
 
     // Above the object, then the grasp from there.
     let above: Vec<IkProblem> = grasps
         .iter()
         .enumerate()
-        .map(|(i, g)| IkProblem { world: i as u32, targets: first(at(g.tool, up)), seed: None })
+        .map(|(i, g)| IkProblem {
+            world: i as u32,
+            targets: first(at(g.tool, up)),
+            seed: None,
+        })
         .collect();
     let above = solve_ik(device, &uploaded, &above, &o.ik)?;
     // The solution nearest the start, not the one with the most clearance: every later pose is
     // seeded from this one, and a far branch (joints near opposite limits) makes the arm swing
     // around for moves of a few centimetres.
-    let above: Vec<Option<Vec<f32>>> =
-        (0..tasks.len()).map(|i| above.nearest(i, &robot.default_q).map(<[f32]>::to_vec)).collect();
+    let above: Vec<Option<Vec<f32>>> = (0..tasks.len())
+        .map(|i| above.nearest(i, &robot.default_q).map(<[f32]>::to_vec))
+        .collect();
     let mut ok: Vec<Option<[Vec<f32>; 4]>> = (0..tasks.len()).map(|_| None).collect();
     let seeded = |ik: &IkResult, i: usize, from: &[f32]| ik.nearest(i, from).map(<[f32]>::to_vec);
     // The grasp, and the pose above the place pose, both from above the object, in one batch.
@@ -553,7 +684,11 @@ pub fn pick_and_place(
     let grasp_and_above_place: Vec<IkProblem> = grasps
         .iter()
         .enumerate()
-        .map(|(i, g)| IkProblem { world: clear(i), targets: first(g.tool), seed: above[i].clone() })
+        .map(|(i, g)| IkProblem {
+            world: clear(i),
+            targets: first(g.tool),
+            seed: above[i].clone(),
+        })
         .chain((0..tasks.len()).map(|i| IkProblem {
             world: clear(i),
             targets: first(at(place_tool[i], up)),
@@ -561,13 +696,22 @@ pub fn pick_and_place(
         }))
         .collect();
     let grasp = solve_ik(device, &uploaded, &grasp_and_above_place, &o.ik)?;
-    let above_place: Vec<Option<Vec<f32>>> =
-        (0..tasks.len()).map(|i| above[i].as_deref().and_then(|from| seeded(&grasp, tasks.len() + i, from))).collect();
+    let above_place: Vec<Option<Vec<f32>>> = (0..tasks.len())
+        .map(|i| {
+            above[i]
+                .as_deref()
+                .and_then(|from| seeded(&grasp, tasks.len() + i, from))
+        })
+        .collect();
 
     // Holding each distinct object size (the grasp fixes where the object sits in the IK frame).
     let ee = robot.ee_links[0];
-    let touch: Vec<String> =
-        robot.links.iter().filter(|l| l.chain == robot.links[ee].chain).map(|l| l.name.clone()).collect();
+    let touch: Vec<String> = robot
+        .links
+        .iter()
+        .filter(|l| l.chain == robot.links[ee].chain)
+        .map(|l| l.name.clone())
+        .collect();
     let mut holders: Vec<(Vec3, Device)> = vec![];
     for g in &grasps {
         if holders.iter().all(|(half, _)| *half != g.half) {
@@ -588,7 +732,11 @@ pub fn pick_and_place(
 
     // The place pose, from above it.
     let place: Vec<IkProblem> = (0..tasks.len())
-        .map(|i| IkProblem { world: clear(i), targets: first(place_tool[i]), seed: above_place[i].clone() })
+        .map(|i| IkProblem {
+            world: clear(i),
+            targets: first(place_tool[i]),
+            seed: above_place[i].clone(),
+        })
         .collect();
     let place = solve_ik(device, &uploaded, &place, &o.ik)?;
     for i in 0..tasks.len() {
@@ -609,7 +757,9 @@ pub fn pick_and_place(
     for (s, segment) in paths.iter_mut().enumerate() {
         *segment = vec![vec![]; tasks.len()];
         let ends = |i: usize| {
-            let q = ok[i].as_ref().expect("live tasks have their configurations");
+            let q = ok[i]
+                .as_ref()
+                .expect("live tasks have their configurations");
             match s {
                 0 => (start.clone(), q[0].clone()),
                 1 => (q[0].clone(), q[1].clone()),
@@ -620,7 +770,15 @@ pub fn pick_and_place(
         let groups: Vec<(&Device, Vec<usize>)> = if s == 2 {
             holders
                 .iter()
-                .map(|(half, held)| (held, live.iter().copied().filter(|&i| grasps[i].half == *half).collect()))
+                .map(|(half, held)| {
+                    (
+                        held,
+                        live.iter()
+                            .copied()
+                            .filter(|&i| grasps[i].half == *half)
+                            .collect(),
+                    )
+                })
                 .collect()
         } else {
             vec![(device, live.clone())]
@@ -663,7 +821,12 @@ pub fn pick_and_place(
         let mut next = || segments.next().expect("four segments per live task");
         let (approach, descend, transfer, lower) = (next(), next(), next(), next());
         // The first hand opens and closes; the others stay open.
-        let (open, closed) = (vec![1.0; hands], (0..hands).map(|h| if h == 0 { 0.0 } else { 1.0 }).collect::<Vec<_>>());
+        let (open, closed) = (
+            vec![1.0; hands],
+            (0..hands)
+                .map(|h| if h == 0 { 0.0 } else { 1.0 })
+                .collect::<Vec<_>>(),
+        );
         let mut episode = Episode::new(n, hands, o.dt);
         episode.append(&approach, &open);
         episode.append(&descend, &open);
@@ -693,16 +856,19 @@ pub fn pick_and_place(
             goal: tasks[i].place,
             trajectory: episode.trajectory,
             gripper: episode.gripper,
-            carried: Some(Carried { obstacle: tasks[i].object, poses }),
+            carried: Some(Carried {
+                obstacle: tasks[i].object,
+                poses,
+            }),
         });
     }
     Ok(demos)
 }
 
 /// One handover: hand `from` picks up the cuboid `object` of `worlds[world]` and brings it to
-/// `meet`, where hand `to` takes it; then hand `to` sets it down at `place`. Each hand holds one end
-/// of the object's longer horizontal side, from above, the end toward its own arm at `meet`. The
-/// object, `meet` and `place` must be upright (their z axis vertical).
+/// `meet`, where hand `to` takes it; then hand `to` sets it down at `place`. Each hand holds one
+/// end of the object's longer horizontal side, from above, the end toward its own arm at `meet`.
+/// The object, `meet` and `place` must be upright (their z axis vertical).
 #[derive(Clone, Debug)]
 pub struct Handover {
     pub world: u32,
@@ -738,9 +904,9 @@ const HANDOVER_GRIP: f32 = 0.75;
 ///
 /// A waiting arm's joints are held (`PlanProblem::hold`). Plans hold the object in the hand that
 /// has it (`Robot::attach`), touching only the links fixed to either wrist, except the lowering,
-/// which plans without it as `pick_and_place`'s does: the object only hangs below the fingers. The demonstration
-/// records both grippers and where the object is at every sample, and a task such as "Pass the box
-/// from the left hand to the right hand and put it down."
+/// which plans without it as `pick_and_place`'s does: the object only hangs below the fingers. The
+/// demonstration records both grippers and where the object is at every sample, and a task such as
+/// "Pass the box from the left hand to the right hand and put it down."
 pub fn handover(
     device: &Device,
     worlds: &[World],
@@ -775,21 +941,39 @@ pub fn handover(
             t.from,
             t.to
         );
-        let world =
-            worlds.get(t.world as usize).ok_or_else(|| input!("task {i}: world {} of {}", t.world, worlds.len()))?;
-        let Some(&Obstacle::Cuboid { center, half_extents: half, rotation }) = world.obstacles.get(t.object) else {
-            return Err(input!("task {i}: obstacle {} of world {} is not a cuboid", t.object, t.world));
+        let world = worlds
+            .get(t.world as usize)
+            .ok_or_else(|| input!("task {i}: world {} of {}", t.world, worlds.len()))?;
+        let Some(&Obstacle::Cuboid {
+            center,
+            half_extents: half,
+            rotation,
+        }) = world.obstacles.get(t.object)
+        else {
+            return Err(input!(
+                "task {i}: obstacle {} of world {} is not a cuboid",
+                t.object,
+                t.world
+            ));
         };
         ensure_input!(
             upright(rotation) && upright(t.meet.rotation) && upright(t.place.rotation),
             "task {i}: the object, the meeting pose and the place pose must be upright"
         );
-        ensure_input!(2.0 * half.x.min(half.y) <= o.max_width, "task {i}: the object is wider than the grippers open");
+        ensure_input!(
+            2.0 * half.x.min(half.y) <= o.max_width,
+            "task {i}: the object is wider than the grippers open"
+        );
         // The end toward each arm at `meet`: the giver's in the object's frame.
         let long = if half.x <= half.y { Vec3::Y } else { Vec3::X };
-        let toward = (t.meet.rotation * long).dot(arms[t.from].base - t.meet.position).signum();
+        let toward = (t.meet.rotation * long)
+            .dot(arms[t.from].base - t.meet.position)
+            .signum();
         let along = toward * HANDOVER_GRIP * half.x.max(half.y);
-        let object = Pose { position: center, rotation };
+        let object = Pose {
+            position: center,
+            rotation,
+        };
         let giver = Grasp::at(object, half, o.grasp_depth, along, &arms[t.from]);
         let taker = Grasp::at(t.meet, half, o.grasp_depth, -along, &arms[t.to]);
         grasps.push((giver, taker));
@@ -801,17 +985,29 @@ pub fn handover(
         w.obstacles.remove(t.object);
         w
     };
-    let scene: Vec<World> =
-        tasks.iter().map(|t| worlds[t.world as usize].clone()).chain(tasks.iter().map(without)).collect();
+    let scene: Vec<World> = tasks
+        .iter()
+        .map(|t| worlds[t.world as usize].clone())
+        .chain(tasks.iter().map(without))
+        .collect();
     let uploaded = device.upload(&scene)?;
     let clear = |i: usize| (tasks.len() + i) as u32;
     let up = Vec3::Z * o.approach;
     let at = |p: Pose| Pose::new(p.position + up, p.rotation);
-    let only = |h: usize, pose: Pose| -> Vec<Option<Pose>> { (0..hands).map(|k| (k == h).then_some(pose)).collect() };
+    let only = |h: usize, pose: Pose| -> Vec<Option<Pose>> {
+        (0..hands).map(|k| (k == h).then_some(pose)).collect()
+    };
     // The joints only hand `h` moves, which wait while the other hand works.
     let own = |h: usize| -> Vec<usize> {
-        let others: Vec<usize> = (0..hands).filter(|&k| k != h).flat_map(|k| robot.hand_joints(k)).collect();
-        robot.hand_joints(h).into_iter().filter(|j| !others.contains(j)).collect()
+        let others: Vec<usize> = (0..hands)
+            .filter(|&k| k != h)
+            .flat_map(|k| robot.hand_joints(k))
+            .collect();
+        robot
+            .hand_joints(h)
+            .into_iter()
+            .filter(|j| !others.contains(j))
+            .collect()
     };
     let nearest = |ik: &IkResult, k: usize, from: &[f32]| ik.nearest(k, from).map(<[f32]>::to_vec);
     let home = robot.default_q.clone();
@@ -827,44 +1023,71 @@ pub fn handover(
     // and the taker above the place pose with the giver back home; the place pose. All but the
     // first and the meeting pose are seeded with the configuration before (`NEAR_SEEDS`).
     let n_tasks = tasks.len();
-    let near_options = IkOptions { seeds: o.ik.seeds.min(NEAR_SEEDS), ..o.ik };
+    let near_options = IkOptions {
+        seeds: o.ik.seeds.min(NEAR_SEEDS),
+        ..o.ik
+    };
     let ik = |problems: Vec<IkProblem>| solve_ik(device, &uploaded, &problems, &o.ik);
     let ik_near = |problems: Vec<IkProblem>| solve_ik(device, &uploaded, &problems, &near_options);
     let above = ik((0..n_tasks)
-        .map(|i| IkProblem { world: i as u32, targets: only(tasks[i].from, at(grasps[i].0.tool)), seed: None })
+        .map(|i| IkProblem {
+            world: i as u32,
+            targets: only(tasks[i].from, at(grasps[i].0.tool)),
+            seed: None,
+        })
         .collect())?;
     let c1: Vec<Option<Vec<f32>>> = (0..n_tasks).map(|i| nearest(&above, i, &home)).collect();
     let meet_tool = |i: usize| grasps[i].0.tool_for(tasks[i].meet);
     let grasp = ik_near(
         (0..n_tasks)
-            .map(|i| IkProblem { world: clear(i), targets: only(tasks[i].from, grasps[i].0.tool), seed: c1[i].clone() })
+            .map(|i| IkProblem {
+                world: clear(i),
+                targets: only(tasks[i].from, grasps[i].0.tool),
+                seed: c1[i].clone(),
+            })
             .collect(),
     )?;
-    let c2: Vec<Option<Vec<f32>>> =
-        (0..n_tasks).map(|i| c1[i].as_deref().and_then(|q| nearest(&grasp, i, q))).collect();
+    let c2: Vec<Option<Vec<f32>>> = (0..n_tasks)
+        .map(|i| c1[i].as_deref().and_then(|q| nearest(&grasp, i, q)))
+        .collect();
     let meeting = ik((0..n_tasks)
         .map(|i| {
             let mut targets = only(tasks[i].from, meet_tool(i));
             targets[tasks[i].to] = Some(at(grasps[i].1.tool));
-            IkProblem { world: clear(i), targets, seed: c1[i].clone() }
+            IkProblem {
+                world: clear(i),
+                targets,
+                seed: c1[i].clone(),
+            }
         })
         .collect())?;
-    let c3: Vec<Option<Vec<f32>>> =
-        (0..n_tasks).map(|i| c1[i].as_deref().and_then(|q| nearest(&meeting, i, q))).collect();
+    let c3: Vec<Option<Vec<f32>>> = (0..n_tasks)
+        .map(|i| c1[i].as_deref().and_then(|q| nearest(&meeting, i, q)))
+        .collect();
     let third = ik_near(
         (0..n_tasks)
-            .map(|i| IkProblem { world: clear(i), targets: only(tasks[i].to, grasps[i].1.tool), seed: c3[i].clone() })
+            .map(|i| IkProblem {
+                world: clear(i),
+                targets: only(tasks[i].to, grasps[i].1.tool),
+                seed: c3[i].clone(),
+            })
             .collect(),
     )?;
-    let c4: Vec<Option<Vec<f32>>> =
-        (0..n_tasks).map(|i| c3[i].as_deref().and_then(|q| nearest(&third, i, q))).collect();
+    let c4: Vec<Option<Vec<f32>>> = (0..n_tasks)
+        .map(|i| c3[i].as_deref().and_then(|q| nearest(&third, i, q)))
+        .collect();
     let place_tool = |i: usize| grasps[i].1.tool_for(tasks[i].place);
     // Above the place pose: the taker's arm from the meeting grasp, the giver's from home.
-    let homed: Vec<Option<Vec<f32>>> =
-        (0..n_tasks).map(|i| c4[i].as_deref().map(|q| with_taker(&tasks[i], &home, q))).collect();
+    let homed: Vec<Option<Vec<f32>>> = (0..n_tasks)
+        .map(|i| c4[i].as_deref().map(|q| with_taker(&tasks[i], &home, q)))
+        .collect();
     let fourth = ik_near(
         (0..n_tasks)
-            .map(|i| IkProblem { world: clear(i), targets: only(tasks[i].from, at(meet_tool(i))), seed: c4[i].clone() })
+            .map(|i| IkProblem {
+                world: clear(i),
+                targets: only(tasks[i].from, at(meet_tool(i))),
+                seed: c4[i].clone(),
+            })
             .chain((0..n_tasks).map(|i| IkProblem {
                 world: clear(i),
                 targets: only(tasks[i].to, at(place_tool(i))),
@@ -872,17 +1095,28 @@ pub fn handover(
             }))
             .collect(),
     )?;
-    let c5: Vec<Option<Vec<f32>>> =
-        (0..n_tasks).map(|i| c4[i].as_deref().and_then(|q| nearest(&fourth, i, q))).collect();
-    let c6: Vec<Option<Vec<f32>>> =
-        (0..n_tasks).map(|i| homed[i].as_deref().and_then(|q| nearest(&fourth, n_tasks + i, q))).collect();
+    let c5: Vec<Option<Vec<f32>>> = (0..n_tasks)
+        .map(|i| c4[i].as_deref().and_then(|q| nearest(&fourth, i, q)))
+        .collect();
+    let c6: Vec<Option<Vec<f32>>> = (0..n_tasks)
+        .map(|i| {
+            homed[i]
+                .as_deref()
+                .and_then(|q| nearest(&fourth, n_tasks + i, q))
+        })
+        .collect();
     let fifth = ik_near(
         (0..n_tasks)
-            .map(|i| IkProblem { world: clear(i), targets: only(tasks[i].to, place_tool(i)), seed: c6[i].clone() })
+            .map(|i| IkProblem {
+                world: clear(i),
+                targets: only(tasks[i].to, place_tool(i)),
+                seed: c6[i].clone(),
+            })
             .collect(),
     )?;
-    let c7: Vec<Option<Vec<f32>>> =
-        (0..n_tasks).map(|i| c6[i].as_deref().and_then(|q| nearest(&fifth, i, q))).collect();
+    let c7: Vec<Option<Vec<f32>>> = (0..n_tasks)
+        .map(|i| c6[i].as_deref().and_then(|q| nearest(&fifth, i, q)))
+        .collect();
     let configs: Vec<Option<[Vec<f32>; 8]>> = (0..n_tasks)
         .map(|i| {
             let c = [&c1, &c2, &c3, &c4, &c5, &c6, &c7].map(|c| c[i].clone());
@@ -899,13 +1133,21 @@ pub fn handover(
     let touch: Vec<String> = robot
         .links
         .iter()
-        .filter(|l| robot.ee_links.iter().any(|&ee| l.chain == robot.links[ee].chain))
+        .filter(|l| {
+            robot
+                .ee_links
+                .iter()
+                .any(|&ee| l.chain == robot.links[ee].chain)
+        })
         .map(|l| l.name.clone())
         .collect();
     let mut holders: Vec<(Vec3, usize, Device)> = vec![];
     for (t, (giver, taker)) in tasks.iter().zip(&grasps) {
         for (hand, grasp) in [(t.from, giver), (t.to, taker)] {
-            if holders.iter().all(|(half, h, _)| (*half, *h) != (grasp.half, hand)) {
+            if holders
+                .iter()
+                .all(|(half, h, _)| (*half, *h) != (grasp.half, hand))
+            {
                 let held = robot.attach(&AttachedObject {
                     name: "held object".into(),
                     link: robot.links[robot.ee_links[hand]].name.clone(),
@@ -957,7 +1199,11 @@ pub fn handover(
             let d = match hand_of(i) {
                 None => device,
                 Some(key) => {
-                    &holders.iter().find(|(half, h, _)| (*half, *h) == key).expect("a holder per size and hand").2
+                    &holders
+                        .iter()
+                        .find(|(half, h, _)| (*half, *h) == key)
+                        .expect("a holder per size and hand")
+                        .2
                 }
             };
             match groups.iter_mut().find(|(g, _)| std::ptr::eq(*g, d)) {
@@ -970,7 +1216,9 @@ pub fn handover(
             let problems: Vec<PlanProblem> = group
                 .iter()
                 .map(|&i| {
-                    let c = configs[i].as_ref().expect("live tasks have their configurations");
+                    let c = configs[i]
+                        .as_ref()
+                        .expect("live tasks have their configurations");
                     let hold = match taker_waits {
                         Some(true) => own(tasks[i].to),
                         Some(false) => own(tasks[i].from),
@@ -1064,7 +1312,10 @@ pub fn handover(
             goal: t.place,
             trajectory: episode.trajectory,
             gripper: episode.gripper,
-            carried: Some(Carried { obstacle: t.object, poses }),
+            carried: Some(Carried {
+                obstacle: t.object,
+                poses,
+            }),
         });
     }
     Ok(demos)
@@ -1077,13 +1328,20 @@ fn describe_handover(robot: &Robot, from: usize, to: usize) -> String {
         Some(prefix) => format!("the {} hand", prefix.trim_end_matches(['_', '/', '-', '.'])),
         None => format!("hand {h}"),
     };
-    format!("Pass the box from {} to {} and put it down.", name(from), name(to))
+    format!(
+        "Pass the box from {} to {} and put it down.",
+        name(from),
+        name(to)
+    )
 }
 
 /// Each path timed at its speed scale and sampled every `dt`, in parallel on the current rayon
 /// pool: timing is most of a generator's work once its planning is batched.
 fn timed(robot: &Robot, paths: &[(&[f32], f32)], dt: f32) -> Result<Vec<JointTrajectory>> {
-    paths.par_iter().map(|&(path, speed_scale)| Trajectory::new(robot, path, speed_scale)?.sample(1.0 / dt)).collect()
+    paths
+        .par_iter()
+        .map(|&(path, speed_scale)| Trajectory::new(robot, path, speed_scale)?.sample(1.0 / dt))
+        .collect()
 }
 
 /// A top-down grasp of an upright cuboid.
@@ -1108,7 +1366,10 @@ impl Arm {
     fn of(robot: &Robot, hand: usize) -> Self {
         let fk = robot.fk(&robot.default_q);
         let ee = robot.ee_links[hand];
-        let base = robot.links[ee].chain.first().map_or(Vec3::ZERO, |&i| fk.pos[i]);
+        let base = robot.links[ee]
+            .chain
+            .first()
+            .map_or(Vec3::ZERO, |&i| fk.pos[i]);
         let outward = fk.rot[ee].x_axis.dot((fk.pos[ee] - base).with_z(0.0)) >= 0.0;
         Self { base, outward }
     }
@@ -1123,15 +1384,26 @@ impl Grasp {
     /// across the narrower one, the hand facing as `arm`'s does.
     fn at(object: Pose, half: Vec3, depth: f32, along: f32, arm: &Arm) -> Self {
         let z = -Vec3::Z;
-        let (narrow, long) = if half.x <= half.y { (Vec3::X, Vec3::Y) } else { (Vec3::Y, Vec3::X) };
+        let (narrow, long) = if half.x <= half.y {
+            (Vec3::X, Vec3::Y)
+        } else {
+            (Vec3::Y, Vec3::X)
+        };
         let mut y = object.rotation * narrow;
         if (y.cross(z).dot((object.position - arm.base).with_z(0.0)) >= 0.0) != arm.outward {
             y = -y;
         }
         let rotation = Quat::from_mat3(&glam::Mat3::from_cols(y.cross(z), y, z));
-        let position = object.position + object.rotation * (long * along) + Vec3::Z * (half.z - depth.min(half.z));
+        let position = object.position
+            + object.rotation * (long * along)
+            + Vec3::Z * (half.z - depth.min(half.z));
         let tool = Pose { position, rotation };
-        Self { object, half, tool, object_in_tool: tool.inverse().mul_pose(object) }
+        Self {
+            object,
+            half,
+            tool,
+            object_in_tool: tool.inverse().mul_pose(object),
+        }
     }
 
     /// The IK frame that holds the object at `place`.
@@ -1147,7 +1419,14 @@ fn describe(from: Vec3, to: Vec3) -> String {
     let (along, direction) = if d.x.abs() >= d.y.abs() {
         (d.x, if d.x >= 0.0 { "forward" } else { "back" })
     } else {
-        (d.y, if d.y >= 0.0 { "to the left" } else { "to the right" })
+        (
+            d.y,
+            if d.y >= 0.0 {
+                "to the left"
+            } else {
+                "to the right"
+            },
+        )
     };
     let cm = ((along.abs() * 20.0).round() * 5.0).max(5.0);
     format!("Pick up the box and put it {cm} cm {direction}.")
@@ -1163,9 +1442,19 @@ struct Episode {
 
 impl Episode {
     fn new(dof: usize, hands: usize, dt: f32) -> Self {
-        let trajectory =
-            JointTrajectory { dof, dt, duration: 0.0, positions: vec![], velocities: vec![], accelerations: vec![] };
-        Self { trajectory, gripper: vec![], hands }
+        let trajectory = JointTrajectory {
+            dof,
+            dt,
+            duration: 0.0,
+            positions: vec![],
+            velocities: vec![],
+            accelerations: vec![],
+        };
+        Self {
+            trajectory,
+            gripper: vec![],
+            hands,
+        }
     }
 
     fn len(&self) -> usize {
@@ -1178,9 +1467,12 @@ impl Episode {
         let n = self.trajectory.dof;
         let skip = usize::from(!self.trajectory.positions.is_empty());
         let t = &mut self.trajectory;
-        t.positions.extend_from_slice(&segment.positions[skip * n..]);
-        t.velocities.extend_from_slice(&segment.velocities[skip * n..]);
-        t.accelerations.extend_from_slice(&segment.accelerations[skip * n..]);
+        t.positions
+            .extend_from_slice(&segment.positions[skip * n..]);
+        t.velocities
+            .extend_from_slice(&segment.velocities[skip * n..]);
+        t.accelerations
+            .extend_from_slice(&segment.accelerations[skip * n..]);
         while self.gripper.len() < t.positions.len() / n * self.hands {
             self.gripper.extend_from_slice(openings);
         }
@@ -1198,7 +1490,8 @@ impl Episode {
             t.velocities.extend(std::iter::repeat_n(0.0, n));
             t.accelerations.extend(std::iter::repeat_n(0.0, n));
             let u = k as f32 / samples as f32;
-            self.gripper.extend(from.iter().zip(to).map(|(a, b)| a + (b - a) * u));
+            self.gripper
+                .extend(from.iter().zip(to).map(|(a, b)| a + (b - a) * u));
         }
         t.duration = (t.len() - 1) as f32 * t.dt;
     }
@@ -1207,7 +1500,12 @@ impl Episode {
 /// `t` played backwards.
 fn reversed(t: &JointTrajectory) -> JointTrajectory {
     let n = t.dof;
-    let rows = |v: &[f32], sign: f32| v.chunks(n).rev().flat_map(|r| r.iter().map(move |x| sign * x)).collect();
+    let rows = |v: &[f32], sign: f32| {
+        v.chunks(n)
+            .rev()
+            .flat_map(|r| r.iter().map(move |x| sign * x))
+            .collect()
+    };
     JointTrajectory {
         positions: rows(&t.positions, 1.0),
         velocities: rows(&t.velocities, -1.0),

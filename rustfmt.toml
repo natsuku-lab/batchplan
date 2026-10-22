@@ -1,2 +1,4 @@
-max_width = 120
-use_small_heuristics = "Max"
+# Google's Rust style guide: the Rust style guide's defaults, 100 columns. Its other options need
+# nightly rustfmt, which CI also runs:
+# cargo +nightly fmt --check -- --config imports_granularity=Module,hex_literal_case=Lower,format_macro_matchers=true
+max_width = 100

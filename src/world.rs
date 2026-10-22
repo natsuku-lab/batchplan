@@ -71,7 +71,10 @@ impl World {
     /// Robots in the same file are left out.
     pub fn load(path: impl AsRef<Path>, grids: &SdfOptions) -> Result<World> {
         let path = path.as_ref();
-        Self::read(path, grids).map_err(|e| Error::Load { path: path.to_path_buf(), message: format!("{e:#}") })
+        Self::read(path, grids).map_err(|e| Error::Load {
+            path: path.to_path_buf(),
+            message: format!("{e:#}"),
+        })
     }
 
     fn read(path: &Path, grids: &SdfOptions) -> anyhow::Result<World> {
@@ -81,15 +84,38 @@ impl World {
             .map(|s| {
                 let (center, rotation) = (s.origin.trans, Quat::from_mat3(&s.origin.rot));
                 Ok(match &s.geometry {
-                    Geometry::Box { half } => Obstacle::Cuboid { center, half_extents: *half, rotation },
-                    Geometry::Sphere { radius } => Obstacle::Sphere { center, radius: *radius },
-                    Geometry::Cylinder { radius, half_length } => {
-                        Obstacle::Cylinder { center, rotation, radius: *radius, half_height: *half_length }
-                    }
-                    Geometry::Capsule { radius, half_length } => {
-                        Obstacle::Capsule { center, rotation, radius: *radius, half_length: *half_length }
-                    }
-                    Geometry::Ellipsoid { radii } => Obstacle::Cuboid { center, half_extents: *radii, rotation },
+                    Geometry::Box { half } => Obstacle::Cuboid {
+                        center,
+                        half_extents: *half,
+                        rotation,
+                    },
+                    Geometry::Sphere { radius } => Obstacle::Sphere {
+                        center,
+                        radius: *radius,
+                    },
+                    Geometry::Cylinder {
+                        radius,
+                        half_length,
+                    } => Obstacle::Cylinder {
+                        center,
+                        rotation,
+                        radius: *radius,
+                        half_height: *half_length,
+                    },
+                    Geometry::Capsule {
+                        radius,
+                        half_length,
+                    } => Obstacle::Capsule {
+                        center,
+                        rotation,
+                        radius: *radius,
+                        half_length: *half_length,
+                    },
+                    Geometry::Ellipsoid { radii } => Obstacle::Cuboid {
+                        center,
+                        half_extents: *radii,
+                        rotation,
+                    },
                     Geometry::Plane => Obstacle::Cuboid {
                         center: center - s.origin.rot * Vec3::Z * PLANE_SLAB,
                         half_extents: Vec3::new(PLANE_EXTENT, PLANE_EXTENT, PLANE_SLAB),
@@ -99,7 +125,11 @@ impl World {
                         let mesh = s.geometry.mesh()?;
                         let grid = SdfGrid::from_mesh(&mesh.vertices, &mesh.triangles, grids)
                             .with_context(|| format!("the scene mesh at {center}"))?;
-                        Obstacle::Sdf { grid: Arc::new(grid), center, rotation }
+                        Obstacle::Sdf {
+                            grid: Arc::new(grid),
+                            center,
+                            rotation,
+                        }
                     }
                 })
             })
@@ -119,12 +149,24 @@ pub(crate) fn worlds_json(worlds: &[World]) -> serde_json::Result<serde_json::Va
                 .obstacles
                 .iter()
                 .map(|o| match o {
-                    Obstacle::Sdf { grid, center, rotation } => {
-                        let index = grids.iter().position(|g| Arc::ptr_eq(g, grid)).unwrap_or_else(|| {
-                            grids.push(grid);
-                            grids.len() - 1
-                        });
-                        Ok(serde_json::json!({"type": "sdf", "grid": index, "center": center, "rotation": rotation}))
+                    Obstacle::Sdf {
+                        grid,
+                        center,
+                        rotation,
+                    } => {
+                        let index = grids
+                            .iter()
+                            .position(|g| Arc::ptr_eq(g, grid))
+                            .unwrap_or_else(|| {
+                                grids.push(grid);
+                                grids.len() - 1
+                            });
+                        Ok(serde_json::json!({
+                            "type": "sdf",
+                            "grid": index,
+                            "center": center,
+                            "rotation": rotation,
+                        }))
                     }
                     o => serde_json::to_value(o),
                 })
@@ -139,7 +181,8 @@ impl World {
     /// Why these obstacles cannot be collision-checked, if they cannot.
     pub(crate) fn check(&self) -> Result<()> {
         for (k, o) in self.obstacles.iter().enumerate() {
-            o.check().map_err(|e| Error::Input(format!("obstacle {k}: {e}")))?;
+            o.check()
+                .map_err(|e| Error::Input(format!("obstacle {k}: {e}")))?;
         }
         Ok(())
     }
@@ -149,14 +192,22 @@ impl From<SdfGrid> for Obstacle {
     /// The grid in world coordinates (its frame the world's), where grids built from points and
     /// depth images belong.
     fn from(grid: SdfGrid) -> Self {
-        Obstacle::Sdf { grid: Arc::new(grid), center: Vec3::ZERO, rotation: Quat::IDENTITY }
+        Obstacle::Sdf {
+            grid: Arc::new(grid),
+            center: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+        }
     }
 }
 
 impl Obstacle {
     /// An axis-aligned box; [`Obstacle::placed`] moves and turns it.
     pub fn cuboid(center: Vec3, half_extents: Vec3) -> Obstacle {
-        Obstacle::Cuboid { center, half_extents, rotation: Quat::IDENTITY }
+        Obstacle::Cuboid {
+            center,
+            half_extents,
+            rotation: Quat::IDENTITY,
+        }
     }
 
     pub fn sphere(center: Vec3, radius: f32) -> Obstacle {
@@ -165,12 +216,22 @@ impl Obstacle {
 
     /// A cylinder along the z axis; [`Obstacle::placed`] moves and turns it.
     pub fn cylinder(center: Vec3, radius: f32, half_height: f32) -> Obstacle {
-        Obstacle::Cylinder { center, rotation: Quat::IDENTITY, radius, half_height }
+        Obstacle::Cylinder {
+            center,
+            rotation: Quat::IDENTITY,
+            radius,
+            half_height,
+        }
     }
 
     /// A capsule along the z axis; [`Obstacle::placed`] moves and turns it.
     pub fn capsule(center: Vec3, radius: f32, half_length: f32) -> Obstacle {
-        Obstacle::Capsule { center, rotation: Quat::IDENTITY, radius, half_length }
+        Obstacle::Capsule {
+            center,
+            rotation: Quat::IDENTITY,
+            radius,
+            half_length,
+        }
     }
 
     fn check(&self) -> Result<()> {
@@ -179,17 +240,29 @@ impl Obstacle {
             center.is_finite() && rotation.is_finite() && (rotation.length() - 1.0).abs() < 1e-3
         };
         let ok = match *self {
-            Obstacle::Cuboid { center, half_extents, rotation } => {
-                pose(center, rotation) && half_extents.to_array().into_iter().all(size)
-            }
+            Obstacle::Cuboid {
+                center,
+                half_extents,
+                rotation,
+            } => pose(center, rotation) && half_extents.to_array().into_iter().all(size),
             Obstacle::Sphere { center, radius } => center.is_finite() && size(radius),
-            Obstacle::Cylinder { center, rotation, radius, half_height: half } => {
-                pose(center, rotation) && size(radius) && size(half)
-            }
-            Obstacle::Capsule { center, rotation, radius, half_length: half } => {
-                pose(center, rotation) && size(radius) && size(half)
-            }
-            Obstacle::Sdf { ref grid, center, rotation } => {
+            Obstacle::Cylinder {
+                center,
+                rotation,
+                radius,
+                half_height: half,
+            } => pose(center, rotation) && size(radius) && size(half),
+            Obstacle::Capsule {
+                center,
+                rotation,
+                radius,
+                half_length: half,
+            } => pose(center, rotation) && size(radius) && size(half),
+            Obstacle::Sdf {
+                ref grid,
+                center,
+                rotation,
+            } => {
                 grid.check()?;
                 pose(center, rotation)
             }
@@ -197,7 +270,9 @@ impl Obstacle {
         if ok {
             Ok(())
         } else {
-            Err(Error::Input("needs finite, non-negative sizes and a unit-quaternion rotation".into()))
+            Err(Error::Input(
+                "needs finite, non-negative sizes and a unit-quaternion rotation".into(),
+            ))
         }
     }
 
@@ -206,25 +281,55 @@ impl Obstacle {
     pub fn placed(&self, pose: Pose) -> Obstacle {
         let (center, rotation) = (pose.position, pose.rotation);
         match self.clone() {
-            Obstacle::Cuboid { half_extents, .. } => Obstacle::Cuboid { center, half_extents, rotation },
+            Obstacle::Cuboid { half_extents, .. } => Obstacle::Cuboid {
+                center,
+                half_extents,
+                rotation,
+            },
             Obstacle::Sphere { radius, .. } => Obstacle::Sphere { center, radius },
-            Obstacle::Cylinder { radius, half_height, .. } => {
-                Obstacle::Cylinder { center, rotation, radius, half_height }
-            }
-            Obstacle::Capsule { radius, half_length, .. } => {
-                Obstacle::Capsule { center, rotation, radius, half_length }
-            }
-            Obstacle::Sdf { grid, .. } => Obstacle::Sdf { grid, center, rotation },
+            Obstacle::Cylinder {
+                radius,
+                half_height,
+                ..
+            } => Obstacle::Cylinder {
+                center,
+                rotation,
+                radius,
+                half_height,
+            },
+            Obstacle::Capsule {
+                radius,
+                half_length,
+                ..
+            } => Obstacle::Capsule {
+                center,
+                rotation,
+                radius,
+                half_length,
+            },
+            Obstacle::Sdf { grid, .. } => Obstacle::Sdf {
+                grid,
+                center,
+                rotation,
+            },
         }
     }
 
     /// The obstacle's frame: its centre and rotation.
     pub fn pose(&self) -> Pose {
         let (position, rotation) = match *self {
-            Obstacle::Cuboid { center, rotation, .. }
-            | Obstacle::Cylinder { center, rotation, .. }
-            | Obstacle::Capsule { center, rotation, .. }
-            | Obstacle::Sdf { center, rotation, .. } => (center, rotation),
+            Obstacle::Cuboid {
+                center, rotation, ..
+            }
+            | Obstacle::Cylinder {
+                center, rotation, ..
+            }
+            | Obstacle::Capsule {
+                center, rotation, ..
+            }
+            | Obstacle::Sdf {
+                center, rotation, ..
+            } => (center, rotation),
             Obstacle::Sphere { center, .. } => (center, Quat::IDENTITY),
         };
         Pose { position, rotation }
@@ -234,18 +339,32 @@ impl Obstacle {
     /// direction, except inside distance grids, where it is the interpolation's gradient).
     pub fn distance(&self, p: Vec3) -> (f32, Vec3) {
         match *self {
-            Obstacle::Cuboid { center, half_extents, rotation } => {
+            Obstacle::Cuboid {
+                center,
+                half_extents,
+                rotation,
+            } => {
                 let r = Mat3::from_quat(rotation);
                 box_distance(r, center, half_extents, p)
             }
             Obstacle::Sphere { center, radius } => sphere_distance(center, radius, p),
-            Obstacle::Cylinder { center, rotation, radius, half_height } => {
-                cylinder_distance(Mat3::from_quat(rotation), center, radius, half_height, p)
-            }
-            Obstacle::Capsule { center, rotation, radius, half_length } => {
-                capsule_distance(Mat3::from_quat(rotation), center, radius, half_length, p)
-            }
-            Obstacle::Sdf { ref grid, center, rotation } => sdf_distance(Mat3::from_quat(rotation), center, grid, p),
+            Obstacle::Cylinder {
+                center,
+                rotation,
+                radius,
+                half_height,
+            } => cylinder_distance(Mat3::from_quat(rotation), center, radius, half_height, p),
+            Obstacle::Capsule {
+                center,
+                rotation,
+                radius,
+                half_length,
+            } => capsule_distance(Mat3::from_quat(rotation), center, radius, half_length, p),
+            Obstacle::Sdf {
+                ref grid,
+                center,
+                rotation,
+            } => sdf_distance(Mat3::from_quat(rotation), center, grid, p),
         }
     }
 }
@@ -279,10 +398,20 @@ pub(crate) fn box_distance(r: Mat3, center: Vec3, half: Vec3, p: Vec3) -> (f32, 
 
 /// Must stay in sync with `obstacle_distance` in kernels.wgsl.
 #[inline]
-pub(crate) fn cylinder_distance(r: Mat3, center: Vec3, radius: f32, half_height: f32, p: Vec3) -> (f32, Vec3) {
+pub(crate) fn cylinder_distance(
+    r: Mat3,
+    center: Vec3,
+    radius: f32,
+    half_height: f32,
+    p: Vec3,
+) -> (f32, Vec3) {
     let lp = r.transpose() * (p - center);
     let rho = (lp.x * lp.x + lp.y * lp.y).sqrt();
-    let radial = if rho > 1e-9 { Vec3::new(lp.x / rho, lp.y / rho, 0.0) } else { Vec3::X };
+    let radial = if rho > 1e-9 {
+        Vec3::new(lp.x / rho, lp.y / rho, 0.0)
+    } else {
+        Vec3::X
+    };
     let axial = Vec3::new(0.0, 0.0, if lp.z >= 0.0 { 1.0 } else { -1.0 });
     let (dr, dz) = (rho - radius, lp.z.abs() - half_height);
     let (d, gl) = if dr > 0.0 && dz > 0.0 {
@@ -305,7 +434,13 @@ pub(crate) fn sdf_distance(r: Mat3, center: Vec3, grid: &SdfGrid, p: Vec3) -> (f
 
 /// Must stay in sync with `obstacle_distance` in kernels.wgsl.
 #[inline]
-pub(crate) fn capsule_distance(r: Mat3, center: Vec3, radius: f32, half_length: f32, p: Vec3) -> (f32, Vec3) {
+pub(crate) fn capsule_distance(
+    r: Mat3,
+    center: Vec3,
+    radius: f32,
+    half_length: f32,
+    p: Vec3,
+) -> (f32, Vec3) {
     let lp = r.transpose() * (p - center);
     let v = lp - Vec3::new(0.0, 0.0, lp.z.clamp(-half_length, half_length));
     let len = v.length();

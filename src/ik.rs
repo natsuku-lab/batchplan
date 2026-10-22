@@ -37,7 +37,12 @@ impl Default for IkOptions {
             rot_weight: 0.5,
             max_step: 0.3,
             collision_step: 0.05,
-            collision: CollisionWeights { world: 100.0, self_collision: 100.0, margin: 0.01, self_margin: 0.005 },
+            collision: CollisionWeights {
+                world: 100.0,
+                self_collision: 100.0,
+                margin: 0.01,
+                self_margin: 0.005,
+            },
             position_tolerance: 1e-3,
             rotation_tolerance: 1e-2,
             rng_seed: 1,
@@ -60,7 +65,11 @@ impl IkProblem {
     /// A one-handed robot's hand at `target` in world `world`, seeded from its default
     /// configuration.
     pub fn new(world: u32, target: Pose) -> Self {
-        Self { world, targets: vec![Some(target)], seed: None }
+        Self {
+            world,
+            targets: vec![Some(target)],
+            seed: None,
+        }
     }
 }
 
@@ -95,7 +104,13 @@ impl IkResult {
     /// The successful seed of `problem` nearest `q` (Euclidean in joint space), which keeps a small
     /// move on the same IK branch.
     pub fn nearest(&self, problem: usize, q: &[f32]) -> Option<&[f32]> {
-        let distance = |i: usize| self.solution(i).iter().zip(q).map(|(a, b)| (a - b).powi(2)).sum::<f32>();
+        let distance = |i: usize| {
+            self.solution(i)
+                .iter()
+                .zip(q)
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f32>()
+        };
         (problem * self.seeds..(problem + 1) * self.seeds)
             .filter(|&i| self.success[i])
             .min_by(|&a, &b| distance(a).total_cmp(&distance(b)))
@@ -107,13 +122,24 @@ impl IkResult {
         self.problems
             .iter()
             .enumerate()
-            .filter_map(|(index, problem)| Some(Solved { index, problem, solution: self.best(index)? }))
+            .filter_map(|(index, problem)| {
+                Some(Solved {
+                    index,
+                    problem,
+                    solution: self.best(index)?,
+                })
+            })
     }
 }
 
 /// Seed 0 starts from the problem's seed or else the robot's default configuration, the rest with
 /// the joints the targeted hands move drawn uniformly within joint limits.
-pub fn solve_ik(device: &Device, worlds: &Worlds, problems: &[IkProblem], o: &IkOptions) -> Result<IkResult> {
+pub fn solve_ik(
+    device: &Device,
+    worlds: &Worlds,
+    problems: &[IkProblem],
+    o: &IkOptions,
+) -> Result<IkResult> {
     let robot = device.robot();
     let n = robot.dof();
     ensure_input!(o.seeds > 0, "need at least one seed");
@@ -131,7 +157,9 @@ pub fn solve_ik(device: &Device, worlds: &Worlds, problems: &[IkProblem], o: &Ik
         for target in p.targets.iter().flatten() {
             let (position, rotation) = (target.position, target.rotation);
             ensure_input!(
-                position.is_finite() && rotation.is_finite() && (rotation.length() - 1.0).abs() < 1e-3,
+                position.is_finite()
+                    && rotation.is_finite()
+                    && (rotation.length() - 1.0).abs() < 1e-3,
                 "IK problem {i}: targets need a finite position and a unit-quaternion rotation"
             );
         }
@@ -159,7 +187,13 @@ pub fn solve_ik(device: &Device, worlds: &Worlds, problems: &[IkProblem], o: &Ik
             if s == 0 {
                 q.extend_from_slice(start);
             } else {
-                q.extend((0..n).map(|j| if moved[j] { rng.range(robot.lower[j], robot.upper[j]) } else { start[j] }));
+                q.extend((0..n).map(|j| {
+                    if moved[j] {
+                        rng.range(robot.lower[j], robot.upper[j])
+                    } else {
+                        start[j]
+                    }
+                }));
             }
             item_world.push(p.world);
             targets.extend_from_slice(&p.targets);
@@ -168,7 +202,11 @@ pub fn solve_ik(device: &Device, worlds: &Worlds, problems: &[IkProblem], o: &Ik
     let err = device.ik(worlds, &item_world, &targets, &mut q, o)?;
     let clear = device.clearance(worlds, &item_world, &q)?;
     let success = (0..items)
-        .map(|i| err[i][0] < o.position_tolerance && err[i][1] < o.rotation_tolerance && collision_free(clear[i]))
+        .map(|i| {
+            err[i][0] < o.position_tolerance
+                && err[i][1] < o.rotation_tolerance
+                && collision_free(clear[i])
+        })
         .collect();
     Ok(IkResult {
         problems: problems.to_vec(),
