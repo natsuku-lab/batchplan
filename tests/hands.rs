@@ -4,10 +4,11 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
+use batchplan::datagen::{self, DemoOptions};
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionWeights, Device, IkOptions, IkProblem, Obstacle, Part, PlanOptions, PlanProblem, Pose,
-    Robot, RobotOptions, RrtOptions, RrtProblem, Trajectory, World, Worlds,
+    CollisionWeights, Device, Error, IkOptions, IkProblem, Obstacle, Part, PlanOptions,
+    PlanProblem, Pose, Robot, RobotOptions, RrtOptions, RrtProblem, Trajectory, World, Worlds,
 };
 use glam::{Quat, Vec3};
 
@@ -189,6 +190,23 @@ fn a_hand_without_a_target_holds_its_arm() {
     }
 }
 
+#[test]
+fn reach_demonstrations_need_a_first_hand_target() {
+    let robot = two_arms();
+    let cpu = Device::cpu(&robot).unwrap();
+    let worlds = cpu.upload(&[World::default()]).unwrap();
+    let goals = [IkProblem {
+        world: 0,
+        targets: vec![None, Some(robot.ee_pose(robot.default_q(), 1))],
+        seed: None,
+    }];
+    let err = datagen::demonstrations(&cpu, &worlds, &goals, &DemoOptions::default()).unwrap_err();
+    assert!(
+        matches!(err, Error::Input(_)),
+        "a goal for the second hand alone is refused, not {err:?}"
+    );
+}
+
 /// A wall in front of the left arm, and problems that carry the left hand from one side of it to
 /// the other while the right arm stays where it starts.
 fn over_the_wall(robot: &Robot, cpu: &Device) -> (World, Vec<PlanProblem>) {
@@ -326,7 +344,7 @@ fn plans_hold_an_arm_still() {
             }
             if let Some(path) = result.best(p) {
                 // Blending equal control points is exact up to rounding.
-                for q in Trajectory::new(&robot, path, 1.0)
+                for q in Trajectory::try_new(&robot, path, 1.0)
                     .unwrap()
                     .sample(100.0)
                     .unwrap()

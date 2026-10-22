@@ -215,7 +215,7 @@ fn hand_system(h: u32) {
 // Hand h's step toward its target, J^T (J J^T + damping^2 I)^-1 e, into `dq`.
 fn pose_step(h: u32, dq: ptr<function, array<f32, MAX_DOF>>) {
     let ep = goal_pos[h].xyz - ee_pos(h);
-    let eo = rot_log(goal_rot[h] * transpose(ee_rot(h))).xyz * P.rot_weight;
+    let eo = rot_log(goal_rot[h] * transpose(ee_rot(h))).xyz * P.rotation_weight;
     hand_system(h);
     let y = chol6_solve(array<f32, 6>(ep.x, ep.y, ep.z, eo.x, eo.y, eo.z));
     for (var j = 0u; j < P.n_dof; j++) {
@@ -639,10 +639,10 @@ fn traj_search(
             let current = candidate(item, t, j, alpha);
             let previous = candidate(item, t - 1u, j, alpha);
             let v = current - previous;
-            part[c] += P.w_vel * v * v;
+            part[c] += P.velocity_weight * v * v;
             if (t >= 2u) {
                 let a = current - 2.0 * previous + candidate(item, t - 2u, j, alpha);
-                part[c] += P.w_acc * a * a;
+                part[c] += P.acceleration_weight * a * a;
             }
         }
     }
@@ -852,13 +852,13 @@ fn traj_grad(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgro
         let qm = qbuf[base - n + j];
         let q0 = qbuf[base + j];
         let qp = qbuf[base + n + j];
-        var g = 2.0 * P.w_vel * (2.0 * q0 - qm - qp);
-        g += 2.0 * P.w_acc * -2.0 * (qp - 2.0 * q0 + qm);
+        var g = 2.0 * P.velocity_weight * (2.0 * q0 - qm - qp);
+        g += 2.0 * P.acceleration_weight * -2.0 * (qp - 2.0 * q0 + qm);
         if (t >= 2u) {
-            g += 2.0 * P.w_acc * (q0 - 2.0 * qm + qbuf[base - 2u * n + j]);
+            g += 2.0 * P.acceleration_weight * (q0 - 2.0 * qm + qbuf[base - 2u * n + j]);
         }
         if (t + 2u < tn) {
-            g += 2.0 * P.w_acc * (qbuf[base + 2u * n + j] - 2.0 * qp + q0);
+            g += 2.0 * P.acceleration_weight * (qbuf[base + 2u * n + j] - 2.0 * qp + q0);
         }
         aux[grad_at(item) + t * n + j] = grad[j] + g;
     }

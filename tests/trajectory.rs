@@ -74,7 +74,7 @@ fn trajectories_stay_within_limits_everywhere() {
     ];
     let mut peak = [0.0f32; 3];
     for path in planned(&robot, 16) {
-        let trajectory = Trajectory::new(&robot, &path, 1.0).unwrap();
+        let trajectory = Trajectory::try_new(&robot, &path, 1.0).unwrap();
         trajectory.check(&robot).unwrap();
         let dt = trajectory.knot_interval / 64.0;
         let samples = trajectory.sample(1.0 / dt).unwrap();
@@ -142,8 +142,8 @@ fn trajectories_stay_within_limits_everywhere() {
 fn slower_speed_scales_stretch_time() {
     let robot = common::panda().unwrap();
     let path = &planned(&robot, 4)[0];
-    let fast = Trajectory::new(&robot, path, 1.0).unwrap();
-    let slow = Trajectory::new(&robot, path, 0.5).unwrap();
+    let fast = Trajectory::try_new(&robot, path, 1.0).unwrap();
+    let slow = Trajectory::try_new(&robot, path, 0.5).unwrap();
     assert!((slow.duration() - 2.0 * fast.duration()).abs() < 1e-5 * fast.duration());
     slow.check(&robot).unwrap();
 }
@@ -151,7 +151,7 @@ fn slower_speed_scales_stretch_time() {
 #[test]
 fn sampling_does_not_allocate() {
     let robot = common::panda().unwrap();
-    let trajectory = Trajectory::new(&robot, &planned(&robot, 4)[0], 1.0).unwrap();
+    let trajectory = Trajectory::try_new(&robot, &planned(&robot, 4)[0], 1.0).unwrap();
     let mut state = JointState::new(robot.dof());
     let before = ALLOCATIONS.with(Cell::get);
     let mut checksum = 0.0;
@@ -176,18 +176,21 @@ fn check_rejects_unsafe_trajectories() {
     let robot = common::panda().unwrap();
     let n = robot.dof();
     let path = &planned(&robot, 4)[0];
-    let good = Trajectory::new(&robot, path, 1.0).unwrap();
+    let good = Trajectory::try_new(&robot, path, 1.0).unwrap();
     good.check(&robot).unwrap();
     // Timing refuses what it cannot honour instead of producing an unsafe or empty trajectory.
     for scale in [0.0, -1.0, 1.5, f32::NAN] {
         assert!(
-            matches!(Trajectory::new(&robot, path, scale), Err(Error::Input(_))),
+            matches!(
+                Trajectory::try_new(&robot, path, scale),
+                Err(Error::Input(_))
+            ),
             "speed scale {scale}"
         );
     }
     assert!(
         matches!(
-            Trajectory::new(&robot, &path[..6 * n], 1.0),
+            Trajectory::try_new(&robot, &path[..6 * n], 1.0),
             Err(Error::Input(_))
         ),
         "six control points"
@@ -210,13 +213,9 @@ fn check_rejects_unsafe_trajectories() {
     nan.control_points[5 * n + 2] = f32::NAN;
     rejects(nan, "a NaN");
 
-    rejects(
-        Trajectory {
-            knot_interval: good.knot_interval * 0.8,
-            ..good.clone()
-        },
-        "running too fast",
-    );
+    let mut fast = good.clone();
+    fast.knot_interval *= 0.8;
+    rejects(fast, "running too fast");
 
     // A long move over few control points, timed to its limits, sped up 10%.
     let mut cp = vec![];
@@ -225,15 +224,11 @@ fn check_rejects_unsafe_trajectories() {
         q[0] = q0;
         cp.extend(q);
     }
-    let sweep = Trajectory::new(&robot, &cp, 1.0).unwrap();
+    let sweep = Trajectory::try_new(&robot, &cp, 1.0).unwrap();
     sweep.check(&robot).unwrap();
-    let err = Trajectory {
-        knot_interval: sweep.knot_interval * 0.9,
-        ..sweep
-    }
-    .check(&robot)
-    .unwrap_err()
-    .to_string();
+    let mut faster = sweep;
+    faster.knot_interval *= 0.9;
+    let err = faster.check(&robot).unwrap_err().to_string();
     assert!(
         err.contains("velocity") || err.contains("acceleration"),
         "{err}"
@@ -255,7 +250,9 @@ fn check_rejects_unsafe_trajectories() {
     out_of_range.control_points[(points / 2) * n + 3] = robot.upper()[3] + 0.1;
     rejects(out_of_range, "leaving a joint range");
 
-    let err = Trajectory { dof: n - 1, ..good }.check(&robot).unwrap_err();
+    let mut fewer = good;
+    fewer.dof = n - 1;
+    let err = fewer.check(&robot).unwrap_err();
     assert!(
         matches!(&err, Error::Input(m) if m.contains("joints")),
         "{err:?}"
@@ -265,7 +262,7 @@ fn check_rejects_unsafe_trajectories() {
 #[test]
 fn trajectories_round_trip_through_json() {
     let robot = common::panda().unwrap();
-    let trajectory = Trajectory::new(&robot, &planned(&robot, 4)[0], 0.7).unwrap();
+    let trajectory = Trajectory::try_new(&robot, &planned(&robot, 4)[0], 0.7).unwrap();
     let text = serde_json::to_string(&trajectory).unwrap();
     let back: Trajectory = serde_json::from_str(&text).unwrap();
     assert_eq!(back, trajectory);
@@ -304,7 +301,7 @@ fn time_optimal_timing_beats_uniform_timing_within_the_limits() {
     };
     let (mut ratios, mut peak) = (vec![], [0.0f32; 3]);
     for path in planned(&robot, 16) {
-        let trajectory = Trajectory::new(&robot, &path, 1.0).unwrap();
+        let trajectory = Trajectory::try_new(&robot, &path, 1.0).unwrap();
         trajectory.check(&robot).unwrap();
         ratios.push(trajectory.duration() / uniform(&path));
         // Four times denser than the check samples.
@@ -369,7 +366,7 @@ fn moving_starts_are_timed_from_their_motion_or_refused() {
     ));
     // A path that starts moving cannot be timed as if from rest.
     assert!(matches!(
-        Trajectory::new(&robot, &cp, 1.0),
+        Trajectory::try_new(&robot, &cp, 1.0),
         Err(Error::Input(_))
     ));
 }
@@ -399,8 +396,8 @@ fn scaled_limits_slow_every_motion() {
     }
     for path in planned(&robot, 8) {
         let (fast, slow_trajectory) = (
-            Trajectory::new(&robot, &path, 1.0).unwrap(),
-            Trajectory::new(&slow, &path, 1.0).unwrap(),
+            Trajectory::try_new(&robot, &path, 1.0).unwrap(),
+            Trajectory::try_new(&slow, &path, 1.0).unwrap(),
         );
         slow_trajectory.check(&slow).unwrap();
         let ratio = slow_trajectory.duration() / fast.duration();
@@ -428,7 +425,7 @@ fn stops_brake_to_rest_along_the_path() {
     let (mut state, mut end) = (JointState::new(n), JointState::new(n));
     let mut stops = 0;
     for path in planned(&robot, 12) {
-        let trajectory = Trajectory::new(&robot, &path, 1.0).unwrap();
+        let trajectory = Trajectory::try_new(&robot, &path, 1.0).unwrap();
         for fraction in [0.2f32, 0.5] {
             let t = fraction * trajectory.duration();
             trajectory.at(t, &mut state);
@@ -459,7 +456,7 @@ fn stops_brake_to_rest_along_the_path() {
     }
     assert!(stops >= 20, "{stops} of 24 stops");
     // A trajectory at rest stops where it is.
-    let trajectory = Trajectory::new(&robot, &planned(&robot, 1)[0], 1.0).unwrap();
+    let trajectory = Trajectory::try_new(&robot, &planned(&robot, 1)[0], 1.0).unwrap();
     trajectory.at(trajectory.duration(), &mut state);
     let stop = trajectory.stop(&robot, trajectory.duration()).unwrap();
     stop.check_from(&robot, &state).unwrap();

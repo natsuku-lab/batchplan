@@ -95,7 +95,7 @@ fn token(prim: &Prim, name: &str) -> Result<Option<String>> {
     })
 }
 
-fn boolean(prim: &Prim, name: &str, default: bool) -> Result<bool> {
+fn boolean_or(prim: &Prim, name: &str, default: bool) -> Result<bool> {
     Ok(match value(prim, name)? {
         Some(Value::Bool(b)) => b,
         _ => default,
@@ -379,12 +379,12 @@ pub(crate) fn load(path: &Path, variants: &[(String, String)]) -> Result<Model> 
             .map(|t| t.as_str().to_string())
             .unwrap_or_default();
         let body = has_api(&prim, "PhysicsRigidBodyAPI")?
-            && boolean(&prim, "physics:rigidBodyEnabled", true)?;
+            && boolean_or(&prim, "physics:rigidBodyEnabled", true)?;
         let collider = has_api(&prim, "PhysicsCollisionAPI")?;
         if body {
             bodies.push(p.clone());
         }
-        if collider && boolean(&prim, "physics:collisionEnabled", true)? {
+        if collider && boolean_or(&prim, "physics:collisionEnabled", true)? {
             colliders.push(p.clone());
         }
         if kind == "Xform"
@@ -420,7 +420,7 @@ pub(crate) fn load(path: &Path, variants: &[(String, String)]) -> Result<Model> 
             driven.insert(p.clone());
         }
         if kind.starts_with("Physics") && kind.ends_with("Joint") {
-            if !boolean(&prim, "physics:jointEnabled", true)? {
+            if !boolean_or(&prim, "physics:jointEnabled", true)? {
                 continue;
             }
             let joint = JointPrim {
@@ -429,7 +429,7 @@ pub(crate) fn load(path: &Path, variants: &[(String, String)]) -> Result<Model> 
                 body0: target(&prim, "physics:body0")?,
                 body1: target(&prim, "physics:body1")?,
             };
-            if boolean(&prim, "physics:excludeFromArticulation", false)? {
+            if boolean_or(&prim, "physics:excludeFromArticulation", false)? {
                 closures.push(joint);
             } else {
                 joints.push(joint);
@@ -774,7 +774,7 @@ fn mimic(
             None => None,
         })
     };
-    if has_api(prim, "NewtonMimicAPI")? && boolean(prim, "newton:mimicEnabled", true)? {
+    if has_api(prim, "NewtonMimicAPI")? && boolean_or(prim, "newton:mimicEnabled", true)? {
         let Some(joint) = leader(target(prim, "newton:mimicJoint")?)? else {
             return Ok(None);
         };

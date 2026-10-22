@@ -12,12 +12,20 @@ use crate::error::{Error, Result};
 use crate::sdf::{self, SdfGrid, SdfOptions};
 use crate::types::Pose;
 
+/// A solid shape a robot must not touch, in world coordinates (meters). Each is placed by its
+/// centre and, except for a sphere, a rotation that maps its own axes to the world's.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+#[allow(
+    missing_docs,
+    reason = "the enum's doc gives every field's units and frame"
+)]
 pub enum Obstacle {
-    /// Oriented box; `rotation` maps box axes to world axes.
+    /// Oriented box.
     Cuboid {
         center: Vec3,
+        /// Half the box's size along each of its axes.
         half_extents: Vec3,
         rotation: Quat,
     },
@@ -25,11 +33,12 @@ pub enum Obstacle {
         center: Vec3,
         radius: f32,
     },
-    /// Solid cylinder along its local z axis; `rotation` maps local axes to world axes.
+    /// Solid cylinder along its local z axis.
     Cylinder {
         center: Vec3,
         rotation: Quat,
         radius: f32,
+        /// Half its length along its axis.
         half_height: f32,
     },
     /// Capsule around the local z segment from `-half_length` to `half_length`.
@@ -39,8 +48,8 @@ pub enum Obstacle {
         radius: f32,
         half_length: f32,
     },
-    /// A signed distance grid with its frame at `center`, turned by `rotation`. Worlds can share
-    /// a grid; a device uploads it once.
+    /// A signed distance grid with its frame at `center`. Worlds can share a grid; a device
+    /// uploads it once.
     Sdf {
         grid: Arc<SdfGrid>,
         center: Vec3,
@@ -48,9 +57,22 @@ pub enum Obstacle {
     },
 }
 
+/// One scene to plan in. Problems name their world by its index in the batch uploaded with
+/// [`Device::upload`](crate::Device::upload).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct World {
+    /// Everything in the scene; uploading checks each is well formed.
     pub obstacles: Vec<Obstacle>,
+}
+
+/// A signed distance to a surface, and its gradient.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Distance {
+    /// Meters: negative inside.
+    pub value: f32,
+    /// How the distance grows with the point: the unit outward direction, except inside
+    /// distance grids, where it is the interpolation's gradient.
+    pub gradient: Vec3,
 }
 
 /// Value returned for clearances when there is nothing to collide with.
@@ -201,7 +223,14 @@ impl From<SdfGrid> for Obstacle {
 }
 
 impl Obstacle {
+    /// The grid in world coordinates, as `Obstacle::from` makes it.
+    #[must_use]
+    pub fn from_grid(grid: SdfGrid) -> Obstacle {
+        Obstacle::from(grid)
+    }
+
     /// An axis-aligned box; [`Obstacle::placed`] moves and turns it.
+    #[must_use]
     pub fn cuboid(center: Vec3, half_extents: Vec3) -> Obstacle {
         Obstacle::Cuboid {
             center,
@@ -210,11 +239,14 @@ impl Obstacle {
         }
     }
 
+    /// A ball.
+    #[must_use]
     pub fn sphere(center: Vec3, radius: f32) -> Obstacle {
         Obstacle::Sphere { center, radius }
     }
 
     /// A cylinder along the z axis; [`Obstacle::placed`] moves and turns it.
+    #[must_use]
     pub fn cylinder(center: Vec3, radius: f32, half_height: f32) -> Obstacle {
         Obstacle::Cylinder {
             center,
@@ -225,6 +257,7 @@ impl Obstacle {
     }
 
     /// A capsule along the z axis; [`Obstacle::placed`] moves and turns it.
+    #[must_use]
     pub fn capsule(center: Vec3, radius: f32, half_length: f32) -> Obstacle {
         Obstacle::Capsule {
             center,
@@ -278,6 +311,7 @@ impl Obstacle {
 
     /// The obstacle moved so that its frame (centre and rotation) is `pose`. Spheres keep no
     /// rotation.
+    #[must_use]
     pub fn placed(&self, pose: Pose) -> Obstacle {
         let (center, rotation) = (pose.position, pose.rotation);
         match self.clone() {
@@ -316,6 +350,7 @@ impl Obstacle {
     }
 
     /// The obstacle's frame: its centre and rotation.
+    #[must_use]
     pub fn pose(&self) -> Pose {
         let (position, rotation) = match *self {
             Obstacle::Cuboid {
@@ -335,10 +370,10 @@ impl Obstacle {
         Pose { position, rotation }
     }
 
-    /// Signed distance from `p` to the obstacle surface and its gradient (the unit outward
-    /// direction, except inside distance grids, where it is the interpolation's gradient).
-    pub fn distance(&self, p: Vec3) -> (f32, Vec3) {
-        match *self {
+    /// Signed distance from `p` to the obstacle surface, and its gradient.
+    #[must_use]
+    pub fn distance(&self, p: Vec3) -> Distance {
+        let (value, gradient) = match *self {
             Obstacle::Cuboid {
                 center,
                 half_extents,
@@ -365,7 +400,8 @@ impl Obstacle {
                 center,
                 rotation,
             } => sdf_distance(Mat3::from_quat(rotation), center, grid, p),
-        }
+        };
+        Distance { value, gradient }
     }
 }
 

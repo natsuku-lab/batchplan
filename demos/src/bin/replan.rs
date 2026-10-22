@@ -179,7 +179,7 @@ fn main() -> Result<()> {
                     continue;
                 };
                 motions[*i] = Motion {
-                    trajectory: Some(Trajectory::new(&robot, path, SPEED)?),
+                    trajectory: Some(Trajectory::try_new(&robot, path, SPEED)?),
                     began: t,
                     goal: p.goal.clone(),
                     hold: p.start.clone(),

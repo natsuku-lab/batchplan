@@ -15,13 +15,16 @@ use crate::trajopt::{self, PlanOptions, PlanProblem, PlanResult};
 use crate::types::{JointTrajectory, Pose, Solved};
 use crate::world::{Obstacle, World};
 
+/// How [`recovery_problems`] perturbs planned paths.
 #[derive(Clone, Copy, Debug)]
 pub struct RecoveryOptions {
+    /// Perturbed states drawn per solved path; those that collide are dropped.
     pub per_trajectory: usize,
     /// Standard deviation of the joint-space perturbation (radians).
     pub sigma: f32,
     /// Range of path fractions where perturbations happen.
     pub phase: (f32, f32),
+    /// Seed of the perturbations.
     pub rng_seed: u64,
 }
 
@@ -38,11 +41,13 @@ impl Default for RecoveryOptions {
 
 /// A planning problem that starts from a perturbed state of a planned path.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Recovery {
     /// Index in `result.problems` of the problem whose best path was perturbed.
     pub parent: usize,
     /// Fraction of the nominal path where the perturbation happened.
     pub phase: f32,
+    /// From the perturbed state to the parent's goal.
     pub problem: PlanProblem,
 }
 
@@ -276,20 +281,26 @@ fn same_hold(a: &Hold, b: &Hold) -> bool {
     }
 }
 
+/// Where a demonstration starts.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Origin {
+    /// From a start state toward the goal.
     Nominal,
     /// Starts from a perturbed state of demonstration `parent`, `phase` of the way along it: a
     /// replanned recovery (`parent` an index into the same output), or that state alone
     /// (`reset_states`, `parent` an index into the demonstrations it perturbs).
     Recovery {
+        /// The demonstration it branches from.
         parent: usize,
+        /// Fraction of the parent's path where it starts.
         phase: f32,
     },
 }
 
 impl Origin {
     /// The demonstration a recovery branches from; `None` for nominal demonstrations.
+    #[must_use]
     pub fn parent(&self) -> Option<usize> {
         match *self {
             Origin::Nominal => None,
@@ -304,13 +315,16 @@ pub const REACH_TASK: &str = "Move the gripper to the target pose.";
 /// One time-parameterized episode in `worlds[world]`.
 #[derive(Clone, Debug)]
 pub struct Demonstration {
+    /// How the episode starts.
     pub origin: Origin,
+    /// The world the episode happens in.
     pub world: u32,
     /// What the episode does, in words; exporters index the distinct tasks.
     pub task: String,
     /// The pose the episode drives toward: the IK frame's for a reach, the object's for
     /// pick-and-place.
     pub goal: Pose,
+    /// The robot's joints, sampled every `trajectory.dt` seconds.
     pub trajectory: JointTrajectory,
     /// Each hand's gripper opening at each sample (`[samples, hands]`): 1 open, 0 closed.
     pub gripper: Vec<f32>,
@@ -322,14 +336,20 @@ pub struct Demonstration {
 /// (the obstacle's own frame: centre and rotation) at each sample.
 #[derive(Clone, Debug)]
 pub struct Carried {
+    /// Its index among the world's obstacles.
     pub obstacle: usize,
+    /// Its pose at each sample of the trajectory.
     pub poses: Vec<Pose>,
 }
 
+/// How [`demonstrations`] solves, plans, perturbs and times its episodes.
 #[derive(Clone, Copy, Debug)]
 pub struct DemoOptions {
+    /// IK for the goals.
     pub ik: IkOptions,
+    /// Planning, nominal and recovery.
     pub plan: PlanOptions,
+    /// Perturbations for the recoveries.
     pub recovery: RecoveryOptions,
     /// Standard deviation of the joint noise added to the default pose for start states (radians).
     /// Starts that collide fall back to the default pose.
@@ -339,6 +359,7 @@ pub struct DemoOptions {
     pub speed_scale: (f32, f32),
     /// Sample period of the trajectories (seconds).
     pub dt: f32,
+    /// Seed of the start noise and speed scales.
     pub rng_seed: u64,
 }
 
@@ -377,6 +398,14 @@ pub fn demonstrations(
         "dt must be positive, got {}",
         o.dt
     );
+    if let Some(g) = goals
+        .iter()
+        .position(|g| g.targets.first().is_none_or(Option::is_none))
+    {
+        return Err(input!(
+            "goal {g}: reach demonstrations target the first hand"
+        ));
+    }
     let mut rng = Rng::new(o.rng_seed);
     let ik = ik::solve_ik(device, worlds, goals, &o.ik)?;
 
@@ -511,14 +540,20 @@ pub(crate) fn check_demos(robot: &Robot, worlds: &[World], demos: &[Demonstratio
 /// down with its centre and rotation at `place`. Both must be upright (their z axis vertical).
 #[derive(Clone, Debug)]
 pub struct PickPlace {
+    /// The world holding the object.
     pub world: u32,
+    /// The object's index among the world's obstacles: a cuboid.
     pub object: usize,
+    /// Where the object's centre and rotation end up.
     pub place: Pose,
 }
 
+/// How [`pick_and_place`] and [`handover`] grasp, plan and time their episodes.
 #[derive(Clone, Copy, Debug)]
 pub struct PickPlaceOptions {
+    /// IK for the grasps and the poses between them.
     pub ik: IkOptions,
+    /// Planning the segments.
     pub plan: PlanOptions,
     /// How far above the grasp and the place pose the gripper approaches from and retreats to
     /// (meters).
@@ -533,6 +568,7 @@ pub struct PickPlaceOptions {
     pub speed_scale: (f32, f32),
     /// Sample period of the trajectories (seconds).
     pub dt: f32,
+    /// Seed of the speed scales.
     pub rng_seed: u64,
 }
 
@@ -872,12 +908,17 @@ pub fn pick_and_place(
 /// The object, `meet` and `place` must be upright (their z axis vertical).
 #[derive(Clone, Debug)]
 pub struct Handover {
+    /// The world holding the object.
     pub world: u32,
+    /// The object's index among the world's obstacles: a cuboid.
     pub object: usize,
+    /// The hand that picks the object up.
     pub from: usize,
+    /// The hand that takes it and sets it down.
     pub to: usize,
     /// Where the object is handed over (its centre and rotation), held by both hands.
     pub meet: Pose,
+    /// Where the taker sets it down (its centre and rotation).
     pub place: Pose,
 }
 
@@ -1344,7 +1385,7 @@ fn describe_handover(robot: &Robot, from: usize, to: usize) -> String {
 fn timed(robot: &Robot, paths: &[(&[f32], f32)], dt: f32) -> Result<Vec<JointTrajectory>> {
     paths
         .par_iter()
-        .map(|&(path, speed_scale)| Trajectory::new(robot, path, speed_scale)?.sample(1.0 / dt))
+        .map(|&(path, speed_scale)| Trajectory::try_new(robot, path, speed_scale)?.sample(1.0 / dt))
         .collect()
 }
 

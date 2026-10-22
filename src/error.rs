@@ -2,8 +2,10 @@
 
 use std::path::PathBuf;
 
+/// Every error batchplan returns, by what a host can do about it.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
+#[must_use]
 pub enum Error {
     /// The call cannot work with what it was given: array shapes, world indices, worlds uploaded
     /// to another device, options out of range, degenerate geometry.
@@ -11,7 +13,12 @@ pub enum Error {
     Input(String),
     /// A robot, scene or collision-model file could not be read or understood.
     #[error("{path}: {message}")]
-    Load { path: PathBuf, message: String },
+    Load {
+        /// The file.
+        path: PathBuf,
+        /// What was wrong with it.
+        message: String,
+    },
     /// No GPU can run the kernels, or the GPU failed while working.
     #[error("{0}")]
     Gpu(String),
@@ -26,6 +33,7 @@ pub enum Error {
     Write(String),
 }
 
+/// What batchplan's functions return.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Typed code reads no files; its I/O is writing exports.

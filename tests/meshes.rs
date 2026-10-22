@@ -10,8 +10,8 @@ use std::sync::{Arc, OnceLock};
 
 use batchplan::rng::Rng;
 use batchplan::{
-    AttachedObject, CollisionWeights, Device, MeshModel, Obstacle, Robot, RobotOptions, SdfGrid,
-    SdfOptions, SphereOptions, World,
+    AttachedObject, Clearance, CollisionWeights, Device, MeshModel, Obstacle, Robot, RobotOptions,
+    SdfGrid, SdfOptions, SphereOptions, World,
 };
 use glam::{Quat, Vec3};
 
@@ -77,7 +77,7 @@ fn cube(half: f32) -> (Vec<Vec3>, Vec<[u32; 3]>) {
 #[test]
 fn clearances_to_every_obstacle_kind_are_exact() {
     let robot = chain();
-    let meshes = MeshModel::new(&robot).unwrap();
+    let meshes = MeshModel::try_new(&robot).unwrap();
     // Each obstacle sits beside link `a`, centred 0.3 m along y, so 0.2 m from its side; links `b`
     // and `c` are farther. The cylinder and the capsule stand upright: lying along y, they would
     // reach into `a`.
@@ -105,7 +105,7 @@ fn clearances_to_every_obstacle_kind_are_exact() {
     ];
     let straight = [0.0; 3];
     for (w, obstacle) in worlds.iter().enumerate() {
-        let [world, _] = meshes.clearance(&worlds, &[w as u32], &straight).unwrap()[0];
+        let Clearance { world, .. } = meshes.clearance(&worlds, &[w as u32], &straight).unwrap()[0];
         assert!(
             (world - 0.2).abs() < 1e-4,
             "{:?}: {world}",
@@ -113,7 +113,7 @@ fn clearances_to_every_obstacle_kind_are_exact() {
         );
     }
     // Turned a quarter turn, `a` runs along +y and passes the sphere 0.1 m away.
-    let [turned, _] = meshes
+    let Clearance { world: turned, .. } = meshes
         .clearance(&worlds, &[0], &[FRAC_PI_2, 0.0, 0.0])
         .unwrap()[0];
     assert!(
@@ -128,7 +128,7 @@ fn clearances_to_every_obstacle_kind_are_exact() {
         rotation: upright,
     });
     assert_eq!(
-        meshes.clearance(&[across], &[0], &straight).unwrap()[0][0],
+        meshes.clearance(&[across], &[0], &straight).unwrap()[0].world,
         0.0
     );
     let inside = world(Obstacle::Cuboid {
@@ -136,14 +136,14 @@ fn clearances_to_every_obstacle_kind_are_exact() {
         half_extents: Vec3::splat(0.02),
         rotation: upright,
     });
-    assert!((meshes.clearance(&[inside], &[0], &straight).unwrap()[0][0] - 0.03).abs() < 1e-4);
+    assert!((meshes.clearance(&[inside], &[0], &straight).unwrap()[0].world - 0.03).abs() < 1e-4);
     // Obstacles listed far to near: the search must not stop at the first one it measures.
     let crowd = World {
         obstacles: [0.6, 0.45, 0.3]
             .map(|y| Obstacle::sphere(Vec3::new(0.2, y, 0.5), 0.05))
             .to_vec(),
     };
-    let [nearest, _] = meshes.clearance(&[crowd], &[0], &straight).unwrap()[0];
+    let Clearance { world: nearest, .. } = meshes.clearance(&[crowd], &[0], &straight).unwrap()[0];
     assert!((nearest - 0.2).abs() < 1e-4, "among several: {nearest}");
     // A ball 6 cm from link `c` (0.36 m from `a`), then one far away: measured link by link in
     // list order, `a` against the far ball would end the search before `c` is reached.
@@ -153,13 +153,15 @@ fn clearances_to_every_obstacle_kind_are_exact() {
             Obstacle::sphere(Vec3::new(-2.0, 0.0, 0.5), 0.05),
         ],
     };
-    let [nearest, _] = meshes.clearance(&[scattered], &[0], &straight).unwrap()[0];
+    let Clearance { world: nearest, .. } =
+        meshes.clearance(&[scattered], &[0], &straight).unwrap()[0];
     assert!((nearest - 0.06).abs() < 1e-4, "beside `c`: {nearest}");
     // Nothing to measure against.
     assert_eq!(
         meshes
             .clearance(&[World::default()], &[0], &straight)
-            .unwrap()[0][0],
+            .unwrap()[0]
+            .world,
         1e30
     );
 }
@@ -167,7 +169,7 @@ fn clearances_to_every_obstacle_kind_are_exact() {
 #[test]
 fn grids_are_checked_at_points_covering_the_surface() {
     let robot = chain();
-    let meshes = MeshModel::new(&robot).unwrap();
+    let meshes = MeshModel::try_new(&robot).unwrap();
     let (vertices, triangles) = cube(0.05);
     let grid = Arc::new(SdfGrid::from_mesh(&vertices, &triangles, &SdfOptions::default()).unwrap());
     let worlds = [world(Obstacle::Sdf {
@@ -178,7 +180,7 @@ fn grids_are_checked_at_points_covering_the_surface() {
     // The cube turned by 0.3 rad is at most 0.2 m from `a`, a little less at its corners. The grid
     // reads up to a voxel diagonal less, and the surface points 5 mm less again.
     let corner = 0.05 * (0.3f32.cos() + 0.3f32.sin()) - 0.05;
-    let [world, _] = meshes.clearance(&worlds, &[0], &[0.0; 3]).unwrap()[0];
+    let Clearance { world, .. } = meshes.clearance(&worlds, &[0], &[0.0; 3]).unwrap()[0];
     let truth = 0.2 - corner;
     assert!(
         world <= truth && world >= truth - 0.0174 - 0.005,
@@ -189,23 +191,29 @@ fn grids_are_checked_at_points_covering_the_surface() {
 #[test]
 fn self_clearance_is_measured_between_link_meshes() {
     let robot = chain();
-    let meshes = MeshModel::new(&robot).unwrap();
+    let meshes = MeshModel::try_new(&robot).unwrap();
     let none = [World::default()];
     // Folded back twice by a quarter turn, `c` runs parallel to `a`, 0.3 m over: their sides are
     // 0.21 m apart.
-    let [_, folded] = meshes
+    let Clearance {
+        self_collision: folded,
+        ..
+    } = meshes
         .clearance(&none, &[0], &[0.0, FRAC_PI_2, FRAC_PI_2])
         .unwrap()[0];
     assert!((folded - 0.21).abs() < 1e-4, "folded: {folded}");
     // Folded further, `c` runs from (0.25, 0.26) down through `a` near (0.2, 0.015).
-    let [_, crossing] = meshes.clearance(&none, &[0], &[0.0, 2.094, 2.43]).unwrap()[0];
+    let Clearance {
+        self_collision: crossing,
+        ..
+    } = meshes.clearance(&none, &[0], &[0.0, 2.094, 2.43]).unwrap()[0];
     assert_eq!(crossing, 0.0);
 }
 
 #[test]
 fn spheres_never_read_farther_than_the_meshes() {
     let robot = chain();
-    let meshes = MeshModel::new(&robot).unwrap();
+    let meshes = MeshModel::try_new(&robot).unwrap();
     let cpu = Device::cpu(&robot).unwrap();
     let scene = vec![World {
         obstacles: vec![
@@ -226,7 +234,14 @@ fn spheres_never_read_farther_than_the_meshes() {
     let spheres = cpu.evaluate(&worlds, &items, &q, &exact).unwrap();
     let on_meshes = meshes.clearance(&scene, &items, &q).unwrap();
     let (mut touching, mut apart) = (0, 0);
-    for (i, [world, self_collision]) in on_meshes.into_iter().enumerate() {
+    for (
+        i,
+        Clearance {
+            world,
+            self_collision,
+        },
+    ) in on_meshes.into_iter().enumerate()
+    {
         // Fitted spheres hold 20,000 surface samples per link, not every surface point.
         assert!(
             spheres.world_clearance[i] <= world + 1e-3,
@@ -266,11 +281,11 @@ fn held_objects_and_real_robots_are_checked_as_meshes() {
         .unwrap();
     // Straight, the tool's tip is at x = 1.1; a sphere 0.1 m beyond it.
     let tip = [world(Obstacle::sphere(Vec3::new(1.25, 0.0, 0.5), 0.05))];
-    let [bare, _] = MeshModel::new(&robot)
+    let Clearance { world: bare, .. } = MeshModel::try_new(&robot)
         .unwrap()
         .clearance(&tip, &[0], &[0.0; 3])
         .unwrap()[0];
-    let [holding, _] = MeshModel::new(&held)
+    let Clearance { world: holding, .. } = MeshModel::try_new(&held)
         .unwrap()
         .clearance(&tip, &[0], &[0.0; 3])
         .unwrap()[0];
@@ -282,21 +297,26 @@ fn held_objects_and_real_robots_are_checked_as_meshes() {
     // The Panda's collision meshes: clear of itself at its default pose, and a pin through its
     // forearm leaves nothing (a small ball inside the forearm would not touch its surface).
     let panda = common::panda().unwrap();
-    let meshes = MeshModel::new(&panda).unwrap();
+    let meshes = MeshModel::try_new(&panda).unwrap();
     let q = panda.default_q().to_vec();
-    let [free, self_collision] = meshes.clearance(&[World::default()], &[0], &q).unwrap()[0];
+    let Clearance {
+        world: free,
+        self_collision,
+    } = meshes.clearance(&[World::default()], &[0], &q).unwrap()[0];
     assert!(
         free == 1e30 && self_collision > 0.0,
         "{free} {self_collision}"
     );
     let elbow = panda.link_pose(&q, "panda_link4").unwrap().position;
     let pin = [world(Obstacle::cuboid(elbow, Vec3::new(0.3, 0.005, 0.005)))];
-    assert_eq!(meshes.clearance(&pin, &[0], &q).unwrap()[0][0], 0.0);
+    assert_eq!(meshes.clearance(&pin, &[0], &q).unwrap()[0].world, 0.0);
 
     // Mounted on a table, the base rests on it; that is not a collision.
     let mut rng = Rng::new(1);
     let table = common::tabletop(&mut rng);
-    let [on_table, _] = meshes
+    let Clearance {
+        world: on_table, ..
+    } = meshes
         .clearance(std::slice::from_ref(&table), &[0], &q)
         .unwrap()[0];
     assert!(on_table > 0.0, "{on_table} on the table");
@@ -333,16 +353,19 @@ fn concave_links_are_measured_on_their_surface_not_their_hull() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("hook.urdf"), HOOK).unwrap();
     let robot = Robot::load(dir.join("hook.urdf"), &RobotOptions::default()).unwrap();
-    let meshes = MeshModel::new(&robot).unwrap();
+    let meshes = MeshModel::try_new(&robot).unwrap();
     // The peg's near corner is 8 cm above the bar, inside the hull's slope from (0, 0.05) to
     // (0.3, 0.25).
-    let [_, peg] = meshes
+    let Clearance {
+        self_collision: peg,
+        ..
+    } = meshes
         .clearance(&[World::default()], &[0], &[0.0, 0.0])
         .unwrap()[0];
     assert!((peg - 0.08).abs() < 1e-4, "the peg: {peg}");
     // With the peg turned away, a ball in the notch is 9 cm from the bar.
     let ball = world(Obstacle::sphere(Vec3::new(0.15, 0.17, 0.5), 0.03));
-    let [notch, _] = meshes
+    let Clearance { world: notch, .. } = meshes
         .clearance(&[ball], &[0], &[0.0, std::f32::consts::PI])
         .unwrap()[0];
     assert!((notch - 0.09).abs() < 1e-4, "the ball: {notch}");

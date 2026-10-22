@@ -184,10 +184,10 @@ fn mimic_collision_gradients_match_finite_differences() {
             continue;
         }
         let fd = |h: f32| (cost(q + h) - cost(q - h)) / (2.0 * h);
-        let err = (fd(1e-3) - e.grad[0])
+        let err = (fd(1e-3) - e.gradient[0])
             .abs()
-            .min((fd(2e-4) - e.grad[0]).abs())
-            / e.grad[0].abs().max(1.0);
+            .min((fd(2e-4) - e.gradient[0]).abs())
+            / e.gradient[0].abs().max(1.0);
         worst = worst.max(err);
         checked += 1;
     }
@@ -233,9 +233,9 @@ fn mimic_gripper_evaluates_the_same_on_every_device() {
                 "{}: self clearance at q = {qi}",
                 d.name(),
             );
-            let scale = reference.grad[i].abs().max(1.0);
+            let scale = reference.gradient[i].abs().max(1.0);
             assert!(
-                (e.grad[i] - reference.grad[i]).abs() / scale < 1e-3,
+                (e.gradient[i] - reference.gradient[i]).abs() / scale < 1e-3,
                 "{}: gradient at q = {qi}",
                 d.name()
             );
@@ -555,7 +555,7 @@ fn joint_limits_replace_the_descriptions_motion_limits() {
         .into_iter()
         .flat_map(|s| start.iter().zip(&goal).map(move |(a, b)| a + (b - a) * s))
         .collect();
-    let duration = |r: &Robot| Trajectory::new(r, &line, 1.0).unwrap().duration();
+    let duration = |r: &Robot| Trajectory::try_new(r, &line, 1.0).unwrap().duration();
     assert!(duration(&plain) < 1.0 / 0.5, "{}", duration(&plain));
     assert!(duration(&slow) >= 1.0 / 0.5, "{}", duration(&slow));
 
@@ -813,11 +813,14 @@ fn devices_agree(robot: &Robot, scene: &[World]) -> Vec<Device> {
                 d.name()
             );
         }
-        let scale = reference.grad.iter().fold(1.0f32, |m, g| m.max(g.abs()));
-        let worst = e
-            .grad
+        let scale = reference
+            .gradient
             .iter()
-            .zip(&reference.grad)
+            .fold(1.0f32, |m, g| m.max(g.abs()));
+        let worst = e
+            .gradient
+            .iter()
+            .zip(&reference.gradient)
             .fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
         assert!(
             worst / scale < 1e-3,

@@ -189,7 +189,7 @@ fn usd_scenes_load_with_schema_defaults() {
         world
             .obstacles
             .iter()
-            .map(|o| o.distance(p).0)
+            .map(|o| o.distance(p).value)
             .fold(f32::INFINITY, f32::min)
     };
     // Floor: a default cube (size 2) scaled to 2 m x 2 cm x 2 m, its top at z = 0.

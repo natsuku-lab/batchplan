@@ -6,6 +6,7 @@
 //! runs on the CPU and is meant for finished trajectories, not for the inner loops.
 
 use std::f32::consts::FRAC_PI_2;
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -38,6 +39,26 @@ pub struct MeshModel {
     links: Vec<Option<LinkMesh>>,
 }
 
+impl fmt::Debug for MeshModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let meshed = self.links.iter().filter(|l| l.is_some()).count();
+        f.debug_struct("MeshModel")
+            .field("robot", &self.robot.name())
+            .field("meshed_links", &meshed)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A configuration's clearances in meters: zero where meshes touch or overlap, `1e30` where
+/// there is nothing to measure.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Clearance {
+    /// From the links' meshes to the world's obstacles.
+    pub world: f32,
+    /// Between the meshes of the link pairs checked for self-collision.
+    pub self_collision: f32,
+}
+
 struct LinkMesh {
     mesh: SharedShape,
     /// The mesh's convex hull: nothing is nearer to the hull than to the mesh, so the hull's
@@ -58,7 +79,7 @@ enum Placed {
 impl MeshModel {
     /// Loads the meshes of `robot`'s links: their collision geometry, or the visual geometry where
     /// spheres were fitted to that. Links without geometry are not checked.
-    pub fn new(robot: &Robot) -> Result<Self> {
+    pub fn try_new(robot: &Robot) -> Result<Self> {
         let links = robot
             .links
             .iter()
@@ -114,16 +135,14 @@ impl MeshModel {
         })
     }
 
-    /// World and self clearance (meters) of each configuration (`[items, dof]`): from the links'
-    /// meshes to the obstacles of `worlds[item_world[i]]`, and between the meshes of the link
-    /// pairs checked for self-collision. Zero where they touch or overlap; `1e30` where there is
-    /// nothing to measure. Runs on the current rayon pool.
+    /// The clearances of each configuration (`[items, dof]`), from the obstacles of
+    /// `worlds[item_world[i]]` and between its links. Runs on the current rayon pool.
     pub fn clearance(
         &self,
         worlds: &[World],
         item_world: &[u32],
         q: &[f32],
-    ) -> Result<Vec<[f32; 2]>> {
+    ) -> Result<Vec<Clearance>> {
         let n = self.robot.dof();
         ensure_input!(
             q.len() == item_world.len() * n,
@@ -143,7 +162,13 @@ impl MeshModel {
             .collect();
         Ok(q.par_chunks(n)
             .zip(item_world)
-            .map(|(q, &w)| self.clearances(&placed[w as usize], q))
+            .map(|(q, &w)| {
+                let [world, self_collision] = self.clearances(&placed[w as usize], q);
+                Clearance {
+                    world,
+                    self_collision,
+                }
+            })
             .collect())
     }
 
@@ -288,7 +313,7 @@ fn place(obstacle: &Obstacle) -> Placed {
             center,
             rotation,
         } => {
-            let (lo, hi) = grid.bounds();
+            let (lo, hi) = (grid.lower_corner(), grid.upper_corner());
             let around = (
                 center + rotation * ((lo + hi) / 2.0),
                 (hi - lo).length() / 2.0,

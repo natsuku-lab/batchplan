@@ -283,11 +283,11 @@ impl Ahead {
     /// spread over the pool, it runs the pool's other work while it waits, every so often, and
     /// before each sample while one is under way: a pool thread that helps one search of a batch
     /// should not hold up another's repair.
-    pub(crate) fn helper<'a>(
+    pub(crate) fn helper<'robot>(
         self: &Arc<Self>,
-        robot: &'a Robot,
-        optimizing: Option<&'a AtomicUsize>,
-    ) -> Option<Helper<'a>> {
+        robot: &'robot Robot,
+        optimizing: Option<&'robot AtomicUsize>,
+    ) -> Option<Helper<'robot>> {
         if self.done.load(Ordering::Acquire) || self.reached.load(Ordering::Relaxed) == 0 {
             return None;
         }
@@ -379,8 +379,8 @@ enum Asked {
 }
 
 /// A thread forecasting a search's samples, run as a search of its own.
-pub(crate) struct Helper<'a> {
-    robot: &'a Robot,
+pub(crate) struct Helper<'robot> {
+    robot: &'robot Robot,
     ahead: Arc<Ahead>,
     /// The base it copied, and its trees, the start's then the goals', with the nodes added since
     /// replayed.
@@ -398,7 +398,7 @@ pub(crate) struct Helper<'a> {
     asked: Asked,
     /// The batch's optimizations under way, if it runs the pool's other work (see
     /// `Ahead::helper`), and its rounds of looking for a sample to forecast.
-    optimizing: Option<&'a AtomicUsize>,
+    optimizing: Option<&'robot AtomicUsize>,
     rounds: usize,
     forecasts: [Forecast; 2],
     new: Vec<f32>,

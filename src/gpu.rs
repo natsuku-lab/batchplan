@@ -85,8 +85,8 @@ shader_struct! {
     GpuParams => Params {
         n_dof: u32, n_items: u32, points: u32, iterations: u32,
         w_world: f32, w_self: f32, margin: f32, self_margin: f32,
-        w_acc: f32, w_vel: f32, initial_step: f32, history: u32,
-        damping: f32, rot_weight: f32, max_step: f32, collision_step: f32,
+        acceleration_weight: f32, velocity_weight: f32, initial_step: f32, history: u32,
+        damping: f32, rotation_weight: f32, max_step: f32, collision_step: f32,
         samples: u32, pad0: u32, pad1: u32, pad2: u32,
     }
 }
@@ -252,7 +252,7 @@ fn robot_wgsl(robot: &Robot) -> String {
         let _ = writeln!(w, "            return rot_{ee};");
     });
     w += "}\n\n// Hand h's Jacobian into `jac` (6 x MAX_DOF, row-major; rotation rows scaled by\n";
-    w += "// P.rot_weight), its moving joints root first, mimic joints adding into their leader.\n";
+    w += "// P.rotation_weight), its moving joints root first, mimic joints adding into their leader.\n";
     w += "fn ee_jacobian(h: u32) {\n    for (var k = 0u; k < JAC_LEN; k++) {\n        jac[k] = 0.0;\n    }\n";
     cases(&mut w, &|w, ee| {
         for (i, d) in robot.chain(ee) {
@@ -266,7 +266,7 @@ fn robot_wgsl(robot: &Robot) -> String {
             } else {
                 let _ = writeln!(
                     w,
-                    "            let jp = m * cross(a, pos_{ee} - pos_{i});\n            let jo = m * a * P.rot_weight;"
+                    "            let jp = m * cross(a, pos_{ee} - pos_{i});\n            let jo = m * a * P.rotation_weight;"
                 );
             }
             for (r, c) in ["jp.x", "jp.y", "jp.z", "jo.x", "jo.y", "jo.z"]
@@ -365,7 +365,7 @@ fn collision(
     w += "    let gate = max(self_margin, 0.0);\n";
     // One link pair: `ends` index its two links in the links buffer; `frame(e)` names end e's
     // rotation and position, `wrench(e)` its force and moment accumulators.
-    type Names<'a> = &'a dyn Fn(usize) -> (String, String);
+    type Names<'names> = &'names dyn Fn(usize) -> (String, String);
     let pair = |l: &str, ends: [&str; 2], frame: Names, wrench: Names| {
         let [a, b] = ends;
         let ((ra, pa), (rb, pb)) = (frame(0), frame(1));
@@ -878,14 +878,14 @@ struct GpuWorlds {
 }
 
 /// Per-call buffers bound alongside the robot buffers.
-struct CallBuffers<'a> {
-    params: &'a wgpu::Buffer,
-    worlds: &'a GpuWorlds,
-    item_world: &'a wgpu::Buffer,
-    targets: &'a wgpu::Buffer,
-    q: &'a wgpu::Buffer,
-    aux: &'a wgpu::Buffer,
-    out: &'a wgpu::Buffer,
+struct CallBuffers<'call> {
+    params: &'call wgpu::Buffer,
+    worlds: &'call GpuWorlds,
+    item_world: &'call wgpu::Buffer,
+    targets: &'call wgpu::Buffer,
+    q: &'call wgpu::Buffer,
+    aux: &'call wgpu::Buffer,
+    out: &'call wgpu::Buffer,
 }
 
 impl GpuBackend {
@@ -1244,7 +1244,7 @@ impl Backend for GpuBackend {
                 out.world_clearance.push(row[0]);
                 out.self_clearance.push(row[1]);
                 out.cost.push(row[2]);
-                out.grad.extend_from_slice(&row[3..]);
+                out.gradient.extend_from_slice(&row[3..]);
             }
         }
         Ok(out)
@@ -1616,7 +1616,7 @@ impl GpuBackend {
         let lanes = lanes_for(items);
         let mut params = self.params(items, &o.collision);
         params.damping = o.damping;
-        params.rot_weight = o.rot_weight;
+        params.rotation_weight = o.rotation_weight;
         params.max_step = o.max_step;
         params.collision_step = o.collision_step;
         let params_buf = self.uniform(&params);
@@ -1695,8 +1695,8 @@ impl GpuBackend {
         let mut params = self.params(items, &o.collision);
         params.points = points as u32;
         params.samples = o.samples_per_span as u32;
-        params.w_acc = o.w_acc;
-        params.w_vel = o.w_vel;
+        params.acceleration_weight = o.acceleration_weight;
+        params.velocity_weight = o.velocity_weight;
         params.initial_step = o.initial_step;
         params.history = o.history as u32;
         let lanes = lanes_for(samples);

@@ -128,6 +128,7 @@ pub struct CollisionModel {
 }
 
 impl CollisionModel {
+    /// Reads a model written by [`CollisionModel::save`].
     pub fn load(path: impl AsRef<Path>) -> error::Result<Self> {
         let path = path.as_ref();
         let load = |message: String| Error::Load {
@@ -138,6 +139,7 @@ impl CollisionModel {
         serde_json::from_str(&text).map_err(|e| load(e.to_string()))
     }
 
+    /// Writes the model as JSON, to commit and hand-tune.
     pub fn save(&self, path: impl AsRef<Path>) -> error::Result<()> {
         let path = path.as_ref();
         std::fs::write(path, serde_json::to_string_pretty(self)?)
@@ -147,6 +149,7 @@ impl CollisionModel {
     /// The model of a robot made with [`Robot::assemble`], from each part's own model and the
     /// prefix its names take: two arms fitted once share one model. Links of different parts are
     /// always checked against each other.
+    #[must_use]
     pub fn assemble(parts: &[(&str, &CollisionModel)]) -> CollisionModel {
         let mut out = CollisionModel::default();
         let sources: Vec<String> = parts
@@ -187,6 +190,7 @@ pub struct JointLimits {
     pub jerk: Option<f32>,
 }
 
+/// How [`Robot::load`] and [`Robot::assemble`] build a robot from its description.
 #[derive(Clone, Debug)]
 pub struct RobotOptions {
     /// Root of the planned tree; defaults to the description's root link.
@@ -209,6 +213,7 @@ pub struct RobotOptions {
     pub package_dirs: Vec<PathBuf>,
     /// Collision spheres; fitted to the description's geometry with `spheres` when `None`.
     pub collision_model: Option<CollisionModel>,
+    /// How spheres are fitted when there is no `collision_model`.
     pub spheres: SphereOptions,
     /// A MoveIt SRDF's text, whose disabled collision pairs are added to the collision model's.
     pub srdf: Option<String>,
@@ -223,7 +228,7 @@ pub struct RobotOptions {
     /// Scales every joint's velocity limit, its description's or `max_velocity`, in (0, 1], as
     /// MoveIt's velocity scaling factor does. Plans, timings and checks all keep within the scaled
     /// limits, so a robot slowed here replans mid-motion at its own pace. To slow every motion by
-    /// `s`, as `Trajectory::new`'s speed scale does, scale velocity by `s`, acceleration by `s²`
+    /// `s`, as `Trajectory::try_new`'s speed scale does, scale velocity by `s`, acceleration by `s²`
     /// and jerk by `s³`.
     pub velocity_scale: f32,
     /// Scales every joint's acceleration limit, in (0, 1].
@@ -290,6 +295,7 @@ pub struct Robot {
 /// A robot description placed in a robot made of several (see [`Robot::assemble`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Part {
+    /// The description file: URDF, MJCF or OpenUSD.
     pub path: PathBuf,
     /// Prefixed to every link and joint name of the description, such as `left_`.
     pub prefix: String,
@@ -304,9 +310,11 @@ pub struct Part {
 pub struct AttachedObject {
     /// The object's frame name, which must not name a link of the robot.
     pub name: String,
+    /// The link holding it.
     pub link: String,
     /// The object's shapes, placed in `link`'s frame. Distance grids are not supported.
     pub shapes: Vec<Obstacle>,
+    /// Other links it may touch.
     pub touch_links: Vec<String>,
     /// How spheres are fitted to the shapes; a held object rarely needs more than 8 to 16.
     pub spheres: SphereOptions,
@@ -422,6 +430,7 @@ impl Robot {
 
     /// The descriptions the robot was loaded from: one for [`Robot::load`], its parts for
     /// [`Robot::assemble`].
+    #[must_use]
     pub fn parts(&self) -> &[Part] {
         &self.parts
     }
@@ -476,7 +485,7 @@ impl Robot {
             "a budget of {} spheres cannot cover {with_geometry} links with geometry",
             o.budget
         );
-        let (fitted, overhang) = spheres::fit(&meshes, o, true);
+        let (fitted, overhang) = spheres::fit(&meshes, o, /* parallel */ true);
         let source = format!(
             "fitted by batchplan: spheres reach up to {:.1} mm beyond the geometry",
             overhang * 1e3
@@ -670,23 +679,32 @@ impl Robot {
     }
 
     /// The robot name from its description.
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// The number of actuated joints: the length of every configuration.
+    #[must_use]
     #[inline]
     pub fn dof(&self) -> usize {
         self.dof_names.len()
     }
 
+    /// The actuated joints' names, in the order configurations hold them.
+    #[must_use]
     pub fn joint_names(&self) -> &[String] {
         &self.dof_names
     }
 
+    /// Each joint's lower position limit (radians, or meters for prismatic joints).
+    #[must_use]
     pub fn lower(&self) -> &[f32] {
         &self.lower
     }
 
+    /// Each joint's upper position limit.
+    #[must_use]
     pub fn upper(&self) -> &[f32] {
         &self.upper
     }
@@ -694,6 +712,7 @@ impl Robot {
     /// Which joints are continuous: they turn without limit and their values wrap every 2π. For
     /// them, [`Robot::lower`] and [`Robot::upper`] give the turn (−π to π) that seeds and samples
     /// come from, not limits.
+    #[must_use]
     pub fn continuous(&self) -> &[bool] {
         &self.continuous
     }
@@ -773,33 +792,44 @@ impl Robot {
         })
     }
 
+    /// Each joint's velocity limit (per second), with `RobotOptions::velocity_scale` applied.
+    #[must_use]
     pub fn max_velocity(&self) -> &[f32] {
         &self.max_velocity
     }
 
+    /// Each joint's acceleration limit, with `RobotOptions::acceleration_scale` applied.
+    #[must_use]
     pub fn max_acceleration(&self) -> &[f32] {
         &self.max_acceleration
     }
 
+    /// Each joint's jerk limit, with `RobotOptions::jerk_scale` applied.
+    #[must_use]
     pub fn max_jerk(&self) -> &[f32] {
         &self.max_jerk
     }
 
+    /// The configuration plans start from by default and IK's first seed starts at.
+    #[must_use]
     pub fn default_q(&self) -> &[f32] {
         &self.default_q
     }
 
     /// The collision spheres in use, generated or as given.
+    #[must_use]
     pub fn collision_model(&self) -> &CollisionModel {
         &self.collision_model
     }
 
     /// The number of hands: IK target frames (`RobotOptions::ee_links`).
+    #[must_use]
     pub fn hands(&self) -> usize {
         self.ee_links.len()
     }
 
     /// World pose of hand `hand`'s IK target frame at configuration `q`.
+    #[must_use]
     pub fn ee_pose(&self, q: &[f32], hand: usize) -> Pose {
         self.pose_of(&self.fk(q), self.ee_links[hand])
     }
@@ -815,6 +845,7 @@ impl Robot {
 
     /// The joints that move hand `hand`, root first: the actuated joints of its chain (a mimic
     /// joint counts as its leader).
+    #[must_use]
     pub fn hand_joints(&self, hand: usize) -> Vec<usize> {
         let mut joints = vec![];
         for (_, dof) in self.chain(self.ee_links[hand]) {
@@ -826,6 +857,7 @@ impl Robot {
     }
 
     /// World pose of the named link at configuration `q`.
+    #[must_use]
     pub fn link_pose(&self, q: &[f32], link: &str) -> Option<Pose> {
         let i = self.links.iter().position(|l| l.name == link)?;
         Some(self.pose_of(&self.fk(q), i))

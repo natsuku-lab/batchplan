@@ -121,7 +121,7 @@ fn main() -> Result<(), Error> {
 
 ## Checking against meshes
 
-Spheres only approximate the links. `MeshModel::new(&robot)` loads each link's collision meshes, and `clearance(&worlds, &item_world, &q)` measures a batch of configurations' world and self clearance on the meshes, as MoveIt checks a planning scene with FCL. It runs on the CPU, to check finished trajectories rather than inside planning:
+Spheres only approximate the links. `MeshModel::try_new(&robot)` loads each link's collision meshes, and `clearance(&worlds, &item_world, &q)` measures a batch of configurations' world and self clearance on the meshes, as MoveIt checks a planning scene with FCL. It runs on the CPU, to check finished trajectories rather than inside planning:
 
 - **Distances are exact** (parry3d's, found by branch and bound): about 110 µs per Panda configuration on an M4 Pro's 14 threads.
 - **Meshes are surfaces**, as in FCL: a link entirely inside another closed mesh does not touch it.
@@ -130,20 +130,23 @@ Spheres only approximate the links. `MeshModel::new(&robot)` loads each link's c
 
 ```rust,no_run
 use batchplan::glam::Vec3;
-use batchplan::{Error, MeshModel, Obstacle, Robot, RobotOptions, World};
+use batchplan::{Clearance, Error, MeshModel, Obstacle, Robot, RobotOptions, World};
 
 fn main() -> Result<(), Error> {
     let robot = Robot::load(
         "assets/ur5e/ur_description/urdf/ur5e.urdf",
         &RobotOptions::default(),
     )?;
-    let meshes = MeshModel::new(&robot)?;
+    let meshes = MeshModel::try_new(&robot)?;
     let wall = Obstacle::cuboid(Vec3::new(1.0, 0.0, 0.4), Vec3::new(0.02, 0.5, 0.4));
     let worlds = vec![World {
         obstacles: vec![wall],
     }];
     let q = robot.default_q().to_vec(); // one configuration; pass a trajectory's samples to check it all
-    let [world, self_collision] = meshes.clearance(&worlds, &[0], &q)?[0];
+    let Clearance {
+        world,
+        self_collision,
+    } = meshes.clearance(&worlds, &[0], &q)?[0];
     println!("{world:.3} m from the wall, {self_collision:.3} m between links");
     Ok(())
 }

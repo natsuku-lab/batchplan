@@ -23,6 +23,12 @@
 //! # anyhow::Ok(())
 //! ```
 
+// The library's own rules from Google's Rust style guide: documented public items, `#[must_use]`
+// pure functions, and `expect` with its reason rather than `unwrap` outside tests.
+#![warn(missing_docs, missing_debug_implementations)]
+#![warn(clippy::must_use_candidate, clippy::return_self_not_must_use)]
+#![cfg_attr(not(test), warn(clippy::unwrap_used))]
+
 mod cpu;
 pub mod datagen;
 mod description;
@@ -58,7 +64,7 @@ pub mod world;
 pub use device::{CollisionWeights, Device, Evaluation, Worlds};
 pub use error::Error;
 pub use ik::{IkOptions, IkProblem, IkResult, solve_ik};
-pub use meshes::MeshModel;
+pub use meshes::{Clearance, MeshModel};
 pub use robot::{AttachedObject, CollisionModel, JointLimits, Part, Robot, RobotOptions};
 pub use rrt::{RrtOptions, RrtProblem, RrtResult};
 pub use sdf::{DepthImage, Intrinsics, Occlusion, OccupancyMap, RobotMask, SdfGrid, SdfOptions};
@@ -67,7 +73,7 @@ pub use spheres::{SphereGeometry, SphereOptions};
 pub use timing::{JointState, Trajectory};
 pub use trajopt::{PlanOptions, PlanProblem, PlanResult, plan};
 pub use types::{JointPaths, JointTrajectory, Pose, Solved, StartMotion};
-pub use world::{Obstacle, World};
+pub use world::{Distance, Obstacle, World};
 
 /// The math types in batchplan's interface (`Vec3`, `Quat`), so callers use the same version.
 pub use glam;

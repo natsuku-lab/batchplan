@@ -432,12 +432,17 @@ fn chol6_solve(l: &[f32; 36], b: [f32; 6]) -> [f32; 6] {
     x
 }
 
-/// Pose error of link `ee`: (6-vector [position; rot_weight * rotation], |position|, angle).
+/// Pose error of link `ee`: (6-vector [position; rotation_weight * rotation], |position|, angle).
 #[inline]
-fn pose_error(fk: &Fk, ee: usize, target: &(Vec3, Mat3), rot_weight: f32) -> ([f32; 6], f32, f32) {
+fn pose_error(
+    fk: &Fk,
+    ee: usize,
+    target: &(Vec3, Mat3),
+    rotation_weight: f32,
+) -> ([f32; 6], f32, f32) {
     let ep = target.0 - fk.pos[ee];
     let (eo, angle) = rot_log(target.1 * fk.rot[ee].transpose());
-    let eo = eo * rot_weight;
+    let eo = eo * rotation_weight;
     ([ep.x, ep.y, ep.z, eo.x, eo.y, eo.z], ep.length(), angle)
 }
 
@@ -467,7 +472,7 @@ fn hand_system(
         let jo = if fk.slides[i] {
             Vec3::ZERO
         } else {
-            m * fk.axis[i] * o.rot_weight
+            m * fk.axis[i] * o.rotation_weight
         };
         for (r, v) in [jp.x, jp.y, jp.z, jo.x, jo.y, jo.z].into_iter().enumerate() {
             jac[r * n + dof] += v;
@@ -538,7 +543,7 @@ fn ik_step(
     let mut last = None;
     for (h, target) in targets.iter().enumerate() {
         let Some(target) = target else { continue };
-        let (e, _, _) = pose_error(fk, robot.ee_links[h], target, o.rot_weight);
+        let (e, _, _) = pose_error(fk, robot.ee_links[h], target, o.rotation_weight);
         hand_system(robot, fk, h, o, jac, &mut a);
         add_jt(jac, chol6_solve(&a, e), dq);
         last = Some(h);
@@ -641,13 +646,13 @@ fn traj_grad(
     }
     for j in 0..n {
         let (qm, q0, qp) = (q(t - 1, j), q(t, j), q(t + 1, j));
-        let mut g = 2.0 * o.w_vel * (2.0 * q0 - qm - qp);
-        g += 2.0 * o.w_acc * -2.0 * (qp - 2.0 * q0 + qm);
+        let mut g = 2.0 * o.velocity_weight * (2.0 * q0 - qm - qp);
+        g += 2.0 * o.acceleration_weight * -2.0 * (qp - 2.0 * q0 + qm);
         if t >= 2 {
-            g += 2.0 * o.w_acc * (q0 - 2.0 * qm + q(t - 2, j));
+            g += 2.0 * o.acceleration_weight * (q0 - 2.0 * qm + q(t - 2, j));
         }
         if t + 2 < t_count {
-            g += 2.0 * o.w_acc * (q(t + 2, j) - 2.0 * qp + q0);
+            g += 2.0 * o.acceleration_weight * (q(t + 2, j) - 2.0 * qp + q0);
         }
         out[j] += g;
     }
@@ -755,10 +760,10 @@ fn traj_search(robot: &Robot, x: &mut [f32], st: &mut Lbfgs, o: &PlanOptions) {
             for t in 1..t_count {
                 let current = candidate(robot, x, &st.dir, alpha, t, j);
                 let v = current - previous;
-                total += o.w_vel * v * v;
+                total += o.velocity_weight * v * v;
                 if t >= 2 {
                     let a = current - 2.0 * previous + before;
-                    total += o.w_acc * a * a;
+                    total += o.acceleration_weight * a * a;
                 }
                 (before, previous) = (previous, current);
             }
@@ -1125,7 +1130,7 @@ impl Backend for CpuBackend {
             world_clearance: vec![0.0; items],
             self_clearance: vec![0.0; items],
             cost: vec![0.0; items],
-            grad: vec![0.0; items * n],
+            gradient: vec![0.0; items * n],
         };
         let rows = out
             .world_clearance
@@ -1133,7 +1138,7 @@ impl Backend for CpuBackend {
             .zip(out.self_clearance.par_iter_mut())
             .zip(out.cost.par_iter_mut());
         self.pool.install(|| {
-            rows.zip(out.grad.par_chunks_mut(n))
+            rows.zip(out.gradient.par_chunks_mut(n))
                 .zip(q.par_chunks(n).zip(item_world.par_iter()))
                 .for_each_init(
                     || Scratch::new(&self.robot),
@@ -1245,7 +1250,7 @@ impl Backend for CpuBackend {
                                     &scratch.fk,
                                     self.robot.ee_links[h],
                                     goal,
-                                    o.rot_weight,
+                                    o.rotation_weight,
                                 );
                                 worst = [worst[0].max(pos_err), worst[1].max(rot_err)];
                             }

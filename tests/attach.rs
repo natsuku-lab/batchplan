@@ -108,9 +108,10 @@ fn attached_objects_move_with_their_link_and_skip_touch_links() {
         down[j] -= h;
         let fd = (cost(&up).cost[0] - cost(&down).cost[0]) / (2.0 * h);
         assert!(
-            (fd - at.grad[j]).abs() < 2e-2 * at.grad.iter().fold(1.0f32, |m, g| m.max(g.abs())),
+            (fd - at.gradient[j]).abs()
+                < 2e-2 * at.gradient.iter().fold(1.0f32, |m, g| m.max(g.abs())),
             "joint {j}: {fd} vs {}",
-            at.grad[j]
+            at.gradient[j]
         );
     }
     // Detaching gives back the robot as it was.
@@ -208,7 +209,7 @@ fn devices_for_an_attached_robot_plan_in_worlds_already_uploaded() {
         let n = held.dof();
         let (mut q, mut item_world) = (vec![], vec![]);
         for s in result.solved() {
-            let trajectory = Trajectory::new(&held, s.solution, 1.0).unwrap();
+            let trajectory = Trajectory::try_new(&held, s.solution, 1.0).unwrap();
             let samples = trajectory
                 .sample(32.0 / trajectory.knot_interval)
                 .unwrap()

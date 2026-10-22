@@ -19,6 +19,7 @@ use crate::edges::{self, Deferred, EdgeQuery, Keep, Search, Wanted};
 use crate::error::{Result, ensure_input};
 use crate::rrt;
 
+/// How [`shortcut`] shortens paths.
 #[derive(Clone, Copy, Debug)]
 pub struct ShortcutOptions {
     /// Spacing of collision checks along new edges (joint-space distance).
@@ -35,6 +36,7 @@ pub struct ShortcutOptions {
     /// obstacles. It shrinks to zero within `clearance_ramp` (joint-space distance) of the path's
     /// ends, which may touch the world.
     pub clearance: f32,
+    /// Joint-space distance from the path's ends over which the clearance ramps up.
     pub clearance_ramp: f32,
 }
 

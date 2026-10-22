@@ -4,6 +4,8 @@ Everything a program uses, by task. Names are in `batchplan::*` unless a module 
 
 Every batched call has the same shape: a `Device`, the `Worlds` uploaded to it, a slice of problems that each name their world by index, and an options struct whose `Default` is a good start. Results keep the problems they answer: `best(problem)` gives one problem's answer, and `solved()` yields each solved problem with its index and answer.
 
+Options and problems are built with struct update syntax (`..Default::default()`, `..PlanProblem::new(..)`). Results, `Trajectory` and the enums that may grow (`Obstacle`, `Occlusion`, `Origin`, `Error`) are `#[non_exhaustive]`: read their fields, and give a `match` on them a wildcard arm.
+
 ## Robots
 
 Guide: [robots.md](robots.md).
@@ -20,7 +22,7 @@ Guide: [robots.md](robots.md).
 | `Robot::attach(&AttachedObject)`, `Robot::detach(name)` | The robot holding an object fixed to one of its links, or without it. |
 | `dof`, `joint_names`, `lower`, `upper`, `continuous`, `default_q`, `max_velocity`, `max_acceleration`, `max_jerk` | The robot's joints and their limits. |
 | `hands`, `hand_joints(hand)`, `ee_pose(q, hand)`, `link_pose(q, link)` | Hands and forward kinematics. |
-| `MeshModel::new(&robot)`, `MeshModel::clearance` | Clearances on the links' meshes instead of the spheres, to check plans against the real geometry. |
+| `MeshModel::try_new(&robot)`, `MeshModel::clearance` | Clearances on the links' meshes instead of the spheres, to check plans against the real geometry: a `Clearance` (`world`, `self_collision`) per configuration. |
 
 ## Worlds and perception
 
@@ -30,14 +32,14 @@ Guide: [perception.md](perception.md).
 |---|---|
 | `World { obstacles }` | One scene: a list of obstacles. |
 | `World::load(path, &SdfOptions)` | A scene's static geometry from MJCF or OpenUSD (feature `usd`). |
-| `Obstacle::cuboid`, `sphere`, `cylinder`, `capsule` | Axis-aligned shapes. `placed(pose)` moves and turns one, `pose()` returns its frame, `distance(p)` its signed distance. |
-| `Obstacle::from(grid)` | A distance grid as an obstacle, in the world's frame. |
-| `SdfGrid::from_mesh`, `from_points`, `from_depth`, `new` | Distance grids from a closed mesh, surface points, one depth image, or your own values. |
+| `Obstacle::cuboid`, `sphere`, `cylinder`, `capsule` | Axis-aligned shapes. `placed(pose)` moves and turns one, `pose()` returns its frame, `distance(p)` its signed distance and gradient (`Distance`). |
+| `Obstacle::from_grid(grid)`, `Obstacle::from(grid)` | A distance grid as an obstacle, in the world's frame. |
+| `SdfGrid::from_mesh`, `from_points`, `from_depth`, `try_new` | Distance grids from a closed mesh, surface points, one depth image, or your own values. `lower_corner()`, `upper_corner()` and `distance(p)` read one. |
 | `SdfOptions` | A grid's voxel size and padding. |
 | `DepthImage`, `Intrinsics` | A depth image with its pinhole intrinsics and camera pose. |
 | `DepthImage::robot_mask(&robot, q, padding)` | Where the robot is in the image (`RobotMask`), so grids leave it out. |
 | `Occlusion` | What a grid assumes behind observed surfaces: free, solid, or solid except the robot's shadow. |
-| `OccupancyMap::new`, `integrate`, `occupancy`, `grid` | Depth images fused over time into occupancy, then into a distance grid. |
+| `OccupancyMap::try_new`, `integrate`, `occupancy`, `grid` | Depth images fused over time into occupancy, then into a distance grid. |
 
 ## Devices
 
@@ -80,7 +82,7 @@ Guide: [planning.md](planning.md#executable-trajectories).
 
 | | |
 |---|---|
-| `Trajectory::new(&robot, control_points, speed_scale)` | A rest-to-rest trajectory within the robot's velocity, acceleration and jerk limits. |
+| `Trajectory::try_new(&robot, control_points, speed_scale)` | A rest-to-rest trajectory within the robot's velocity, acceleration and jerk limits. |
 | `Trajectory::moving(&robot, control_points, &StartMotion)` | A trajectory that starts in motion, for a path planned with `start_motion`. |
 | `duration()`, `at(t, &mut JointState)`, `sample(hz)` | Its length in seconds, the state at a time without allocating, and samples at a fixed rate (`JointTrajectory`). |
 | `stop(&robot, t)` | A controlled stop along the path from time `t`. |

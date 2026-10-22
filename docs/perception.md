@@ -48,7 +48,7 @@ Grids from depth images grow toward collision by about three voxels, so set the 
 
 ## Fused maps
 
-`OccupancyMap::new(lo, hi, voxel)` is a fixed grid in the world frame that fuses frames as OctoMap does. Each voxel holds the log-odds that it is occupied: a hit adds 0.85 and a miss subtracts 0.4, clamped to [−2, 3.5]. Something seen once and then seen through three times is free again. Voxels behind readings, outside the image or beyond the map are not updated.
+`OccupancyMap::try_new(lo, hi, voxel)` is a fixed grid in the world frame that fuses frames as OctoMap does. Each voxel holds the log-odds that it is occupied: a hit adds 0.85 and a miss subtracts 0.4, clamped to [−2, 3.5]. Something seen once and then seen through three times is free again. Voxels behind readings, outside the image or beyond the map are not updated.
 
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
@@ -60,7 +60,8 @@ use batchplan::{
 fn main() -> Result<(), Error> {
     let robot = Robot::load("assets/franka/franka_panda.urdf", &RobotOptions::default())?;
     let device = Device::gpu(&robot).or_else(|_| Device::cpu(&robot))?;
-    let mut map = OccupancyMap::new(Vec3::new(-0.2, -0.8, -0.1), Vec3::new(1.2, 0.8, 1.0), 0.01)?;
+    let mut map =
+        OccupancyMap::try_new(Vec3::new(-0.2, -0.8, -0.1), Vec3::new(1.2, 0.8, 1.0), 0.01)?;
     // Your camera's pose in OpenCV axes (z forward, y down): here 1.5 m up, looking down.
     let camera = Pose::new(
         Vec3::new(0.5, 0.0, 1.5),

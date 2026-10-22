@@ -24,6 +24,7 @@ use crate::spline;
 use crate::timing::Trajectory;
 use crate::types::{JointPaths, Solved, StartMotion};
 
+/// How [`plan`] searches, shortens, fits and optimizes paths.
 #[derive(Clone, Copy, Debug)]
 pub struct PlanOptions {
     /// Seeds trajectory optimization runs per problem, besides the searched path: its spline, the
@@ -42,14 +43,15 @@ pub struct PlanOptions {
     /// Largest joint change of a step without history: the first, and any after a reset.
     pub initial_step: f32,
     /// Weight of squared second differences of control points.
-    pub w_acc: f32,
+    pub acceleration_weight: f32,
     /// Weight of squared differences of control points (path length).
-    pub w_vel: f32,
+    pub velocity_weight: f32,
     /// Collision cost of the optimization. Repairs of stuck splines keep their own weights and a
     /// 2 cm margin.
     pub collision: CollisionWeights,
     /// Samples per span used to validate the result.
     pub validate_substeps: usize,
+    /// Seed of the optimization seeds' random via points.
     pub rng_seed: u64,
     /// Searching for each path: RRT-Connect after the straight line.
     pub rrt: RrtOptions,
@@ -77,8 +79,8 @@ impl Default for PlanOptions {
             iterations: 100,
             history: 6,
             initial_step: 0.1,
-            w_acc: 5.0,
-            w_vel: 10.0,
+            acceleration_weight: 5.0,
+            velocity_weight: 10.0,
             collision: CollisionWeights {
                 world: 1000.0,
                 self_collision: 1000.0,
@@ -97,9 +99,12 @@ impl Default for PlanOptions {
     }
 }
 
+/// A path from a start to a goal configuration, in one world.
 #[derive(Clone, Debug)]
 pub struct PlanProblem {
+    /// The world's index in the batch.
     pub world: u32,
+    /// Where the path starts.
     pub start: Vec<f32>,
     /// Where the path ends, up to whole turns: continuous joints turn the short way (or the long
     /// way, if that is the one that is free), and a joint whose range spans more than a turn may
@@ -132,11 +137,15 @@ impl PlanProblem {
 /// Per-seed results for `problems`; paths are problem-major (`item = problem * seeds + seed`).
 /// Seed 0 is the searched path; optimized seeds follow, invalid where a problem was not optimized.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct PlanResult {
+    /// The problems, in order.
     pub problems: Vec<PlanProblem>,
+    /// Seeds per problem: the searched path, then [`PlanOptions::seeds`] optimized ones.
     pub seeds: usize,
     /// B-spline control points of every seed's path.
     pub paths: JointPaths,
+    /// Per seed: whether its path passed validation, collision-free along it.
     pub valid: Vec<bool>,
     /// Joint-space path length.
     pub length: Vec<f32>,
@@ -144,6 +153,7 @@ pub struct PlanResult {
 
 impl PlanResult {
     /// The shortest valid seed.
+    #[must_use]
     pub fn best(&self, problem: usize) -> Option<&[f32]> {
         (problem * self.seeds..(problem + 1) * self.seeds)
             .filter(|&i| self.valid[i])
@@ -152,7 +162,7 @@ impl PlanResult {
     }
 
     /// Every problem with a valid seed, with its best path's control points (`[points, dof]`);
-    /// [`crate::timing::Trajectory::new`] times one for execution.
+    /// [`crate::timing::Trajectory::try_new`] times one for execution.
     pub fn solved(&self) -> impl Iterator<Item = Solved<'_, PlanProblem>> {
         self.problems
             .iter()
@@ -167,6 +177,9 @@ impl PlanResult {
     }
 }
 
+/// Plans a collision-free path for each problem, all in one batch: a search, shortcuts and
+/// smoothing, then a B-spline fitted along it and checked; with [`PlanOptions::seeds`], trajectory
+/// optimization too. [`PlanResult::solved`] yields each solved problem's best path.
 pub fn plan(
     device: &Device,
     worlds: &Worlds,
@@ -258,11 +271,11 @@ const KEEP_ITERATIONS: usize = 2000;
 /// simplification, then splines along the path checked shortest first. If none is valid (one cuts
 /// a corner into an obstacle, or cannot follow the start motion), the first is optimized for
 /// `REPAIR_ITERATIONS` steps on the same thread and checked again.
-struct Planning<'r> {
-    robot: &'r Robot,
-    problem: &'r PlanProblem,
-    o: &'r PlanOptions,
-    phase: Phase<'r>,
+struct Planning<'call> {
+    robot: &'call Robot,
+    problem: &'call PlanProblem,
+    o: &'call PlanOptions,
+    phase: Phase<'call>,
     /// The shortest valid spline and its length.
     chosen: Option<(Vec<f32>, f32)>,
     /// The spline optimization starts from: the chosen one, or the shortest candidate.
@@ -274,9 +287,9 @@ struct Planning<'r> {
     ahead: Arc<Ahead>,
 }
 
-enum Phase<'r> {
+enum Phase<'call> {
     /// RRT-Connect keeping the clearance first (if any), then without it.
-    Search(Box<Connect<'r>>, bool),
+    Search(Box<Connect<'call>>, bool),
     Simplify(Simplify),
     Fitting(Box<Fitting>),
     /// The spline to repair, and whether it has been optimized.
@@ -286,11 +299,11 @@ enum Phase<'r> {
     Done,
 }
 
-impl<'r> Planning<'r> {
+impl<'call> Planning<'call> {
     fn new(
-        robot: &'r Robot,
-        problem: &'r PlanProblem,
-        o: &'r PlanOptions,
+        robot: &'call Robot,
+        problem: &'call PlanProblem,
+        o: &'call PlanOptions,
         ahead: Arc<Ahead>,
     ) -> Self {
         let phase = searching(robot, problem, o, Sampling::NearLine, &ahead);
@@ -309,13 +322,13 @@ impl<'r> Planning<'r> {
 
 /// RRT-Connect for `problem`. Keeping the clearance can make narrow passages impassable, so that
 /// search is short; it continues without the clearance if it fails.
-fn searching<'r>(
-    robot: &'r Robot,
+fn searching<'call>(
+    robot: &'call Robot,
     problem: &PlanProblem,
-    o: &'r PlanOptions,
+    o: &'call PlanOptions,
     sampling: Sampling,
     ahead: &Arc<Ahead>,
-) -> Phase<'r> {
+) -> Phase<'call> {
     let goals = search_goals(robot, problem);
     let search = RrtProblem {
         world: problem.world,
@@ -749,8 +762,8 @@ fn repairing(o: &PlanOptions) -> PlanOptions {
     };
     PlanOptions {
         iterations: REPAIR_ITERATIONS,
-        w_acc: 50.0,
-        w_vel: 2.0,
+        acceleration_weight: 50.0,
+        velocity_weight: 2.0,
         collision,
         ..*o
     }

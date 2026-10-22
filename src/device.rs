@@ -8,6 +8,7 @@
 //! both rather than a panic on one and a plausible wrong answer on the other.
 
 use std::any::Any;
+use std::fmt;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -25,9 +26,13 @@ use crate::trajopt::PlanOptions;
 use crate::types::{JointPaths, Pose};
 use crate::world::World;
 
+/// The collision cost IK and trajectory optimization lower: each clearance's shortfall below its
+/// margin, weighted. The default, [`CollisionWeights::NONE`], weighs nothing.
 #[derive(Clone, Copy, Debug)]
 pub struct CollisionWeights {
+    /// Weight of the world cost.
     pub world: f32,
+    /// Weight of the self-collision cost.
     pub self_collision: f32,
     /// Obstacle clearance below which the world cost activates (meters).
     pub margin: f32,
@@ -45,9 +50,16 @@ impl CollisionWeights {
     };
 }
 
+impl Default for CollisionWeights {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
 /// Per-configuration collision evaluation, indexed by item. Clearances are 1e30 when there is
 /// nothing to check (an empty world, or no self-collision pairs).
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Evaluation {
     /// Signed distance from the robot spheres to the nearest obstacle (negative = penetrating).
     /// Exact up to the margin (or zero, if larger); above it, a lower bound that is still above
@@ -58,12 +70,15 @@ pub struct Evaluation {
     /// margin (or zero, if larger); above it, a lower bound that is still above it, as for
     /// `world_clearance` with pairs of links.
     pub self_clearance: Vec<f32>,
+    /// The collision cost the weights define.
     pub cost: Vec<f32>,
     /// d(cost)/dq, `[items, dof]`.
-    pub grad: Vec<f32>,
+    pub gradient: Vec<f32>,
 }
 
 impl Evaluation {
+    /// Whether item `item` clears the world and itself.
+    #[must_use]
     pub fn collision_free(&self, item: usize) -> bool {
         collision_free([self.world_clearance[item], self.self_clearance[item]])
     }
@@ -74,9 +89,19 @@ pub(crate) fn collision_free(c: [f32; 2]) -> bool {
     c[0] >= 0.0 && c[1] >= 0.0
 }
 
+/// Runs batched IK, planning, optimization and grid building on a GPU or on CPU threads: the
+/// only way to run batched work. Each device owns its threads.
 pub struct Device {
     id: u64,
     backend: Box<dyn Backend>,
+}
+
+impl fmt::Debug for Device {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Device")
+            .field("name", &self.name())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Worlds prepared for one [`Device`] by [`Device::upload`]. On a GPU their obstacles and distance
@@ -86,6 +111,14 @@ pub struct Worlds {
     device: u64,
     worlds: Vec<World>,
     prepared: Box<dyn Any + Send + Sync>,
+}
+
+impl fmt::Debug for Worlds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Worlds")
+            .field("worlds", &self.worlds.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Deref for Worlds {
@@ -173,10 +206,14 @@ impl Device {
         })
     }
 
+    /// What runs the batches: the GPU adapter and its API, or the CPU's thread count.
+    #[must_use]
     pub fn name(&self) -> String {
         self.backend.name()
     }
 
+    /// The robot it plans for.
+    #[must_use]
     pub fn robot(&self) -> &Robot {
         self.backend.robot()
     }

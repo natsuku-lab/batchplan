@@ -74,7 +74,8 @@ fn main() -> Result<()> {
 
     // The map: each view with the robot masked out, then a grid in which never-seen space is solid.
     let t = Instant::now();
-    let mut map = OccupancyMap::new(Vec3::new(-0.3, -0.9, -0.05), Vec3::new(1.2, 0.9, 1.0), 0.01)?;
+    let mut map =
+        OccupancyMap::try_new(Vec3::new(-0.3, -0.9, -0.05), Vec3::new(1.2, 0.9, 1.0), 0.01)?;
     for ((_, pose), view) in cameras.iter().zip(&views) {
         let image = DepthImage {
             depth: view,
@@ -130,7 +131,11 @@ fn main() -> Result<()> {
     let mut reached = 0;
     for k in 0..problems.len() {
         let Some(path) = planned.best(k) else { break };
-        samples.extend(Trajectory::new(&robot, path, SPEED)?.sample(HZ)?.positions);
+        samples.extend(
+            Trajectory::try_new(&robot, path, SPEED)?
+                .sample(HZ)?
+                .positions,
+        );
         reached += 1;
     }
     let n = robot.dof();
@@ -230,7 +235,7 @@ fn main() -> Result<()> {
     }
 
     // The grid's surface: points within half a voxel of distance zero.
-    let (lo, hi) = grid.bounds();
+    let (lo, hi) = (grid.lower_corner(), grid.upper_corner());
     let step = grid.voxel();
     let mut surface = vec![];
     let mut p = lo;
@@ -239,7 +244,7 @@ fn main() -> Result<()> {
         while p.y <= hi.y {
             p.x = lo.x;
             while p.x <= hi.x {
-                if grid.distance(p).0.abs() < step * 0.5 {
+                if grid.distance(p).value.abs() < step * 0.5 {
                     surface.push(p.to_array());
                 }
                 p.x += step;
@@ -310,7 +315,7 @@ fn depth_image(scene: &World, camera: Pose, k: Intrinsics) -> Vec<f32> {
                 let d = scene
                     .obstacles
                     .iter()
-                    .map(|o| o.distance(p).0)
+                    .map(|o| o.distance(p).value)
                     .fold(f32::INFINITY, f32::min);
                 if d < 1e-4 {
                     return t * ray.z;

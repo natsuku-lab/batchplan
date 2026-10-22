@@ -13,6 +13,7 @@ use crate::error::{Result, ensure_input};
 use crate::robot::Robot;
 use crate::world::{self, World};
 
+/// How [`export`] writes the arrays.
 #[derive(Clone, Debug, Default)]
 pub struct ExportOptions {
     /// Extra entries merged into `meta.json`, e.g. generation parameters.

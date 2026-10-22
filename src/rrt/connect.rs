@@ -13,6 +13,7 @@ use crate::error::{Result, ensure_input};
 use crate::lanes::LANES;
 use crate::robot::Robot;
 
+/// How [`connect`] searches.
 #[derive(Clone, Copy, Debug)]
 pub struct RrtOptions {
     /// Longest edge a tree grows by (joint-space distance).
@@ -27,6 +28,7 @@ pub struct RrtOptions {
     /// Clearance edges keep from the world (meters), shrinking to zero within `clearance_ramp`
     /// (joint-space distance) of the start and the goals, which may touch the world.
     pub clearance: f32,
+    /// Joint-space distance from the path's ends over which the clearance ramps up.
     pub clearance_ramp: f32,
 }
 
@@ -43,9 +45,12 @@ impl Default for RrtOptions {
     }
 }
 
+/// A search from a start to any of a set of goals, in one world.
 #[derive(Clone, Debug)]
 pub struct RrtProblem {
+    /// The world's index in the batch.
     pub world: u32,
+    /// Where the path starts.
     pub start: Vec<f32>,
     /// The path may end at any of these.
     pub goals: Vec<Vec<f32>>,
@@ -59,8 +64,11 @@ pub(crate) fn holds(start: &[f32], goal: &[f32], hold: &[usize]) -> bool {
     hold.iter().all(|&j| j < start.len() && goal[j] == start[j])
 }
 
+/// What [`connect`] found for each problem.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct RrtResult {
+    /// The problems, in order.
     pub problems: Vec<RrtProblem>,
     /// Each problem's path as waypoints (`[k, dof]`, start first), if one was found. The edges
     /// between waypoints are collision-free at `resolution`.
@@ -529,8 +537,8 @@ enum Stage {
 }
 
 /// One problem's RRT-Connect.
-pub(crate) struct Connect<'r> {
-    robot: &'r Robot,
+pub(crate) struct Connect<'call> {
+    robot: &'call Robot,
     pub(super) world: u32,
     pub(super) range: f32,
     pub(super) resolution: f32,
@@ -571,9 +579,9 @@ pub(crate) struct Connect<'r> {
     pub(super) sharing: Sharing,
 }
 
-impl<'r> Connect<'r> {
+impl<'call> Connect<'call> {
     pub(crate) fn new(
-        robot: &'r Robot,
+        robot: &'call Robot,
         p: &RrtProblem,
         o: &RrtOptions,
         sampling: Sampling,
@@ -1057,7 +1065,7 @@ impl Search for Connect<'_> {
                     let mut edges = edges::reuse(buffer);
                     self.trees[0].push_node(near, &mut edges);
                     edges.extend_from_slice(&self.new);
-                    if let Some(answer) = self.forecast(&edges, false) {
+                    if let Some(answer) = self.forecast(&edges, /* connect */ false) {
                         *buffer = edges;
                         self.answer(answer);
                         continue;
@@ -1068,7 +1076,7 @@ impl Search for Connect<'_> {
                     let mut edges = edges::reuse(buffer);
                     self.trees[0].push_node(from, &mut edges);
                     connect_edges(&self.steps, n, &mut edges);
-                    if let Some(answer) = self.forecast(&edges, true) {
+                    if let Some(answer) = self.forecast(&edges, /* connect */ true) {
                         *buffer = edges;
                         self.answer(answer);
                         continue;

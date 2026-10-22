@@ -173,9 +173,9 @@ impl<S: Search, F: FnOnce() -> S + Send> Search for Deferred<S, F> {
 
 /// A path's B-spline control points to improve with `options.iterations` steps of trajectory
 /// optimization in `world`.
-pub(crate) struct Optimize<'a> {
+pub(crate) struct Optimize<'path> {
     pub(crate) world: u32,
-    pub(crate) path: &'a mut [f32],
+    pub(crate) path: &'path mut [f32],
     pub(crate) options: PlanOptions,
 }
 

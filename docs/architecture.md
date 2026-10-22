@@ -52,7 +52,7 @@ Each L-BFGS round dispatches five passes: the collision cost at every sample of 
 
 ## Data pipeline
 
-`datagen` plans in batches and times trajectories with `Trajectory::new(..).sample(1 / dt)`. Exporters write `Demonstration`s: `npy` as arrays, `lerobot` natively in LeRobot's v3.0 layout (parquet through Arrow, streamed to rolling files, with per-episode statistics aggregated as LeRobot does).
+`datagen` plans in batches and times trajectories with `Trajectory::try_new(..).sample(1 / dt)`. Exporters write `Demonstration`s: `npy` as arrays, `lerobot` natively in LeRobot's v3.0 layout (parquet through Arrow, streamed to rolling files, with per-episode statistics aggregated as LeRobot does).
 
 ## Performance work
 

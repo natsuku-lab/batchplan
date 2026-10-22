@@ -902,7 +902,7 @@ mod tests {
                 p.distance(ball) - 0.08 * s
             })
             .collect();
-        let grid = Arc::new(SdfGrid::new(dims, voxel, origin, &distances).unwrap());
+        let grid = Arc::new(SdfGrid::try_new(dims, voxel, origin, &distances).unwrap());
         let v = |x: f32, y: f32, z: f32| Vec3::new(x, y, z) * s;
         World {
             obstacles: vec![
@@ -1053,7 +1053,7 @@ mod tests {
     #[test]
     fn lanes_match_the_scalar_twin_on_every_robot() {
         let panda = panda();
-        lanes_match_the_scalar_twin(&panda, true);
+        lanes_match_the_scalar_twin(&panda, /* arm */ true);
         // Its fingers slide on prismatic joints.
         let model = CollisionModel::load("assets/franka/panda_collision.json").unwrap();
         let options = RobotOptions {
@@ -1061,7 +1061,7 @@ mod tests {
             ..Default::default()
         };
         let fingers = Robot::load("assets/franka/franka_panda.urdf", &options).unwrap();
-        lanes_match_the_scalar_twin(&fingers, true);
+        lanes_match_the_scalar_twin(&fingers, /* arm */ true);
         let held = panda
             .attach(&AttachedObject {
                 name: "box".into(),
@@ -1074,7 +1074,7 @@ mod tests {
                 spheres: SphereOptions::default(),
             })
             .unwrap();
-        lanes_match_the_scalar_twin(&held, true);
+        lanes_match_the_scalar_twin(&held, /* arm */ true);
         // Quartic mimic joints closing a loop, and a prismatic-free arm with joints wider than a
         // turn. Its meshes are not in the repository; a sphere at each link's origin and
         // one off it.
@@ -1109,12 +1109,12 @@ mod tests {
             },
         )
         .unwrap();
-        lanes_match_the_scalar_twin(&gripper, false);
+        lanes_match_the_scalar_twin(&gripper, /* arm */ false);
         let ur5e = Robot::load(
             "assets/ur5e/ur_description/urdf/ur5e.urdf",
             &RobotOptions::default(),
         )
         .unwrap();
-        lanes_match_the_scalar_twin(&ur5e, true);
+        lanes_match_the_scalar_twin(&ur5e, /* arm */ true);
     }
 }

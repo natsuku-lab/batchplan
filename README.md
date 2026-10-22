@@ -90,7 +90,7 @@ fn main() -> Result<(), Error> {
 
     // Time each path within the robot's velocity, acceleration and jerk limits.
     for s in plans.solved() {
-        let trajectory = Trajectory::new(&robot, s.solution, 1.0)?;
+        let trajectory = Trajectory::try_new(&robot, s.solution, 1.0)?;
         let samples = trajectory.sample(100.0)?; // 100 Hz, for a controller
         println!(
             "motion {}: {:.2} s, {} samples",

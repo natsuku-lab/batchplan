@@ -38,7 +38,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
 use batchplan::{
-    CollisionModel, CollisionWeights, Device, IkOptions, IkProblem, MeshModel, Obstacle,
+    Clearance, CollisionModel, CollisionWeights, Device, IkOptions, IkProblem, MeshModel, Obstacle,
     PlanOptions, PlanProblem, PlanResult, Pose, Robot, RobotOptions, Trajectory, World, Worlds,
 };
 use glam::{EulerRot, Quat, Vec3};
@@ -293,7 +293,7 @@ fn score(
     for s in result.solved() {
         // Check the timed trajectory a controller would run, sampled denser per span than the
         // planner validates by default.
-        let trajectory = Trajectory::new(robot, s.solution, 1.0)?;
+        let trajectory = Trajectory::try_new(robot, s.solution, 1.0)?;
         let dense = trajectory
             .sample(per_span / trajectory.knot_interval)?
             .positions;
@@ -317,11 +317,12 @@ fn score(
         out.success += 1;
         if let Some(meshes) = meshes {
             let clear = meshes.clearance(worlds, &vec![s.problem.world; items], &dense)?;
-            out.on_meshes += usize::from(
-                clear
-                    .iter()
-                    .all(|&[world, self_collision]| world > 0.0 && self_collision > 0.0),
-            );
+            out.on_meshes += usize::from(clear.iter().all(
+                |&Clearance {
+                     world,
+                     self_collision,
+                 }| world > 0.0 && self_collision > 0.0,
+            ));
         }
         let q = |i: usize| &dense[i * n..(i + 1) * n];
         out.path_length.push(
@@ -435,9 +436,18 @@ fn main() -> Result<()> {
         for f in ["mb_set.yaml", "mpinets_set.yaml"] {
             sets.extend(load(&args.data.join(f))?);
         }
-        return check(&args.check, &robot, &cpu, &MeshModel::new(&robot)?, &sets);
+        return check(
+            &args.check,
+            &robot,
+            &cpu,
+            &MeshModel::try_new(&robot)?,
+            &sets,
+        );
     }
-    let meshes = args.meshes.then(|| MeshModel::new(&robot)).transpose()?;
+    let meshes = args
+        .meshes
+        .then(|| MeshModel::try_new(&robot))
+        .transpose()?;
     let mut devices = vec![];
     if args.device != "cpu" {
         devices.push(Device::gpu(&robot)?);
@@ -665,7 +675,7 @@ fn main() -> Result<()> {
 
 /// A planned path as waypoints: its timed trajectory sampled as densely as `score` checks it.
 fn dense_path(robot: &Robot, solution: &[f32]) -> Result<Vec<Vec<f32>>> {
-    let trajectory = Trajectory::new(robot, solution, 1.0)?;
+    let trajectory = Trajectory::try_new(robot, solution, 1.0)?;
     let dense = trajectory
         .sample(JUDGE_PER_SPAN as f32 / trajectory.knot_interval)?
         .positions;
@@ -804,7 +814,14 @@ fn check(
                     .sum();
                 lengths.push(length);
                 let clear = meshes.clearance(&scene, &vec![i as u32; items], &dense)?;
-                let clear = reached && within && clear.iter().all(|&[w, s]| w > 0.0 && s > 0.0);
+                let clear = reached
+                    && within
+                    && clear.iter().all(
+                        |&Clearance {
+                             world: w,
+                             self_collision: s,
+                         }| w > 0.0 && s > 0.0,
+                    );
                 on_meshes += usize::from(clear);
                 verdicts.push(Some(Verdict {
                     length,

@@ -7,7 +7,7 @@ mod common;
 use std::f64::consts::FRAC_PI_2;
 
 use batchplan::rng::Rng;
-use batchplan::{CollisionWeights, Device, IkOptions, IkProblem, Obstacle, Robot, World};
+use batchplan::{CollisionWeights, Device, Distance, IkOptions, IkProblem, Obstacle, Robot, World};
 use glam::{DMat3, DVec3, EulerRot, Quat, Vec3};
 
 fn panda() -> Robot {
@@ -100,13 +100,18 @@ fn obstacle_distances_are_exact_and_differentiable() {
                 rng.range(-0.6, 0.2),
                 rng.range(-0.1, 0.7),
             );
-            let (d, g) = o.distance(p);
+            let Distance {
+                value: d,
+                gradient: g,
+            } = o.distance(p);
             assert!(
                 (g.length() - 1.0).abs() < 1e-4,
                 "{o:?}: gradient {g} at {p} is not a unit vector"
             );
             // Stepping back along the gradient by the distance lands on the surface.
-            let (on_surface, _) = o.distance(p - d * g);
+            let Distance {
+                value: on_surface, ..
+            } = o.distance(p - d * g);
             assert!(
                 on_surface.abs() < 1e-4,
                 "{o:?}: {p} - {d} * {g} is {on_surface} from the surface"
@@ -115,9 +120,9 @@ fn obstacle_distances_are_exact_and_differentiable() {
             // agreement with finite differences at either of two step sizes.
             let fd_error = |h: f32| {
                 let fd = Vec3::new(
-                    o.distance(p + Vec3::X * h).0 - o.distance(p - Vec3::X * h).0,
-                    o.distance(p + Vec3::Y * h).0 - o.distance(p - Vec3::Y * h).0,
-                    o.distance(p + Vec3::Z * h).0 - o.distance(p - Vec3::Z * h).0,
+                    o.distance(p + Vec3::X * h).value - o.distance(p - Vec3::X * h).value,
+                    o.distance(p + Vec3::Y * h).value - o.distance(p - Vec3::Y * h).value,
+                    o.distance(p + Vec3::Z * h).value - o.distance(p - Vec3::Z * h).value,
                 ) / (2.0 * h);
                 (fd - g).length()
             };
@@ -150,7 +155,7 @@ fn round_obstacle_distances_match_closed_forms() {
         (&capsule, Vec3::new(0.2, 0.0, -0.3), -0.3), // inside the shaft
     ];
     for (o, offset, expected) in cases {
-        let (d, _) = o.distance(center + offset);
+        let Distance { value: d, .. } = o.distance(center + offset);
         assert!(
             (d - expected).abs() < 1e-5,
             "{o:?} at offset {offset}: {d}, expected {expected}"
@@ -164,7 +169,14 @@ fn round_obstacle_distances_match_closed_forms() {
         radius: 0.5,
         half_height: 1.0,
     };
-    assert!((rotated.distance(center + r * Vec3::new(0.8, 0.0, 1.4)).0 - 0.5).abs() < 1e-5);
+    assert!(
+        (rotated
+            .distance(center + r * Vec3::new(0.8, 0.0, 1.4))
+            .value
+            - 0.5)
+            .abs()
+            < 1e-5
+    );
 }
 
 #[test]
@@ -223,7 +235,7 @@ fn collision_gradient_matches_finite_differences() {
         if e.cost[0] < 1e-3 {
             continue;
         }
-        let g = &e.grad;
+        let g = &e.gradient;
         let norm = g.iter().map(|v| v * v).sum::<f32>().sqrt().max(1.0);
         // The cost is only piecewise smooth (box faces, hinge activation), so a finite difference
         // straddling a kink is wrong at that step size; accept agreement at either step size.

@@ -24,6 +24,7 @@ use crate::device::Device;
 use crate::error::{Error, Result, ensure_input, input};
 use crate::robot::Robot;
 use crate::types::Pose;
+use crate::world::Distance;
 
 /// Grids with more points are refused; 2^26 half floats take 128 MiB.
 const MAX_POINTS: u64 = 1 << 26;
@@ -53,15 +54,20 @@ impl Default for SdfOptions {
 /// Pinhole intrinsics of a depth camera, in pixels.
 #[derive(Clone, Copy, Debug)]
 pub struct Intrinsics {
+    /// Focal length along the image's rows.
     pub fx: f32,
+    /// Focal length along its columns.
     pub fy: f32,
+    /// The principal point's column.
     pub cx: f32,
+    /// The principal point's row.
     pub cy: f32,
 }
 
 /// What [`SdfGrid::from_depth`] assumes about space hidden behind observed surfaces, and
 /// [`OccupancyMap::grid`] about space no image has observed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Occlusion {
     /// Only observed surfaces are obstacles.
     Free,
@@ -78,10 +84,14 @@ pub enum Occlusion {
 /// or non-finite values for pixels without a reading. `camera` places the camera (x right, y down,
 /// z forward, as in OpenCV) in the frame grids and maps are built in.
 #[derive(Clone, Copy, Debug)]
-pub struct DepthImage<'a> {
-    pub depth: &'a [f32],
+pub struct DepthImage<'depth> {
+    /// Meters along the camera's z axis, `[height, width]`.
+    pub depth: &'depth [f32],
+    /// Pixels per row.
     pub width: usize,
+    /// The camera's pinhole model.
     pub intrinsics: Intrinsics,
+    /// The camera's pose in the frame grids and maps are built in.
     pub camera: Pose,
 }
 
@@ -353,13 +363,13 @@ impl Layout {
 }
 
 /// Where a grid's occupancy comes from.
-pub(crate) enum Occupancy<'a> {
+pub(crate) enum Occupancy<'source> {
     /// One flag per point.
-    Given(&'a [bool]),
+    Given(&'source [bool]),
     /// A depth image, as [`SdfGrid::from_depth`] reads it.
     Seen {
-        image: &'a DepthImage<'a>,
-        robot: Option<&'a RobotMask>,
+        image: &'source DepthImage<'source>,
+        robot: Option<&'source RobotMask>,
         behind: Occlusion,
     },
 }
@@ -501,7 +511,7 @@ pub struct SdfGrid {
     pub(crate) values: Vec<u16>,
 }
 
-/// A grid as serialized, checked like [`SdfGrid::new`] before it becomes one.
+/// A grid as serialized, checked like [`SdfGrid::try_new`] before it becomes one.
 #[derive(Deserialize)]
 struct GridParts {
     dims: [u32; 3],
@@ -528,7 +538,7 @@ impl TryFrom<GridParts> for SdfGrid {
 impl SdfGrid {
     /// A grid holding `distances` at `dims` points (`dims[0] * dims[1] * dims[2]` values, x
     /// fastest), rounded to the nearest half float: no conservative offset is applied.
-    pub fn new(dims: [u32; 3], voxel: f32, origin: Vec3, distances: &[f32]) -> Result<Self> {
+    pub fn try_new(dims: [u32; 3], voxel: f32, origin: Vec3, distances: &[f32]) -> Result<Self> {
         let values = distances
             .iter()
             .map(|&d| flush(f16::from_f32(d)).to_bits())
@@ -543,7 +553,7 @@ impl SdfGrid {
         Ok(grid)
     }
 
-    /// Why this grid cannot be sampled, if it cannot: the rules of [`SdfGrid::new`].
+    /// Why this grid cannot be sampled, if it cannot: the rules of [`SdfGrid::try_new`].
     pub(crate) fn check(&self) -> Result<()> {
         let (dims, voxel) = (self.dims, self.voxel);
         ensure_input!(
@@ -695,25 +705,35 @@ impl SdfGrid {
         Self::from_values(&grid, values)
     }
 
+    /// Grid points along x, y and z.
+    #[must_use]
     pub fn dims(&self) -> [u32; 3] {
         self.dims
     }
 
+    /// Meters between neighbouring grid points.
+    #[must_use]
     pub fn voxel(&self) -> f32 {
         self.voxel
     }
 
-    /// Lower and upper corners of the grid's box, in its frame.
-    pub fn bounds(&self) -> (Vec3, Vec3) {
-        (
-            self.origin,
-            self.origin + (UVec3::from(self.dims) - 1).as_vec3() * self.voxel,
-        )
+    /// The grid's first point, its box's lower corner, in its frame.
+    #[must_use]
+    pub fn lower_corner(&self) -> Vec3 {
+        self.origin
     }
 
-    /// Signed distance at `p` (in the grid's frame) and its gradient.
-    pub fn distance(&self, p: Vec3) -> (f32, Vec3) {
-        grid_distance(self, p)
+    /// The grid's last point, its box's upper corner, in its frame.
+    #[must_use]
+    pub fn upper_corner(&self) -> Vec3 {
+        self.origin + (UVec3::from(self.dims) - 1).as_vec3() * self.voxel
+    }
+
+    /// Signed distance at `p` (in the grid's frame), and its gradient.
+    #[must_use]
+    pub fn distance(&self, p: Vec3) -> Distance {
+        let (value, gradient) = grid_distance(self, p);
+        Distance { value, gradient }
     }
 
     #[inline]
@@ -1005,7 +1025,7 @@ pub struct OccupancyMap {
 
 impl OccupancyMap {
     /// An unobserved map with `voxel` spacing whose points cover `lo..=hi`.
-    pub fn new(lo: Vec3, hi: Vec3, voxel: f32) -> Result<Self> {
+    pub fn try_new(lo: Vec3, hi: Vec3, voxel: f32) -> Result<Self> {
         ensure_input!(
             lo.is_finite() && hi.is_finite() && lo.cmplt(hi).all(),
             "a map needs lo < hi, got {lo} and {hi}"
@@ -1041,6 +1061,7 @@ impl OccupancyMap {
 
     /// The probability that the voxel holding `p` is occupied; `None` if it was never observed or
     /// lies outside the map.
+    #[must_use]
     pub fn occupancy(&self, p: Vec3) -> Option<f32> {
         let l = self.log_odds[self.grid.nearest(p)];
         (self.grid.contains(p) && l != UNOBSERVED && l != SHADOWED)

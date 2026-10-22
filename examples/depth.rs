@@ -46,7 +46,7 @@ fn render(scene: &World, camera: Pose, k: Intrinsics) -> Vec<f32> {
                 let d = scene
                     .obstacles
                     .iter()
-                    .map(|o| o.distance(p).0)
+                    .map(|o| o.distance(p).value)
                     .fold(f32::INFINITY, f32::min);
                 if d < 1e-4 {
                     return t * ray.normalize().z;
@@ -128,7 +128,7 @@ fn main() -> Result<()> {
     let truth = cpu.upload(std::slice::from_ref(&scene))?;
     let (mut samples, mut worst) = (vec![], f32::INFINITY);
     for s in result.solved() {
-        let trajectory = Trajectory::new(&robot, s.solution, 1.0)?;
+        let trajectory = Trajectory::try_new(&robot, s.solution, 1.0)?;
         samples.extend(
             trajectory
                 .sample(32.0 / trajectory.knot_interval)?

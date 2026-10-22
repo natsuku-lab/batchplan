@@ -179,7 +179,7 @@ fn boxes_are_picked_up_carried_and_set_down_where_asked() {
                                     [-h.y, h.y][c >> 1 & 1],
                                     [-h.z, h.z][c >> 2 & 1],
                                 );
-                                o.distance(center + rotation * corner).0
+                                o.distance(center + rotation * corner).value
                             })
                             .fold(f32::INFINITY, f32::min)
                     })
@@ -638,7 +638,7 @@ fn corner_clearance(block: &Obstacle, obstacles: &[Obstacle]) -> f32 {
                         [-h.z, h.z][c >> 2 & 1],
                     )
         })
-        .flat_map(|corner| obstacles.iter().map(move |o| o.distance(corner).0))
+        .flat_map(|corner| obstacles.iter().map(move |o| o.distance(corner).value))
         .fold(f32::INFINITY, f32::min)
 }
 

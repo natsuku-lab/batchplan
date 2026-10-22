@@ -22,12 +22,17 @@ use crate::types::{JointTrajectory, StartMotion};
 /// Joint position, velocity and acceleration at one instant.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct JointState {
+    /// Per joint, radians (meters for prismatic joints).
     pub position: Vec<f32>,
+    /// Per joint, per second.
     pub velocity: Vec<f32>,
+    /// Per joint, per second squared.
     pub acceleration: Vec<f32>,
 }
 
 impl JointState {
+    /// Zeros for `dof` joints, to fill with [`Trajectory::at`].
+    #[must_use]
     pub fn new(dof: usize) -> Self {
         Self {
             position: vec![0.0; dof],
@@ -44,7 +49,9 @@ impl JointState {
 /// time map's last three points equal. Plain data, so it can be sent to another process;
 /// [`Trajectory::check`] verifies one before it runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Trajectory {
+    /// Joints per configuration.
     pub dof: usize,
     /// The path, `[points, dof]`: a uniform cubic B-spline over `s` from 0 to `points - 3` spans.
     pub control_points: Vec<f32>,
@@ -62,7 +69,7 @@ const DIFFERENCES: [(usize, &[f32]); 3] =
 impl Trajectory {
     /// Times a planned path (`[points, dof]` control points, at least 7) as fast as the robot's
     /// velocity, acceleration and jerk limits allow, then slows it by `speed_scale` in (0, 1].
-    pub fn new(robot: &Robot, control_points: &[f32], speed_scale: f32) -> Result<Self> {
+    pub fn try_new(robot: &Robot, control_points: &[f32], speed_scale: f32) -> Result<Self> {
         let n = robot.dof();
         ensure_input!(
             speed_scale > 0.0 && speed_scale <= 1.0,
@@ -103,7 +110,7 @@ impl Trajectory {
         );
         check_path(control_points, n)?;
         let Some(h0) = start_knot(control_points, n, motion)? else {
-            return Self::new(robot, control_points, 1.0);
+            return Self::try_new(robot, control_points, 1.0);
         };
         let spans = control_points.len() / n - 3;
         // Uniform timing at exactly h0, when that is no faster than the differences allow.
@@ -131,6 +138,8 @@ impl Trajectory {
         self.control_points.len() / self.dof - 3
     }
 
+    /// Seconds from its start to where it comes to rest.
+    #[must_use]
     pub fn duration(&self) -> f32 {
         (self.time_points.len() - 3) as f32 * self.knot_interval
     }

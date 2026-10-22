@@ -61,6 +61,7 @@ const QUANTILES: [(f64, &str); 5] = [
 const GOAL_WIDTH: usize = 7;
 const OBSTACLE_WIDTH: usize = 12;
 
+/// How [`export`] writes a dataset.
 #[derive(Clone, Debug)]
 pub struct ExportOptions {
     /// `robot_type` in `meta/info.json`; the URDF robot name when `None`.
@@ -283,11 +284,11 @@ impl Column {
     fn arrow(&self) -> (Field, ArrayRef) {
         match (&self.data, self.width) {
             (Data::F32(v), 1) => (
-                Field::new(&self.name, DataType::Float32, true),
+                Field::new(&self.name, DataType::Float32, /* nullable */ true),
                 Arc::new(Float32Array::from(v.clone())),
             ),
             (Data::I64(v), _) => (
-                Field::new(&self.name, DataType::Int64, true),
+                Field::new(&self.name, DataType::Int64, /* nullable */ true),
                 Arc::new(Int64Array::from(v.clone())),
             ),
             (Data::F32(v), w) => {
@@ -299,7 +300,11 @@ impl Column {
                     None,
                 );
                 (
-                    Field::new(&self.name, DataType::FixedSizeList(item, w as i32), true),
+                    Field::new(
+                        &self.name,
+                        DataType::FixedSizeList(item, w as i32),
+                        /* nullable */ true,
+                    ),
                     Arc::new(array),
                 )
             }
@@ -608,7 +613,7 @@ fn environment_state(
                 center,
                 rotation,
             } => {
-                let (lo, hi) = grid.bounds();
+                let (lo, hi) = (grid.lower_corner(), grid.upper_corner());
                 (
                     4.0,
                     center + rotation * (0.5 * (lo + hi)),
@@ -749,8 +754,8 @@ fn tasks_batch(tasks: &[&str]) -> Result<RecordBatch> {
         "pandas_version": "2.2.3",
     });
     let schema = Schema::new(vec![
-        Field::new("task_index", DataType::Int64, true),
-        Field::new("task", DataType::Utf8, true),
+        Field::new("task_index", DataType::Int64, /* nullable */ true),
+        Field::new("task", DataType::Utf8, /* nullable */ true),
     ])
     .with_metadata(HashMap::from([("pandas".to_string(), pandas.to_string())]));
     let arrays: Vec<ArrayRef> = vec![

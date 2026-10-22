@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionModel, CollisionWeights, Device, JointLimits, Obstacle, Pose, Robot, RobotOptions,
-    SdfOptions, World,
+    CollisionModel, CollisionWeights, Device, Distance, JointLimits, Obstacle, Pose, Robot,
+    RobotOptions, SdfOptions, World,
 };
 use glam::{DAffine3, DMat3, DQuat, DVec3, Quat, Vec3};
 
@@ -272,7 +272,7 @@ fn scenes_load_as_worlds_without_their_robots() {
         1,
         "the floor only; the Panda is a robot, not scene"
     );
-    let (top, _) = floor.obstacles[0].distance(Vec3::new(0.3, 0.2, 0.0));
+    let Distance { value: top, .. } = floor.obstacles[0].distance(Vec3::new(0.3, 0.2, 0.0));
     assert!(top.abs() < 1e-6, "the floor's surface is z = 0");
 
     let dir = scratch("scene");
@@ -451,7 +451,7 @@ fn nonlinear_joint_equalities_follow_their_polynomial_on_every_device() {
         .filter(|&(i, _)| reference.cost[i] > 1e-3);
     for (i, &x) in costly {
         let fd = |h: f32| (cost(x + h) - cost(x - h)) / (2.0 * h);
-        let g = reference.grad[i];
+        let g = reference.gradient[i];
         let err = (fd(2e-4) - g).abs().min((fd(5e-5) - g).abs()) / g.abs().max(1.0);
         assert!(err < 2e-2, "gradient {g} against finite differences at {x}");
         checked += 1;
@@ -463,9 +463,9 @@ fn nonlinear_joint_equalities_follow_their_polynomial_on_every_device() {
                 .evaluate(&gpu.upload(&scene).unwrap(), &vec![0; 400], &q, &w)
                 .unwrap();
             for (i, x) in q.iter().enumerate() {
-                let scale = reference.grad[i].abs().max(1.0);
+                let scale = reference.gradient[i].abs().max(1.0);
                 assert!(
-                    (e.grad[i] - reference.grad[i]).abs() / scale < 1e-3,
+                    (e.gradient[i] - reference.gradient[i]).abs() / scale < 1e-3,
                     "gradient at {x}"
                 );
                 assert!(

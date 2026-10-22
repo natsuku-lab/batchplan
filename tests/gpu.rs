@@ -33,9 +33,7 @@ fn setup() -> Option<(Robot, Device, Device)> {
 #[test]
 fn unknown_adapter_is_a_clear_error() {
     let robot = common::panda().unwrap();
-    let err = Device::gpu_named(&robot, "no-such-gpu")
-        .err()
-        .expect("should fail");
+    let err = Device::gpu_named(&robot, "no-such-gpu").expect_err("should fail");
     assert!(
         matches!(&err, Error::Gpu(m) if m.contains("no-such-gpu")),
         "{err:?}"
@@ -89,7 +87,7 @@ fn evaluate_matches_cpu() {
         worst[2] = worst[2].max((a.cost[i] - b.cost[i]).abs() / a.cost[i].abs().max(1.0));
         // Gradient error relative to the gradient's norm (components cancel in f32).
         let row = |g: &[f32]| g[i * n..(i + 1) * n].to_vec();
-        let (ga, gb) = (row(&a.grad), row(&b.grad));
+        let (ga, gb) = (row(&a.gradient), row(&b.gradient));
         let norm = ga.iter().map(|v| v * v).sum::<f32>().sqrt().max(1.0);
         let diff = ga
             .iter()
@@ -130,7 +128,7 @@ fn evaluate_matches_cpu_for_every_obstacle_kind() {
                 }
             }
         }
-        Arc::new(SdfGrid::new(dims, 0.01, origin, &values).unwrap())
+        Arc::new(SdfGrid::try_new(dims, 0.01, origin, &values).unwrap())
     };
     let torus = sampled([41, 41, 21], Vec3::new(-0.2, -0.2, -0.1), &|p| {
         Vec2::new(p.truncate().length() - 0.15, p.z).length() - 0.05
@@ -141,7 +139,7 @@ fn evaluate_matches_cpu_for_every_obstacle_kind() {
         rotation: Quat::IDENTITY,
     };
     let boxed = sampled([30, 20, 16], Vec3::new(-0.15, -0.1, -0.08), &|p| {
-        block.distance(p).0
+        block.distance(p).value
     });
     let grid = |grid: &Arc<SdfGrid>, center: Vec3| Obstacle::Sdf {
         grid: grid.clone(),
@@ -208,7 +206,10 @@ fn evaluate_matches_cpu_for_every_obstacle_kind() {
             colliding += usize::from(a.cost[i] > 0.0);
             worst_clearance =
                 worst_clearance.max((a.world_clearance[i] - b.world_clearance[i]).abs());
-            let (ga, gb) = (&a.grad[i * n..(i + 1) * n], &b.grad[i * n..(i + 1) * n]);
+            let (ga, gb) = (
+                &a.gradient[i * n..(i + 1) * n],
+                &b.gradient[i * n..(i + 1) * n],
+            );
             let norm = ga.iter().map(|v| v * v).sum::<f32>().sqrt().max(1.0);
             let diff = ga
                 .iter()
@@ -325,7 +326,7 @@ fn gpu_plans_are_collision_free_under_cpu_check() {
         ..
     } in result.solved()
     {
-        let trajectory = Trajectory::new(&robot, cp, 1.0).unwrap();
+        let trajectory = Trajectory::try_new(&robot, cp, 1.0).unwrap();
         trajectory.check(&robot).unwrap();
         let samples = trajectory
             .sample(per_span / trajectory.knot_interval)
@@ -559,10 +560,13 @@ fn trajopt_lowers_the_cost_as_far_as_the_cpu() {
             let p = |t: usize, j: usize| cp[t * n + j] as f64;
             for j in 0..n {
                 smooth += (0..points - 1)
-                    .map(|t| o.w_vel as f64 * (p(t + 1, j) - p(t, j)).powi(2))
+                    .map(|t| o.velocity_weight as f64 * (p(t + 1, j) - p(t, j)).powi(2))
                     .sum::<f64>();
                 smooth += (1..points - 1)
-                    .map(|t| o.w_acc as f64 * (p(t + 1, j) - 2.0 * p(t, j) + p(t - 1, j)).powi(2))
+                    .map(|t| {
+                        o.acceleration_weight as f64
+                            * (p(t + 1, j) - 2.0 * p(t, j) + p(t - 1, j)).powi(2)
+                    })
                     .sum::<f64>();
             }
         }

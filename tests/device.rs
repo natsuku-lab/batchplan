@@ -251,7 +251,7 @@ fn evaluation_does_not_depend_on_the_batch() {
             d.name()
         );
         assert!(
-            close(&alone.grad, &batched.grad[..few * n]),
+            close(&alone.gradient, &batched.gradient[..few * n]),
             "{}: gradient",
             d.name()
         );
@@ -336,7 +336,7 @@ fn results_keep_the_worlds_of_their_problems() {
             assert_eq!(s.problem.world, problems[s.index].world);
             // Every reported path is collision-free in its own world along its whole length.
             let n = robot.dof();
-            let trajectory = Trajectory::new(&robot, s.solution, 1.0).unwrap();
+            let trajectory = Trajectory::try_new(&robot, s.solution, 1.0).unwrap();
             let q = trajectory
                 .sample(32.0 / trajectory.knot_interval)
                 .unwrap()
@@ -358,7 +358,7 @@ fn results_keep_the_worlds_of_their_problems() {
 #[test]
 fn trajopt_smoothness_gradient_matches_its_cost() {
     // Collision off: the trajectory cost is pure smoothness,
-    //   J = w_acc * sum |q[t+1] - 2 q[t] + q[t-1]|^2 + w_vel * sum |q[t+1] - q[t]|^2,
+    //   J = acceleration_weight * sum |q[t+1] - 2 q[t] + q[t-1]|^2 + velocity_weight * sum |q[t+1] - q[t]|^2,
     // whose gradient sets the direction of the first L-BFGS step (see tests/gpu.rs).
     let robot = panda();
     let n = robot.dof();
@@ -388,10 +388,11 @@ fn trajopt_smoothness_gradient_matches_its_cost() {
         let mut c = 0.0;
         for j in 0..n {
             for t in 0..t_count - 1 {
-                c += o.w_vel as f64 * (q(t + 1, j) - q(t, j)).powi(2);
+                c += o.velocity_weight as f64 * (q(t + 1, j) - q(t, j)).powi(2);
             }
             for t in 1..t_count - 1 {
-                c += o.w_acc as f64 * (q(t + 1, j) - 2.0 * q(t, j) + q(t - 1, j)).powi(2);
+                c += o.acceleration_weight as f64
+                    * (q(t + 1, j) - 2.0 * q(t, j) + q(t - 1, j)).powi(2);
             }
         }
         c
@@ -519,10 +520,11 @@ fn trajopt_collision_gradient_matches_its_cost() {
         let mut c = 0.0;
         for j in 0..n {
             for t in 0..points - 1 {
-                c += o.w_vel as f64 * (q(t + 1, j) - q(t, j)).powi(2);
+                c += o.velocity_weight as f64 * (q(t + 1, j) - q(t, j)).powi(2);
             }
             for t in 1..points - 1 {
-                c += o.w_acc as f64 * (q(t + 1, j) - 2.0 * q(t, j) + q(t - 1, j)).powi(2);
+                c += o.acceleration_weight as f64
+                    * (q(t + 1, j) - 2.0 * q(t, j) + q(t - 1, j)).powi(2);
             }
         }
         c
@@ -702,7 +704,7 @@ fn reaches_replan_mid_motion_at_full_speed() {
     let mut state = JointState::new(n);
     let (mut moving, mut states) = (vec![], vec![]);
     for s in rest.solved() {
-        let trajectory = Trajectory::new(&robot, s.solution, 1.0).unwrap();
+        let trajectory = Trajectory::try_new(&robot, s.solution, 1.0).unwrap();
         trajectory.at(0.4 * trajectory.duration(), &mut state);
         if state.velocity.iter().fold(0.0f32, |m, v| m.max(v.abs())) < 1.5 {
             continue;
@@ -993,7 +995,7 @@ fn plans_without_seeds_ignore_the_optimization_weights() {
     let moving: Vec<PlanProblem> = rest
         .solved()
         .map(|s| {
-            let trajectory = Trajectory::new(&robot, s.solution, 1.0).unwrap();
+            let trajectory = Trajectory::try_new(&robot, s.solution, 1.0).unwrap();
             trajectory.at(0.4 * trajectory.duration(), &mut state);
             let motion = StartMotion {
                 velocity: state.velocity.clone(),
@@ -1007,8 +1009,8 @@ fn plans_without_seeds_ignore_the_optimization_weights() {
         })
         .collect();
     let weighed = PlanOptions {
-        w_acc: 0.5,
-        w_vel: 40.0,
+        acceleration_weight: 0.5,
+        velocity_weight: 40.0,
         collision: CollisionWeights {
             margin: 0.003,
             ..PlanOptions::default().collision

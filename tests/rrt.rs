@@ -268,7 +268,7 @@ fn plan_solves_every_problem_rrt_connect_reaches() {
         // Every plan, timed and sampled 4x denser than validation, under the CPU model.
         let (mut q, mut item_world) = (vec![], vec![]);
         for s in result.solved() {
-            let trajectory = Trajectory::new(&robot, s.solution, 1.0).unwrap();
+            let trajectory = Trajectory::try_new(&robot, s.solution, 1.0).unwrap();
             trajectory.check(&robot).unwrap();
             let samples = trajectory
                 .sample(32.0 / trajectory.knot_interval)
@@ -354,7 +354,7 @@ fn continuous_joints_turn_the_short_way_unless_it_is_blocked() {
             d.name()
         );
         // The trajectory runs past pi, as a continuous joint may.
-        Trajectory::new(&robot, path, 1.0)
+        Trajectory::try_new(&robot, path, 1.0)
             .unwrap()
             .check(&robot)
             .unwrap();
@@ -608,7 +608,7 @@ fn plans_around_a_ball_on_the_straight_line_stay_near_it() {
         .solved()
         .map(|s| {
             let straight = length(&[&s.problem.start[..], &s.problem.goal[..]].concat(), n);
-            let dense = Trajectory::new(&robot, s.solution, 1.0)
+            let dense = Trajectory::try_new(&robot, s.solution, 1.0)
                 .unwrap()
                 .sample(100.0)
                 .unwrap()

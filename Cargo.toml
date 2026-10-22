@@ -47,6 +47,14 @@ usd = ["dep:openusd", "dep:openusd-schemas"]
 # Every build warns on these; CI denies warnings.
 [lints.clippy]
 all = { level = "warn", priority = -1 }
+# Rules of Google's Rust style guide that clippy checks.
+wildcard_imports = "warn"
+enum_glob_use = "warn"
+needless_for_each = "warn"
+undocumented_unsafe_blocks = "warn"
+format_push_string = "warn"
+redundant_clone = "warn"
+ref_option = "warn"
 
 [profile.release]
 debug = 1

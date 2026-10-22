@@ -4,7 +4,7 @@ Planning in batchplan is three steps. IK and planning are batched calls on a [`D
 
 1. **IK** (`solve_ik`) turns target poses into joint configurations.
 2. **Planning** (`plan`) finds a collision-free path from a start to a goal configuration (the straight line, bent if an obstacle only grazes it, else RRT-Connect), then shortens and smooths it into a B-spline. Trajectory optimization can polish it further.
-3. **Timing** (`Trajectory::new`) turns the path into a trajectory a controller can run, within the robot's velocity, acceleration and jerk limits.
+3. **Timing** (`Trajectory::try_new`) turns the path into a trajectory a controller can run, within the robot's velocity, acceleration and jerk limits.
 
 Every call takes many problems, each naming its world, so one call can cover thousands of scenes.
 
@@ -39,7 +39,7 @@ fn main() -> Result<(), Error> {
         .collect();
     let result = batchplan::plan(&device, &worlds, &problems, &PlanOptions::default())?;
     for s in result.solved() {
-        let trajectory = Trajectory::new(&robot, s.solution, 1.0)?;
+        let trajectory = Trajectory::try_new(&robot, s.solution, 1.0)?;
         println!("problem {}: {:.2} s", s.index, trajectory.duration());
     }
     Ok(())
@@ -79,10 +79,10 @@ fn main() -> Result<(), Error> {
 
 `PlanOptions::seeds` (0 by default) adds trajectory optimization of that many seeds per problem, batched on the device:
 - **Seeds.** The first starts from the searched spline, the second from the straight line to the goal, as cuRobo's first attempt does. Further seeds run straight to the goal's equivalents, or bend through random via points. Problems searched to within 2% of the straight line are not optimized, since no seed could be much shorter; their seeds stay invalid.
-- **Cost.** Length and smoothness, as squared differences of the control points (weighted `w_vel`, 10) and squared second differences (`w_acc`, 5), plus a collision cost for the world and for self-collision, sampled along the curve (`samples_per_span` points per span) and active within `collision.margin` (1.2 cm) of an obstacle and `collision.self_margin` (1 cm) between links.
+- **Cost.** Length and smoothness, as squared differences of the control points (weighted `velocity_weight`, 10) and squared second differences (`acceleration_weight`, 5), plus a collision cost for the world and for self-collision, sampled along the curve (`samples_per_span` points per span) and active within `collision.margin` (1.2 cm) of an obstacle and `collision.self_margin` (1 cm) between links.
 - **Optimizer.** L-BFGS (`iterations`, 100, remembering `history` steps). Each iteration prices four step sizes along the L-BFGS direction in one batched pass and keeps the cheapest.
 
-Repairing a stuck spline (above) uses the same optimizer with its own settings, whatever these options say: ten steps, smoothness weighted over length (`w_acc` 50, `w_vel` 2) and a 2 cm margin. These repair more splines than the length-favouring weights do.
+Repairing a stuck spline (above) uses the same optimizer with its own settings, whatever these options say: ten steps, smoothness weighted over length (`acceleration_weight` 50, `velocity_weight` 2) and a 2 cm margin. These repair more splines than the length-favouring weights do.
 
 Optimized seeds are validated like the searched path, and `best` picks the shortest valid one of all. On the benchmark's box-only problems, two seeds give 3.137 rad paths at the median, against 3.243 without and cuRobo's 3.144 ([benchmarks](benchmarks.md#results)). Optimization costs milliseconds per problem (15.1 ms on 14 CPU threads; 746 problems/s in batches on an M4 Pro's GPU), against a fraction of a millisecond for the search.
 
@@ -96,7 +96,7 @@ Continuous joints are unbounded, and joints whose range spans more than a turn (
 
 ## Executable trajectories
 
-`Trajectory::new(&robot, path, speed_scale)` keeps the path and adds a time map `s = σ(t)` (itself a uniform cubic B-spline), choosing the faster of two timings:
+`Trajectory::try_new(&robot, path, speed_scale)` keeps the path and adds a time map `s = σ(t)` (itself a uniform cubic B-spline), choosing the faster of two timings:
 
 - **Time-optimal** (TOPP-RA, Pham and Pham 2018): the fastest timing of the path under joint velocity and acceleration limits, plus a speed cap from the jerk limit, smoothed into a B-spline time map. Where the smoothed map overshoots a limit, the caps are lowered there and the profile solved again. On planned Panda paths it is 12% faster than uniform timing on average and never slower, at about 0.5 ms per trajectory.
 - **Uniform**: `σ(t) = t / h`, with the smallest `h` that keeps every joint within its limits. Velocity, acceleration and jerk are then B-splines over the control points' differences, so the bound holds exactly along the whole curve.
@@ -165,5 +165,5 @@ fn main() -> Result<(), Error> {
 | `PlanOptions::shortcut.straighten` | on | Straighten each joint along the path: about 1% shorter paths on the Panda benchmark and 13–18% less joint travel on pick-and-place carries, for about 3% of batched throughput. |
 | `PlanOptions::control_points` | 24 | Control points of the spline: more follow longer paths more closely. |
 | `PlanOptions::seeds` | 0 | Trajectory optimization seeds per problem: with 2, paths are about 3% shorter (shorter than cuRobo's on its benchmark), at milliseconds per problem. |
-| `RobotOptions::velocity_scale`, `acceleration_scale`, `jerk_scale` | 1 | A slower robot everywhere: plans, timings, checks and replanning from motion all keep to the scaled limits. `Trajectory::new`'s speed scale slows one trajectory instead. |
+| `RobotOptions::velocity_scale`, `acceleration_scale`, `jerk_scale` | 1 | A slower robot everywhere: plans, timings, checks and replanning from motion all keep to the scaled limits. `Trajectory::try_new`'s speed scale slows one trajectory instead. |
 | `PlanOptions::time_budget` | none | Bounded latency, at the cost of determinism. |

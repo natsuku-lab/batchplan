@@ -12,8 +12,8 @@ use std::sync::{Arc, OnceLock};
 use batchplan::datagen::{Demonstration, Origin};
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionWeights, DepthImage, Device, Intrinsics, JointTrajectory, Obstacle, Occlusion,
-    OccupancyMap, Pose, Robot, SdfGrid, SdfOptions, World,
+    CollisionWeights, DepthImage, Device, Distance, Intrinsics, JointTrajectory, Obstacle,
+    Occlusion, OccupancyMap, Pose, Robot, SdfGrid, SdfOptions, World,
 };
 use glam::{BVec3, EulerRot, Mat3, Quat, Vec3};
 
@@ -74,7 +74,7 @@ fn add_box(mesh: &mut (Vec<Vec3>, Vec<[u32; 3]>), lo: Vec3, hi: Vec3) {
 
 fn box_distance(lo: Vec3, hi: Vec3, p: Vec3) -> f32 {
     let (center, half) = (0.5 * (lo + hi), 0.5 * (hi - lo));
-    Obstacle::cuboid(center, half).distance(p).0
+    Obstacle::cuboid(center, half).distance(p).value
 }
 
 /// Half a voxel diagonal: how much built grids lower distances.
@@ -105,7 +105,7 @@ fn grid_gradients_match_finite_differences() {
         center,
         rotation,
     };
-    let (glo, ghi) = grid.bounds();
+    let (glo, ghi) = (grid.lower_corner(), grid.upper_corner());
     let mut rng = Rng::new(3);
     let h = 2e-4;
     let (mut inside_box, mut outside_box, mut worst) = (0, 0, 0.0f32);
@@ -130,10 +130,10 @@ fn grid_gradients_match_finite_differences() {
             continue;
         }
         let p = center + rotation * local;
-        let (_, g) = obstacle.distance(p);
+        let Distance { gradient: g, .. } = obstacle.distance(p);
         let fd = Vec3::from_array(std::array::from_fn(|k| {
             let e = Vec3::AXES[k] * h;
-            (obstacle.distance(p + e).0 - obstacle.distance(p - e).0) / (2.0 * h)
+            (obstacle.distance(p + e).value - obstacle.distance(p - e).value) / (2.0 * h)
         }));
         worst = worst.max((fd - g).length() / g.length().max(0.1));
         if beyond.any() {
@@ -187,7 +187,13 @@ fn grid_collision_gradients_match_finite_differences() {
         if e.cost[0] < 1e-3 {
             continue;
         }
-        let norm = e.grad.iter().map(|v| v * v).sum::<f32>().sqrt().max(1.0);
+        let norm = e
+            .gradient
+            .iter()
+            .map(|v| v * v)
+            .sum::<f32>()
+            .sqrt()
+            .max(1.0);
         // Spheres crossing cell faces make the cost only piecewise smooth; accept either step.
         let rel_err = |h: f32| {
             let fd = (0..n).map(|j| {
@@ -197,7 +203,7 @@ fn grid_collision_gradients_match_finite_differences() {
                 let cost = |q: &[f32]| cpu.evaluate(&worlds, &[0], q, &w).unwrap().cost[0];
                 (cost(&qp) - cost(&qm)) / (2.0 * h)
             });
-            fd.zip(&e.grad)
+            fd.zip(&e.gradient)
                 .map(|(f, g)| (f - g).powi(2))
                 .sum::<f32>()
                 .sqrt()
@@ -226,7 +232,7 @@ fn thin_walls_leak_through_raw_samples_but_not_through_built_grids() {
         padding: 0.05,
     };
     let built = SdfGrid::from_mesh(&mesh.0, &mesh.1, &o).unwrap();
-    let (origin, _) = built.bounds();
+    let origin = built.lower_corner();
     assert!(
         (((0.005 - origin.x) / voxel).fract() - 0.5).abs() < 1e-3,
         "the wall is not midway between points"
@@ -246,7 +252,7 @@ fn thin_walls_leak_through_raw_samples_but_not_through_built_grids() {
             }
         }
     }
-    let raw = SdfGrid::new(dims, voxel, origin, &exact).unwrap();
+    let raw = SdfGrid::try_new(dims, voxel, origin, &exact).unwrap();
     let mut rng = Rng::new(5);
     let (mut leaked, mut worst_inside, mut worst_growth) = (0.0f32, f32::MIN, 0.0f32);
     for _ in 0..500 {
@@ -255,15 +261,15 @@ fn thin_walls_leak_through_raw_samples_but_not_through_built_grids() {
             rng.range(-0.15, 0.15),
             rng.range(-0.15, 0.15),
         );
-        leaked = leaked.max(raw.distance(inside).0);
-        worst_inside = worst_inside.max(built.distance(inside).0);
+        leaked = leaked.max(raw.distance(inside).value);
+        worst_inside = worst_inside.max(built.distance(inside).value);
         let near = Vec3::new(
             rng.range(0.03, 0.1),
             rng.range(-0.15, 0.15),
             rng.range(-0.15, 0.15),
         );
         let truth = box_distance(wall_lo, wall_hi, near);
-        let (d, _) = built.distance(near);
+        let Distance { value: d, .. } = built.distance(near);
         assert!(
             d <= truth + 1e-4,
             "built grid reads {d} where the wall is {truth} away"
@@ -306,7 +312,7 @@ fn mesh_grids_are_conservative_within_a_voxel_diagonal() {
             rng.range(-0.11, 0.11),
             rng.range(-0.06, 0.14),
         );
-        let (truth, d) = (box_distance(lo, hi, p), grid.distance(p).0);
+        let (truth, d) = (box_distance(lo, hi, p), grid.distance(p).value);
         assert!(
             d <= truth + 1e-4 && d >= truth - 2.0 * shift(o.voxel) - 1e-4,
             "{d} at {p}, truth {truth}"
@@ -314,7 +320,11 @@ fn mesh_grids_are_conservative_within_a_voxel_diagonal() {
     }
     // Beyond the padded box, distances keep growing.
     let far = Vec3::new(0.5, 0.0, 0.04);
-    assert!(grid.distance(far).0 > 0.35, "{}", grid.distance(far).0);
+    assert!(
+        grid.distance(far).value > 0.35,
+        "{}",
+        grid.distance(far).value
+    );
 }
 
 #[test]
@@ -370,22 +380,22 @@ fn point_clouds_become_solid_shells() {
     let grid = SdfGrid::from_points(cpu(), &points, &o).unwrap();
     for &p in points.iter().step_by(97) {
         assert!(
-            grid.distance(p).0 <= 0.0,
+            grid.distance(p).value <= 0.0,
             "a surface point reads {}",
-            grid.distance(p).0
+            grid.distance(p).value
         );
     }
     for _ in 0..500 {
         let dir = Vec3::new(rng.normal(), rng.normal(), rng.normal()).normalize();
         let truth = rng.range(0.02, 0.08);
-        let d = grid.distance(center + dir * (radius + truth)).0;
+        let d = grid.distance(center + dir * (radius + truth)).value;
         assert!(
             d <= truth + 2e-3 && d >= truth - occupancy_slack(o.voxel),
             "{d} for {truth}"
         );
     }
     // Inside the shell is unobserved and reads as free.
-    assert!(grid.distance(center).0 > 0.05);
+    assert!(grid.distance(center).value > 0.05);
 }
 
 #[test]
@@ -409,7 +419,7 @@ fn point_grids_never_read_beyond_their_solid_voxels() {
             })
             .collect();
         let grid = SdfGrid::from_points(cpu(), &points, &o).unwrap();
-        let (origin, hi) = grid.bounds();
+        let (origin, hi) = (grid.lower_corner(), grid.upper_corner());
         let cubes: Vec<Vec3> = points
             .iter()
             .map(|&p| origin + ((p - origin) / o.voxel).round() * o.voxel)
@@ -424,7 +434,7 @@ fn point_grids_never_read_beyond_their_solid_voxels() {
                 .iter()
                 .map(|&c| box_distance(c - 0.5 * o.voxel, c + 0.5 * o.voxel, p))
                 .fold(f32::INFINITY, f32::min);
-            worst = worst.max(grid.distance(p).0 - truth);
+            worst = worst.max(grid.distance(p).value - truth);
         }
     }
     assert!(
@@ -486,27 +496,28 @@ fn check_table(grid: &SdfGrid, behind: Occlusion, o: &SdfOptions, rng: &mut Rng)
     for _ in 0..300 {
         let height = rng.range(0.03, 0.25);
         let p = Vec3::new(rng.range(-0.25, 0.25), rng.range(-0.25, 0.25), height);
-        let d = grid.distance(p).0;
+        let d = grid.distance(p).value;
         assert!(
             d <= height + 1e-4 && d >= height - occupancy_slack(o.voxel),
             "{d} at {p}"
         );
-        let below = grid.distance(Vec3::new(p.x, p.y, -0.05)).0;
+        let below = grid.distance(Vec3::new(p.x, p.y, -0.05)).value;
         match behind {
             // The table, not a robot, hides what is below it.
             Occlusion::Occupied | Occlusion::OccupiedExceptRobotShadow => {
                 assert!(below < 0.0, "{below} below the table at {p}")
             }
             Occlusion::Free => assert!(below > 0.02, "{below} below the table at {p}"),
+            other => panic!("no expectation below the table under {other:?}"),
         }
     }
     // Outside the view nothing was seen, so it is free even under the occupied rule.
-    let (_, hi) = grid.bounds();
+    let hi = grid.upper_corner();
     let aside = Vec3::new(hi.x - 0.005, 0.0, -0.1);
     assert!(
-        grid.distance(aside).0 > 0.02,
+        grid.distance(aside).value > 0.02,
         "{} outside the view",
-        grid.distance(aside).0
+        grid.distance(aside).value
     );
 }
 
@@ -559,12 +570,12 @@ fn depth_images_become_grids_on(device: &Device) {
     for (behind, inside) in [(Occlusion::Occupied, -0.05), (Occlusion::Free, 0.05)] {
         let grid =
             SdfGrid::from_depth(device, &scene.image(&depth, 640, vga), None, behind, &o).unwrap();
-        let above = grid.distance(c + Vec3::new(0.0, 0.0, r + 0.05)).0;
+        let above = grid.distance(c + Vec3::new(0.0, 0.0, r + 0.05)).value;
         assert!(
             above <= 0.05 + 2e-3 && above > 0.05 - occupancy_slack(o.voxel),
             "{above} above the ball"
         );
-        let center = grid.distance(c).0;
+        let center = grid.distance(c).value;
         assert!(
             center.signum() == f32::signum(inside),
             "{center} at the ball's center under {behind:?}"
@@ -573,8 +584,8 @@ fn depth_images_become_grids_on(device: &Device) {
         let obstacle = Obstacle::from(grid);
         assert_eq!(
             [
-                obstacle.distance(c).0,
-                obstacle.distance(c + Vec3::new(0.0, 0.0, r + 0.05)).0
+                obstacle.distance(c).value,
+                obstacle.distance(c + Vec3::new(0.0, 0.0, r + 0.05)).value
             ],
             [center, above],
             "an obstacle made from the grid measures it as the grid does"
@@ -596,11 +607,11 @@ fn depth_images_become_grids_on(device: &Device) {
     )
     .unwrap();
     assert!(
-        grid.distance(Vec3::new(0.054, -0.054, -0.05)).0 > 0.0,
+        grid.distance(Vec3::new(0.054, -0.054, -0.05)).value > 0.0,
         "below a pixel without a reading"
     );
     assert!(
-        grid.distance(Vec3::new(0.163, -0.054, -0.05)).0 < 0.0,
+        grid.distance(Vec3::new(0.163, -0.054, -0.05)).value < 0.0,
         "below a pixel with one"
     );
     let all_holes = vec![f32::NAN; 64];
@@ -676,7 +687,7 @@ fn mjcf_scene_meshes_load_as_grids_of_their_convex_hulls() {
     let world = World::load(dir.join("scene.xml"), &o).unwrap();
     assert!(matches!(world.obstacles[..], [Obstacle::Sdf { .. }]));
     // Rotated a quarter turn about z: local (x, y) lies at world (0.5 - y, x).
-    let at = |x: f32, y: f32, z: f32| world.obstacles[0].distance(Vec3::new(0.5 - y, x, z)).0;
+    let at = |x: f32, y: f32, z: f32| world.obstacles[0].distance(Vec3::new(0.5 - y, x, z)).value;
     assert!(at(0.05, 0.05, 0.05) < -0.04, "inside the L");
     assert!(
         at(0.14, 0.14, 0.05) < 0.0,
@@ -727,7 +738,7 @@ fn usd_scene_meshes_load_as_grids_honoring_the_approximation() {
     )
     .unwrap();
     assert_eq!(world.obstacles.len(), 2);
-    let notch = |o: &Obstacle, x: f32| o.distance(Vec3::new(x + 0.15, 0.15, 0.05)).0;
+    let notch = |o: &Obstacle, x: f32| o.distance(Vec3::new(x + 0.15, 0.15, 0.05)).value;
     assert!(
         notch(&world.obstacles[0], 0.0) > 0.0,
         "the exact mesh leaves the notch free"
@@ -847,7 +858,7 @@ fn lerobot_exports_describe_grids_by_their_boxes() {
         .downcast_ref::<Float32Array>()
         .unwrap()
         .values();
-    let (lo, hi) = grid.bounds();
+    let (lo, hi) = (grid.lower_corner(), grid.upper_corner());
     let (mid, half) = (center + rotation * (0.5 * (lo + hi)), 0.5 * (hi - lo));
     let expected = [
         1.0, 4.0, mid.x, mid.y, mid.z, half.x, half.y, half.z, rotation.x, rotation.y, rotation.z,
@@ -902,7 +913,7 @@ fn fused_maps_on(device: &Device) {
         scene.render(640, 480, vga, false),
     );
     let mut map =
-        OccupancyMap::new(Vec3::new(-0.3, -0.3, -0.1), Vec3::new(0.3, 0.3, 0.3), 0.01).unwrap();
+        OccupancyMap::try_new(Vec3::new(-0.3, -0.3, -0.1), Vec3::new(0.3, 0.3, 0.3), 0.01).unwrap();
     let (c, r) = scene.ball;
     let top = c + Vec3::new(0.0, 0.0, r);
     let above = top + Vec3::new(0.0, 0.0, 0.05);
@@ -910,7 +921,11 @@ fn fused_maps_on(device: &Device) {
         .unwrap();
     assert!(map.occupancy(top).unwrap() > 0.5, "the ball's top is seen");
     assert!(
-        map.grid(device, Occlusion::Free).unwrap().distance(above).0 < 0.06,
+        map.grid(device, Occlusion::Free)
+            .unwrap()
+            .distance(above)
+            .value
+            < 0.06,
         "the ball is in the grid"
     );
     // Seen through twice, the ball's top still holds (0.85 - 2 x 0.4); a third time clears it.
@@ -925,9 +940,9 @@ fn fused_maps_on(device: &Device) {
     }
     let grid = map.grid(device, Occlusion::Free).unwrap();
     assert!(
-        grid.distance(above).0 > 0.2,
+        grid.distance(above).value > 0.2,
         "the ball is gone: {}",
-        grid.distance(above).0
+        grid.distance(above).value
     );
     // The table stays; below it nothing was observed, which the grid treats as told.
     assert!(
@@ -944,17 +959,21 @@ fn fused_maps_on(device: &Device) {
         map.grid(device, Occlusion::Occupied)
             .unwrap()
             .distance(below)
-            .0
+            .value
             < 0.0,
         "unobserved space is solid under Occlusion::Occupied"
     );
     assert!(
-        map.grid(device, Occlusion::Free).unwrap().distance(below).0 > 0.0,
+        map.grid(device, Occlusion::Free)
+            .unwrap()
+            .distance(below)
+            .value
+            > 0.0,
         "unobserved space is free under Occlusion::Free"
     );
     // A map ending inside the ball (its last voxels at x = 0) takes no hits from the readings
     // beyond its edge.
-    let mut part = OccupancyMap::new(
+    let mut part = OccupancyMap::try_new(
         Vec3::new(-0.3, -0.3, -0.1),
         Vec3::new(-0.005, 0.3, 0.3),
         0.01,
@@ -1057,7 +1076,7 @@ fn robot_masking_on(device: &Device) {
     // Unmasked, the arm is an obstacle.
     let raw = SdfGrid::from_depth(device, &image, None, Occlusion::Free, &o).unwrap();
     assert!(
-        spheres.iter().any(|&(c, r)| raw.distance(c).0 < r),
+        spheres.iter().any(|&(c, r)| raw.distance(c).value < r),
         "the arm should read as an obstacle"
     );
     // Masked, its space is free while the box in front of it stays.
@@ -1072,19 +1091,19 @@ fn robot_masking_on(device: &Device) {
     let masked = SdfGrid::from_depth(device, &image, Some(&mask), Occlusion::Free, &o).unwrap();
     for &(c, r) in &spheres {
         assert!(
-            masked.distance(c).0 > r,
+            masked.distance(c).value > r,
             "an obstacle at the arm: {} at {c}",
-            masked.distance(c).0
+            masked.distance(c).value
         );
     }
     assert!(
-        masked.distance(face).0 <= 0.0,
+        masked.distance(face).value <= 0.0,
         "the box in front of the arm is lost: {}",
-        masked.distance(face).0
+        masked.distance(face).value
     );
     // A fused map clears space in front of the arm and adds nothing at it.
     let mut map =
-        OccupancyMap::new(Vec3::new(-0.2, -0.6, 0.0), Vec3::new(1.2, 0.6, 1.2), 0.02).unwrap();
+        OccupancyMap::try_new(Vec3::new(-0.2, -0.6, 0.0), Vec3::new(1.2, 0.6, 1.2), 0.02).unwrap();
     map.integrate(device, &image, Some(&mask)).unwrap();
     for &(c, _) in &spheres {
         assert!(
@@ -1111,7 +1130,7 @@ fn robot_masking_on(device: &Device) {
         .filter(|&p| p.x > wall + 0.1 && spheres.iter().all(|&(c, r)| p.distance(c) > r + 0.06))
         .find(|&p| depth[pixel(p)] >= mask.depth[pixel(p)] - 0.01)
         .expect("a point only the arm hides");
-    let mut map = OccupancyMap::new(
+    let mut map = OccupancyMap::try_new(
         Vec3::new(wall + 0.05, -0.6, 0.0),
         Vec3::new(1.2, 0.6, 1.2),
         0.01,
@@ -1128,13 +1147,13 @@ fn robot_masking_on(device: &Device) {
     for (name, grid) in grids {
         for &(c, r) in &spheres {
             assert!(
-                grid.distance(c).0 > r,
+                grid.distance(c).value > r,
                 "{name}: an obstacle at the arm: {} at {c}",
-                grid.distance(c).0
+                grid.distance(c).value
             );
         }
         assert!(
-            grid.distance(shadow).0 <= 0.0,
+            grid.distance(shadow).value <= 0.0,
             "{name}: what the arm hides at {shadow} is free"
         );
     }
@@ -1160,18 +1179,18 @@ fn robot_masking_on(device: &Device) {
     ];
     for (name, grid) in grids {
         assert!(
-            grid.distance(shadow).0 > 0.0,
+            grid.distance(shadow).value > 0.0,
             "{name}: what only the arm hides at {shadow} is solid"
         );
         assert!(
-            grid.distance(behind_box).0 <= 0.0,
+            grid.distance(behind_box).value <= 0.0,
             "{name}: what the box hides at {behind_box} is free"
         );
         for &(c, r) in &spheres {
             assert!(
-                grid.distance(c).0 > r,
+                grid.distance(c).value > r,
                 "{name}: an obstacle at the arm: {} at {c}",
-                grid.distance(c).0
+                grid.distance(c).value
             );
         }
     }
@@ -1193,7 +1212,7 @@ fn every_device_builds_the_same_grids_from_occupancy() {
     let image = scene.image(&depth, 640, vga);
     let mask = image.robot_mask(&robot, robot.default_q(), 0.02).unwrap();
     let mut map =
-        OccupancyMap::new(Vec3::new(-0.3, -0.3, -0.1), Vec3::new(0.3, 0.3, 0.3), 0.01).unwrap();
+        OccupancyMap::try_new(Vec3::new(-0.3, -0.3, -0.1), Vec3::new(0.3, 0.3, 0.3), 0.01).unwrap();
     map.integrate(cpu(), &image, Some(&mask)).unwrap();
     let mut rng = Rng::new(5);
     let points: Vec<Vec3> = (0..2000)

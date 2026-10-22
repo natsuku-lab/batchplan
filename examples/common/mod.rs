@@ -117,7 +117,7 @@ pub fn grasp_target(world: &World, rng: &mut Rng) -> Pose {
             rng.range(-0.45, 0.45),
             rng.range(0.05, 0.4),
         );
-        if world.obstacles.iter().all(|o| o.distance(p).0 > 0.06) {
+        if world.obstacles.iter().all(|o| o.distance(p).value > 0.06) {
             let rotation = Quat::from_rotation_z(rng.range(-PI, PI)) * Quat::from_rotation_x(PI);
             return Pose {
                 position: p,

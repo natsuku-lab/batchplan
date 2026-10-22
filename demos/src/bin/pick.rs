@@ -214,8 +214,9 @@ fn pick_place_scene(world: u32, rng: &mut Rng) -> (World, PickPlace) {
         );
         let c = Vec3::new(rng.range(0.3, 0.8), rng.range(-0.6, 0.6), h.z);
         let candidate = upright(c, h, rng.range(0.0, PI));
-        let clear = |p: Vec3| candidate.distance(p).0 > 0.08 + half.max_element();
-        if clear(pick) && clear(place) && candidate.distance(Vec3::new(0.0, 0.0, 0.3)).0 > 0.25 {
+        let clear = |p: Vec3| candidate.distance(p).value > 0.08 + half.max_element();
+        if clear(pick) && clear(place) && candidate.distance(Vec3::new(0.0, 0.0, 0.3)).value > 0.25
+        {
             clutter.push(candidate);
         }
     }
@@ -253,7 +254,7 @@ fn straight_carry_blocked(world: &World, task: &PickPlace) -> bool {
             .obstacles
             .iter()
             .enumerate()
-            .any(|(i, o)| i != task.object && i != 0 && o.distance(p).0 < 0.0)
+            .any(|(i, o)| i != task.object && i != 0 && o.distance(p).value < 0.0)
     })
 }
 

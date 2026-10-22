@@ -390,10 +390,10 @@ fn has_joint(body: &Element) -> bool {
         || body.children("body").any(has_joint)
 }
 
-struct Builder<'a> {
-    compiler: &'a Compiler,
-    defaults: &'a Defaults,
-    meshes: &'a HashMap<String, (PathBuf, Vec3)>,
+struct Builder<'model> {
+    compiler: &'model Compiler,
+    defaults: &'model Defaults,
+    meshes: &'model HashMap<String, (PathBuf, Vec3)>,
     links: Vec<LinkDesc>,
     joints: Vec<JointDesc>,
     scene: Vec<Shape>,
