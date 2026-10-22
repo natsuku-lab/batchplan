@@ -3,18 +3,21 @@
 `Robot::load(path, &RobotOptions)` loads a robot from URDF, MJCF or OpenUSD, builds its kinematic tree, and gives it a collision model of spheres, fitted to the links' geometry or loaded from a file you commit.
 
 ```rust,no_run
-use batchplan::*;
+use batchplan::{CollisionModel, Error, Robot, RobotOptions};
 
 fn main() -> Result<(), Error> {
     let options = RobotOptions {
-        ee_links: vec!["tool0".into()],                  // the frame IK targets: one per hand
+        ee_links: vec!["tool0".into()], // the frame IK targets: one per hand
         ..Default::default()
     };
     let robot = Robot::load("assets/ur5e/ur_description/urdf/ur5e.urdf", &options)?;
     println!("{} joints: {:?}", robot.dof(), robot.joint_names());
     // Fitting spheres takes a few seconds; save the model and load it next time.
     robot.collision_model().save("ur5e_spheres.json")?;
-    let fast = RobotOptions { collision_model: Some(CollisionModel::load("ur5e_spheres.json")?), ..options };
+    let fast = RobotOptions {
+        collision_model: Some(CollisionModel::load("ur5e_spheres.json")?),
+        ..options
+    };
     let _same = Robot::load("assets/ur5e/ur_description/urdf/ur5e.urdf", &fast)?;
     Ok(())
 }
@@ -48,8 +51,8 @@ fn main() -> Result<(), Error> {
 `Robot::assemble(&[Part], &RobotOptions)` makes one robot of several descriptions, such as two arms at a table. Each `Part` gives a description's path, a prefix for its link and joint names (`left_`, say) and the pose of its root link; the parts hang from one root link, `world`. Options name links and joints with their prefixes. `robot.parts()` lists the descriptions a robot came from, for a simulator to rebuild it.
 
 ```rust,no_run
-use batchplan::*;
 use batchplan::glam::{Quat, Vec3};
+use batchplan::{Error, Part, Pose, Robot, RobotOptions};
 
 fn main() -> Result<(), Error> {
     let arm = |prefix: &str, y: f32| Part {
@@ -57,7 +60,10 @@ fn main() -> Result<(), Error> {
         prefix: prefix.into(),
         base: Pose::new(Vec3::new(0.0, y, 0.0), Quat::IDENTITY),
     };
-    let options = RobotOptions { ee_links: vec!["left_tool0".into(), "right_tool0".into()], ..Default::default() };
+    let options = RobotOptions {
+        ee_links: vec!["left_tool0".into(), "right_tool0".into()],
+        ..Default::default()
+    };
     let robot = Robot::assemble(&[arm("left_", 0.5), arm("right_", -0.5)], &options)?;
     assert_eq!((robot.dof(), robot.hands()), (12, 2));
     Ok(())
@@ -89,7 +95,9 @@ How tight the spheres are is a trade-off you can measure: see [Spheres and meshe
 
 ```rust,no_run
 use batchplan::glam::Vec3;
-use batchplan::*;
+use batchplan::{
+    AttachedObject, Device, Error, Obstacle, Robot, RobotOptions, SphereOptions, World,
+};
 
 fn main() -> Result<(), Error> {
     let robot = Robot::load("assets/franka/franka_panda.urdf", &RobotOptions::default())?;
@@ -98,11 +106,14 @@ fn main() -> Result<(), Error> {
     let held = robot.attach(&AttachedObject {
         name: "box".into(),
         link: "panda_hand".into(),
-        shapes: vec![Obstacle::cuboid(Vec3::new(0.0, 0.0, 0.1), Vec3::splat(0.03))],
+        shapes: vec![Obstacle::cuboid(
+            Vec3::new(0.0, 0.0, 0.1),
+            Vec3::splat(0.03),
+        )],
         touch_links: vec!["panda_leftfinger".into(), "panda_rightfinger".into()],
         spheres: SphereOptions::default(),
     })?;
-    let holding = device.with_robot(&held)?;     // plans with the box, in the same `worlds`
+    let holding = device.with_robot(&held)?; // plans with the box, in the same `worlds`
     let _ = (holding, worlds);
     Ok(())
 }
@@ -119,13 +130,18 @@ Spheres only approximate the links. `MeshModel::new(&robot)` loads each link's c
 
 ```rust,no_run
 use batchplan::glam::Vec3;
-use batchplan::*;
+use batchplan::{Error, MeshModel, Obstacle, Robot, RobotOptions, World};
 
 fn main() -> Result<(), Error> {
-    let robot = Robot::load("assets/ur5e/ur_description/urdf/ur5e.urdf", &RobotOptions::default())?;
+    let robot = Robot::load(
+        "assets/ur5e/ur_description/urdf/ur5e.urdf",
+        &RobotOptions::default(),
+    )?;
     let meshes = MeshModel::new(&robot)?;
     let wall = Obstacle::cuboid(Vec3::new(1.0, 0.0, 0.4), Vec3::new(0.02, 0.5, 0.4));
-    let worlds = vec![World { obstacles: vec![wall] }];
+    let worlds = vec![World {
+        obstacles: vec![wall],
+    }];
     let q = robot.default_q().to_vec(); // one configuration; pass a trajectory's samples to check it all
     let [world, self_collision] = meshes.clearance(&worlds, &[0], &q)?[0];
     println!("{world:.3} m from the wall, {self_collision:.3} m between links");

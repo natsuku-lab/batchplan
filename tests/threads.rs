@@ -6,7 +6,10 @@
 mod common;
 
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{
+    AttachedObject, Device, IkOptions, IkProblem, Obstacle, PlanOptions, PlanProblem, RrtOptions,
+    RrtProblem, ShortcutOptions, SphereOptions, World, rrt, shortcut,
+};
 
 #[cfg(target_os = "linux")]
 fn threads() -> usize {
@@ -42,14 +45,14 @@ fn a_one_thread_device_works_on_its_one_thread() {
     let goals: Vec<IkProblem> = (0..2)
         .map(|w| IkProblem::new(w, common::grasp_target(&scene[w as usize], &mut rng)))
         .collect();
-    let ik = solve_ik(&device, &worlds, &goals, &IkOptions::default()).unwrap();
+    let ik = batchplan::solve_ik(&device, &worlds, &goals, &IkOptions::default()).unwrap();
     let problems: Vec<PlanProblem> = ik
         .solved()
         .map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution))
         .collect();
     assert!(!problems.is_empty());
     assert!(
-        plan(&device, &worlds, &problems, &PlanOptions::default())
+        batchplan::plan(&device, &worlds, &problems, &PlanOptions::default())
             .unwrap()
             .solved()
             .count()

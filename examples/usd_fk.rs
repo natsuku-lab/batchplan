@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{CollisionModel, Robot, RobotOptions};
 use serde_json::{Value, json};
 
 fn main() -> Result<()> {

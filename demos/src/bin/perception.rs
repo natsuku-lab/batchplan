@@ -16,8 +16,11 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use batchplan::glam::{Mat3, Quat, Vec3};
 use batchplan::rng::Rng;
-use batchplan::*;
-use batchplan_demos::*;
+use batchplan::{
+    CollisionWeights, DepthImage, Device, IkOptions, IkProblem, Intrinsics, Obstacle, Occlusion,
+    OccupancyMap, PlanOptions, PlanProblem, Pose, Trajectory, World,
+};
+use batchplan_demos::{Args, OPEN};
 use rayon::prelude::*;
 
 const WIDTH: u32 = 640;
@@ -29,10 +32,10 @@ const SPEED: f32 = 0.6;
 
 fn main() -> Result<()> {
     let args = Args::parse()?;
-    let robot = panda()?;
+    let robot = batchplan_demos::panda()?;
     let device = args.device(&robot, true)?;
     let mut rng = Rng::new(args.count.unwrap_or(4) as u64);
-    let mut truth = tabletop(&mut rng);
+    let mut truth = batchplan_demos::tabletop(&mut rng);
     truth
         .obstacles
         .push(Obstacle::sphere(Vec3::new(0.55, 0.25, 0.08), 0.08));
@@ -96,9 +99,9 @@ fn main() -> Result<()> {
     let t = Instant::now();
     let worlds = device.upload(std::slice::from_ref(&observed))?;
     let targets: Vec<IkProblem> = (0..REACHES * 3)
-        .map(|_| IkProblem::new(0, grasp_target(&truth, &mut rng)))
+        .map(|_| IkProblem::new(0, batchplan_demos::grasp_target(&truth, &mut rng)))
         .collect();
-    let ik = solve_ik(&device, &worlds, &targets, &IkOptions::default())?;
+    let ik = batchplan::solve_ik(&device, &worlds, &targets, &IkOptions::default())?;
     let goals: Vec<Vec<f32>> = (0..targets.len())
         .filter_map(|k| ik.best(k).map(<[f32]>::to_vec))
         .take(REACHES)
@@ -118,7 +121,7 @@ fn main() -> Result<()> {
             )
         })
         .collect();
-    let planned = plan(&device, &worlds, &problems, &PlanOptions::default())?;
+    let planned = batchplan::plan(&device, &worlds, &problems, &PlanOptions::default())?;
     let planning = t.elapsed().as_secs_f64() * 1e3;
     // Played one after another, stopping at the first reach without a path.
     let mut samples: Vec<f32> = vec![];
@@ -170,7 +173,8 @@ fn main() -> Result<()> {
     let truth_boxes: Vec<(usize, &Obstacle)> = truth.obstacles.iter().enumerate().collect();
     rec.log_static(
         "world/truth",
-        &boxes(&truth_boxes, |_| slate()).with_fill_mode(rerun::FillMode::MajorWireframe),
+        &batchplan_demos::boxes(&truth_boxes, |_| batchplan_demos::slate())
+            .with_fill_mode(rerun::FillMode::MajorWireframe),
     )?;
     for (k, o) in truth.obstacles.iter().enumerate() {
         match *o {
@@ -178,7 +182,7 @@ fn main() -> Result<()> {
                 rec.log_static(
                     format!("world/truth/sphere_{k}"),
                     &rerun::Ellipsoids3D::from_centers_and_radii([center.to_array()], [radius])
-                        .with_colors([slate()]),
+                        .with_colors([batchplan_demos::slate()]),
                 )?;
             }
             Obstacle::Cylinder {
@@ -191,8 +195,8 @@ fn main() -> Result<()> {
                     format!("world/truth/cylinder_{k}"),
                     &rerun::Cylinders3D::from_lengths_and_radii([2.0 * half_height], [radius])
                         .with_centers([center.to_array()])
-                        .with_quaternions([quaternion(rotation)])
-                        .with_colors([slate()]),
+                        .with_quaternions([batchplan_demos::quaternion(rotation)])
+                        .with_colors([batchplan_demos::slate()]),
                 )?;
             }
             _ => {}
@@ -202,7 +206,7 @@ fn main() -> Result<()> {
     // The cameras, and the point cloud each one's depth makes.
     for ((name, pose), view) in cameras.iter().zip(&views) {
         let entity = format!("world/cameras/{name}");
-        rec.log_static(entity.as_str(), &transform(pose))?;
+        rec.log_static(entity.as_str(), &batchplan_demos::transform(pose))?;
         rec.log_static(
             entity.as_str(),
             &rerun::Pinhole::from_focal_length_and_resolution(
@@ -249,7 +253,7 @@ fn main() -> Result<()> {
             .with_colors([rerun::Color::from_rgb(240, 150, 40)]),
     )?;
 
-    let meshes = panda_meshes(&rec, "world/panda", &robot)?;
+    let meshes = batchplan_demos::panda_meshes(&rec, "world/panda", &robot)?;
     let hand: Vec<[f32; 3]> = samples
         .chunks(n)
         .map(|q| robot.ee_pose(q, 0).position.to_array())
@@ -271,7 +275,7 @@ fn main() -> Result<()> {
             &rec,
             &[(
                 Vec3::ZERO,
-                meshes.link_poses(&robot, q, panda_fingers(&robot, q, OPEN)?)?,
+                meshes.link_poses(&robot, q, batchplan_demos::panda_fingers(&robot, q, OPEN)?)?,
             )],
         )?;
     }

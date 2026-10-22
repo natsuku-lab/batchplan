@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use batchplan::datagen::{DemoOptions, Demonstration, demonstrations};
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{Device, Error, IkProblem, Pose, Robot, World};
 use glam::Vec3;
 
 fn demos(dt: f32) -> (Robot, Vec<World>, Vec<Demonstration>) {
@@ -197,6 +197,7 @@ mod lerobot {
     use std::fs::File;
 
     use arrow_array::{Array, FixedSizeListArray, Float32Array, Int64Array, RecordBatch};
+    use batchplan::JointTrajectory;
     use batchplan::datagen::{Carried, Origin};
     use batchplan::lerobot::{ExportOptions, export};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;

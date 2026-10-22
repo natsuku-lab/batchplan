@@ -8,13 +8,16 @@ A `Device` runs batched work: forward kinematics, collision costs and gradients,
 The two produce the same results (the test suite compares them throughout), so code written for one runs on the other. To prefer the GPU and fall back to the CPU:
 
 ```rust,no_run
-use batchplan::*;
+use batchplan::{Device, Error, Robot, RobotOptions, World};
 
 fn main() -> Result<(), Error> {
-    let robot = Robot::load("assets/ur5e/ur_description/urdf/ur5e.urdf", &RobotOptions::default())?;
+    let robot = Robot::load(
+        "assets/ur5e/ur_description/urdf/ur5e.urdf",
+        &RobotOptions::default(),
+    )?;
     let device = Device::gpu(&robot).or_else(|_| Device::cpu(&robot))?;
     println!("planning on {}", device.name());
-    let worlds = device.upload(&[World::default()])?;   // uploaded once, used by every call
+    let worlds = device.upload(&[World::default()])?; // uploaded once, used by every call
     let _ = worlds;
     Ok(())
 }

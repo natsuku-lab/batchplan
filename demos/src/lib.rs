@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use batchplan::glam::{EulerRot, Quat, Vec3};
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{CollisionModel, Device, Obstacle, Pose, Robot, RobotOptions, World};
 
 pub const ASSETS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../assets");
 /// How far each Panda finger opens, metres.

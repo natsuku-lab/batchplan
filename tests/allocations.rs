@@ -11,7 +11,7 @@ use std::cell::Cell;
 
 use batchplan::rrt::{RrtOptions, RrtProblem, connect};
 use batchplan::shortcut::shortcut;
-use batchplan::*;
+use batchplan::{Device, PlanOptions};
 
 struct Counting;
 
@@ -57,8 +57,10 @@ fn batches_build_their_searches_on_the_threads_that_run_them() {
     let per_problem = |small: usize, large: usize| (large - small) as f64 / (many - few) as f64;
 
     let o = PlanOptions::default();
-    let small = allocations(|| drop(plan(&device, &worlds, &problems[..few], &o).unwrap()));
-    let large = allocations(|| drop(plan(&device, &worlds, &problems[..many], &o).unwrap()));
+    let small =
+        allocations(|| drop(batchplan::plan(&device, &worlds, &problems[..few], &o).unwrap()));
+    let large =
+        allocations(|| drop(batchplan::plan(&device, &worlds, &problems[..many], &o).unwrap()));
     let plans = per_problem(small, large);
 
     let searches: Vec<RrtProblem> = problems[..many]

@@ -7,7 +7,7 @@ mod common;
 use std::f64::consts::FRAC_PI_2;
 
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{CollisionWeights, Device, IkOptions, IkProblem, Obstacle, Robot, World};
 use glam::{DMat3, DVec3, Quat, Vec3};
 
 fn panda() -> Robot {
@@ -271,7 +271,7 @@ fn ik_reaches_targets_from_collision_free_configurations() {
         seeds: 16,
         ..Default::default()
     };
-    let result = solve_ik(&cpu, &empty, &problems, &o).unwrap();
+    let result = batchplan::solve_ik(&cpu, &empty, &problems, &o).unwrap();
     let solved = (0..problems.len())
         .filter(|&p| result.best(p).is_some())
         .count();

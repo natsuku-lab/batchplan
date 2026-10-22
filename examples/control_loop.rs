@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{
+    Device, IkOptions, IkProblem, JointState, PlanOptions, PlanProblem, Robot, Trajectory, World,
+};
 
 const PERIOD: Duration = Duration::from_millis(20);
 
@@ -32,7 +34,7 @@ fn planner(
     for start in starts {
         let t = Instant::now();
         let target = common::grasp_target(&scene, &mut rng);
-        let ik = solve_ik(
+        let ik = batchplan::solve_ik(
             &device,
             &worlds,
             &[IkProblem::new(0, target)],
@@ -44,7 +46,7 @@ fn planner(
             time_budget: Some(Duration::from_millis(500)),
             ..Default::default()
         };
-        let result = plan(&device, &worlds, &[problem], &options)?;
+        let result = batchplan::plan(&device, &worlds, &[problem], &options)?;
         let Some(path) = result.best(0) else { continue };
         let trajectory = Trajectory::new(&robot, path, 0.8)?;
         // The controller only ever receives trajectories that pass the safety check.

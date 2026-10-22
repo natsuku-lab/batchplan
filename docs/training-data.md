@@ -29,13 +29,18 @@ IK above the box takes the solution nearest the start. IK for the grasp and the 
 `examples/datagen.rs --pick-place` completes 492 of 512 random tabletop tasks, with boxes of 512 different sizes, in 0.5 s on an M4 Pro's GPU. IK runs in three batches however many sizes there are; only the transfers, which hold the box, plan per box size, on CPU threads.
 
 ```rust,no_run
-use batchplan::datagen::{PickPlace, PickPlaceOptions, pick_and_place};
+use batchplan::datagen::{PickPlace, PickPlaceOptions};
 use batchplan::glam::{Quat, Vec3};
-use batchplan::*;
+use batchplan::{
+    CollisionModel, Device, Error, Obstacle, Pose, Robot, RobotOptions, World, datagen,
+};
 
 fn main() -> Result<(), Error> {
     // IK targets the grasp point between the fingers. The fingers stay locked: episodes record the gripper apart.
-    let fingers = [("panda_finger_joint1".to_string(), 0.04), ("panda_finger_joint2".to_string(), 0.04)];
+    let fingers = [
+        ("panda_finger_joint1".to_string(), 0.04),
+        ("panda_finger_joint2".to_string(), 0.04),
+    ];
     let options = RobotOptions {
         ee_links: vec!["ee_link".into()],
         lock_joints: fingers.into_iter().collect(),
@@ -46,10 +51,16 @@ fn main() -> Result<(), Error> {
     let device = Device::gpu(&robot).or_else(|_| Device::cpu(&robot))?;
     let table = Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02));
     let block = Obstacle::cuboid(Vec3::new(0.45, 0.2, 0.03), Vec3::new(0.02, 0.03, 0.03));
-    let worlds = vec![World { obstacles: vec![table, block] }];
+    let worlds = vec![World {
+        obstacles: vec![table, block],
+    }];
     let place = Pose::new(Vec3::new(0.45, -0.2, 0.03), Quat::from_rotation_z(0.5));
-    let tasks = [PickPlace { world: 0, object: 1, place }];
-    let demos = pick_and_place(&device, &worlds, &tasks, &PickPlaceOptions::default())?;
+    let tasks = [PickPlace {
+        world: 0,
+        object: 1,
+        place,
+    }];
+    let demos = datagen::pick_and_place(&device, &worlds, &tasks, &PickPlaceOptions::default())?;
     for d in &demos {
         println!("{}: {} samples", d.task, d.trajectory.len());
     }
@@ -74,17 +85,24 @@ On a robot with several hands, `pick_and_place` uses the first and holds the joi
 The segments cover DexMimicGen's subtask kinds: sequential (one arm waits for the other), parallel (both move, each on its own errand) and coordinated (both must arrive together). IK solves both hands at once at the meeting pose. Plans hold the box in the hand that has it, and both wrists may touch it; the final lowering plans without it, as pick-and-place's does. The episode records both grippers, where the box is at every sample, and a task such as "Pass the box from the left hand to the right hand and put it down."
 
 ```rust,no_run
-use batchplan::datagen::{Handover, PickPlaceOptions, handover};
+use batchplan::datagen::{Handover, PickPlaceOptions};
 use batchplan::glam::{Quat, Vec3};
-use batchplan::*;
+use batchplan::{Device, Error, Pose, World, datagen};
 
 /// Hands a 22 cm block lying in front of the left arm (obstacle 1 of world 0) to the right arm.
 fn pass_it(device: &Device, worlds: &[World]) -> Result<Vec<datagen::Demonstration>, Error> {
     let across = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
     let meet = Pose::new(Vec3::new(0.5, 0.0, 0.3), across);
     let place = Pose::new(Vec3::new(0.45, -0.3, 0.025), across);
-    let task = Handover { world: 0, object: 1, from: 0, to: 1, meet, place };
-    handover(device, worlds, &[task], &PickPlaceOptions::default())
+    let task = Handover {
+        world: 0,
+        object: 1,
+        from: 0,
+        to: 1,
+        meet,
+        place,
+    };
+    datagen::handover(device, worlds, &[task], &PickPlaceOptions::default())
 }
 ```
 
@@ -160,20 +178,26 @@ Visual meshes are simplified to 2,000 triangles each as they load. The reBot's C
 | `is_recovery`, `parent_episode_index`, `world_index` | extensions that LeRobot's policies ignore |
 
 ```rust,no_run
-use batchplan::datagen::{DemoOptions, demonstrations};
+use batchplan::datagen::DemoOptions;
 use batchplan::glam::{Quat, Vec3};
-use batchplan::lerobot::{ExportOptions, export};
-use batchplan::*;
+use batchplan::lerobot::ExportOptions;
+use batchplan::{Device, Error, IkProblem, Pose, Robot, RobotOptions, World, datagen, lerobot};
 
 fn main() -> Result<(), Error> {
-    let robot = Robot::load("assets/ur5e/ur_description/urdf/ur5e.urdf", &RobotOptions::default())?;
+    let robot = Robot::load(
+        "assets/ur5e/ur_description/urdf/ur5e.urdf",
+        &RobotOptions::default(),
+    )?;
     let device = Device::gpu(&robot).or_else(|_| Device::cpu(&robot))?;
     let worlds = device.upload(&[World::default()])?;
     let down = Quat::from_rotation_x(std::f32::consts::PI);
     let goals = vec![IkProblem::new(0, Pose::new(Vec3::new(0.4, 0.2, 0.3), down))];
-    let demos = demonstrations(&device, &worlds, &goals, &DemoOptions::default())?;
-    let options = ExportOptions { data_files_size_in_mb: 100, ..Default::default() };
-    export("data/my_dataset", &robot, &worlds, &demos, &options)
+    let demos = datagen::demonstrations(&device, &worlds, &goals, &DemoOptions::default())?;
+    let options = ExportOptions {
+        data_files_size_in_mb: 100,
+        ..Default::default()
+    };
+    lerobot::export("data/my_dataset", &robot, &worlds, &demos, &options)
 }
 ```
 

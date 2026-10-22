@@ -9,7 +9,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{
+    CollisionModel, CollisionWeights, Device, Error, JointLimits, Obstacle, PlanOptions,
+    PlanProblem, Robot, RobotOptions, SphereOptions, Trajectory, World,
+};
 use glam::{DMat3, DVec3, Mat3, Quat, Vec3};
 
 const UR5E: &str = "ur5e/ur_description/urdf/ur5e.urdf";
@@ -743,7 +746,7 @@ fn every_test_arm_loads_spherizes_and_plans() {
             }
         }
         for d in devices(&robot) {
-            let result = plan(
+            let result = batchplan::plan(
                 &d,
                 &d.upload(&scene).unwrap(),
                 &problems,
@@ -871,7 +874,7 @@ fn robots_past_the_old_kernel_limits_work_on_every_device() {
         let mut goal = vec![0.0; 40];
         goal[0] = 1.0;
         let problem = PlanProblem::new(0, start, goal);
-        let result = plan(&d, &worlds, &[problem], &PlanOptions::default()).unwrap();
+        let result = batchplan::plan(&d, &worlds, &[problem], &PlanOptions::default()).unwrap();
         assert!(
             result.best(0).is_some(),
             "{}: no plan for the snake",
@@ -962,7 +965,7 @@ fn floating_and_planar_joints_become_one_axis_joints() {
             let mut goal = vec![0.0; robot.dof()];
             goal[0] = 0.8;
             let problem = PlanProblem::new(0, vec![0.0; robot.dof()], goal);
-            let result = plan(&d, &worlds, &[problem], &PlanOptions::default()).unwrap();
+            let result = batchplan::plan(&d, &worlds, &[problem], &PlanOptions::default()).unwrap();
             assert!(
                 result.best(0).is_some(),
                 "{}: no plan for the {kind} base",

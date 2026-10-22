@@ -54,16 +54,24 @@ The paths below point at test robots in this repository's `assets/`; use your ow
 
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
-use batchplan::*;
+use batchplan::{
+    Device, Error, IkOptions, IkProblem, Obstacle, PlanOptions, PlanProblem, Pose, Robot,
+    RobotOptions, Trajectory, World,
+};
 
 fn main() -> Result<(), Error> {
     // Any URDF, MJCF or USD robot. Collision spheres are fitted when it loads.
-    let robot = Robot::load("assets/ur5e/ur_description/urdf/ur5e.urdf", &RobotOptions::default())?;
+    let robot = Robot::load(
+        "assets/ur5e/ur_description/urdf/ur5e.urdf",
+        &RobotOptions::default(),
+    )?;
     let device = Device::gpu(&robot).or_else(|_| Device::cpu(&robot))?;
 
     // Scenes are uploaded once. Problems name their scene by index.
     let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.02), Vec3::new(1.0, 1.0, 0.02));
-    let worlds = device.upload(&[World { obstacles: vec![table] }])?;
+    let worlds = device.upload(&[World {
+        obstacles: vec![table],
+    }])?;
 
     // IK for a batch of gripper poses...
     let down = Quat::from_rotation_x(std::f32::consts::PI);
@@ -71,18 +79,25 @@ fn main() -> Result<(), Error> {
         .into_iter()
         .map(|position| IkProblem::new(0, Pose::new(position, down)))
         .collect();
-    let ik = solve_ik(&device, &worlds, &goals, &IkOptions::default())?;
+    let ik = batchplan::solve_ik(&device, &worlds, &goals, &IkOptions::default())?;
 
     // ...then a collision-free motion to every solution, in one call.
-    let problems: Vec<PlanProblem> =
-        ik.solved().map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution)).collect();
-    let plans = plan(&device, &worlds, &problems, &PlanOptions::default())?;
+    let problems: Vec<PlanProblem> = ik
+        .solved()
+        .map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution))
+        .collect();
+    let plans = batchplan::plan(&device, &worlds, &problems, &PlanOptions::default())?;
 
     // Time each path within the robot's velocity, acceleration and jerk limits.
     for s in plans.solved() {
         let trajectory = Trajectory::new(&robot, s.solution, 1.0)?;
         let samples = trajectory.sample(100.0)?; // 100 Hz, for a controller
-        println!("motion {}: {:.2} s, {} samples", s.index, trajectory.duration(), samples.len());
+        println!(
+            "motion {}: {:.2} s, {} samples",
+            s.index,
+            trajectory.duration(),
+            samples.len()
+        );
     }
     Ok(())
 }
@@ -91,26 +106,41 @@ fn main() -> Result<(), Error> {
 ### Make a training dataset
 
 ```rust,no_run
-use batchplan::datagen::{DemoOptions, demonstrations};
+use batchplan::datagen::DemoOptions;
 use batchplan::glam::{Quat, Vec3};
-use batchplan::lerobot::{ExportOptions, export};
-use batchplan::*;
+use batchplan::lerobot::ExportOptions;
+use batchplan::{Device, Error, IkProblem, Pose, Robot, RobotOptions, World, datagen, lerobot};
 
 fn main() -> Result<(), Error> {
-    let robot = Robot::load("assets/ur5e/ur_description/urdf/ur5e.urdf", &RobotOptions::default())?;
+    let robot = Robot::load(
+        "assets/ur5e/ur_description/urdf/ur5e.urdf",
+        &RobotOptions::default(),
+    )?;
     let device = Device::gpu(&robot).or_else(|_| Device::cpu(&robot))?;
     let worlds = device.upload(&[World::default()])?;
 
     // Reaches to 64 goals, plus recoveries from states perturbed along them.
     let down = Quat::from_rotation_x(std::f32::consts::PI);
     let goals: Vec<IkProblem> = (0..64)
-        .map(|i| Vec3::new(0.3 + 0.03 * (i % 8) as f32, -0.25 + 0.06 * (i / 8) as f32, 0.3))
+        .map(|i| {
+            Vec3::new(
+                0.3 + 0.03 * (i % 8) as f32,
+                -0.25 + 0.06 * (i / 8) as f32,
+                0.3,
+            )
+        })
         .map(|position| IkProblem::new(0, Pose::new(position, down)))
         .collect();
-    let demos = demonstrations(&device, &worlds, &goals, &DemoOptions::default())?;
+    let demos = datagen::demonstrations(&device, &worlds, &goals, &DemoOptions::default())?;
 
     // A LeRobot v3.0 dataset (cargo feature `lerobot`), ready for `lerobot-train`.
-    export("data/reaches", &robot, &worlds, &demos, &ExportOptions::default())
+    lerobot::export(
+        "data/reaches",
+        &robot,
+        &worlds,
+        &demos,
+        &ExportOptions::default(),
+    )
 }
 ```
 
@@ -118,22 +148,40 @@ fn main() -> Result<(), Error> {
 
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
-use batchplan::*;
+use batchplan::{
+    DepthImage, Device, Error, Intrinsics, Obstacle, Occlusion, Pose, Robot, SdfGrid, SdfOptions,
+    World, Worlds,
+};
 
 /// Turns one depth frame into a world to plan in, leaving the arm itself out.
-fn world_from_camera(device: &Device, robot: &Robot, depth: &[f32], q: &[f32]) -> Result<Worlds, Error> {
+fn world_from_camera(
+    device: &Device,
+    robot: &Robot,
+    depth: &[f32],
+    q: &[f32],
+) -> Result<Worlds, Error> {
     let image = DepthImage {
         depth, // metres, row by row
         width: 640,
-        intrinsics: Intrinsics { fx: 525.0, fy: 525.0, cx: 319.5, cy: 239.5 },
+        intrinsics: Intrinsics {
+            fx: 525.0,
+            fy: 525.0,
+            cx: 319.5,
+            cy: 239.5,
+        },
         // 1.5 m above the table, looking down (OpenCV axes: z forward, y down).
-        camera: Pose::new(Vec3::new(0.5, 0.0, 1.5), Quat::from_rotation_x(std::f32::consts::PI)),
+        camera: Pose::new(
+            Vec3::new(0.5, 0.0, 1.5),
+            Quat::from_rotation_x(std::f32::consts::PI),
+        ),
     };
     let arm = image.robot_mask(robot, q, 0.04)?; // the arm is not an obstacle to itself
     // What objects hide is solid; what only the arm hides is free, or it would wall the arm in.
     let behind = Occlusion::OccupiedExceptRobotShadow;
     let grid = SdfGrid::from_depth(device, &image, Some(&arm), behind, &SdfOptions::default())?;
-    device.upload(&[World { obstacles: vec![Obstacle::from(grid)] }])
+    device.upload(&[World {
+        obstacles: vec![Obstacle::from(grid)],
+    }])
 }
 ```
 

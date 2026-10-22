@@ -22,8 +22,8 @@ use anyhow::{Context, Result};
 use batchplan::datagen::{Demonstration, Handover, handover};
 use batchplan::glam::Vec3;
 use batchplan::rng::Rng;
-use batchplan::*;
-use batchplan_demos::*;
+use batchplan::{Obstacle, Pose, Robot, World};
+use batchplan_demos::{Args, RobotMeshes};
 use rebot::{FINGERS_OPEN, scene, two_rebots};
 
 /// Where `scripts/fetch_rebot.sh` puts the arm.
@@ -80,7 +80,7 @@ fn main() -> Result<()> {
     for d in &demos {
         episodes[d.world as usize] = Some(d);
     }
-    let offsets = grid(count, SPACING);
+    let offsets = batchplan_demos::grid(count, SPACING);
     for (i, task) in tasks.iter().enumerate() {
         log_scene(&rec, &robot, &worlds[i], task, episodes[i], offsets[i], i)?;
     }
@@ -98,7 +98,10 @@ fn main() -> Result<()> {
                 Some(d) => {
                     let s = f.min(d.trajectory.len() - 1);
                     if let Some(c) = &d.carried {
-                        rec.log(format!("world/scene_{i}/block"), &transform(&c.poses[s]))?;
+                        rec.log(
+                            format!("world/scene_{i}/block"),
+                            &batchplan_demos::transform(&c.poses[s]),
+                        )?;
                     }
                     (
                         &d.trajectory.positions[s * n..][..n],
@@ -162,7 +165,13 @@ fn log_scene(
         .collect();
     rec.log_static(
         format!("{scene}/obstacles"),
-        &boxes(&fixed, |k| if k == 0 { wood() } else { slate() }),
+        &batchplan_demos::boxes(&fixed, |k| {
+            if k == 0 {
+                batchplan_demos::wood()
+            } else {
+                batchplan_demos::slate()
+            }
+        }),
     )?;
     let Obstacle::Cuboid {
         center,
@@ -182,7 +191,7 @@ fn log_scene(
     if !episode.is_some_and(|d| d.carried.is_some()) {
         rec.log_static(
             format!("{scene}/block"),
-            &transform(&Pose {
+            &batchplan_demos::transform(&Pose {
                 position: center,
                 rotation,
             }),
@@ -200,7 +209,7 @@ fn log_scene(
                 [pose.position.to_array()],
                 [half_extents.to_array()],
             )
-            .with_quaternions([quaternion(pose.rotation)])
+            .with_quaternions([batchplan_demos::quaternion(pose.rotation)])
             .with_colors([if name == "place" {
                 color
             } else {

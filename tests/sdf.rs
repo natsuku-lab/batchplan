@@ -10,7 +10,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{
+    CollisionWeights, DepthImage, Device, Intrinsics, JointTrajectory, Obstacle, Occlusion,
+    OccupancyMap, Pose, Robot, SdfGrid, SdfOptions, World,
+};
 use glam::{Quat, Vec3};
 
 /// A CPU device for the builders' distance transform, which needs no particular robot.

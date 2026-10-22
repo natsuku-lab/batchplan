@@ -15,8 +15,11 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use batchplan::glam::Vec3;
 use batchplan::rng::Rng;
-use batchplan::*;
-use batchplan_demos::*;
+use batchplan::{
+    CollisionWeights, Device, IkOptions, IkProblem, JointState, Obstacle, PlanOptions, PlanProblem,
+    Pose, Robot, StartMotion, Trajectory, World, Worlds,
+};
+use batchplan_demos::{Args, OPEN};
 
 const SPACING: f32 = 2.4;
 /// The control period, seconds.
@@ -46,7 +49,7 @@ struct Motion {
 fn main() -> Result<()> {
     let args = Args::parse()?;
     let count = args.count.unwrap_or(4);
-    let robot = panda()?;
+    let robot = batchplan_demos::panda()?;
     // Replanning is a few problems at a time, where the CPU answers soonest.
     let device = args.device(&robot, false)?;
     let mut rng = Rng::new(
@@ -57,7 +60,7 @@ fn main() -> Result<()> {
     );
     let mut worlds: Vec<World> = (0..count)
         .map(|_| {
-            let mut w = tabletop(&mut rng);
+            let mut w = batchplan_demos::tabletop(&mut rng);
             w.obstacles.push(Obstacle::cuboid(PARKED, BOX));
             w
         })
@@ -79,8 +82,8 @@ fn main() -> Result<()> {
             device.name()
         )),
     )?;
-    let meshes = panda_meshes(&rec, "world/panda", &robot)?;
-    let offsets = grid(count, SPACING);
+    let meshes = batchplan_demos::panda_meshes(&rec, "world/panda", &robot)?;
+    let offsets = batchplan_demos::grid(count, SPACING);
     for (i, w) in worlds.iter().enumerate() {
         let scene = format!("world/scene_{i}");
         rec.log_static(
@@ -95,7 +98,13 @@ fn main() -> Result<()> {
             .collect();
         rec.log_static(
             format!("{scene}/obstacles"),
-            &boxes(&fixed, |k| if k == 0 { wood() } else { slate() }),
+            &batchplan_demos::boxes(&fixed, |k| {
+                if k == 0 {
+                    batchplan_demos::wood()
+                } else {
+                    batchplan_demos::slate()
+                }
+            }),
         )?;
     }
 
@@ -144,9 +153,14 @@ fn main() -> Result<()> {
         if !arrived.is_empty() {
             let goals: Vec<IkProblem> = arrived
                 .iter()
-                .map(|&i| IkProblem::new(i as u32, grasp_target(&worlds[i], &mut rng)))
+                .map(|&i| {
+                    IkProblem::new(
+                        i as u32,
+                        batchplan_demos::grasp_target(&worlds[i], &mut rng),
+                    )
+                })
                 .collect();
-            let ik = solve_ik(&device, &uploaded, &goals, &IkOptions::default())?;
+            let ik = batchplan::solve_ik(&device, &uploaded, &goals, &IkOptions::default())?;
             let reaches: Vec<(usize, PlanProblem)> = arrived
                 .iter()
                 .enumerate()
@@ -159,7 +173,7 @@ fn main() -> Result<()> {
                 })
                 .collect();
             let problems: Vec<PlanProblem> = reaches.iter().map(|(_, p)| p.clone()).collect();
-            let planned = plan(&device, &uploaded, &problems, &PlanOptions::default())?;
+            let planned = batchplan::plan(&device, &uploaded, &problems, &PlanOptions::default())?;
             for (k, (i, p)) in reaches.iter().enumerate() {
                 let Some(path) = planned.best(k) else {
                     continue;
@@ -265,7 +279,7 @@ fn main() -> Result<()> {
                     ..Default::default()
                 };
                 let started = Instant::now();
-                let replanned = plan(&device, &uploaded, &problems, &options)?;
+                let replanned = batchplan::plan(&device, &uploaded, &problems, &options)?;
                 let mut done = 0;
                 let mut stuck = vec![];
                 let mut labels: Vec<(usize, String)> = vec![];
@@ -392,7 +406,7 @@ fn main() -> Result<()> {
                     meshes.link_poses(
                         &robot,
                         &now[i].position,
-                        panda_fingers(&robot, &now[i].position, OPEN)?,
+                        batchplan_demos::panda_fingers(&robot, &now[i].position, OPEN)?,
                     )?,
                 ))
             })

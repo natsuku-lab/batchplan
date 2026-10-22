@@ -8,7 +8,10 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{
+    Device, Error, IkOptions, IkProblem, JointState, PlanOptions, PlanProblem, Robot, RobotOptions,
+    StartMotion, Trajectory, World,
+};
 
 /// Counts allocations made by the current thread, so other test threads cannot interfere.
 struct CountingAllocator;
@@ -42,12 +45,12 @@ fn planned(robot: &Robot, count: usize) -> Vec<Vec<f32>> {
         .map(|(i, w)| IkProblem::new(i as u32, common::grasp_target(w, &mut rng)))
         .collect();
     let worlds = cpu.upload(&worlds).unwrap();
-    let ik = solve_ik(&cpu, &worlds, &goals, &IkOptions::default()).unwrap();
+    let ik = batchplan::solve_ik(&cpu, &worlds, &goals, &IkOptions::default()).unwrap();
     let problems: Vec<PlanProblem> = ik
         .solved()
         .map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution))
         .collect();
-    let result = plan(&cpu, &worlds, &problems, &PlanOptions::default()).unwrap();
+    let result = batchplan::plan(&cpu, &worlds, &problems, &PlanOptions::default()).unwrap();
     let paths: Vec<Vec<f32>> = result.solved().map(|s| s.solution.to_vec()).collect();
     assert!(
         paths.len() >= count * 3 / 4,

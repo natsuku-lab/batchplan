@@ -14,7 +14,10 @@ use std::time::Instant;
 
 use anyhow::Result;
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{
+    CollisionWeights, DepthImage, Device, IkOptions, IkProblem, Intrinsics, Obstacle, Occlusion,
+    PlanOptions, PlanProblem, Pose, SdfGrid, SdfOptions, Trajectory, World,
+};
 use glam::{Mat3, Quat, Vec3};
 use rayon::prelude::*;
 
@@ -106,12 +109,12 @@ fn main() -> Result<()> {
     let goals: Vec<IkProblem> = (0..64)
         .map(|_| IkProblem::new(0, common::grasp_target(&scene, &mut rng)))
         .collect();
-    let ik = solve_ik(&device, &worlds, &goals, &IkOptions::default())?;
+    let ik = batchplan::solve_ik(&device, &worlds, &goals, &IkOptions::default())?;
     let problems: Vec<PlanProblem> = ik
         .solved()
         .map(|s| PlanProblem::new(0, robot.default_q(), s.solution))
         .collect();
-    let result = plan(&device, &worlds, &problems, &PlanOptions::default())?;
+    let result = batchplan::plan(&device, &worlds, &problems, &PlanOptions::default())?;
     println!(
         "IK reached {} of {} targets, planned {} in {:.0} ms",
         problems.len(),

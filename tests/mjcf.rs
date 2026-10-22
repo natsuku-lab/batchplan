@@ -9,7 +9,10 @@ use std::f64::consts::FRAC_PI_2;
 use std::path::PathBuf;
 
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{
+    CollisionModel, CollisionWeights, Device, JointLimits, Obstacle, Pose, Robot, RobotOptions,
+    SdfOptions, World,
+};
 use glam::{DAffine3, DMat3, DQuat, DVec3, Vec3};
 
 /// Kinematics only: these Menagerie models reference meshes that are not bundled.

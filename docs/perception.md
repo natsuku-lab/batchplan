@@ -52,23 +52,41 @@ Grids from depth images grow toward collision by about three voxels, so set the 
 
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
-use batchplan::*;
+use batchplan::{
+    DepthImage, Device, Error, Intrinsics, Obstacle, Occlusion, OccupancyMap, Pose, Robot,
+    RobotOptions, World,
+};
 
 fn main() -> Result<(), Error> {
     let robot = Robot::load("assets/franka/franka_panda.urdf", &RobotOptions::default())?;
     let device = Device::gpu(&robot).or_else(|_| Device::cpu(&robot))?;
     let mut map = OccupancyMap::new(Vec3::new(-0.2, -0.8, -0.1), Vec3::new(1.2, 0.8, 1.0), 0.01)?;
     // Your camera's pose in OpenCV axes (z forward, y down): here 1.5 m up, looking down.
-    let camera = Pose::new(Vec3::new(0.5, 0.0, 1.5), Quat::from_rotation_x(std::f32::consts::PI));
-    let intrinsics = Intrinsics { fx: 525.0, fy: 525.0, cx: 319.5, cy: 239.5 };
-    let q = robot.default_q().to_vec();                                                 // the arm's current state
+    let camera = Pose::new(
+        Vec3::new(0.5, 0.0, 1.5),
+        Quat::from_rotation_x(std::f32::consts::PI),
+    );
+    let intrinsics = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
+    let q = robot.default_q().to_vec(); // the arm's current state
     for depth in frames() {
-        let image = DepthImage { depth: &depth, width: 640, intrinsics, camera };
-        let mask = image.robot_mask(&robot, &q, 0.04)?;                                 // the arm is not an obstacle
+        let image = DepthImage {
+            depth: &depth,
+            width: 640,
+            intrinsics,
+            camera,
+        };
+        let mask = image.robot_mask(&robot, &q, 0.04)?; // the arm is not an obstacle
         map.integrate(&device, &image, Some(&mask))?;
     }
-    let grid = map.grid(&device, Occlusion::Occupied)?;                                 // never-seen space is solid
-    let world = World { obstacles: vec![Obstacle::from(grid)] };
+    let grid = map.grid(&device, Occlusion::Occupied)?; // never-seen space is solid
+    let world = World {
+        obstacles: vec![Obstacle::from(grid)],
+    };
     let _worlds = device.upload(&[world])?;
     Ok(())
 }

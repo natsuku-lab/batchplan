@@ -9,7 +9,10 @@ use std::f32::consts::FRAC_PI_2;
 use std::sync::{Arc, OnceLock};
 
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{
+    AttachedObject, CollisionWeights, Device, MeshModel, Obstacle, Robot, RobotOptions, SdfGrid,
+    SdfOptions, SphereOptions, World,
+};
 use glam::{Quat, Vec3};
 
 /// Three box links in a horizontal plane at z = 0.5, each turning about z: `a` (x from 0 to 0.4,

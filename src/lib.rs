@@ -12,13 +12,13 @@
 //!   LeRobot v3.0 with the optional `lerobot` feature.
 //!
 //! ```no_run
-//! use batchplan::*;
+//! use batchplan::{Device, PlanOptions, PlanProblem, Robot, RobotOptions, World};
 //! let robot = Robot::load("assets/ur5e/ur_description/urdf/ur5e.urdf", &RobotOptions::default())?;
 //! let device = Device::gpu(&robot)?;
 //! let worlds = device.upload(&[World::default()])?;
 //! let goal = vec![0.5, -1.2, 1.0, -1.4, -1.5, 0.3];
 //! let problems = vec![PlanProblem::new(0, robot.default_q(), goal)];
-//! let result = plan(&device, &worlds, &problems, &PlanOptions::default())?;
+//! let result = batchplan::plan(&device, &worlds, &problems, &PlanOptions::default())?;
 //! println!("solved: {}", result.best(0).is_some());
 //! # anyhow::Ok(())
 //! ```

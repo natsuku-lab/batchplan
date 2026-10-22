@@ -6,7 +6,7 @@
 mod common;
 
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{CollisionWeights, Device, Pose, Robot, RobotOptions, SdfOptions, World};
 use std::f32::consts::{FRAC_PI_2, PI};
 
 use glam::{DAffine3, DMat3, DVec3, Vec3};

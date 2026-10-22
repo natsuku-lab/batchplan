@@ -7,7 +7,10 @@ mod common;
 use batchplan::rng::Rng;
 use batchplan::rrt::connect;
 use batchplan::shortcut::shortcut;
-use batchplan::*;
+use batchplan::{
+    CollisionWeights, Device, Obstacle, PlanOptions, PlanProblem, Robot, RobotOptions, RrtOptions,
+    RrtProblem, ShortcutOptions, Trajectory, World, Worlds,
+};
 use glam::Vec3;
 
 const UR5E: &str = "ur5e/ur_description/urdf/ur5e.urdf";
@@ -230,7 +233,7 @@ fn plan_solves_every_problem_rrt_connect_reaches() {
     let mut solved = vec![];
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
-        let result = plan(&d, &worlds, &problems, &PlanOptions::default()).unwrap();
+        let result = batchplan::plan(&d, &worlds, &problems, &PlanOptions::default()).unwrap();
         let reachable = connect(&d, &worlds, &searches(&problems), &RrtOptions::default()).unwrap();
         let rrt = reachable.paths.iter().flatten().count();
         eprintln!(
@@ -335,7 +338,7 @@ fn continuous_joints_turn_the_short_way_unless_it_is_blocked() {
     };
     for d in devices(&robot) {
         let worlds = d.upload(&[World::default(), wall.clone()]).unwrap();
-        let open = plan(
+        let open = batchplan::plan(
             &d,
             &worlds,
             std::slice::from_ref(&problem),
@@ -371,7 +374,7 @@ fn continuous_joints_turn_the_short_way_unless_it_is_blocked() {
             world: 1,
             ..problem.clone()
         };
-        let around = plan(&d, &worlds, &[blocked], &PlanOptions::default()).unwrap();
+        let around = batchplan::plan(&d, &worlds, &[blocked], &PlanOptions::default()).unwrap();
         let path = around
             .best(0)
             .unwrap_or_else(|| panic!("{}: no plan around the wall", d.name()));
@@ -430,7 +433,7 @@ fn ur5e_reaches_a_goal_a_turn_away_the_other_way_round() {
     for d in devices(&robot) {
         let worlds = d.upload(std::slice::from_ref(&wall)).unwrap();
         let problem = PlanProblem::new(0, start.clone(), goal.clone());
-        let result = plan(&d, &worlds, &[problem], &PlanOptions::default()).unwrap();
+        let result = batchplan::plan(&d, &worlds, &[problem], &PlanOptions::default()).unwrap();
         let path = result
             .best(0)
             .unwrap_or_else(|| panic!("{}: no plan", d.name()));
@@ -595,7 +598,7 @@ fn plans_around_a_ball_on_the_straight_line_stay_near_it() {
             scene.push(world);
         }
     }
-    let result = plan(
+    let result = batchplan::plan(
         &cpu,
         &cpu.upload(&scene).unwrap(),
         &problems,
@@ -705,6 +708,6 @@ fn a_path_no_spline_follows_is_searched_again() {
         ],
     );
     let worlds = cpu.upload(&[World { obstacles }]).unwrap();
-    let result = plan(&cpu, &worlds, &[problem], &PlanOptions::default()).unwrap();
+    let result = batchplan::plan(&cpu, &worlds, &[problem], &PlanOptions::default()).unwrap();
     assert!(result.best(0).is_some(), "no path");
 }

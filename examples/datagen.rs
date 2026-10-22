@@ -19,7 +19,7 @@ use batchplan::datagen::{
     DemoOptions, Demonstration, Origin, PickPlaceOptions, demonstrations, pick_and_place,
 };
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{Device, IkProblem, Robot, World};
 
 fn main() -> Result<()> {
     let (mut lerobot, mut pick_place, mut file_mb, mut positional) = (false, false, 100, vec![]);

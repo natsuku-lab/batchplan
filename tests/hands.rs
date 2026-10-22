@@ -5,7 +5,10 @@
 mod common;
 
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{
+    CollisionWeights, Device, IkOptions, IkProblem, Obstacle, Part, PlanOptions, PlanProblem, Pose,
+    Robot, RobotOptions, RrtOptions, RrtProblem, Trajectory, World, Worlds,
+};
 use glam::{Quat, Vec3};
 
 const UR5E: &str = "ur5e/ur_description/urdf/ur5e.urdf";
@@ -107,7 +110,7 @@ fn ik_reaches_both_hands_targets_at_once() {
     let o = IkOptions::default();
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
-        let ik = solve_ik(&d, &worlds, &problems, &o).unwrap();
+        let ik = batchplan::solve_ik(&d, &worlds, &problems, &o).unwrap();
         let solved: Vec<_> = ik.solved().collect();
         eprintln!(
             "{}: {} of {} two-hand problems",
@@ -159,7 +162,7 @@ fn a_hand_without_a_target_holds_its_arm() {
         .collect();
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
-        let ik = solve_ik(&d, &worlds, &problems, &IkOptions::default()).unwrap();
+        let ik = batchplan::solve_ik(&d, &worlds, &problems, &IkOptions::default()).unwrap();
         assert!(
             ik.solved().count() >= 12,
             "{}: solved {} of {}",
@@ -297,7 +300,7 @@ fn plans_hold_an_arm_still() {
             seeds: 2,
             ..Default::default()
         };
-        let result = plan(&d, &worlds, &problems, &o).unwrap();
+        let result = batchplan::plan(&d, &worlds, &problems, &o).unwrap();
         let solved = result.solved().count();
         eprintln!("{}: planned {solved} of {}", d.name(), problems.len());
         assert!(

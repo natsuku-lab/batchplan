@@ -9,7 +9,7 @@ use batchplan::datagen::{
     reset_states,
 };
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{CollisionWeights, Device, Obstacle, Pose, Robot, World};
 use glam::{Quat, Vec3};
 
 fn devices(robot: &Robot) -> Vec<Device> {

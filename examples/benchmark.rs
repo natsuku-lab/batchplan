@@ -37,7 +37,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
-use batchplan::*;
+use batchplan::{
+    CollisionModel, CollisionWeights, Device, IkOptions, IkProblem, MeshModel, Obstacle,
+    PlanOptions, PlanProblem, PlanResult, Pose, Robot, RobotOptions, Trajectory, World, Worlds,
+};
 use glam::{Quat, Vec3};
 use serde::Deserialize;
 
@@ -382,7 +385,7 @@ fn ik_and_plan(
     problems: &[Problem],
     o: &PlanOptions,
 ) -> Result<PlanResult> {
-    let ik = solve_ik(
+    let ik = batchplan::solve_ik(
         device,
         worlds,
         &ik_problems(problems),
@@ -398,7 +401,7 @@ fn ik_and_plan(
             )
         })
         .collect();
-    Ok(plan(device, worlds, &plans, o)?)
+    Ok(batchplan::plan(device, worlds, &plans, o)?)
 }
 
 fn main() -> Result<()> {
@@ -480,7 +483,7 @@ fn main() -> Result<()> {
         let (mut total, mut total_free, mut total_plan, mut total_full, mut total_time) =
             (0, 0, 0, 0, 0.0);
         let mut all_latency = vec![];
-        solve_ik(
+        batchplan::solve_ik(
             device,
             &device.upload(&[World::default()])?,
             &[IkProblem::new(0, robot.ee_pose(robot.default_q(), 0))],
@@ -496,7 +499,7 @@ fn main() -> Result<()> {
                 .map(|(i, p)| PlanProblem::new(i as u32, p.start.clone(), p.goal_ik[0].clone()))
                 .collect();
             let t = Instant::now();
-            let planned = plan(device, &device.upload(&scene)?, &to_ik, &args.plan)?;
+            let planned = batchplan::plan(device, &device.upload(&scene)?, &to_ik, &args.plan)?;
             let plan_only = Outcome {
                 seconds: t.elapsed().as_secs_f64(),
                 ..score(&robot, &cpu, &on_cpu, meshes.as_ref(), problems, &planned)?
@@ -544,7 +547,7 @@ fn main() -> Result<()> {
                     ..to_ik[i].clone()
                 }];
                 let t = Instant::now();
-                plan(device, &device.upload(&scene[i..i + 1])?, &one, &args.plan)?;
+                batchplan::plan(device, &device.upload(&scene[i..i + 1])?, &one, &args.plan)?;
                 plan_latency.push(t.elapsed().as_secs_f64() * 1e3);
             }
             if args.save.is_some() {

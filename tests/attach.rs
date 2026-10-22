@@ -6,7 +6,10 @@
 mod common;
 
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{
+    AttachedObject, CollisionWeights, Device, Error, IkOptions, IkProblem, Obstacle, PlanOptions,
+    PlanProblem, Robot, SphereOptions, Trajectory, World,
+};
 use glam::{Quat, Vec3};
 
 fn devices(robot: &Robot) -> Vec<Device> {
@@ -189,12 +192,13 @@ fn devices_for_an_attached_robot_plan_in_worlds_already_uploaded() {
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let holding = d.with_robot(&held).unwrap();
-        let ik = solve_ik(&holding, &worlds, &goals, &IkOptions::default()).unwrap();
+        let ik = batchplan::solve_ik(&holding, &worlds, &goals, &IkOptions::default()).unwrap();
         let problems: Vec<PlanProblem> = ik
             .solved()
             .map(|s| PlanProblem::new(s.problem.world, held.default_q(), s.solution))
             .collect();
-        let result = plan(&holding, &worlds, &problems, &PlanOptions::default()).unwrap();
+        let result =
+            batchplan::plan(&holding, &worlds, &problems, &PlanOptions::default()).unwrap();
         assert!(
             result.solved().count() >= 6,
             "{}: planned {} of 8",

@@ -8,7 +8,7 @@ mod common;
 
 use std::sync::Mutex;
 
-use batchplan::*;
+use batchplan::{Device, PlanOptions, Robot, RobotOptions, RrtOptions};
 
 const UR5E: &str = "ur5e/ur_description/urdf/ur5e.urdf";
 
@@ -43,7 +43,7 @@ fn the_search_keeps_the_time_budget() {
         let worlds = d.upload(&scene).unwrap();
         let timed = |o: &PlanOptions| {
             let t = std::time::Instant::now();
-            plan(&d, &worlds, &problems, o).unwrap();
+            batchplan::plan(&d, &worlds, &problems, o).unwrap();
             t.elapsed()
         };
         let full = timed(&slow);
@@ -84,7 +84,7 @@ fn a_tiny_time_budget_returns_after_at_most_one_more_chunk() {
         let worlds = d.upload(&scene).unwrap();
         let timed = |o: &PlanOptions| {
             let t = std::time::Instant::now();
-            let result = plan(&d, &worlds, &problems, o).unwrap();
+            let result = batchplan::plan(&d, &worlds, &problems, o).unwrap();
             (t.elapsed(), result)
         };
         timed(&o); // warm up
@@ -130,13 +130,13 @@ fn a_busy_global_pool_does_not_hold_up_gpu_plans() {
     };
     let (scene, problems) = common::reaches(&robot);
     let worlds = gpu.upload(&scene).unwrap();
-    plan(&gpu, &worlds, &problems, &PlanOptions::default()).unwrap();
+    batchplan::plan(&gpu, &worlds, &problems, &PlanOptions::default()).unwrap();
     let busy = std::time::Duration::from_secs(1);
     let started = std::time::Instant::now();
     for _ in 0..rayon::current_num_threads() {
         rayon::spawn(move || std::thread::sleep(busy));
     }
-    let result = plan(&gpu, &worlds, &problems, &PlanOptions::default()).unwrap();
+    let result = batchplan::plan(&gpu, &worlds, &problems, &PlanOptions::default()).unwrap();
     let spent = started.elapsed();
     assert!(
         spent < busy / 2,

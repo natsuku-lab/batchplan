@@ -18,8 +18,8 @@ use anyhow::{Context, Result, bail};
 use batchplan::datagen::{PickPlace, PickPlaceOptions, pick_and_place};
 use batchplan::glam::{Quat, Vec3};
 use batchplan::rng::Rng;
-use batchplan::*;
-use batchplan_demos::*;
+use batchplan::{Obstacle, Pose, Robot, World, datagen};
+use batchplan_demos::{Args, OPEN, RobotMeshes};
 
 /// Distance between neighbouring scenes in the grid, metres.
 const SPACING: f32 = 1.8;
@@ -29,7 +29,7 @@ const HZ: f32 = 30.0;
 fn main() -> Result<()> {
     let args = Args::parse()?;
     let count = args.count.unwrap_or(16);
-    let robot = panda()?;
+    let robot = batchplan_demos::panda()?;
     // Small batches plan sooner on the CPU, which pays no per-call GPU cost.
     let device = args.device(&robot, false)?;
     let mut rng = Rng::new(3);
@@ -283,7 +283,7 @@ impl<'a> PickScenes<'a> {
         for d in demos {
             episodes[d.world as usize] = Some(d);
         }
-        let offsets = grid(tasks.len(), spacing);
+        let offsets = batchplan_demos::grid(tasks.len(), spacing);
         for (i, task) in tasks.iter().enumerate() {
             let world = &worlds[task.world as usize];
             let scene = format!("world/scene_{i}");
@@ -299,7 +299,13 @@ impl<'a> PickScenes<'a> {
                 .collect();
             rec.log_static(
                 format!("{scene}/obstacles"),
-                &boxes(&fixed, |k| if k == 0 { wood() } else { slate() }),
+                &batchplan_demos::boxes(&fixed, |k| {
+                    if k == 0 {
+                        batchplan_demos::wood()
+                    } else {
+                        batchplan_demos::slate()
+                    }
+                }),
             )?;
             let Obstacle::Cuboid {
                 center,
@@ -320,7 +326,7 @@ impl<'a> PickScenes<'a> {
             if !episode.is_some_and(|d| d.carried.is_some()) {
                 rec.log_static(
                     format!("{scene}/object"),
-                    &transform(&Pose {
+                    &batchplan_demos::transform(&Pose {
                         position: center,
                         rotation,
                     }),
@@ -337,7 +343,7 @@ impl<'a> PickScenes<'a> {
                     [task.place.position.to_array()],
                     [half_extents.to_array()],
                 )
-                .with_quaternions([quaternion(task.place.rotation)])
+                .with_quaternions([batchplan_demos::quaternion(task.place.rotation)])
                 .with_colors([color]),
             )?;
             if let Some(d) = episode {
@@ -355,7 +361,7 @@ impl<'a> PickScenes<'a> {
                 )?;
             }
         }
-        let meshes = panda_meshes(rec, "world/panda", robot)?;
+        let meshes = batchplan_demos::panda_meshes(rec, "world/panda", robot)?;
         Ok(Self {
             robot,
             worlds,
@@ -391,7 +397,10 @@ impl<'a> PickScenes<'a> {
                 Some(d) => {
                     let s = f.min(d.trajectory.len() - 1);
                     if let Some(c) = &d.carried {
-                        rec.log(format!("world/scene_{i}/object"), &transform(&c.poses[s]))?;
+                        rec.log(
+                            format!("world/scene_{i}/object"),
+                            &batchplan_demos::transform(&c.poses[s]),
+                        )?;
                     }
                     // The fingers close until they meet the box, across its narrower side.
                     let world = &self.worlds[self.tasks[i].world as usize];
@@ -414,10 +423,10 @@ impl<'a> PickScenes<'a> {
                     .context("the Panda's hand")?;
                 rec.log(
                     format!("world/scene_{i}/robot/panda_hand"),
-                    &transform(&hand),
+                    &batchplan_demos::transform(&hand),
                 )?;
             }
-            let fingers = panda_fingers(self.robot, q, opening)?;
+            let fingers = batchplan_demos::panda_fingers(self.robot, q, opening)?;
             robots.push((
                 self.offsets[i],
                 self.meshes.link_poses(self.robot, q, fingers)?,

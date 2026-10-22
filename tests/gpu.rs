@@ -6,7 +6,10 @@
 mod common;
 
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{
+    CollisionWeights, Device, Error, IkOptions, IkProblem, Obstacle, PlanOptions, PlanProblem,
+    Robot, SdfGrid, Solved, Trajectory, World,
+};
 
 fn setup() -> Option<(Robot, Device, Device)> {
     let robot = common::panda().unwrap();
@@ -237,8 +240,8 @@ fn ik_matches_cpu() {
     let problems = ik_problems(&scene, 5);
     let o = IkOptions::default();
     let (on_cpu, on_gpu) = (cpu.upload(&scene).unwrap(), gpu.upload(&scene).unwrap());
-    let a = solve_ik(&cpu, &on_cpu, &problems, &o).unwrap();
-    let b = solve_ik(&gpu, &on_gpu, &problems, &o).unwrap();
+    let a = batchplan::solve_ik(&cpu, &on_cpu, &problems, &o).unwrap();
+    let b = batchplan::solve_ik(&gpu, &on_gpu, &problems, &o).unwrap();
     let agree = a
         .success
         .iter()
@@ -288,13 +291,13 @@ fn gpu_plans_are_collision_free_under_cpu_check() {
     let scene = worlds(128, 6);
     let problems = ik_problems(&scene, 7);
     let (on_cpu, on_gpu) = (cpu.upload(&scene).unwrap(), gpu.upload(&scene).unwrap());
-    let ik = solve_ik(&gpu, &on_gpu, &problems, &IkOptions::default()).unwrap();
+    let ik = batchplan::solve_ik(&gpu, &on_gpu, &problems, &IkOptions::default()).unwrap();
     let plan_problems: Vec<PlanProblem> = ik
         .solved()
         .map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution))
         .collect();
     let o = PlanOptions::default();
-    let result = plan(&gpu, &on_gpu, &plan_problems, &o).unwrap();
+    let result = batchplan::plan(&gpu, &on_gpu, &plan_problems, &o).unwrap();
     let solved = result.solved().count();
     eprintln!(
         "ik solved {}/{}; planned {solved}/{}",
@@ -395,7 +398,7 @@ fn step_directions(
     step: u32,
 ) -> (Vec<f32>, Vec<bool>) {
     let worlds = d.upload(worlds).unwrap();
-    let seed = plan(
+    let seed = batchplan::plan(
         d,
         &worlds,
         problems,
@@ -407,7 +410,7 @@ fn step_directions(
     .unwrap()
     .paths
     .positions;
-    let stepped = plan(
+    let stepped = batchplan::plan(
         d,
         &worlds,
         problems,
@@ -443,7 +446,7 @@ fn trajopt_directions_match_cpu_element_wise() {
     };
     let n = robot.dof();
     let mut worlds = worlds(64, 8);
-    let ik = solve_ik(
+    let ik = batchplan::solve_ik(
         &cpu,
         &cpu.upload(&worlds).unwrap(),
         &ik_problems(&worlds, 9),
@@ -519,7 +522,7 @@ fn trajopt_lowers_the_cost_as_far_as_the_cpu() {
     };
     let n = robot.dof();
     let mut scene = worlds(32, 12);
-    let ik = solve_ik(
+    let ik = batchplan::solve_ik(
         &cpu,
         &cpu.upload(&scene).unwrap(),
         &ik_problems(&scene, 13),
@@ -564,7 +567,7 @@ fn trajopt_lowers_the_cost_as_far_as_the_cpu() {
             .unwrap();
         e.cost.iter().map(|&c| c as f64).sum::<f64>() + smooth
     };
-    let seeds = plan(
+    let seeds = batchplan::plan(
         &cpu,
         &on_cpu,
         &problems,
@@ -573,8 +576,11 @@ fn trajopt_lowers_the_cost_as_far_as_the_cpu() {
     .unwrap()
     .paths
     .positions;
-    let on_cpu_paths = plan(&cpu, &on_cpu, &problems, &o).unwrap().paths.positions;
-    let on_gpu_paths = plan(&gpu, &gpu.upload(&scene).unwrap(), &problems, &o)
+    let on_cpu_paths = batchplan::plan(&cpu, &on_cpu, &problems, &o)
+        .unwrap()
+        .paths
+        .positions;
+    let on_gpu_paths = batchplan::plan(&gpu, &gpu.upload(&scene).unwrap(), &problems, &o)
         .unwrap()
         .paths
         .positions;

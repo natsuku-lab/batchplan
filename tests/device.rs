@@ -4,7 +4,10 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
-use batchplan::*;
+use batchplan::{
+    CollisionWeights, Device, Error, IkOptions, IkProblem, JointState, Obstacle, PlanOptions,
+    PlanProblem, Pose, Robot, RobotOptions, RrtOptions, StartMotion, Trajectory, World,
+};
 use glam::Vec3;
 
 fn panda() -> Robot {
@@ -52,7 +55,7 @@ fn malformed_batches_are_errors_on_every_device() {
         );
         let target = robot.ee_pose(&q, 0);
         assert!(
-            solve_ik(
+            batchplan::solve_ik(
                 &d,
                 &worlds,
                 &[IkProblem::new(1, target)],
@@ -63,7 +66,7 @@ fn malformed_batches_are_errors_on_every_device() {
         );
         let problem = PlanProblem::new(1, q.clone(), q.clone());
         assert!(
-            plan(&d, &worlds, &[problem], &PlanOptions::default()).is_err(),
+            batchplan::plan(&d, &worlds, &[problem], &PlanOptions::default()).is_err(),
             "{name}: plan"
         );
         // Inputs no device could check consistently are refused before any work.
@@ -72,14 +75,16 @@ fn malformed_batches_are_errors_on_every_device() {
         beyond[3] = robot.upper()[3] + 0.5;
         let past_limits = PlanProblem::new(0, q.clone(), beyond);
         assert!(
-            input(plan(&d, &worlds, &[past_limits], &PlanOptions::default()).map(|_| ())),
+            input(
+                batchplan::plan(&d, &worlds, &[past_limits], &PlanOptions::default()).map(|_| ())
+            ),
             "{name}: goal past limits"
         );
         let skewed = Pose {
             rotation: glam::Quat::from_xyzw(0.0, 0.0, 0.0, 2.0),
             ..target
         };
-        let ik = solve_ik(
+        let ik = batchplan::solve_ik(
             &d,
             &worlds,
             &[IkProblem::new(0, skewed)],
@@ -171,7 +176,7 @@ fn ik_reports_the_clearances_evaluate_finds() {
         .collect();
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
-        let ik = solve_ik(&d, &worlds, &problems, &IkOptions::default()).unwrap();
+        let ik = batchplan::solve_ik(&d, &worlds, &problems, &IkOptions::default()).unwrap();
         let items = ik.q.len() / robot.dof();
         let e = d
             .evaluate(&worlds, &vec![0; items], &ik.q, &CollisionWeights::NONE)
@@ -268,7 +273,7 @@ fn obstacle_free_worlds_work_on_every_device() {
             e.world_clearance[0] > 1e29,
             "{name}: an empty world has nothing to hit"
         );
-        let ik = solve_ik(
+        let ik = batchplan::solve_ik(
             &d,
             &worlds,
             &[IkProblem::new(0, target)],
@@ -279,7 +284,7 @@ fn obstacle_free_worlds_work_on_every_device() {
             .best(0)
             .unwrap_or_else(|| panic!("{name}: reachable target unsolved"))
             .to_vec();
-        let result = plan(
+        let result = batchplan::plan(
             &d,
             &worlds,
             &[PlanProblem::new(0, start.clone(), goal)],
@@ -307,7 +312,7 @@ fn results_keep_the_worlds_of_their_problems() {
     let on_cpu = cpu.upload(&scene).unwrap();
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
-        let ik = solve_ik(&d, &worlds, &goals, &IkOptions::default()).unwrap();
+        let ik = batchplan::solve_ik(&d, &worlds, &goals, &IkOptions::default()).unwrap();
         assert_eq!(ik.problems.len(), goals.len());
         let problems: Vec<PlanProblem> = ik
             .solved()
@@ -318,7 +323,7 @@ fn results_keep_the_worlds_of_their_problems() {
             "{}: too few IK solutions to test",
             d.name()
         );
-        let result = plan(&d, &worlds, &problems, &PlanOptions::default()).unwrap();
+        let result = batchplan::plan(&d, &worlds, &problems, &PlanOptions::default()).unwrap();
         assert!(
             result.solved().any(|s| s.index as u32 != s.problem.world),
             "{}: no solved problem whose index differs from its world",
@@ -390,11 +395,11 @@ fn trajopt_smoothness_gradient_matches_its_cost() {
     };
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
-        let seed = plan(&d, &worlds, &problems, &PlanOptions { iterations: 0, ..o })
+        let seed = batchplan::plan(&d, &worlds, &problems, &PlanOptions { iterations: 0, ..o })
             .unwrap()
             .paths
             .positions;
-        let stepped = plan(&d, &worlds, &problems, &PlanOptions { iterations: 1, ..o })
+        let stepped = batchplan::plan(&d, &worlds, &problems, &PlanOptions { iterations: 1, ..o })
             .unwrap()
             .paths
             .positions;
@@ -523,11 +528,11 @@ fn trajopt_collision_gradient_matches_its_cost() {
     let on_cpu = cpu.upload(&scene).unwrap();
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
-        let seed = plan(&d, &worlds, &problems, &PlanOptions { iterations: 0, ..o })
+        let seed = batchplan::plan(&d, &worlds, &problems, &PlanOptions { iterations: 0, ..o })
             .unwrap()
             .paths
             .positions;
-        let stepped = plan(&d, &worlds, &problems, &PlanOptions { iterations: 1, ..o })
+        let stepped = batchplan::plan(&d, &worlds, &problems, &PlanOptions { iterations: 1, ..o })
             .unwrap()
             .paths
             .positions;
@@ -622,8 +627,8 @@ fn planning_without_a_budget_gives_the_same_result_every_run() {
     let (scene, problems) = common::reaches(&robot);
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
-        let a = plan(&d, &worlds, &problems, &PlanOptions::default()).unwrap();
-        let b = plan(&d, &worlds, &problems, &PlanOptions::default()).unwrap();
+        let a = batchplan::plan(&d, &worlds, &problems, &PlanOptions::default()).unwrap();
+        let b = batchplan::plan(&d, &worlds, &problems, &PlanOptions::default()).unwrap();
         assert_eq!(a.paths, b.paths, "{}: paths differ between runs", d.name());
         assert_eq!((a.valid, a.length), (b.valid, b.length), "{}", d.name());
     }
@@ -653,7 +658,7 @@ fn plans_from_a_moving_start_continue_its_motion() {
     };
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
-        let result = plan(&d, &worlds, &moving, &PlanOptions::default()).unwrap();
+        let result = batchplan::plan(&d, &worlds, &moving, &PlanOptions::default()).unwrap();
         let solved: Vec<_> = result.solved().collect();
         assert!(
             solved.len() >= 6,
@@ -684,7 +689,7 @@ fn reaches_replan_mid_motion_at_full_speed() {
     let n = robot.dof();
     let (scene, problems) = common::reaches(&robot);
     let cpu = Device::cpu(&robot).unwrap();
-    let rest = plan(
+    let rest = batchplan::plan(
         &cpu,
         &cpu.upload(&scene).unwrap(),
         &problems[..24],
@@ -713,7 +718,7 @@ fn reaches_replan_mid_motion_at_full_speed() {
     assert!(moving.len() >= 8, "only {} reaches move fast", moving.len());
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
-        let result = plan(&d, &worlds, &moving, &PlanOptions::default()).unwrap();
+        let result = batchplan::plan(&d, &worlds, &moving, &PlanOptions::default()).unwrap();
         let solved: Vec<_> = result.solved().collect();
         eprintln!(
             "{}: {} of {} replanned at full speed",
@@ -798,7 +803,7 @@ fn a_robot_mounted_on_a_table_is_not_in_collision_with_it() {
         );
         assert!(!e.collision_free(1), "{}: the pin should collide", d.name());
         let problem = PlanProblem::new(0, robot.default_q(), goal.clone());
-        let result = plan(&d, &worlds, &[problem], &PlanOptions::default()).unwrap();
+        let result = batchplan::plan(&d, &worlds, &[problem], &PlanOptions::default()).unwrap();
         assert!(
             result.best(0).is_some(),
             "{}: no plan on the table",
@@ -835,7 +840,7 @@ fn seeded_ik_stays_on_the_branch_it_starts_from() {
             targets: vec![Some(target)],
             seed: Some(here.clone()),
         };
-        let ik = solve_ik(&d, &worlds, &[seeded], &one_seed).unwrap();
+        let ik = batchplan::solve_ik(&d, &worlds, &[seeded], &one_seed).unwrap();
         let q = ik
             .nearest(0, &here)
             .unwrap_or_else(|| panic!("{}: no solution from the seed", d.name()));
@@ -847,7 +852,7 @@ fn seeded_ik_stays_on_the_branch_it_starts_from() {
             .sqrt();
         assert!(moved < 0.2, "{}: moved {moved} rad from the seed", d.name());
         // Unseeded, the one seed starts from the default configuration and ends elsewhere.
-        let ik = solve_ik(&d, &worlds, &[IkProblem::new(0, target)], &one_seed).unwrap();
+        let ik = batchplan::solve_ik(&d, &worlds, &[IkProblem::new(0, target)], &one_seed).unwrap();
         let elsewhere = ik
             .solution(0)
             .iter()
@@ -877,7 +882,7 @@ fn optimization_seeds_start_with_the_searched_path_and_the_straight_line() {
     };
     let (points, per_path) = (o.control_points, o.control_points * n);
     for d in devices(&robot) {
-        let result = plan(&d, &d.upload(&scene).unwrap(), &problems, &o).unwrap();
+        let result = batchplan::plan(&d, &d.upload(&scene).unwrap(), &problems, &o).unwrap();
         let mut seeded = 0;
         for (pi, p) in problems.iter().enumerate() {
             let path = |k: usize| result.paths.path(pi * 3 + k);
@@ -929,7 +934,7 @@ fn problems_searched_straight_are_not_optimized() {
         ..Default::default()
     };
     for d in devices(&robot) {
-        let result = plan(&d, &d.upload(&scene).unwrap(), &problems, &o).unwrap();
+        let result = batchplan::plan(&d, &d.upload(&scene).unwrap(), &problems, &o).unwrap();
         for pi in 0..problems.len() {
             assert!(
                 result.valid[pi * 5],
@@ -962,7 +967,7 @@ fn a_spent_budget_starts_no_optimization() {
         ..Default::default()
     };
     for d in devices(&robot) {
-        let result = plan(&d, &d.upload(&scene).unwrap(), &problems, &o).unwrap();
+        let result = batchplan::plan(&d, &d.upload(&scene).unwrap(), &problems, &o).unwrap();
         assert!(
             result.valid.iter().all(|&v| !v),
             "{}: a seed was planned or optimized",
@@ -980,7 +985,7 @@ fn plans_without_seeds_ignore_the_optimization_weights() {
     let (scene, problems) = common::reaches(&robot);
     let cpu = Device::cpu(&robot).unwrap();
     let worlds = cpu.upload(&scene).unwrap();
-    let rest = plan(&cpu, &worlds, &problems, &PlanOptions::default()).unwrap();
+    let rest = batchplan::plan(&cpu, &worlds, &problems, &PlanOptions::default()).unwrap();
     let mut state = JointState::new(n);
     let moving: Vec<PlanProblem> = rest
         .solved()
@@ -1007,8 +1012,8 @@ fn plans_without_seeds_ignore_the_optimization_weights() {
         },
         ..Default::default()
     };
-    let a = plan(&cpu, &worlds, &moving, &PlanOptions::default()).unwrap();
-    let b = plan(&cpu, &worlds, &moving, &weighed).unwrap();
+    let a = batchplan::plan(&cpu, &worlds, &moving, &PlanOptions::default()).unwrap();
+    let b = batchplan::plan(&cpu, &worlds, &moving, &weighed).unwrap();
     assert_eq!(
         a.paths.positions, b.paths.positions,
         "the optimization's weights changed plans without seeds"

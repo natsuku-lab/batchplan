@@ -20,7 +20,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use batchplan::datagen::{Demonstration, Handover, RecoveryOptions, handover, reset_states};
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{Device, Robot, World, npy};
 use rebot::{scene, two_rebots};
 
 /// Where `scripts/fetch_rebot.sh` puts the arm.

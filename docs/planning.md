@@ -10,23 +10,34 @@ Every call takes many problems, each naming its world, so one call can cover tho
 
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
-use batchplan::*;
+use batchplan::{
+    Device, Error, IkOptions, IkProblem, PlanOptions, PlanProblem, Pose, Robot, RobotOptions,
+    Trajectory, World,
+};
 
 fn main() -> Result<(), Error> {
-    let robot = Robot::load("assets/ur5e/ur_description/urdf/ur5e.urdf", &RobotOptions::default())?;
+    let robot = Robot::load(
+        "assets/ur5e/ur_description/urdf/ur5e.urdf",
+        &RobotOptions::default(),
+    )?;
     let device = Device::cpu(&robot)?;
     let worlds = device.upload(&[World::default()])?;
 
     // Several targets in one call; each problem names its world.
     let down = Quat::from_rotation_x(std::f32::consts::PI);
     let targets = [Vec3::new(0.4, 0.2, 0.3), Vec3::new(0.3, -0.3, 0.4)];
-    let goals: Vec<IkProblem> = targets.iter().map(|&p| IkProblem::new(0, Pose::new(p, down))).collect();
-    let ik = solve_ik(&device, &worlds, &goals, &IkOptions::default())?;
+    let goals: Vec<IkProblem> = targets
+        .iter()
+        .map(|&p| IkProblem::new(0, Pose::new(p, down)))
+        .collect();
+    let ik = batchplan::solve_ik(&device, &worlds, &goals, &IkOptions::default())?;
 
     // `solved()` yields each problem that has a solution, with its world, so they cannot be mixed up.
-    let problems: Vec<PlanProblem> =
-        ik.solved().map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution)).collect();
-    let result = plan(&device, &worlds, &problems, &PlanOptions::default())?;
+    let problems: Vec<PlanProblem> = ik
+        .solved()
+        .map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution))
+        .collect();
+    let result = batchplan::plan(&device, &worlds, &problems, &PlanOptions::default())?;
     for s in result.solved() {
         let trajectory = Trajectory::new(&robot, s.solution, 1.0)?;
         println!("problem {}: {:.2} s", s.index, trajectory.duration());
@@ -107,17 +118,33 @@ To replan mid-motion, give `PlanProblem::start_motion` the robot's current veloc
 - `trajectory.check_from(&robot, &state)` verifies that a trajectory starts at a given state.
 
 ```rust,no_run
-use batchplan::*;
+use batchplan::{
+    Device, Error, JointState, PlanOptions, PlanProblem, Robot, RobotOptions, StartMotion,
+    Trajectory, World,
+};
 
 fn main() -> Result<(), Error> {
-    let robot = Robot::load("assets/ur5e/ur_description/urdf/ur5e.urdf", &RobotOptions::default())?;
+    let robot = Robot::load(
+        "assets/ur5e/ur_description/urdf/ur5e.urdf",
+        &RobotOptions::default(),
+    )?;
     let device = Device::cpu(&robot)?;
     let worlds = device.upload(&[World::default()])?;
-    let now = JointState { position: robot.default_q().to_vec(), velocity: vec![0.2; robot.dof()], acceleration: vec![0.0; robot.dof()] };
-    let motion = StartMotion { velocity: now.velocity.clone(), acceleration: now.acceleration.clone() };
+    let now = JointState {
+        position: robot.default_q().to_vec(),
+        velocity: vec![0.2; robot.dof()],
+        acceleration: vec![0.0; robot.dof()],
+    };
+    let motion = StartMotion {
+        velocity: now.velocity.clone(),
+        acceleration: now.acceleration.clone(),
+    };
     let goal = vec![0.5, -1.2, 1.0, -1.4, -1.5, 0.3];
-    let problem = PlanProblem { start_motion: Some(motion.clone()), ..PlanProblem::new(0, now.position.clone(), goal) };
-    let result = plan(&device, &worlds, &[problem], &PlanOptions::default())?;
+    let problem = PlanProblem {
+        start_motion: Some(motion.clone()),
+        ..PlanProblem::new(0, now.position.clone(), goal)
+    };
+    let result = batchplan::plan(&device, &worlds, &[problem], &PlanOptions::default())?;
     if let Some(path) = result.best(0) {
         let trajectory = Trajectory::moving(&robot, path, &motion)?;
         trajectory.check_from(&robot, &now)?;

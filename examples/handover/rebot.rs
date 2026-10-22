@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use batchplan::datagen::{Handover, PickPlaceOptions};
 use batchplan::glam::{Quat, Vec3};
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{CollisionModel, Obstacle, Part, Pose, Robot, RobotOptions, SphereOptions, World};
 
 /// The arms' bases, either side of the table's centre line.
 const BASE_Y: f32 = 0.22;

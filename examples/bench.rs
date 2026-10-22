@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use batchplan::rng::Rng;
-use batchplan::*;
+use batchplan::{Device, IkOptions, IkProblem, PlanOptions, PlanProblem, World};
 
 fn main() -> Result<()> {
     let count: usize = std::env::args().nth(1).map_or(Ok(512), |a| a.parse())?;
@@ -42,7 +42,7 @@ fn main() -> Result<()> {
     for device in &devices {
         let worlds = device.upload(&worlds)?;
         // Warm up (pipeline compilation, thread pool).
-        solve_ik(
+        batchplan::solve_ik(
             device,
             &worlds,
             &ik_problems[..1],
@@ -53,7 +53,7 @@ fn main() -> Result<()> {
         )?;
 
         let t = Instant::now();
-        let ik = solve_ik(device, &worlds, &ik_problems, &ik_opts)?;
+        let ik = batchplan::solve_ik(device, &worlds, &ik_problems, &ik_opts)?;
         let ik_time = t.elapsed().as_secs_f64();
         let problems: Vec<PlanProblem> = ik
             .solved()
@@ -61,7 +61,7 @@ fn main() -> Result<()> {
             .collect();
 
         let t = Instant::now();
-        let result = plan(device, &worlds, &problems, &plan_opts)?;
+        let result = batchplan::plan(device, &worlds, &problems, &plan_opts)?;
         let plan_time = t.elapsed().as_secs_f64();
         let solved = result.solved().count();
 
