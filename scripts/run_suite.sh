@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# The comparison's baseline on the held-out problems (`scripts/run_comparison.sh` for each part), run on
-# an idle host. Each part writes <out>/<part>/<config>/round<k>.
+# The whole comparison on one split (`scripts/run_comparison.sh` for each part), run on an idle host:
+# the frozen baseline on the held-out problems, the published run on the final ones. Each part writes
+# <out>/<part>/<config>/round<k>.
 #
-#   scripts/run_baseline.sh <out> [split=heldout]
+#   scripts/run_suite.sh <out> [split=heldout]
 set -euo pipefail
 out=$1 split=${2:-heldout}
 cd "$(dirname "$0")/.."
@@ -25,4 +26,4 @@ SET=onescene $run "$out/onescene" "$split" sixteen 3 $seeds batchplan-A roboplan
 
 # 4. One query at a time on one core: single-query latency without contention, one seed.
 $run "$out/one-core" "$split" one 1 1 batchplan-A roboplan-A moveit-A batchplan-B roboplan-B-Adaptive moveit-B-totg
-SCENE=capsules $run "$out/one-core-capsules" "$split" one 1 1 batchplan-A vamp-A ompl-A
+SCENE=capsules $run "$out/one-core-capsules" "$split" one 1 1 batchplan-A vamp-A ompl-A batchplan-A-matched vamp-A-matched
