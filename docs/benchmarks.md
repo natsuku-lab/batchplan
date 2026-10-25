@@ -10,9 +10,154 @@ The load was checked before each run. Every command to reproduce them is [at the
 
 ## Against other planners
 
+One robot model for every planner, one checker for every output, one machine, planners in rotating order. The tables are the 262 final problems, held back until optimization had ended; `scripts/report.py` regenerates each of them from the saved records ([commands](#reproducing)).
+
+### Setup
+
+| | |
+|---|---|
+| Robot | The Franka Panda of VAMP's spherized URDF: 59 spheres, fingers fixed 6.5 cm out, and the 34 disabled pairs of MoveIt's Panda SRDF. Every planner loads these files (`scripts/bench_model.py export`). On 2,250 fixture configurations (random, within half a millimetre of contact, and colliding), every planner's forward kinematics agrees with the judge's within 0.3 µm, and every collision verdict agrees (`scripts/parity.py`). |
+| Problems | MotionBenchMaker's 800 and MπNets' 1,800 Panda problems (robometrics), from a joint-space start to a joint-space goal. The first 20% of each set (520) were for tuning, the next 70% (1,818) for the frozen baseline, and the last 10% (262) are the final set below. The final set ran three times: the first two, at 17266d6 and be046f4, came before fixes to regressions found on the held-out problems, and the second was read. |
+| Scenes | Exact boxes and cylinders for batchplan, RoboPlan and MoveIt 2. VAMP and OMPL take no cylinders, so they get each cylinder as the capsule around it, and batchplan runs those scenes too. Boxes the base sphere touches are cut around it for every planner; the base touches nothing in any problem. |
+| Judge | `scripts/validate.py`, independent of every planner. It checks the start and goal, the joint bounds, and world and self collision on the spheres, sampled at most 0.005 rad apart. For trajectories it also checks velocity, acceleration (the reported velocities' rate of change) and jerk against the Panda's datasheet limits, with 1% tolerance. |
+| On the meshes | A separate practical check (`compare mesh`, with batchplan's `MeshModel`): each output against the exact scene on the Panda's collision meshes, posed as the canonical model, with the SRDF's pairs. It covers the first round of each configuration. |
+| Machine | AMD Ryzen AI Max+ 395, Ubuntu 26.04, otherwise idle. *16 cores* is CPUs 0–15, one thread per core; *one core* is CPU 2. |
+| Runs | 5 seeds × 3 rounds per configuration (one core: 1 seed, 1 round), 5 s per query at most. A pass is every problem once with one seed. |
+
+| Planner | Version | Timed per query | Defaults | Matched |
+|---|---|---|---|---|
+| batchplan | 44b086b | `plan` on its scene: straight line or RRT-Connect, simplification, a B-spline; for trajectories, also `Trajectory::try_new` and sampling at 100 Hz | `PlanOptions::default()` | No clearance |
+| [VAMP](https://github.com/KavrakiLab/vamp) | 0.6.4, C++, `-O3 -march=native` | Building the scene, RRT-Connect (1 rad steps), simplification | 100,000 samples | 10,000 samples |
+| [OMPL](https://ompl.kavrakilab.org) | 1.7.0, C++, with VAMP's state checks | `RRTConnect`, `simplifySolution` | Edges checked every 1% of the space's extent | Every 1/32 rad |
+| [RoboPlan](https://github.com/open-planning/roboplan) | 0.7.0, Python, Coal | Its scene, RRT-Connect, shortcutting; for trajectories, TOPP-RA in each of its four modes | Edge steps of 0.05 rad, 100,000 nodes | 1/32 rad |
+| [MoveIt 2](https://moveit.ai) | Jazzy image, `moveit_py`, FCL | The planning pipeline (OMPL's RRTConnect, simplification); for trajectories, with TOTG or Ruckig and its validation | Edges every 1% of the space's extent | Every 1/32 rad |
+
+On 16 cores, VAMP, OMPL, RoboPlan and MoveIt 2 run 16 single-threaded workers, one pinned to each core, each taking the next query. batchplan plans one query at a time on 16 threads (*time per query*), then each pass in one `plan` call (*valid/s*). *Valid/s* counts valid outputs per second of a pass's wall time, failures included. The *relative* columns compare each row with batchplan's in the same family, on the problems both solve validly, paired by problem: time as the geometric mean of the ratios, length and duration as the mean. The reports give 95% bootstrap intervals.
+
+### Paths
+
+On the exact scenes, 16 cores:
+
+| Planner | Valid | On the meshes | Time per query (median / p99) | Valid/s | Time, relative | Length, relative |
+|---|---|---|---|---|---|---|
+| **batchplan** | **91.1%** | **86.6%** | **0.12 / 2.0 ms** | **25,255** | 1 | 1 |
+| RoboPlan | 84.7% | 68.9% | 75 / 666 ms | 73 | 657× | 1.43× |
+| MoveIt 2 | 61.6% | 56.5% | 40 / 1,589 ms | 33 | 396× | 1.40× |
+| batchplan, matched | 88.4% | 67.6% | **0.12 / 0.8 ms** | **49,077** | 1 | 1 |
+| RoboPlan, matched | **89.1%** | **71.4%** | 86 / 691 ms | 74 | 800× | 1.48× |
+| MoveIt 2, matched | 86.9% | 65.5% | 264 / 5,004 ms | 19 | 2,654× | 1.40× |
+
+On the capsule scenes, 16 cores:
+
+| Planner | Valid | On the meshes | Time per query (median / p99) | Valid/s | Time, relative | Length, relative |
+|---|---|---|---|---|---|---|
+| **batchplan** | **91.1%** | **86.7%** | **0.12** / 2.0 ms | 25,908 | 1 | 1 |
+| VAMP | 87.6% | 67.3% | 0.17 / **1.5** ms | **31,426** | 1.07× | 1.11× |
+| OMPL | 64.7% | 58.2% | 1.1 / 5,056 ms | 17 | 9.1× | 1.33× |
+| **batchplan, matched** | **88.5%** | 68.0% | **0.12 / 0.8 ms** | 48,239 | 1 | 1 |
+| VAMP, matched | 87.5% | 67.3% | 0.14 / 1.1 ms | **58,414** | 0.95× | 1.14× |
+| OMPL, matched | 85.6% | **68.5%** | 3.4 / 5,056 ms | 22 | 31× | 1.38× |
+
+### Trajectories
+
+On the exact scenes, 16 cores: from the start and goal to a timed trajectory within the Panda's velocity, acceleration and jerk limits, RoboPlan in each of its TOPP-RA modes.
+
+| Planner | Valid (within 10%) | On the meshes | Time per query (median / p99) | Valid/s | Time, relative | Duration, relative |
+|---|---|---|---|---|---|---|
+| **batchplan** | **91.1%** (91.1%) | **86.6%** | **0.54 / 2.3 ms** | **14,534** | 1 | 1 |
+| RoboPlan, Hermite | 56.2% (64.1%) | 48.7% | 78 / 648 ms | 47 | 142× | 1.13× |
+| RoboPlan, Cubic | 75.9% (79.6%) | 69.5% | 82 / 667 ms | 62 | 157× | 1.11× |
+| RoboPlan, Adaptive | 81.1% (85.9%) | 73.9% | 85 / 691 ms | 65 | 158× | 1.11× |
+| RoboPlan, Linear Blend | 84.0% (84.0%) | 68.3% | 80 / 668 ms | 69 | 154× | 1.16× |
+| MoveIt 2, TOTG | 2.7% (62.1%) | 2.5% | 49 / 1,792 ms | 1 | 75× | 1.13×¹ |
+| MoveIt 2, Ruckig | 2.1% (57.4%) | 2.1% | 51 / 1,846 ms | 1 | 68× | 0.94×¹ |
+
+¹ Over the 33 and 12 problems MoveIt 2 solves validly. Over the problems it solves within 10% of the limits (235 and 233), its trajectories take 14% and 13% longer than batchplan's.
+
+### One core
+
+| Planner | Scenes | Valid | Time per query (median / p99) | Valid/s | Time, relative | Length or duration, relative |
+|---|---|---|---|---|---|---|
+| **batchplan** | exact | **91.2%** | **0.12 / 1.4 ms** | **4,096** | 1 | 1 |
+| RoboPlan | exact | 83.6% | 37 / 535 ms | 9 | 351× | 1.47× |
+| MoveIt 2 | exact | 62.2% | 36 / 1,352 ms | 6 | 414× | 1.40× |
+| **batchplan** | capsules | **91.2%** | 0.12 / 1.4 ms | **4,200** | 1 | 1 |
+| VAMP | capsules | 88.2% | 0.13 / 1.4 ms | 4,034 | **0.92×** | 1.13× |
+| OMPL | capsules | 64.1% | 0.86 / 5,046 ms | 2 | 8.9× | 1.29× |
+| **batchplan, matched** | capsules | **88.9%** | 0.12 / **0.7** ms | **5,528** | 1 | 1 |
+| VAMP, matched | capsules | 88.2% | 0.12 / 1.3 ms | 4,420 | **0.85×** | 1.16× |
+| **batchplan, trajectories** | exact | **91.2%** | **0.54 / 1.8 ms** | **1,545** | 1 | 1 |
+| RoboPlan, Adaptive | exact | 82.4% | 46 / 588 ms | 8 | 86× | 1.12× duration |
+| MoveIt 2, TOTG | exact | 1.9% | 45 / 1,231 ms | 0 | 58× | 0.86× duration, 5 problems |
+
+### Repeated queries in one scene
+
+25 queries in each of 20 scenes, 16 cores; each worker loads a scene once:
+
+| Planner | Valid | On the meshes | Time per query (median / p99) | Valid/s | Time, relative | Length, relative |
+|---|---|---|---|---|---|---|
+| **batchplan** | **100%** | **99.5%** | **0.03 / 1.2 ms** | **72,946** | 1 | 1 |
+| RoboPlan | 98.2% | 94.2% | 39 / 385 ms | 161 | 943× | 1.06× |
+| MoveIt 2 | 61.6% | 60.4% | 25 / 73 ms | 348 | 638× | 1.05× |
+
+### Reading the results
+
+- **Endpoints.** 23 of the 262 problems start or end in collision on the model, so no planner can solve them, and none can pass 91.2% valid. batchplan solves 3,582 of the 3,585 queries of the other 239, and every path and trajectory it returns passes the judge. VAMP checks neither end, so it returns paths for those 23 too.
+- **Speed.** batchplan answers a query in 0.12 ms, or 0.54 ms with its trajectory: 350 to 2,650 times sooner than RoboPlan and MoveIt 2 on the same spheres, and 58 to 158 times sooner for trajectories. Against VAMP, on 16 cores, its queries take 7% less time with each library's defaults, and the two tie with matched settings (VAMP 0.95×, interval 0.89–1.01). On one core, VAMP's take 8% less time (15% matched).
+- **Throughput.** One `plan` call returns 25,000–73,000 valid paths per second on 16 cores, and 4,096–5,528 on one, more than any other planner except VAMP on 16 cores. Here, on these 262 problems, VAMP's 16 workers return more (31,426 against 25,908, 58,414 against 48,239 matched). A batch lasts as long as its slowest searches, and batchplan's slowest, which drop their clearance and then repair their spline, take longer. On the 1,818 held-out problems batchplan's batches return 32,304 valid paths per second against VAMP's 4,346 (VAMP's 100,000-sample searches of unsolvable problems set its pace there), and 44,420 against 38,382 matched.
+- **Quality.** batchplan's paths are the shortest: VAMP's are 11–16% longer, RoboPlan's and MoveIt 2's 40–48% longer. Its trajectories reach the goal sooner than RoboPlan's in every mode (11–16%), within the limits.
+- **The clearance.** batchplan keeps 1.5 cm while searching and 1 cm while shortcutting, and 86.6% of its paths clear the meshes. Without it (matched), 67.6% do, and RoboPlan's longer paths, checked at the same resolution, are valid slightly more often (89.1% against 88.4%) and clear the meshes more often (71.4% against 67.6%).
+- **Tails.** p99 counts every query, failures included. The 5 s figures are queries that ran into the limit.
+
+<details>
+<summary>Per set: the share of queries solved validly</summary>
+
+| Set | Problems | batchplan | RoboPlan | MoveIt 2 | batchplan, capsules | VAMP | OMPL |
+|---|---|---|---|---|---|---|---|
+| `bookshelf_small_panda` | 10 | 100% | 90% | 62% | 100% | 96% | 61% |
+| `bookshelf_tall_panda` | 10 | 100% | 94% | 63% | 100% | 98% | 63% |
+| `bookshelf_thin_panda` | 10 | 100% | 90% | 65% | 100% | 94% | 65% |
+| `box_panda` | 10 | 100% | 98% | 63% | 100% | 98% | 73% |
+| `box_panda_flipped` | 10 | 100% | 96% | 62% | 100% | 98% | 61% |
+| `cage_panda` | 10 | 100% | 90% | 39% | 100% | 96% | 57% |
+| `cubby_neutral_goal` | 8 | 88% | 85% | 72% | 88% | 85% | 81% |
+| `cubby_neutral_start` | 8 | 100% | 90% | 59% | 100% | 98% | 72% |
+| `cubby_task_oriented` | 15 | 80% | 63% | 29% | 80% | 72% | 32% |
+| `dresser_neutral_goal` | 15 | 93% | 87% | 53% | 93% | 89% | 60% |
+| `dresser_neutral_start` | 15 | 100% | 89% | 70% | 100% | 99% | 78% |
+| `dresser_task_oriented` | 30 | 99% | 90% | 49% | 99% | 89% | 46% |
+| `merged_cubby_neutral_goal` | 8 | 100% | 100% | 95% | 100% | 100% | 98% |
+| `merged_cubby_neutral_start` | 8 | 88% | 88% | 83% | 88% | 85% | 83% |
+| `merged_cubby_task_oriented` | 15 | 93% | 89% | 68% | 93% | 91% | 74% |
+| `table_pick_panda` | 10 | 100% | 92% | 85% | 100% | 98% | 89% |
+| `table_under_pick_panda` | 10 | 100% | 88% | 38% | 100% | 90% | 40% |
+| `tabletop_neutral_goal` | 15 | 93% | 92% | 86% | 93% | 92% | 85% |
+| `tabletop_neutral_start` | 15 | 53% | 53% | 53% | 53% | 53% | 53% |
+| `tabletop_task_oriented` | 30 | 73% | 70% | 68% | 73% | 73% | 69% |
+</details>
+
+### Before and after optimization
+
+The suite first ran on the 1,818 held-out problems at a237326, and that baseline was frozen. The changes under [How the speed came](#how-the-speed-came) were then made against it on the tuning problems, and batchplan was measured again on the held-out ones. Validity, path lengths and durations stayed the same:
+
+| batchplan, held-out problems, 16 cores | a237326 | 44b086b |
+|---|---|---|
+| Paths: time per query (median / p99), paired | 0.12 / 3.6 ms | 0.12 / 2.6 ms, 0.88× |
+| Paths: valid/s | 30,867 | 31,704 |
+| Paths, one core: p99 | 6.8 ms | 3.1 ms |
+| Trajectories: time per query (median / p99), paired | 1.06 / 4.4 ms | 0.54 / 2.9 ms, 0.52× |
+| Trajectories: valid/s | 9,018 | 15,296 |
+
+### The earlier comparison
+
+Before this harness, batchplan was compared with each planner on that planner's own robot model: on VAMP's spheres against VAMP and OMPL, on its own spheres against RoboPlan and MoveIt 2 (which planned on the meshes), and against cuRobo on a T4. The comparison above replaces it. Its numbers are as recorded then, at batchplan 0.1.1–0.2.0.
+
+<details>
+<summary>The earlier comparison, as published</summary>
+
 These results describe the configurations and hardware recorded below. They do not isolate planner implementation speed where collision geometry, pipeline stages, settings or hardware differ. The same output checker makes validation consistent, but does not equalize the work done during planning. No new benchmark runs accompany this clarification.
 
-### The problems
+**The problems.**
 
 MotionBenchMaker's 800 problems (8 sets) and MπNets' 1,800 (12 sets), all for the Franka Panda, as [robometrics](https://github.com/fishbotics/robometrics) packages them. Each planner plans from the start to the set's first IK solution: a joint-space goal, so only planning is compared.
 
@@ -29,7 +174,7 @@ Every planner gets the same scenes, as close as it can take them:
 - VAMP and OMPL get cylinders as capsules, as VAMP's own MotionBenchMaker loader does, and boxes in the `box` sets. The others get exact boxes and cylinders.
 - Every scene's floor or table top is level with the Panda's base. batchplan, RoboPlan, MoveIt 2 and the judge never check the base against the scene. VAMP does, and its base sphere reaches 3 cm below the base, so the boxes under it get a hole around it, a centimetre wider than the sphere, where no other link can reach. Everywhere else, VAMP plans in the scene the judge checks. Cutting a box into pieces costs VAMP about 9% of its planning time: every problem planned with the same geometry as one box and as pieces took 0.91 and 1.00 ms on average.
 
-### The checks
+**The checks.**
 
 One checker, `benchmark --check`, judges every planner's paths, batchplan's included (`benchmark --save` writes batchplan's in the other planners' format, its splines sampled at 32 points per span). A path solves its problem when:
 
@@ -44,7 +189,7 @@ Collision is checked twice:
 
 The Panda's collision meshes provide a shared model for the output check. Three of the planners plan on spheres, while RoboPlan and MoveIt 2 check meshes at intervals along each edge. The judge also samples paths; passing it is not a continuous collision guarantee or a physical-robot validation. Path lengths are medians over the problems every planner in a table solves.
 
-### Results
+**Results.**
 
 **On the same robot model.** batchplan, VAMP and OMPL plan on VAMP's Panda spheres and are judged on them, on the M4 Pro. *One core* plans every problem in turn. *In batches* counts each set's problems over the time the whole set took on all 14 cores: batchplan's set in one `plan` call, VAMP's and OMPL's one problem per thread, each thread taking the next. batchplan is built without flags and picks the CPU's widest SIMD instructions at run time; VAMP is built with its release flags for the machine (`-mcpu=native`). Times are medians of two or three alternating rounds.
 
@@ -141,7 +286,7 @@ By their own checks, VAMP solved 98.6% (98.5% with 2 rad steps), OMPL 90.5%, Rob
 | `tabletop_task_oriented` | 300 | 263 | 247 | 252 |
 </details>
 
-### Reading the results
+**Reading the results.**
 
 - **Results for the tested shared-sphere configurations.** On VAMP's spheres, 9.3% of the problems start or end in collision, so no planner can solve more than 90.7% on them; batchplan solves 2,351 of the 2,358 others. VAMP counts 98.6% solved because it checks neither the start nor the goal, and checks edges 1/32 rad apart, where the judge's denser samples find grazes. OMPL's paths graze most often: its own motion validator checks edges at 1% of the joint space's extent, about 0.13 rad. batchplan's paths are the shortest because its searches start near the straight line ([below](#closing-the-path-length-gap)).
 - **Planning times in the tested VAMP comparison.** Both run RRT-Connect on SIMD collision checks. VAMP searches its few unsolvable problems up to 100,000 samples, so all 2,600 take it 2.43 s on one core. Stopped at 10,000, as batchplan's searches are, VAMP is still slower on one core and in batches. A batch lasts as long as its few unsolvable problems, and batchplan's idle threads help those along ([below](#how-the-speed-came)). The slowest problems take about as long: VAMP's 98th percentile is 1.75 ms against batchplan's 1.68, which moves by ±0.3 ms with where batchplan's Halton samples start (`--rrt-seed`). The throughput tables describe the tested pipelines; the RoboPlan and MoveIt rows use different planning geometry and should not be read as isolated algorithm speedups.
@@ -150,6 +295,7 @@ By their own checks, VAMP solved 98.6% (98.5% with 2 rad steps), OMPL 90.5%, Rob
 - **Path lengths with two optimization seeds in the tested cuRobo comparison.** Optimizing the searched path and the straight line (`PlanOptions::seeds = 2`) gives 3.137 rad where all solve, against cuRobo's 3.144, and the shorter path on 78% of the problems. It costs 15.1 ms per problem on 14 CPU threads, or 746 problems/s in batches on the M4 Pro's GPU. cuRobo's mean stays 1% shorter (0.2% against four seeds), from a few long problems. Without optimization, batchplan's paths are 3% longer than cuRobo's (3.243 rad), from searches that stay near the straight line ([below](#closing-the-path-length-gap)), at a sixtieth of the optimized time.
 - **The measured pipelines produce different outputs.** Our VAMP, OMPL and RoboPlan adapters return geometric waypoint paths. We did not call RoboPlan's TOPP-RA trajectory generator. Its default Hermite mode stops at waypoints, but its Cubic, Adaptive and Linear Blend modes can avoid intermediate stops, with collision checks and fallback behavior ([RoboPlan trajectory generation](https://roboplan.readthedocs.io/en/latest/concepts/trajectory_generation.html)). Those modes were not evaluated here. The measured MoveIt 2 and cuRobo pipelines return timed trajectories. batchplan's `plan` returns a cubic B-spline path; the separate `Trajectory::try_new` step times it within velocity, acceleration and jerk limits in about 0.5 ms. These results do not establish a ranking of executable trajectory quality or duration.
 - **The timing boundaries differ.** batchplan's covers `plan`, excluding `Trajectory::try_new`. VAMP's and OMPL's cover building the scene, planning and simplifying, from C++. cuRobo's covers loading the world and `plan_cspace`, with the GPU synchronized. RoboPlan's covers RRT planning and shortcutting from Python, excluding scene setup and trajectory generation. MoveIt 2's covers its planning call from Python, including its configured simplification, time parameterization and validation. An equivalent-output comparison needs these stages measured separately.
+</details>
 
 ## The 2,600 problems on every device
 
@@ -158,14 +304,14 @@ By their own checks, VAMP solved 98.6% (98.5% with 2 rad steps), OMPL 90.5%, Rob
 - **plan:** plan from the start to the set's first IK solution, as in the comparison above;
 - **IK + plan:** solve IK for the goal pose, then plan to the solution with the most clearance.
 
-It checks success as above, on cuRobo's spheres, which ship with batchplan. Timings are medians of three runs; the M4 Pro's GPU also drives its display. "Free ends" counts the problems whose start and given IK solution are collision-free on these spheres, which caps what planning can reach. Throughput runs each set as one batch; time per problem covers the first 20 problems of each set, one at a time.
+It checks success as above, on cuRobo's spheres, which ship with batchplan. Timings are medians of three runs; the M4 Pro's GPU also drives its display. The M4 Pro rows are batchplan 0.2.0's, the Ryzen and Radeon rows 44b086b's. "Free ends" counts the problems whose start and given IK solution are collision-free on these spheres, which caps what planning can reach. Throughput runs each set as one batch; time per problem covers the first 20 problems of each set, one at a time.
 
 | Device | Free ends | Plan | IK + plan | IK + plan, clear on meshes | Plan, problems/s | Plan, time per problem (median / p98) | IK + plan, problems/s | IK + plan, time per problem (mean / p98) |
 |---|---|---|---|---|---|---|---|---|
 | M4 Pro CPU, 14 threads | 98.1% | 98.0% | 97.0% | 89.8% | 21,098 | 0.2 / 1.9 ms | 2,557 | **1 / 3 ms** |
 | M4 Pro GPU | 98.1% | 98.0% | 97.0% | 90.0% | 19,444 | 0.2 / 2.0 ms | 2,046 | 10 / 28 ms |
-| Ryzen AI Max+ 395, 32 threads | 98.1% | 98.0% | 97.0% | 89.8% | **31,196** | **0.1 / 1.7 ms** | **2,956** | **1 / 3 ms** |
-| Radeon 8060S | 98.1% | 98.0% | 97.0% | 89.7% | 28,362 | 0.2 / 1.5 ms | 1,948 | 11 / 37 ms |
+| Ryzen AI Max+ 395, 32 threads | 98.1% | 98.0% | 97.0% | 89.8% | **33,335** | **0.1 / 1.6 ms** | **2,946** | **1 / 3 ms** |
+| Radeon 8060S | 98.1% | 98.0% | 97.0% | 89.6% | 29,099 | 0.2 / **1.5** ms | 1,885 | 11 / 37 ms |
 
 Searching near the straight line and straightening cost 7% of batched throughput on the Ryzen and 14% on the M4 Pro. Idle threads now help the longest searches along ([below](#how-the-speed-came)), which more than pays it back. In three alternating rounds against the version before helpers, the Ryzen's batches plan 21,796 against 18,116 problems/s (22,806 against 17,869 on VAMP's spheres), with every path the same. On the M4 Pro they plan 19,898 against 15,779 in three rotating rounds; in six rotating rounds of 15 batches of each set, all the sets' batches take 122.1 ms against 154.4. Single problems plan as fast as before at the median (0.126 against 0.126 ms on the Ryzen, 0.172 against 0.173 on the M4 Pro) and within 3% at the 98th percentile (1.39 against 1.39 ms on the Ryzen, 1.48 against 1.46 on VAMP's spheres, 1.69 against 1.74 on the M4 Pro). The slowest plans in 21.2 ms against 30.9 on the Ryzen, and 26 against 46 on the M4 Pro.
 
@@ -173,7 +319,7 @@ Planning runs on each device's own CPU threads, so the devices plan alike. IK ru
 
 The motions stay within the Panda's limits: over the sets, median motions take 2.0–3.3 s, peak accelerations reach 4.9 rad/s² against a 5 rad/s² limit, and peak jerks 40–46 rad/s³ against 50.
 
-Planning alone clears the meshes in 93.1% of the problems. IK + plan clears them less often: its goals are chosen on the spheres too, so some of them touch the meshes.
+Planning alone clears the meshes in 93.0% of the problems. IK + plan clears them less often: its goals are chosen on the spheres too, so some of them touch the meshes.
 
 ## GPU and CPU throughput
 
@@ -186,32 +332,32 @@ Every device solves the same 484 of 512 targets and plans all 484.
 
 | Machine | IK seeds/s, GPU / CPU | Planning, problems/s | End to end, GPU | End to end, CPU |
 |---|---|---|---|---|
-| Ryzen AI Max+ 395 and Radeon 8060S | 579,000–622,000 / 210,000–214,000 | 200,000–314,000 | **15,988–16,910 problems/s** | 6,070–6,187 problems/s (32 threads) |
-| M4 Pro | 291,000–321,000 / 168,000–171,000 | 108,000–181,000 | **8,046–8,782 problems/s** | 4,845–4,913 problems/s (14 threads) |
+| Ryzen AI Max+ 395 and Radeon 8060S | 572,000–583,000 / 211,000–220,000 | 226,000–410,000 | **15,954–16,074 problems/s** | 6,136–6,356 problems/s (32 threads) |
+| M4 Pro (0.2.0) | 291,000–321,000 / 168,000–171,000 | 108,000–181,000 | **8,046–8,782 problems/s** | 4,845–4,913 problems/s (14 threads) |
 
 Ranges cover runs after a warm-up run. The first run after the GPU idles is up to 30% slower, and the M4 Pro's GPU, which also drives its display, varies with what is on screen.
 
-By batch size, end to end, in solved problems per second (medians of three runs):
+By batch size, end to end, in solved problems per second (medians of three runs; the M4 Pro's at 0.2.0):
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU | Radeon 8060S | Ryzen CPU |
 |---|---|---|---|---|
-| 1 | 114 | **1,752** | 139 | **1,315** |
-| 8 | 878 | **2,835** | 1,036 | **4,183** |
-| 64 | 2,577 | **4,149** | 3,895 | **5,834** |
-| 512 | **8,611** | 4,882 | **16,661** | 6,148 |
-| 4,096 | **10,763** | 4,643 | **20,996** | 6,214 |
+| 1 | 114 | **1,752** | 143 | **1,245** |
+| 8 | 878 | **2,835** | 1,047 | **4,546** |
+| 64 | 2,577 | **4,149** | 3,871 | **6,005** |
+| 512 | **8,611** | 4,882 | **16,001** | 6,329 |
+| 4,096 | **10,763** | 4,643 | **21,380** | 6,392 |
 
-A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster on the CPU. On the M4 Pro that cost varies from run to run: one problem's IK took 8 to 20 ms within one session, on batchplan 0.1.0 as on this version. The CPU fills its cores by 64 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.3 (M4 Pro) to 3.4 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 1.8 to 2.8 times.
+A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster on the CPU. On the M4 Pro that cost varies from run to run: one problem's IK took 8 to 20 ms within one session, on batchplan 0.1.0 as on this version. The CPU fills its cores by 64 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.3 (M4 Pro) to 3.3 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 1.8 to 2.8 times.
 
 ## Bimanual handovers
 
 `examples/handover/` generates the [handover episodes](training-data.md#handovers) for two reBot B601-DM arms 44 cm apart at a table. In each task one arm picks up a block lying in front of it and hands it over between the arms, and the other arm sets it down in front of itself. The blocks are 24–28 cm long, in four sizes; the block, meeting and place poses vary in position and yaw, and 0–2 small boxes stand elsewhere on the table. Three tables in four are divided down the middle, a quarter each by a low wall (6–8 cm) that the block is lifted over, a screen 16–18 cm tall with an opening 8.5–10.5 cm wide, and a row of posts as tall. The block cannot be lifted over the tall ones, so the hands meet at one end of their reach and the block lies, and is set down, toward the other: it is carried along the divider to the gap and back. Planned without its divider, the block alone would pass through it on 267 of the 372 divided tables (79 of 120 walls, 82 of 118 screens, 106 of 134 rows of posts). Half the tasks go left to right. Every step is batched over all the tasks: six IK batches (the meeting pose solves both hands at once), seven planned segments, two of them moving both arms, then timing and the episodes.
 
-| 512 tasks | M4 Pro GPU | M4 Pro CPU (14 threads) | Radeon 8060S | Ryzen CPU (32 threads) |
+| 512 tasks | M4 Pro GPU (0.2.0) | M4 Pro CPU, 14 threads (0.2.0) | Radeon 8060S | Ryzen CPU (32 threads) |
 |---|---|---|---|---|
 | Handovers | 510 of 512 | 510 of 512 | 510 of 512 | 510 of 512 |
-| Time | 1.52–1.53 s | 1.65–1.67 s | 1.40–1.41 s | 1.43 s |
-| Episodes/s | 333–336 | 305–308 | 362–364 | 357 |
+| Time | 1.52–1.53 s | 1.65–1.67 s | 1.14 s | 1.11–1.12 s |
+| Episodes/s | 333–336 | 305–308 | 446–448 | 456–459 |
 
 The 510 episodes hold 110 minutes of motion at 30 fps, 12.8 s each at the median, and every planned segment succeeds: the two tasks lost fail IK. Times are three runs each after a warm-up. Four of the IK batches are seeded with the configuration before them (each grasp with the one just above it), so they keep 4 of the 32 seeds: that seed nearly always converges, and fewer seeds take the M4 Pro's GPU run from 2.25 to 1.52 s with the same 510 handovers. The blocks come in four sizes because each size needs its own carried spheres and so plans in batches of its own: sizes drawn from a continuous range take 3.65–3.67 s.
 
@@ -281,6 +427,13 @@ batchplan's paths were 12% longer than cuRobo's at the median where both solved 
   - Not adopted: handing the search each forecast's nearest node as well, so it measures only the nodes added since (within noise); helpers summoned as rayon jobs by searches that run long, which took the threads repairs need (`cage_panda`'s last search repaired in 7.1 ms rather than 2.2); and sending helpers away from a search when they answer fewer than one in eight of its queries, letting them back once it has checked twice as many samples, which sped `bookshelf_small_panda` up as much but left `dresser_task_oriented` 6% slower (24.4 against 23.1 ms on VAMP's spheres), as its unsolvable searches were answered little at first.
 - **Not adopted.** Random and partial shortcuts, as some planners use, shortened paths 1% for 17% more time. Straightening one joint at a time along the whole path, as HPP does, shortened them from 3.60 to 3.56 rad for a sixth less batched throughput, so at first only training data used it. On paths near the straight line it costs about 3%, and it is now on by default (`ShortcutOptions::straighten`, [above](#closing-the-path-length-gap)). Wider bends, up to 1.6 rad, shortened them to 3.59 rad but cost 77% more time. Checking each link's last-hit obstacle first cost more than it saved. Four-wide NEON lanes gained nothing over the full set on the M4 Pro. VAMP's 2 rad steps planned sooner but gave longer paths and solved fewer problems.
 
+**Fewer checks, sooner trajectories.** Measured against the comparison's frozen baseline (a237326), each change in interleaved runs on the tuning problems, then the whole on the 1,818 held-out ones ([above](#before-and-after-optimization)): paths 12% sooner per query, trajectories 48% sooner, the same validity.
+
+- **A straight line's spline is not checked again.** Simplification leaves only the straight line once it is free keeping the shortcuts' clearance, and a straight line the search found was checked keeping a wider one, so the spline along it, which runs on it, needs no check of its own. Outputs are the same, and single queries take 8% less time (M4 Pro).
+- **Repairs a step at a time.** A spline no fit validates was optimized for ten L-BFGS steps (about 5 ms on one thread) before its check. The optimizer now resumes where it stopped, and the repair checks each step's spline, keeping the 2 mm margin; most pass after one to three steps. Of the 1,560 tuning answers, the 9 repaired ones change, as valid. One-core p99 on the held-out problems fell from 6.8 to 3.1 ms.
+- **TOPP-RA: each stage's own constraints once.** A stage's acceleration lines are ordered over an interval of x that does not depend on the next stage, so it is found once per time map, and the passes check only the lines the next stage adds (15 pairs instead of 64). Smoothing candidates share their round's profile, so one needing more stretch than the round's best takes longer, and its assessment stops there. Each stage's bounds are built once, not once per pass. Trajectories are byte-identical, and timing one takes half as long.
+- **Not adopted.** Checking splines at the edges' spacing alone, without `validate_substeps` per span: 6% faster on the M4 Pro, but on the held-out problems one spline dipped 1 mm into an obstacle between its samples. A shorter clearance-keeping search (500 or 1,000 samples rather than 2,000): 3–5% faster, but paths 0.1–0.3% longer and less clearance kept.
+
 **GPU kernels.** GPU trajectory optimization on the Radeon went from about 1,550 to 22,800 seeds/s (15×), and on the M4 Pro from 1,220 to 7,660 (6.3×), in six steps, each measured with alternating runs of the old and new builds:
 
 | Change | Radeon (seeds/s) | M4 Pro (seeds/s) |
@@ -313,6 +466,23 @@ cargo run --release --features lerobot --example handover -- 16 --lerobot data/h
 scripts/fetch_benchmark.sh
 cargo run --release --example benchmark -- --meshes    # --clearance M (or --search-clearance, --shortcut-clearance), --passes N, --no-straighten, --optimize S, --rrt-seed N, --spheres curobo|vamp|fitted, --device gpu|cpu
 
+# The comparison with other planners: one spherized Panda for every planner, one judge
+uv venv .venv-roboplan --python 3.12
+uv pip install --python .venv-roboplan/bin/python roboplan==0.7.0 pyyaml numpy pytest
+.venv-roboplan/bin/python scripts/bench_model.py export data/robometrics data/bench/inputs   # the canonical model and scenes, with checksums
+.venv-roboplan/bin/pytest scripts/test_bench.py      # faults the judge and the parity check must catch
+scripts/build_compare_cpp.sh                         # VAMP 0.6.4 and OMPL, in the moveit/moveit2:jazzy-release image
+# The parity check: one command per planner, as scripts/parity.py's header lists them, then `parity.py compare`
+scripts/run_suite.sh data/bench/final final          # every configuration in rotating rounds, each run judged
+scripts/run_suite.sh data/bench/baseline heldout     # the frozen baseline: the held-out problems, at a237326
+for d in data/bench/final/*/*/round1; do cargo run --release --example compare -- mesh data/bench/inputs "$d"; done
+scripts/report_suite.sh data/bench/final             # every table above
+```
+
+<details>
+<summary>The earlier comparison's commands</summary>
+
+```bash
 # batchplan on its own spheres, on VAMP's, and on VAMP's without clearance, every path saved for the judge
 cargo run --release --example benchmark -- --device cpu --latency 300 --save data/batchplan.json
 cargo run --release --example benchmark -- --device cpu --spheres vamp --latency 300 --save data/batchplan_vamp.json
@@ -369,3 +539,4 @@ cargo run --release --example benchmark -- --check data/batchplan.json --check d
 cargo run --release --example benchmark -- data/robometrics_boxes --check data/batchplan_cpu.json --check data/batchplan_gpu.json \
   --check data/batchplan_seeds2.json --check data/batchplan_seeds4.json --check data/compare_curobo.json --check data/compare_curobo_batch.json
 ```
+</details>
