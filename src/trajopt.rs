@@ -49,7 +49,7 @@ pub struct PlanOptions {
     /// Collision cost of the optimization. Repairs of stuck splines keep their own weights and a
     /// 2 cm margin.
     pub collision: CollisionWeights,
-    /// Samples per span used to validate the result.
+    /// Samples per span that validate optimized seeds.
     pub validate_substeps: usize,
     /// Seed of the optimization seeds' random via points.
     pub rng_seed: u64,
@@ -370,7 +370,7 @@ fn next_fit(
     fit: &mut Fitting,
     buffer: &mut Vec<f32>,
 ) -> Option<EdgeQuery> {
-    let (n, k) = (robot.dof(), o.validate_substeps.max(1));
+    let n = robot.dof();
     loop {
         if fit.path == fit.paths.len() {
             (fit.round, fit.path) = (fit.round + 1, 0);
@@ -406,7 +406,6 @@ fn next_fit(
         spline::checked(
             &fit.spline,
             n,
-            k,
             o.shortcut.resolution,
             &mut fit.dense,
             &mut fit.starts,
@@ -658,13 +657,12 @@ impl Search for Planning<'_> {
                 // Not yet optimized: `optimize` hands the spline over first.
                 Phase::Repair(_, false) => return None,
                 Phase::Repair(spline, true) => {
-                    let (n, k) = (self.robot.dof(), self.o.validate_substeps.max(1));
+                    let n = self.robot.dof();
                     hold_still(spline, &self.problem.start, &self.problem.hold);
                     let (mut dense, mut starts) = (vec![], vec![]);
                     spline::checked(
                         spline,
                         n,
-                        k,
                         self.o.shortcut.resolution,
                         &mut dense,
                         &mut starts,

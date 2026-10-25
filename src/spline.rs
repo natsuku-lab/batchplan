@@ -68,14 +68,13 @@ pub(crate) fn dense(cp: &[f32], dof: usize, per_span: usize, out: &mut [f32]) {
     out[spans * per_span * dof..].copy_from_slice(&cp[cp.len() - dof..]);
 }
 
-/// The spline sampled for a collision check: every span at `per_span` evenly spaced points, or at
-/// more where it moves farther, so neighbouring samples lie at most `spacing` apart (joint-space
-/// distance), as edges are checked; then its exact end. `starts` gets the index of each span's
-/// first sample, then the end's.
+/// The spline sampled for a collision check: every span at the fewest evenly spaced points (at
+/// least one) that keep neighbouring samples at most `spacing` apart (joint-space distance), as
+/// edges are checked; then its exact end. `starts` gets the index of each span's first sample, then
+/// the end's.
 pub(crate) fn checked(
     cp: &[f32],
     dof: usize,
-    per_span: usize,
     spacing: f32,
     out: &mut Vec<f32>,
     starts: &mut Vec<usize>,
@@ -95,7 +94,7 @@ pub(crate) fn checked(
         let speed = (0.5 * gap(span, span + 2))
             .max(gap(span + 1, span + 2))
             .max(0.5 * gap(span + 1, span + 3));
-        let count = per_span.max((speed / spacing).ceil() as usize);
+        let count = ((speed / spacing).ceil() as usize).max(1);
         starts.push(out.len() / dof);
         for s in 0..count {
             let row = out.len();
@@ -125,8 +124,8 @@ pub(crate) fn at_phase(cp: &[f32], dof: usize, phase: f32, out: &mut [f32]) {
 mod tests {
     use super::*;
 
-    /// Checked samples lie no farther apart than the spacing where spans are long, keep `per_span`
-    /// where they are short, start each span where `starts` says, and end at the spline's end.
+    /// Checked samples lie no farther apart than the spacing, start each span where `starts` says,
+    /// and end at the spline's end; a span that barely moves takes one.
     #[test]
     fn checked_samples_are_spaced_as_edges_are() {
         let dof = 2;
@@ -136,9 +135,9 @@ mod tests {
             2.5,
         ]
         .to_vec();
-        let (per_span, spacing) = (8, 1.0 / 32.0);
+        let spacing = 1.0 / 32.0;
         let (mut out, mut starts) = (vec![], vec![]);
-        checked(&cp, dof, per_span, spacing, &mut out, &mut starts);
+        checked(&cp, dof, spacing, &mut out, &mut starts);
         let samples: Vec<&[f32]> = out.chunks(dof).collect();
         let spans = cp.len() / dof - 3;
         assert_eq!(starts.len(), spans + 1);
@@ -150,8 +149,6 @@ mod tests {
             .fold(0.0, f32::max);
         assert!(widest <= spacing * 1.0001, "samples {widest} apart");
         for span in 0..spans {
-            let count = starts[span + 1] - starts[span];
-            assert!(count >= per_span, "span {span} has {count} samples");
             let mut at = [0.0; 2];
             blend(&cp, dof, span, basis(0.0), &mut at);
             assert!(
@@ -159,7 +156,7 @@ mod tests {
                 "span {span} starts elsewhere"
             );
         }
-        // Short spans keep the fixed count: the first span moves 1 cm.
-        assert_eq!(starts[1] - starts[0], per_span);
+        // The first span moves at most 1 cm.
+        assert_eq!(starts[1] - starts[0], 1);
     }
 }

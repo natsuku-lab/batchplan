@@ -73,7 +73,7 @@ fn main() -> Result<(), Error> {
 
 **Clearance.** A path that only just clears the spheres can graze the meshes where the spheres leave them uncovered. So RRT-Connect keeps `rrt.clearance` (1.5 cm) from obstacles, and shortcuts keep `shortcut.clearance` (1 cm). Both shrink to zero within `clearance_ramp` (0.5 rad) of the start and the goals, since paths often start or end in contact, as at a grasp. The search's wider clearance finds routes through open space, which clear the meshes more often; the shortcuts' narrower one lets the path pull tight. If RRT-Connect finds no path within 2,000 samples, it continues from the same trees without its clearance for up to `rrt.max_iterations` samples more, so narrow passages stay passable. Splines keep the shortcuts' clearance first, then a 2 mm margin (or the shortcuts' clearance, if smaller), so the curve cannot graze an obstacle between the samples it is checked at.
 
-**Validation.** Each spline candidate is sampled densely (`validate_substeps` per span) and checked for world and self-collision and joint limits. `result.best(problem)` is the shortest valid path, and `result.solved()` yields every solved problem with it.
+**Validation.** Each spline candidate is checked for world and self-collision and joint limits: the searched path's splines at samples no farther apart than `shortcut.resolution`, optimized seeds at `validate_substeps` samples per span. `result.best(problem)` is the shortest valid path, and `result.solved()` yields every solved problem with it.
 
 ### Trajectory optimization (optional)
 
