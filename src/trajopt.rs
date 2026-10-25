@@ -266,7 +266,8 @@ pub fn plan(
 }
 
 /// Iterations RRT-Connect gets to find a path keeping the clearance before it searches without.
-const KEEP_ITERATIONS: usize = 2000;
+/// Few searches that find one need more, and every search that relaxes spends them all first.
+const KEEP_ITERATIONS: usize = 500;
 
 /// One problem's planning, run whole on a device thread: RRT-Connect toward every equivalent goal,
 /// simplification, then splines along the path checked shortest first. If none is valid (one cuts
