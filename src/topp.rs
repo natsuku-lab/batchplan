@@ -105,9 +105,10 @@ pub(crate) fn time_map(
     let stage_bounds: Vec<Bounds> = (0..=stages)
         .map(|i| {
             let mut b = Bounds {
-                lower: Vec::with_capacity(n + 1),
-                upper: Vec::with_capacity(n + 1),
+                lower: Vec::with_capacity(n),
+                upper: Vec::with_capacity(n),
                 cap: f64::INFINITY,
+                own: None,
             };
             let full = if i == 0 && start_speed.is_some() {
                 1.0 / HEADROOM
@@ -138,6 +139,12 @@ pub(crate) fn time_map(
                     b.cap = b.cap.min(c / d.abs());
                 }
             }
+            let mut own = (f64::NEG_INFINITY, f64::INFINITY);
+            let ordered = b
+                .lower
+                .iter()
+                .all(|&l| b.upper.iter().all(|&u| narrow(l, u, &mut own)));
+            b.own = ordered.then_some(own);
             b
         })
         .collect();
@@ -151,21 +158,18 @@ pub(crate) fn time_map(
     // The x in [0, cap] for which some u lies between every lower and upper bound: the stage's own,
     // and the next stage's interval's when there is one.
     let feasible = |b: &Bounds, next: Option<(f64, f64)>, cap: f64| -> Option<(f64, f64)> {
-        let extra = next.map(next_lines);
-        let (mut lo, mut hi) = (0.0f64, cap);
-        for (ls, lo_off) in b.lower.iter().copied().chain(extra.map(|e| e.0)) {
-            for (us, up_off) in b.upper.iter().copied().chain(extra.map(|e| e.1)) {
-                // ls x + lo_off <= us x + up_off
-                let (k, r) = (ls - us, up_off - lo_off);
-                if k > 1e-12 {
-                    hi = hi.min(r / k);
-                } else if k < -1e-12 {
-                    lo = lo.max(r / k);
-                } else if r < -1e-12 {
-                    return None;
-                }
+        let (own_lo, own_hi) = b.own?;
+        let mut x = (own_lo.max(0.0), own_hi.min(cap));
+        if let Some(next) = next {
+            let (lower, upper) = next_lines(next);
+            let ordered = b.lower.iter().all(|&l| narrow(l, upper, &mut x))
+                && b.upper.iter().all(|&u| narrow(lower, u, &mut x))
+                && narrow(lower, upper, &mut x);
+            if !ordered {
+                return None;
             }
         }
+        let (lo, hi) = x;
         (lo <= hi + 1e-12).then_some((lo, hi.max(lo)))
     };
 
@@ -267,7 +271,13 @@ pub(crate) fn time_map(
                 None => (CHECK_SAMPLES / 4, 1.0),
                 Some(_) => (CHECK_SAMPLES, 1.0 / (STRETCH_MARGIN * STRETCH_MARGIN)),
             };
-            let (stretch, overshoots) = assess(robot, cp, tau as f32, &points, samples, target);
+            // Candidates share the profile, so one needing more stretch than the round's best takes
+            // longer, and its assessment can stop there (with room for the duration's rounding).
+            let beaten = round
+                .as_ref()
+                .map_or(f32::INFINITY, |(r, ..)| r * (1.0 + 1e-4));
+            let (stretch, overshoots) =
+                assess(robot, cp, tau as f32, &points, samples, target, beaten);
             let knot = tau as f32 * stretch;
             let duration = |knot: f32, points: &[f32]| knot * (points.len() - 3) as f32;
             let usable = start_speed.is_none() || stretch <= 1.0;
@@ -306,7 +316,7 @@ pub(crate) fn time_map(
     let (knot, points) = best?;
     match start_speed {
         None => {
-            let (stretch, _) = assess(robot, cp, knot, &points, CHECK_SAMPLES, 1.0);
+            let (stretch, _) = assess(robot, cp, knot, &points, CHECK_SAMPLES, 1.0, f32::INFINITY);
             Some((knot * stretch * STRETCH_MARGIN, points))
         }
         // Only candidates that needed no stretch at full density are kept.
@@ -314,11 +324,27 @@ pub(crate) fn time_map(
     }
 }
 
-/// A TOPP stage's acceleration bounds on u as lines u = slope x + offset, and its cap on x.
+/// A TOPP stage's acceleration bounds on u as lines u = slope x + offset, its cap on x, and the x
+/// for which its own lines are ordered (`None` if none).
 struct Bounds {
     lower: Vec<(f64, f64)>,
     upper: Vec<(f64, f64)>,
     cap: f64,
+    own: Option<(f64, f64)>,
+}
+
+/// Narrows the interval `x` to where `lower` (slope, offset) lies at or below `upper`; false if
+/// they are parallel and `lower` is above.
+fn narrow(lower: (f64, f64), upper: (f64, f64), x: &mut (f64, f64)) -> bool {
+    let (k, r) = (lower.0 - upper.0, upper.1 - lower.1);
+    if k > 1e-12 {
+        x.1 = x.1.min(r / k);
+    } else if k < -1e-12 {
+        x.0 = x.0.max(r / k);
+    } else if r < -1e-12 {
+        return false;
+    }
+    true
 }
 
 /// The path's joint velocity, acceleration and jerk where the time map is at `u` of span `m`.
@@ -365,6 +391,7 @@ pub(crate) fn within_limits(robot: &Robot, cp: &[f32], knot: f32, points: &[f32]
         points,
         CHECK_SAMPLES,
         1.0 / (STRETCH_MARGIN * STRETCH_MARGIN),
+        f32::INFINITY,
     )
     .0 <= 1.0
 }
@@ -372,7 +399,7 @@ pub(crate) fn within_limits(robot: &Robot, cp: &[f32], knot: f32, points: &[f32]
 /// How much longer the time map must take for every joint's sampled velocity, acceleration and jerk
 /// to keep its limits (velocity scales with 1/k, acceleration 1/k², jerk 1/k³; at least 1), and
 /// where it overshoots: each such sample's path position and the factor on x that limit needs
-/// there.
+/// there. Once the stretch passes `beaten`, it returns what it has found.
 fn assess(
     robot: &Robot,
     cp: &[f32],
@@ -380,6 +407,7 @@ fn assess(
     points: &[f32],
     samples: usize,
     target: f32,
+    beaten: f32,
 ) -> (f32, Vec<(f32, f32)>) {
     let n = robot.dof();
     let limits = [
@@ -387,6 +415,9 @@ fn assess(
         robot.max_acceleration(),
         robot.max_jerk(),
     ];
+    let targets: Vec<[f32; 3]> = (0..n)
+        .map(|j| std::array::from_fn(|order| limits[order][j] * target))
+        .collect();
     let mut out = vec![[0.0f32; 3]; n];
     let (mut k, mut overshoots) = (1.0f32, vec![]);
     // A ratio's root raises k only if the ratio exceeds k to the root's power. Below these powers,
@@ -398,9 +429,9 @@ fn assess(
             let u = sample as f32 / samples as f32;
             derivatives(cp, n, knot, points, m, u, &mut out);
             let mut factor = 1.0f32;
-            for (j, d) in out.iter().enumerate() {
+            for (d, limit) in out.iter().zip(&targets) {
                 for order in 0..3 {
-                    let ratio = d[order].abs() / (limits[order][j] * target);
+                    let ratio = d[order].abs() / limit[order];
                     if ratio > floor[order] {
                         let root = ratio.powf(1.0 / (order + 1) as f32);
                         if root > k {
@@ -419,6 +450,9 @@ fn assess(
                     .sum::<f32>();
                 overshoots.push((s, factor * 0.98));
             }
+        }
+        if k > beaten {
+            break;
         }
     }
     (k, overshoots)
