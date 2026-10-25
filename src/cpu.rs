@@ -902,26 +902,84 @@ pub(crate) fn optimize_path(
     deadline: Option<Instant>,
     parallel: bool,
 ) {
-    let n = robot.dof();
-    let (t_count, k) = (tr.len() / n, o.samples_per_span);
-    let samples = (t_count - 3) * k;
-    let mut sample_grad = vec![0.0f32; samples * n];
-    let mut st = Lbfgs::new(t_count, n, samples, o);
-    let mut scratch = Scratch::new(robot);
-    // The first round only prices the seed: its direction is still zero.
-    for round in 0..=o.iterations {
-        if deadline.is_some_and(|d| Instant::now() >= d) {
-            break;
+    let mut optimizer = PathOptimizer::new(robot, tr.len() / robot.dof(), o);
+    optimizer.run(robot, world, tr, o.iterations, deadline, parallel);
+}
+
+/// One path's trajectory optimization (`optimize_path`), run a few rounds at a time: each `run`
+/// goes on where the last stopped, so the rounds take the same steps however they are split.
+pub(crate) struct PathOptimizer {
+    o: PlanOptions,
+    st: Lbfgs,
+    sample_grad: Vec<f32>,
+    scratch: Scratch,
+    /// The next round; the first only prices the seed, whose direction is still zero.
+    round: u32,
+    /// Whether the last round moved the path and its next direction is still to find.
+    direction_due: bool,
+    over: bool,
+}
+
+impl PathOptimizer {
+    pub(crate) fn new(robot: &Robot, points: usize, o: &PlanOptions) -> Self {
+        let n = robot.dof();
+        let samples = (points - 3) * o.samples_per_span;
+        Self {
+            o: *o,
+            st: Lbfgs::new(points, n, samples, o),
+            sample_grad: vec![0.0; samples * n],
+            scratch: Scratch::new(robot),
+            round: 0,
+            direction_due: false,
+            over: false,
         }
-        let tr_ref = &*tr;
-        let dir = &st.dir;
-        each_chunk(
-            parallel,
-            robot,
-            &mut scratch,
-            &mut st.costs,
-            1,
-            |s, i, cost| {
+    }
+
+    /// Whether every round has run, or the optimization stopped early.
+    pub(crate) fn finished(&self) -> bool {
+        self.over
+    }
+
+    /// Runs the rounds up to and including `through` (at most the options' iterations) on `tr`,
+    /// the path the earlier rounds left, or until `deadline` passes. With `parallel`, samples are
+    /// spread over the current pool's threads.
+    pub(crate) fn run(
+        &mut self,
+        robot: &Robot,
+        world: &[Prepared],
+        tr: &mut [f32],
+        through: u32,
+        deadline: Option<Instant>,
+        parallel: bool,
+    ) {
+        let Self {
+            o,
+            st,
+            sample_grad,
+            scratch,
+            ..
+        } = self;
+        let (n, k) = (robot.dof(), o.samples_per_span);
+        let (t_count, samples) = (tr.len() / n, (tr.len() / n - 3) * k);
+        while !self.over && self.round <= through.min(o.iterations) {
+            if self.direction_due {
+                let tr_ref = &*tr;
+                each_chunk(parallel, robot, scratch, sample_grad, n, |s, i, g| {
+                    traj_sample_grad(robot, world, tr_ref, i / k, i % k, o, g, s);
+                });
+                for t in 3..t_count - 3 {
+                    traj_grad(tr, sample_grad, n, t, o, &mut st.grad[t * n..(t + 1) * n]);
+                }
+                lbfgs_direction(st, n, o);
+                self.direction_due = false;
+            }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                self.over = true;
+                break;
+            }
+            let tr_ref = &*tr;
+            let dir = &st.dir;
+            each_chunk(parallel, robot, scratch, &mut st.costs, 1, |s, i, cost| {
                 let (c, i) = (i / samples, i % samples);
                 cost[0] = traj_cost(
                     robot,
@@ -934,29 +992,17 @@ pub(crate) fn optimize_path(
                     o,
                     s,
                 );
-            },
-        );
-        let steepest = st.count == 0;
-        traj_search(robot, tr, &mut st, o);
-        // A failed steepest-descent search leaves nothing to change in later rounds.
-        if round == o.iterations || (steepest && st.started && !st.pending) {
-            break;
+            });
+            let steepest = st.count == 0;
+            traj_search(robot, tr, st, o);
+            // A failed steepest-descent search leaves nothing to change in later rounds.
+            if self.round == o.iterations || (steepest && st.started && !st.pending) {
+                self.over = true;
+            } else {
+                self.direction_due = true;
+            }
+            self.round += 1;
         }
-        let tr_ref = &*tr;
-        each_chunk(
-            parallel,
-            robot,
-            &mut scratch,
-            &mut sample_grad,
-            n,
-            |s, i, g| {
-                traj_sample_grad(robot, world, tr_ref, i / k, i % k, o, g, s);
-            },
-        );
-        for t in 3..t_count - 3 {
-            traj_grad(tr, &sample_grad, n, t, o, &mut st.grad[t * n..(t + 1) * n]);
-        }
-        lbfgs_direction(&mut st, n, o);
     }
 }
 
@@ -1330,9 +1376,12 @@ impl Backend for CpuBackend {
 
 #[cfg(test)]
 mod tests {
+    use glam::{Quat, Vec3};
+
     use super::*;
     use crate::rng::Rng;
     use crate::robot::{CollisionModel, RobotOptions};
+    use crate::world::{Obstacle, World};
 
     #[test]
     fn lbfgs_direction_applies_the_bfgs_inverse_hessian() {
@@ -1442,5 +1491,58 @@ mod tests {
             st.pending && st.count == 3 && st.cost < 1.0,
             "a cheaper step must be taken"
         );
+    }
+
+    /// Repairs run the optimizer a round at a time and check each round's path, so its rounds
+    /// split over calls must take the steps of one uninterrupted run.
+    #[test]
+    fn split_optimization_rounds_take_the_same_steps() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/franka");
+        let spheres = CollisionModel::load(format!("{dir}/panda_collision.json")).unwrap();
+        let options = RobotOptions {
+            collision_model: Some(spheres),
+            ..Default::default()
+        };
+        let fingers = ["panda_finger_joint1", "panda_finger_joint2"].map(|j| (j.to_string(), 0.04));
+        let options = RobotOptions {
+            lock_joints: fingers.into_iter().collect(),
+            ..options
+        };
+        let robot = Robot::load(format!("{dir}/franka_panda.urdf"), &options).unwrap();
+        let world = World {
+            obstacles: vec![Obstacle::Cuboid {
+                center: Vec3::new(0.45, 0.0, 0.45),
+                half_extents: Vec3::new(0.05, 0.05, 0.3),
+                rotation: Quat::IDENTITY,
+            }],
+        };
+        let prepared = prepare(&[world]);
+        let n = robot.dof();
+        let o = PlanOptions::default();
+        let (start, goal) = (
+            [-1.2, 0.3, 0.0, -1.8, 0.0, 2.0, 0.8],
+            [1.2, 0.3, 0.0, -1.8, 0.0, 2.0, 0.8],
+        );
+        // The straight line from start to goal swings the hand through the box.
+        let path: Vec<f32> = (0..o.control_points)
+            .flat_map(|t| {
+                let a = ((t.max(2) - 2) as f32 / (o.control_points - 5) as f32).min(1.0);
+                (0..n).map(move |j| start[j] + a * (goal[j] - start[j]))
+            })
+            .collect();
+        let mut whole = path.clone();
+        optimize_path(&robot, &prepared[0], &mut whole, &o, None, false);
+        assert_ne!(
+            whole, path,
+            "the path must cross the box, or nothing moves it"
+        );
+        let mut split = path;
+        let mut optimizer = PathOptimizer::new(&robot, o.control_points, &o);
+        for through in 1..=o.iterations {
+            assert!(!optimizer.finished(), "round {through} has yet to run");
+            optimizer.run(&robot, &prepared[0], &mut split, through, None, false);
+        }
+        assert!(optimizer.finished());
+        assert_eq!(split, whole);
     }
 }

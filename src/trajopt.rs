@@ -13,6 +13,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::cpu::PathOptimizer;
 use crate::device::{CollisionWeights, Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Keep, Optimize, Search};
 use crate::error::{Result, ensure_input};
@@ -295,11 +296,22 @@ enum Phase<'call> {
     Search(Box<Connect<'call>>, bool),
     Simplify(Simplify),
     Fitting(Box<Fitting>),
-    /// The spline to repair, and whether it has been optimized.
-    Repair(Vec<f32>, bool),
-    /// The repaired spline and its dense samples, under check.
-    Check(Vec<f32>, Vec<f32>),
+    Repair(Box<Repair>),
     Done,
+}
+
+/// A stuck spline under repair: optimized a round at a time, its held joints put back and checked
+/// after each round, keeping the splines' last clearance (`keep`), and after the last round without.
+struct Repair {
+    spline: Vec<f32>,
+    optimizer: PathOptimizer,
+    /// Rounds handed to the optimizer.
+    rounds: u32,
+    keep: Arc<Keep>,
+    /// Whether a round has run since the last check.
+    optimized: bool,
+    /// The spline under check and its dense samples.
+    checking: Option<(Vec<f32>, Vec<f32>)>,
 }
 
 impl<'call> Planning<'call> {
@@ -686,19 +698,27 @@ impl Search for Planning<'_> {
                     if let Some(query) = next_fit(self.robot, self.problem, self.o, fit, buffer) {
                         return Some(query);
                     }
-                    self.phase = Phase::Repair(
-                        self.start.clone().expect("fitting follows simplification"),
-                        false,
-                    );
+                    let spline = self.start.clone().expect("fitting follows simplification");
+                    let points = spline.len() / self.robot.dof();
+                    self.phase = Phase::Repair(Box::new(Repair {
+                        optimizer: PathOptimizer::new(self.robot, points, &repairing(self.o)),
+                        spline,
+                        rounds: 0,
+                        keep: fit.keeps.last().expect("splines keep a clearance").clone(),
+                        optimized: false,
+                        checking: None,
+                    }));
                 }
                 // Not yet optimized: `optimize` hands the spline over first.
-                Phase::Repair(_, false) => return None,
-                Phase::Repair(spline, true) => {
+                Phase::Repair(repair) if !repair.optimized => return None,
+                Phase::Repair(repair) => {
                     let n = self.robot.dof();
-                    hold_still(spline, &self.problem.start, &self.problem.hold);
+                    repair.optimized = false;
+                    let mut spline = repair.spline.clone();
+                    hold_still(&mut spline, &self.problem.start, &self.problem.hold);
                     let (mut dense, mut starts) = (vec![], vec![]);
                     spline::checked(
-                        spline,
+                        &spline,
                         n,
                         self.o.shortcut.resolution,
                         &mut dense,
@@ -706,15 +726,17 @@ impl Search for Planning<'_> {
                     );
                     let mut edges = edges::reuse(buffer);
                     edges.extend_from_slice(&dense);
-                    let query = EdgeQuery {
+                    // The last round's spline is free enough without the margin: the repair's
+                    // collision cost keeps 2 cm.
+                    let keep = (!repair.optimizer.finished()).then(|| repair.keep.clone());
+                    repair.checking = Some((spline, dense));
+                    return Some(EdgeQuery {
                         world: self.problem.world,
                         edges,
                         wanted: None,
                         spacing: 0.0,
-                        keep: None,
-                    };
-                    self.phase = Phase::Check(std::mem::take(spline), dense);
-                    return Some(query);
+                        keep,
+                    });
                 }
                 // A path found near the straight line that no spline follows: the search a planner
                 // without the tube would run.
@@ -728,7 +750,7 @@ impl Search for Planning<'_> {
                         &self.ahead,
                     );
                 }
-                Phase::Check(..) | Phase::Done => return None,
+                Phase::Done => return None,
             }
         }
     }
@@ -756,35 +778,43 @@ impl Search for Planning<'_> {
                     fit.restart();
                 }
             }
-            Phase::Check(spline, dense) => {
+            Phase::Repair(repair) => {
                 let n = self.robot.dof();
-                let follows = |m: &StartMotion| Trajectory::moving(self.robot, spline, m).is_ok();
+                let (spline, dense) = repair.checking.take().expect("answers follow checks");
+                let follows = |m: &StartMotion| Trajectory::moving(self.robot, &spline, m).is_ok();
                 if answer == dense.len() / n
                     && self.problem.start_motion.as_ref().is_none_or(follows)
                 {
-                    self.chosen = Some((std::mem::take(spline), shortcut::length(dense, n)));
+                    self.chosen = Some((spline, shortcut::length(&dense, n)));
+                    self.phase = Phase::Done;
+                } else if repair.optimizer.finished() {
+                    self.phase = Phase::Done;
                 }
-                self.phase = Phase::Done;
             }
-            Phase::Repair(..) | Phase::Done => unreachable!("answers follow requests"),
+            Phase::Done => unreachable!("answers follow requests"),
         }
     }
 
     fn optimize(&mut self) -> Option<Optimize<'_>> {
-        let Phase::Repair(spline, optimized @ false) = &mut self.phase else {
+        let Phase::Repair(repair) = &mut self.phase else {
             return None;
         };
-        *optimized = true;
+        if repair.optimized || repair.optimizer.finished() {
+            return None;
+        }
+        repair.optimized = true;
+        repair.rounds += 1;
         Some(Optimize {
             world: self.problem.world,
-            path: spline,
-            options: repairing(self.o),
+            path: &mut repair.spline,
+            optimizer: &mut repair.optimizer,
+            through: repair.rounds,
         })
     }
 }
 
-/// L-BFGS steps that repair a stuck spline: a few push it off the obstacles, and many more trade
-/// that clearance back for length, leaving fewer valid.
+/// Most L-BFGS steps that repair a stuck spline: a few push it off the obstacles, and many more
+/// trade that clearance back for length, leaving fewer valid.
 const REPAIR_ITERATIONS: u32 = 10;
 
 /// Repairs weigh smoothness over length and keep a 2 cm margin whatever the options say: their

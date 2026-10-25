@@ -15,11 +15,10 @@ use std::time::Instant;
 
 use fearless_simd::{Simd, dispatch};
 
-use crate::cpu::{self, Prepared};
+use crate::cpu::{PathOptimizer, Prepared};
 use crate::lanes::{LANES, LaneScratch, Lanes};
 use crate::robot::Robot;
 use crate::rrt::{self, Ahead};
-use crate::trajopt::PlanOptions;
 
 /// What a query asks of its edges, checked in order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,12 +170,13 @@ impl<S: Search, F: FnOnce() -> S + Send> Search for Deferred<S, F> {
     }
 }
 
-/// A path's B-spline control points to improve with `options.iterations` steps of trajectory
-/// optimization in `world`.
+/// More rounds of a path's trajectory optimization in `world`: `optimizer`'s rounds through
+/// `through`, on the B-spline control points `path` its earlier rounds left.
 pub(crate) struct Optimize<'path> {
     pub(crate) world: u32,
     pub(crate) path: &'path mut [f32],
-    pub(crate) options: PlanOptions,
+    pub(crate) optimizer: &'path mut PathOptimizer,
+    pub(crate) through: u32,
 }
 
 /// `buffer`'s allocation, emptied, for a query's edges: searches fill it instead of allocating
@@ -257,11 +257,11 @@ fn run_at<S: Simd>(
             if let Some(optimizing) = spread {
                 optimizing.fetch_add(1, Ordering::Relaxed);
             }
-            cpu::optimize_path(
+            o.optimizer.run(
                 robot,
                 &worlds[o.world as usize],
                 o.path,
-                &o.options,
+                o.through,
                 deadline,
                 spread.is_some(),
             );
