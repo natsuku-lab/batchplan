@@ -4,6 +4,10 @@ Each argument is a configuration's directory of rounds (`<part>/<config>/round<k
 directory. Rounds and seeds are pooled:
 - success: the share of queries a planner claims, and the share whose final output the judge accepts
   (and accepts with the kinodynamic limits loosened to 10%), with the reasons for the rest;
+- on the meshes, where a round has `mesh_verdicts.jsonl` (`examples/compare.rs mesh`), apart from
+  validity: the share of that round's queries whose output passes the judge but for collision on
+  the spheres and is clear of the exact scene on the Panda's collision meshes, and how many of the
+  rest start or end touching the meshes;
 - time per query, failures included at what they cost: end-to-end median, p95 and p99, and the median
   without loading the scene (search, post-processing, timing and the pipeline's own validation);
 - throughput: judge-valid results per second of each pass's wall time (a pass is every problem once
@@ -24,6 +28,7 @@ from pathlib import Path
 import numpy as np
 
 KINODYNAMIC = {"velocity", "acceleration", "jerk"}
+COLLISION = {"world collision", "self collision"}
 PLANNING = ["search", "post", "plan", "search+post", "search+post+timing+validation", "timing", "validation"]
 
 
@@ -46,12 +51,17 @@ def valid_within(v, tolerance):
         return False
     if v["valid"]:
         return True
-    reasons = {r.strip() for r in v["reason"].split(",") if r.strip()}
-    return reasons <= KINODYNAMIC and all(v.get(f"{r}_ratio", 0) <= 1 + tolerance for r in reasons)
+    failed = reasons(v)
+    return failed <= KINODYNAMIC and all(v.get(f"{r}_ratio", 0) <= 1 + tolerance for r in failed)
+
+
+def reasons(v):
+    return {r.strip() for r in v["reason"].split(",") if r.strip()}
 
 
 def summarize(path):
     queries, passes, manifest = [], [], None
+    meshes = {"queries": 0, "clear": 0, "ends_touch": 0}
     for run in runs_of(path):
         manifest = json.loads((run / "manifest.json").read_text())
         verdicts = {}
@@ -59,6 +69,11 @@ def summarize(path):
             for l in open(run / "verdicts.jsonl"):
                 v = json.loads(l)
                 verdicts[(v["problem"], v["seed"])] = v
+        mesh = {}
+        if (run / "mesh_verdicts.jsonl").exists():
+            for l in open(run / "mesh_verdicts.jsonl"):
+                m = json.loads(l)
+                mesh[(m["problem"], m["seed"])] = m
         records = [json.loads(l) for l in open(run / "records.jsonl")]
         valid_in_pass = Counter()
         for r in records:
@@ -70,6 +85,12 @@ def summarize(path):
             queries.append({"problem": r["problem"], "seed": r["seed"], "round": run.name, "status": r["status"],
                             "verdict": v, "total": phases.get("total", 0.0), "planning": planning})
             valid_in_pass[(run.name, r["seed"])] += bool(v and v["valid"])
+            if mesh:
+                m = mesh.get((r["problem"], r["seed"]))
+                meshes["queries"] += 1
+                if m and v and (v["valid"] or reasons(v) <= COLLISION):
+                    meshes["clear"] += m["clear"]
+                    meshes["ends_touch"] += not m["clear"] and not m["ends_clear"]
         for p in map(json.loads, open(run / "passes.jsonl")):
             passes.append({**p, "round": run.name, "valid": valid_in_pass[(run.name, p["seed"])]})
     q = len(queries)
@@ -86,7 +107,7 @@ def summarize(path):
         "p99": float(np.percentile(totals, 99)),
         "planning": float(np.median(planning)) if len(planning) else float("nan"),
         "rate": float(np.median(rates)), "rate_range": (float(min(rates)), float(max(rates))),
-        "passes": passes,
+        "passes": passes, "meshes": meshes,
     }
 
 
@@ -145,14 +166,16 @@ def main():
     m = summaries[0]["manifest"]
     print(f"{m['split']} split, {m.get('set', 'problems')}, {m.get('scene', 'exact')} scenes, "
           f"{m['workers']} core{'s' if m['workers'] > 1 else ''}; queries = problems x seeds x rounds")
-    head = ["configuration", "queries", "claimed", "valid", "valid ≤10%", "median ms", "p95 ms", "p99 ms",
-            "without setup ms", "valid/s (range)"]
+    head = ["configuration", "queries", "claimed", "valid", "valid ≤10%", "on meshes", "median ms", "p95 ms",
+            "p99 ms", "without setup ms", "valid/s (range)"]
     rows = []
     for s in summaries:
         lo, hi = s["rate_range"]
+        m = s["meshes"]
+        on_meshes = f"{100 * m['clear'] / m['queries']:.1f}%" if m["queries"] else "–"
         rows.append([s["label"], str(s["n"]), f"{100 * s['claimed']:.1f}%", f"{100 * s['valid']:.1f}%",
-                     f"{100 * s['valid10']:.1f}%", f"{s['median']:.2f}", f"{s['p95']:.1f}", f"{s['p99']:.1f}",
-                     f"{s['planning']:.2f}", f"{s['rate']:.0f} ({lo:.0f}–{hi:.0f})"])
+                     f"{100 * s['valid10']:.1f}%", on_meshes, f"{s['median']:.2f}", f"{s['p95']:.1f}",
+                     f"{s['p99']:.1f}", f"{s['planning']:.2f}", f"{s['rate']:.0f} ({lo:.0f}–{hi:.0f})"])
     if args.markdown:
         print("| " + " | ".join(head) + " |\n|" + "---|" * len(head))
         for r in rows:
@@ -163,6 +186,10 @@ def main():
         for r in rows:
             print("  ".join(c.rjust(w) if i else c.ljust(w) for i, (c, w) in enumerate(zip(r, widths))))
     for s in summaries:
+        m = s["meshes"]
+        if m["queries"]:
+            print(f"  {s['label']}: on the meshes, {m['clear']} of {m['queries']} queries clear; of the "
+                  f"rest, {m['ends_touch']} answers start or end touching the meshes")
         if s["reasons"]:
             print(f"  {s['label']}: invalid " + ", ".join(f"{r} {n}" for r, n in s["reasons"].most_common(6)))
         batch = [p for p in s["passes"] if "single_wall" in p]

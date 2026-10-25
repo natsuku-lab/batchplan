@@ -9,6 +9,9 @@
 //!     a run of the comparison, as `scripts/compare.py run --planner batchplan` writes its job:
 //!     for every repetition and seed, each problem planned alone ("single": latency), then every
 //!     problem in one `plan` call, each in its own world ("batch": throughput)
+//! cargo run --release --example compare -- mesh <inputs_dir> <run_dir>
+//!     any planner's run, checked on the Panda's collision meshes in the exact scenes, apart from
+//!     the judge's check on the canonical spheres: `mesh_verdicts.jsonl`
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -17,8 +20,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use batchplan::{
-    CollisionModel, CollisionWeights, Device, JointLimits, Obstacle, PlanOptions, PlanProblem,
-    Pose, Robot, RobotOptions, Trajectory, World,
+    Clearance, CollisionModel, CollisionWeights, Device, JointLimits, MeshModel, Obstacle,
+    PlanOptions, PlanProblem, Pose, Robot, RobotOptions, Trajectory, World,
 };
 use glam::{EulerRot, Quat, Vec3};
 use serde::Deserialize;
@@ -543,6 +546,160 @@ fn run(job_path: &Path, out_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The Panda's collision meshes: batchplan's Franka description, posed as the canonical model is
+/// (its fingers 6.5 cm out, as VAMP's spherized URDF fixes them), with the canonical SRDF's pairs.
+fn mesh_model(inputs: &Path) -> Result<MeshModel> {
+    let asset = |path: &str| format!("{}/assets/franka/{path}", env!("CARGO_MANIFEST_DIR"));
+    let fingers = ["panda_finger_joint1", "panda_finger_joint2"].map(|j| (j.to_string(), 0.065));
+    let options = RobotOptions {
+        lock_joints: fingers.into_iter().collect(),
+        collision_model: Some(CollisionModel::load(asset("panda_collision.json"))?),
+        srdf: Some(std::fs::read_to_string(inputs.join("panda.srdf"))?),
+        ..Default::default()
+    };
+    Ok(MeshModel::try_new(&Robot::load(
+        asset("franka_panda.urdf"),
+        &options,
+    )?)?)
+}
+
+/// `waypoints` (`[k, dof]`) with states added along each edge, at most `step` apart in every joint.
+fn densified(waypoints: &[f32], dof: usize, step: f32) -> Vec<f32> {
+    let mut dense = waypoints[..dof].to_vec();
+    for (a, b) in waypoints.chunks(dof).zip(waypoints.chunks(dof).skip(1)) {
+        let widest = a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| (y - x).abs())
+            .fold(0.0, f32::max);
+        let k = ((widest / step).ceil() as usize).max(1);
+        for s in 1..=k {
+            let t = s as f32 / k as f32;
+            dense.extend(a.iter().zip(b).map(|(x, y)| x + (y - x) * t));
+        }
+    }
+    dense
+}
+
+/// Checks every answer of a run's first repetition on the meshes (`mesh_model`), in the exact
+/// scene, sampled as the judge samples: the final output (the timed trajectory in workload B),
+/// densified to 0.005 rad. Writes, per problem and seed, whether the output is clear, whether its
+/// problem's start and goal are, and its least world and self clearance.
+fn mesh(inputs: &Path, run_dir: &Path) -> Result<()> {
+    use rayon::prelude::*;
+
+    let model = mesh_model(inputs)?;
+    let n = 7;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run_dir.join("manifest.json"))?)?;
+    let trajectories = manifest["workload"] == "B";
+    let problems: Vec<Problem> =
+        serde_json::from_str(&std::fs::read_to_string(inputs.join("problems.json"))?)?;
+    let queries: Vec<Query> = serde_json::from_str(&std::fs::read_to_string(
+        inputs.join("queries_onescene.json"),
+    )?)?;
+    let by_id: HashMap<&str, &Problem> = problems.iter().map(|p| (p.id.as_str(), p)).collect();
+    // Each answered id's ends and its scene's problem.
+    let mut ends: HashMap<&str, (&[f32], &[f32], &Problem)> = problems
+        .iter()
+        .map(|p| (p.id.as_str(), (&p.start[..], &p.goal[..], p)))
+        .collect();
+    for q in &queries {
+        let p = by_id
+            .get(q.scene_ref.as_str())
+            .with_context(|| format!("no scene {}", q.scene_ref))?;
+        ends.insert(&q.id, (&q.start, &q.goal, p));
+    }
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(run_dir.join("records.jsonl"))?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    let answered: Vec<(String, u64)> = records
+        .iter()
+        .filter(|r| {
+            r["rep"] == 1 && r.get("api").is_none_or(|a| a == "single") && r["status"] == "solved"
+        })
+        .map(|r| {
+            let problem = r["problem"].as_str().context("a problem id")?.to_string();
+            Ok((problem, r["seed"].as_u64().context("a seed")?))
+        })
+        .collect::<Result<_>>()?;
+    // The outputs of each seed: values and index.
+    let mut outputs: HashMap<u64, (Vec<f32>, serde_json::Value)> = HashMap::new();
+    for &(_, seed) in &answered {
+        if outputs.contains_key(&seed) {
+            continue;
+        }
+        let stem = run_dir.join(format!("outputs_seed{seed}"));
+        let bytes = std::fs::read(stem.with_extension("bin"))?;
+        let values = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&b| f32::from_le_bytes(b))
+            .collect();
+        let index = serde_json::from_str(&std::fs::read_to_string(stem.with_extension("json"))?)?;
+        outputs.insert(seed, (values, index));
+    }
+    let output = |problem: &str, seed: u64| -> Result<&[f32]> {
+        let (values, index) = &outputs[&seed];
+        let key = [format!("{problem}|q"), format!("{problem}|path")]
+            .into_iter()
+            .find(|k| (trajectories || k.ends_with("|path")) && index.get(k).is_some())
+            .with_context(|| format!("no output for {problem} seed {seed}"))?;
+        let at = |i: usize| index[&key][i].as_u64().map(|v| v as usize);
+        let (offset, rows, cols) = (at(0), at(1), at(2));
+        let (Some(offset), Some(rows), Some(7)) = (offset, rows, cols) else {
+            bail!("{key}: not [offset, rows, 7]");
+        };
+        Ok(&values[offset..offset + rows * n])
+    };
+    // Each distinct scene once, and per answer its densified output, scene and ends.
+    let mut scene_index: HashMap<&str, u32> = HashMap::new();
+    let (mut worlds, mut jobs) = (vec![], vec![]);
+    for (problem, seed) in &answered {
+        let &(start, goal, p) = ends.get(problem.as_str()).context("an answered id")?;
+        let w = *scene_index.entry(p.id.as_str()).or_insert_with(|| {
+            worlds.push(world(&p.scene));
+            worlds.len() as u32 - 1
+        });
+        let path = densified(output(problem, *seed)?, n, 0.005);
+        jobs.push((path, w, [start, goal].concat()));
+    }
+    let least = |c: &[Clearance]| {
+        c.iter().fold((f32::INFINITY, f32::INFINITY), |(w, s), c| {
+            (w.min(c.world), s.min(c.self_collision))
+        })
+    };
+    let verdicts: Vec<serde_json::Value> = jobs
+        .par_iter()
+        .zip(&answered)
+        .map(|((path, w, ends), (problem, seed))| {
+            let (world, self_collision) =
+                least(&model.clearance(&worlds, &vec![*w; path.len() / n], path)?);
+            let (end_world, end_self) = least(&model.clearance(&worlds, &[*w; 2], ends)?);
+            Ok(json!({
+                "problem": problem, "seed": seed,
+                "clear": world > 0.0 && self_collision > 0.0,
+                "ends_clear": end_world > 0.0 && end_self > 0.0,
+                "world": world, "self": self_collision,
+            }))
+        })
+        .collect::<Result<_>>()?;
+    let mut out =
+        std::io::BufWriter::new(std::fs::File::create(run_dir.join("mesh_verdicts.jsonl"))?);
+    for v in &verdicts {
+        writeln!(out, "{v}")?;
+    }
+    let clear = verdicts.iter().filter(|v| v["clear"] == true).count();
+    println!(
+        "{}: {clear} of {} answers clear on the meshes",
+        run_dir.display(),
+        verdicts.len()
+    );
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args
@@ -555,8 +712,10 @@ fn main() -> Result<()> {
             parity(Path::new(inputs), Path::new(fixtures), Path::new(out))
         }
         ["run", job, out] => run(Path::new(job), Path::new(out)),
+        ["mesh", inputs, run_dir] => mesh(Path::new(inputs), Path::new(run_dir)),
         _ => bail!(
-            "usage: compare parity <inputs_dir> <fixtures.json> <out.json> | run <job.json> <out_dir>"
+            "usage: compare parity <inputs_dir> <fixtures.json> <out.json> | run <job.json> \
+             <out_dir> | mesh <inputs_dir> <run_dir>"
         ),
     }
 }
