@@ -13,7 +13,7 @@ of the first repetition are kept, as float32 arrays, in one file per pass.
     python scripts/compare.py run <inputs> <out_dir> --planner roboplan --workload A --family defaults \\
         --split tuning --seeds 1,2,3,4,5 --reps 3 --cores 0-15
 
-batchplan, VAMP and OMPL run in their own binaries (`examples/compare.rs`, `scripts/cpp_planners.cc`),
+batchplan, VAMP and OMPL run in their own binaries (`examples/compare.rs`, `scripts/compare_cpp.cc`),
 which write the same records.
 """
 
