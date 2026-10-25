@@ -50,7 +50,8 @@ pub struct PlanOptions {
     /// Collision cost of the optimization. Repairs of stuck splines keep their own weights and a
     /// 2 cm margin.
     pub collision: CollisionWeights,
-    /// Samples per span that validate optimized seeds.
+    /// Samples per span that validate optimized seeds, and that check, at least, the searched
+    /// path's splines where they keep no clearance.
     pub validate_substeps: usize,
     /// Seed of the optimization seeds' random via points.
     pub rng_seed: u64,
@@ -427,9 +428,11 @@ fn next_fit(
                 continue;
             }
         }
+        let keep = &fit.keeps[fit.round];
         spline::checked(
             &fit.spline,
             n,
+            least_per_span(Some(keep), o),
             o.shortcut.resolution,
             &mut fit.dense,
             &mut fit.starts,
@@ -449,7 +452,7 @@ fn next_fit(
             .clear
             .min(fit.starts[changed.saturating_sub(3).min(fit.starts.len() - 1)]);
         fit.checked.clone_from(&fit.spline);
-        let keep = Some(fit.keeps[fit.round].clone());
+        let keep = Some(keep.clone());
         let mut edges = edges::reuse(buffer);
         edges.extend_from_slice(&fit.dense[fit.from * n..]);
         return Some(EdgeQuery {
@@ -465,6 +468,17 @@ fn next_fit(
 /// Clearance every spline keeps from the world away from its ends, so it cannot graze an obstacle
 /// between the samples it is checked at; at most the shortcuts' clearance.
 const SPLINE_MARGIN: f32 = 0.002;
+
+/// The fewest samples per span a spline's check takes. Keeping a margin, samples the edges'
+/// spacing apart cover the curve between them; keeping none, `validate_substeps` per span do,
+/// where spans are short.
+fn least_per_span(keep: Option<&Keep>, o: &PlanOptions) -> usize {
+    if keep.is_some_and(|k| k.clearance > 0.0) {
+        1
+    } else {
+        o.validate_substeps.max(1)
+    }
+}
 
 /// Maximum waypoints pinned per path before the next path is tried.
 const MAX_PINS: usize = 6;
@@ -685,6 +699,7 @@ impl Search for Planning<'_> {
                         spline::checked(
                             &fit.spline,
                             n,
+                            least_per_span(fit.keeps.first().map(|k| &**k), self.o),
                             self.o.shortcut.resolution,
                             &mut fit.dense,
                             &mut fit.starts,
@@ -716,19 +731,20 @@ impl Search for Planning<'_> {
                     repair.optimized = false;
                     let mut spline = repair.spline.clone();
                     hold_still(&mut spline, &self.problem.start, &self.problem.hold);
+                    // The last round's spline is free enough without the margin: the repair's
+                    // collision cost keeps 2 cm.
+                    let keep = (!repair.optimizer.finished()).then(|| repair.keep.clone());
                     let (mut dense, mut starts) = (vec![], vec![]);
                     spline::checked(
                         &spline,
                         n,
+                        least_per_span(keep.as_deref(), self.o),
                         self.o.shortcut.resolution,
                         &mut dense,
                         &mut starts,
                     );
                     let mut edges = edges::reuse(buffer);
                     edges.extend_from_slice(&dense);
-                    // The last round's spline is free enough without the margin: the repair's
-                    // collision cost keeps 2 cm.
-                    let keep = (!repair.optimizer.finished()).then(|| repair.keep.clone());
                     repair.checking = Some((spline, dense));
                     return Some(EdgeQuery {
                         world: self.problem.world,
