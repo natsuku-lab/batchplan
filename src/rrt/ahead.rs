@@ -157,11 +157,9 @@ impl Connect<'_> {
             shared.log(trees, sent);
         } else {
             *sent = Some(trees.map(Tree::len));
-            let mut halton = self.halton.clone();
-            halton.index -= sample as u64 + 1;
             ahead.publish(Base {
                 trees: trees.map(Tree::clone),
-                halton,
+                halton: self.halton.rewound(sample as u64 + 1),
                 world: self.world,
                 range: self.range,
                 resolution: self.resolution,
@@ -503,7 +501,7 @@ impl Helper<'_> {
         let (robot, base) = (self.robot, self.base.as_ref().expect("synced"));
         let target = &mut self.target;
         base.halton
-            .point(base.halton.index + self.sample as u64 + 1, target);
+            .point(base.halton.index() + self.sample as u64 + 1, target);
         // The tube's samples come first: while it lasts, as many were drawn before as this one's
         // index.
         let tube = connect::tube_radius(robot, &base.across, base.max_iterations, self.sample);

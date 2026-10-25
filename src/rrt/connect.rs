@@ -468,7 +468,14 @@ impl KdTree {
 #[derive(Clone)]
 pub(super) struct Halton {
     bases: Vec<u32>,
-    pub(super) index: u64,
+    /// The last point's index.
+    index: u64,
+    /// `index` in each base, its least significant digit first, which `next` counts up rather than
+    /// dividing it out: samples far into the sequence (each seed starts a million on) cost a
+    /// division per digit and base otherwise.
+    digits: Vec<Vec<u32>>,
+    /// Each base's negative powers, `1/b`, `1/b²`, …, as `point` divides them out.
+    scales: Vec<Vec<f64>>,
 }
 
 impl Halton {
@@ -485,15 +492,71 @@ impl Halton {
             }
             k += 2;
         }
+        Self::at(bases, start)
+    }
+
+    /// The sequence in `bases` with `index` as its last point.
+    fn at(bases: Vec<u32>, index: u64) -> Self {
+        let digits = bases
+            .iter()
+            .map(|&b| {
+                let (mut i, mut digits) = (index, vec![]);
+                while i > 0 {
+                    digits.push((i % u64::from(b)) as u32);
+                    i /= u64::from(b);
+                }
+                digits
+            })
+            .collect();
         Self {
+            scales: vec![vec![]; bases.len()],
             bases,
-            index: start,
+            index,
+            digits,
         }
     }
 
+    /// The last point's index.
+    pub(super) fn index(&self) -> u64 {
+        self.index
+    }
+
+    /// The sequence `by` points earlier.
+    pub(super) fn rewound(&self, by: u64) -> Self {
+        Self::at(self.bases.clone(), self.index - by)
+    }
+
+    /// The next point, as `point` computes it.
     fn next(&mut self, out: &mut [f32]) {
         self.index += 1;
-        self.point(self.index, out);
+        let dims = self
+            .bases
+            .iter()
+            .zip(&mut self.digits)
+            .zip(&mut self.scales);
+        for (o, ((&b, digits), scales)) in out.iter_mut().zip(dims) {
+            let mut k = 0;
+            loop {
+                if k == digits.len() {
+                    digits.push(0);
+                }
+                digits[k] += 1;
+                if digits[k] < b {
+                    break;
+                }
+                digits[k] = 0;
+                k += 1;
+            }
+            while scales.len() < digits.len() {
+                let last = scales.last().copied().unwrap_or(1.0);
+                scales.push(last / f64::from(b));
+            }
+            let mut r = 0.0f64;
+            for (&d, &f) in digits.iter().zip(scales.iter()) {
+                r += f * f64::from(d);
+            }
+            *o = r as f32;
+        }
     }
 
     /// Point `index` of the sequence.
@@ -1193,6 +1256,26 @@ impl Search for Connect<'_> {
 mod tests {
     use super::*;
     use crate::rng::Rng;
+
+    /// `next` counts each base's digits up rather than dividing them out: its points must be
+    /// `point`'s bit for bit, across carries and from the starts seeds give.
+    #[test]
+    fn halton_points_follow_on_exactly() {
+        for start in [0, 1, 25, 3_000_009, u64::from(u32::MAX) - 2] {
+            let mut halton = Halton::new(7, start);
+            let (mut next, mut point) = (vec![0.0; 7], vec![0.0; 7]);
+            for k in 1..=5000 {
+                halton.next(&mut next);
+                halton.point(start + k, &mut point);
+                assert_eq!(next, point, "point {} from {start}", start + k);
+            }
+            assert_eq!(halton.index(), start + 5000);
+            let mut back = halton.rewound(4000);
+            back.next(&mut next);
+            halton.point(start + 1001, &mut point);
+            assert_eq!(next, point, "rewound from {start}");
+        }
+    }
 
     /// Bends move via points only along joints that may move: none of the directions a bend can
     /// take moves a held joint.
