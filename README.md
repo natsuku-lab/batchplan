@@ -1,7 +1,7 @@
 <h1 align="center">batchplan</h1>
 
 <p align="center">
-  <em>The fastest motion planning in the West.</em>
+  <em>Batched motion planning for robotics.</em>
 </p>
 
 <img width="1135" height="654" alt="Two reBot arms at each of many tables, seen from the front, handing a block over and around posts, screens and low walls, every handover planned in one batch" src="https://raw.githubusercontent.com/natsuku-lab/batchplan/main/docs/handover.gif" />
@@ -189,11 +189,13 @@ To fuse frames over time, use an `OccupancyMap` ([Worlds and perception](docs/pe
 
 ## How it compares
 
-Each library planned the same 2,600 Panda problems from MotionBenchMaker and MπNets, and one checker judged every path, batchplan's included. *Solved* means the path reaches the goal within the joint limits without touching the model it was planned on; *clear on the meshes* checks it against the Panda's meshes, the real robot. [Setup and per-set results](docs/benchmarks.md#against-other-planners) · [Run them yourself](docs/benchmarks.md#reproducing)
+The benchmark suite contains 2,600 Panda problems from MotionBenchMaker and MπNets; the cuRobo comparison uses the 1,300 box-only problems. One checker evaluates every returned path, batchplan's included. *Solved* means it passes the sampled goal, joint-limit and collision checks on its planning model; *clear on the meshes* uses the Panda's collision meshes. This is a model-based check, not validation on a physical robot. [Setup and per-set results](docs/benchmarks.md#against-other-planners) · [Run them yourself](docs/benchmarks.md#reproducing)
 
-- **The fastest of these planners:** 0.17 ms per problem and 19,902 problems/s on an M4 Pro CPU, ahead of VAMP on the same spheres.
-- **Clear of the real robot most often:** 85–93% of its paths clear the Panda's meshes; no other planner's reach 82%.
-- **Solves the most** in every comparison, with shorter paths than every other sampling-based planner, and, with two optimization seeds, than cuRobo.
+These are measurements of the configurations below, not a general ranking of the libraries. Collision geometry, pipeline stages and, in the cuRobo table, hardware differ. A common output checker does not equalize that work.
+
+- **Planning on shared spheres:** batchplan measured 0.17 ms per problem and 19,902 problems/s on the M4 Pro CPU in the VAMP/OMPL comparison.
+- **Sampled mesh validation:** 85–93% of batchplan's paths passed, depending on the configuration and problem set.
+- **Path quality:** the tables report joint-space path length over problems all compared configurations solve; they do not compare robot execution time.
 
 ### Against VAMP and OMPL, on VAMP's spheres
 
@@ -211,7 +213,7 @@ Apple M4 Pro CPU, 14 cores.
 
 ### Against cuRobo, on cuRobo's spheres
 
-cuRobo on an NVIDIA T4 GPU with 8 Xeon threads; batchplan on the M4 Pro². The 1,300 problems whose scenes are only boxes, which both libraries load exactly.
+cuRobo on an NVIDIA T4 GPU with 8 Xeon threads; batchplan on the M4 Pro². The 1,300 problems whose scenes are only boxes, which both libraries load exactly. These cross-hardware timings do not establish a hardware-controlled speed comparison.
 
 | Planner | Solved | Clear on the meshes | Path length¹ | Time per problem (median) | Batched |
 |---|---|---|---|---|---|
@@ -224,7 +226,9 @@ cuRobo on an NVIDIA T4 GPU with 8 Xeon threads; batchplan on the M4 Pro². The 1
 
 ### Against MoveIt 2 and RoboPlan, which plan on the meshes
 
-AMD Ryzen AI Max+ 395 CPU, 32 threads. batchplan plans on the spheres it ships with; every path is judged on the meshes.
+AMD Ryzen AI Max+ 395 CPU, 32 threads. batchplan plans on the spheres it ships with; RoboPlan and MoveIt plan on meshes. Every returned path is checked against the meshes. The different planning geometry and pipeline stages mean these timings do not isolate planner implementation speed.
+
+The RoboPlan adapter measures RRT-Connect and shortcutting, without its TOPP-RA trajectory generator. RoboPlan also supports trajectory modes that avoid stopping at every waypoint; those modes were not evaluated here. MoveIt's measured pipeline includes time parameterization and validation. batchplan's timing covers `plan`, excluding the separate trajectory-timing step.
 
 | Planner | Solved, on the meshes | Path length¹ | Time per problem (median) | Batched |
 |---|---|---|---|---|
