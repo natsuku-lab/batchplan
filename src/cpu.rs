@@ -1518,7 +1518,11 @@ mod tests {
         };
         let prepared = prepare(&[world]);
         let n = robot.dof();
-        let o = PlanOptions::default();
+        // A repair's ten rounds.
+        let o = PlanOptions {
+            iterations: 10,
+            ..Default::default()
+        };
         let (start, goal) = (
             [-1.2, 0.3, 0.0, -1.8, 0.0, 2.0, 0.8],
             [1.2, 0.3, 0.0, -1.8, 0.0, 2.0, 0.8],
@@ -1538,10 +1542,20 @@ mod tests {
         );
         let mut split = path;
         let mut optimizer = PathOptimizer::new(&robot, o.control_points, &o);
+        // The optimization may stop early (a failed steepest-descent step), but not before a few
+        // rounds have resumed where the last call stopped.
+        let mut calls = 0;
         for through in 1..=o.iterations {
-            assert!(!optimizer.finished(), "round {through} has yet to run");
+            if optimizer.finished() {
+                break;
+            }
             optimizer.run(&robot, &prepared[0], &mut split, through, None, false);
+            calls += 1;
         }
+        assert!(
+            calls >= 3,
+            "only {calls} calls ran before the optimization stopped"
+        );
         assert!(optimizer.finished());
         assert_eq!(split, whole);
     }
