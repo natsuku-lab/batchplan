@@ -1,12 +1,19 @@
-"""The comparison's tables, regenerated from saved runs (`compare.py run`, then `validate.py run`).
+"""The comparison's tables, regenerated from saved runs (`run_comparison.sh`, which runs and judges them).
 
-For each run directory: how many queries each planner claims to solve and how many the judge accepts
-(with their failure reasons); end-to-end time per query, failures included at what they cost (median,
-p95, p99); throughput as judge-valid results per second of pass wall time; and, over the problems every
-compared configuration solves validly, path length and trajectory duration with 95% bootstrap intervals
-resampled by problem (each problem's mean over its seeds).
+Each argument is a configuration's directory of rounds (`<part>/<config>/round<k>`) or a single run
+directory. Rounds and seeds are pooled:
+- success: the share of queries a planner claims, and the share whose final output the judge accepts
+  (and accepts with the kinodynamic limits loosened to 10%), with the reasons for the rest;
+- time per query, failures included at what they cost: end-to-end median, p95 and p99, and the median
+  without loading the scene (search, post-processing, timing and the pipeline's own validation);
+- throughput: judge-valid results per second of each pass's wall time (a pass is every problem once
+  with one seed), median and range over passes;
+- against the first configuration, on the problems both solve validly: time per query (end-to-end),
+  path length and trajectory duration, as per-problem means over valid outputs, paired, with 95%
+  bootstrap intervals of the mean ratio (resampled by problem). Time is compared as the ratio of the
+  per-problem medians' geometric mean.
 
-    python scripts/report.py data/bench/runs/<run> [<run> ...] [--markdown]
+    python scripts/report.py <config_dir> [<config_dir> ...] [--markdown] [--per-set]
 """
 
 import argparse
@@ -17,117 +24,168 @@ from pathlib import Path
 import numpy as np
 
 KINODYNAMIC = {"velocity", "acceleration", "jerk"}
+PLANNING = ["search", "post", "plan", "search+post", "search+post+timing+validation", "timing", "validation"]
 
 
-def load(run):
-    run = Path(run)
-    manifest = json.loads((run / "manifest.json").read_text())
-    records = [json.loads(l) for l in open(run / "records.jsonl")]
-    passes = [json.loads(l) for l in open(run / "passes.jsonl")]
-    verdicts = {}
-    if (run / "verdicts.jsonl").exists():
-        for l in open(run / "verdicts.jsonl"):
-            v = json.loads(l)
-            verdicts[(v["problem"], v["seed"])] = v
-    return manifest, records, passes, verdicts
+def runs_of(path):
+    path = Path(path)
+    rounds = sorted(path.glob("round*"))
+    return rounds if rounds else [path]
 
 
 def label(manifest):
     s = manifest.get("settings", {})
-    extra = s.get("mode") or ("ruckig" if s.get("smoothing") == "ruckig" else "")
-    budget = f"{manifest['workers']} core" + ("s" if manifest["workers"] > 1 else "")
-    return " ".join(x for x in [manifest["planner"], manifest["workload"], manifest["family"], extra, budget] if x)
+    extra = s.get("mode") or ("Ruckig" if s.get("smoothing") == "ruckig" else "")
+    family = "" if manifest["family"] == "defaults" else "matched"
+    return " ".join(x for x in [manifest["planner"], manifest["workload"], extra, family] if x)
 
 
 def valid_within(v, tolerance):
-    """A verdict re-read with a looser tolerance on the kinodynamic limits only."""
+    """A verdict re-read with the kinodynamic limits loosened to `tolerance`."""
     if v is None:
         return False
     if v["valid"]:
         return True
     reasons = {r.strip() for r in v["reason"].split(",") if r.strip()}
-    if not reasons <= KINODYNAMIC:
-        return False
-    return all(v.get(f"{r}_ratio", 0) <= 1 + tolerance for r in reasons)
+    return reasons <= KINODYNAMIC and all(v.get(f"{r}_ratio", 0) <= 1 + tolerance for r in reasons)
 
 
-def summarize(run):
-    manifest, records, passes, verdicts = load(run)
-    singles = [r for r in records if r.get("api", "single") == "single"]
-    first = [r for r in singles if r["rep"] == 1]
-    claimed = sum(r["status"] == "solved" for r in first)
-    judged = [verdicts.get((r["problem"], r["seed"])) if r["status"] == "solved" else None for r in first]
-    valid = sum(bool(v and v["valid"]) for v in judged)
-    valid10 = sum(valid_within(v, 0.10) for v in judged)
-    reasons = Counter(v["reason"] for v in judged if v and not v["valid"])
-    statuses = Counter(r["status"] if r["status"] != "solved" else "solved" for r in first)
-    times = np.array([r["phases"]["total"] for r in singles]) * 1e3
-    walls = [p["wall"] for p in passes]
-    answers = sum(p["problems"] for p in passes)
-    valid_rate = valid / max(1, len(first))
+def summarize(path):
+    queries, passes, manifest = [], [], None
+    for run in runs_of(path):
+        manifest = json.loads((run / "manifest.json").read_text())
+        verdicts = {}
+        if (run / "verdicts.jsonl").exists():
+            for l in open(run / "verdicts.jsonl"):
+                v = json.loads(l)
+                verdicts[(v["problem"], v["seed"])] = v
+        records = [json.loads(l) for l in open(run / "records.jsonl")]
+        valid_in_pass = Counter()
+        for r in records:
+            if r.get("api", "single") != "single" or r["rep"] != 1:
+                continue
+            v = verdicts.get((r["problem"], r["seed"])) if r["status"] == "solved" else None
+            phases = r.get("phases", {})
+            planning = sum(phases.get(k, 0.0) for k in PLANNING)
+            queries.append({"problem": r["problem"], "seed": r["seed"], "round": run.name, "status": r["status"],
+                            "verdict": v, "total": phases.get("total", 0.0), "planning": planning})
+            valid_in_pass[(run.name, r["seed"])] += bool(v and v["valid"])
+        for p in map(json.loads, open(run / "passes.jsonl")):
+            passes.append({**p, "round": run.name, "valid": valid_in_pass[(run.name, p["seed"])]})
+    q = len(queries)
+    totals = np.array([x["total"] for x in queries]) * 1e3
+    planning = np.array([x["planning"] for x in queries if x["status"] == "solved"]) * 1e3
+    rates = [p["valid"] / p["wall"] for p in passes]
     return {
-        "label": label(manifest), "manifest": manifest, "queries": len(first), "claimed": claimed,
-        "valid": valid, "valid10": valid10, "reasons": reasons, "statuses": statuses,
-        "median_ms": float(np.median(times)), "p95_ms": float(np.percentile(times, 95)),
-        "p99_ms": float(np.percentile(times, 99)),
-        # Every pass answers every problem; judge-valid answers per second, scaled by the first
-        # repetition's valid rate (outputs are judged for repetition 1).
-        "answers_per_s": answers / sum(walls), "valid_per_s": valid_rate * answers / sum(walls),
-        "verdicts": {(r["problem"], r["seed"]): v for r, v in zip(first, judged)},
-        "batch_passes": [p for p in passes if "single_wall" in p],
+        "label": label(manifest), "manifest": manifest, "queries": queries, "n": q,
+        "claimed": sum(x["status"] == "solved" for x in queries) / q,
+        "valid": sum(bool(x["verdict"] and x["verdict"]["valid"]) for x in queries) / q,
+        "valid10": sum(valid_within(x["verdict"], 0.10) for x in queries) / q,
+        "reasons": Counter(x["verdict"]["reason"] for x in queries if x["verdict"] and not x["verdict"]["valid"]),
+        "median": float(np.median(totals)), "p95": float(np.percentile(totals, 95)),
+        "p99": float(np.percentile(totals, 99)),
+        "planning": float(np.median(planning)) if len(planning) else float("nan"),
+        "rate": float(np.median(rates)), "rate_range": (float(min(rates)), float(max(rates))),
+        "passes": passes,
     }
 
 
-def bootstrap(values, rng, n=2000):
-    values = np.asarray(values)
-    if len(values) == 0:
-        return float("nan"), float("nan")
-    means = [rng.choice(values, len(values)).mean() for _ in range(n)]
-    return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
+def per_problem(summary, key):
+    """Each problem's mean of `key` over its valid outputs (`time`: the median end-to-end time)."""
+    values = defaultdict(list)
+    for x in summary["queries"]:
+        v = x["verdict"]
+        if v and v["valid"]:
+            if key == "time":
+                values[x["problem"]].append(x["total"])
+            elif key in v:
+                values[x["problem"]].append(v[key])
+    pick = np.median if key == "time" else np.mean
+    return {p: float(pick(v)) for p, v in values.items()}
 
 
-def common(summaries, key):
-    """Per configuration, the per-problem mean of `key` over its valid seeds, on the problems every
-    configuration solves validly for at least one seed."""
-    per = []
-    for s in summaries:
-        by_problem = defaultdict(list)
-        for (problem, _), v in s["verdicts"].items():
-            if v and v["valid"] and key in v:
-                by_problem[problem].append(v[key])
-        per.append({p: float(np.mean(x)) for p, x in by_problem.items()})
-    shared = sorted(set.intersection(*(set(p) for p in per))) if per else []
-    return shared, [np.array([p[k] for k in shared]) for p in per]
+def paired_ratio(base, other, key, rng, n=4000):
+    """Mean of other/base per problem both solve validly, with a 95% bootstrap interval."""
+    a, b = per_problem(base, key), per_problem(other, key)
+    shared = sorted(set(a) & set(b))
+    if not shared:
+        return None
+    ratios = np.array([b[p] / a[p] for p in shared])
+    if key == "time":
+        # Times span orders of magnitude: the geometric mean of the ratios.
+        logs = np.log(ratios)
+        means = [np.exp(rng.choice(logs, len(logs)).mean()) for _ in range(n)]
+        centre = float(np.exp(logs.mean()))
+    else:
+        means = [rng.choice(ratios, len(ratios)).mean() for _ in range(n)]
+        centre = float(ratios.mean())
+    return len(shared), centre, float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5)), \
+        float(np.median([a[p] for p in shared])), float(np.median([b[p] for p in shared]))
+
+
+def per_set(summaries):
+    sets = sorted({x["problem"].rsplit("/", 1)[0] for s in summaries for x in s["queries"]})
+    print(f"\n{'set':<28}" + "".join(f"{s['label'][:16]:>17}" for s in summaries))
+    for name in sets:
+        row = []
+        for s in summaries:
+            xs = [x for x in s["queries"] if x["problem"].rsplit("/", 1)[0] == name]
+            row.append(f"{100 * sum(bool(x['verdict'] and x['verdict']['valid']) for x in xs) / max(1, len(xs)):>16.1f}%")
+        print(f"{name:<28}" + "".join(row))
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("runs", nargs="+")
+    parser.add_argument("configs", nargs="+")
     parser.add_argument("--markdown", action="store_true")
+    parser.add_argument("--per-set", action="store_true")
     args = parser.parse_args()
-    summaries = [summarize(r) for r in args.runs]
+    summaries = [summarize(c) for c in args.configs]
     rng = np.random.default_rng(0)
-    print(f"{'configuration':<40} {'queries':>7} {'claimed':>8} {'valid':>8} {'≤10%':>8} {'median ms':>10} {'p95 ms':>9} "
-          f"{'p99 ms':>9} {'valid/s':>9}")
+    m = summaries[0]["manifest"]
+    print(f"{m['split']} split, {m.get('set', 'problems')}, {m.get('scene', 'exact')} scenes, "
+          f"{m['workers']} core{'s' if m['workers'] > 1 else ''}; queries = problems x seeds x rounds")
+    head = ["configuration", "queries", "claimed", "valid", "valid ≤10%", "median ms", "p95 ms", "p99 ms",
+            "without setup ms", "valid/s (range)"]
+    rows = []
     for s in summaries:
-        q = s["queries"]
-        pct = lambda k: f"{100 * k / q:.1f}%"
-        print(f"{s['label']:<40} {q:>7} {pct(s['claimed']):>8} {pct(s['valid']):>8} {pct(s['valid10']):>8} "
-              f"{s['median_ms']:>10.2f} {s['p95_ms']:>9.1f} {s['p99_ms']:>9.1f} {s['valid_per_s']:>9.1f}")
+        lo, hi = s["rate_range"]
+        rows.append([s["label"], str(s["n"]), f"{100 * s['claimed']:.1f}%", f"{100 * s['valid']:.1f}%",
+                     f"{100 * s['valid10']:.1f}%", f"{s['median']:.2f}", f"{s['p95']:.1f}", f"{s['p99']:.1f}",
+                     f"{s['planning']:.2f}", f"{s['rate']:.0f} ({lo:.0f}–{hi:.0f})"])
+    if args.markdown:
+        print("| " + " | ".join(head) + " |\n|" + "---|" * len(head))
+        for r in rows:
+            print("| " + " | ".join(r) + " |")
+    else:
+        widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(head)]
+        print("  ".join(h.rjust(w) if i else h.ljust(w) for i, (h, w) in enumerate(zip(head, widths))))
+        for r in rows:
+            print("  ".join(c.rjust(w) if i else c.ljust(w) for i, (c, w) in enumerate(zip(r, widths))))
     for s in summaries:
         if s["reasons"]:
-            print(f"  {s['label']}: invalid " + ", ".join(f"{r} {n}" for r, n in s["reasons"].most_common()))
-        for p in s["batch_passes"][:1]:
-            print(f"  {s['label']}: native batch {p['problems'] / p['wall']:.0f} answers/s "
-                  f"(singles {p['problems'] / p['single_wall']:.0f}/s), batch matches singles on {p['batch_matches_single']}/{p['problems']}")
-    for key, unit in [("length", "rad"), ("duration", "s")]:
-        shared, values = common(summaries, key)
-        if not shared or any(len(v) == 0 for v in values):
-            continue
-        print(f"\n{key} over the {len(shared)} problems every configuration solves validly (mean, 95% CI):")
-        for s, v in zip(summaries, values):
-            lo, hi = bootstrap(v, rng)
-            print(f"  {s['label']:<40} {v.mean():.3f} {unit} [{lo:.3f}, {hi:.3f}]  median {np.median(v):.3f}")
+            print(f"  {s['label']}: invalid " + ", ".join(f"{r} {n}" for r, n in s["reasons"].most_common(6)))
+        batch = [p for p in s["passes"] if "single_wall" in p]
+        if batch:
+            print(f"  {s['label']}: native batch {np.median([p['problems'] / p['wall'] for p in batch]):.0f} answers/s, "
+                  f"one query at a time {np.median([p['problems'] / p['single_wall'] for p in batch]):.0f}/s; "
+                  f"batch identical to singles on {sum(p['batch_matches_single'] for p in batch)}/{sum(p['problems'] for p in batch)}")
+    base = summaries[0]
+    for key, unit in [("time", "s"), ("length", "rad"), ("duration", "s")]:
+        lines = []
+        for s in summaries[1:]:
+            r = paired_ratio(base, s, key, rng)
+            if r:
+                n, mean, lo, hi, a, b = r
+                scale = 1e3 if key == "time" else 1.0
+                shown = "ms" if key == "time" else unit
+                lines.append(f"  {s['label']:<28} {mean:.3f}x [{lo:.3f}, {hi:.3f}] on {n} problems "
+                             f"(medians {scale * a:.3f} {shown} for {base['label']}, {scale * b:.3f} {shown})")
+        if lines:
+            print(f"\n{key}, relative to {base['label']} on the problems both solve validly (mean ratio, 95% CI):")
+            print("\n".join(lines))
+    if args.per_set:
+        per_set(summaries)
 
 
 if __name__ == "__main__":
