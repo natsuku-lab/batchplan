@@ -283,6 +283,9 @@ struct Planning<'call> {
     /// Whether the search found its path after sampling the tube around the straight line; if no
     /// spline follows that path, the problem is searched again without the tube.
     near_line: bool,
+    /// Whether the straight line between the path's ends, if simplification leaves only that, has
+    /// been checked keeping what a spline along it must; that spline then needs no check.
+    line_checked: bool,
     /// What its searches share with threads that help them along.
     ahead: Arc<Ahead>,
 }
@@ -315,6 +318,7 @@ impl<'call> Planning<'call> {
             chosen: None,
             start: None,
             near_line: false,
+            line_checked: false,
             ahead,
         }
     }
@@ -352,6 +356,14 @@ fn searching<'call>(
         )),
         keeping,
     )
+}
+
+/// Whether an edge the search checks keeping its clearance also keeps what the shortcuts' does: at
+/// least as much, as far from the ends, at most as far apart.
+fn covers_splines(rrt: &RrtOptions, shortcut: &ShortcutOptions) -> bool {
+    rrt.clearance >= shortcut.clearance
+        && rrt.clearance_ramp <= shortcut.clearance_ramp
+        && rrt.resolution <= shortcut.resolution
 }
 
 /// Every equivalent of `problem`'s goal a whole turn away (`Robot::goal_variants`) that leaves its
@@ -572,6 +584,16 @@ impl Search for Planning<'_> {
                         continue;
                     }
                     self.near_line = connect.path.is_some() && connect.sampled_tube();
+                    // Simplification cuts a path down to the straight line between its ends only
+                    // once that line is free keeping the shortcuts' clearance, which splines keep
+                    // first. A straight line the search found covers it while keeping a clearance
+                    // that covers the shortcuts', from the same ends (a single goal).
+                    self.line_checked = connect.path.as_ref().is_some_and(|path| {
+                        path.len() > 2 * self.robot.dof()
+                            || (*keeping
+                                && covers_splines(&self.o.rrt, &self.o.shortcut)
+                                && search_goals(self.robot, self.problem).len() == 1)
+                    });
                     self.ahead.finish();
                     self.phase = match connect.path.take() {
                         Some(path) => Phase::Simplify(Simplify::new(
@@ -643,6 +665,21 @@ impl Search for Planning<'_> {
                         );
                     }
                     self.start = Some(fit.spline.clone());
+                    // A spline along a straight line runs on it.
+                    if self.line_checked
+                        && fit.paths[0].len() == 2 * n
+                        && self.problem.start_motion.is_none()
+                    {
+                        spline::checked(
+                            &fit.spline,
+                            n,
+                            self.o.shortcut.resolution,
+                            &mut fit.dense,
+                            &mut fit.starts,
+                        );
+                        self.chosen = Some((fit.spline, shortcut::length(&fit.dense, n)));
+                        continue;
+                    }
                     self.phase = Phase::Fitting(Box::new(fit));
                 }
                 Phase::Fitting(fit) => {
