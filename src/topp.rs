@@ -47,42 +47,42 @@ pub(crate) fn time_map(
     let n = robot.dof();
     let spans = cp.len() / n - 3;
     let (stages, step) = (spans * STAGES_PER_SPAN, 1.0 / STAGES_PER_SPAN as f64);
-    let derivative = |s: f64, weights: fn(f32) -> [f32; 4]| -> Vec<f64> {
-        let span = (s as usize).min(spans - 1);
+    // The path's first and second derivatives at each stage, `[stages + 1, n]`.
+    let derivatives = |weights: fn(f32) -> [f32; 4]| -> Vec<f64> {
+        let mut table = Vec::with_capacity((stages + 1) * n);
         let mut out = vec![0.0f32; n];
-        spline::blend(cp, n, span, weights((s - span as f64) as f32), &mut out);
-        out.into_iter().map(f64::from).collect()
+        for i in 0..=stages {
+            let s = i as f64 * step;
+            let span = (s as usize).min(spans - 1);
+            spline::blend(cp, n, span, weights((s - span as f64) as f32), &mut out);
+            table.extend(out.iter().map(|&v| f64::from(v)));
+        }
+        table
     };
-    let first: Vec<Vec<f64>> = (0..=stages)
-        .map(|i| derivative(i as f64 * step, spline::basis_d1))
-        .collect();
-    let second: Vec<Vec<f64>> = (0..=stages)
-        .map(|i| derivative(i as f64 * step, spline::basis_d2))
-        .collect();
+    let first = derivatives(spline::basis_d1);
+    let second = derivatives(spline::basis_d2);
     // The path's third derivative is constant along each span; the stage takes the larger of the
     // spans it touches.
-    let third: Vec<Vec<f64>> = (0..=stages)
-        .map(|i| {
-            let s = i as f64 * step;
-            let spans_here = [
-                (s as usize).min(spans - 1),
-                (s.ceil() as usize).saturating_sub(1).min(spans - 1),
-            ];
-            (0..n)
-                .map(|j| {
-                    spans_here
-                        .iter()
-                        .map(|&k| {
-                            (0..4)
-                                .map(|w| BASIS_D3[w] as f64 * cp[(k + w) * n + j] as f64)
-                                .sum::<f64>()
-                                .abs()
-                        })
-                        .fold(0.0, f64::max)
+    let mut third = Vec::with_capacity((stages + 1) * n);
+    for i in 0..=stages {
+        let s = i as f64 * step;
+        let spans_here = [
+            (s as usize).min(spans - 1),
+            (s.ceil() as usize).saturating_sub(1).min(spans - 1),
+        ];
+        for j in 0..n {
+            let largest = spans_here
+                .iter()
+                .map(|&k| {
+                    (0..4)
+                        .map(|w| BASIS_D3[w] as f64 * cp[(k + w) * n + j] as f64)
+                        .sum::<f64>()
+                        .abs()
                 })
-                .collect()
-        })
-        .collect();
+                .fold(0.0, f64::max);
+            third.push(largest);
+        }
+    }
     let vmax: Vec<f64> = robot
         .max_velocity()
         .iter()
@@ -99,52 +99,62 @@ pub(crate) fn time_map(
         .map(|&j| j as f64 * HEADROOM)
         .collect();
 
-    // Bounds on u at stage i for state x, as lines u = slope x + offset, plus the largest x the
-    // velocity limits and the joints that do not move allow, scaled by `scale`. A given start is
-    // held to the full limits rather than the headroom: it is not ours to choose.
-    let bounds = |i: usize, next: (f64, f64), scale: f64| {
-        let (mut lower, mut upper, mut cap) = (vec![], vec![], f64::INFINITY);
-        let full = if i == 0 && start_speed.is_some() {
-            1.0 / HEADROOM
-        } else {
-            1.0
-        };
-        let (vmax, amax, jmax): (Vec<f64>, Vec<f64>, Vec<f64>) = (
-            vmax.iter().map(|v| v * full).collect(),
-            amax.iter().map(|a| a * full).collect(),
-            jmax.iter().map(|j| j * full).collect(),
-        );
-        for j in 0..n {
-            // Jerk's speed term, the path's third derivative times ṡ³, caps ṡ like velocity does.
-            if third[i][j] > 1e-9 {
-                cap = cap.min((jmax[j] / third[i][j]).powf(2.0 / 3.0));
-            }
-            let (a, b, c) = (first[i][j], second[i][j], amax[j]);
-            if a.abs() > 1e-9 {
-                cap = cap.min((vmax[j] / a).powi(2));
-                // -c <= a u + b x <= c
-                let (lo, hi) = (((-b / a), (-c / a)), ((-b / a), (c / a)));
-                if a > 0.0 {
-                    lower.push(lo);
-                    upper.push(hi);
-                } else {
-                    lower.push(hi);
-                    upper.push(lo);
+    // Each stage's bounds on u for state x, as lines u = slope x + offset, and the largest x the
+    // velocity and jerk limits and the joints that do not move allow, before scaling. A given start
+    // is held to the full limits rather than the headroom: it is not ours to choose.
+    let stage_bounds: Vec<Bounds> = (0..=stages)
+        .map(|i| {
+            let mut b = Bounds {
+                lower: Vec::with_capacity(n + 1),
+                upper: Vec::with_capacity(n + 1),
+                cap: f64::INFINITY,
+            };
+            let full = if i == 0 && start_speed.is_some() {
+                1.0 / HEADROOM
+            } else {
+                1.0
+            };
+            for j in 0..n {
+                let (vmax, amax, jmax) = (vmax[j] * full, amax[j] * full, jmax[j] * full);
+                let at = i * n + j;
+                // Jerk's speed term, the path's third derivative times ṡ³, caps ṡ like velocity
+                // does.
+                if third[at] > 1e-9 {
+                    b.cap = b.cap.min((jmax / third[at]).powf(2.0 / 3.0));
                 }
-            } else if b.abs() > 1e-9 {
-                cap = cap.min(c / b.abs());
+                let (a, d, c) = (first[at], second[at], amax);
+                if a.abs() > 1e-9 {
+                    b.cap = b.cap.min((vmax / a).powi(2));
+                    // -c <= a u + d x <= c
+                    let (lo, hi) = (((-d / a), (-c / a)), ((-d / a), (c / a)));
+                    if a > 0.0 {
+                        b.lower.push(lo);
+                        b.upper.push(hi);
+                    } else {
+                        b.lower.push(hi);
+                        b.upper.push(lo);
+                    }
+                } else if d.abs() > 1e-9 {
+                    b.cap = b.cap.min(c / d.abs());
+                }
             }
-        }
-        // The next stage's interval: next.0 <= x + 2 step u <= next.1.
-        lower.push((-1.0 / (2.0 * step), next.0 / (2.0 * step)));
-        upper.push((-1.0 / (2.0 * step), next.1 / (2.0 * step)));
-        (lower, upper, cap * scale)
+            b
+        })
+        .collect();
+    // The next stage's interval as a lower and an upper line: next.0 <= x + 2 step u <= next.1.
+    let next_lines = |next: (f64, f64)| {
+        (
+            (-1.0 / (2.0 * step), next.0 / (2.0 * step)),
+            (-1.0 / (2.0 * step), next.1 / (2.0 * step)),
+        )
     };
-    // The x in [0, cap] for which some u lies between every lower and upper bound.
-    let feasible = |lower: &[(f64, f64)], upper: &[(f64, f64)], cap: f64| -> Option<(f64, f64)> {
+    // The x in [0, cap] for which some u lies between every lower and upper bound: the stage's own,
+    // and the next stage's interval's when there is one.
+    let feasible = |b: &Bounds, next: Option<(f64, f64)>, cap: f64| -> Option<(f64, f64)> {
+        let extra = next.map(next_lines);
         let (mut lo, mut hi) = (0.0f64, cap);
-        for &(ls, lo_off) in lower {
-            for &(us, up_off) in upper {
+        for (ls, lo_off) in b.lower.iter().copied().chain(extra.map(|e| e.0)) {
+            for (us, up_off) in b.upper.iter().copied().chain(extra.map(|e| e.1)) {
                 // ls x + lo_off <= us x + up_off
                 let (k, r) = (ls - us, up_off - lo_off);
                 if k > 1e-12 {
@@ -165,11 +175,11 @@ pub(crate) fn time_map(
     let profile = |scale: &[f64]| -> Option<(Vec<f64>, Vec<f64>)> {
         // Backward: controllable intervals, from anything within the caps at the end.
         let mut controllable = vec![(0.0f64, 0.0f64); stages + 1];
-        let (lower, upper, cap) = bounds(stages, (0.0, f64::MAX), scale[stages]);
-        controllable[stages] = feasible(&lower[..lower.len() - 1], &upper[..upper.len() - 1], cap)?;
+        let last = &stage_bounds[stages];
+        controllable[stages] = feasible(last, None, last.cap * scale[stages])?;
         for i in (0..stages).rev() {
-            let (lower, upper, cap) = bounds(i, controllable[i + 1], scale[i]);
-            controllable[i] = feasible(&lower, &upper, cap)?;
+            let b = &stage_bounds[i];
+            controllable[i] = feasible(b, Some(controllable[i + 1]), b.cap * scale[i])?;
         }
         // Forward: from the given start or the fastest one, the largest u each stage allows, except
         // that a given start keeps s̈ as near 0 as it can.
@@ -183,17 +193,11 @@ pub(crate) fn time_map(
             None => controllable[0].1,
         };
         for i in 0..stages {
-            let (lower, upper, _) = bounds(i, controllable[i + 1], scale[i]);
-            let at = |lines: &[(f64, f64)], pick: fn(f64, f64) -> f64, from: f64| {
-                lines
-                    .iter()
-                    .map(|&(slope, offset)| slope * x[i] + offset)
-                    .fold(from, pick)
-            };
-            let (u_lo, u_hi) = (
-                at(&lower, f64::max, f64::NEG_INFINITY),
-                at(&upper, f64::min, f64::INFINITY),
-            );
+            let b = &stage_bounds[i];
+            let (next_lower, next_upper) = next_lines(controllable[i + 1]);
+            let line = |&(slope, offset): &(f64, f64)| slope * x[i] + offset;
+            let u_lo = b.lower.iter().map(line).fold(line(&next_lower), f64::max);
+            let u_hi = b.upper.iter().map(line).fold(line(&next_upper), f64::min);
             let u = if i == 0 && start_speed.is_some() {
                 0.0f64.clamp(u_lo.min(u_hi), u_hi)
             } else {
@@ -310,6 +314,13 @@ pub(crate) fn time_map(
     }
 }
 
+/// A TOPP stage's acceleration bounds on u as lines u = slope x + offset, and its cap on x.
+struct Bounds {
+    lower: Vec<(f64, f64)>,
+    upper: Vec<(f64, f64)>,
+    cap: f64,
+}
+
 /// The path's joint velocity, acceleration and jerk where the time map is at `u` of span `m`.
 pub(crate) fn derivatives(
     cp: &[f32],
@@ -378,6 +389,10 @@ fn assess(
     ];
     let mut out = vec![[0.0f32; 3]; n];
     let (mut k, mut overshoots) = (1.0f32, vec![]);
+    // A ratio's root raises k only if the ratio exceeds k to the root's power. Below these powers,
+    // shaded down past rounding, the root is not taken.
+    let floors = |k: f32| [k, k * k, k * k * k].map(|power| power * (1.0 - 1e-4));
+    let mut floor = floors(k);
     for m in 0..points.len() - 3 {
         for sample in 0..=samples {
             let u = sample as f32 / samples as f32;
@@ -386,7 +401,13 @@ fn assess(
             for (j, d) in out.iter().enumerate() {
                 for order in 0..3 {
                     let ratio = d[order].abs() / (limits[order][j] * target);
-                    k = k.max(ratio.powf(1.0 / (order + 1) as f32));
+                    if ratio > floor[order] {
+                        let root = ratio.powf(1.0 / (order + 1) as f32);
+                        if root > k {
+                            k = root;
+                            floor = floors(k);
+                        }
+                    }
                     if ratio > 1.0 {
                         factor = factor.min(ratio.powf(-2.0 / (order + 1) as f32));
                     }
