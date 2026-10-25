@@ -68,10 +68,10 @@ pub(crate) fn dense(cp: &[f32], dof: usize, per_span: usize, out: &mut [f32]) {
     out[spans * per_span * dof..].copy_from_slice(&cp[cp.len() - dof..]);
 }
 
-/// The spline sampled for a collision check: every span at the fewest evenly spaced points, at
-/// least `per_span`, that keep neighbouring samples at most `spacing` apart (joint-space distance),
-/// as edges are checked; then its exact end. `starts` gets the index of each span's first sample,
-/// then the end's.
+/// The spline sampled for a collision check: every span at `per_span` evenly spaced points, or at
+/// more where it moves farther, so neighbouring samples lie at most `spacing` apart (joint-space
+/// distance), as edges are checked; then its exact end. `starts` gets the index of each span's
+/// first sample, then the end's.
 pub(crate) fn checked(
     cp: &[f32],
     dof: usize,
@@ -95,7 +95,7 @@ pub(crate) fn checked(
         let speed = (0.5 * gap(span, span + 2))
             .max(gap(span + 1, span + 2))
             .max(0.5 * gap(span + 1, span + 3));
-        let count = ((speed / spacing).ceil() as usize).max(per_span);
+        let count = per_span.max((speed / spacing).ceil() as usize);
         starts.push(out.len() / dof);
         for s in 0..count {
             let row = out.len();
@@ -125,8 +125,8 @@ pub(crate) fn at_phase(cp: &[f32], dof: usize, phase: f32, out: &mut [f32]) {
 mod tests {
     use super::*;
 
-    /// Checked samples lie no farther apart than the spacing, keep `per_span` where spans are
-    /// short, start each span where `starts` says, and end at the spline's end.
+    /// Checked samples lie no farther apart than the spacing where spans are long, keep `per_span`
+    /// where they are short, start each span where `starts` says, and end at the spline's end.
     #[test]
     fn checked_samples_are_spaced_as_edges_are() {
         let dof = 2;
@@ -159,7 +159,7 @@ mod tests {
                 "span {span} starts elsewhere"
             );
         }
-        // Short spans keep the fixed count: the first span moves at most 1 cm.
+        // Short spans keep the fixed count: the first span moves 1 cm.
         assert_eq!(starts[1] - starts[0], per_span);
     }
 }
