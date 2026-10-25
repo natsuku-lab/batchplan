@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use fearless_simd::dispatch;
-use glam::{Mat3, Vec3};
+use glam::{Mat3, Vec2, Vec3};
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder, Yield};
 
@@ -58,16 +58,13 @@ impl CpuBackend {
 }
 
 /// Obstacle with its rotation matrix precomputed. An `upright` box is turned about the world's z
-/// axis only, so its z axis is the world's and the SIMD lanes rotate points in the plane alone;
-/// `radius` is that of a sphere about its centre around it, a hair wide, so a test against the
-/// sphere never rules out what the exact test would not.
+/// axis only, so its z axis is the world's and the SIMD lanes rotate points in the plane alone.
 pub(crate) enum Prepared {
     Cuboid {
         rot: Mat3,
         center: Vec3,
         half: Vec3,
         upright: bool,
-        radius: f32,
     },
     Sphere {
         center: Vec3,
@@ -92,14 +89,58 @@ pub(crate) enum Prepared {
     },
 }
 
+impl Prepared {
+    /// A sphere around the obstacle, a hair wide, so a test against it never rules out what the
+    /// exact test would not; infinite for a distance grid.
+    fn bounding_sphere(&self) -> BoundingSphere {
+        let (center, radius) = match *self {
+            Prepared::Cuboid { center, half, .. } => (center, half.length()),
+            Prepared::Sphere { center, radius } => (center, radius),
+            Prepared::Cylinder {
+                center,
+                radius,
+                half_height,
+                ..
+            } => (center, Vec2::new(radius, half_height).length()),
+            Prepared::Capsule {
+                center,
+                radius,
+                half_length,
+                ..
+            } => (center, radius + half_length),
+            Prepared::Sdf { center, .. } => (center, f32::INFINITY),
+        };
+        BoundingSphere {
+            center,
+            radius: radius * 1.0001 + 1e-6,
+        }
+    }
+}
+
+/// A sphere around an obstacle (`Prepared::bounding_sphere`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BoundingSphere {
+    pub(crate) center: Vec3,
+    pub(crate) radius: f32,
+}
+
+/// A world's obstacles, prepared, and the sphere around each, which checks (`Lanes::keeps`) test
+/// first: most obstacles are out of reach of a link, and the spheres, kept apart from the
+/// obstacles, scan faster than the obstacles' whole records.
+pub(crate) struct CpuWorld {
+    pub(crate) obstacles: Vec<Prepared>,
+    pub(crate) bounds: Vec<BoundingSphere>,
+}
+
 /// The obstacles of each world, prepared.
-pub(crate) type CpuWorlds = Vec<Vec<Prepared>>;
+pub(crate) type CpuWorlds = Vec<CpuWorld>;
 
 pub(crate) fn prepare(worlds: &[World]) -> CpuWorlds {
     worlds
         .iter()
         .map(|s| {
-            s.obstacles
+            let obstacles: Vec<Prepared> = s
+                .obstacles
                 .iter()
                 .map(|o| match *o {
                     Obstacle::Cuboid {
@@ -110,13 +151,11 @@ pub(crate) fn prepare(worlds: &[World]) -> CpuWorlds {
                         let rot = Mat3::from_quat(rotation);
                         let upright =
                             rot.z_axis == Vec3::Z && rot.x_axis.z == 0.0 && rot.y_axis.z == 0.0;
-                        let radius = half_extents.length() * 1.0001 + 1e-6;
                         Prepared::Cuboid {
                             rot,
                             center,
                             half: half_extents,
                             upright,
-                            radius,
                         }
                     }
                     Obstacle::Sphere { center, radius } => Prepared::Sphere { center, radius },
@@ -152,7 +191,9 @@ pub(crate) fn prepare(worlds: &[World]) -> CpuWorlds {
                         grid: grid.clone(),
                     },
                 })
-                .collect()
+                .collect();
+            let bounds = obstacles.iter().map(Prepared::bounding_sphere).collect();
+            CpuWorld { obstacles, bounds }
         })
         .collect()
 }
@@ -1019,7 +1060,7 @@ pub(crate) fn run_searches(
     searches: &mut [&mut dyn Search],
     robot: &Robot,
     lanes: &Lanes,
-    worlds: &[Vec<Prepared>],
+    worlds: &[CpuWorld],
     deadline: Option<Instant>,
 ) {
     if let [search] = searches {
@@ -1190,7 +1231,7 @@ impl Backend for CpuBackend {
                     || Scratch::new(&self.robot),
                     |scratch, ((((wc, sc), cost), g), (qi, &s))| {
                         self.robot.fk_into(qi, &mut scratch.fk);
-                        let world = &prepared[s as usize];
+                        let world = &prepared[s as usize].obstacles;
                         let c = collision::<true>(
                             &self.robot,
                             world,
@@ -1219,7 +1260,7 @@ impl Backend for CpuBackend {
                 let w = worlds[start];
                 let end = start + worlds[start..].iter().take_while(|&&x| x == w).count();
                 let (world, q, c) = (
-                    &prepared[w as usize],
+                    &prepared[w as usize].obstacles,
                     &q[start * n..end * n],
                     &mut c[start..end],
                 );
@@ -1275,7 +1316,7 @@ impl Backend for CpuBackend {
                 .map_init(
                     || (Scratch::new(&self.robot), vec![None; hands]),
                     |(scratch, goals), (qi, (&s, item_targets))| {
-                        let world = &prepared[s as usize];
+                        let world = &prepared[s as usize].obstacles;
                         scratch.moving.fill(false);
                         for (h, (goal, target)) in goals.iter_mut().zip(item_targets).enumerate() {
                             *goal = target.map(|t| (t.position, Mat3::from_quat(t.rotation)));
@@ -1331,7 +1372,7 @@ impl Backend for CpuBackend {
                 .for_each(|(tr, &s)| {
                     optimize_path(
                         &self.robot,
-                        &prepared[s as usize],
+                        &prepared[s as usize].obstacles,
                         tr,
                         o,
                         deadline,
@@ -1535,7 +1576,7 @@ mod tests {
             })
             .collect();
         let mut whole = path.clone();
-        optimize_path(&robot, &prepared[0], &mut whole, &o, None, false);
+        optimize_path(&robot, &prepared[0].obstacles, &mut whole, &o, None, false);
         assert_ne!(
             whole, path,
             "the path must cross the box, or nothing moves it"
@@ -1549,7 +1590,14 @@ mod tests {
             if optimizer.finished() {
                 break;
             }
-            optimizer.run(&robot, &prepared[0], &mut split, through, None, false);
+            optimizer.run(
+                &robot,
+                &prepared[0].obstacles,
+                &mut split,
+                through,
+                None,
+                false,
+            );
             calls += 1;
         }
         assert!(

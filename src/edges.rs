@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use fearless_simd::{Simd, dispatch};
 
-use crate::cpu::{PathOptimizer, Prepared};
+use crate::cpu::{CpuWorld, PathOptimizer};
 use crate::lanes::{LANES, LaneScratch, Lanes};
 use crate::robot::Robot;
 use crate::rrt::{self, Ahead};
@@ -219,7 +219,7 @@ pub(crate) fn run(
     search: &mut dyn Search,
     robot: &Robot,
     lanes: &Lanes,
-    worlds: &[Vec<Prepared>],
+    worlds: &[CpuWorld],
     deadline: Option<Instant>,
     spread: Option<&AtomicUsize>,
     pause: Option<&dyn Fn() -> bool>,
@@ -238,7 +238,7 @@ fn run_at<S: Simd>(
     search: &mut dyn Search,
     robot: &Robot,
     lanes: &Lanes,
-    worlds: &[Vec<Prepared>],
+    worlds: &[CpuWorld],
     deadline: Option<Instant>,
     spread: Option<&AtomicUsize>,
     pause: Option<&dyn Fn() -> bool>,
@@ -259,7 +259,7 @@ fn run_at<S: Simd>(
             }
             o.optimizer.run(
                 robot,
-                &worlds[o.world as usize],
+                &worlds[o.world as usize].obstacles,
                 o.path,
                 o.through,
                 deadline,
@@ -319,7 +319,7 @@ fn run_at<S: Simd>(
 fn edge_free<S: Simd>(
     simd: S,
     lanes: &Lanes,
-    world: &[Prepared],
+    world: &CpuWorld,
     (a, b): (&[f32], &[f32]),
     query: &EdgeQuery,
     s: &mut EdgeScratch,

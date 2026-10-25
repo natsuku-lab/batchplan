@@ -640,7 +640,7 @@ mod tests {
     use rayon::ThreadPoolBuilder;
 
     use super::*;
-    use crate::cpu::{self, Prepared};
+    use crate::cpu::{self, CpuWorld};
     use crate::edges::EdgeScratch;
     use crate::lanes::Lanes;
     use crate::robot::{CollisionModel, RobotOptions};
@@ -918,7 +918,7 @@ mod tests {
         ahead: &Arc<Ahead>,
         robot: &Robot,
         lanes: &Lanes,
-        worlds: &[Vec<Prepared>],
+        worlds: &[CpuWorld],
         search: impl FnOnce(),
     ) {
         let started = &Barrier::new(threads + 1);

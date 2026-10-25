@@ -9,7 +9,7 @@ use fearless_simd::prelude::*;
 use fearless_simd::{Level, Simd, f32x8};
 use glam::{Mat3, Vec3};
 
-use crate::cpu::Prepared;
+use crate::cpu::{CpuWorld, Prepared};
 use crate::robot::{JointKind, Robot};
 use crate::world::{self, FAR};
 
@@ -655,7 +655,7 @@ impl Lanes {
     pub(crate) fn keeps<S: Simd>(
         &self,
         simd: S,
-        world: &[Prepared],
+        world: &CpuWorld,
         q: &[f32],
         margin: [f32; LANES],
         s: &mut LaneScratch,
@@ -665,19 +665,17 @@ impl Lanes {
         for &(link, first, end, b) in self.world_links.iter().rev() {
             let bc = self.bound_center(simd, link, s);
             let reach = margin + b[3];
-            for o in world {
-                // A box's surrounding sphere out of reach first, which most are: half the work of
+            for (o, bound) in world.obstacles.iter().zip(&world.bounds) {
+                // The sphere around the obstacle out of reach first, which most are: a fraction of
                 // the exact test, which follows.
-                if let Prepared::Cuboid { center, radius, .. } = *o {
-                    let r = reach + radius;
-                    if !bc
-                        .sub(V3::splat(simd, center))
-                        .length_squared()
-                        .simd_lt(r * r)
-                        .any_true()
-                    {
-                        continue;
-                    }
+                let r = reach + bound.radius;
+                if !bc
+                    .sub(V3::splat(simd, bound.center))
+                    .length_squared()
+                    .simd_lt(r * r)
+                    .any_true()
+                {
+                    continue;
                 }
                 // Within the link's bounding sphere's reach of an obstacle, check its spheres.
                 if !matches!(o, Prepared::Sdf { .. }) && !within(o, bc, reach).any_true() {
@@ -1022,7 +1020,10 @@ mod tests {
         let mut out = [[0.0; 2]];
         let lanes_baseline: Vec<[f32; 2]> = (0..items)
             .map(|i| {
-                let (world, q) = (&prepared[item_world[i] as usize], &q[i * n..(i + 1) * n]);
+                let (world, q) = (
+                    &prepared[item_world[i] as usize].obstacles,
+                    &q[i * n..(i + 1) * n],
+                );
                 fearless_simd::dispatch!(baseline.level, simd => {
                     baseline.clearance(simd, world, q, &mut out, &mut scratch)
                 });

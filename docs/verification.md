@@ -22,7 +22,7 @@ What the test suite pins down, so you know what to rely on. Every new test was f
 - **SIMD collision checks:**
   - Lanes checking eight configurations at a time give the same world and self clearances as the scalar twin of the GPU kernels, to 2e-5 m. This holds over 3,000 random configurations against every obstacle kind, on the Panda (fingers locked or sliding), the Panda holding a box, MuJoCo Menagerie's 2F-85 (quartic mimic joints) and the UR5e. Runs of worlds cross the groups of eight.
   - Their yes-or-no check (`keeps`) of a 1 cm margin agrees with the scalar twin's exact clearances away from the boundary, at the CPU's best SIMD level and at the baseline.
-  - Planting ignored link-bound gating, a flipped sine, a dropped quartic term, a dropped self buffer, an ignored prismatic offset, a cylinder's missing corner, a flipped planar rotation for upright boxes, a box's surrounding sphere of zero radius or a self-collision sphere of zero reach fails the test.
+  - Planting ignored link-bound gating, a flipped sine, a dropped quartic term, a dropped self buffer, an ignored prismatic offset, a cylinder's missing corner, a flipped planar rotation for upright boxes, an obstacle's surrounding sphere of zero radius or a self-collision sphere of zero reach fails the test.
 - **Edge checks:**
   - On every device, 400 queries over random edges (how many edges from the first are free, or which is the first free one) get the same answers as checking every state one by one, and CPU and GPU answers are identical.
   - An edge 5–10 mm from an obstacle is free, fails to keep a 1 cm clearance, and keeps it where its ends are near the path's ends.
