@@ -33,9 +33,8 @@ Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-la
 
 ## Install
 
-```toml
-[dependencies]
-batchplan = "0.2"
+```bash
+cargo add batchplan                        # --features lerobot,usd for the optional features below
 ```
 
 | Cargo feature | Default | Adds |
