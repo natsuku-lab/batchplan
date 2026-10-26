@@ -195,30 +195,30 @@ Every planner below plans on one robot model, VAMP's spherized Panda, and one in
 
 | Planner | Valid | Clear on the meshes | Time per query (median) | Valid paths/s | Path length |
 |---|---|---|---|---|---|
-| **batchplan** | **91.1%** | **86.6%** | **0.12 ms** | 25,255 | **1** |
-| [VAMP](https://github.com/KavrakiLab/vamp) 0.6.4¹ | 87.6% | 67.3% | 0.17 ms | **31,426** | 1.11× |
-| [RoboPlan](https://github.com/open-planning/roboplan) 0.7 | 84.7% | 68.9% | 75 ms | 73 | 1.43× |
-| [OMPL](https://ompl.kavrakilab.org) 1.7¹ | 64.7% | 58.2% | 1.1 ms | 17 | 1.33× |
-| [MoveIt 2](https://moveit.ai) Jazzy | 61.6% | 56.5% | 40 ms | 33 | 1.40× |
+| **batchplan** | **91.2%** | **86.6%** | **0.11 ms** | **42,842** | **1** |
+| [VAMP](https://github.com/KavrakiLab/vamp) 0.6.4¹ | 87.6% | 67.3% | 0.16 ms | 31,517 | 1.11× |
+| [RoboPlan](https://github.com/open-planning/roboplan) 0.7 | 84.7% | 68.9% | 75 ms | 72 | 1.44× |
+| [OMPL](https://ompl.kavrakilab.org) 1.7¹ | 64.9% | 56.9% | 1.1 ms | 17 | 1.33× |
+| [MoveIt 2](https://moveit.ai) Jazzy | 62.0% | 55.1% | 40 ms | 34 | 1.40× |
 
-¹ On the scenes with cylinders as capsules, which VAMP and OMPL take. batchplan on those: 91.1% valid, 86.7% clear, 0.12 ms, 25,908 valid paths/s.
+¹ On the scenes with cylinders as capsules, which VAMP and OMPL take. batchplan on those: 91.2% valid, 86.7% clear, 0.11 ms, 42,773 valid paths/s.
 
 **Trajectories**, within the Panda's velocity, acceleration and jerk limits:
 
 | Planner | Valid | Time per query (median) | Valid trajectories/s | Duration |
 |---|---|---|---|---|
-| **batchplan** | **91.1%** | **0.54 ms** | **14,534** | **1** |
-| RoboPlan, Linear Blend | 84.0% | 80 ms | 69 | 1.16× |
-| RoboPlan, Adaptive | 81.1% | 85 ms | 65 | 1.11× |
-| RoboPlan, Cubic | 75.9% | 82 ms | 62 | 1.11× |
+| **batchplan** | **91.2%** | **0.52 ms** | **17,677** | **1** |
+| RoboPlan, Linear Blend | 84.0% | 82 ms | 69 | 1.17× |
+| RoboPlan, Adaptive | 81.1% | 86 ms | 65 | 1.11× |
+| RoboPlan, Cubic | 75.9% | 84 ms | 62 | 1.11× |
 | RoboPlan, Hermite | 56.2% | 78 ms | 47 | 1.13× |
-| MoveIt 2, TOTG | 2.7% | 49 ms | 1 | 1.13×² |
-| MoveIt 2, Ruckig | 2.1% | 51 ms | 1 | 0.94×² |
+| MoveIt 2, TOTG | 2.5% | 49 ms | 1 | 1.07×² |
+| MoveIt 2, Ruckig | 2.5% | 52 ms | 1 | 1.03×² |
 
-Lengths and durations are relative to batchplan's, on the problems both solve validly. ² Over the 33 and 12 problems MoveIt 2 solves validly. 62% and 57% of its trajectories stay within 10% of the limits, and those take 14% and 13% longer than batchplan's.
+Lengths and durations are relative to batchplan's, on the problems both solve validly. ² Over the 26 and 22 problems MoveIt 2 solves validly. 63% and 58% of its trajectories stay within 10% of the limits, and those take 14% and 15% longer than batchplan's.
 
-- 23 of the 262 problems start or end in collision, so no planner can pass 91.2%. batchplan solves 3,582 of the other 3,585 queries, and every path and trajectory it returns is valid.
-- VAMP's 16 workers return more valid paths per second on this set. Per query, batchplan takes 7% less time on 16 cores, and VAMP 8% less on one core. With matched settings (edges checked as finely, batchplan without its clearance, VAMP stopped at 10,000 samples), the two tie on 16 cores, and RoboPlan solves 89.1% against batchplan's 88.4%. [All of it](docs/benchmarks.md#reading-the-results).
+- 23 of the 262 problems start or end in collision, so no planner can pass 91.2%. batchplan solves all 3,585 of the other queries, and every path and trajectory it returns is valid.
+- Per query, batchplan takes 17% less time than VAMP on 16 cores, and the two tie on one core. With matched settings (edges checked as finely, batchplan without its clearance, VAMP stopped at 10,000 samples), VAMP's 16 workers return more valid paths per second (61,501 against 51,759), and RoboPlan solves 89.1% against batchplan's 88.4%. [All of it](docs/benchmarks.md#reading-the-results).
 - On cuRobo's own spheres, batchplan solved 98.9% of the box-only problems against cuRobo's 85.2% ([the earlier comparison](docs/benchmarks.md#the-earlier-comparison), with cuRobo on a T4 and batchplan on an M4 Pro).
 
 ### Batches and the GPU
@@ -227,11 +227,11 @@ Planning runs on CPU threads on either device; IK and trajectory optimization al
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU (14 cores) | Radeon 8060S GPU | Ryzen AI Max+ 395 CPU (16 cores) |
 |---|---|---|---|---|
-| 1 | 114 | **1,752** | 143 | **1,245** |
-| 8 | 878 | **2,835** | 1,047 | **4,546** |
-| 64 | 2,577 | **4,149** | 3,871 | **6,005** |
-| 512 | **8,611** | 4,882 | **16,001** | 6,329 |
-| 4,096 | **10,763** | 4,643 | **21,380** | 6,392 |
+| 1 | 114 | **1,752** | 142 | **1,403** |
+| 8 | 878 | **2,835** | 1,055 | **4,259** |
+| 64 | 2,577 | **4,149** | 3,938 | **6,107** |
+| 512 | **8,611** | 4,882 | **16,348** | 6,233 |
+| 4,096 | **10,763** | 4,643 | **21,245** | 6,372 |
 
 A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster on the CPU; from a few hundred problems per call the GPU overtakes it, and at 4,096 it solves 2.3–3.3 times as many.
 
