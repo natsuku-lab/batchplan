@@ -1,6 +1,6 @@
 [package]
 name = "batchplan"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.90"
 description = "Batched, collision-aware robot motion generation: IK, motion planning and training data for thousands of problems at once, on any GPU (wgpu) or CPU threads"
