@@ -80,7 +80,7 @@ Guide: [planning.md](planning.md#planning-a-path).
 | `follow(&device, &worlds, &[ToolPath], &ToolPathOptions)` | A hand moved in straight lines through poses ([guide](planning.md#moving-the-hand-along-a-path)): per path, the `fraction` it covers, why it `stopped` short (`ToolPathStop`), and the motion's control points (`ToolPathResult`). |
 | `pick(&device, &worlds, &[Pick], &TaskOptions)`, `place(.., &[Place], ..)` | A whole task in one call ([guide](planning.md#picking-up-and-setting-down)): per task, a `TaskPlan` for every candidate that gets through, quickest first (`transit`, `approach` and `depart` trajectories, the `candidate`, what is `held` or `placed`, `end`), or a `TaskFailure` with each candidate's step and reason (`CandidateStop`). |
 | `Pick::new(world, start, object, grasps)`, `Place::new(world, start, held, poses)` | Hand 0 (a pick) or the holding hand (a place), 10 cm straight moves in and away, no `support`; a place's `idle` takes the other arms elsewhere on its transit. |
-| `TaskOptions` | IK, planning and tool path options, the straight moves' speed cap (`tool_speed`) and how much of each they must make (`min_fraction`). |
+| `TaskOptions` | IK, planning and tool path options, the straight moves' speed cap (`tool_speed`, `f32::INFINITY` for none) and how much of each they must make (`min_fraction`). |
 | `grasps(&obstacle, &GraspOptions)`, `place_poses(&obstacle, pose, turns)`, `Held::attachment(&robot)` | Grasps of a box, ball, cylinder or capsule for a parallel gripper; an object's symmetric turns at one spot; a held object as an `AttachedObject`. |
 
 ## Timing

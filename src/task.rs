@@ -155,10 +155,12 @@ pub struct TaskOptions {
     pub plan: PlanOptions,
     /// The straight moves.
     pub tool_path: ToolPathOptions,
-    /// The hand's speed cap on the straight moves (m/s): 10 cm/s.
+    /// The hand's speed cap on the straight moves (m/s): 10 cm/s. `f32::INFINITY` leaves it
+    /// uncapped, the moves as fast as the joints' limits allow.
     pub tool_speed: f32,
     /// How much of each straight move a candidate must make, in (0, 1]: 1, all of it. Less lets
-    /// an obstacle shorten the move in or away rather than stop the candidate.
+    /// an obstacle shorten the move in or away rather than stop the candidate; a move stopped
+    /// short for any other reason (out of reach, a jump) still stops it.
     pub min_fraction: f32,
 }
 
@@ -1158,7 +1160,8 @@ enum Leg {
 }
 
 /// Each candidate's straight move from its grasp or release, in the world of `worlds` that
-/// `worlds_of` gives it: kept if it covers at least `o.min_fraction`.
+/// `worlds_of` gives it: kept if it covers all of it, or at least `o.min_fraction` where an obstacle
+/// stops it.
 fn straight(
     device: &Device,
     worlds: &Worlds,
@@ -1187,7 +1190,9 @@ fn straight(
     let result = tool_path::follow(device, worlds, &paths, &o.tool_path)?;
     for (i, c) in live.iter_mut().enumerate() {
         let path = &result.paths[i];
-        if result.fraction[i] >= o.min_fraction && !path.is_empty() {
+        let fraction = result.fraction[i];
+        let blocked = matches!(result.stopped[i], Some(ToolPathStop::Collision { .. }));
+        if (fraction == 1.0 || blocked && fraction >= o.min_fraction) && !path.is_empty() {
             match leg {
                 Leg::In => c.approach = path.chunks(n).rev().flatten().copied().collect(),
                 Leg::Away => c.depart.clone_from(path),
@@ -1351,7 +1356,7 @@ fn unit(pose: &Pose) -> bool {
 
 fn check_options(o: &TaskOptions) -> Result<()> {
     ensure_input!(
-        o.tool_speed.is_finite() && o.tool_speed > 0.0,
+        o.tool_speed > 0.0,
         "the tool speed must be positive, got {}",
         o.tool_speed
     );

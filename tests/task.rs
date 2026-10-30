@@ -223,6 +223,13 @@ fn a_task_none_of_whose_grasps_gets_through_says_where_and_why_each_stopped() {
     let grasp_height = HALF.z * 2.0 - 0.02;
     let moved = begins.position.z - grasp_height;
     assert!(moved > 0.02 && moved < 0.38, "the move in is {moved} m");
+    // Only an obstacle shortens a move: a lift out of reach stops the pick all the same.
+    let too_high = Pick {
+        lift: Vec3::Z * 1.5,
+        ..tops()
+    };
+    let f = pick_in(&device, scene(vec![]), too_high, &shorter).unwrap_err();
+    assert!(stops(&f, TaskStep::Depart, out), "{f}");
     // Lifting the box off a table it may not touch, and into a small lid just over the box,
     // between the fingers and below the palm.
     let unsupported = Pick {
@@ -851,6 +858,10 @@ fn malformed_tasks_are_input_errors() {
             ..TaskOptions::default()
         },
         TaskOptions {
+            tool_speed: f32::NAN,
+            ..TaskOptions::default()
+        },
+        TaskOptions {
             min_fraction: 0.0,
             ..TaskOptions::default()
         },
@@ -859,8 +870,17 @@ fn malformed_tasks_are_input_errors() {
             ..TaskOptions::default()
         },
     ] {
+        // Refused as options, by name, not later as the motions are timed.
+        let named = if options.min_fraction == 1.0 {
+            "tool speed"
+        } else {
+            "min_fraction"
+        };
         let result = batchplan::pick(&device, &worlds, std::slice::from_ref(&good), &options);
-        assert!(matches!(result, Err(Error::Input(_))), "{options:?}");
+        assert!(
+            matches!(&result, Err(Error::Input(why)) if why.contains(named)),
+            "{options:?}: {result:?}"
+        );
     }
     // A place on a device that already holds the object.
     let held = Held {

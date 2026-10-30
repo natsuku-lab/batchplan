@@ -489,6 +489,18 @@ fn hand_speed_caps_hold_and_bind() {
         mean < 1.35,
         "the caps slow the motion more than they need: {mean}"
     );
+    // A hand with neither cap is timed as the joints alone allow.
+    let uncapped = HandSpeed {
+        hand: 0,
+        linear: f32::INFINITY,
+        angular: f32::INFINITY,
+    };
+    for path in &paths {
+        assert_eq!(
+            Trajectory::with_hand_speed(&robot, path, &uncapped).unwrap(),
+            Trajectory::try_new(&robot, path, 1.0).unwrap()
+        );
+    }
     let bad = [(1, 0.2, 0.5), (0, 0.0, 0.5), (0, 0.2, f32::NAN)];
     for (hand, linear, angular) in bad {
         let speed = HandSpeed {
