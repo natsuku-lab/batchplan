@@ -9,9 +9,7 @@ use anyhow::Result;
 use batchplan::datagen::{Handover, PickPlaceOptions};
 use batchplan::glam::{Quat, Vec3};
 use batchplan::rng::Rng;
-use batchplan::{
-    CollisionModel, Obstacle, Part, Pose, Robot, RobotOptions, SphereOptions, TaskOptions, World,
-};
+use batchplan::{CollisionModel, Obstacle, Part, Pose, Robot, RobotOptions, SphereOptions, World};
 
 /// The arms' bases, either side of the table's centre line.
 const BASE_Y: f32 = 0.22;
@@ -254,7 +252,7 @@ pub fn scene(world: u32, rng: &mut Rng) -> (World, Handover, Divider) {
 /// both arms at once, past a divider, with the block clear of the other hand, the hardest need
 /// more than the default 10,000.
 pub fn options(hz: f32) -> PickPlaceOptions {
-    let mut task = TaskOptions::default();
+    let mut task = PickPlaceOptions::default().task;
     task.plan.rrt.max_iterations = 30_000;
     PickPlaceOptions {
         task,

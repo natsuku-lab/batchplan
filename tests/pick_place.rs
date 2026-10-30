@@ -484,7 +484,7 @@ fn episodes_stay_on_one_arm_configuration() {
         "{} of 64 episodes; the joints travel {median:.1} rad in the median one",
         demos.len()
     );
-    // 11.3 rad on an M4 Pro; 15.4 when the grasp took the solution with the most clearance. The
+    // 11.1 rad on an M4 Pro; 15.4 when the grasp took the solution with the most clearance. The
     // threshold leaves room for other machines.
     assert!(
         median < 13.5,
@@ -627,7 +627,7 @@ fn carries_keep_moving_around_obstacles() {
         "{} of 512 episodes; {stopped} carries stop on their way",
         demos.len()
     );
-    // 2 on an M4 Pro, at corners no blend clears; 43 when splines keep every stop the fitting
+    // 5 on an M4 Pro, at corners no blend clears; 43 when splines keep every stop the fitting
     // pinned.
     assert!(stopped <= 20, "{stopped} carries stop on their way");
 }
@@ -689,10 +689,8 @@ fn blocks_are_handed_from_one_hand_to_the_other() {
     for d in devices(&robot) {
         let demos = datagen::handover(&d, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
         eprintln!("{}: {} of {} handovers", d.name(), demos.len(), tasks.len());
-        // 5 of 8 on the M4 Pro, CPU and GPU, since the moves in and away are straight: one task's
-        // move down to its block passes its post, which a planned descent bent around.
         assert!(
-            demos.len() >= 5,
+            demos.len() >= 6,
             "{}: {} of {} handovers",
             d.name(),
             demos.len(),

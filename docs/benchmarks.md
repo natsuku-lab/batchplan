@@ -380,14 +380,14 @@ The pick that fails has every grasp blocked by clutter or out of reach. A pick's
 | 512 tasks | M4 Pro GPU (0.2.0) | M4 Pro CPU, 14 threads (0.2.0) | Radeon 8060S | Ryzen CPU (32 threads) |
 |---|---|---|---|---|
 | Handovers | 510 of 512 | 510 of 512 | 510 of 512 | 510 of 512 |
-| Time | 1.52–1.53 s | 1.65–1.67 s | 1.09–1.10 s | 1.10–1.12 s |
-| Episodes/s | 333–336 | 305–308 | 465–469 | 455–462 |
+| Time | 1.52–1.53 s | 1.65–1.67 s | 1.06–1.07 s | 1.09–1.10 s |
+| Episodes/s | 333–336 | 305–308 | 478–480 | 463–468 |
 
-The 510 episodes hold 118 minutes of motion at 30 fps, 13.5 s each at the median: the moves in and away go straight, at up to 10 cm/s. The two tasks lost fail IK at the grasp. Times are three runs each after a warm-up. Against 2c98826, which planned those moves and lifted and lowered the block unchecked, alternating runs took 1.16–1.20 s on the Radeon and 1.12–1.14 s on the Ryzen, with the same 510 handovers.
+The 510 episodes hold 112 minutes of motion at 30 fps, 12.8 s each at the median. The two tasks lost fail IK at the grasp. Times are three runs each after a warm-up. Against 2c98826, which planned the moves in and away and lifted and lowered the block unchecked, alternating runs took 1.14–1.16 s on the Radeon and 1.12–1.15 s on the Ryzen, with the same 510 handovers and the same 12.8 s median episode.
 
-Searches draw up to 30,000 samples, against `plan`'s default 10,000: with the block clear of the other hand, the hardest moves of both arms at once, past a divider, need more, and five tasks were lost without them. IK where the taker lets go keeps 4 of the 32 seeds, since it starts from where the carry starts: 32 make the run 0.16 s slower on the Radeon and 0.22 s on the Ryzen. The blocks come in four sizes because each size needs its own carried spheres and so plans in batches of its own: at 0.2.0, sizes drawn from a continuous range took 3.65–3.67 s on the M4 Pro's GPU, against 1.52 s.
+Searches draw up to 30,000 samples, against `plan`'s default 10,000: with the block clear of the other hand, the hardest moves of both arms at once, past a divider, need more, and five tasks were lost without them. IK where the taker lets go keeps 4 of the 32 seeds, since it starts from where the carry starts: 32 make the run 0.18 s slower on the Radeon and 0.21 s on the Ryzen. The blocks come in four sizes because each size needs its own carried spheres and so plans in batches of its own: at 0.2.0, sizes drawn from a continuous range took 3.65–3.67 s on the M4 Pro's GPU, against 1.52 s.
 
-Rendering the episodes' camera videos in MuJoCo (`scripts/replay_mujoco.py`, three 640×480 cameras) takes about 15 ms a frame on the M4 Pro: 98 s for 16 episodes (6,420 frames) that take 0.19 s to generate.
+Rendering the episodes' camera videos in MuJoCo (`scripts/replay_mujoco.py`, three 640×480 cameras) takes about 15 ms a frame on the M4 Pro: 89 s for 16 episodes (6,073 frames) that take 0.18 s to generate.
 
 ## Spheres and meshes
 

@@ -562,8 +562,12 @@ pub struct PickPlace {
 #[derive(Clone, Debug)]
 pub struct PickPlaceOptions {
     /// Picking the object up and setting it down ([`crate::pick`], [`crate::place`]): IK, the
-    /// planned paths, the straight moves and the hand's speed on them. A handover's moves between
-    /// the two use them too, but its straight moves must cover their whole length.
+    /// planned paths, the straight moves and the hand's speed on them. By default the hand is
+    /// uncapped, so the straight moves go as fast as the joints allow, as the planned paths do,
+    /// before their speed scales; and a move in or away may be shortened to 30% of its length
+    /// where an obstacle blocks the rest: a move in then starts nearer, the planned path going
+    /// round the obstacle to it, and a move away ends sooner. A handover's moves between the two
+    /// use these too, but its straight moves must cover their whole length.
     pub task: TaskOptions,
     /// How far above the grasp and the place pose the gripper moves in from and backs off to
     /// (meters).
@@ -585,7 +589,11 @@ pub struct PickPlaceOptions {
 impl Default for PickPlaceOptions {
     fn default() -> Self {
         Self {
-            task: TaskOptions::default(),
+            task: TaskOptions {
+                tool_speed: f32::INFINITY,
+                min_fraction: 0.3,
+                ..TaskOptions::default()
+            },
             approach: 0.1,
             grasp_depth: 0.02,
             max_width: 0.08,

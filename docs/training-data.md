@@ -25,9 +25,9 @@ Every episode plans as [`plan`](planning.md) does, straightening each joint (`Sh
 
 A task the grasp cannot pick up is tried again with the hand turned half way round, and one that cannot be set down at its pose with the box turned onto itself there (half a turn, or a quarter for a square footprint), each in a batch only as large as the failures.
 
-IK at the grasp and where the hand lets go takes the solution nearest the configuration before, so the arm keeps to one IK branch and short moves stay short. The straight moves go at up to `TaskOptions::tool_speed` (10 cm/s), and every motion is slowed by its own random speed scale. The robot's IK frame must be the grasp point, its z axis pointing out of the gripper and its y axis along the fingers' closing direction (as the Panda's `ee_link`). Each episode records the gripper's opening, where the box is at every sample, and a task such as "Pick up the box and put it 20 cm to the left."
+IK at the grasp and where the hand lets go takes the solution nearest the configuration before, so the arm keeps to one IK branch and short moves stay short. The straight moves go as fast as the joints allow, as the planned paths do (`PickPlaceOptions::task` leaves the hand's speed uncapped), and every motion is slowed by its own random speed scale. Where an obstacle blocks part of a move in or away, the move may be shortened to 30% of its length (`TaskOptions::min_fraction`): a move in then starts nearer, the planned path going round the obstacle to it, and a move away ends sooner, the next planned path starting there. A move stopped by anything else, such as a joint limit, still rules the grasp or pose out. The robot's IK frame must be the grasp point, its z axis pointing out of the gripper and its y axis along the fingers' closing direction (as the Panda's `ee_link`). Each episode records the gripper's opening, where the box is at every sample, and a task such as "Pick up the box and put it 20 cm to the left."
 
-`examples/datagen.rs --pick-place` completes 492 of 512 random tabletop tasks, with boxes of 512 different sizes, in 0.26 s on the Radeon 8060S, as many as and no slower than before it moved onto `pick` and `place` (0.27 s). IK runs in two batches however many sizes there are, plus small ones for tasks tried again; every step that holds a box runs per box size, the sizes in parallel. The tasks tried again matter: by one grasp and pose alone, 467 get through, and 25 of the others stop on the way down, where a joint of the Panda's wrist meets its limit.
+`examples/datagen.rs --pick-place` completes 492 of 512 random tabletop tasks, with boxes of 512 different sizes, in 0.24–0.25 s on the Radeon 8060S, as many as and no slower than before it moved onto `pick` and `place` (0.25–0.26 s). IK runs in two batches however many sizes there are, plus small ones for tasks tried again; every step that holds a box runs per box size, the sizes in parallel. The tasks tried again matter: by one grasp and pose alone, 469 get through.
 
 ```rust,no_run
 use batchplan::datagen::{PickPlace, PickPlaceOptions};
@@ -116,7 +116,7 @@ Reinforcement learning that starts episodes from many states along a task, as [O
 2. **The carried object** moves with the hand whose gripper is closed on it, in the grip that hand had when it last held the object alone. Samples where both hands hold it are skipped, since noise would pull the hands apart.
 3. **A check** on the device keeps the collision-free states. An object no hand holds is an obstacle where it is; a held one is attached to its hand. The check is conservative: fingers about to close around an object collide with it, and a held object must clear the table, so states right at a grasp, a handover or a set-down are rare.
 
-Each state is a one-sample `Demonstration` whose origin is a recovery from its sample, with `parent` indexing `demos`, so `npy::export` writes states as it writes episodes (`positions.npy` is `[states, 1, dof]`). The episodes' own samples are valid states too; `cargo run --release --example handover -- 512 --resets <dir>` writes both, to `episodes/` and `resets/`. From 510 handovers, 8 states each at the default 0.15 rad of noise, 2,021 of 4,080 are collision-free on the CPU device: 593 with the block in the left hand, 609 in the right and 819 on the table (2,019 on the GPU, whose clearances differ from the CPU's in the last bits at the margin). The check takes 0.04 s on the Ryzen's CPU device and 0.13 s on the Radeon.
+Each state is a one-sample `Demonstration` whose origin is a recovery from its sample, with `parent` indexing `demos`, so `npy::export` writes states as it writes episodes (`positions.npy` is `[states, 1, dof]`). The episodes' own samples are valid states too; `cargo run --release --example handover -- 512 --resets <dir>` writes both, to `episodes/` and `resets/`. From 510 handovers, 8 states each at the default 0.15 rad of noise, 2,015 of 4,080 are collision-free on the CPU device: 596 with the block in the left hand, 602 in the right and 817 on the table (2,020 on the GPU, whose clearances differ from the CPU's in the last bits at the margin). The check takes 0.04 s on the Ryzen's CPU device and 0.10 s on the Radeon.
 
 ## Demonstrations
 
@@ -148,7 +148,7 @@ What batchplan cannot know comes from `meta/replay.json`, which the exporting pr
 }
 ```
 
-Visual meshes are simplified to 2,000 triangles each as they load. The reBot's CAD exports carry 860,000, which made rendering three times slower with no visible difference at 640×480. On an M4 Pro, three 640×480 cameras render at about 15 ms a frame: 16 handover episodes (6,420 frames) in 98 s.
+Visual meshes are simplified to 2,000 triangles each as they load. The reBot's CAD exports carry 860,000, which made rendering three times slower with no visible difference at 640×480. On an M4 Pro, three 640×480 cameras render at about 15 ms a frame: 16 handover episodes (6,073 frames) in 89 s.
 
 ## Exporting
 
@@ -214,7 +214,7 @@ uv venv .venv --python 3.12 && uv pip install --python .venv/bin/python "lerobot
   --policy.device=cpu --policy.push_to_hub=false --steps=50 --batch_size=16 --num_workers=0
 ```
 
-It passes on reach exports (5,704 episodes from 2,048 worlds, split over 6 episode-metadata files at a 1 MB limit), pick-and-place exports (492 episodes, 18 tasks), and 16 two-arm handovers before and after `replay_mujoco.py` adds their videos. LeRobot's ACT policy trains on each. A 50-step CPU run (batch 16, the loss logged every 10 steps) cut the loss from 4.5 at step 10 to 0.52 at step 50 on reaches, and from 4.2 to 0.51 on pick-and-place; a 40-step run on the rendered handovers, from the three cameras and both arms' states, from 3.9 to 0.59.
+It passes on reach exports (5,704 episodes from 2,048 worlds, split over 6 episode-metadata files at a 1 MB limit), pick-and-place exports (492 episodes, 18 tasks), and 16 two-arm handovers before and after `replay_mujoco.py` adds their videos. LeRobot's ACT policy trains on each. A 50-step CPU run (batch 16, the loss logged every 10 steps) cut the loss from 4.5 at step 10 to 0.52 at step 50 on reaches, and from 4.2 to 0.49 on pick-and-place; a 40-step run on the rendered handovers, from the three cameras and both arms' states, from 4.0 to 0.61.
 
 ## `examples/datagen.rs`
 
