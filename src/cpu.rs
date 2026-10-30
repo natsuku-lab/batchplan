@@ -1287,6 +1287,10 @@ impl Backend for CpuBackend {
         format!("cpu ({} threads)", self.pool.current_num_threads())
     }
 
+    fn pool(&self) -> &ThreadPool {
+        &self.pool
+    }
+
     fn robot(&self) -> &Robot {
         &self.robot
     }

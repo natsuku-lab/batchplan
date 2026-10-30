@@ -861,15 +861,40 @@ impl Robot {
     /// frame) and every link below that one: its fingers, and any object it holds.
     #[must_use]
     pub fn hand_links(&self, hand: usize) -> Vec<&str> {
+        self.below_hand(hand, /* with_palm */ true)
+    }
+
+    /// Names of the links below the first of [`Robot::hand_links`] that have collision spheres:
+    /// hand `hand`'s fingers (and any object it holds), without its palm. Empty for a hand with
+    /// none, such as a suction cup or a bare flange, whose frames below the palm are only frames.
+    #[must_use]
+    pub fn finger_links(&self, hand: usize) -> Vec<&str> {
+        self.below_hand(hand, /* with_palm */ false)
+    }
+
+    fn below_hand(&self, hand: usize, with_palm: bool) -> Vec<&str> {
         let ancestors = |link: usize| std::iter::successors(Some(link), |&l| self.links[l].parent);
+        let spheres = |link: usize| self.sphere_ranges[link][1] > 0;
         let frame = self.ee_links[hand];
-        let root = ancestors(frame)
-            .find(|&l| self.sphere_ranges[l][1] > 0)
-            .unwrap_or(frame);
+        let palm = ancestors(frame).find(|&l| spheres(l)).unwrap_or(frame);
         (0..self.links.len())
-            .filter(|&i| ancestors(i).any(|a| a == root))
+            .filter(|&i| ancestors(i).any(|a| a == palm))
+            .filter(|&i| with_palm || (i != palm && spheres(i)))
             .map(|i| self.links[i].name.as_str())
             .collect()
+    }
+
+    /// The joints other hands move and hand `hand` does not, sorted: they wait while it works.
+    pub(crate) fn idle_joints(&self, hand: usize) -> Vec<usize> {
+        let mine = self.hand_joints(hand);
+        let mut others: Vec<usize> = (0..self.hands())
+            .filter(|&h| h != hand)
+            .flat_map(|h| self.hand_joints(h))
+            .filter(|j| !mine.contains(j))
+            .collect();
+        others.sort_unstable();
+        others.dedup();
+        others
     }
 
     /// World pose of the named link at configuration `q`.

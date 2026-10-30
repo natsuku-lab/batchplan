@@ -612,16 +612,7 @@ pub fn pick_and_place(
     let first = |pose: Pose| -> Vec<Option<Pose>> {
         (0..hands).map(|h| (h == 0).then_some(pose)).collect()
     };
-    let hold: Vec<usize> = {
-        let mine = robot.hand_joints(0);
-        let mut others: Vec<usize> = (1..hands)
-            .flat_map(|h| robot.hand_joints(h))
-            .filter(|j| !mine.contains(j))
-            .collect();
-        others.sort_unstable();
-        others.dedup();
-        others
-    };
+    let hold = robot.idle_joints(0);
     let (slowest, fastest) = o.speed_scale;
     ensure_input!(
         slowest > 0.0 && slowest <= fastest && fastest <= 1.0,

@@ -1236,6 +1236,10 @@ impl Backend for GpuBackend {
         )
     }
 
+    fn pool(&self) -> &ThreadPool {
+        &self.pool
+    }
+
     fn robot(&self) -> &Robot {
         &self.robot
     }

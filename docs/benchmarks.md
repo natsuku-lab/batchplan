@@ -349,6 +349,19 @@ By batch size, end to end, in solved problems per second (medians of three runs;
 
 A GPU call costs about 10 ms, so one problem at a time runs 10–15 times faster on the CPU. On the M4 Pro that cost varies from run to run: one problem's IK took 8 to 20 ms within one session, on batchplan 0.1.0 as on this version. The CPU fills its cores by 64 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.3 (M4 Pro) to 3.3 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 1.8 to 2.8 times.
 
+## Picking and placing
+
+`examples/tasks.rs` picks a box out of clutter on 64 random tabletops and sets it down at a free spot: a table, a box 3–7 cm wide and 4–10 cm tall, 2–5 more boxes up to 30 cm tall, and a spot 12 cm clear of them. Each `pick` tries every grasp `grasps` proposes for the box (16 or 24), each `place` both of its turns at the spot (`place_poses`). Times are the best of five calls of each size, the median of three runs, after a first call that compiles the GPU's kernels; an idle machine.
+
+| Device | Pick, 1 task | 16 | 64 | Place, 1 task | 16 | Through |
+|---|---|---|---|---|---|---|
+| Ryzen AI Max+ 395, 32 threads | 6.8 ms | 86 ms | 334 ms | 2.7 ms | 15.6 ms | 63 of 64 picks, every place |
+| Radeon 8060S | 14.8 ms | 39 ms | 115 ms | 11.1 ms | 21.4 ms | the same |
+| M4 Pro, 14 threads | 7.4 ms | 112 ms | 434 ms | 2.2 ms | 18.1 ms | the same |
+| M4 Pro's GPU | 15.3 ms | 59 ms | 193 ms | 9.4 ms | 24.9 ms | the same |
+
+The pick that fails has every grasp blocked by clutter or out of reach. A pick's time is mostly IK at the grasps (24 problems of 32 seeds each), which the GPU speeds up from 16 tasks on. A place solves IK for the robot alone in one batch: where the hand lets go fixes where the object is, so each task's solutions are then checked holding its object, on the CPU's lanes. Holding each object in its own IK call took 198 ms for 16 places on the M4 Pro's GPU, against 25 ms now.
+
 ## Bimanual handovers
 
 `examples/handover/` generates the [handover episodes](training-data.md#handovers) for two reBot B601-DM arms 44 cm apart at a table. In each task one arm picks up a block lying in front of it and hands it over between the arms, and the other arm sets it down in front of itself. The blocks are 24–28 cm long, in four sizes; the block, meeting and place poses vary in position and yaw, and 0–2 small boxes stand elsewhere on the table. Three tables in four are divided down the middle, a quarter each by a low wall (6–8 cm) that the block is lifted over, a screen 16–18 cm tall with an opening 8.5–10.5 cm wide, and a row of posts as tall. The block cannot be lifted over the tall ones, so the hands meet at one end of their reach and the block lies, and is set down, toward the other: it is carried along the divider to the gap and back. Planned without its divider, the block alone would pass through it on 267 of the 372 divided tables (79 of 120 walls, 82 of 118 screens, 106 of 134 rows of posts). Half the tasks go left to right. Every step is batched over all the tasks: six IK batches (the meeting pose solves both hands at once), seven planned segments, two of them moving both arms, then timing and the episodes.

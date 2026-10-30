@@ -13,6 +13,8 @@ use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use rayon::ThreadPool;
+
 use crate::error::{Result, ensure_input, input};
 
 use crate::cpu::CpuBackend;
@@ -247,6 +249,11 @@ impl Device {
         self.backend.evaluate(worlds, item_world, q, w)
     }
 
+    /// Runs `op` on this device's threads, so that its parallel loops run there too.
+    pub(crate) fn install<R: Send>(&self, op: impl FnOnce() -> R + Send) -> R {
+        self.backend.pool().install(op)
+    }
+
     /// Runs every search to its end, or to `deadline` (see `edges`).
     pub(crate) fn search(
         &self,
@@ -404,6 +411,8 @@ impl Device {
 pub(crate) trait Backend: Send + Sync {
     fn name(&self) -> String;
     fn robot(&self) -> &Robot;
+    /// The threads the backend's batched work runs on.
+    fn pool(&self) -> &ThreadPool;
     /// The backend's own form of `worlds`, which [`Worlds::prepared`] hands back to it.
     fn upload(&self, worlds: &[World]) -> Result<Box<dyn Any + Send + Sync>>;
     /// The same backend for another robot, sharing the hardware and the form of worlds.

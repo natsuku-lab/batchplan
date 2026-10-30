@@ -145,6 +145,81 @@ fn main() -> Result<(), Error> {
 - **Timing.** `Trajectory::with_hand_speed` times the motion as fast as the joints' limits allow with the hand under caps on its speed and on how fast it turns ([below](#executable-trajectories)); `Trajectory::try_new` times it by the joints alone.
 - **Speed.** Paths are searches, run in parallel on the device's threads like plans. On an M4 Pro, one 10 cm move takes 0.08 ms on one thread, and 64 take 0.42 ms on 14.
 
+## Picking up and setting down
+
+`pick(&device, &worlds, &[Pick], &TaskOptions)` and `place(&device, &worlds, &[Place], &TaskOptions)` each do a whole task in one call: three motions from rest to rest. The `transit` is a planned path from the start to where the hand begins to move in, the `approach` a straight move in (to the grasp, or down to where the object goes), and the `depart` a straight move away (lifting the object, or backing off from it). Close or open the gripper between the approach and the departure. Every motion is checked with the fingers where the start has them, so open them first.
+
+```rust,no_run
+use batchplan::glam::{Quat, Vec3};
+use batchplan::{
+    CollisionModel, Device, Error, GraspOptions, Obstacle, Pick, Place, Pose, Robot, RobotOptions,
+    TaskOptions, World,
+};
+
+fn main() -> Result<(), Error> {
+    // IK targets the grasp point between the open fingers, as `grasps` expects.
+    let fingers = [
+        ("panda_finger_joint1".to_string(), 0.04),
+        ("panda_finger_joint2".to_string(), 0.04),
+    ];
+    let options = RobotOptions {
+        ee_links: vec!["ee_link".into()],
+        lock_joints: fingers.into_iter().collect(),
+        collision_model: Some(CollisionModel::load("assets/franka/panda_collision.json")?),
+        ..Default::default()
+    };
+    let robot = Robot::load("assets/franka/franka_panda.urdf", &options)?;
+    let device = Device::cpu(&robot)?;
+    let table = Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02));
+    let block = Obstacle::cuboid(Vec3::new(0.45, 0.2, 0.03), Vec3::new(0.02, 0.03, 0.03));
+    let mut world = World::new(vec![table, block]);
+    let o = TaskOptions::default();
+    // By any grasp that fits the fingers, lifting the block off the table (obstacle 0).
+    let grasps = batchplan::grasps(&world.obstacles[1].placed(Pose::IDENTITY), &GraspOptions::default())?;
+    let pick = Pick {
+        support: vec![0],
+        ..Pick::new(0, robot.default_q(), 1, grasps)
+    };
+    let worlds = device.upload(std::slice::from_ref(&world))?;
+    let picked = match batchplan::pick(&device, &worlds, &[pick], &o)?.outcomes.remove(0) {
+        Ok(plans) => plans[0].clone(),
+        Err(why) => {
+            println!("no pick: {why}");
+            return Ok(());
+        }
+    };
+    // Run the transit and the approach, close the gripper, run the departure. Then set the block
+    // down 40 cm to the right, at any of its turns there, on the table it has left.
+    let block = world.remove(1)?;
+    let worlds = device.upload(&[world])?;
+    let to = Pose::new(Vec3::new(0.45, -0.2, 0.03), Quat::from_rotation_z(0.5));
+    let held = picked.held.clone().expect("a pick holds what it picked up");
+    let place = Place {
+        support: vec![0],
+        ..Place::new(0, picked.end(), held, batchplan::place_poses(&block, to, 8))
+    };
+    match batchplan::place(&device, &worlds, &[place], &o)?.outcomes.remove(0) {
+        Ok(plans) => println!("{:.1} s up, {:.1} s down", picked.duration(), plans[0].duration()),
+        Err(why) => println!("no place: {why}"),
+    }
+    Ok(())
+}
+```
+
+- **Candidates.** Each of a task's grasps or poses is a candidate, and every task's candidates run together, step by step, one batch per step:
+  1. The start, checked for collision.
+  2. IK at the grasp, or where the hand lets go, taking the solution nearest the start.
+  3. The straight move in, followed backward from there so it ends exactly there: from `approach` back along the hand's z axis to a grasp, or along `lower` to where a place lets go.
+  4. The straight move away: `lift` in the world's frame, or `retreat` back along the hand's z axis.
+  5. A planned path from the start to where the move in begins.
+
+  Every candidate that passes every step comes back, quickest first (`TaskPlan::candidate` says which). So a place batched over each surviving grasp's `end` and `held` finds the quickest pick and place together, in two calls. The straight moves keep the hand under `TaskOptions::tool_speed` (10 cm/s), and must make `min_fraction` of their length (all of it): less lets an obstacle shorten a move in or away rather than rule the candidate out.
+- **What may touch.** At the grasp and moving in, the fingers (`Robot::finger_links`, or the whole hand where it has no links with collision spheres below its palm) may touch the object; the palm may not, so a grasp set too deep fails. The held object may touch what it rests on as it leaves (`Pick::support`) and what it is set on as it arrives (`Place::support`). Backing off, the fingers may touch the object where it now stands. Everything else collides.
+- **What the hand holds.** A pick's plan holds a `Held` (`TaskPlan::held`): the object in its own frame and the grasp. `place` takes it and attaches the object itself, to the device without it; `Held::attachment(&robot)` gives the `AttachedObject` to plan with it otherwise ([`Robot::attach`](robots.md)). A place's plan gives the object where it now stands (`TaskPlan::placed`), to add to the world, and `TaskPlan::end` is where the next task starts. `World::remove` takes the object out of its world for the place, renumbering the touches.
+- **Proposals.** `grasps(&obstacle, &GraspOptions)` proposes grasps for a box, ball, cylinder or capsule, in its frame: the hand facing each side, closing across what fits between its fingers (`opening`, 8 cm), `depth` (2 cm) in from the surface. They suit a parallel gripper whose IK frame lies between its fingertips, its z axis pointing out of the hand and its y axis along the closing direction, as the Panda's `ee_link`. `place_poses(&obstacle, pose, turns)` gives an object's symmetric turns at one spot: 2 for a box (4 with a square footprint), `turns` for a round object.
+- **Why it failed.** When no candidate gets through, the task's `TaskFailure` holds each candidate's step and reason (`CandidateStop`: a pose out of reach, a collision or a jump, or no path), and says it in a sentence: "none of 24 candidates got through: 20 at the grasp or release (1 out of reach, 19 colliding), 4 moving away (4 colliding)". IK that finds nothing is solved once more without its push away from obstacles, which tells a pose out of reach from one that collides.
+- **Speed.** On the Ryzen AI Max+ 395 (32 threads), picking a box by its 24 grasps takes 6.8 ms on the CPU device, and 64 such picks at once 334 ms; on the Radeon 8060S, 15 ms and 115 ms. Setting a box down at either of its turns takes 2.7 ms on the CPU, and 16 at once 15.6 ms. [Benchmarks](benchmarks.md#picking-and-placing) has both machines and every batch size.
+
 ## Executable trajectories
 
 `Trajectory::try_new(&robot, path, speed_scale)` keeps the path and adds a time map `s = σ(t)` (itself a uniform cubic B-spline), choosing the faster of two timings:

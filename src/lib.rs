@@ -3,10 +3,10 @@
 //!
 //! - **Batch-first.** Every query covers many seeds, problems and worlds at once; a [`Device`]
 //!   checks each batch and runs it in parallel on a GPU or on all CPU cores.
-//! - **Separate algorithms over shared types.** [`ik`], [`trajopt`], [`timing`], [`datagen`] and
-//!   the exporters ([`npy`], `lerobot`) are independent modules that take a `Device` and exchange
-//!   the [`types`]; there are no planner plugins or runtime configuration. Results keep the
-//!   problems they answer (`solved()`).
+//! - **Separate algorithms over shared types.** [`ik`], [`trajopt`], [`tool_path`], [`task`],
+//!   [`timing`], [`datagen`] and the exporters ([`npy`], `lerobot`) are independent modules that
+//!   take a `Device` and exchange the [`types`]; there are no planner plugins or runtime
+//!   configuration. Results keep the problems they answer (`solved()`).
 //! - **Standalone.** No middleware. Robots load from URDF, MJCF or OpenUSD; collision spheres are
 //!   fitted to their geometry or loaded from a committed collision-model file. Datasets export to
 //!   LeRobot v3.0 with the optional `lerobot` feature.
@@ -54,6 +54,7 @@ pub mod sdf;
 pub mod shortcut;
 pub mod spheres;
 mod spline;
+pub mod task;
 pub mod timing;
 pub mod tool_path;
 mod topp;
@@ -73,6 +74,10 @@ pub use rrt::{RrtOptions, RrtProblem, RrtResult};
 pub use sdf::{DepthImage, Intrinsics, Occlusion, OccupancyMap, RobotMask, SdfGrid, SdfOptions};
 pub use shortcut::ShortcutOptions;
 pub use spheres::{SphereGeometry, SphereOptions};
+pub use task::{
+    CandidateStop, GraspOptions, Held, Pick, Place, TaskFailure, TaskOptions, TaskPlan, TaskResult,
+    TaskStep, grasps, pick, place, place_poses,
+};
 pub use timing::{HandSpeed, JointState, Trajectory};
 pub use tool_path::{ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, follow};
 pub use trajopt::{PlanOptions, PlanProblem, PlanResult, plan};
