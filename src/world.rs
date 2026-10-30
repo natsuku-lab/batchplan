@@ -120,6 +120,22 @@ impl World {
         }
     }
 
+    /// Takes obstacle `obstacle` out of the world, as a hand picking it up does, and returns it.
+    /// Its touches go with it, and the touches of the obstacles after it follow them down.
+    pub fn remove(&mut self, obstacle: usize) -> Result<Obstacle> {
+        let count = self.obstacles.len();
+        if obstacle >= count {
+            return Err(Error::Input(format!("obstacle {obstacle} of {count}")));
+        }
+        self.touch.retain(|t| t.obstacle != obstacle);
+        for t in &mut self.touch {
+            if t.obstacle > obstacle {
+                t.obstacle -= 1;
+            }
+        }
+        Ok(self.obstacles.remove(obstacle))
+    }
+
     /// The static collision geometry of a scene file: MJCF (`.xml`, `.mjcf`) geoms in the world
     /// body and in bodies without joints, or OpenUSD (`.usd*`, feature `usd`) colliders outside
     /// rigid bodies. Planes become slabs below their surface; ellipsoids become their bounding
@@ -290,11 +306,18 @@ impl World {
 /// The links allowed to touch each obstacle of a world ([`World::touch_sets`]).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct LinkSets {
-    pub(crate) bits: Vec<u64>,
-    pub(crate) words: usize,
+    bits: Vec<u64>,
+    words: usize,
 }
 
 impl LinkSets {
+    /// Obstacle `obstacle`'s set: link `l` is bit `l % 64` of word `l / 64`. Empty when no link
+    /// may touch anything.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn row(&self, obstacle: usize) -> &[u64] {
+        &self.bits[obstacle * self.words..(obstacle + 1) * self.words]
+    }
+
     /// Whether `link` may touch obstacle `obstacle`. Links beyond those the sets were built for,
     /// such as an object attached since, touch nothing.
     #[inline(always)]

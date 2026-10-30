@@ -111,6 +111,9 @@ pub struct Worlds {
     device: u64,
     worlds: Vec<World>,
     prepared: Box<dyn Any + Send + Sync>,
+    /// The uploading robot's links, by name, when a world lets some touch: the touch sets hold
+    /// their indices.
+    links: Vec<String>,
 }
 
 impl fmt::Debug for Worlds {
@@ -183,8 +186,10 @@ impl Device {
     }
 
     /// A device for `robot` on the same hardware: it shares this device's GPU or threads, and
-    /// worlds uploaded to either work on both. Use it when the robot changes, as when it picks up
-    /// an object ([`Robot::attach`]), without starting a device or uploading worlds again.
+    /// worlds uploaded to either work on both, except that worlds with touches need the links
+    /// both robots have to match by name ([`Device::upload`]). Use it when the robot changes, as
+    /// when it picks up an object ([`Robot::attach`]), without starting a device or uploading
+    /// worlds again.
     pub fn with_robot(&self, robot: &Robot) -> Result<Self> {
         Ok(Self {
             id: self.id,
@@ -192,17 +197,27 @@ impl Device {
         })
     }
 
-    /// Prepares `worlds` for this device. Calls on other devices refuse the result. Errors if an
-    /// obstacle has non-finite or negative sizes, a rotation that is not a unit quaternion, or a
-    /// malformed distance grid.
+    /// Prepares `worlds` for this device. Calls on other devices refuse the result. When a world
+    /// lets links touch obstacles, so do devices made with [`Device::with_robot`] whose links
+    /// differ by name from this one's where both have links: attaching an object, detaching the
+    /// last one attached, or holding another of the same name keeps the worlds valid; an object of
+    /// another name at the same link does not. Errors if an obstacle has non-finite or negative
+    /// sizes, a rotation that is not a unit quaternion, or a malformed distance grid, or if a
+    /// touch names an obstacle the world lacks or a link the robot lacks.
     pub fn upload(&self, worlds: &[World]) -> Result<Worlds> {
         for (i, w) in worlds.iter().enumerate() {
             w.check().map_err(|e| input!("world {i}: {e}"))?;
         }
+        let touching = worlds.iter().any(|w| !w.touch.is_empty());
         Ok(Worlds {
             device: self.id,
             worlds: worlds.to_vec(),
             prepared: self.backend.upload(worlds)?,
+            links: if touching {
+                self.robot().links.iter().map(|l| l.name.clone()).collect()
+            } else {
+                vec![]
+            },
         })
     }
 
@@ -239,10 +254,7 @@ impl Device {
         searches: &mut [&mut dyn Search],
         deadline: Option<Instant>,
     ) -> Result<()> {
-        ensure_input!(
-            worlds.device == self.id,
-            "these worlds were uploaded to a different device"
-        );
+        self.check_worlds(worlds)?;
         self.backend.search(worlds, searches, deadline);
         Ok(())
     }
@@ -334,6 +346,30 @@ impl Device {
         self.backend.trajopt(worlds, item_world, paths, o, deadline)
     }
 
+    /// Whether `worlds` were uploaded to this device, for links named as this robot's: their
+    /// touch sets hold link indices.
+    fn check_worlds(&self, worlds: &Worlds) -> Result<()> {
+        ensure_input!(
+            worlds.device == self.id,
+            "these worlds were uploaded to a different device"
+        );
+        let links = &self.robot().links;
+        if let Some((i, (was, is))) = worlds
+            .links
+            .iter()
+            .zip(links)
+            .enumerate()
+            .find(|(_, (was, is))| **was != is.name)
+        {
+            return Err(input!(
+                "these worlds let links touch obstacles, and link {i} was '{was}' when they were \
+                 uploaded but is '{}' now: upload them again for this robot",
+                is.name
+            ));
+        }
+        Ok(())
+    }
+
     /// The device, shape and index invariants every batch must satisfy before it reaches a backend.
     fn check_batch(
         &self,
@@ -342,10 +378,7 @@ impl Device {
         values: usize,
         per_item: usize,
     ) -> Result<()> {
-        ensure_input!(
-            worlds.device == self.id,
-            "these worlds were uploaded to a different device"
-        );
+        self.check_worlds(worlds)?;
         let items = item_world.len();
         ensure_input!(
             values == items * per_item,

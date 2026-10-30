@@ -8,7 +8,7 @@ use std::ops::Range;
 
 use batchplan::datagen::{self, Handover, Origin, PickPlace, PickPlaceOptions, RecoveryOptions};
 use batchplan::rng::Rng;
-use batchplan::{CollisionWeights, Device, Obstacle, Pose, Robot, World};
+use batchplan::{CollisionWeights, Device, Obstacle, Pose, Robot, Touch, World};
 use glam::{Quat, Vec3};
 
 fn devices(robot: &Robot) -> Vec<Device> {
@@ -51,6 +51,28 @@ fn scenes(count: usize) -> (Vec<World>, Vec<PickPlace>) {
         });
     }
     (worlds, tasks)
+}
+
+#[test]
+fn worlds_that_let_the_hand_touch_the_box_are_picked_from_alike() {
+    // The hand may touch the box, the last obstacle: taking it out of the world takes its touch
+    // too.
+    let robot = common::panda().unwrap();
+    let cpu = Device::cpu(&robot).unwrap();
+    let (worlds, tasks) = scenes(4);
+    let touching: Vec<World> = worlds
+        .iter()
+        .zip(&tasks)
+        .map(|(w, t)| World {
+            touch: vec![Touch::new(t.object, robot.hand_links(0))],
+            ..w.clone()
+        })
+        .collect();
+    let o = PickPlaceOptions::default();
+    let plain = datagen::pick_and_place(&cpu, &worlds, &tasks, &o).unwrap();
+    let touched = datagen::pick_and_place(&cpu, &touching, &tasks, &o).unwrap();
+    assert!(!plain.is_empty());
+    assert_eq!(plain.len(), touched.len());
 }
 
 #[test]

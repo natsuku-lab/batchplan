@@ -22,8 +22,10 @@ What the test suite pins down, so you know what to rely on. Every new test was f
   - On every device, a bar through the open fingers collides until the world lets the hand touch it. Letting one finger touch it leaves the other colliding, and links the world does not name still collide with the same obstacle and with others.
   - IK solves a grasp inside an object, and a plan reaches it, only with the touch. `MeshModel` skips the same pairs. A held box rests on a table only on the holder's device, where the world may name it.
   - Unknown links and obstacle indices are input errors on every device and in `MeshModel`.
-  - The SIMD lanes match the scalar twin on worlds with touches, and the GPU matches the CPU with touch sets spanning two 32-bit words.
-  - Planting a missing skip in the scalar twin, the lanes' `keeps` or `clearance`, the GPU kernels or `MeshModel`, or a GPU that reads only a set's first word, fails a test.
+  - The SIMD lanes match the scalar twin on worlds with touches. The GPU matches the CPU holding 60 balls, so that sets span two 64-bit words on the CPU and three 32-bit words on the GPU, with a distance grid beside the sets in the GPU's world data and touched itself.
+  - Worlds uploaded for the robot without the balls give the robot holding them the same clearances as worlds uploaded for it, the balls touching nothing; a robot holding something else at those links is refused them.
+  - Removing an obstacle takes its touches with it and renumbers the rest, so pick-and-place from worlds that let the hand touch the box makes the same episodes.
+  - Planting a missing skip in the scalar twin, the lanes' `keeps` or `clearance`, the GPU kernels or `MeshModel`, a GPU that reads only a set's first word, a missing bound on a set's words on either device, a wrong row stride, grids that do not move past the touch sets, or no check of the uploading robot's links fails a test.
 - **Tool paths:**
   - On every device, a 10 cm straight move stays within 1 mm and 0.01 rad of the line, and ends at its pose. A turn in place keeps the hand where it is. An L-shaped path keeps its precision through the corner at 5 mm steps and at 5 cm ones.
   - A slab across the way stops the motion between a tenth and three fifths of the way down, as a `Collision`, and what it returns keeps clear of the slab. A pose out of reach stops it as `Unreachable` after a straight stretch. A move across the UR5e's wrist singularity stops before it, on the line.

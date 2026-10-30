@@ -132,19 +132,18 @@ const SPHERE: u32 = 1;
 const CYLINDER: u32 = 2;
 const CAPSULE: u32 = 3;
 const SDF: u32 = 4;
-/// `GpuObstacle::touch` of an obstacle no link may touch.
-const NO_TOUCH: u32 = u32::MAX;
 
 shader_struct! {
     /// `center.w` is the kind (`CUBOID`, `SPHERE`, ...). `half` holds the half extents of a cuboid,
     /// the radius (x) and half height or half length (y) of the round kinds, or a distance grid's
     /// origin (xyz) and voxel size (w). r0..r2 are the world-from-local rotation columns. A grid
     /// has `nx * ny * nz` points, two per `world_data` word from word `grid`. The links that may
-    /// touch the obstacle are a bit set in `world_data` from word `touch`: its length in words,
-    /// then link `l` bit `l % 32` of the `l / 32`-th word; `NO_TOUCH` when none may.
+    /// touch the obstacle are a bit set in `world_data` from word `r0.w` (a float, exact below
+    /// 2^24, since touch sets come first): its length in words, then link `l` bit `l % 32` of the
+    /// `l / 32`-th word. Word 0 holds no set, so `r0.w` is 0 when no link may touch the obstacle.
     GpuObstacle => Obstacle {
         center: Vec4, half: Vec4, r0: Vec4, r1: Vec4, r2: Vec4,
-        nx: u32, ny: u32, nz: u32, grid: u32, touch: u32, pad0: u32, pad1: u32, pad2: u32,
+        nx: u32, ny: u32, nz: u32, grid: u32,
     }
 }
 
@@ -337,8 +336,9 @@ fn collision(
         let bc = rot_{i} * bl.xyz + pos_{i};
         for (var k = 0u; k < range.y; k++) {{
             let o = obstacles[range.x + k];
-            if (o.touch != NO_TOUCH && {word}u < world_data[o.touch]
-                && (world_data[o.touch + {word}u + 1u] & {bit}u) != 0u) {{
+            let touch = u32(o.r0.w);
+            if (touch != 0u && {word}u < world_data[touch]
+                && (world_data[touch + {word}u + 1u] & {bit}u) != 0u) {{
                 continue;
             }}
             if (u32(o.center.w) != SDF) {{
@@ -776,7 +776,6 @@ fn build_kernels(
         "alias Vec4 = vec4<f32>;\n",
         &format!("const CUBOID: u32 = {CUBOID}u;\nconst SPHERE: u32 = {SPHERE}u;\n"),
         &format!("const CYLINDER: u32 = {CYLINDER}u;\nconst CAPSULE: u32 = {CAPSULE}u;\nconst SDF: u32 = {SDF}u;\n"),
-        &format!("const NO_TOUCH: u32 = {NO_TOUCH}u;\n"),
         &format!("const WORKGROUP: u32 = {WORKGROUP}u;\n"),
         &format!(
             "const MAX_HISTORY: u32 = {MAX_HISTORY}u;\nconst LINE_STEPS: u32 = {}u;\n\
@@ -1004,8 +1003,8 @@ impl GpuBackend {
         let cpu = cpu::prepare(&self.robot, worlds)?;
         let mut obstacles = vec![];
         let mut ranges: Vec<[u32; 2]> = vec![];
-        // Each distinct distance grid once, then each obstacle's touch set.
-        let mut words: Vec<u32> = vec![];
+        // Touch sets after a word that holds none, then each distinct distance grid once.
+        let (mut touches, mut words): (Vec<u32>, Vec<u32>) = (vec![0], vec![]);
         let mut grid_offsets: HashMap<*const SdfGrid, u32> = HashMap::new();
         for (s, prepared) in worlds.iter().zip(&cpu) {
             ranges.push([obstacles.len() as u32, s.obstacles.len() as u32]);
@@ -1065,19 +1064,26 @@ impl GpuBackend {
                         }
                     }
                 });
-                let touch = &prepared.touch;
-                let set = &touch.bits[k * touch.words..(k + 1) * touch.words];
-                let last = obstacles.len() - 1;
-                obstacles[last].touch = if set.iter().any(|&w| w != 0) {
-                    let at = words.len() as u32;
-                    words.push(2 * set.len() as u32);
-                    words.extend(set.iter().flat_map(|&w| [w as u32, (w >> 32) as u32]));
-                    at
-                } else {
-                    NO_TOUCH
-                };
+                let set = prepared.touch.row(k);
+                if set.iter().any(|&w| w != 0) {
+                    let last = obstacles.len() - 1;
+                    obstacles[last].r0[3] = touches.len() as f32;
+                    touches.push(2 * set.len() as u32);
+                    touches.extend(set.iter().flat_map(|&w| [w as u32, (w >> 32) as u32]));
+                }
             }
         }
+        if touches.len() > 1 << 24 {
+            return Err(Error::Gpu(format!(
+                "the worlds' touch sets take {} words, more than their offsets can address",
+                touches.len()
+            )));
+        }
+        for o in obstacles.iter_mut().filter(|o| o.center[3] == SDF as f32) {
+            o.grid += touches.len() as u32;
+        }
+        touches.append(&mut words);
+        let words = touches;
         let limits = self.device.limits();
         let bytes = (words.len() * 4) as u64;
         if bytes

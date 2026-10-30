@@ -18,5 +18,5 @@ cargo clippy --all-targets
 cargo clippy --all-targets --features lerobot,usd
 cargo clippy --all-targets --no-default-features
 cargo doc --no-deps --features lerobot,usd
-(cd demos && CARGO_TARGET_DIR="$CARGO_TARGET_DIR/demos" cargo clippy --all-targets)
+(cd demos && CARGO_TARGET_DIR="$CARGO_TARGET_DIR/demos" cargo clippy --release --all-targets)
 echo "every check passes"

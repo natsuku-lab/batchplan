@@ -178,7 +178,8 @@ pub fn reset_states(
                         }
                         [h] => {
                             let in_hand = grips[h].expect("the hand holds it alone at this sample");
-                            held = Some((h, world.obstacles.remove(c.obstacle).placed(in_hand)));
+                            let object = world.remove(c.obstacle)?;
+                            held = Some((h, object.placed(in_hand)));
                             robot.ee_pose(&q, h).mul_pose(in_hand)
                         }
                         _ => continue,
@@ -675,16 +676,16 @@ pub fn pick_and_place(
     }
 
     // Each task's world as given (index i) and without its object (index tasks + i).
-    let without = |t: &PickPlace| {
+    let without = |t: &PickPlace| -> Result<World> {
         let mut w = worlds[t.world as usize].clone();
-        w.obstacles.remove(t.object);
-        w
+        w.remove(t.object)?;
+        Ok(w)
     };
     let scene: Vec<World> = tasks
         .iter()
-        .map(|t| worlds[t.world as usize].clone())
+        .map(|t| Ok(worlds[t.world as usize].clone()))
         .chain(tasks.iter().map(without))
-        .collect();
+        .collect::<Result<_>>()?;
     let uploaded = device.upload(&scene)?;
     let clear = |i: usize| (tasks.len() + i) as u32;
     let up = Vec3::Z * o.approach;
@@ -1022,16 +1023,16 @@ pub fn handover(
     }
 
     // Each task's world as given (index i) and without its object (index tasks + i).
-    let without = |t: &Handover| {
+    let without = |t: &Handover| -> Result<World> {
         let mut w = worlds[t.world as usize].clone();
-        w.obstacles.remove(t.object);
-        w
+        w.remove(t.object)?;
+        Ok(w)
     };
     let scene: Vec<World> = tasks
         .iter()
-        .map(|t| worlds[t.world as usize].clone())
+        .map(|t| Ok(worlds[t.world as usize].clone()))
         .chain(tasks.iter().map(without))
-        .collect();
+        .collect::<Result<_>>()?;
     let uploaded = device.upload(&scene)?;
     let clear = |i: usize| (tasks.len() + i) as u32;
     let up = Vec3::Z * o.approach;

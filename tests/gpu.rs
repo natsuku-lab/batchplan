@@ -238,39 +238,55 @@ fn touches_past_the_first_word_match_cpu() {
     let Some((robot, gpu, cpu)) = setup() else {
         return;
     };
-    // A ring of small balls held around the hand: the Panda's 13 links and 24 balls, so the touch
-    // sets span two 32-bit words.
+    // A ring of small balls held around the hand: the Panda's 12 links and 60 balls, so the touch
+    // sets span two 64-bit words on the CPU (ball 52 on) and three 32-bit words on the GPU.
     let mut held = robot;
-    for k in 0..24 {
-        let angle = k as f32 * std::f32::consts::TAU / 24.0;
+    for k in 0..60 {
+        let angle = k as f32 * std::f32::consts::TAU / 60.0;
         let at = Vec3::new(0.12 * angle.cos(), 0.12 * angle.sin(), 0.05);
         held = held
             .attach(&AttachedObject {
                 name: format!("ball {k}"),
                 link: "panda_hand".into(),
-                shapes: vec![Obstacle::sphere(at, 0.02)],
+                shapes: vec![Obstacle::sphere(at, 0.01)],
                 touch_links: vec![],
                 spheres: SphereOptions::default(),
             })
             .unwrap();
     }
+    let (bare_gpu, bare_cpu) = (gpu, cpu);
     let (gpu, cpu) = (
-        gpu.with_robot(&held).unwrap(),
-        cpu.with_robot(&held).unwrap(),
+        bare_gpu.with_robot(&held).unwrap(),
+        bare_cpu.with_robot(&held).unwrap(),
     );
     let block = Obstacle::cuboid(Vec3::new(0.4, 0.0, 0.4), Vec3::new(0.25, 0.3, 0.2));
-    let mut links: Vec<String> = (10..24).map(|k| format!("ball {k}")).collect();
+    // A ball as a distance grid beside it, sharing the world data with the touch sets.
+    let (dims, origin) = ([21u32, 21, 21], Vec3::new(0.25, 0.25, 0.45));
+    let mut values = vec![];
+    for k in 0..dims[2] {
+        for j in 0..dims[1] {
+            for i in 0..dims[0] {
+                let p = origin + Vec3::new(i as f32, j as f32, k as f32) * 0.01;
+                values.push(p.distance(Vec3::new(0.35, 0.35, 0.55)) - 0.08);
+            }
+        }
+    }
+    let grid = Obstacle::from_grid(SdfGrid::try_new(dims, 0.01, origin, &values).unwrap());
+    let mut links: Vec<String> = (40..60).map(|k| format!("ball {k}")).collect();
     links.push("panda_leftfinger".into());
     let worlds = [
-        World::new(vec![block.clone()]),
+        World::new(vec![block.clone(), grid.clone()]),
         World {
-            touch: vec![Touch::new(0, links)],
-            ..World::new(vec![block])
+            touch: vec![
+                Touch::new(0, links),
+                Touch::new(1, ["ball 3", "ball 58", "panda_link7"]),
+            ],
+            ..World::new(vec![block.clone(), grid.clone()])
         },
     ];
     let n = held.dof();
     let mut rng = Rng::new(23);
-    let items = 4000;
+    let items = 2000;
     let q: Vec<f32> = (0..items * n)
         .map(|i| rng.range(held.lower()[i % n], held.upper()[i % n]))
         .collect();
@@ -318,6 +334,70 @@ fn touches_past_the_first_word_match_cpu() {
         .filter(|&i| touching.world_clearance[i] > plain.world_clearance[i])
         .count();
     assert!(freed > 20, "the touches change only {freed} clearances");
+    // So do the grid's alone, on links in either word of the second obstacle's set, with the
+    // block out of reach.
+    let far = Obstacle::cuboid(Vec3::new(-3.0, 0.0, 0.0), Vec3::splat(0.1));
+    let clearances = |touch: Vec<Touch>| {
+        let world = World {
+            touch,
+            ..World::new(vec![far.clone(), grid.clone()])
+        };
+        let uploaded = cpu.upload(std::slice::from_ref(&world)).unwrap();
+        cpu.evaluate(&uploaded, &vec![0; items], &q, &w)
+            .unwrap()
+            .world_clearance
+    };
+    let (alone, touched) = (
+        clearances(vec![]),
+        clearances(vec![Touch::new(1, ["ball 3", "ball 58", "panda_link7"])]),
+    );
+    let freed = (0..items).filter(|&i| touched[i] > alone[i]).count();
+    assert!(
+        freed > 5,
+        "the grid's touches change only {freed} clearances"
+    );
+    // Worlds uploaded for the robot without the balls stay valid holding them, and the balls,
+    // past the links their sets were built for, touch nothing.
+    let hand = World {
+        touch: vec![Touch::new(0, ["panda_leftfinger", "panda_hand"])],
+        ..World::new(vec![block, grid])
+    };
+    let world = std::slice::from_ref(&hand);
+    let each = vec![0; items];
+    let for_held = cpu
+        .evaluate(&cpu.upload(world).unwrap(), &each, &q, &w)
+        .unwrap();
+    for (device, bare) in [(&cpu, &bare_cpu), (&gpu, &bare_gpu)] {
+        let from_bare = bare.upload(world).unwrap();
+        let e = device.evaluate(&from_bare, &each, &q, &w).unwrap();
+        for i in 0..items {
+            assert!(
+                (e.world_clearance[i] - for_held.world_clearance[i]).abs() < 1e-4,
+                "{}: item {i}: {} vs {}",
+                device.name(),
+                e.world_clearance[i],
+                for_held.world_clearance[i]
+            );
+        }
+    }
+    // A robot holding another object where the balls were cannot use the bare robot's held
+    // worlds.
+    let other = bare_cpu
+        .robot()
+        .attach(&AttachedObject {
+            name: "cup".into(),
+            link: "panda_hand".into(),
+            shapes: vec![Obstacle::sphere(Vec3::Z * 0.1, 0.03)],
+            touch_links: vec![],
+            spheres: SphereOptions::default(),
+        })
+        .unwrap();
+    let cup = bare_cpu.with_robot(&other).unwrap();
+    let held_worlds = cpu.upload(&worlds).unwrap();
+    assert!(matches!(
+        cup.evaluate(&held_worlds, &[1], &q[..n], &w),
+        Err(Error::Input(_))
+    ));
 }
 
 #[test]

@@ -247,6 +247,28 @@ fn a_held_object_may_touch_what_the_world_lets_it() {
 }
 
 #[test]
+fn removing_an_obstacle_keeps_every_touch_on_its_obstacle() {
+    let ball = |x: f32| Obstacle::sphere(Vec3::new(x, 0.0, 0.0), 0.1);
+    let mut world = World {
+        touch: vec![
+            Touch::new(0, ["a"]),
+            Touch::new(1, ["b"]),
+            Touch::new(2, ["c"]),
+        ],
+        ..World::new(vec![ball(0.0), ball(1.0), ball(2.0)])
+    };
+    assert_eq!(world.remove(1).unwrap(), ball(1.0));
+    assert_eq!(world.obstacles, vec![ball(0.0), ball(2.0)]);
+    assert_eq!(
+        world.touch,
+        vec![Touch::new(0, ["a"]), Touch::new(1, ["c"])]
+    );
+    assert_eq!(world.remove(0).unwrap(), ball(0.0));
+    assert_eq!(world.touch, vec![Touch::new(0, ["c"])]);
+    assert!(matches!(world.remove(1), Err(Error::Input(_))));
+}
+
+#[test]
 fn worlds_without_touches_serialize_as_before() {
     let bar = Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.1));
     let plain = serde_json::to_value(World::new(vec![bar.clone()])).unwrap();
