@@ -28,6 +28,7 @@ scripts/fetch_rebot.sh && cargo run --release --example handover -- 512 [--cpu] 
 cargo run --release --features lerobot --example handover -- 16 --lerobot data/handover && .venv/bin/python scripts/replay_mujoco.py data/handover data/handover_video   # + MuJoCo camera videos
 cargo run --release --example handover -- 512 --resets data/resets   # a reset bank: the episodes and states perturbed from them, as .npy
 cargo run --release --example datagen -- data/demo 512 20       # .npy dataset: <out_dir> [worlds] [fps]
+cargo run --release --example tool_paths                        # straight moves and pours: one at a time on one thread, and 64 at once
 cargo run --release --example tasks -- 64                       # picks and places on random tabletops: how many get through, where the rest stop, per batch size
 cargo run --release --example depth [-- --cpu]                  # a distance grid from a rendered depth image, then plans around it
 cargo run --release --example control_loop -- [seconds]         # a planner thread feeding a 50 Hz loop

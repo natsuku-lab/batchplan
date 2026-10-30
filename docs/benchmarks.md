@@ -349,6 +349,17 @@ By batch size, end to end, in solved problems per second (medians of three runs;
 
 A GPU call costs about 10 ms, so one problem at a time runs 10–15 times faster on the CPU. On the M4 Pro that cost varies from run to run: one problem's IK took 8 to 20 ms within one session, on batchplan 0.1.0 as on this version. The CPU fills its cores by 64 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.3 (M4 Pro) to 3.3 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 1.8 to 2.8 times.
 
+## Tool paths
+
+`examples/tool_paths.rs` times `follow` on the Panda from its ready pose: 64 straight 10 cm moves in random directions, and 64 pours (half a radian about a random axis while the hand moves 3 mm). A move at a time on a one-thread device is the median over the 64 of each one's median of five; a batch of 64 on every thread, the median of 200 calls after 20.
+
+| Machine | One move, one thread | 64 moves | 64 pours |
+|---|---|---|---|
+| Ryzen AI Max+ 395, 32 threads | 0.042 ms | 0.27 ms | 0.20 ms |
+| M4 Pro, 14 threads (load 4) | 0.048 ms | 0.42 ms | 0.27 ms |
+
+Against the version before the audit that pinned the spline to the joint limits, weighed rotation in placing a sample along the path and kept the search's buffers as fields, in five alternating runs on the Ryzen: a move on one thread takes 2% longer (0.0416 against 0.0407 ms), batches of 64 moves 7% less time (0.265 against 0.284 ms), and pours 36% less (0.197 against 0.308 ms), since they no longer stop on the way. Counted with `perf stat`, a call of the 64 moves on one thread runs 0.3% more instructions (53.1 million against 52.9 million): the rest of the 2% is fewer instructions per cycle. Along the way, `perf` showed batches 7% slower while each search's buffers lived until the caller dropped it: 32 threads' allocations all freed on one thread, which glibc does slowly. A search now frees them on its own thread when it finishes.
+
 ## Picking and placing
 
 `examples/tasks.rs` picks a box out of clutter on 64 random tabletops and sets it down at a free spot: a table, a box 3–7 cm wide and 4–10 cm tall, 2–5 more boxes up to 30 cm tall, and a spot 12 cm clear of them. Each `pick` tries every grasp `grasps` proposes for the box (16 or 24), each `place` both of its turns at the spot (`place_poses`). Times are the best of five calls of each size, the median of three runs, after a first call that compiles the GPU's kernels; an idle machine.
@@ -473,6 +484,10 @@ batchplan's paths were 12% longer than cuRobo's at the median where both solved 
 ```bash
 # GPU against CPU
 cargo run --release --example bench -- 512
+
+# Tool paths, and picks and places on random tabletops
+cargo run --release --example tool_paths
+cargo run --release --example tasks -- 64
 
 # Two reBot arms handing blocks over (downloads the arm at a pinned commit, with checksums), and their camera videos
 scripts/fetch_rebot.sh
