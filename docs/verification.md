@@ -24,6 +24,11 @@ What the test suite pins down, so you know what to rely on. Every new test was f
   - Unknown links and obstacle indices are input errors on every device and in `MeshModel`.
   - The SIMD lanes match the scalar twin on worlds with touches, and the GPU matches the CPU with touch sets spanning two 32-bit words.
   - Planting a missing skip in the scalar twin, the lanes' `keeps` or `clearance`, the GPU kernels or `MeshModel`, or a GPU that reads only a set's first word, fails a test.
+- **Tool paths:**
+  - On every device, a 10 cm straight move stays within 1 mm and 0.01 rad of the line, and ends at its pose. A turn in place keeps the hand where it is. An L-shaped path keeps its precision through the corner at 5 mm steps and at 5 cm ones.
+  - A slab across the way stops the motion between a tenth and three fifths of the way down, as a `Collision`, and what it returns keeps clear of the slab. A pose out of reach stops it as `Unreachable` after a straight stretch. A move across the UR5e's wrist singularity stops before it, on the line.
+  - An approach that ends around a bar succeeds only where the hand may touch it. CPU and GPU devices return the same motions, and malformed paths and options are input errors.
+  - Planting a missing midpoint check, a missing check of the spline against the path, an end the motion does not rest at, ignored collisions of the spline, or unbounded halving fails a test.
 - **CPU IK and retiming:** IK solves targets taken from collision-free configurations; retiming respects velocity limits and keeps the endpoints.
 - **SIMD collision checks:**
   - Lanes checking eight configurations at a time give the same world and self clearances as the scalar twin of the GPU kernels, to 2e-5 m. This holds over 3,000 random configurations against every obstacle kind, on the Panda (fingers locked or sliding), the Panda holding a box, MuJoCo Menagerie's 2F-85 (quartic mimic joints) and the UR5e. Runs of worlds cross the groups of eight.

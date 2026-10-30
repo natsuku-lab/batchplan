@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use fearless_simd::dispatch;
-use glam::{Mat3, Vec2, Vec3};
+use glam::{Mat3, Quat, Vec2, Vec3};
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder, Yield};
 
@@ -635,6 +635,84 @@ fn ik_step(
     for j in 0..n {
         let (lo, hi) = robot.bounds(j);
         q[j] = (q[j] + dq[j] * scale).clamp(lo, hi);
+    }
+}
+
+/// Damped least squares toward one hand's pose with nothing else in the step: how a tool path
+/// (`tool_path`) moves from one configuration to the next. One per path, reused along it.
+pub(crate) struct Reach {
+    fk: Fk,
+    jac: Vec<f32>,
+    dq: Vec<f32>,
+}
+
+impl Reach {
+    pub(crate) fn new(robot: &Robot) -> Self {
+        let n = robot.dof();
+        Self {
+            fk: Fk::new(robot.links.len()),
+            jac: vec![0.0; 6 * n],
+            dq: vec![0.0; n],
+        }
+    }
+
+    /// Steps `q` toward hand `hand`'s `target` until it is within `o`'s tolerances or
+    /// `o.iterations` steps have run, as `ik_step` does without its collision push. Returns
+    /// whether it got there.
+    pub(crate) fn reach(
+        &mut self,
+        robot: &Robot,
+        hand: usize,
+        target: &(Vec3, Mat3),
+        q: &mut [f32],
+        o: &IkOptions,
+    ) -> bool {
+        let mut a = [0.0f32; 36];
+        for step in 0..=o.iterations {
+            robot.fk_into(q, &mut self.fk);
+            let (e, position, rotation) =
+                pose_error(&self.fk, robot.ee_links[hand], target, o.rotation_weight);
+            if position < o.position_tolerance && rotation < o.rotation_tolerance {
+                return true;
+            }
+            if step == o.iterations {
+                break;
+            }
+            hand_system(robot, &self.fk, hand, o, &mut self.jac, &mut a);
+            self.dq.fill(0.0);
+            add_jt(&self.jac, chol6_solve(&a, e), &mut self.dq);
+            let largest = self.dq.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            let scale = if largest > o.max_step {
+                o.max_step / largest
+            } else {
+                1.0
+            };
+            for (j, qj) in q.iter_mut().enumerate() {
+                let (lo, hi) = robot.bounds(j);
+                *qj = (*qj + self.dq[j] * scale).clamp(lo, hi);
+            }
+        }
+        false
+    }
+
+    /// Hand `hand`'s pose at `q`.
+    pub(crate) fn pose(&mut self, robot: &Robot, hand: usize, q: &[f32]) -> Pose {
+        robot.fk_into(q, &mut self.fk);
+        let ee = robot.ee_links[hand];
+        Pose::new(self.fk.pos[ee], Quat::from_mat3(&self.fk.rot[ee]))
+    }
+
+    /// How far hand `hand` is from `target` at `q`: meters, and radians.
+    pub(crate) fn error(
+        &mut self,
+        robot: &Robot,
+        hand: usize,
+        target: &(Vec3, Mat3),
+        q: &[f32],
+    ) -> [f32; 2] {
+        robot.fk_into(q, &mut self.fk);
+        let (_, position, rotation) = pose_error(&self.fk, robot.ee_links[hand], target, 1.0);
+        [position, rotation]
     }
 }
 

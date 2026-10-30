@@ -76,6 +76,7 @@ Guide: [planning.md](planning.md#planning-a-path).
 | `PlanOptions` | Control points, optimization seeds and iterations, the search (`rrt`: `RrtOptions`), shortcutting (`shortcut`: `ShortcutOptions`) and a `time_budget`. |
 | `PlanResult::best(problem)`, `solved()` | The shortest valid path's control points, and every solved problem. Every seed's path is in `paths` (`JointPaths`). |
 | `rrt::connect`, `shortcut::shortcut` | The search and the shortcutting that `plan` runs, on their own, for waypoint paths. |
+| `follow(&device, &worlds, &[ToolPath], &ToolPathOptions)` | A hand moved in straight lines through poses ([guide](planning.md#moving-the-hand-along-a-path)): per path, the `fraction` it covers, why it `stopped` short (`ToolPathStop`), and the motion's control points (`ToolPathResult`). |
 
 ## Timing
 

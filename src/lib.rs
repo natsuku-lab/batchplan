@@ -53,6 +53,7 @@ pub mod shortcut;
 pub mod spheres;
 mod spline;
 pub mod timing;
+pub mod tool_path;
 mod topp;
 pub mod trajopt;
 pub mod types;
@@ -71,6 +72,7 @@ pub use sdf::{DepthImage, Intrinsics, Occlusion, OccupancyMap, RobotMask, SdfGri
 pub use shortcut::ShortcutOptions;
 pub use spheres::{SphereGeometry, SphereOptions};
 pub use timing::{JointState, Trajectory};
+pub use tool_path::{ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, follow};
 pub use trajopt::{PlanOptions, PlanProblem, PlanResult, plan};
 pub use types::{JointPaths, JointTrajectory, Pose, Solved, StartMotion};
 pub use world::{Distance, Obstacle, Touch, World};

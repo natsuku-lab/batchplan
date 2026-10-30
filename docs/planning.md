@@ -96,6 +96,47 @@ Continuous joints are unbounded, and joints whose range spans more than a turn (
 
 `PlanOptions::time_budget` stops every search and the optimization once it passes, and returns the valid paths found so far. Without a budget nothing checks the clock, and two runs give bit-identical results, on either device.
 
+## Moving the hand along a path
+
+`follow(&device, &worlds, &[ToolPath], &ToolPathOptions)` moves a hand through poses: in a straight line from each to the next, turning by the shortest rotation, as MoveIt's Cartesian paths do. Each `ToolPath` names its world, its start configuration, the hand, and the `waypoints` after the start; only the joints that move that hand move. It is what an approach, a lift or a pour asks for, where a planned path would take any route.
+
+```rust,no_run
+use batchplan::glam::Vec3;
+use batchplan::{
+    Device, Error, Pose, Robot, RobotOptions, ToolPath, ToolPathOptions, Trajectory, World,
+};
+
+fn main() -> Result<(), Error> {
+    let robot = Robot::load("assets/franka/franka_panda.urdf", &RobotOptions::default())?;
+    let device = Device::cpu(&robot)?;
+    let worlds = device.upload(&[World::default()])?;
+    let start = robot.default_q().to_vec();
+    let hand = robot.ee_pose(&start, 0);
+    // Lift the hand 10 cm straight up, keeping its rotation.
+    let up = Pose::new(hand.position + Vec3::new(0.0, 0.0, 0.1), hand.rotation);
+    let path = ToolPath {
+        world: 0,
+        start,
+        hand: 0,
+        waypoints: vec![up],
+    };
+    let result = batchplan::follow(&device, &worlds, &[path], &ToolPathOptions::default())?;
+    if let Some(why) = result.stopped[0] {
+        println!("{:.0}% of the way: {why:?}", 100.0 * result.fraction[0]);
+    }
+    if !result.paths[0].is_empty() {
+        let lift = Trajectory::try_new(&robot, &result.paths[0], 1.0)?;
+        println!("lifted in {:.2} s", lift.duration());
+    }
+    Ok(())
+}
+```
+
+- **Steps.** The hand moves at most `step` (5 mm) or `rotation_step` (0.05 rad) between configurations, each solved by damped least squares from the one before. Where the joints' straight motion between two configurations would take the hand more than `precision` (1 mm) or `rotation_precision` (0.01 rad) off the path at its middle, the step is halved, up to 8 times.
+- **The motion.** A cubic B-spline passes through every configuration and rests at both ends. Where it would stray from the path by more than the precision, as at a sharp turn, it stops at the configuration there instead. It is checked for collision at the planner's resolution, honouring [allowed contacts](perception.md#allowed-contacts), so an approach can end with the fingers around what they grasp.
+- **How far it got.** A motion that cannot finish goes as far as it can. `fraction` says how much of the path it covers, by its steps, and `stopped` why it ended there: `Unreachable` (beyond reach or joint limits, or at a singularity), `Collision`, or `Jump` (configurations either side, but the joints would leap between them, as a wrist does at a singularity). Each names the pose it stopped before. `paths` holds the motion that does run, ready for `Trajectory::try_new`.
+- **Speed.** Paths are searches, run in parallel on the device's threads like plans. On an M4 Pro, one 10 cm move takes 0.08 ms on one thread, and 64 take 0.42 ms on 14.
+
 ## Executable trajectories
 
 `Trajectory::try_new(&robot, path, speed_scale)` keeps the path and adds a time map `s = σ(t)` (itself a uniform cubic B-spline), choosing the faster of two timings:

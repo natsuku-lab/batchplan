@@ -30,6 +30,10 @@ A batch of searches runs on the device's threads as VAMP's batches do: each thre
 
 RRT-Connect is sequential, but most samples extend from the node they would have extended from a few dozen samples earlier. A helper replays the search's trees from a log, forecasts the extension and connection each coming sample makes, and checks them; when the trees' sizes are near the ratio that decides which one a sample extends, it forecasts both. The search takes a forecast's answer only for the exact query it would have asked, bit for bit, so it grows the same trees as it would alone. Forecasts match where the trees are large and grow slowly, as an unsolvable search's do. On shorter searches, helpers answer few queries and slow those searches by keeping every core busy. A batch's helpers run the pool's other work while they wait. They also run it before each sample while another search's repair is spreading its samples over the pool, since the repair needs the threads.
 
+## Tool paths
+
+`follow` runs each tool path as a search too. It splits the path into poses a step apart, then steps along them by damped least squares from the configuration before (the IK step without its collision push). Where the joints' straight motion between two configurations strays from the path at its middle, the step is halved; eight halvings without meeting the precision is a jump. A cubic B-spline then interpolates the configurations, resting at the ends and stopping wherever it would stray from the path. The search asks for the spline to be checked densely; a collision cuts the motion back to before the span that hits, and the spline is fitted again.
+
 ## Collision
 
 The robot is a set of spheres; obstacles are primitives or distance grids. One configuration's collision cost sums squared penetrations of every sphere into every obstacle, and of every sphere pair the self-collision model checks, within a margin.
