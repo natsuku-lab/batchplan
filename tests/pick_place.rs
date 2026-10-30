@@ -4,12 +4,16 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
+use std::f32::consts::PI;
 use std::ops::Range;
 
 use batchplan::datagen::{self, Handover, Origin, PickPlace, PickPlaceOptions, RecoveryOptions};
 use batchplan::rng::Rng;
-use batchplan::{CollisionWeights, Device, Obstacle, Pose, Robot, Touch, World};
-use glam::{Quat, Vec3};
+use batchplan::{
+    CollisionWeights, Device, Obstacle, Pick, Place, Pose, Robot, TaskOptions, TaskStep, Touch,
+    World,
+};
+use glam::{Mat3, Quat, Vec3};
 
 fn devices(robot: &Robot) -> Vec<Device> {
     let mut devices = vec![Device::cpu(robot).unwrap()];
@@ -48,6 +52,7 @@ fn scenes(count: usize) -> (Vec<World>, Vec<PickPlace>) {
             world: w as u32,
             object: 2,
             place,
+            support: vec![0],
         });
     }
     (worlds, tasks)
@@ -302,10 +307,156 @@ fn pick_and_place_tasks_are_checked() {
     );
 }
 
+/// The box is checked against the scene while the hand lifts it and sets it down, not only while
+/// it is carried between: a ledge just over its far end, clear of the hand, stops the lift; a
+/// ledge just over where its far end goes stops the lowering; and a low slab where it would stand
+/// stops the release. Each is shown stopping at its step through `pick` and `place` too.
+#[test]
+fn a_box_is_neither_lifted_nor_lowered_into_a_ledge_nor_set_down_into_a_slab() {
+    let robot = common::panda().unwrap();
+    let half = Vec3::new(0.02, 0.05, 0.03);
+    let (from, to) = (Vec3::new(0.45, 0.2, half.z), Vec3::new(0.45, -0.2, half.z));
+    let table = Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02));
+    let world = |more: Vec<Obstacle>| {
+        let mut obstacles = vec![table.clone(), Obstacle::cuboid(from, half)];
+        obstacles.extend(more);
+        World::new(obstacles)
+    };
+    // 4 mm over the box's far end, 8-16 mm above its top.
+    let ledge = |at: Vec3| {
+        Obstacle::cuboid(
+            at + Vec3::new(0.0, half.y + 0.002, half.z + 0.012),
+            Vec3::new(0.03, 0.006, 0.004),
+        )
+    };
+    let slab = Obstacle::cuboid(
+        Vec3::new(to.x, to.y + 0.035, 0.0075),
+        Vec3::new(0.03, 0.005, 0.0075),
+    );
+    let worlds = [
+        world(vec![]),
+        world(vec![ledge(from)]),
+        world(vec![ledge(to)]),
+        world(vec![slab]),
+    ];
+    let place = Pose::new(to, Quat::IDENTITY);
+    let tasks: Vec<PickPlace> = (0..4)
+        .map(|w| PickPlace {
+            world: w,
+            object: 1,
+            place,
+            support: vec![0],
+        })
+        .collect();
+    for d in devices(&robot) {
+        let demos =
+            datagen::pick_and_place(&d, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
+        let done: Vec<u32> = demos.iter().map(|demo| demo.world).collect();
+        assert_eq!(done, [0], "{}", d.name());
+    }
+    // Top-down, closing across the box's narrower side, either way round.
+    let grasp = Pose::new(
+        Vec3::Z * (half.z - 0.02),
+        Quat::from_mat3(&Mat3::from_cols(Vec3::Y, Vec3::X, -Vec3::Z)),
+    );
+    let grasps = vec![
+        grasp,
+        Pose::new(grasp.position, grasp.rotation * Quat::from_rotation_z(PI)),
+    ];
+    let cpu = Device::cpu(&robot).unwrap();
+    let o = TaskOptions::default();
+    let stops = worlds[1..].iter().map(|w| {
+        let uploaded = cpu.upload(std::slice::from_ref(w)).unwrap();
+        let pick = Pick {
+            support: vec![0],
+            ..Pick::new(0, robot.default_q(), 1, grasps.clone())
+        };
+        let up = match batchplan::pick(&cpu, &uploaded, &[pick], &o)
+            .unwrap()
+            .outcomes
+            .remove(0)
+        {
+            Ok(plans) => plans.into_iter().next().unwrap(),
+            Err(why) => return why.step(),
+        };
+        let mut set_in = w.clone();
+        set_in.remove(1).unwrap();
+        let uploaded = cpu.upload(&[set_in]).unwrap();
+        let box_shape = Obstacle::cuboid(Vec3::ZERO, half);
+        let down = Place {
+            support: vec![0],
+            ..Place::new(
+                0,
+                up.end(),
+                up.held.clone().unwrap(),
+                batchplan::place_poses(&box_shape, place, 1),
+            )
+        };
+        let placed = batchplan::place(&cpu, &uploaded, &[down], &o).unwrap();
+        placed.outcomes[0].as_ref().unwrap_err().step()
+    });
+    let lifted_lowered_released = [TaskStep::Depart, TaskStep::Approach, TaskStep::Reach];
+    assert_eq!(stops.collect::<Vec<_>>(), lifted_lowered_released);
+}
+
+/// A box the wrist cannot set down as asked (its last joint meets its limit on the way down) is
+/// set down turned half way round, which it cannot tell apart; the others as asked, each episode's
+/// goal and box where its own task says.
+#[test]
+fn boxes_that_cannot_be_set_down_as_asked_are_set_down_turned() {
+    let robot = common::panda().unwrap();
+    let half = Vec3::new(0.02, 0.03, 0.03);
+    let table = Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02));
+    // (The box's yaw, the place pose's): the second and the fourth need the half turn, as do
+    // their neighbours a quarter radian off, on an M4 Pro and a Ryzen alike.
+    let yaws = [(0.0, 0.0), (0.75, -1.75), (0.5, 0.5), (0.25, 2.75)];
+    let mut worlds = vec![];
+    let mut tasks = vec![];
+    for (w, &(lying, placed)) in yaws.iter().enumerate() {
+        let object = Obstacle::Cuboid {
+            center: Vec3::new(0.45, 0.2, half.z),
+            half_extents: half,
+            rotation: Quat::from_rotation_z(lying),
+        };
+        worlds.push(World::new(vec![table.clone(), object]));
+        tasks.push(PickPlace {
+            world: w as u32,
+            object: 1,
+            place: Pose::new(Vec3::new(0.45, -0.2, half.z), Quat::from_rotation_z(placed)),
+            support: vec![0],
+        });
+    }
+    let cpu = Device::cpu(&robot).unwrap();
+    let demos =
+        datagen::pick_and_place(&cpu, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
+    let done: Vec<u32> = demos.iter().map(|d| d.world).collect();
+    assert_eq!(done, [0, 1, 2, 3]);
+    for demo in &demos {
+        let asked = tasks[demo.world as usize].place;
+        let turned = Pose::new(asked.position, asked.rotation * Quat::from_rotation_z(PI));
+        let expected = if demo.world % 2 == 1 { turned } else { asked };
+        let close = |a: Pose, b: Pose| {
+            a.position.distance(b.position) < 3e-3 && a.rotation.dot(b.rotation).abs() > 1.0 - 1e-4
+        };
+        assert!(
+            close(demo.goal, expected),
+            "world {}: goal {:?}",
+            demo.world,
+            demo.goal
+        );
+        let end = *demo.carried.as_ref().unwrap().poses.last().unwrap();
+        assert!(
+            close(end, expected),
+            "world {}: the box ends at {end:?}",
+            demo.world
+        );
+    }
+}
+
 #[test]
 fn episodes_stay_on_one_arm_configuration() {
-    // The pose above each box starts every later IK, so a far solution there (joints near
-    // opposite limits) makes the arm swing around for moves of a few centimetres.
+    // IK at the grasp starts every later motion, so a far solution there (joints near opposite
+    // limits) makes the arm swing around for moves of a few centimetres.
     let robot = common::panda().unwrap();
     let n = robot.dof();
     let cpu = Device::cpu(&robot).unwrap();
@@ -333,8 +484,8 @@ fn episodes_stay_on_one_arm_configuration() {
         "{} of 64 episodes; the joints travel {median:.1} rad in the median one",
         demos.len()
     );
-    // 11.3 rad on an M4 Pro; 15.8 when the pose above the box took the solution with the most
-    // clearance. The threshold leaves room for other machines.
+    // 11.3 rad on an M4 Pro; 15.4 when the grasp took the solution with the most clearance. The
+    // threshold leaves room for other machines.
     assert!(
         median < 13.5,
         "the joints travel {median} rad in the median episode"
@@ -407,6 +558,7 @@ fn walled(count: usize) -> (Vec<World>, Vec<PickPlace>) {
             world: w as u32,
             object: obstacles.len() - 1,
             place: Pose::new(place, Quat::from_rotation_z(rng.range(-1.0, 1.0))),
+            support: vec![0],
         });
         worlds.push(World::new(obstacles));
     }
@@ -518,6 +670,7 @@ fn handovers(count: usize) -> (Vec<World>, Vec<Handover>) {
             to: 1,
             meet,
             place,
+            support: vec![0],
         });
     }
     (worlds, tasks)
@@ -536,8 +689,10 @@ fn blocks_are_handed_from_one_hand_to_the_other() {
     for d in devices(&robot) {
         let demos = datagen::handover(&d, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
         eprintln!("{}: {} of {} handovers", d.name(), demos.len(), tasks.len());
+        // 5 of 8 on the M4 Pro, CPU and GPU, since the moves in and away are straight: one task's
+        // move down to its block passes its post, which a planned descent bent around.
         assert!(
-            demos.len() >= 6,
+            demos.len() >= 5,
             "{}: {} of {} handovers",
             d.name(),
             demos.len(),

@@ -1299,7 +1299,7 @@ fn by_task(_: usize, c: &Candidate) -> u32 {
 
 /// The links of hand `hand` that may touch what it grasps: its fingers, or the whole hand if it
 /// has none.
-fn fingers(robot: &Robot, hand: usize) -> Vec<&str> {
+pub(crate) fn fingers(robot: &Robot, hand: usize) -> Vec<&str> {
     let fingers = robot.finger_links(hand);
     if fingers.is_empty() {
         robot.hand_links(hand)
@@ -1323,7 +1323,7 @@ fn held(task: &Pick, worlds: &Worlds, index: usize) -> Held {
 }
 
 /// `pose` moved `distance` back along its own z axis.
-fn behind(pose: Pose, distance: f32) -> Pose {
+pub(crate) fn behind(pose: Pose, distance: f32) -> Pose {
     Pose::new(
         pose.position - pose.rotation * Vec3::Z * distance,
         pose.rotation,

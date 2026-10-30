@@ -219,6 +219,7 @@ pub fn pick_place_scene(world: u32, rng: &mut Rng) -> (World, PickPlace) {
             world,
             object,
             place,
+            support: vec![0],
         },
     )
 }

@@ -17,16 +17,17 @@ Every episode plans as [`plan`](planning.md) does, straightening each joint (`Sh
 
 ## Pick-and-place
 
-`datagen::pick_and_place(&device, &worlds, &tasks, &PickPlaceOptions)` turns tasks (a box in a world and the pose to set it down at) into episodes. Each chains segments planned in batches, all from rest to rest:
+`datagen::pick_and_place(&device, &worlds, &tasks, &PickPlaceOptions)` turns tasks (a box in a world, the pose to set it down at, and what it rests on) into episodes. Each is a [`pick`](planning.md#picking-up-and-setting-down) from the default configuration and a `place` from where the pick ends, each batched over the tasks, every motion from rest to rest:
 
-1. **Approach** a pose 10 cm above the grasp, which is 2 cm below the box's top, from the default configuration, with the box an obstacle.
-2. **Descend** to a top-down grasp across the box's narrower side, with the box no longer an obstacle, since the fingers close around it. **Close** the gripper over half a second.
-3. **Lift** back up and **transfer** to above the place pose holding the box (`Robot::attach`, touching only the links fixed to the wrist).
-4. **Lower** it, **open** the gripper and **retreat**.
+1. **Approach**: a planned path to 10 cm above a top-down grasp across the box's narrower side, 2 cm below its top, then straight down to the grasp, where only the fingers may touch the box. **Close** the gripper over half a second.
+2. **Lift** the box straight up, where it may touch what it rests on (`PickPlace::support`), and **carry** it on a planned path to above the place pose, holding it (`Robot::attach`).
+3. **Lower** it straight down onto its supports there, **open** the gripper and **back off** straight up.
 
-IK above the box takes the solution nearest the start. IK for the grasp and the place pose is seeded from the configuration above each and takes the solution nearest it, so the arm keeps to one IK branch and short moves stay short. The robot's IK frame must be the grasp point, its z axis pointing out of the gripper and its y axis along the fingers' closing direction (as the Panda's `ee_link`). Each episode records the gripper's opening, where the box is at every sample, and a task such as "Pick up the box and put it 20 cm to the left."
+A task the grasp cannot pick up is tried again with the hand turned half way round, and one that cannot be set down at its pose with the box turned onto itself there (half a turn, or a quarter for a square footprint), each in a batch only as large as the failures.
 
-`examples/datagen.rs --pick-place` completes 492 of 512 random tabletop tasks, with boxes of 512 different sizes, in 0.5 s on an M4 Pro's GPU. IK runs in three batches however many sizes there are; only the transfers, which hold the box, plan per box size, on CPU threads.
+IK at the grasp and where the hand lets go takes the solution nearest the configuration before, so the arm keeps to one IK branch and short moves stay short. The straight moves go at up to `TaskOptions::tool_speed` (10 cm/s), and every motion is slowed by its own random speed scale. The robot's IK frame must be the grasp point, its z axis pointing out of the gripper and its y axis along the fingers' closing direction (as the Panda's `ee_link`). Each episode records the gripper's opening, where the box is at every sample, and a task such as "Pick up the box and put it 20 cm to the left."
+
+`examples/datagen.rs --pick-place` completes 492 of 512 random tabletop tasks, with boxes of 512 different sizes, in 0.26 s on the Radeon 8060S, as many as and no slower than before it moved onto `pick` and `place` (0.27 s). IK runs in two batches however many sizes there are, plus small ones for tasks tried again; every step that holds a box runs per box size, the sizes in parallel. The tasks tried again matter: by one grasp and pose alone, 467 get through, and 25 of the others stop on the way down, where a joint of the Panda's wrist meets its limit.
 
 ```rust,no_run
 use batchplan::datagen::{PickPlace, PickPlaceOptions};
@@ -53,10 +54,12 @@ fn main() -> Result<(), Error> {
     let block = Obstacle::cuboid(Vec3::new(0.45, 0.2, 0.03), Vec3::new(0.02, 0.03, 0.03));
     let worlds = vec![World::new(vec![table, block])];
     let place = Pose::new(Vec3::new(0.45, -0.2, 0.03), Quat::from_rotation_z(0.5));
+    // The block rests on the table (obstacle 0) where it lies and where it goes.
     let tasks = [PickPlace {
         world: 0,
         object: 1,
         place,
+        support: vec![0],
     }];
     let demos = datagen::pick_and_place(&device, &worlds, &tasks, &PickPlaceOptions::default())?;
     for d in &demos {
@@ -70,24 +73,24 @@ On a robot with several hands, `pick_and_place` uses the first and holds the joi
 
 ## Handovers
 
-`datagen::handover(&device, &worlds, &tasks, &PickPlaceOptions)` passes a box between the two hands of a two-arm robot (see [Robots](robots.md#several-arms-several-hands)). A `Handover` names the box, the hand that picks it up (`from`), the hand that sets it down (`to`), the pose where the hands meet, and the place pose. Each hand holds the box from above by one end of its longer side, the end nearer its own arm at the meeting pose. Every segment is batched over the tasks, one batch per box size and hand while a hand holds the box:
+`datagen::handover(&device, &worlds, &tasks, &PickPlaceOptions)` passes a box between the two hands of a two-arm robot (see [Robots](robots.md#several-arms-several-hands)). A `Handover` names the box, the hand that picks it up (`from`), the hand that sets it down (`to`), the pose where the hands meet, the place pose, and what the box rests on. Each hand holds the box from above by one end of its longer side, the end nearer its own arm at the meeting pose. Every step is batched over the tasks:
 
-1. **The giver picks the box up**: approach, descend, close, lift, while the taker waits with its joints held (`PlanProblem::hold`).
-2. **Both arms move at once**: the giver carries the box to the meeting pose while the taker comes above its end. One plan moves every joint, so they arrive together.
-3. **The taker takes it**: it descends onto its end and closes while the giver waits, then the giver opens and lifts off while the taker waits.
-4. **Both arms move at once again**: the giver returns to the default configuration while the taker carries the box above the place pose.
-5. **The taker sets it down**: lower, open, retreat, while the giver waits.
+1. **The giver picks the box up** (`pick`): approach, close, lift, while the taker waits.
+2. **Both arms move at once**: the giver carries the box to the meeting pose while the taker comes above its end. One plan moves every joint, holding the box in the giver's hand, so they arrive together.
+3. **The taker takes it**: it moves straight down onto its end and closes while the giver waits, then the giver opens and backs straight off while the taker waits. The box stands where the giver held it; the giver's hand and the taker's fingers may touch it.
+4. **The taker sets it down** (`place`): it carries the box to above the place pose while the giver returns to the default configuration, both at once (`Place::idle`), then lowers it, opens and backs off while the giver waits.
 
 `examples/handover/` runs this on two [reBot B601](https://github.com/Seeed-Projects/reBot-DevArm) arms facing a table, half the tasks passing left to right and half right to left. Three tables in four are divided down the middle, by a low wall, a screen with an opening or a row of posts, which the arms plan over or around. [Benchmarks](benchmarks.md#bimanual-handovers) gives its speed.
 
-The segments cover DexMimicGen's subtask kinds: sequential (one arm waits for the other), parallel (both move, each on its own errand) and coordinated (both must arrive together). IK solves both hands at once at the meeting pose. Plans hold the box in the hand that has it, and both wrists may touch it; the final lowering plans without it, as pick-and-place's does. The episode records both grippers, where the box is at every sample, and a task such as "Pass the box from the left hand to the right hand and put it down."
+The steps cover DexMimicGen's subtask kinds: sequential (one arm waits for the other), parallel (both move, each on its own errand) and coordinated (both must arrive together). IK solves both hands at once at the meeting pose. The box is checked against the scene and the other arm the whole way: lifted, carried, handed over and set down. The episode records both grippers, where the box is at every sample, and a task such as "Pass the box from the left hand to the right hand and put it down."
 
 ```rust,no_run
 use batchplan::datagen::{Handover, PickPlaceOptions};
 use batchplan::glam::{Quat, Vec3};
 use batchplan::{Device, Error, Pose, World, datagen};
 
-/// Hands a 22 cm block lying in front of the left arm (obstacle 1 of world 0) to the right arm.
+/// Hands a 22 cm block (obstacle 1 of world 0), lying on the table (obstacle 0) in front of the
+/// left arm, to the right arm.
 fn pass_it(device: &Device, worlds: &[World]) -> Result<Vec<datagen::Demonstration>, Error> {
     let across = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
     let meet = Pose::new(Vec3::new(0.5, 0.0, 0.3), across);
@@ -99,6 +102,7 @@ fn pass_it(device: &Device, worlds: &[World]) -> Result<Vec<datagen::Demonstrati
         to: 1,
         meet,
         place,
+        support: vec![0],
     };
     datagen::handover(device, worlds, &[task], &PickPlaceOptions::default())
 }
@@ -112,7 +116,7 @@ Reinforcement learning that starts episodes from many states along a task, as [O
 2. **The carried object** moves with the hand whose gripper is closed on it, in the grip that hand had when it last held the object alone. Samples where both hands hold it are skipped, since noise would pull the hands apart.
 3. **A check** on the device keeps the collision-free states. An object no hand holds is an obstacle where it is; a held one is attached to its hand. The check is conservative: fingers about to close around an object collide with it, and a held object must clear the table, so states right at a grasp, a handover or a set-down are rare.
 
-Each state is a one-sample `Demonstration` whose origin is a recovery from its sample, with `parent` indexing `demos`, so `npy::export` writes states as it writes episodes (`positions.npy` is `[states, 1, dof]`). The episodes' own samples are valid states too; `cargo run --release --example handover -- 512 --resets <dir>` writes both, to `episodes/` and `resets/`. From 510 handovers, 8 states each at the default 0.15 rad of noise, 2,008 of 4,080 are collision-free: 574 with the block in the left hand, 585 in the right and 849 on the table. The check takes under 0.1 s on an M4 Pro, GPU or CPU.
+Each state is a one-sample `Demonstration` whose origin is a recovery from its sample, with `parent` indexing `demos`, so `npy::export` writes states as it writes episodes (`positions.npy` is `[states, 1, dof]`). The episodes' own samples are valid states too; `cargo run --release --example handover -- 512 --resets <dir>` writes both, to `episodes/` and `resets/`. From 510 handovers, 8 states each at the default 0.15 rad of noise, 2,021 of 4,080 are collision-free on the CPU device: 593 with the block in the left hand, 609 in the right and 819 on the table (2,019 on the GPU, whose clearances differ from the CPU's in the last bits at the margin). The check takes 0.04 s on the Ryzen's CPU device and 0.13 s on the Radeon.
 
 ## Demonstrations
 
@@ -144,7 +148,7 @@ What batchplan cannot know comes from `meta/replay.json`, which the exporting pr
 }
 ```
 
-Visual meshes are simplified to 2,000 triangles each as they load. The reBot's CAD exports carry 860,000, which made rendering three times slower with no visible difference at 640×480. On an M4 Pro, three 640×480 cameras render at about 15 ms a frame: 16 handover episodes (6,002 frames) in 91 s.
+Visual meshes are simplified to 2,000 triangles each as they load. The reBot's CAD exports carry 860,000, which made rendering three times slower with no visible difference at 640×480. On an M4 Pro, three 640×480 cameras render at about 15 ms a frame: 16 handover episodes (6,420 frames) in 98 s.
 
 ## Exporting
 
@@ -210,7 +214,7 @@ uv venv .venv --python 3.12 && uv pip install --python .venv/bin/python "lerobot
   --policy.device=cpu --policy.push_to_hub=false --steps=50 --batch_size=16 --num_workers=0
 ```
 
-It passes on reach exports (5,693 episodes, split over 6 episode-metadata files at a 1 MB limit), pick-and-place exports (18 tasks), and two-arm handovers before and after `replay_mujoco.py` adds their videos. LeRobot's ACT policy trains on each. A 50-step CPU run cut the loss from 44 to 5.8 on reaches and from 45 to 5.8 on pick-and-place; a 40-step run on 16 rendered handovers, from the three cameras and both arms' states, cut it from 58 to 7.4.
+It passes on reach exports (5,704 episodes from 2,048 worlds, split over 6 episode-metadata files at a 1 MB limit), pick-and-place exports (492 episodes, 18 tasks), and 16 two-arm handovers before and after `replay_mujoco.py` adds their videos. LeRobot's ACT policy trains on each. A 50-step CPU run (batch 16, the loss logged every 10 steps) cut the loss from 4.5 at step 10 to 0.52 at step 50 on reaches, and from 4.2 to 0.51 on pick-and-place; a 40-step run on the rendered handovers, from the three cameras and both arms' states, from 3.9 to 0.59.
 
 ## `examples/datagen.rs`
 

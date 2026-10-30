@@ -2,9 +2,10 @@
 //!
 //! Each scene is a table with a box to move to the other side, and a wall, posts, an arch or a
 //! cluster of boxes standing between the two spots. One
-//! `datagen::pick_and_place` call plans every episode: IK for the grasp and the place pose, then
-//! approach, descend, close, lift, carry, lower, open and retreat, each segment planned for every
-//! scene in one batch and timed within the Panda's limits. The viewer shows every scene at once,
+//! `datagen::pick_and_place` call plans every episode, each step for every scene in one batch: a
+//! `pick` (a planned path to above the box, straight down, close, straight up with it) and a
+//! `place` (a planned path holding it, straight down, open, straight back up), timed within the
+//! Panda's limits. The viewer shows every scene at once,
 //! the box riding in the gripper, and the first episode's joints over time.
 //!
 //!   cargo run --release --bin pick                      # 16 scenes, in the viewer
@@ -42,7 +43,7 @@ fn main() -> Result<()> {
     };
     // Trajectory optimization smooths the carries the search had to bend around obstacles; without
     // it, about one carry in six stops at a corner of its searched path.
-    options.plan.seeds = 2;
+    options.task.plan.seeds = 2;
     // The first call on a GPU compiles its kernels; time the second.
     datagen::pick_and_place(&device, &worlds[..1], &tasks[..1], &options)?;
     let t = Instant::now();
@@ -59,10 +60,10 @@ fn main() -> Result<()> {
         "## {} of {count} pick-and-place episodes\n\n\
          In {blocked} of the {count} scenes, a wall, posts, an arch or a cluster of boxes stands \
          across the straight carry, so the robot must plan around it.\n\n\
-         Planned in {:.0} ms on {}: IK for every grasp and place pose, then 4 planned motions per \
-         episode (the lift and the retreat retrace the descent and the lowering), each planned for \
-         every scene in one batch, smoothed by trajectory optimization and timed within the \
-         Panda's limits.\n\n\
+         Planned in {:.0} ms on {}: a pick and a place per episode, each step for every scene in \
+         one batch: IK at the grasp and where the hand lets go, straight moves in and away, and \
+         planned paths between, smoothed by trajectory optimization and timed within the Panda's \
+         limits.\n\n\
          Scene {}: *{}*",
         demos.len(),
         planned.as_secs_f64() * 1e3,
@@ -236,6 +237,7 @@ fn pick_place_scene(world: u32, rng: &mut Rng) -> (World, PickPlace) {
             world,
             object,
             place,
+            support: vec![0],
         },
     )
 }

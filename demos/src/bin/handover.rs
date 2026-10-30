@@ -3,8 +3,8 @@
 //! The scenes are `examples/handover`'s: a table with a block lying in front of one arm and a few
 //! small boxes. One `datagen::handover` call plans every episode: the giver picks the block up,
 //! both arms move at once to where they meet, the taker grasps its end, the giver lets go and
-//! returns home while the taker carries the block to the place pose and sets it down. Every segment
-//! is planned for every scene in one batch. The viewer shows every scene at once and the first
+//! returns home while the taker carries the block to the place pose and sets it down. Every step
+//! runs for every scene in one batch: planned paths, and straight moves in and away. The viewer shows every scene at once and the first
 //! episode's joints and grippers over time.
 //!
 //!   ../scripts/fetch_rebot.sh ../data/rebot
