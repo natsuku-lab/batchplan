@@ -241,7 +241,7 @@ To replan mid-motion, give `PlanProblem::start_motion` the robot's current veloc
 - The spline's first spans last as long as the robot needs to change its velocity (about |v| / a). Where it still cannot follow the motion, longer spans are tried, and then trajectory optimization smooths the spline until it can.
 - When reaches are replanned to the same goal from partway through, plans succeed every time with every joint below 1.5 rad/s, and three times in four with one faster, near the Panda's full speed. In the rest, momentum carries a joint out of its range or into the scene, or no timing keeps the limits.
 - A path that cannot brake in time is refused with `Error::Unsafe`.
-- `trajectory.check_from(&robot, &state)` verifies that a trajectory starts at a given state.
+- `trajectory.check_from(&robot, &state)` verifies that a trajectory starts at a given state: each position to 1e-4 of (1 + |q|) rad, each velocity and acceleration to 1e-4 of its value plus the joint's limit.
 
 ```rust,no_run
 use batchplan::{

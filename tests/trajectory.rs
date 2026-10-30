@@ -520,6 +520,13 @@ fn stops_brake_to_rest_along_the_path() {
             };
             // From exactly this state, within every limit, at rest at its end, on the same path.
             stop.check_from(&robot, &state).unwrap();
+            // Not from one a hundredth of a joint's acceleration limit off.
+            let mut off = state.clone();
+            off.acceleration[1] += 0.01 * robot.max_acceleration()[1];
+            assert!(matches!(
+                stop.check_from(&robot, &off),
+                Err(Error::Unsafe(_))
+            ));
             assert!(
                 trajectory.control_points.ends_with(&stop.control_points),
                 "the stop leaves the path"

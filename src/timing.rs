@@ -407,7 +407,8 @@ impl Trajectory {
     }
 
     /// [`Trajectory::check`] for a trajectory that starts in motion ([`Trajectory::moving`]): it
-    /// must start exactly at `start`, position, velocity and acceleration, instead of at rest.
+    /// must start at `start` instead of at rest, each position to 1e-4 of (1 + |q|) rad, and each
+    /// velocity and acceleration to 1e-4 of its value plus the joint's limit.
     pub fn check_from(&self, robot: &Robot, start: &JointState) -> Result<()> {
         self.verify(robot, Some(start))
     }
@@ -493,16 +494,24 @@ impl Trajectory {
                 );
                 let mut first = JointState::new(n);
                 self.at(0.0, &mut first);
-                let close = |a: &[f32], b: &[f32]| {
+                // To 1e-4 of each joint's limit, as f32 time maps hold a state: a stop rebuilds
+                // its start's acceleration from map points a short knot apart, and on the tests'
+                // planned reaches came 1.8e-4 rad/s² off against 1e-4 of (1 + |a|).
+                let close = |a: &[f32], b: &[f32], limits: &[f32]| {
                     a.iter()
                         .zip(b)
-                        .all(|(x, y)| (x - y).abs() <= 1e-4 * (1.0 + y.abs()))
+                        .zip(limits)
+                        .all(|((x, y), l)| (x - y).abs() <= 1e-4 * (y.abs() + l))
                 };
                 ensure_safe!(
-                    close(&first.position, &expected.position)
-                        && close(&first.velocity, &expected.velocity)
-                        && close(&first.acceleration, &expected.acceleration),
-                    "trajectory does not start at the given state: it starts at {first:?}"
+                    close(&first.position, &expected.position, &vec![1.0; n])
+                        && close(&first.velocity, &expected.velocity, robot.max_velocity())
+                        && close(
+                            &first.acceleration,
+                            &expected.acceleration,
+                            robot.max_acceleration()
+                        ),
+                    "trajectory does not start at the given state {expected:?}: it starts at {first:?}"
                 );
             }
         }
