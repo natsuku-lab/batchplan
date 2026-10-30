@@ -32,7 +32,8 @@ pub struct IkOptions {
     pub position_tolerance: f32,
     /// Largest rotation error of a successful seed (radians).
     pub rotation_tolerance: f32,
-    /// Seed of the random starting configurations.
+    /// Seed of the random starting configurations. Each problem draws its own from it and its
+    /// targets and seed, so a problem's solutions do not depend on the others in its batch.
     pub rng_seed: u64,
 }
 
@@ -199,7 +200,6 @@ pub fn solve_ik(
         }
     }
     let items = problems.len() * o.seeds;
-    let mut rng = Rng::new(o.rng_seed);
     let mut q = Vec::with_capacity(items * n);
     let mut item_world = Vec::with_capacity(items);
     let mut targets = Vec::with_capacity(items * hands);
@@ -214,6 +214,14 @@ pub fn solve_ik(
             }
         }
         let start = p.seed.as_deref().unwrap_or(&robot.default_q);
+        let aims = p.targets.iter().flat_map(|t| match t {
+            Some(Pose {
+                position: v,
+                rotation: r,
+            }) => [1.0, v.x, v.y, v.z, r.x, r.y, r.z, r.w],
+            None => [0.0; 8],
+        });
+        let mut rng = Rng::for_problem(o.rng_seed, aims.chain(start.iter().copied()));
         for s in 0..o.seeds {
             if s == 0 {
                 q.extend_from_slice(start);

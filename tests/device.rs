@@ -255,6 +255,88 @@ fn evaluation_does_not_depend_on_the_batch() {
     }
 }
 
+/// A problem's IK solves alike alone and in a batch: each problem draws its random seeds alike.
+#[test]
+fn ik_does_not_depend_on_the_batch() {
+    let robot = panda();
+    let n = robot.dof();
+    let scene = [common::tabletop(&mut Rng::new(4))];
+    let mut rng = Rng::new(9);
+    let problems: Vec<IkProblem> = (0..8)
+        .map(|_| IkProblem::new(0, common::grasp_target(&scene[0], &mut rng)))
+        .collect();
+    let o = IkOptions::default();
+    for d in devices(&robot) {
+        let worlds = d.upload(&scene).unwrap();
+        let batch = batchplan::solve_ik(&d, &worlds, &problems, &o).unwrap();
+        for (i, p) in problems.iter().enumerate() {
+            let alone = batchplan::solve_ik(&d, &worlds, std::slice::from_ref(p), &o).unwrap();
+            let items = i * o.seeds..(i + 1) * o.seeds;
+            assert_eq!(
+                alone.q,
+                batch.q[items.start * n..items.end * n],
+                "{}: problem {i}",
+                d.name()
+            );
+            assert_eq!(alone.success, batch.success[items], "{}", d.name());
+        }
+        // Unmoved, each seed is where it starts: problems that differ start from random seeds of
+        // their own, and a problem given twice from the same ones.
+        let unmoved = IkOptions { iterations: 0, ..o };
+        let twice = [
+            problems[0].clone(),
+            problems[1].clone(),
+            problems[0].clone(),
+        ];
+        let starts = batchplan::solve_ik(&d, &worlds, &twice, &unmoved).unwrap();
+        let random = |problem: usize| starts.solution(problem * o.seeds + 1).to_vec();
+        assert_ne!(random(0), random(1), "{}", d.name());
+        assert_eq!(random(0), random(2), "{}", d.name());
+    }
+}
+
+/// A problem's plan is the same wherever it is in its batch, optimization seeds included: each
+/// problem bends its seeds through random via points alike.
+#[test]
+fn plans_do_not_depend_on_the_batch() {
+    let robot = panda();
+    let (scene, problems) = common::blocked_reaches(&robot);
+    let o = PlanOptions {
+        seeds: 6,
+        ..Default::default()
+    };
+    let reversed: Vec<PlanProblem> = problems.iter().rev().cloned().collect();
+    for d in devices(&robot) {
+        let worlds = d.upload(&scene).unwrap();
+        let a = batchplan::plan(&d, &worlds, &problems, &o).unwrap();
+        let b = batchplan::plan(&d, &worlds, &reversed, &o).unwrap();
+        let seeds = a.seeds;
+        // The last seed bends through a random via point; problems searched straight keep it zero.
+        let bent = (0..problems.len())
+            .filter(|&i| {
+                a.paths
+                    .path(i * seeds + seeds - 1)
+                    .iter()
+                    .any(|&v| v != 0.0)
+            })
+            .count();
+        assert!(bent > 2, "{}: {bent} problems optimized", d.name());
+        for i in 0..problems.len() {
+            let j = problems.len() - 1 - i;
+            for s in 0..seeds {
+                let (x, y) = (i * seeds + s, j * seeds + s);
+                assert_eq!(
+                    a.paths.path(x),
+                    b.paths.path(y),
+                    "{}: problem {i}, seed {s}",
+                    d.name()
+                );
+                assert_eq!((a.valid[x], a.length[x]), (b.valid[y], b.length[y]));
+            }
+        }
+    }
+}
+
 #[test]
 fn obstacle_free_worlds_work_on_every_device() {
     let robot = panda();

@@ -11,6 +11,18 @@ impl Rng {
         Self(seed)
     }
 
+    /// A generator for one problem: `seed` mixed with the bits of `values`, the problem's own
+    /// numbers. A problem draws alike wherever it is in a batch, and problems whose numbers differ
+    /// draw independently.
+    pub(crate) fn for_problem(seed: u64, values: impl IntoIterator<Item = f32>) -> Self {
+        let mut mixed = Self(seed);
+        for v in values {
+            mixed.0 ^= u64::from(v.to_bits());
+            mixed.0 = mixed.next_u64();
+        }
+        mixed
+    }
+
     /// The next 64 random bits.
     pub fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);

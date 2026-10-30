@@ -52,7 +52,8 @@ pub struct PlanOptions {
     pub collision: CollisionWeights,
     /// Samples per span used to validate the result.
     pub validate_substeps: usize,
-    /// Seed of the optimization seeds' random via points.
+    /// Seed of the optimization seeds' random via points. Each problem draws its own from it and
+    /// its start and goal, so a problem's plan does not depend on the others in its batch.
     pub rng_seed: u64,
     /// Searching for each path: RRT-Connect after the straight line.
     pub rrt: RrtOptions,
@@ -864,7 +865,6 @@ fn optimize(
         "L-BFGS history must be 1 to {MAX_HISTORY} steps"
     );
     ensure_input!(o.initial_step > 0.0, "the initial step must be positive");
-    let mut rng = Rng::new(o.rng_seed);
     let near_straight = |pi: usize| {
         let item = pi * result.seeds;
         let searched = result.paths.path(item);
@@ -880,6 +880,7 @@ fn optimize(
         let p = &result.problems[pi];
         let goals = robot.goal_variants(&p.start, &p.goal);
         let lines_from = usize::from(searched[pi].is_some());
+        let mut rng = Rng::for_problem(o.rng_seed, p.start.iter().chain(&p.goal).copied());
         for s in 0..o.seeds {
             let path = paths.path_mut(w * o.seeds + s);
             match &searched[pi] {

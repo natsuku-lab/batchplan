@@ -155,8 +155,7 @@ fn the_quickest_grasp_that_gets_through_wins() {
             "{name}"
         );
         assert_ne!(all[0].candidate, 0, "{name}");
-        // Each grasp alone takes as long, but for IK's seeds, which each problem draws after
-        // those before it in the batch.
+        // Each grasp alone moves alike.
         for plan in &all {
             let alone = pick_in(
                 &device,
@@ -164,13 +163,14 @@ fn the_quickest_grasp_that_gets_through_wins() {
                 pick_from(&robot, vec![grasps[plan.candidate]]),
                 &o,
             )
-            .unwrap()[0]
-                .duration();
-            assert!(
-                (alone - plan.duration()).abs() < 0.02 * alone,
-                "{name}: grasp {}: {} batched, {alone} alone",
-                plan.candidate,
-                plan.duration()
+            .unwrap()
+            .remove(0);
+            let motions = |p: &TaskPlan| [p.transit.clone(), p.approach.clone(), p.depart.clone()];
+            assert_eq!(
+                motions(&alone),
+                motions(plan),
+                "{name}: grasp {}",
+                plan.candidate
             );
         }
     }
