@@ -91,10 +91,10 @@ fn main() -> Result<()> {
     let grid = Arc::new(map.grid(&device, Occlusion::OccupiedExceptRobotShadow)?);
     let built = t.elapsed().as_secs_f64() * 1e3;
     let observed = World::new(vec![Obstacle::Sdf {
-            grid: grid.clone(),
-            center: Vec3::ZERO,
-            rotation: Quat::IDENTITY,
-        }]);
+        grid: grid.clone(),
+        center: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+    }]);
 
     // A run of reaches to targets clear of the true scene, planned against the grid alone.
     let t = Instant::now();

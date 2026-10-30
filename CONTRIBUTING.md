@@ -12,6 +12,7 @@ cargo test --release --no-default-features                            # the CPU-
 cargo clippy --release --all-targets --features lerobot,usd           # zero warnings; CI denies them
 cargo doc --no-deps --features lerobot,usd                            # zero warnings
 (cd demos && cargo clippy --release --all-targets)                    # the Rerun demos, a crate of their own
+scripts/check.sh                                                      # every lint CI runs, on both crates: run it before pushing
 ```
 
 CI runs the same on Linux, with the GPU kernels on Mesa's llvmpipe, and builds on macOS, Windows
