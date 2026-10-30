@@ -85,6 +85,7 @@ Guide: [planning.md](planning.md#executable-trajectories).
 | | |
 |---|---|
 | `Trajectory::try_new(&robot, control_points, speed_scale)` | A rest-to-rest trajectory within the robot's velocity, acceleration and jerk limits. |
+| `Trajectory::with_hand_speed(&robot, control_points, &HandSpeed)` | The same, with a hand under caps on its speed and on how fast it turns. |
 | `Trajectory::moving(&robot, control_points, &StartMotion)` | A trajectory that starts in motion, for a path planned with `start_motion`. |
 | `duration()`, `at(t, &mut JointState)`, `sample(hz)` | Its length in seconds, the state at a time without allocating, and samples at a fixed rate (`JointTrajectory`). |
 | `stop(&robot, t)` | A controlled stop along the path from time `t`. |

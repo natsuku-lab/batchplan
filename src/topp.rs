@@ -15,11 +15,15 @@
 //! smooths it while keeping it monotone; the map is then stretched in time just enough that
 //! velocity, acceleration and jerk, sampled densely, keep their limits.
 
-use crate::robot::Robot;
+use glam::Vec3;
+
+use crate::robot::{Fk, Robot};
 use crate::spline::{self, BASIS_D3};
 
 /// TOPP grid stages per path span.
 const STAGES_PER_SPAN: usize = 12;
+/// Samples of a hand's rates per path span: a multiple of the stages, so every stage has one.
+const HAND_SAMPLES_PER_SPAN: usize = 4 * STAGES_PER_SPAN;
 /// Fraction of each velocity and acceleration limit the time-optimal profile may use, leaving room
 /// for the smoothing.
 const HEADROOM: f64 = 0.95;
@@ -35,14 +39,66 @@ const STRETCH_MARGIN: f32 = 1.003;
 /// Rounds of lowering the caps where the smoothed map overshoots.
 const REFINEMENTS: usize = 3;
 
+/// How fast a hand moves along a path per unit of `s`, sampled densely, and the speeds it must
+/// keep under: meters and radians, per unit of `s` and per second. A hand's speed is its rate
+/// times ṡ, so its caps are velocity limits on `s` alone.
+pub(crate) struct HandRates {
+    rates: Vec<[f32; 2]>,
+    limits: [f32; 2],
+}
+
+impl HandRates {
+    pub(crate) fn new(robot: &Robot, cp: &[f32], hand: usize, limits: [f32; 2]) -> Self {
+        let n = robot.dof();
+        let spans = cp.len() / n - 3;
+        let mut fk = Fk::new(robot.links.len());
+        let (mut q, mut dq) = (vec![0.0f32; n], vec![0.0f32; n]);
+        let mut rates = Vec::with_capacity(spans * HAND_SAMPLES_PER_SPAN + 1);
+        for k in 0..=spans * HAND_SAMPLES_PER_SPAN {
+            let s = k as f32 / HAND_SAMPLES_PER_SPAN as f32;
+            let span = (s as usize).min(spans - 1);
+            let u = s - span as f32;
+            spline::blend(cp, n, span, spline::basis(u), &mut q);
+            spline::blend(cp, n, span, spline::basis_d1(u), &mut dq);
+            robot.fk_into(&q, &mut fk);
+            rates.push(robot.hand_velocity(&fk, hand, &dq).map(Vec3::length));
+        }
+        Self { rates, limits }
+    }
+
+    /// The larger of the rates sampled either side of `s`, for position and for rotation.
+    fn at(&self, s: f32) -> [f32; 2] {
+        let k = s.max(0.0) * HAND_SAMPLES_PER_SPAN as f32;
+        let last = self.rates.len() - 1;
+        let (below, above) = (
+            (k.floor() as usize).min(last),
+            (k.ceil() as usize).min(last),
+        );
+        std::array::from_fn(|i| self.rates[below][i].max(self.rates[above][i]))
+    }
+
+    /// The smallest knot interval at which uniform timing keeps the hand under its caps.
+    pub(crate) fn uniform_knot(&self) -> f32 {
+        let mut h = 0.0f32;
+        for rates in &self.rates {
+            for (rate, limit) in rates.iter().zip(self.limits) {
+                h = h.max(rate / limit);
+            }
+        }
+        h * STRETCH_MARGIN
+    }
+}
+
 /// A time map for `cp`: seconds per span and control points, or `None` when the path does not
 /// move or cannot be timed. With `start_speed`, the map starts at that ṡ (spans per second) with
 /// no s̈, to continue a motion already under way; it is then never stretched (that would change the
-/// start), so a path that cannot be timed from that speed within the limits has no map.
+/// start), so a path that cannot be timed from that speed within the limits has no map. With
+/// `hand`, the hand's speed keeps under its caps as the joints keep their limits.
 pub(crate) fn time_map(
     robot: &Robot,
     cp: &[f32],
     start_speed: Option<f64>,
+    hand: Option<&HandRates>,
 ) -> Option<(f32, Vec<f32>)> {
     let n = robot.dof();
     let spans = cp.len() / n - 3;
@@ -137,6 +193,16 @@ pub(crate) fn time_map(
                     }
                 } else if d.abs() > 1e-9 {
                     b.cap = b.cap.min(c / d.abs());
+                }
+            }
+            // A hand's caps take no headroom: smoothing barely raises a speed the profile keeps,
+            // and the stretch takes out what it does.
+            if let Some(hand) = hand {
+                let rates = hand.at((i as f64 * step) as f32);
+                for (rate, limit) in rates.into_iter().zip(hand.limits) {
+                    if rate > 1e-9 {
+                        b.cap = b.cap.min((f64::from(limit) / f64::from(rate)).powi(2));
+                    }
                 }
             }
             let mut own = (f64::NEG_INFINITY, f64::INFINITY);
@@ -276,8 +342,9 @@ pub(crate) fn time_map(
             let beaten = round
                 .as_ref()
                 .map_or(f32::INFINITY, |(r, ..)| r * (1.0 + 1e-4));
-            let (stretch, overshoots) =
-                assess(robot, cp, tau as f32, &points, samples, target, beaten);
+            let (stretch, overshoots) = assess(
+                robot, cp, hand, tau as f32, &points, samples, target, beaten,
+            );
             let knot = tau as f32 * stretch;
             let duration = |knot: f32, points: &[f32]| knot * (points.len() - 3) as f32;
             let usable = start_speed.is_none() || stretch <= 1.0;
@@ -316,7 +383,16 @@ pub(crate) fn time_map(
     let (knot, points) = best?;
     match start_speed {
         None => {
-            let (stretch, _) = assess(robot, cp, knot, &points, CHECK_SAMPLES, 1.0, f32::INFINITY);
+            let (stretch, _) = assess(
+                robot,
+                cp,
+                hand,
+                knot,
+                &points,
+                CHECK_SAMPLES,
+                1.0,
+                f32::INFINITY,
+            );
             Some((knot * stretch * STRETCH_MARGIN, points))
         }
         // Only candidates that needed no stretch at full density are kept.
@@ -387,6 +463,7 @@ pub(crate) fn within_limits(robot: &Robot, cp: &[f32], knot: f32, points: &[f32]
     assess(
         robot,
         cp,
+        None,
         knot,
         points,
         CHECK_SAMPLES,
@@ -397,12 +474,14 @@ pub(crate) fn within_limits(robot: &Robot, cp: &[f32], knot: f32, points: &[f32]
 }
 
 /// How much longer the time map must take for every joint's sampled velocity, acceleration and jerk
-/// to keep its limits (velocity scales with 1/k, acceleration 1/k², jerk 1/k³; at least 1), and
-/// where it overshoots: each such sample's path position and the factor on x that limit needs
-/// there. Once the stretch passes `beaten`, it returns what it has found.
+/// to keep its limits, and the hand's speed its caps (velocity scales with 1/k, acceleration 1/k²,
+/// jerk 1/k³; at least 1), and where it overshoots: each such sample's path position and the factor
+/// on x that limit needs there. Once the stretch passes `beaten`, it returns what it has found.
+#[allow(clippy::too_many_arguments)]
 fn assess(
     robot: &Robot,
     cp: &[f32],
+    hand: Option<&HandRates>,
     knot: f32,
     points: &[f32],
     samples: usize,
@@ -428,7 +507,22 @@ fn assess(
         for sample in 0..=samples {
             let u = sample as f32 / samples as f32;
             derivatives(cp, n, knot, points, m, u, &mut out);
+            let map = |w: [f32; 4]| (0..4).map(|i| w[i] * points[m + i]).sum::<f32>();
             let mut factor = 1.0f32;
+            if let Some(hand) = hand {
+                let speed = map(spline::basis_d1(u)).abs() / knot;
+                let rates = hand.at(map(spline::basis(u)));
+                for (rate, limit) in rates.into_iter().zip(hand.limits) {
+                    let ratio = rate * speed / (limit * target);
+                    if ratio > k {
+                        k = ratio;
+                        floor = floors(k);
+                    }
+                    if ratio > 1.0 {
+                        factor = factor.min(ratio.powi(-2));
+                    }
+                }
+            }
             for (d, limit) in out.iter().zip(&targets) {
                 for order in 0..3 {
                     let ratio = d[order].abs() / limit[order];
@@ -445,10 +539,7 @@ fn assess(
                 }
             }
             if factor < 1.0 {
-                let s = (0..4)
-                    .map(|i| spline::basis(u)[i] * points[m + i])
-                    .sum::<f32>();
-                overshoots.push((s, factor * 0.98));
+                overshoots.push((map(spline::basis(u)), factor * 0.98));
             }
         }
         if k > beaten {

@@ -895,6 +895,26 @@ impl Robot {
         })
     }
 
+    /// Hand `hand`'s linear and angular velocity at the configuration `fk` holds, with the joints
+    /// moving at `dq`.
+    pub(crate) fn hand_velocity(&self, fk: &Fk, hand: usize, dq: &[f32]) -> [Vec3; 2] {
+        let ee = self.ee_links[hand];
+        let (mut linear, mut angular) = (Vec3::ZERO, Vec3::ZERO);
+        for (i, dof) in self.chain(ee) {
+            let curve = &self.links[i]
+                .joint
+                .actuation()
+                .expect("chain links have moving joints")
+                .1;
+            let rate = fk.rate(i, curve) * dq[dof];
+            linear += rate * fk.dpoint(i, fk.pos[ee]);
+            if !fk.slides[i] {
+                angular += rate * fk.axis[i];
+            }
+        }
+        [linear, angular]
+    }
+
     pub(crate) fn fk(&self, q: &[f32]) -> Fk {
         let mut fk = Fk::new(self.links.len());
         self.fk_into(q, &mut fk);

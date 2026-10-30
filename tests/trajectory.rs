@@ -9,8 +9,8 @@ use std::cell::Cell;
 
 use batchplan::rng::Rng;
 use batchplan::{
-    Device, Error, IkOptions, IkProblem, JointState, PlanOptions, PlanProblem, Robot, RobotOptions,
-    StartMotion, Trajectory, World,
+    Device, Error, HandSpeed, IkOptions, IkProblem, JointState, PlanOptions, PlanProblem, Robot,
+    RobotOptions, StartMotion, Trajectory, World,
 };
 
 /// Counts allocations made by the current thread, so other test threads cannot interfere.
@@ -414,6 +414,91 @@ fn scaled_limits_slow_every_motion() {
         assert!(matches!(
             Robot::load(common::asset("franka/franka_panda.urdf"), &bad),
             Err(Error::Load { .. })
+        ));
+    }
+}
+
+/// How the hand moves along `trajectory`: the fastest it moves and turns, and how far, from
+/// central differences of its pose sampled 64 times per knot interval.
+fn hand_motion(robot: &Robot, trajectory: &Trajectory) -> ([f32; 2], [f32; 2]) {
+    let dt = trajectory.knot_interval / 64.0;
+    let samples = trajectory.sample(1.0 / dt).unwrap();
+    let poses: Vec<_> = samples
+        .positions
+        .chunks(robot.dof())
+        .map(|q| robot.ee_pose(q, 0))
+        .collect();
+    let (mut peaks, mut totals) = ([0.0f32; 2], [0.0f32; 2]);
+    for w in poses.windows(3) {
+        let moved = w[2].position.distance(w[0].position);
+        // From the difference's vector part: acos loses small angles to f32 rounding.
+        let turned = 2.0
+            * (w[0].rotation.inverse() * w[2].rotation)
+                .xyz()
+                .length()
+                .asin();
+        for (i, change) in [moved, turned].into_iter().enumerate() {
+            peaks[i] = peaks[i].max(change / (2.0 * dt));
+            totals[i] += change / 2.0;
+        }
+    }
+    (peaks, totals)
+}
+
+#[test]
+fn hand_speed_caps_hold_and_bind() {
+    let robot = common::panda().unwrap();
+    let paths = planned(&robot, 8);
+    let mut ratios = vec![];
+    for path in &paths {
+        // Each cap alone, then both, at half how fast the joints' limits alone move the hand.
+        let fastest = Trajectory::try_new(&robot, path, 1.0).unwrap();
+        let [linear, angular] = hand_motion(&robot, &fastest).0.map(|peak| peak / 2.0);
+        assert!(linear > 0.1 && angular > 0.1, "the hand barely moves");
+        let caps = [
+            [linear, f32::INFINITY],
+            [f32::INFINITY, angular],
+            [linear, angular],
+        ];
+        for cap in caps {
+            let speed = HandSpeed {
+                hand: 0,
+                linear: cap[0],
+                angular: cap[1],
+            };
+            let trajectory = Trajectory::with_hand_speed(&robot, path, &speed).unwrap();
+            trajectory.check(&robot).unwrap();
+            let (peaks, totals) = hand_motion(&robot, &trajectory);
+            // The least time the hand's travel and turn take at its caps.
+            let at_caps = (totals[0] / cap[0]).max(totals[1] / cap[1]);
+            ratios.push(trajectory.duration() / at_caps);
+            assert!(
+                peaks.iter().zip(cap).all(|(p, c)| *p <= c * (1.0 + 1e-3)),
+                "under caps {cap:?} the hand reaches {peaks:?}"
+            );
+            assert!(
+                peaks.iter().zip(cap).any(|(p, c)| *p > 0.9 * c),
+                "no cap of {cap:?} is close to binding: {peaks:?}"
+            );
+        }
+    }
+    let mean = ratios.iter().sum::<f32>() / ratios.len() as f32;
+    eprintln!("duration against the caps' whole way: mean {mean:.3}");
+    // Stretching the joints' timing until the hand keeps its caps averages about 1.5.
+    assert!(
+        mean < 1.35,
+        "the caps slow the motion more than they need: {mean}"
+    );
+    let bad = [(1, 0.2, 0.5), (0, 0.0, 0.5), (0, 0.2, f32::NAN)];
+    for (hand, linear, angular) in bad {
+        let speed = HandSpeed {
+            hand,
+            linear,
+            angular,
+        };
+        assert!(matches!(
+            Trajectory::with_hand_speed(&robot, &paths[0], &speed),
+            Err(Error::Input(_))
         ));
     }
 }

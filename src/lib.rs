@@ -71,7 +71,7 @@ pub use rrt::{RrtOptions, RrtProblem, RrtResult};
 pub use sdf::{DepthImage, Intrinsics, Occlusion, OccupancyMap, RobotMask, SdfGrid, SdfOptions};
 pub use shortcut::ShortcutOptions;
 pub use spheres::{SphereGeometry, SphereOptions};
-pub use timing::{JointState, Trajectory};
+pub use timing::{HandSpeed, JointState, Trajectory};
 pub use tool_path::{ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, follow};
 pub use trajopt::{PlanOptions, PlanProblem, PlanResult, plan};
 pub use types::{JointPaths, JointTrajectory, Pose, Solved, StartMotion};

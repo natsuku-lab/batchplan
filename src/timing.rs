@@ -42,6 +42,18 @@ impl JointState {
     }
 }
 
+/// Caps on how fast a hand moves, on top of the joints' limits, for
+/// [`Trajectory::with_hand_speed`]. `f32::INFINITY` leaves one uncapped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HandSpeed {
+    /// The hand, as [`Robot::ee_pose`] numbers them.
+    pub hand: usize,
+    /// The largest speed of the hand's frame, meters per second.
+    pub linear: f32,
+    /// The largest rate at which it turns, radians per second.
+    pub angular: f32,
+}
+
 /// A rest-to-rest joint trajectory: a path whose first three and last three control points are
 /// equal, and the time map that runs along it. A trajectory from a moving start
 /// ([`Trajectory::moving`]) starts with the motion its first control points encode; a controlled
@@ -70,22 +82,61 @@ impl Trajectory {
     /// Times a planned path (`[points, dof]` control points, at least 7) as fast as the robot's
     /// velocity, acceleration and jerk limits allow, then slows it by `speed_scale` in (0, 1].
     pub fn try_new(robot: &Robot, control_points: &[f32], speed_scale: f32) -> Result<Self> {
+        Self::timed(robot, control_points, speed_scale, None)
+    }
+
+    /// Times a planned path as fast as [`Trajectory::try_new`] does while hand `speed.hand` keeps
+    /// under `speed`'s caps too, as a tool moved along a path ([`crate::follow`]) may need.
+    /// [`Trajectory::check`] checks the joints' limits only.
+    pub fn with_hand_speed(
+        robot: &Robot,
+        control_points: &[f32],
+        speed: &HandSpeed,
+    ) -> Result<Self> {
+        ensure_input!(
+            speed.hand < robot.hands(),
+            "hand {} does not exist: the robot has {}",
+            speed.hand,
+            robot.hands()
+        );
+        ensure_input!(
+            speed.linear > 0.0 && speed.angular > 0.0,
+            "hand speed caps must be positive, got {} m/s and {} rad/s",
+            speed.linear,
+            speed.angular
+        );
+        Self::timed(robot, control_points, 1.0, Some(speed))
+    }
+
+    fn timed(
+        robot: &Robot,
+        control_points: &[f32],
+        speed_scale: f32,
+        hand: Option<&HandSpeed>,
+    ) -> Result<Self> {
         let n = robot.dof();
         ensure_input!(
             speed_scale > 0.0 && speed_scale <= 1.0,
             "speed_scale must be in (0, 1], got {speed_scale}"
         );
         check_path(control_points, n)?;
-        let h = uniform_knot(robot, control_points);
-        let spans = control_points.len() / n - 3;
         let first = &control_points[..3 * n];
         ensure_input!(
             first.chunks(n).all(|p| p == &first[..n]),
             "the path starts moving: time it with Trajectory::moving and its start motion"
         );
+        let rates = hand.map(|speed| {
+            let limits = [speed.linear, speed.angular];
+            topp::HandRates::new(robot, control_points, speed.hand, limits)
+        });
+        let h = rates
+            .as_ref()
+            .map_or(0.0, topp::HandRates::uniform_knot)
+            .max(uniform_knot(robot, control_points));
+        let spans = control_points.len() / n - 3;
         let (mut knot, mut points) = (h, linear(spans));
         if h > 0.0
-            && let Some((tau, map)) = topp::time_map(robot, control_points, None)
+            && let Some((tau, map)) = topp::time_map(robot, control_points, None, rates.as_ref())
             && tau * ((map.len() - 3) as f32) < h * spans as f32
         {
             (knot, points) = (tau, map);
@@ -121,7 +172,7 @@ impl Trajectory {
             time_points,
         };
         let uniform = (uniform_knot(robot, control_points) <= h0).then(|| at(h0, linear(spans)));
-        let optimal = topp::time_map(robot, control_points, Some(1.0 / h0 as f64))
+        let optimal = topp::time_map(robot, control_points, Some(1.0 / h0 as f64), None)
             .map(|(knot, map)| at(knot, map));
         [uniform, optimal]
             .into_iter()

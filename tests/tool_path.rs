@@ -6,7 +6,7 @@
 mod common;
 
 use batchplan::{
-    CollisionModel, CollisionWeights, Device, Error, IkOptions, Obstacle, Pose, Robot,
+    CollisionModel, CollisionWeights, Device, Error, HandSpeed, IkOptions, Obstacle, Pose, Robot,
     RobotOptions, ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, Touch, Trajectory,
     World,
 };
@@ -82,6 +82,28 @@ fn a_straight_line_is_followed_within_its_precision() {
         let last = poses.last().unwrap();
         assert!(last.position.distance(end.position) < 1e-3, "{name}");
     }
+}
+
+#[test]
+fn a_hand_speed_cap_moves_the_hand_at_that_speed() {
+    let robot = panda();
+    let start = robot.ee_pose(robot.default_q(), 0);
+    let end = Pose::new(start.position - Vec3::new(0.0, 0.0, 0.1), start.rotation);
+    let cpu = Device::cpu(&robot).unwrap();
+    let result = follow(&cpu, World::default(), &[path(&robot, vec![end])]);
+    let speed = HandSpeed {
+        hand: 0,
+        linear: 0.05,
+        angular: f32::INFINITY,
+    };
+    let trajectory = Trajectory::with_hand_speed(&robot, &result.paths[0], &speed).unwrap();
+    // 2 s at the cap, and a little more to start and stop.
+    let at_cap = 0.1 / speed.linear;
+    assert!(
+        trajectory.duration() >= at_cap && trajectory.duration() < 1.15 * at_cap,
+        "{} s for {at_cap} s at the cap",
+        trajectory.duration()
+    );
 }
 
 #[test]

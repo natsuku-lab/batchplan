@@ -103,7 +103,8 @@ Continuous joints are unbounded, and joints whose range spans more than a turn (
 ```rust,no_run
 use batchplan::glam::Vec3;
 use batchplan::{
-    Device, Error, Pose, Robot, RobotOptions, ToolPath, ToolPathOptions, Trajectory, World,
+    Device, Error, HandSpeed, Pose, Robot, RobotOptions, ToolPath, ToolPathOptions, Trajectory,
+    World,
 };
 
 fn main() -> Result<(), Error> {
@@ -112,21 +113,27 @@ fn main() -> Result<(), Error> {
     let worlds = device.upload(&[World::default()])?;
     let start = robot.default_q().to_vec();
     let hand = robot.ee_pose(&start, 0);
-    // Lift the hand 10 cm straight up, keeping its rotation.
-    let up = Pose::new(hand.position + Vec3::new(0.0, 0.0, 0.1), hand.rotation);
+    // Lower the hand 10 cm straight down, keeping its rotation.
+    let down = Pose::new(hand.position - Vec3::new(0.0, 0.0, 0.1), hand.rotation);
     let path = ToolPath {
         world: 0,
         start,
         hand: 0,
-        waypoints: vec![up],
+        waypoints: vec![down],
     };
     let result = batchplan::follow(&device, &worlds, &[path], &ToolPathOptions::default())?;
     if let Some(why) = result.stopped[0] {
         println!("{:.0}% of the way: {why:?}", 100.0 * result.fraction[0]);
     }
     if !result.paths[0].is_empty() {
-        let lift = Trajectory::try_new(&robot, &result.paths[0], 1.0)?;
-        println!("lifted in {:.2} s", lift.duration());
+        // At 5 cm/s, turning as fast as the joints allow.
+        let speed = HandSpeed {
+            hand: 0,
+            linear: 0.05,
+            angular: f32::INFINITY,
+        };
+        let descent = Trajectory::with_hand_speed(&robot, &result.paths[0], &speed)?;
+        println!("lowered in {:.2} s", descent.duration());
     }
     Ok(())
 }
@@ -134,7 +141,8 @@ fn main() -> Result<(), Error> {
 
 - **Steps.** The hand moves at most `step` (5 mm) or `rotation_step` (0.05 rad) between configurations, each solved by damped least squares from the one before. Where the joints' straight motion between two configurations would take the hand more than `precision` (1 mm) or `rotation_precision` (0.01 rad) off the path at its middle, the step is halved, up to 8 times.
 - **The motion.** A cubic B-spline passes through every configuration and rests at both ends. Where it would stray from the path by more than the precision, as at a sharp turn, it stops at the configuration there instead. It is checked for collision at the planner's resolution, honouring [allowed contacts](perception.md#allowed-contacts), so an approach can end with the fingers around what they grasp.
-- **How far it got.** A motion that cannot finish goes as far as it can. `fraction` says how much of the path it covers, by its steps, and `stopped` why it ended there: `Unreachable` (beyond reach or joint limits, or at a singularity), `Collision`, or `Jump` (configurations either side, but the joints would leap between them, as a wrist does at a singularity). Each names the pose it stopped before. `paths` holds the motion that does run, ready for `Trajectory::try_new`.
+- **How far it got.** A motion that cannot finish goes as far as it can. `fraction` says how much of the path it covers, by its steps, and `stopped` why it ended there: `Unreachable` (beyond reach or joint limits, or at a singularity), `Collision`, or `Jump` (configurations either side, but the joints would leap between them, as a wrist does at a singularity). Each names the pose it stopped before. `paths` holds the motion that does run, ready for timing.
+- **Timing.** `Trajectory::with_hand_speed` times the motion as fast as the joints' limits allow with the hand under caps on its speed and on how fast it turns ([below](#executable-trajectories)); `Trajectory::try_new` times it by the joints alone.
 - **Speed.** Paths are searches, run in parallel on the device's threads like plans. On an M4 Pro, one 10 cm move takes 0.08 ms on one thread, and 64 take 0.42 ms on 14.
 
 ## Executable trajectories
@@ -144,7 +152,7 @@ fn main() -> Result<(), Error> {
 - **Time-optimal** (TOPP-RA, Pham and Pham 2018): the fastest timing of the path under joint velocity and acceleration limits, plus a speed cap from the jerk limit, smoothed into a B-spline time map. Where the smoothed map overshoots a limit, the caps are lowered there and the profile solved again. On planned Panda paths it is 12% faster than uniform timing on average and never slower, at about 0.5 ms per trajectory.
 - **Uniform**: `σ(t) = t / h`, with the smallest `h` that keeps every joint within its limits. Velocity, acceleration and jerk are then B-splines over the control points' differences, so the bound holds exactly along the whole curve.
 
-Either is slowed by `speed_scale` (1.0 is as fast as the limits allow). Limits come from `RobotOptions::joint_limits` for joints it names, then from the robot description when it has them (URDF 1.2 `acceleration` and `jerk`), otherwise from `RobotOptions` (5 rad/s² and 50 rad/s³ by default).
+Either is slowed by `speed_scale` (1.0 is as fast as the limits allow). Limits come from `RobotOptions::joint_limits` for joints it names, then from the robot description when it has them (URDF 1.2 `acceleration` and `jerk`), otherwise from `RobotOptions` (5 rad/s² and 50 rad/s³ by default). `Trajectory::with_hand_speed(&robot, path, &HandSpeed)` keeps a hand under caps too: `linear` on its speed (m/s) and `angular` on how fast it turns (rad/s), where `f32::INFINITY` leaves one uncapped. Both timings keep them, and `check` checks the joints' limits only.
 
 - **For control loops**: `trajectory.at(t, &mut state)` writes position, velocity and acceleration without allocating.
 - **For datasets**: `trajectory.sample(hz)` returns fixed-rate samples.
