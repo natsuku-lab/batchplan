@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionWeights, Device, Error, IkOptions, IkProblem, Obstacle, PlanOptions, PlanProblem,
-    Robot, SdfGrid, Solved, Trajectory, World,
+    AttachedObject, CollisionWeights, Device, Error, IkOptions, IkProblem, Obstacle, PlanOptions,
+    PlanProblem, Robot, SdfGrid, Solved, SphereOptions, Touch, Trajectory, World,
 };
 use glam::{EulerRot, Quat, Vec2, Vec3};
 
@@ -172,7 +172,7 @@ fn evaluate_matches_cpu_for_every_obstacle_kind() {
         ],
     ]
     .into_iter()
-    .map(|obstacles| World { obstacles })
+    .map(World::new)
     .collect();
     let kinds = [
         "cuboid",
@@ -231,6 +231,93 @@ fn evaluate_matches_cpu_for_every_obstacle_kind() {
             "the {name} differs between devices"
         );
     }
+}
+
+#[test]
+fn touches_past_the_first_word_match_cpu() {
+    let Some((robot, gpu, cpu)) = setup() else {
+        return;
+    };
+    // A ring of small balls held around the hand: the Panda's 13 links and 24 balls, so the touch
+    // sets span two 32-bit words.
+    let mut held = robot;
+    for k in 0..24 {
+        let angle = k as f32 * std::f32::consts::TAU / 24.0;
+        let at = Vec3::new(0.12 * angle.cos(), 0.12 * angle.sin(), 0.05);
+        held = held
+            .attach(&AttachedObject {
+                name: format!("ball {k}"),
+                link: "panda_hand".into(),
+                shapes: vec![Obstacle::sphere(at, 0.02)],
+                touch_links: vec![],
+                spheres: SphereOptions::default(),
+            })
+            .unwrap();
+    }
+    let (gpu, cpu) = (
+        gpu.with_robot(&held).unwrap(),
+        cpu.with_robot(&held).unwrap(),
+    );
+    let block = Obstacle::cuboid(Vec3::new(0.4, 0.0, 0.4), Vec3::new(0.25, 0.3, 0.2));
+    let mut links: Vec<String> = (10..24).map(|k| format!("ball {k}")).collect();
+    links.push("panda_leftfinger".into());
+    let worlds = [
+        World::new(vec![block.clone()]),
+        World {
+            touch: vec![Touch::new(0, links)],
+            ..World::new(vec![block])
+        },
+    ];
+    let n = held.dof();
+    let mut rng = Rng::new(23);
+    let items = 4000;
+    let q: Vec<f32> = (0..items * n)
+        .map(|i| rng.range(held.lower()[i % n], held.upper()[i % n]))
+        .collect();
+    let item_world: Vec<u32> = (0..items as u32).map(|i| i % 2).collect();
+    let w = CollisionWeights {
+        world: 1000.0,
+        self_collision: 0.0,
+        margin: 0.02,
+        self_margin: 0.0,
+    };
+    let a = cpu
+        .evaluate(&cpu.upload(&worlds).unwrap(), &item_world, &q, &w)
+        .unwrap();
+    let b = gpu
+        .evaluate(&gpu.upload(&worlds).unwrap(), &item_world, &q, &w)
+        .unwrap();
+    for i in 0..items {
+        let (ga, gb) = (
+            &a.gradient[i * n..(i + 1) * n],
+            &b.gradient[i * n..(i + 1) * n],
+        );
+        let norm = ga.iter().map(|v| v * v).sum::<f32>().sqrt().max(1.0);
+        let diff = ga
+            .iter()
+            .zip(gb)
+            .map(|(x, y)| (x - y).powi(2))
+            .sum::<f32>()
+            .sqrt();
+        assert!(
+            (a.world_clearance[i] - b.world_clearance[i]).abs() < 1e-4 && diff / norm < 1e-3,
+            "item {i}: clearance {} vs {}",
+            a.world_clearance[i],
+            b.world_clearance[i]
+        );
+    }
+    // The touches matter: the same configurations clear by more in the second world.
+    let same_q = vec![1; items];
+    let touching = cpu
+        .evaluate(&cpu.upload(&worlds).unwrap(), &same_q, &q, &w)
+        .unwrap();
+    let plain = cpu
+        .evaluate(&cpu.upload(&worlds).unwrap(), &vec![0; items], &q, &w)
+        .unwrap();
+    let freed = (0..items)
+        .filter(|&i| touching.world_clearance[i] > plain.world_clearance[i])
+        .count();
+    assert!(freed > 20, "the touches change only {freed} clearances");
 }
 
 #[test]

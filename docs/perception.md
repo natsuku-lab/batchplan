@@ -1,6 +1,6 @@
 # Worlds and perception
 
-A `World` is a list of obstacles. Worlds are uploaded to a [`Device`](devices.md) once (`device.upload(&worlds)`) and stay there. Every IK and planning call takes the uploaded `Worlds`, and each problem names its world by index.
+A `World` is a list of obstacles, and the links allowed to touch some of them. Worlds are uploaded to a [`Device`](devices.md) once (`device.upload(&worlds)`) and stay there. Every IK and planning call takes the uploaded `Worlds`, and each problem names its world by index.
 
 ## Obstacles
 
@@ -13,6 +13,36 @@ A `World` is a list of obstacles. Worlds are uploaded to a [`Device`](devices.md
 | `Sdf { grid, center, rotation }` | a signed distance grid, for any other shape |
 
 `Obstacle::cuboid(center, half_extents)`, `sphere`, `cylinder` and `capsule` build the primitives axis-aligned, and `.placed(pose)` moves and turns one. `Obstacle::from(grid)` puts a grid in world coordinates, where grids built from points and depth images belong. Primitives are exact.
+
+## Allowed contacts
+
+A grasp touches what it grasps. `World::touch` lists links that may touch particular obstacles, as MoveIt's allowed collision matrix does for a scene: contact between them is not a collision, while every other link still keeps clear of the obstacle, and the touching links of every other obstacle. IK, planning, trajectory optimization, `Device::evaluate` and `MeshModel` all skip those pairs. `robot.hand_links(hand)` names a hand's links: the first link at or above its frame with collision spheres, and everything below it, its fingers included.
+
+```rust,no_run
+use batchplan::glam::Vec3;
+use batchplan::{
+    Device, Error, Obstacle, PlanOptions, PlanProblem, Robot, RobotOptions, Touch, World,
+};
+
+fn main() -> Result<(), Error> {
+    let robot = Robot::load("assets/franka/franka_panda.urdf", &RobotOptions::default())?;
+    let device = Device::cpu(&robot)?;
+    let can = Obstacle::cylinder(Vec3::new(0.5, 0.0, 0.1), 0.03, 0.06);
+    let table = Obstacle::cuboid(Vec3::new(0.5, 0.0, -0.02), Vec3::new(0.4, 0.4, 0.02));
+    // The hand may touch the can it closes on, not the table; the arm may touch neither.
+    let grasp = World {
+        touch: vec![Touch::new(0, robot.hand_links(0))],
+        ..World::new(vec![can, table])
+    };
+    let worlds = device.upload(&[grasp])?;
+    let (start, goal) = (robot.default_q().to_vec(), robot.default_q().to_vec());
+    let problem = PlanProblem::new(0, start, goal); // goal: the grasp, solved by IK in this world
+    let _ = batchplan::plan(&device, &worlds, &[problem], &PlanOptions::default())?;
+    Ok(())
+}
+```
+
+Link names are resolved when the worlds are uploaded, against the device's robot; an unknown name, or an obstacle index past the end, is an input error. A held object is a link of the robot holding it ([holding objects](robots.md#holding-objects)), so a world where it may rest on a table is uploaded to the device for that robot.
 
 ## Scenes
 
@@ -85,9 +115,7 @@ fn main() -> Result<(), Error> {
         map.integrate(&device, &image, Some(&mask))?;
     }
     let grid = map.grid(&device, Occlusion::Occupied)?; // never-seen space is solid
-    let world = World {
-        obstacles: vec![Obstacle::from(grid)],
-    };
+    let world = World::new(vec![Obstacle::from(grid)]);
     let _worlds = device.upload(&[world])?;
     Ok(())
 }

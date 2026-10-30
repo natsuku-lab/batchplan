@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::description::Geometry;
 use crate::error::{Error, Result};
+use crate::robot::Robot;
 use crate::sdf::{self, SdfGrid, SdfOptions};
 use crate::types::Pose;
 
@@ -63,6 +64,33 @@ pub enum Obstacle {
 pub struct World {
     /// Everything in the scene; uploading checks each is well formed.
     pub obstacles: Vec<Obstacle>,
+    /// Links allowed to touch particular obstacles, as fingers touch what they grasp: contact
+    /// between them is not a collision, anywhere batchplan checks one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub touch: Vec<Touch>,
+}
+
+/// Links that may touch one obstacle of a [`World`]. Their names are resolved when the world is
+/// uploaded, against the robot of the device it is uploaded to; devices made from that one with
+/// [`Device::with_robot`](crate::Device::with_robot) for an attached object keep them. A world in
+/// which a held object may touch something is uploaded to the device holding it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Touch {
+    /// The obstacle's index in [`World::obstacles`].
+    pub obstacle: usize,
+    /// Links of the robot, such as a hand's ([`Robot::hand_links`](crate::Robot::hand_links)).
+    pub links: Vec<String>,
+}
+
+impl Touch {
+    /// Lets `links` touch obstacle `obstacle`: `Touch::new(0, robot.hand_links(0))`.
+    #[must_use]
+    pub fn new<S: Into<String>>(obstacle: usize, links: impl IntoIterator<Item = S>) -> Touch {
+        Touch {
+            obstacle,
+            links: links.into_iter().map(Into::into).collect(),
+        }
+    }
 }
 
 /// A signed distance to a surface, and its gradient.
@@ -83,6 +111,15 @@ const PLANE_SLAB: f32 = 0.05;
 const PLANE_EXTENT: f32 = 50.0;
 
 impl World {
+    /// A world of `obstacles`, none of which any link may touch.
+    #[must_use]
+    pub fn new(obstacles: Vec<Obstacle>) -> World {
+        World {
+            obstacles,
+            touch: vec![],
+        }
+    }
+
     /// The static collision geometry of a scene file: MJCF (`.xml`, `.mjcf`) geoms in the world
     /// body and in bodies without joints, or OpenUSD (`.usd*`, feature `usd`) colliders outside
     /// rigid bodies. Planes become slabs below their surface; ellipsoids become their bounding
@@ -156,7 +193,7 @@ impl World {
                 })
             })
             .collect::<anyhow::Result<_>>()?;
-        Ok(World { obstacles })
+        Ok(World::new(obstacles))
     }
 }
 
@@ -193,7 +230,11 @@ pub(crate) fn worlds_json(worlds: &[World]) -> serde_json::Result<serde_json::Va
                     o => serde_json::to_value(o),
                 })
                 .collect::<serde_json::Result<Vec<_>>>()?;
-            Ok(serde_json::json!({ "obstacles": obstacles }))
+            let mut world = serde_json::json!({ "obstacles": obstacles });
+            if !w.touch.is_empty() {
+                world["touch"] = serde_json::to_value(&w.touch)?;
+            }
+            Ok(world)
         })
         .collect::<serde_json::Result<Vec<_>>>()?;
     Ok(serde_json::json!({ "grids": grids, "worlds": worlds }))
@@ -206,7 +247,60 @@ impl World {
             o.check()
                 .map_err(|e| Error::Input(format!("obstacle {k}: {e}")))?;
         }
+        for (k, t) in self.touch.iter().enumerate() {
+            if t.obstacle >= self.obstacles.len() {
+                return Err(Error::Input(format!(
+                    "touch {k}: obstacle {} of {}",
+                    t.obstacle,
+                    self.obstacles.len()
+                )));
+            }
+        }
         Ok(())
+    }
+
+    /// The links allowed to touch each obstacle, by index in `robot`'s links: `words` 64-bit
+    /// words per obstacle, link `l` bit `l % 64` of word `l / 64`. Empty, with no words, when no
+    /// link may touch anything.
+    pub(crate) fn touch_sets(&self, robot: &Robot) -> Result<LinkSets> {
+        if self.touch.is_empty() {
+            return Ok(LinkSets::default());
+        }
+        let words = robot.links.len().div_ceil(64);
+        let mut bits = vec![0u64; self.obstacles.len() * words];
+        for (k, t) in self.touch.iter().enumerate() {
+            for name in &t.links {
+                let link = robot
+                    .links
+                    .iter()
+                    .position(|l| &l.name == name)
+                    .ok_or_else(|| {
+                        Error::Input(format!(
+                            "touch {k}: robot '{}' has no link '{name}'",
+                            robot.name()
+                        ))
+                    })?;
+                bits[t.obstacle * words + link / 64] |= 1 << (link % 64);
+            }
+        }
+        Ok(LinkSets { bits, words })
+    }
+}
+
+/// The links allowed to touch each obstacle of a world ([`World::touch_sets`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LinkSets {
+    pub(crate) bits: Vec<u64>,
+    pub(crate) words: usize,
+}
+
+impl LinkSets {
+    /// Whether `link` may touch obstacle `obstacle`. Links beyond those the sets were built for,
+    /// such as an object attached since, touch nothing.
+    #[inline(always)]
+    pub(crate) fn contains(&self, obstacle: usize, link: usize) -> bool {
+        let word = link / 64;
+        word < self.words && self.bits[obstacle * self.words + word] >> (link % 64) & 1 == 1
     }
 }
 

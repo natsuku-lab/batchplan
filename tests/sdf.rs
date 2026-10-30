@@ -166,11 +166,7 @@ fn grid_collision_gradients_match_finite_differences() {
         center: Vec3::new(0.45, 0.0, 0.0),
         rotation: Quat::from_rotation_z(0.4),
     };
-    let worlds = cpu
-        .upload(&[World {
-            obstacles: vec![post],
-        }])
-        .unwrap();
+    let worlds = cpu.upload(&[World::new(vec![post])]).unwrap();
     let w = CollisionWeights {
         world: 1000.0,
         self_collision: 0.0,
@@ -783,12 +779,8 @@ fn exports_write_each_grid_once() {
         rotation: Quat::IDENTITY,
     };
     let worlds = vec![
-        World {
-            obstacles: vec![shared(0.3)],
-        },
-        World {
-            obstacles: vec![shared(0.5), shared(0.6)],
-        },
+        World::new(vec![shared(0.3)]),
+        World::new(vec![shared(0.5), shared(0.6)]),
     ];
     let root = scratch("export");
     batchplan::npy::export(
@@ -821,13 +813,11 @@ fn lerobot_exports_describe_grids_by_their_boxes() {
     add_box(&mut mesh, Vec3::ZERO, Vec3::new(0.2, 0.1, 0.1));
     let grid = Arc::new(SdfGrid::from_mesh(&mesh.0, &mesh.1, &SdfOptions::default()).unwrap());
     let (center, rotation) = (Vec3::new(0.5, 0.2, 0.0), Quat::from_rotation_z(0.5));
-    let worlds = vec![World {
-        obstacles: vec![Obstacle::Sdf {
-            grid: grid.clone(),
-            center,
-            rotation,
-        }],
-    }];
+    let worlds = vec![World::new(vec![Obstacle::Sdf {
+        grid: grid.clone(),
+        center,
+        rotation,
+    }])];
     let root = scratch("lerobot");
     batchplan::lerobot::export(
         &root,

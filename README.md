@@ -27,7 +27,7 @@ Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-la
 
 - **Plan:** batched IK; RRT-Connect, shortcutting and smoothing on SIMD collision checks; smooth B-spline paths, optionally optimized with L-BFGS; time-optimal timing within velocity, acceleration and jerk limits; replanning from a moving state; and controlled stops along the path.
 - **Robots:** load from URDF, MJCF or OpenUSD, including mimic joints, closed loops, continuous joints and ball or floating joints, or assemble several, such as two arms. Collision spheres are fitted automatically. IK takes a target for each hand at once, and plans can hold one arm still while another moves.
-- **Worlds:** boxes, spheres, cylinders, capsules and signed distance grids, built from meshes, point clouds, depth images or frames fused over time.
+- **Worlds:** boxes, spheres, cylinders, capsules and signed distance grids, built from meshes, point clouds, depth images or frames fused over time, and the links allowed to touch them, as a hand touches what it grasps.
 - **Data:** reaches with recoveries from mistakes, pick-and-place episodes and handovers between two arms, with grippers and task strings, plus states perturbed from them to start reinforcement learning from. They export as LeRobot v3.0 datasets (arm by arm, as ALOHA's) or NumPy arrays; `scripts/replay_mujoco.py` replays them in MuJoCo and adds camera videos.
 - **Embeddable:** CPU-only builds, threads you own, time budgets, allocation-free sampling and typed errors, for use inside a robot's control process.
 
@@ -68,9 +68,7 @@ fn main() -> Result<(), Error> {
 
     // Scenes are uploaded once. Problems name their scene by index.
     let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.02), Vec3::new(1.0, 1.0, 0.02));
-    let worlds = device.upload(&[World {
-        obstacles: vec![table],
-    }])?;
+    let worlds = device.upload(&[World::new(vec![table])])?;
 
     // IK for a batch of gripper poses...
     let down = Quat::from_rotation_x(std::f32::consts::PI);
@@ -178,9 +176,7 @@ fn world_from_camera(
     // What objects hide is solid; what only the arm hides is free, or it would wall the arm in.
     let behind = Occlusion::OccupiedExceptRobotShadow;
     let grid = SdfGrid::from_depth(device, &image, Some(&arm), behind, &SdfOptions::default())?;
-    device.upload(&[World {
-        obstacles: vec![Obstacle::from(grid)],
-    }])
+    device.upload(&[World::new(vec![Obstacle::from(grid)])])
 }
 ```
 

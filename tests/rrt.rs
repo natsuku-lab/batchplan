@@ -328,13 +328,11 @@ fn continuous_joints_turn_the_short_way_unless_it_is_blocked() {
     let short = std::f32::consts::TAU - 5.2;
     // A fin along -x, beyond the turntable but within the arm's reach: across the short way only
     // (the arm points along -x at pi).
-    let wall = World {
-        obstacles: vec![Obstacle::Cuboid {
-            center: Vec3::new(-0.55, 0.0, 0.15),
-            half_extents: Vec3::new(0.1, 0.01, 0.25),
-            rotation: Quat::IDENTITY,
-        }],
-    };
+    let wall = World::new(vec![Obstacle::Cuboid {
+        center: Vec3::new(-0.55, 0.0, 0.15),
+        half_extents: Vec3::new(0.1, 0.01, 0.25),
+        rotation: Quat::IDENTITY,
+    }]);
     for d in devices(&robot) {
         let worlds = d.upload(&[World::default(), wall.clone()]).unwrap();
         let open = batchplan::plan(
@@ -386,12 +384,12 @@ fn continuous_joints_turn_the_short_way_unless_it_is_blocked() {
 
         // With the fin along +x instead, only the way through pi is open, and RRT-Connect finds
         // it: its distances and steps wrap.
-        let fin = |x: f32| World {
-            obstacles: vec![Obstacle::Cuboid {
+        let fin = |x: f32| {
+            World::new(vec![Obstacle::Cuboid {
                 center: Vec3::new(x, 0.0, 0.15),
                 half_extents: Vec3::new(0.1, 0.01, 0.25),
                 rotation: Quat::IDENTITY,
-            }],
+            }])
         };
         let worlds = d.upload(&[fin(0.55)]).unwrap();
         let search = RrtProblem {
@@ -422,13 +420,11 @@ fn ur5e_reaches_a_goal_a_turn_away_the_other_way_round() {
     start[0] = 0.0;
     let mut goal = start.clone();
     goal[0] = 4.0;
-    let wall = World {
-        obstacles: vec![Obstacle::Cuboid {
-            center: Vec3::new(0.0, 0.6, 0.3),
-            half_extents: Vec3::new(0.05, 0.3, 0.6),
-            rotation: Quat::IDENTITY,
-        }],
-    };
+    let wall = World::new(vec![Obstacle::Cuboid {
+        center: Vec3::new(0.0, 0.6, 0.3),
+        half_extents: Vec3::new(0.05, 0.3, 0.6),
+        rotation: Quat::IDENTITY,
+    }]);
     for d in devices(&robot) {
         let worlds = d.upload(std::slice::from_ref(&wall)).unwrap();
         let problem = PlanProblem::new(0, start.clone(), goal.clone());
@@ -480,11 +476,7 @@ fn shortcutting_straightens_a_joint_that_swings_back() {
         .map(|(a, b)| 0.5 * (a + b))
         .collect();
     let ball = Obstacle::sphere(robot.ee_pose(&middle, 0).position, 0.02);
-    let worlds = cpu
-        .upload(&[World {
-            obstacles: vec![ball],
-        }])
-        .unwrap();
+    let worlds = cpu.upload(&[World::new(vec![ball])]).unwrap();
     let mut over = middle.clone();
     over[1] -= 0.4;
     over[n - 1] += 1.5;
@@ -531,11 +523,7 @@ fn a_grazed_straight_line_is_bent_around_the_obstacle() {
         .map(|(a, b)| 0.5 * (a + b))
         .collect();
     let ball = Obstacle::sphere(robot.ee_pose(&middle, 0).position, 0.02);
-    let worlds = cpu
-        .upload(&[World {
-            obstacles: vec![ball],
-        }])
-        .unwrap();
+    let worlds = cpu.upload(&[World::new(vec![ball])]).unwrap();
     let blocked = cpu
         .evaluate(&worlds, &[0], &middle, &CollisionWeights::NONE)
         .unwrap();
@@ -580,9 +568,7 @@ fn plans_around_a_ball_on_the_straight_line_stay_near_it() {
             .map(|(a, b)| 0.5 * (a + b))
             .collect();
         let ball = Obstacle::sphere(robot.ee_pose(&middle, 0).position, 0.2);
-        let world = World {
-            obstacles: vec![ball],
-        };
+        let world = World::new(vec![ball]);
         let one = cpu.upload(std::slice::from_ref(&world)).unwrap();
         let ends = cpu
             .evaluate(
@@ -706,7 +692,7 @@ fn a_path_no_spline_follows_is_searched_again() {
             0.35020632,
         ],
     );
-    let worlds = cpu.upload(&[World { obstacles }]).unwrap();
+    let worlds = cpu.upload(&[World::new(obstacles)]).unwrap();
     let result = batchplan::plan(&cpu, &worlds, &[problem], &PlanOptions::default()).unwrap();
     assert!(result.best(0).is_some(), "no path");
 }

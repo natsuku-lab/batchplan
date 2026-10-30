@@ -16,8 +16,8 @@
 // IK targets: 4 vec4 per item and hand (position with w = 1 when the hand has a target, rotation
 // columns).
 @group(0) @binding(8) var<storage, read> targets: array<vec4<f32>>;
-// Distance grid values, two half floats per word (see Obstacle.grid).
-@group(0) @binding(9) var<storage, read> grid_data: array<u32>;
+// Distance grids, two half floats per word (see Obstacle.grid), and touch sets (Obstacle.touch).
+@group(0) @binding(9) var<storage, read> world_data: array<u32>;
 @group(0) @binding(10) var<storage, read_write> qbuf: array<f32>;
 // trajopt: the L-BFGS state of each path (see lbfgs_stride).
 @group(0) @binding(11) var<storage, read_write> aux: array<f32>;

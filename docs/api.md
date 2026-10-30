@@ -21,7 +21,7 @@ Guide: [robots.md](robots.md).
 | `SphereOptions`, `SphereGeometry` | How spheres are fitted when no collision model is given: the budget, the tolerance, and collision or visual geometry. |
 | `Robot::attach(&AttachedObject)`, `Robot::detach(name)` | The robot holding an object fixed to one of its links, or without it. |
 | `dof`, `joint_names`, `lower`, `upper`, `continuous`, `default_q`, `max_velocity`, `max_acceleration`, `max_jerk` | The robot's joints and their limits. |
-| `hands`, `hand_joints(hand)`, `ee_pose(q, hand)`, `link_pose(q, link)` | Hands and forward kinematics. |
+| `hands`, `hand_joints(hand)`, `hand_links(hand)`, `ee_pose(q, hand)`, `link_pose(q, link)` | Hands and forward kinematics; `hand_links` names a hand and its fingers, for allowed contacts. |
 | `MeshModel::try_new(&robot)`, `MeshModel::clearance` | Clearances on the links' meshes instead of the spheres, to check plans against the real geometry: a `Clearance` (`world`, `self_collision`) per configuration. |
 
 ## Worlds and perception
@@ -30,7 +30,8 @@ Guide: [perception.md](perception.md).
 
 | | |
 |---|---|
-| `World { obstacles }` | One scene: a list of obstacles. |
+| `World::new(obstacles)` | One scene: a list of obstacles. |
+| `World::touch`, `Touch::new(obstacle, links)` | Links allowed to touch an obstacle, such as the hand that grasps it ([allowed contacts](perception.md#allowed-contacts)). |
 | `World::load(path, &SdfOptions)` | A scene's static geometry from MJCF or OpenUSD (feature `usd`). |
 | `Obstacle::cuboid`, `sphere`, `cylinder`, `capsule` | Axis-aligned shapes. `placed(pose)` moves and turns one, `pose()` returns its frame, `distance(p)` its signed distance and gradient (`Distance`). |
 | `Obstacle::from_grid(grid)`, `Obstacle::from(grid)` | A distance grid as an obstacle, in the world's frame. |

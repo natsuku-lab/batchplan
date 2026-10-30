@@ -91,7 +91,7 @@ How tight the spheres are is a trade-off you can measure: see [Spheres and meshe
 
 ## Holding objects
 
-`robot.attach(&AttachedObject)` follows MoveIt: the object becomes a frame fixed to a link. It collides with the world and the rest of the robot, but never with its link or the `touch_links` that hold it; `detach` takes it off. Spheres are fitted to its shapes, except that boxes and spheres are covered directly, in microseconds. A sphere is itself. A box splits into a grid of cells, each covered by the sphere through its corners, so that the spheres overhang the box by at most the tolerance (or the least the budget allows). `device.with_robot(&held)` gives a device for the new robot that shares the old one's GPU or threads and uploaded worlds, so picking something up needs no new device or upload.
+`robot.attach(&AttachedObject)` follows MoveIt: the object becomes a frame fixed to a link. It collides with the world and the rest of the robot, but never with its link or the `touch_links` that hold it; `detach` takes it off. Spheres are fitted to its shapes, except that boxes and spheres are covered directly, in microseconds. A sphere is itself. A box splits into a grid of cells, each covered by the sphere through its corners, so that the spheres overhang the box by at most the tolerance (or the least the budget allows). `device.with_robot(&held)` gives a device for the new robot that shares the old one's GPU or threads and uploaded worlds, so picking something up needs no new device or upload. Setting it down touches the surface it rests on: a world whose [`touch`](perception.md#allowed-contacts) lets the object's link touch the table, uploaded to the holding device.
 
 ```rust,no_run
 use batchplan::glam::Vec3;
@@ -139,9 +139,7 @@ fn main() -> Result<(), Error> {
     )?;
     let meshes = MeshModel::try_new(&robot)?;
     let wall = Obstacle::cuboid(Vec3::new(1.0, 0.0, 0.4), Vec3::new(0.02, 0.5, 0.4));
-    let worlds = vec![World {
-        obstacles: vec![wall],
-    }];
+    let worlds = vec![World::new(vec![wall])];
     let q = robot.default_q().to_vec(); // one configuration; pass a trajectory's samples to check it all
     let Clearance {
         world,

@@ -43,9 +43,7 @@ fn scenes(count: usize) -> (Vec<World>, Vec<PickPlace>) {
             Vec3::new(rng.range(0.35, 0.5), rng.range(-0.3, -0.15), half.z),
             Quat::from_rotation_z(rng.range(-1.0, 1.0)),
         );
-        worlds.push(World {
-            obstacles: vec![table, clutter, object],
-        });
+        worlds.push(World::new(vec![table, clutter, object]));
         tasks.push(PickPlace {
             world: w as u32,
             object: 2,
@@ -388,7 +386,7 @@ fn walled(count: usize) -> (Vec<World>, Vec<PickPlace>) {
             object: obstacles.len() - 1,
             place: Pose::new(place, Quat::from_rotation_z(rng.range(-1.0, 1.0))),
         });
-        worlds.push(World { obstacles });
+        worlds.push(World::new(obstacles));
     }
     (worlds, tasks)
 }
@@ -490,9 +488,7 @@ fn handovers(count: usize) -> (Vec<World>, Vec<Handover>) {
         // A post where the left hand passes on its way down to the block, so reaching it takes a
         // search.
         let wall = Obstacle::cuboid(Vec3::new(0.32, 0.35, 0.225), Vec3::new(0.01, 0.01, 0.225));
-        worlds.push(World {
-            obstacles: vec![table, object, wall],
-        });
+        worlds.push(World::new(vec![table, object, wall]));
         tasks.push(Handover {
             world: w as u32,
             object: 1,

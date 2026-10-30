@@ -132,15 +132,19 @@ const SPHERE: u32 = 1;
 const CYLINDER: u32 = 2;
 const CAPSULE: u32 = 3;
 const SDF: u32 = 4;
+/// `GpuObstacle::touch` of an obstacle no link may touch.
+const NO_TOUCH: u32 = u32::MAX;
 
 shader_struct! {
     /// `center.w` is the kind (`CUBOID`, `SPHERE`, ...). `half` holds the half extents of a cuboid,
     /// the radius (x) and half height or half length (y) of the round kinds, or a distance grid's
     /// origin (xyz) and voxel size (w). r0..r2 are the world-from-local rotation columns. A grid
-    /// has `nx * ny * nz` points, two per `grid_data` word from word `grid`.
+    /// has `nx * ny * nz` points, two per `world_data` word from word `grid`. The links that may
+    /// touch the obstacle are a bit set in `world_data` from word `touch`: its length in words,
+    /// then link `l` bit `l % 32` of the `l / 32`-th word; `NO_TOUCH` when none may.
     GpuObstacle => Obstacle {
         center: Vec4, half: Vec4, r0: Vec4, r1: Vec4, r2: Vec4,
-        nx: u32, ny: u32, nz: u32, grid: u32,
+        nx: u32, ny: u32, nz: u32, grid: u32, touch: u32, pad0: u32, pad1: u32, pad2: u32,
     }
 }
 
@@ -324,6 +328,8 @@ fn collision(
     let checked = (0..links.len())
         .filter(|&i| robot.sphere_ranges[i][1] > 0 && !robot.links[i].chain.is_empty());
     for i in checked {
+        // The link's word and bit in a touch set.
+        let (word, bit) = (i / 32, 1u32 << (i % 32));
         let _ = write!(
             w,
             r"    {{
@@ -331,6 +337,10 @@ fn collision(
         let bc = rot_{i} * bl.xyz + pos_{i};
         for (var k = 0u; k < range.y; k++) {{
             let o = obstacles[range.x + k];
+            if (o.touch != NO_TOUCH && {word}u < world_data[o.touch]
+                && (world_data[o.touch + {word}u + 1u] & {bit}u) != 0u) {{
+                continue;
+            }}
             if (u32(o.center.w) != SDF) {{
                 let gap = obstacle_distance(o, bc).w - bl.w;
                 if (gap > world_gate) {{
@@ -766,6 +776,7 @@ fn build_kernels(
         "alias Vec4 = vec4<f32>;\n",
         &format!("const CUBOID: u32 = {CUBOID}u;\nconst SPHERE: u32 = {SPHERE}u;\n"),
         &format!("const CYLINDER: u32 = {CYLINDER}u;\nconst CAPSULE: u32 = {CAPSULE}u;\nconst SDF: u32 = {SDF}u;\n"),
+        &format!("const NO_TOUCH: u32 = {NO_TOUCH}u;\n"),
         &format!("const WORKGROUP: u32 = {WORKGROUP}u;\n"),
         &format!(
             "const MAX_HISTORY: u32 = {MAX_HISTORY}u;\nconst LINE_STEPS: u32 = {}u;\n\
@@ -872,7 +883,8 @@ fn build_kernels(
 struct GpuWorlds {
     obstacles: wgpu::Buffer,
     ranges: wgpu::Buffer,
-    grids: wgpu::Buffer,
+    /// Distance grids and touch sets (`GpuObstacle`).
+    data: wgpu::Buffer,
     /// The worlds as the CPU checks them, for searches.
     cpu: CpuWorlds,
 }
@@ -989,13 +1001,15 @@ impl GpuBackend {
     }
 
     fn upload_worlds(&self, worlds: &[World]) -> Result<GpuWorlds> {
+        let cpu = cpu::prepare(&self.robot, worlds)?;
         let mut obstacles = vec![];
         let mut ranges: Vec<[u32; 2]> = vec![];
-        let mut grid_words: Vec<u32> = vec![];
+        // Each distinct distance grid once, then each obstacle's touch set.
+        let mut words: Vec<u32> = vec![];
         let mut grid_offsets: HashMap<*const SdfGrid, u32> = HashMap::new();
-        for s in worlds {
+        for (s, prepared) in worlds.iter().zip(&cpu) {
             ranges.push([obstacles.len() as u32, s.obstacles.len() as u32]);
-            for o in &s.obstacles {
+            for (k, o) in s.obstacles.iter().enumerate() {
                 let rotated = |kind: u32, center: Vec3, half: [f32; 4], rotation: Quat| {
                     let r = Mat3::from_quat(rotation);
                     GpuObstacle {
@@ -1034,8 +1048,8 @@ impl GpuBackend {
                         rotation,
                     } => {
                         let offset = *grid_offsets.entry(Arc::as_ptr(grid)).or_insert_with(|| {
-                            let offset = grid_words.len() as u32;
-                            grid_words.extend(grid.values.chunks(2).map(|pair| {
+                            let offset = words.len() as u32;
+                            words.extend(grid.values.chunks(2).map(|pair| {
                                 u32::from(pair[0])
                                     | u32::from(pair.get(1).copied().unwrap_or(0)) << 16
                             }));
@@ -1051,17 +1065,28 @@ impl GpuBackend {
                         }
                     }
                 });
+                let touch = &prepared.touch;
+                let set = &touch.bits[k * touch.words..(k + 1) * touch.words];
+                let last = obstacles.len() - 1;
+                obstacles[last].touch = if set.iter().any(|&w| w != 0) {
+                    let at = words.len() as u32;
+                    words.push(2 * set.len() as u32);
+                    words.extend(set.iter().flat_map(|&w| [w as u32, (w >> 32) as u32]));
+                    at
+                } else {
+                    NO_TOUCH
+                };
             }
         }
         let limits = self.device.limits();
-        let bytes = (grid_words.len() * 4) as u64;
+        let bytes = (words.len() * 4) as u64;
         if bytes
             > limits
                 .max_storage_buffer_binding_size
                 .min(limits.max_buffer_size)
         {
             return Err(Error::Gpu(format!(
-                "the distance grids take {} MiB, more than {} can bind",
+                "the worlds' distance grids take {} MiB, more than {} can bind",
                 bytes >> 20,
                 self.info.name
             )));
@@ -1069,8 +1094,8 @@ impl GpuBackend {
         Ok(GpuWorlds {
             obstacles: storage(&self.device, "obstacles", &obstacles),
             ranges: storage(&self.device, "world ranges", &ranges),
-            grids: storage(&self.device, "distance grids", &grid_words),
-            cpu: cpu::prepare(worlds),
+            data: storage(&self.device, "world data", &words),
+            cpu,
         })
     }
 
@@ -1094,7 +1119,7 @@ impl GpuBackend {
             &b.worlds.ranges,
             b.item_world,
             b.targets,
-            &b.worlds.grids,
+            &b.worlds.data,
             b.q,
             b.aux,
             b.out,

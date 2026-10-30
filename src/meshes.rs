@@ -20,7 +20,7 @@ use crate::description::{Geometry, TriMesh};
 use crate::error::{Error, Result, ensure_input, input};
 use crate::robot::Robot;
 use crate::sdf::{self, SdfGrid};
-use crate::world::{FAR, Obstacle, World};
+use crate::world::{FAR, LinkSets, Obstacle, World};
 
 /// Points cover each link's surface for checks against distance grids: every surface point lies
 /// within this distance of one.
@@ -136,7 +136,8 @@ impl MeshModel {
     }
 
     /// The clearances of each configuration (`[items, dof]`), from the obstacles of
-    /// `worlds[item_world[i]]` and between its links. Runs on the current rayon pool.
+    /// `worlds[item_world[i]]` its links may not touch, and between its links. Runs on the current
+    /// rayon pool.
     pub fn clearance(
         &self,
         worlds: &[World],
@@ -156,6 +157,14 @@ impl MeshModel {
         for (i, w) in worlds.iter().enumerate() {
             w.check().map_err(|e| input!("world {i}: {e}"))?;
         }
+        let touch: Vec<LinkSets> = worlds
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                w.touch_sets(&self.robot)
+                    .map_err(|e| input!("world {i}: {e}"))
+            })
+            .collect::<Result<_>>()?;
         let placed: Vec<Vec<Placed>> = worlds
             .iter()
             .map(|w| w.obstacles.iter().map(place).collect())
@@ -163,7 +172,8 @@ impl MeshModel {
         Ok(q.par_chunks(n)
             .zip(item_world)
             .map(|(q, &w)| {
-                let [world, self_collision] = self.clearances(&placed[w as usize], q);
+                let w = w as usize;
+                let [world, self_collision] = self.clearances(&placed[w], &touch[w], q);
                 Clearance {
                     world,
                     self_collision,
@@ -174,7 +184,7 @@ impl MeshModel {
 
     /// Branch and bound: pairs in order of their bounding spheres' gap, which stops the search
     /// once it reaches the nearest distance found; then each pair's hulls, then its meshes.
-    fn clearances(&self, obstacles: &[Placed], q: &[f32]) -> [f32; 2] {
+    fn clearances(&self, obstacles: &[Placed], touch: &LinkSets, q: &[f32]) -> [f32; 2] {
         let fk = self.robot.fk(q);
         let pose = |i: usize| Pose::from_parts(fk.pos[i], Quat::from_mat3(&fk.rot[i]));
         let bound = |i: usize, m: &LinkMesh| (fk.rot[i] * m.bound.0 + fk.pos[i], m.bound.1);
@@ -208,7 +218,11 @@ impl MeshModel {
             .iter()
             .enumerate()
             .flat_map(|(k, &(i, link))| {
-                obstacles.iter().enumerate().map(move |(o, obstacle)| {
+                let untouched = obstacles
+                    .iter()
+                    .enumerate()
+                    .filter(move |&(o, _)| !touch.contains(o, i));
+                untouched.map(move |(o, obstacle)| {
                     let (Placed::Solid(_, _, around) | Placed::Grid(.., around)) = obstacle;
                     (gap(bound(i, link), *around), k, o)
                 })

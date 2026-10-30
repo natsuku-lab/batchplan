@@ -231,7 +231,7 @@ fn pick_place_scene(world: u32, rng: &mut Rng) -> (World, PickPlace) {
     let place = Pose::new(place, Quat::from_rotation_z(rng.range(-1.2, 1.2)));
     let object = obstacles.len() - 1;
     (
-        World { obstacles },
+        World::new(obstacles),
         PickPlace {
             world,
             object,

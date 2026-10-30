@@ -421,13 +421,11 @@ fn nonlinear_joint_equalities_follow_their_polynomial_on_every_device() {
     }
     // The collision gradient carries the curve's slope: it matches finite differences on the CPU,
     // and the GPU matches the CPU.
-    let scene = [World {
-        obstacles: vec![Obstacle::Cuboid {
-            center: Vec3::new(0.55, 0.0, 0.1),
-            half_extents: Vec3::new(0.2, 0.2, 0.05),
-            rotation: Quat::IDENTITY,
-        }],
-    }];
+    let scene = [World::new(vec![Obstacle::Cuboid {
+        center: Vec3::new(0.55, 0.0, 0.1),
+        half_extents: Vec3::new(0.2, 0.2, 0.05),
+        rotation: Quat::IDENTITY,
+    }])];
     let w = CollisionWeights {
         world: 1000.0,
         self_collision: 0.0,

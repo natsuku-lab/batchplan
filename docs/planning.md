@@ -59,6 +59,8 @@ fn main() -> Result<(), Error> {
 
 `PlanProblem::new(world, start, goal)` plans from rest with every joint free to move; set the other fields on top of it (`PlanProblem { hold, ..PlanProblem::new(world, start, goal) }`).
 
+A plan into a grasp ends with the fingers around the object: let the hand touch it ([allowed contacts](perception.md#allowed-contacts)), and the rest of the arm still keeps clear of it.
+
 `PlanProblem::hold` lists joints that stay where `start` has them, such as the other arm of a two-armed robot while one arm moves (`robot.hand_joints(hand)` lists an arm's); `goal` must have the same values there. The search samples and bends only the other joints, no goal equivalent turns a held joint, and optimized paths are put back on the held values before they are checked, so every control point keeps them.
 
 `plan` runs every problem as its own search, whole on one CPU thread, with the searches in parallel on either device, as VAMP does (Thomason, Kingston and Kavraki, 2024):

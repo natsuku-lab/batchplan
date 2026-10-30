@@ -233,7 +233,7 @@ pub fn scene(world: u32, rng: &mut Rng) -> (World, Handover, Divider) {
         obstacles.push(upright(center, h, rng.range(0.0, 3.0)));
     }
     (
-        World { obstacles },
+        World::new(obstacles),
         Handover {
             world,
             object: 1,

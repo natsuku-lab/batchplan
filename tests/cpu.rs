@@ -184,9 +184,7 @@ fn default_pose_is_collision_free_on_table() {
     let robot = panda();
     let cpu = Device::cpu(&robot).unwrap();
     let world = common::tabletop(&mut Rng::new(1));
-    let table_only = World {
-        obstacles: world.obstacles[..1].to_vec(),
-    };
+    let table_only = World::new(world.obstacles[..1].to_vec());
     // Clearances are exact up to the margins.
     let w = CollisionWeights {
         margin: 0.1,

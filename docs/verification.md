@@ -2,7 +2,7 @@
 
 What the test suite pins down, so you know what to rely on. Every new test was first shown to fail with the bug it guards against planted in the code ("planting ... fails a test" below).
 
-`BATCHPLAN_REQUIRE_GPU=1 cargo test --release` runs 142 tests, including the code in these guides, which compiles as doctests. `--features lerobot` adds 6 export tests and the README's and training-data guide's code (154 in all), and `--features usd` adds 7 OpenUSD tests. Without default features (CPU only), 134 tests run. All configurations pass on a Ryzen AI Max+ 395 with a Radeon 8060S (Vulkan) and on an M4 Pro (Metal); CI runs them on Linux with the kernels on Mesa's llvmpipe. An earlier version of the suite (14 tests) also passed on an NVIDIA T4 (Vulkan).
+`BATCHPLAN_REQUIRE_GPU=1 cargo test --release` runs 154 tests, including the code in these guides, which compiles as doctests. `--features lerobot` adds 6 export tests and the README's and training-data guide's code (166 in all), and `--features usd` adds 7 OpenUSD tests. Without default features (CPU only), 145 tests run. All configurations pass on a Ryzen AI Max+ 395 with a Radeon 8060S (Vulkan) and on an M4 Pro (Metal); CI runs them on Linux with the kernels on Mesa's llvmpipe. An earlier version of the suite (14 tests) also passed on an NVIDIA T4 (Vulkan).
 - **FK:** URDF forward kinematics matches Franka's published DH parameters to 1e-5.
 - **Collision gradients:** analytic gradients match finite differences.
 - **Trajectory optimization:**
@@ -18,6 +18,12 @@ What the test suite pins down, so you know what to rely on. Every new test was f
   - Malformed batches (wrong array lengths, a world index past the end, worlds uploaded to another device) are an `Err` on both CPU and GPU.
   - Obstacle-free worlds plan on both.
   - Plans keep the worlds of their problems when one world holds several targets.
+- **Allowed contacts:**
+  - On every device, a bar through the open fingers collides until the world lets the hand touch it. Letting one finger touch it leaves the other colliding, and links the world does not name still collide with the same obstacle and with others.
+  - IK solves a grasp inside an object, and a plan reaches it, only with the touch. `MeshModel` skips the same pairs. A held box rests on a table only on the holder's device, where the world may name it.
+  - Unknown links and obstacle indices are input errors on every device and in `MeshModel`.
+  - The SIMD lanes match the scalar twin on worlds with touches, and the GPU matches the CPU with touch sets spanning two 32-bit words.
+  - Planting a missing skip in the scalar twin, the lanes' `keeps` or `clearance`, the GPU kernels or `MeshModel`, or a GPU that reads only a set's first word, fails a test.
 - **CPU IK and retiming:** IK solves targets taken from collision-free configurations; retiming respects velocity limits and keeps the endpoints.
 - **SIMD collision checks:**
   - Lanes checking eight configurations at a time give the same world and self clearances as the scalar twin of the GPU kernels, to 2e-5 m. This holds over 3,000 random configurations against every obstacle kind, on the Panda (fingers locked or sliding), the Panda holding a box, MuJoCo Menagerie's 2F-85 (quartic mimic joints) and the UR5e. Runs of worlds cross the groups of eight.

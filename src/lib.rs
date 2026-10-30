@@ -73,7 +73,7 @@ pub use spheres::{SphereGeometry, SphereOptions};
 pub use timing::{JointState, Trajectory};
 pub use trajopt::{PlanOptions, PlanProblem, PlanResult, plan};
 pub use types::{JointPaths, JointTrajectory, Pose, Solved, StartMotion};
-pub use world::{Distance, Obstacle, World};
+pub use world::{Distance, Obstacle, Touch, World};
 
 /// The math types in batchplan's interface (`Vec3`, `Quat`), so callers use the same version.
 pub use glam;

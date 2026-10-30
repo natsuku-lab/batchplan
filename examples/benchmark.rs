@@ -109,7 +109,7 @@ impl Problem {
                 half_height: c.height * 0.5,
             });
         }
-        World { obstacles }
+        World::new(obstacles)
     }
 
     fn hand_goal(&self) -> Pose {

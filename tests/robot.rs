@@ -159,9 +159,10 @@ fn between_the_fingers(robot: &Robot) -> World {
             .position
     };
     let center = 0.5 * (tip("left", 0.4) + tip("right", 0.4));
-    World {
-        obstacles: vec![Obstacle::sphere(center + Vec3::new(0.0, 0.0, 0.02), 0.015)],
-    }
+    World::new(vec![Obstacle::sphere(
+        center + Vec3::new(0.0, 0.0, 0.02),
+        0.015,
+    )])
 }
 
 #[test]
@@ -878,9 +879,10 @@ fn robots_past_the_old_kernel_limits_work_on_every_device() {
         "{} joints, {spheres} spheres",
         robot.dof()
     );
-    let scene = [World {
-        obstacles: vec![Obstacle::cuboid(Vec3::new(0.6, 0.0, 1.2), Vec3::splat(0.3))],
-    }];
+    let scene = [World::new(vec![Obstacle::cuboid(
+        Vec3::new(0.6, 0.0, 1.2),
+        Vec3::splat(0.3),
+    )])];
     for d in devices_agree(&robot, &scene) {
         let worlds = d.upload(&scene).unwrap();
         let start = vec![0.0; 40];
@@ -970,9 +972,10 @@ fn floating_and_planar_joints_become_one_axis_joints() {
             .fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(off < 1e-5, "{kind}: rotation off by {off}");
         // Every device sees the same robot and can move its base.
-        let scene = [World {
-            obstacles: vec![Obstacle::cuboid(Vec3::new(0.0, 0.0, 0.5), Vec3::splat(0.6))],
-        }];
+        let scene = [World::new(vec![Obstacle::cuboid(
+            Vec3::new(0.0, 0.0, 0.5),
+            Vec3::splat(0.6),
+        )])];
         for d in devices_agree(&robot, &scene) {
             let worlds = d.upload(&[World::default()]).unwrap();
             let mut goal = vec![0.0; robot.dof()];

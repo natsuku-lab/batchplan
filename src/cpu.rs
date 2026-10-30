@@ -25,7 +25,7 @@ use crate::sdf::{self, DepthImage, Layout, Occupancy, RobotMask, SdfGrid};
 use crate::spline;
 use crate::trajopt::{LINE_SEARCH, MAX_HISTORY, PlanOptions};
 use crate::types::{JointPaths, Pose};
-use crate::world::{self, FAR, Obstacle, World};
+use crate::world::{self, FAR, LinkSets, Obstacle, World};
 
 /// Up to eight clearances out, their configurations and their worlds.
 type Lanes8<'a> = (&'a mut [[f32; 2]], (&'a [f32], &'a [u32]));
@@ -126,19 +126,23 @@ pub(crate) struct BoundingSphere {
 
 /// A world's obstacles, prepared, and the sphere around each, which checks (`Lanes::keeps`) test
 /// first: most obstacles are out of reach of a link, and the spheres, kept apart from the
-/// obstacles, scan faster than the obstacles' whole records.
+/// obstacles, scan faster than the obstacles' whole records. With them, the links that may touch
+/// each obstacle, which every check skips.
 pub(crate) struct CpuWorld {
     pub(crate) obstacles: Vec<Prepared>,
     pub(crate) bounds: Vec<BoundingSphere>,
+    pub(crate) touch: LinkSets,
 }
 
 /// The obstacles of each world, prepared.
 pub(crate) type CpuWorlds = Vec<CpuWorld>;
 
-pub(crate) fn prepare(worlds: &[World]) -> CpuWorlds {
+/// `worlds` for checks of `robot`, whose links their touches name.
+pub(crate) fn prepare(robot: &Robot, worlds: &[World]) -> Result<CpuWorlds> {
     worlds
         .iter()
-        .map(|s| {
+        .enumerate()
+        .map(|(i, s)| {
             let obstacles: Vec<Prepared> = s
                 .obstacles
                 .iter()
@@ -193,7 +197,14 @@ pub(crate) fn prepare(worlds: &[World]) -> CpuWorlds {
                 })
                 .collect();
             let bounds = obstacles.iter().map(Prepared::bounding_sphere).collect();
-            CpuWorld { obstacles, bounds }
+            let touch = s
+                .touch_sets(robot)
+                .map_err(|e| Error::Input(format!("world {i}: {e}")))?;
+            Ok(CpuWorld {
+                obstacles,
+                bounds,
+                touch,
+            })
         })
         .collect()
 }
@@ -282,7 +293,7 @@ fn obstacle_distance(o: &Prepared, p: Vec3) -> (f32, Vec3) {
 #[inline(always)]
 fn collision<const GRADIENT: bool>(
     robot: &Robot,
-    world: &[Prepared],
+    world: &CpuWorld,
     fk: &Fk,
     w: &CollisionWeights,
     grad: &mut [f32],
@@ -308,7 +319,7 @@ fn collision<const GRADIENT: bool>(
     // link's spheres; the gap bounds their clearance from below. Distance grids are interpolated,
     // not exact, so their spheres are always checked. Links no joint moves are not checked against
     // the world: they touch it the same way in every configuration, as a mounted robot's base
-    // rests on its table.
+    // rests on its table. Links may touch the obstacles the world lets them.
     let world_gate = w.margin.max(0.0);
     for (link, &[first, count]) in robot.sphere_ranges.iter().enumerate() {
         if count == 0 || robot.links[link].chain.is_empty() {
@@ -316,7 +327,10 @@ fn collision<const GRADIENT: bool>(
         }
         let b = robot.link_bounds[link];
         let bc = rot[link] * Vec3::new(b[0], b[1], b[2]) + pos[link];
-        for o in world {
+        for (k, o) in world.obstacles.iter().enumerate() {
+            if world.touch.contains(k, link) {
+                continue;
+            }
             if !matches!(o, Prepared::Sdf { .. }) {
                 let gap = obstacle_distance(o, bc).0 - b[3];
                 if gap > world_gate {
@@ -554,7 +568,7 @@ fn add_jt(jac: &[f32], x: [f32; 6], out: &mut [f32]) {
 /// where they are. Mirrors `ik_step` in kernels.wgsl, pass for pass.
 fn ik_step(
     robot: &Robot,
-    world: &[Prepared],
+    world: &CpuWorld,
     targets: &[Option<(Vec3, Mat3)>],
     q: &mut [f32],
     o: &IkOptions,
@@ -629,7 +643,7 @@ fn ik_step(
 #[allow(clippy::too_many_arguments)]
 fn traj_sample_grad(
     robot: &Robot,
-    world: &[Prepared],
+    world: &CpuWorld,
     cp: &[f32],
     span: usize,
     s: usize,
@@ -717,7 +731,7 @@ fn candidate(robot: &Robot, x: &[f32], d: &[f32], alpha: f32, t: usize, j: usize
 #[allow(clippy::too_many_arguments)]
 fn traj_cost(
     robot: &Robot,
-    world: &[Prepared],
+    world: &CpuWorld,
     x: &[f32],
     d: &[f32],
     alpha: f32,
@@ -937,7 +951,7 @@ fn each_chunk<T: Send>(
 /// the current pool's threads.
 pub(crate) fn optimize_path(
     robot: &Robot,
-    world: &[Prepared],
+    world: &CpuWorld,
     tr: &mut [f32],
     o: &PlanOptions,
     deadline: Option<Instant>,
@@ -987,7 +1001,7 @@ impl PathOptimizer {
     pub(crate) fn run(
         &mut self,
         robot: &Robot,
-        world: &[Prepared],
+        world: &CpuWorld,
         tr: &mut [f32],
         through: u32,
         deadline: Option<Instant>,
@@ -1192,7 +1206,7 @@ impl Backend for CpuBackend {
     }
 
     fn upload(&self, worlds: &[World]) -> Result<Box<dyn Any + Send + Sync>> {
-        Ok(Box::new(prepare(worlds)))
+        Ok(Box::new(prepare(&self.robot, worlds)?))
     }
 
     fn with_robot(&self, robot: &Robot) -> Result<Box<dyn Backend>> {
@@ -1231,7 +1245,7 @@ impl Backend for CpuBackend {
                     || Scratch::new(&self.robot),
                     |scratch, ((((wc, sc), cost), g), (qi, &s))| {
                         self.robot.fk_into(qi, &mut scratch.fk);
-                        let world = &prepared[s as usize].obstacles;
+                        let world = &prepared[s as usize];
                         let c = collision::<true>(
                             &self.robot,
                             world,
@@ -1260,7 +1274,7 @@ impl Backend for CpuBackend {
                 let w = worlds[start];
                 let end = start + worlds[start..].iter().take_while(|&&x| x == w).count();
                 let (world, q, c) = (
-                    &prepared[w as usize].obstacles,
+                    &prepared[w as usize],
                     &q[start * n..end * n],
                     &mut c[start..end],
                 );
@@ -1316,7 +1330,7 @@ impl Backend for CpuBackend {
                 .map_init(
                     || (Scratch::new(&self.robot), vec![None; hands]),
                     |(scratch, goals), (qi, (&s, item_targets))| {
-                        let world = &prepared[s as usize].obstacles;
+                        let world = &prepared[s as usize];
                         scratch.moving.fill(false);
                         for (h, (goal, target)) in goals.iter_mut().zip(item_targets).enumerate() {
                             *goal = target.map(|t| (t.position, Mat3::from_quat(t.rotation)));
@@ -1372,7 +1386,7 @@ impl Backend for CpuBackend {
                 .for_each(|(tr, &s)| {
                     optimize_path(
                         &self.robot,
-                        &prepared[s as usize].obstacles,
+                        &prepared[s as usize],
                         tr,
                         o,
                         deadline,
@@ -1550,14 +1564,12 @@ mod tests {
             ..options
         };
         let robot = Robot::load(format!("{dir}/franka_panda.urdf"), &options).unwrap();
-        let world = World {
-            obstacles: vec![Obstacle::Cuboid {
-                center: Vec3::new(0.45, 0.0, 0.45),
-                half_extents: Vec3::new(0.05, 0.05, 0.3),
-                rotation: Quat::IDENTITY,
-            }],
-        };
-        let prepared = prepare(&[world]);
+        let world = World::new(vec![Obstacle::Cuboid {
+            center: Vec3::new(0.45, 0.0, 0.45),
+            half_extents: Vec3::new(0.05, 0.05, 0.3),
+            rotation: Quat::IDENTITY,
+        }]);
+        let prepared = prepare(&robot, &[world]).expect("the box is well formed");
         let n = robot.dof();
         // A repair's ten rounds.
         let o = PlanOptions {
@@ -1576,7 +1588,7 @@ mod tests {
             })
             .collect();
         let mut whole = path.clone();
-        optimize_path(&robot, &prepared[0].obstacles, &mut whole, &o, None, false);
+        optimize_path(&robot, &prepared[0], &mut whole, &o, None, false);
         assert_ne!(
             whole, path,
             "the path must cross the box, or nothing moves it"
@@ -1590,14 +1602,7 @@ mod tests {
             if optimizer.finished() {
                 break;
             }
-            optimizer.run(
-                &robot,
-                &prepared[0].obstacles,
-                &mut split,
-                through,
-                None,
-                false,
-            );
+            optimizer.run(&robot, &prepared[0], &mut split, through, None, false);
             calls += 1;
         }
         assert!(

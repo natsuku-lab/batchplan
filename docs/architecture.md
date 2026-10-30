@@ -37,6 +37,7 @@ The robot is a set of spheres; obstacles are primitives or distance grids. One c
 - **Gating.** Each link has a bounding sphere around its spheres. An obstacle farther from it than the margin skips the link's spheres; a link pair whose bounding spheres are farther apart than the self margin skips its sphere pairs. The gap stands in for their clearance, so clearances stay exact up to the margin.
 - **Gradients.** Collision gradients accumulate a wrench per link (force, and moment about the origin); one reverse pass from the leaves gives each joint its share.
 - **Links no joint moves** are not checked against the world: their contact with the scene does not depend on the configuration.
+- **Allowed contacts.** A world's `touch` lists become one link bit set per obstacle when it is uploaded. Every check skips a (link, obstacle) pair in its set: the scalar twin, the SIMD lanes, the GPU kernels and `MeshModel`.
 
 ## Kernels written per robot
 

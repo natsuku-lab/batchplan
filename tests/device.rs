@@ -31,9 +31,10 @@ fn devices(robot: &Robot) -> Vec<Device> {
 fn malformed_batches_are_errors_on_every_device() {
     let robot = panda();
     let q = robot.default_q().to_vec();
-    let scene = vec![World {
-        obstacles: vec![Obstacle::sphere(Vec3::new(2.0, 0.0, 0.0), 0.1)],
-    }];
+    let scene = vec![World::new(vec![Obstacle::sphere(
+        Vec3::new(2.0, 0.0, 0.0),
+        0.1,
+    )])];
     let none = CollisionWeights::NONE;
     for d in devices(&robot) {
         let name = d.name();
@@ -104,11 +105,7 @@ fn malformed_batches_are_errors_on_every_device() {
             Obstacle::sphere(Vec3::ZERO, -0.1),
             rotated(Quat::from_xyzw(0.0, 0.0, 0.0, 0.5)),
         ] {
-            let err = d
-                .upload(&[World {
-                    obstacles: vec![bad.clone()],
-                }])
-                .map(|_| ());
+            let err = d.upload(&[World::new(vec![bad.clone()])]).map(|_| ());
             assert!(input(err), "{name}: {bad:?} uploaded");
         }
     }
@@ -374,9 +371,7 @@ fn trajopt_smoothness_gradient_matches_its_cost() {
         .collect();
     let ball = Obstacle::sphere(robot.ee_pose(&middle, 0).position, 0.05);
     let problems = vec![PlanProblem::new(0, robot.default_q(), goal)];
-    let scene = vec![World {
-        obstacles: vec![ball],
-    }];
+    let scene = vec![World::new(vec![ball])];
     let o = PlanOptions {
         collision: CollisionWeights::NONE,
         seeds: 8,
@@ -488,9 +483,7 @@ fn trajopt_collision_gradient_matches_its_cost() {
         radius: 0.05,
         half_height: 0.3,
     };
-    let scene = vec![World {
-        obstacles: vec![post],
-    }];
+    let scene = vec![World::new(vec![post])];
     let problems = vec![PlanProblem::new(0, start, goal)];
     // No search beyond the straight line, which the post blocks, so optimized seed 0 is that line.
     let o = PlanOptions {
@@ -772,9 +765,7 @@ fn a_robot_mounted_on_a_table_is_not_in_collision_with_it() {
         half_extents: Vec3::new(0.7, 0.8, 0.02),
         rotation: Quat::IDENTITY,
     };
-    let mounted = World {
-        obstacles: vec![table.clone()],
-    };
+    let mounted = World::new(vec![table.clone()]);
     // A pin through the elbow still collides.
     let elbow = robot
         .link_pose(robot.default_q(), "panda_link4")
@@ -785,9 +776,7 @@ fn a_robot_mounted_on_a_table_is_not_in_collision_with_it() {
         half_extents: Vec3::new(0.3, 0.005, 0.005),
         rotation: Quat::IDENTITY,
     };
-    let pinned = World {
-        obstacles: vec![table, pin],
-    };
+    let pinned = World::new(vec![table, pin]);
     let goal = vec![0.5, -0.8, 0.0, -2.2, 0.0, 1.6, 0.8];
     for d in devices(&robot) {
         let worlds = d.upload(&[mounted.clone(), pinned.clone()]).unwrap();

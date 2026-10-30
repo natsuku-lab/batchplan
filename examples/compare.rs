@@ -83,9 +83,7 @@ impl Shape {
 }
 
 fn world(shapes: &[Shape]) -> World {
-    World {
-        obstacles: shapes.iter().map(Shape::obstacle).collect(),
-    }
+    World::new(shapes.iter().map(Shape::obstacle).collect())
 }
 
 /// The canonical Panda: the spherized URDF's kinematics, its spheres exactly as written (not

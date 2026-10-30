@@ -858,7 +858,7 @@ mod tests {
             ]],
             hold: vec![],
         };
-        (World { obstacles }, problem)
+        (World::new(obstacles), problem)
     }
 
     /// The search as `Planning` runs it, keeping a clearance and then without it, alone or with
@@ -870,7 +870,9 @@ mod tests {
         problem: &RrtProblem,
         helpers: usize,
     ) -> (Vec<u32>, usize, usize) {
-        let (lanes, worlds) = (Lanes::new(robot), cpu::prepare(std::slice::from_ref(world)));
+        let worlds =
+            cpu::prepare(robot, std::slice::from_ref(world)).expect("the world is well formed");
+        let lanes = Lanes::new(robot);
         let keeping = RrtOptions {
             clearance: 0.015,
             max_iterations: 1000,
@@ -1000,7 +1002,7 @@ mod tests {
         let (world, problem) = dresser();
         let (lanes, worlds) = (
             Lanes::new(&robot),
-            cpu::prepare(std::slice::from_ref(&world)),
+            cpu::prepare(&robot, std::slice::from_ref(&world)).expect("the world is well formed"),
         );
         let (robot, lanes, worlds) = (&robot, &lanes, &worlds);
         let o = RrtOptions {
@@ -1051,7 +1053,7 @@ mod tests {
         let (world, problem) = dresser();
         let (lanes, worlds) = (
             Lanes::new(&robot),
-            cpu::prepare(std::slice::from_ref(&world)),
+            cpu::prepare(&robot, std::slice::from_ref(&world)).expect("the world is well formed"),
         );
         let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
         let long = RrtOptions {

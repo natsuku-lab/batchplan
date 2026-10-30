@@ -213,12 +213,10 @@ fn over_the_wall(robot: &Robot, cpu: &Device) -> (World, Vec<PlanProblem>) {
     let n = robot.dof();
     let left = robot.hand_joints(0);
     let right: Vec<usize> = (0..n).filter(|j| !left.contains(j)).collect();
-    let wall = World {
-        obstacles: vec![Obstacle::cuboid(
-            Vec3::new(0.47, 0.5, 0.25),
-            Vec3::new(0.02, 0.35, 0.25),
-        )],
-    };
+    let wall = World::new(vec![Obstacle::cuboid(
+        Vec3::new(0.47, 0.5, 0.25),
+        Vec3::new(0.02, 0.35, 0.25),
+    )]);
     let worlds = cpu.upload(std::slice::from_ref(&wall)).unwrap();
     let mut rng = Rng::new(9);
     let (mut near, mut far) = (vec![], vec![]);

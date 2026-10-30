@@ -10,10 +10,10 @@ batchplan is a Rust library for batched, collision-aware robot motion generation
 
 ```bash
 cargo build --release --all-targets [--features lerobot] [--no-default-features]   # without `gpu`: CPU only, no wgpu
-BATCHPLAN_REQUIRE_GPU=1 cargo test --release                    # 142 tests, guides' code included; without the env var, GPU tests skip silently when no adapter exists
+BATCHPLAN_REQUIRE_GPU=1 cargo test --release                    # 154 tests, guides' code included; without the env var, GPU tests skip silently when no adapter exists
 BATCHPLAN_REQUIRE_GPU=1 cargo test --release --features lerobot # + 6 export tests and the README's and training-data guide's code
 BATCHPLAN_REQUIRE_GPU=1 cargo test --release --features usd     # + 7 OpenUSD tests
-cargo test --release --test gpu trajopt_directions_match_cpu_element_wise   # one test (test files: cpu, gpu, device, budget, export, pick_place, robot, hands, trajectory, mjcf, usd, sdf, meshes, rrt, attach, threads, allocations)
+cargo test --release --test gpu trajopt_directions_match_cpu_element_wise   # one test (test files: cpu, gpu, device, budget, export, pick_place, robot, hands, trajectory, mjcf, usd, sdf, meshes, rrt, attach, touch, threads, allocations)
 cargo fmt --check && cargo +nightly fmt --check -- --config imports_granularity=Module,hex_literal_case=Lower,format_macro_matchers=true   # 100 columns; the second checks the style guide's nightly-only options (CI runs both)
 cargo clippy --release --all-targets [--features lerobot,usd | --no-default-features]   # zero warnings everywhere; CI denies them (lints in Cargo.toml)
 cargo build --release --lib --target aarch64-unknown-linux-gnu --no-default-features     # the CPU-only robot build CI checks
@@ -98,6 +98,7 @@ These decisions are settled. Keep to them unless the user decides otherwise.
   - The CPU kernels keep per-configuration state in `Scratch` (`cpu.rs`: FK frames, sphere centres, wrenches, IK buffers). It is sized to the robot and reused per thread (`for_each_init`, or one per path), so hot loops neither allocate nor clear more than the robot needs. Inline small vectors were tried first and cost 5–27% of CPU throughput.
   - The GPU kernels are written per robot. Self-collision is unrolled per link pair up to `UNROLLED_LINK_PAIRS` (64); beyond that, a run-time loop over frames copied into arrays keeps the generated code growing with links, not pairs.
 - Links no joint moves (`Link.chain` empty: the base and what is fixed to it) are not checked against the world on either device, nor by `MeshModel`: their contact with the scene does not depend on the configuration, and a mounted robot's base rests on its table. They still self-collide.
+- Allowed contacts (`World::touch`, `Touch`): link names resolve at upload, against the device's robot, into one bit set per obstacle (`World::touch_sets` → `LinkSets`, 64-bit words, on `CpuWorld::touch`). On the GPU each obstacle's set follows the grids in `world_data` (`GpuObstacle::touch`: a word count, then 32-bit words; `NO_TOUCH` when empty), and the generated per-link loop tests its constant word and bit. `cpu::collision`, `Lanes::{clearance, keeps}`, the WGSL `collision()` and `MeshModel::clearances` skip a touched pair before anything else about it (`keeps` after the obstacle's bounding sphere, which rules out most pairs). Links appended later (an attached object) touch nothing in worlds uploaded before them, so a world in which a held object may touch something is uploaded to the holder's device.
 - Collision is gated by each link's bounding sphere (`link_bounds`, `GpuLink.bound`); the gap stands in for the clearance of whatever it skips.
   - World: an obstacle farther from a link's bound than `max(margin, 0)` skips the link's spheres (`Robot::sphere_ranges`). Distance grids are never gated: their interpolated distance is not 1-Lipschitz.
   - Self: sphere pairs are grouped by link pair (`Robot::self_link_pairs`). A link pair whose bounds are farther apart than `max(self_margin, 0)` skips its sphere pairs. On the GPU, the `pairs` buffer starts with one `(first, count)` entry per link pair, followed by the sphere pairs.

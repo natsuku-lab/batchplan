@@ -374,7 +374,7 @@ pub fn tabletop(rng: &mut Rng) -> World {
             rotation: Quat::from_rotation_z(rng.range(0.0, PI)),
         });
     }
-    World { obstacles }
+    World::new(obstacles)
 }
 
 /// A top-down grasp (the gripper's z axis pointing down) at least 6 cm from every obstacle.

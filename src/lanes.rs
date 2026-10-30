@@ -574,7 +574,7 @@ impl Lanes {
     pub(crate) fn clearance<S: Simd>(
         &self,
         simd: S,
-        world: &[Prepared],
+        world: &CpuWorld,
         q: &[f32],
         out: &mut [[f32; 2]],
         s: &mut LaneScratch,
@@ -587,7 +587,10 @@ impl Lanes {
             let bc = M3::load(simd, &s.rot[link])
                 .times(Vec3::new(b[0], b[1], b[2]))
                 .add(V3::load(simd, &s.pos[link]));
-            for o in world {
+            for (k, o) in world.obstacles.iter().enumerate() {
+                if world.touch.contains(k, link) {
+                    continue;
+                }
                 if matches!(o, Prepared::Sdf { .. }) {
                     wmin = wmin.min(self.spheres_clearance(simd, o, first, end, s));
                     continue;
@@ -665,15 +668,17 @@ impl Lanes {
         for &(link, first, end, b) in self.world_links.iter().rev() {
             let bc = self.bound_center(simd, link, s);
             let reach = margin + b[3];
-            for (o, bound) in world.obstacles.iter().zip(&world.bounds) {
+            let near = world.obstacles.iter().zip(&world.bounds).enumerate();
+            for (k, (o, bound)) in near {
                 // The sphere around the obstacle out of reach first, which most are: a fraction of
-                // the exact test, which follows.
+                // the exact test, which follows. Then whether the link may touch it.
                 let r = reach + bound.radius;
                 if !bc
                     .sub(V3::splat(simd, bound.center))
                     .length_squared()
                     .simd_lt(r * r)
                     .any_true()
+                    || world.touch.contains(k, link)
                 {
                     continue;
                 }
@@ -920,7 +925,7 @@ mod tests {
     use crate::robot::{AttachedObject, CollisionModel, RobotOptions};
     use crate::sdf::SdfGrid;
     use crate::spheres::SphereOptions;
-    use crate::world::{Obstacle, World};
+    use crate::world::{Obstacle, Touch, World};
 
     fn panda() -> Robot {
         let fingers = [
@@ -952,39 +957,37 @@ mod tests {
             .collect();
         let grid = Arc::new(SdfGrid::try_new(dims, voxel, origin, &distances).unwrap());
         let v = |x: f32, y: f32, z: f32| Vec3::new(x, y, z) * s;
-        World {
-            obstacles: vec![
-                Obstacle::Cuboid {
-                    center: v(0.5, 0.0, 0.3),
-                    half_extents: v(0.05, 0.2, 0.1),
-                    rotation: tilt,
-                },
-                // Upright: turned about z only.
-                Obstacle::Cuboid {
-                    center: v(0.1, -0.5, 0.2),
-                    half_extents: v(0.15, 0.05, 0.2),
-                    rotation: Quat::from_rotation_z(0.7),
-                },
-                Obstacle::sphere(v(0.0, 0.5, 0.5), 0.1 * s),
-                Obstacle::Cylinder {
-                    center: v(-0.4, 0.0, 0.4),
-                    rotation: tilt,
-                    radius: 0.06 * s,
-                    half_height: 0.2 * s,
-                },
-                Obstacle::Capsule {
-                    center: v(0.2, 0.4, 0.1),
-                    rotation: tilt,
-                    radius: 0.05 * s,
-                    half_length: 0.15 * s,
-                },
-                Obstacle::Sdf {
-                    grid,
-                    center: Vec3::ZERO,
-                    rotation: Quat::IDENTITY,
-                },
-            ],
-        }
+        World::new(vec![
+            Obstacle::Cuboid {
+                center: v(0.5, 0.0, 0.3),
+                half_extents: v(0.05, 0.2, 0.1),
+                rotation: tilt,
+            },
+            // Upright: turned about z only.
+            Obstacle::Cuboid {
+                center: v(0.1, -0.5, 0.2),
+                half_extents: v(0.15, 0.05, 0.2),
+                rotation: Quat::from_rotation_z(0.7),
+            },
+            Obstacle::sphere(v(0.0, 0.5, 0.5), 0.1 * s),
+            Obstacle::Cylinder {
+                center: v(-0.4, 0.0, 0.4),
+                rotation: tilt,
+                radius: 0.06 * s,
+                half_height: 0.2 * s,
+            },
+            Obstacle::Capsule {
+                center: v(0.2, 0.4, 0.1),
+                rotation: tilt,
+                radius: 0.05 * s,
+                half_length: 0.15 * s,
+            },
+            Obstacle::Sdf {
+                grid,
+                center: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+            },
+        ])
     }
 
     /// The device's clearances (eight at a time, in runs that share a world) against `evaluate`,
@@ -993,9 +996,20 @@ mod tests {
     /// still follow the configuration.
     fn lanes_match_the_scalar_twin(robot: &Robot, arm: bool) {
         let device = Device::cpu(robot).unwrap();
-        let worlds = device
-            .upload(&[scene(1.0), World::default(), scene(1.0)])
-            .unwrap();
+        // The third world lets the tip touch the tilted box and a middle link the grid.
+        let checked: Vec<&str> = (0..robot.links.len())
+            .filter(|&i| robot.sphere_ranges[i][1] > 0 && !robot.links[i].chain.is_empty())
+            .map(|i| robot.links[i].name.as_str())
+            .collect();
+        let touched = World {
+            touch: vec![
+                Touch::new(0, [checked[checked.len() - 1]]),
+                Touch::new(5, [checked[checked.len() / 2]]),
+            ],
+            ..scene(1.0)
+        };
+        let scenes = [scene(1.0), World::default(), touched];
+        let worlds = device.upload(&scenes).unwrap();
         let n = robot.dof();
         let mut rng = Rng::new(7);
         let items = 3000;
@@ -1015,21 +1029,32 @@ mod tests {
         // The baseline SIMD level too (SSE2 on x86-64), one configuration at a time.
         let mut baseline = Lanes::new(robot);
         baseline.level = Level::baseline();
-        let prepared = crate::cpu::prepare(&[scene(1.0), World::default(), scene(1.0)]);
+        let prepared = crate::cpu::prepare(robot, &scenes).expect("the scenes are well formed");
         let mut scratch = baseline.scratch();
         let mut out = [[0.0; 2]];
         let lanes_baseline: Vec<[f32; 2]> = (0..items)
             .map(|i| {
-                let (world, q) = (
-                    &prepared[item_world[i] as usize].obstacles,
-                    &q[i * n..(i + 1) * n],
-                );
+                let (world, q) = (&prepared[item_world[i] as usize], &q[i * n..(i + 1) * n]);
                 fearless_simd::dispatch!(baseline.level, simd => {
                     baseline.clearance(simd, world, q, &mut out, &mut scratch)
                 });
                 out[0]
             })
             .collect();
+        // The touches matter: the same configurations clear by more in the third world.
+        let world_clearance = |w: u32| {
+            device
+                .evaluate(&worlds, &vec![w; items], &q, &CollisionWeights::NONE)
+                .unwrap()
+                .world_clearance
+        };
+        let (plain, touching) = (world_clearance(0), world_clearance(2));
+        let freed = plain.iter().zip(&touching).filter(|(a, b)| b > a).count();
+        assert!(
+            !arm || freed > 10,
+            "{}: the touches change only {freed} clearances",
+            robot.name()
+        );
         let (mut hits, mut misses, mut self_hits) = (0, 0, 0);
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
         for i in 0..items {

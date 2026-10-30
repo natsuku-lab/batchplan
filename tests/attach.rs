@@ -64,12 +64,10 @@ fn attached_objects_move_with_their_link_and_skip_touch_links() {
     let pose = robot.default_q();
     // An obstacle between the open fingers misses the bare hand but hits the box.
     let hand = robot.link_pose(pose, "panda_hand").unwrap();
-    let between = World {
-        obstacles: vec![Obstacle::sphere(
-            hand.position + hand.rotation * Vec3::new(0.0, 0.0, 0.1),
-            0.01,
-        )],
-    };
+    let between = World::new(vec![Obstacle::sphere(
+        hand.position + hand.rotation * Vec3::new(0.0, 0.0, 0.1),
+        0.01,
+    )]);
     let worlds = cpu.upload(&[between]).unwrap();
     let evaluate = |d: &Device| {
         d.evaluate(&worlds, &[0], pose, &CollisionWeights::NONE)

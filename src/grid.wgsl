@@ -1,8 +1,8 @@
-// Distance grids as the kernels read them, included in kernels.wgsl, which binds `grid_data`:
+// Distance grids as the kernels read them, included in kernels.wgsl, which binds `world_data`:
 // every grid's half floats, two per word.
 
 fn grid_value(o: Obstacle, n: u32) -> f32 {
-    let pair = unpack2x16float(grid_data[o.grid + (n >> 1u)]);
+    let pair = unpack2x16float(world_data[o.grid + (n >> 1u)]);
     return select(pair.x, pair.y, (n & 1u) == 1u);
 }
 

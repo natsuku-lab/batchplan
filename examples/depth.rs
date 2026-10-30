@@ -99,9 +99,7 @@ fn main() -> Result<()> {
         grid.voxel(),
         t.elapsed().as_secs_f64() * 1e3
     );
-    let observed = World {
-        obstacles: vec![Obstacle::from(grid)],
-    };
+    let observed = World::new(vec![Obstacle::from(grid)]);
 
     let t = Instant::now();
     let worlds = device.upload(&[observed])?;

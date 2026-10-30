@@ -106,7 +106,7 @@ pub fn tabletop(rng: &mut Rng) -> World {
             rotation: Quat::from_rotation_z(rng.range(0.0, PI)),
         });
     }
-    World { obstacles }
+    World::new(obstacles)
 }
 
 /// A top-down grasp pose (gripper z axis pointing down) in free space above the table.
@@ -153,9 +153,7 @@ pub fn tabletop_for(robot: &Robot, cpu: &Device, rng: &mut Rng) -> World {
         Vec3::new(0.0, 0.0, floor - 0.01 - reach * 0.05),
         Vec3::new(2.0 * reach, 2.0 * reach, reach * 0.05),
     );
-    let mut world = World {
-        obstacles: vec![table],
-    };
+    let mut world = World::new(vec![table]);
     while world.obstacles.len() < 4 {
         let (angle, radius) = (rng.range(-3.1, 3.1), rng.range(0.4, 0.8) * reach);
         let half = Vec3::new(0.06, 0.06, 0.3) * reach;
@@ -216,7 +214,7 @@ pub fn pick_place_scene(world: u32, rng: &mut Rng) -> (World, PickPlace) {
     );
     let object = obstacles.len() - 1;
     (
-        World { obstacles },
+        World::new(obstacles),
         PickPlace {
             world,
             object,

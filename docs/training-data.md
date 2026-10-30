@@ -51,9 +51,7 @@ fn main() -> Result<(), Error> {
     let device = Device::gpu(&robot).or_else(|_| Device::cpu(&robot))?;
     let table = Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02));
     let block = Obstacle::cuboid(Vec3::new(0.45, 0.2, 0.03), Vec3::new(0.02, 0.03, 0.03));
-    let worlds = vec![World {
-        obstacles: vec![table, block],
-    }];
+    let worlds = vec![World::new(vec![table, block])];
     let place = Pose::new(Vec3::new(0.45, -0.2, 0.03), Quat::from_rotation_z(0.5));
     let tasks = [PickPlace {
         world: 0,

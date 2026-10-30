@@ -856,6 +856,22 @@ impl Robot {
         joints
     }
 
+    /// Names of the links hand `hand` grips with, for [`Touch`](crate::Touch): the first link at
+    /// or above its frame that has collision spheres (the Panda's `panda_hand`, above its tool
+    /// frame) and every link below that one: its fingers, and any object it holds.
+    #[must_use]
+    pub fn hand_links(&self, hand: usize) -> Vec<&str> {
+        let ancestors = |link: usize| std::iter::successors(Some(link), |&l| self.links[l].parent);
+        let frame = self.ee_links[hand];
+        let root = ancestors(frame)
+            .find(|&l| self.sphere_ranges[l][1] > 0)
+            .unwrap_or(frame);
+        (0..self.links.len())
+            .filter(|&i| ancestors(i).any(|a| a == root))
+            .map(|i| self.links[i].name.as_str())
+            .collect()
+    }
+
     /// World pose of the named link at configuration `q`.
     #[must_use]
     pub fn link_pose(&self, q: &[f32], link: &str) -> Option<Pose> {

@@ -43,9 +43,7 @@ fn chain() -> Robot {
 }
 
 fn world(obstacle: Obstacle) -> World {
-    World {
-        obstacles: vec![obstacle],
-    }
+    World::new(vec![obstacle])
 }
 
 /// A closed cube mesh of side `2 * half`, centred at the origin.
@@ -138,21 +136,19 @@ fn clearances_to_every_obstacle_kind_are_exact() {
     });
     assert!((meshes.clearance(&[inside], &[0], &straight).unwrap()[0].world - 0.03).abs() < 1e-4);
     // Obstacles listed far to near: the search must not stop at the first one it measures.
-    let crowd = World {
-        obstacles: [0.6, 0.45, 0.3]
+    let crowd = World::new(
+        [0.6, 0.45, 0.3]
             .map(|y| Obstacle::sphere(Vec3::new(0.2, y, 0.5), 0.05))
             .to_vec(),
-    };
+    );
     let Clearance { world: nearest, .. } = meshes.clearance(&[crowd], &[0], &straight).unwrap()[0];
     assert!((nearest - 0.2).abs() < 1e-4, "among several: {nearest}");
     // A ball 6 cm from link `c` (0.36 m from `a`), then one far away: measured link by link in
     // list order, `a` against the far ball would end the search before `c` is reached.
-    let scattered = World {
-        obstacles: vec![
-            Obstacle::sphere(Vec3::new(0.8, 0.15, 0.5), 0.05),
-            Obstacle::sphere(Vec3::new(-2.0, 0.0, 0.5), 0.05),
-        ],
-    };
+    let scattered = World::new(vec![
+        Obstacle::sphere(Vec3::new(0.8, 0.15, 0.5), 0.05),
+        Obstacle::sphere(Vec3::new(-2.0, 0.0, 0.5), 0.05),
+    ]);
     let Clearance { world: nearest, .. } =
         meshes.clearance(&[scattered], &[0], &straight).unwrap()[0];
     assert!((nearest - 0.06).abs() < 1e-4, "beside `c`: {nearest}");
@@ -215,12 +211,10 @@ fn spheres_never_read_farther_than_the_meshes() {
     let robot = chain();
     let meshes = MeshModel::try_new(&robot).unwrap();
     let cpu = Device::cpu(&robot).unwrap();
-    let scene = vec![World {
-        obstacles: vec![
-            Obstacle::cuboid(Vec3::new(0.3, 0.35, 0.5), Vec3::splat(0.06)),
-            Obstacle::cylinder(Vec3::new(-0.2, -0.3, 0.5), 0.05, 0.2),
-        ],
-    }];
+    let scene = vec![World::new(vec![
+        Obstacle::cuboid(Vec3::new(0.3, 0.35, 0.5), Vec3::splat(0.06)),
+        Obstacle::cylinder(Vec3::new(-0.2, -0.3, 0.5), 0.05, 0.2),
+    ])];
     let worlds = cpu.upload(&scene).unwrap();
     let mut rng = Rng::new(3);
     let q: Vec<f32> = (0..300 * 3).map(|_| rng.range(-3.0, 3.0)).collect();
