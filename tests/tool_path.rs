@@ -5,8 +5,9 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
+use batchplan::rng::Rng;
 use batchplan::{
-    CollisionModel, CollisionWeights, Device, Error, HandSpeed, IkOptions, Obstacle, Pose, Robot,
+    CollisionModel, CollisionWeights, Device, Error, HandSpeed, Obstacle, Pose, Robot,
     RobotOptions, ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, Touch, Trajectory,
     World,
 };
@@ -240,9 +241,11 @@ fn sharp_turns_keep_the_precision_at_any_step() {
 }
 
 #[test]
-fn the_motion_stops_before_a_singularity() {
-    // The UR5e's wrist lines up where its fifth joint passes zero: a straight move whose ends lie
-    // on either side of it can only be tracked by spinning the wrist half a turn at once.
+fn the_motion_through_a_singularity_stays_on_the_line() {
+    // The UR5e's wrist lines up where its fifth joint passes zero, and a straight move whose ends
+    // lie on either side of it needs the wrist to swing about half a turn. IK held to the
+    // precision gives up short of it; given more iterations, it swings the wrist on the way
+    // through. Either way the hand keeps to the line.
     let options = RobotOptions {
         collision_model: Some(CollisionModel::default()),
         ..Default::default()
@@ -256,16 +259,6 @@ fn the_motion_stops_before_a_singularity() {
     let mut mirrored = start.clone();
     mirrored[4] = -0.3;
     let (from, to) = (robot.ee_pose(&start, 0), robot.ee_pose(&mirrored, 0));
-    // IK loose enough to step up to the singularity, where only the jump check stops it.
-    let o = ToolPathOptions {
-        ik: IkOptions {
-            iterations: 300,
-            position_tolerance: 5e-4,
-            rotation_tolerance: 5e-3,
-            ..IkOptions::default()
-        },
-        ..ToolPathOptions::default()
-    };
     for device in devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[World::default()]).unwrap();
@@ -275,18 +268,39 @@ fn the_motion_stops_before_a_singularity() {
             hand: 0,
             waypoints: vec![to],
         };
-        let result = batchplan::follow(&device, &worlds, &[tool_path], &o).unwrap();
-        assert!(
-            result.fraction[0] < 1.0 && result.stopped[0].is_some(),
-            "{name}: the motion passes the singularity"
-        );
-        let samples = Trajectory::try_new(&robot, &result.paths[0], 1.0)
-            .unwrap()
-            .sample(250.0)
-            .unwrap();
-        for q in samples.positions.chunks(robot.dof()) {
-            let off = off_segment(robot.ee_pose(q, 0).position, from.position, to.position);
-            assert!(off <= o.precision + 1e-4, "{name}: {off} m off the line");
+        for (iterations, through) in [(300, false), (1000, true)] {
+            let o = ToolPathOptions {
+                iterations,
+                ..ToolPathOptions::default()
+            };
+            let result =
+                batchplan::follow(&device, &worlds, std::slice::from_ref(&tool_path), &o).unwrap();
+            assert_eq!(
+                result.fraction[0] == 1.0,
+                through,
+                "{name}, {iterations} iterations: {:?}",
+                result.stopped[0]
+            );
+            let samples = Trajectory::try_new(&robot, &result.paths[0], 1.0)
+                .unwrap()
+                .sample(250.0)
+                .unwrap();
+            let wrist: Vec<f32> = samples
+                .positions
+                .chunks(robot.dof())
+                .map(|q| q[5])
+                .collect();
+            let swing = wrist
+                .iter()
+                .fold(0.0f32, |m, &w| m.max((w - wrist[0]).abs()));
+            assert!(
+                !through || swing > 2.5,
+                "{name}: the wrist swings only {swing} rad"
+            );
+            for q in samples.positions.chunks(robot.dof()) {
+                let off = off_segment(robot.ee_pose(q, 0).position, from.position, to.position);
+                assert!(off <= o.precision + 1e-4, "{name}: {off} m off the line");
+            }
         }
     }
 }
@@ -358,6 +372,109 @@ fn paths_that_do_not_move_the_hand_are_covered() {
 }
 
 #[test]
+fn motions_keep_the_joint_limits() {
+    // Starts near the joints' limits and moves in every direction: joints run into their limits
+    // and stay there while the others carry on.
+    let robot = panda();
+    let n = robot.dof();
+    let device = Device::cpu(&robot).unwrap();
+    let mut rng = Rng::new(9);
+    let paths: Vec<ToolPath> = (0..400)
+        .map(|_| {
+            let start: Vec<f32> = (0..n)
+                .map(|j| {
+                    let (lo, hi) = (robot.lower()[j], robot.upper()[j]);
+                    let near = (hi - lo) * rng.range(0.0, 0.08);
+                    if rng.uniform() < 0.5 {
+                        lo + near
+                    } else {
+                        hi - near
+                    }
+                })
+                .collect();
+            let hand = robot.ee_pose(&start, 0);
+            let direction = Vec3::new(rng.normal(), rng.normal(), rng.normal()).normalize();
+            ToolPath {
+                start,
+                ..path(
+                    &robot,
+                    vec![Pose::new(hand.position + direction * 0.15, hand.rotation)],
+                )
+            }
+        })
+        .collect();
+    let result = follow(&device, World::default(), &paths);
+    let moved: Vec<&Vec<f32>> = result.paths.iter().filter(|p| !p.is_empty()).collect();
+    assert!(moved.len() > 100, "only {} motions", moved.len());
+    for control_points in moved {
+        Trajectory::try_new(&robot, control_points, 1.0)
+            .unwrap()
+            .check(&robot)
+            .unwrap();
+    }
+}
+
+#[test]
+fn turning_while_moving_a_little_keeps_the_precision_without_stopping() {
+    // Pours: up to a radian of turn about any axis while the hand moves half a millimetre to six,
+    // from configurations around the default.
+    let robot = panda();
+    let n = robot.dof();
+    let o = ToolPathOptions::default();
+    let device = Device::cpu(&robot).unwrap();
+    let mut rng = Rng::new(4);
+    let paths: Vec<ToolPath> = (0..200)
+        .map(|_| {
+            let start: Vec<f32> = robot
+                .default_q()
+                .iter()
+                .enumerate()
+                .map(|(j, &v)| (v + 0.4 * rng.normal()).clamp(robot.lower()[j], robot.upper()[j]))
+                .collect();
+            let hand = robot.ee_pose(&start, 0);
+            let random = |rng: &mut Rng| Vec3::new(rng.normal(), rng.normal(), rng.normal());
+            let axis = random(&mut rng).normalize();
+            let shift = random(&mut rng).normalize() * rng.range(0.0005, 0.006);
+            let turn = Quat::from_axis_angle(axis, rng.range(0.2, 1.0));
+            ToolPath {
+                start,
+                ..path(
+                    &robot,
+                    vec![Pose::new(hand.position + shift, turn * hand.rotation)],
+                )
+            }
+        })
+        .collect();
+    let result = follow(&device, World::default(), &paths);
+    let covered: Vec<usize> = (0..paths.len())
+        .filter(|&i| result.fraction[i] == 1.0)
+        .collect();
+    assert!(covered.len() > 100, "only {} pours covered", covered.len());
+    // Each motion rests at its two ends; a stop on the way rests a third time.
+    let mut stops = 0;
+    for &i in &covered {
+        let control: Vec<&[f32]> = result.paths[i].chunks(n).collect();
+        let rests = control
+            .windows(3)
+            .filter(|w| w[0] == w[1] && w[1] == w[2])
+            .count();
+        stops += rests - 2;
+    }
+    assert!(
+        stops <= covered.len() / 50,
+        "{stops} stops on the way in {} pours",
+        covered.len()
+    );
+    for &i in covered.iter().take(20) {
+        let (from, to) = (robot.ee_pose(&paths[i].start, 0), paths[i].waypoints[0]);
+        for pose in hand_poses(&robot, &result.paths[i]) {
+            let off = off_segment(pose.position, from.position, to.position);
+            assert!(off <= o.precision + 1e-4, "pour {i}: {off} m off the line");
+        }
+    }
+}
+
+#[test]
 fn malformed_paths_are_input_errors() {
     let robot = panda();
     let start = robot.ee_pose(robot.default_q(), 0);
@@ -397,6 +514,14 @@ fn malformed_paths_are_input_errors() {
             },
             o.clone(),
             "no waypoints",
+        ),
+        (
+            ToolPath {
+                start: robot.upper().iter().map(|v| v + 0.1).collect(),
+                ..good.clone()
+            },
+            o.clone(),
+            "leaves the joint limits",
         ),
         (good, ToolPathOptions { step: 0.0, ..o }, "positive"),
     ];

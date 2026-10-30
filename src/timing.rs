@@ -271,8 +271,9 @@ impl Trajectory {
     /// path already checked, for when the motion must not go on (an obstacle appeared, a replan
     /// failed). It starts in exactly the state at `t` and stops as soon along the path as a time
     /// map braking at an even rate within the limits allows; verify it with
-    /// [`Trajectory::check_from`]. Errors with [`Error::Unsafe`] if no such stop ends before
-    /// the path does, where this trajectory comes to rest anyway.
+    /// [`Trajectory::check_from`]. It keeps the joints' limits; caps on a hand's speed
+    /// ([`Trajectory::with_hand_speed`]) are not kept. Errors with [`Error::Unsafe`] if no such
+    /// stop ends before the path does, where this trajectory comes to rest anyway.
     pub fn stop(&self, robot: &Robot, t: f32) -> Result<Self> {
         ensure_input!(
             self.dof == robot.dof(),

@@ -41,8 +41,9 @@ pub struct ToolPathOptions {
     pub rotation_precision: f32,
     /// Joint-space spacing of collision checks, as [`RrtOptions::resolution`](crate::RrtOptions).
     pub resolution: f32,
-    /// The IK that takes each step. Its tolerances hold each configuration to its pose.
-    pub ik: IkOptions,
+    /// Damped-least-squares iterations per step at most: 30. Each configuration is held to a
+    /// tenth of the precisions.
+    pub iterations: u32,
 }
 
 impl Default for ToolPathOptions {
@@ -53,12 +54,7 @@ impl Default for ToolPathOptions {
             precision: 0.001,
             rotation_precision: 0.01,
             resolution: 1.0 / 32.0,
-            ik: IkOptions {
-                iterations: 30,
-                position_tolerance: 1e-4,
-                rotation_tolerance: 1e-3,
-                ..IkOptions::default()
-            },
+            iterations: 30,
         }
     }
 }
@@ -69,8 +65,9 @@ impl Default for ToolPathOptions {
 pub struct ToolPathResult {
     /// The paths, in order.
     pub problems: Vec<ToolPath>,
-    /// Per path: how much of it the motion covers, from 0 to 1, by its steps: its length, or its
-    /// turning where the hand only turns. A path that does not move the hand is covered.
+    /// Per path: how much of it the motion covers, from 0 to 1, in steps: each stretch between
+    /// poses counts its length over `step` or its turn over `rotation_step`, whichever is more. A
+    /// path that does not move the hand is covered.
     pub fraction: Vec<f32>,
     /// Per path: why the motion stops short, where it does.
     pub stopped: Vec<Option<ToolPathStop>>,
@@ -117,20 +114,28 @@ pub fn follow(
     let n = robot.dof();
     ensure_input!(
         o.step > 0.0 && o.rotation_step > 0.0 && o.precision > 0.0 && o.rotation_precision > 0.0,
-        "steps and precisions must be positive"
+        "steps and precisions must be positive, got {} m, {} rad, {} m and {} rad",
+        o.step,
+        o.rotation_step,
+        o.precision,
+        o.rotation_precision
     );
-    ensure_input!(o.resolution > 0.0, "the resolution must be positive");
     ensure_input!(
-        o.ik.rotation_weight > 0.0
-            && o.ik.position_tolerance > 0.0
-            && o.ik.rotation_tolerance > 0.0,
-        "the IK's rotation weight and tolerances must be positive"
+        o.resolution > 0.0,
+        "the resolution must be positive, got {}",
+        o.resolution
     );
+    ensure_input!(o.iterations > 0, "the IK needs at least one iteration");
     for (i, p) in paths.iter().enumerate() {
         ensure_input!(
             p.start.len() == n,
             "path {i}: a start of {} joints, not {n}",
             p.start.len()
+        );
+        ensure_input!(
+            robot.within(&p.start),
+            "path {i}: the start {:?} leaves the joint limits",
+            p.start
         );
         ensure_input!(
             p.hand < robot.hands(),
@@ -166,7 +171,7 @@ pub fn follow(
     };
     for search in searches {
         let done = search.into_inner();
-        result.fraction.push(done.fraction());
+        result.fraction.push(done.covered);
         result.stopped.push(done.stop);
         result.paths.push(done.control);
     }
@@ -179,6 +184,17 @@ const MAX_SPLITS: u32 = 8;
 
 /// Spline samples per span checked against the path's precision, ends excluded.
 const PRECISION_SAMPLES: usize = 4;
+
+/// The share of a step's motion, in precisions, below which its turn does not place a sample
+/// along it, which saves an arccosine per sample of a step that only moves.
+const TURN_SHARE: f32 = 1e-3;
+
+/// The share of the precisions each configuration is held to by its IK.
+const TOLERANCE: f32 = 0.1;
+
+/// How far past a joint limit a control point may lie, for rounding: well inside the slack
+/// `Trajectory::check` allows.
+const LIMIT_SLACK: f32 = 1e-6;
 
 /// Spline samples per span for its collision check, at least.
 const CHECK_SAMPLES: usize = 4;
@@ -216,18 +232,34 @@ impl Point {
         Pose::new(self.position, self.rotation)
     }
 
-    /// How far `pose` strays from the path between `self` and `to`: from the nearest point of the
-    /// straight line between them, and from the path's rotation there (meters, radians).
-    fn deviation(&self, to: &Point, pose: &Pose) -> [f32; 2] {
+    /// How far `pose` strays from the path between `self` and `to`, from the point of it `pose`
+    /// is nearest and from the path's rotation there (meters, radians). Nearest weighs position
+    /// and rotation each by its precision, so a step that mostly turns is placed by its turn.
+    fn deviation(&self, to: &Point, pose: &Pose, o: &ToolPathOptions) -> [f32; 2] {
         let span = to.position - self.position;
         let turn = self.rotation.angle_between(to.rotation);
-        let t = if span.length_squared() > 1e-12 {
-            (pose.position - self.position).dot(span) / span.length_squared()
-        } else if turn > 1e-6 {
-            self.rotation.angle_between(pose.rotation) / turn
+        // How far along the step `pose` lies by its position and by its turn, each weighed by
+        // how many precisions the step moves it; a turn that weighs next to nothing is not read.
+        let (moved, turned) = (
+            span.length_squared() / (o.precision * o.precision),
+            (turn / o.rotation_precision).powi(2),
+        );
+        let share = if moved + turned > 0.0 {
+            turned / (moved + turned)
         } else {
             0.0
         };
+        let along_span = if span.length_squared() > 1e-12 {
+            (pose.position - self.position).dot(span) / span.length_squared()
+        } else {
+            0.0
+        };
+        let along_turn = if share > TURN_SHARE && turn > 1e-6 {
+            self.rotation.angle_between(pose.rotation) / turn
+        } else {
+            along_span
+        };
+        let t = along_span + share * (along_turn - along_span);
         let on = Point::between(self, to, t.clamp(0.0, 1.0));
         [
             on.position.distance(pose.position),
@@ -258,6 +290,10 @@ struct Follow<'a> {
     /// The path's poses a step apart, the start's first.
     points: Vec<Point>,
     reach: Reach,
+    /// Each step's IK, holding configurations to a tenth of the precisions.
+    ik: IkOptions,
+    /// Each joint's range ([`Robot::bounds`]), which the spline's control points keep.
+    bounds: Vec<(f32, f32)>,
     /// Configurations along the path (`[k, dof]`), the start's first, the point each reaches, and
     /// whether the spline stops there.
     q: Vec<f32>,
@@ -271,6 +307,19 @@ struct Follow<'a> {
     starts: Vec<usize>,
     stop: Option<ToolPathStop>,
     stage: Stage,
+    /// How much of the path the motion covers, once the search is done (`fraction`).
+    covered: f32,
+    /// Working memory, reused by every query: a configuration being stepped to and one between
+    /// two, whether each control point lies past a joint limit, the poses still to reach before
+    /// the next point, the pinned configurations, and the fit's solves.
+    next: Vec<f32>,
+    between: Vec<f32>,
+    outside: Vec<bool>,
+    pending: Vec<(Point, u32)>,
+    pins: Vec<usize>,
+    rhs: Vec<f32>,
+    scratch: Vec<f32>,
+    solved: Vec<f32>,
 }
 
 impl<'a> Follow<'a> {
@@ -284,6 +333,13 @@ impl<'a> Follow<'a> {
             n: robot.dof(),
             points,
             reach: Reach::new(robot),
+            ik: IkOptions {
+                iterations: o.iterations,
+                position_tolerance: o.precision * TOLERANCE,
+                rotation_tolerance: o.rotation_precision * TOLERANCE,
+                ..IkOptions::default()
+            },
+            bounds: (0..robot.dof()).map(|j| robot.bounds(j)).collect(),
             q: path.start.clone(),
             reached: vec![],
             pinned: vec![],
@@ -292,7 +348,41 @@ impl<'a> Follow<'a> {
             starts: vec![],
             stop: None,
             stage: Stage::Steps,
+            covered: 0.0,
+            next: path.start.clone(),
+            between: vec![0.0; robot.dof()],
+            outside: vec![],
+            pending: vec![],
+            pins: vec![],
+            rhs: vec![],
+            scratch: vec![],
+            solved: vec![],
         }
+    }
+
+    /// Ends the search. It keeps what `follow` reads and frees the rest of its memory here, on the
+    /// thread that allocated it: freed later by the caller, a batch's buffers all return to one
+    /// thread, and glibc frees memory from another thread's arena slowly.
+    fn finish(&mut self) {
+        self.covered = self.fraction();
+        self.stage = Stage::Done;
+        (self.points, self.reached, self.pending) = Default::default();
+        (
+            self.q,
+            self.next,
+            self.between,
+            self.rhs,
+            self.scratch,
+            self.solved,
+        ) = Default::default();
+        (
+            self.pinned,
+            self.outside,
+            self.pins,
+            self.spans,
+            self.starts,
+        ) = Default::default();
+        self.bounds = vec![];
     }
 
     fn fraction(&self) -> f32 {
@@ -302,51 +392,53 @@ impl<'a> Follow<'a> {
         self.reached.last().map_or(0.0, |p| p.along)
     }
 
-    fn config(&self, k: usize) -> &[f32] {
-        &self.q[k * self.n..(k + 1) * self.n]
-    }
-
     /// Steps from the start along every point, halving a step where the joints' motion would take
     /// the hand off the path, until the path ends or a pose cannot be reached.
     fn walk(&mut self) {
+        let n = self.n;
         self.reached.push(self.points[0]);
         self.pinned.push(true);
-        let mut next = self.q.clone();
-        let mut middle = vec![0.0; self.n];
         for p in 1..self.points.len() {
             // Poses still to reach before this point is, the next one last, with how often their
             // step was halved.
-            let mut pending = vec![(self.points[p], 0)];
-            while let Some(&(to, splits)) = pending.last() {
+            self.pending.clear();
+            self.pending.push((self.points[p], 0));
+            while let Some(&(to, splits)) = self.pending.last() {
                 let k = self.reached.len() - 1;
-                next.copy_from_slice(self.config(k));
-                let reached =
-                    self.reach
-                        .reach(self.robot, self.hand, &to.target(), &mut next, &self.o.ik);
+                self.next.copy_from_slice(&self.q[k * n..(k + 1) * n]);
+                let reached = self.reach.reach(
+                    self.robot,
+                    self.hand,
+                    &to.target(),
+                    &mut self.next,
+                    &self.ik,
+                );
                 if !reached {
                     self.stop = Some(ToolPathStop::Unreachable { at: to.pose() });
                     return;
                 }
                 let from = self.reached[k];
-                for ((m, a), b) in middle.iter_mut().zip(self.config(k)).zip(&next) {
-                    *m = 0.5 * (a + b);
+                let at = &self.q[k * n..(k + 1) * n];
+                for ((b, a), z) in self.between.iter_mut().zip(at).zip(&self.next) {
+                    *b = 0.5 * (a + z);
                 }
                 let halfway = Point::between(&from, &to, 0.5);
                 let [position, rotation] =
                     self.reach
-                        .error(self.robot, self.hand, &halfway.target(), &middle);
-                if position <= self.o.precision && rotation <= self.o.rotation_precision {
-                    pending.pop();
-                    self.q.extend_from_slice(&next);
+                        .error(self.robot, self.hand, &halfway.target(), &self.between);
+                let on_path = position <= self.o.precision && rotation <= self.o.rotation_precision;
+                if on_path {
+                    self.pending.pop();
+                    self.q.extend_from_slice(&self.next);
                     self.reached.push(to);
                     self.pinned.push(false);
                 } else if splits == MAX_SPLITS {
                     self.stop = Some(ToolPathStop::Jump { at: to.pose() });
                     return;
                 } else {
-                    let top = pending.len() - 1;
-                    pending[top].1 = splits + 1;
-                    pending.push((halfway, splits + 1));
+                    let top = self.pending.len() - 1;
+                    self.pending[top].1 = splits + 1;
+                    self.pending.push((halfway, splits + 1));
                 }
             }
         }
@@ -366,19 +458,22 @@ impl<'a> Follow<'a> {
     }
 
     /// The spline through every configuration (`control`), resting at the pinned ones, held to the
-    /// path's precision: a span that strays pins the nearer free configuration it runs between,
-    /// and the fit is redone.
+    /// path's precision and the joint limits: a span that strays or leaves them pins the nearer free
+    /// configuration it runs between, and the fit is redone.
     fn fit(&mut self) {
+        let n = self.n;
         if self.reached.len() == 2 {
             // One step: its middle as a configuration of its own, for a spline of seven points.
-            let middle: Vec<f32> = self
-                .config(0)
-                .iter()
-                .zip(self.config(1))
-                .map(|(a, b)| 0.5 * (a + b))
-                .collect();
+            for ((b, x), y) in self
+                .between
+                .iter_mut()
+                .zip(&self.q[..n])
+                .zip(&self.q[n..2 * n])
+            {
+                *b = 0.5 * (x + y);
+            }
             let point = Point::between(&self.reached[0], &self.reached[1], 0.5);
-            self.q.splice(self.n..self.n, middle);
+            self.q.splice(n..n, self.between.iter().copied());
             self.reached.insert(1, point);
             self.pinned.insert(1, false);
         }
@@ -401,28 +496,28 @@ impl<'a> Follow<'a> {
         for _ in 0..3 {
             self.control.extend_from_slice(&self.q[..n]);
         }
-        let pins: Vec<usize> = (0..self.reached.len())
-            .filter(|&k| self.pinned[k])
-            .collect();
-        let (mut rhs, mut scratch, mut solved) = (vec![], vec![], vec![]);
-        for pair in pins.windows(2) {
+        self.pins.clear();
+        let pinned = (0..self.reached.len()).filter(|&k| self.pinned[k]);
+        self.pins.extend(pinned);
+        for pair in self.pins.windows(2) {
             let (a, b) = (pair[0], pair[1]);
             let r = b - a - 1;
-            solved.clear();
-            solved.resize(r * n, 0.0);
+            self.solved.clear();
+            self.solved.resize(r * n, 0.0);
             for j in 0..n {
-                rhs.clear();
-                rhs.extend((a + 1..b).map(|k| 6.0 * self.q[k * n + j]));
+                self.rhs.clear();
+                let between = (a + 1..b).map(|k| 6.0 * self.q[k * n + j]);
+                self.rhs.extend(between);
                 if r > 0 {
-                    rhs[0] -= self.q[a * n + j];
-                    rhs[r - 1] -= self.q[b * n + j];
+                    self.rhs[0] -= self.q[a * n + j];
+                    self.rhs[r - 1] -= self.q[b * n + j];
                 }
-                solve_one_four_one(&mut rhs, &mut scratch);
-                for (i, x) in rhs.iter().enumerate() {
-                    solved[i * n + j] = *x;
+                solve_one_four_one(&mut self.rhs, &mut self.scratch);
+                for (i, x) in self.rhs.iter().enumerate() {
+                    self.solved[i * n + j] = *x;
                 }
             }
-            self.control.extend_from_slice(&solved);
+            self.control.extend_from_slice(&self.solved);
             for _ in 0..3 {
                 self.control.extend_from_slice(&self.q[b * n..(b + 1) * n]);
             }
@@ -438,17 +533,31 @@ impl<'a> Follow<'a> {
         }
     }
 
-    /// The configuration to pin, if some span of the spline strays from the path: the nearer of
-    /// the two it runs between that is not pinned yet.
+    /// The configuration to pin, if some span of the spline strays from the path or has a control
+    /// point past a joint limit: the nearer of the two configurations it runs between that is not
+    /// pinned yet. A span's curve stays within its control points, so one whose points keep the
+    /// limits keeps them along its whole length.
     fn stray(&mut self) -> Option<usize> {
         let n = self.n;
-        let mut q = vec![0.0; n];
+        // Each control point checked once, then each span by its four.
+        self.outside.clear();
+        let past = |c: &[f32]| {
+            c.iter()
+                .zip(&self.bounds)
+                .any(|(&v, &(lo, hi))| v < lo - LIMIT_SLACK || v > hi + LIMIT_SLACK)
+        };
+        self.outside.extend(self.control.chunks(n).map(past));
         for (span, &k) in self.spans.iter().enumerate() {
+            let outside = self.outside[span..span + 4].contains(&true);
+            if outside && let Some(pin) = [k + 1, k].into_iter().find(|&e| !self.pinned[e]) {
+                return Some(pin);
+            }
             for s in 1..PRECISION_SAMPLES {
                 let u = s as f32 / PRECISION_SAMPLES as f32;
-                spline::blend(&self.control, n, span, spline::basis(u), &mut q);
-                let pose = self.reach.pose(self.robot, self.hand, &q);
-                let [position, rotation] = self.reached[k].deviation(&self.reached[k + 1], &pose);
+                spline::blend(&self.control, n, span, spline::basis(u), &mut self.between);
+                let pose = self.reach.pose(self.robot, self.hand, &self.between);
+                let [position, rotation] =
+                    self.reached[k].deviation(&self.reached[k + 1], &pose, self.o);
                 if position <= self.o.precision && rotation <= self.o.rotation_precision {
                     continue;
                 }
@@ -531,7 +640,7 @@ impl Search for Follow<'_> {
         }
         if self.reached.len() < 2 {
             self.control.clear();
-            self.stage = Stage::Done;
+            self.finish();
             return None;
         }
         self.fit();
@@ -557,7 +666,7 @@ impl Search for Follow<'_> {
     fn answer(&mut self, answer: usize) {
         let samples = *self.starts.last().expect("a spline has an end sample") + 1;
         if answer >= samples {
-            self.stage = Stage::Done;
+            self.finish();
             return;
         }
         // The configurations before the span of the first sample that may collide.
