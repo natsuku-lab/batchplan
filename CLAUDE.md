@@ -62,7 +62,7 @@ These decisions are settled. Keep to them unless the user decides otherwise.
 - **Small interfaces.** `Robot` exposes accessors and pose queries only; its internals are `pub(crate)`. Prefer deepening an existing module to adding a new public one.
 - **Loaders stay thin.** A loader (`urdf.rs`, `mjcf.rs`, `usd.rs` behind feature `usd`) only translates a file into the crate-private `Model` (`description.rs`): a `RobotDescription` and static scene shapes. Kinematics, sphere fitting, self-collision analysis and `World::load` work on those, never on a file format. Format semantics are translated, not approximated away: MJCF mesh geoms become `Geometry::ConvexHull` because MuJoCo collides their hulls.
 - **Distance grids err toward collision.** `sdf.rs` builders store at most the true signed distance per point, minus half a voxel diagonal (trilinear interpolation's largest overestimate). Keep that invariant when touching a builder; `tests/sdf.rs` checks it.
-- **Typed errors at the surface.** Public functions return `batchplan::Error` (`error.rs`). A host matches on its kinds, so choose the kind deliberately (`ensure_input!`/`input!` for bad input). The format loaders and robot building keep `anyhow` internally for context chains; `Robot::load`, `World::load` and `CollisionModel::load` turn them into `Error::Load` with the path.
+- **Typed errors at the surface.** Public functions return `batchplan::Error` (`error.rs`). A host matches on its kinds, so choose the kind deliberately (`ensure_input!`/`input!` for bad input), and name what was rejected and the value given. The format loaders and robot building keep `anyhow` internally for context chains; `Robot::load`, `World::load` and `CollisionModel::load` turn them into `Error::Load` with the path.
 - **Embeddable.** Each device owns its rayon pool (`Device::cpu_threads`; the GPU device's has one thread per core).
   - Every parallel loop in `cpu.rs` and `gpu.rs` runs inside `self.pool.install` or on `cpu::run_searches`' broadcast, never on the global pool. `tests/threads.rs` counts OS threads; `tests/budget.rs` checks that a busy global pool does not hold up GPU plans.
   - Batches too small to be worth handing over (`SMALL_BATCH` clearances, a single search) run on the calling thread.
@@ -104,8 +104,8 @@ The code follows [Google's Rust style guide](https://google.github.io/styleguide
 
 ## Working rules
 
-- **Run `scripts/check.sh` before every push.** It runs every lint CI runs, on the library and on `demos/`, which `cargo fmt` at the root does not reach.
-- **A new test must fail on the unfixed code.** Prove it by planting the bug. For example, swapping `acceleration_weight`/`velocity_weight` in the GPU packing must fail `trajopt_directions_match_cpu_element_wise` and `trajopt_smoothness_gradient_matches_its_cost`.
+- **Run `scripts/check.sh` and the reviewer before every push.** The script runs every lint CI runs, on the library and on `demos/`, which `cargo fmt` at the root does not reach. The reviewer agent (`.claude/agents/reviewer.md`) checks the change against these rules and reports verified defects.
+- **A new test must fail on the unfixed code.** Prove it by planting the bug. A bound loosened later names the run that needed it. For example, swapping `acceleration_weight`/`velocity_weight` in the GPU packing must fail `trajopt_directions_match_cpu_element_wise` and `trajopt_smoothness_gradient_matches_its_cost`.
 - **Assert that test inputs exercise the code.** The smoothness test asserts its path isn't straight, because a straight path has zero smoothness gradient.
 - **Test through the interface** (`Device`, `solve_ik`, `plan`, the exporters). Internal unit tests are only for internal seams, such as sphere pairs and `unmet_limits`.
 - **Compare optimizer steps by direction, not position.** The line search scales each L-BFGS step, so `step_directions` in `tests/gpu.rs` scales each path's step to its largest entry: step 1 is the negative gradient, later steps the two-loop recursion. Outcomes are compared through the full trajectory cost (`trajopt_lowers_the_cost_as_far_as_the_cpu`).
@@ -113,6 +113,7 @@ The code follows [Google's Rust style guide](https://google.github.io/styleguide
   - Build the previous commit in a `git worktree` with its own `CARGO_TARGET_DIR`, and alternate runs with the current code.
   - Check the load first; the dev machines often run other heavy work.
   - A single run proves nothing.
+  - Cover every class the change touches (CPU and GPU, each robot, batch sizes); none may regress.
 - **Keep `#[inline]` on hot functions the CPU backend calls across modules** (`Robot::fk_into`, `Fk::dpoint`, `box_distance`, `sphere_distance`). Without it, how the compiler splits the crate into chunks swings CPU throughput by 15–20%. Mark new hot cross-module helpers the same way. `cpu::collision` is `#[inline(always)]`: with a second cost-only caller, LLVM stopped inlining it into the line search (−5%).
 - **`unwrap`/`expect` only for invariants you can prove.** Fallible paths return errors.
 - **The repo is public.** Keep hostnames, usernames and account details out of committed files.

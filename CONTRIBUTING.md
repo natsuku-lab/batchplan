@@ -55,6 +55,16 @@ library). Where the guide leaves a choice to the codebase:
 - **Numbers in the docs come from runs you can name.** [Benchmarks](docs/benchmarks.md) says how
   each was measured; rerun what a change moves and update every page that quotes it.
 
+## Review
+
+Before pushing, run `scripts/check.sh`, then have the reviewer agent read the change. In
+[Claude Code](https://claude.com/claude-code), ask for the `reviewer` agent on your branch
+([`.claude/agents/reviewer.md`](.claude/agents/reviewer.md)). It checks the change against the
+rules in [CLAUDE.md](CLAUDE.md): correctness, the CPU/GPU twin and the other invariants,
+deep-module design, the style guide, tests that fail on the unfixed code, measured performance and
+docs that match the code. It reports each defect with the input that shows it. Fix what it finds,
+or say in the pull request why a finding does not apply.
+
 [CLAUDE.md](CLAUDE.md) holds the architecture and the working rules in full, for people and coding
 agents alike.
 
