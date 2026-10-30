@@ -1244,17 +1244,17 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
         max_velocity.push(
             limits
                 .velocity
-                .unwrap_or(or_default(joint.max_velocity, o.max_velocity)),
+                .unwrap_or_else(|| or_default(joint.max_velocity, o.max_velocity)),
         );
         max_acceleration.push(
             limits
                 .acceleration
-                .unwrap_or(or_default(joint.max_acceleration, o.max_acceleration)),
+                .unwrap_or_else(|| or_default(joint.max_acceleration, o.max_acceleration)),
         );
         max_jerk.push(
             limits
                 .jerk
-                .unwrap_or(or_default(joint.max_jerk, o.max_jerk)),
+                .unwrap_or_else(|| or_default(joint.max_jerk, o.max_jerk)),
         );
     }
     ensure!(

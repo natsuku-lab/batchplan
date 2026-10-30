@@ -1,8 +1,10 @@
 //! CPU reference backend (rayon over items, on a pool it owns). Every function here has a WGSL twin
 //! in `kernels.wgsl`; the GPU parity tests compare the two.
 
-// Index loops here mirror kernels.wgsl line for line, which keeps the two easy to compare.
-#![allow(clippy::needless_range_loop)]
+#![allow(
+    clippy::needless_range_loop,
+    reason = "index loops mirror kernels.wgsl line for line, which keeps the two easy to compare"
+)]
 
 use std::any::Any;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -718,7 +720,10 @@ impl Reach {
 
 /// Collision gradient of the trajectory cost at sample `s` of span `span`, with respect to the
 /// configuration there. Must match `traj_samples` in kernels.wgsl.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the scalar twin of a kernel, which takes the same inputs"
+)]
 fn traj_sample_grad(
     robot: &Robot,
     world: &CpuWorld,
@@ -806,7 +811,10 @@ fn candidate(robot: &Robot, x: &[f32], d: &[f32], alpha: f32, t: usize, j: usize
 
 /// Collision cost at sample `s` of span `span` of the candidate path `x + alpha d`. Must match
 /// `traj_costs` in kernels.wgsl.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the scalar twin of a kernel, which takes the same inputs"
+)]
 fn traj_cost(
     robot: &Robot,
     world: &CpuWorld,

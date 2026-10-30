@@ -1,5 +1,5 @@
 //! Random tabletop worlds shared by the examples and tests.
-#![allow(dead_code)]
+#![allow(dead_code, reason = "each example and test uses part of it")]
 
 use std::collections::HashMap;
 use std::f32::consts::PI;

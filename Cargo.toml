@@ -55,6 +55,18 @@ undocumented_unsafe_blocks = "warn"
 format_push_string = "warn"
 redundant_clone = "warn"
 ref_option = "warn"
+# Bun's rules that a library shares: no placeholders or debug prints left in, lazy defaults,
+# buffers reused through `clone_from`, and a reason on every `allow`.
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+needless_collect = "warn"
+or_fun_call = "warn"
+implicit_clone = "warn"
+assigning_clones = "warn"
+allow_attributes_without_reason = "warn"
+# The library reads no environment variables (clippy.toml); `src/lib.rs` turns this on for it.
+disallowed_methods = "allow"
 
 [profile.release]
 debug = 1

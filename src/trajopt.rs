@@ -1292,7 +1292,7 @@ mod tests {
                 .chunks(n)
                 .zip(fit.dense.chunks(n))
                 .position(|(a, b)| a != b);
-            let changed = changed.unwrap_or(before.len().min(fit.dense.len()) / n);
+            let changed = changed.unwrap_or_else(|| before.len().min(fit.dense.len()) / n);
             assert!(
                 fit.from <= changed,
                 "pin {pin} at {w}: the check starts at {} past a change at {changed}",

@@ -214,7 +214,10 @@ const POLL: usize = 64;
 /// searches take its samples first (see `rrt::Ahead::helper`). `pause`, if given, is asked every
 /// `POLL` queries whether to return early, between queries; true if it did, and a later call goes
 /// on with the search (where a search alone stops to summon help, see `cpu::run_searches`).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the driver lends its state to each search, apart, so they borrow separately"
+)]
 pub(crate) fn run(
     search: &mut dyn Search,
     robot: &Robot,
@@ -232,7 +235,10 @@ pub(crate) fn run(
 }
 
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the driver lends its state to each search, apart, so they borrow separately"
+)]
 fn run_at<S: Simd>(
     simd: S,
     search: &mut dyn Search,

@@ -477,7 +477,10 @@ pub(crate) fn within_limits(robot: &Robot, cp: &[f32], knot: f32, points: &[f32]
 /// to keep its limits, and the hand's speed its caps (velocity scales with 1/k, acceleration 1/k²,
 /// jerk 1/k³; at least 1), and where it overshoots: each such sample's path position and the factor
 /// on x that limit needs there. Once the stretch passes `beaten`, it returns what it has found.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "private, with three callers that each set the sampling apart"
+)]
 fn assess(
     robot: &Robot,
     cp: &[f32],

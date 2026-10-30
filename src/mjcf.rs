@@ -248,7 +248,7 @@ impl Compiler {
 }
 
 pub(crate) fn load(path: &Path) -> Result<Model> {
-    let dir = path.parent().unwrap_or(Path::new("."));
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let model = read(path, dir, 0)?;
     ensure!(
         model.tag == "mujoco",
@@ -272,7 +272,7 @@ pub(crate) fn load(path: &Path) -> Result<Model> {
             compiler.eulerseq = seq.chars().collect();
             ensure!(compiler.eulerseq.len() == 3, "eulerseq needs 3 axes");
         }
-        if let Some(d) = c.attr("meshdir").or(c.attr("assetdir")) {
+        if let Some(d) = c.attr("meshdir").or_else(|| c.attr("assetdir")) {
             compiler.meshdir = dir.join(d);
         }
     }
@@ -287,7 +287,7 @@ pub(crate) fn load(path: &Path) -> Result<Model> {
             let name = a.get("name").map(str::to_string).unwrap_or_else(|| {
                 Path::new(file)
                     .file_stem()
-                    .map_or(file.to_string(), |s| s.to_string_lossy().into_owned())
+                    .map_or_else(|| file.to_string(), |s| s.to_string_lossy().into_owned())
             });
             let scale = a.vec3("scale")?.unwrap_or(Vec3::ONE);
             meshes.insert(name, (compiler.meshdir.join(file), scale));
@@ -441,7 +441,7 @@ impl Builder<'_> {
             } else {
                 ja.get("type").unwrap_or("hinge")
             };
-            let range = ja.floats("range")?.unwrap_or(vec![0.0, 0.0]);
+            let range = ja.floats("range")?.unwrap_or_else(|| vec![0.0, 0.0]);
             ensure!(
                 range.len() == 2,
                 "joint '{joint_name}' range needs 2 numbers"
@@ -635,7 +635,7 @@ impl Builder<'_> {
             .context("joint equalities fixing a joint are not supported; lock it instead")?;
         let c = Attrs(eq.attrs.clone())
             .floats("polycoef")?
-            .unwrap_or(vec![0.0, 1.0, 0.0, 0.0, 0.0]);
+            .unwrap_or_else(|| vec![0.0, 1.0, 0.0, 0.0, 0.0]);
         ensure!(c.len() == 5, "joint equality polycoef needs 5 numbers");
         let joint = self
             .joints

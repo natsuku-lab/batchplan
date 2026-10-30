@@ -425,7 +425,7 @@ impl Helper<'_> {
         if epoch != self.epoch {
             let base = log.base.clone().expect("a base for every epoch");
             drop(log);
-            self.trees = base.trees.clone();
+            self.trees.clone_from(&base.trees);
             self.base = Some(base);
             (self.epoch, self.replayed) = (epoch, 0);
             return self.sync();

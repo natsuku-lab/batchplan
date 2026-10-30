@@ -216,7 +216,10 @@ pub(crate) enum Geometry {
         scale: Vec3,
     },
     /// A mesh given inline (USD) rather than by file.
-    #[cfg_attr(not(feature = "usd"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "usd"),
+        allow(dead_code, reason = "only the USD loader makes one")
+    )]
     TriMesh(TriMesh),
     /// The convex hull of a geometry, as MuJoCo collides meshes.
     ConvexHull(Box<Geometry>),

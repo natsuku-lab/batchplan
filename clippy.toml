@@ -1,0 +1,6 @@
+# The library reads no environment variables: only its tests and examples do (`src/lib.rs` turns
+# this on for the library alone).
+disallowed-methods = [
+    { path = "std::env::var", reason = "the library reads no environment variables" },
+    { path = "std::env::var_os", reason = "the library reads no environment variables" },
+]

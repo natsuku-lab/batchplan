@@ -868,7 +868,10 @@ pub(super) fn tube_radius(
 /// Turns `target`, a Halton point in the unit cube, into a sample: in the tube of radius `tube`
 /// around the line from `start` to `line_goal` (`across` spanning the directions across it), or in
 /// the joint ranges, with held joints at the start. `unit` is working memory.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the search's working buffers, borrowed apart from it"
+)]
 pub(super) fn place(
     robot: &Robot,
     start: &[f32],
@@ -934,7 +937,10 @@ pub(super) fn reach(
 
 /// Into `steps`, a connection's steps from `new` to node `other` of `tree`, `d` away: equal, at
 /// most `range` long, the last at the node turned toward `new` (into `target`).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the search's working buffers, borrowed apart from it"
+)]
 pub(super) fn steps_to(
     robot: &Robot,
     range: f32,

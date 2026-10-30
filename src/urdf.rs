@@ -16,7 +16,7 @@ pub(crate) fn load(path: &Path, package_dirs: &[PathBuf]) -> Result<RobotDescrip
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     from_text(
         &text,
-        Some(path.parent().unwrap_or(Path::new("."))),
+        Some(path.parent().unwrap_or_else(|| Path::new("."))),
         package_dirs,
     )
 }

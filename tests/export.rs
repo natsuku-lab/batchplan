@@ -458,7 +458,7 @@ mod lerobot {
                 let expected = demos[e]
                     .carried
                     .as_ref()
-                    .map_or(start_of(e), |c| c.poses[frame].position.z);
+                    .map_or_else(|| start_of(e), |c| c.poses[frame].position.z);
                 assert!(
                     (z - expected).abs() < 1e-6,
                     "episode {e} frame {frame}: obstacle 1 at {z}, not {expected}"

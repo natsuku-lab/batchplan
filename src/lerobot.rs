@@ -504,7 +504,10 @@ fn robot_json(robot: &Robot) -> Value {
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "an episode's columns, each its own output array"
+)]
 fn episode_columns(
     robot: &Robot,
     world: &World,
