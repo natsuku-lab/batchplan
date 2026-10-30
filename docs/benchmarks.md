@@ -362,16 +362,16 @@ Against the version before the audit that pinned the spline to the joint limits,
 
 ## Picking and placing
 
-`examples/tasks.rs` picks a box out of clutter on 64 random tabletops and sets it down at a free spot: a table, a box 3–7 cm wide and 4–10 cm tall, 2–5 more boxes up to 30 cm tall, and a spot 12 cm clear of them. Each `pick` tries every grasp `grasps` proposes for the box (16 or 24), each `place` both of its turns at the spot (`place_poses`). Times are the best of five calls of each size, the median of three runs, after a first call that compiles the GPU's kernels; an idle machine.
+`examples/tasks.rs` picks a box out of clutter on 64 random tabletops and sets it down at a free spot: a table, a box 3–7 cm wide and 4–10 cm tall, 2–5 more boxes up to 30 cm tall, and a spot 12 cm clear of them. Each `pick` tries every grasp `grasps` proposes for the box (16 or 24), each `place` both of its turns at the spot (`place_poses`). Times are the best of five calls of each size, the median of three runs, after a first call that compiles the GPU's kernels; an idle machine. The M4 Pro rows are 2c98826's, before a place ran each held object's candidates in parallel.
 
 | Device | Pick, 1 task | 16 | 64 | Place, 1 task | 16 | Through |
 |---|---|---|---|---|---|---|
-| Ryzen AI Max+ 395, 32 threads | 6.8 ms | 86 ms | 334 ms | 2.7 ms | 15.6 ms | 63 of 64 picks, every place |
-| Radeon 8060S | 14.8 ms | 39 ms | 115 ms | 11.1 ms | 21.4 ms | the same |
+| Ryzen AI Max+ 395, 32 threads | 6.5 ms | 85 ms | 333 ms | 2.4 ms | 11.6 ms | 63 of 64 picks, every place |
+| Radeon 8060S | 14.7 ms | 38 ms | 114 ms | 10.8 ms | 17.2 ms | the same |
 | M4 Pro, 14 threads | 7.4 ms | 112 ms | 434 ms | 2.2 ms | 18.1 ms | the same |
 | M4 Pro's GPU | 15.3 ms | 59 ms | 193 ms | 9.4 ms | 24.9 ms | the same |
 
-The pick that fails has every grasp blocked by clutter or out of reach. A pick's time is mostly IK at the grasps (24 problems of 32 seeds each), which the GPU speeds up from 16 tasks on. A place solves IK for the robot alone in one batch: where the hand lets go fixes where the object is, so each task's solutions are then checked holding its object, on the CPU's lanes. Holding each object in its own IK call took 198 ms for 16 places on the M4 Pro's GPU, against 25 ms now.
+The pick that fails has every grasp blocked by clutter or out of reach. A pick's time is mostly IK at the grasps (24 problems of 32 seeds each), which the GPU speeds up from 16 tasks on. A place solves IK for the robot alone in one batch: where the hand lets go fixes where the object is, so each task's solutions are then checked holding its object, on the CPU's lanes. Holding each object in its own IK call took 198 ms for 16 places on the M4 Pro's GPU, against 25 ms at 2c98826. Each held object's candidates are a batch of their own at every step, and the batches run in parallel: run one after another, 16 places took 15.9 ms on the Ryzen and 21.5 ms on the Radeon, in alternating runs with the same plans.
 
 ## Bimanual handovers
 

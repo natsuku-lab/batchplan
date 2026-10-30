@@ -469,6 +469,100 @@ fn each_hand_lifts_and_sets_down_what_it_holds() {
 }
 
 #[test]
+fn a_place_takes_the_other_arms_where_they_wait() {
+    // The left Panda picks its box up and sets it down 15 cm further out, the right one waiting
+    // where the start has it, or turning away on the transit and waiting there.
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let o = TaskOptions::default();
+    let at = Vec3::new(0.45, 0.35, HALF.z);
+    let mut world = World::new(vec![
+        Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.9, 0.02)),
+        Obstacle::cuboid(at, HALF),
+    ]);
+    let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
+    let pick = Pick {
+        support: vec![TABLE],
+        ..Pick::new(0, robot.default_q(), BOX, vec![top(), top_across()])
+    };
+    let picked = batchplan::pick(&device, &worlds, &[pick], &o)
+        .unwrap()
+        .outcomes[0]
+        .as_ref()
+        .unwrap()[0]
+        .clone();
+    world.remove(BOX).unwrap();
+    let worlds = device.upload(&[world]).unwrap();
+    let start = picked.end().to_vec();
+    let (mine, others) = (robot.hand_joints(0), robot.hand_joints(1));
+    let mut idle = start.clone();
+    idle[others[0]] -= 0.5;
+    // The left arm's joints in it do not count.
+    let mut ignored = idle.clone();
+    for &j in &mine {
+        ignored[j] = 0.5 * (robot.lower()[j] + robot.upper()[j]);
+    }
+    let place = |idle: Option<Vec<f32>>| Place {
+        support: vec![TABLE],
+        idle,
+        ..Place::new(
+            0,
+            start.clone(),
+            picked.held.clone().unwrap(),
+            vec![Pose::new(at + Vec3::X * 0.15, Quat::IDENTITY)],
+        )
+    };
+    let tasks = [place(None), place(Some(idle.clone())), place(Some(ignored))];
+    let placed = batchplan::place(&device, &worlds, &tasks, &o).unwrap();
+    let plans: Vec<&TaskPlan> = placed
+        .outcomes
+        .iter()
+        .map(|outcome| &outcome.as_ref().unwrap()[0])
+        .collect();
+    let n = robot.dof();
+    let other_arm = |q: &[f32]| -> Vec<f32> { others.iter().map(|&j| q[j]).collect() };
+    let rows =
+        |t: &Trajectory| -> Vec<Vec<f32>> { t.control_points.chunks(n).map(other_arm).collect() };
+    // The straight moves' splines interpolate a joint that waits to within rounding.
+    let at = |r: &[f32], q: &[f32]| {
+        r.iter()
+            .zip(other_arm(q))
+            .all(|(a, b)| (a - b).abs() < 1e-5)
+    };
+    let (waiting, turned) = (plans[0], plans[1]);
+    for t in [&waiting.transit, &waiting.approach, &waiting.depart] {
+        assert!(rows(t).iter().all(|r| at(r, &start)));
+    }
+    let transit = rows(&turned.transit);
+    assert!(at(&transit[0], &start));
+    assert!(at(transit.last().unwrap(), &idle));
+    for t in [&turned.approach, &turned.depart] {
+        assert!(rows(t).iter().all(|r| at(r, &idle)));
+    }
+    let motions = |p: &TaskPlan| [p.transit.clone(), p.approach.clone(), p.depart.clone()];
+    assert_eq!(motions(plans[2]), motions(turned));
+    // A configuration of the wrong length, or with an idle joint past its limits or not a number,
+    // is refused; the left arm's joints may be anything.
+    let mut past = idle.clone();
+    past[others[1]] = robot.upper()[others[1]] + 0.1;
+    let mut nan = idle.clone();
+    nan[others[2]] = f32::NAN;
+    for bad in [vec![0.0; 3], past, nan] {
+        let result = batchplan::place(&device, &worlds, &[place(Some(bad))], &o);
+        assert!(matches!(result, Err(Error::Input(_))), "{result:?}");
+    }
+    let mut anything = idle.clone();
+    for &j in &mine {
+        anything[j] = f32::NAN;
+    }
+    let placed = batchplan::place(&device, &worlds, &[place(Some(anything))], &o).unwrap();
+    assert_eq!(
+        motions(&placed.outcomes[0].as_ref().unwrap()[0]),
+        motions(turned)
+    );
+}
+
+#[test]
 fn a_hand_without_fingers_touches_what_it_grasps_with_the_whole_hand() {
     // The UR5e's tool frames below its wrist have no spheres: the wrist is the hand, and holding
     // the tool frame a centimeter into a box puts the wrist's spheres into it.
