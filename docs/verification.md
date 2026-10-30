@@ -2,7 +2,7 @@
 
 What the test suite pins down, so you know what to rely on. Every new test was first shown to fail with the bug it guards against planted in the code ("planting ... fails a test" below).
 
-`BATCHPLAN_REQUIRE_GPU=1 cargo test --release` runs 154 tests, including the code in these guides, which compiles as doctests. `--features lerobot` adds 6 export tests and the README's and training-data guide's code (166 in all), and `--features usd` adds 7 OpenUSD tests. Without default features (CPU only), 145 tests run. All configurations pass on a Ryzen AI Max+ 395 with a Radeon 8060S (Vulkan) and on an M4 Pro (Metal); CI runs them on Linux with the kernels on Mesa's llvmpipe. An earlier version of the suite (14 tests) also passed on an NVIDIA T4 (Vulkan).
+`BATCHPLAN_REQUIRE_GPU=1 cargo test --release` runs every test, including the code in these guides, which compiles as doctests. `--features lerobot` adds the export tests and the README's and training-data guide's code, `--features usd` the OpenUSD tests, and `--no-default-features` runs the CPU-only build's. All configurations pass on a Ryzen AI Max+ 395 with a Radeon 8060S (Vulkan) and on an M4 Pro (Metal); CI runs them on Linux with the kernels on Mesa's llvmpipe. An earlier version of the suite (14 tests) also passed on an NVIDIA T4 (Vulkan).
 - **FK:** URDF forward kinematics matches Franka's published DH parameters to 1e-5.
 - **Collision gradients:** analytic gradients match finite differences.
 - **Trajectory optimization:**
