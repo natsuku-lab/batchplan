@@ -283,7 +283,7 @@ A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster 
 | | |
 |---|---|
 | [Contributing](CONTRIBUTING.md) | Building and testing, the style guide the code follows, and what a change needs. |
-| [How it works](docs/architecture.md) | How the code fits together, in diagrams and a page: devices, planning, searches, collision, the GPU, tasks, timing and training data. |
+| [How it works](docs/architecture.md) | How the code fits together: a map of the modules, devices, planning, searches, collision, the GPU, tool paths, joins and tasks, timing and training data. |
 | [Verification](docs/verification.md) | Running the tests, and what each one pins down. |
 | [CLAUDE.md](CLAUDE.md) | The design rules, invariants and working rules, for people and coding agents. |
 

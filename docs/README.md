@@ -19,6 +19,6 @@ The [README](../README.md) is the front door: what batchplan is, how to install 
 | | |
 |---|---|
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | Building and testing, the style guide the code follows, and what a change needs. |
-| [`architecture.md`](architecture.md) | How the code fits together, in diagrams: the modules, the design rules, planning a path, searches, collision, the GPU, tasks, timing and training data. |
+| [`architecture.md`](architecture.md) | How the code fits together: a map of the modules, the principles they follow, planning a path, searches, collision, the GPU, tool paths, joins and tasks, timing and training data. |
 | [`verification.md`](verification.md) | Running the tests, and what each test pins down. |
 | [`../CLAUDE.md`](../CLAUDE.md) | The design rules, invariants and working rules, for people and coding agents alike. |
