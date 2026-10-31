@@ -26,7 +26,7 @@
 
 Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-lab/batchplan-ros), or to generate [LeRobot training datasets](docs/training-data.md).
 
-- **Plan:** batched IK; RRT-Connect, shortcutting and smoothing on SIMD collision checks; the hand moved in straight lines through poses; picking up and setting down objects in one call; smooth B-spline paths, optionally optimized with L-BFGS; time-optimal timing within velocity, acceleration and jerk limits, and the hand's speed if capped; replanning from a moving state; and controlled stops along the path.
+- **Plan:** batched IK; RRT-Connect, shortcutting and smoothing on SIMD collision checks; the hand moved in straight lines through poses; picking up and setting down objects in one call; consecutive motions joined without stopping; smooth B-spline paths, optionally optimized with L-BFGS; time-optimal timing within velocity, acceleration and jerk limits, and the hand's speed if capped; replanning from a moving state; and controlled stops along the path.
 - **Robots:** load from URDF, MJCF or OpenUSD, including mimic joints, closed loops, continuous joints and ball or floating joints, or assemble several, such as two arms. Collision spheres are fitted automatically. IK takes a target for each hand at once, and plans can hold one arm still while another moves.
 - **Worlds:** boxes, spheres, cylinders, capsules and signed distance grids, built from meshes, point clouds, depth images or frames fused over time, and the links allowed to touch them, as a hand touches what it grasps.
 - **Data:** reaches with recoveries from mistakes, pick-and-place episodes and handovers between two arms, with grippers and task strings, plus states perturbed from them to start reinforcement learning from. They export as LeRobot v3.0 datasets (arm by arm, as ALOHA's) or NumPy arrays; `scripts/replay_mujoco.py` replays them in MuJoCo and adds camera videos.
@@ -210,7 +210,7 @@ From here, the [guides](#where-to-find-things) go further: planning around [what
 | | |
 |---|---|
 | [API](docs/api.md) | Every type and function, by task, with the guide for each. |
-| [Planning](docs/planning.md) | IK, searching and smoothing paths, keeping clear of obstacles, optional trajectory optimization, goals a turn away, moving the hand in straight lines, picking up and setting down, timing, replanning mid-motion, and the options worth knowing. |
+| [Planning](docs/planning.md) | IK, searching and smoothing paths, keeping clear of obstacles, optional trajectory optimization, goals a turn away, moving the hand in straight lines, picking up and setting down, joining motions, timing, replanning mid-motion, and the options worth knowing. |
 | [Robots](docs/robots.md) | URDF, MJCF and OpenUSD; joint types, mimic joints and closed loops; several arms as one robot; collision spheres; holding objects; checking against meshes. |
 | [Worlds and perception](docs/perception.md) | Obstacles, allowed contacts, scenes, distance grids, depth images, masking the robot, and fused occupancy maps. |
 | [Training data](docs/training-data.md) | Reaches with recoveries, pick-and-place, handovers between two arms, reset states, and exporting to NumPy or LeRobot. |
@@ -311,7 +311,7 @@ A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster 
 
 - **Spheres.** Planning sees the robot as spheres. `MeshModel` checks finished plans against its meshes on the CPU, as a filter.
 - **Joints.** Each closed loop must have exactly one actuated joint. Ball and floating joints are expanded into Euler angles, which lose a direction of motion where the middle angle reaches ±90°.
-- **Timing.** Trajectories end at rest. Time-optimal timing respects jerk limits but does not minimize jerk.
+- **Timing.** Every trajectory ends at rest: `join` runs a sequence of motions without stopping, but a running motion is not extended. Time-optimal timing keeps jerk limits by smoothing its profile, lowering its speed caps where the smoothed map overshoots and stretching what remains, which costs most of what a wide blend through a sharp turn would gain; it does not minimize jerk.
 - **Small batches on a GPU.** A GPU call costs about 10 ms however small the batch, so below a few hundred problems per call the CPU is faster ([Batches and the GPU](#batches-and-the-gpu)). Planning itself runs on CPU threads on either device.
 - **Generated pick-and-place and handovers.** `datagen`'s episodes grasp upright boxes from above and have no recoveries; `pick` and `place` themselves take other shapes and grasps. Camera videos come from replaying the episodes in MuJoCo, kinematically: no physics checks the grasps.
 - **Maturity.** batchplan is before 1.0, and its interface may change between minor versions. It is tested on AMD (Vulkan) and Apple (Metal) GPUs; on NVIDIA, only earlier versions ran (on a T4).

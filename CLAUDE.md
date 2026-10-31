@@ -30,6 +30,8 @@ cargo run --release --example handover -- 512 --resets data/resets   # a reset b
 cargo run --release --example datagen -- data/demo 512 20       # .npy dataset: <out_dir> [worlds] [fps]
 cargo run --release --example tool_paths                        # straight moves and pours: one at a time on one thread, and 64 at once
 cargo run --release --example tasks -- 64                       # picks and places on random tabletops: how many get through, where the rest stop, per batch size
+cargo run --release --example join [-- so101]                  # pick-like motions joined without stopping (one reBot, or the SO-101): how much sooner, per blend radius
+cargo run --release --example timing                            # timing's cost and the trajectories' durations, by kind of path, on one thread
 cargo run --release --example depth [-- --cpu]                  # a distance grid from a rendered depth image, then plans around it
 cargo run --release --example control_loop -- [seconds]         # a planner thread feeding a 50 Hz loop
 cargo run --release --features lerobot --example datagen -- --lerobot data/lerobot_demo 512 20   # --pick-place for pick-and-place, --file-mb N to split files sooner
@@ -87,6 +89,7 @@ How the pieces work is in [`docs/architecture.md`](docs/architecture.md) and eac
 - **SIMD dispatch happens once** per search or run of eight configurations, and everything between the dispatch and the vector operations is `#[inline(always)]` code without closures: a closure loses the dispatched level and runs about seven times slower.
 - **Results do not depend on the batch or the device.** Searches run on CPU threads on both devices with the same checks, and without a time budget nothing reads the clock.
 - **Continuous joints** are checked and clamped with `Robot::bounds` / `Robot::within`, never `lower` / `upper`.
+- **Timing does not depend on how finely a path is split.** A path split at its spans' middles (`spline::split`) is the same curve and must time within 3% of it (`a_split_path_takes_as_long`): `join` splits paths to space them alike, and tool paths are dense.
 
 ## Docs
 

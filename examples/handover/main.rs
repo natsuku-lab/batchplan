@@ -116,11 +116,17 @@ fn main() -> Result<()> {
         };
         let started = Instant::now();
         let states = datagen::reset_states(&device, &worlds, &demos, &options)?;
+        let took = started.elapsed().as_secs_f64();
+        // Where the block is in each state: in the hand whose gripper is closed, as `reset_states`
+        // tells (it skips samples where both hold it), or on the table.
+        let in_hand = |hand: usize| states.iter().filter(|s| s.gripper[hand] == 0.0).count();
+        let (left, right) = (in_hand(0), in_hand(1));
         println!(
-            "{} of {} perturbed states collision-free in {:.2} s",
+            "{} of {} perturbed states collision-free in {took:.2} s: {left} with the block in the \
+             left hand, {right} in the right and {} on the table",
             states.len(),
             demos.len() * options.per_trajectory,
-            started.elapsed().as_secs_f64()
+            states.len() - left - right,
         );
         let episodes = out.join("episodes");
         npy::export(&episodes, &robot, &worlds, &demos, &Default::default())?;

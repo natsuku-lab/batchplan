@@ -82,6 +82,7 @@ Guide: [planning.md](planning.md#planning-a-path).
 | `Pick::new(world, start, object, grasps)`, `Place::new(world, start, held, poses)` | Hand 0 (a pick) or the holding hand (a place), 10 cm straight moves in and away, no `support`; a place's `idle` takes the other arms elsewhere on its transit. |
 | `TaskOptions` | IK, planning and tool path options, the straight moves' speed cap (`tool_speed`, `f32::INFINITY` for none) and how much of each they must make (`min_fraction`). |
 | `grasps(&obstacle, &GraspOptions)`, `place_poses(&obstacle, pose, turns)`, `Held::attachment(&robot)` | Grasps of a box, ball, cylinder or capsule for a parallel gripper; an object's symmetric turns at one spot; a held object as an `AttachedObject`. |
+| `join(&device, &worlds, &[Sequence], &JoinOptions)` | Consecutive motions run without stopping between them ([guide](planning.md#joining-motions)): per sequence, one path for each stretch the robot moves without stopping, and each join's blend radius, `None` where it stops (`JoinResult`). `JoinOptions::blend` is the radius (5 cm). |
 
 ## Timing
 

@@ -221,6 +221,31 @@ fn main() -> Result<(), Error> {
 - **Why it failed.** When no candidate gets through, the task's `TaskFailure` holds each candidate's step and reason (`CandidateStop`: a pose out of reach, a collision or a jump, or no path), and says it in a sentence: "none of 24 candidates got through: 20 at the grasp or release (1 out of reach, 19 colliding), 4 moving away (4 colliding)". IK that finds nothing is solved once more without its push away from obstacles, which tells a pose out of reach from one that collides.
 - **Speed.** On the Ryzen AI Max+ 395 (32 threads), picking a box by its 24 grasps takes 6.5 ms on the CPU device, and 64 such picks at once 333 ms; on the Radeon 8060S, 15 ms and 114 ms. Setting a box down at either of its turns takes 2.4 ms on the CPU, and 16 at once 11.6 ms. [Benchmarks](benchmarks.md#picking-and-placing) has both machines and every batch size.
 
+## Joining motions
+
+`join(&device, &worlds, &sequences, &JoinOptions)` runs consecutive motions without stopping between them, as MoveIt's Pilz planner blends a motion sequence. A `Sequence` names its world and its paths in order, each rest-to-rest as `plan` and `follow` return them and starting where the one before ends.
+
+```rust,no_run
+# use batchplan::{Device, Error, JoinOptions, Sequence, Trajectory, World};
+# fn run(device: &Device, transit: Vec<f32>, approach: Vec<f32>) -> Result<(), Error> {
+let worlds = device.upload(&[World::default()])?;
+let sequence = Sequence { world: 0, paths: vec![transit, approach] };
+let joined = batchplan::join(device, &worlds, &[sequence], &JoinOptions::default())?;
+// One path per stretch the robot moves without stopping: here one, unless the join stopped.
+for path in &joined.paths[0] {
+    let trajectory = Trajectory::try_new(device.robot(), path, 1.0)?;
+    println!("{:.2} s", trajectory.duration());
+}
+# Ok(())
+# }
+```
+
+- **The blend.** Near a join, the joined path leaves the motions only while every hand is within `JoinOptions::blend` (5 cm) of where it is at the join, and is the motions themselves elsewhere: a tool path stays on its line outside the blend. Inside it, the path follows a curve that sets out and arrives along both motions without curving there, so jerk-limited timing can follow it at speed.
+- **Kept only where it is sooner.** Each join weighs three blends: the widest within the radius, one dropping half as many control points, and the narrowest. Those that make the stretch so far and the next motion finish sooner than with a stop between them are checked for collision, soonest first, and the first that is free is kept. A turn back, or a tight turn at speed, rarely gains, and keeps its stop. `JoinResult::blends` gives each join's radius, `None` where it stops. Joining never makes a sequence take longer.
+- **The result.** Per sequence, one path for each stretch the robot moves without stopping, to time with `Trajectory::try_new`. A stretch of one motion is that motion as given.
+- **What it gains.** On pick-like sequences, a transit into a straight move in and a straight move out into the next transit, the default radius finished 4.9% sooner on average on a reBot B601 (14% at most) and 7.5% on an SO-101 (18%), and joining 60 of them took 16 ms on 32 threads ([Benchmarks](benchmarks.md#joining-motions)). Motions that carry on in about the same direction gain more; a sharp turn needs most of a stop's braking anyway.
+- **Limits.** Each stretch has one timing, so a hand speed cap (`Trajectory::with_hand_speed`) caps all of it, and `pick` and `place` still stop between their steps. Each join times the stretch so far, so joining a long sequence costs more per join than a short one.
+
 ## Executable trajectories
 
 `Trajectory::try_new(&robot, path, speed_scale)` keeps the path and adds a time map `s = σ(t)` (itself a uniform cubic B-spline), choosing the faster of two timings:

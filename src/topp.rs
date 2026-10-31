@@ -38,6 +38,15 @@ type Candidate = (f32, Vec<(f32, f32)>, usize);
 const STRETCH_MARGIN: f32 = 1.003;
 /// Rounds of lowering the caps where the smoothed map overshoots.
 const REFINEMENTS: usize = 3;
+/// Time-map span lengths tried, in multiples of the longest time a joint's jerk limit takes to
+/// change its acceleration by its acceleration limit.
+const SWING: [f64; 5] = [0.5, 0.7, 1.0, 1.4, 2.0];
+/// The stretch every map sized by the path must need before maps sized by the limits are tried,
+/// and before they also choose where the caps come down. Below the second they only compete to be
+/// the result; past it, the rounds lower different caps. Either way the result is sooner on
+/// average, but not for every path: candidates are compared at a quarter of the checking density.
+const SWUNG_AFTER: f32 = 1.1;
+const STEERED_AFTER: f32 = 1.3;
 
 /// How fast a hand moves along a path per unit of `s`, sampled densely, and the speeds it must
 /// keep under: meters and radians, per unit of `s` and per second. A hand's speed is its rate
@@ -294,6 +303,9 @@ pub(crate) fn time_map(
     // and the profile is solved again; whatever overshoot remains is taken out by stretching.
     let mut scale = vec![1.0f64; stages + 1];
     let mut best: Option<(f32, Vec<f32>)> = None;
+    let swing = (0..n)
+        .map(|j| f64::from(robot.max_acceleration()[j] / robot.max_jerk()[j]))
+        .fold(0.0, f64::max);
     let rounds = if start_speed.is_some() {
         2 * REFINEMENTS
     } else {
@@ -315,8 +327,27 @@ pub(crate) fn time_map(
         };
         // The candidate needing the least stretch: that stretch, its overshoots and its span count.
         let mut round: Option<Candidate> = None;
-        for per_span in [0.5, 1.0, 2.0] {
-            let m = ((spans as f64 * per_span) as usize).max(4);
+        // Map spans to try: half, one and two per path span; then, where all of those need
+        // stretching by more than `SWUNG_AFTER`, spans lasting from half to twice the time the
+        // jerk limit takes to change acceleration by its limit, coarser than any of them, steering
+        // the rounds only past `STEERED_AFTER`. A map much finer than that follows the profile's
+        // steps in s̈ too closely to keep jerk, so without them a path split into more spans would
+        // time slower.
+        let coarsest = ((spans as f64 * 0.5) as usize).max(4);
+        let mut counts: Vec<usize> = [0.5, 1.0, 2.0]
+            .map(|per_span| ((spans as f64 * per_span) as usize).max(4))
+            .into();
+        counts.dedup();
+        let swung: Vec<usize> = SWING
+            .map(|c| ((total / (c * swing)).ceil() as usize).max(4))
+            .into_iter()
+            .filter(|&m| m < coarsest)
+            .collect();
+        let (per_path, mut tried, mut stretched, mut steers) =
+            (counts.len(), 0, f32::INFINITY, true);
+        while tried < counts.len() {
+            let m = counts[tried];
+            tried += 1;
             let tau = total / m as f64;
             // Schoenberg's approximation of s(t): s at the control points' Greville points, the
             // first and last reflected so the map starts at 0 and ends at the path's end exactly.
@@ -355,8 +386,13 @@ pub(crate) fn time_map(
             {
                 best = Some((knot, points));
             }
-            if round.as_ref().is_none_or(|(r, ..)| stretch < *r) {
+            if steers && round.as_ref().is_none_or(|(r, ..)| stretch < *r) {
                 round = Some((stretch, overshoots, m));
+            }
+            stretched = stretched.min(stretch);
+            if tried == per_path && stretched > SWUNG_AFTER {
+                counts.extend(&swung);
+                steers = stretched > STEERED_AFTER;
             }
         }
         let (stretch, overshoots, m) = round?;
@@ -550,4 +586,63 @@ fn assess(
         }
     }
     (k, overshoots)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::device::Device;
+    use crate::robot::{CollisionModel, Robot, RobotOptions};
+    use crate::spline;
+    use crate::timing::Trajectory;
+    use crate::trajopt::{PlanOptions, PlanProblem};
+    use crate::world::World;
+
+    /// A path split into more spans is the same curve, so it takes about as long: the time map is
+    /// sized by the limits as well as by the path's spans.
+    #[test]
+    fn a_split_path_takes_as_long() {
+        let fingers = [
+            ("panda_finger_joint1".to_string(), 0.04),
+            ("panda_finger_joint2".to_string(), 0.04),
+        ];
+        let options = RobotOptions {
+            lock_joints: HashMap::from(fingers),
+            collision_model: Some(
+                CollisionModel::load("assets/franka/panda_collision.json").unwrap(),
+            ),
+            ..Default::default()
+        };
+        let robot = Robot::load("assets/franka/franka_panda.urdf", &options).unwrap();
+        let n = robot.dof();
+        let device = Device::cpu(&robot).unwrap();
+        let worlds = device.upload(&[World::default()]).unwrap();
+        let goals = [
+            [0.6, -0.8, 0.2, -2.2, 0.1, 1.7, 0.5],
+            [-0.5, -0.5, -0.3, -1.8, 0.4, 1.9, 1.2],
+            [0.2, -1.0, 0.5, -2.6, -0.3, 1.4, 0.3],
+        ];
+        let problems: Vec<PlanProblem> = goals
+            .iter()
+            .map(|goal| PlanProblem::new(0, robot.default_q().to_vec(), goal.to_vec()))
+            .collect();
+        let plans = crate::plan(&device, &worlds, &problems, &PlanOptions::default()).unwrap();
+        assert_eq!(plans.solved().count(), goals.len(), "every motion plans");
+        for s in plans.solved() {
+            let whole = Trajectory::try_new(&robot, s.solution, 1.0)
+                .unwrap()
+                .duration();
+            let mut path = s.solution.to_vec();
+            for splits in 1..=2 {
+                path = spline::split(&path, n);
+                let split = Trajectory::try_new(&robot, &path, 1.0).unwrap().duration();
+                assert!(
+                    split < 1.03 * whole,
+                    "motion {}, split {splits} times: {split} s, {whole} s whole",
+                    s.index
+                );
+            }
+        }
+    }
 }

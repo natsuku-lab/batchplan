@@ -373,6 +373,28 @@ Against the version before the audit that pinned the spline to the joint limits,
 
 The pick that fails has every grasp blocked by clutter or out of reach. A pick's time is mostly IK at the grasps (24 problems of 32 seeds each), which the GPU speeds up from 16 tasks on. A place solves IK for the robot alone in one batch: where the hand lets go fixes where the object is, so each task's solutions are then checked holding its object, on the CPU's lanes. Holding each object in its own IK call took 198 ms for 16 places on the M4 Pro's GPU, against 25 ms at 2c98826. Each held object's candidates are a batch of their own at every step, and the batches run in parallel: run one after another, 16 places took 15.9 ms on the Ryzen and 21.5 ms on the Radeon, in alternating runs with the same plans.
 
+## Joining motions
+
+`examples/join.rs` [joins](planning.md#joining-motions) pick-like motions on one arm in free space: a transit planned from home or the last pre-grasp to a random pre-grasp configuration, then the hand's straight move in along its z (5 cm on the reBot, 3 cm on the SO-101); or the straight move back out, then the transit to the next pre-grasp. Each sequence is timed with its motions one after another, and joined; the Ryzen AI Max+ 395, 32 threads, the ROS stack up.
+
+| Blend radius | reBot B601-DM, 60 sequences: joined | Sooner, mean (most) | SO-101, 34 sequences: joined | Sooner, mean (most) |
+|---|---|---|---|---|
+| 2 cm | 20 | 1.1% (9.5%) | 20 | 4.5% (15.4%) |
+| 5 cm (the default) | 47 | 4.9% (14.1%) | 33 | 7.5% (18.4%) |
+| 10 cm | 40 | 4.7% (20.5%) | 30 | 6.4% (17.9%) |
+
+No sequence finished later than its motions one after another. Joining a batch took 15–19 ms for the reBot's 60 and 7–10 ms for the SO-101's 34. The joins that keep their stops turn back on themselves or turn tightly at speed, where a blend is no sooner. Wide blends through sharp turns lose to the timing: TOPP-RA's profile through them is sooner than stopping, but keeping jerk within its limit, by smoothing the profile, lowering its caps where the smoothed map overshoots and stretching what remains, gives the gain back, so such corners keep narrow blends.
+
+`join` splits paths so their control points are spaced alike, and timing used to slow finely split paths: in `a_split_path_takes_as_long`'s three planned Panda paths, split twice, by 21–41%. Where every time map sized by the path needs more than 10% stretch, timing now also tries maps whose spans last about as long as the jerk limit takes to swing acceleration, and past 30% lets them choose where the caps come down; those paths now time within 3% of the whole. Against the previous commit, on one Ryzen thread (`examples/timing.rs`, three alternating runs):
+
+| | Paths | Duration | Timing each |
+|---|---|---|---|
+| Planned from rest | 438 | the same, 2.323 s on average | the same, about 350 µs |
+| Replanned while moving | 61 | the same | the same, about 745 µs |
+| The hand's straight moves | 121 | 1.058 s, against 1.080 (2.1% sooner) | 250 µs, against 220 (14% more) |
+
+Some straight moves finish later than before, while more finish sooner. In the [handovers](#bimanual-handovers), 32 of the 510 episodes changed length on the Ryzen's CPU device: 14 longer, by at most 2 frames, and 18 shorter, 9 frames shorter in all (`--resets` writes `episodes/length.npy` at both commits). In four alternating runs, with the machine's load at 5–13, the change ran 420 against 418 episodes/s on the Radeon and 369 against 354 on the Ryzen, the same 510 of 512 with a 12.8 s median episode.
+
 ## Bimanual handovers
 
 `examples/handover/` generates the [handover episodes](training-data.md#handovers) for two reBot B601-DM arms 44 cm apart at a table. In each task one arm picks up a block lying in front of it and hands it over between the arms, and the other arm sets it down in front of itself. The blocks are 24–28 cm long, in four sizes; the block, meeting and place poses vary in position and yaw, and 0–2 small boxes stand elsewhere on the table. Three tables in four are divided down the middle, a quarter each by a low wall (6–8 cm) that the block is lifted over, a screen 16–18 cm tall with an opening 8.5–10.5 cm wide, and a row of posts as tall. The block cannot be lifted over the tall ones, so the hands meet at one end of their reach and the block lies, and is set down, toward the other: it is carried along the divider to the gap and back. Planned without its divider, the block alone would pass through it on 267 of the 372 divided tables (79 of 120 walls, 82 of 118 screens, 106 of 134 rows of posts). Half the tasks go left to right. Every step is batched over all the tasks: the giver's `pick`, IK for both hands at the meeting pose, one plan moving both arms there, the straight moves of the handover, and the taker's `place`, whose transit moves both arms (the giver going home); then the episodes' sampling.
@@ -387,7 +409,7 @@ The 510 episodes hold 112 minutes of motion at 30 fps, 12.8 s each at the median
 
 Searches draw up to 30,000 samples, against `plan`'s default 10,000: with the block clear of the other hand, the hardest moves of both arms at once, past a divider, need more, and five tasks were lost without them. IK where the taker lets go keeps 4 of the 32 seeds, since it starts from where the carry starts: 32 make the run 0.18 s slower on the Radeon and 0.21 s on the Ryzen. The blocks come in four sizes because each size needs its own carried spheres and so plans in batches of its own: at 0.2.0, sizes drawn from a continuous range took 3.65–3.67 s on the M4 Pro's GPU, against 1.52 s.
 
-Rendering the episodes' camera videos in MuJoCo (`scripts/replay_mujoco.py`, three 640×480 cameras) takes about 15 ms a frame on the M4 Pro: 89 s for 16 episodes (6,073 frames) that take 0.18 s to generate.
+Rendering the episodes' camera videos in MuJoCo (`scripts/replay_mujoco.py`, three 640×480 cameras) takes about 14 ms a frame on the M4 Pro: 85 s for 16 episodes (6,075 frames) that take 0.17 s to generate.
 
 ## Spheres and meshes
 
@@ -490,6 +512,10 @@ cargo run --release --example bench -- 512
 # Tool paths, and picks and places on random tabletops
 cargo run --release --example tool_paths
 cargo run --release --example tasks -- 64
+
+# Joining pick-like motions on one reBot (after scripts/fetch_rebot.sh), or the SO-101; timing by kind of path
+cargo run --release --example join [-- so101]
+cargo run --release --example timing
 
 # Two reBot arms handing blocks over (downloads the arm at a pinned commit, with checksums), and their camera videos
 scripts/fetch_rebot.sh

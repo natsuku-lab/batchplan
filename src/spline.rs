@@ -80,16 +80,39 @@ pub(crate) fn checked(
     out: &mut Vec<f32>,
     starts: &mut Vec<usize>,
 ) {
-    let spans = cp.len() / dof - 3;
+    out.clear();
+    starts.clear();
+    checked_spans(
+        cp,
+        dof,
+        0..cp.len() / dof - 3,
+        per_span,
+        spacing,
+        out,
+        starts,
+    );
+    starts.push(out.len() / dof);
+    out.extend_from_slice(&cp[cp.len() - dof..]);
+}
+
+/// Spans `spans` of the spline sampled as [`checked`] samples them, appended to `out`, with each
+/// span's first sample's index appended to `starts`. The end of the last is left out.
+pub(crate) fn checked_spans(
+    cp: &[f32],
+    dof: usize,
+    spans: std::ops::Range<usize>,
+    per_span: usize,
+    spacing: f32,
+    out: &mut Vec<f32>,
+    starts: &mut Vec<usize>,
+) {
     let gap = |a: usize, b: usize| {
         (0..dof)
             .map(|j| (cp[b * dof + j] - cp[a * dof + j]).powi(2))
             .sum::<f32>()
             .sqrt()
     };
-    out.clear();
-    starts.clear();
-    for span in 0..spans {
+    for span in spans {
         // A span moves at most three times its Bezier control polygon's longest edge per unit of
         // its parameter: |P2 - P0| / 2, |P2 - P1| or |P3 - P1| / 2.
         let speed = (0.5 * gap(span, span + 2))
@@ -109,8 +132,24 @@ pub(crate) fn checked(
             );
         }
     }
-    starts.push(out.len() / dof);
-    out.extend_from_slice(&cp[cp.len() - dof..]);
+}
+
+/// The same spline on twice as many spans, each span split at its middle (Lane and Riesenfeld's
+/// subdivision): `[points, dof]` control points become `2 * points - 3`, the curve unchanged.
+/// Equal neighbours stay bit-exact, so a path's ends stay at rest.
+pub(crate) fn split(cp: &[f32], dof: usize) -> Vec<f32> {
+    let points = cp.len() / dof;
+    let p = |i: usize, j: usize| cp[i * dof + j];
+    let mut out = Vec::with_capacity((2 * points - 3) * dof);
+    for i in 0..points - 1 {
+        if i > 0 {
+            out.extend(
+                (0..dof).map(|j| p(i, j) + (p(i - 1, j) - 2.0 * p(i, j) + p(i + 1, j)) / 8.0),
+            );
+        }
+        out.extend((0..dof).map(|j| p(i, j) + (p(i + 1, j) - p(i, j)) / 2.0));
+    }
+    out
 }
 
 /// The point a fraction `phase` in [0, 1] of the way along the spline.
@@ -124,6 +163,37 @@ pub(crate) fn at_phase(cp: &[f32], dof: usize, phase: f32, out: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Splitting keeps the curve: span `k` of the split spline at `u` is the original's span
+    /// `k / 2` at `(k % 2 + u) / 2`, and the ends stay at rest, bit-exact.
+    #[test]
+    fn splitting_keeps_the_curve() {
+        let dof = 3;
+        let mut cp: Vec<f32> = [0.2, -0.4, 1.0].repeat(3);
+        cp.extend([0.5, 0.1, 0.8, 1.4, 0.3, -0.2, 0.9, 1.2, 0.4]);
+        cp.extend([1.5, -0.6, 0.7].repeat(3));
+        let split = split(&cp, dof);
+        assert_eq!(split.len() / dof, 2 * cp.len() / dof - 3);
+        assert_eq!(&split[..3 * dof], &cp[..3 * dof], "starts at rest");
+        assert_eq!(
+            &split[split.len() - 3 * dof..],
+            &cp[cp.len() - 3 * dof..],
+            "ends at rest"
+        );
+        let (mut a, mut b) = ([0.0; 3], [0.0; 3]);
+        for k in 0..split.len() / dof - 3 {
+            for u in [0.0, 0.25, 0.5, 0.75] {
+                blend(&split, dof, k, basis(u), &mut a);
+                blend(&cp, dof, k / 2, basis(((k % 2) as f32 + u) / 2.0), &mut b);
+                for j in 0..dof {
+                    assert!(
+                        (a[j] - b[j]).abs() < 1e-6,
+                        "span {k} at {u}: {a:?} vs {b:?}"
+                    );
+                }
+            }
+        }
+    }
 
     /// Checked samples lie no farther apart than the spacing where spans are long, keep `per_span`
     /// where they are short, start each span where `starts` says, and end at the spline's end.

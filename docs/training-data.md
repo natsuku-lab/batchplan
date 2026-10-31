@@ -116,7 +116,7 @@ Reinforcement learning that starts episodes from many states along a task, as [O
 2. **The carried object** moves with the hand whose gripper is closed on it, in the grip that hand had when it last held the object alone. Samples where both hands hold it are skipped, since noise would pull the hands apart.
 3. **A check** on the device keeps the collision-free states. An object no hand holds is an obstacle where it is; a held one is attached to its hand. The check is conservative: fingers about to close around an object collide with it, and a held object must clear the table, so states right at a grasp, a handover or a set-down are rare.
 
-Each state is a one-sample `Demonstration` whose origin is a recovery from its sample, with `parent` indexing `demos`, so `npy::export` writes states as it writes episodes (`positions.npy` is `[states, 1, dof]`). The episodes' own samples are valid states too; `cargo run --release --example handover -- 512 --resets <dir>` writes both, to `episodes/` and `resets/`. From 510 handovers, 8 states each at the default 0.15 rad of noise, 2,015 of 4,080 are collision-free on the CPU device: 596 with the block in the left hand, 602 in the right and 817 on the table (2,020 on the GPU, whose clearances differ from the CPU's in the last bits at the margin). The check takes 0.04 s on the Ryzen's CPU device and 0.10 s on the Radeon.
+Each state is a one-sample `Demonstration` whose origin is a recovery from its sample, with `parent` indexing `demos`, so `npy::export` writes states as it writes episodes (`positions.npy` is `[states, 1, dof]`). The episodes' own samples are valid states too; `cargo run --release --example handover -- 512 --resets <dir>` writes both, to `episodes/` and `resets/`. From 510 handovers, 8 states each at the default 0.15 rad of noise, 2,015 of 4,080 are collision-free on the Ryzen's CPU device: 595 with the block in the left hand, 603 in the right and 817 on the table (2,020 on the Radeon, whose clearances differ from the CPU's in the last bits at the margin). The check takes 0.04 s on the Ryzen's CPU device and 0.07 s on the Radeon.
 
 ## Demonstrations
 
@@ -148,7 +148,7 @@ What batchplan cannot know comes from `meta/replay.json`, which the exporting pr
 }
 ```
 
-Visual meshes are simplified to 2,000 triangles each as they load. The reBot's CAD exports carry 860,000, which made rendering three times slower with no visible difference at 640×480. On an M4 Pro, three 640×480 cameras render at about 15 ms a frame: 16 handover episodes (6,073 frames) in 89 s.
+Visual meshes are simplified to 2,000 triangles each as they load. The reBot's CAD exports carry 860,000, which made rendering three times slower with no visible difference at 640×480. On an M4 Pro, three 640×480 cameras render at about 14 ms a frame: 16 handover episodes (6,075 frames) in 85 s.
 
 ## Exporting
 
