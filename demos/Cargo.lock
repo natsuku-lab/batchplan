@@ -477,6 +477,7 @@ dependencies = [
  "batchplan",
  "rayon",
  "rerun",
+ "serde_json",
  "urdf-rs",
 ]
 

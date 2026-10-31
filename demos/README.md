@@ -1,6 +1,8 @@
 # Demos
 
-batchplan planning live in [Rerun](https://rerun.io). This is a crate of its own, so the library never depends on the viewer.
+batchplan planning live in [Rerun](https://rerun.io), and the GIFs of the README and below. This is a crate of its own, so the library never depends on a viewer.
+
+## In Rerun
 
 | Demo | What it shows |
 |---|---|
@@ -23,3 +25,24 @@ PATH="$PWD/.venv/bin:$PATH" cargo run --release --bin perception
 PATH="$PWD/.venv/bin:$PATH" cargo run --release --bin replan
 cargo run --release --bin handover -- 16 --save handover.rrd      # a recording instead; open it with `rerun handover.rrd`
 ```
+
+## GIFs
+
+### Handovers
+
+<img width="1135" height="654" alt="Two reBot arms at each of many tables handing a block over, around posts, screens and low walls" src="gifs/handover.gif" />
+
+Two reBot B601 arms at each of 20 tables hand a block over, from the episodes of [`examples/handover/`](../examples/handover/): the giver picks it up (`batchplan::pick`), both arms move to meet at once, and the taker sets it down (`batchplan::place`) while the giver goes home (`Place::idle`).
+
+### Picking up and setting down
+
+<img width="1135" height="654" alt="A Panda at each of many tables carrying a box over or around a wall, posts, an arch or a cluster of boxes" src="gifs/pick_place.gif" />
+
+A Panda at each of 20 tables picks a box up and sets it down on the other side of a wall, a row of posts, an arch or a cluster of boxes, so the carry has to go over or around it: the scenes of the `pick` demo, planned with `datagen::pick_and_place`. In front, the box goes over a 37 cm wall.
+
+### Moving the hand in straight lines
+
+<img width="1135" height="654" alt="A UR5e at each of many tables drawing a triangle, square, hexagon or star with a pen" src="gifs/tool_paths.gif" />
+
+A UR5e at each of 20 tables draws a shape with a pen, in straight lines through its corners (`batchplan::follow`), every arm in one call: `cargo run --release --bin drawing -- <out_dir>` plans them and writes the motions. The pen may touch the table (`World::touch`; without it every pen stops just above it), and goes no faster than 15 cm/s (`Trajectory::with_hand_speed`).
+
