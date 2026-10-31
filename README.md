@@ -4,14 +4,15 @@
   <em>Batched motion planning for robotics.</em>
 </p>
 
-<img width="1135" height="654" alt="Two reBot arms at each of many tables, seen from the front, handing a block over and around posts, screens and low walls, every handover planned in one batch" src="https://raw.githubusercontent.com/natsuku-lab/batchplan/main/docs/handover.gif" />
+<img width="1135" height="654" alt="Two reBot arms at each of many tables, seen from the front, handing a block over and around posts, screens and low walls, every handover planned in one batch" src="https://raw.githubusercontent.com/natsuku-lab/batchplan/main/demos/gifs/handover.gif" />
 
 <p align="center">
   <a href="#quick-start"><b>Quick start</b></a> ·
   <a href="docs/README.md">Docs</a> ·
   <a href="docs/api.md">API</a> ·
   <a href="docs/benchmarks.md">Benchmarks</a> ·
-  <a href="examples/">Examples</a> ·
+  <a href="#examples">Examples</a> ·
+  <a href="demos/">Demos</a> ·
   <a href="docs/architecture.md">How it works</a>
 </p>
 
@@ -25,11 +26,18 @@
 
 Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-lab/batchplan-ros), or to generate [LeRobot training datasets](docs/training-data.md).
 
-- **Plan:** batched IK; RRT-Connect, shortcutting and smoothing on SIMD collision checks; the hand moved in straight lines through poses; picking up and setting down objects in one call; smooth B-spline paths, optionally optimized with L-BFGS; time-optimal timing within velocity, acceleration and jerk limits, and the hand's speed if capped; replanning from a moving state; and controlled stops along the path.
-- **Robots:** load from URDF, MJCF or OpenUSD, including mimic joints, closed loops, continuous joints and ball or floating joints, or assemble several, such as two arms. Collision spheres are fitted automatically. IK takes a target for each hand at once, and plans can hold one arm still while another moves.
-- **Worlds:** boxes, spheres, cylinders, capsules and signed distance grids, built from meshes, point clouds, depth images or frames fused over time, and the links allowed to touch them, as a hand touches what it grasps.
-- **Data:** reaches with recoveries from mistakes, pick-and-place episodes and handovers between two arms, with grippers and task strings, plus states perturbed from them to start reinforcement learning from. They export as LeRobot v3.0 datasets (arm by arm, as ALOHA's) or NumPy arrays; `scripts/replay_mujoco.py` replays them in MuJoCo and adds camera videos.
-- **Embeddable:** CPU-only builds, threads you own, time budgets, allocation-free sampling and typed errors, for use inside a robot's control process.
+## What it does
+
+| | |
+|---|---|
+| [Planning](docs/planning.md) | [Batched IK](docs/planning.md#inverse-kinematics), [paths](docs/planning.md#planning-a-path) by RRT-Connect, shortcutting and smoothing on SIMD collision checks, optionally [optimized](docs/planning.md#trajectory-optimization-optional). The hand [moved in straight lines](docs/planning.md#moving-the-hand-along-a-path), and objects [picked up and set down](docs/planning.md#picking-up-and-setting-down) in one call. [Time-optimal trajectories](docs/planning.md#executable-trajectories) within velocity, acceleration and jerk limits and the hand's speed, [replanning from a moving state](docs/planning.md#starting-from-a-moving-state), and controlled stops. |
+| [Robots](docs/robots.md) | [URDF, MJCF and OpenUSD](docs/robots.md#file-formats), with [mimic joints, closed loops, continuous, ball and floating joints](docs/robots.md#kinematics). [Several arms](docs/robots.md#several-arms-several-hands) as one robot, a target for each hand. [Collision spheres](docs/robots.md#collision-spheres) fitted automatically, [held objects](docs/robots.md#holding-objects), and plans [checked against the meshes](docs/robots.md#checking-against-meshes). |
+| [Worlds and perception](docs/perception.md) | [Boxes, spheres, cylinders and capsules](docs/perception.md#obstacles), [distance grids](docs/perception.md#distance-grids) from meshes, point clouds, [depth images](docs/perception.md#depth-images) or [frames fused over time](docs/perception.md#fused-maps), and the [links allowed to touch them](docs/perception.md#allowed-contacts), as a hand touches what it grasps. |
+| [Training data](docs/training-data.md) | [Reaches with recoveries](docs/training-data.md#reaches-and-recoveries), [pick-and-place](docs/training-data.md#pick-and-place), [handovers between two arms](docs/training-data.md#handovers) and [reset states](docs/training-data.md#reset-states) for reinforcement learning, exported as [LeRobot v3.0 datasets or NumPy arrays](docs/training-data.md#exporting) and [replayed in MuJoCo](docs/training-data.md#camera-images) for camera videos. |
+| [Devices](docs/devices.md) | The CPU, or [any GPU wgpu supports](docs/devices.md#which-gpus). CPU-only builds, threads you own, time budgets and typed errors, [inside a robot's control process](docs/devices.md#embedding-in-a-control-process). |
+| [API](docs/api.md) | Every type and function, by task, with the guide for each. |
+| [Benchmarks](docs/benchmarks.md) | Against VAMP, OMPL, RoboPlan and MoveIt 2 on one robot model, GPU against CPU, spheres against meshes, and how to reproduce them. |
+| [Demos](demos/) | Handovers, pick-and-place, depth cameras and replanning live in [Rerun](https://rerun.io), and GIFs of tasks and tool paths. |
 
 ## Install
 
@@ -47,7 +55,7 @@ batchplan builds on stable Rust 1.90 or later (1.96 with `usd`), with no build f
 
 ## Quick start
 
-The paths below point at test robots in this repository's `assets/`; use your own robot's file instead.
+Each snippet below is a whole program. Its paths point at test robots in this repository's `assets/`, so to run one as it is, clone the repository, save the snippet as `examples/first.rs` and run `cargo run --release --example first`. In your own project, point it at your robot's file.
 
 ### Plan a batch of motions
 
@@ -64,7 +72,8 @@ fn main() -> Result<(), Error> {
         "assets/ur5e/ur_description/urdf/ur5e.urdf",
         &RobotOptions::default(),
     )?;
-    let device = Device::gpu(&robot).or_else(|_| Device::cpu(&robot))?;
+    // The CPU is fastest for a few problems; Device::gpu(&robot) pays off from a few hundred.
+    let device = Device::cpu(&robot)?;
 
     // Scenes are uploaded once. Problems name their scene by index.
     let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.02), Vec3::new(1.0, 1.0, 0.02));
@@ -100,7 +109,62 @@ fn main() -> Result<(), Error> {
 }
 ```
 
+### Pick up a box
+
+```rust,no_run
+use batchplan::glam::{Quat, Vec3};
+use batchplan::{
+    CollisionModel, Device, Error, GraspOptions, Obstacle, Pick, Pose, Robot, RobotOptions,
+    TaskOptions, World,
+};
+
+fn main() -> Result<(), Error> {
+    // A Panda with its fingers held open. IK targets `ee_link`, between the fingertips.
+    let options = RobotOptions {
+        ee_links: vec!["ee_link".into()],
+        lock_joints: [("panda_finger_joint1", 0.04), ("panda_finger_joint2", 0.04)]
+            .map(|(joint, open)| (joint.to_string(), open))
+            .into(),
+        collision_model: Some(CollisionModel::load("assets/franka/panda_collision.json")?),
+        ..Default::default()
+    };
+    let robot = Robot::load("assets/franka/franka_panda.urdf", &options)?;
+    let device = Device::cpu(&robot)?;
+
+    // A box on a table, in three scenes: on the left, ahead, on the right.
+    let table = Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02));
+    let block = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.03, 0.03));
+    let worlds: Vec<World> = [0.25, 0.0, -0.25]
+        .map(|y| block.placed(Pose::new(Vec3::new(0.45, y, 0.03), Quat::IDENTITY)))
+        .map(|placed| World::new(vec![table.clone(), placed]))
+        .into();
+    let worlds = device.upload(&worlds)?;
+
+    // Pick it up in every scene at once, by any grasp that fits the fingers, off the table.
+    let grasps = batchplan::grasps(&block, &GraspOptions::default())?;
+    let picks: Vec<Pick> = (0..3)
+        .map(|world| Pick {
+            support: vec![0],
+            ..Pick::new(world, robot.default_q(), 1, grasps.clone())
+        })
+        .collect();
+    let picked = batchplan::pick(&device, &worlds, &picks, &TaskOptions::default())?;
+    for (world, outcome) in picked.outcomes.iter().enumerate() {
+        match outcome {
+            // Every grasp that works, quickest first: move in, close the gripper, lift.
+            Ok(plans) => println!("scene {world}: picked up in {:.1} s", plans[0].duration()),
+            Err(why) => println!("scene {world}: {why}"),
+        }
+    }
+    Ok(())
+}
+```
+
+`batchplan::place` sets it down again, from where the pick ends ([Picking up and setting down](docs/planning.md#picking-up-and-setting-down)).
+
 ### Make a training dataset
+
+With `--features lerobot`:
 
 ```rust,no_run
 use batchplan::datagen::DemoOptions;
@@ -113,7 +177,7 @@ fn main() -> Result<(), Error> {
         "assets/ur5e/ur_description/urdf/ur5e.urdf",
         &RobotOptions::default(),
     )?;
-    let device = Device::gpu(&robot).or_else(|_| Device::cpu(&robot))?;
+    let device = Device::cpu(&robot)?;
     let worlds = device.upload(&[World::default()])?;
 
     // Reaches to 64 goals, plus recoveries from states perturbed along them.
@@ -129,8 +193,9 @@ fn main() -> Result<(), Error> {
         .map(|position| IkProblem::new(0, Pose::new(position, down)))
         .collect();
     let demos = datagen::demonstrations(&device, &worlds, &goals, &DemoOptions::default())?;
+    println!("{} demonstrations", demos.len());
 
-    // A LeRobot v3.0 dataset (cargo feature `lerobot`), ready for `lerobot-train`.
+    // A LeRobot v3.0 dataset, ready for `lerobot-train`.
     lerobot::export(
         "data/reaches",
         &robot,
@@ -141,46 +206,7 @@ fn main() -> Result<(), Error> {
 }
 ```
 
-### Plan around what a depth camera sees
-
-```rust,no_run
-use batchplan::glam::{Quat, Vec3};
-use batchplan::{
-    DepthImage, Device, Error, Intrinsics, Obstacle, Occlusion, Pose, Robot, SdfGrid, SdfOptions,
-    World, Worlds,
-};
-
-/// Turns one depth frame into a world to plan in, leaving the arm itself out.
-fn world_from_camera(
-    device: &Device,
-    robot: &Robot,
-    depth: &[f32],
-    q: &[f32],
-) -> Result<Worlds, Error> {
-    let image = DepthImage {
-        depth, // metres, row by row
-        width: 640,
-        intrinsics: Intrinsics {
-            fx: 525.0,
-            fy: 525.0,
-            cx: 319.5,
-            cy: 239.5,
-        },
-        // 1.5 m above the table, looking down (OpenCV axes: z forward, y down).
-        camera: Pose::new(
-            Vec3::new(0.5, 0.0, 1.5),
-            Quat::from_rotation_x(std::f32::consts::PI),
-        ),
-    };
-    let arm = image.robot_mask(robot, q, 0.04)?; // the arm is not an obstacle to itself
-    // What objects hide is solid; what only the arm hides is free, or it would wall the arm in.
-    let behind = Occlusion::OccupiedExceptRobotShadow;
-    let grid = SdfGrid::from_depth(device, &image, Some(&arm), behind, &SdfOptions::default())?;
-    device.upload(&[World::new(vec![Obstacle::from(grid)])])
-}
-```
-
-To fuse frames over time, use an `OccupancyMap` ([Worlds and perception](docs/perception.md)).
+From here, the [table above](#what-it-does) leads to each guide: planning around [what a depth camera sees](docs/perception.md#depth-images), moving the hand [in straight lines](docs/planning.md#moving-the-hand-along-a-path), [two arms](docs/robots.md#several-arms-several-hands) at once. The [examples](#examples) and [demos](demos/) run them on many scenes.
 
 ## How it compares
 
@@ -210,11 +236,16 @@ Every planner below plans on one robot model, VAMP's spherized Panda, and one in
 | MoveIt 2, TOTG | 2.5% | 49 ms | 1 | 1.07×² |
 | MoveIt 2, Ruckig | 2.5% | 52 ms | 1 | 1.03×² |
 
+<details>
+<summary>Reading these numbers</summary>
+
 Lengths and durations are relative to batchplan's, on the problems both solve validly. ² Over the 26 and 22 problems MoveIt 2 solves validly. 63% and 58% of its trajectories stay within 10% of the limits, and those take 14% and 15% longer than batchplan's.
 
 - 23 of the 262 problems start or end in collision, so no planner can pass 91.2%. batchplan solves all 3,585 of the other queries, and every path and trajectory it returns is valid.
 - Per query, batchplan takes 17% less time than VAMP on 16 cores, and the two tie on one core. With matched settings (edges checked as finely, batchplan without its clearance, VAMP stopped at 10,000 samples), VAMP's 16 workers return more valid paths per second (61,501 against 51,759), and RoboPlan solves 89.1% against batchplan's 88.4%. [All of it](docs/benchmarks.md#reading-the-results).
 - On cuRobo's own spheres, batchplan solved 98.9% of the box-only problems against cuRobo's 85.2% ([the earlier comparison](docs/benchmarks.md#the-earlier-comparison), with cuRobo on a T4 and batchplan on an M4 Pro).
+
+</details>
 
 ### Batches and the GPU
 
@@ -237,28 +268,14 @@ A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster 
 - **MoveIt 2**, for ROS 2: perception, controllers, grasping and the rest of a robot's stack around the planner.
 - **OMPL**, for its range of planners, such as asymptotically optimal and kinodynamic ones.
 
-## Where to find things
-
-### You want to use it
-
-| | |
-|---|---|
-| [API](docs/api.md) | Every type and function, by task, with the guide for each. |
-| [Planning](docs/planning.md) | IK, searching and smoothing paths, keeping clear of obstacles, optional trajectory optimization, goals a turn away, timing, replanning mid-motion, and the options worth knowing. |
-| [Robots](docs/robots.md) | URDF, MJCF and OpenUSD; joint types, mimic joints and closed loops; collision spheres; holding objects; checking against meshes. |
-| [Worlds and perception](docs/perception.md) | Obstacles, scenes, distance grids, depth images, masking the robot, and fused occupancy maps. |
-| [Training data](docs/training-data.md) | Reaches with recoveries, pick-and-place, and exporting to NumPy or LeRobot. |
-| [Devices](docs/devices.md) | GPU or CPU, which GPUs work, and running inside a robot's control process. |
-| [Benchmarks](docs/benchmarks.md) | Against VAMP, OMPL, RoboPlan and MoveIt 2 on one robot model, GPU against CPU, spheres against meshes, and how to reproduce them. |
-
-### You are working on it
+## Working on batchplan
 
 | | |
 |---|---|
 | [Contributing](CONTRIBUTING.md) | Building and testing, the style guide the code follows, and what a change needs. |
-| [How it works](docs/architecture.md) | The design rules, the CPU/GPU twin, collision, per-robot kernels, and how the optimizer runs on the device. |
+| [How it works](docs/architecture.md) | How the code fits together, in diagrams and a page: devices, planning, searches, collision, the GPU, tasks, timing and training data. |
 | [Verification](docs/verification.md) | Running the tests, and what each one pins down. |
-| [CLAUDE.md](CLAUDE.md) | Working rules and the architecture in full detail, for people and coding agents. |
+| [CLAUDE.md](CLAUDE.md) | The design rules, invariants and working rules, for people and coding agents. |
 
 ## Examples
 
@@ -268,15 +285,17 @@ A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster 
 | `cargo run --release --example bench -- 512` | IK and planning for 512 cluttered tabletop scenes, GPU against CPU. |
 | `cargo run --release --example datagen -- data/demo 512 20` | Reaches and recoveries in 512 scenes, as `.npy` arrays at 20 fps. |
 | `cargo run --release --features lerobot --example datagen -- --pick-place --lerobot data/pick 512 20` | Pick-and-place episodes as a LeRobot dataset. |
+| `cargo run --release --example tasks` | Picks and places on 64 random tabletops: how many get through, where the rest stop, and how long a call takes. |
+| `cargo run --release --example tool_paths` | Straight moves and pours of the Panda's hand, one at a time and 64 at once. |
 | `cargo run --release --example depth` | Builds a distance grid from a rendered depth image and plans around it. |
 | `cargo run --release --example control_loop -- 10` | A planner thread feeding a 50 Hz control loop. |
 | `scripts/fetch_benchmark.sh && cargo run --release --example benchmark` | The 2,600 MotionBenchMaker and MπNets problems, on every device. |
 
-[`demos/`](demos/) shows four of them live in [Rerun](https://rerun.io): two reBot arms handing blocks over, Panda pick-and-place around obstacles, planning around what depth cameras see, and replanning mid-motion.
+[`demos/`](demos/) shows them live in [Rerun](https://rerun.io): two reBot arms handing blocks over, Panda pick-and-place around obstacles, whole tasks picked out of clutter, planning around what depth cameras see, and replanning mid-motion. Its [GIFs](demos/README.md#gifs) show this page's handovers, Pandas carrying boxes over and around walls, posts and arches, and UR5e arms drawing shapes with a pen in straight lines.
 
 ### With ROS 2
 
-[batchplan-ros](https://github.com/natsuku-lab/batchplan-ros) is a ROS 2 Jazzy node that speaks MoveIt's messages without needing MoveIt: a `MoveGroup` action and an IK service, with the scene in each request. Several goals in one request are planned in one batched call, and the shortest path wins. It comes with a browser demo of a simulated Panda (`pixi run demo`, on Linux or macOS) and an optional MoveIt planner plugin, through which batchplan plans the stock Panda demo's requests in 4–5 ms, against OMPL's 14–15 ms.
+[batchplan-ros](https://github.com/natsuku-lab/batchplan-ros) is a ROS 2 node (Lyrical and Jazzy) that speaks MoveIt's messages without needing MoveIt: a `MoveGroup` action and an IK service, with the scene in each request. Several goals in one request are planned in one batched call, and the shortest path wins. It comes with a browser demo of a simulated Panda (`pixi run demo`, on Linux or macOS) and an optional MoveIt planner plugin, through which batchplan plans the stock Panda demo's requests in 4–5 ms, against OMPL's 14–15 ms.
 
 ## Limitations
 
@@ -284,8 +303,8 @@ A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster 
 - **Joints.** Each closed loop must have exactly one actuated joint. Ball and floating joints are expanded into Euler angles, which lose a direction of motion where the middle angle reaches ±90°.
 - **Timing.** Trajectories end at rest. Time-optimal timing respects jerk limits but does not minimize jerk.
 - **Small batches on a GPU.** A GPU call costs about 10 ms however small the batch, so below a few hundred problems per call the CPU is faster ([Batches and the GPU](#batches-and-the-gpu)). Planning itself runs on CPU threads on either device.
-- **Pick-and-place and handovers.** Episodes grasp upright boxes from above and have no recoveries. Camera videos come from replaying them in MuJoCo, kinematically: no physics checks the grasps.
-- **Maturity.** batchplan is at version 0.2, and its interface may change. It is tested on AMD (Vulkan) and Apple (Metal) GPUs; on NVIDIA, only earlier versions ran (on a T4).
+- **Generated pick-and-place and handovers.** `datagen`'s episodes grasp upright boxes from above and have no recoveries; `pick` and `place` themselves take other shapes and grasps. Camera videos come from replaying the episodes in MuJoCo, kinematically: no physics checks the grasps.
+- **Maturity.** batchplan is before 1.0, and its interface may change between minor versions. It is tested on AMD (Vulkan) and Apple (Metal) GPUs; on NVIDIA, only earlier versions ran (on a T4).
 
 ## License
 

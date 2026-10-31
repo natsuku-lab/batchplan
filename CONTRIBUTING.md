@@ -65,8 +65,8 @@ deep-module design, the style guide, tests that fail on the unfixed code, measur
 docs that match the code. It reports each defect with the input that shows it. Fix what it finds,
 or say in the pull request why a finding does not apply.
 
-[CLAUDE.md](CLAUDE.md) holds the architecture and the working rules in full, for people and coding
-agents alike.
+[CLAUDE.md](CLAUDE.md) holds the design rules, invariants and working rules, for people and coding
+agents alike; [architecture.md](docs/architecture.md) says how the code fits together.
 
 ## License
 
