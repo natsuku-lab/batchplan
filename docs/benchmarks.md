@@ -476,7 +476,7 @@ batchplan's paths were 12% longer than cuRobo's at the median where both solved 
 | Run per-path passes as cooperative workgroups | 15,900 → 22,800 | 7,130 → 7,660 |
 | Give small batches several invocations per configuration | batch-1 latency 21 → 16 ms | 44 → 29 ms |
 
-- **Per-robot kernels.** On Mesa's RADV, per-link arrays cost 3–5 KB of scratch memory per invocation; writing the kernels per robot removed it ([why](architecture.md#kernels-written-per-robot)).
+- **Per-robot kernels.** On Mesa's RADV, per-link arrays cost 3–5 KB of scratch memory per invocation; writing the kernels per robot removed it ([why](architecture.md#the-gpu)).
 - **Grids.** [Building distance grids on the GPU](perception.md#building-grids-on-the-gpu), with an integer distance transform, made a 640×480 depth image's 1 cm grid 11× faster on the Radeon (21.1–22.7 → 1.9–2.0 ms) and 3.3× faster on the M4 Pro.
 - **Mesh checks.** A branch-and-bound search took mesh clearance from 620 to 110 µs per Panda configuration.
 - **Not adopted.** Shader modules without bounds checks would add 6–12%, but need `unsafe`. Reusing each call's buffers would save under 1.5%: creating, filling and binding them takes 0.04–0.07 ms of a 4.5–18 ms IK call for one target on the M4 Pro, and 0.36 ms of 53 ms for 16,384 seeds. Grid buffers, which are megabytes, are reused.

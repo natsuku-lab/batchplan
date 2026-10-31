@@ -1,198 +1,162 @@
 # Architecture
 
-This page is for contributors: how the code is organised and why. `CLAUDE.md` holds the rules for changing it, for people and coding agents alike; [In depth](#in-depth) goes module by module.
+How batchplan's code is organised, and why. [`CLAUDE.md`](../CLAUDE.md) holds the rules for changing it; each module's doc comment holds its details, and its constants say why they have the values they do.
+
+## The shape of it
+
+A robot and its worlds go onto a device once. Every algorithm then takes the device, the worlds and a batch of problems, and returns each problem with its answer.
+
+```mermaid
+flowchart LR
+    files["URDF · MJCF · OpenUSD"] --> loaders["loaders<br/>urdf.rs · mjcf.rs · usd.rs"]
+    loaders --> robot["Robot<br/>kinematics · collision spheres"]
+    scene["World<br/>obstacles · distance grids · allowed contacts"] -- "Device::upload" --> worlds["Worlds"]
+    robot --> device["Device"]
+    device --> cpu["CPU backend<br/>cpu.rs · lanes.rs"]
+    device --> gpu["GPU backend<br/>gpu.rs · WGSL"]
+    device --> algorithms["solve_ik · plan · follow<br/>pick · place · datagen"]
+    worlds --> algorithms
+    algorithms --> trajectory["Trajectory<br/>timing.rs · topp.rs"]
+    trajectory --> out["a controller · npy · LeRobot"]
+```
+
+**`Device` is the only way to run a batch.** It holds the robot and one of two backends, CPU or GPU, behind the crate-private `Backend` trait. It checks every batch (array shapes, world indices, and that the worlds were uploaded to it) before either backend sees it, so bad input is an error on both.
+
+**Both backends compute the same numbers.** The GPU kernels and `cpu.rs` implement the same math function by function, and parity tests hold them together. Searches, which are sequential, run on CPU threads on either device, with the same checks. So results depend on neither the batch nor the device.
+
+**Algorithms are plain functions.** `solve_ik`, `plan`, `follow`, `pick`, `place` and `datagen` take a device, its worlds and problems, and exchange the shared types. Each owns its seeding, validation and choice of answer. There are no planner plugins and no runtime configuration.
+
+| Modules | What they own |
+|---|---|
+| `robot.rs`, `description.rs`, `urdf.rs`, `mjcf.rs`, `usd.rs`, `loops.rs`, `spheres.rs` | Loading a robot: each format into one description, closed loops into mimic joints, the kinematic tree, fitted collision spheres and the self-collision pairs worth checking. |
+| `world.rs`, `sdf.rs` | Obstacles, their distances and allowed contacts; distance grids from meshes, points and depth images; fused occupancy maps. |
+| `device.rs`, `cpu.rs`, `lanes.rs`, `gpu.rs`, `*.wgsl` | Running batches: validation, the two backends, SIMD collision checks on the CPU. |
+| `ik.rs` | Batched IK: damped least squares from many seeds, pushed away from obstacles. |
+| `trajopt.rs`, `rrt/`, `shortcut.rs`, `edges.rs`, `spline.rs` | Planning: searching, simplifying, fitting a B-spline, and optimizing it on the device; the protocol searches use to ask for edge checks. |
+| `tool_path.rs` | Moving a hand in straight lines through poses (`follow`). |
+| `task.rs` | Picking up and setting down in one call (`pick`, `place`), and proposing grasps. |
+| `timing.rs`, `topp.rs` | Timing a path within the joints' limits (`Trajectory`), starts in motion and controlled stops. |
+| `datagen.rs`, `npy.rs`, `lerobot.rs` | Demonstrations for training, and their export. |
+| `meshes.rs` | Exact clearance against the robot's meshes, as a check after planning. |
+| `types.rs`, `error.rs`, `rng.rs` | The shared types, typed errors, and the generator every algorithm seeds from. |
 
 ## Design rules
 
-- **Batch-first.** Every call covers many items, and items reference worlds by index (`IkProblem::world`, `PlanProblem::world`, `item_world`), so one call spans many scenes.
-- **Worlds live on the device.** `Device::upload(&[World]) -> Worlds` prepares worlds once (GPU buffers, CPU rotation matrices); every algorithm takes `&Worlds`. A device checks that worlds were uploaded to it.
-- **One public handle, two hidden implementations.** `Device` is the only way to run batched work. The CPU and GPU implementations sit behind a crate-private `Backend` trait and are tested against each other through `Device`. `Device` validates every batch before either sees it.
-- **Algorithms are plain functions over shared types.** `ik`, `trajopt`, `rrt` and `datagen` take a `Device` and its worlds, `timing` and the exporters take the `Robot`, and all of them exchange the `types`. There are no planner plugins and no runtime configuration. Algorithm modules own seeding (`rng::Rng`; each problem's generator mixes the options' `rng_seed` with the problem's own numbers (IK's targets and seed, a plan's start and goal), `Rng::for_problem`, so a problem draws alike in any batch and problems whose numbers differ draw independently), validation and selection, so both devices see bit-identical inputs.
+- **Batch-first.** Every call covers many items, and items name their world by index (`IkProblem::world`, `PlanProblem::world`), so one call spans many scenes.
+- **Worlds live on the device.** `Device::upload` prepares worlds once (GPU buffers, CPU rotation matrices), and every algorithm takes them as `&Worlds`.
 - **Results carry their problems.** `solved()` yields each problem with its solution; the world comes from the problem, never from its position in a list.
-- **Loaders stay thin.** URDF, MJCF and USD loaders only translate a file into one internal description. Kinematics, sphere fitting and self-collision analysis never see a format.
-- **Errors are typed at the surface.** Public functions return `batchplan::Error`; its kind is what a host matches on.
+- **Seeds come from the problem.** Each problem's generator mixes the options' seed with the problem's own numbers (`Rng::for_problem`), so a problem draws alike in any batch, and both devices see bit-identical inputs.
+- **Loaders stay thin.** A loader only translates a file into the internal description; kinematics, sphere fitting and self-collision analysis never see a format.
+- **Errors are typed at the surface.** Public functions return `batchplan::Error`, whose kind a host matches on.
 
-## The CPU/GPU twin
+## Planning a path
 
-The GPU kernels (`src/kernels.wgsl`, plus the per-robot code `gpu.rs` generates) and `src/cpu.rs` implement the same math function by function: forward kinematics, the collision cost and its gradient, the IK step, and the trajectory optimizer's passes. Grid building (`grids.wgsl` / `sdf.rs`) is a twin too. Any change to the math lands on both sides in the same change, and parity tests catch drift.
+`plan` runs each problem as one search on one CPU thread, from start to finish. Only optional trajectory optimization runs on the device, batched over every problem.
 
-Every struct the GPU reads (parameters, links, spheres, obstacles) and every shared constant is declared once in Rust with `shader_struct!`; its WGSL declaration is generated from that, so host and shader layouts cannot drift.
+```mermaid
+flowchart TD
+    problem["PlanProblem<br/>start · goal · world"] --> line{"straight line<br/>free?"}
+    line -- no --> bend{"line bent around<br/>the collision free?"}
+    bend -- no --> rrt["RRT-Connect<br/>samples near the line first,<br/>then over the joint ranges"]
+    line -- yes --> simplify
+    bend -- yes --> simplify
+    rrt --> simplify["simplify<br/>shortcuts and smoothing"]
+    simplify --> fit["fit a B-spline<br/>pin waypoints where it collides,<br/>then ease the pins"]
+    fit -- "no valid spline" --> repair["repair<br/>optimize it a few steps,<br/>checking each"]
+    fit --> optimize{"seeds > 0?"}
+    repair --> optimize
+    optimize -- yes --> device["optimize the spline and seeds<br/>on the device (L-BFGS)"]
+    optimize -- no --> best
+    device --> best["the shortest valid path"]
+```
 
-The CPU also checks collisions eight configurations at a time in SIMD lanes (`lanes.rs`, `fearless_simd::f32x8` on stable Rust): forward kinematics, then world and self clearance. The lanes answer the CPU device's clearances and every search's edge checks. `cpu.rs` stays the line-by-line twin of the kernels, and a test holds the lanes to it on four robots and every obstacle kind. The lanes run at the CPU's widest SIMD level, found at run time (SSE2 up to AVX-512 on x86-64, NEON on ARM), so a default build needs no target flags. Code enters that level once per search and once per run of up to eight clearances that share a world; the code between that choice and the vector operations is inlined and has no closures.
+1. **Search** (`rrt::Connect`). RRT-Connect as VAMP runs it: Halton samples, dynamic domains, balanced trees and a k-d tree for nearest neighbours. Samples come first from a tube around the straight line, widening until it spans the joint ranges. The search keeps a clearance from obstacles for its first samples, then continues the same trees without it.
+2. **Simplify** (`shortcut::Simplify`). VAMP's simplification: the straight line, then passes of greedy shortcuts and smoothing.
+3. **Fit** (`trajopt::Fitting`). A cubic B-spline through the simplified path, its control points spread by arc length. Where it collides, the nearest waypoint is pinned; with every waypoint pinned, it traces the path exactly. Each pin is then eased into the widest blend that keeps the spline valid, as OpenRAVE's smoother removes a path's stops. Splines are checked keeping the shortcuts' clearance, then a 2 mm margin, so a curve cannot graze an obstacle between samples.
+4. **Repair.** A problem searched but left without a valid spline has the spline optimized a few steps on its own thread, with idle threads helping, and takes the first step that checks valid.
+5. **Optimize** (optional, `PlanOptions::seeds`). The searched spline and seeds straight to the goal, or bent through random points, are optimized together on the device and validated densely; the shortest valid path wins.
+
+A goal on a joint whose range spans more than a turn is reached at whichever equivalent, a whole turn away, is nearest or free. Held joints (`PlanProblem::hold`) are never sampled away from their start, and every stage keeps them. A start in motion (`PlanProblem::start_motion`) pins the spline's first span to the current velocity and acceleration.
 
 ## Searches
 
-Sampling-based planning is sequential and branchy, so on either device it runs on CPU threads, one problem per thread, each search to its end (`edges.rs`). A search (RRT-Connect, simplification, choosing a spline) is a small state machine: it asks for an edge check, takes the answer and decides what to ask next. The SIMD lanes answer each check at once; a GPU device keeps the CPU form of its worlds for them. Results therefore never depend on the batch or the device. If no spline is valid, a search asks once for its first spline to be optimized; the thread running it does so, with idle threads helping, and the search checks the result. A search allocates nothing per query, since the allocator would serialize small allocations across a batch's threads: it writes each query's edges into a buffer its thread lends it and keeps its working configurations. Each search is also built by the thread that runs it (`edges::Deferred`), so the memory it grows belongs to that thread's allocator arena; built on the calling thread, every thread of a batch waited for the caller's arena lock.
+Sampling-based planning is sequential and branchy, so searches run on CPU threads. A search (RRT-Connect, simplification, checking a spline, following a tool path) is a small state machine (`edges::Search`): it asks for an edge check, takes the answer and decides what to ask next. The SIMD lanes answer at once; a GPU device keeps a CPU copy of its worlds for them.
 
-Edges are checked as VAMP checks them: eight states spread over the edge, each pass stepping back, stopping at the first collision. A link's spheres are placed only when its bounding sphere is near something, and tests compare squared distances. Cheap tests go first. A sphere around each obstacle, kept in a compact array apart from the obstacles, rules it out before the exact test (only 1.6% of the benchmark's link-against-box tests find the link near), and in self-collision each sphere of one link is first tested against the other link's bounding sphere. A required clearance (`Keep`) adds a margin per lane that ramps down toward a path's ends; an edge entirely beyond the ramp takes the full clearance without measuring each state's distance to the ends.
-
-A batch of searches runs on the device's threads as VAMP's batches do: each thread takes the next search from a shared counter until none is left, so no thread idles while another still holds a fixed share. A batch then lasts as long as its longest searches, often a few unsolvable problems that draw every sample. Threads left without a search therefore help searches that have checked 2,000 samples (`rrt/ahead.rs`), and sleep while none has and others still sample. A search planned alone summons helpers into the pool once it has checked 4,000.
-
-RRT-Connect is sequential, but most samples extend from the node they would have extended from a few dozen samples earlier. A helper replays the search's trees from a log, forecasts the extension and connection each coming sample makes, and checks them; when the trees' sizes are near the ratio that decides which one a sample extends, it forecasts both. The search takes a forecast's answer only for the exact query it would have asked, bit for bit, so it grows the same trees as it would alone. Forecasts match where the trees are large and grow slowly, as an unsolvable search's do. On shorter searches, helpers answer few queries and slow those searches by keeping every core busy. A batch's helpers run the pool's other work while they wait. They also run it before each sample while another search's repair is spreading its samples over the pool, since the repair needs the threads.
-
-## Tool paths
-
-`follow` runs each tool path as a search too. It splits the path into poses a step apart, then steps along them by damped least squares from the configuration before (the IK step without its collision push). Each step's IK holds its configuration to a tenth of the precisions (`TOLERANCE`). Where the joints' straight motion between two configurations strays from the path at its middle, the step is halved; eight halvings without meeting the precision is a jump. A cubic B-spline then interpolates the configurations, resting at the ends and stopping wherever it would stray from the path or a span's control points pass a joint limit (a span stays within its control points, so it then keeps the limits). How far a sample strays is measured from the point of the path it is nearest, weighing position and rotation by their precisions: placed by position alone, a step that mostly turns moved the point by its wobble, and pours stopped at most steps. The search asks for the spline to be checked densely; a collision cuts the motion back to before the span holding the first group of eight samples that may collide, so it stops up to a group early. Its buffers are fields of the search, so its queries allocate only as they grow, and a finished search frees them on its own thread (`Follow::finish`): freed by the caller, a batch's buffers all went back to one thread, which made batches of 64 moves 7% slower.
-
-## Tasks
-
-`task::pick` and `task::place` turn every task's candidates into `Candidate`s that pass the steps in order, each step one batch over the candidates that got to it: the start (`first_free`), IK at the grasp or release (the solution nearest the candidate's `rest`), `follow` from there backward along the move in (reversed into the approach), `follow` from there along the move away, then `trajopt::plan` to where the approach begins. A step keeps a straight move that covers `min_fraction`. A step's worlds are the task's world with what it may touch: the fingers on the object for a pick's IK and move in (uploaded to the bare device); for the lift, the world without the object (`World::remove`) and the held link (`"held by hand {h}"`) on its supports; for a place, the held link on its supports, and per candidate the placed object with the fingers on it. Holders (`Device::with_robot` of `Robot::attach(Held::attachment)`) for one hand name the held link alike, so one upload per hand serves them all. A pick builds a holder per distinct `Held` among the candidates that reach their lift, and a place one per distinct `Held` among its tasks; each holder's candidates are a batch of their own, and the holders are built and run in parallel on the device's pool (`Device::install`): run one after another, pick-and-place datagen's 512 boxes of as many sizes took 0.35 s against 0.25 s on the Radeon. A candidate's `rest` is its start but for a place's `idle` joints: IK at the release is seeded from it, and the transit holds only the idle joints that rest where they start. A place's IK is for the robot alone, in one batch, since where the hand lets go fixes where the object is: each task's solutions are then checked holding its object, nearest its `rest` first, by a search (`FirstFree`, the configurations as edges that do not move), which runs on the CPU's lanes on both devices; the start checks use the same search. IK that finds nothing is solved again without its collision push (`classify`): a pose reached then collides, one not reached is out of reach. Timing runs in parallel on the device's pool, with the bare robot: attaching adds a fixed link, so joints and limits stay.
+- **Edge checks** follow VAMP: eight states spread over the edge, each pass stepping back, stopping at the first collision. A link's spheres are placed only when its bounding sphere is near something, a sphere around each obstacle rules it out before the exact test, and distances are compared squared.
+- **Scheduling.** Each thread takes the next search from a shared counter until none is left, as VAMP's batches do. A batch lasts as long as its longest search, often an unsolvable one that draws every sample, so threads with nothing left help searches that have checked many samples (`rrt/ahead.rs`): they replay the search's trees from its log and check the edges its next samples will ask about. The search takes an answer only for a query equal to its own bit for bit, so it grows the same trees as it would alone.
+- **Memory.** A search allocates nothing per query: it writes each query into a buffer its thread lends it. It is also built on the thread that runs it (`edges::Deferred`), so the memory it grows belongs to that thread's allocator arena. Built on the caller, every thread of a batch waited on the caller's arena lock.
 
 ## Collision
 
-The robot is a set of spheres; obstacles are primitives or distance grids. One configuration's collision cost sums squared penetrations of every sphere into every obstacle, and of every sphere pair the self-collision model checks, within a margin.
+The robot is a set of spheres; obstacles are boxes, spheres, cylinders, capsules or distance grids. A configuration's collision cost sums the squared penetration of every sphere into every obstacle, and of every sphere pair the self-collision model checks, within a margin.
 
-- **Gating.** Each link has a bounding sphere around its spheres. An obstacle farther from it than the margin skips the link's spheres; a link pair whose bounding spheres are farther apart than the self margin skips its sphere pairs. The gap stands in for their clearance, so clearances stay exact up to the margin.
-- **Gradients.** Collision gradients accumulate a wrench per link (force, and moment about the origin); one reverse pass from the leaves gives each joint its share.
-- **Links no joint moves** are not checked against the world: their contact with the scene does not depend on the configuration.
-- **Allowed contacts.** A world's `touch` lists become one link bit set per obstacle when it is uploaded. Every check skips a (link, obstacle) pair in its set: the scalar twin, the SIMD lanes, the GPU kernels and `MeshModel`.
+- **Gating.** Each link has a bounding sphere around its spheres. An obstacle farther from it than the margin skips the link's spheres, and so does a link pair for self-collision. Distance grids are always checked: their interpolated distance can change faster than the distance itself. The gap stands in for their clearance, so clearances stay exact up to the margin.
+- **Gradients** accumulate a wrench per link; one reverse pass from the leaves gives each joint its share.
+- **Links no joint moves** (the base and what is fixed to it) are not checked against the world: their contact with the scene does not depend on the configuration, and a mounted robot's base rests on its table.
+- **Allowed contacts.** A world's `touch` lists become one link bit set per obstacle at upload. Every check skips a (link, obstacle) pair in its set: on the CPU, in the SIMD lanes, on the GPU and in `MeshModel`. Names resolve against the uploading robot, so a link attached later (a held object) touches nothing in worlds uploaded before it.
+- **SIMD on the CPU** (`lanes.rs`). Eight configurations per call in `f32x8` lanes: forward kinematics, then world and self clearance, at the widest SIMD level the CPU has, found at run time (SSE2 up to AVX-512, NEON). Code enters that level once per search, and everything between that choice and the vector operations is inlined, with no closures: a closure loses the level and runs about seven times slower. `cpu::collision` stays the scalar twin the lanes are tested against.
 
-## Kernels written per robot
+## The GPU
 
-`robot_wgsl` writes the robot-specific part of the GPU code: forward kinematics, the end effector's Jacobian and the collision cost, link by link, with each link's frame and wrench in its own variable. Mesa's RADV driver moves any private array indexed at run time and larger than 256 bytes into scratch memory. Per-link arrays cost 3–5 KB of it per invocation; writing the code per robot made GPU planning 4.8× faster on a Radeon and 2.7× on an M4 Pro. Kernels compile per robot shape and are cached, so attaching different objects to one link reuses them.
+- **The twin.** `kernels.wgsl`, with the code written per robot, and `cpu.rs` implement the same functions: forward kinematics, the collision cost and its gradient, the IK step and the trajectory optimizer's passes. `cpu.rs` keeps index loops so the two read side by side, and `tests/gpu.rs` and `tests/device.rs` hold them together.
+- **One source of truth for layouts.** Every struct the GPU reads is declared once in Rust with `shader_struct!`, and its WGSL is generated from that; shared constants are written into the shader from their Rust values. So host and shader cannot drift.
+- **Kernels written per robot.** `robot_wgsl` writes the robot's forward kinematics, Jacobians and collision cost link by link, each link's frame and wrench in its own variable. Mesa's RADV driver moves any run-time-indexed private array over 256 bytes into scratch memory; per-link arrays cost 3–5 KB of it per invocation, and writing the code per robot made GPU planning 4.8× faster on a Radeon and 2.7× on an M4 Pro. Kernels are compiled per robot shape and cached.
+- **Lanes for small batches.** For small batches, collision kernels give each configuration 8 invocations that split its sphere loops; each kernel is built for 1 lane and for 8.
+- **Trajectory optimization** is L-BFGS with a parallel line search. Each round dispatches five passes: the collision cost of every path moved by each of four step sizes; a per-path pass that takes the cheapest; the collision gradient at every sample; the gradient per control point; and a per-path pass for the next direction. Work is split across submissions to stay under driver watchdogs.
 
-For small batches, the collision kernels give each configuration 8 invocations ("lanes") that split its inner sphere loops. Each is built for 1 lane and for 8, through a WGSL override constant.
+## Moving the hand along a path
 
-## Trajectory optimization on the device
+`follow` runs each tool path as a search. It splits the path into poses a step apart and solves each by damped least squares from the configuration before (the IK step without its push away from obstacles). Where the joints' straight motion between two configurations strays from the path at its middle, the step is halved; eight halvings without meeting the precision is a jump. A cubic B-spline then passes through the configurations, resting at both ends and stopping wherever it would stray from the path or pass a joint limit. The spline is checked densely, honouring allowed contacts, and a collision cuts the motion back to before the span where it may first collide.
 
-Optimization is optional in `plan` (`PlanOptions::seeds`) and runs batched on the device.
+## Picking up and setting down
 
-Each L-BFGS round dispatches five passes: the collision cost at every sample of every path moved by each of four step sizes; a per-path pass that takes the cheapest step; the collision gradient at every sample; the gradient per control point; and a per-path pass for the next L-BFGS direction. The per-path passes run one workgroup per path, with workgroup reductions. Work is split across queue submissions to stay under driver watchdogs. Paths are optimized in chunks whose state fits one storage binding.
+`pick` and `place` turn every task's grasps or place poses into candidates, and run them through the same steps. Each step is one batch over the candidates that reached it, across every task.
 
-## Data pipeline
+```mermaid
+flowchart LR
+    candidates["every task's candidates<br/>(grasps or place poses)"] --> start["start<br/>collision-free?"]
+    start --> ik["IK at the grasp<br/>or release"]
+    ik --> approach["straight move in<br/>(followed backward)"]
+    approach --> depart["straight move away"]
+    depart --> transit["planned path<br/>to the move in"]
+    transit --> plans["survivors,<br/>quickest first"]
+```
 
-`datagen` plans in batches and times trajectories with `Trajectory::try_new(..).sample(1 / dt)`. Exporters write `Demonstration`s: `npy` as arrays, `lerobot` natively in LeRobot's v3.0 layout (parquet through Arrow, streamed to rolling files, with per-episode statistics aggregated as LeRobot does).
+- **What each step may touch.** Each step runs in the task's world with the contacts it allows: the fingers on the object for the grasp and the move in; the held object on its supports for the lift and the set-down; the fingers on the placed object for backing off.
+- **Holding.** A held object is a link attached to the robot (`Robot::attach`), so a lift or carry runs on a device for the holding robot (`Device::with_robot`). Holders for one hand name the held link alike, so one upload per hand serves them all. Candidates are grouped by what they hold, and the groups run in parallel on the device's threads.
+- **The release.** Where the hand lets go fixes where the object is, so a place solves IK for the robot alone, then checks each solution holding its object, nearest the candidate's rest first.
+- **Other arms.** A pick or place moves its hand's joints alone. With `Place::idle`, the transit also takes the other arms to where they wait.
+- **Why a candidate failed.** IK that finds nothing is solved once more without its push away from obstacles: a pose reached then collides, one not reached is out of reach. Every candidate's step and reason make up the task's `TaskFailure`.
 
-## Performance work
+## Timing
 
-Performance claims come from alternating runs of two builds on one machine, after checking the machine is otherwise idle; a single run proves nothing. [Benchmarks](benchmarks.md#how-the-speed-came) lists what those runs found.
+A `Trajectory` is the path plus a time map `s = σ(t)`, itself a uniform cubic B-spline. `Trajectory::try_new` keeps the faster of two timings: uniform (`σ = t / h`, exact along the whole curve) and time-optimal (TOPP-RA on the path parameter, smoothed, with caps lowered where the smoothed map overshoots a limit). A cap on the hand's speed becomes a speed limit on `s`, from the hand's rate along the path. A start in motion is timed from its current speed along the path. A controlled stop (`Trajectory::stop`) keeps the path from the moment it starts and brakes to rest along it as soon as an even deceleration within the limits allows.
 
-## In depth
+## Perception
 
-The details that span files, module by module.
+Distance grids are built by a CPU/GPU twin too (`sdf.rs` / `grids.wgsl`): voxels are classified from depth images or points, then given distances by an exact distance transform in integer arithmetic, so both devices build identical grids from the same occupancy. A robot mask makes the space the robot fills free, so a camera that sees the arm never makes it an obstacle to itself. Grids store at most the true signed distance, less half a voxel diagonal, so interpolating between voxels never overestimates a clearance.
 
-**CPU/GPU twin.**
-- The GPU kernels (`src/kernels.wgsl` and `src/grid.wgsl`, plus the per-robot code `robot_wgsl` writes in `gpu.rs`) and `src/cpu.rs` implement the same math function by function: `fk`, `collision`, `rot_log`, `chol6`, `ik_step`, the trajectory passes (`traj_costs`/`traj_cost`, `traj_search`, `traj_samples`/`traj_sample_grad`, `traj_grad`, `lbfgs_direction`). `spline.rs` holds the B-spline basis that `basis` in WGSL mirrors; `world.rs` and `sdf.rs` (`grid_distance`) hold the obstacle distances that `obstacle_distance` and `grid_distance` mirror.
-- `cpu.rs` keeps index loops on purpose so the two read side by side.
-- Any change to the math lands in both files in the same change. The parity tests in `tests/gpu.rs` and `tests/device.rs` catch drift.
-- Grid building has its own twin: `src/grids.wgsl` mirrors `sdf.rs`'s `DepthImage::classify`/`sees`, `RobotMask::contains`, `depth_occupancy`, `integrate`, `squared_edt`/`Line`/`meet` and `finish`. Builders (`SdfGrid::from_points`/`from_depth`, `OccupancyMap::integrate`/`grid`) take a `Device` and go through `Backend::grid_values` and `Backend::integrate`.
-  - A `RobotMask` (`DepthImage::robot_mask`) carries each pixel's depth to the robot and its grown spheres. The space they fill is free, so a robot is never an obstacle to itself, even where hidden space is solid. On the GPU the spheres follow the depths in binding 2.
-  - Space behind the robot along a pixel that sees it is `Seen::Shadow` (`SHADOW` in grids.wgsl), solid only under `Occlusion::Occupied`. Maps mark such voxels `SHADOWED` until an image observes them, and `OccupancyMap::grid` treats them as free under `OccupiedExceptRobotShadow`.
-  - The distance transform is integer arithmetic, so both devices build identical grids from the same occupancy (`every_device_builds_the_same_grids_from_occupancy`).
-  - Each value is finished by a table the host builds (`finishing_table`, sized by the grid's squared diagonal, hence `MAX_DIAGONAL`), so the GPU never needs `sqrt` to match the CPU.
-  - Classification projects voxel centres in floating point and may differ at rounding ties. The internal test `every_device_classifies_depth_images_alike` bounds that at 0.05% of voxels; the behavioural tests in `tests/sdf.rs` run on every device.
-  - The GPU keeps its grid buffers (`GridBuffers`) between builds, because wgpu zero-fills new buffers.
+## Training data
 
-**Host/shader structs.**
-- Each struct the GPU reads is declared once with `shader_struct!` in `gpu.rs`: `GpuParams`, `GpuLink`, `GpuSphere`, `GpuObstacle` and the grid builder's `GpuGridParams`. The constants (`MAX_HISTORY` and the line-search steps `LINE_SEARCH` from `trajopt.rs`, obstacle kinds, `WORKGROUP`) are written into the shader prelude from their Rust values.
-- Their WGSL declarations are generated from the same field list. `gpu.rs` builds the shader source as: generated prelude (`alias Vec4`, the constants, the structs) + `robot_wgsl(robot)` + `kernels.wgsl` + `grid.wgsl` (`grid_distance`, mirroring `sdf.rs`). Grid building (`grids.wgsl`) is a separate module that needs no robot.
-- To add a kernel parameter:
-  1. Add a field to the right `shader_struct!`.
-  2. Fill it in `GpuBackend`.
-  3. Read it in WGSL as `P.<field>`.
-  4. Mirror it in `cpu.rs`.
-- There are no fixed size limits on robots.
-  - The CPU kernels keep per-configuration state in `Scratch` (`cpu.rs`: FK frames, sphere centres, wrenches, IK buffers). It is sized to the robot and reused per thread (`for_each_init`, or one per path), so hot loops neither allocate nor clear more than the robot needs. Inline small vectors were tried first and cost 5–27% of CPU throughput.
-  - The GPU kernels are written per robot. Self-collision is unrolled per link pair up to `UNROLLED_LINK_PAIRS` (64); beyond that, a run-time loop over frames copied into arrays keeps the generated code growing with links, not pairs.
-- Links no joint moves (`Link.chain` empty: the base and what is fixed to it) are not checked against the world on either device, nor by `MeshModel`: their contact with the scene does not depend on the configuration, and a mounted robot's base rests on its table. They still self-collide.
-- Allowed contacts (`World::touch`, `Touch`): link names resolve at upload, against the device's robot, into one bit set per obstacle (`World::touch_sets` → `LinkSets`, 64-bit words, on `CpuWorld::touch`). On the GPU the sets come first in `world_data`, after a word that holds none, and the grids after them; each obstacle keeps its set's word as a float in `GpuObstacle::r0.w` (exact below 2^24, 0 when no link may touch it), so the struct stays at 96 bytes. The generated per-link loop tests its constant word and bit. `cpu::collision`, `Lanes::{clearance, keeps}`, the WGSL `collision()` and `MeshModel::clearances` skip a touched pair before anything else about it (`keeps` after the obstacle's bounding sphere, which rules out most pairs). `Worlds` keep the uploading robot's link names when a world has touches, and every call checks them against its robot's where both have links (`Device::check_worlds`): worlds with touches stay valid while the links both robots have match by name. So links appended later (an attached object) touch nothing in worlds uploaded before them, detaching the last object attached or holding another of the same name keeps them valid (`pick` and `place` rely on that, one upload per hand), and a robot holding an object of another name at those indices must upload again. So a world in which a held object may touch something is uploaded to the holder's device.
-- Collision is gated by each link's bounding sphere (`link_bounds`, `GpuLink.bound`); the gap stands in for the clearance of whatever it skips.
-  - World: an obstacle farther from a link's bound than `max(margin, 0)` skips the link's spheres (`Robot::sphere_ranges`). Distance grids are never gated: their interpolated distance is not 1-Lipschitz.
-  - Self: sphere pairs are grouped by link pair (`Robot::self_link_pairs`). A link pair whose bounds are farther apart than `max(self_margin, 0)` skips its sphere pairs. On the GPU, the `pairs` buffer starts with one `(first, count)` entry per link pair, followed by the sphere pairs.
+```mermaid
+flowchart LR
+    goals["goals in many worlds"] --> ik["batched IK"] --> nominal["nominal plans"]
+    nominal --> perturb["perturbed states<br/>along each path"] --> recover["plans back<br/>from them"]
+    nominal --> timed["timed and sampled<br/>at a random speed"]
+    recover --> timed
+    timed --> demos["Demonstrations"] --> export["npy · LeRobot v3.0"]
+```
 
-**Per-robot GPU kernels.**
-- `robot_wgsl` writes the robot-specific code: `MAX_DOF`, `HANDS`, forward kinematics, each hand's frame and Jacobian (`ee_pos(h)`, `ee_rot(h)`, `ee_jacobian(h)`, `mark_moving(h)`, switches with hand 0 as the default) and the collision cost.
-  - IK (`ik_step`, twinned in `cpu.rs`) runs two passes: each targeted hand's pose step, then the collision gradient pushed out of each targeted hand's Jacobian row space (`grad − Σ J^T A^-1 J grad` on the joints the targeted hands move; held joints never move). The hand that went last keeps its system in `jac`/`chol`, so a single hand computes it once. For `HANDS == 1` the kernel takes a branch without the loop over hands: the loop cost 4–10% of GPU IK throughput on the M4 Pro.
-  - Each link's frame (`rot_i`, `pos_i`) and collision wrench (`force_i`, `moment_i`) is its own private variable, indexed only by constants.
-  - Sphere and pair ranges come from the buffers (`GpuLink.first_sphere`, the `pairs` header), so robots that differ only in their spheres share code.
-- Why: Mesa's RADV moves any run-time-indexed private array larger than 256 bytes into scratch memory. With per-link and per-sphere arrays, every collision kernel spilled 3–5 KB per invocation. Writing the code per robot removed that and made GPU planning 4.8× faster on the Radeon and 2.7× on the M4 Pro. Never add such an array to a collision kernel. To check on RADV, `MESA_SHADER_CACHE_DISABLE=true RADV_DEBUG=shaderstats cargo run --release --example bench -- 8` prints each pipeline's VGPRs and scratch size.
-- Collision gradients accumulate a wrench per link (force, and moment about the world origin). One reverse pass, leaves first, adds each link's wrench into its parent and gives each joint `a·(M − o×F)` (revolute) or `a·F` (prismatic). `cpu.rs` does the same.
-- `GpuBackend` compiles kernels per robot shape and caches them by generated source, shared by every backend `with_robot` derives.
-- **Lanes.** The collision kernels (`evaluate_main`, `clearance_main`, `ik_main`, `traj_costs`, `traj_samples`) give each configuration `LANES` consecutive invocations. `LANES` is a WGSL `override`, and each kernel is built twice:
-  - with 1 lane for large batches, where the lane code folds away;
-  - with `SHARED_LANES` (8) for batches whose configurations times 8 fit within `LANE_TARGET` threads.
+- **Reaches** (`datagen::demonstrations`): IK with many seeds, nominal plans, then recoveries planned from states perturbed along them.
+- **Pick-and-place** (`datagen::pick_and_place`): a `pick` per task, then a `place` from its end, so everything the tasks check holds for the episodes. Tasks that fail are tried again with the hand or the object turned.
+- **Handovers** (`datagen::handover`): the giver's `pick`, IK for both hands where they meet, one plan moving both arms there, straight moves for the taker to grasp and the giver to let go, then the taker's `place` while the giver goes home (`Place::idle`).
+- **Reset states** (`datagen::reset_states`): samples of the episodes with joint noise, checked collision-free, to start reinforcement learning from.
+- **Export.** `npy` writes one array per field. `lerobot` writes the v3.0 layout natively (Parquet through Arrow, rolling files, statistics aggregated as LeRobot does), with the state laid out arm by arm and the robot described for simulators that replay it.
 
-  Lanes split the inner sphere loops of `collision()`. Every lane runs every block, so a wave stays converged; splitting whole blocks across lanes diverged and was slower. `group_collision` and `group_grad` combine the lanes. These kernels have no early returns, because lanes meet at barriers. `evaluation_does_not_depend_on_the_batch` checks that both builds agree. Pipelines skip workgroup zero-initialization: every kernel writes its workgroup memory before reading it.
+## The robot model
 
-**GPU details.**
-- Bind group 0 has 12 storage buffers. `unmet_limits` skips adapters that can't provide them, and the error names each rejected adapter and what it lacks.
-- `GpuWorlds` holds every world's obstacles, per-world ranges and `grid_data`: each distinct grid (by `Arc` pointer) once, two half floats per `u32`, read with `unpack2x16float`. Grids store subnormal halves as zero because GPUs may flush them.
-- Storage buffers are created by `storage::<T>()`, padded to at least one shader element: empty obstacle lists used to crash.
-- Work is split per queue submission (`EVAL_CHUNK`, `IK_ITERS_PER_SUBMIT`, `TRAJ_ITERS_PER_SUBMIT`) to stay under driver watchdogs.
-- Trajectory optimization is L-BFGS with a parallel line search. Each round dispatches five passes:
-  1. `traj_costs`: the collision cost at every sample of every path moved by each line-search step;
-  2. `traj_search` (one workgroup per path): the cheapest step moves the path if it lowers the cost, otherwise the history resets;
-  3. `traj_samples`: the collision gradient at every sample;
-  4. `traj_grad`: per free control point, basis-weighted sample gradients plus smoothness;
-  5. `lbfgs_direction` (one workgroup per path): record the last step and gradient change, then the two-loop recursion.
+`Robot::load` reads the description, closes any kinematic loops (each loop's passive joints become polynomial mimics of its one actuated joint, fitted to the loop's static equilibrium), expands ball, planar and floating joints into one-axis joints, numbers the actuated joints breadth first, and fits collision spheres (cuRobo's voxel method) unless a model is given. `Robot::assemble` does the same for several descriptions, their names prefixed. Continuous joints wrap every turn, so they are clamped and checked with `Robot::bounds` and `Robot::within`. `MeshModel` measures exact clearance against the robot's meshes on the CPU, as a check after planning, not part of either device.
 
-  The first round only prices the seeds (their direction is still zero). In the per-path passes, each invocation owns every `WORKGROUP`-th element (coalesced loads), and sums go through `workgroup_sum`/`workgroup_max`, whose results come back through `workgroupUniformLoad` so later barriers stay in uniform control flow. `aux` holds each path's L-BFGS state (`lbfgs_stride`, mirrored by the `Lbfgs` struct in `cpu.rs`); paths are optimized in chunks whose state fits one storage binding.
+## Demos and performance
 
-**Held joints.** `PlanProblem::hold` / `RrtProblem::hold` keep joints at their start values: `Connect` samples them at the start and never bends along them (`line_to`), `search_goals` drops goal variants that turn them, and `hold_still` puts optimized splines (repair and seeds) back on them before their check. Shortcuts, straightening and spline fitting keep them because every waypoint has the same value; timed samples keep them up to the blend's rounding.
-
-**Planning flow.** In `trajopt::plan`, each problem is a `Planning` search (see **Searches** below), run whole on one CPU thread on either device:
-1. `rrt::Connect`: the straight line to each goal variant (`Robot::goal_variants`), else that line bent (`Stage::Locate`, `Stage::Bend`: the stretch where it collides moved aside along each joint's axis, `BEND_RADII` off it), else VAMP-style RRT-Connect:
-   - Halton samples, range 1 rad, dynamic domains, balanced trees, connect in equal steps, a k-d tree for nearest neighbours unless a joint is continuous (leaves of up to 128 nodes keep their coordinates in groups of eight per joint, as nigh's batched k-d tree).
-   - The first samples come from a tube around the straight line to the nearest free goal: `TUBE_RADIUS` across it and past its ends, doubling every `TUBE_DOUBLING` samples until it spans the joint ranges. Its orthonormal basis across the line (`Connect::across`) is set once, when the straight line first collides. The tube's samples come on top of `max_iterations`; none are drawn when it is 0.
-   - It first searches keeping `rrt.clearance` for up to `KEEP_ITERATIONS` samples, then `Connect::relax` continues the same trees without it for `max_iterations` more.
-   - If no spline follows a path found after sampling the tube (`Planning::near_line`), the problem is searched again with `Sampling::JointRanges`, which draws the samples a search without the tube would.
-   - Continuous joints step and measure the short way (`Robot::turn_toward`), and the found path is unwrapped.
-2. `shortcut::Simplify`: VAMP's simplification (straight line, then passes of greedy shortcuts and smoothing), keeping `shortcut.clearance`. It records the path after the first pass's shortcuts.
-3. `Fitting`: `fit_spline` spreads control points by arc length along the smoothed path, then the shortcut path. It pins (triples) the waypoint nearest each failed sample, up to `MAX_PINS`; with every waypoint pinned, the spline traces the path exactly. A valid spline's stops are then eased: each pin passes within the widest of `BLENDS` blends that keeps the spline valid, and stays `EXACT` (a stop) where none does, as OpenRAVE's smoother removes a path's stops. Splines are checked keeping `shortcut.clearance`, then `SPLINE_MARGIN` (2 mm, so a curve cannot graze an obstacle between its samples; never more than `shortcut.clearance`). Configuration queries locate the failure. The first spline that passes is seed 0. A path simplified to its straight line takes its spline unchecked (`Planning::line_checked`): simplification only cuts a path to that line once it checks free keeping the shortcuts' clearance, and a straight line the search found covers that when `covers_splines` and there is one goal.
-4. Moving starts (`start_motion`): splines must also pass `Trajectory::moving` (a failure retries with every waypoint pinned). Problems searched but with no valid spline, moving or not, are repaired inside their search (`Phase::Repair`). `Search::optimize` hands the searched spline to the thread running the search, which optimizes it one step at a time, up to `REPAIR_ITERATIONS` (10) (`cpu::PathOptimizer`, which resumes where it stopped, so the steps match one uninterrupted run; its samples spread over idle pool threads). The search checks each step's spline keeping the splines' last clearance (`SPLINE_MARGIN`), and the last step's without; the first that passes is taken. Most pass after one to three steps, and more steps trade the clearance back for length and leave fewer valid. Both devices repair on CPU threads, so they repair alike.
-5. With `seeds > 0`, `optimize` runs batched trajectory optimization on the device: the searched spline, then `seed_path` seeds straight to the goal and its variants, then bent through random via points, validated densely (`validate`, `Device::clearance`). Problems searched to within `OPTIMIZE_SLACK` of the straight line are not optimized (their seeds stay invalid), and optimization does not start once the time budget is spent. `best()` picks the shortest valid path of all. The options' optimization weights favour length; repairs take `repairing`'s own (10 steps, `acceleration_weight` 50, `velocity_weight` 2, a 2 cm margin), which repair more splines.
-
-**Searches.** `edges.rs`: a `Search` (RRT-Connect, simplification, planning) asks for `EdgeQuery`s and takes answers.
-- `request(buffer)` writes a query's edges into the thread's buffer (`edges::reuse`), which the driver hands back after the answer, and searches keep their working configurations as fields. A search allocates nothing per query, since glibc's allocator serializes small allocations across a batch's threads.
-- Batched calls build each search on the thread that runs it (`edges::Deferred`, in `plan`, `rrt::connect` and `shortcut::shortcut`). Built on the calling thread, the memory a search grows belongs to the caller's malloc arena, and every thread of a batch waits for that arena's lock: 32 threads planned easy reaches slower than 4. `tests/allocations.rs` counts the calling thread's allocations per problem.
-- Answers are how many edges from the first are free (`Wanted::Prefix`), the first free one (`FirstValid`), or how many configurations from the first are free, in groups of `LANES` (`wanted: None`).
-- `Device::search` → `Backend::search` runs every search to its end on CPU threads (`edges::run`, which also runs the optimizations a search asks for), answering at once with `lanes.rs`: each edge's `LANES * n` states `spacing` apart, in rake order (spread over the edge, each pass stepping back), stopping at the first collision. `Keep` adds a clearance per lane that ramps to zero toward a path's ends (an edge beyond the ramp, `Keep::beyond_ramp`, takes the full clearance without a distance per state). The GPU backend keeps the CPU form of its worlds (`GpuWorlds::cpu`) and a `Lanes` for this, so searches give the same answers on both devices.
-- On either device (the GPU backend also plans through `cpu::run_searches`), each pool thread takes the next search from a shared counter (`ThreadPool::broadcast`), then helps the searches still running that have checked `ahead::JOIN_AFTER` samples. While none has and some still sample, it sleeps (`cpu::WAIT`, after the pool's other work). `Search::help` hands `cpu::run_searches` an `rrt::Ahead`, and `rrt/ahead.rs`'s helpers check the extensions and connections RRT-Connect's next samples will ask about, on trees replayed from its log. A search takes an answer only for a query equal to its own bit for bit, so results stay the same.
-- A search alone stops after checking `ahead::ALONE_AFTER` samples (`edges::run`'s `pause`) and goes on in a scope with helpers it summons into the pool.
-- `Connect` deals with its helpers only through `ahead::Sharing`, `report_sample` and `forecast`, all in `ahead.rs`. It reports each sample it checks, except those its dynamic domains turn down. A search planned again on the same `Ahead` is helped as a new one. Batch helpers run pool work before each sample while `edges::run`'s `spread` counter shows a repair spreading its samples.
-
-**SIMD collision checks.** `lanes.rs` runs eight configurations per call in `fearless_simd::f32x8` lanes, generic over the SIMD level (`S: Simd`): forward kinematics (a revolute joint's rotation folded into `fixed + cos * C + sin * S`; a joint about its own z axis turns the parent's frame times its origin in the plane of two columns, `Joint::RevoluteZ`), link-bound gating, and world and self clearance (`Lanes::clearance`, behind `CpuBackend::clearance`) or validity with early exit (`Lanes::keeps`).
-- `Lanes::keeps` shortcuts: squared distances; sphere centres placed per link only when its bound is near something; every obstacle first ruled out by the sphere around it, from a compact array beside the obstacles (`CpuWorld::bounds`), and a box turned in the plane alone when `upright`; each link's bound centre computed once per check; in self-collision, each sphere first held against the tighter link's bound (`SphereGroups`). They never change an answer: their spheres are a hair wide.
-- `cpu::collision` stays the line-by-line twin of the GPU kernels; `lanes_match_the_scalar_twin_on_every_robot` holds the lanes to it. The parity test also runs `Level::baseline()` (SSE2 on x86-64).
-- Callers `dispatch!` on `Lanes::level()` (the CPU's widest level, found at run time) once: `edges::run` per search, `CpuBackend::clearance` per run of eight. Everything between the dispatch and the vector operations is `#[inline(always)]` code without closures. A closure is a function of its own without the dispatched level, so its SIMD operations become calls (seven times slower on x86); dispatching per `keeps` call costs 11%.
-
-`timing::Trajectory` is the path plus a time map `σ(t)` (a uniform cubic B-spline in time). `Trajectory::try_new` keeps the faster of uniform timing (`σ = t / h`, `h` from control-point differences, exact along the whole curve) and `topp::time_map`: TOPP-RA on the path parameter, smoothed (Schoenberg), with caps lowered locally where the smoothed map overshoots and a final stretch measured at `CHECK_SAMPLES` per map span. A hand's speed is its rate along the path times ṡ, so `HandSpeed` caps become velocity limits on `s`: `topp::HandRates` samples the rates (`Robot::hand_velocity` of the path's derivative, 48 per span), each TOPP stage caps `x` at `(cap / rate)²` without the joints' headroom (smoothing barely raises a speed, and the stretch takes out what it does), `assess` checks them at every sample, and uniform timing's `h` covers the largest rate. `check` is exact for uniform maps and samples `CHECK_SAMPLES` per span otherwise. Moving starts (`PlanProblem::start_motion`):
-- `trajopt::continue_motion` pins the first three control points for a knot interval `h0`, at least the time the robot needs to change its velocity (`max |v_j| / a_j`): shorter first spans put the jerk at a fast start over its limit. `next_fit` tries `START_KNOTS` multiples of it before pinning waypoints;
-- `Trajectory::moving` recovers `h0` from them and times the path from ṡ = 1/h0. Stage 0 is held to the full limits, candidates are refined at full density against limits less the margin, and nothing is stretched;
-- `check_from` checks the start state. A robot slows everywhere through `RobotOptions::velocity_scale`, `acceleration_scale` and `jerk_scale`, applied to its limits at load; `Trajectory::moving` has no speed scale of its own. `check` measures joint ranges on the curve (`span_range`, each span's exact extremes), not the control points: a moving start's first control point lies behind the start. Likewise `runs_forward` checks the time map's rate along each span exactly (a quadratic), since an accelerating start's map points may dip.
-- `Trajectory::stop(robot, t)`: a controlled stop. It keeps the path from the span it starts in (dropping whole spans shifts `s` exactly, and a map near zero keeps f32 precision) and a new time map (`stop_map`): three points continuing (s, ṡ, s̈), steps falling evenly to zero over `m` spans, three equal points at the end. For each of `STOP_SPANS`, knot intervals double then bisect to the shortest within `topp::within_limits`; the soonest stop along the path wins. A trajectory's time map may therefore start partway along its path (from a moving start) and end before the path's end, where three equal map points bring it to rest; `at` snaps to a path end only where the map reaches it.
-
-**Data pipeline.**
-- `datagen::demonstrations` runs:
-  1. IK with many seeds.
-  2. Nominal plans from noisy, collision-free starts.
-  3. `recovery_problems`: perturb solved paths and keep collision-free starts.
-  4. Replanning from those starts.
-  5. `Trajectory::try_new(..).sample(1 / dt)`: timing within the robot's limits at a random speed scale.
-- `datagen::pick_and_place` is a `task::pick` per task by the first hand from `default_q`, with `PickPlaceOptions`' own `TaskOptions` (no cap on the hand's speed, as the old generator's planned descents had none, and `min_fraction` 0.3), then a `task::place` from each pick's end in the worlds without the objects (`World::remove`; the supports renumbered), so everything `pick` and `place` check holds for the episodes. Each task is tried by one `top_down` grasp at its place pose, built in the object's frame so that objects of one size held alike share a `Held` and with it a holder device; `with_fallback` tries the tasks that fail again, in a batch of their own, with the hand turned half way round (`turned_grasps`) or the object turned onto itself (`turned_poses`). IK where the hand lets go keeps `NEAR_SEEDS` (4) seeds: it starts from where the carry starts, and on the two reBots 32 seeds made the handover benchmark 0.18 s slower on the Radeon (1.24 against 1.06 s) and 0.21 s on the Ryzen's CPU, with the same 510 handovers.
-  - `sampled` slows each motion by its speed scale (the knot interval divided by it, as `Trajectory::try_new` does) and samples it, on the device's pool: the speed scales come after timing, so they cost no timing of their own.
-  - `Episode` concatenates rest-to-rest motions, dropping each one's duplicate first sample, with one gripper opening per hand per sample (`Demonstration::gripper` is `[samples, hands]`).
-- `datagen::handover` passes a cuboid between two hands: a `pick` by the giver (the taker's joints held as idle joints), IK for both hands at the meeting pose seeded from the pick's end (`IkResult::nearest` it), one plan moving both arms there on a holder per distinct `Held`, then two straight moves (`follow`) in worlds where the object stands where the giver holds it, the giver's hand links and the taker's fingers (`task::fingers`) touching it: the taker down onto its end, the giver back off its own. A `place` by the taker with `Place::idle` at `default_q` takes the giver home on the transit. Both generators try failed picks and places again as `pick_and_place` does. Grasps are `top_down` at the ends of the longer side (`HANDOVER_GRIP`), each hand facing as its arm's does at the default configuration (`Arm`).
-- `datagen::reset_states` turns demonstrations into a reset bank: samples with joint noise, at rest, as one-sample `Demonstration`s whose `Origin::Recovery` parent indexes the input, so `npy::export` writes them unchanged. A carried object follows the one hand closed on it, in the grip from that hand's last sample holding it alone (where a gripper has just closed, the object still sits where it was). Samples with both hands closed on it are skipped. States are checked in one world each (the object placed, or left out when held), batched per hand and grip on `with_robot` devices holding it, that hand's wrist links touching it. `same_hold` compares rotations by `dot`, since `Quat::angle_between` turns quaternion-norm rounding into milliradians and split one grip into hundreds of batches.
-- `Demonstration` carries `task`, the gripper's opening per sample and an optional `Carried` obstacle with its pose per sample; `check_demos` checks their lengths.
-- `Origin::parent()` encodes recovery links for both exporters.
-- `lerobot.rs` writes the v3.0 layout natively:
-  - data and episode metadata through `Files`, which rolls over past `data_files_size_in_mb`; each episode row records its own file. Global stats are `Aggregate`d from per-episode stats as LeRobot's `aggregate_feature_stats` does, so nothing holds every frame. Keep features in column order (`serde_json::Map` sorts its keys);
-  - `tasks.parquet` lists the distinct tasks with pandas index metadata; `info.json`, `stats.json`, and a `meta/batchplan.json` extension.
-  - The state is laid out arm by arm (`state_layout`): the joints no hand moves, then each hand's `hand_joints` and its gripper (`left_gripper` from the part prefix, `gripper` on one arm); `action` is the next frame's state. `meta/batchplan.json` also describes the robot (`robot_json`: parts, joints, hands) for simulators that replay the episodes. `observation.environment_state` holds the goal plus padded obstacles, each where it is at that frame.
-  - Extension columns use names outside `observation.*` and `action*`, so LeRobot policies ignore them.
-
-**Robot model.**
-- `Robot::load` runs:
-  1. `description::load_robot` (by extension; `Robot::from_urdf` takes URDF text to `urdf::from_text` instead);
-  2. if the description has loops, `loops::close_loops` on the open tree: each loop's passive joints become quartic mimics of its one actuated joint (the least spring energy that closes the loop within their limits, by projected Levenberg-Marquardt over the driver's range; `tests/mjcf.rs` holds MuJoCo's settled 2F-85 as the reference);
-  3. `kinematics`: planar, ball and floating joints expanded into one-axis joints on massless links by `expand_compound_joints`, so nothing downstream sees them; a breadth-first tree, actuated joints numbered in that order; mimic joints resolved to their driving joint with a `Curve` (a polynomial of degree ≤ 4, composed along mimic chains; `Fk` records each nonlinear joint's slope, which gradients and Jacobians use in place of the multiplier); locked joints baked into fixed origins;
-  4. the collision model (given, or fitted by `spheres.rs`);
-  5. SRDF pairs.
-- `Robot::assemble(&[Part])` loads each part's description, prefixes its link and joint names (mimics and loops included) and fixes its root to `world` at the part's base (`description::assemble`); the rest is `Robot::load`'s path. `Robot::parts` records where a robot came from, for exports and simulators. A robot's hands are `ee_links` (`RobotOptions::ee_links`, else the deepest link); `hand_joints(h)` are the actuated joints of a hand's chain.
-- Continuous joints (`Robot::continuous`) are unbounded reals whose values wrap every 2π; `lower`/`upper` give them only the turn that seeds and samples come from. Clamp and check with `Robot::bounds`/`Robot::within`, never with `lower`/`upper` directly; the GPU limits buffer holds ±∞ for them.
-- IK Jacobians walk `Link.chain`, the indices of the moving links at or above a link, root first, so mimic joints add into their leader. Both devices iterate it in the same order (`robot_wgsl` unrolls it).
-- Each `Link` keeps its collision shapes (`Link.shapes`, from the description or an attached object). `MeshModel` (`meshes.rs`) loads them as parry3d meshes and convex hulls and measures exact mesh clearances by branch and bound; it is a CPU post-check, not part of either device.
-- `assets/franka/panda_collision.json` holds cuRobo's hand-tuned Panda spheres (Apache-2.0, credited in the README and `assets/README.md`); keep that credit when touching assets. `examples/common/mod.rs` has the Panda's options (locked fingers, `ee_links`, default pose).
-
-**Demos.** `demos/` is a crate of its own (Rerun, urdf-rs), so the library never depends on the viewer; CI lints it in its own job. `RobotMeshes` draws any robot's URDF meshes, the parts of an assembled one included. The handover demo includes `examples/handover/rebot.rs`, so the two reBots and their scenes are written once.
+`demos/` is a crate of its own (Rerun), so the library never depends on a viewer; CI lints it in its own job. Performance claims come from alternating runs of two builds on one machine; [Benchmarks](benchmarks.md#how-the-speed-came) lists what those runs found.
