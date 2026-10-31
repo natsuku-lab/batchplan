@@ -395,6 +395,34 @@ No sequence finished later than its motions one after another. Joining a batch t
 
 Some straight moves finish later than before, while more finish sooner. In the [handovers](#bimanual-handovers), 32 of the 510 episodes changed length on the Ryzen's CPU device: 14 longer, by at most 2 frames, and 18 shorter, 9 frames shorter in all (`--resets` writes `episodes/length.npy` at both commits). In four alternating runs, with the machine's load at 5–13, the change ran 420 against 418 episodes/s on the Radeon and 369 against 354 on the Ryzen, the same 510 of 512 with a 12.8 s median episode.
 
+## Tracking on actuator models
+
+`examples/actuators.rs` times random motions of one arm in free space under several limits, and `scripts/actuators.py` plays them in MuJoCo through a model of the arm's actuators, measuring the largest gap between the arm and the trajectory while it runs (median over the motions, any joint). Each motion starts settled under gravity; every 2 ms step sends that step's target.
+
+- **SO-101:** the Feetech STS3215 (7.4 V) model [BAM](https://github.com/Rhoban/bam) identified from recorded trajectories (model m6): the firmware's rate-limited P controller, PWM and supply limits, load-dependent friction. The stock arm powers these servos from 5 V; BAM identified them at 7.4 V. Gain 16 is what LeRobot sets; 32 is the firmware's default.
+- **reBot B601-DM:** BAM has not identified its Damiao motors, so they are modelled from Seeed's datasheet at 24 V: MIT mode with the trajectory's velocity and gravity fed forward, the torque-speed curve the torque constant, phase resistance and no-load speed give (27 N·m to about 4.1 rad/s on the DM-J4340, 7 N·m on the DM-J4310), and the datasheet's inertia taken as the rotor's, through the gearbox. No friction, and gains chosen here, not reBot's: kp 60 and 20 N·m/rad (soft) or 150 and 40 (stiff) on the two motors, and each joint's kd for a damping ratio of 0.7 at the ready pose. These are estimates.
+
+| SO-101, 165 motions | Duration | 5 V, gain 16 | 5 V, gain 32 | 7.4 V, gain 16 | 7.4 V, gain 32 |
+|---|---|---|---|---|---|
+| Limits as given | 1.74 s | 16.6° (6.3%) | 8.4° (6.3%) | 11.3° | 5.6° |
+| Speed × 0.75 | 2.32 s | 13.0° (0.6%) | 6.6° (0.5%) | 8.8° | 4.4° |
+| Acceleration × 0.5 | 2.26 s | 13.3° (0.5%) | 6.6° (0.5%) | 9.0° | 4.5° |
+| Jerk × 0.25 | 2.39 s | 14.1° (1.9%) | 7.0° (1.7%) | 9.4° | 4.7° |
+
+| reBot, 201 motions | Duration | Soft gains | Stiff gains |
+|---|---|---|---|
+| Limits as given | 1.93 s | 2.2° | 0.8° |
+| Speed × 0.75 | 2.57 s | 1.2° | 0.5° |
+| Acceleration × 0.5 | 2.46 s | 1.3° | 0.5° |
+| Jerk × 0.25 | 2.52 s | 1.5° | 0.6° |
+
+The share of steps with a servo at its PWM limit is in brackets; at 7.4 V, and on the reBot, none were. On the Ryzen.
+
+- **Speed, not jerk, sets how far the arm lags.** On both arms, at about the same duration, a quarter of the jerk limit tracks no better than a slower speed or acceleration. On the reBot it does reduce the overshoot where the motion ends (0.18° against 0.33° with soft gains).
+- **The SO-101 at 5 V cannot keep up with its limits at full speed.** Its servos sit at the PWM limit on 6.3% of steps, and the worst motion lags 58°; at 0.75 of the speed, 0.6% and 32°. `Trajectory::try_new`'s speed scale, or `RobotOptions::velocity_scale`, slows it.
+- **The reBot's motors keep up.** By inverse dynamics its motions ask at most 73% of the shoulder's 27 N·m, mostly to hold the arm up.
+- **[Joined](#joining-motions) pick-like sequences track as their motions do one after another:** 16.4° against 16.7° on the SO-101 at 5 V, 1.7° against 1.8° on the reBot, finishing 7% and 5% sooner.
+
 ## Bimanual handovers
 
 `examples/handover/` generates the [handover episodes](training-data.md#handovers) for two reBot B601-DM arms 44 cm apart at a table. In each task one arm picks up a block lying in front of it and hands it over between the arms, and the other arm sets it down in front of itself. The blocks are 24–28 cm long, in four sizes; the block, meeting and place poses vary in position and yaw, and 0–2 small boxes stand elsewhere on the table. Three tables in four are divided down the middle, a quarter each by a low wall (6–8 cm) that the block is lifted over, a screen 16–18 cm tall with an opening 8.5–10.5 cm wide, and a row of posts as tall. The block cannot be lifted over the tall ones, so the hands meet at one end of their reach and the block lies, and is set down, toward the other: it is carried along the divider to the gap and back. Planned without its divider, the block alone would pass through it on 267 of the 372 divided tables (79 of 120 walls, 82 of 118 screens, 106 of 134 rows of posts). Half the tasks go left to right. Every step is batched over all the tasks: the giver's `pick`, IK for both hands at the meeting pose, one plan moving both arms there, the straight moves of the handover, and the taker's `place`, whose transit moves both arms (the giver going home); then the episodes' sampling.
@@ -516,6 +544,14 @@ cargo run --release --example tasks -- 64
 # Joining pick-like motions on one reBot (after scripts/fetch_rebot.sh), or the SO-101; timing by kind of path
 cargo run --release --example join [-- so101]
 cargo run --release --example timing
+
+# Tracking on actuator models: BAM's STS3215 on the SO-101, Damiao datasheet models on one reBot
+uv venv .venv-actuators --python 3.12
+uv pip install --python .venv-actuators/bin/python "better-actuator-models[mujoco]==1.0.3" mujoco==3.17.0 numpy==2.5.4
+cargo run --release --example actuators -- so101 data/actuators/so101          # --sequences for joined pick-like motions
+.venv-actuators/bin/python scripts/actuators.py servo data/actuators/so101       # --kp 32, --vin 7.4
+cargo run --release --example actuators -- rebot data/actuators/rebot
+.venv-actuators/bin/python scripts/actuators.py motor data/actuators/rebot       # --gains stiff; torque for inverse dynamics
 
 # Two reBot arms handing blocks over (downloads the arm at a pinned commit, with checksums), and their camera videos
 scripts/fetch_rebot.sh

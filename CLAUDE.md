@@ -32,6 +32,7 @@ cargo run --release --example tool_paths                        # straight moves
 cargo run --release --example tasks -- 64                       # picks and places on random tabletops: how many get through, where the rest stop, per batch size
 cargo run --release --example join [-- so101]                  # pick-like motions joined without stopping (one reBot, or the SO-101): how much sooner, per blend radius
 cargo run --release --example timing                            # timing's cost and the trajectories' durations, by kind of path, on one thread
+cargo run --release --example actuators -- so101 data/actuators/so101 && .venv-actuators/bin/python scripts/actuators.py servo data/actuators/so101   # tracking on actuator models (docs/benchmarks.md#tracking-on-actuator-models)
 cargo run --release --example depth [-- --cpu]                  # a distance grid from a rendered depth image, then plans around it
 cargo run --release --example control_loop -- [seconds]         # a planner thread feeding a 50 Hz loop
 cargo run --release --features lerobot --example datagen -- --lerobot data/lerobot_demo 512 20   # --pick-place for pick-and-place, --file-mb N to split files sooner
