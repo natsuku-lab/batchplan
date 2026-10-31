@@ -372,6 +372,135 @@ fn moving_starts_are_timed_from_their_motion_or_refused() {
 }
 
 #[test]
+fn replanning_while_moving_is_timed_about_as_fast_as_from_rest() {
+    // Halfway along planned motions, at about 3 rad/s, replanned to new goals: the motion must
+    // brake and turn first, but is timed as fast as the limits allow, not at the pace the
+    // replanned path's first span was fitted to (which took up to 15 times as long).
+    let robot = common::panda().unwrap();
+    let n = robot.dof();
+    let cpu = Device::cpu(&robot).unwrap();
+    let worlds = cpu.upload(&[World::default()]).unwrap();
+    let mut rng = Rng::new(7);
+    let mut random = || -> Vec<f32> {
+        (0..n)
+            .map(|j| rng.range(robot.lower()[j], robot.upper()[j]))
+            .collect()
+    };
+    let problems: Vec<PlanProblem> = (0..16)
+        .map(|_| PlanProblem::new(0, random(), random()))
+        .collect();
+    let plans = batchplan::plan(&cpu, &worlds, &problems, &PlanOptions::default()).unwrap();
+    let mut state = JointState::new(n);
+    let mut replanned = 0;
+    for s in plans.solved().take(12) {
+        let trajectory = Trajectory::try_new(&robot, s.solution, 1.0).unwrap();
+        trajectory.at(0.5 * trajectory.duration(), &mut state);
+        let motion = StartMotion {
+            velocity: state.velocity.clone(),
+            acceleration: state.acceleration.clone(),
+        };
+        let rest = PlanProblem::new(0, state.position.clone(), random());
+        let moving = PlanProblem {
+            start_motion: Some(motion.clone()),
+            ..rest.clone()
+        };
+        let both =
+            batchplan::plan(&cpu, &worlds, &[rest, moving], &PlanOptions::default()).unwrap();
+        let (Some(from_rest), Some(from_moving)) = (both.best(0), both.best(1)) else {
+            continue;
+        };
+        let from_rest = Trajectory::try_new(&robot, from_rest, 1.0)
+            .unwrap()
+            .duration();
+        let moving = Trajectory::moving(&robot, from_moving, &motion).unwrap();
+        moving.check_from(&robot, &state).unwrap();
+        assert!(
+            moving.duration() < 3.0 * from_rest,
+            "motion {}: {} s from its moving start, {from_rest} s from rest",
+            s.index,
+            moving.duration()
+        );
+        replanned += 1;
+    }
+    assert!(replanned >= 10, "only {replanned} replanned");
+}
+
+#[test]
+fn paths_planned_from_a_moving_start_run_from_it() {
+    // Replanned from 30%, 50% and 70% of the way along planned motions to new goals: every path
+    // `plan` returns is timed from exactly that state and keeps every limit and joint range, even
+    // where momentum would carry a joint out of its range in the first span.
+    let robots = [
+        common::panda().unwrap(),
+        Robot::load(
+            common::asset("so101/so101_new_calib.urdf"),
+            &RobotOptions::default(),
+        )
+        .unwrap(),
+    ];
+    for robot in robots {
+        let n = robot.dof();
+        let cpu = Device::cpu(&robot).unwrap();
+        let worlds = cpu.upload(&[World::default()]).unwrap();
+        let mut rng = Rng::new(17);
+        let mut random = || -> Vec<f32> {
+            (0..n)
+                .map(|j| rng.range(robot.lower()[j], robot.upper()[j]))
+                .collect()
+        };
+        let problems: Vec<PlanProblem> = (0..160)
+            .map(|_| PlanProblem::new(0, random(), random()))
+            .collect();
+        let plans = batchplan::plan(&cpu, &worlds, &problems, &PlanOptions::default()).unwrap();
+        let mut state = JointState::new(n);
+        let (mut moving, mut states) = (vec![], vec![]);
+        for (k, s) in plans.solved().take(96).enumerate() {
+            let trajectory = Trajectory::try_new(&robot, s.solution, 1.0).unwrap();
+            trajectory.at([0.3, 0.5, 0.7][k % 3] * trajectory.duration(), &mut state);
+            let motion = StartMotion {
+                velocity: state.velocity.clone(),
+                acceleration: state.acceleration.clone(),
+            };
+            moving.push(PlanProblem {
+                start_motion: Some(motion),
+                ..PlanProblem::new(0, state.position.clone(), random())
+            });
+            states.push(state.clone());
+        }
+        let replans = batchplan::plan(&cpu, &worlds, &moving, &PlanOptions::default()).unwrap();
+        let solved: Vec<_> = replans.solved().collect();
+        assert!(
+            solved.len() >= moving.len() * 3 / 4,
+            "only {} of {} replanned",
+            solved.len(),
+            moving.len()
+        );
+        for s in solved {
+            let motion = s.problem.start_motion.as_ref().unwrap();
+            let trajectory = Trajectory::moving(&robot, s.solution, motion).unwrap();
+            if let Err(e) = trajectory.check_from(&robot, &states[s.index]) {
+                panic!("replan {}: {e}", s.index);
+            }
+        }
+        // So does every seed trajectory optimization keeps.
+        let o = PlanOptions {
+            seeds: 2,
+            ..Default::default()
+        };
+        let optimized = batchplan::plan(&cpu, &worlds, &moving[..32], &o).unwrap();
+        for item in (0..optimized.valid.len()).filter(|&i| optimized.valid[i]) {
+            let index = item / optimized.seeds;
+            let motion = moving[index].start_motion.as_ref().unwrap();
+            let path = optimized.paths.path(item);
+            let trajectory = Trajectory::moving(&robot, path, motion).unwrap();
+            if let Err(e) = trajectory.check_from(&robot, &states[index]) {
+                panic!("replan {index}, seed {}: {e}", item % optimized.seeds);
+            }
+        }
+    }
+}
+
+#[test]
 fn scaled_limits_slow_every_motion() {
     let robot = common::panda().unwrap();
     // Half speed: velocity by a half, acceleration by its square, jerk by its cube.

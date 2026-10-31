@@ -120,7 +120,7 @@ The robot is a set of spheres; obstacles are boxes, spheres, cylinders, capsules
 
 ## Timing
 
-A `Trajectory` is the path plus a time map `s = σ(t)`, itself a uniform cubic B-spline. `Trajectory::try_new` keeps the faster of uniform timing (exact along the whole curve) and time-optimal timing: TOPP-RA on the path parameter, with the jerk limit as a cap on speed, smoothed into the time map and stretched where the map overshoots a limit. Map spans are sized by the path and, for finely split paths, by the time the jerk limit takes to swing acceleration. A start in motion is timed from its speed along the path; a controlled stop brakes to rest along the path.
+A `Trajectory` is the path plus a time map `s = σ(t)`, itself a uniform cubic B-spline. `Trajectory::try_new` keeps the faster of uniform timing (exact along the whole curve) and time-optimal timing: TOPP-RA on the path parameter, with the jerk limit as a cap on speed, smoothed into the time map and stretched where the map overshoots a limit. Map spans are sized by the path and, for finely split paths, by the time the jerk limit takes to swing acceleration. A start in motion is timed from its speed along the path; where that finds no timing, again with the full limits at the start easing to the headroom over two spans, and the map stretched with its start set again. A controlled stop brakes to rest along the path.
 
 ## Perception and training data
 

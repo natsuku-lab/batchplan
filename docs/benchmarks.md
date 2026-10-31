@@ -395,6 +395,22 @@ No sequence finished later than its motions one after another. Joining a batch t
 
 Some straight moves finish later than before, while more finish sooner. In the [handovers](#bimanual-handovers), 32 of the 510 episodes changed length on the Ryzen's CPU device: 14 longer, by at most 2 frames, and 18 shorter, 9 frames shorter in all (`--resets` writes `episodes/length.npy` at both commits). In four alternating runs, with the machine's load at 5–13, the change ran 420 against 418 episodes/s on the Radeon and 369 against 354 on the Ryzen, the same 510 of 512 with a 12.8 s median episode.
 
+## Replanning while moving
+
+`examples/timing.rs` replans 61 planned Panda motions to new goals from halfway along them, where joints move at up to their limits (about 3 rad/s together), and times them with `Trajectory::moving`. Timing used to give up on such a start when its smoothed time map overshot a limit: the map could not be stretched without slowing the start, and lowered caps near the start left its speed out of reach. It then fell back to uniform timing at the pace the path's first span was fitted to, 18–23 s for most. Now, where that first try finds no timing, a second one gives the start the full limits, easing to the headroom over two path spans, stretches the map with its first points set again for the start's speed, and ends the refinement with what the earlier rounds found where lowered caps cannot start at that speed. Starts the first try times keep their timing exactly; the cost is the second try, on the starts the first gave up on. Against the previous commit, on the Ryzen, three alternating runs:
+
+| | Before | Now |
+|---|---|---|
+| Replanned while moving, mean duration | 12.93 s | 3.76 s |
+| Timing each, one thread | 735 µs | 1,160 µs |
+| Full-speed reaches replanned to their goals (`tests/device.rs`) | 18 of 24 | 24 of 24 |
+| 96 Panda motions replanned from 30–70% along them (`tests/trajectory.rs`'s construction), planned | 75, some unable to run from their starts | 85, every one runnable |
+| The same, as one batch on 14 threads | 68 ms | 59 ms |
+| The same, as one batch on 32 threads | 48 ms | 59 ms |
+| The same, one at a time | 8.0 ms | 6.6 ms |
+
+Paths planned from rest (2.3 s on average) and the hand's straight moves time exactly as before, and the handover episodes are the same bit for bit on both devices, at the same pace (466 against 464 episodes/s on the Ryzen, 476 on the Radeon, four alternating runs). `plan` also no longer returns a path from a moving start that cannot run from it: where momentum carried a joint out of its range in the first span, it tries longer first spans, and otherwise leaves the problem unsolved. On 32 threads the batch waits on its longest search, which that lengthens, so it no longer gains from the threads beyond 14.
+
 ## Bimanual handovers
 
 `examples/handover/` generates the [handover episodes](training-data.md#handovers) for two reBot B601-DM arms 44 cm apart at a table. In each task one arm picks up a block lying in front of it and hands it over between the arms, and the other arm sets it down in front of itself. The blocks are 24–28 cm long, in four sizes; the block, meeting and place poses vary in position and yaw, and 0–2 small boxes stand elsewhere on the table. Three tables in four are divided down the middle, a quarter each by a low wall (6–8 cm) that the block is lifted over, a screen 16–18 cm tall with an opening 8.5–10.5 cm wide, and a row of posts as tall. The block cannot be lifted over the tall ones, so the hands meet at one end of their reach and the block lies, and is set down, toward the other: it is carried along the divider to the gap and back. Planned without its divider, the block alone would pass through it on 267 of the 372 divided tables (79 of 120 walls, 82 of 118 screens, 106 of 134 rows of posts). Half the tasks go left to right. Every step is batched over all the tasks: the giver's `pick`, IK for both hands at the meeting pose, one plan moving both arms there, the straight moves of the handover, and the taker's `place`, whose transit moves both arms (the giver going home); then the episodes' sampling.

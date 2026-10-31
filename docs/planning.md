@@ -263,9 +263,10 @@ Either is slowed by `speed_scale` (1.0 is as fast as the limits allow). Limits c
 ### Starting from a moving state
 
 To replan mid-motion, give `PlanProblem::start_motion` the robot's current velocity and acceleration. The spline's first control points then continue that motion, and `Trajectory::moving(&robot, path, &start_motion)` times it from exactly that state, as fast as the limits allow.
-- `plan` only returns splines that can be timed this way.
+- `plan` only returns splines that can run from that state: `Trajectory::moving` times them from it, keeping every limit and joint range, as `check_from` checks. Where momentum would carry a joint out of its range in the first span, longer first spans are tried; a path that still cannot run is not returned.
 - The spline's first spans last as long as the robot needs to change its velocity (about |v| / a). Where it still cannot follow the motion, longer spans are tried, and then trajectory optimization smooths the spline until it can.
-- When reaches are replanned to the same goal from partway through, plans succeed every time with every joint below 1.5 rad/s, and three times in four with one faster, near the Panda's full speed. In the rest, momentum carries a joint out of its range or into the scene, or no timing keeps the limits.
+- Where no timing fits from the start as it is, timing tries again with the full limits at the start, since its motion is not ours to choose, easing to the usual headroom over the path's first two spans, and stretches the rest of the motion where its smoothed map needs it while keeping the start's speed. Replanned to new goals from halfway along planned Panda motions, at about 3 rad/s, motions took 3.8 s on average, against 12.9 s when timing gave up on such starts, and none took longer ([Benchmarks](benchmarks.md#replanning-while-moving)).
+- When reaches are replanned to the same goal from partway through, plans succeeded every time, with every joint below 1.5 rad/s and with one faster, near the Panda's full speed (24 of 24). Where one fails, momentum carries a joint out of its range or into the scene.
 - A path that cannot brake in time is refused with `Error::Unsafe`.
 - `trajectory.check_from(&robot, &state)` verifies that a trajectory starts at a given state: each position to 1e-4 of (1 + |q|) rad, each velocity and acceleration to 1e-4 of its value plus the joint's limit.
 

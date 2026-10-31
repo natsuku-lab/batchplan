@@ -806,9 +806,10 @@ fn reaches_replan_mid_motion_at_full_speed() {
             solved.len(),
             moving.len()
         );
-        // 18 of 24 on an M4 Pro, 17 on CI's x86-64; the start knot interval sized for rest gives 0.
+        // 24 of 24 on an M4 Pro and on the Ryzen; 18 when timing gave up on a moving start whose
+        // smoothed map overshot, and 0 with the start knot interval sized for rest.
         assert!(
-            5 * solved.len() >= 3 * moving.len(),
+            10 * solved.len() >= 9 * moving.len(),
             "{}: {} of {} replanned",
             d.name(),
             solved.len(),

@@ -13,6 +13,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rayon::prelude::*;
+
 use crate::cpu::PathOptimizer;
 use crate::device::{CollisionWeights, Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Keep, Optimize, Search};
@@ -22,7 +24,7 @@ use crate::robot::Robot;
 use crate::rrt::{self, Ahead, Connect, RrtOptions, RrtProblem, Sampling};
 use crate::shortcut::{self, ShortcutOptions, Simplify};
 use crate::spline;
-use crate::timing::Trajectory;
+use crate::timing::{JointState, Trajectory};
 use crate::types::{JointPaths, Solved, StartMotion};
 
 /// How [`plan`] searches, shortens, fits and optimizes paths.
@@ -263,7 +265,39 @@ pub fn plan(
     if o.seeds > 0 && deadline.is_none_or(|d| Instant::now() < d) {
         optimize(device, worlds, &mut result, &searched, o, deadline)?;
     }
+    // The searched paths run from their moving starts; optimized seeds are checked the same way.
+    let optimized: Vec<usize> = (0..problems.len() * seeds)
+        .filter(|&item| item % seeds > 0 && result.valid[item])
+        .filter(|&item| problems[item / seeds].start_motion.is_some())
+        .collect();
+    let stuck: Vec<usize> = device.install(|| {
+        optimized
+            .into_par_iter()
+            .filter(|&item| {
+                !runs_from_start(robot, &problems[item / seeds], result.paths.path(item))
+            })
+            .collect()
+    });
+    for item in stuck {
+        result.valid[item] = false;
+        result.length[item] = f32::INFINITY;
+    }
     Ok(result)
+}
+
+/// Whether `path` can run from `problem`'s start: from rest, or from its moving start timed by
+/// `Trajectory::moving` from exactly that state, keeping every limit and joint range there as
+/// `Trajectory::check_from` checks. Momentum can carry a joint out of its range in the first span.
+fn runs_from_start(robot: &Robot, problem: &PlanProblem, path: &[f32]) -> bool {
+    let Some(m) = &problem.start_motion else {
+        return true;
+    };
+    let start = JointState {
+        position: problem.start.clone(),
+        velocity: m.velocity.clone(),
+        acceleration: m.acceleration.clone(),
+    };
+    Trajectory::moving(robot, path, m).is_ok_and(|t| t.check_from(robot, &start).is_ok())
 }
 
 /// Iterations RRT-Connect gets to find a path keeping the clearance before it searches without.
@@ -417,7 +451,7 @@ fn next_fit(
             let goal = &path[path.len() - n..];
             let follows = START_KNOTS.iter().any(|&longer| {
                 continue_motion(robot, &problem.start, goal, m, longer, &mut fit.spline);
-                Trajectory::moving(robot, &fit.spline, m).is_ok()
+                runs_from_start(robot, problem, &fit.spline)
             });
             if !follows {
                 if fit.pins.iter().all(|&p| p == EXACT) {
@@ -786,10 +820,7 @@ impl Search for Planning<'_> {
             Phase::Repair(repair) => {
                 let n = self.robot.dof();
                 let (spline, dense) = repair.checking.take().expect("answers follow checks");
-                let follows = |m: &StartMotion| Trajectory::moving(self.robot, &spline, m).is_ok();
-                if answer == dense.len() / n
-                    && self.problem.start_motion.as_ref().is_none_or(follows)
-                {
+                if answer == dense.len() / n && runs_from_start(self.robot, self.problem, &spline) {
                     self.chosen = Some((spline, shortcut::length(&dense, n)));
                     self.phase = Phase::Done;
                 } else if repair.optimizer.finished() {
