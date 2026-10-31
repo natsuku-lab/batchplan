@@ -411,6 +411,23 @@ Some straight moves finish later than before, while more finish sooner. In the [
 
 Paths planned from rest (2.3 s on average) and the hand's straight moves time exactly as before, and the handover episodes are the same bit for bit on both devices, at the same pace (466 against 464 episodes/s on the Ryzen, 476 on the Radeon, four alternating runs). `plan` also no longer returns a path from a moving start that cannot run from it: where momentum carried a joint out of its range in the first span, it tries longer first spans, and otherwise leaves the problem unsolved. On 32 threads the batch waits on its longest search, which that lengthens, so it no longer gains from the threads beyond 14.
 
+## Tracking on the SO-101's servos
+
+`examples/so101_tracking.rs` times random motions of the SO-101 in free space under several limits, and `scripts/so101_tracking.py` plays them in MuJoCo through the model of its Feetech STS3215 (7.4 V) servos that [BAM](https://github.com/Rhoban/bam) identified from recorded trajectories (model m6: the firmware's rate-limited P controller, PWM and supply limits, load-dependent friction). It measures the largest gap between the arm and the trajectory while it runs, the median over the motions, any joint. Each motion starts settled under gravity, and every 2 ms step sends that step's target. The stock arm powers these servos from 5 V; BAM identified them at 7.4 V. Gain 16 is what LeRobot sets; 32 is the firmware's default.
+
+| 165 motions | Duration | 5 V, gain 16 | 5 V, gain 32 | 7.4 V, gain 16 | 7.4 V, gain 32 |
+|---|---|---|---|---|---|
+| Limits as given | 1.74 s | 16.6° (6.3%) | 8.4° (6.3%) | 11.3° | 5.6° |
+| Speed × 0.75 | 2.32 s | 13.0° (0.6%) | 6.6° (0.5%) | 8.8° | 4.4° |
+| Acceleration × 0.5 | 2.26 s | 13.3° (0.5%) | 6.6° (0.5%) | 9.0° | 4.5° |
+| Jerk × 0.25 | 2.39 s | 14.1° (1.9%) | 7.0° (1.7%) | 9.4° | 4.7° |
+
+The share of steps with a servo at its PWM limit is in brackets; at 7.4 V none were. On the Ryzen.
+
+- **Speed, not jerk, sets how far the arm lags.** At about the same duration, a quarter of the jerk limit tracks no better than a slower speed or acceleration.
+- **At 5 V the SO-101 cannot keep up with its limits at full speed.** Its servos sit at the PWM limit on 6.3% of steps, and the worst motion lags 58°; at 0.75 of the speed, 0.6% and 32°. `Trajectory::try_new`'s speed scale, or `RobotOptions::velocity_scale`, slows it.
+- **[Joined](#joining-motions) pick-like sequences track as their motions do one after another:** 16.4° against 16.7° at 5 V, finishing 7% sooner.
+
 ## Bimanual handovers
 
 `examples/handover/` generates the [handover episodes](training-data.md#handovers) for two reBot B601-DM arms 44 cm apart at a table. In each task one arm picks up a block lying in front of it and hands it over between the arms, and the other arm sets it down in front of itself. The blocks are 24–28 cm long, in four sizes; the block, meeting and place poses vary in position and yaw, and 0–2 small boxes stand elsewhere on the table. Three tables in four are divided down the middle, a quarter each by a low wall (6–8 cm) that the block is lifted over, a screen 16–18 cm tall with an opening 8.5–10.5 cm wide, and a row of posts as tall. The block cannot be lifted over the tall ones, so the hands meet at one end of their reach and the block lies, and is set down, toward the other: it is carried along the divider to the gap and back. Planned without its divider, the block alone would pass through it on 267 of the 372 divided tables (79 of 120 walls, 82 of 118 screens, 106 of 134 rows of posts). Half the tasks go left to right. Every step is batched over all the tasks: the giver's `pick`, IK for both hands at the meeting pose, one plan moving both arms there, the straight moves of the handover, and the taker's `place`, whose transit moves both arms (the giver going home); then the episodes' sampling.
@@ -532,6 +549,12 @@ cargo run --release --example tasks -- 64
 # Joining pick-like motions on one reBot (after scripts/fetch_rebot.sh), or the SO-101; timing by kind of path
 cargo run --release --example join [-- so101]
 cargo run --release --example timing
+
+# Tracking on the SO-101's servos, on BAM's model of them
+uv venv .venv-so101 --python 3.12
+uv pip install --python .venv-so101/bin/python "better-actuator-models[mujoco]==1.0.3" mujoco==3.17.0 numpy==2.5.4
+cargo run --release --example so101_tracking -- data/so101_tracking      # --sequences for joined pick-like motions
+.venv-so101/bin/python scripts/so101_tracking.py data/so101_tracking      # --kp 32, --vin 7.4
 
 # Two reBot arms handing blocks over (downloads the arm at a pinned commit, with checksums), and their camera videos
 scripts/fetch_rebot.sh
