@@ -32,10 +32,6 @@ Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-la
 - **Data:** reaches with recoveries from mistakes, pick-and-place episodes and handovers between two arms, with grippers and task strings, plus states perturbed from them to start reinforcement learning from. They export as LeRobot v3.0 datasets (arm by arm, as ALOHA's) or NumPy arrays; `scripts/replay_mujoco.py` replays them in MuJoCo and adds camera videos.
 - **Embeddable:** CPU-only builds, threads you own, time budgets, allocation-free sampling and typed errors, for use inside a robot's control process.
 
-<img width="1135" height="654" alt="A UR5e at each of many tables drawing a triangle, square, hexagon or star with a pen, every arm planned in one call" src="https://raw.githubusercontent.com/natsuku-lab/batchplan/main/demos/gifs/tool_paths.gif" />
-
-<p align="center"><em>Twenty UR5e arms drawing with a pen, in <a href="docs/planning.md#moving-the-hand-along-a-path">straight lines</a> planned in one call, the pen <a href="docs/perception.md#allowed-contacts">allowed to touch</a> the table and kept under 15 cm/s (<a href="demos/README.md#moving-the-hand-in-straight-lines">demo</a>).</em></p>
-
 ## Install
 
 ```bash
@@ -49,6 +45,10 @@ cargo add batchplan                        # --features lerobot,usd for the opti
 | `usd` | off | Robots and scenes from OpenUSD. |
 
 batchplan builds on stable Rust 1.90 or later (1.96 with `usd`), with no build flags to set: its collision checks use the widest SIMD instructions the CPU has, chosen when the program runs (SSE2 up to AVX-512 on x86-64, NEON on ARM).
+
+<img width="1135" height="654" alt="A UR5e at each of many tables drawing a triangle, square, hexagon or star with a pen, every arm planned in one call" src="https://raw.githubusercontent.com/natsuku-lab/batchplan/main/demos/gifs/tool_paths.gif" />
+
+<p align="center"><em>Twenty UR5e arms drawing with a pen, in <a href="docs/planning.md#moving-the-hand-along-a-path">straight lines</a> planned in one call, the pen <a href="docs/perception.md#allowed-contacts">allowed to touch</a> the table and kept under 15 cm/s (<a href="demos/README.md#moving-the-hand-in-straight-lines">demo</a>).</em></p>
 
 ## Quick start
 
