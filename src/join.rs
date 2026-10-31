@@ -36,15 +36,15 @@ pub struct Sequence {
     /// The motions' paths in order: rest-to-rest B-spline control points (`[points, dof]`, three
     /// equal at each end), as [`plan`](crate::plan) and [`follow`](crate::follow) return them.
     pub paths: Vec<Vec<f32>>,
+    /// Per join, one fewer than the paths, its blend radius (meters): near it, the joined path
+    /// leaves the paths only while every hand is within this distance of where it is at the join,
+    /// as Pilz's and UR's blend radii. 0 stops there.
+    pub blends: Vec<f32>,
 }
 
-/// How [`join`] passes from one motion to the next.
+/// How [`join`] checks its blends.
 #[derive(Clone, Debug)]
 pub struct JoinOptions {
-    /// The blend radius (meters): near each join, the joined path leaves the paths only while
-    /// every hand is within this distance of where it is at the join, as Pilz's and UR's blend
-    /// radii: 5 cm.
-    pub blend: f32,
     /// Joint-space spacing of collision checks, as [`RrtOptions::resolution`](crate::RrtOptions).
     pub resolution: f32,
 }
@@ -52,7 +52,6 @@ pub struct JoinOptions {
 impl Default for JoinOptions {
     fn default() -> Self {
         Self {
-            blend: 0.05,
             resolution: 1.0 / 32.0,
         }
     }
@@ -70,7 +69,8 @@ pub struct JoinResult {
     pub paths: Vec<Vec<Vec<f32>>>,
     /// Per sequence, per join: the radius its blend turns within (meters), the farthest any hand
     /// is from its place at the join where the path leaves or rejoins the motions: no more than
-    /// [`JoinOptions::blend`], less where a narrower blend is sooner or a wider one collides.
+    /// its [`Sequence::blends`] radius, less where a narrower blend is sooner or a wider one
+    /// collides.
     /// `None` where the motion stops.
     pub blends: Vec<Vec<Option<f32>>>,
 }
@@ -95,11 +95,6 @@ pub fn join(
     let robot = device.robot();
     let n = robot.dof();
     ensure_input!(
-        o.blend >= 0.0 && o.blend.is_finite(),
-        "the blend radius must be finite and not negative, got {}",
-        o.blend
-    );
-    ensure_input!(
         o.resolution > 0.0,
         "the resolution must be positive, got {}",
         o.resolution
@@ -112,6 +107,19 @@ pub fn join(
             worlds.len()
         );
         ensure_input!(!sequence.paths.is_empty(), "sequence {i} has no paths");
+        ensure_input!(
+            sequence.blends.len() + 1 == sequence.paths.len(),
+            "sequence {i}: {} blend radii for {} paths, not one per join",
+            sequence.blends.len(),
+            sequence.paths.len()
+        );
+        for (k, &radius) in sequence.blends.iter().enumerate() {
+            ensure_input!(
+                radius >= 0.0 && radius.is_finite(),
+                "sequence {i}, join {k}: the blend radius must be finite and not negative, got \
+                 {radius}"
+            );
+        }
         for (k, path) in sequence.paths.iter().enumerate() {
             ensure_input!(
                 path.len() % n == 0 && path.len() / n >= 7,
@@ -182,10 +190,11 @@ struct Joining<'a> {
     robot: &'a Robot,
     world: u32,
     n: usize,
-    blend: f32,
+    /// Each join's blend radius.
+    radii: &'a [f32],
     resolution: f32,
-    /// The motions as given, how long each takes so, and the path so far: them, split, one after
-    /// another, the joins decided so far blended.
+    /// The motions as given, how long each beside a blend takes so, and the path so far: them,
+    /// split, one after another, the joins decided so far blended.
     given: &'a [Vec<f32>],
     apart: Vec<f32>,
     path: Vec<f32>,
@@ -209,28 +218,44 @@ impl<'a> Joining<'a> {
     fn new(robot: &'a Robot, sequence: &'a Sequence, o: &JoinOptions) -> Self {
         let n = robot.dof();
         let last = sequence.paths.len() - 1;
+        let radii = &sequence.blends[..];
+        // The blend radius of the join before motion `k` and of the one after it, 0 where there is
+        // none.
+        let before = |k: usize| if k > 0 { radii[k - 1] } else { 0.0 };
+        let after = |k: usize| radii.get(k).copied().unwrap_or(0.0);
+        let blended = |k: usize| before(k) > 0.0 || after(k) > 0.0;
+        // Motions joined by positive radii form a chain; a stop at radius 0 separates the chains
+        // either side of it entirely, as if they were sequences of their own.
+        let chain: Vec<usize> = (0..=last)
+            .scan(0, |c, k| {
+                *c += usize::from(k > 0 && radii[k - 1] == 0.0);
+                Some(*c)
+            })
+            .collect();
         let mut motions = sequence.paths.clone();
-        if o.blend > 0.0 {
+        if (0..=last).any(blended) {
             let mut splits = vec![0; motions.len()];
             loop {
-                // Motions of fewer than eight control points have no room for a blend, so never
-                // share a stretch with another.
-                let finest = motions
-                    .iter()
-                    .filter(|p| p.len() / n >= 8)
-                    .map(|p| spacing(p, n))
-                    .filter(|&d| d > 1e-6)
-                    .fold(f32::INFINITY, f32::min);
+                // The finest pace in each chain. Motions of fewer than eight control points have no
+                // room for a blend, so never share a stretch with another.
+                let mut finest = vec![f32::INFINITY; chain[last] + 1];
+                for (k, p) in motions.iter().enumerate() {
+                    let d = spacing(p, n);
+                    if blended(k) && p.len() / n >= 8 && d > 1e-6 {
+                        finest[chain[k]] = finest[chain[k]].min(d);
+                    }
+                }
                 let mut split = false;
                 for (k, p) in motions.iter_mut().enumerate() {
                     let points = p.len() / n;
-                    let coarse = |knot: usize, at: usize| {
+                    let coarse = |knot: usize, at: usize, radius: f32| {
                         reach(robot, &knot_point(p, n, knot), &p[at * n..(at + 1) * n])
-                            > 0.5 * o.blend
+                            > 0.5 * radius
                     };
-                    let wanted = spacing(p, n) > 2.0 * finest
-                        || (k < last && coarse(points - 5, points - 1))
-                        || (k > 0 && coarse(4, 0));
+                    let wanted = blended(k)
+                        && (spacing(p, n) > 2.0 * finest[chain[k]]
+                            || (after(k) > 0.0 && coarse(points - 5, points - 1, after(k)))
+                            || (before(k) > 0.0 && coarse(4, 0, before(k))));
                     if wanted && splits[k] < MAX_SPLITS {
                         *p = spline::split(p, n);
                         splits[k] += 1;
@@ -262,19 +287,22 @@ impl<'a> Joining<'a> {
                 });
             }
         }
-        let apart = if o.blend > 0.0 {
-            let duration = |p: &Vec<f32>| {
-                Trajectory::try_new(robot, p, 1.0).map_or(f32::INFINITY, |t| t.duration())
-            };
-            sequence.paths.iter().map(duration).collect()
-        } else {
-            vec![]
-        };
+        // How long each motion beside a blend takes as given; the others' are never read.
+        let apart: Vec<f32> = (0..=last)
+            .map(|k| {
+                if blended(k) {
+                    Trajectory::try_new(robot, &sequence.paths[k], 1.0)
+                        .map_or(f32::INFINITY, |t| t.duration())
+                } else {
+                    0.0
+                }
+            })
+            .collect();
         let mut joining = Self {
             robot,
             world: sequence.world,
             n,
-            blend: o.blend,
+            radii,
             resolution: o.resolution,
             given: &sequence.paths,
             so_far: apart.first().copied().unwrap_or(0.0),
@@ -300,7 +328,8 @@ impl<'a> Joining<'a> {
         let Some(seam) = self.seams.get(s) else {
             return vec![];
         };
-        if self.blend == 0.0 {
+        let radius = self.radii[s];
+        if radius == 0.0 {
             return vec![];
         }
         let (n, at) = (self.n, seam.at);
@@ -312,19 +341,19 @@ impl<'a> Joining<'a> {
             return vec![];
         }
         let (mut before, mut after) = (vec![reach_at(at - 2)], vec![reach_at(at + 4)]);
-        if before[0].max(after[0]) > self.blend {
+        if before[0].max(after[0]) > radius {
             return vec![];
         }
         while at >= seam.lower + 2 + before.len() {
             let r = reach_at(at - 2 - before.len());
-            if r > self.blend {
+            if r > radius {
                 break;
             }
             before.push(r);
         }
         while at + 4 + after.len() <= seam.upper {
             let r = reach_at(at + 4 + after.len());
-            if r > self.blend {
+            if r > radius {
                 break;
             }
             after.push(r);
@@ -591,8 +620,8 @@ mod tests {
     }
 
     /// Two planned motions sweeping across the front, the second carrying on where the first was
-    /// going.
-    fn sweep(robot: &Robot) -> Sequence {
+    /// going, joined within `blend`.
+    fn sweep(robot: &Robot, blend: f32) -> Sequence {
         let stops = [
             vec![-1.2, -0.6, 0.0, -2.2, 0.0, 1.6, 0.8],
             vec![-0.4, -0.3, 0.1, -1.9, 0.1, 1.7, 0.7],
@@ -607,7 +636,11 @@ mod tests {
         let plans = crate::plan(&device, &worlds, &problems, &PlanOptions::default()).unwrap();
         let paths: Vec<Vec<f32>> = plans.solved().map(|s| s.solution.to_vec()).collect();
         assert_eq!(paths.len(), 2);
-        Sequence { world: 0, paths }
+        Sequence {
+            world: 0,
+            paths,
+            blends: vec![blend],
+        }
     }
 
     /// A blend changes the curve only on the spans `bridge` reports, so checking them checks it.
@@ -615,12 +648,8 @@ mod tests {
     fn a_blend_changes_only_the_spans_it_reports() {
         let robot = panda();
         let n = robot.dof();
-        let sequence = sweep(&robot);
-        let o = JoinOptions {
-            blend: 0.2,
-            ..Default::default()
-        };
-        let joining = Joining::new(&robot, &sequence, &o);
+        let sequence = sweep(&robot, 0.2);
+        let joining = Joining::new(&robot, &sequence, &JoinOptions::default());
         let at = joining.seams[0].at;
         assert!(!joining.candidates.is_empty(), "the sweep blends");
         let curve = |cp: &[f32], span: usize, u: f32| {
@@ -666,7 +695,7 @@ mod tests {
     fn blends_at_neighbouring_joins_never_meet() {
         let robot = panda();
         let n = robot.dof();
-        let mut sequence = sweep(&robot);
+        let mut sequence = sweep(&robot, 1.0);
         let device = Device::cpu(&robot).unwrap();
         let worlds = device.upload(&[World::default()]).unwrap();
         let last = &sequence.paths[1];
@@ -677,11 +706,8 @@ mod tests {
         );
         let plans = crate::plan(&device, &worlds, &[onward], &PlanOptions::default()).unwrap();
         sequence.paths.push(plans.best(0).unwrap().to_vec());
-        let o = JoinOptions {
-            blend: 1.0,
-            ..Default::default()
-        };
-        let joining = Joining::new(&robot, &sequence, &o);
+        sequence.blends.push(1.0);
+        let joining = Joining::new(&robot, &sequence, &JoinOptions::default());
         // The knots bounding the spans each seam's blends change: from `enter - 1` to `leave + 1`,
         // both still the paths' own; neighbours may share one.
         let changed: Vec<(usize, usize)> = (0..joining.seams.len())
@@ -749,11 +775,8 @@ mod tests {
     #[test]
     fn colliding_blends_give_way_to_the_next_then_to_the_stop() {
         let robot = panda();
-        let sequence = sweep(&robot);
-        let o = JoinOptions {
-            blend: 0.2,
-            ..Default::default()
-        };
+        let sequence = sweep(&robot, 0.2);
+        let o = JoinOptions::default();
         let mut buffer = vec![];
         let mut every_one_collides = Joining::new(&robot, &sequence, &o);
         let tries = every_one_collides.candidates.len();

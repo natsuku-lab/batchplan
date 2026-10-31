@@ -223,13 +223,13 @@ fn main() -> Result<(), Error> {
 
 ## Joining motions
 
-`join(&device, &worlds, &sequences, &JoinOptions)` runs consecutive motions without stopping between them, as MoveIt's Pilz planner blends a motion sequence. A `Sequence` names its world and its paths in order, each rest-to-rest as `plan` and `follow` return them and starting where the one before ends.
+`join(&device, &worlds, &sequences, &JoinOptions)` runs consecutive motions without stopping between them, as MoveIt's Pilz planner blends a motion sequence. A `Sequence` names its world, its paths in order, each rest-to-rest as `plan` and `follow` return them and starting where the one before ends, and a blend radius for each join, as each item of a Pilz sequence gives its own.
 
 ```rust,no_run
 # use batchplan::{Device, Error, JoinOptions, Sequence, Trajectory, World};
 # fn run(device: &Device, transit: Vec<f32>, approach: Vec<f32>) -> Result<(), Error> {
 let worlds = device.upload(&[World::default()])?;
-let sequence = Sequence { world: 0, paths: vec![transit, approach] };
+let sequence = Sequence { world: 0, paths: vec![transit, approach], blends: vec![0.05] };
 let joined = batchplan::join(device, &worlds, &[sequence], &JoinOptions::default())?;
 // One path per stretch the robot moves without stopping: here one, unless the join stopped.
 for path in &joined.paths[0] {
@@ -240,10 +240,10 @@ for path in &joined.paths[0] {
 # }
 ```
 
-- **The blend.** Near a join, the joined path leaves the motions only while every hand is within `JoinOptions::blend` (5 cm) of where it is at the join, and is the motions themselves elsewhere: a tool path stays on its line outside the blend. Inside it, the path follows a curve that sets out and arrives along both motions without curving there, so jerk-limited timing can follow it at speed.
+- **The blend.** Near a join, the joined path leaves the motions only while every hand is within the join's radius of where it is at the join (0 stops there), and is the motions themselves elsewhere: a tool path stays on its line outside the blend. Inside it, the path follows a curve that sets out and arrives along both motions without curving there, so jerk-limited timing can follow it at speed.
 - **Kept only where it is sooner.** Each join weighs three blends: the widest within the radius, one dropping half as many control points, and the narrowest. Those that make the stretch so far and the next motion finish sooner than with a stop between them are checked for collision, soonest first, and the first that is free is kept. A turn back, or a tight turn at speed, rarely gains, and keeps its stop. `JoinResult::blends` gives each join's radius, `None` where it stops. Joining never makes a sequence take longer.
 - **The result.** Per sequence, one path for each stretch the robot moves without stopping, to time with `Trajectory::try_new`. A stretch of one motion is that motion as given.
-- **What it gains.** On pick-like sequences, a transit into a straight move in and a straight move out into the next transit, the default radius finished 4.9% sooner on average on a reBot B601 (14% at most) and 7.5% on an SO-101 (18%), and joining 60 of them took 16 ms on 32 threads ([Benchmarks](benchmarks.md#joining-motions)). Motions that carry on in about the same direction gain more; a sharp turn needs most of a stop's braking anyway.
+- **What it gains.** On pick-like sequences, a transit into a straight move in and a straight move out into the next transit, a 5 cm radius finished 4.9% sooner on average on a reBot B601 (14% at most) and 7.5% on an SO-101 (18%), and joining 60 of them took 16 ms on 32 threads ([Benchmarks](benchmarks.md#joining-motions)). Motions that carry on in about the same direction gain more; a sharp turn needs most of a stop's braking anyway.
 - **Limits.** Each stretch has one timing, so a hand speed cap (`Trajectory::with_hand_speed`) caps all of it, and `pick` and `place` still stop between their steps. Each join times the stretch so far, so joining a long sequence costs more per join than a short one.
 
 ## Executable trajectories

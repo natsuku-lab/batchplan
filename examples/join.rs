@@ -119,28 +119,26 @@ fn main() -> Result<()> {
         let Some(onward) = onward.best(0) else {
             continue;
         };
-        sequences.push(Sequence {
-            world: 0,
-            paths: vec![transit.to_vec(), inward],
-        });
-        sequences.push(Sequence {
-            world: 0,
-            paths: vec![outward, onward.to_vec()],
-        });
+        sequences.push(vec![transit.to_vec(), inward]);
+        sequences.push(vec![outward, onward.to_vec()]);
     }
     println!("{name}: {} sequences of two motions", sequences.len());
 
     let apart: Vec<f32> = sequences
         .iter()
-        .map(|s| duration(&robot, &s.paths))
+        .map(|paths| duration(&robot, paths))
         .collect::<Result<_>>()?;
     for blend in BLENDS {
-        let o = JoinOptions {
-            blend,
-            ..Default::default()
-        };
+        let joining: Vec<Sequence> = sequences
+            .iter()
+            .map(|paths| Sequence {
+                world: 0,
+                paths: paths.clone(),
+                blends: vec![blend],
+            })
+            .collect();
         let start = Instant::now();
-        let joined = batchplan::join(&device, &worlds, &sequences, &o)?;
+        let joined = batchplan::join(&device, &worlds, &joining, &JoinOptions::default())?;
         let took = start.elapsed().as_secs_f64() * 1e3;
         let mut saved: Vec<f32> = joined
             .paths

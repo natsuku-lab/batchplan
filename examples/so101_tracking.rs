@@ -186,14 +186,8 @@ fn main() -> Result<()> {
             let Some(onward) = onward.best(0) else {
                 continue;
             };
-            found.push(Sequence {
-                world: 0,
-                paths: vec![transit.to_vec(), inward],
-            });
-            found.push(Sequence {
-                world: 0,
-                paths: vec![outward, onward.to_vec()],
-            });
+            found.push(vec![transit.to_vec(), inward]);
+            found.push(vec![outward, onward.to_vec()]);
         }
         println!("{} sequences of two motions", found.len());
         let timed = |stretches: &[Vec<f32>]| -> Result<Timed> {
@@ -207,15 +201,19 @@ fn main() -> Result<()> {
         };
         let apart = found
             .iter()
-            .map(|s| timed(&s.paths))
+            .map(|paths| timed(paths))
             .collect::<Result<_>>()?;
         variants.push(("apart".to_string(), apart));
         for blend in BLENDS {
-            let o = JoinOptions {
-                blend,
-                ..Default::default()
-            };
-            let joined = batchplan::join(&device, &worlds, &found, &o)?;
+            let joining: Vec<Sequence> = found
+                .iter()
+                .map(|paths| Sequence {
+                    world: 0,
+                    paths: paths.clone(),
+                    blends: vec![blend],
+                })
+                .collect();
+            let joined = batchplan::join(&device, &worlds, &joining, &JoinOptions::default())?;
             let motions = joined
                 .paths
                 .iter()

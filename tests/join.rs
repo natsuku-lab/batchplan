@@ -26,9 +26,17 @@ fn devices(robot: &Robot) -> Vec<Device> {
     devices
 }
 
-fn join(device: &Device, worlds: &Worlds, paths: Vec<Vec<f32>>, o: &JoinOptions) -> JoinResult {
-    let sequence = Sequence { world: 0, paths };
-    batchplan::join(device, worlds, &[sequence], o).unwrap()
+/// The radius the tests join at: 5 cm.
+const BLEND: f32 = 0.05;
+
+/// `paths` joined within `blend` at every join.
+fn join(device: &Device, worlds: &Worlds, paths: Vec<Vec<f32>>, blend: f32) -> JoinResult {
+    let sequence = Sequence {
+        world: 0,
+        blends: vec![blend; paths.len() - 1],
+        paths,
+    };
+    batchplan::join(device, worlds, &[sequence], &JoinOptions::default()).unwrap()
 }
 
 /// The hand moved `down` meters down from the ready pose, then `side` sideways: two straight
@@ -81,18 +89,14 @@ fn duration(robot: &Robot, paths: &[Vec<f32>]) -> f32 {
 #[test]
 fn joined_motions_turn_within_the_blend_and_finish_sooner() {
     let robot = panda();
-    let o = JoinOptions::default();
     let precision = ToolPathOptions::default().precision;
     for device in devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[World::default()]).unwrap();
         let (paths, [start, corner, end]) = self::corner(&device, &worlds, 0.1, 0.1);
-        let joined = join(&device, &worlds, paths.clone(), &o);
+        let joined = join(&device, &worlds, paths.clone(), BLEND);
         let radius = joined.blends[0][0].expect("a free corner blends");
-        assert!(
-            radius > 0.0 && radius <= o.blend,
-            "{name}: blend {radius} m"
-        );
+        assert!(radius > 0.0 && radius <= BLEND, "{name}: blend {radius} m");
         assert_eq!(
             joined.paths[0].len(),
             1,
@@ -133,11 +137,7 @@ fn a_zero_blend_stops_at_every_join() {
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::default()]).unwrap();
     let (paths, _) = corner(&device, &worlds, 0.1, 0.1);
-    let o = JoinOptions {
-        blend: 0.0,
-        ..Default::default()
-    };
-    let joined = join(&device, &worlds, paths.clone(), &o);
+    let joined = join(&device, &worlds, paths.clone(), 0.0);
     assert_eq!(joined.blends[0], vec![None]);
     assert_eq!(joined.paths[0], paths, "the motions, one after another");
 }
@@ -172,11 +172,7 @@ fn turning_back_never_finishes_later_than_stopping() {
         let paths: Vec<Vec<f32>> = plans.solved().map(|s| s.solution.to_vec()).collect();
         assert_eq!(paths.len(), problems.len());
         for blend in [0.02, 0.05, 0.1, 0.2, 0.4] {
-            let o = JoinOptions {
-                blend,
-                ..Default::default()
-            };
-            let joined = join(&device, &worlds, paths.clone(), &o);
+            let joined = join(&device, &worlds, paths.clone(), blend);
             let (joined, apart) = (duration(&robot, &joined.paths[0]), duration(&robot, &paths));
             assert!(
                 joined <= apart,
@@ -208,7 +204,7 @@ fn planned_motions_join_within_the_limits_alike_on_every_device() {
         let plans = batchplan::plan(&device, &worlds, &problems, &PlanOptions::default()).unwrap();
         let paths: Vec<Vec<f32>> = plans.solved().map(|s| s.solution.to_vec()).collect();
         assert_eq!(paths.len(), 3, "{name}: every motion plans");
-        let joined = join(&device, &worlds, paths.clone(), &JoinOptions::default());
+        let joined = join(&device, &worlds, paths.clone(), BLEND);
         assert_eq!(joined.blends[0].len(), 2);
         assert!(
             joined.blends[0].iter().all(Option::is_some),
@@ -263,7 +259,11 @@ fn malformed_sequences_are_input_errors() {
             Err(Error::Input(_))
         )
     };
-    let sequence = |paths: Vec<Vec<f32>>| Sequence { world: 0, paths };
+    let sequence = |paths: Vec<Vec<f32>>| Sequence {
+        world: 0,
+        blends: vec![BLEND; paths.len().saturating_sub(1)],
+        paths,
+    };
 
     let mut apart = paths.clone();
     apart[1].iter_mut().take(3 * n).for_each(|v| *v += 0.1);
@@ -284,21 +284,27 @@ fn malformed_sequences_are_input_errors() {
         input(
             Sequence {
                 world: 1,
-                paths: paths.clone()
+                ..sequence(paths.clone())
             },
             &o
         ),
         "a world out of range"
     );
-    let wide = JoinOptions {
-        blend: -0.01,
-        ..Default::default()
-    };
-    assert!(input(sequence(paths.clone()), &wide), "a negative blend");
-    let coarse = JoinOptions {
-        resolution: 0.0,
-        ..Default::default()
-    };
+    for blends in [vec![], vec![BLEND; 2]] {
+        let wrong = Sequence {
+            blends,
+            ..sequence(paths.clone())
+        };
+        assert!(input(wrong, &o), "a radius for each path, not each join");
+    }
+    for radius in [-0.01, f32::NAN] {
+        let wide = Sequence {
+            blends: vec![radius],
+            ..sequence(paths.clone())
+        };
+        assert!(input(wide, &o), "a blend radius of {radius}");
+    }
+    let coarse = JoinOptions { resolution: 0.0 };
     assert!(input(sequence(paths), &coarse), "no resolution");
 }
 
@@ -333,7 +339,7 @@ fn longer_sequences_never_finish_later_than_their_motions() {
         let paths: Option<Vec<Vec<f32>>> = (0..problems.len())
             .map(|i| plans.best(i).map(<[f32]>::to_vec))
             .collect();
-        sequences.extend(paths.map(|paths| Sequence { world: 0, paths }));
+        sequences.extend(paths);
     }
     assert!(
         sequences.len() >= 20,
@@ -341,11 +347,16 @@ fn longer_sequences_never_finish_later_than_their_motions() {
         sequences.len()
     );
     for blend in [0.02, 0.05, 0.1] {
-        let o = JoinOptions {
-            blend,
-            ..Default::default()
-        };
-        let joined = batchplan::join(&device, &worlds, &sequences, &o).unwrap();
+        let sequences: Vec<Sequence> = sequences
+            .iter()
+            .map(|paths| Sequence {
+                world: 0,
+                paths: paths.clone(),
+                blends: vec![blend; paths.len() - 1],
+            })
+            .collect();
+        let joined =
+            batchplan::join(&device, &worlds, &sequences, &JoinOptions::default()).unwrap();
         for (i, (stretches, sequence)) in joined.paths.iter().zip(&sequences).enumerate() {
             let (joined, apart) = (
                 duration(&robot, stretches),
@@ -396,7 +407,7 @@ fn a_kept_stop_ends_one_stretch_at_rest_and_starts_the_next() {
         .collect();
     let middle: Vec<f32> = end.iter().zip(&on).map(|(a, b)| 0.5 * (a + b)).collect();
     paths.push([end.repeat(3), middle, on.repeat(3)].concat());
-    let joined = join(&device, &worlds, paths.clone(), &JoinOptions::default());
+    let joined = join(&device, &worlds, paths.clone(), BLEND);
     assert!(
         matches!(joined.blends[0][..], [Some(_), None]),
         "{:?}",
@@ -416,4 +427,115 @@ fn a_kept_stop_ends_one_stretch_at_rest_and_starts_the_next() {
             .check(&robot)
             .unwrap();
     }
+}
+
+#[test]
+fn each_join_turns_within_its_own_radius() {
+    // The sweep of three motions, joined at radii that differ per join, as each item of a Pilz
+    // sequence gives its own.
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[World::default()]).unwrap();
+    let paths = planned(
+        &device,
+        &worlds,
+        &[
+            vec![-1.2, -0.6, 0.0, -2.2, 0.0, 1.6, 0.8],
+            vec![-0.4, -0.3, 0.1, -1.9, 0.1, 1.7, 0.7],
+            vec![0.4, -0.2, 0.2, -1.8, 0.2, 1.8, 0.6],
+            vec![1.2, -0.4, 0.3, -2.0, 0.3, 1.9, 0.5],
+        ],
+    );
+    let sequences: Vec<Sequence> = [vec![BLEND, 0.0], vec![0.0, BLEND], vec![0.2, BLEND]]
+        .into_iter()
+        .map(|blends| Sequence {
+            world: 0,
+            paths: paths.clone(),
+            blends,
+        })
+        .collect();
+    let joined = batchplan::join(&device, &worlds, &sequences, &JoinOptions::default()).unwrap();
+    for (sequence, (blends, stretches)) in sequences
+        .iter()
+        .zip(joined.blends.iter().zip(&joined.paths))
+    {
+        let asked = &sequence.blends;
+        for (k, (&radius, &got)) in asked.iter().zip(blends).enumerate() {
+            match got {
+                None => assert_eq!(radius, 0.0, "join {k} of {asked:?} stops"),
+                Some(got) => assert!(
+                    got > 0.0 && got <= radius,
+                    "join {k} of {asked:?} turns within {got} m"
+                ),
+            }
+        }
+        let stops = asked.iter().filter(|&&r| r == 0.0).count();
+        assert_eq!(
+            stretches.len(),
+            1 + stops,
+            "{asked:?}: a stretch per stop and one more"
+        );
+    }
+}
+
+#[test]
+fn a_stop_separates_the_joins_either_side_of_it() {
+    // Random planned motions joined at radii [r, 0, r] join as the two sequences either side of
+    // the stop, joined alone: how one side is split to time it never depends on the other.
+    let robot = panda();
+    let n = robot.dof();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[World::default()]).unwrap();
+    let mut rng = batchplan::rng::Rng::new(5);
+    let mut compared = 0;
+    for trial in 0..24 {
+        let stops: Vec<Vec<f32>> = (0..5)
+            .map(|_| {
+                (0..n)
+                    .map(|j| {
+                        let (lower, upper) = (robot.lower()[j], robot.upper()[j]);
+                        let middle = 0.5 * (lower + upper);
+                        rng.range(
+                            middle - 0.3 * (upper - lower),
+                            middle + 0.3 * (upper - lower),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        let problems: Vec<PlanProblem> = stops
+            .windows(2)
+            .map(|w| PlanProblem::new(0, w[0].clone(), w[1].clone()))
+            .collect();
+        let plans = batchplan::plan(&device, &worlds, &problems, &PlanOptions::default()).unwrap();
+        let Some(paths) = (0..4)
+            .map(|i| plans.best(i).map(<[f32]>::to_vec))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let r = [0.02, 0.05, 0.1][trial % 3];
+        let sequence = |paths: &[Vec<f32>], blends: Vec<f32>| Sequence {
+            world: 0,
+            paths: paths.to_vec(),
+            blends,
+        };
+        let sequences = [
+            sequence(&paths, vec![r, 0.0, r]),
+            sequence(&paths[..2], vec![r]),
+            sequence(&paths[2..], vec![r]),
+        ];
+        let joined =
+            batchplan::join(&device, &worlds, &sequences, &JoinOptions::default()).unwrap();
+        let apart: Vec<Vec<f32>> = joined.paths[1]
+            .iter()
+            .chain(&joined.paths[2])
+            .cloned()
+            .collect();
+        let blends: Vec<Option<f32>> = [joined.blends[1][0], None, joined.blends[2][0]].to_vec();
+        assert_eq!(joined.blends[0], blends, "trial {trial}, {r} m");
+        assert_eq!(joined.paths[0], apart, "trial {trial}, {r} m");
+        compared += 1;
+    }
+    assert!(compared >= 16, "{compared} trials planned");
 }

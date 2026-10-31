@@ -380,7 +380,7 @@ The pick that fails has every grasp blocked by clutter or out of reach. A pick's
 | Blend radius | reBot B601-DM, 60 sequences: joined | Sooner, mean (most) | SO-101, 34 sequences: joined | Sooner, mean (most) |
 |---|---|---|---|---|
 | 2 cm | 20 | 1.1% (9.5%) | 20 | 4.5% (15.4%) |
-| 5 cm (the default) | 47 | 4.9% (14.1%) | 33 | 7.5% (18.4%) |
+| 5 cm | 47 | 4.9% (14.1%) | 33 | 7.5% (18.4%) |
 | 10 cm | 40 | 4.7% (20.5%) | 30 | 6.4% (17.9%) |
 
 No sequence finished later than its motions one after another. Joining a batch took 15–19 ms for the reBot's 60 and 7–10 ms for the SO-101's 34. The joins that keep their stops turn back on themselves or turn tightly at speed, where a blend is no sooner. Wide blends through sharp turns lose to the timing: TOPP-RA's profile through them is sooner than stopping, but keeping jerk within its limit, by smoothing the profile, lowering its caps where the smoothed map overshoots and stretching what remains, gives the gain back, so such corners keep narrow blends.
