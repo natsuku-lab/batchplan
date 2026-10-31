@@ -43,6 +43,7 @@ src/
 ├── task.rs          # pick and place: a whole task in one call
 ├── timing.rs        # Trajectory: a path timed within the limits; stops; moving starts
 ├── topp.rs          # time-optimal timing (TOPP-RA), smoothed for jerk
+├── live.rs          # Follower and servo: running a motion while the world changes
 │
 │   training data
 ├── datagen.rs       # reaches with recoveries, pick-and-place, handovers, reset states
@@ -121,6 +122,11 @@ The robot is a set of spheres; obstacles are boxes, spheres, cylinders, capsules
 ## Timing
 
 A `Trajectory` is the path plus a time map `s = σ(t)`, itself a uniform cubic B-spline. `Trajectory::try_new` keeps the faster of uniform timing (exact along the whole curve) and time-optimal timing: TOPP-RA on the path parameter, with the jerk limit as a cap on speed, smoothed into the time map and stretched where the map overshoots a limit. Map spans are sized by the path and, for finely split paths, by the time the jerk limit takes to swing acceleration. A start in motion is timed from its speed along the path; where that finds no timing, again with the full limits at the start easing to the headroom over two spans, and the map stretched with its start set again. A controlled stop brakes to rest along the path.
+
+## Live motion
+
+- **`Follower`** is built from the pieces above: `evaluate` on the rest of its motion every tick (up to a pending takeover, then the replan, and any stop), `plan` with a `start_motion` and a time budget, `Trajectory::moving`, and `Trajectory::stop`. It replans from where the robot will be once the budget has passed.
+- **`servo`** solves the hand's velocity with the same damped least squares and analytic Jacobian as `follow` (`cpu::Reach`). It checks, in one `evaluate` batch, the braking paths from the state it would command at full speed and from braking now, with the margin at `slow_within` so the clearances it acts on are exact.
 
 ## Perception and training data
 

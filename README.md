@@ -26,7 +26,7 @@
 
 Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-lab/batchplan-ros), or to generate [LeRobot training datasets](docs/training-data.md).
 
-- **Plan:** batched IK; RRT-Connect, shortcutting and smoothing on SIMD collision checks; the hand moved in straight lines through poses; picking up and setting down objects in one call; consecutive motions joined without stopping; smooth B-spline paths, optionally optimized with L-BFGS; time-optimal timing within velocity, acceleration and jerk limits, and the hand's speed if capped; replanning from a moving state; and controlled stops along the path.
+- **Plan:** batched IK; RRT-Connect, shortcutting and smoothing on SIMD collision checks; the hand moved in straight lines through poses; picking up and setting down objects in one call; consecutive motions joined without stopping; smooth B-spline paths, optionally optimized with L-BFGS; time-optimal timing within velocity, acceleration and jerk limits, and the hand's speed if capped; replanning from a moving state; controlled stops along the path; and live motion: following a trajectory while the world changes, replanning or stopping in time, and servoing the hand toward a moving target.
 - **Robots:** load from URDF, MJCF or OpenUSD, including mimic joints, closed loops, continuous joints and ball or floating joints, or assemble several, such as two arms. Collision spheres are fitted automatically. IK takes a target for each hand at once, and plans can hold one arm still while another moves.
 - **Worlds:** boxes, spheres, cylinders, capsules and signed distance grids, built from meshes, point clouds, depth images or frames fused over time, and the links allowed to touch them, as a hand touches what it grasps.
 - **Data:** reaches with recoveries from mistakes, pick-and-place episodes and handovers between two arms, with grippers and task strings, plus states perturbed from them to start reinforcement learning from. They export as LeRobot v3.0 datasets (arm by arm, as ALOHA's) or NumPy arrays; `scripts/replay_mujoco.py` replays them in MuJoCo and adds camera videos.
@@ -210,7 +210,7 @@ From here, the [guides](#where-to-find-things) go further: planning around [what
 | | |
 |---|---|
 | [API](docs/api.md) | Every type and function, by task, with the guide for each. |
-| [Planning](docs/planning.md) | IK, searching and smoothing paths, keeping clear of obstacles, optional trajectory optimization, goals a turn away, moving the hand in straight lines, picking up and setting down, joining motions, timing, replanning mid-motion, and the options worth knowing. |
+| [Planning](docs/planning.md) | IK, searching and smoothing paths, keeping clear of obstacles, optional trajectory optimization, goals a turn away, moving the hand in straight lines, picking up and setting down, joining motions, timing, replanning mid-motion, live motion and servoing, and the options worth knowing. |
 | [Robots](docs/robots.md) | URDF, MJCF and OpenUSD; joint types, mimic joints and closed loops; several arms as one robot; collision spheres; holding objects; checking against meshes. |
 | [Worlds and perception](docs/perception.md) | Obstacles, allowed contacts, scenes, distance grids, depth images, masking the robot, and fused occupancy maps. |
 | [Training data](docs/training-data.md) | Reaches with recoveries, pick-and-place, handovers between two arms, reset states, and exporting to NumPy or LeRobot. |

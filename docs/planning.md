@@ -307,6 +307,56 @@ fn main() -> Result<(), Error> {
 }
 ```
 
+## Live motion
+
+A `Follower` runs a trajectory while the world changes. Each `tick(&device, &worlds, now)` returns the state to command (`Tick`) and checks the rest of the motion against the worlds it is given: samples `check_every` apart (20 ms), in one `evaluate` batch.
+- **Replanned:** when the rest collides, it plans from the state the trajectory reaches `budget` later (50 ms), starting in motion, within that budget, and switches to the new trajectory then. A tick that replans takes as long as the plan, up to `budget`; a controller that keeps running the current trajectory meanwhile (`trajectory()`, `began()`) never waits for it.
+- **Before a takeover:** the rest of the motion is the current trajectory up to the takeover, then the replan. If either collides, the replan is dropped and the robot stops.
+- **Stopping, then blocked:** when no plan arrives in time, or the collision comes sooner than the budget, it takes the controlled stop along its path and reports `Blocked` at rest. Plan again from there, or give up.
+- **Collides:** the stop is checked too. When no stop within the limits ends short of the collision, the status is `Collides { at }`, with the time it comes: stop the robot some other way.
+
+`servo(&device, &worlds, world, &state, target, &ServoOptions)` is one control step of the hand toward a pose that may move, as MoveIt Servo does. The step works like this:
+- **Velocity:** the hand moves at the pose's error times `gain`, within the `linear` and `angular` caps, by damped least squares on its Jacobian. It turns the shorter way round.
+- **Limits:** the joints keep their velocity, acceleration and jerk limits, and reach the velocity they are asked for without overshooting it. A joint brakes in time to rest within its range.
+- **Near obstacles:** it checks where the robot would come to rest if it braked at the limits from the state it commands, and the path there, with clearances exact out to `slow_within`. Within `slow_within` of an obstacle (2 cm) it slows, so that an even deceleration brings it to `halt_within` (2 mm); there it brakes to rest instead.
+- **Too close to stop:** `Halted { clearance }` carries the least clearance while it brakes. At zero or below, no stop within the limits ends short of contact, as when an obstacle appears closer than the robot can stop.
+
+`ServoStep::status` says whether it moved normally, slowed, halted or arrived.
+
+```rust,no_run
+use batchplan::{
+    Device, Error, FollowStatus, Follower, FollowerOptions, PlanOptions, PlanProblem, Robot,
+    RobotOptions, Trajectory, World,
+};
+
+fn main() -> Result<(), Error> {
+    let robot = Robot::load(
+        "assets/ur5e/ur_description/urdf/ur5e.urdf",
+        &RobotOptions::default(),
+    )?;
+    let device = Device::cpu(&robot)?;
+    let worlds = device.upload(&[World::default()])?;
+    let goal = vec![0.5, -1.2, 1.0, -1.4, -1.5, 0.3];
+    let problem = PlanProblem::new(0, robot.default_q(), goal);
+    let result = batchplan::plan(&device, &worlds, &[problem], &PlanOptions::default())?;
+    let Some(path) = result.best(0) else {
+        return Ok(());
+    };
+    let trajectory = Trajectory::try_new(&robot, path, 1.0)?;
+    let mut follower = Follower::try_new(&robot, 0, trajectory, 0.0, FollowerOptions::default())?;
+    // A 100 Hz loop; upload the worlds again whenever perception updates them. A tick that
+    // replans can take up to the 50 ms budget.
+    for step in 0..10_000 {
+        let tick = follower.tick(&device, &worlds, step as f32 * 0.01)?;
+        // Command tick.state here.
+        if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
+            break;
+        }
+    }
+    Ok(())
+}
+```
+
 ## Options worth knowing
 
 | Option | Default | What it trades |

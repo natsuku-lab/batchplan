@@ -97,6 +97,19 @@ Guide: [planning.md](planning.md#executable-trajectories).
 | `stop(&robot, t)` | A controlled stop along the path from time `t`. |
 | `check(&robot)`, `check_from(&robot, &start)` | Verifying a trajectory before running it. |
 
+## Live motion
+
+Guide: [planning.md](planning.md#live-motion).
+
+| | |
+|---|---|
+| `Follower::try_new(&robot, world, trajectory, now, FollowerOptions)` | Follows a trajectory from time `now`, on the caller's clock. |
+| `follower.tick(&device, &worlds, now)` | The state to command at `now`, and what the follower did (`Tick`, `FollowStatus`): following, replanned to take over `at` a time, stopping, colliding `at` a time with no stop short of it, arrived, or blocked at rest. |
+| `follower.trajectory()`, `began()` | The trajectory it follows now, and when it began on the caller's clock. |
+| `FollowerOptions` | A replan's time `budget`, the spacing of the checks along the rest of the motion (`check_every`), and the `plan` options. |
+| `servo(&device, &worlds, world, &state, target, &ServoOptions)` | One control step of a hand toward a pose (`ServoStep`): the next state, the `ServoStatus` (normal, slowing, halted with its clearance while braking, or arrived) and the error. |
+| `ServoOptions` | The hand, the period `dt`, the `gain`, the `linear` and `angular` caps, the `slow_within` and `halt_within` clearances, and the `damping`. |
+
 ## Training data
 
 Guide: [training-data.md](training-data.md).

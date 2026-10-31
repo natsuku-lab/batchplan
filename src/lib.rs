@@ -44,6 +44,7 @@ pub mod join;
 mod lanes;
 #[cfg(feature = "lerobot")]
 pub mod lerobot;
+pub mod live;
 mod loops;
 pub mod meshes;
 mod mjcf;
@@ -70,6 +71,9 @@ pub use device::{CollisionWeights, Device, Evaluation, Worlds};
 pub use error::Error;
 pub use ik::{IkOptions, IkProblem, IkResult, solve_ik};
 pub use join::{JoinOptions, JoinResult, Sequence, join};
+pub use live::{
+    FollowStatus, Follower, FollowerOptions, ServoOptions, ServoStatus, ServoStep, Tick, servo,
+};
 pub use meshes::{Clearance, MeshModel};
 pub use robot::{AttachedObject, CollisionModel, JointLimits, Part, Robot, RobotOptions};
 pub use rrt::{RrtOptions, RrtProblem, RrtResult};

@@ -697,6 +697,29 @@ impl Reach {
         false
     }
 
+    /// Joint velocities that move hand `hand` at `twist` (m/s, then rad/s) from `q`, by damped
+    /// least squares as `reach` steps: `J^T (J J^T + damping^2 I)^-1 twist`.
+    pub(crate) fn velocity(
+        &mut self,
+        robot: &Robot,
+        hand: usize,
+        q: &[f32],
+        twist: [f32; 6],
+        damping: f32,
+    ) -> &[f32] {
+        let o = IkOptions {
+            damping,
+            rotation_weight: 1.0,
+            ..IkOptions::default()
+        };
+        let mut a = [0.0f32; 36];
+        robot.fk_into(q, &mut self.fk);
+        hand_system(robot, &self.fk, hand, &o, &mut self.jac, &mut a);
+        self.dq.fill(0.0);
+        add_jt(&self.jac, chol6_solve(&a, twist), &mut self.dq);
+        &self.dq
+    }
+
     /// Hand `hand`'s pose at `q`.
     pub(crate) fn pose(&mut self, robot: &Robot, hand: usize, q: &[f32]) -> Pose {
         robot.fk_into(q, &mut self.fk);
