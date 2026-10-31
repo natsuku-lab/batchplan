@@ -26,18 +26,11 @@
 
 Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-lab/batchplan-ros), or to generate [LeRobot training datasets](docs/training-data.md).
 
-## What it does
-
-| | |
-|---|---|
-| [Planning](docs/planning.md) | Batched IK; RRT-Connect, shortcutting and smoothing on SIMD collision checks; the hand moved in straight lines through poses; picking up and setting down objects in one call; smooth B-spline paths, optionally optimized with L-BFGS; time-optimal timing within velocity, acceleration and jerk limits, and the hand's speed if capped; replanning from a moving state; and controlled stops along the path. |
-| [Robots](docs/robots.md) | URDF, MJCF or OpenUSD, including mimic joints, closed loops, continuous joints and ball or floating joints, or several assembled into one, such as two arms. Collision spheres are fitted automatically. IK takes a target for each hand at once, and plans can hold one arm still while another moves. |
-| [Worlds and perception](docs/perception.md) | Boxes, spheres, cylinders, capsules and signed distance grids, built from meshes, point clouds, depth images or frames fused over time, and the links allowed to touch them, as a hand touches what it grasps. |
-| [Training data](docs/training-data.md) | Reaches with recoveries from mistakes, pick-and-place episodes and handovers between two arms, with grippers and task strings, plus states perturbed from them to start reinforcement learning from. They export as LeRobot v3.0 datasets (arm by arm, as ALOHA's) or NumPy arrays, and replay in MuJoCo for camera videos. |
-| [Devices](docs/devices.md) | The CPU or any GPU wgpu supports. CPU-only builds, threads you own, time budgets, allocation-free sampling and typed errors, for use inside a robot's control process. |
-| [API](docs/api.md) | Every type and function, by task, with the guide for each. |
-| [Benchmarks](docs/benchmarks.md) | Against VAMP, OMPL, RoboPlan and MoveIt 2 on one robot model, GPU against CPU, spheres against meshes, and how to reproduce them. |
-| [Demos](demos/) | Handovers, pick-and-place, depth cameras and replanning, live in Rerun, and GIFs of tasks and tool paths. |
+- **Plan:** batched IK; RRT-Connect, shortcutting and smoothing on SIMD collision checks; the hand moved in straight lines through poses; picking up and setting down objects in one call; smooth B-spline paths, optionally optimized with L-BFGS; time-optimal timing within velocity, acceleration and jerk limits, and the hand's speed if capped; replanning from a moving state; and controlled stops along the path.
+- **Robots:** load from URDF, MJCF or OpenUSD, including mimic joints, closed loops, continuous joints and ball or floating joints, or assemble several, such as two arms. Collision spheres are fitted automatically. IK takes a target for each hand at once, and plans can hold one arm still while another moves.
+- **Worlds:** boxes, spheres, cylinders, capsules and signed distance grids, built from meshes, point clouds, depth images or frames fused over time, and the links allowed to touch them, as a hand touches what it grasps.
+- **Data:** reaches with recoveries from mistakes, pick-and-place episodes and handovers between two arms, with grippers and task strings, plus states perturbed from them to start reinforcement learning from. They export as LeRobot v3.0 datasets (arm by arm, as ALOHA's) or NumPy arrays; `scripts/replay_mujoco.py` replays them in MuJoCo and adds camera videos.
+- **Embeddable:** CPU-only builds, threads you own, time budgets, allocation-free sampling and typed errors, for use inside a robot's control process.
 
 <img width="1135" height="654" alt="A UR5e at each of many tables drawing a triangle, square, hexagon or star with a pen, every arm planned in one call" src="https://raw.githubusercontent.com/natsuku-lab/batchplan/main/demos/gifs/tool_paths.gif" />
 
@@ -210,7 +203,20 @@ fn main() -> Result<(), Error> {
 }
 ```
 
-From here, the [table above](#what-it-does) leads to each guide: planning around [what a depth camera sees](docs/perception.md#depth-images), moving the hand [in straight lines](docs/planning.md#moving-the-hand-along-a-path), [two arms](docs/robots.md#several-arms-several-hands) at once. The [examples](#examples) and [demos](demos/) run them on many scenes.
+From here, the [guides](#where-to-find-things) go further: planning around [what a depth camera sees](docs/perception.md#depth-images), moving the hand [in straight lines](docs/planning.md#moving-the-hand-along-a-path), [two arms](docs/robots.md#several-arms-several-hands) at once. The [examples](#examples) and [demos](demos/) run them on many scenes.
+
+## Where to find things
+
+| | |
+|---|---|
+| [API](docs/api.md) | Every type and function, by task, with the guide for each. |
+| [Planning](docs/planning.md) | IK, searching and smoothing paths, keeping clear of obstacles, optional trajectory optimization, goals a turn away, moving the hand in straight lines, picking up and setting down, timing, replanning mid-motion, and the options worth knowing. |
+| [Robots](docs/robots.md) | URDF, MJCF and OpenUSD; joint types, mimic joints and closed loops; several arms as one robot; collision spheres; holding objects; checking against meshes. |
+| [Worlds and perception](docs/perception.md) | Obstacles, allowed contacts, scenes, distance grids, depth images, masking the robot, and fused occupancy maps. |
+| [Training data](docs/training-data.md) | Reaches with recoveries, pick-and-place, handovers between two arms, reset states, and exporting to NumPy or LeRobot. |
+| [Devices](docs/devices.md) | GPU or CPU, which GPUs work, and running inside a robot's control process. |
+| [Benchmarks](docs/benchmarks.md) | Against VAMP, OMPL, RoboPlan and MoveIt 2 on one robot model, GPU against CPU, spheres against meshes, and how to reproduce them. |
+| [Demos](demos/) | Handovers, pick-and-place, depth cameras and replanning, live in Rerun, and GIFs of tasks and tool paths. |
 
 ## How it compares
 
