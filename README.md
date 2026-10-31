@@ -39,6 +39,10 @@ Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-la
 | [Benchmarks](docs/benchmarks.md) | Against VAMP, OMPL, RoboPlan and MoveIt 2 on one robot model, GPU against CPU, spheres against meshes, and how to reproduce them. |
 | [Demos](demos/) | Handovers, pick-and-place, depth cameras and replanning live in [Rerun](https://rerun.io), and GIFs of tasks and tool paths. |
 
+<img width="1135" height="654" alt="A UR5e at each of many tables drawing a triangle, square, hexagon or star with a pen, every arm planned in one call" src="https://raw.githubusercontent.com/natsuku-lab/batchplan/main/demos/gifs/tool_paths.gif" />
+
+<p align="center"><em>Twenty UR5e arms drawing with a pen, in <a href="docs/planning.md#moving-the-hand-along-a-path">straight lines</a> planned in one call, the pen <a href="docs/perception.md#allowed-contacts">allowed to touch</a> the table and kept under 15 cm/s (<a href="demos/README.md#moving-the-hand-in-straight-lines">demo</a>).</em></p>
+
 ## Install
 
 ```bash
