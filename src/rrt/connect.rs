@@ -7,6 +7,7 @@ use fearless_simd::prelude::*;
 use fearless_simd::{Level, Simd, dispatch, f32x8};
 
 use super::ahead::{Ahead, Sharing};
+use crate::constraint::{self, HandConstraint, Projector, Region};
 use crate::device::{Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Keep, Search, Wanted};
 use crate::error::{Result, ensure_input};
@@ -76,6 +77,8 @@ pub struct RrtProblem {
     /// Joints that stay where `start` has them, as an arm that waits while another moves; every
     /// goal has the same values there.
     pub hold: Vec<usize>,
+    /// Where the hands must stay along the path; the start and every goal must keep them.
+    pub constraints: Vec<HandConstraint>,
 }
 
 /// Whether `hold` names joints of the configurations whose values `goal` keeps from `start`.
@@ -172,12 +175,23 @@ pub(crate) fn connect_until(
             p.goals.iter().all(|g| holds(&p.start, g, &p.hold)),
             "problem {i}: held joints must be joints of the robot, with the start's values in every goal"
         );
+        if !p.constraints.is_empty() {
+            constraint::check(robot, &p.constraints, &format!("problem {i}"))?;
+            let mut ends = std::iter::once(&p.start).chain(&p.goals);
+            if let Some(why) = ends.find_map(|q| constraint::breach(robot, &p.constraints, q)) {
+                return Err(crate::error::input!(
+                    "problem {i}: an end breaks its constraints: {why}"
+                ));
+            }
+        }
     }
     let mut searches: Vec<_> = problems
         .iter()
         .map(|p| {
             let ahead = Arc::<Ahead>::default();
-            Deferred::new(Some(ahead.clone()), move || {
+            // Helpers forecast unconstrained extensions: a constrained search takes no help.
+            let help = p.constraints.is_empty().then(|| ahead.clone());
+            Deferred::new(help, move || {
                 Connect::new(robot, p, o, Sampling::NearLine, ahead)
             })
         })
@@ -652,6 +666,14 @@ pub(crate) struct Connect<'call> {
     pub(crate) path: Option<Vec<f32>>,
     /// What the search shares with threads that help it (see `ahead`).
     pub(super) sharing: Sharing,
+    /// With constraints: the checks' bounds, and the projection that extensions and connections
+    /// walk by, in hops `hop` long (one pass of the lanes at `resolution`); whether the walk in
+    /// `steps` ends on its target; and the walk's working configuration.
+    region: Option<Arc<Region>>,
+    projector: Option<Projector<'call>>,
+    hop: f32,
+    reached: bool,
+    walking: Vec<f32>,
 }
 
 impl<'call> Connect<'call> {
@@ -663,6 +685,8 @@ impl<'call> Connect<'call> {
         ahead: Arc<Ahead>,
     ) -> Self {
         let n = robot.dof();
+        let projector =
+            (!p.constraints.is_empty()).then(|| Projector::new(robot, &p.constraints, &p.hold));
         Self {
             robot,
             world: p.world,
@@ -702,6 +726,11 @@ impl<'call> Connect<'call> {
             across: vec![],
             path: None,
             sharing: Sharing::new(ahead),
+            region: projector.as_ref().map(Projector::bounds),
+            projector,
+            hop: (LANES as f32 * o.resolution).min(o.range),
+            reached: false,
+            walking: Vec::new(),
         }
     }
 
@@ -821,7 +850,47 @@ impl<'call> Connect<'call> {
             wanted: Some(wanted),
             spacing: self.resolution,
             keep: self.keep.clone(),
+            region: self.region.clone(),
         })
+    }
+
+    /// Into `steps`, a projected walk from node `from` of the extending tree toward `target`,
+    /// turned toward the node first, at most `range` long; `reached` says whether it ends on
+    /// `target`. The node is left in `new`.
+    fn walk_from(&mut self, from: usize, target: &mut [f32]) {
+        let projector = self.projector.as_mut().expect("walks are constrained");
+        self.new.clear();
+        self.trees[0].push_node(from, &mut self.new);
+        self.robot.turn_toward(&self.new, target);
+        self.reached = walk(
+            projector,
+            self.hop,
+            self.range,
+            &self.new,
+            target,
+            &mut self.walking,
+            &mut self.steps,
+        );
+    }
+
+    /// Into `steps`, the next stretch of a constrained connection from node `from` of the
+    /// extending tree to node `other` of the other, turned toward it; `Stage::Connect` if there is
+    /// one, else the next sample (or the end, if the trees meet).
+    fn connect_walk(&mut self, from: usize, other: usize) {
+        let mut target = std::mem::take(&mut self.sample);
+        target.clear();
+        self.trees[1].push_node(other, &mut target);
+        self.walk_from(from, &mut target);
+        self.sample = target;
+        self.stage = if self.steps.is_empty() {
+            if self.reached {
+                self.finish(from, other);
+                return;
+            }
+            Stage::Sample
+        } else {
+            Stage::Connect { from, other }
+        };
     }
 
     /// The path from the start through the extending tree's node `a` and the other's node `b`.
@@ -986,6 +1055,53 @@ pub(super) fn connect_edges(steps: &[f32], n: usize, edges: &mut Vec<f32>) {
     }
 }
 
+/// Into `steps` (`[k, dof]`), a walk from `from` toward `target` in hops at most `hop` long, each
+/// projected into the constraints, until it has gone `length`: CBiRRT's constrained extension. The
+/// last hop lands on `target` itself where `target` keeps the constraints. It stops where a
+/// projection fails, a hop gets no closer, or a projected hop lands more than twice its length
+/// away. Returns whether it reached `target`. `q` is working memory.
+pub(crate) fn walk(
+    projector: &mut Projector<'_>,
+    hop: f32,
+    length: f32,
+    from: &[f32],
+    target: &[f32],
+    q: &mut Vec<f32>,
+    steps: &mut Vec<f32>,
+) -> bool {
+    steps.clear();
+    q.clear();
+    q.extend_from_slice(from);
+    let mut walked = 0.0;
+    loop {
+        let d = distance(q, target);
+        if d == 0.0 {
+            return true;
+        }
+        if walked >= length {
+            return false;
+        }
+        let at = steps.len();
+        if d <= hop {
+            steps.extend_from_slice(target);
+        } else {
+            steps.extend(q.iter().zip(target).map(|(a, b)| a + (b - a) * (hop / d)));
+        }
+        let next = &mut steps[at..];
+        let landed = (d <= hop && projector.keeps(next)) || projector.project(next);
+        let (step, left) = (distance(q, next), distance(next, target));
+        if !landed || left >= d || step > 2.0 * hop {
+            steps.truncate(at);
+            return false;
+        }
+        q.copy_from_slice(next);
+        walked += step;
+        if left == 0.0 {
+            return true;
+        }
+    }
+}
+
 impl Search for Connect<'_> {
     fn help(&self) -> Option<Arc<Ahead>> {
         Some(self.sharing.ahead())
@@ -1045,6 +1161,7 @@ impl Search for Connect<'_> {
                         wanted: None,
                         spacing: self.resolution,
                         keep: self.keep.clone(),
+                        region: self.region.clone(),
                     });
                 }
                 &Stage::Bend(k) => {
@@ -1130,6 +1247,16 @@ impl Search for Connect<'_> {
                     if self.trees[0].radius[near] < d {
                         continue;
                     }
+                    if self.projector.is_some() {
+                        let mut target = std::mem::take(&mut self.sample);
+                        self.walk_from(near, &mut target);
+                        self.sample = target;
+                        self.stage = Stage::Extend { near };
+                        if self.steps.is_empty() {
+                            self.answer(0);
+                        }
+                        continue;
+                    }
                     self.report_sample(sample);
                     reach(
                         self.robot,
@@ -1145,6 +1272,10 @@ impl Search for Connect<'_> {
                 &Stage::Extend { near } => {
                     let mut edges = edges::reuse(buffer);
                     self.trees[0].push_node(near, &mut edges);
+                    if self.projector.is_some() {
+                        connect_edges(&self.steps, n, &mut edges);
+                        return self.query(edges, Wanted::Prefix);
+                    }
                     edges.extend_from_slice(&self.new);
                     if let Some(answer) = self.forecast(&edges, /* connect */ false) {
                         *buffer = edges;
@@ -1157,6 +1288,9 @@ impl Search for Connect<'_> {
                     let mut edges = edges::reuse(buffer);
                     self.trees[0].push_node(from, &mut edges);
                     connect_edges(&self.steps, n, &mut edges);
+                    if self.projector.is_some() {
+                        return self.query(edges, Wanted::Prefix);
+                    }
                     if let Some(answer) = self.forecast(&edges, /* connect */ true) {
                         *buffer = edges;
                         self.answer(answer);
@@ -1200,8 +1334,19 @@ impl Search for Connect<'_> {
                         .expect("a free goal");
                     self.finish(0, goal);
                 } else if !self.free_goals.is_empty() {
-                    self.line_to(self.nearest_goal());
-                    self.stage = Stage::Locate(true);
+                    let nearest = self.nearest_goal();
+                    self.line_to(nearest);
+                    if self.projector.is_some() {
+                        // Bent lines leave the constraints: the straight line's projected walk.
+                        let node = self
+                            .free_goals
+                            .iter()
+                            .position(|&f| f == nearest)
+                            .expect("a free goal");
+                        self.connect_walk(0, node);
+                    } else {
+                        self.stage = Stage::Locate(true);
+                    }
                 }
             }
             Stage::Locate(forward) => {
@@ -1241,6 +1386,18 @@ impl Search for Connect<'_> {
                 if tree.radius[near].is_finite() {
                     tree.radius[near] *= 1.0 + DOMAIN_ALPHA;
                 }
+                if self.projector.is_some() {
+                    // The walk's free hops, then a walk toward the other tree's nearest node.
+                    let mut last = near;
+                    for step in self.steps.chunks(n).take(answer) {
+                        last = self.trees[0].add(step, Some(last));
+                    }
+                    self.new.clear();
+                    self.trees[0].push_node(last, &mut self.new);
+                    let (other, _) = self.trees[1].nearest(&self.new, &self.robot.continuous);
+                    self.connect_walk(last, other);
+                    return;
+                }
                 let from = tree.add(&self.new, Some(near));
                 let (other, d) = self.trees[1].nearest(&self.new, &self.robot.continuous);
                 steps_to(
@@ -1257,11 +1414,17 @@ impl Search for Connect<'_> {
             }
             Stage::Connect { from, other } => {
                 let count = self.steps.len() / n;
+                // A walk that falls short of the other tree gains all its steps and walks on; one
+                // that reaches it ends on its node.
+                let short = self.projector.is_some() && !self.reached;
+                let keep = if short { answer } else { answer.min(count - 1) };
                 let mut last = from;
-                for step in self.steps.chunks(n).take(answer.min(count - 1)) {
+                for step in self.steps.chunks(n).take(keep) {
                     last = self.trees[0].add(step, Some(last));
                 }
-                if answer == count {
+                if answer == count && short {
+                    self.connect_walk(last, other);
+                } else if answer == count {
                     self.finish(last, other);
                 }
             }
@@ -1313,6 +1476,7 @@ mod tests {
             start,
             goals: vec![goal],
             hold: hold.clone(),
+            constraints: vec![],
         };
         let mut connect = Connect::new(
             &robot,

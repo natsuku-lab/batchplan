@@ -31,6 +31,7 @@
 #![warn(clippy::must_use_candidate, clippy::return_self_not_must_use)]
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::disallowed_methods))]
 
+mod constraint;
 mod cpu;
 pub mod datagen;
 mod description;
@@ -67,6 +68,7 @@ mod urdf;
 mod usd;
 pub mod world;
 
+pub use constraint::HandConstraint;
 pub use device::{CollisionWeights, Device, Evaluation, Worlds};
 pub use error::Error;
 pub use ik::{IkOptions, IkProblem, IkResult, solve_ik};

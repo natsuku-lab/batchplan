@@ -360,6 +360,23 @@ A GPU call costs about 10 ms, so one problem at a time runs 10–15 times faster
 
 Against the version before the audit that pinned the spline to the joint limits, weighed rotation in placing a sample along the path and kept the search's buffers as fields, in five alternating runs on the Ryzen: a move on one thread takes 2% longer (0.0416 against 0.0407 ms), batches of 64 moves 7% less time (0.265 against 0.284 ms), and pours 36% less (0.197 against 0.308 ms), since they no longer stop on the way. Counted with `perf stat`, a call of the 64 moves on one thread runs 0.3% more instructions (53.1 million against 52.9 million): the rest of the 2% is fewer instructions per cycle. Along the way, `perf` showed batches 7% slower while each search's buffers lived until the caller dropped it: 32 threads' allocations all freed on one thread, which glibc does slowly. A search now frees them on its own thread when it finishes.
 
+## Constraints along the path
+
+`examples/constraints.rs` keeps the Panda's gripper upright on reaches past a pillar: a floor, a pillar 6 cm in radius and 0.6 m tall, and a zone 0.30–0.75 m out, ±0.45 m across and 0.25–0.70 m up. The start is in a corner of the zone, by IK nearest the ready pose; each of the 54 goals is a random place in the zone at a random turn about the vertical, solved by IK from the start. The tool frame between the fingertips stays within the bound of straight down and turns freely. Each problem is planned alone on one thread (the median), then all of them in one `plan` call on every thread; the largest tilt is over every path sampled at 1 kHz once timed. Times are the median of three runs. On the M4 Pro (14 threads):
+
+| Bound | Solved | Alone | One batch | Largest tilt | Length | Optimized, 4 seeds |
+|---|---|---|---|---|---|---|
+| 1° | 54 of 54 | 0.12 ms | 3.1 ms | 1.00° | 2.274 rad | 27 shorter, 2.173 rad |
+| 2° | 54 of 54 | 0.11 ms | 2.4 ms | 2.00° | 2.229 rad | 25 shorter, 2.156 rad |
+| 5° | 54 of 54 | 0.10 ms | 2.6 ms | 5.00° | 2.219 rad | 25 shorter, 2.149 rad |
+| 10° | 54 of 54 | 0.12 ms | 2.0 ms | 9.90° | 2.219 rad | 25 shorter, 2.132 rad |
+| 5°, inside the zone | 54 of 54 | 0.10 ms | 2.7 ms | 4.99° | 2.219 rad | 26 shorter, 2.150 rad |
+| none | 54 of 54 | 0.09 ms | 0.9 ms | 44.65° | 2.176 rad | |
+
+- **The constraint costs**, at 5°, a tenth more time per problem alone and 2% more length. A batch takes longer because constrained searches take no help from idle threads, and its longest search sets its time.
+- **Optimization** with 4 seeds takes 110–127 ms for the batch and keeps every bound; the optimized lengths are of the shortest valid seed.
+- **Two arms carrying a tray level** over a block 25 cm tall (two Pandas, the right hand pinned in the left hand's frame, the left within 5° of straight down), from below the block's top to 5 places beyond it: 5 of 5 solved, 0.89 ms per problem alone, 2.3 ms in one batch. Optimization shortens the paths by 21% (3.546 to 2.786 rad on average).
+
 ## Picking and placing
 
 `examples/tasks.rs` picks a box out of clutter on 64 random tabletops and sets it down at a free spot: a table, a box 3–7 cm wide and 4–10 cm tall, 2–5 more boxes up to 30 cm tall, and a spot 12 cm clear of them. Each `pick` tries every grasp `grasps` proposes for the box (16 or 24), each `place` both of its turns at the spot (`place_poses`). Times are the best of five calls of each size, the median of three runs, after a first call that compiles the GPU's kernels; an idle machine. The M4 Pro rows are 2c98826's, before a place ran each held object's candidates in parallel.
@@ -565,6 +582,10 @@ cargo run --release --features lerobot --example handover -- 16 --lerobot data/h
 # The 2,600 problems on every device (downloads robometrics' YAML and VAMP's Panda spheres at pinned commits, with checksums)
 scripts/fetch_benchmark.sh
 cargo run --release --example benchmark -- --meshes    # --clearance M (or --search-clearance, --shortcut-clearance), --passes N, --no-straighten, --optimize S, --rrt-seed N, --spheres curobo|vamp|fitted, --device gpu|cpu
+
+# The gripper kept upright past a pillar, and kept inside the zone too
+cargo run --release --example constraints -- 64 5
+cargo run --release --example constraints -- 64 5 --zone
 
 # The comparison with other planners: one spherized Panda for every planner, one judge
 uv venv .venv-roboplan --python 3.12

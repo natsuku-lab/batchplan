@@ -15,12 +15,13 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
+use crate::constraint::{self, HandConstraint, Projector, Region};
 use crate::cpu::PathOptimizer;
 use crate::device::{CollisionWeights, Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Keep, Optimize, Search};
 use crate::error::{Result, ensure_input};
 use crate::rng::Rng;
-use crate::robot::Robot;
+use crate::robot::{Fk, Robot};
 use crate::rrt::{self, Ahead, Connect, RrtOptions, RrtProblem, Sampling};
 use crate::shortcut::{self, ShortcutOptions, Simplify};
 use crate::spline;
@@ -33,7 +34,8 @@ pub struct PlanOptions {
     /// Seeds trajectory optimization runs per problem, besides the searched path: its spline, the
     /// straight lines to the goal and its equivalents, then bends through random via points.
     /// Problems searched to within 2% of the straight line are not optimized (their seeds stay
-    /// invalid). 0 keeps the searched path as it is.
+    /// invalid). Constrained problems' seeds keep their constraints as a cost, and are kept only
+    /// where every sample keeps them. 0 keeps the searched path as it is.
     pub seeds: usize,
     /// B-spline control points per path, including the three pinned at each end (at least 7).
     pub control_points: usize,
@@ -150,6 +152,9 @@ pub struct PlanProblem {
     /// (`Robot::hand_joints` lists an arm's); `goal` has the same values there. Searching,
     /// shortening and optimizing all leave them still.
     pub hold: Vec<usize>,
+    /// Where the hands must stay along the whole path, as a tray carried upright; `start` and
+    /// `goal` must keep them. Every state the path is checked at keeps them.
+    pub constraints: Vec<HandConstraint>,
 }
 
 impl PlanProblem {
@@ -161,6 +166,7 @@ impl PlanProblem {
             goal: goal.into(),
             start_motion: None,
             hold: Vec::new(),
+            constraints: Vec::new(),
         }
     }
 }
@@ -241,6 +247,16 @@ pub fn plan(
             crate::rrt::holds(&p.start, &p.goal, &p.hold),
             "problem {pi}: held joints must be joints of the robot, with the start's values in the goal"
         );
+        if !p.constraints.is_empty() {
+            constraint::check(robot, &p.constraints, &format!("problem {pi}"))?;
+            for (end, q) in [("start", &p.start), ("goal", &p.goal)] {
+                if let Some(why) = constraint::breach(robot, &p.constraints, q) {
+                    return Err(crate::error::input!(
+                        "problem {pi}: the {end} breaks its constraints: {why}"
+                    ));
+                }
+            }
+        }
         if let Some(m) = &p.start_motion {
             ensure_input!(
                 m.velocity.len() == n && m.acceleration.len() == n,
@@ -270,9 +286,9 @@ pub fn plan(
         .iter()
         .map(|p| {
             let ahead = Arc::<Ahead>::default();
-            Deferred::new(Some(ahead.clone()), move || {
-                Planning::new(robot, p, o, ahead)
-            })
+            // Helpers forecast unconstrained extensions: a constrained search takes no help.
+            let help = p.constraints.is_empty().then(|| ahead.clone());
+            Deferred::new(help, move || Planning::new(robot, p, o, ahead))
         })
         .collect();
     let mut running: Vec<&mut dyn Search> =
@@ -352,12 +368,14 @@ struct Planning<'call> {
     line_checked: bool,
     /// What its searches share with threads that help them along.
     ahead: Arc<Ahead>,
+    /// The problem's constraints, which every check keeps.
+    region: Option<Arc<Region>>,
 }
 
 enum Phase<'call> {
     /// RRT-Connect keeping the clearance first (if any), then without it.
     Search(Box<Connect<'call>>, bool),
-    Simplify(Simplify),
+    Simplify(Box<Simplify<'call>>),
     Fitting(Box<Fitting>),
     Repair(Box<Repair>),
     Done,
@@ -395,6 +413,8 @@ impl<'call> Planning<'call> {
             near_line: false,
             line_checked: false,
             ahead,
+            region: (!problem.constraints.is_empty())
+                .then(|| Arc::new(Region::new(robot, &problem.constraints))),
         }
     }
 }
@@ -414,6 +434,7 @@ fn searching<'call>(
         start: problem.start.clone(),
         goals,
         hold: problem.hold.clone(),
+        constraints: problem.constraints.clone(),
     };
     let keeping = o.rrt.clearance > 0.0;
     let first = RrtOptions {
@@ -467,7 +488,8 @@ fn next_fit(
             return None;
         }
         let path = &fit.paths[fit.path];
-        if !fit_spline(path, n, &fit.pins, &mut fit.spline, &mut fit.at) {
+        let through = (!problem.constraints.is_empty()).then_some(robot);
+        if !fit_spline(path, n, &fit.pins, through, &mut fit.spline, &mut fit.at) {
             fit.path += 1;
             fit.restart();
             continue;
@@ -522,6 +544,7 @@ fn next_fit(
             wanted: None,
             spacing: 0.0,
             keep,
+            region: fit.region.clone(),
         });
     }
 }
@@ -572,6 +595,8 @@ struct Fitting {
     from: usize,
     /// The stop of a valid spline that blends are being tried at.
     relaxing: Option<usize>,
+    /// The problem's constraints.
+    region: Option<Arc<Region>>,
 }
 
 impl Fitting {
@@ -672,12 +697,19 @@ impl Search for Planning<'_> {
                     });
                     self.ahead.finish();
                     self.phase = match connect.path.take() {
-                        Some(path) => Phase::Simplify(Simplify::new(
+                        Some(path) => Phase::Simplify(Box::new(Simplify::new(
                             self.problem.world,
                             self.robot.dof(),
                             path,
                             &self.o.shortcut,
-                        )),
+                            self.region.is_some().then(|| {
+                                Projector::new(
+                                    self.robot,
+                                    &self.problem.constraints,
+                                    &self.problem.hold,
+                                )
+                            }),
+                        ))),
                         None => Phase::Done,
                     };
                 }
@@ -725,10 +757,19 @@ impl Search for Planning<'_> {
                         clear: 0,
                         from: 0,
                         relaxing: None,
+                        region: self.region.clone(),
                     };
                     fit.restart();
                     // Optimization, if any, starts from the smoothed path spread out.
-                    fit_spline(&fit.paths[0], n, &fit.pins, &mut fit.spline, &mut fit.at);
+                    let through = (!self.problem.constraints.is_empty()).then_some(self.robot);
+                    fit_spline(
+                        &fit.paths[0],
+                        n,
+                        &fit.pins,
+                        through,
+                        &mut fit.spline,
+                        &mut fit.at,
+                    );
                     if let Some(m) = &self.problem.start_motion {
                         let goal = &fit.paths[0][fit.paths[0].len() - n..];
                         continue_motion(
@@ -766,7 +807,14 @@ impl Search for Planning<'_> {
                     let spline = self.start.clone().expect("fitting follows simplification");
                     let points = spline.len() / self.robot.dof();
                     self.phase = Phase::Repair(Box::new(Repair {
-                        optimizer: PathOptimizer::new(self.robot, points, &repairing(self.o)),
+                        optimizer: PathOptimizer::new(
+                            self.robot,
+                            points,
+                            &repairing(self.o),
+                            self.region.as_ref().map(|_| {
+                                Arc::new(Region::inset(self.robot, &self.problem.constraints))
+                            }),
+                        ),
                         spline,
                         rounds: 0,
                         keep: fit.keeps.last().expect("splines keep a clearance").clone(),
@@ -802,6 +850,7 @@ impl Search for Planning<'_> {
                         wanted: None,
                         spacing: 0.0,
                         keep,
+                        region: self.region.clone(),
                     });
                 }
                 // A path found near the straight line that no spline follows: the search a planner
@@ -925,8 +974,16 @@ fn optimize(
         .collect();
     let mut paths = JointPaths::zeros(wanted.len() * o.seeds, points, n);
     let mut item_world = Vec::with_capacity(paths.len());
+    // A constrained problem's seeds keep its constraints as a cost, inset as projection lands, and
+    // are checked against them as given.
+    let (mut item_inset, mut item_bounds) = (vec![], vec![]);
     for (w, &pi) in wanted.iter().enumerate() {
         let p = &result.problems[pi];
+        let constrained = !p.constraints.is_empty();
+        let inset = constrained.then(|| Arc::new(Region::inset(robot, &p.constraints)));
+        let bounds = constrained.then(|| Arc::new(Region::new(robot, &p.constraints)));
+        item_inset.extend(std::iter::repeat_n(inset, o.seeds));
+        item_bounds.extend(std::iter::repeat_n(bounds, o.seeds));
         let goals = robot.goal_variants(&p.start, &p.goal);
         let lines_from = usize::from(searched[pi].is_some());
         let mut rng = Rng::for_problem(o.rng_seed, p.start.iter().chain(&p.goal).copied());
@@ -949,7 +1006,7 @@ fn optimize(
             item_world.push(p.world);
         }
     }
-    device.trajopt(worlds, &item_world, &mut paths, o, deadline)?;
+    device.trajopt(worlds, &item_world, &item_inset, &mut paths, o, deadline)?;
     for (w, &pi) in wanted.iter().enumerate() {
         for s in 0..o.seeds {
             hold_still(
@@ -959,7 +1016,7 @@ fn optimize(
             );
         }
     }
-    let (clearance, lengths) = validate(device, worlds, &paths, &item_world, o)?;
+    let (clearance, lengths) = validate(device, worlds, &paths, &item_world, &item_bounds, o)?;
     for (w, &pi) in wanted.iter().enumerate() {
         for s in 0..o.seeds {
             let (from, to) = (w * o.seeds + s, pi * result.seeds + 1 + s);
@@ -971,12 +1028,14 @@ fn optimize(
     Ok(())
 }
 
-/// The smallest clearance along each path, sampled densely along the curve, and its length.
+/// The smallest clearance along each path, sampled densely along the curve, NaN where a sample
+/// breaks the path's constraints (`item_bounds`), and its length.
 fn validate(
     device: &Device,
     worlds: &Worlds,
     paths: &JointPaths,
     item_world: &[u32],
+    item_bounds: &[Option<Arc<Region>>],
     o: &PlanOptions,
 ) -> Result<(Vec<f32>, Vec<f32>)> {
     let (n, items) = (paths.dof, paths.len());
@@ -991,8 +1050,27 @@ fn validate(
         .flat_map(|&w| std::iter::repeat_n(w, samples))
         .collect();
     let clear = device.clearance(worlds, &dense_world, &dense)?;
+    let robot = device.robot();
+    let keeps: Vec<bool> = device.install(|| {
+        item_bounds
+            .par_iter()
+            .zip(dense.par_chunks(samples * n))
+            .map(|(bounds, dense)| {
+                bounds.as_ref().is_none_or(|b| {
+                    let mut fk = Fk::new(robot.links.len());
+                    dense.chunks(n).all(|q| {
+                        robot.fk_into(q, &mut fk);
+                        b.contains(&fk)
+                    })
+                })
+            })
+            .collect()
+    });
     let min_clearance = (0..items)
         .map(|item| {
+            if !keeps[item] {
+                return f32::NAN;
+            }
             (item * samples..(item + 1) * samples)
                 .map(|i| clear[i][0].min(clear[i][1]))
                 // NaN marks the path invalid rather than vanishing in a minimum.
@@ -1029,9 +1107,18 @@ fn hold_still(path: &mut [f32], start: &[f32], hold: &[usize]) {
 /// blends use at most half of either edge), and each level a quarter of the last. At the ends and
 /// at `EXACT` the three coincide: the curve passes through, stopping there. `at` gets each control
 /// point's distance along the path. With nothing pinned the control points spread along the whole
-/// path; with every waypoint pinned `EXACT` the curve runs exactly along it. False if the pins need
-/// more control points than `out` holds.
-fn fit_spline(path: &[f32], n: usize, pinned: &[u8], out: &mut [f32], at: &mut [f32]) -> bool {
+/// path; with every waypoint pinned `EXACT` the curve runs exactly along it. With `through`, the
+/// free control points move so that the curve passes through the points they were placed at,
+/// within that robot's joint limits (`through_knots`). False if the pins need more control points
+/// than `out` holds.
+fn fit_spline(
+    path: &[f32],
+    n: usize,
+    pinned: &[u8],
+    through: Option<&Robot>,
+    out: &mut [f32],
+    at: &mut [f32],
+) -> bool {
     let (waypoints, count) = (path.len() / n, out.len() / n);
     let point = |w: usize| &path[w * n..(w + 1) * n];
     let mut along = vec![0.0; waypoints];
@@ -1076,6 +1163,7 @@ fn fit_spline(path: &[f32], n: usize, pinned: &[u8], out: &mut [f32], at: &mut [
         at[*t] = s;
         *t += 1;
     };
+    let mut free = vec![];
     for (i, &(pin, blend)) in pins.iter().enumerate() {
         // Without a blend, the three are the waypoint itself, copied bit-exact.
         for offset in [-blend, 0.0, blend] {
@@ -1086,13 +1174,72 @@ fn fit_spline(path: &[f32], n: usize, pinned: &[u8], out: &mut [f32], at: &mut [
                 put(&q, along[pin] + offset, &mut t);
             }
         }
+        let first = t;
         for c in 1..=counts.get(i).copied().unwrap_or(0) {
             let s = along[pin] + blend + stretch[i] * c as f32 / (counts[i] + 1) as f32;
             shortcut::locate(path, n, s, &mut q);
             put(&q, s, &mut t);
         }
+        if through.is_some() {
+            free.push(first..t);
+        }
+    }
+    if let Some(robot) = through {
+        for stretch in free {
+            through_knots(out, n, stretch, robot);
+        }
     }
     true
+}
+
+/// Moves the control points `free` (between fixed ones) so that the curve passes, at each one's
+/// knot, through where it was: a uniform cubic B-spline is at `(c[k-1] + 4 c[k] + c[k+1]) / 6`
+/// there, a tridiagonal system solved per joint (Thomas' algorithm). A curve through points on a
+/// path strays from it between them by the fourth power of their spacing, against the square for
+/// control points on the path, which cut its corners. A joint that does not change over the
+/// stretch keeps its values bit for bit, and solved control points past a joint's limits in `robot`
+/// are clamped to them: the curve stays within the range of its control points.
+fn through_knots(out: &mut [f32], n: usize, free: std::ops::Range<usize>, robot: &Robot) {
+    let (a, b) = (free.start, free.end);
+    if a == b {
+        return;
+    }
+    let m = b - a;
+    let (mut upper, mut rhs) = (vec![0.0; m], vec![0.0; m]);
+    for j in 0..n {
+        let value = |k: usize| out[k * n + j];
+        if (a - 1..=b).all(|k| value(k) == value(a)) {
+            continue;
+        }
+        // Forward sweep over 4 c[k] + c[k+1] + c[k-1] = 6 d[k], the fixed neighbours moved right.
+        let mut previous = (0.0, 0.0);
+        for i in 0..m {
+            let k = a + i;
+            let mut d = 6.0 * value(k);
+            if i == 0 {
+                d -= value(a - 1);
+            }
+            if i + 1 == m {
+                d -= value(b);
+            }
+            let diagonal = 4.0 - previous.0;
+            upper[i] = if i + 1 < m { 1.0 / diagonal } else { 0.0 };
+            rhs[i] = (d - previous.1) / diagonal;
+            previous = (upper[i], rhs[i]);
+        }
+        for i in (0..m).rev() {
+            let next = if i + 1 < m {
+                out[(a + i + 1) * n + j]
+            } else {
+                0.0
+            };
+            out[(a + i) * n + j] = rhs[i] - upper[i] * next;
+        }
+        let (lo, hi) = robot.bounds(j);
+        for k in a..b {
+            out[k * n + j] = out[k * n + j].clamp(lo, hi);
+        }
+    }
 }
 
 /// Pins `path`'s first three control points so the spline leaves `start` with `motion`'s velocity
@@ -1195,7 +1342,7 @@ mod tests {
         let mut dense = vec![0.0; (21 * k + 1) * n];
         let near = |dense: &[f32], q: &[f32]| dense.chunks(n).any(|d| rrt::distance(d, q) < 1e-4);
         for pinned in [[0, EXACT, 0, EXACT, 0], [0, 0, EXACT, 0, 0]] {
-            assert!(fit_spline(&path, n, &pinned, &mut out, &mut at));
+            assert!(fit_spline(&path, n, &pinned, None, &mut out, &mut at));
             spline::dense(&out, n, k, &mut dense);
             for (w, q) in path.chunks(n).enumerate() {
                 let must = w == 0 || w == 4 || pinned[w] == EXACT;
@@ -1210,7 +1357,7 @@ mod tests {
             );
         }
         // Every waypoint pinned: each dense sample lies on the path.
-        assert!(fit_spline(&path, n, &[EXACT; 5], &mut out, &mut at));
+        assert!(fit_spline(&path, n, &[EXACT; 5], None, &mut out, &mut at));
         spline::dense(&out, n, k, &mut dense);
         let on_path = |d: &[f32]| {
             (0..4).any(|e| {
@@ -1225,7 +1372,7 @@ mod tests {
             "a fully pinned spline leaves its path"
         );
         // No pins: the free control points are evenly spaced along the path, cutting its corners.
-        assert!(fit_spline(&path, n, &[0; 5], &mut out, &mut at));
+        assert!(fit_spline(&path, n, &[0; 5], None, &mut out, &mut at));
         let gaps: Vec<f32> = at[3..21].windows(2).map(|a| a[1] - a[0]).collect();
         assert!(
             gaps.iter().all(|g| (g - gaps[0]).abs() < 1e-5),
@@ -1236,9 +1383,51 @@ mod tests {
             &path,
             n,
             &[EXACT; 5],
+            None,
             &mut vec![0.0; 12 * n],
             &mut [0.0; 12]
         ));
+    }
+
+    /// Validation refuses a path clear of the world where a sample breaks its constraints: the
+    /// Panda's hand tilted 0.6 rad on the way between two states that keep it level.
+    #[test]
+    fn validation_refuses_paths_that_break_their_constraints() {
+        use crate::constraint::HandConstraint;
+        use crate::world::World;
+
+        let fingers = [
+            ("panda_finger_joint1".to_string(), 0.04),
+            ("panda_finger_joint2".to_string(), 0.04),
+        ];
+        let options = RobotOptions {
+            lock_joints: HashMap::from(fingers),
+            ..Default::default()
+        };
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/franka/franka_panda.urdf"
+        );
+        let robot = Robot::load(path, &options).unwrap();
+        let device = Device::cpu(&robot).unwrap();
+        let worlds = device.upload(&[World::default()]).unwrap();
+        let (n, start) = (robot.dof(), robot.default_q().to_vec());
+        let mut tilted = start.clone();
+        tilted[5] += 0.6;
+        let mut paths = JointPaths::zeros(1, 11, n);
+        for (k, point) in paths.path_mut(0).chunks_mut(n).enumerate() {
+            point.copy_from_slice(if (3..8).contains(&k) { &tilted } else { &start });
+        }
+        let level = HandConstraint {
+            tilt: 0.1,
+            ..HandConstraint::new(0, robot.ee_pose(&start, 0))
+        };
+        let bounds = Some(Arc::new(Region::new(&robot, &[level])));
+        let o = PlanOptions::default();
+        let (free, _) = validate(&device, &worlds, &paths, &[0], &[None], &o).unwrap();
+        let (kept, _) = validate(&device, &worlds, &paths, &[0], &[bounds], &o).unwrap();
+        assert!(free[0] >= 0.0, "the path is clear of the world");
+        assert!(kept[0].is_nan(), "the tilted path is valid: {}", kept[0]);
     }
 
     /// A joint whose range spans more than a turn may end a turn away, unless it is held.
@@ -1258,6 +1447,7 @@ mod tests {
             goal: goal.clone(),
             start_motion: None,
             hold: hold.to_vec(),
+            constraints: vec![],
         };
         let (held, free) = (
             search_goals(&robot, &problem(&hold)),
@@ -1323,6 +1513,7 @@ mod tests {
             clear: 0,
             from: 0,
             relaxing: None,
+            region: None,
         };
         fit.restart();
         let mut buffer = vec![];
@@ -1367,7 +1558,14 @@ mod tests {
         let mut dense = vec![0.0; (21 * k + 1) * n];
         let mut gaps = vec![];
         for level in 0..=EXACT {
-            assert!(fit_spline(&path, n, &[0, level, 0], &mut out, &mut at));
+            assert!(fit_spline(
+                &path,
+                n,
+                &[0, level, 0],
+                None,
+                &mut out,
+                &mut at
+            ));
             assert!(
                 at.windows(2).all(|a| a[0] <= a[1]),
                 "control points out of order at level {level}"

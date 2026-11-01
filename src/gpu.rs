@@ -11,6 +11,7 @@ use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use wgpu::util::DeviceExt;
 
+use crate::constraint::{CONSTRAINT_WEIGHT, Region};
 use crate::cpu::{self, CpuWorlds};
 use crate::device::{Backend, CollisionWeights, Evaluation, Worlds};
 use crate::edges::Search;
@@ -21,7 +22,7 @@ use crate::robot::{JointKind, Robot};
 use crate::sdf::{self, DepthImage, FAR, Layout, Occlusion, Occupancy, RobotMask, SdfGrid};
 use crate::trajopt::{LINE_SEARCH, MAX_HISTORY, PlanOptions};
 use crate::types::{JointPaths, Pose};
-use crate::world::{Obstacle, World};
+use crate::world::{self, Obstacle, World};
 
 const WORKGROUP: u32 = 64;
 const _: () = assert!(
@@ -87,7 +88,7 @@ shader_struct! {
         w_world: f32, w_self: f32, margin: f32, self_margin: f32,
         acceleration_weight: f32, velocity_weight: f32, initial_step: f32, history: u32,
         damping: f32, rotation_weight: f32, max_step: f32, collision_step: f32,
-        samples: u32, pad0: u32, pad1: u32, pad2: u32,
+        samples: u32, constraints: u32, constraint_weight: f32, pad0: u32,
     }
 }
 
@@ -661,6 +662,18 @@ struct Kernels {
     traj_search: wgpu::ComputePipeline,
     traj_grad: wgpu::ComputePipeline,
     lbfgs_direction: wgpu::ComputePipeline,
+    /// The module and layout every pipeline is built from, for those built when first needed.
+    module: wgpu::ShaderModule,
+    layout: wgpu::PipelineLayout,
+    /// The trajectory kernels that keep constraints, for one lane and SHARED_LANES, built the
+    /// first time a constrained path is optimized.
+    constrained: OnceLock<[TrajKernels; 2]>,
+}
+
+/// The per-sample trajectory kernels, built to keep constraints.
+struct TrajKernels {
+    traj_costs: wgpu::ComputePipeline,
+    traj_samples: wgpu::ComputePipeline,
 }
 
 /// The kernels that check collision, built for one number of lanes per configuration.
@@ -681,6 +694,85 @@ impl Kernels {
             &self.shared
         }
     }
+
+    /// The per-sample trajectory kernels for `lanes`: costs, then gradients, keeping constraints
+    /// with `constrained`.
+    fn traj(
+        &self,
+        device: &wgpu::Device,
+        info: &wgpu::AdapterInfo,
+        lanes: u32,
+        constrained: bool,
+    ) -> Result<[&wgpu::ComputePipeline; 2]> {
+        if !constrained {
+            let c = self.collision(lanes);
+            return Ok([&c.traj_costs, &c.traj_samples]);
+        }
+        let built = match self.constrained.get() {
+            Some(built) => built,
+            None => {
+                let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let traj = |lanes: u32| TrajKernels {
+                    traj_costs: pipeline(
+                        device,
+                        &self.layout,
+                        &self.module,
+                        "traj_costs",
+                        lanes,
+                        true,
+                    ),
+                    traj_samples: pipeline(
+                        device,
+                        &self.layout,
+                        &self.module,
+                        "traj_samples",
+                        lanes,
+                        true,
+                    ),
+                };
+                let built = [traj(1), traj(SHARED_LANES)];
+                if let Some(e) = pollster::block_on(scope.pop()) {
+                    return Err(Error::Gpu(format!(
+                        "{} ({:?}) cannot build the constrained trajectory kernels: {e}",
+                        info.name, info.backend
+                    )));
+                }
+                self.constrained.get_or_init(|| built)
+            }
+        };
+        let t = &built[usize::from(lanes != 1)];
+        Ok([&t.traj_costs, &t.traj_samples])
+    }
+}
+
+/// The pipeline for kernel `entry` with `lanes` per configuration, keeping constraints with
+/// `constrained` (`LANES`, `CONSTRAINED` in kernels.wgsl).
+fn pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    module: &wgpu::ShaderModule,
+    entry: &str,
+    lanes: u32,
+    constrained: bool,
+) -> wgpu::ComputePipeline {
+    let lanes = ("LANES", f64::from(lanes));
+    let constants = [lanes, ("CONSTRAINED", 1.0)];
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(entry),
+        layout: Some(layout),
+        module,
+        entry_point: Some(entry),
+        compilation_options: wgpu::PipelineCompilationOptions {
+            constants: if constrained {
+                &constants
+            } else {
+                &constants[..1]
+            },
+            // Every kernel writes its workgroup memory before reading it.
+            zero_initialize_workgroup_memory: false,
+        },
+        cache: None,
+    })
 }
 
 /// The robot as the kernels read it./// The robot as the kernels read it.
@@ -828,20 +920,8 @@ fn build_kernels(
         bind_group_layouts: &[Some(&layout0)],
         immediate_size: 0,
     });
-    let pipeline = |entry: &str, lanes: u32| {
-        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some(entry),
-            layout: Some(&pl_main),
-            module: &module,
-            entry_point: Some(entry),
-            compilation_options: wgpu::PipelineCompilationOptions {
-                constants: &[("LANES", f64::from(lanes))],
-                // Every kernel writes its workgroup memory before reading it.
-                zero_initialize_workgroup_memory: false,
-            },
-            cache: None,
-        })
-    };
+    let pipeline =
+        |entry: &str, lanes: u32| pipeline(device, &pl_main, &module, entry, lanes, false);
     let collision = |lanes: u32| CollisionKernels {
         evaluate: pipeline("evaluate_main", lanes),
         clearance: pipeline("clearance_main", lanes),
@@ -874,6 +954,9 @@ fn build_kernels(
         traj_search,
         traj_grad,
         lbfgs_direction,
+        module,
+        layout: pl_main,
+        constrained: OnceLock::new(),
     })
 }
 
@@ -1328,6 +1411,7 @@ impl Backend for GpuBackend {
         &self,
         worlds: &Worlds,
         item_world: &[u32],
+        item_region: &[Option<Arc<Region>>],
         paths: &mut JointPaths,
         o: &PlanOptions,
         deadline: Option<Instant>,
@@ -1347,14 +1431,15 @@ impl Backend for GpuBackend {
             / bytes)
             .max(1) as usize;
         let chunk = fits.min(TRAJ_CHUNK);
-        for (chunk_world, chunk_paths) in item_world
+        for ((chunk_world, chunk_region), chunk_paths) in item_world
             .chunks(chunk)
+            .zip(item_region.chunks(chunk))
             .zip(paths.positions.chunks_mut(chunk * points * n))
         {
             if deadline.is_some_and(|d| Instant::now() >= d) {
                 break;
             }
-            self.trajopt_chunk(worlds, chunk_world, chunk_paths, points, o, deadline)?;
+            self.trajopt_chunk(worlds, chunk_world, chunk_region, chunk_paths, o, deadline)?;
         }
         Ok(())
     }
@@ -1716,16 +1801,19 @@ impl GpuBackend {
             .collect())
     }
 
+    /// Optimizes the paths `traj` holds, one per item of `item_world`, each keeping its constraints
+    /// (`item_region`) if it has any.
     fn trajopt_chunk(
         &self,
         worlds: &GpuWorlds,
         item_world: &[u32],
+        item_region: &[Option<Arc<Region>>],
         traj: &mut [f32],
-        points: usize,
         o: &PlanOptions,
         deadline: Option<Instant>,
     ) -> Result<()> {
         let items = item_world.len();
+        let points = traj.len() / (items * self.robot.dof());
         let samples = items * (points - 3) * o.samples_per_span;
         let mut params = self.params(items, &o.collision);
         params.points = points as u32;
@@ -1734,11 +1822,23 @@ impl GpuBackend {
         params.velocity_weight = o.velocity_weight;
         params.initial_step = o.initial_step;
         params.history = o.history as u32;
+        let slots = item_region.iter().flatten().map(|r| r.limits.len()).max();
+        let slots = slots.unwrap_or(0);
+        params.constraints = slots as u32;
+        params.constraint_weight = CONSTRAINT_WEIGHT;
+        // The constraints' gradients read the hands' Jacobians unscaled.
+        params.rotation_weight = 1.0;
         let lanes = lanes_for(samples);
-        let collision = self.kernels.collision(lanes);
+        let [traj_costs, traj_samples] =
+            self.kernels
+                .traj(&self.device, &self.info, lanes, slots > 0)?;
         let params_buf = self.uniform(&params);
         let world_buf = storage(&self.device, "item world", item_world);
-        let dummy = storage::<f32>(&self.device, "unused", &[]);
+        let constraints = storage(
+            &self.device,
+            "constraints",
+            &constraint_slots(item_region, slots),
+        );
         let q_buf = storage(&self.device, "trajectories", traj);
         let aux = storage_zeroed(
             &self.device,
@@ -1750,7 +1850,7 @@ impl GpuBackend {
             params: &params_buf,
             worlds,
             item_world: &world_buf,
-            targets: &dummy,
+            targets: &constraints,
             q: &q_buf,
             aux: &aux,
             out: &out,
@@ -1763,14 +1863,14 @@ impl GpuBackend {
             self.submit_pass(|pass| {
                 pass.set_bind_group(0, &bg, &[]);
                 for round in k..end {
-                    pass.set_pipeline(&collision.traj_costs);
+                    pass.set_pipeline(traj_costs);
                     dispatch(pass, samples * LINE_SEARCH.len() * lanes as usize);
                     pass.set_pipeline(&self.kernels.traj_search);
                     dispatch_groups(pass, items);
                     if round + 1 == rounds {
                         break;
                     }
-                    pass.set_pipeline(&collision.traj_samples);
+                    pass.set_pipeline(traj_samples);
                     dispatch(pass, samples * lanes as usize);
                     pass.set_pipeline(&self.kernels.traj_grad);
                     dispatch(pass, items * (points - 6));
@@ -1790,6 +1890,31 @@ impl GpuBackend {
         traj.copy_from_slice(&self.read(&q_buf, traj.len())?);
         Ok(())
     }
+}
+
+/// Each item's constraints as `constraint_cost` in kernels.wgsl reads them, `slots` per item of
+/// `CONSTRAINT_VEC4S` (5): the centre and the hand, the half extents and the hand it is relative to
+/// (-1 for none), and the reference rotation's columns with the tilt bound, the twist bound and 1.
+/// Free bounds are `world::FAR`, which every state keeps; empty slots are zero.
+fn constraint_slots(item_region: &[Option<Arc<Region>>], slots: usize) -> Vec<Vec4> {
+    let mut out = vec![[0.0; 4]; item_region.len() * slots * 5];
+    let finite = |v: f32| v.min(world::FAR);
+    for (item, region) in item_region.iter().enumerate() {
+        for (k, l) in region.iter().flat_map(|r| &r.limits).enumerate() {
+            let at = (item * slots + k) * 5;
+            let frame = l.frame.map_or(-1.0, |f| f.hand as f32);
+            let h = l.half.to_array().map(finite);
+            let r = l.reference;
+            out[at..at + 5].copy_from_slice(&[
+                v4(l.center, l.hand as f32),
+                [h[0], h[1], h[2], frame],
+                v4(r.x_axis, finite(l.tilt)),
+                v4(r.y_axis, finite(l.twist)),
+                v4(r.z_axis, 1.0),
+            ]);
+        }
+    }
+    out
 }
 
 /// Adapter limits the kernels need beyond what wgpu guarantees; empty when the adapter suffices.

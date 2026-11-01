@@ -272,6 +272,7 @@ fn main() -> Result<()> {
                             acceleration: now[i].acceleration.clone(),
                         }),
                         hold: vec![],
+                        constraints: vec![],
                     })
                     .collect();
                 let options = PlanOptions {

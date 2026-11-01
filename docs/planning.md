@@ -96,6 +96,64 @@ Continuous joints are unbounded, and joints whose range spans more than a turn (
 
 `PlanOptions::time_budget` stops every search and the optimization once it passes, and returns the valid paths found so far. Without a budget nothing checks the clock, and two runs give bit-identical results, on either device.
 
+## Constraints along the path
+
+A `HandConstraint` bounds where a hand may be at every point of a plan, as a cup or a tray must be carried: its z axis within a cone (its tilt), its turn about that axis (its twist), and its origin within a box, in the world or in another hand's frame. `HandConstraint::new(hand, pose)` leaves all three free; set the ones that matter. `PlanProblem::constraints` takes any number of them, on any hands.
+
+```rust,no_run
+use std::f32::consts::PI;
+
+use batchplan::glam::{Quat, Vec3};
+use batchplan::{
+    Device, Error, HandConstraint, IkOptions, IkProblem, PlanOptions, PlanProblem, Pose, Robot,
+    RobotOptions, World,
+};
+
+fn main() -> Result<(), Error> {
+    let robot = Robot::load("assets/franka/franka_panda.urdf", &RobotOptions::default())?;
+    let device = Device::cpu(&robot)?;
+    let worlds = device.upload(&[World::default()])?;
+    let o = IkOptions::default();
+    // The gripper pointing straight down, then 40 cm across, by IK from where it starts.
+    let down = Quat::from_rotation_x(PI);
+    let here = IkProblem::new(0, Pose::new(Vec3::new(0.4, -0.2, 0.3), down));
+    let ik = batchplan::solve_ik(&device, &worlds, &[here], &o)?;
+    let Some(start) = ik.best(0).map(<[f32]>::to_vec) else {
+        return Ok(());
+    };
+    let there = IkProblem {
+        seed: Some(start.clone()),
+        ..IkProblem::new(0, Pose::new(Vec3::new(0.4, 0.2, 0.3), down))
+    };
+    let ik = batchplan::solve_ik(&device, &worlds, &[there], &o)?;
+    let Some(goal) = ik.nearest(0, &start).map(<[f32]>::to_vec) else {
+        return Ok(());
+    };
+    // Within 5° of straight down all the way, turning freely about the vertical.
+    let level = HandConstraint {
+        tilt: 5f32.to_radians(),
+        ..HandConstraint::new(0, Pose::new(Vec3::ZERO, down))
+    };
+    let problem = PlanProblem {
+        constraints: vec![level],
+        ..PlanProblem::new(0, start, goal)
+    };
+    let result = batchplan::plan(&device, &worlds, &[problem], &PlanOptions::default())?;
+    println!("carried level: {}", result.best(0).is_some());
+    Ok(())
+}
+```
+
+- **What it bounds.** Each bound is measured from `pose`, in the world. `tilt` is the angle between the hand's z axis and `pose`'s: a cone, which "within 5° of upright" means, rather than a box on roll and pitch, which allows 7.07° at its corners and is singular at a pitch of ±90°. `twist` is how far the hand turns about its z axis once its tilt is taken out (the swing-twist decomposition); a hand tilted half a turn has no such turn, so a bounded twist needs a tilt bound of at most π/2. `position` is how far the hand's origin may be from `pose.position` along each world axis. Infinity leaves an axis of the box free, and π or more an angle. Bounds below what IK solves to (1 mm, 0.01 rad) count as those, so a goal IK solved for the pose keeps a constraint pinned to it.
+- **Relative to another hand.** With `relative_to: Some(other)`, `pose` and the bounds are in that hand's frame and move with it, the box along its axes, as MoveIt's constraints take a link's frame. Two hands holding one tray pin the second hand where it holds it in the first's frame, `HandConstraint { relative_to: Some(0), position: Vec3::ZERO, tilt: 0.0, twist: 0.0, ..HandConstraint::new(1, place) }` with `place` the first hand's pose inverted times the second's at the start, and keep the first upright to carry the tray level. The floors double (2 mm, 0.02 rad): both hands' IK errors add.
+- **The ends.** The start and the goal must keep their constraints; an input error names the bound broken and by how much. Take them from one IK branch: on the example's reaches, a start IK placed with the Panda's third joint at its limit, the arm wound the other way round its base, reaches only 5 of 54 goals inside the zone even with 100,000 samples, since unwinding the arm with the gripper upright leaves the zone; from the solution nearest the ready pose, 54 of 54.
+- **How it plans.** As CBiRRT does, by projection. RRT-Connect's extensions and connections walk toward their targets in hops of eight `rrt.resolution` steps (0.25 rad), one SIMD pass each. Each hop is projected back inside the bounds by damped least squares on the bounds it breaks, through the Jacobians of the hand and of the hand it is relative to. Projection lands a little inside (half the bound, up to 1 cm and 2°), so the edges between hops have room to bulge. The straight line comes first, then its projected walk, before any sampling. Shortcuts and smoothing keep the constraints too, and a smoothed waypoint is projected back inside before it is checked.
+- **The guarantee.** Every state a search, a shortcut or a spline is checked at is tested against the bounds as given, in the SIMD lanes beside the collision test, so the returned path keeps them wherever it is checked: at `shortcut.resolution` along searched paths and their splines (and at least `validate_substeps` per span), and at `validate_substeps` per span along optimized seeds. Between those states a path may stray past a bound by a hair.
+- **The spline.** The spline's control points are fitted so that the curve passes through the path's points rather than near them, clamped to the joint limits: its gap from the path falls with the fourth power of their spacing rather than the square. So the usual 24 control points follow a long, curved constrained path within 1°.
+- **Optimization.** With `seeds`, trajectory optimization keeps the constraints as a cost, as cuRobo and TrajOpt do: the squared distance past each bound projection lands within, at every optimizer sample, on the CPU and the GPU alike. An optimized seed is kept only where every validation sample keeps the bounds as given. On the upright reaches below, 4 seeds shorten 25 of 54 paths and their mean length by 3.2%; on two arms carrying a tray, the mean length by 21%. Splines too short to follow a path are repaired the same way. On a GPU, the first constrained optimization a device runs builds its kernels (1.8 s on the M4 Pro the first time, 10 ms once the driver has cached them), which a time budget does not cover.
+- **Everywhere a path is planned.** `join` keeps a `Sequence`'s constraints in every blend, and a join whose blends all break them stops. `pick` and `place` keep theirs along the transit, as MTC's Connect stage takes path constraints; a candidate whose move in begins where they break stops at the transit. `Follower` keeps `FollowerOptions::constraints` in its replans, and stops where a replan would start outside them. `follow` and `servo` set the hand's path themselves and take none.
+- **What it costs.** On upright reaches past a pillar (`cargo run --release --example constraints`), the gripper within 5° of straight down: 54 of 54 solved, 0.10 ms per problem alone at the median and 2.6 ms for all 54 in one batch on the M4 Pro, against 0.09 and 0.9 ms without the constraint. Two arms carry a tray level over a block in 0.89 ms per problem ([Benchmarks](benchmarks.md#constraints-along-the-path)).
+
 ## Moving the hand along a path
 
 `follow(&device, &worlds, &[ToolPath], &ToolPathOptions)` moves a hand through poses: in a straight line from each to the next, turning by the shortest rotation, as MoveIt's Cartesian paths do. Each `ToolPath` names its world, its start configuration, the hand, and the `waypoints` after the start; only the joints that move that hand move. It is what an approach, a lift or a pour asks for, where a planned path would take any route.
@@ -229,7 +287,12 @@ fn main() -> Result<(), Error> {
 # use batchplan::{Device, Error, JoinOptions, Sequence, Trajectory, World};
 # fn run(device: &Device, transit: Vec<f32>, approach: Vec<f32>) -> Result<(), Error> {
 let worlds = device.upload(&[World::default()])?;
-let sequence = Sequence { world: 0, paths: vec![transit, approach], blends: vec![0.05] };
+let sequence = Sequence {
+    world: 0,
+    paths: vec![transit, approach],
+    blends: vec![0.05],
+    constraints: vec![],
+};
 let joined = batchplan::join(device, &worlds, &[sequence], &JoinOptions::default())?;
 // One path per stretch the robot moves without stopping: here one, unless the join stopped.
 for path in &joined.paths[0] {

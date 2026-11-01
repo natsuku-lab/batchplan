@@ -9,6 +9,7 @@ use fearless_simd::prelude::*;
 use fearless_simd::{Level, Simd, f32x8};
 use glam::{Mat3, Vec3};
 
+use crate::constraint::Region;
 use crate::cpu::{CpuWorld, Prepared};
 use crate::robot::{JointKind, Robot};
 use crate::world::{self, FAR};
@@ -130,6 +131,11 @@ impl<S: Simd> V3<S> {
     #[inline(always)]
     fn dot(self, a: Vec3) -> F<S> {
         self.x * a.x + self.y * a.y + self.z * a.z
+    }
+
+    #[inline(always)]
+    fn dot_lanes(self, o: Self) -> F<S> {
+        self.x * o.x + self.y * o.y + self.z * o.z
     }
 }
 
@@ -650,9 +656,10 @@ impl Lanes {
         least
     }
 
-    /// Whether all of up to eight configurations (`[k, dof]`) keep `margin[lane]` from the world
-    /// and are free of self-collision, as `collision_free` judges their clearance with a zero
-    /// margin; stops at the first collision. Links are checked from the tip, where collisions are
+    /// Whether all of up to eight configurations (`[k, dof]`) keep `region`'s constraints, if any,
+    /// and `margin[lane]` from the world, and are free of self-collision, as `collision_free`
+    /// judges their clearance with a zero margin; stops at the first collision. The constraints
+    /// come first, a few operations per hand; then links from the tip, where collisions are
     /// likeliest, each first through its bounding sphere.
     #[inline(always)]
     pub(crate) fn keeps<S: Simd>(
@@ -661,9 +668,15 @@ impl Lanes {
         world: &CpuWorld,
         q: &[f32],
         margin: [f32; LANES],
+        region: Option<&Region>,
         s: &mut LaneScratch,
     ) -> bool {
         self.pose(simd, q, s);
+        if let Some(region) = region
+            && !inside(simd, region, s)
+        {
+            return false;
+        }
         let margin = F::simd_from(simd, margin);
         for &(link, first, end, b) in self.world_links.iter().rev() {
             let bc = self.bound_center(simd, link, s);
@@ -737,6 +750,52 @@ impl Lanes {
         }
         true
     }
+}
+
+/// Whether every lane's hands keep `region`'s bounds, as `Region::contains` tests them: with `R`
+/// a hand's rotation and `S` the constraint's in the world (`R0`, or `Rf R0` relative to a hand at
+/// `Rf`), the entries of `Sᵀ R` are dot products of their columns.
+#[inline(always)]
+fn inside<S: Simd>(simd: S, region: &Region, s: &LaneScratch) -> bool {
+    for l in &region.limits {
+        let [x, y, z] = M3::load(simd, &s.rot[l.link]).0;
+        let p = V3::load(simd, &s.pos[l.link]);
+        let r = l.reference;
+        let (away, m22, n, d) = match l.frame {
+            None => (
+                p.sub(V3::splat(simd, l.center)),
+                z.dot(r.z_axis),
+                x.dot(r.y_axis) - y.dot(r.x_axis),
+                x.dot(r.x_axis) + y.dot(r.y_axis),
+            ),
+            Some(f) => {
+                let rf = M3::load(simd, &s.rot[f.link]);
+                let center = V3::load(simd, &s.pos[f.link]).add(rf.times(l.center));
+                let [sx, sy, sz] = rf.times_matrix(r).0;
+                let [ax, ay, az] = rf.0;
+                let d = p.sub(center);
+                (
+                    V3 {
+                        x: ax.dot_lanes(d),
+                        y: ay.dot_lanes(d),
+                        z: az.dot_lanes(d),
+                    },
+                    z.dot_lanes(sz),
+                    x.dot_lanes(sy) - y.dot_lanes(sx),
+                    x.dot_lanes(sx) + y.dot_lanes(sy),
+                )
+            }
+        };
+        let keeps = away.x.abs().simd_le(F::splat(simd, l.half.x))
+            & away.y.abs().simd_le(F::splat(simd, l.half.y))
+            & away.z.abs().simd_le(F::splat(simd, l.half.z))
+            & m22.simd_ge(F::splat(simd, l.cos_tilt))
+            & d.simd_ge((n * n + d * d).sqrt() * l.cos_twist);
+        if !keeps.all_true() {
+            return false;
+        }
+    }
+    true
 }
 
 /// The lanes where `p` is nearer `o` than `r` (positive): its distance (`distance`) below `r`,
@@ -1099,7 +1158,7 @@ mod tests {
                 }
                 let (world, q) = (&prepared[item_world[i] as usize], &q[i * n..(i + 1) * n]);
                 let keeps = fearless_simd::dispatch!(level, simd => {
-                    lanes.keeps(simd, world, q, [margin; LANES], &mut scratch)
+                    lanes.keeps(simd, world, q, [margin; LANES], None, &mut scratch)
                 });
                 assert_eq!(
                     keeps,
@@ -1124,6 +1183,98 @@ mod tests {
             hi - lo > 1e-3,
             "{name}: world clearances should follow the configuration"
         );
+    }
+
+    /// `keeps` with constraints agrees with `Region::contains` on states free of self-collision, at
+    /// the best SIMD level and the baseline, on states that keep each bound and states that break
+    /// it, in the world and relative to a second hand at the arm's fourth link.
+    #[test]
+    fn lanes_keep_constraints_as_the_scalar_test_does() {
+        use std::f32::consts::PI;
+
+        use crate::constraint::{HandConstraint, Region};
+
+        let fingers = [
+            ("panda_finger_joint1".to_string(), 0.04),
+            ("panda_finger_joint2".to_string(), 0.04),
+        ];
+        let options = RobotOptions {
+            ee_links: vec!["panda_hand".into(), "panda_link4".into()],
+            lock_joints: HashMap::from(fingers),
+            collision_model: Some(
+                CollisionModel::load("assets/franka/panda_collision.json").unwrap(),
+            ),
+            ..Default::default()
+        };
+        let robot = Robot::load("assets/franka/franka_panda.urdf", &options).unwrap();
+        let n = robot.dof();
+        let prepared = crate::cpu::prepare(&robot, &[World::default()]).unwrap();
+        let mut rng = Rng::new(11);
+        let random = |rng: &mut Rng| -> Vec<f32> {
+            (0..n)
+                .map(|j| rng.range(robot.lower[j], robot.upper[j]))
+                .collect()
+        };
+        let kinds = [
+            (false, Vec3::new(0.1, 0.15, 0.12), PI, PI),
+            (false, Vec3::INFINITY, 0.3, PI),
+            (false, Vec3::INFINITY, PI, 0.4),
+            (false, Vec3::splat(0.2), 0.5, 0.6),
+            (true, Vec3::new(0.05, 0.08, 0.06), PI, PI),
+            (true, Vec3::INFINITY, 0.3, 0.4),
+            (true, Vec3::splat(0.1), 0.5, 0.6),
+        ];
+        for level in [Level::new(), Level::baseline()] {
+            let mut lanes = Lanes::new(&robot);
+            lanes.level = level;
+            let mut scratch = lanes.scratch();
+            let mut counts = [[0usize; 2]; 7];
+            for _ in 0..4000 {
+                let kind = ((rng.uniform() * 7.0) as usize).min(6);
+                let (relative, position, tilt, twist) = kinds[kind];
+                let q = random(&mut rng);
+                // Measured from a pose near the state's, so that it keeps the bounds about as
+                // often as it breaks them.
+                let near: Vec<f32> = q.iter().map(|v| v + rng.range(-0.5, 0.5)).collect();
+                let pose = if relative {
+                    robot
+                        .ee_pose(&near, 1)
+                        .inverse()
+                        .mul_pose(robot.ee_pose(&near, 0))
+                } else {
+                    robot.ee_pose(&near, 0)
+                };
+                let c = HandConstraint {
+                    relative_to: relative.then_some(1),
+                    position,
+                    tilt,
+                    twist,
+                    ..HandConstraint::new(0, pose)
+                };
+                let region = Region::new(&robot, &[c]);
+                // Self-collision fails both.
+                let (free, keeps) = fearless_simd::dispatch!(level, simd => {
+                    let world = &prepared[0];
+                    let free = lanes.keeps(simd, world, &q, [0.0; LANES], None, &mut scratch);
+                    let keeps =
+                        lanes.keeps(simd, world, &q, [0.0; LANES], Some(&region), &mut scratch);
+                    (free, keeps)
+                });
+                if !free {
+                    continue;
+                }
+                assert_eq!(
+                    keeps,
+                    region.contains(&robot.fk(&q)),
+                    "kind {kind} at {q:?}"
+                );
+                counts[kind][usize::from(keeps)] += 1;
+            }
+            assert!(
+                counts.iter().all(|c| c[0] > 20 && c[1] > 20),
+                "every kind should keep and break its bounds: {counts:?}"
+            );
+        }
     }
 
     #[test]

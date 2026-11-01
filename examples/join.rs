@@ -135,6 +135,7 @@ fn main() -> Result<()> {
                 world: 0,
                 paths: paths.clone(),
                 blends: vec![blend],
+                constraints: vec![],
             })
             .collect();
         let start = Instant::now();

@@ -519,6 +519,141 @@ fn scalars_at(item: u32) -> u32 {
     return steps_at(item, 2u * P.history);
 }
 
+// The trajectory kernels built to keep constraints (gpu.rs builds them when a constrained path is
+// first optimized); without, their constraint code folds away.
+override CONSTRAINED: bool = false;
+// Each item's constraints in `targets`: P.constraints slots of CONSTRAINT_VEC4S (see
+// constraint_slots in gpu.rs): the centre and the hand, the box's half extents and the hand it is
+// relative to (-1 for none), then the reference rotation's columns with the tilt bound, the twist
+// bound and whether the slot holds a constraint.
+const CONSTRAINT_VEC4S: u32 = 5u;
+
+// Adds hand h's Jacobian, transposed, times the rate (linear, angular) into `grad`.
+fn add_hand_rate(h: u32, linear: vec3<f32>, angular: vec3<f32>) {
+    if (all(linear == vec3<f32>(0.0)) && all(angular == vec3<f32>(0.0))) {
+        return;
+    }
+    ee_jacobian(h);
+    for (var j = 0u; j < P.n_dof; j++) {
+        let jp = vec3<f32>(jac[j], jac[MAX_DOF + j], jac[2u * MAX_DOF + j]);
+        let jo = vec3<f32>(jac[3u * MAX_DOF + j], jac[4u * MAX_DOF + j], jac[5u * MAX_DOF + j]);
+        grad[j] += dot(linear, jp) + dot(angular, jo);
+    }
+}
+
+// How far the offset `d` along a box's axis is past its half extent `half`: 0 within it.
+fn box_past(d: f32, half: f32) -> f32 {
+    return d - clamp(d, -half, half);
+}
+
+// How far the angle of (x, y) is past `bound`, negative within it or when the bound is free (FAR):
+// one small angle rather than the difference of two near ones, which drivers' acos and atan2 (good
+// to 1e-4 rad and 2e-5 of the angle on RADV) swamp. As past() in constraint.rs.
+fn angle_past(y: f32, x: f32, bound: f32) -> f32 {
+    if (bound >= FAR) {
+        return -1.0;
+    }
+    let c = cos(bound);
+    let s = sin(bound);
+    return atan2(y * c - x * s, x * c + y * s);
+}
+
+// The cost past item `item`'s constraints of the configuration last passed to fk(), as
+// Region::cost in constraint.rs; with `gradient`, adds its d(cost)/dq into `grad`. ee_jacobian()
+// reads P.rotation_weight, which constrained optimizations set to 1.
+fn constraint_cost(item: u32, gradient: bool) -> f32 {
+    var cost = 0.0;
+    let w = P.constraint_weight;
+    for (var k = 0u; k < P.constraints; k++) {
+        let t = (item * P.constraints + k) * CONSTRAINT_VEC4S;
+        let zc = targets[t + 4u];
+        if (zc.w < 0.5) {
+            continue;
+        }
+        let c = targets[t];
+        let half = targets[t + 1u];
+        let xc = targets[t + 2u];
+        let yc = targets[t + 3u];
+        let hand = u32(c.w);
+        let relative = half.w >= 0.0;
+        let p = ee_pos(hand);
+        let r = ee_rot(hand);
+        let reference = mat3x3<f32>(xc.xyz, yc.xyz, zc.xyz);
+        // The frame where this configuration has it: the world's, or the other hand's.
+        var s = reference;
+        var center = c.xyz;
+        var axes = mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0));
+        var origin = vec3<f32>(0.0);
+        if (relative) {
+            let rf = ee_rot(u32(half.w));
+            origin = ee_pos(u32(half.w));
+            s = rf * reference;
+            center = origin + rf * c.xyz;
+            axes = rf;
+        }
+        let lever = p - origin;
+        let offset = p - center;
+        var d = offset;
+        if (relative) {
+            d = vec3<f32>(dot(axes[0], offset), dot(axes[1], offset), dot(axes[2], offset));
+        }
+        // Each hand's rate of the cost: 2 w times each broken bound's distance past it and rate.
+        var hand_linear = vec3<f32>(0.0);
+        var hand_angular = vec3<f32>(0.0);
+        var frame_linear = vec3<f32>(0.0);
+        var frame_angular = vec3<f32>(0.0);
+        let past = vec3<f32>(box_past(d.x, half.x), box_past(d.y, half.y), box_past(d.z, half.z));
+        for (var axis = 0u; axis < 3u; axis++) {
+            if (past[axis] != 0.0) {
+                cost += w * past[axis] * past[axis];
+                let a = axes[axis];
+                let g = 2.0 * w * past[axis];
+                hand_linear += g * a;
+                frame_linear -= g * a;
+                frame_angular += g * cross(a, lever);
+            }
+        }
+        let u = s[2];
+        let away = cross(u, r[2]);
+        let size = length(away);
+        let residual = angle_past(size, dot(r[2], u), xc.w);
+        if (residual > 0.0) {
+            cost += w * residual * residual;
+            var axis = away / max(size, 1e-30);
+            if (size <= 1e-6) {
+                // glam's any_orthonormal_vector.
+                let sign = select(-1.0, 1.0, u.z >= 0.0);
+                let a = -1.0 / (sign + u.z);
+                axis = vec3<f32>(u.x * u.y * a, sign + u.y * u.y * a, -u.y);
+            }
+            let g = 2.0 * w * residual;
+            hand_angular += g * axis;
+            frame_angular -= g * axis;
+        }
+        let n = dot(r[0], s[1]) - dot(r[1], s[0]);
+        let dn = dot(r[0], s[0]) + dot(r[1], s[1]);
+        let h2 = n * n + dn * dn;
+        let over = angle_past(abs(n), dn, yc.w);
+        if (h2 > 1e-12 && over > 0.0) {
+            let residual = select(-over, over, n >= 0.0);
+            cost += w * residual * residual;
+            let m20 = dot(r[0], s[2]);
+            let m21 = dot(r[1], s[2]);
+            let rate = vec3<f32>((n * m21 - dn * m20) / h2, -(dn * m21 + n * m20) / h2, 1.0);
+            let g = 2.0 * w * residual;
+            hand_angular += g * (s * rate);
+            frame_angular -= g * (s * rate);
+        }
+        if (gradient) {
+            add_hand_rate(hand, hand_linear, hand_angular);
+            if (relative) {
+                add_hand_rate(u32(half.w), frame_linear, frame_angular);
+            }
+        }
+    }
+    return cost;
+}
+
 // Control point t, joint j of the candidate path x + alpha d: free points move and are clamped
 // to the joint range, the three pinned at each end stay.
 fn candidate(item: u32, t: u32, j: u32, alpha: f32) -> f32 {
@@ -532,7 +667,7 @@ fn candidate(item: u32, t: u32, j: u32, alpha: f32) -> f32 {
 }
 
 // One lane group per line-search step and collision sample: the collision cost at that point of
-// the candidate path.
+// the candidate path, and the constraints' if CONSTRAINED.
 @compute @workgroup_size(WORKGROUP)
 fn traj_costs(
     @builtin(global_invocation_id) gid: vec3<u32>,
@@ -553,7 +688,10 @@ fn traj_costs(
             + w.z * candidate(item, span + 2u, j, alpha) + w.w * candidate(item, span + 3u, j, alpha);
     }
     fk();
-    let part = collision(item_world[item], P.w_world, P.w_self, P.margin, P.self_margin, false, at.y);
+    var part = collision(item_world[item], P.w_world, P.w_self, P.margin, P.self_margin, false, at.y);
+    if (CONSTRAINED && at.y == 0u) {
+        part.x += constraint_cost(item, false);
+    }
     let c3 = group_collision(lid, part);
     if (at.z == 1u && at.y == 0u) {
         aux[costs_at(item) + c * per_item + sample] = c3.x;
@@ -787,7 +925,8 @@ fn lbfgs_direction(
     }
 }
 
-// One lane group per collision sample: writes d(collision cost)/dq at that point of the curve.
+// One lane group per collision sample: writes d(collision cost)/dq at that point of the curve, and
+// the constraints' if CONSTRAINED.
 @compute @workgroup_size(WORKGROUP)
 fn traj_samples(
     @builtin(global_invocation_id) gid: vec3<u32>,
@@ -808,6 +947,9 @@ fn traj_samples(
     }
     fk();
     collision(item_world[item], P.w_world, P.w_self, P.margin, P.self_margin, true, at.y);
+    if (CONSTRAINED && at.y == 0u) {
+        _ = constraint_cost(item, true);
+    }
     group_grad(lid);
     if (at.z == 1u && at.y == 0u) {
         let sample = idx % per_item;

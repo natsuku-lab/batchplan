@@ -17,6 +17,7 @@ use std::fmt;
 use glam::{Mat3, Quat, Vec3};
 use rayon::prelude::*;
 
+use crate::constraint::{self, HandConstraint};
 use crate::device::{Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Search, Wanted};
 use crate::error::{Result, ensure_input, input};
@@ -48,6 +49,10 @@ pub struct Pick {
     pub lift: Vec3,
     /// Obstacles the object rests on, by index: it may touch them as it leaves.
     pub support: Vec<usize>,
+    /// Where the hands must stay along the transit ([`HandConstraint`]), as MTC's Connect stage
+    /// takes path constraints. The start must keep them; a grasp whose move in begins where they
+    /// break stops at the transit.
+    pub constraints: Vec<HandConstraint>,
 }
 
 impl Pick {
@@ -64,6 +69,7 @@ impl Pick {
             approach: 0.1,
             lift: Vec3::Z * 0.1,
             support: vec![],
+            constraints: vec![],
         }
     }
 }
@@ -91,6 +97,10 @@ pub struct Place {
     pub retreat: f32,
     /// Obstacles the object is set on, by index: it may touch them as it arrives.
     pub support: Vec<usize>,
+    /// Where the hands must stay along the transit ([`HandConstraint`]), as a cup carried upright
+    /// to where it goes. The start must keep them; a pose whose move in begins where they break
+    /// stops at the transit.
+    pub constraints: Vec<HandConstraint>,
 }
 
 impl Place {
@@ -107,6 +117,7 @@ impl Place {
             lower: Vec3::Z * -0.1,
             retreat: 0.1,
             support: vec![],
+            constraints: vec![],
         }
     }
 }
@@ -346,7 +357,7 @@ pub fn pick(
     let robot = device.robot();
     check_options(o)?;
     for (i, t) in tasks.iter().enumerate() {
-        let world = check_task(robot, worlds, i, t.world, &t.start, t.hand)?;
+        let world = check_task(robot, worlds, i, t.world, &t.start, t.hand, &t.constraints)?;
         let object = world.obstacles.get(t.object).ok_or_else(|| {
             input!(
                 "task {i}: obstacle {} of {}",
@@ -478,10 +489,12 @@ pub fn pick(
     }
 
     // From the start, around the object.
+    let constraints: Vec<&[HandConstraint]> = tasks.iter().map(|t| &t.constraints[..]).collect();
     transit(
         device,
         worlds,
         &mut live(&mut candidates, TaskStep::Transit),
+        &constraints,
         &o.plan,
     )?;
 
@@ -508,7 +521,15 @@ pub fn place(
     let robot = device.robot();
     check_options(o)?;
     for (i, t) in tasks.iter().enumerate() {
-        let world = check_task(robot, worlds, i, t.world, &t.start, t.held.hand)?;
+        let world = check_task(
+            robot,
+            worlds,
+            i,
+            t.world,
+            &t.start,
+            t.held.hand,
+            &t.constraints,
+        )?;
         if let Some(idle) = &t.idle {
             ensure_input!(
                 idle.len() == robot.dof(),
@@ -726,11 +747,12 @@ pub fn place(
         &holder_of,
         &holders,
     );
+    let constraints: Vec<&[HandConstraint]> = tasks.iter().map(|t| &t.constraints[..]).collect();
     device.install(|| {
         going
             .par_iter_mut()
             .zip(&holders)
-            .try_for_each(|(group, holder)| transit(holder, worlds, group, &o.plan))
+            .try_for_each(|(group, holder)| transit(holder, worlds, group, &constraints, &o.plan))
     })?;
 
     let outcomes = choose(device, tasks.len(), &candidates, o, |c| {
@@ -1108,6 +1130,7 @@ impl Search for FirstFree {
             wanted: Some(Wanted::FirstValid),
             spacing: 1.0,
             keep: None,
+            region: None,
         })
     }
 
@@ -1206,32 +1229,44 @@ fn straight(
 }
 
 /// A planned path from each candidate's start to where its move in begins, the joints only other
-/// hands move held where they rest there already.
+/// hands move held where they rest there already, keeping its task's `constraints`. A candidate
+/// whose move in begins where they break gets none.
 fn transit(
     device: &Device,
     worlds: &Worlds,
     live: &mut [&mut Candidate],
+    constraints: &[&[HandConstraint]],
     o: &PlanOptions,
 ) -> Result<()> {
-    if live.is_empty() {
-        return Ok(());
-    }
     let robot = device.robot();
     let n = robot.dof();
-    let problems: Vec<PlanProblem> = live
+    let keeping: Vec<usize> = (0..live.len())
+        .filter(|&k| {
+            let c = &live[k];
+            constraint::breach(robot, constraints[c.task], &c.approach[..n]).is_none()
+        })
+        .collect();
+    if keeping.is_empty() {
+        return Ok(());
+    }
+    let problems: Vec<PlanProblem> = keeping
         .iter()
-        .map(|c| PlanProblem {
-            hold: robot
-                .idle_joints(c.hand)
-                .into_iter()
-                .filter(|&j| c.rest[j] == c.start[j])
-                .collect(),
-            ..PlanProblem::new(c.world, c.start.clone(), &c.approach[..n])
+        .map(|&k| {
+            let c = &live[k];
+            PlanProblem {
+                hold: robot
+                    .idle_joints(c.hand)
+                    .into_iter()
+                    .filter(|&j| c.rest[j] == c.start[j])
+                    .collect(),
+                constraints: constraints[c.task].to_vec(),
+                ..PlanProblem::new(c.world, c.start.clone(), &c.approach[..n])
+            }
         })
         .collect();
     let result = trajopt::plan(device, worlds, &problems, o)?;
     for solved in result.solved() {
-        let c = &mut live[solved.index];
+        let c = &mut live[keeping[solved.index]];
         c.transit = solved.solution.to_vec();
         c.passed += 1;
     }
@@ -1376,6 +1411,7 @@ fn check_task<'a>(
     world: u32,
     start: &[f32],
     hand: usize,
+    constraints: &[HandConstraint],
 ) -> Result<&'a World> {
     let w = worlds
         .get(world as usize)
@@ -1399,6 +1435,10 @@ fn check_task<'a>(
         "task {i}: hand {hand} of {}",
         robot.hands()
     );
+    constraint::check(robot, constraints, &format!("task {i}"))?;
+    if let Some(why) = constraint::breach(robot, constraints, start) {
+        return Err(input!("task {i}: the start breaks its constraints: {why}"));
+    }
     Ok(w)
 }
 

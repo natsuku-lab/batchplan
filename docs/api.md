@@ -73,16 +73,17 @@ Guide: [planning.md](planning.md#planning-a-path).
 | | |
 |---|---|
 | `plan(&device, &worlds, &[PlanProblem], &PlanOptions)` | Collision-free B-spline paths, one search per problem (`PlanResult`). |
-| `PlanProblem::new(world, start, goal)` | From `start` at rest to `goal`. The fields `hold` (joints that stay still) and `start_motion` (a `StartMotion`, to replan from a moving state) cover the rest. |
+| `PlanProblem::new(world, start, goal)` | From `start` at rest to `goal`. The fields `hold` (joints that stay still), `start_motion` (a `StartMotion`, to replan from a moving state) and `constraints` (below) cover the rest. |
+| `HandConstraint::new(hand, pose)` | Where a hand may be along the whole path, measured from `pose` ([guide](planning.md#constraints-along-the-path)): set `tilt` (its z axis within a cone), `twist` (its turn about that axis) and `position` (a box), all free by default, and `relative_to` another hand to measure them in its frame. `RrtProblem`, `Pick`, `Place`, `Sequence` and `FollowerOptions` take them too. |
 | `PlanOptions` | Control points, optimization seeds and iterations, the search (`rrt`: `RrtOptions`), shortcutting (`shortcut`: `ShortcutOptions`) and a `time_budget`. |
 | `PlanResult::best(problem)`, `solved()` | The shortest valid path's control points, and every solved problem. Every seed's path is in `paths` (`JointPaths`). |
 | `rrt::connect`, `shortcut::shortcut` | The search and the shortcutting that `plan` runs, on their own, for waypoint paths. |
 | `follow(&device, &worlds, &[ToolPath], &ToolPathOptions)` | A hand moved in straight lines through poses ([guide](planning.md#moving-the-hand-along-a-path)): per path, the `fraction` it covers, why it `stopped` short (`ToolPathStop`), and the motion's control points (`ToolPathResult`). |
 | `pick(&device, &worlds, &[Pick], &TaskOptions)`, `place(.., &[Place], ..)` | A whole task in one call ([guide](planning.md#picking-up-and-setting-down)): per task, a `TaskPlan` for every candidate that gets through, quickest first (`transit`, `approach` and `depart` trajectories, the `candidate`, what is `held` or `placed`, `end`), or a `TaskFailure` with each candidate's step and reason (`CandidateStop`). |
-| `Pick::new(world, start, object, grasps)`, `Place::new(world, start, held, poses)` | Hand 0 (a pick) or the holding hand (a place), 10 cm straight moves in and away, no `support`; a place's `idle` takes the other arms elsewhere on its transit. |
+| `Pick::new(world, start, object, grasps)`, `Place::new(world, start, held, poses)` | Hand 0 (a pick) or the holding hand (a place), 10 cm straight moves in and away, no `support` and no `constraints` on the transit; a place's `idle` takes the other arms elsewhere on its transit. |
 | `TaskOptions` | IK, planning and tool path options, the straight moves' speed cap (`tool_speed`, `f32::INFINITY` for none) and how much of each they must make (`min_fraction`). |
 | `grasps(&obstacle, &GraspOptions)`, `place_poses(&obstacle, pose, turns)`, `Held::attachment(&robot)` | Grasps of a box, ball, cylinder or capsule for a parallel gripper; an object's symmetric turns at one spot; a held object as an `AttachedObject`. |
-| `join(&device, &worlds, &[Sequence], &JoinOptions)` | Consecutive motions run without stopping between them ([guide](planning.md#joining-motions)): per sequence, one path for each stretch the robot moves without stopping, and each join's blend radius, `None` where it stops (`JoinResult`). `Sequence::blends` gives each join's radius, 0 to stop. |
+| `join(&device, &worlds, &[Sequence], &JoinOptions)` | Consecutive motions run without stopping between them ([guide](planning.md#joining-motions)): per sequence, one path for each stretch the robot moves without stopping, and each join's blend radius, `None` where it stops (`JoinResult`). `Sequence::blends` gives each join's radius, 0 to stop, and `Sequence::constraints` what every blend keeps. |
 
 ## Timing
 
@@ -106,7 +107,7 @@ Guide: [planning.md](planning.md#live-motion).
 | `Follower::try_new(&robot, world, trajectory, now, FollowerOptions)` | Follows a trajectory from time `now`, on the caller's clock. |
 | `follower.tick(&device, &worlds, now)` | The state to command at `now`, and what the follower did (`Tick`, `FollowStatus`): following, replanned to take over `at` a time, stopping, colliding `at` a time with no stop short of it, arrived, or blocked at rest. |
 | `follower.trajectory()`, `began()` | The trajectory it follows now, and when it began on the caller's clock. |
-| `FollowerOptions` | A replan's time `budget`, the spacing of the checks along the rest of the motion (`check_every`), and the `plan` options. |
+| `FollowerOptions` | A replan's time `budget`, the spacing of the checks along the rest of the motion (`check_every`), the `plan` options, and the `constraints` replans keep. |
 | `servo(&device, &worlds, world, &state, target, &ServoOptions)` | One control step of a hand toward a pose (`ServoStep`): the next state, the `ServoStatus` (normal, slowing, halted with its clearance while braking, or arrived) and the error. |
 | `ServoOptions` | The hand, the period `dt`, the `gain`, the `linear` and `angular` caps, the `slow_within` and `halt_within` clearances, and the `damping`. |
 

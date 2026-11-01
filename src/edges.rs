@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use fearless_simd::{Simd, dispatch};
 
+use crate::constraint::Region;
 use crate::cpu::{CpuWorld, PathOptimizer};
 use crate::error::{Result, ensure_input};
 use crate::lanes::{LANES, LaneScratch, Lanes};
@@ -33,7 +34,7 @@ pub(crate) enum Wanted {
 /// Edges `[k, 2, dof]` (each its start then its end) in one world, checked `spacing` apart, or
 /// configurations `[k, dof]` (`wanted` is `None`), whose answer is how many from the first are
 /// collision-free, counted in groups of `LANES` (`k` when all are). With `keep`, edges and
-/// configurations must also keep a clearance from the world.
+/// configurations must also keep a clearance from the world, and with `region`, its constraints.
 #[derive(Clone, Debug)]
 pub(crate) struct EdgeQuery {
     pub(crate) world: u32,
@@ -41,6 +42,7 @@ pub(crate) struct EdgeQuery {
     pub(crate) wanted: Option<Wanted>,
     pub(crate) spacing: f32,
     pub(crate) keep: Option<Arc<Keep>>,
+    pub(crate) region: Option<Arc<Region>>,
 }
 
 /// A clearance from the world that states keep, shrinking to zero toward a path's ends: a state
@@ -306,7 +308,8 @@ fn run_at<S: Simd>(
                             *m = keep.margin(c);
                         }
                     }
-                    if !lanes.keeps(simd, world, q, margin, &mut scratch.lanes) {
+                    let region = query.region.as_deref();
+                    if !lanes.keeps(simd, world, q, margin, region, &mut scratch.lanes) {
                         answer = group * LANES;
                         break;
                     }
@@ -321,7 +324,7 @@ fn run_at<S: Simd>(
 }
 
 /// Whether the edge from `a` to `b` is collision-free at its states `query.spacing` apart, and
-/// keeps the query's clearance.
+/// keeps the query's clearance and constraints.
 #[inline(always)]
 fn edge_free<S: Simd>(
     simd: S,
@@ -348,7 +351,14 @@ fn edge_free<S: Simd>(
                 margin[l] = keep.margin(out);
             }
         }
-        if !lanes.keeps(simd, world, &s.states, margin, &mut s.lanes) {
+        if !lanes.keeps(
+            simd,
+            world,
+            &s.states,
+            margin,
+            query.region.as_deref(),
+            &mut s.lanes,
+        ) {
             return false;
         }
     }
@@ -473,6 +483,7 @@ mod tests {
                     wanted: Some(wanted),
                     spacing,
                     keep: None,
+                    region: None,
                 }
             })
             .collect();
@@ -560,6 +571,7 @@ mod tests {
             wanted: Some(Wanted::Prefix),
             spacing: 0.01,
             keep,
+            region: None,
         };
         let queries = vec![
             query(None),

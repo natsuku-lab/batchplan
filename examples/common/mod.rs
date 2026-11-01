@@ -2,13 +2,13 @@
 #![allow(dead_code, reason = "each example and test uses part of it")]
 
 use std::collections::HashMap;
-use std::f32::consts::PI;
+use std::f32::consts::{FRAC_PI_2, PI};
 
 use batchplan::datagen::PickPlace;
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionModel, CollisionWeights, Device, IkOptions, IkProblem, Obstacle, Part, PlanProblem,
-    Pose, Robot, RobotOptions, World,
+    CollisionModel, CollisionWeights, Device, HandConstraint, IkOptions, IkProblem, Obstacle, Part,
+    PlanProblem, Pose, Robot, RobotOptions, World,
 };
 use glam::{Quat, Vec3};
 
@@ -314,4 +314,184 @@ pub fn blocked_reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
     };
     let problems = problems.into_iter().filter(free).collect();
     (scene, problems)
+}
+
+/// The zone the upright reaches start and end in (meters).
+pub const ZONE_MIN: Vec3 = Vec3::new(0.30, -0.45, 0.25);
+pub const ZONE_MAX: Vec3 = Vec3::new(0.75, 0.45, 0.70);
+
+/// The upright reaches' scene: a floor under the robot, and a pillar in the zone between the
+/// start of `upright_reaches` and many of its goals.
+pub fn pillar_scene() -> World {
+    let size = ZONE_MAX - ZONE_MIN;
+    let height = 0.85 * ZONE_MAX.z;
+    let floor = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.05), Vec3::new(1.5, 1.5, 0.05));
+    let pillar = Obstacle::cylinder(
+        Vec3::new(ZONE_MIN.x + 0.12 * size.x, 0.0, 0.5 * height),
+        0.06,
+        0.5 * height,
+    );
+    World::new(vec![floor, pillar])
+}
+
+/// The Panda's gripper pointing straight down, turned `yaw` about the vertical.
+pub fn upright(yaw: f32) -> Quat {
+    Quat::from_rotation_x(PI) * Quat::from_rotation_z(yaw)
+}
+
+/// Where `upright_reaches` starts the gripper: in a corner of the zone, between the pillar and the
+/// robot's right.
+pub fn zone_corner() -> Vec3 {
+    ZONE_MIN + 0.12 * (ZONE_MAX - ZONE_MIN)
+}
+
+/// Reaches with the gripper upright in `pillar_scene` (world 0 of `worlds`): from the zone's corner,
+/// solved by IK nearest the robot's ready pose, to `count` places in the zone (`upright_goals`).
+/// The start, and the goals IK reached.
+pub fn upright_reaches(
+    device: &Device,
+    worlds: &batchplan::Worlds,
+    count: usize,
+    rng: &mut Rng,
+) -> Result<(Vec<f32>, Vec<Vec<f32>>), batchplan::Error> {
+    let ready = device.robot().default_q();
+    let first = IkProblem {
+        seed: Some(ready.to_vec()),
+        ..IkProblem::new(0, Pose::new(zone_corner(), upright(0.0)))
+    };
+    let start = batchplan::solve_ik(device, worlds, &[first], &IkOptions::default())?
+        .nearest(0, ready)
+        .expect("the start is in reach")
+        .to_vec();
+    let goals = upright_goals(device, worlds, &start, count, rng)?;
+    Ok((start, goals))
+}
+
+/// `count` places in the zone at random turns about the vertical, the gripper upright, each solved
+/// by IK from `start` and the solution nearest it kept: the goals IK reached.
+pub fn upright_goals(
+    device: &Device,
+    worlds: &batchplan::Worlds,
+    start: &[f32],
+    count: usize,
+    rng: &mut Rng,
+) -> Result<Vec<Vec<f32>>, batchplan::Error> {
+    let inset = 0.12 * (ZONE_MAX - ZONE_MIN);
+    let targets: Vec<IkProblem> = (0..count)
+        .map(|_| {
+            let at = Vec3::new(
+                rng.range(ZONE_MIN.x + inset.x, ZONE_MAX.x - inset.x),
+                rng.range(ZONE_MIN.y + inset.y, ZONE_MAX.y - inset.y),
+                rng.range(ZONE_MIN.z + inset.z, ZONE_MAX.z - inset.z),
+            );
+            IkProblem {
+                seed: Some(start.to_vec()),
+                ..IkProblem::new(0, Pose::new(at, upright(rng.range(-PI, PI))))
+            }
+        })
+        .collect();
+    let ik = batchplan::solve_ik(device, worlds, &targets, &IkOptions::default())?;
+    Ok((0..count)
+        .filter_map(|i| ik.nearest(i, start).map(<[f32]>::to_vec))
+        .collect())
+}
+
+/// The scene of `tray_carries`: a block 25 cm tall in front of two arms (`two_pandas`).
+pub fn tray_scene() -> World {
+    World::new(vec![Obstacle::cuboid(
+        Vec3::new(0.5, 0.0, 0.125),
+        Vec3::new(0.06, 0.4, 0.125),
+    )])
+}
+
+/// A tray at `at` turned `yaw` about the vertical.
+pub fn tray(at: Vec3, yaw: f32) -> Pose {
+    Pose::new(at, Quat::from_rotation_z(yaw))
+}
+
+/// Two arms (`two_pandas`) holding a tray at `tray`, each gripper pointing down and closing across
+/// an edge 12 cm either side of its middle, its narrow side to the other's and turned half a turn
+/// from it, so that one hand's place in the other's frame turns as well: the left hand at its
+/// edge, and the right at `right` in the left hand's frame, or else at its own edge. The IK
+/// solution in world 0 of `worlds` nearest `seed`, if any.
+pub fn tray_grip(
+    device: &Device,
+    worlds: &batchplan::Worlds,
+    tray: Pose,
+    right: Option<Pose>,
+    seed: &[f32],
+) -> Result<Option<Vec<f32>>, batchplan::Error> {
+    let grasp = |side: f32| Pose::new(Vec3::new(0.0, 0.12 * side, 0.0), upright(FRAC_PI_2 * side));
+    let left = tray.mul_pose(grasp(1.0));
+    let right = right.map_or_else(|| tray.mul_pose(grasp(-1.0)), |r| left.mul_pose(r));
+    let problem = IkProblem {
+        world: 0,
+        targets: vec![Some(left), Some(right)],
+        seed: Some(seed.to_vec()),
+    };
+    let solved = batchplan::solve_ik(device, worlds, &[problem], &IkOptions::default())?;
+    Ok(solved.nearest(0, seed).map(<[f32]>::to_vec))
+}
+
+/// Two arms carrying a tray (`tray_carries`).
+pub struct TrayCarries {
+    pub start: Vec<f32>,
+    /// The right hand's place in the left hand's frame at the start.
+    pub place: Pose,
+    /// The goals IK reached keeping it.
+    pub goals: Vec<Vec<f32>>,
+}
+
+/// Two arms carrying a tray over the block of `tray_scene` (world 0 of `worlds`), from below its
+/// top to places beyond it at turns about the vertical, where no straight walk gets.
+pub fn tray_carries(
+    device: &Device,
+    worlds: &batchplan::Worlds,
+) -> Result<TrayCarries, batchplan::Error> {
+    let robot = device.robot();
+    let at = tray(Vec3::new(0.3, 0.0, 0.2), 0.0);
+    let start =
+        tray_grip(device, worlds, at, None, robot.default_q())?.expect("the tray is in reach");
+    let place = robot
+        .ee_pose(&start, 0)
+        .inverse()
+        .mul_pose(robot.ee_pose(&start, 1));
+    let mut goals = vec![];
+    for (at, yaw) in [
+        (Vec3::new(0.62, 0.0, 0.32), 0.0),
+        (Vec3::new(0.62, 0.05, 0.36), 0.3),
+        (Vec3::new(0.6, -0.05, 0.34), -0.3),
+        (Vec3::new(0.65, 0.0, 0.4), 0.15),
+        (Vec3::new(0.66, 0.0, 0.3), 0.0),
+    ] {
+        goals.extend(tray_grip(
+            device,
+            worlds,
+            tray(at, yaw),
+            Some(place),
+            &start,
+        )?);
+    }
+    Ok(TrayCarries {
+        start,
+        place,
+        goals,
+    })
+}
+
+/// A tray carried level by two arms: the right hand pinned to `place` in the left hand's frame,
+/// the left within `tilt` of straight down.
+pub fn carried_level(place: Pose, tilt: f32) -> [HandConstraint; 2] {
+    let pinned = HandConstraint {
+        relative_to: Some(0),
+        position: Vec3::ZERO,
+        tilt: 0.0,
+        twist: 0.0,
+        ..HandConstraint::new(1, place)
+    };
+    let level = HandConstraint {
+        tilt,
+        ..HandConstraint::new(0, Pose::new(Vec3::ZERO, upright(0.0)))
+    };
+    [pinned, level]
 }

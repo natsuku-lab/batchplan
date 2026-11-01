@@ -255,6 +255,7 @@ fn over_the_wall(robot: &Robot, cpu: &Device) -> (World, Vec<PlanProblem>) {
                 goal,
                 start_motion: None,
                 hold: right.clone(),
+                constraints: vec![],
             }
         })
         .collect();
@@ -276,6 +277,7 @@ fn searches_hold_an_arm_still() {
             start: p.start.clone(),
             goals: vec![p.goal.clone()],
             hold: p.hold.clone(),
+            constraints: vec![],
         })
         .collect();
     let found = batchplan::rrt::connect(&cpu, &worlds, &searches, &RrtOptions::default()).unwrap();

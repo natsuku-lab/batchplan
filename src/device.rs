@@ -10,11 +10,13 @@
 use std::any::Any;
 use std::fmt;
 use std::ops::Deref;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use rayon::ThreadPool;
 
+use crate::constraint::Region;
 use crate::error::{Result, ensure_input, input};
 
 use crate::cpu::CpuBackend;
@@ -328,11 +330,13 @@ impl Device {
         self.backend.ik(worlds, item_world, targets, q, o)
     }
 
-    /// Optimizes `paths` in place; stops early once `deadline` passes.
+    /// Optimizes `paths` in place, each in its world, keeping its constraints (`Region::inset`) if
+    /// it has any; stops early once `deadline` passes.
     pub(crate) fn trajopt(
         &self,
         worlds: &Worlds,
         item_world: &[u32],
+        item_region: &[Option<Arc<Region>>],
         paths: &mut JointPaths,
         o: &PlanOptions,
         deadline: Option<Instant>,
@@ -350,7 +354,9 @@ impl Device {
             paths.positions.len(),
             paths.points * paths.dof,
         )?;
-        self.backend.trajopt(worlds, item_world, paths, o, deadline)
+        debug_assert_eq!(item_region.len(), item_world.len());
+        self.backend
+            .trajopt(worlds, item_world, item_region, paths, o, deadline)
     }
 
     /// Whether `worlds` were uploaded to this device, for links named as this robot's: their
@@ -446,6 +452,7 @@ pub(crate) trait Backend: Send + Sync {
         &self,
         worlds: &Worlds,
         item_world: &[u32],
+        item_region: &[Option<Arc<Region>>],
         paths: &mut JointPaths,
         o: &PlanOptions,
         deadline: Option<Instant>,

@@ -31,6 +31,7 @@ fn searches(problems: &[PlanProblem]) -> Vec<RrtProblem> {
             start: p.start.clone(),
             goals: vec![p.goal.clone()],
             hold: vec![],
+            constraints: vec![],
         })
         .collect()
 }
@@ -457,6 +458,7 @@ fn continuous_joints_turn_the_short_way_unless_it_is_blocked() {
             start: problem.start.clone(),
             goals: vec![problem.goal.clone()],
             hold: vec![],
+            constraints: vec![],
         };
         let found = rrt::connect(&d, &worlds, &[search], &RrtOptions::default()).unwrap();
         let path = found.paths[0]
@@ -593,6 +595,7 @@ fn a_grazed_straight_line_is_bent_around_the_obstacle() {
         start: start.clone(),
         goals: vec![goal.clone()],
         hold: vec![],
+        constraints: vec![],
     };
     let result = rrt::connect(&cpu, &worlds, &[problem], &RrtOptions::default()).unwrap();
     let path = result.paths[0].as_ref().expect("a path");

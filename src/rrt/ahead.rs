@@ -628,6 +628,7 @@ fn query(base: &Base, edges: Vec<f32>) -> EdgeQuery {
         wanted: Some(Wanted::Prefix),
         spacing: base.resolution,
         keep: base.keep.clone(),
+        region: None,
     }
 }
 
@@ -857,6 +858,7 @@ mod tests {
                 0.1406762, -0.7326517, 0.1564918, -2.1809819, 0.1102163, 1.5412756, 0.9102062,
             ]],
             hold: vec![],
+            constraints: vec![],
         };
         (World::new(obstacles), problem)
     }

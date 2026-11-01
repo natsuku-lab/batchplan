@@ -1,14 +1,15 @@
 //! Joining motions without stopping (`join`), on every device: the joined motion turns within the
 //! blend radius of each join and is the motions themselves elsewhere, finishes sooner than the
-//! motions one after another and never later, keeps the limits, and refuses sequences whose
-//! motions do not meet. Falling back from blends that collide is tested in `src/join.rs`.
+//! motions one after another and never later, keeps the limits and the sequence's constraints, and
+//! refuses sequences whose motions do not meet. Falling back from blends that collide is tested in `src/join.rs`.
 
 #[path = "../examples/common/mod.rs"]
 mod common;
 
+use batchplan::rng::Rng;
 use batchplan::{
-    Device, Error, JoinOptions, JoinResult, PlanOptions, PlanProblem, Pose, Robot, Sequence,
-    ToolPath, ToolPathOptions, Trajectory, World, Worlds,
+    Device, Error, HandConstraint, JoinOptions, JoinResult, PlanOptions, PlanProblem, Pose, Robot,
+    Sequence, ToolPath, ToolPathOptions, Trajectory, World, Worlds,
 };
 use glam::Vec3;
 
@@ -35,6 +36,7 @@ fn join(device: &Device, worlds: &Worlds, paths: Vec<Vec<f32>>, blend: f32) -> J
         world: 0,
         blends: vec![blend; paths.len() - 1],
         paths,
+        constraints: vec![],
     };
     batchplan::join(device, worlds, &[sequence], &JoinOptions::default()).unwrap()
 }
@@ -263,6 +265,7 @@ fn malformed_sequences_are_input_errors() {
         world: 0,
         blends: vec![BLEND; paths.len().saturating_sub(1)],
         paths,
+        constraints: vec![],
     };
 
     let mut apart = paths.clone();
@@ -304,6 +307,14 @@ fn malformed_sequences_are_input_errors() {
         };
         assert!(input(wide, &o), "a blend radius of {radius}");
     }
+    let elsewhere = Sequence {
+        constraints: vec![HandConstraint::new(1, Pose::IDENTITY)],
+        ..sequence(paths.clone())
+    };
+    assert!(
+        input(elsewhere, &o),
+        "a constraint on a hand the robot lacks"
+    );
     for resolution in [f32::INFINITY, f32::NAN, 1e-30, 0.0] {
         let unchecked = JoinOptions { resolution };
         assert!(
@@ -358,6 +369,7 @@ fn longer_sequences_never_finish_later_than_their_motions() {
                 world: 0,
                 paths: paths.clone(),
                 blends: vec![blend; paths.len() - 1],
+                constraints: vec![],
             })
             .collect();
         let joined =
@@ -457,6 +469,7 @@ fn each_join_turns_within_its_own_radius() {
             world: 0,
             paths: paths.clone(),
             blends,
+            constraints: vec![],
         })
         .collect();
     let joined = batchplan::join(&device, &worlds, &sequences, &JoinOptions::default()).unwrap();
@@ -524,6 +537,7 @@ fn a_stop_separates_the_joins_either_side_of_it() {
             world: 0,
             paths: paths.to_vec(),
             blends,
+            constraints: vec![],
         };
         let sequences = [
             sequence(&paths, vec![r, 0.0, r]),
@@ -543,4 +557,70 @@ fn a_stop_separates_the_joins_either_side_of_it() {
         compared += 1;
     }
     assert!(compared >= 16, "{compared} trials planned");
+}
+
+/// Blends keep the sequence's constraints: motions planned with the gripper within 2° of straight
+/// down, joined 30 cm wide, stay within it once timed, where the same blends without the
+/// constraint tilt it past (to 5.8° on the Ryzen, 10.5° on the M4 Pro). Blends between motions that
+/// keep the cone stray past it only where they are wide.
+#[test]
+fn blends_keep_the_sequence_constraints() {
+    let robot = panda();
+    let down = common::upright(0.0);
+    let upright = HandConstraint {
+        tilt: 2f32.to_radians(),
+        ..HandConstraint::new(0, Pose::new(Vec3::ZERO, down))
+    };
+    let tilt = |q: &[f32]| (robot.ee_pose(q, 0).rotation * Vec3::Z).angle_between(down * Vec3::Z);
+    // The same stops for every device: IK on the GPU lands a little elsewhere.
+    let cpu = Device::cpu(&robot).unwrap();
+    let scene = common::pillar_scene();
+    let reaching = cpu.upload(std::slice::from_ref(&scene)).unwrap();
+    let (start, goals) = common::upright_reaches(&cpu, &reaching, 24, &mut Rng::new(3)).unwrap();
+    let mut stops = vec![start];
+    stops.extend(goals.into_iter().take(19));
+    for device in devices(&robot) {
+        let worlds = device.upload(std::slice::from_ref(&scene)).unwrap();
+        let problems: Vec<PlanProblem> = stops
+            .windows(2)
+            .map(|w| PlanProblem {
+                constraints: vec![upright],
+                ..PlanProblem::new(0, w[0].clone(), w[1].clone())
+            })
+            .collect();
+        let planned =
+            batchplan::plan(&device, &worlds, &problems, &PlanOptions::default()).unwrap();
+        let paths: Vec<Vec<f32>> = (0..problems.len())
+            .map(|i| planned.best(i).expect("an upright motion").to_vec())
+            .collect();
+        let most = |constraints: Vec<HandConstraint>| {
+            let sequence = Sequence {
+                world: 0,
+                blends: vec![0.3; paths.len() - 1],
+                paths: paths.clone(),
+                constraints,
+            };
+            let joined =
+                batchplan::join(&device, &worlds, &[sequence], &JoinOptions::default()).unwrap();
+            assert!(
+                joined.blends[0].iter().any(Option::is_some),
+                "nothing blended"
+            );
+            joined.paths[0]
+                .iter()
+                .flat_map(|p| samples(&robot, p))
+                .collect::<Vec<f32>>()
+                .chunks(robot.dof())
+                .map(tilt)
+                .fold(0.0, f32::max)
+        };
+        let (kept, free) = (most(vec![upright]), most(vec![]));
+        assert!(
+            kept <= upright.tilt + 1e-5 && free > upright.tilt + 1e-3,
+            "{}: the joined motion tilts {:.3}° with the constraint and {:.3}° without",
+            device.name(),
+            kept.to_degrees(),
+            free.to_degrees()
+        );
+    }
 }

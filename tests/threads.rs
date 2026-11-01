@@ -67,6 +67,7 @@ fn a_one_thread_device_works_on_its_one_thread() {
             start: p.start.clone(),
             goals: vec![p.goal.clone()],
             hold: vec![],
+            constraints: vec![],
         })
         .collect();
     let found = rrt::connect(&device, &worlds, &searches, &RrtOptions::default()).unwrap();

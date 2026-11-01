@@ -20,6 +20,9 @@
 //! stretch so far at each join makes a long sequence cost more per join than a short one. A blend
 //! takes at most the half of each path nearest its join, so blends never meet.
 
+use std::sync::Arc;
+
+use crate::constraint::{self, HandConstraint, Region};
 use crate::device::{Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Search};
 use crate::error::{Result, ensure_input};
@@ -40,6 +43,10 @@ pub struct Sequence {
     /// leaves the paths only while every hand is within this distance of where it is at the join,
     /// as Pilz's and UR's blend radii. 0 stops there.
     pub blends: Vec<f32>,
+    /// Where the hands must stay ([`HandConstraint`]): every blend keeps them, and a join whose
+    /// blends all break them stops. The paths should keep them already, as `plan` keeps a
+    /// problem's.
+    pub constraints: Vec<HandConstraint>,
 }
 
 /// How [`join`] checks its blends.
@@ -109,6 +116,7 @@ pub fn join(
             sequence.blends.len(),
             sequence.paths.len()
         );
+        constraint::check(robot, &sequence.constraints, &format!("sequence {i}"))?;
         for (k, &radius) in sequence.blends.iter().enumerate() {
             ensure_input!(
                 radius >= 0.0 && radius.is_finite(),
@@ -208,6 +216,8 @@ struct Joining<'a> {
     samples: usize,
     starts: Vec<usize>,
     blends: Vec<Option<f32>>,
+    /// The sequence's constraints, which blends keep.
+    region: Option<Arc<Region>>,
 }
 
 impl<'a> Joining<'a> {
@@ -312,6 +322,8 @@ impl<'a> Joining<'a> {
             samples: 0,
             starts: vec![],
             blends: vec![],
+            region: (!sequence.constraints.is_empty())
+                .then(|| Arc::new(Region::new(robot, &sequence.constraints))),
         };
         joining.candidates = joining.blends_at(0);
         joining
@@ -576,6 +588,7 @@ impl Search for Joining<'_> {
             wanted: None,
             spacing: 0.0,
             keep: None,
+            region: self.region.clone(),
         })
     }
 
@@ -636,6 +649,7 @@ mod tests {
             world: 0,
             paths,
             blends: vec![blend],
+            constraints: vec![],
         }
     }
 

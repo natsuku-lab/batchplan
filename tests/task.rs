@@ -9,9 +9,9 @@ use std::f32::consts::PI;
 
 use batchplan::rng::Rng;
 use batchplan::{
-    Device, Error, GraspOptions, Held, IkOptions, IkProblem, Obstacle, Pick, Place, Pose, Robot,
-    RobotOptions, SdfGrid, TaskFailure, TaskOptions, TaskPlan, TaskStep, ToolPathStop, Touch,
-    Trajectory, World,
+    Device, Error, GraspOptions, HandConstraint, Held, IkOptions, IkProblem, Obstacle, Pick, Place,
+    Pose, Robot, RobotOptions, SdfGrid, TaskFailure, TaskOptions, TaskPlan, TaskStep, ToolPathStop,
+    Touch, Trajectory, World,
 };
 use glam::{Mat3, Quat, Vec3};
 
@@ -382,6 +382,112 @@ fn a_picked_box_is_set_down_where_there_is_room() {
         let failure = batchplan::place(&device, &after, &[unsupported], &o).unwrap();
         let failure = failure.outcomes[0].as_ref().unwrap_err();
         assert_eq!(failure.step(), TaskStep::Reach, "{name}: {failure}");
+    }
+}
+
+/// The gripper's largest tilt from straight down along a trajectory, sampled at 1 kHz.
+fn most_tilt(robot: &Robot, t: &Trajectory) -> f32 {
+    let samples = t.sample(1000.0).unwrap();
+    samples
+        .positions
+        .chunks(robot.dof())
+        .map(|q| (robot.ee_pose(q, 0).rotation * Vec3::Z).angle_between(Vec3::NEG_Z))
+        .fold(0.0, f32::max)
+}
+
+/// A place carries the box with the gripper within 5° of straight down along its transit, over a
+/// wall it would otherwise tip the box past; a pose the hand reaches tilted stops at the transit,
+/// and a start that breaks the constraint is an input error. A pick whose hand must stay near its
+/// start stops at the transit too.
+#[test]
+fn a_place_carries_the_box_upright() {
+    let robot = panda();
+    let bound = 5f32.to_radians();
+    let upright = HandConstraint {
+        tilt: bound,
+        ..HandConstraint::new(0, Pose::new(Vec3::ZERO, Quat::from_rotation_x(PI)))
+    };
+    for device in devices(&robot) {
+        let name = device.name();
+        let o = TaskOptions::default();
+        let wall = Obstacle::cuboid(Vec3::new(0.45, 0.0, 0.15), Vec3::new(0.15, 0.01, 0.15));
+        let world = scene(vec![wall]);
+        let picked = pick_in(&device, world.clone(), pick_from(&robot, vec![top()]), &o).unwrap();
+        // Kept within 20 cm of where it starts, the hand cannot get down to the box.
+        let near = HandConstraint {
+            position: Vec3::splat(0.2),
+            ..HandConstraint::new(0, robot.ee_pose(robot.default_q(), 0))
+        };
+        let confined = Pick {
+            constraints: vec![near],
+            ..pick_from(&robot, vec![top()])
+        };
+        let failure = pick_in(&device, world.clone(), confined, &o).unwrap_err();
+        assert_eq!(failure.step(), TaskStep::Transit, "{name}: {failure}");
+        let held = picked[0].held.clone().unwrap();
+        let mut after = world;
+        after.remove(BOX).unwrap();
+        let after = device.upload(&[after]).unwrap();
+        let level = Pose::new(Vec3::new(0.45, -0.2, HALF.z), Quat::from_rotation_z(0.3));
+        let tipped = Pose::new(Vec3::new(0.5, -0.15, 0.15), Quat::from_rotation_x(0.35));
+        let place = |poses: Vec<Pose>, constraints: Vec<HandConstraint>| Place {
+            support: vec![TABLE],
+            constraints,
+            ..Place::new(0, picked[0].end(), held.clone(), poses)
+        };
+        let carried = batchplan::place(&device, &after, &[place(vec![level], vec![upright])], &o);
+        let plans = carried.unwrap().outcomes.remove(0).unwrap();
+        let free = batchplan::place(&device, &after, &[place(vec![level], vec![])], &o);
+        let loose = free.unwrap().outcomes.remove(0).unwrap();
+        plans[0].transit.check(&robot).unwrap();
+        let (kept, tipping) = (
+            most_tilt(&robot, &plans[0].transit),
+            most_tilt(&robot, &loose[0].transit),
+        );
+        assert!(
+            kept <= bound + 1e-4 && tipping > 2.0 * bound,
+            "{name}: the transit tilts {:.2}° with the constraint and {:.2}° without",
+            kept.to_degrees(),
+            tipping.to_degrees()
+        );
+        let tipping = batchplan::place(&device, &after, &[place(vec![tipped], vec![upright])], &o);
+        let failure = tipping.unwrap().outcomes.remove(0).unwrap_err();
+        assert_eq!(failure.step(), TaskStep::Transit, "{name}: {failure}");
+        // Behind a candidate that stops at the transit, the next one's transit is its own.
+        let both = place(vec![tipped, level], vec![upright]);
+        let plans = batchplan::place(&device, &after, &[both], &o).unwrap();
+        let plans = plans.outcomes[0].as_ref().unwrap();
+        let n = robot.dof();
+        assert!(
+            plans.iter().all(|p| p.candidate == 1),
+            "{name}: only the level pose"
+        );
+        for p in plans {
+            let ends = &p.transit.control_points[p.transit.control_points.len() - n..];
+            assert_eq!(
+                ends,
+                &p.approach.control_points[..n],
+                "{name}: a transit ends elsewhere"
+            );
+        }
+        let anyhow = batchplan::place(&device, &after, &[place(vec![tipped], vec![])], &o);
+        assert!(
+            anyhow.unwrap().outcomes[0].is_ok(),
+            "{name}: the tipped pose plans without the constraint"
+        );
+        let tilted_start = Place {
+            start: robot.default_q().to_vec(),
+            ..place(vec![level], vec![upright])
+        };
+        match batchplan::place(&device, &after, &[tilted_start], &o) {
+            Err(Error::Input(m)) => {
+                assert!(
+                    m.contains("task 0: the start breaks its constraints"),
+                    "{m}"
+                );
+            }
+            other => panic!("{name}: a tilted start should be an input error, got {other:?}"),
+        }
     }
 }
 

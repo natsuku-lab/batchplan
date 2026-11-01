@@ -1,6 +1,7 @@
 //! Live motion through its interface: a follower replans around a box moved into its path and
 //! takes over from the state the robot is in then, stops on its path when there is no time or its
-//! replan collides, and says so when no stop is short enough; servo steps slow and halt before a
+//! replan collides, and says so when no stop is short enough; replans keep the trajectory's
+//! constraints, and stop where they cannot start inside them; servo steps slow and halt before a
 //! wall without entering it, reach a free target and brake joints before their ends, within the
 //! limits.
 
@@ -8,10 +9,11 @@
 mod common;
 
 use batchplan::glam::{Quat, Vec3};
+use batchplan::rng::Rng;
 use batchplan::{
-    CollisionWeights, Device, Error, FollowStatus, Follower, FollowerOptions, JointState, Obstacle,
-    PlanOptions, PlanProblem, Pose, Robot, RobotOptions, RrtOptions, ServoOptions, ServoStatus,
-    Trajectory, World, Worlds,
+    CollisionWeights, Device, Error, FollowStatus, Follower, FollowerOptions, HandConstraint,
+    JointState, Obstacle, PlanOptions, PlanProblem, Pose, Robot, RobotOptions, RrtOptions,
+    ServoOptions, ServoStatus, Trajectory, World, Worlds,
 };
 
 const DT: f32 = 0.02;
@@ -612,7 +614,32 @@ fn non_finite_and_degenerate_inputs_are_errors() {
         check_every: f32::INFINITY,
         ..Default::default()
     };
-    assert!(input(Follower::try_new(&robot, 0, trajectory, 0.0, sparse)));
+    assert!(input(Follower::try_new(
+        &robot,
+        0,
+        trajectory.clone(),
+        0.0,
+        sparse
+    )));
+    // A replan's goal is the trajectory's: constraints it breaks would refuse every replan, and a
+    // hand the robot lacks every plan.
+    let far = HandConstraint {
+        position: Vec3::splat(0.01),
+        ..HandConstraint::new(0, Pose::new(Vec3::new(0.0, 0.0, 2.0), Quat::IDENTITY))
+    };
+    for constraint in [far, HandConstraint::new(1, Pose::IDENTITY)] {
+        let kept = FollowerOptions {
+            constraints: vec![constraint],
+            ..Default::default()
+        };
+        assert!(input(Follower::try_new(
+            &robot,
+            0,
+            trajectory.clone(),
+            0.0,
+            kept
+        )));
+    }
     let state = JointState {
         position: robot.default_q().to_vec(),
         ..JointState::new(robot.dof())
@@ -634,4 +661,112 @@ fn non_finite_and_degenerate_inputs_are_errors() {
     assert!(input(servo(&state, hand, &forever)));
     let backward = ServoOptions { linear: -0.1, ..o };
     assert!(input(servo(&state, hand, &backward)));
+}
+
+/// The gripper's tilt from straight down at `q`.
+fn tilt(robot: &Robot, q: &[f32]) -> f32 {
+    (robot.ee_pose(q, 0).rotation * Vec3::Z).angle_between(Vec3::NEG_Z)
+}
+
+/// A follower carrying the gripper upright replans around a box put in its way within the same
+/// bound: every state it commands, and its trajectory sampled at 1 kHz once it arrives, keep the
+/// gripper within 5° of straight down, where a replan without the constraint tilts it past. Kept
+/// near its goal, where it is not yet, it stops instead of replanning.
+#[test]
+fn replans_keep_the_constraints_the_trajectory_was_planned_with() {
+    let robot = common::panda().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let bound = 5f32.to_radians();
+    let upright = HandConstraint {
+        tilt: bound,
+        ..HandConstraint::new(0, Pose::new(Vec3::ZERO, common::upright(0.0)))
+    };
+    let scene = common::pillar_scene();
+    let empty = device.upload(std::slice::from_ref(&scene)).unwrap();
+    let (start, goals) = common::upright_reaches(&device, &empty, 16, &mut Rng::new(2)).unwrap();
+    let far = |g: &&Vec<f32>| {
+        let d: f32 = g.iter().zip(&start).map(|(a, b)| (a - b) * (a - b)).sum();
+        d
+    };
+    let goal = goals
+        .iter()
+        .max_by(|a, b| far(a).total_cmp(&far(b)))
+        .unwrap()
+        .clone();
+    let problem = PlanProblem {
+        constraints: vec![upright],
+        ..PlanProblem::new(0, start, goal)
+    };
+    let plans = batchplan::plan(&device, &empty, &[problem], &PlanOptions::default()).unwrap();
+    let first = Trajectory::try_new(&robot, plans.best(0).expect("an upright reach"), 0.5).unwrap();
+    let duration = first.duration();
+    let mut blocked = scene;
+    blocked
+        .obstacles
+        .push(box_at(&robot, &first, 0.6 * duration));
+    let blocked = device.upload(&[blocked]).unwrap();
+    // Within a centimeter of where the goal has the hand: the goal keeps it, a replan's start not.
+    let points = &first.control_points;
+    let end = robot.ee_pose(&points[points.len() - robot.dof()..], 0);
+    let elsewhere = HandConstraint {
+        position: Vec3::splat(0.01),
+        ..HandConstraint::new(0, end)
+    };
+    for constraints in [vec![upright], vec![], vec![elsewhere]] {
+        let o = FollowerOptions {
+            constraints: constraints.clone(),
+            ..FollowerOptions::default()
+        };
+        let mut follower = Follower::try_new(&robot, 0, first.clone(), 0.0, o).unwrap();
+        let (mut t, mut statuses, mut most) = (0.0, vec![], 0.0f32);
+        while t < 4.0 * duration {
+            let worlds = if t < 0.3 * duration { &empty } else { &blocked };
+            let tick = follower.tick(&device, worlds, t).unwrap();
+            assert!(
+                clear(&device, worlds, &tick.state.position),
+                "at {t:.2} s it collides"
+            );
+            most = most.max(tilt(&robot, &tick.state.position));
+            statuses.push(tick.status.clone());
+            if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
+                break;
+            }
+            t += DT;
+        }
+        let timed = follower.trajectory().sample(1000.0).unwrap();
+        let replan = timed
+            .positions
+            .chunks(robot.dof())
+            .map(|q| tilt(&robot, q))
+            .fold(0.0, f32::max);
+        if constraints == [elsewhere] {
+            assert!(
+                statuses.contains(&FollowStatus::Stopping)
+                    && statuses.last() == Some(&FollowStatus::Blocked),
+                "{statuses:?}"
+            );
+            continue;
+        }
+        assert!(
+            statuses
+                .iter()
+                .any(|s| matches!(s, FollowStatus::Replanned { .. }))
+                && statuses.last() == Some(&FollowStatus::Arrived),
+            "{statuses:?}"
+        );
+        if constraints.is_empty() {
+            assert!(
+                replan > 2.0 * bound,
+                "the free replan tilts only {:.2}°",
+                replan.to_degrees()
+            );
+        } else {
+            assert!(
+                most <= bound + 1e-4 && replan <= bound + 1e-4,
+                "the follower tilts {:.2}° at its ticks, {:.2}° along its replan",
+                most.to_degrees(),
+                replan.to_degrees()
+            );
+        }
+    }
 }

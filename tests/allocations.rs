@@ -72,6 +72,7 @@ fn batches_build_their_searches_on_the_threads_that_run_them() {
             start: p.start.clone(),
             goals: vec![p.goal.clone()],
             hold: vec![],
+            constraints: vec![],
         })
         .collect();
     let small = allocations(|| {

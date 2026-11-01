@@ -14,6 +14,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::constraint::{Projector, Region};
 use crate::device::{Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Keep, Search, Wanted};
 use crate::error::{Result, ensure_input};
@@ -116,7 +117,7 @@ pub(crate) fn shortcut_until(
         .zip(world)
         .map(|(path, &world)| {
             let path = std::mem::take(path);
-            Deferred::new(None, move || Simplify::new(world, n, path, o))
+            Deferred::new(None, move || Simplify::new(world, n, path, o, None))
         })
         .collect();
     let mut running: Vec<&mut dyn Search> =
@@ -148,7 +149,7 @@ enum Step {
 }
 
 /// One path's simplification.
-pub(crate) struct Simplify {
+pub(crate) struct Simplify<'call> {
     world: u32,
     n: usize,
     path: Vec<f32>,
@@ -159,14 +160,24 @@ pub(crate) struct Simplify {
     /// The path after the first pass's shortcuts and straightened joints.
     shortcut: Option<Vec<f32>>,
     keep: Option<Arc<Keep>>,
+    /// The constraints every new edge keeps, and the projection that puts a smoothed waypoint back
+    /// inside them.
+    region: Option<Arc<Region>>,
+    projector: Option<Projector<'call>>,
     /// Where smoothing would move the waypoint under check.
     to: Vec<f32>,
     /// The joint under check at each waypoint, straightened.
     line: Vec<f32>,
 }
 
-impl Simplify {
-    pub(crate) fn new(world: u32, n: usize, path: Vec<f32>, o: &ShortcutOptions) -> Self {
+impl<'call> Simplify<'call> {
+    pub(crate) fn new(
+        world: u32,
+        n: usize,
+        path: Vec<f32>,
+        o: &ShortcutOptions,
+        projector: Option<Projector<'call>>,
+    ) -> Self {
         let ends = vec![path[..n].to_vec(), path[path.len() - n..].to_vec()];
         let keep = (o.clearance > 0.0).then(|| {
             Arc::new(Keep {
@@ -186,6 +197,8 @@ impl Simplify {
             step: Step::Straight,
             shortcut: None,
             keep,
+            region: projector.as_ref().map(Projector::bounds),
+            projector,
             to,
             line,
         }
@@ -212,6 +225,7 @@ impl Simplify {
             wanted: Some(wanted),
             spacing: self.o.resolution,
             keep: self.keep.clone(),
+            region: self.region.clone(),
         })
     }
 
@@ -286,7 +300,7 @@ impl Simplify {
     }
 }
 
-impl Search for Simplify {
+impl Search for Simplify<'_> {
     fn request(&mut self, buffer: &mut Vec<f32>) -> Option<EdgeQuery> {
         let n = self.n;
         loop {
@@ -342,13 +356,13 @@ impl Search for Simplify {
                         moved[at + j] = 0.5 * (self.line[w] + self.line[w + 1]);
                     }
                     self.step = Step::Joint(j);
-                    let keep = self.keep.clone();
                     return Some(EdgeQuery {
                         world: self.world,
                         edges: moved,
                         wanted: None,
                         spacing: 0.0,
-                        keep,
+                        keep: self.keep.clone(),
+                        region: self.region.clone(),
                     });
                 }
                 &Step::JointEdges(j) => {
@@ -378,7 +392,15 @@ impl Search for Simplify {
                         for (j, to) in self.to.iter_mut().enumerate() {
                             *to = 0.25 * before[j] + 0.5 * at[j] + 0.25 * after[j];
                         }
-                        if rrt::distance(&self.to, at) >= self.o.min_change {
+                        // Averaging leaves the constraints where they curve: back inside first.
+                        let inside = self
+                            .projector
+                            .as_mut()
+                            .is_none_or(|p| p.project(&mut self.to));
+                        if inside
+                            && rrt::distance(&self.to, &self.path[v * n..(v + 1) * n])
+                                >= self.o.min_change
+                        {
                             break true;
                         }
                         v += 2;

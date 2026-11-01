@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use glam::Vec3;
 
+use crate::constraint::{self, HandConstraint};
 use crate::cpu::Reach;
 use crate::device::{CollisionWeights, Device, Worlds};
 use crate::error::{Result, ensure_input};
@@ -33,6 +34,9 @@ pub struct FollowerOptions {
     pub check_every: f32,
     /// How replans are planned; their time budget is `budget`.
     pub plan: PlanOptions,
+    /// Where the hands must stay along replans ([`HandConstraint`]), as the trajectory was planned
+    /// to keep them. A replan that would start where they break stops instead.
+    pub constraints: Vec<HandConstraint>,
 }
 
 impl Default for FollowerOptions {
@@ -41,6 +45,7 @@ impl Default for FollowerOptions {
             budget: 0.05,
             check_every: 0.02,
             plan: PlanOptions::default(),
+            constraints: vec![],
         }
     }
 }
@@ -107,7 +112,8 @@ struct Stretch<'a> {
 impl Follower {
     /// Follows `trajectory` in world `world` of the worlds each tick is given, from time `now`,
     /// toward where it ends. Plan options that [`crate::plan`] refuses are refused here, before a
-    /// replan would fail with the robot moving.
+    /// replan would fail with the robot moving, and so are constraints the trajectory's goal
+    /// breaks.
     pub fn try_new(
         robot: &Robot,
         world: u32,
@@ -132,8 +138,15 @@ impl Follower {
             o.check_every
         );
         o.plan.check()?;
+        constraint::check(robot, &o.constraints, "the follower")?;
         let points = &trajectory.control_points;
         let goal = points[points.len() - trajectory.dof..].to_vec();
+        // A replan's goal must keep them, or planning refuses it with the robot moving.
+        if let Some(why) = constraint::breach(robot, &o.constraints, &goal) {
+            return Err(crate::error::input!(
+                "the trajectory's goal breaks the follower's constraints: {why}"
+            ));
+        }
         Ok(Self {
             robot: robot.clone(),
             world,
@@ -218,9 +231,12 @@ impl Follower {
         // takeover, on the stretch of this trajectory that was found to collide.
         let pending = self.next.take().is_some();
         let start = t + self.o.budget;
-        if !pending && self.began + start < hit && start < duration {
-            let mut from = JointState::new(n);
-            self.trajectory.at(start, &mut from);
+        let mut from = JointState::new(n);
+        self.trajectory.at(start.min(duration), &mut from);
+        // Between the states its plan was checked at, the trajectory may stray past a bound.
+        let keeps =
+            || constraint::breach(&self.robot, &self.o.constraints, &from.position).is_none();
+        if !pending && self.began + start < hit && start < duration && keeps() {
             let motion = StartMotion {
                 velocity: from.velocity.clone(),
                 acceleration: from.acceleration.clone(),
@@ -231,6 +247,7 @@ impl Follower {
                 goal: self.goal.clone(),
                 start_motion: Some(motion.clone()),
                 hold: vec![],
+                constraints: self.o.constraints.clone(),
             };
             let options = PlanOptions {
                 time_budget: Some(Duration::from_secs_f32(self.o.budget.max(1e-3))),

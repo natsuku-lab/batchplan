@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use batchplan::rng::Rng;
 use batchplan::{
-    AttachedObject, CollisionWeights, Device, Error, IkOptions, IkProblem, Obstacle, PlanOptions,
-    PlanProblem, Robot, SdfGrid, Solved, SphereOptions, Touch, Trajectory, World,
+    AttachedObject, CollisionWeights, Device, Error, HandConstraint, IkOptions, IkProblem,
+    Obstacle, PlanOptions, PlanProblem, Robot, SdfGrid, Solved, SphereOptions, Touch, Trajectory,
+    World,
 };
 use glam::{EulerRot, Quat, Vec2, Vec3};
 
@@ -616,7 +617,6 @@ fn trajopt_directions_match_cpu_element_wise() {
     let Some((robot, gpu, cpu)) = setup() else {
         return;
     };
-    let n = robot.dof();
     let mut worlds = worlds(64, 8);
     let ik = batchplan::solve_ik(
         &cpu,
@@ -634,31 +634,10 @@ fn trajopt_directions_match_cpu_element_wise() {
         seeds: 8,
         ..Default::default()
     };
-    let per_path = o.control_points * n;
     // Step 1 follows the gradient; step 4 the two-loop recursion over three remembered steps.
     for step in [1, 4] {
-        let (a, clamped_a) = step_directions(&cpu, &worlds, &problems, &o, step);
-        let (b, clamped_b) = step_directions(&gpu, &worlds, &problems, &o, step);
-        let (mut worst, mut compared) = (0.0f32, 0);
-        let moved = |g: &[f32]| g.iter().any(|&v| v != 0.0);
-        for (p, (ga, gb)) in a.chunks(per_path).zip(b.chunks(per_path)).enumerate() {
-            if (0..per_path).any(|i| clamped_a[p * per_path + i] || clamped_b[p * per_path + i])
-                || !moved(ga)
-            {
-                continue;
-            }
-            worst = ga
-                .iter()
-                .zip(gb)
-                .fold(worst, |m, (x, y)| m.max((x - y).abs()));
-            compared += 1;
-        }
-        // Problems searched to within a few percent of the straight line are not optimized.
-        let optimized = a.chunks(per_path).filter(|g| moved(g)).count();
-        eprintln!(
-            "step {step}: worst |cpu-gpu| of directions scaled to their largest entry, {compared} of {optimized} \
-             optimized paths: {worst:.2e}"
-        );
+        let (worst, compared, optimized) =
+            directions_apart(&cpu, &gpu, &worlds, &problems, &o, step);
         assert!(
             optimized >= 48,
             "step {step}: only {optimized} paths optimized"
@@ -671,6 +650,117 @@ fn trajopt_directions_match_cpu_element_wise() {
             worst < 1e-2,
             "step {step}: directions differ by {worst} of their largest entry"
         );
+    }
+}
+
+/// How far apart the CPU's and the GPU's `step`-th directions are (`step_directions`): the largest
+/// difference of their entries over the paths no joint limit clamped, how many paths those are,
+/// and the paths optimized.
+fn directions_apart(
+    cpu: &Device,
+    gpu: &Device,
+    worlds: &[World],
+    problems: &[PlanProblem],
+    o: &PlanOptions,
+    step: u32,
+) -> (f32, usize, usize) {
+    let per_path = o.control_points * cpu.robot().dof();
+    let (a, clamped_a) = step_directions(cpu, worlds, problems, o, step);
+    let (b, clamped_b) = step_directions(gpu, worlds, problems, o, step);
+    let (mut worst, mut compared) = (0.0f32, 0);
+    let moved = |g: &[f32]| g.iter().any(|&v| v != 0.0);
+    for (p, (ga, gb)) in a.chunks(per_path).zip(b.chunks(per_path)).enumerate() {
+        if (0..per_path).any(|i| clamped_a[p * per_path + i] || clamped_b[p * per_path + i])
+            || !moved(ga)
+        {
+            continue;
+        }
+        worst = ga
+            .iter()
+            .zip(gb)
+            .fold(worst, |m, (x, y)| m.max((x - y).abs()));
+        compared += 1;
+    }
+    // Problems searched to within a few percent of the straight line are not optimized.
+    let optimized = a.chunks(per_path).filter(|g| moved(g)).count();
+    eprintln!(
+        "step {step}: worst |cpu-gpu| of directions scaled to their largest entry, {compared} of {optimized} \
+         optimized paths: {worst:.2e}"
+    );
+    (worst, compared, optimized)
+}
+
+/// Constrained problems' directions match the CPU's too, their constraints' cost and gradient
+/// twins of each other: the gripper within 5° of straight down on reaches past a pillar, and two
+/// arms carrying a tray level, the right hand pinned in the left's frame, whose gradient runs
+/// through both hands' Jacobians.
+#[test]
+fn constrained_trajopt_directions_match_cpu_element_wise() {
+    let Some((_, gpu, cpu)) = setup() else {
+        return;
+    };
+    let o = PlanOptions {
+        seeds: 4,
+        ..Default::default()
+    };
+    let scene = vec![common::pillar_scene()];
+    let reaching = cpu.upload(&scene).unwrap();
+    let (start, goals) = common::upright_reaches(&cpu, &reaching, 48, &mut Rng::new(6)).unwrap();
+    let upright = HandConstraint {
+        tilt: 5f32.to_radians(),
+        ..HandConstraint::new(0, batchplan::Pose::new(Vec3::ZERO, common::upright(0.0)))
+    };
+    let uprights: Vec<PlanProblem> = goals
+        .into_iter()
+        .map(|g| PlanProblem {
+            constraints: vec![upright],
+            ..PlanProblem::new(0, start.clone(), g)
+        })
+        .collect();
+    let two = common::two_pandas().unwrap();
+    let (two_cpu, two_gpu) = (Device::cpu(&two).unwrap(), Device::gpu(&two).unwrap());
+    let tray = vec![common::tray_scene()];
+    let carrying = two_cpu.upload(&tray).unwrap();
+    let common::TrayCarries {
+        start,
+        place,
+        goals,
+    } = common::tray_carries(&two_cpu, &carrying).unwrap();
+    let carried = common::carried_level(place, 5f32.to_radians()).to_vec();
+    let carries: Vec<PlanProblem> = goals
+        .into_iter()
+        .map(|g| PlanProblem {
+            constraints: carried.clone(),
+            ..PlanProblem::new(0, start.clone(), g)
+        })
+        .collect();
+    // Step 1 checks the constraints' gradient. A step's direction doesn't show how far its line
+    // search went, so their cost there shows from the next step on: the first search's at step 2,
+    // the third's at step 4. Each step also turns on where the last landed, and an upright reach's
+    // first step can cancel a constraint gradient of thousands down to a few: the constraint's
+    // stiffness then turns f32 differences in where steps land into thousandths of the next
+    // gradient, compounding. By step 4 the CPU against itself, its gradients perturbed by 1e-5, is
+    // 1.1e-2 apart on the M4 Pro and 8.6e-3 on the Ryzen, and RADV (Mesa 26.0.8) against the CPU
+    // 1.9e-2, so the reaches stop at step 2. The carries, 2.5e-4 apart by that measure at step 5,
+    // go on to step 4.
+    let cases = [
+        (&cpu, &gpu, &scene, &uprights, 48, 2),
+        (&two_cpu, &two_gpu, &tray, &carries, 12, 4),
+    ];
+    for (cpu, gpu, worlds, problems, least, last) in cases {
+        let steps = [(1, 1e-3), (2, 1e-2), (4, 1e-2)];
+        for (step, bound) in steps.into_iter().filter(|&(step, _)| step <= last) {
+            let (worst, compared, optimized) =
+                directions_apart(cpu, gpu, worlds, problems, &o, step);
+            assert!(
+                optimized >= least && compared > optimized / 2,
+                "step {step}: {compared} of {optimized} paths compared"
+            );
+            assert!(
+                worst < bound,
+                "step {step}: directions differ by {worst} of their largest entry"
+            );
+        }
     }
 }
 

@@ -665,6 +665,7 @@ impl Search for Follow<'_> {
             wanted: None,
             spacing: 0.0,
             keep: None,
+            region: None,
         })
     }
 

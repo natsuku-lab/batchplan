@@ -16,6 +16,7 @@ use glam::{Mat3, Quat, Vec2, Vec3};
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder, Yield};
 
+use crate::constraint::{CostScratch, Region};
 use crate::device::{Backend, CollisionWeights, Evaluation, Worlds};
 use crate::edges::{self, EdgeScratch, Search};
 use crate::error::{Error, Result};
@@ -238,6 +239,8 @@ struct Scratch {
     grad: Vec<f32>,
     push: Vec<f32>,
     moving: Vec<bool>,
+    /// Trajectory optimization: the working memory of a constraint's cost.
+    constraint: CostScratch,
 }
 
 impl Scratch {
@@ -256,6 +259,7 @@ impl Scratch {
             grad: vec![0.0; n],
             push: vec![0.0; n],
             moving: vec![false; n],
+            constraint: CostScratch::new(robot),
         }
     }
 }
@@ -742,7 +746,8 @@ impl Reach {
 }
 
 /// Collision gradient of the trajectory cost at sample `s` of span `span`, with respect to the
-/// configuration there. Must match `traj_samples` in kernels.wgsl.
+/// configuration there, and the gradient of `region`'s cost if any. Must match `traj_samples` in
+/// kernels.wgsl.
 #[expect(
     clippy::too_many_arguments,
     reason = "the scalar twin of a kernel, which takes the same inputs"
@@ -750,6 +755,7 @@ impl Reach {
 fn traj_sample_grad(
     robot: &Robot,
     world: &CpuWorld,
+    region: Option<&Region>,
     cp: &[f32],
     span: usize,
     s: usize,
@@ -775,6 +781,9 @@ fn traj_sample_grad(
         out,
         &mut scratch.collision,
     );
+    if let Some(region) = region {
+        region.cost(robot, &scratch.fk, Some(out), &mut scratch.constraint);
+    }
 }
 
 /// Gradient of the trajectory cost w.r.t. free control point `t`: the collision gradients of the
@@ -832,8 +841,8 @@ fn candidate(robot: &Robot, x: &[f32], d: &[f32], alpha: f32, t: usize, j: usize
     (x[i] + alpha * d[i]).clamp(lo, hi)
 }
 
-/// Collision cost at sample `s` of span `span` of the candidate path `x + alpha d`. Must match
-/// `traj_costs` in kernels.wgsl.
+/// Collision cost at sample `s` of span `span` of the candidate path `x + alpha d`, and `region`'s
+/// if any. Must match `traj_costs` in kernels.wgsl.
 #[expect(
     clippy::too_many_arguments,
     reason = "the scalar twin of a kernel, which takes the same inputs"
@@ -841,6 +850,7 @@ fn candidate(robot: &Robot, x: &[f32], d: &[f32], alpha: f32, t: usize, j: usize
 fn traj_cost(
     robot: &Robot,
     world: &CpuWorld,
+    region: Option<&Region>,
     x: &[f32],
     d: &[f32],
     alpha: f32,
@@ -856,7 +866,7 @@ fn traj_cost(
         scratch.q[j] = w[0] * c(0) + w[1] * c(1) + w[2] * c(2) + w[3] * c(3);
     }
     robot.fk_into(&scratch.q, &mut scratch.fk);
-    collision::<false>(
+    let cost = collision::<false>(
         robot,
         world,
         &scratch.fk,
@@ -864,7 +874,10 @@ fn traj_cost(
         &mut [],
         &mut scratch.collision,
     )
-    .cost
+    .cost;
+    cost + region.map_or(0.0, |r| {
+        r.cost(robot, &scratch.fk, None, &mut scratch.constraint)
+    })
 }
 
 /// One path's L-BFGS state, as kernels.wgsl keeps it in `aux`.
@@ -1056,17 +1069,18 @@ fn each_chunk<T: Send>(
 }
 
 /// Optimizes one path's control points in place in `world`, holding the three at each end fixed,
-/// and stops between rounds once `deadline` passes. With `parallel`, its samples are spread over
-/// the current pool's threads.
+/// keeping `region`'s constraints if any, and stops between rounds once `deadline` passes. With
+/// `parallel`, its samples are spread over the current pool's threads.
 pub(crate) fn optimize_path(
     robot: &Robot,
     world: &CpuWorld,
+    region: Option<Arc<Region>>,
     tr: &mut [f32],
     o: &PlanOptions,
     deadline: Option<Instant>,
     parallel: bool,
 ) {
-    let mut optimizer = PathOptimizer::new(robot, tr.len() / robot.dof(), o);
+    let mut optimizer = PathOptimizer::new(robot, tr.len() / robot.dof(), o, region);
     optimizer.run(robot, world, tr, o.iterations, deadline, parallel);
 }
 
@@ -1074,6 +1088,8 @@ pub(crate) fn optimize_path(
 /// goes on where the last stopped, so the rounds take the same steps however they are split.
 pub(crate) struct PathOptimizer {
     o: PlanOptions,
+    /// The constraints its samples keep, as costs (`Region::inset`).
+    region: Option<Arc<Region>>,
     st: Lbfgs,
     sample_grad: Vec<f32>,
     scratch: Scratch,
@@ -1085,11 +1101,17 @@ pub(crate) struct PathOptimizer {
 }
 
 impl PathOptimizer {
-    pub(crate) fn new(robot: &Robot, points: usize, o: &PlanOptions) -> Self {
+    pub(crate) fn new(
+        robot: &Robot,
+        points: usize,
+        o: &PlanOptions,
+        region: Option<Arc<Region>>,
+    ) -> Self {
         let n = robot.dof();
         let samples = (points - 3) * o.samples_per_span;
         Self {
             o: *o,
+            region,
             st: Lbfgs::new(points, n, samples, o),
             sample_grad: vec![0.0; samples * n],
             scratch: Scratch::new(robot),
@@ -1118,18 +1140,20 @@ impl PathOptimizer {
     ) {
         let Self {
             o,
+            region,
             st,
             sample_grad,
             scratch,
             ..
         } = self;
+        let region = region.as_deref();
         let (n, k) = (robot.dof(), o.samples_per_span);
         let (t_count, samples) = (tr.len() / n, (tr.len() / n - 3) * k);
         while !self.over && self.round <= through.min(o.iterations) {
             if self.direction_due {
                 let tr_ref = &*tr;
                 each_chunk(parallel, robot, scratch, sample_grad, n, |s, i, g| {
-                    traj_sample_grad(robot, world, tr_ref, i / k, i % k, o, g, s);
+                    traj_sample_grad(robot, world, region, tr_ref, i / k, i % k, o, g, s);
                 });
                 for t in 3..t_count - 3 {
                     traj_grad(tr, sample_grad, n, t, o, &mut st.grad[t * n..(t + 1) * n]);
@@ -1148,6 +1172,7 @@ impl PathOptimizer {
                 cost[0] = traj_cost(
                     robot,
                     world,
+                    region,
                     tr_ref,
                     dir,
                     LINE_SEARCH[c],
@@ -1480,6 +1505,7 @@ impl Backend for CpuBackend {
         &self,
         worlds: &Worlds,
         item_world: &[u32],
+        item_region: &[Option<Arc<Region>>],
         paths: &mut JointPaths,
         o: &PlanOptions,
         deadline: Option<Instant>,
@@ -1496,10 +1522,12 @@ impl Backend for CpuBackend {
                 .positions
                 .par_chunks_mut(points)
                 .zip(item_world.par_iter())
-                .for_each(|(tr, &s)| {
+                .zip(item_region.par_iter())
+                .for_each(|((tr, &s), region)| {
                     optimize_path(
                         &self.robot,
                         &prepared[s as usize],
+                        region.clone(),
                         tr,
                         o,
                         deadline,
@@ -1701,13 +1729,13 @@ mod tests {
             })
             .collect();
         let mut whole = path.clone();
-        optimize_path(&robot, &prepared[0], &mut whole, &o, None, false);
+        optimize_path(&robot, &prepared[0], None, &mut whole, &o, None, false);
         assert_ne!(
             whole, path,
             "the path must cross the box, or nothing moves it"
         );
         let mut split = path;
-        let mut optimizer = PathOptimizer::new(&robot, o.control_points, &o);
+        let mut optimizer = PathOptimizer::new(&robot, o.control_points, &o, None);
         // The optimization may stop early (a failed steepest-descent step), but not before a few
         // rounds have resumed where the last call stopped.
         let mut calls = 0;
