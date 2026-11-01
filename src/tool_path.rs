@@ -31,9 +31,9 @@ pub struct ToolPath {
 /// How [`follow`] tracks a path.
 #[derive(Clone, Debug)]
 pub struct ToolPathOptions {
-    /// Largest step of the hand between configurations (meters): 5 mm.
+    /// Largest step of the hand between configurations (meters): 5 mm, at least 10 µm.
     pub step: f32,
-    /// Largest turn of the hand between configurations (radians): 0.05.
+    /// Largest turn of the hand between configurations (radians): 0.05, at least 1e-5.
     pub rotation_step: f32,
     /// How far the hand may stray from the path (meters): 1 mm.
     pub precision: f32,
@@ -58,6 +58,10 @@ impl Default for ToolPathOptions {
         }
     }
 }
+
+/// The finest `step` and `rotation_step` [`follow`] takes (meters and radians): 10 µm, a tenth of an
+/// arm's repeatability. A step near zero would split a path into unbounded poses.
+const MIN_STEP: f32 = 1e-5;
 
 /// What [`follow`] did with each path.
 #[derive(Clone, Debug)]
@@ -112,19 +116,20 @@ pub fn follow(
 ) -> Result<ToolPathResult> {
     let robot = device.robot();
     let n = robot.dof();
+    let steps = MIN_STEP..f32::INFINITY;
     ensure_input!(
-        o.step > 0.0 && o.rotation_step > 0.0 && o.precision > 0.0 && o.rotation_precision > 0.0,
-        "steps and precisions must be positive, got {} m, {} rad, {} m and {} rad",
+        steps.contains(&o.step) && steps.contains(&o.rotation_step),
+        "steps must be finite and at least {MIN_STEP}, got {} m and {} rad",
         o.step,
-        o.rotation_step,
+        o.rotation_step
+    );
+    ensure_input!(
+        o.precision > 0.0 && o.rotation_precision > 0.0,
+        "precisions must be positive, got {} m and {} rad",
         o.precision,
         o.rotation_precision
     );
-    ensure_input!(
-        o.resolution > 0.0,
-        "the resolution must be positive, got {}",
-        o.resolution
-    );
+    edges::check_resolution("the resolution", o.resolution)?;
     ensure_input!(o.iterations > 0, "the IK needs at least one iteration");
     for (i, p) in paths.iter().enumerate() {
         ensure_input!(

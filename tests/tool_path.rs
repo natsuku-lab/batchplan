@@ -523,7 +523,54 @@ fn malformed_paths_are_input_errors() {
             o.clone(),
             "leaves the joint limits",
         ),
-        (good, ToolPathOptions { step: 0.0, ..o }, "positive"),
+        (
+            good.clone(),
+            ToolPathOptions {
+                resolution: f32::INFINITY,
+                ..o.clone()
+            },
+            "resolution",
+        ),
+        (
+            good.clone(),
+            ToolPathOptions {
+                resolution: 1e-30,
+                ..o.clone()
+            },
+            "resolution",
+        ),
+        (
+            good.clone(),
+            ToolPathOptions {
+                step: f32::INFINITY,
+                ..o.clone()
+            },
+            "steps",
+        ),
+        (
+            good.clone(),
+            ToolPathOptions {
+                step: 1e-30,
+                ..o.clone()
+            },
+            "steps",
+        ),
+        (
+            good.clone(),
+            ToolPathOptions {
+                rotation_step: 1e-9,
+                ..o.clone()
+            },
+            "steps",
+        ),
+        (
+            good,
+            ToolPathOptions {
+                precision: 0.0,
+                ..o
+            },
+            "positive",
+        ),
     ];
     for (bad, options, says) in cases {
         let err = batchplan::follow(&device, &worlds, &[bad], &options).unwrap_err();

@@ -103,6 +103,33 @@ impl Default for PlanOptions {
     }
 }
 
+impl PlanOptions {
+    /// An `Error::Input` naming the first option [`plan`] cannot run with.
+    pub(crate) fn check(&self) -> Result<()> {
+        ensure_input!(
+            self.control_points >= 7,
+            "need at least 7 control points, got {}",
+            self.control_points
+        );
+        ensure_input!(
+            self.samples_per_span > 0,
+            "need at least one collision sample per span"
+        );
+        ensure_input!(
+            (1..=MAX_HISTORY).contains(&self.history),
+            "L-BFGS history must be 1 to {MAX_HISTORY} steps, got {}",
+            self.history
+        );
+        ensure_input!(
+            self.initial_step > 0.0,
+            "the initial step must be positive, got {}",
+            self.initial_step
+        );
+        self.rrt.check()?;
+        self.shortcut.check()
+    }
+}
+
 /// A path from a start to a goal configuration, in one world.
 #[derive(Clone, Debug)]
 pub struct PlanProblem {
@@ -194,7 +221,7 @@ pub fn plan(
     let robot = device.robot();
     let n = robot.dof();
     let points = o.control_points;
-    ensure_input!(points >= 7, "need at least 7 control points");
+    o.check()?;
     for (pi, p) in problems.iter().enumerate() {
         ensure_input!(
             (p.world as usize) < worlds.len(),
@@ -887,15 +914,6 @@ fn optimize(
 ) -> Result<()> {
     let robot = device.robot();
     let (n, points) = (robot.dof(), o.control_points);
-    ensure_input!(
-        o.samples_per_span > 0,
-        "need at least one collision sample per span"
-    );
-    ensure_input!(
-        (1..=MAX_HISTORY).contains(&o.history),
-        "L-BFGS history must be 1 to {MAX_HISTORY} steps"
-    );
-    ensure_input!(o.initial_step > 0.0, "the initial step must be positive");
     let near_straight = |pi: usize| {
         let item = pi * result.seeds;
         let searched = result.paths.path(item);

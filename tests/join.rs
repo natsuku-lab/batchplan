@@ -304,8 +304,13 @@ fn malformed_sequences_are_input_errors() {
         };
         assert!(input(wide, &o), "a blend radius of {radius}");
     }
-    let coarse = JoinOptions { resolution: 0.0 };
-    assert!(input(sequence(paths), &coarse), "no resolution");
+    for resolution in [f32::INFINITY, f32::NAN, 1e-30, 0.0] {
+        let unchecked = JoinOptions { resolution };
+        assert!(
+            input(sequence(paths.clone()), &unchecked),
+            "a resolution of {resolution}"
+        );
+    }
 }
 
 #[test]

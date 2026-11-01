@@ -94,11 +94,7 @@ pub fn join(
 ) -> Result<JoinResult> {
     let robot = device.robot();
     let n = robot.dof();
-    ensure_input!(
-        o.resolution > 0.0,
-        "the resolution must be positive, got {}",
-        o.resolution
-    );
+    edges::check_resolution("the resolution", o.resolution)?;
     for (i, sequence) in sequences.iter().enumerate() {
         ensure_input!(
             (sequence.world as usize) < worlds.len(),

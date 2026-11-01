@@ -16,6 +16,7 @@ use std::time::Instant;
 use fearless_simd::{Simd, dispatch};
 
 use crate::cpu::{CpuWorld, PathOptimizer};
+use crate::error::{Result, ensure_input};
 use crate::lanes::{LANES, LaneScratch, Lanes};
 use crate::robot::Robot;
 use crate::rrt::{self, Ahead};
@@ -357,6 +358,21 @@ fn edge_free<S: Simd>(
 /// The passes an edge from `a` to `b` takes: `LANES` states each.
 pub(crate) fn passes(a: &[f32], b: &[f32], spacing: f32) -> usize {
     ((rrt::distance(a, b) / (LANES as f32 * spacing)).ceil() as usize).max(1)
+}
+
+/// The finest spacing of collision checks a call takes (joint-space distance): a link a meter from
+/// its joint moves 0.1 mm between checks, finer than its spheres. A spacing near zero would take
+/// unbounded time and memory.
+pub(crate) const MIN_SPACING: f32 = 1e-4;
+
+/// An `Error::Input` unless `resolution`, a spacing of collision checks that `what` names, is finite
+/// and at least `MIN_SPACING`.
+pub(crate) fn check_resolution(what: &str, resolution: f32) -> Result<()> {
+    ensure_input!(
+        (MIN_SPACING..f32::INFINITY).contains(&resolution),
+        "{what} must be finite and at least {MIN_SPACING}, got {resolution}"
+    );
+    Ok(())
 }
 
 /// State `m` of `total` along the edge from `a` to `b`, into `out`.

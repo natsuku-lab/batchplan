@@ -106,7 +106,8 @@ struct Stretch<'a> {
 
 impl Follower {
     /// Follows `trajectory` in world `world` of the worlds each tick is given, from time `now`,
-    /// toward where it ends.
+    /// toward where it ends. Plan options that [`crate::plan`] refuses are refused here, before a
+    /// replan would fail with the robot moving.
     pub fn try_new(
         robot: &Robot,
         world: u32,
@@ -130,6 +131,7 @@ impl Follower {
             o.budget,
             o.check_every
         );
+        o.plan.check()?;
         let points = &trajectory.control_points;
         let goal = points[points.len() - trajectory.dof..].to_vec();
         Ok(Self {

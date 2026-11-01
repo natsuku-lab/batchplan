@@ -22,7 +22,7 @@ use crate::rrt;
 /// How [`shortcut`] shortens paths.
 #[derive(Clone, Copy, Debug)]
 pub struct ShortcutOptions {
-    /// Spacing of collision checks along new edges (joint-space distance).
+    /// Spacing of collision checks along new edges (joint-space distance), at least 1e-4.
     pub resolution: f32,
     /// Passes of shortcutting and smoothing at most; they stop early once a pass changes nothing.
     pub passes: usize,
@@ -53,6 +53,25 @@ impl Default for ShortcutOptions {
     }
 }
 
+impl ShortcutOptions {
+    /// An `Error::Input` naming the first option shortcutting cannot run with.
+    pub(crate) fn check(&self) -> Result<()> {
+        edges::check_resolution("the shortcuts' resolution", self.resolution)?;
+        ensure_input!(
+            self.min_change > 0.0,
+            "the shortcuts' smallest change must be positive, got {}",
+            self.min_change
+        );
+        ensure_input!(
+            self.clearance >= 0.0 && self.clearance_ramp > 0.0,
+            "the shortcuts' clearance must not be negative, and its ramp positive, got {} m and {}",
+            self.clearance,
+            self.clearance_ramp
+        );
+        Ok(())
+    }
+}
+
 /// Shortens and smooths each path (`[k, dof]` waypoints in world `world[i]`) in place. Endpoints
 /// stay; the length never grows.
 pub fn shortcut(
@@ -77,14 +96,7 @@ pub(crate) fn shortcut_until(
     deadline: Option<Instant>,
 ) -> Result<Vec<Vec<f32>>> {
     let n = device.robot().dof();
-    ensure_input!(
-        o.resolution > 0.0 && o.min_change > 0.0,
-        "the resolution and smallest change must be positive"
-    );
-    ensure_input!(
-        o.clearance >= 0.0 && o.clearance_ramp > 0.0,
-        "the clearance must not be negative, and its ramp positive"
-    );
+    o.check()?;
     ensure_input!(
         world.len() == paths.len(),
         "{} worlds for {} paths",

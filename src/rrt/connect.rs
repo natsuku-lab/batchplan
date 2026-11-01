@@ -18,7 +18,7 @@ use crate::robot::Robot;
 pub struct RrtOptions {
     /// Longest edge a tree grows by (joint-space distance).
     pub range: f32,
-    /// Spacing of collision checks along edges (joint-space distance).
+    /// Spacing of collision checks along edges (joint-space distance), at least 1e-4.
     pub resolution: f32,
     /// Samples a problem draws from the joint ranges before it gives up; the tube's (see the
     /// module docs) come on top. 0 tries only the straight lines and their bends.
@@ -42,6 +42,25 @@ impl Default for RrtOptions {
             clearance: 0.0,
             clearance_ramp: 0.5,
         }
+    }
+}
+
+impl RrtOptions {
+    /// An `Error::Input` naming the first option a search cannot run with.
+    pub(crate) fn check(&self) -> Result<()> {
+        ensure_input!(
+            self.range > 0.0,
+            "the search's range must be positive, got {}",
+            self.range
+        );
+        edges::check_resolution("the search's resolution", self.resolution)?;
+        ensure_input!(
+            self.clearance >= 0.0 && self.clearance_ramp > 0.0,
+            "the search's clearance must not be negative, and its ramp positive, got {} m and {}",
+            self.clearance,
+            self.clearance_ramp
+        );
+        Ok(())
     }
 }
 
@@ -129,14 +148,7 @@ pub(crate) fn connect_until(
 ) -> Result<RrtResult> {
     let robot = device.robot();
     let n = robot.dof();
-    ensure_input!(
-        o.range > 0.0 && o.resolution > 0.0,
-        "the range and resolution must be positive"
-    );
-    ensure_input!(
-        o.clearance >= 0.0 && o.clearance_ramp > 0.0,
-        "the clearance must not be negative, and its ramp positive"
-    );
+    o.check()?;
     for (i, p) in problems.iter().enumerate() {
         ensure_input!(
             (p.world as usize) < worlds.len(),

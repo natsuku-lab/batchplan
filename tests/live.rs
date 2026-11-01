@@ -10,8 +10,8 @@ mod common;
 use batchplan::glam::{Quat, Vec3};
 use batchplan::{
     CollisionWeights, Device, Error, FollowStatus, Follower, FollowerOptions, JointState, Obstacle,
-    PlanOptions, PlanProblem, Pose, Robot, RobotOptions, ServoOptions, ServoStatus, Trajectory,
-    World, Worlds,
+    PlanOptions, PlanProblem, Pose, Robot, RobotOptions, RrtOptions, ServoOptions, ServoStatus,
+    Trajectory, World, Worlds,
 };
 
 const DT: f32 = 0.02;
@@ -587,6 +587,25 @@ fn non_finite_and_degenerate_inputs_are_errors() {
         trajectory.clone(),
         0.0,
         fine
+    )));
+    // Options `plan` refuses would fail the first replan, with the robot moving.
+    let defaults = PlanOptions::default();
+    let unplannable = FollowerOptions {
+        plan: PlanOptions {
+            rrt: RrtOptions {
+                resolution: 0.0,
+                ..defaults.rrt
+            },
+            ..defaults
+        },
+        ..Default::default()
+    };
+    assert!(input(Follower::try_new(
+        &robot,
+        0,
+        trajectory.clone(),
+        0.0,
+        unplannable
     )));
     // Infinitely far apart, the first check would come at no time at all.
     let sparse = FollowerOptions {

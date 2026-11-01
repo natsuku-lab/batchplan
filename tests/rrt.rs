@@ -6,8 +6,8 @@ mod common;
 
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionWeights, Device, Obstacle, PlanOptions, PlanProblem, Robot, RobotOptions, RrtOptions,
-    RrtProblem, ShortcutOptions, Trajectory, World, Worlds, rrt, shortcut,
+    CollisionWeights, Device, Error, Obstacle, PlanOptions, PlanProblem, Robot, RobotOptions,
+    RrtOptions, RrtProblem, ShortcutOptions, Trajectory, World, Worlds, rrt, shortcut,
 };
 use glam::{Quat, Vec3};
 
@@ -219,6 +219,66 @@ fn fixed_seeds_give_fixed_results() {
         }),
         "the seed changes nothing"
     );
+}
+
+#[test]
+fn resolutions_that_cannot_be_checked_at_are_input_errors() {
+    // A spacing of zero, or near it, would check an edge without end; an infinite or NaN one would
+    // skip the checks. `plan`, `rrt::connect` and `shortcut` refuse each before searching.
+    let robot = Robot::load(common::asset(UR5E), &RobotOptions::default()).unwrap();
+    let cpu = Device::cpu(&robot).unwrap();
+    let worlds = cpu.upload(&[World::default()]).unwrap();
+    let problem = PlanProblem::new(0, vec![0.0; 6], vec![0.5, 0.0, -0.4, 0.0, 0.3, 0.0]);
+    let line = [problem.start.clone(), problem.goal.clone()].concat();
+    fn refused<T: std::fmt::Debug>(r: Result<T, Error>, what: &str) {
+        assert!(
+            matches!(&r, Err(Error::Input(m)) if m.contains("resolution")),
+            "{what}: {r:?}"
+        );
+    }
+    let defaults = PlanOptions::default();
+    for resolution in [f32::INFINITY, f32::NAN, -1.0, 1e-30, 0.0] {
+        let rrt = RrtOptions {
+            resolution,
+            ..defaults.rrt
+        };
+        let shortcut = ShortcutOptions {
+            resolution,
+            ..defaults.shortcut
+        };
+        let searched = PlanOptions { rrt, ..defaults };
+        let shortened = PlanOptions {
+            shortcut,
+            ..defaults
+        };
+        for o in [searched, shortened] {
+            let r = batchplan::plan(&cpu, &worlds, std::slice::from_ref(&problem), &o);
+            refused(r, &format!("plan at {resolution}"));
+        }
+        let r = rrt::connect(
+            &cpu,
+            &worlds,
+            &searches(std::slice::from_ref(&problem)),
+            &rrt,
+        );
+        refused(r, &format!("rrt::connect at {resolution}"));
+        let r = shortcut::shortcut(&cpu, &worlds, &[0], &mut [line.clone()], &shortcut);
+        refused(r, &format!("shortcut at {resolution}"));
+    }
+    // The finest spacing taken still plans.
+    let finest = PlanOptions {
+        rrt: RrtOptions {
+            resolution: 1e-4,
+            ..defaults.rrt
+        },
+        shortcut: ShortcutOptions {
+            resolution: 1e-4,
+            ..defaults.shortcut
+        },
+        ..defaults
+    };
+    let result = batchplan::plan(&cpu, &worlds, &[problem], &finest).unwrap();
+    assert!(result.best(0).is_some(), "no path at the finest resolution");
 }
 
 #[test]
