@@ -26,10 +26,11 @@
 
 Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-lab/batchplan-ros), or to generate [LeRobot training datasets](docs/training-data.md).
 
-- **Plan:** batched IK; RRT-Connect, shortcutting and smoothing on SIMD collision checks; constraints on the hands along the path, such as a cup kept upright or a tray held level between two hands; the hand moved in straight lines through poses; picking up and setting down objects in one call; consecutive motions joined without stopping; smooth B-spline paths, optionally optimized with L-BFGS; time-optimal timing within velocity, acceleration and jerk limits, and the hand's speed if capped; replanning from a moving state; controlled stops along the path; and live motion: following a trajectory while the world changes, replanning or stopping in time, and servoing the hand toward a moving target.
-- **Robots:** load from URDF, MJCF or OpenUSD, including mimic joints, closed loops, continuous joints and ball or floating joints, or assemble several, such as two arms. Collision spheres are fitted automatically. IK takes a target for each hand at once, and plans can hold one arm still while another moves.
-- **Worlds:** boxes, spheres, cylinders, capsules and signed distance grids, built from meshes, point clouds, depth images or frames fused over time, and the links allowed to touch them, as a hand touches what it grasps.
-- **Data:** reaches with recoveries from mistakes, pick-and-place episodes and handovers between two arms, with grippers and task strings, plus states perturbed from them to start reinforcement learning from. They export as LeRobot v3.0 datasets (arm by arm, as ALOHA's) or NumPy arrays; `scripts/replay_mujoco.py` replays them in MuJoCo and adds camera videos.
+- **Plan:** batched IK, RRT-Connect on SIMD collision checks, and B-spline paths, optionally optimized with L-BFGS, timed optimally within velocity, acceleration, jerk and hand speed limits. Paths can keep a cup upright or a tray level between two hands, follow straight lines, pick and place, join without stopping, and start while the robot moves.
+- **Live motion:** follow a trajectory as the world changes, replan or stop in time, and servo the hand toward a moving target.
+- **Robots:** URDF, MJCF or OpenUSD, including mimic, ball and floating joints and closed loops, or several robots assembled into one. Collision spheres are fitted automatically. IK solves every hand at once, and one arm can hold still while another moves.
+- **Worlds:** boxes, spheres, cylinders, capsules and distance grids from meshes, point clouds or fused depth images, with the links allowed to touch them.
+- **Data:** reaches with recoveries, pick-and-place episodes and two-arm handovers, with grippers and task strings, plus perturbed start states for reinforcement learning. Export as LeRobot v3.0 datasets or NumPy arrays, and replay in MuJoCo with camera videos (`scripts/replay_mujoco.py`).
 - **Embeddable:** CPU-only builds, threads you own, time budgets, allocation-free sampling and typed errors, for use inside a robot's control process.
 
 ## Install
