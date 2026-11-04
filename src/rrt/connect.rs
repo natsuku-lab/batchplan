@@ -730,7 +730,7 @@ impl<'call> Connect<'call> {
             projector,
             hop: (LANES as f32 * o.resolution).min(o.range),
             reached: false,
-            walking: Vec::new(),
+            walking: Vec::with_capacity(n),
         }
     }
 
@@ -864,13 +864,14 @@ impl<'call> Connect<'call> {
         self.robot.turn_toward(&self.new, target);
         self.reached = walk(
             projector,
-            self.hop,
+            (self.hop, false),
             self.range,
             &self.new,
             target,
             &mut self.walking,
             &mut self.steps,
-        );
+        )
+        .reached;
     }
 
     /// Into `steps`, the next stretch of a constrained connection from node `from` of the
@@ -1046,7 +1047,7 @@ pub(super) fn steps_to(
 
 /// Appends the edges between a connection's steps (`[k, dof]`) to `edges`, which holds the node
 /// it starts from.
-pub(super) fn connect_edges(steps: &[f32], n: usize, edges: &mut Vec<f32>) {
+pub(crate) fn connect_edges(steps: &[f32], n: usize, edges: &mut Vec<f32>) {
     for (k, step) in steps.chunks(n).enumerate() {
         if k > 0 {
             edges.extend_from_slice(&steps[(k - 1) * n..k * n]);
@@ -1057,49 +1058,85 @@ pub(super) fn connect_edges(steps: &[f32], n: usize, edges: &mut Vec<f32>) {
 
 /// Into `steps` (`[k, dof]`), a walk from `from` toward `target` in hops at most `hop` long, each
 /// projected into the constraints, until it has gone `length`: CBiRRT's constrained extension. The
-/// last hop lands on `target` itself where `target` keeps the constraints. It stops where a
-/// projection fails, a hop gets no closer, or a projected hop lands more than twice its length
-/// away. Returns whether it reached `target`. `q` is working memory.
+/// last hop lands on `target` itself where `target` keeps the constraints. With `halve` (a tight
+/// bound's shortcut), a hop whose edge leaves the bounds at its middle, as edges between projected
+/// states bulge where a hand is pinned to another, is halved until it keeps them, down to an
+/// eighth of `hop`, and the next hop grows back. It stops where a projection fails, a hop gets no
+/// closer, lands more than twice its length away, or bulges out at its shortest. `q` is working
+/// memory.
 pub(crate) fn walk(
     projector: &mut Projector<'_>,
-    hop: f32,
+    (hop, halve): (f32, bool),
     length: f32,
     from: &[f32],
     target: &[f32],
     q: &mut Vec<f32>,
     steps: &mut Vec<f32>,
-) -> bool {
+) -> Walked {
+    let n = from.len();
     steps.clear();
     q.clear();
     q.extend_from_slice(from);
-    let mut walked = 0.0;
+    let (mut walked, mut size, mut bent) = (0.0, hop, false);
+    let ended = |reached: bool, bent: bool| Walked { reached, bent };
     loop {
-        let d = distance(q, target);
+        let d = distance(&q[..n], target);
         if d == 0.0 {
-            return true;
+            return ended(true, bent);
         }
         if walked >= length {
-            return false;
+            return ended(false, bent);
         }
         let at = steps.len();
-        if d <= hop {
-            steps.extend_from_slice(target);
-        } else {
-            steps.extend(q.iter().zip(target).map(|(a, b)| a + (b - a) * (hop / d)));
-        }
+        let straight = |j: usize, q: &[f32]| {
+            if d <= size {
+                target[j]
+            } else {
+                q[j] + (target[j] - q[j]) * (size / d)
+            }
+        };
+        steps.extend((0..n).map(|j| straight(j, q)));
         let next = &mut steps[at..];
-        let landed = (d <= hop && projector.keeps(next)) || projector.project(next);
-        let (step, left) = (distance(q, next), distance(next, target));
-        if !landed || left >= d || step > 2.0 * hop {
+        let kept = d <= size && projector.keeps(next);
+        let landed = kept || projector.project(next);
+        let (step, left) = (distance(&q[..n], next), distance(next, target));
+        if !landed || left >= d || step > 2.0 * size {
             steps.truncate(at);
-            return false;
+            return ended(false, bent);
         }
-        q.copy_from_slice(next);
+        let moved = !kept && (0..n).any(|j| steps[at + j] != straight(j, q));
+        if halve {
+            // The edge's middle, past the hop in `q`.
+            q.resize(2 * n, 0.0);
+            for j in 0..n {
+                q[n + j] = 0.5 * (q[j] + steps[at + j]);
+            }
+            let bulges = !projector.keeps(&q[n..]);
+            q.truncate(n);
+            if bulges {
+                steps.truncate(at);
+                if size <= hop / 8.0 {
+                    return ended(false, bent);
+                }
+                size *= 0.5;
+                continue;
+            }
+        }
+        q.copy_from_slice(&steps[at..]);
         walked += step;
+        bent |= moved;
+        size = (2.0 * size).min(hop);
         if left == 0.0 {
-            return true;
+            return ended(true, bent);
         }
     }
+}
+
+/// How a `walk` ended: whether it reached its target, and whether projection moved any hop it
+/// took off the straight line toward the target, without which the walk is that line.
+pub(crate) struct Walked {
+    pub(crate) reached: bool,
+    pub(crate) bent: bool,
 }
 
 impl Search for Connect<'_> {
@@ -1514,6 +1551,59 @@ mod tests {
                     assert_eq!((a, da), (b, db), "the k-d tree and the scan disagree");
                 }
             }
+        }
+    }
+
+    /// A shortcut's walk along tight bounds halves its hops where their edges would leave them:
+    /// two Pandas, the right hand pinned in the left hand's frame 0.7 m away, which it must follow
+    /// around as the left arm turns, a curve on which edges four default hops long bulge past the
+    /// 2 mm floor (TIAGo Pro's long arms bulge so at one). Every hop's edge keeps the bounds at
+    /// its middle.
+    #[test]
+    fn walks_keep_tight_bounds_between_their_hops() {
+        let (robot, pinned, start) = crate::constraint::pinned_pandas();
+        let mut projector = Projector::new(&robot, &[pinned], &[]);
+        assert!(
+            projector.tight(),
+            "a 2 mm floor is tighter than the insets' room"
+        );
+        // The left arm's first joint turned a step at a time, the right arm projected after it.
+        let mut goal = start.clone();
+        for _ in 0..10 {
+            goal[0] += 0.15;
+            assert!(
+                projector.project(&mut goal),
+                "the right arm follows the left"
+            );
+        }
+        let hop = 4.0 * LANES as f32 * RrtOptions::default().resolution;
+        let (mut q, mut steps) = (vec![], vec![]);
+        let walked = walk(
+            &mut projector,
+            (hop, true),
+            10.0,
+            &start,
+            &goal,
+            &mut q,
+            &mut steps,
+        );
+        assert!(
+            walked.reached && walked.bent,
+            "the walk reaches the goal along the curve"
+        );
+        let n = robot.dof();
+        let hops: Vec<&[f32]> = std::iter::once(&start[..]).chain(steps.chunks(n)).collect();
+        assert!(hops.len() > 2, "the walk takes {} hops", hops.len() - 1);
+        for (k, pair) in hops.windows(2).enumerate() {
+            let middle: Vec<f32> = pair[0]
+                .iter()
+                .zip(pair[1])
+                .map(|(a, b)| 0.5 * (a + b))
+                .collect();
+            assert!(
+                projector.keeps(&middle),
+                "hop {k}'s edge leaves the bounds at its middle"
+            );
         }
     }
 }

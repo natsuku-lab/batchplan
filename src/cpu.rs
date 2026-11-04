@@ -239,6 +239,10 @@ struct Scratch {
     grad: Vec<f32>,
     push: Vec<f32>,
     moving: Vec<bool>,
+    /// IK on a robot whose hands share joints (`Robot::hands_share_joints`), else empty.
+    stack: Stack,
+    /// IK: whether the item holds joints, which `moving` then leaves out.
+    holding: bool,
     /// Trajectory optimization: the working memory of a constraint's cost.
     constraint: CostScratch,
 }
@@ -246,6 +250,11 @@ struct Scratch {
 impl Scratch {
     fn new(robot: &Robot) -> Self {
         let (n, links) = (robot.dof(), robot.links.len());
+        let rows = if robot.hands_share_joints() {
+            6 * robot.hands()
+        } else {
+            0
+        };
         Self {
             fk: Fk::new(links),
             q: vec![0.0; n],
@@ -259,9 +268,23 @@ impl Scratch {
             grad: vec![0.0; n],
             push: vec![0.0; n],
             moving: vec![false; n],
+            stack: Stack {
+                jac: vec![0.0; rows * n],
+                normal: vec![0.0; rows * rows],
+                rhs: vec![0.0; rows],
+            },
+            holding: false,
             constraint: CostScratch::new(robot),
         }
     }
+}
+
+/// The targeted hands' system solved as one (`stack_system`): their Jacobians stacked (6 rows
+/// each), their damped normal matrix factored, and a right-hand side.
+struct Stack {
+    jac: Vec<f32>,
+    normal: Vec<f32>,
+    rhs: Vec<f32>,
 }
 
 /// Signed distance from `o` to `p` and its gradient. Mirrors `obstacle_distance` in kernels.wgsl.
@@ -493,6 +516,41 @@ fn chol6_solve(l: &[f32; 36], b: [f32; 6]) -> [f32; 6] {
     x
 }
 
+/// `chol6` for an `m x m` matrix, the stacked hands' (`stack_system`).
+fn chol(a: &mut [f32], m: usize) {
+    for i in 0..m {
+        for j in 0..=i {
+            let mut s = a[i * m + j];
+            for k in 0..j {
+                s -= a[i * m + k] * a[j * m + k];
+            }
+            a[i * m + j] = if i == j {
+                s.max(1e-12).sqrt()
+            } else {
+                s / a[j * m + j]
+            };
+        }
+    }
+}
+
+/// `chol6_solve` for an `m x m` factor, in place.
+fn chol_solve(l: &[f32], m: usize, b: &mut [f32]) {
+    for i in 0..m {
+        let mut s = b[i];
+        for k in 0..i {
+            s -= l[i * m + k] * b[k];
+        }
+        b[i] = s / l[i * m + i];
+    }
+    for i in (0..m).rev() {
+        let mut s = b[i];
+        for k in i + 1..m {
+            s -= l[k * m + i] * b[k];
+        }
+        b[i] = s / l[i * m + i];
+    }
+}
+
 /// Pose error of link `ee`: (6-vector [position; rotation_weight * rotation], |position|, angle).
 #[inline]
 fn pose_error(
@@ -508,15 +566,84 @@ fn pose_error(
 }
 
 /// Hand `h`'s Jacobian into `jac` (6 x dof, row-major) and its damped normal matrix, factored, into
-/// `a`. Mirrors `hand_system` in kernels.wgsl.
+/// `a`; with `moving`, only those joints' columns. Mirrors `hand_system` in kernels.wgsl.
 #[inline]
 fn hand_system(
     robot: &Robot,
     fk: &Fk,
     h: usize,
     o: &IkOptions,
+    moving: Option<&[bool]>,
     jac: &mut [f32],
     a: &mut [f32; 36],
+) {
+    let n = robot.dof();
+    hand_jacobian(robot, fk, h, o, moving, jac);
+    for r in 0..6 {
+        for c in 0..=r {
+            let mut s = 0.0;
+            for j in 0..n {
+                s += jac[r * n + j] * jac[c * n + j];
+            }
+            if r == c {
+                s += o.damping * o.damping;
+            }
+            a[r * 6 + c] = s;
+            a[c * 6 + r] = s;
+        }
+    }
+    chol6(a);
+}
+
+/// The targeted hands' Jacobians stacked, 6 rows each in hand order, into `s.jac`, and their damped
+/// normal matrix, factored, into `s.normal`; with `moving`, only those joints' columns; the number
+/// of rows. Mirrors `stack_system` in kernels.wgsl.
+fn stack_system(
+    robot: &Robot,
+    fk: &Fk,
+    targets: &[Option<(Vec3, Mat3)>],
+    o: &IkOptions,
+    moving: Option<&[bool]>,
+    jac: &mut [f32],
+    s: &mut Stack,
+) -> usize {
+    let n = robot.dof();
+    let (stack, normal) = (&mut s.jac[..], &mut s.normal[..]);
+    let mut m = 0;
+    for (h, target) in targets.iter().enumerate() {
+        if target.is_some() {
+            hand_jacobian(robot, fk, h, o, moving, jac);
+            stack[m * n..(m + 6) * n].copy_from_slice(&jac[..6 * n]);
+            m += 6;
+        }
+    }
+    for r in 0..m {
+        for c in 0..=r {
+            let mut s = 0.0;
+            for j in 0..n {
+                s += stack[r * n + j] * stack[c * n + j];
+            }
+            if r == c {
+                s += o.damping * o.damping;
+            }
+            normal[r * m + c] = s;
+            normal[c * m + r] = s;
+        }
+    }
+    chol(normal, m);
+    m
+}
+
+/// Hand `h`'s Jacobian into `jac` (6 x dof, row-major), the rotation rows scaled by the options'
+/// rotation weight; with `moving`, the columns of joints it leaves out (held ones) zero.
+#[inline]
+fn hand_jacobian(
+    robot: &Robot,
+    fk: &Fk,
+    h: usize,
+    o: &IkOptions,
+    moving: Option<&[bool]>,
+    jac: &mut [f32],
 ) {
     let (n, ee) = (robot.dof(), robot.ee_links[h]);
     jac.fill(0.0);
@@ -539,39 +666,34 @@ fn hand_system(
             jac[r * n + dof] += v;
         }
     }
-    for r in 0..6 {
-        for c in 0..=r {
-            let mut s = 0.0;
-            for j in 0..n {
-                s += jac[r * n + j] * jac[c * n + j];
+    if let Some(moving) = moving {
+        for j in (0..n).filter(|&j| !moving[j]) {
+            for r in 0..6 {
+                jac[r * n + j] = 0.0;
             }
-            if r == c {
-                s += o.damping * o.damping;
-            }
-            a[r * 6 + c] = s;
-            a[c * 6 + r] = s;
         }
     }
-    chol6(a);
 }
 
-/// `out += jac^T x`.
+/// `out += jac^T x`, `jac` holding a row per entry of `x`.
 #[inline]
-fn add_jt(jac: &[f32], x: [f32; 6], out: &mut [f32]) {
+fn add_jt(jac: &[f32], x: &[f32], out: &mut [f32]) {
     let n = out.len();
     for j in 0..n {
-        for r in 0..6 {
-            out[j] += jac[r * n + j] * x[r];
+        for (r, v) in x.iter().enumerate() {
+            out[j] += jac[r * n + j] * v;
         }
     }
 }
 
-/// One damped-least-squares IK step toward each targeted hand's pose (`targets`, one per hand),
-/// then a collision push in the null space of every targeted hand's Jacobian: with `J` a hand's
-/// Jacobian and `A = J J^T + damping^2 I`, each hand steps `J^T A^-1 e` toward its target, and
-/// the joints `moving` marks take `-collision_step (g - sum over hands of J^T A^-1 J g)`. Hands on
-/// separate arms make that the step of the stacked system; joints no targeted hand moves stay
-/// where they are. Mirrors `ik_step` in kernels.wgsl, pass for pass.
+/// One damped-least-squares IK step toward the targeted hands' poses (`targets`, one per hand),
+/// then a collision push in the null space of their Jacobian: with `J` the targeted hands'
+/// Jacobians stacked and `A = J J^T + damping^2 I`, the step is `J^T A^-1 e` toward the targets,
+/// and the joints `moving` marks take `-collision_step (g - J^T A^-1 J g)`. Hands on separate arms
+/// make `A` block-diagonal, so each solves alone, its own 6 x 6 system; hands that share joints (a
+/// mobile base, a torso) solve together, or each would move the shared joints for itself in full.
+/// Joints no targeted hand moves stay where they are. Mirrors `ik_step` in kernels.wgsl, pass for
+/// pass.
 fn ik_step(
     robot: &Robot,
     world: &CpuWorld,
@@ -590,6 +712,8 @@ fn ik_step(
         grad,
         push,
         moving,
+        stack,
+        holding,
         ..
     } = s;
     let (jac, dq, grad, push, moving) = (
@@ -601,30 +725,60 @@ fn ik_step(
     );
     let mut a = [0.0f32; 36];
     dq.fill(0.0);
+    let keep = holding.then_some(moving);
+    let stacked = !stack.jac.is_empty();
+    let mut rows = 0;
     let mut last = None;
-    for (h, target) in targets.iter().enumerate() {
-        let Some(target) = target else { continue };
-        let (e, _, _) = pose_error(fk, robot.ee_links[h], target, o.rotation_weight);
-        hand_system(robot, fk, h, o, jac, &mut a);
-        add_jt(jac, chol6_solve(&a, e), dq);
-        last = Some(h);
+    if stacked {
+        rows = stack_system(robot, fk, targets, o, keep, jac, stack);
+        let targeted = targets
+            .iter()
+            .enumerate()
+            .filter_map(|(h, t)| Some((h, t.as_ref()?)));
+        for ((h, target), e) in targeted.zip(stack.rhs.chunks_mut(6)) {
+            e.copy_from_slice(&pose_error(fk, robot.ee_links[h], target, o.rotation_weight).0);
+        }
+        chol_solve(&stack.normal, rows, &mut stack.rhs[..rows]);
+        add_jt(&stack.jac, &stack.rhs[..rows], dq);
+    } else {
+        for (h, target) in targets.iter().enumerate() {
+            let Some(target) = target else { continue };
+            let (e, _, _) = pose_error(fk, robot.ee_links[h], target, o.rotation_weight);
+            hand_system(robot, fk, h, o, keep, jac, &mut a);
+            add_jt(jac, &chol6_solve(&a, e), dq);
+            last = Some(h);
+        }
     }
     if o.collision_step > 0.0 {
         grad.fill(0.0);
         collision::<true>(robot, world, fk, &o.collision, grad, buffers);
         push.fill(0.0);
-        let targeted = targets.iter().enumerate().filter(|(_, t)| t.is_some());
-        for (h, _) in targeted {
-            if Some(h) != last {
-                hand_system(robot, fk, h, o, jac, &mut a);
-            }
-            let mut jg = [0.0f32; 6];
-            for r in 0..6 {
+        if stacked {
+            let jg = &mut stack.rhs[..rows];
+            for (r, v) in jg.iter_mut().enumerate() {
+                *v = 0.0;
                 for j in 0..n {
-                    jg[r] += jac[r * n + j] * grad[j];
+                    *v += stack.jac[r * n + j] * grad[j];
                 }
             }
-            add_jt(jac, chol6_solve(&a, jg), push);
+            chol_solve(&stack.normal, rows, jg);
+            add_jt(&stack.jac, jg, push);
+        } else {
+            // The last hand's system is still in `jac` and `a`: its push first, then the others'.
+            let targeted = targets.iter().enumerate().filter(|(_, t)| t.is_some());
+            let others = targeted.map(|(h, _)| h).filter(|&h| Some(h) != last);
+            for (k, h) in last.into_iter().chain(others).enumerate() {
+                if k > 0 {
+                    hand_system(robot, fk, h, o, keep, jac, &mut a);
+                }
+                let mut jg = [0.0f32; 6];
+                for r in 0..6 {
+                    for j in 0..n {
+                        jg[r] += jac[r * n + j] * grad[j];
+                    }
+                }
+                add_jt(jac, &chol6_solve(&a, jg), push);
+            }
         }
         for j in 0..n {
             if moving[j] {
@@ -684,9 +838,9 @@ impl Reach {
             if step == o.iterations {
                 break;
             }
-            hand_system(robot, &self.fk, hand, o, &mut self.jac, &mut a);
+            hand_system(robot, &self.fk, hand, o, None, &mut self.jac, &mut a);
             self.dq.fill(0.0);
-            add_jt(&self.jac, chol6_solve(&a, e), &mut self.dq);
+            add_jt(&self.jac, &chol6_solve(&a, e), &mut self.dq);
             let largest = self.dq.iter().fold(0.0f32, |m, v| m.max(v.abs()));
             let scale = if largest > o.max_step {
                 o.max_step / largest
@@ -718,9 +872,9 @@ impl Reach {
         };
         let mut a = [0.0f32; 36];
         robot.fk_into(q, &mut self.fk);
-        hand_system(robot, &self.fk, hand, &o, &mut self.jac, &mut a);
+        hand_system(robot, &self.fk, hand, &o, None, &mut self.jac, &mut a);
         self.dq.fill(0.0);
-        add_jt(&self.jac, chol6_solve(&a, twist), &mut self.dq);
+        add_jt(&self.jac, &chol6_solve(&a, twist), &mut self.dq);
         &self.dq
     }
 
@@ -1456,6 +1610,7 @@ impl Backend for CpuBackend {
         worlds: &Worlds,
         item_world: &[u32],
         targets: &[Option<Pose>],
+        held: &[bool],
         q: &mut [f32],
         o: &IkOptions,
     ) -> Result<Vec<[f32; 2]>> {
@@ -1464,10 +1619,11 @@ impl Backend for CpuBackend {
         let hand_joints: Vec<Vec<usize>> = (0..hands).map(|h| self.robot.hand_joints(h)).collect();
         Ok(self.pool.install(|| {
             q.par_chunks_mut(n)
+                .enumerate()
                 .zip(item_world.par_iter().zip(targets.par_chunks(hands)))
                 .map_init(
                     || (Scratch::new(&self.robot), vec![None; hands]),
-                    |(scratch, goals), (qi, (&s, item_targets))| {
+                    |(scratch, goals), ((item, qi), (&s, item_targets))| {
                         let world = &prepared[s as usize];
                         scratch.moving.fill(false);
                         for (h, (goal, target)) in goals.iter_mut().zip(item_targets).enumerate() {
@@ -1477,6 +1633,11 @@ impl Backend for CpuBackend {
                                     scratch.moving[j] = true;
                                 }
                             }
+                        }
+                        let item_held = held.get(item * n..(item + 1) * n).unwrap_or_default();
+                        scratch.holding = item_held.contains(&true);
+                        for (m, &h) in scratch.moving.iter_mut().zip(item_held) {
+                            *m &= !h;
                         }
                         for _ in 0..o.iterations {
                             ik_step(&self.robot, world, goals, qi, o, scratch);

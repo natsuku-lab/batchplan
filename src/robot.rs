@@ -856,6 +856,17 @@ impl Robot {
         joints
     }
 
+    /// Whether two hands share a joint, as the arms on a mobile base or a torso do: IK then
+    /// solves their targets as one system.
+    pub(crate) fn hands_share_joints(&self) -> bool {
+        let joints: Vec<Vec<usize>> = (0..self.hands()).map(|h| self.hand_joints(h)).collect();
+        joints.iter().enumerate().any(|(h, a)| {
+            joints[h + 1..]
+                .iter()
+                .any(|b| a.iter().any(|j| b.contains(j)))
+        })
+    }
+
     /// Names of the links hand `hand` grips with, for [`Touch`](crate::Touch): the first link at
     /// or above its frame that has collision spheres (the Panda's `panda_hand`, above its tool
     /// frame) and every link below that one: its fingers, and any object it holds.

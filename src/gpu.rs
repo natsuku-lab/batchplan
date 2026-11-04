@@ -88,7 +88,7 @@ shader_struct! {
         w_world: f32, w_self: f32, margin: f32, self_margin: f32,
         acceleration_weight: f32, velocity_weight: f32, initial_step: f32, history: u32,
         damping: f32, rotation_weight: f32, max_step: f32, collision_step: f32,
-        samples: u32, constraints: u32, constraint_weight: f32, pad0: u32,
+        samples: u32, constraints: u32, constraint_weight: f32, held: u32,
     }
 }
 
@@ -236,6 +236,16 @@ fn robot_wgsl(robot: &Robot) -> String {
     // Hand h's frame, Jacobian and joints, each a switch with hand 0 as the default case.
     let hands = &robot.ee_links;
     let _ = writeln!(w, "\nconst HANDS: u32 = {}u;", hands.len());
+    // IK solves hands that share joints as one system (`ik_step`); its buffers stay a single
+    // value for other robots, whose kernels never touch them.
+    let stacked = robot.hands_share_joints();
+    let stack = if stacked { 6 * hands.len() } else { 6 };
+    let _ = writeln!(
+        w,
+        "const STACKED: bool = {stacked};\nconst STACK: u32 = {stack}u;\nconst STACK_JAC: u32 = {}u;\nconst STACK_CHOL: u32 = {}u;",
+        if stacked { stack * dof } else { 1 },
+        if stacked { stack * stack } else { 1 },
+    );
     let cases = |w: &mut String, body: &dyn Fn(&mut String, usize)| {
         w.push_str("    switch h {\n");
         for (h, &ee) in hands.iter().enumerate().skip(1) {
@@ -1391,6 +1401,7 @@ impl Backend for GpuBackend {
         worlds: &Worlds,
         item_world: &[u32],
         targets: &[Option<Pose>],
+        held: &[bool],
         q: &mut [f32],
         o: &IkOptions,
     ) -> Result<Vec<[f32; 2]>> {
@@ -1400,9 +1411,13 @@ impl Backend for GpuBackend {
         let chunks = item_world
             .chunks(IK_CHUNK)
             .zip(targets.chunks(IK_CHUNK * hands))
-            .zip(q.chunks_mut(IK_CHUNK * n));
-        for ((chunk_world, chunk_targets), chunk_q) in chunks {
-            errors.extend(self.ik_chunk(worlds, chunk_world, chunk_targets, chunk_q, o)?);
+            .zip(q.chunks_mut(IK_CHUNK * n))
+            .enumerate();
+        for (c, ((chunk_world, chunk_targets), chunk_q)) in chunks {
+            let start = c * IK_CHUNK * n;
+            let chunk_held = held.get(start..start + chunk_q.len()).unwrap_or_default();
+            let call = (chunk_world, chunk_targets, chunk_held);
+            errors.extend(self.ik_chunk(worlds, call, chunk_q, o)?);
         }
         Ok(errors)
     }
@@ -1721,11 +1736,11 @@ fn lbfgs_stride(points: usize, n: usize, o: &PlanOptions) -> usize {
 }
 
 impl GpuBackend {
+    /// IK on one chunk: its items' worlds, targets and held joints (`call`), in place on `q`.
     fn ik_chunk(
         &self,
         worlds: &GpuWorlds,
-        item_world: &[u32],
-        targets: &[Option<Pose>],
+        (item_world, targets, held): (&[u32], &[Option<Pose>], &[bool]),
         q: &mut [f32],
         o: &IkOptions,
     ) -> Result<Vec<[f32; 2]>> {
@@ -1739,6 +1754,7 @@ impl GpuBackend {
         params.rotation_weight = o.rotation_weight;
         params.max_step = o.max_step;
         params.collision_step = o.collision_step;
+        params.held = u32::from(!held.is_empty());
         let params_buf = self.uniform(&params);
         let world_buf = storage(&self.device, "item world", item_world);
         // Per item and hand: the position with w = 1 when the hand has a target, then the
@@ -1759,7 +1775,9 @@ impl GpuBackend {
             })
             .collect();
         let target_buf = storage(&self.device, "targets", &target_data);
-        let dummy = storage::<f32>(&self.device, "unused", &[]);
+        // Per item and joint, 1 where it is held (`P.held`).
+        let flags: Vec<f32> = held.iter().map(|&h| f32::from(u8::from(h))).collect();
+        let held_buf = storage(&self.device, "held", &flags);
         let q_buf = storage(&self.device, "q", q);
         let out = storage_zeroed(&self.device, "ik errors", items * 2);
         let bg = self.bind_main(&CallBuffers {
@@ -1768,7 +1786,7 @@ impl GpuBackend {
             item_world: &world_buf,
             targets: &target_buf,
             q: &q_buf,
-            aux: &dummy,
+            aux: &held_buf,
             out: &out,
         });
         let mut done = 0;

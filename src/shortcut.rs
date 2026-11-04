@@ -7,7 +7,10 @@
 //! straightened where that shortens the path: it changes at one rate along the whole path while the
 //! others keep their values, as HPP's partial shortcut makes it, which removes a joint's swing out
 //! and back that shortcuts between whole configurations keep. None lengthens a path or moves its
-//! ends, and every new edge is checked.
+//! ends, and every new edge is checked. Under tight constraints, such as a hand pinned in another's
+//! frame, straight shortcuts mostly leave them, so from each waypoint whose straight shortcuts stop
+//! short of the end it also walks toward farther waypoints, the end first, as the search's
+//! extensions walk (CBiRRT's projected walk), keeping a walk that arrives shorter.
 //!
 //! Each path is its own search (see `edges`), so results do not depend on the batch or device.
 
@@ -18,6 +21,7 @@ use crate::constraint::{Projector, Region};
 use crate::device::{Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Keep, Search, Wanted};
 use crate::error::{Result, ensure_input};
+use crate::lanes::LANES;
 use crate::rrt;
 
 /// How [`shortcut`] shortens paths.
@@ -125,7 +129,7 @@ pub(crate) fn shortcut_until(
     device.search(worlds, &mut running, deadline)?;
     let mut shortcut = Vec::with_capacity(paths.len());
     for (path, s) in paths.iter_mut().zip(searches) {
-        let (simplified, short) = s.into_inner().into_paths();
+        let (simplified, short, _) = s.into_inner().into_paths();
         *path = simplified;
         shortcut.push(short);
     }
@@ -137,6 +141,13 @@ enum Step {
     Straight,
     /// Checking shortcuts from waypoint `i`, the farthest first.
     Shortcut(usize),
+    /// A constrained path: checking a projected walk (`Simplify::steps`) from waypoint `from`
+    /// toward waypoint `to`, after the straight shortcuts from `from` reached `straight` at most.
+    Walk {
+        from: usize,
+        to: usize,
+        straight: usize,
+    },
     /// Checking joint `j` straightened (`Simplify::line`), from joint `j` on: first at the
     /// waypoints it moves and the middle of every edge, a batch of configurations that rules
     /// out most joints before their edges are checked.
@@ -166,6 +177,11 @@ pub(crate) struct Simplify<'call> {
     projector: Option<Projector<'call>>,
     /// Where smoothing would move the waypoint under check.
     to: Vec<f32>,
+    /// A constrained path's walks: their hops (one pass of the lanes at `resolution`), the hops of
+    /// the walk under check, and its working configuration.
+    hop: f32,
+    steps: Vec<f32>,
+    walking: Vec<f32>,
     /// The joint under check at each waypoint, straightened.
     line: Vec<f32>,
 }
@@ -200,14 +216,18 @@ impl<'call> Simplify<'call> {
             region: projector.as_ref().map(Projector::bounds),
             projector,
             to,
+            hop: LANES as f32 * o.resolution,
+            steps: vec![],
+            walking: Vec::with_capacity(2 * n),
             line,
         }
     }
 
-    /// The simplified path, and the path as the first pass's shortcuts left it.
-    pub(crate) fn into_paths(self) -> (Vec<f32>, Vec<f32>) {
+    /// The simplified path, the path as the first pass's shortcuts left it, and the projection
+    /// into the path's constraints, if any, for the spline fit.
+    pub(crate) fn into_paths(self) -> (Vec<f32>, Vec<f32>, Option<Projector<'call>>) {
         let shortcut = self.shortcut.unwrap_or_else(|| self.path.clone());
-        (self.path, shortcut)
+        (self.path, shortcut, self.projector)
     }
 
     fn waypoint(&self, i: usize) -> &[f32] {
@@ -272,6 +292,16 @@ impl<'call> Simplify<'call> {
             self.line.push(x);
         }
         total - after >= self.o.min_change
+    }
+
+    /// Shortcuts waypoint `from` straight to waypoint `to`, dropping those between, and goes on to
+    /// the next waypoint's shortcuts.
+    fn shortcut_to(&mut self, from: usize, to: usize) {
+        if to > from + 1 {
+            self.path.drain((from + 1) * self.n..to * self.n);
+            self.changed = true;
+        }
+        self.step = Step::Shortcut(from + 1);
     }
 
     /// Ends a pass's shortcuts and straightened joints: smoothing next, if it is on, else the next
@@ -365,6 +395,53 @@ impl Search for Simplify<'_> {
                         region: self.region.clone(),
                     });
                 }
+                &Step::Walk { from, to, straight } => {
+                    if to <= straight.max(from + 1) {
+                        self.shortcut_to(from, straight);
+                        continue;
+                    }
+                    let projector = self.projector.as_mut().expect("walks are constrained");
+                    let section = length(&self.path[from * n..(to + 1) * n], n);
+                    let (start, end) = (
+                        &self.path[from * n..(from + 1) * n],
+                        &self.path[to * n..(to + 1) * n],
+                    );
+                    let shorter = section - self.o.min_change;
+                    // No walk is shorter than the straight distance between its ends.
+                    if shorter <= rrt::distance(start, end) {
+                        self.step = Step::Walk {
+                            from,
+                            to: from + (to - from) / 2,
+                            straight,
+                        };
+                        continue;
+                    }
+                    let walk = rrt::walk(
+                        projector,
+                        (self.hop, true),
+                        shorter,
+                        start,
+                        end,
+                        &mut self.walking,
+                        &mut self.steps,
+                    );
+                    let walked = rrt::distance(start, &self.steps[..n.min(self.steps.len())])
+                        + length(&self.steps, n);
+                    // A walk no projection bent is the straight edge the shortcuts just refuted.
+                    if !walk.reached || !walk.bent || walked > shorter {
+                        self.step = Step::Walk {
+                            from,
+                            to: from + (to - from) / 2,
+                            straight,
+                        };
+                        continue;
+                    }
+                    let mut edges = edges::reuse(buffer);
+                    edges.extend_from_slice(self.waypoint(from));
+                    rrt::connect_edges(&self.steps, n, &mut edges);
+                    self.step = Step::Walk { from, to, straight };
+                    return self.query(edges, Wanted::Prefix);
+                }
                 &Step::JointEdges(j) => {
                     let mut edges = edges::reuse(buffer);
                     for k in 0..self.count() - 1 {
@@ -436,12 +513,37 @@ impl Search for Simplify<'_> {
             Step::Shortcut(i) => {
                 let last = self.count() - 1;
                 // Answer k is the edge to waypoint last - k; the first valid one is the farthest.
-                if answer <= last - i - 2 {
-                    let j = last - answer;
-                    self.path.drain((i + 1) * n..j * n);
-                    self.changed = true;
+                let straight = if answer <= last - i - 2 {
+                    last - answer
+                } else {
+                    i + 1
+                };
+                // Wider bounds leave straight shortcuts room enough (see `Projector::tight`).
+                if self.projector.as_ref().is_some_and(Projector::tight) && straight < last {
+                    self.step = Step::Walk {
+                        from: i,
+                        to: last,
+                        straight,
+                    };
+                } else {
+                    self.shortcut_to(i, straight);
                 }
-                self.step = Step::Shortcut(i + 1);
+            }
+            Step::Walk { from, to, straight } => {
+                let hops = self.steps.len() / n;
+                if answer == hops {
+                    // The walk's last hop is waypoint `to`; the others replace those between.
+                    let between = self.steps[..(hops - 1) * n].iter().copied();
+                    self.path.splice((from + 1) * n..to * n, between);
+                    self.changed = true;
+                    self.step = Step::Shortcut(from + hops);
+                } else {
+                    self.step = Step::Walk {
+                        from,
+                        to: from + (to - from) / 2,
+                        straight,
+                    };
+                }
             }
             Step::Joint(j) => {
                 let checked = 2 * self.count() - 3;

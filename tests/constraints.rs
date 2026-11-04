@@ -444,8 +444,11 @@ fn off_its_place(robot: &Robot, q: &[f32], relative: Pose) -> (f32, f32, f32) {
 /// its place in the left hand's frame, the left within 5° of straight down. Every path, sampled
 /// densely once timed, keeps the right hand within 2 mm and 0.02 rad of its place, the floors of
 /// a constraint relative to another hand, and the left hand level, and is collision-free; the same
-/// problems planned without the constraints pull the hands centimeters apart. A goal 1.5 mm off its
-/// place plans, within the floor; one 4 mm off is an input error.
+/// problems planned without the constraints pull the hands centimeters apart, and are hardly
+/// shorter: shortcuts that leave the constraints walk projected instead. Over sampling seeds 0-23
+/// the carries average 0.982 to 1.129 times the unconstrained paths' length, and 1.171 to 1.663
+/// with straight shortcuts alone (M4 Pro, CPU). A goal 1.5 mm off its place plans, within the
+/// floor; one 4 mm off is an input error.
 #[test]
 fn two_hands_carry_a_tray_level_between_them() {
     let robot = common::two_pandas().unwrap();
@@ -508,6 +511,20 @@ fn two_hands_carry_a_tray_level_between_them() {
             })
             .collect();
         let loose = batchplan::plan(&device, &worlds, &unconstrained, &o).unwrap();
+        let mean = |r: &batchplan::PlanResult| {
+            let lengths: Vec<f32> = r.solved().map(|s| r.length[s.index * r.seeds]).collect();
+            lengths.iter().sum::<f32>() / lengths.len() as f32
+        };
+        let (kept, free) = (mean(&result), mean(&loose));
+        eprintln!(
+            "{}: carries {kept:.3} rad long on average, {free:.3} unconstrained",
+            device.name()
+        );
+        assert!(
+            kept <= 1.14 * free,
+            "{}: carries average {kept:.3} rad, against {free:.3} unconstrained",
+            device.name()
+        );
         let apart = loose
             .solved()
             .filter(|s| {

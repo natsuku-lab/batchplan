@@ -527,6 +527,10 @@ pub(crate) struct Projector<'robot> {
     normal: Vec<f32>,
     solved: Vec<f32>,
     dq: Vec<f32>,
+    /// Whether a bound is too tight for projection to land the full inset inside it (half the
+    /// bound, short of `POSITION_INSET` or `ROTATION_INSET`): the room the insets leave covers
+    /// the edges between projected states only where it is full.
+    tight: bool,
 }
 
 impl<'robot> Projector<'robot> {
@@ -556,7 +560,30 @@ impl<'robot> Projector<'robot> {
             normal: Vec::with_capacity(rows * rows),
             solved: Vec::with_capacity(rows),
             dq: vec![0.0; n],
+            tight: constraints.iter().any(|c| {
+                let floor = if c.relative_to.is_some() { 2.0 } else { 1.0 };
+                let short = |bound: f32, floor: f32, most: f32| 0.5 * bound.max(floor) < most;
+                let angle =
+                    |bound: f32| bound < PI && short(bound, floor * ROTATION_FLOOR, ROTATION_INSET);
+                c.position
+                    .to_array()
+                    .iter()
+                    .any(|&h| h.is_finite() && short(h, floor * POSITION_FLOOR, POSITION_INSET))
+                    || angle(c.tilt)
+                    || angle(c.twist)
+            }),
         }
+    }
+
+    /// Whether a bound is too tight for the room the insets leave to cover the edges between
+    /// projected states (see `tight`).
+    pub(crate) fn tight(&self) -> bool {
+        self.tight
+    }
+
+    /// The robot it projects for.
+    pub(crate) fn robot(&self) -> &'robot Robot {
+        self.robot
     }
 
     /// The bounds as given, for checks to keep.
@@ -679,6 +706,52 @@ fn solve(a: &mut [f32], m: usize, b: &mut [f32]) -> bool {
         b[i] = v / a[i * m + i];
     }
     true
+}
+
+/// Two Pandas 0.7 m apart, the right hand pinned in the left hand's frame where the default
+/// configuration puts it, and that configuration: a constraint whose curve the right arm must
+/// follow around a long lever as the left arm turns.
+#[cfg(test)]
+pub(crate) fn pinned_pandas() -> (Robot, HandConstraint, Vec<f32>) {
+    use std::collections::HashMap;
+
+    use crate::robot::{Part, RobotOptions};
+
+    let panda = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/franka/franka_panda.urdf"
+    );
+    let part = |prefix: &str, y: f32| Part {
+        path: panda.into(),
+        prefix: prefix.into(),
+        base: Pose::new(Vec3::new(0.0, y, 0.0), glam::Quat::IDENTITY),
+    };
+    let fingers = ["left_", "right_"]
+        .iter()
+        .flat_map(|p| {
+            [
+                format!("{p}panda_finger_joint1"),
+                format!("{p}panda_finger_joint2"),
+            ]
+        })
+        .map(|j| (j, 0.04));
+    let options = RobotOptions {
+        ee_links: vec!["left_panda_hand".into(), "right_panda_hand".into()],
+        lock_joints: HashMap::from_iter(fingers),
+        ..Default::default()
+    };
+    let robot = Robot::assemble(&[part("left_", 0.35), part("right_", -0.35)], &options)
+        .expect("two Pandas assemble");
+    let start = robot.default_q().to_vec();
+    let (left, right) = (robot.ee_pose(&start, 0), robot.ee_pose(&start, 1));
+    let pinned = HandConstraint {
+        relative_to: Some(0),
+        position: Vec3::ZERO,
+        tilt: 0.0,
+        twist: 0.0,
+        ..HandConstraint::new(1, left.inverse().mul_pose(right))
+    };
+    (robot, pinned, start)
 }
 
 #[cfg(test)]

@@ -561,8 +561,10 @@ fn a_stop_separates_the_joins_either_side_of_it() {
 
 /// Blends keep the sequence's constraints: motions planned with the gripper within 2° of straight
 /// down, joined 30 cm wide, stay within it once timed, where the same blends without the
-/// constraint tilt it past (to 5.8° on the Ryzen, 10.5° on the M4 Pro). Blends between motions that
-/// keep the cone stray past it only where they are wide.
+/// constraint tilt it past (to 11.0° on the Ryzen, 4.3° on the M4 Pro). The goals are seed 4's:
+/// once splines passed through points projected inside the cone, seed 3's unconstrained blends
+/// stayed within 1.14°, inside it, on the Ryzen and on its Radeon (2026-11-03). Blends between
+/// motions that keep the cone stray past it only where they are wide.
 #[test]
 fn blends_keep_the_sequence_constraints() {
     let robot = panda();
@@ -576,7 +578,7 @@ fn blends_keep_the_sequence_constraints() {
     let cpu = Device::cpu(&robot).unwrap();
     let scene = common::pillar_scene();
     let reaching = cpu.upload(std::slice::from_ref(&scene)).unwrap();
-    let (start, goals) = common::upright_reaches(&cpu, &reaching, 24, &mut Rng::new(3)).unwrap();
+    let (start, goals) = common::upright_reaches(&cpu, &reaching, 24, &mut Rng::new(4)).unwrap();
     let mut stops = vec![start];
     stops.extend(goals.into_iter().take(19));
     for device in devices(&robot) {

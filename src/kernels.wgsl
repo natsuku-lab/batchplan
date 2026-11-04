@@ -3,7 +3,8 @@
 // MAX_HISTORY, LINE_STEPS and line_search) and the shared structs (Params, Link, Sphere, Obstacle),
 // generated from their Rust definitions so the two sides cannot drift apart, and the code written
 // for the robot (`robot_wgsl`): MAX_DOF, JAC_LEN, HANDS, fk(), ee_pos(h), ee_rot(h),
-// ee_jacobian(h), mark_moving(h) and collision().
+// ee_jacobian(h), mark_moving(h), collision(), and STACKED with the stacked system's sizes (STACK,
+// STACK_JAC, STACK_CHOL).
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read> links: array<Link>;
@@ -19,7 +20,8 @@
 // Touch sets (see Obstacle.r0.w), then distance grids, two half floats per word (Obstacle.grid).
 @group(0) @binding(9) var<storage, read> world_data: array<u32>;
 @group(0) @binding(10) var<storage, read_write> qbuf: array<f32>;
-// trajopt: the L-BFGS state of each path (see lbfgs_stride).
+// trajopt: the L-BFGS state of each path (see lbfgs_stride); IK: 1 per item and joint held, when
+// P.held.
 @group(0) @binding(11) var<storage, read_write> aux: array<f32>;
 @group(0) @binding(12) var<storage, read_write> outbuf: array<f32>;
 
@@ -34,6 +36,10 @@ var<private> chol: array<f32, 36>;
 var<private> goal_pos: array<vec4<f32>, HANDS>;
 var<private> goal_rot: array<mat3x3<f32>, HANDS>;
 var<private> moving: array<bool, MAX_DOF>;
+// IK when the hands share joints (STACKED): the targeted hands' Jacobians stacked, 6 rows each in
+// hand order (STACK x MAX_DOF, row-major), and their damped normal matrix, factored.
+var<private> stack_jac: array<f32, STACK_JAC>;
+var<private> stack_chol: array<f32, STACK_CHOL>;
 
 fn item_index(gid: vec3<u32>, nwg: vec3<u32>) -> u32 {
     return gid.x + gid.y * nwg.x * 64u;
@@ -177,7 +183,80 @@ fn chol6_solve(b: array<f32, 6>) -> array<f32, 6> {
     return x;
 }
 
-// Item `item`'s targets into goal_pos and goal_rot, and the joints they move into `moving`.
+// The targeted hands' Jacobians into stack_jac and their damped normal matrix, factored, into
+// stack_chol; returns the rows. Mirrors `stack_system` in cpu.rs.
+fn stack_system() -> u32 {
+    let n = P.n_dof;
+    var m = 0u;
+    for (var h = 0u; h < HANDS; h++) {
+        if (goal_pos[h].w > 0.5) {
+            ee_jacobian(h);
+            hold_columns();
+            for (var r = 0u; r < 6u; r++) {
+                for (var j = 0u; j < n; j++) {
+                    stack_jac[(m + r) * MAX_DOF + j] = jac[r * MAX_DOF + j];
+                }
+            }
+            m += 6u;
+        }
+    }
+    for (var r = 0u; r < m; r++) {
+        for (var c = 0u; c <= r; c++) {
+            var s = 0.0;
+            for (var j = 0u; j < n; j++) {
+                s += stack_jac[r * MAX_DOF + j] * stack_jac[c * MAX_DOF + j];
+            }
+            if (r == c) {
+                s += P.damping * P.damping;
+            }
+            stack_chol[r * m + c] = s;
+            stack_chol[c * m + r] = s;
+        }
+    }
+    for (var i = 0u; i < m; i++) {
+        for (var j = 0u; j <= i; j++) {
+            var s = stack_chol[i * m + j];
+            for (var k = 0u; k < j; k++) {
+                s -= stack_chol[i * m + k] * stack_chol[j * m + k];
+            }
+            if (i == j) {
+                stack_chol[i * m + j] = sqrt(max(s, 1e-12));
+            } else {
+                stack_chol[i * m + j] = s / stack_chol[j * m + j];
+            }
+        }
+    }
+    return m;
+}
+
+// (J J^T + damping^2 I)^-1 b for the m rows factored in stack_chol, then J^T of that added into
+// `out`. Mirrors cpu.rs's `chol_solve` and `add_jt`.
+fn stack_solve(b: array<f32, STACK>, m: u32, out: ptr<function, array<f32, MAX_DOF>>) {
+    var x = b;
+    for (var i = 0u; i < m; i++) {
+        var s = x[i];
+        for (var k = 0u; k < i; k++) {
+            s -= stack_chol[i * m + k] * x[k];
+        }
+        x[i] = s / stack_chol[i * m + i];
+    }
+    for (var ii = 0u; ii < m; ii++) {
+        let i = m - 1u - ii;
+        var s = x[i];
+        for (var k = i + 1u; k < m; k++) {
+            s -= stack_chol[k * m + i] * x[k];
+        }
+        x[i] = s / stack_chol[i * m + i];
+    }
+    for (var j = 0u; j < P.n_dof; j++) {
+        for (var r = 0u; r < m; r++) {
+            (*out)[j] += stack_jac[r * MAX_DOF + j] * x[r];
+        }
+    }
+}
+
+// Item `item`'s targets into goal_pos and goal_rot, and the joints they move, less those it holds
+// (P.held), into `moving`.
 fn load_goals(item: u32) {
     for (var j = 0u; j < MAX_DOF; j++) {
         moving[j] = false;
@@ -190,12 +269,33 @@ fn load_goals(item: u32) {
             mark_moving(h);
         }
     }
+    if (P.held == 1u) {
+        for (var j = 0u; j < P.n_dof; j++) {
+            if (aux[item * P.n_dof + j] > 0.5) {
+                moving[j] = false;
+            }
+        }
+    }
+}
+
+// With joints held (P.held), zeroes the columns of jac `moving` leaves out: theirs.
+fn hold_columns() {
+    if (P.held == 1u) {
+        for (var j = 0u; j < P.n_dof; j++) {
+            if (!moving[j]) {
+                for (var r = 0u; r < 6u; r++) {
+                    jac[r * MAX_DOF + j] = 0.0;
+                }
+            }
+        }
+    }
 }
 
 // Hand h's Jacobian into `jac`, and its damped normal matrix, factored, into `chol`.
 fn hand_system(h: u32) {
     let n = P.n_dof;
     ee_jacobian(h);
+    hold_columns();
     for (var r = 0u; r < 6u; r++) {
         for (var c = 0u; c <= r; c++) {
             var s = 0.0;
@@ -248,21 +348,40 @@ fn null_part(push: ptr<function, array<f32, MAX_DOF>>) {
     }
 }
 
-// One damped-least-squares step toward each targeted hand's pose, then a collision push in the
-// null space of every targeted hand's Jacobian: `moving` joints take
-// -collision_step (grad - sum over hands of J^T (J J^T + damping^2 I)^-1 J grad). Hands on separate
-// arms make that the step of the stacked system. Mirrors `ik_step` in cpu.rs.
+// One damped-least-squares step toward the targeted hands' poses, then a collision push in the
+// null space of their stacked Jacobian J: `moving` joints take
+// -collision_step (grad - J^T (J J^T + damping^2 I)^-1 J grad). Hands on separate arms solve each
+// alone, the stacked system being block-diagonal; hands that share joints (STACKED) solve it
+// whole. Mirrors `ik_step` in cpu.rs.
 fn ik_step(world: u32, lid: u32, lane: u32) {
     let n = P.n_dof;
     fk();
     var dq: array<f32, MAX_DOF>;
-    var push: array<f32, MAX_DOF>;
     // One hand, the usual case, keeps its system in jac and chol for the push: a loop over hands
     // around this code costs 4-10% of IK throughput on an M4 Pro's GPU. HANDS is a constant, so
     // only one branch is compiled.
     var last = 0u;
+    var rows = 0u;
     if (HANDS == 1u) {
         pose_step(0u, &dq);
+    } else if (STACKED) {
+        rows = stack_system();
+        var e: array<f32, STACK>;
+        var r = 0u;
+        for (var h = 0u; h < HANDS; h++) {
+            if (goal_pos[h].w > 0.5) {
+                let ep = goal_pos[h].xyz - ee_pos(h);
+                let eo = rot_log(goal_rot[h] * transpose(ee_rot(h))).xyz * P.rotation_weight;
+                e[r] = ep.x;
+                e[r + 1u] = ep.y;
+                e[r + 2u] = ep.z;
+                e[r + 3u] = eo.x;
+                e[r + 4u] = eo.y;
+                e[r + 5u] = eo.z;
+                r += 6u;
+            }
+        }
+        stack_solve(e, rows, &dq);
     } else {
         for (var h = 0u; h < HANDS; h++) {
             if (goal_pos[h].w > 0.5) {
@@ -277,14 +396,25 @@ fn ik_step(world: u32, lid: u32, lane: u32) {
         }
         collision(world, P.w_world, P.w_self, P.margin, P.self_margin, true, lane);
         group_grad(lid);
+        var push: array<f32, MAX_DOF>;
         if (HANDS == 1u) {
             null_part(&push);
+        } else if (STACKED) {
+            var jg: array<f32, STACK>;
+            for (var r = 0u; r < rows; r++) {
+                var s = 0.0;
+                for (var j = 0u; j < n; j++) {
+                    s += stack_jac[r * MAX_DOF + j] * grad[j];
+                }
+                jg[r] = s;
+            }
+            stack_solve(jg, rows, &push);
         } else {
+            // The last hand's system is still in jac and chol: its part first, then the others'.
+            null_part(&push);
             for (var h = 0u; h < HANDS; h++) {
-                if (goal_pos[h].w > 0.5) {
-                    if (h != last) {
-                        hand_system(h);
-                    }
+                if (goal_pos[h].w > 0.5 && h != last) {
+                    hand_system(h);
                     null_part(&push);
                 }
             }

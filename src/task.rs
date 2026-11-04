@@ -1047,6 +1047,7 @@ fn solve(
                 .map(|h| (h == c.hand).then_some(c.poses[1]))
                 .collect(),
             seed: Some(c.rest.clone()),
+            hold: vec![],
         })
         .collect();
     ik::solve_ik(device, worlds, &problems, o)

@@ -10,8 +10,8 @@ use std::sync::Arc;
 use batchplan::rng::Rng;
 use batchplan::{
     AttachedObject, CollisionWeights, Device, Error, HandConstraint, IkOptions, IkProblem,
-    Obstacle, PlanOptions, PlanProblem, Robot, SdfGrid, Solved, SphereOptions, Touch, Trajectory,
-    World,
+    Obstacle, PlanOptions, PlanProblem, Robot, RobotOptions, SdfGrid, Solved, SphereOptions, Touch,
+    Trajectory, World,
 };
 use glam::{EulerRot, Quat, Vec2, Vec3};
 
@@ -451,6 +451,60 @@ fn ik_matches_cpu() {
         );
         assert!(eval.collision_free(i));
     }
+}
+
+/// One IK step of hands that share joints, which IK solves as one stacked system, matches the
+/// CPU's element-wise: the Panda's hand and a second hand at its fourth link, on tabletops whose
+/// collision push moves the arm too.
+#[test]
+fn ik_steps_of_hands_sharing_joints_match_cpu() {
+    if setup().is_none() {
+        return;
+    }
+    let options = RobotOptions {
+        ee_links: vec!["panda_hand".into(), "panda_link4".into()],
+        ..common::panda_options()
+    };
+    let robot = Robot::load(common::asset("franka/franka_panda.urdf"), &options).unwrap();
+    let (gpu, cpu) = (Device::gpu(&robot).unwrap(), Device::cpu(&robot).unwrap());
+    let scene = worlds(32, 6);
+    let mut rng = Rng::new(7);
+    let random = |rng: &mut Rng| -> Vec<f32> {
+        (0..robot.dof())
+            .map(|j| rng.range(robot.lower()[j], robot.upper()[j]))
+            .collect()
+    };
+    let problems: Vec<IkProblem> = (0..scene.len() as u32)
+        .map(|world| {
+            let aim = random(&mut rng);
+            IkProblem {
+                world,
+                targets: vec![Some(robot.ee_pose(&aim, 0)), Some(robot.ee_pose(&aim, 1))],
+                seed: Some(random(&mut rng)),
+                hold: vec![],
+            }
+        })
+        .collect();
+    let o = IkOptions {
+        seeds: 1,
+        iterations: 1,
+        ..Default::default()
+    };
+    let (on_cpu, on_gpu) = (cpu.upload(&scene).unwrap(), gpu.upload(&scene).unwrap());
+    let a = batchplan::solve_ik(&cpu, &on_cpu, &problems, &o).unwrap();
+    let b = batchplan::solve_ik(&gpu, &on_gpu, &problems, &o).unwrap();
+    let seeds = problems.iter().flat_map(|p| p.seed.clone().expect("given"));
+    let moved =
+        a.q.iter()
+            .zip(seeds)
+            .fold(0.0f32, |m, (x, s)| m.max((x - s).abs()));
+    let apart =
+        a.q.iter()
+            .zip(&b.q)
+            .fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+    eprintln!("one step moves joints up to {moved:.3} rad; |cpu-gpu| at most {apart:.2e}");
+    assert!(moved > 0.05, "the step moves the arm ({moved})");
+    assert!(apart < 1e-4, "one IK step differs by {apart} rad");
 }
 
 #[test]

@@ -1,10 +1,11 @@
 //! Batched collision-aware inverse kinematics: damped least squares from many seeds per target,
 //! with the collision gradient projected into the Jacobian null space. A problem gives each hand of
-//! the robot a target or none: each step solves every targeted hand's 6 x 6 system, which is exact
-//! for hands on separate arms (hands whose chains share joints add their steps there), and joints
-//! no targeted hand moves stay where the seed has them.
+//! the robot a target or none: each step solves every targeted hand's 6 x 6 system where the
+//! hands are on separate arms, and their targets as one stacked system where the hands share
+//! joints (a mobile base, a torso), and joints no targeted hand moves stay where the seed has
+//! them.
 
-use crate::error::{Result, ensure_input};
+use crate::error::{Result, ensure_input, input};
 
 use crate::device::{self, CollisionWeights, Device, Worlds};
 use crate::rng::Rng;
@@ -70,6 +71,9 @@ pub struct IkProblem {
     /// Where seed 0 starts instead of the robot's default configuration: the current state, for a
     /// target close to it (see [`IkResult::nearest`]). Every seed starts held joints here.
     pub seed: Option<Vec<f32>>,
+    /// Joints that stay where the seed has them, in every seed, even where a targeted hand moves
+    /// on them: a mobile base placed beside a table while its arms reach.
+    pub hold: Vec<usize>,
 }
 
 impl IkProblem {
@@ -81,6 +85,7 @@ impl IkProblem {
             world,
             targets: vec![Some(target)],
             seed: None,
+            hold: Vec::new(),
         }
     }
 }
@@ -198,6 +203,11 @@ pub fn solve_ik(
                 "IK problem {i}: the seed needs {n} finite values"
             );
         }
+        if let Some(&j) = p.hold.iter().find(|&&j| j >= n) {
+            return Err(input!(
+                "IK problem {i}: holds joint {j} of a robot with {n}"
+            ));
+        }
     }
     let items = problems.len() * o.seeds;
     let mut q = Vec::with_capacity(items * n);
@@ -205,6 +215,9 @@ pub fn solve_ik(
     let mut targets = Vec::with_capacity(items * hands);
     let hand_joints: Vec<Vec<usize>> = (0..hands).map(|h| robot.hand_joints(h)).collect();
     let mut moved = vec![false; n];
+    // Per item and joint, whether it is held; empty when no problem holds one.
+    let holding = problems.iter().any(|p| !p.hold.is_empty());
+    let mut held = Vec::with_capacity(if holding { items * n } else { 0 });
     for p in problems {
         moved.fill(false);
         let targeted = p.targets.iter().enumerate().filter(|(_, t)| t.is_some());
@@ -212,6 +225,9 @@ pub fn solve_ik(
             for &j in &hand_joints[h] {
                 moved[j] = true;
             }
+        }
+        for &j in &p.hold {
+            moved[j] = false;
         }
         let start = p.seed.as_deref().unwrap_or(&robot.default_q);
         let aims = p.targets.iter().flat_map(|t| match t {
@@ -236,9 +252,12 @@ pub fn solve_ik(
             }
             item_world.push(p.world);
             targets.extend_from_slice(&p.targets);
+            if holding {
+                held.extend((0..n).map(|j| p.hold.contains(&j)));
+            }
         }
     }
-    let err = device.ik(worlds, &item_world, &targets, &mut q, o)?;
+    let err = device.ik(worlds, &item_world, &targets, &held, &mut q, o)?;
     let clear = device.clearance(worlds, &item_world, &q)?;
     let success = (0..items)
         .map(|i| {

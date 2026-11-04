@@ -913,6 +913,7 @@ pub fn handover(
                 world: e.task as u32,
                 targets,
                 seed: Some(e.up.end().to_vec()),
+                hold: vec![],
             }
         })
         .collect();

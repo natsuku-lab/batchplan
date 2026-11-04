@@ -366,16 +366,16 @@ Against the version before the audit that pinned the spline to the joint limits,
 
 | Bound | Solved | Alone | One batch | Largest tilt | Length | Optimized, 4 seeds |
 |---|---|---|---|---|---|---|
-| 1° | 54 of 54 | 0.12 ms | 3.1 ms | 1.00° | 2.274 rad | 27 shorter, 2.173 rad |
-| 2° | 54 of 54 | 0.11 ms | 2.4 ms | 2.00° | 2.229 rad | 25 shorter, 2.156 rad |
-| 5° | 54 of 54 | 0.10 ms | 2.6 ms | 5.00° | 2.219 rad | 25 shorter, 2.149 rad |
-| 10° | 54 of 54 | 0.12 ms | 2.0 ms | 9.90° | 2.219 rad | 25 shorter, 2.132 rad |
+| 1° | 54 of 54 | 0.14 ms | 3.0 ms | 0.55° | 2.247 rad | 24 shorter, 2.173 rad |
+| 2° | 54 of 54 | 0.13 ms | 2.6 ms | 1.06° | 2.216 rad | 26 shorter, 2.162 rad |
+| 5° | 54 of 54 | 0.11 ms | 2.6 ms | 5.00° | 2.219 rad | 25 shorter, 2.149 rad |
+| 10° | 54 of 54 | 0.12 ms | 2.1 ms | 9.90° | 2.219 rad | 25 shorter, 2.132 rad |
 | 5°, inside the zone | 54 of 54 | 0.10 ms | 2.7 ms | 4.99° | 2.219 rad | 26 shorter, 2.150 rad |
-| none | 54 of 54 | 0.09 ms | 0.9 ms | 44.65° | 2.176 rad | |
+| none | 54 of 54 | 0.09 ms | 1.0 ms | 44.65° | 2.176 rad | |
 
-- **The constraint costs**, at 5°, a tenth more time per problem alone and 2% more length. A batch takes longer because constrained searches take no help from idle threads, and its longest search sets its time.
-- **Optimization** with 4 seeds takes 110–127 ms for the batch and keeps every bound; the optimized lengths are of the shortest valid seed.
-- **Two arms carrying a tray level** over a block 25 cm tall (two Pandas, the right hand pinned in the left hand's frame, the left within 5° of straight down), from below the block's top to 5 places beyond it: 5 of 5 solved, 0.89 ms per problem alone, 2.3 ms in one batch. Optimization shortens the paths by 21% (3.546 to 2.786 rad on average).
+- **The constraint costs**, at 5°, 0.02 ms more per problem alone and 2% more length. A batch takes longer because constrained searches take no help from idle threads, and its longest search sets its time.
+- **Optimization** with 4 seeds takes 110–124 ms for the batch and keeps every bound; the optimized lengths are of the shortest valid seed.
+- **Two arms carrying a tray level** over a block 25 cm tall (two Pandas, the right hand pinned in the left hand's frame, the left within 5° of straight down), from below the block's top to 5 places beyond it: 5 of 5 solved, 1.11 ms per problem alone, 1.3 ms in one batch. Optimization shortens the paths by 4% (2.473 to 2.373 rad on average): the shortcuts' projected walks leave it less to take out.
 
 ## Picking and placing
 

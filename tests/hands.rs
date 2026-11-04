@@ -106,6 +106,7 @@ fn ik_reaches_both_hands_targets_at_once() {
             world: 0,
             targets: vec![Some(robot.ee_pose(q, 0)), Some(robot.ee_pose(q, 1))],
             seed: None,
+            hold: vec![],
         })
         .collect();
     let o = IkOptions::default();
@@ -144,6 +145,229 @@ fn ik_reaches_both_hands_targets_at_once() {
     }
 }
 
+/// IK's collision push moves only along what keeps every targeted hand where it is: from a
+/// configuration already at both hands' targets, each forearm inside a box, one step moves both
+/// arms and neither hand, but for what the damping lets through (2.07 and 1.80 mm). Projected
+/// with a stale Jacobian, the second hand's push moved the hands 0.29 and 0.27 m. Hands that share
+/// joints push as one system: the Panda's hand and its fourth link (`sharing_hands`), a box at its
+/// sixth link, leave the arm no motion that keeps both, and neither moves.
+#[test]
+fn the_collision_push_keeps_both_hands_at_their_targets() {
+    let robot = two_arms();
+    let q: Vec<f32> = robot.default_q().iter().map(|v| v + 0.4).collect();
+    let boxes = ["left_forearm_link", "right_forearm_link"].map(|link| {
+        let at = robot.link_pose(&q, link).expect("the forearm is a link");
+        Obstacle::cuboid(at.position + Vec3::new(0.0, 0.0, 0.05), Vec3::splat(0.06))
+    });
+    let scene = [World::new(boxes.to_vec())];
+    let problem = IkProblem {
+        world: 0,
+        targets: vec![Some(robot.ee_pose(&q, 0)), Some(robot.ee_pose(&q, 1))],
+        seed: Some(q.clone()),
+        hold: vec![],
+    };
+    let o = IkOptions {
+        seeds: 1,
+        iterations: 1,
+        ..Default::default()
+    };
+    for d in devices(&robot) {
+        let worlds = d.upload(&scene).unwrap();
+        let ik = batchplan::solve_ik(&d, &worlds, std::slice::from_ref(&problem), &o).unwrap();
+        let stepped = &ik.q;
+        let (left, right) = (robot.hand_joints(0), robot.hand_joints(1));
+        let moved = |joints: &[usize]| {
+            joints
+                .iter()
+                .map(|&j| (stepped[j] - q[j]).abs())
+                .fold(0.0, f32::max)
+        };
+        let strayed = |h: usize| {
+            (robot.ee_pose(stepped, h).position - robot.ee_pose(&q, h).position).length()
+        };
+        eprintln!(
+            "{}: the arms move up to {:.4} and {:.4} rad, the hands {:.2e} and {:.2e} m",
+            d.name(),
+            moved(&left),
+            moved(&right),
+            strayed(0),
+            strayed(1)
+        );
+        assert!(
+            moved(&left) > 0.01 && moved(&right) > 0.01,
+            "{}: both boxes push their arm",
+            d.name()
+        );
+        for h in 0..2 {
+            assert!(
+                strayed(h) < 1e-2,
+                "{}: hand {h} strays {} m",
+                d.name(),
+                strayed(h)
+            );
+        }
+    }
+    let robot = sharing_hands();
+    let q = robot.default_q().to_vec();
+    let at = robot
+        .link_pose(&q, "panda_link6")
+        .expect("the sixth link is a link");
+    let scene = [World::new(vec![Obstacle::cuboid(
+        at.position,
+        Vec3::splat(0.06),
+    )])];
+    let problem = IkProblem {
+        world: 0,
+        targets: vec![Some(robot.ee_pose(&q, 0)), Some(robot.ee_pose(&q, 1))],
+        seed: Some(q.clone()),
+        hold: vec![],
+    };
+    for d in devices(&robot) {
+        let worlds = d.upload(&scene).unwrap();
+        let ik = batchplan::solve_ik(&d, &worlds, std::slice::from_ref(&problem), &o).unwrap();
+        for h in 0..2 {
+            let strayed =
+                (robot.ee_pose(&ik.q, h).position - robot.ee_pose(&q, h).position).length();
+            assert!(
+                strayed < 1e-2,
+                "{}: the sharing hand {h} strays {strayed} m",
+                d.name()
+            );
+        }
+    }
+}
+
+/// A problem's held joints stay where its seed has them in every seed, though the targeted hands
+/// move on them, as a mobile base placed beside a table while its arms reach: the Panda's first
+/// two joints held, toward poses it reaches with them there, with one hand and with two hands
+/// sharing those joints (`sharing_hands`), which solve as one system. Holding a joint the robot
+/// lacks is an input error.
+#[test]
+fn ik_holds_the_joints_a_problem_names() {
+    for robot in [common::panda().unwrap(), sharing_hands()] {
+        let cpu = Device::cpu(&robot).unwrap();
+        let scene = [World::default()];
+        let on_cpu = cpu.upload(&scene).unwrap();
+        let seed = robot.default_q().to_vec();
+        let hold = vec![0, 1];
+        let problems: Vec<IkProblem> = configurations(&robot, &cpu, &on_cpu, 32)
+            .into_iter()
+            .map(|mut q| {
+                for &j in &hold {
+                    q[j] = seed[j];
+                }
+                IkProblem {
+                    world: 0,
+                    targets: (0..robot.hands())
+                        .map(|h| Some(robot.ee_pose(&q, h)))
+                        .collect(),
+                    seed: Some(seed.clone()),
+                    hold: hold.clone(),
+                }
+            })
+            .collect();
+        let o = IkOptions::default();
+        let n = robot.dof();
+        for d in devices(&robot) {
+            let worlds = d.upload(&scene).unwrap();
+            let ik = batchplan::solve_ik(&d, &worlds, &problems, &o).unwrap();
+            let solved = ik.solved().count();
+            eprintln!(
+                "{}: {solved} of {} problems with two joints held, {} hands",
+                d.name(),
+                problems.len(),
+                robot.hands()
+            );
+            assert!(
+                solved >= 24,
+                "{}: solved {solved} of {} with {} hands",
+                d.name(),
+                problems.len(),
+                robot.hands()
+            );
+            for (i, q) in ik.q.chunks(n).enumerate() {
+                assert!(
+                    hold.iter().all(|&j| q[j] == seed[j]),
+                    "{}: seed {i} moves a held joint, {} hands",
+                    d.name(),
+                    robot.hands()
+                );
+            }
+            let wrong = IkProblem {
+                hold: vec![n],
+                ..problems[0].clone()
+            };
+            match batchplan::solve_ik(&d, &worlds, &[wrong], &o) {
+                Err(Error::Input(m)) => assert!(m.contains(&format!("holds joint {n}")), "{m}"),
+                other => panic!("holding joint {n} should be an input error, got {other:?}"),
+            }
+        }
+    }
+}
+
+/// The Panda with a second hand at its fourth link, sharing joints 1-4 with the first, as two arms
+/// on one mobile base share its joints.
+fn sharing_hands() -> Robot {
+    let options = RobotOptions {
+        ee_links: vec!["panda_hand".into(), "panda_link4".into()],
+        ..common::panda_options()
+    };
+    Robot::load(common::asset("franka/franka_panda.urdf"), &options).unwrap()
+}
+
+/// IK solves hands that share joints as one system: with each hand's step taken alone and summed,
+/// both moved the shared joints in full, and the default iterations ended short of the targets.
+#[test]
+fn ik_solves_hands_that_share_joints_together() {
+    let robot = sharing_hands();
+    let (first, second) = (robot.hand_joints(0), robot.hand_joints(1));
+    assert!(
+        second.len() == 4 && second.iter().all(|j| first.contains(j)),
+        "the second hand moves on four of the first's joints"
+    );
+    let cpu = Device::cpu(&robot).unwrap();
+    let scene = [World::default()];
+    let on_cpu = cpu.upload(&scene).unwrap();
+    let problems: Vec<IkProblem> = configurations(&robot, &cpu, &on_cpu, 32)
+        .iter()
+        .map(|q| IkProblem {
+            world: 0,
+            targets: vec![Some(robot.ee_pose(q, 0)), Some(robot.ee_pose(q, 1))],
+            seed: None,
+            hold: vec![],
+        })
+        .collect();
+    let o = IkOptions::default();
+    for d in devices(&robot) {
+        let worlds = d.upload(&scene).unwrap();
+        let ik = batchplan::solve_ik(&d, &worlds, &problems, &o).unwrap();
+        let solved: Vec<_> = ik.solved().collect();
+        eprintln!(
+            "{}: {} of {} problems with hands sharing joints",
+            d.name(),
+            solved.len(),
+            problems.len()
+        );
+        assert!(
+            solved.len() >= 28,
+            "{}: solved {} of {}",
+            d.name(),
+            solved.len(),
+            problems.len()
+        );
+        for s in &solved {
+            for (hand, target) in s.problem.targets.iter().enumerate() {
+                let reached = robot.ee_pose(s.solution, hand);
+                assert!(
+                    (reached.position - target.unwrap().position).length() < o.position_tolerance,
+                    "{}: hand {hand} misses",
+                    d.name()
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn a_hand_without_a_target_holds_its_arm() {
     let robot = two_arms();
@@ -159,6 +383,7 @@ fn a_hand_without_a_target_holds_its_arm() {
             world: 0,
             targets: vec![Some(robot.ee_pose(&w[1], 0)), None],
             seed: Some(w[0].clone()),
+            hold: vec![],
         })
         .collect();
     for d in devices(&robot) {
@@ -199,6 +424,7 @@ fn reach_demonstrations_need_a_first_hand_target() {
         world: 0,
         targets: vec![None, Some(robot.ee_pose(robot.default_q(), 1))],
         seed: None,
+        hold: vec![],
     }];
     let err = datagen::demonstrations(&cpu, &worlds, &goals, &DemoOptions::default()).unwrap_err();
     assert!(

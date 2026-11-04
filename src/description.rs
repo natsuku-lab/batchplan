@@ -418,9 +418,16 @@ fn sign(bit: u32) -> f32 {
 }
 
 fn load_mesh(path: &Path, scale: Vec3) -> Result<TriMesh> {
-    let scene = Loader::default()
-        .load(path)
-        .with_context(|| format!("loading mesh {}", path.display()))?;
+    let loading = || format!("loading mesh {}", path.display());
+    let scene = if binary_stl(path).with_context(loading)? {
+        // The header holds no geometry: blanked, it cannot pass for ASCII.
+        let mut bytes = std::fs::read(path).with_context(loading)?;
+        bytes[..80].fill(0);
+        Loader::default().load_stl_from_slice(&bytes, path)
+    } else {
+        Loader::default().load(path)
+    }
+    .with_context(loading)?;
     let mut mesh = TriMesh::default();
     for m in scene.meshes {
         mesh.append(TriMesh {
@@ -432,6 +439,29 @@ fn load_mesh(path: &Path, scale: Vec3) -> Result<TriMesh> {
         bail!("mesh {} has no triangles", path.display());
     }
     Ok(mesh)
+}
+
+/// Whether `path` is an STL of exactly the binary layout's size (an 80-byte header, the triangle
+/// count, 50 bytes per triangle), as trimesh tells binary from ASCII. mesh-loader reads a file
+/// that starts with "solid" as ASCII, and binary ones may: CAD exporters write "solid <name>" in
+/// the header, and a line break in the count then fails its parse.
+fn binary_stl(path: &Path) -> std::io::Result<bool> {
+    use std::io::Read;
+    if !path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("stl"))
+    {
+        return Ok(false);
+    }
+    let mut file = std::fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    if size < 84 {
+        return Ok(false);
+    }
+    let mut head = [0u8; 84];
+    file.read_exact(&mut head)?;
+    let triangles = u32::from_le_bytes([head[80], head[81], head[82], head[83]]);
+    Ok(size == 84 + 50 * u64::from(triangles))
 }
 
 /// Loads a robot description, choosing the format by file extension.

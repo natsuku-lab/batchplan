@@ -376,7 +376,7 @@ enum Phase<'call> {
     /// RRT-Connect keeping the clearance first (if any), then without it.
     Search(Box<Connect<'call>>, bool),
     Simplify(Box<Simplify<'call>>),
-    Fitting(Box<Fitting>),
+    Fitting(Box<Fitting<'call>>),
     Repair(Box<Repair>),
     Done,
 }
@@ -488,7 +488,7 @@ fn next_fit(
             return None;
         }
         let path = &fit.paths[fit.path];
-        let through = (!problem.constraints.is_empty()).then_some(robot);
+        let through = fit.projector.as_mut();
         if !fit_spline(path, n, &fit.pins, through, &mut fit.spline, &mut fit.at) {
             fit.path += 1;
             fit.restart();
@@ -573,7 +573,7 @@ const START_KNOTS: [f32; 3] = [1.0, 1.5, 2.25];
 /// valid, each stop's widest first (`BLENDS` of them), as OpenRAVE's smoother takes a path that
 /// stops at its waypoints and removes the stops, and as TOTG passes corners within a deviation,
 /// which it does not check. Each check after the first starts at the first span a change reaches.
-struct Fitting {
+struct Fitting<'call> {
     paths: [Vec<f32>; 2],
     /// What the splines keep from the world, round by round: the shortcuts' clearance, then
     /// `SPLINE_MARGIN`.
@@ -595,11 +595,13 @@ struct Fitting {
     from: usize,
     /// The stop of a valid spline that blends are being tried at.
     relaxing: Option<usize>,
-    /// The problem's constraints.
+    /// The problem's constraints, and the projection that puts the points a constrained spline
+    /// passes through inside them.
     region: Option<Arc<Region>>,
+    projector: Option<Projector<'call>>,
 }
 
-impl Fitting {
+impl Fitting<'_> {
     /// No waypoint of the current path pinned.
     fn restart(&mut self) {
         let n = self.spline.len() / self.at.len();
@@ -721,7 +723,7 @@ impl Search for Planning<'_> {
                     else {
                         unreachable!()
                     };
-                    let (smooth, short) = simplify.into_paths();
+                    let (smooth, short, projector) = simplify.into_paths();
                     let (n, points) = (self.robot.dof(), self.o.control_points);
                     let ends = vec![short[..n].to_vec(), short[short.len() - n..].to_vec()];
                     let ramp = self.o.shortcut.clearance_ramp;
@@ -758,15 +760,15 @@ impl Search for Planning<'_> {
                         from: 0,
                         relaxing: None,
                         region: self.region.clone(),
+                        projector,
                     };
                     fit.restart();
                     // Optimization, if any, starts from the smoothed path spread out.
-                    let through = (!self.problem.constraints.is_empty()).then_some(self.robot);
                     fit_spline(
                         &fit.paths[0],
                         n,
                         &fit.pins,
-                        through,
+                        fit.projector.as_mut(),
                         &mut fit.spline,
                         &mut fit.at,
                     );
@@ -1107,15 +1109,17 @@ fn hold_still(path: &mut [f32], start: &[f32], hold: &[usize]) {
 /// blends use at most half of either edge), and each level a quarter of the last. At the ends and
 /// at `EXACT` the three coincide: the curve passes through, stopping there. `at` gets each control
 /// point's distance along the path. With nothing pinned the control points spread along the whole
-/// path; with every waypoint pinned `EXACT` the curve runs exactly along it. With `through`, the
-/// free control points move so that the curve passes through the points they were placed at,
-/// within that robot's joint limits (`through_knots`). False if the pins need more control points
+/// path; with every waypoint pinned `EXACT` the curve runs exactly along it. With `through`, a
+/// constrained path's projection, the free control points move so that the curve passes through
+/// the points they were placed at, within the robot's joint limits (`through_knots`); under tight
+/// constraints (`Projector::tight`), which a point between waypoints, on the straight edge, can
+/// leave, those points are projected into them first. False if the pins need more control points
 /// than `out` holds.
 fn fit_spline(
     path: &[f32],
     n: usize,
     pinned: &[u8],
-    through: Option<&Robot>,
+    mut through: Option<&mut Projector<'_>>,
     out: &mut [f32],
     at: &mut [f32],
 ) -> bool {
@@ -1157,7 +1161,7 @@ fn fit_spline(
         counts[i.expect("a path has two ends")] += 1;
     }
     let mut t = 0;
-    let mut q = vec![0.0; n];
+    let (mut q, mut projected) = (vec![0.0; n], vec![0.0; n]);
     let mut put = |q: &[f32], s: f32, t: &mut usize| {
         out[*t * n..(*t + 1) * n].copy_from_slice(q);
         at[*t] = s;
@@ -1178,15 +1182,21 @@ fn fit_spline(
         for c in 1..=counts.get(i).copied().unwrap_or(0) {
             let s = along[pin] + blend + stretch[i] * c as f32 / (counts[i] + 1) as f32;
             shortcut::locate(path, n, s, &mut q);
+            if let Some(projector) = through.as_mut().filter(|p| p.tight()) {
+                projected.clone_from(&q);
+                if projector.project(&mut projected) {
+                    q.clone_from(&projected);
+                }
+            }
             put(&q, s, &mut t);
         }
         if through.is_some() {
             free.push(first..t);
         }
     }
-    if let Some(robot) = through {
+    if let Some(projector) = through {
         for stretch in free {
-            through_knots(out, n, stretch, robot);
+            through_knots(out, n, stretch, projector.robot());
         }
     }
     true
@@ -1389,6 +1399,48 @@ mod tests {
         ));
     }
 
+    /// A constrained spline passes through points inside its constraints, its free control points
+    /// placed along the path and projected before the curve is solved through them: on three
+    /// waypoints the pinned right hand of two Pandas follows (`pinned_pandas`), whose straight
+    /// edges leave the 2 mm floor, the curve keeps it at every free control point's knot.
+    #[test]
+    fn constrained_splines_pass_through_points_inside_their_constraints() {
+        let (robot, pinned, start) = crate::constraint::pinned_pandas();
+        let mut projector = Projector::new(&robot, &[pinned], &[]);
+        let n = robot.dof();
+        let mut path = start.clone();
+        let mut q = start;
+        for turn in 1..=10 {
+            q[0] += 0.15;
+            assert!(projector.project(&mut q), "the right arm follows the left");
+            if turn % 5 == 0 {
+                path.extend_from_slice(&q);
+            }
+        }
+        let middle: Vec<f32> = (0..n).map(|j| 0.5 * (path[j] + path[n + j])).collect();
+        assert!(!projector.keeps(&middle), "the first edge keeps the bounds");
+        let points = 12;
+        let (mut out, mut at) = (vec![0.0; points * n], vec![0.0; points]);
+        assert!(fit_spline(
+            &path,
+            n,
+            &[0; 3],
+            Some(&mut projector),
+            &mut out,
+            &mut at
+        ));
+        for k in 3..points - 3 {
+            let c = |i: usize| &out[i * n..(i + 1) * n];
+            let knot: Vec<f32> = (0..n)
+                .map(|j| (c(k - 1)[j] + 4.0 * c(k)[j] + c(k + 1)[j]) / 6.0)
+                .collect();
+            assert!(
+                projector.keeps(&knot),
+                "the curve leaves the bounds at knot {k}"
+            );
+        }
+    }
+
     /// Validation refuses a path clear of the world where a sample breaks its constraints: the
     /// Panda's hand tilted 0.6 rad on the way between two states that keep it level.
     #[test]
@@ -1514,6 +1566,7 @@ mod tests {
             from: 0,
             relaxing: None,
             region: None,
+            projector: None,
         };
         fit.restart();
         let mut buffer = vec![];

@@ -316,6 +316,7 @@ impl Device {
         worlds: &Worlds,
         item_world: &[u32],
         targets: &[Option<Pose>],
+        held: &[bool],
         q: &mut [f32],
         o: &IkOptions,
     ) -> Result<Vec<[f32; 2]>> {
@@ -327,7 +328,13 @@ impl Device {
             targets.len(),
             item_world.len()
         );
-        self.backend.ik(worlds, item_world, targets, q, o)
+        ensure_input!(
+            held.is_empty() || held.len() == q.len(),
+            "{} held flags for {} joint values",
+            held.len(),
+            q.len()
+        );
+        self.backend.ik(worlds, item_world, targets, held, q, o)
     }
 
     /// Optimizes `paths` in place, each in its world, keeping its constraints (`Region::inset`) if
@@ -436,13 +443,14 @@ pub(crate) trait Backend: Send + Sync {
     /// Runs every search to its end, or to `deadline`, each on one CPU thread (see `edges`).
     fn search(&self, worlds: &Worlds, searches: &mut [&mut dyn Search], deadline: Option<Instant>);
     /// Runs IK in place on `q` (`[items, dof]`) toward `targets` (`[items, hands]`, `None` for a
-    /// hand held still); returns each item's largest `[position error, rotation error]` over its
-    /// targeted hands.
+    /// hand held still), the joints `held` marks (`[items, dof]`, or empty for none) staying put;
+    /// returns each item's largest `[position error, rotation error]` over its targeted hands.
     fn ik(
         &self,
         worlds: &Worlds,
         item_world: &[u32],
         targets: &[Option<Pose>],
+        held: &[bool],
         q: &mut [f32],
         o: &IkOptions,
     ) -> Result<Vec<[f32; 2]>>;

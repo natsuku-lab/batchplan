@@ -327,6 +327,71 @@ fn fitting_is_deterministic() {
     assert_eq!(load(UR5E).collision_model(), load(UR5E).collision_model());
 }
 
+/// A binary STL may start with "solid": its 80-byte header is free text, which CAD exporters fill
+/// with "solid <name>" (TIAGo Pro's meshes have it). Thirteen triangles put a carriage return in
+/// the count, which ends that "solid" line for a parser reading ASCII. It loads as its ASCII twin.
+#[test]
+fn binary_stls_that_start_with_solid_load_as_their_ascii_twin() {
+    use std::fmt::Write;
+    let corners = |i: usize| Vec3::new((i & 1) as f32, ((i >> 1) & 1) as f32, (i >> 2) as f32);
+    let quads = [
+        [0, 1, 3, 2],
+        [4, 6, 7, 5],
+        [0, 4, 5, 1],
+        [2, 3, 7, 6],
+        [0, 2, 6, 4],
+        [1, 5, 7, 3],
+    ];
+    let mut triangles: Vec<[Vec3; 3]> = quads
+        .iter()
+        .flat_map(|&[a, b, c, d]| [[a, b, c], [a, c, d]])
+        .map(|t| t.map(|i| 0.1 * corners(i)))
+        .collect();
+    triangles.push(triangles[0]);
+    assert_eq!(triangles.len(), 13, "13 is a carriage return");
+    let mut binary = format!("{:<80}", "solid exported cube").into_bytes();
+    binary.extend(13u32.to_le_bytes());
+    let mut ascii = String::from("solid exported cube\n");
+    for t in &triangles {
+        binary.extend([0.0f32; 3].iter().flat_map(|v| v.to_le_bytes()));
+        binary.extend(
+            t.iter()
+                .flat_map(|v| v.to_array())
+                .flat_map(f32::to_le_bytes),
+        );
+        binary.extend([0, 0]);
+        ascii += "facet normal 0 0 0\nouter loop\n";
+        for v in t {
+            writeln!(ascii, "vertex {} {} {}", v.x, v.y, v.z).expect("writing to a String");
+        }
+        ascii += "endloop\nendfacet\n";
+    }
+    ascii += "endsolid exported cube\n";
+    let dir = scratch("solid-stl");
+    std::fs::write(dir.join("binary.stl"), binary).unwrap();
+    std::fs::write(dir.join("ascii.stl"), ascii).unwrap();
+    let robot = |mesh: &str| {
+        let urdf = format!(
+            r#"<robot name="cube"><link name="base"/>
+              <joint name="j" type="revolute"><parent link="base"/><child link="cube"/>
+                <axis xyz="0 0 1"/><limit lower="-1" upper="1" effort="1" velocity="1"/></joint>
+              <link name="cube"><collision><geometry><mesh filename="{}"/></geometry></collision></link>
+            </robot>"#,
+            dir.join(mesh).display()
+        );
+        let path = dir.join(format!("{mesh}.urdf"));
+        std::fs::write(&path, urdf).unwrap();
+        Robot::load(&path, &RobotOptions::default())
+    };
+    let twin = robot("ascii.stl").unwrap();
+    assert!(
+        !twin.collision_model().spheres["cube"].is_empty(),
+        "the cube is fitted with spheres"
+    );
+    let binary = robot("binary.stl").unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(binary.collision_model(), twin.collision_model());
+}
+
 #[test]
 fn collision_models_round_trip_through_files() {
     let fitted = load(SO101);
