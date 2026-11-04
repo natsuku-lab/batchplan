@@ -60,17 +60,17 @@ pub struct Solved<'result, P> {
     pub solution: &'result [f32],
 }
 
-/// A batch of joint-space paths with a shared control-point count, row-major `[len, points, dof]`.
-/// Each path is a uniform cubic B-spline over its control points (see [`crate::timing`]).
+/// A batch of joint-space paths with a shared control-point count, row-major `[len, points, dof]`,
+/// as trajectory optimization runs them. Each path is a uniform cubic B-spline over its control
+/// points (see [`crate::timing`]).
 #[derive(Clone, Debug, PartialEq)]
-#[non_exhaustive]
-pub struct JointPaths {
+pub(crate) struct JointPaths {
     /// Joints per configuration.
-    pub dof: usize,
+    pub(crate) dof: usize,
     /// Control points per path.
-    pub points: usize,
+    pub(crate) points: usize,
     /// Every path's control points, `[len, points, dof]`.
-    pub positions: Vec<f32>,
+    pub(crate) positions: Vec<f32>,
 }
 
 impl JointPaths {
@@ -83,20 +83,12 @@ impl JointPaths {
     }
 
     /// The number of paths.
-    #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.positions.len() / (self.points * self.dof)
     }
 
-    /// Whether there are no paths.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.positions.is_empty()
-    }
-
     /// Path `i` as `[points, dof]`.
-    #[must_use]
-    pub fn path(&self, i: usize) -> &[f32] {
+    pub(crate) fn path(&self, i: usize) -> &[f32] {
         let n = self.points * self.dof;
         &self.positions[i * n..(i + 1) * n]
     }

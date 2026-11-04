@@ -34,10 +34,14 @@ pub struct PlanOptions {
     /// Seeds trajectory optimization runs per problem, besides the searched path: its spline, the
     /// straight lines to the goal and its equivalents, then bends through random via points.
     /// Problems searched to within 2% of the straight line are not optimized (their seeds stay
-    /// invalid). Constrained problems' seeds keep their constraints as a cost, and are kept only
-    /// where every sample keeps them. 0 keeps the searched path as it is.
+    /// invalid), unless their spline needed more control points than `control_points`.
+    /// Constrained problems' seeds keep their constraints as a cost, and are kept only where every
+    /// sample keeps them. 0 keeps the searched path as it is.
     pub seeds: usize,
-    /// B-spline control points per path, including the three pinned at each end (at least 7).
+    /// B-spline control points per path, including the three pinned at each end (at least 7). A
+    /// searched path that no spline this size follows, fitted or repaired, is fitted again with
+    /// twice as many (one found near the straight line is searched again first), while fewer are
+    /// free than the path has waypoints. Optimized seeds keep this count.
     pub control_points: usize,
     /// Collision samples per span during optimization.
     pub samples_per_span: usize,
@@ -180,8 +184,10 @@ pub struct PlanResult {
     pub problems: Vec<PlanProblem>,
     /// Seeds per problem: the searched path, then [`PlanOptions::seeds`] optimized ones.
     pub seeds: usize,
-    /// B-spline control points of every seed's path.
-    pub paths: JointPaths,
+    /// Every seed's path as B-spline control points (`[points, dof]`): as many as
+    /// [`PlanOptions::control_points`], or more where the searched path needed them; empty where a
+    /// seed has none.
+    pub paths: Vec<Vec<f32>>,
     /// Per seed: whether its path passed validation, collision-free along it.
     pub valid: Vec<bool>,
     /// Joint-space path length.
@@ -195,7 +201,7 @@ impl PlanResult {
         (problem * self.seeds..(problem + 1) * self.seeds)
             .filter(|&i| self.valid[i])
             .min_by(|&a, &b| self.length[a].total_cmp(&self.length[b]))
-            .map(|i| self.paths.path(i))
+            .map(|i| self.paths[i].as_slice())
     }
 
     /// Every problem with a valid seed, with its best path's control points (`[points, dof]`);
@@ -226,7 +232,6 @@ pub fn plan(
     let deadline = o.time_budget.map(|budget| Instant::now() + budget);
     let robot = device.robot();
     let n = robot.dof();
-    let points = o.control_points;
     o.check()?;
     for (pi, p) in problems.iter().enumerate() {
         ensure_input!(
@@ -278,7 +283,7 @@ pub fn plan(
     let mut result = PlanResult {
         problems: problems.to_vec(),
         seeds,
-        paths: JointPaths::zeros(problems.len() * seeds, points, n),
+        paths: vec![Vec::new(); problems.len() * seeds],
         valid: vec![false; problems.len() * seeds],
         length: vec![f32::INFINITY; problems.len() * seeds],
     };
@@ -297,11 +302,11 @@ pub fn plan(
     let mut searched = Vec::with_capacity(problems.len());
     let built = plannings.into_iter().map(Deferred::into_inner);
     for (pi, planning) in built.enumerate() {
-        if let Some((spline, length)) = &planning.chosen {
+        if let Some((spline, length)) = planning.chosen {
             let item = pi * seeds;
-            result.paths.path_mut(item).copy_from_slice(spline);
+            result.paths[item] = spline;
             result.valid[item] = true;
-            result.length[item] = *length;
+            result.length[item] = length;
         }
         searched.push(planning.start);
     }
@@ -316,9 +321,7 @@ pub fn plan(
     let stuck: Vec<usize> = device.install(|| {
         optimized
             .into_par_iter()
-            .filter(|&item| {
-                !runs_from_start(robot, &problems[item / seeds], result.paths.path(item))
-            })
+            .filter(|&item| !runs_from_start(robot, &problems[item / seeds], &result.paths[item]))
             .collect()
     });
     for item in stuck {
@@ -350,7 +353,9 @@ const KEEP_ITERATIONS: usize = 500;
 /// One problem's planning, run whole on a device thread: RRT-Connect toward every equivalent goal,
 /// simplification, then splines along the path checked shortest first. If none is valid (one cuts
 /// a corner into an obstacle, or cannot follow the start motion), the first is optimized for
-/// `REPAIR_ITERATIONS` steps on the same thread and checked again.
+/// `REPAIR_ITERATIONS` steps on the same thread and checked again. If that fails too, a path found
+/// near the straight line is searched again without the tube, and the last path's splines get
+/// twice the control points, both running again (`Fitting::grow`).
 struct Planning<'call> {
     robot: &'call Robot,
     problem: &'call PlanProblem,
@@ -358,7 +363,8 @@ struct Planning<'call> {
     phase: Phase<'call>,
     /// The shortest valid spline and its length.
     chosen: Option<(Vec<f32>, f32)>,
-    /// The spline optimization starts from: the chosen one, or the shortest candidate.
+    /// The spline optimization starts from, with its seeds' control points: the chosen one if it
+    /// has as many, else the smoothed path spread out.
     start: Option<Vec<f32>>,
     /// Whether the search found its path after sampling the tube around the straight line; if no
     /// spline follows that path, the problem is searched again without the tube.
@@ -377,13 +383,15 @@ enum Phase<'call> {
     Search(Box<Connect<'call>>, bool),
     Simplify(Box<Simplify<'call>>),
     Fitting(Box<Fitting<'call>>),
-    Repair(Box<Repair>),
+    Repair(Box<Repair<'call>>),
     Done,
 }
 
 /// A stuck spline under repair: optimized a round at a time, its held joints put back and checked
 /// after each round, keeping the splines' last clearance (`keep`), and after the last round without.
-struct Repair {
+/// It keeps the fit it repairs, to grow if the repair fails.
+struct Repair<'call> {
+    fit: Box<Fitting<'call>>,
     spline: Vec<f32>,
     optimizer: PathOptimizer,
     /// Rounds handed to the optimizer.
@@ -573,6 +581,9 @@ const START_KNOTS: [f32; 3] = [1.0, 1.5, 2.25];
 /// valid, each stop's widest first (`BLENDS` of them), as OpenRAVE's smoother takes a path that
 /// stops at its waypoints and removes the stops, and as TOTG passes corners within a deviation,
 /// which it does not check. Each check after the first starts at the first span a change reaches.
+/// Where no spline is valid and neither is its repair, the splines get twice the control points
+/// and all of it runs again (`grow`), as FITPACK adds knots until its fit holds, while fewer are
+/// free than the longer path has waypoints, the density of TOPP-RA's spline through every waypoint.
 struct Fitting<'call> {
     paths: [Vec<f32>; 2],
     /// What the splines keep from the world, round by round: the shortcuts' clearance, then
@@ -599,9 +610,47 @@ struct Fitting<'call> {
     /// passes through inside them.
     region: Option<Arc<Region>>,
     projector: Option<Projector<'call>>,
+    /// The first spline at the current count, the smoothed path spread out, which a repair starts
+    /// from.
+    first: Vec<f32>,
 }
 
 impl Fitting<'_> {
+    /// The smoothed path spread out at the current count, continuing `problem`'s start motion if it
+    /// has one, as the spline under check and `first`, no waypoint pinned.
+    fn spread(&mut self, robot: &Robot, problem: &PlanProblem) {
+        let n = robot.dof();
+        self.restart();
+        let path = &self.paths[0];
+        fit_spline(
+            path,
+            n,
+            &self.pins,
+            self.projector.as_mut(),
+            &mut self.spline,
+            &mut self.at,
+        );
+        if let Some(m) = &problem.start_motion {
+            let goal = &path[path.len() - n..];
+            continue_motion(robot, &problem.start, goal, m, 1.0, &mut self.spline);
+        }
+        self.first.clone_from(&self.spline);
+    }
+
+    /// Twice the control points, from the first round and path on, while fewer are free (between
+    /// the three at each end) than the longer path has waypoints; false once as many are.
+    fn grow(&mut self, robot: &Robot, problem: &PlanProblem) -> bool {
+        let (n, points) = (robot.dof(), self.at.len());
+        if points - 6 >= self.paths[0].len().max(self.paths[1].len()) / n {
+            return false;
+        }
+        self.spline = vec![0.0; 2 * points * n];
+        self.at = vec![0.0; 2 * points];
+        (self.round, self.path) = (0, 0);
+        self.spread(robot, problem);
+        true
+    }
+
     /// No waypoint of the current path pinned.
     fn restart(&mut self) {
         let n = self.spline.len() / self.at.len();
@@ -761,29 +810,11 @@ impl Search for Planning<'_> {
                         relaxing: None,
                         region: self.region.clone(),
                         projector,
+                        first: vec![],
                     };
-                    fit.restart();
                     // Optimization, if any, starts from the smoothed path spread out.
-                    fit_spline(
-                        &fit.paths[0],
-                        n,
-                        &fit.pins,
-                        fit.projector.as_mut(),
-                        &mut fit.spline,
-                        &mut fit.at,
-                    );
-                    if let Some(m) = &self.problem.start_motion {
-                        let goal = &fit.paths[0][fit.paths[0].len() - n..];
-                        continue_motion(
-                            self.robot,
-                            &self.problem.start,
-                            goal,
-                            m,
-                            1.0,
-                            &mut fit.spline,
-                        );
-                    }
-                    self.start = Some(fit.spline.clone());
+                    fit.spread(self.robot, self.problem);
+                    self.start = Some(fit.first.clone());
                     // A spline along a straight line runs on it.
                     if self.line_checked
                         && fit.paths[0].len() == 2 * n
@@ -806,8 +837,11 @@ impl Search for Planning<'_> {
                     if let Some(query) = next_fit(self.robot, self.problem, self.o, fit, buffer) {
                         return Some(query);
                     }
-                    let spline = self.start.clone().expect("fitting follows simplification");
-                    let points = spline.len() / self.robot.dof();
+                    let Phase::Fitting(fit) = std::mem::replace(&mut self.phase, Phase::Done)
+                    else {
+                        unreachable!()
+                    };
+                    let points = fit.first.len() / self.robot.dof();
                     self.phase = Phase::Repair(Box::new(Repair {
                         optimizer: PathOptimizer::new(
                             self.robot,
@@ -817,11 +851,12 @@ impl Search for Planning<'_> {
                                 Arc::new(Region::inset(self.robot, &self.problem.constraints))
                             }),
                         ),
-                        spline,
+                        spline: fit.first.clone(),
                         rounds: 0,
                         keep: fit.keeps.last().expect("splines keep a clearance").clone(),
                         optimized: false,
                         checking: None,
+                        fit,
                     }));
                 }
                 // Not yet optimized: `optimize` hands the spline over first.
@@ -882,7 +917,9 @@ impl Search for Planning<'_> {
                 let passed = answer == fit.dense.len() / n;
                 fit.clear = answer;
                 if passed {
-                    self.start = Some(fit.spline.clone());
+                    if fit.spline.len() == self.o.control_points * n {
+                        self.start = Some(fit.spline.clone());
+                    }
                     self.chosen = Some((fit.spline.clone(), shortcut::length(&fit.dense, n)));
                 }
                 if passed || fit.relaxing.is_some() {
@@ -902,7 +939,15 @@ impl Search for Planning<'_> {
                     self.chosen = Some((spline, shortcut::length(&dense, n)));
                     self.phase = Phase::Done;
                 } else if repair.optimizer.finished() {
-                    self.phase = Phase::Done;
+                    let Phase::Repair(repair) = std::mem::replace(&mut self.phase, Phase::Done)
+                    else {
+                        unreachable!()
+                    };
+                    // A path found near the straight line is searched again first (`Phase::Done`).
+                    let mut fit = repair.fit;
+                    if !self.near_line && fit.grow(self.robot, self.problem) {
+                        self.phase = Phase::Fitting(fit);
+                    }
                 }
             }
             Phase::Done => unreachable!("answers follow requests"),
@@ -954,7 +999,8 @@ const OPTIMIZE_SLACK: f32 = 0.02;
 
 /// Trajectory optimization of `o.seeds` seeds per problem into seeds 1 onward: the searched
 /// spline where there is one, straight lines to the goal and its equivalents, and bends through
-/// random via points. Problems whose searched path is within `OPTIMIZE_SLACK` of straight keep it.
+/// random via points. Problems whose searched spline is within `OPTIMIZE_SLACK` of straight keep it,
+/// unless it grew: they were optimized before it could.
 fn optimize(
     device: &Device,
     worlds: &Worlds,
@@ -967,9 +1013,12 @@ fn optimize(
     let (n, points) = (robot.dof(), o.control_points);
     let near_straight = |pi: usize| {
         let item = pi * result.seeds;
-        let searched = result.paths.path(item);
-        let straight = rrt::distance(&searched[..n], &searched[searched.len() - n..]);
-        result.valid[item] && result.length[item] <= straight * (1.0 + OPTIMIZE_SLACK)
+        let searched = &result.paths[item];
+        result.valid[item]
+            && searched.len() == points * n
+            && result.length[item]
+                <= rrt::distance(&searched[..n], &searched[searched.len() - n..])
+                    * (1.0 + OPTIMIZE_SLACK)
     };
     let wanted: Vec<usize> = (0..result.problems.len())
         .filter(|&pi| !near_straight(pi))
@@ -1022,7 +1071,7 @@ fn optimize(
     for (w, &pi) in wanted.iter().enumerate() {
         for s in 0..o.seeds {
             let (from, to) = (w * o.seeds + s, pi * result.seeds + 1 + s);
-            result.paths.path_mut(to).copy_from_slice(paths.path(from));
+            result.paths[to] = paths.path(from).to_vec();
             result.valid[to] = clearance[from] >= 0.0;
             result.length[to] = lengths[from];
         }
@@ -1482,6 +1531,67 @@ mod tests {
         assert!(kept[0].is_nan(), "the tilted path is valid: {}", kept[0]);
     }
 
+    /// A problem searched to within `OPTIMIZE_SLACK` of its straight line keeps its spline without
+    /// optimization, unless the spline grew: no spline at the seeds' count followed the path, and
+    /// the seeds were optimized before splines grew.
+    #[test]
+    fn grown_splines_near_the_straight_line_are_optimized() {
+        use crate::world::World;
+
+        let fingers = [
+            ("panda_finger_joint1".to_string(), 0.04),
+            ("panda_finger_joint2".to_string(), 0.04),
+        ];
+        let options = RobotOptions {
+            lock_joints: HashMap::from(fingers),
+            ..Default::default()
+        };
+        let robot = Robot::load("assets/franka/franka_panda.urdf", &options).unwrap();
+        let device = Device::cpu(&robot).unwrap();
+        let worlds = device.upload(&[World::default()]).unwrap();
+        let (n, start) = (robot.dof(), robot.default_q().to_vec());
+        let mut goal = start.clone();
+        goal[0] += 1.0;
+        let o = PlanOptions {
+            seeds: 2,
+            ..PlanOptions::default()
+        };
+        let straight = |points: usize| {
+            let mut path = vec![0.0; points * n];
+            seed_path(&robot, &start, &goal, true, &mut Rng::new(0), &mut path);
+            path
+        };
+        let base = straight(o.control_points);
+        for (searched, optimized) in [
+            (base.clone(), false),
+            (straight(2 * o.control_points), true),
+        ] {
+            let mut result = PlanResult {
+                problems: vec![PlanProblem::new(0, start.clone(), goal.clone())],
+                seeds: 1 + o.seeds,
+                paths: vec![searched, vec![], vec![]],
+                valid: vec![true, false, false],
+                length: vec![1.0, f32::INFINITY, f32::INFINITY],
+            };
+            optimize(
+                &device,
+                &worlds,
+                &mut result,
+                &[Some(base.clone())],
+                &o,
+                None,
+            )
+            .unwrap();
+            let seeded = result.paths[1..].iter().filter(|p| !p.is_empty()).count();
+            assert_eq!(
+                seeded,
+                if optimized { o.seeds } else { 0 },
+                "a straight spline of {} control points",
+                result.paths[0].len() / n
+            );
+        }
+    }
+
     /// A joint whose range spans more than a turn may end a turn away, unless it is held.
     #[test]
     fn search_goals_never_turn_held_joints() {
@@ -1567,6 +1677,7 @@ mod tests {
             relaxing: None,
             region: None,
             projector: None,
+            first: vec![],
         };
         fit.restart();
         let mut buffer = vec![];
@@ -1596,6 +1707,79 @@ mod tests {
                 query.edges,
                 fit.dense[fit.from * n..],
                 "pin {pin} at {w}: the check stops short"
+            );
+        }
+    }
+
+    /// The splines double their control points while fewer are free than the longer of the two
+    /// paths has waypoints, each time starting over spread along the smoothed path, unpinned.
+    #[test]
+    fn splines_grow_until_as_dense_as_their_waypoints() {
+        let fingers = [
+            ("panda_finger_joint1".to_string(), 0.04),
+            ("panda_finger_joint2".to_string(), 0.04),
+        ];
+        let options = RobotOptions {
+            lock_joints: HashMap::from(fingers),
+            ..Default::default()
+        };
+        let robot = Robot::load("assets/franka/franka_panda.urdf", &options).unwrap();
+        let n = robot.dof();
+        let zigzag = |waypoints: usize| -> Vec<f32> {
+            (0..waypoints)
+                .flat_map(|w| (0..n).map(move |j| 0.1 * w as f32 + 0.05 * ((w + j) % 2) as f32))
+                .collect()
+        };
+        // Either path may be the longer one.
+        for (smoothed, shortcut) in [(20, 25), (25, 20)] {
+            let (smooth, short) = (zigzag(smoothed), zigzag(shortcut));
+            let problem =
+                PlanProblem::new(0, smooth[..n].to_vec(), smooth[smooth.len() - n..].to_vec());
+            let mut fit = Fitting {
+                paths: [smooth.clone(), short],
+                keeps: vec![],
+                round: 1,
+                path: 1,
+                pins: vec![],
+                spline: vec![0.0; 7 * n],
+                dense: vec![],
+                starts: vec![],
+                at: vec![0.0; 7],
+                checked: vec![],
+                clear: 0,
+                from: 0,
+                relaxing: None,
+                region: None,
+                projector: None,
+                first: vec![],
+            };
+            let mut counts = vec![fit.at.len()];
+            while counts.len() < 8 && fit.grow(&robot, &problem) {
+                counts.push(fit.at.len());
+                assert_eq!((fit.round, fit.path), (0, 0), "growing starts over");
+                assert!(
+                    fit.pins.len() == smoothed && fit.pins.iter().all(|&p| p == 0),
+                    "growing unpins every waypoint of the smoothed path"
+                );
+                let (mut spread, mut at) = (vec![0.0; fit.spline.len()], vec![0.0; fit.at.len()]);
+                assert!(fit_spline(
+                    &smooth,
+                    n,
+                    &fit.pins,
+                    None,
+                    &mut spread,
+                    &mut at
+                ));
+                assert!(
+                    fit.spline == spread && fit.first == spread,
+                    "the grown spline is not the smoothed path spread out"
+                );
+            }
+            // 1, 8 and 22 free control points are fewer than 25 waypoints; 50 are not.
+            assert_eq!(
+                counts,
+                [7, 14, 28, 56],
+                "{smoothed} and {shortcut} waypoints"
             );
         }
     }

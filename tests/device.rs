@@ -311,14 +311,9 @@ fn plans_do_not_depend_on_the_batch() {
         let a = batchplan::plan(&d, &worlds, &problems, &o).unwrap();
         let b = batchplan::plan(&d, &worlds, &reversed, &o).unwrap();
         let seeds = a.seeds;
-        // The last seed bends through a random via point; problems searched straight keep it zero.
+        // The last seed bends through a random via point; problems searched straight have none.
         let bent = (0..problems.len())
-            .filter(|&i| {
-                a.paths
-                    .path(i * seeds + seeds - 1)
-                    .iter()
-                    .any(|&v| v != 0.0)
-            })
+            .filter(|&i| !a.paths[i * seeds + seeds - 1].is_empty())
             .count();
         assert!(bent > 2, "{}: {bent} problems optimized", d.name());
         for i in 0..problems.len() {
@@ -326,8 +321,8 @@ fn plans_do_not_depend_on_the_batch() {
             for s in 0..seeds {
                 let (x, y) = (i * seeds + s, j * seeds + s);
                 assert_eq!(
-                    a.paths.path(x),
-                    b.paths.path(y),
+                    a.paths[x],
+                    b.paths[y],
                     "{}: problem {i}, seed {s}",
                     d.name()
                 );
@@ -478,20 +473,15 @@ fn trajopt_smoothness_gradient_matches_its_cost() {
         let worlds = d.upload(&scene).unwrap();
         let seed = batchplan::plan(&d, &worlds, &problems, &PlanOptions { iterations: 0, ..o })
             .unwrap()
-            .paths
-            .positions;
+            .paths;
         let stepped = batchplan::plan(&d, &worlds, &problems, &PlanOptions { iterations: 1, ..o })
             .unwrap()
-            .paths
-            .positions;
+            .paths;
         // Optimized seed 2's path, bent through a via point (seed 0 is the searched path, seed 1
         // the straight line), after the searched path. Only control points 3..points - 3 move.
         let points = o.control_points;
-        let offset = 3 * points * n;
-        let path: Vec<f64> = seed[offset..offset + points * n]
-            .iter()
-            .map(|&v| v as f64)
-            .collect();
+        let (seed, stepped) = (&seed[3], &stepped[3]);
+        let path: Vec<f64> = seed.iter().map(|&v| v as f64).collect();
         let free = 3 * n..(points - 3) * n;
         let fd: Vec<f64> = free
             .clone()
@@ -504,9 +494,7 @@ fn trajopt_smoothness_gradient_matches_its_cost() {
             })
             .collect();
         // Without history the step is steepest descent: -gradient times a positive scale.
-        let step: Vec<f64> = free
-            .map(|i| (seed[offset + i] - stepped[offset + i]) as f64)
-            .collect();
+        let step: Vec<f64> = free.map(|i| (seed[i] - stepped[i]) as f64).collect();
         let largest = |v: &[f64]| v.iter().fold(0.0f64, |m, x| m.max(x.abs()));
         let (fd_max, step_max) = (largest(&fd), largest(&step));
         assert!(
@@ -610,17 +598,13 @@ fn trajopt_collision_gradient_matches_its_cost() {
         let worlds = d.upload(&scene).unwrap();
         let seed = batchplan::plan(&d, &worlds, &problems, &PlanOptions { iterations: 0, ..o })
             .unwrap()
-            .paths
-            .positions;
+            .paths;
         let stepped = batchplan::plan(&d, &worlds, &problems, &PlanOptions { iterations: 1, ..o })
             .unwrap()
-            .paths
-            .positions;
+            .paths;
         // Optimized seed 0, the straight line through the post, after the (unsolved) searched path.
-        let path: Vec<f64> = seed[points * n..2 * points * n]
-            .iter()
-            .map(|&v| v as f64)
-            .collect();
+        let (seed, stepped) = (&seed[1], &stepped[1]);
+        let path: Vec<f64> = seed.iter().map(|&v| v as f64).collect();
         let free: Vec<usize> = (3 * n..(points - 3) * n).collect();
         // Central differences at two step sizes: the cost is only piecewise smooth (obstacle
         // edges, hinge activation) and evaluated in f32, so take the closer of the two.
@@ -661,7 +645,7 @@ fn trajopt_collision_gradient_matches_its_cost() {
         // gradients are compared scaled to their largest entries.
         let step: Vec<f64> = free
             .iter()
-            .map(|&i| (seed[points * n + i] - stepped[points * n + i]) as f64)
+            .map(|&i| (seed[i] - stepped[i]) as f64)
             .collect();
         let largest = |v: &[f64]| v.iter().fold(0.0f64, |m, x| m.max(x.abs()));
         let (fine_max, coarse_max, step_max) = (largest(&fine), largest(&coarse), largest(&step));
@@ -963,8 +947,8 @@ fn optimization_seeds_start_with_the_searched_path_and_the_straight_line() {
         let result = batchplan::plan(&d, &d.upload(&scene).unwrap(), &problems, &o).unwrap();
         let mut seeded = 0;
         for (pi, p) in problems.iter().enumerate() {
-            let path = |k: usize| result.paths.path(pi * 3 + k);
-            if path(1).iter().all(|&v| v == 0.0) {
+            let path = |k: usize| &result.paths[pi * 3 + k];
+            if path(1).is_empty() {
                 continue;
             }
             seeded += 1;
@@ -992,7 +976,15 @@ fn optimization_seeds_start_with_the_searched_path_and_the_straight_line() {
             d.name(),
             problems.len()
         );
-        assert_eq!(result.paths.positions.len(), problems.len() * 3 * per_path);
+        assert_eq!(result.paths.len(), problems.len() * 3);
+        assert!(
+            result
+                .paths
+                .iter()
+                .all(|p| p.is_empty() || p.len() == per_path),
+            "{}: a path has other than the options' control points",
+            d.name()
+        );
     }
 }
 
@@ -1093,7 +1085,7 @@ fn plans_without_seeds_ignore_the_optimization_weights() {
     let a = batchplan::plan(&cpu, &worlds, &moving, &PlanOptions::default()).unwrap();
     let b = batchplan::plan(&cpu, &worlds, &moving, &weighed).unwrap();
     assert_eq!(
-        a.paths.positions, b.paths.positions,
+        a.paths, b.paths,
         "the optimization's weights changed plans without seeds"
     );
 }

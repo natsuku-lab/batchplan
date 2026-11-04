@@ -615,6 +615,22 @@ fn block_straight_lines(
     problems.into_iter().filter(free).collect()
 }
 
+/// Every seed's control points back to back, `per_path` values each, a seed without a path as
+/// zeros: the layout the step and cost comparisons index. No searched path here needs more control
+/// points than the options give.
+fn back_to_back(paths: Vec<Vec<f32>>, per_path: usize) -> Vec<f32> {
+    let mut all = Vec::with_capacity(paths.len() * per_path);
+    for path in paths {
+        if path.is_empty() {
+            all.resize(all.len() + per_path, 0.0);
+        } else {
+            assert_eq!(path.len(), per_path, "a searched path grew");
+            all.extend(path);
+        }
+    }
+    all
+}
+
 fn step_directions(
     d: &Device,
     worlds: &[World],
@@ -623,32 +639,14 @@ fn step_directions(
     step: u32,
 ) -> (Vec<f32>, Vec<bool>) {
     let worlds = d.upload(worlds).unwrap();
-    let seed = batchplan::plan(
-        d,
-        &worlds,
-        problems,
-        &PlanOptions {
-            iterations: step - 1,
-            ..*o
-        },
-    )
-    .unwrap()
-    .paths
-    .positions;
-    let stepped = batchplan::plan(
-        d,
-        &worlds,
-        problems,
-        &PlanOptions {
-            iterations: step,
-            ..*o
-        },
-    )
-    .unwrap()
-    .paths
-    .positions;
     let robot = d.robot();
     let n = robot.dof();
+    let after = |iterations: u32| {
+        let result =
+            batchplan::plan(d, &worlds, problems, &PlanOptions { iterations, ..*o }).unwrap();
+        back_to_back(result.paths, o.control_points * n)
+    };
+    let (seed, stepped) = (after(step - 1), after(step));
     let clamped = stepped
         .iter()
         .enumerate()
@@ -886,23 +884,19 @@ fn trajopt_lowers_the_cost_as_far_as_the_cpu() {
             .unwrap();
         e.cost.iter().map(|&c| c as f64).sum::<f64>() + smooth
     };
+    let per_path = points * robot.dof();
     let seeds = batchplan::plan(
         &cpu,
         &on_cpu,
         &problems,
         &PlanOptions { iterations: 0, ..o },
     )
-    .unwrap()
-    .paths
-    .positions;
-    let on_cpu_paths = batchplan::plan(&cpu, &on_cpu, &problems, &o)
-        .unwrap()
-        .paths
-        .positions;
-    let on_gpu_paths = batchplan::plan(&gpu, &gpu.upload(&scene).unwrap(), &problems, &o)
-        .unwrap()
-        .paths
-        .positions;
+    .unwrap();
+    let seeds = back_to_back(seeds.paths, per_path);
+    let on_cpu_paths = batchplan::plan(&cpu, &on_cpu, &problems, &o).unwrap();
+    let on_cpu_paths = back_to_back(on_cpu_paths.paths, per_path);
+    let on_gpu_paths = batchplan::plan(&gpu, &gpu.upload(&scene).unwrap(), &problems, &o).unwrap();
+    let on_gpu_paths = back_to_back(on_gpu_paths.paths, per_path);
     let (start, a, b) = (cost(&seeds), cost(&on_cpu_paths), cost(&on_gpu_paths));
     eprintln!(
         "trajectory cost of {} paths: seeds {start:.0}, CPU {a:.0}, GPU {b:.0}",

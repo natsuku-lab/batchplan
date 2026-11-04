@@ -491,7 +491,7 @@ fn paths_planned_from_a_moving_start_run_from_it() {
         for item in (0..optimized.valid.len()).filter(|&i| optimized.valid[i]) {
             let index = item / optimized.seeds;
             let motion = moving[index].start_motion.as_ref().unwrap();
-            let path = optimized.paths.path(item);
+            let path = &optimized.paths[item];
             let trajectory = Trajectory::moving(&robot, path, motion).unwrap();
             if let Err(e) = trajectory.check_from(&robot, &states[index]) {
                 panic!("replan {index}, seed {}: {e}", item % optimized.seeds);

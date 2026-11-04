@@ -95,7 +95,7 @@ fn a_gripper_carried_past_a_pillar_stays_upright() {
         for p in 0..problems.len() {
             let base = p * result.seeds;
             for seed in (0..result.seeds).filter(|&k| result.valid[base + k]) {
-                let q = samples(&robot, result.paths.path(base + seed));
+                let q = samples(&robot, &result.paths[base + seed]);
                 let most = q
                     .iter()
                     .map(|q| tilt_and_twist(&robot, q, 0, down).0)
@@ -185,7 +185,7 @@ fn optimized_seeds_that_break_their_constraints_are_invalid() {
                 refused += 1;
                 continue;
             }
-            let most = samples(&robot, result.paths.path(item))
+            let most = samples(&robot, &result.paths[item])
                 .iter()
                 .map(|q| tilt_and_twist(&robot, q, 0, down).0)
                 .fold(0.0, f32::max);
@@ -201,9 +201,9 @@ fn optimized_seeds_that_break_their_constraints_are_invalid() {
 }
 
 /// A spline too short to follow its path within 1° is repaired keeping the bound: with 10 control
-/// points, every upright reach plans, and keeps the bound at 1 kHz. Reaches whose searched path is
-/// over 4 rad are left out: one winds 5.8 rad on the M4 Pro, twice the others' 2.2 on average, past
-/// what 10 control points follow.
+/// points, every upright reach plans with 10, and keeps the bound at 1 kHz. Reaches whose searched
+/// path is over 4 rad are left out: the one such reach, twice the others' 2.2 rad on average, winds
+/// as each machine rounds (5.4 rad on the M4 Pro, 4.9 on the Ryzen).
 #[test]
 fn short_splines_are_repaired_within_their_constraints() {
     let robot = common::panda().unwrap();
@@ -243,6 +243,12 @@ fn short_splines_are_repaired_within_their_constraints() {
     let result = batchplan::plan(&device, &worlds, &problems, &o).unwrap();
     assert_eq!(result.solved().count(), problems.len(), "every reach plans");
     for s in result.solved() {
+        assert_eq!(
+            s.solution.len(),
+            o.control_points * robot.dof(),
+            "problem {}'s spline grew",
+            s.index
+        );
         let most = samples(&robot, s.solution)
             .iter()
             .map(|q| tilt_and_twist(&robot, q, 0, down).0)
@@ -560,6 +566,69 @@ fn two_hands_carry_a_tray_level_between_them() {
             Err(Error::Input(m)) => assert!(m.contains("the goal breaks its constraints"), "{m}"),
             other => panic!("4 mm off its place should be an input error, got {other:?}"),
         }
+    }
+}
+
+/// A spline with too few control points to follow its path gets more: with 7 control points, one
+/// of them free, the fits and repairs of two arms carrying a tray level all fail, and every carry
+/// plans with more, keeping the right hand within the floors of its place and the left level at
+/// 1 kHz, collision-free. The optimized seeds keep 7.
+#[test]
+fn splines_too_short_for_their_paths_grow() {
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[common::tray_scene()]).unwrap();
+    let common::TrayCarries {
+        start,
+        place,
+        goals,
+    } = common::tray_carries(&device, &worlds).unwrap();
+    let bound = 5f32.to_radians();
+    let carried = common::carried_level(place, bound).to_vec();
+    let problems: Vec<PlanProblem> = goals
+        .iter()
+        .map(|g| PlanProblem {
+            constraints: carried.clone(),
+            ..PlanProblem::new(0, start.clone(), g.clone())
+        })
+        .collect();
+    let o = PlanOptions {
+        control_points: 7,
+        seeds: 2,
+        ..PlanOptions::default()
+    };
+    let result = batchplan::plan(&device, &worlds, &problems, &o).unwrap();
+    assert_eq!(result.solved().count(), problems.len(), "every carry plans");
+    let n = robot.dof();
+    for s in result.solved() {
+        let optimized = &result.paths[s.index * result.seeds + 1..(s.index + 1) * result.seeds];
+        assert!(
+            optimized.iter().all(|p| p.len() == o.control_points * n),
+            "carry {}: an optimized seed has other than {} control points",
+            s.index,
+            o.control_points
+        );
+        assert!(
+            s.solution.len() > o.control_points * n,
+            "carry {} plans with {} control points",
+            s.index,
+            o.control_points
+        );
+        let q = samples(&robot, s.solution);
+        for q in &q {
+            let (away, tilt, twist) = off_its_place(&robot, q, place);
+            let level = tilt_and_twist(&robot, q, 0, common::upright(0.0)).0;
+            assert!(
+                away <= 2e-3 + 1e-5 && tilt.max(twist) <= 0.02 + 1e-4 && level <= bound + 1e-4,
+                "carry {} moves the right hand {:.2} mm and {:.4} rad off its place, and tilts \
+                 the left {:.2}°",
+                s.index,
+                away * 1e3,
+                tilt.max(twist),
+                level.to_degrees()
+            );
+        }
+        assert!(free(&device, &worlds, &q), "carry {} collides", s.index);
     }
 }
 

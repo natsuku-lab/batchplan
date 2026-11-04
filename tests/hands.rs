@@ -560,7 +560,7 @@ fn plans_hold_an_arm_still() {
             let valid = (0..result.seeds).filter(|&s| result.valid[p * result.seeds + s]);
             for s in valid {
                 optimized += usize::from(s > 0);
-                for q in result.paths.path(p * result.seeds + s).chunks(n) {
+                for q in result.paths[p * result.seeds + s].chunks(n) {
                     assert!(
                         problem.hold.iter().all(|&j| q[j] == problem.start[j]),
                         "{}: seed {s} moves the held arm",
