@@ -1557,8 +1557,7 @@ mod tests {
     /// A shortcut's walk along tight bounds halves its hops where their edges would leave them:
     /// two Pandas, the right hand pinned in the left hand's frame 0.7 m away, which it must follow
     /// around as the left arm turns, a curve on which edges four default hops long bulge past the
-    /// 2 mm floor (TIAGo Pro's long arms bulge so at one). Every hop's edge keeps the bounds at
-    /// its middle.
+    /// 2 mm floor. Every hop's edge keeps the bounds at its middle.
     #[test]
     fn walks_keep_tight_bounds_between_their_hops() {
         let (robot, pinned, start) = crate::constraint::pinned_pandas();

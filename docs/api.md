@@ -22,6 +22,7 @@ Guide: [robots.md](robots.md).
 | `Robot::attach(&AttachedObject)`, `Robot::detach(name)` | The robot holding an object fixed to one of its links, or without it. |
 | `dof`, `joint_names`, `lower`, `upper`, `continuous`, `default_q`, `max_velocity`, `max_acceleration`, `max_jerk` | The robot's joints and their limits. |
 | `hands`, `hand_joints(hand)`, `hand_links(hand)`, `finger_links(hand)`, `ee_pose(q, hand)`, `link_pose(q, link)` | Hands and forward kinematics; `hand_links` names a hand and its fingers, for allowed contacts, and `finger_links` its fingers alone. |
+| `breach(constraints, q)` | Why a configuration breaks `HandConstraint`s, if it does, tested as `plan` tests its start and goals: to keep only goals that keep them before planning. |
 | `MeshModel::try_new(&robot)`, `MeshModel::clearance` | Clearances on the links' meshes instead of the spheres, to check plans against the real geometry: a `Clearance` (`world`, `self_collision`) per configuration. |
 
 ## Worlds and perception

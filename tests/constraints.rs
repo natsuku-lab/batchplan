@@ -632,6 +632,49 @@ fn splines_too_short_for_their_paths_grow() {
     }
 }
 
+/// `Robot::breach` tests a state as `plan` tests its ends: the ready pose keeps a twist bound
+/// around its own hand, and the last joint turned 0.5 rad breaks it. A bound below IK's precision
+/// counts as that precision, so a hand turned 5 mrad keeps a twist pinned to 0. Constraints a plan
+/// refuses, and a configuration of the wrong length or with a NaN, are input errors.
+#[test]
+fn robots_tell_which_states_break_their_constraints() {
+    let robot = common::panda().unwrap();
+    let start = robot.default_q().to_vec();
+    let level = robot.ee_pose(&start, 0);
+    let turned = |by: f32| {
+        let mut q = start.clone();
+        q[6] -= by;
+        q
+    };
+    let twist = HandConstraint {
+        tilt: 0.1,
+        twist: 0.2,
+        ..HandConstraint::new(0, level)
+    };
+    assert_eq!(robot.breach(&[twist], &start).unwrap(), None);
+    let why = robot.breach(&[twist], &turned(0.5)).unwrap();
+    assert!(
+        why.as_deref().is_some_and(|w| w.contains("turns")),
+        "{why:?}"
+    );
+    let pinned = HandConstraint {
+        tilt: 0.0,
+        twist: 0.0,
+        ..HandConstraint::new(0, level)
+    };
+    assert_eq!(robot.breach(&[pinned], &turned(0.005)).unwrap(), None);
+    assert!(robot.breach(&[pinned], &turned(0.05)).unwrap().is_some());
+    let mut nan = start.clone();
+    nan[3] = f32::NAN;
+    for refused in [
+        robot.breach(&[HandConstraint::new(1, level)], &start),
+        robot.breach(&[twist], &start[1..]),
+        robot.breach(&[twist], &nan),
+    ] {
+        assert!(matches!(refused, Err(Error::Input(_))), "{refused:?}");
+    }
+}
+
 /// A start or goal that breaks its constraints, a hand the robot does not have, a constraint
 /// relative to its own hand or a missing one, and a negative bound are input errors that say what
 /// was wrong; so is an end of a search that breaks them.

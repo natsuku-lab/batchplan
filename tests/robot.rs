@@ -328,8 +328,8 @@ fn fitting_is_deterministic() {
 }
 
 /// A binary STL may start with "solid": its 80-byte header is free text, which CAD exporters fill
-/// with "solid <name>" (TIAGo Pro's meshes have it). Thirteen triangles put a carriage return in
-/// the count, which ends that "solid" line for a parser reading ASCII. It loads as its ASCII twin.
+/// with "solid <name>". Thirteen triangles put a carriage return in the count, which ends that
+/// "solid" line for a parser reading ASCII. It loads as its ASCII twin.
 #[test]
 fn binary_stls_that_start_with_solid_load_as_their_ascii_twin() {
     use std::fmt::Write;

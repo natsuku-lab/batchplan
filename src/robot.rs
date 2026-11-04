@@ -8,6 +8,7 @@ use anyhow::{Result, bail, ensure};
 use glam::{Mat3, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
+use crate::constraint::{self, HandConstraint};
 use crate::description::{
     self, Curve, Geometry, JointDesc, JointType, LinkDesc, RobotDescription, Shape, TriMesh,
 };
@@ -913,6 +914,24 @@ impl Robot {
     pub fn link_pose(&self, q: &[f32], link: &str) -> Option<Pose> {
         let i = self.links.iter().position(|l| l.name == link)?;
         Some(self.pose_of(&self.fk(q), i))
+    }
+
+    /// Why configuration `q` breaks `constraints`, if it does: the constraint, the bound and by how
+    /// much, in words. Bounds below IK's precision count as [`crate::plan`] counts them, so this is
+    /// the constraint test a plan's start and goals must pass. An `Error::Input` for constraints the
+    /// robot can't keep, as `plan` refuses them, or a `q` without one finite value per joint.
+    pub fn breach(
+        &self,
+        constraints: &[HandConstraint],
+        q: &[f32],
+    ) -> error::Result<Option<String>> {
+        ensure_input!(
+            q.len() == self.dof() && q.iter().all(|v| v.is_finite()),
+            "a configuration needs {} finite values, got {q:?}",
+            self.dof()
+        );
+        constraint::check(self, constraints, "the constraints")?;
+        Ok(constraint::breach(self, constraints, q))
     }
 
     fn pose_of(&self, fk: &Fk, link: usize) -> Pose {
