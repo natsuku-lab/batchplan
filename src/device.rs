@@ -267,9 +267,8 @@ impl Device {
     /// optimization. Call it once after making the device and before timing anything. A device
     /// made with [`Device::with_robot`] for a robot of the same shape (the same one, or one
     /// relocked) shares what it built; one for a robot of another shape, such as one holding an
-    /// object, builds kernels of its own, so warm it up too. Buffers
-    /// grow to the largest batch they have carried, so warm up with batches the size of those you
-    /// time too.
+    /// object, builds kernels of its own, so warm it up too. Buffers grow to the largest batch they
+    /// have carried, so warm up with batches the size of those you time too.
     pub fn warmup(&self) -> Result<()> {
         self.backend.build_all()?;
         let robot = self.robot();
