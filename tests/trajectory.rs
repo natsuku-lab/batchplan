@@ -694,3 +694,34 @@ fn stops_brake_to_rest_along_the_path() {
     let stop = trajectory.stop(&robot, trajectory.duration()).unwrap();
     stop.check_from(&robot, &state).unwrap();
 }
+
+#[test]
+fn a_trajectory_starts_and_ends_where_its_motion_does() {
+    let robot = common::panda().unwrap();
+    let n = robot.dof();
+    let path = planned(&robot, 1).remove(0);
+    let trajectory = Trajectory::try_new(&robot, &path, 1.0).unwrap();
+    // At rest at both ends of its path: exactly the first and last control points.
+    assert_eq!(trajectory.start(), path[..n]);
+    assert_eq!(trajectory.end(), path[path.len() - n..]);
+    // A stop starts where it was called and ends short of the path's end.
+    let t = 0.4 * trajectory.duration();
+    let mut state = JointState::new(n);
+    trajectory.at(t, &mut state);
+    let stop = trajectory.stop(&robot, t).unwrap();
+    let mut end = JointState::new(n);
+    stop.at(stop.duration(), &mut end);
+    let distance = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).powi(2))
+            .sum::<f32>()
+            .sqrt()
+    };
+    assert!(distance(&stop.start(), &state.position) < 1e-5);
+    assert_eq!(stop.end(), end.position);
+    assert!(
+        distance(&stop.end(), &path[path.len() - n..]) > 1e-3,
+        "the stop runs to the path's end"
+    );
+}

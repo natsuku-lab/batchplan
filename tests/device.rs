@@ -167,6 +167,108 @@ fn clearances_are_exact_up_to_the_margins() {
 }
 
 #[test]
+fn contacts_name_what_each_clearance_measures() {
+    let robot = panda();
+    let (n, items) = (robot.dof(), 2000);
+    let mut rng = Rng::new(6);
+    let q: Vec<f32> = (0..items * n)
+        .map(|i| rng.range(robot.lower()[i % n], robot.upper()[i % n]))
+        .collect();
+    let item_world = vec![0; items];
+    let scene = common::tabletop(&mut Rng::new(4));
+    // The table may touch every link: it names no contact.
+    let mut touching = scene.clone();
+    let links: Vec<String> = robot.collision_model().spheres.keys().cloned().collect();
+    touching.touch.push(batchplan::Touch::new(0, links));
+    // A table the base stands in, which no joint moves it out of: not a contact either.
+    let mounted = World::new(vec![Obstacle::cuboid(
+        Vec3::new(0.0, 0.0, -0.47),
+        Vec3::new(0.3, 0.3, 0.5),
+    )]);
+    let scenes = [scene, touching, mounted];
+    let everything = CollisionWeights {
+        margin: 10.0,
+        self_margin: 10.0,
+        ..CollisionWeights::NONE
+    };
+    let within = 0.05;
+    let cpu = Device::cpu(&robot).unwrap();
+    let cpu_worlds = cpu.upload(&scenes).unwrap();
+    let mut listed = None;
+    for d in devices(&robot) {
+        let worlds = d.upload(&scenes).unwrap();
+        let contacts = d.contacts(&worlds, &item_world, &q, within).unwrap();
+        let on_mount = vec![2; items];
+        let mounted = d.contacts(&worlds, &on_mount, &q, within).unwrap();
+        let exact = cpu
+            .evaluate(&cpu_worlds, &item_world, &q, &everything)
+            .unwrap();
+        let exact_mounted = cpu
+            .evaluate(&cpu_worlds, &on_mount, &q, &everything)
+            .unwrap();
+        for (found, exact) in mounted.iter().zip(&exact_mounted.world_clearance) {
+            let nearest = found
+                .iter()
+                .find(|c| matches!(c, batchplan::Contact::World { .. }))
+                .map(batchplan::Contact::distance);
+            assert_eq!(nearest, (*exact < within).then_some(*exact), "{}", d.name());
+        }
+        let (mut world, mut own) = (0, 0);
+        for (item, found) in contacts.iter().enumerate() {
+            assert!(
+                found.windows(2).all(|w| w[0].distance() <= w[1].distance()),
+                "{}: nearest first",
+                d.name()
+            );
+            let nearest = |self_collision: bool| {
+                found
+                    .iter()
+                    .filter(|c| {
+                        matches!(c, batchplan::Contact::SelfCollision { .. }) == self_collision
+                    })
+                    .map(batchplan::Contact::distance)
+                    .next()
+            };
+            let expected = |clearance: f32| (clearance < within).then_some(clearance);
+            assert_eq!(
+                nearest(false),
+                expected(exact.world_clearance[item]),
+                "{}: item {item}",
+                d.name()
+            );
+            assert_eq!(
+                nearest(true),
+                expected(exact.self_clearance[item]),
+                "{}: item {item}",
+                d.name()
+            );
+            world += usize::from(exact.world_clearance[item] < 0.0);
+            own += usize::from(exact.self_clearance[item] < 0.0);
+        }
+        assert!(
+            world > 50 && own > 50,
+            "{world} in the world, {own} in themselves"
+        );
+        // Allowed to touch the table, the links name only the boxes.
+        let touching = d.contacts(&worlds, &vec![1; items], &q, within).unwrap();
+        let on_table = touching
+            .iter()
+            .flatten()
+            .any(|c| matches!(c, batchplan::Contact::World { obstacle: 0, .. }));
+        assert!(!on_table, "{}: a touch is a contact", d.name());
+        let named_table = contacts
+            .iter()
+            .flatten()
+            .any(|c| matches!(c, batchplan::Contact::World { obstacle: 0, .. }));
+        assert!(named_table, "the table is near");
+        match &listed {
+            None => listed = Some(contacts),
+            Some(first) => assert_eq!(*first, contacts, "{} lists other contacts", d.name()),
+        }
+    }
+}
+
+#[test]
 fn ik_reports_the_clearances_evaluate_finds() {
     let robot = panda();
     let scene = [common::tabletop(&mut Rng::new(4))];

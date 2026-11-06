@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder, Yield};
 
 use crate::constraint::{CostScratch, Region};
-use crate::device::{Backend, CollisionWeights, Evaluation, Worlds};
+use crate::device::{Backend, CollisionWeights, Contact, Evaluation, Worlds};
 use crate::edges::{self, EdgeScratch, Search};
 use crate::error::{Error, Result};
 use crate::ik::IkOptions;
@@ -453,6 +453,57 @@ fn collision<const GRADIENT: bool>(
         world_clearance: wmin,
         self_clearance: smin,
     }
+}
+
+/// Every link and obstacle, and every pair of links checked against each other, whose spheres
+/// come nearer than `within` at the configuration behind `fk` in `world`, nearest first
+/// (`Device::contacts`): `collision`'s distances, without its gates, skipping what it skips.
+pub(crate) fn contacts(robot: &Robot, world: &CpuWorld, fk: &Fk, within: f32) -> Vec<Contact> {
+    let center = |s: usize| {
+        let sphere = &robot.spheres[s];
+        fk.rot[sphere.link] * sphere.center + fk.pos[sphere.link]
+    };
+    let name = |link: usize| robot.links[link].name.clone();
+    let mut out = vec![];
+    for (link, &[first, count]) in robot.sphere_ranges.iter().enumerate() {
+        if count == 0 || robot.links[link].chain.is_empty() {
+            continue;
+        }
+        for (k, o) in world.obstacles.iter().enumerate() {
+            if world.touch.contains(k, link) {
+                continue;
+            }
+            let mut distance = FAR;
+            for s in first as usize..(first + count) as usize {
+                distance =
+                    distance.min(obstacle_distance(o, center(s)).0 - robot.spheres[s].radius);
+            }
+            if distance < within {
+                out.push(Contact::World {
+                    link: name(link),
+                    obstacle: k,
+                    distance,
+                });
+            }
+        }
+    }
+    for lp in &robot.self_link_pairs {
+        let mut distance = FAR;
+        for &[a, b] in &robot.self_pairs[lp.first as usize..(lp.first + lp.count) as usize] {
+            let (sa, sb) = (&robot.spheres[a as usize], &robot.spheres[b as usize]);
+            let apart = (center(a as usize) - center(b as usize)).length();
+            distance =
+                distance.min(apart - (sa.radius + sa.self_buffer) - (sb.radius + sb.self_buffer));
+        }
+        if distance < within {
+            out.push(Contact::SelfCollision {
+                links: [name(lp.a as usize), name(lp.b as usize)],
+                distance,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.distance().total_cmp(&b.distance()));
+    out
 }
 
 /// Rotation vector (axis * angle) of `r`. Must stay in sync with `rot_log` in kernels.wgsl.
@@ -1507,6 +1558,10 @@ impl Backend for CpuBackend {
             lanes: Arc::new(Lanes::new(robot)),
             pool: self.pool.clone(),
         }))
+    }
+
+    fn checked<'w>(&self, worlds: &'w Worlds) -> &'w CpuWorlds {
+        worlds.prepared()
     }
 
     fn evaluate(

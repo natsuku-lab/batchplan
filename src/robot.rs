@@ -76,6 +76,51 @@ impl JointKind {
     }
 }
 
+/// Where a link's frame can be, for [`Robot::reach`]: the frame of the nearest moving joint at
+/// or above it (or the root) lies in the box from `lo` to `hi`, grown by `carried` in every
+/// direction; that joint's frame turns by `turn` in every configuration, or by different turns
+/// (`None`); and the link's frame is `frame` in it.
+#[derive(Clone, Copy)]
+struct Reachable {
+    lo: Vec3,
+    hi: Vec3,
+    carried: f32,
+    turn: Option<Mat3>,
+    frame: Transform,
+}
+
+impl Reachable {
+    const ROOT: Reachable = Reachable {
+        lo: Vec3::ZERO,
+        hi: Vec3::ZERO,
+        carried: 0.0,
+        turn: Some(Mat3::IDENTITY),
+        frame: Transform::IDENTITY,
+    };
+
+    /// Where the point `p` of the moving joint's frame can be, as the joint's own frame can.
+    fn place(&self, p: Vec3) -> Reachable {
+        match self.turn {
+            Some(turn) => Reachable {
+                lo: self.lo + turn * p,
+                hi: self.hi + turn * p,
+                frame: Transform::IDENTITY,
+                ..*self
+            },
+            None => Reachable {
+                carried: self.carried + p.length(),
+                frame: Transform::IDENTITY,
+                ..*self
+            },
+        }
+    }
+}
+
+/// Points of a prismatic joint's range at which [`Robot::reach`] measures its travel: a mimic
+/// joint's travel is a polynomial of its leader's value, whose largest magnitude may lie inside
+/// the range.
+const PRISMATIC_SAMPLES: usize = 64;
+
 #[derive(Clone, Debug)]
 pub(crate) struct Link {
     pub(crate) name: String,
@@ -914,6 +959,76 @@ impl Robot {
     pub fn link_pose(&self, q: &[f32], link: &str) -> Option<Pose> {
         let i = self.links.iter().position(|l| l.name == link)?;
         Some(self.pose_of(&self.fk(q), i))
+    }
+
+    /// Every collision sphere at configuration `q`, in the robot's frame, as `[x, y, z, radius]`,
+    /// link by link: what the world is checked against, to mask the robot out of a camera's view
+    /// or draw it.
+    #[must_use]
+    pub fn spheres(&self, q: &[f32]) -> Vec<[f32; 4]> {
+        let fk = self.fk(q);
+        self.spheres
+            .iter()
+            .map(|s| {
+                let c = fk.rot[s.link] * s.center + fk.pos[s.link];
+                [c.x, c.y, c.z, s.radius]
+            })
+            .collect()
+    }
+
+    /// How far from the origin of its frame the robot reaches (meters): a bound on its collision
+    /// spheres' farthest points over every configuration within the joint limits, to leave out
+    /// what a camera sees beyond it. Joint by joint down each chain, the bound keeps a box that
+    /// holds every place a joint's frame can be and how far a revolute joint above it can carry
+    /// it: translations along fixed directions (a mobile base's) grow the box, and a turn carries
+    /// what lies past it as far as it lies from the turning joint.
+    #[must_use]
+    pub fn reach(&self) -> f32 {
+        let mut places: Vec<Reachable> = Vec::with_capacity(self.links.len());
+        for link in &self.links {
+            let above = link.parent.map_or(Reachable::ROOT, |p| places[p]);
+            let joint = above.frame.mul(&link.origin);
+            let at = above.place(joint.trans);
+            places.push(match link.joint {
+                JointKind::Fixed => Reachable {
+                    frame: joint,
+                    ..above
+                },
+                JointKind::Revolute { .. } => Reachable { turn: None, ..at },
+                JointKind::Prismatic { dof, axis, curve } => {
+                    let (lo, hi) = (self.lower[dof], self.upper[dof]);
+                    let (least, most) = (0..=PRISMATIC_SAMPLES)
+                        .map(|k| curve.value(lo + (hi - lo) * k as f32 / PRISMATIC_SAMPLES as f32))
+                        .fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), v| {
+                            (a.min(v), b.max(v))
+                        });
+                    match at.turn {
+                        Some(turn) => {
+                            let turn = turn * joint.rot;
+                            let ends = [turn * axis * least, turn * axis * most];
+                            Reachable {
+                                lo: at.lo + ends[0].min(ends[1]),
+                                hi: at.hi + ends[0].max(ends[1]),
+                                turn: Some(turn),
+                                ..at
+                            }
+                        }
+                        None => Reachable {
+                            carried: at.carried + least.abs().max(most.abs()),
+                            ..at
+                        },
+                    }
+                }
+            });
+        }
+        self.spheres
+            .iter()
+            .map(|s| {
+                let place = places[s.link];
+                let at = place.place(place.frame.rot * s.center + place.frame.trans);
+                at.lo.abs().max(at.hi.abs()).length() + at.carried + s.radius
+            })
+            .fold(0.0, f32::max)
     }
 
     /// Why configuration `q` breaks `constraints`, if it does: the constraint, the bound and by how

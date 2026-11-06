@@ -69,9 +69,9 @@ mod usd;
 pub mod world;
 
 pub use constraint::HandConstraint;
-pub use device::{CollisionWeights, Device, Evaluation, Worlds};
+pub use device::{CollisionWeights, Contact, Device, Evaluation, Worlds};
 pub use error::Error;
-pub use ik::{IkOptions, IkProblem, IkResult, solve_ik};
+pub use ik::{IkFailure, IkOptions, IkProblem, IkResult, solve_ik};
 pub use join::{JoinOptions, JoinResult, Sequence, join};
 pub use live::{
     FollowStatus, Follower, FollowerOptions, ServoOptions, ServoStatus, ServoStep, Tick, servo,
@@ -88,7 +88,7 @@ pub use task::{
 };
 pub use timing::{HandSpeed, JointState, Trajectory};
 pub use tool_path::{ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, follow};
-pub use trajopt::{PlanOptions, PlanProblem, PlanResult, plan};
+pub use trajopt::{PlanFailure, PlanOptions, PlanProblem, PlanResult, plan};
 pub use types::{JointTrajectory, Pose, Solved, StartMotion};
 pub use world::{Distance, Obstacle, Touch, World};
 

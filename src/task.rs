@@ -18,10 +18,10 @@ use glam::{Mat3, Quat, Vec3};
 use rayon::prelude::*;
 
 use crate::constraint::{self, HandConstraint};
-use crate::device::{Device, Worlds};
+use crate::device::{Contact, Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Search, Wanted};
 use crate::error::{Result, ensure_input, input};
-use crate::ik::{self, IkOptions, IkProblem, IkResult};
+use crate::ik::{self, IkFailure, IkOptions, IkProblem, IkResult};
 use crate::robot::{AttachedObject, Robot};
 use crate::timing::{HandSpeed, Trajectory};
 use crate::tool_path::{self, ToolPath, ToolPathOptions, ToolPathStop};
@@ -236,7 +236,7 @@ impl TaskPlan {
         self.transit.duration() + self.approach.duration() + self.depart.duration()
     }
 
-    /// Where the departure comes to rest: the start of the next task.
+    /// Where the departure comes to rest, its last control point: the start of the next task.
     #[must_use]
     pub fn end(&self) -> &[f32] {
         let points = &self.depart.control_points;
@@ -245,7 +245,7 @@ impl TaskPlan {
 }
 
 /// Where one candidate stopped, and why.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct CandidateStop {
     /// The step it did not get past.
@@ -253,6 +253,10 @@ pub struct CandidateStop {
     /// What stopped it there: a pose out of reach, a collision or a jump at the start, at IK and
     /// at the straight moves; nothing for a transit no plan was found for.
     pub why: Option<ToolPathStop>,
+    /// For a collision, what collides ([`Device::contacts`]), nearest first: the start, the IK
+    /// solution with the most clearance that reaches the grasp or release, or the straight move's
+    /// next step. Empty for the rest.
+    pub contacts: Vec<Contact>,
 }
 
 /// Why none of a task's candidates got through: each one's step and reason, in the task's order.
@@ -685,8 +689,9 @@ pub fn place(
                 })
                 .collect::<Result<_>>()
         })?;
-        let mut failed = vec![];
         let n = robot.dof();
+        // Per holder, the candidates whose every solution collides holding the object.
+        let mut holding: Vec<Vec<usize>> = holders.iter().map(|_| vec![]).collect();
         for (&i, found) in mine.iter().flatten().zip(found.into_iter().flatten()) {
             let c = &mut reaching[i];
             match found {
@@ -694,11 +699,30 @@ pub fn place(
                     c.grasped = solutions[i][k * n..(k + 1) * n].to_vec();
                     c.passed += 1;
                 }
-                None if solutions[i].is_empty() => failed.push(i),
-                None => c.stop = Some(ToolPathStop::Collision { at: c.poses[1] }),
+                None if solutions[i].is_empty() => {}
+                None => {
+                    c.stop = Some(ToolPathStop::Collision { at: c.poses[1] });
+                    holding[holder_of[c.task]].push(i);
+                }
             }
         }
-        classify(device, worlds, &mut reaching, &failed, &given, &o.ik)?;
+        // What the nearest solution collides with, holding the object.
+        for (holder, colliding) in holders.iter().zip(&holding) {
+            let Some(&first) = colliding.first() else {
+                continue;
+            };
+            let item_world: Vec<u32> = colliding.iter().map(|&i| reaching[i].task as u32).collect();
+            let q: Vec<f32> = colliding
+                .iter()
+                .flat_map(|&i| solutions[i][..n].iter().copied())
+                .collect();
+            let uploaded = uploaded_for(reaching[first].hand);
+            let contacts = holder.contacts(uploaded, &item_world, &q, 0.0)?;
+            for (&i, contacts) in colliding.iter().zip(contacts) {
+                reaching[i].contacts = contacts;
+            }
+        }
+        classify(device, worlds, &mut reaching, &solved, &o.ik)?;
     }
     let mut moving = by_holder(
         live(&mut candidates, TaskStep::Approach),
@@ -916,8 +940,9 @@ struct Candidate {
     poses: [Pose; 3],
     /// How many steps it has passed.
     passed: usize,
-    /// What stopped it, if something did.
+    /// What stopped it, if something did, and for a collision, what collides.
     stop: Option<ToolPathStop>,
+    contacts: Vec<Contact>,
     /// The configuration at the grasp or release, where both straight moves start.
     grasped: Vec<f32>,
     /// Its motions: in, away and from the start, as control points.
@@ -945,6 +970,7 @@ impl Candidate {
             poses,
             passed: 0,
             stop: None,
+            contacts: vec![],
             grasped: vec![],
             approach: vec![],
             depart: vec![],
@@ -993,13 +1019,24 @@ fn start(
         .map(|c| (worlds_of[c.task], c.start.clone()))
         .collect();
     let free = first_free(device, worlds, lists)?;
+    let mut colliding = vec![];
     for (c, free) in starting.iter_mut().zip(free) {
         if free.is_some() {
             c.passed += 1;
         } else {
             let at = device.robot().ee_pose(&c.start, c.hand);
             c.stop = Some(ToolPathStop::Collision { at });
+            colliding.push(c);
         }
+    }
+    let item_world: Vec<u32> = colliding.iter().map(|c| worlds_of[c.task]).collect();
+    let q: Vec<f32> = colliding
+        .iter()
+        .flat_map(|c| c.start.iter().copied())
+        .collect();
+    let contacts = device.contacts(worlds, &item_world, &q, 0.0)?;
+    for (c, contacts) in colliding.into_iter().zip(contacts) {
+        c.contacts = contacts;
     }
     Ok(())
 }
@@ -1015,17 +1052,13 @@ fn reach(
         return Ok(());
     }
     let solved = solve(device, worlds, live, &by_task, o)?;
-    let mut failed = vec![];
     for (i, c) in live.iter_mut().enumerate() {
-        match solved.nearest(i, &c.rest) {
-            Some(q) => {
-                c.grasped = q.to_vec();
-                c.passed += 1;
-            }
-            None => failed.push(i),
+        if let Some(q) = solved.nearest(i, &c.rest) {
+            c.grasped = q.to_vec();
+            c.passed += 1;
         }
     }
-    classify(device, worlds, live, &failed, &by_task, o)
+    classify(device, worlds, live, &solved, o)
 }
 
 /// IK at each candidate's grasp or release, in the world of `worlds` that `worlds_of` gives it,
@@ -1053,37 +1086,27 @@ fn solve(
     ik::solve_ik(device, worlds, &problems, o)
 }
 
-/// Why IK found nothing for the candidates `failed` names: solved again without its push away
-/// from obstacles, a pose it reaches then collides, one it does not is out of reach.
+/// Why IK found nothing for the candidates `solved` (their IK, problem by candidate) has no
+/// solution for ([`ik::failures`]): a pose out of reach, or one reached only in collision, with
+/// what collides.
 fn classify(
     device: &Device,
     worlds: &Worlds,
     live: &mut [&mut Candidate],
-    failed: &[usize],
-    worlds_of: &dyn Fn(usize, &Candidate) -> u32,
+    solved: &IkResult,
     o: &IkOptions,
 ) -> Result<()> {
-    if failed.is_empty() {
-        return Ok(());
-    }
-    let unpushed = IkOptions {
-        collision_step: 0.0,
-        ..*o
-    };
-    let mut retried: Vec<&mut Candidate> = vec![];
-    for (i, c) in live.iter_mut().enumerate() {
-        if failed.contains(&i) {
-            retried.push(c);
-        }
-    }
-    let anyway = solve(device, worlds, &retried, worlds_of, &unpushed)?;
-    for (k, c) in retried.into_iter().enumerate() {
+    let failures = ik::failures(device, worlds, solved, o)?;
+    for (c, failure) in live.iter_mut().zip(failures) {
         let at = c.poses[1];
-        c.stop = Some(if reaches(&anyway, k, &unpushed) {
-            ToolPathStop::Collision { at }
-        } else {
-            ToolPathStop::Unreachable { at }
-        });
+        match failure {
+            None => {}
+            Some(IkFailure::Collides { contacts }) => {
+                c.stop = Some(ToolPathStop::Collision { at });
+                c.contacts = contacts;
+            }
+            Some(_) => c.stop = Some(ToolPathStop::Unreachable { at }),
+        }
     }
     Ok(())
 }
@@ -1166,14 +1189,6 @@ fn first_free(
     Ok(searches.into_iter().map(|s| s.into_inner().found).collect())
 }
 
-/// Whether some seed of `problem` came within the tolerances, collision-free or not.
-fn reaches(result: &IkResult, problem: usize, o: &IkOptions) -> bool {
-    (problem * result.seeds..(problem + 1) * result.seeds).any(|k| {
-        result.position_error[k] <= o.position_tolerance
-            && result.rotation_error[k] <= o.rotation_tolerance
-    })
-}
-
 /// The straight moves.
 #[derive(Clone, Copy)]
 enum Leg {
@@ -1224,6 +1239,7 @@ fn straight(
             c.passed += 1;
         } else {
             c.stop = result.stopped[i];
+            c.contacts.clone_from(&result.contacts[i]);
         }
     }
     Ok(())
@@ -1323,6 +1339,7 @@ fn choose(
                         .map(|c| CandidateStop {
                             step: STEPS[c.passed],
                             why: c.stop,
+                            contacts: c.contacts.clone(),
                         })
                         .collect(),
                 });

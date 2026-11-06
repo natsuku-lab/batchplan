@@ -17,12 +17,12 @@ use rayon::prelude::*;
 
 use crate::constraint::{self, HandConstraint, Projector, Region};
 use crate::cpu::PathOptimizer;
-use crate::device::{CollisionWeights, Device, Worlds};
+use crate::device::{CollisionWeights, Contact, Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Keep, Optimize, Search};
 use crate::error::{Result, ensure_input};
 use crate::rng::Rng;
 use crate::robot::{Fk, Robot};
-use crate::rrt::{self, Ahead, Connect, RrtOptions, RrtProblem, Sampling};
+use crate::rrt::{self, Ahead, Connect, End, RrtOptions, RrtProblem, Sampling};
 use crate::shortcut::{self, ShortcutOptions, Simplify};
 use crate::spline;
 use crate::timing::{JointState, Trajectory};
@@ -175,6 +175,30 @@ impl PlanProblem {
     }
 }
 
+/// Why a problem of a [`PlanResult`] has no valid path, the first thing that stopped it.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum PlanFailure {
+    /// The start collides ([`Device::contacts`] says with what): plan from a free state.
+    StartCollides {
+        /// What it collides with, nearest first.
+        contacts: Vec<Contact>,
+    },
+    /// The goal collides, and so does every equivalent of it a whole turn away.
+    GoalCollides {
+        /// What the goal collides with, nearest first.
+        contacts: Vec<Contact>,
+    },
+    /// The search drew every sample it may ([`RrtOptions::max_iterations`]) without joining the
+    /// start to the goal: the way is blocked, or too narrow for the samples given.
+    NoPath,
+    /// A path was found, but no spline along it (fitted, repaired, or with more control points)
+    /// checked collision-free, or followed the start's motion.
+    NoSpline,
+    /// The time budget ran out first.
+    OutOfTime,
+}
+
 /// Per-seed results for `problems`; paths are problem-major (`item = problem * seeds + seed`).
 /// Seed 0 is the searched path; optimized seeds follow, invalid where a problem was not optimized.
 #[derive(Clone, Debug)]
@@ -192,6 +216,8 @@ pub struct PlanResult {
     pub valid: Vec<bool>,
     /// Joint-space path length.
     pub length: Vec<f32>,
+    /// Per problem: why it has no valid seed, or `None` where it has one.
+    pub failures: Vec<Option<PlanFailure>>,
 }
 
 impl PlanResult {
@@ -286,6 +312,7 @@ pub fn plan(
         paths: vec![Vec::new(); problems.len() * seeds],
         valid: vec![false; problems.len() * seeds],
         length: vec![f32::INFINITY; problems.len() * seeds],
+        failures: vec![None; problems.len()],
     };
     let mut plannings: Vec<_> = problems
         .iter()
@@ -300,8 +327,10 @@ pub fn plan(
         plannings.iter_mut().map(|p| p as &mut dyn Search).collect();
     device.search(worlds, &mut running, deadline)?;
     let mut searched = Vec::with_capacity(problems.len());
+    let mut stopped = Vec::with_capacity(problems.len());
     let built = plannings.into_iter().map(Deferred::into_inner);
     for (pi, planning) in built.enumerate() {
+        stopped.push(planning.stopped());
         if let Some((spline, length)) = planning.chosen {
             let item = pi * seeds;
             result.paths[item] = spline;
@@ -328,7 +357,52 @@ pub fn plan(
         result.valid[item] = false;
         result.length[item] = f32::INFINITY;
     }
+    // Why the problems left without a valid seed failed, and what a colliding end collides with.
+    let unsolved: Vec<usize> = (0..problems.len())
+        .filter(|&pi| result.best(pi).is_none())
+        .collect();
+    let mut ends = vec![];
+    for pi in unsolved {
+        result.failures[pi] = Some(match stopped[pi] {
+            Stopped::Blocked(end) => {
+                ends.push((pi, end));
+                continue;
+            }
+            Stopped::NoPath => PlanFailure::NoPath,
+            Stopped::NoSpline => PlanFailure::NoSpline,
+            Stopped::OutOfTime => PlanFailure::OutOfTime,
+        });
+    }
+    let item_world: Vec<u32> = ends.iter().map(|&(pi, _)| problems[pi].world).collect();
+    let q: Vec<f32> = ends
+        .iter()
+        .flat_map(|&(pi, end)| match end {
+            End::Start => &problems[pi].start,
+            End::Goal => &problems[pi].goal,
+        })
+        .copied()
+        .collect();
+    let contacts = device.contacts(worlds, &item_world, &q, 0.0)?;
+    for ((pi, end), contacts) in ends.into_iter().zip(contacts) {
+        result.failures[pi] = Some(match end {
+            End::Start => PlanFailure::StartCollides { contacts },
+            End::Goal => PlanFailure::GoalCollides { contacts },
+        });
+    }
     Ok(result)
+}
+
+/// Where a problem's planning stopped without a valid spline.
+#[derive(Clone, Copy, Debug)]
+enum Stopped {
+    /// An end of its search collides.
+    Blocked(End),
+    /// Its search found no path.
+    NoPath,
+    /// No spline along the path it found checked valid.
+    NoSpline,
+    /// The deadline passed first.
+    OutOfTime,
 }
 
 /// Whether `path` can run from `problem`'s start: from rest, or from its moving start timed by
@@ -376,6 +450,10 @@ struct Planning<'call> {
     ahead: Arc<Ahead>,
     /// The problem's constraints, which every check keeps.
     region: Option<Arc<Region>>,
+    /// Whether a search found a path, and which end of the last search, if any, kept it from
+    /// starting.
+    found: bool,
+    blocked: Option<End>,
 }
 
 enum Phase<'call> {
@@ -423,6 +501,22 @@ impl<'call> Planning<'call> {
             ahead,
             region: (!problem.constraints.is_empty())
                 .then(|| Arc::new(Region::new(robot, &problem.constraints))),
+            found: false,
+            blocked: None,
+        }
+    }
+
+    /// Where planning stopped, for a problem left without a valid spline: still running when the
+    /// deadline passed, or done.
+    fn stopped(&self) -> Stopped {
+        if !matches!(self.phase, Phase::Done) {
+            Stopped::OutOfTime
+        } else if self.found {
+            Stopped::NoSpline
+        } else if let Some(end) = self.blocked {
+            Stopped::Blocked(end)
+        } else {
+            Stopped::NoPath
         }
     }
 }
@@ -747,6 +841,8 @@ impl Search for Planning<'_> {
                                 && search_goals(self.robot, self.problem).len() == 1)
                     });
                     self.ahead.finish();
+                    self.found |= connect.path.is_some();
+                    self.blocked = connect.blocked();
                     self.phase = match connect.path.take() {
                         Some(path) => Phase::Simplify(Box::new(Simplify::new(
                             self.problem.world,
@@ -1572,6 +1668,7 @@ mod tests {
                 paths: vec![searched, vec![], vec![]],
                 valid: vec![true, false, false],
                 length: vec![1.0, f32::INFINITY, f32::INFINITY],
+                failures: vec![None],
             };
             optimize(
                 &device,

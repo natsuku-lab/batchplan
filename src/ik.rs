@@ -7,7 +7,7 @@
 
 use crate::error::{Result, ensure_input, input};
 
-use crate::device::{self, CollisionWeights, Device, Worlds};
+use crate::device::{self, CollisionWeights, Contact, Device, Worlds};
 use crate::rng::Rng;
 use crate::types::{Pose, Solved};
 
@@ -161,6 +161,100 @@ impl IkResult {
                 })
             })
     }
+}
+
+/// Why a problem of an [`IkResult`] has no solution ([`failures`]).
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum IkFailure {
+    /// No seed reaches the targets within the tolerances, even without the push away from
+    /// obstacles: they lie beyond the arm's reach or its joint limits, or need more seeds or
+    /// iterations than were given.
+    Unreachable,
+    /// Seeds reach the targets, but only in collision: what the one with the most clearance
+    /// collides with ([`Device::contacts`]).
+    Collides {
+        /// Its contacts, nearest first.
+        contacts: Vec<Contact>,
+    },
+}
+
+/// Why each problem of `result`, solved by [`solve_ik`] with `o`, has no solution: `None` where it
+/// has one. The push away from obstacles can hold every seed off a pose that collides, so problems
+/// no seed reached are solved once more without it (`collision_step` 0): a pose reached then
+/// collides, one still not reached is out of reach. That solve costs what theirs did, so it runs
+/// only when asked for, here.
+pub fn failures(
+    device: &Device,
+    worlds: &Worlds,
+    result: &IkResult,
+    o: &IkOptions,
+) -> Result<Vec<Option<IkFailure>>> {
+    ensure_input!(
+        result.seeds == o.seeds,
+        "a result of {} seeds per problem, from options with {}",
+        result.seeds,
+        o.seeds
+    );
+    let problems = 0..result.problems.len();
+    let failed: Vec<usize> = problems.filter(|&p| result.best(p).is_none()).collect();
+    let unreached: Vec<usize> = failed
+        .iter()
+        .copied()
+        .filter(|&p| reaching(result, p, o).is_none())
+        .collect();
+    let unpushed = IkOptions {
+        collision_step: 0.0,
+        ..*o
+    };
+    let retried = if unreached.is_empty() || o.collision_step == 0.0 {
+        None
+    } else {
+        let again: Vec<IkProblem> = unreached
+            .iter()
+            .map(|&p| result.problems[p].clone())
+            .collect();
+        Some(solve_ik(device, worlds, &again, &unpushed)?)
+    };
+    // Per failed problem, the reaching configuration whose contacts it reports, if any.
+    let mut colliding: Vec<(usize, u32, &[f32])> = vec![];
+    for &p in &failed {
+        let world = result.problems[p].world;
+        if let Some(item) = reaching(result, p, o) {
+            colliding.push((p, world, result.solution(item)));
+        } else if let Some(again) = &retried {
+            let k = unreached
+                .iter()
+                .position(|&u| u == p)
+                .expect("problems no seed reached were solved again");
+            if let Some(item) = reaching(again, k, &unpushed) {
+                colliding.push((p, world, again.solution(item)));
+            }
+        }
+    }
+    let item_world: Vec<u32> = colliding.iter().map(|&(_, w, _)| w).collect();
+    let q: Vec<f32> = colliding.iter().flat_map(|&(_, _, q)| q).copied().collect();
+    let contacts = device.contacts(worlds, &item_world, &q, 0.0)?;
+    let mut out: Vec<Option<IkFailure>> = vec![None; result.problems.len()];
+    for &p in &failed {
+        out[p] = Some(IkFailure::Unreachable);
+    }
+    for ((p, _, _), contacts) in colliding.into_iter().zip(contacts) {
+        out[p] = Some(IkFailure::Collides { contacts });
+    }
+    Ok(out)
+}
+
+/// The seed of `problem` with the most clearance among those within `o`'s tolerances, collision-free
+/// or not.
+fn reaching(result: &IkResult, problem: usize, o: &IkOptions) -> Option<usize> {
+    let clearance = |k: usize| result.world_clearance[k].min(result.self_clearance[k]);
+    (problem * result.seeds..(problem + 1) * result.seeds)
+        .filter(|&k| {
+            result.position_error[k] < o.position_tolerance
+                && result.rotation_error[k] < o.rotation_tolerance
+        })
+        .max_by(|&a, &b| clearance(a).total_cmp(&clearance(b)))
 }
 
 /// Seed 0 starts from the problem's seed or else the robot's default configuration, the rest with

@@ -1055,3 +1055,102 @@ fn floating_and_planar_joints_become_one_axis_joints() {
         }
     }
 }
+
+#[test]
+fn spheres_are_the_collision_model_placed_at_the_configuration() {
+    let robot = load(UR5E);
+    let mut rng = Rng::new(3);
+    let q = random_q(&robot, &mut rng);
+    let mut expected = vec![];
+    for link in robot.collision_model().spheres.keys() {
+        let pose = robot.link_pose(&q, link).unwrap();
+        for s in &robot.collision_model().spheres[link] {
+            let c = pose.position + pose.rotation * Vec3::new(s[0], s[1], s[2]);
+            expected.push([c.x, c.y, c.z, s[3]]);
+        }
+    }
+    let mut placed = robot.spheres(&q);
+    assert_eq!(placed.len(), expected.len());
+    let key = |s: &[f32; 4]| (s[0].to_bits(), s[1].to_bits(), s[2].to_bits());
+    placed.sort_by_key(key);
+    expected.sort_by_key(key);
+    for (a, b) in placed.iter().zip(&expected) {
+        let gap = Vec3::from_slice(&a[..3]).distance(Vec3::from_slice(&b[..3]));
+        assert!(gap < 1e-5 && a[3] == b[3], "{a:?} against {b:?}");
+    }
+}
+
+#[test]
+fn reach_bounds_every_sphere_and_stays_near_the_farthest_one() {
+    let dir = scratch("reach");
+    let planar = dir.join("planar.urdf");
+    std::fs::write(&planar, mounted_arm_urdf("planar")).unwrap();
+    // The same base on a slope: its slides rise and fall as they go.
+    let sloped = dir.join("sloped.urdf");
+    let slope = mounted_arm_urdf("planar").replace(
+        r#"<origin xyz="0 0 0.5"/>"#,
+        r#"<origin xyz="0 0 0.5" rpy="0.7 0 0"/>"#,
+    );
+    assert!(slope.contains("rpy"), "the base turns");
+    std::fs::write(&sloped, slope).unwrap();
+    let slide = JointLimits {
+        position: Some([-1.0, 1.0]),
+        ..Default::default()
+    };
+    let on_a_base = RobotOptions {
+        joint_limits: [("mount_x".into(), slide), ("mount_y".into(), slide)].into(),
+        ..Default::default()
+    };
+    let robots = [
+        ("UR5e", load(UR5E)),
+        ("SO-101", load(SO101)),
+        ("Panda", common::panda().unwrap()),
+        ("two Pandas", common::two_pandas().unwrap()),
+        ("the 2F-85", load(GRIPPER)),
+        ("a planar base", Robot::load(&planar, &on_a_base).unwrap()),
+        ("a sloped base", Robot::load(&sloped, &on_a_base).unwrap()),
+    ];
+    let mut rng = Rng::new(5);
+    for (name, robot) in robots {
+        let reach = robot.reach();
+        let far = |q: &[f32]| {
+            robot
+                .spheres(q)
+                .iter()
+                .map(|s| Vec3::from_slice(&s[..3]).length() + s[3])
+                .fold(0.0, f32::max)
+        };
+        // The farthest of random configurations, then climbed toward farther ones.
+        let mut best = robot.default_q().to_vec();
+        for _ in 0..2000 {
+            let q = random_q(&robot, &mut rng);
+            if far(&q) > far(&best) {
+                best = q;
+            }
+        }
+        for k in 0..4000 {
+            let step = 0.5 * (1.0 - k as f32 / 4000.0);
+            let q: Vec<f32> = best
+                .iter()
+                .enumerate()
+                .map(|(j, v)| {
+                    let (lo, hi) = (robot.lower()[j], robot.upper()[j]);
+                    (v + step * (hi - lo).min(6.3) * rng.range(-0.5, 0.5)).clamp(lo, hi)
+                })
+                .collect();
+            if far(&q) > far(&best) {
+                best = q;
+            }
+        }
+        let farthest = far(&best);
+        assert!(farthest > 0.0, "{name} has spheres");
+        assert!(
+            farthest <= reach + 1e-5,
+            "{name}: a sphere reaches {farthest} m, past the bound of {reach} m"
+        );
+        assert!(
+            reach <= 1.12 * farthest,
+            "{name}: a bound of {reach} m for spheres reaching {farthest} m"
+        );
+    }
+}

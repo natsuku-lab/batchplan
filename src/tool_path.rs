@@ -7,10 +7,11 @@
 use glam::{Mat3, Quat, Vec3};
 
 use crate::cpu::Reach;
-use crate::device::{Device, Worlds};
+use crate::device::{Contact, Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Search};
 use crate::error::{Result, ensure_input};
 use crate::ik::IkOptions;
+use crate::lanes::LANES;
 use crate::robot::Robot;
 use crate::spline;
 use crate::types::Pose;
@@ -80,6 +81,9 @@ pub struct ToolPathResult {
     /// [`Trajectory::try_new`](crate::Trajectory::try_new). It stops only where it must to keep
     /// the precision, as at a sharp turn. Empty where it reaches nothing past the start.
     pub paths: Vec<Vec<f32>>,
+    /// Per path stopped by a collision: what the hand's next step collides with
+    /// ([`Device::contacts`](crate::Device::contacts)), nearest first. Empty for the rest.
+    pub contacts: Vec<Vec<Contact>>,
 }
 
 /// Why a tool path's motion stops short.
@@ -173,12 +177,27 @@ pub fn follow(
         fraction: Vec::with_capacity(paths.len()),
         stopped: Vec::with_capacity(paths.len()),
         paths: Vec::with_capacity(paths.len()),
+        contacts: vec![vec![]; paths.len()],
     };
-    for search in searches {
+    // Each collided path's group of samples, checked whole: its first contacts are the collision's.
+    let (mut collided, mut item_world, mut q) = (vec![], vec![], vec![]);
+    for (i, search) in searches.into_iter().enumerate() {
         let done = search.into_inner();
+        if matches!(done.stop, Some(ToolPathStop::Collision { .. })) {
+            let samples = done.collided.len() / n;
+            collided.push((i, item_world.len()..item_world.len() + samples));
+            item_world.extend(std::iter::repeat_n(paths[i].world, samples));
+            q.extend_from_slice(&done.collided);
+        }
         result.fraction.push(done.covered);
         result.stopped.push(done.stop);
         result.paths.push(done.control);
+    }
+    let mut contacts = device.contacts(worlds, &item_world, &q, 0.0)?;
+    for (i, group) in collided {
+        if let Some(first) = contacts[group].iter_mut().find(|c| !c.is_empty()) {
+            result.contacts[i] = std::mem::take(first);
+        }
     }
     Ok(result)
 }
@@ -311,6 +330,10 @@ struct Follow<'a> {
     /// Where each span's samples start in the last spline check, then the end's.
     starts: Vec<usize>,
     stop: Option<ToolPathStop>,
+    /// Where the last collision that cut the motion back was found: the group of the spline's
+    /// check samples (`[k, dof]`, at most `LANES`) that holds the first that collides, as the
+    /// check answers in groups. Empty until one is.
+    collided: Vec<f32>,
     stage: Stage,
     /// How much of the path the motion covers, once the search is done (`fraction`).
     covered: f32,
@@ -352,6 +375,7 @@ impl<'a> Follow<'a> {
             spans: vec![],
             starts: vec![],
             stop: None,
+            collided: Vec::with_capacity(LANES * robot.dof()),
             stage: Stage::Steps,
             covered: 0.0,
             next: path.start.clone(),
@@ -675,12 +699,28 @@ impl Search for Follow<'_> {
             self.finish();
             return;
         }
+        // The span of a sample, and where along it the sample lies.
+        let last = self.spans.len() - 1;
+        let at = |sample: usize| {
+            let span = self
+                .starts
+                .partition_point(|&s| s <= sample)
+                .saturating_sub(1)
+                .min(last);
+            let (first, next) = (self.starts[span], self.starts[span + 1]);
+            (span, (sample - first) as f32 / (next - first) as f32)
+        };
+        let n = self.n;
+        self.collided.clear();
+        for sample in answer..(answer + LANES).min(samples) {
+            let (span, along) = at(sample);
+            let row = self.collided.len();
+            self.collided.resize(row + n, 0.0);
+            let weights = spline::basis(along);
+            spline::blend(&self.control, n, span, weights, &mut self.collided[row..]);
+        }
         // The configurations before the span of the first sample that may collide.
-        let span = self
-            .starts
-            .partition_point(|&s| s <= answer)
-            .saturating_sub(1);
-        self.truncate(self.spans[span.min(self.spans.len() - 1)] + 1);
+        self.truncate(self.spans[at(answer).0] + 1);
         self.stage = Stage::Spline;
     }
 }

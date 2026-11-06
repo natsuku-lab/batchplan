@@ -7,7 +7,7 @@ mod common;
 
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionModel, CollisionWeights, Device, Error, HandSpeed, Obstacle, Pose, Robot,
+    CollisionModel, CollisionWeights, Contact, Device, Error, HandSpeed, Obstacle, Pose, Robot,
     RobotOptions, ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, Touch, Trajectory,
     World,
 };
@@ -132,6 +132,16 @@ fn an_obstacle_stops_the_motion_where_it_collides() {
             "{name}: {:?}",
             result.stopped[0]
         );
+        // What the next step collides with: the slab, and nothing else.
+        let hits_slab = |c: &Contact| matches!(c, Contact::World { obstacle: 0, .. });
+        assert!(
+            !result.contacts[0].is_empty()
+                && result.contacts[0]
+                    .iter()
+                    .all(|c| hits_slab(c) && c.distance() < 0.0),
+            "{name}: {:?}",
+            result.contacts[0]
+        );
         // The motion it returns keeps clear of the slab.
         let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
         let samples = Trajectory::try_new(&robot, &result.paths[0], 1.0)
@@ -168,6 +178,7 @@ fn poses_out_of_reach_stop_the_motion_before_them() {
             "{name}: {:?}",
             result.stopped[0]
         );
+        assert!(result.contacts[0].is_empty(), "{name}: nothing collides");
         // As far as it went, it went straight.
         let poses = hand_poses(&robot, &result.paths[0]);
         let reached = poses.last().unwrap().position;

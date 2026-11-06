@@ -15,11 +15,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use rayon::ThreadPool;
+use rayon::prelude::*;
 
 use crate::constraint::Region;
 use crate::error::{Result, ensure_input, input};
 
-use crate::cpu::CpuBackend;
+use crate::cpu::{CpuBackend, CpuWorlds};
 use crate::edges::Search;
 #[cfg(feature = "gpu")]
 use crate::gpu::GpuBackend;
@@ -85,6 +86,40 @@ impl Evaluation {
     #[must_use]
     pub fn collision_free(&self, item: usize) -> bool {
         collision_free([self.world_clearance[item], self.self_clearance[item]])
+    }
+}
+
+/// A link of the robot near an obstacle, or two of its links near each other: one of a
+/// configuration's [`Device::contacts`].
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum Contact {
+    /// A link and an obstacle of the world.
+    World {
+        /// The link's name.
+        link: String,
+        /// The obstacle's index in [`World::obstacles`].
+        obstacle: usize,
+        /// Signed distance from the link's spheres to the obstacle (meters): negative where they
+        /// overlap.
+        distance: f32,
+    },
+    /// Two links of the robot that are checked against each other.
+    SelfCollision {
+        /// The links' names.
+        links: [String; 2],
+        /// Signed distance between their spheres (meters), self-collision buffers included.
+        distance: f32,
+    },
+}
+
+impl Contact {
+    /// The signed distance between the two (meters): negative where they overlap.
+    #[must_use]
+    pub fn distance(&self) -> f32 {
+        match *self {
+            Contact::World { distance, .. } | Contact::SelfCollision { distance, .. } => distance,
+        }
     }
 }
 
@@ -249,6 +284,43 @@ impl Device {
     ) -> Result<Evaluation> {
         self.check_batch(worlds, item_world, q.len(), self.robot().dof())?;
         self.backend.evaluate(worlds, item_world, q, w)
+    }
+
+    /// What each configuration in `q` (`[items, dof]`) comes within `within` meters of in
+    /// `worlds[item_world[item]]`, nearest first: every link and obstacle, and every pair of links
+    /// checked against each other, whose spheres come that close. `within` 0 lists what collides,
+    /// to say why a start or a goal is in collision. The checks' rules hold: links touch what the
+    /// world lets them, links no joint moves are not checked against the world, and pairs the
+    /// collision model ignores are left out. Distances are exact, computed on the device's CPU
+    /// threads from the copy of the worlds searches check, so both devices list the same. Errors
+    /// as [`Device::evaluate`] does, or for a `within` that is not finite.
+    pub fn contacts(
+        &self,
+        worlds: &Worlds,
+        item_world: &[u32],
+        q: &[f32],
+        within: f32,
+    ) -> Result<Vec<Vec<Contact>>> {
+        let robot = self.robot();
+        self.check_batch(worlds, item_world, q.len(), robot.dof())?;
+        ensure_input!(
+            within.is_finite(),
+            "contacts within a finite distance, got {within}"
+        );
+        let checked = self.backend.checked(worlds);
+        let contacts = |(q, &world): (&[f32], &u32)| {
+            crate::cpu::contacts(robot, &checked[world as usize], &robot.fk(q), within)
+        };
+        let configurations = q.chunks(robot.dof()).zip(item_world);
+        if item_world.len() <= 1 {
+            return Ok(configurations.map(contacts).collect());
+        }
+        Ok(self.install(|| {
+            q.par_chunks(robot.dof())
+                .zip(item_world.par_iter())
+                .map(contacts)
+                .collect()
+        }))
     }
 
     /// Runs `op` on this device's threads, so that its parallel loops run there too.
@@ -430,6 +502,8 @@ pub(crate) trait Backend: Send + Sync {
     fn upload(&self, worlds: &[World]) -> Result<Box<dyn Any + Send + Sync>>;
     /// The same backend for another robot, sharing the hardware and the form of worlds.
     fn with_robot(&self, robot: &Robot) -> Result<Box<dyn Backend>>;
+    /// `worlds` as the CPU checks them: what searches run against on either backend.
+    fn checked<'w>(&self, worlds: &'w Worlds) -> &'w CpuWorlds;
     fn evaluate(
         &self,
         worlds: &Worlds,

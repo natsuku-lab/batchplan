@@ -23,4 +23,4 @@ mod connect;
 pub use connect::{RrtOptions, RrtProblem, RrtResult, connect};
 
 pub(crate) use ahead::{Ahead, HELPERS};
-pub(crate) use connect::{Connect, Sampling, connect_edges, distance, holds, walk};
+pub(crate) use connect::{Connect, End, Sampling, connect_edges, distance, holds, walk};

@@ -1527,8 +1527,12 @@ impl Backend for GpuBackend {
         Ok(bytemuck::cast_slice::<u32, u16>(&words)[..points].to_vec())
     }
 
+    fn checked<'w>(&self, worlds: &'w Worlds) -> &'w CpuWorlds {
+        &worlds.prepared::<GpuWorlds>().cpu
+    }
+
     fn search(&self, worlds: &Worlds, searches: &mut [&mut dyn Search], deadline: Option<Instant>) {
-        let cpu = &worlds.prepared::<GpuWorlds>().cpu;
+        let cpu = self.checked(worlds);
         crate::cpu::run_searches(
             &self.pool,
             searches,

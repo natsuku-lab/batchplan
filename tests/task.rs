@@ -9,9 +9,9 @@ use std::f32::consts::PI;
 
 use batchplan::rng::Rng;
 use batchplan::{
-    Device, Error, GraspOptions, HandConstraint, Held, IkOptions, IkProblem, Obstacle, Pick, Place,
-    Pose, Robot, RobotOptions, SdfGrid, TaskFailure, TaskOptions, TaskPlan, TaskStep, ToolPathStop,
-    Touch, Trajectory, World,
+    Contact, Device, Error, GraspOptions, HandConstraint, Held, IkOptions, IkProblem, Obstacle,
+    Pick, Place, Pose, Robot, RobotOptions, SdfGrid, TaskFailure, TaskOptions, TaskPlan, TaskStep,
+    ToolPathStop, Touch, Trajectory, World,
 };
 use glam::{Mat3, Quat, Vec3};
 
@@ -188,9 +188,18 @@ fn a_task_none_of_whose_grasps_gets_through_says_where_and_why_each_stopped() {
             .all(|c| c.step == step && c.why.as_ref().is_some_and(why))
     };
     let collides = |s: &ToolPathStop| matches!(s, ToolPathStop::Collision { .. });
+    // What each candidate collides with: obstacle `k`, among others.
+    let names = |f: &TaskFailure, k: usize| {
+        f.candidates.iter().all(|c| {
+            c.contacts
+                .iter()
+                .any(|t| matches!(t, Contact::World { obstacle, .. } if *obstacle == k))
+        })
+    };
     // A slab where the palm would be at the grasp.
     let f = pick_in(&device, scene(vec![slab(0.09)]), tops(), &o).unwrap_err();
     assert!(stops(&f, TaskStep::Reach, collides), "{f}");
+    assert!(names(&f, 2), "{:?}", f.candidates);
     assert_eq!(
         f.to_string(),
         "none of 3 candidates got through: 3 at the grasp or release (3 colliding)"
@@ -201,6 +210,7 @@ fn a_task_none_of_whose_grasps_gets_through_says_where_and_why_each_stopped() {
     let f = pick_in(&device, far, tops(), &o).unwrap_err();
     let out = |s: &ToolPathStop| matches!(s, ToolPathStop::Unreachable { .. });
     assert!(stops(&f, TaskStep::Reach, out), "{f}");
+    assert!(f.candidates.iter().all(|c| c.contacts.is_empty()));
     // From 40 cm up, the hand passes a small block high over the box that the arm clears at the
     // grasp: the moves in stop at it, unless they may stop short.
     let block = Obstacle::cuboid(Vec3::new(0.45, 0.2, 0.38), Vec3::new(0.02, 0.02, 0.01));
@@ -210,6 +220,7 @@ fn a_task_none_of_whose_grasps_gets_through_says_where_and_why_each_stopped() {
     };
     let f = pick_in(&device, scene(vec![block.clone()]), from_high(), &o).unwrap_err();
     assert!(stops(&f, TaskStep::Approach, collides), "{f}");
+    assert!(names(&f, 2), "{:?}", f.candidates);
     let shorter = TaskOptions {
         min_fraction: 0.05,
         ..TaskOptions::default()
@@ -258,6 +269,7 @@ fn a_task_none_of_whose_grasps_gets_through_says_where_and_why_each_stopped() {
     let cage = Obstacle::cuboid(hand, Vec3::splat(0.05));
     let f = pick_in(&device, scene(vec![cage]), tops(), &o).unwrap_err();
     assert!(stops(&f, TaskStep::Start, collides), "{f}");
+    assert!(names(&f, 2), "{:?}", f.candidates);
     assert_eq!(f.to_string(), "the start collides");
 }
 
@@ -382,6 +394,14 @@ fn a_picked_box_is_set_down_where_there_is_room() {
         let failure = batchplan::place(&device, &after, &[unsupported], &o).unwrap();
         let failure = failure.outcomes[0].as_ref().unwrap_err();
         assert_eq!(failure.step(), TaskStep::Reach, "{name}: {failure}");
+        // At the free pose, the object it holds meets the table; the other collides as before.
+        let on_table = |c: &Contact| matches!(c, Contact::World { link, obstacle: TABLE, .. } if link == "held by hand 0");
+        let held_on_table = &failure.candidates[1].contacts;
+        assert!(
+            !held_on_table.is_empty() && held_on_table.iter().all(on_table),
+            "{name}: {held_on_table:?}"
+        );
+        assert!(!failure.candidates[0].contacts.is_empty(), "{name}");
     }
 }
 

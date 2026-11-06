@@ -195,6 +195,26 @@ impl Trajectory {
         (self.time_points.len() - 3) as f32 * self.knot_interval
     }
 
+    /// The configuration it starts at: its first control point, or where a stop begins along its
+    /// path.
+    #[must_use]
+    pub fn start(&self) -> Vec<f32> {
+        self.position_at(0.0)
+    }
+
+    /// The configuration it comes to rest at: its last control point, or where a stop ends, short
+    /// of its path's end. The start of the motion that follows.
+    #[must_use]
+    pub fn end(&self) -> Vec<f32> {
+        self.position_at(self.duration())
+    }
+
+    fn position_at(&self, t: f32) -> Vec<f32> {
+        let mut state = JointState::new(self.dof);
+        self.at(t, &mut state);
+        state.position
+    }
+
     /// The state at time `t` (clamped to the trajectory), written into `out` without allocating.
     pub fn at(&self, t: f32, out: &mut JointState) {
         let n = self.dof;

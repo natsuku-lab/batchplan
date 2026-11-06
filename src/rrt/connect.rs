@@ -599,6 +599,13 @@ impl Halton {
     }
 }
 
+/// An end of a search: its start, or its goals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum End {
+    Start,
+    Goal,
+}
+
 enum Stage {
     /// Checking the start.
     Start,
@@ -826,6 +833,19 @@ impl<'call> Connect<'call> {
     /// Whether any sample came from the tube.
     pub(crate) fn sampled_tube(&self) -> bool {
         self.tube_samples > 0
+    }
+
+    /// Which end kept a search that is over from starting: its start collides, or else every
+    /// goal does (the goals are checked only from a free start).
+    pub(crate) fn blocked(&self) -> Option<End> {
+        let start = &self.trees[usize::from(!self.start_first)];
+        if start.len() == 0 {
+            Some(End::Start)
+        } else if self.free_goals.is_empty() {
+            Some(End::Goal)
+        } else {
+            None
+        }
     }
 
     /// The free goal nearest the start.
