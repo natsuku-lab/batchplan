@@ -110,7 +110,7 @@ A robot that loads may still have spheres unfit to plan with. Before planning wi
 
 - `ik.best(i)`, `plans.best(i)` and `solved()` return only valid answers; `IkResult::success` and `PlanResult::valid` are per seed, problem-major (`problem * seeds + seed`).
 - A plan is B-spline control points, not a trajectory: time it with `Trajectory::try_new` (`Trajectory::moving` from a moving start), sample it with `at` or `sample`, and `check` it before it runs on hardware. Never send control points to a controller.
-- Results do not depend on the batch or the device. With a `time_budget`, they depend on the machine's speed.
+- Plans do not depend on the batch or the device; with a `time_budget`, they depend on the machine's speed. IK starts every problem from the same seeds in any batch, but a GPU rounds differently from the CPU, and differently on either side of where it switches how many invocations share a configuration (4,096 configurations, more for robots with many spheres), so solutions there can differ slightly.
 
 ### Diagnose a failed request, in order
 

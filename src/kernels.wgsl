@@ -441,7 +441,8 @@ fn ik_step(world: u32, lid: u32, lane: u32) {
 
 // Collision kernels give each configuration LANES consecutive invocations, which split its
 // collision work (see collision()). gpu.rs builds them twice: with one lane, where the lane code
-// folds away, for large batches, and with several for batches too small to fill the GPU. They have
+// folds away, for large batches, and with several for batches too small to fill the GPU and for
+// IK of robots with many spheres (`ik_lanes`). They have
 // no early returns, because the lanes meet at barriers: invocations past the end work on the last
 // configuration and write nothing.
 override LANES: u32 = 1u;
