@@ -260,6 +260,47 @@ impl Device {
         })
     }
 
+    /// Pays now what the first calls would: builds the kernels a GPU builds when first needed (for
+    /// constrained trajectory optimization and for distance grids), then runs one small call of
+    /// each kind on the device's threads and GPU: a collision check, IK and a step of trajectory
+    /// optimization. Call it once after making the device and before timing anything. A device
+    /// made with [`Device::with_robot`] for the same robot shares what it built; one for a changed
+    /// robot, such as one holding an object, builds kernels of its own, so warm it up too. Buffers
+    /// grow to the largest batch they have carried, so warm up with batches the size of those you
+    /// time too.
+    pub fn warmup(&self) -> Result<()> {
+        self.backend.build_all()?;
+        let robot = self.robot();
+        let n = robot.dof();
+        let worlds = self.upload(&[World::default()])?;
+        let q = robot.default_q();
+        self.evaluate(&worlds, &[0], q, &CollisionWeights::NONE)?;
+        let target = (0..robot.hands())
+            .map(|h| Some(robot.ee_pose(q, h)))
+            .collect();
+        let problem = crate::IkProblem {
+            targets: target,
+            ..crate::IkProblem::new(0, Pose::IDENTITY)
+        };
+        let ik = IkOptions {
+            seeds: 1,
+            iterations: 1,
+            ..IkOptions::default()
+        };
+        crate::solve_ik(self, &worlds, &[problem], &ik)?;
+        let points = 7;
+        let mut paths = JointPaths::zeros(1, points, n);
+        for p in 0..points {
+            paths.path_mut(0)[p * n..(p + 1) * n].copy_from_slice(q);
+        }
+        let o = PlanOptions {
+            iterations: 1,
+            control_points: points,
+            ..PlanOptions::default()
+        };
+        self.trajopt(&worlds, &[0], &[None], &mut paths, &o, None)
+    }
+
     /// What runs the batches: the GPU adapter and its API, or the CPU's thread count.
     #[must_use]
     pub fn name(&self) -> String {
@@ -291,9 +332,10 @@ impl Device {
     /// checked against each other, whose spheres come that close. `within` 0 lists what collides,
     /// to say why a start or a goal is in collision. The checks' rules hold: links touch what the
     /// world lets them, links no joint moves are not checked against the world, and pairs the
-    /// collision model ignores are left out. Distances are exact, computed on the device's CPU
-    /// threads from the copy of the worlds searches check, so both devices list the same. Errors
-    /// as [`Device::evaluate`] does, or for a `within` that is not finite.
+    /// collision model ignores are left out. Distances are exact to primitives and interpolated in
+    /// distance grids, as the checks see them, computed on the device's CPU threads from the copy
+    /// of the worlds searches check, so both devices list the same. Errors as [`Device::evaluate`]
+    /// does, or for a `within` or a configuration value that is not finite.
     pub fn contacts(
         &self,
         worlds: &Worlds,
@@ -307,6 +349,13 @@ impl Device {
             within.is_finite(),
             "contacts within a finite distance, got {within}"
         );
+        if let Some(i) = q.iter().position(|v| !v.is_finite()) {
+            return Err(input!(
+                "item {} has a configuration value that is not finite: {}",
+                i / robot.dof(),
+                q[i]
+            ));
+        }
         let checked = self.backend.checked(worlds);
         let contacts = |(q, &world): (&[f32], &u32)| {
             crate::cpu::contacts(robot, &checked[world as usize], &robot.fk(q), within)
@@ -504,6 +553,8 @@ pub(crate) trait Backend: Send + Sync {
     fn with_robot(&self, robot: &Robot) -> Result<Box<dyn Backend>>;
     /// `worlds` as the CPU checks them: what searches run against on either backend.
     fn checked<'w>(&self, worlds: &'w Worlds) -> &'w CpuWorlds;
+    /// Builds every kernel the backend would otherwise build the first time it is needed.
+    fn build_all(&self) -> Result<()>;
     fn evaluate(
         &self,
         worlds: &Worlds,

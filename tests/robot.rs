@@ -1154,3 +1154,154 @@ fn reach_bounds_every_sphere_and_stays_near_the_farthest_one() {
         );
     }
 }
+
+#[test]
+fn qualification_measures_how_the_spheres_fit_each_link() {
+    let robot = load(SO101);
+    let fitted = robot.qualify().unwrap();
+    let with_geometry = [
+        "base_link",
+        "shoulder_link",
+        "upper_arm_link",
+        "lower_arm_link",
+        "wrist_link",
+        "gripper_link",
+        "moving_jaw_so101_v1_link",
+    ];
+    let named: Vec<&str> = fitted.links.iter().map(|l| l.link.as_str()).collect();
+    assert_eq!(named, with_geometry);
+    // The fit's own account of its overhang, to the tenth of a millimeter it gives.
+    let source = robot.collision_model().source.clone().unwrap();
+    let reported: f32 = source
+        .split("up to ")
+        .nth(1)
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let largest = fitted.links.iter().map(|l| l.overhang).fold(0.0, f32::max);
+    assert!(
+        (largest * 1e3 - reported).abs() < 0.06,
+        "{largest} m against {source}"
+    );
+    for l in &fitted.links {
+        assert_eq!(l.spheres, robot.collision_model().spheres[&l.link].len());
+        assert!(l.uncovered < 0.005 && l.thickness > 0.01, "{l:?}");
+    }
+    // Spheres halved leave most of the surface out and reach less far; one moved off the link
+    // reaches as far as it moved.
+    let mut model = robot.collision_model().clone();
+    for s in model.spheres.get_mut("upper_arm_link").unwrap() {
+        s[3] *= 0.5;
+    }
+    model.spheres.get_mut("wrist_link").unwrap()[0][2] += 0.05;
+    let hand_tuned = Robot::load(
+        common::asset(SO101),
+        &RobotOptions {
+            collision_model: Some(model),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .qualify()
+    .unwrap();
+    let link = |q: &batchplan::Qualification, name: &str| {
+        q.links.iter().find(|l| l.link == name).unwrap().clone()
+    };
+    let (before, after) = (
+        link(&fitted, "upper_arm_link"),
+        link(&hand_tuned, "upper_arm_link"),
+    );
+    assert!(
+        after.uncovered > 0.3 && after.overhang < before.overhang,
+        "{after:?}"
+    );
+    let (before, after) = (link(&fitted, "wrist_link"), link(&hand_tuned, "wrist_link"));
+    assert!(
+        after.overhang > before.overhang + 0.02,
+        "{before:?} then {after:?}"
+    );
+    assert_eq!(link(&fitted, "base_link"), link(&hand_tuned, "base_link"));
+}
+
+#[test]
+fn a_hands_tip_is_how_far_its_spheres_reach_past_its_frame() {
+    let robot = common::panda().unwrap();
+    let q = robot.default_q();
+    let frame = robot.ee_pose(q, 0);
+    let mut farthest = f32::NEG_INFINITY;
+    for link in robot.hand_links(0) {
+        let Some(spheres) = robot.collision_model().spheres.get(link) else {
+            continue;
+        };
+        let pose = robot.link_pose(q, link).unwrap();
+        for s in spheres {
+            let center = pose.position + pose.rotation * Vec3::new(s[0], s[1], s[2]);
+            let along = (frame.rotation * Vec3::Z).dot(center - frame.position);
+            farthest = farthest.max(along + s[3]);
+        }
+    }
+    assert!(
+        farthest > 0.0,
+        "the fingertips reach past the frame between them"
+    );
+    assert!((robot.tip(0) - farthest).abs() < 1e-6);
+    assert_eq!(robot.qualify().unwrap().tips, [robot.tip(0)]);
+}
+
+#[test]
+fn links_given_a_tighter_tolerance_get_spheres_that_reach_less_far() {
+    let jaws = ["gripper_link", "moving_jaw_so101_v1_link"];
+    let fit = |tolerances: &[(&str, f32)]| {
+        let options = RobotOptions {
+            spheres: SphereOptions {
+                budget: 256,
+                ..Default::default()
+            },
+            sphere_tolerances: tolerances
+                .iter()
+                .map(|&(l, t)| (l.to_string(), t))
+                .collect(),
+            ..Default::default()
+        };
+        let robot = Robot::load(common::asset(SO101), &options).unwrap();
+        let spheres: usize = robot.collision_model().spheres.values().map(Vec::len).sum();
+        assert!(spheres <= 256, "{spheres} spheres");
+        robot.qualify().unwrap().links
+    };
+    let even = fit(&[]);
+    let tight = fit(&jaws.map(|l| (l, 0.002)));
+    let reach = |links: &[batchplan::LinkQualification], of_jaws: bool| {
+        links
+            .iter()
+            .filter(|l| jaws.contains(&l.link.as_str()) == of_jaws)
+            .map(|l| l.overhang)
+            .collect::<Vec<f32>>()
+    };
+    let most = |v: Vec<f32>| v.into_iter().fold(0.0, f32::max);
+    let least = |v: Vec<f32>| v.into_iter().fold(f32::INFINITY, f32::min);
+    // The jaws reach less far than any other link, and than they did, at the arm's cost.
+    assert!(
+        most(reach(&tight, true)) < 0.75 * least(reach(&tight, false)),
+        "{tight:?}"
+    );
+    assert!(
+        most(reach(&tight, true)) < least(reach(&even, true)),
+        "{even:?} {tight:?}"
+    );
+    assert!(most(reach(&tight, false)) > most(reach(&even, false)));
+    // Tolerances name links of the robot, and are positive.
+    for (link, tolerance) in [("jaw", 0.002), ("gripper_link", 0.0)] {
+        let options = RobotOptions {
+            sphere_tolerances: [(link.to_string(), tolerance)].into(),
+            ..Default::default()
+        };
+        let err = Robot::load(common::asset(SO101), &options).unwrap_err();
+        assert!(
+            matches!(err, Error::Load { .. }) && err.to_string().contains(link),
+            "{err}"
+        );
+    }
+}

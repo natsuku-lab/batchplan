@@ -85,7 +85,7 @@ fn a_box_in_the_path_is_replanned_around_from_the_predicted_state() {
             );
         }
         let (before, began) = (follower.trajectory().clone(), follower.began());
-        let tick = follower.tick(&device, &worlds, t).unwrap();
+        let tick = follower.tick(&device, &worlds, t, None).unwrap();
         assert!(
             clear(&device, &worlds, &tick.state.position),
             "at {t:.2} s the robot collides ({:?})",
@@ -140,7 +140,7 @@ fn with_no_time_to_replan_the_robot_stops_before_the_box() {
                 .upload(&[World::new(vec![box_at(&robot, &first, 0.8 * duration)])])
                 .unwrap();
         }
-        let tick = follower.tick(&device, &worlds, t).unwrap();
+        let tick = follower.tick(&device, &worlds, t, None).unwrap();
         assert!(
             clear(&device, &worlds, &tick.state.position),
             "at {t:.2} s the robot collides ({:?})",
@@ -451,14 +451,14 @@ fn a_box_ahead_of_the_takeover_stops_the_robot_before_it() {
                 "the box blocks the old trajectory before the takeover"
             );
             let mut ahead = follower.clone();
-            ahead.tick(&device, &worlds, at).unwrap();
+            ahead.tick(&device, &worlds, at, None).unwrap();
             let replan = ahead.trajectory();
             let along = (0..=100).map(|k| replan.duration() * k as f32 / 100.0);
             for s in along {
                 assert!(clear(&device, &worlds, &state_at(replan, s).position));
             }
         }
-        let tick = follower.tick(&device, &worlds, t).unwrap();
+        let tick = follower.tick(&device, &worlds, t, None).unwrap();
         assert!(
             clear(&device, &worlds, &tick.state.position),
             "at {t:.2} s the robot collides ({:?})",
@@ -499,7 +499,7 @@ fn a_pending_replan_that_collides_is_dropped_for_a_stop() {
     let mut worlds = device.upload(&[World::new(vec![big.clone()])]).unwrap();
     let mut t = 0.1 * duration;
     let at = loop {
-        let tick = follower.tick(&device, &worlds, t).unwrap();
+        let tick = follower.tick(&device, &worlds, t, None).unwrap();
         if let FollowStatus::Replanned { at } = tick.status {
             break at;
         }
@@ -508,7 +508,7 @@ fn a_pending_replan_that_collides_is_dropped_for_a_stop() {
     };
     // The replan, read from a copy that has switched to it.
     let mut ahead = follower.clone();
-    ahead.tick(&device, &worlds, at).unwrap();
+    ahead.tick(&device, &worlds, at, None).unwrap();
     let replan = ahead.trajectory().clone();
     // A box on the replan a second after it takes over, clear of the old trajectory before.
     let hand = robot.ee_pose(&state_at(&replan, 1.0).position, 0).position;
@@ -520,7 +520,7 @@ fn a_pending_replan_that_collides_is_dropped_for_a_stop() {
         assert!(clear(&device, &worlds, &state_at(&first, s).position));
         s += 0.01;
     }
-    let tick = follower.tick(&device, &worlds, t + DT).unwrap();
+    let tick = follower.tick(&device, &worlds, t + DT, None).unwrap();
     assert_eq!(tick.status, FollowStatus::Stopping);
 }
 
@@ -545,7 +545,7 @@ fn a_stop_that_cannot_end_short_of_a_box_reports_the_collision() {
                 .unwrap();
             assert!(clear(&device, &worlds, &state_at(&first, t).position));
         }
-        let tick = follower.tick(&device, &worlds, t).unwrap();
+        let tick = follower.tick(&device, &worlds, t, None).unwrap();
         if let FollowStatus::Collides { at } = tick.status {
             reported.get_or_insert(at);
         }
@@ -566,6 +566,70 @@ fn a_stop_that_cannot_end_short_of_a_box_reports_the_collision() {
 }
 
 #[test]
+fn a_robot_held_far_back_is_followed_from_where_it_is() {
+    let robot = common::panda().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[World::default()]).unwrap();
+    let first = sweep(&robot, &device);
+    let duration = first.duration();
+    let mut follower =
+        Follower::try_new(&robot, 0, first.clone(), 0.0, FollowerOptions::default()).unwrap();
+    // A servo a little short of its command: the trajectory goes on as it was.
+    let t = 0.4 * duration;
+    let mut short = state_at(&first, t);
+    short.position[0] -= 0.1;
+    let tick = follower.tick(&device, &worlds, t, Some(&short)).unwrap();
+    assert_eq!(tick.status, FollowStatus::Following);
+    assert_eq!(tick.state, state_at(&first, t));
+    // Held back where it was a third of the way earlier: a new trajectory from there.
+    let held = state_at(&first, 0.1 * duration);
+    let tick = follower.tick(&device, &worlds, t, Some(&held)).unwrap();
+    let FollowStatus::Reanchored { off } = tick.status else {
+        panic!("{:?}", tick.status);
+    };
+    let farthest = (0..robot.dof())
+        .map(|j| (held.position[j] - state_at(&first, t).position[j]).abs())
+        .fold(0.0, f32::max);
+    assert!((off - farthest).abs() < 1e-5 && off > 0.2, "{off}");
+    let from = (0..robot.dof()).map(|j| (tick.state.position[j] - held.position[j]).abs());
+    assert!(from.fold(0.0, f32::max) < 1e-5, "{:?}", tick.state);
+    let speed = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let gap = (0..robot.dof()).map(|j| (tick.state.velocity[j] - held.velocity[j]).abs());
+    assert!(gap.fold(0.0, f32::max) < 1e-3 && speed(&held.velocity) > 0.1);
+    assert_eq!(follower.began(), t);
+    // Then followed to the goal.
+    let mut now = t;
+    let status = loop {
+        now += DT;
+        let tick = follower.tick(&device, &worlds, now, None).unwrap();
+        if !matches!(tick.status, FollowStatus::Following) || now > t + 4.0 * duration {
+            break tick;
+        }
+    };
+    assert_eq!(status.status, FollowStatus::Arrived);
+    assert_eq!(status.state.position, TO);
+    // Held inside a box, it cannot plan from there: held at rest there, blocked.
+    let mut follower =
+        Follower::try_new(&robot, 0, first.clone(), 0.0, FollowerOptions::default()).unwrap();
+    let boxed = device
+        .upload(&[World::new(vec![box_at(&robot, &first, 0.1 * duration)])])
+        .unwrap();
+    let tick = follower.tick(&device, &boxed, t, Some(&held)).unwrap();
+    assert_eq!(tick.status, FollowStatus::Blocked);
+    assert_eq!(tick.state.position, held.position);
+    assert!(speed(&tick.state.velocity) == 0.0);
+    let tick = follower.tick(&device, &boxed, t + DT, None).unwrap();
+    assert_eq!(tick.status, FollowStatus::Blocked);
+    assert_eq!(tick.state.position, held.position);
+    // A measured state of the wrong size is refused.
+    let wrong = JointState::new(robot.dof() - 1);
+    assert!(matches!(
+        follower.tick(&device, &worlds, t, Some(&wrong)),
+        Err(Error::Input(_))
+    ));
+}
+
+#[test]
 fn non_finite_and_degenerate_inputs_are_errors() {
     let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
@@ -576,7 +640,7 @@ fn non_finite_and_degenerate_inputs_are_errors() {
     fn input<T>(r: Result<T, Error>) -> bool {
         matches!(r, Err(Error::Input(_)))
     }
-    assert!(input(follower.tick(&device, &worlds, f32::NAN)));
+    assert!(input(follower.tick(&device, &worlds, f32::NAN, None)));
     // Checks closer than f32 can step through a motion's times would never end.
     let fine = FollowerOptions {
         check_every: 1e-8,
@@ -721,7 +785,7 @@ fn replans_keep_the_constraints_the_trajectory_was_planned_with() {
         let (mut t, mut statuses, mut most) = (0.0, vec![], 0.0f32);
         while t < 4.0 * duration {
             let worlds = if t < 0.3 * duration { &empty } else { &blocked };
-            let tick = follower.tick(&device, worlds, t).unwrap();
+            let tick = follower.tick(&device, worlds, t, None).unwrap();
             assert!(
                 clear(&device, worlds, &tick.state.position),
                 "at {t:.2} s it collides"

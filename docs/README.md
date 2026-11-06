@@ -6,6 +6,7 @@ The [README](../README.md) is the front door: what batchplan is, how to install 
 
 | | |
 |---|---|
+| [`../AGENTS.md`](../AGENTS.md) | For coding agents using batchplan: conventions, the lifecycle, which call fits a task, qualifying a robot, reading results, diagnosing a failed request in order, and footguns. |
 | [`api.md`](api.md) | Every type and function a program uses, by task, with the guide for each. |
 | [`planning.md`](planning.md) | IK, searching and smoothing paths with SIMD collision checks, keeping clear of obstacles, optional trajectory optimization, goals a turn away, constraints on the hand along the path, moving the hand along a path, picking up and setting down, time-optimal timing, replanning from a moving state, live motion and servoing, and the options worth knowing. |
 | [`robots.md`](robots.md) | Loading URDF, MJCF and OpenUSD; joint types, mimic joints and closed loops; fitted collision spheres and collision-model files; holding objects; checking plans against meshes. |

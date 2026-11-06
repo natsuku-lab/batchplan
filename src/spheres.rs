@@ -2,8 +2,9 @@
 //!
 //! Spheres follow the voxel method cuRobo uses for robot models: interior grid points become
 //! candidate spheres that touch the surface, and a greedy cover picks the candidates that reach
-//! the most surface samples. The overhang allowed while covering is searched for across the whole
-//! robot, and a final inflation grows spheres until every sample is inside one.
+//! the most surface samples. The overhang allowed while covering is each link's tolerance, scaled
+//! by one factor searched for across the whole robot, and a final inflation grows spheres until
+//! every sample is inside one.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -130,6 +131,10 @@ struct LinkFit {
     /// Surface points the final spheres must contain.
     dense: Vec<Vec3>,
     candidates: Vec<(Vec3, f32)>,
+    /// The geometry, as parry tests points against it.
+    solids: Vec<ParryMesh>,
+    /// The largest candidate's radius, before the candidates are thinned out.
+    largest: f32,
     /// Whether its loops run on the current rayon pool, or on the calling thread alone.
     parallel: bool,
 }
@@ -185,13 +190,53 @@ impl LinkFit {
             // Open or degenerate geometry has no interior; grow spheres from the surface instead.
             candidates = samples.iter().map(|&p| (p, 0.0)).collect();
         }
+        let largest = candidates.iter().map(|c| c.1).fold(0.0, f32::max);
         let stride = candidates.len().div_ceil(MAX_CANDIDATES).max(1);
         Some(Self {
             samples,
             dense,
             candidates: candidates.into_iter().step_by(stride).collect(),
+            solids,
+            largest,
             parallel,
         })
+    }
+
+    /// How `spheres` (`[x, y, z, radius]`, in the meshes' frame) fit this geometry: their largest
+    /// overhang, the share of the dense samples outside every one, and the geometry's thickness.
+    fn measure(&self, link: &str, spheres: &[[f32; 4]]) -> LinkQualification {
+        use parry3d::query::PointQuery;
+
+        // How deep `p` lies inside the geometry: negative outside.
+        let depth = |p: Vec3| {
+            inscribed(&self.solids, p).map_or_else(
+                || {
+                    -self
+                        .solids
+                        .iter()
+                        .map(|s| s.distance_to_local_point(p, false))
+                        .fold(f32::INFINITY, f32::min)
+                },
+                |(_, r)| r,
+            )
+        };
+        let overhang = spheres
+            .iter()
+            .map(|s| s[3] - depth(Vec3::new(s[0], s[1], s[2])))
+            .fold(0.0, f32::max);
+        let inside = |p: &&Vec3| {
+            spheres
+                .iter()
+                .any(|s| p.distance(Vec3::new(s[0], s[1], s[2])) <= s[3] * (1.0 + 1e-5))
+        };
+        let outside = self.dense.len() - self.dense.iter().filter(inside).count();
+        LinkQualification {
+            link: link.to_string(),
+            spheres: spheres.len(),
+            overhang,
+            uncovered: outside as f32 / self.dense.len().max(1) as f32,
+            thickness: 2.0 * self.largest,
+        }
     }
 
     /// Greedy cover: candidates reaching each sample within `overhang` beyond their radius,
@@ -285,13 +330,63 @@ impl LinkFit {
     }
 }
 
-/// The smallest overhang, from `o.tolerance` up, at which the greedy covers of all links fit in
-/// `o.budget` spheres.
-fn search_overhang(fits: &[Option<LinkFit>], o: &SphereOptions) -> f32 {
-    let needed = |overhang: f32| {
+/// How well a robot's collision spheres fit its geometry ([`Robot::qualify`](crate::Robot::qualify)):
+/// a robot that loads may still have spheres unfit to plan with, such as fingers inside spheres too
+/// large to grasp small objects.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Qualification {
+    /// Every link with both geometry and spheres, in the robot's order.
+    pub links: Vec<LinkQualification>,
+    /// Per hand: how far its spheres reach past its IK frame ([`Robot::tip`](crate::Robot::tip)).
+    pub tips: Vec<f32>,
+}
+
+/// How well one link's spheres fit its geometry.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct LinkQualification {
+    /// The link's name.
+    pub link: String,
+    /// How many collision spheres it has.
+    pub spheres: usize,
+    /// How far its spheres reach beyond its geometry, at most (meters): a sphere's radius less
+    /// how deep its center lies inside.
+    pub overhang: f32,
+    /// The share of its geometry's surface outside every sphere, from 20,000 fresh samples: a
+    /// fraction of a percent for fitted spheres, which cover their own samples, and more where a
+    /// hand-tuned model leaves gaps.
+    pub uncovered: f32,
+    /// How thick its geometry is where thickest (meters): the largest sphere inside it, across. A
+    /// link thinner than its spheres' overhang is mostly sphere.
+    pub thickness: f32,
+}
+
+/// How `spheres` fit `meshes` (both in the link's frame), or `None` where the meshes have no
+/// surface. The same samples on every call, seeded by `o`.
+pub(crate) fn measure(
+    link: &str,
+    meshes: &[TriMesh],
+    spheres: &[[f32; 4]],
+    o: &SphereOptions,
+) -> Option<LinkQualification> {
+    let fit = LinkFit::new(
+        meshes,
+        o,
+        &mut Rng::new(o.rng_seed),
+        /* parallel */ true,
+    )?;
+    Some(fit.measure(link, spheres))
+}
+
+/// The smallest scale, from 1 up, of every link's tolerance (`tolerances`, per link) at which the
+/// greedy covers of all links fit in `o.budget` spheres.
+fn search_scale(fits: &[Option<LinkFit>], tolerances: &[f32], o: &SphereOptions) -> f32 {
+    let needed = |scale: f32| {
         let mut total = 0;
-        for f in fits.iter().flatten() {
-            let (picks, complete) = f.greedy(overhang, o.budget + 1 - total);
+        for (f, &tolerance) in fits.iter().zip(tolerances) {
+            let Some(f) = f else { continue };
+            let (picks, complete) = f.greedy(tolerance * scale, o.budget + 1 - total);
             total += picks.len() + usize::from(!complete);
             if total > o.budget {
                 break;
@@ -299,19 +394,20 @@ fn search_overhang(fits: &[Option<LinkFit>], o: &SphereOptions) -> f32 {
         }
         total
     };
-    if needed(o.tolerance) <= o.budget {
-        return o.tolerance;
+    if needed(1.0) <= o.budget {
+        return 1.0;
     }
-    // Bisect between the tolerance and an overhang at which one sphere covers any link.
-    let (mut lo, mut hi) = (o.tolerance, 0.0f32);
-    for f in fits.iter().flatten() {
+    // Bisect between the tolerances and a scale at which one sphere covers any link.
+    let (mut lo, mut hi) = (1.0f32, 1.0f32);
+    for (f, &tolerance) in fits.iter().zip(tolerances) {
+        let Some(f) = f else { continue };
         let (lo_corner, hi_corner) = f
             .samples
             .iter()
             .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(a, b), &p| {
                 (a.min(p), b.max(p))
             });
-        hi = hi.max((hi_corner - lo_corner).length());
+        hi = hi.max((hi_corner - lo_corner).length() / tolerance);
     }
     for _ in 0..SEARCH_STEPS {
         let mid = 0.5 * (lo + hi);
@@ -325,27 +421,30 @@ fn search_overhang(fits: &[Option<LinkFit>], o: &SphereOptions) -> f32 {
 }
 
 /// Spheres `[x, y, z, radius]` for each link's meshes (in the link frame), at most `o.budget` in
-/// total, and how far the largest one reaches beyond the surface it touches. Every link shares
-/// one overhang: `o.tolerance` when the budget allows, otherwise the smallest the budget can
-/// achieve. With `parallel`, the work runs on the current rayon pool; without, on the calling
-/// thread alone, without registering it with any pool.
+/// total, and how far the largest one reaches beyond the surface it touches. Each link's overhang
+/// is its tolerance (`tolerances`, per link) when the budget allows, otherwise every tolerance
+/// scaled up by the smallest factor the budget can achieve. With `parallel`, the work runs on the
+/// current rayon pool; without, on the calling thread alone, without registering it with any pool.
 pub(crate) fn fit(
     links: &[Vec<TriMesh>],
+    tolerances: &[f32],
     o: &SphereOptions,
     parallel: bool,
 ) -> (Vec<Vec<[f32; 4]>>, f32) {
     debug_assert!(o.check().is_ok(), "callers check the options");
+    debug_assert_eq!(links.len(), tolerances.len());
     let mut rng = Rng::new(o.rng_seed);
     let fits: Vec<Option<LinkFit>> = links
         .iter()
         .map(|m| LinkFit::new(m, o, &mut rng, parallel))
         .collect();
-    let overhang = search_overhang(&fits, o);
+    let scale = search_scale(&fits, tolerances, o);
     let fitted: Vec<(Vec<[f32; 4]>, f32)> = fits
         .iter()
-        .map(|f| {
+        .zip(tolerances)
+        .map(|(f, &tolerance)| {
             f.as_ref().map_or((vec![], 0.0), |f| {
-                f.spheres(&f.greedy(overhang, usize::MAX).0)
+                f.spheres(&f.greedy(tolerance * scale, usize::MAX).0)
             })
         })
         .collect();

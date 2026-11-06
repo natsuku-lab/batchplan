@@ -25,6 +25,10 @@ fn main() -> Result<(), Error> {
 
 A device is bound to its robot. `device.with_robot(&other)` gives a device for another robot (the same robot holding an object, say) that shares the GPU context or threads and every uploaded `Worlds`. Every batch is checked before either implementation sees it (array shapes, world indices, worlds uploaded to this device), so malformed input is an `Err` on both.
 
+## Make once, warm up, reuse
+
+Make one device per robot, upload each scene once, and reuse both for every call: never make a device or a robot inside a control loop. A GPU device compiles its main kernels when it is made; the kernels that keep constraints during trajectory optimization and the ones that build distance grids compile the first time they are needed, and buffers grow to the largest batch they have carried. `device.warmup()?` builds those kernels and runs one small call of each kind, so call it once after making the device and before timing anything, then warm up with a batch the size of those you time. A device made with `with_robot` shares the threads, and the kernels too for the same robot; for a changed robot, such as one holding an object, it builds its own, so warm it up as well. Uploading worlds is cheap ([changing a scene](perception.md#changing-a-scene)).
+
 ## Which GPUs
 
 The kernels use only core features: 32-bit floats, and no subgroups, float atomics or extensions. Any adapter wgpu exposes through Vulkan, Metal or DX12 should work if it allows 12 storage buffers per shader stage and 64-wide compute workgroups. Desktop drivers allow far more; browser WebGPU and some embedded GPUs do not. `Device::gpu` skips adapters that fall short; if none qualifies, its error names each adapter and what it lacks. OpenGL adapters are not used. `Device::gpu_named(&robot, "radeon")` picks an adapter by name.

@@ -9,9 +9,9 @@ use std::f32::consts::PI;
 
 use batchplan::rng::Rng;
 use batchplan::{
-    Contact, Device, Error, GraspOptions, HandConstraint, Held, IkOptions, IkProblem, Obstacle,
-    Pick, Place, Pose, Robot, RobotOptions, SdfGrid, TaskFailure, TaskOptions, TaskPlan, TaskStep,
-    ToolPathStop, Touch, Trajectory, World,
+    CandidateStop, Contact, Device, Error, GraspOptions, HandConstraint, Held, IkOptions,
+    IkProblem, Obstacle, Pick, Place, Pose, Robot, RobotOptions, SdfGrid, TaskFailure, TaskOptions,
+    TaskPlan, TaskStep, ToolPathStop, Touch, Trajectory, World,
 };
 use glam::{Mat3, Quat, Vec3};
 
@@ -891,6 +891,119 @@ fn grasps_fit_between_the_fingers_and_face_into_the_object() {
     let grid = SdfGrid::try_new([2, 2, 2], 0.1, Vec3::ZERO, &[1.0; 8]).unwrap();
     let grid = Obstacle::from_grid(grid);
     assert!(matches!(batchplan::grasps(&grid, &o), Err(Error::Input(_))));
+}
+
+#[test]
+fn grasps_keep_the_hand_above_the_floor_or_say_why_there_are_none() {
+    // A 2.5 cm cube on a table whose top is at z = 0, fingertips 12 mm past the frame.
+    let cube = Obstacle::cuboid(Vec3::new(0.4, 0.0, 0.0125), Vec3::splat(0.0125));
+    let o = GraspOptions {
+        tip: 0.012,
+        floor: Some(0.002),
+        ..GraspOptions::default()
+    };
+    let grasps = batchplan::grasps(&cube, &o).unwrap();
+    let at = cube.pose();
+    let height = |g: &Pose, reach: f32| {
+        at.mul_pose(*g).position.z + (at.rotation * g.rotation * Vec3::Z).z * reach
+    };
+    let down = |g: &Pose| (at.rotation * g.rotation * Vec3::Z).z;
+    assert!(
+        grasps
+            .iter()
+            .all(|g| height(g, 0.0) >= 0.002 - 1e-5 && height(g, o.tip) >= 0.002 - 1e-5)
+    );
+    // From above, as deep as keeps the fingertips at the floor; from the sides, the full depth;
+    // from below, none.
+    let from_above: Vec<&Pose> = grasps.iter().filter(|g| down(g) < -0.5).collect();
+    assert_eq!(from_above.len(), 4);
+    assert!(
+        from_above
+            .iter()
+            .all(|g| (height(g, o.tip) - 0.002).abs() < 1e-5)
+    );
+    let from_sides: Vec<&Pose> = grasps.iter().filter(|g| down(g).abs() < 0.5).collect();
+    assert_eq!(from_sides.len(), 16);
+    let held = o.depth.min(0.0125);
+    assert!(
+        from_sides
+            .iter()
+            .all(|g| (cube.distance(at.mul_pose(**g).position).value + held).abs() < 1e-4)
+    );
+    assert_eq!(grasps.len(), 20, "none from below");
+    // With no floor, every face's grasps at the full depth, the fingertips in the table.
+    let anywhere = batchplan::grasps(&cube, &GraspOptions { floor: None, ..o }).unwrap();
+    assert_eq!(anywhere.len(), 24);
+    // A floor over the cube leaves none, and says why; so does a box too wide every way.
+    let err = batchplan::grasps(
+        &cube,
+        &GraspOptions {
+            floor: Some(0.03),
+            ..o
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, Error::Input(_)) && err.to_string().contains("floor"),
+        "{err}"
+    );
+    let wide = Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.05));
+    let err = batchplan::grasps(&wide, &GraspOptions::default()).unwrap_err();
+    assert!(
+        err.to_string().contains("10.0 cm across") && err.to_string().contains("8.0 cm"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_small_cube_on_a_table_is_picked_with_the_fingertips_kept_off_the_table() {
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let (tip, floor) = (robot.tip(0), 0.002);
+    // Narrower than the fingers reach past the frame, so a grasp at its middle puts them in the
+    // table, but tall enough to hold above them.
+    let half = 0.8 * tip;
+    assert!(
+        2.0 * half > tip + floor,
+        "the fingertips reach {tip} m past the frame"
+    );
+    let cube = Obstacle::cuboid(Vec3::new(0.45, 0.1, half), Vec3::splat(half));
+    let world = World::new(vec![scene(vec![]).obstacles[TABLE].clone(), cube.clone()]);
+    let worlds = device.upload(&[world]).unwrap();
+    let pick = |grasps: Vec<Pose>| {
+        let task = Pick {
+            support: vec![TABLE],
+            ..Pick::new(0, robot.default_q(), 1, grasps)
+        };
+        batchplan::pick(&device, &worlds, &[task], &TaskOptions::default())
+            .unwrap()
+            .outcomes
+            .remove(0)
+    };
+    let from_above = |g: &Pose| (g.rotation * Vec3::Z).z < -0.5;
+    let deep = batchplan::grasps(&cube, &GraspOptions::default()).unwrap();
+    let deep: Vec<Pose> = deep.into_iter().filter(from_above).collect();
+    let failure = pick(deep).unwrap_err();
+    let on_table = |c: &CandidateStop| {
+        c.contacts.iter().any(|t| {
+            matches!(
+                t,
+                Contact::World {
+                    obstacle: TABLE,
+                    ..
+                }
+            )
+        })
+    };
+    assert!(failure.candidates.iter().all(on_table), "{failure}");
+    let o = GraspOptions {
+        tip,
+        floor: Some(floor),
+        ..GraspOptions::default()
+    };
+    let kept = batchplan::grasps(&cube, &o).unwrap();
+    let kept: Vec<Pose> = kept.into_iter().filter(from_above).collect();
+    assert!(pick(kept).is_ok());
 }
 
 #[test]

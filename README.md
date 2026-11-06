@@ -210,6 +210,7 @@ From here, the [guides](#where-to-find-things) go further: planning around [what
 
 | | |
 |---|---|
+| [AGENTS.md](AGENTS.md) | For coding agents using batchplan: conventions, the lifecycle, which call fits a task, qualifying a robot, reading results, and diagnosing a failed request in order. |
 | [API](docs/api.md) | Every type and function, by task, with the guide for each. |
 | [Planning](docs/planning.md) | IK, searching and smoothing paths, keeping clear of obstacles, optional trajectory optimization, goals a turn away, moving the hand in straight lines, picking up and setting down, joining motions, timing, replanning mid-motion, live motion and servoing, and the options worth knowing. |
 | [Robots](docs/robots.md) | URDF, MJCF and OpenUSD; joint types, mimic joints and closed loops; several arms as one robot; collision spheres; holding objects; checking against meshes. |
@@ -310,7 +311,8 @@ A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster 
 
 ## Limitations
 
-- **Spheres.** Planning sees the robot as spheres. `MeshModel` checks finished plans against its meshes on the CPU, as a filter.
+- **Spheres.** Planning sees the robot as spheres. `MeshModel` checks finished plans against its meshes on the CPU, as a filter, and `Robot::qualify` measures how far the spheres reach past each link.
+- **Payloads.** A held object collides as part of the robot, but has no mass: timing keeps the joints' limits whatever the robot carries.
 - **Joints.** Each closed loop must have exactly one actuated joint. Ball and floating joints are expanded into Euler angles, which lose a direction of motion where the middle angle reaches ±90°.
 - **Timing.** Jerk is kept within its limit by smoothing the time-optimal profile, lowering its speed caps where the smoothed map overshoots and stretching what remains, which costs time where a path turns sharply at speed: a wide blend through a sharp turn gains little over stopping ([joining motions](docs/benchmarks.md#joining-motions)). `Trajectory::check` samples each trajectory at a fixed density, so it can miss a short jerk overshoot between its samples.
 - **Small batches on a GPU.** A GPU call costs about 10 ms however small the batch, so below a few hundred problems per call the CPU is faster ([Batches and the GPU](#batches-and-the-gpu)). Planning itself runs on CPU threads on either device.

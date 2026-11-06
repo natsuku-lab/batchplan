@@ -1531,6 +1531,14 @@ impl Backend for GpuBackend {
         &worlds.prepared::<GpuWorlds>().cpu
     }
 
+    fn build_all(&self) -> Result<()> {
+        for lanes in [1, SHARED_LANES] {
+            self.kernels
+                .traj(&self.device, &self.info, lanes, /* constrained */ true)?;
+        }
+        self.grid_kernels().map(|_| ())
+    }
+
     fn search(&self, worlds: &Worlds, searches: &mut [&mut dyn Search], deadline: Option<Instant>) {
         let cpu = self.checked(worlds);
         crate::cpu::run_searches(
@@ -2000,6 +2008,26 @@ fn storage_zeroed(device: &wgpu::Device, label: &str, floats: usize) -> wgpu::Bu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn building_everything_builds_the_kernels_first_use_would() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/ur5e/ur_description/urdf/ur5e.urdf"
+        );
+        let robot = Robot::load(path, &crate::RobotOptions::default()).expect("the UR5e loads");
+        let gpu = match GpuBackend::new(&robot, None) {
+            Ok(gpu) => gpu,
+            Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => {
+                eprintln!("skipping GPU: {e}");
+                return;
+            }
+            Err(e) => panic!("no GPU: {e}"),
+        };
+        assert!(gpu.kernels.constrained.get().is_none() && gpu.grids.get().is_none());
+        gpu.build_all().expect("the kernels build");
+        assert!(gpu.kernels.constrained.get().is_some() && gpu.grids.get().is_some());
+    }
 
     #[test]
     fn baseline_webgpu_limits_are_rejected_with_the_reason() {

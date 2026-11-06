@@ -97,7 +97,8 @@ How the pieces work is in [`docs/architecture.md`](docs/architecture.md) and eac
 ## Docs
 
 - `README.md` is for people who use the library: the pitch, install, three quick-start snippets, the comparison, links and limitations. Everything else lives in `docs/`, one page per topic (`docs/README.md` indexes them). A page owns its topic; others link to it rather than repeat it.
-- Every Rust block in the README and the guides compiles as a doctest (`lib.rs`, `mod guides`; the README and `training-data.md` need `--features lerobot`). Mark them `rust,no_run` and run each once by hand when it changes.
+- `AGENTS.md` is for coding agents that use the library: conventions, lifecycle, a task-to-call table, qualifying a robot, the output contract, a diagnosis checklist and footguns, each linking to the page that owns it. A change to what an agent must know (a convention, a failure reason, a call's cost) updates it too.
+- Every Rust block in the README, `AGENTS.md` and the guides compiles as a doctest (`lib.rs`, `mod guides`; the README and `training-data.md` need `--features lerobot`). Mark them `rust,no_run` and run each once by hand when it changes.
 - Numbers in the docs come from runs you can name: `docs/benchmarks.md` says how each was measured and how to reproduce it. When a change moves a number, rerun it and update every page that quotes it.
 - This file holds lasting rules, not a log of changes: how the code works belongs in `docs/architecture.md` and the modules' doc comments. No page quotes test counts or lists the test files, which every new test would change.
 

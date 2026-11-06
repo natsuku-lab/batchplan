@@ -81,7 +81,7 @@ pub use robot::{AttachedObject, CollisionModel, JointLimits, Part, Robot, RobotO
 pub use rrt::{RrtOptions, RrtProblem, RrtResult};
 pub use sdf::{DepthImage, Intrinsics, Occlusion, OccupancyMap, RobotMask, SdfGrid, SdfOptions};
 pub use shortcut::ShortcutOptions;
-pub use spheres::{SphereGeometry, SphereOptions};
+pub use spheres::{LinkQualification, Qualification, SphereGeometry, SphereOptions};
 pub use task::{
     CandidateStop, GraspOptions, Held, Pick, Place, TaskFailure, TaskOptions, TaskPlan, TaskResult,
     TaskStep, grasps, pick, place, place_poses,
@@ -101,6 +101,8 @@ mod guides {
     #[cfg(feature = "lerobot")]
     #[doc = include_str!("../README.md")]
     pub struct Readme;
+    #[doc = include_str!("../AGENTS.md")]
+    pub struct Agents;
     #[doc = include_str!("../docs/devices.md")]
     pub struct Devices;
     #[doc = include_str!("../docs/perception.md")]

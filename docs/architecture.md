@@ -89,6 +89,8 @@ The library's engineering principles, and where the code shows them:
 
 Goals on joints whose range spans more than a turn are reached at whichever equivalent is nearest or free. Held joints never move. A start in motion pins the spline's first span to the current velocity and acceleration.
 
+**Failure reasons** come from where each problem's planning stopped: a search that never started (`Connect::blocked`: the start, or every goal, collides), one that drew all its samples, a path whose splines all failed, or a planning still running at the deadline. Only the colliding ends get contacts, in one batch after the searches.
+
 **Constraints** (`constraint.rs`) change four steps and add a test to every check. A `Region` holds a problem's constraints prepared once; each bound it breaks is a row with its rate per unit of the hand's velocity and of the velocity of the hand it is relative to, which both projection and optimization read. The search's extensions and connections walk in hops of one lane pass each, every hop projected back inside the bounds by damped least squares on the rows it breaks (CBiRRT), and the straight line's projected walk replaces its bends. Smoothing projects a moved waypoint before checking it. The spline is fitted through points along the path rather than near them (`through_knots`). Under bounds tighter than the room projection leaves (`Projector::tight`), shortcuts that stop short walk the same way toward farther waypoints, halving hops whose edges bulge out at their middles (`shortcut::Step::Walk`), and the spline's points are projected before it is fitted through them. Optimization adds the squared distance past each row to its cost, on the CPU (`Region::cost`) and in its GPU twin (`constraint_cost`), which the trajectory kernels compile in only when built with `CONSTRAINED`, the first time a constrained path is optimized; the constraints ride in the `targets` binding IK uses. Every check of a constrained problem tests the hands' frames in the lanes after their forward kinematics, before any collision test, so it costs a few dot products per eight states. A constrained search takes no help from idle threads, which forecast unconstrained extensions. Joins, tasks and the follower pass their constraints to the checks and plans they already make.
 
 ## Searches
@@ -107,6 +109,7 @@ The robot is a set of spheres; obstacles are boxes, spheres, cylinders, capsules
 - **Gradients** accumulate a wrench per link; one reverse pass gives each joint its share.
 - **Links no joint moves** are not checked against the world.
 - **Allowed contacts** become one link bit set per obstacle at upload, which every check skips.
+- **Contacts** (`Device::contacts`, `cpu::contacts`) say what a configuration collides with: `collision`'s distances per link and obstacle and per link pair, without its gates, skipping what it skips. They run on the CPU copy of the worlds that searches check, so both devices list the same. Plans, IK diagnosis, tool paths and tasks call them only for what failed.
 - **SIMD** (`lanes.rs`): forward kinematics and clearances for eight configurations in `f32x8` lanes, at the widest level the CPU has (SSE2 to AVX-512, NEON), chosen once per search and inlined all the way down. `cpu::collision` is the scalar twin the lanes are tested against.
 
 ## The GPU

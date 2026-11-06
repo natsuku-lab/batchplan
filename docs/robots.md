@@ -72,6 +72,8 @@ fn main() -> Result<(), Error> {
 
 A robot has one hand per entry of `ee_links`; with none given, its one hand is the link with the most actuated joints above it. `robot.ee_pose(&q, hand)` is a hand's pose, and `robot.hand_joints(hand)` the joints that move it. Joints are numbered breadth first, so two arms' joints interleave; `hand_joints` tells them apart. IK gives each hand a target or none (see [Planning](planning.md#inverse-kinematics)), and plans move every joint at once, so two arms arrive together.
 
+A hand's fingers, `robot.finger_links(hand)`, are the links with spheres below its palm (the first link at or above its frame with spheres); they may touch what the hand grasps. Where a finger is part of the palm's link, as the SO-101's fixed jaw is part of `gripper_link`, name the hand's fingers, the palm among them: `RobotOptions::finger_links` maps a hand's `ee_links` entry to them. `robot.tip(hand)` is how far the hand's spheres reach past its frame along its z axis, the depth the fingertips go beyond a grasp.
+
 ## Collision spheres
 
 Planning checks the robot as a few dozen spheres against obstacles, which are exact primitives or distance grids. Spheres are what make thousands of configurations per millisecond possible on a GPU, as in cuRobo and VAMP.
@@ -79,15 +81,25 @@ Planning checks the robot as a few dozen spheres against obstacles, which are ex
 - **Fitted spheres.** Without a collision model, spheres are fitted to each link's collision geometry (or its visual geometry, with `SphereOptions::geometry`) by cuRobo's voxel method:
   1. Interior grid points become candidate spheres that touch the surface.
   2. A greedy cover picks the candidates that reach the most surface samples.
-  3. A search finds one overhang for the whole robot: the smallest at which the cover fits the budget (64 spheres by default).
+  3. A search finds one scale for the whole robot: the smallest at which the cover fits the budget (64 spheres by default) with every link's overhang its tolerance times that scale. `SphereOptions::tolerance` is every link's, unless `RobotOptions::sphere_tolerances` gives a link its own: on the SO-101 at 256 spheres, its jaws held to 2 mm reach 5.6–7.4 mm past their geometry and the rest of the arm 11.4–13.6 mm, against 8.9–12.0 mm for every link without them (`links_given_a_tighter_tolerance_get_spheres_that_reach_less_far` fits both). Parts thinner than the grid (`SphereOptions::voxel_size`, 1 cm) need a finer one.
   4. Spheres grow until 20,000 surface samples per link lie inside them, so the model is conservative.
 
   The model's `source` records how far its spheres reach beyond the geometry: with 64 spheres, 3.0 cm on the UR5e and the Panda, 1.9 cm on the SO-101 and 1.2 cm on the 2F-85. Fresh surface samples land at most 0.8 mm outside the UR5e's spheres.
 - **Collision-model files.** `robot.collision_model().save(path)` writes the spheres, self-collision buffers and ignored pairs as JSON. Commit it, tune it by hand if needed, and load it through `RobotOptions::collision_model`. The repository's Panda uses cuRobo's hand-tuned spheres this way (`assets/franka/panda_collision.json`).
 - **Self-collision pairs** follow MoveIt's setup assistant, which skips adjacent links, pairs whose spheres already overlap at the default configuration, and pairs whose meshes never touch across 10,000 random configurations. `RobotOptions::srdf` adds the disabled pairs of a MoveIt SRDF, given as text.
-- **Mounted robots.** Links that no joint moves (the base and anything fixed to it) are not checked against the world. They touch it the same way in every configuration, so a robot standing on its table is not in collision with it. They still collide with the robot's moving links.
+- **Mounted robots.** Links that no joint moves (the base and anything fixed to it) are not checked against the world. They touch it the same way in every configuration, so a robot standing on its table is not in collision with it. They still collide with the robot's moving links. A moving link can touch the table in every configuration too, as the SO-101's shoulder turns just above its base: `world.always_touching(&robot)` finds such links by sampling, as MoveIt's setup assistant finds pairs that always collide, and returns the touches to add to the world.
 
 How tight the spheres are is a trade-off you can measure: see [Spheres and meshes](benchmarks.md#spheres-and-meshes).
+
+### Qualifying a robot
+
+A robot that loads may still have spheres unfit to plan with. `robot.qualify()?` measures them against the geometry they cover. Per link with geometry and spheres (`LinkQualification`):
+
+- `overhang`: how far its spheres reach beyond the geometry, at most;
+- `uncovered`: the share of its surface outside every sphere, from fresh samples: a fraction of a percent for fitted spheres, and more where a hand-tuned model leaves gaps;
+- `thickness`: the geometry's thickest point, across; a link thinner than its overhang is mostly sphere.
+
+`tips` holds each hand's `tip`. Check that the fingers' overhang and tip leave room to grasp the smallest object you will pick and to keep off what it stands on (see [Picking up and setting down](planning.md#picking-up-and-setting-down)); that no link the camera sees is uncovered; and, with `device.contacts`, that the default configuration and the SRDF's named states collide with nothing but what the world lets touch. `robot.spheres(&q)` places every sphere at a configuration, to draw them or mask the robot from a camera, and `robot.reach()` bounds how far they reach from the base in any configuration.
 
 ## Holding objects
 

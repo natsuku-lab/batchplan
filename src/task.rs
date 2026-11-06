@@ -253,9 +253,10 @@ pub struct CandidateStop {
     /// What stopped it there: a pose out of reach, a collision or a jump at the start, at IK and
     /// at the straight moves; nothing for a transit no plan was found for.
     pub why: Option<ToolPathStop>,
-    /// For a collision, what collides ([`Device::contacts`]), nearest first: the start, the IK
-    /// solution with the most clearance that reaches the grasp or release, or the straight move's
-    /// next step. Empty for the rest.
+    /// For a collision, what collides ([`Device::contacts`]), nearest first: at the start, at the
+    /// IK solution with the most clearance that reaches the grasp or release, holding the object
+    /// at the solution nearest the rest where every one collides holding it (a place), or at the
+    /// straight move's next step. Empty for the rest.
     pub contacts: Vec<Contact>,
 }
 
@@ -826,6 +827,14 @@ pub struct GraspOptions {
     pub depth: f32,
     /// Grasps spread around a round object's axis: 8.
     pub turns: usize,
+    /// How far the fingers reach past the IK frame along its z axis (meters), as
+    /// [`Robot::tip`] measures it: 0.
+    pub tip: f32,
+    /// A height the hand's frame and fingertips stay above, in the frame the object is placed in
+    /// (meters): the top of the table it stands on, and room to spare. A grasp from above that
+    /// would take them lower holds the object less deep, and one that cannot is left out, as are
+    /// grasps from below. `None` for no floor.
+    pub floor: Option<f32>,
 }
 
 impl Default for GraspOptions {
@@ -834,6 +843,8 @@ impl Default for GraspOptions {
             opening: 0.08,
             depth: 0.02,
             turns: 8,
+            tip: 0.0,
+            floor: None,
         }
     }
 }
@@ -842,30 +853,62 @@ impl Default for GraspOptions {
 /// facing each side and closing across what fits between its fingers. A box is grasped on each
 /// face, closing along either axis of the face it fits across, each both ways round; a ball like
 /// a box its size; a cylinder or capsule from `turns` directions around its side, closing around
-/// it or along it, and from `turns` turns at each end.
+/// it or along it, and from `turns` turns at each end. With a `floor`, the object's pose places
+/// it: pass a world's obstacle as it stands. An `Error::Input` saying why where no grasp fits: the
+/// object is wider than the fingers open every way, or every grasp would take the fingertips
+/// below the floor.
 pub fn grasps(object: &Obstacle, o: &GraspOptions) -> Result<Vec<Pose>> {
     ensure_input!(
-        o.opening > 0.0 && o.depth >= 0.0 && o.turns > 0,
-        "grasps need a positive opening, a depth of at least 0 and a turn, got {} m, {} m and {}",
+        o.opening > 0.0 && o.depth >= 0.0 && o.turns > 0 && o.tip.is_finite(),
+        "grasps need a positive opening, a depth of at least 0, a turn and a finite tip, got {} m, {} m, {} and {} m",
         o.opening,
         o.depth,
-        o.turns
+        o.turns,
+        o.tip
     );
+    if let Some(floor) = o.floor {
+        ensure_input!(floor.is_finite(), "the floor must be finite, got {floor}");
+    }
     let fits = |width: f32| width <= o.opening;
+    let placed = object.pose();
     // The hand's z axis along `toward`, its fingers closing along `closing`, `depth` in from a
-    // surface `surface` from the frame's origin.
-    let grasp = |toward: Vec3, closing: Vec3, surface: f32| {
+    // surface `surface` from the frame's origin, or less where that takes the fingertips below the
+    // floor; none where even the surface does.
+    let mut fitting = 0;
+    let mut grasp = |toward: Vec3, closing: Vec3, surface: f32| {
+        fitting += 1;
         let rotation = Quat::from_mat3(&Mat3::from_cols(closing.cross(toward), closing, toward));
-        Pose::new(-toward * (surface - o.depth.min(surface)), rotation)
+        let mut depth = o.depth.min(surface);
+        if let Some(floor) = o.floor {
+            // The height of a point `reach` along the hand's z axis from its frame, at a depth `d`;
+            // the lowest of the frame and the fingertips sets how deep a grasp from above goes.
+            let down = (placed.rotation * toward).z;
+            let height = |d: f32, reach: f32| placed.position.z + down * (d - surface + reach);
+            let lowest = if down < 0.0 { o.tip.max(0.0) } else { 0.0 };
+            if down < 0.0 && height(depth, lowest) < floor {
+                depth = surface - lowest + (floor - placed.position.z) / down;
+            }
+            // From below, the rest of the hand would be lower still.
+            if down > 1e-6 || depth < 0.0 || height(depth, lowest) < floor - 1e-6 {
+                return None;
+            }
+        }
+        Some(Pose::new(-toward * (surface - depth), rotation))
     };
     let mut out = vec![];
     let around = |turn: usize| {
         let angle = TAU * turn as f32 / o.turns as f32;
         Vec3::new(angle.cos(), angle.sin(), 0.0)
     };
-    match *object {
-        Obstacle::Cuboid { half_extents, .. } => sides(half_extents, &fits, &grasp, &mut out),
-        Obstacle::Sphere { radius, .. } => sides(Vec3::splat(radius), &fits, &grasp, &mut out),
+    let narrowest = match *object {
+        Obstacle::Cuboid { half_extents, .. } => {
+            sides(half_extents, &fits, &mut grasp, &mut out);
+            2.0 * half_extents.min_element()
+        }
+        Obstacle::Sphere { radius, .. } => {
+            sides(Vec3::splat(radius), &fits, &mut grasp, &mut out);
+            2.0 * radius
+        }
         Obstacle::Cylinder {
             radius,
             half_height: length,
@@ -884,22 +927,38 @@ pub fn grasps(object: &Obstacle, o: &GraspOptions) -> Result<Vec<Pose>> {
                 let outward = around(turn);
                 for sign in [1.0, -1.0] {
                     if fits(2.0 * radius) {
-                        out.push(grasp(-outward, sign * Vec3::Z.cross(outward), radius));
+                        out.extend(grasp(-outward, sign * Vec3::Z.cross(outward), radius));
                     }
                     if fits(2.0 * end) {
-                        out.push(grasp(-outward, sign * Vec3::Z, radius));
+                        out.extend(grasp(-outward, sign * Vec3::Z, radius));
                     }
                 }
             }
             if fits(2.0 * radius) {
                 for sign in [1.0, -1.0] {
                     for turn in 0..o.turns {
-                        out.push(grasp(-sign * Vec3::Z, around(turn), end));
+                        out.extend(grasp(-sign * Vec3::Z, around(turn), end));
                     }
                 }
             }
+            2.0 * radius.min(end)
         }
         Obstacle::Sdf { .. } => return Err(input!("a distance grid has no grasps")),
+    };
+    if out.is_empty() {
+        return Err(if fitting == 0 {
+            input!(
+                "no grasp fits: the object is {:.1} cm across where narrowest, and the fingers open {:.1} cm",
+                narrowest * 100.0,
+                o.opening * 100.0
+            )
+        } else {
+            input!(
+                "no grasp keeps the hand above the floor at {:.3} m: each of the {fitting} that fit between the fingers would take the frame or the fingertips, {:.1} cm past it, lower",
+                o.floor.unwrap_or_default(),
+                o.tip * 100.0
+            )
+        });
     }
     Ok(out)
 }
@@ -908,7 +967,7 @@ pub fn grasps(object: &Obstacle, o: &GraspOptions) -> Result<Vec<Pose>> {
 fn sides(
     half: Vec3,
     fits: &impl Fn(f32) -> bool,
-    grasp: &impl Fn(Vec3, Vec3, f32) -> Pose,
+    grasp: &mut impl FnMut(Vec3, Vec3, f32) -> Option<Pose>,
     out: &mut Vec<Pose>,
 ) {
     for face in 0..3 {
@@ -916,7 +975,7 @@ fn sides(
             let outward = Vec3::AXES[face] * sign;
             for across in (0..3).filter(|&a| a != face && fits(2.0 * half[a])) {
                 for turn in [1.0, -1.0] {
-                    out.push(grasp(-outward, Vec3::AXES[across] * turn, half[face]));
+                    out.extend(grasp(-outward, Vec3::AXES[across] * turn, half[face]));
                 }
             }
         }

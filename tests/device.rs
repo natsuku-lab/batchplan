@@ -57,6 +57,15 @@ fn malformed_batches_are_errors_on_every_device() {
             d.evaluate(&worlds, &[1], &q, &none).is_err(),
             "{name}: world index past the end"
         );
+        let mut unknown = q.clone();
+        unknown[0] = f32::NAN;
+        assert!(
+            matches!(
+                d.contacts(&worlds, &[0], &unknown, 0.0),
+                Err(Error::Input(_))
+            ),
+            "{name}: contacts of a configuration that is not finite"
+        );
         let target = robot.ee_pose(&q, 0);
         assert!(
             batchplan::solve_ik(
@@ -265,6 +274,33 @@ fn contacts_name_what_each_clearance_measures() {
             None => listed = Some(contacts),
             Some(first) => assert_eq!(*first, contacts, "{} lists other contacts", d.name()),
         }
+    }
+}
+
+#[test]
+fn warming_up_builds_what_first_calls_would_and_changes_no_result() {
+    let robot = panda();
+    let (scene, problems) = common::blocked_reaches(&robot);
+    let problems = &problems[..4];
+    let o = PlanOptions {
+        seeds: 2,
+        ..PlanOptions::default()
+    };
+    let goals: Vec<IkProblem> = problems
+        .iter()
+        .map(|p| IkProblem::new(p.world, robot.ee_pose(&p.goal, 0)))
+        .collect();
+    let run = |d: &Device| {
+        let worlds = d.upload(&scene).unwrap();
+        let plans = batchplan::plan(d, &worlds, problems, &o).unwrap();
+        let ik = batchplan::solve_ik(d, &worlds, &goals, &IkOptions::default()).unwrap();
+        (plans.paths, plans.valid, ik.q)
+    };
+    let mut fresh = devices(&robot);
+    for (cold, warm) in fresh.drain(..).zip(devices(&robot)) {
+        warm.warmup().unwrap();
+        warm.with_robot(&robot).unwrap().warmup().unwrap();
+        assert_eq!(run(&cold), run(&warm), "{}", warm.name());
     }
 }
 

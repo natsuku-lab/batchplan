@@ -40,17 +40,10 @@ fn main() -> Result<()> {
         ik_opts.seeds, ik_opts.iterations, plan_opts.shortcut.passes, plan_opts.control_points
     );
     for device in &devices {
+        device.warmup()?;
+        let t = Instant::now();
         let worlds = device.upload(&worlds)?;
-        // Warm up (pipeline compilation, thread pool).
-        batchplan::solve_ik(
-            device,
-            &worlds,
-            &ik_problems[..1],
-            &IkOptions {
-                iterations: 1,
-                ..ik_opts
-            },
-        )?;
+        let upload_time = t.elapsed().as_secs_f64();
 
         let t = Instant::now();
         let ik = batchplan::solve_ik(device, &worlds, &ik_problems, &ik_opts)?;
@@ -66,6 +59,7 @@ fn main() -> Result<()> {
         let solved = result.solved().count();
 
         println!("{}", device.name());
+        println!("  upload {:6.1} ms for {count} worlds", upload_time * 1e3);
         println!(
             "  IK    {:7.3} s  {:9.0} seeds/s   targets solved {}/{count}",
             ik_time,

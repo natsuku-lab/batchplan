@@ -1564,6 +1564,10 @@ impl Backend for CpuBackend {
         worlds.prepared()
     }
 
+    fn build_all(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn evaluate(
         &self,
         worlds: &Worlds,

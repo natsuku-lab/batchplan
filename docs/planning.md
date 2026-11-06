@@ -53,6 +53,7 @@ fn main() -> Result<(), Error> {
 - `IkProblem::new(world, target)` targets a one-handed robot's hand from the default pose; the fields below cover the rest.
 - `ik.best(problem)` is the successful seed with the most obstacle clearance; `ik.solved()` yields every solved problem with that configuration.
 - `IkProblem::seed` starts seed 0 from a configuration you give (the robot's current state, say) instead of the default pose, and `ik.nearest(problem, &q)` returns the successful seed nearest `q`. Together they keep short moves on the same IK branch, as `pick` and `place` do at the grasp and where the hand lets go.
+- `ik::failures(&device, &worlds, &ik, &options)` says why each unsolved problem has no solution (`IkFailure`): `Unreachable`, or `Collides` with what the reaching seed with the most clearance collides with. The push away from obstacles can hold every seed off a pose that collides, so problems no seed reached are solved once more without it; that costs what their solve did, so it runs only when called.
 - `IkProblem::targets` gives each of the robot's hands (`RobotOptions::ee_links`) a target pose, or `None`. Each step solves every targeted hand's damped least squares and pushes the collision gradient out of their Jacobians' row spaces. Hands that share joints, such as two arms on a mobile base or a torso, solve as one system; solved alone, each would move the shared joints for itself in full. A hand without a target holds its arm: in every seed, the joints only that hand moves stay where the seed has them. So one arm can reach while the other waits, or both can reach at once and keep clear of each other. `IkProblem::hold` holds named joints the same way, even where a targeted hand moves on them: a mobile base placed beside a table stays there while its arms reach, as `PlanProblem::hold` keeps the arms still while the base drives.
 
 ## Planning a path
@@ -95,6 +96,20 @@ Continuous joints are unbounded, and joints whose range spans more than a turn (
 ### Time budgets and determinism
 
 `PlanOptions::time_budget` stops every search and the optimization once it passes, and returns the valid paths found so far. Without a budget nothing checks the clock, and two runs give bit-identical results, on either device.
+
+### Why a problem failed
+
+`PlanResult::failures` holds, per problem, why it has no valid path (`PlanFailure`), the first thing that stopped it, or `None` where it has one:
+
+| `PlanFailure` | What stopped it | What to try |
+|---|---|---|
+| `StartCollides { contacts }` | the start collides, with what `contacts` lists | plan from a free state; a link that always touches the table needs a [touch](perception.md#allowed-contacts) |
+| `GoalCollides { contacts }` | the goal collides, and so does every equivalent a turn away | another IK solution or goal |
+| `NoPath` | the search drew `rrt.max_iterations` samples without joining start and goal | more samples, or the way is blocked |
+| `NoSpline` | a path was found, but no spline along it checked valid or followed the start's motion | more `control_points`, or a start moving slower |
+| `OutOfTime` | the `time_budget` ran out first | a longer budget |
+
+Each contact (`Contact`) names a link and an obstacle, or two links, with the signed distance between them. `device.contacts(&worlds, &item_world, &q, within)` lists them for any batch of configurations, nearest first, as the checks see them: touches, links no joint moves and ignored pairs are left out. Both devices compute them exactly on the CPU, so they list the same. `pick` and `place` report a candidate's contacts too (below), and `follow` the contacts of a straight move's step that collides (`ToolPathResult::contacts`).
 
 ## Constraints along the path
 
@@ -275,8 +290,9 @@ fn main() -> Result<(), Error> {
 - **What may touch.** At the grasp and moving in, the fingers (`Robot::finger_links`, or the whole hand where it has no links with collision spheres below its palm) may touch the object; the palm may not, so a grasp set too deep fails. The held object may touch what it rests on as it leaves (`Pick::support`) and what it is set on as it arrives (`Place::support`). Backing off, the fingers may touch the object where it now stands. Everything else collides.
 - **What the hand holds.** A pick's plan holds a `Held` (`TaskPlan::held`): the object in its own frame and the grasp. `place` takes it and attaches the object itself, to the device without it; `Held::attachment(&robot)` gives the `AttachedObject` to plan with it otherwise ([`Robot::attach`](robots.md)). A place's plan gives the object where it now stands (`TaskPlan::placed`), to add to the world, and `TaskPlan::end` is where the next task starts. `World::remove` takes the object out of its world for the place, renumbering the touches.
 - **Other arms.** A pick or place moves its hand's joints alone; the joints only other hands move wait where the start has them. A place's transit can take them elsewhere at the same time (`Place::idle`), as another arm going home while this one carries the object, and they wait there through the moves in and away: IK at the release starts from there.
-- **Proposals.** `grasps(&obstacle, &GraspOptions)` proposes grasps for a box, ball, cylinder or capsule, in its frame: the hand facing each side, closing across what fits between its fingers (`opening`, 8 cm), `depth` (2 cm) in from the surface. They suit a parallel gripper whose IK frame lies between its fingertips, its z axis pointing out of the hand and its y axis along the closing direction, as the Panda's `ee_link`. `place_poses(&obstacle, pose, turns)` gives an object's symmetric turns at one spot: 2 for a box (4 with a square footprint), `turns` for a round object.
-- **Why it failed.** When no candidate gets through, the task's `TaskFailure` holds each candidate's step and reason (`CandidateStop`: a pose out of reach, a collision or a jump, or no path), and says it in a sentence: "none of 24 candidates got through: 20 at the grasp or release (1 out of reach, 19 colliding), 4 moving away (4 colliding)". IK that finds nothing is solved once more without its push away from obstacles, which tells a pose out of reach from one that collides.
+- **Proposals.** `grasps(&obstacle, &GraspOptions)` proposes grasps for a box, ball, cylinder or capsule, in its frame: the hand facing each side, closing across what fits between its fingers (`opening`, 8 cm), `depth` (2 cm) in from the surface. They suit a parallel gripper whose IK frame lies between its fingertips, its z axis pointing out of the hand and its y axis along the closing direction, as the Panda's `ee_link`. Where no grasp fits, `grasps` says why: the object is wider than the fingers open every way, or a floor rules out every grasp. `place_poses(&obstacle, pose, turns)` gives an object's symmetric turns at one spot: 2 for a box (4 with a square footprint), `turns` for a round object.
+- **Near a support.** A small object on a table puts the fingertips in the table at the full depth. Give `GraspOptions::tip` the fingers' reach past the frame (`robot.tip(hand)`) and `floor` the height they keep above, such as the table's top and a few millimeters, and pass the obstacle as it stands in the world: grasps from above then hold the object as deep as keeps the fingertips over the floor, and grasps that cannot, or come from below, are left out.
+- **Why it failed.** When no candidate gets through, the task's `TaskFailure` holds each candidate's step and reason (`CandidateStop`: a pose out of reach, a collision or a jump, or no path), and says it in a sentence: "none of 24 candidates got through: 20 at the grasp or release (1 out of reach, 19 colliding), 4 moving away (4 colliding)". IK that finds nothing is classified by `ik::failures`. A candidate stopped by a collision carries what collides (`CandidateStop::contacts`): at the start, at the IK solution with the most clearance, holding the object where a place lets go, or at the straight move's next step.
 - **Speed.** On the Ryzen AI Max+ 395 (32 threads), picking a box by its 24 grasps takes 6.5 ms on the CPU device, and 64 such picks at once 333 ms; on the Radeon 8060S, 15 ms and 114 ms. Setting a box down at either of its turns takes 2.4 ms on the CPU, and 16 at once 11.6 ms. [Benchmarks](benchmarks.md#picking-and-placing) has both machines and every batch size.
 
 ## Joining motions
@@ -321,6 +337,8 @@ Either is slowed by `speed_scale` (1.0 is as fast as the limits allow). Limits c
 - **For control loops**: `trajectory.at(t, &mut state)` writes position, velocity and acceleration without allocating.
 - **For datasets**: `trajectory.sample(hz)` returns fixed-rate samples.
 - **For safety layers**: a `Trajectory` is plain serializable data. `trajectory.check(&robot)` refuses one that is non-finite, does not start and end at rest, leaves a joint range, runs backward, or exceeds a velocity, acceleration or jerk limit.
+- **Its ends**: `trajectory.start()` and `trajectory.end()` are where it starts and comes to rest: its first and last control points, or for a stop, where the stop begins and ends along the path.
+- **Payloads**: timing knows the joints' limits, not the load. A held object collides as part of the robot ([holding objects](robots.md#holding-objects)), but batchplan has no payload mass or inertia, so a heavy carry is timed as an empty one: slow it with `speed_scale` or the robot's limit scales.
 - **For stopping**: `trajectory.stop(&robot, t)` is a controlled stop: the same path from time `t`, braking to rest as soon as an even deceleration within the limits allows. It stays on the checked path, so it needs no new collision check; verify it with `check_from` and the state at `t`. On planned Panda reaches it takes under 1.2 ms to compute, rests in about half the time left, and errors only where the path ends sooner than any stop would (late in short, fast motions).
 
 ### Starting from a moving state
@@ -372,7 +390,8 @@ fn main() -> Result<(), Error> {
 
 ## Live motion
 
-A `Follower` runs a trajectory while the world changes. Each `tick(&device, &worlds, now)` returns the state to command (`Tick`) and checks the rest of the motion against the worlds it is given: samples `check_every` apart (20 ms), in one `evaluate` batch.
+A `Follower` runs a trajectory while the world changes. Each `tick(&device, &worlds, now, measured)` returns the state to command (`Tick`) and checks the rest of the motion against the worlds it is given: samples `check_every` apart (20 ms), in one `evaluate` batch.
+- **Measured state:** given the state the robot was measured in, a tick compares it with where the trajectory has it. Within `tolerance` (0.2 rad per joint), as a servo settles short under load, the follower goes on from its own states, so commands never step. Farther, as an arm held back or pushed, it plans from the measured state, within `budget`, and reports `Reanchored { off }`; where it cannot, it holds the robot where it is and reports `Blocked`. `None` trusts the trajectory, as in simulation.
 - **Replanned:** when the rest collides, it plans from the state the trajectory reaches `budget` later (50 ms), starting in motion, within that budget, and switches to the new trajectory then. A tick that replans takes as long as the plan, up to `budget`; a controller that keeps running the current trajectory meanwhile (`trajectory()`, `began()`) never waits for it.
 - **Before a takeover:** the rest of the motion is the current trajectory up to the takeover, then the replan. If either collides, the replan is dropped and the robot stops.
 - **Stopping, then blocked:** when no plan arrives in time, or the collision comes sooner than the budget, it takes the controlled stop along its path and reports `Blocked` at rest. Plan again from there, or give up.
@@ -410,7 +429,7 @@ fn main() -> Result<(), Error> {
     // A 100 Hz loop; upload the worlds again whenever perception updates them. A tick that
     // replans can take up to the 50 ms budget.
     for step in 0..10_000 {
-        let tick = follower.tick(&device, &worlds, step as f32 * 0.01)?;
+        let tick = follower.tick(&device, &worlds, step as f32 * 0.01, None)?;
         // Command tick.state here.
         if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
             break;

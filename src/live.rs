@@ -11,6 +11,7 @@
 //! from the state it commands would bring the robot too close to an obstacle, and braking each
 //! joint in time to rest within its range.
 
+use std::f32::consts::{PI, TAU};
 use std::time::Duration;
 
 use glam::Vec3;
@@ -37,6 +38,12 @@ pub struct FollowerOptions {
     /// Where the hands must stay along replans ([`HandConstraint`]), as the trajectory was planned
     /// to keep them. A replan that would start where they break stops instead.
     pub constraints: Vec<HandConstraint>,
+    /// How far a joint of the measured state a tick is given may be from where the trajectory has
+    /// it at that tick (radians, or meters for a prismatic joint) before the follower plans again
+    /// from the measured state: 0.2. Set it above how far the robot lags its commands at speed.
+    /// Within it, as a servo settles short under load, plans continue from the trajectory's own
+    /// states, so commands do not step.
+    pub tolerance: f32,
 }
 
 impl Default for FollowerOptions {
@@ -46,6 +53,7 @@ impl Default for FollowerOptions {
             check_every: 0.02,
             plan: PlanOptions::default(),
             constraints: vec![],
+            tolerance: 0.2,
         }
     }
 }
@@ -72,8 +80,16 @@ pub enum FollowStatus {
     },
     /// At the goal, at rest.
     Arrived,
-    /// At rest short of the goal after a stop: plan again from here, or give up.
+    /// At rest short of the goal after a stop: plan again from here, or give up. A follower that
+    /// cannot plan from a measured state it re-anchors on holds the robot there, blocked.
     Blocked,
+    /// The measured state was farther from the trajectory than `FollowerOptions::tolerance`, by
+    /// `off` at its farthest joint, as an arm held back or pushed: a new trajectory from the
+    /// measured state takes over now.
+    Reanchored {
+        /// How far the farthest joint was from the trajectory (radians or meters).
+        off: f32,
+    },
 }
 
 /// The state to command at a tick, and what the follower did.
@@ -137,6 +153,11 @@ impl Follower {
             o.budget,
             o.check_every
         );
+        ensure_input!(
+            o.tolerance > 0.0,
+            "a follower needs a positive tolerance, got {}",
+            o.tolerance
+        );
         o.plan.check()?;
         constraint::check(robot, &o.constraints, "the follower")?;
         let points = &trajectory.control_points;
@@ -171,22 +192,53 @@ impl Follower {
         self.began
     }
 
-    /// The state to command at `now`. First, when the rest of the motion collides in `worlds`, a
-    /// replan from the state the robot will be in at `now + budget`, or a controlled stop when
-    /// none is found in time or the collision comes sooner. A tick that replans takes as long as
-    /// the plan does, up to `budget`.
-    pub fn tick(&mut self, device: &Device, worlds: &Worlds, now: f32) -> Result<Tick> {
+    /// The state to command at `now`, given the state the robot was `measured` in, if known.
+    /// First, when the measured state is farther from the trajectory than the tolerance, a new
+    /// trajectory from it ([`FollowStatus::Reanchored`]); then, when the rest of the motion
+    /// collides in `worlds`, a replan from the state the robot will be in at `now + budget`, or a
+    /// controlled stop when none is found in time or the collision comes sooner. A tick that
+    /// replans takes as long as the plan does, up to `budget`.
+    pub fn tick(
+        &mut self,
+        device: &Device,
+        worlds: &Worlds,
+        now: f32,
+        measured: Option<&JointState>,
+    ) -> Result<Tick> {
         ensure_input!(now.is_finite(), "a tick at a finite time, got {now}");
+        let n = self.robot.dof();
+        if let Some(m) = measured {
+            let finite = |v: &[f32]| v.len() == n && v.iter().all(|x| x.is_finite());
+            ensure_input!(
+                finite(&m.position) && finite(&m.velocity),
+                "a measured state needs {n} finite positions and velocities"
+            );
+        }
         if self.next.as_ref().is_some_and(|(_, at)| now >= *at) {
             let (trajectory, at) = self.next.take().expect("a replan to take over");
             self.trajectory = trajectory;
             self.began = at;
         }
-        let n = self.robot.dof();
         let duration = self.trajectory.duration();
         let t = (now - self.began).max(0.0);
         let mut state = JointState::new(n);
         self.trajectory.at(t.min(duration), &mut state);
+        if let Some(m) = measured {
+            let off = (0..n)
+                .map(|j| {
+                    let d = m.position[j] - state.position[j];
+                    if self.robot.continuous()[j] {
+                        (d + PI).rem_euclid(TAU) - PI
+                    } else {
+                        d
+                    }
+                    .abs()
+                })
+                .fold(0.0, f32::max);
+            if off > self.o.tolerance {
+                return self.reanchor(device, worlds, now, m, off);
+            }
+        }
         if t >= duration {
             let status = if self.stopping {
                 FollowStatus::Blocked
@@ -288,6 +340,85 @@ impl Follower {
             None => FollowStatus::Stopping,
         };
         Ok(Tick { state, status })
+    }
+
+    /// A new trajectory to the goal from the measured state `m`, taking over now: from its
+    /// position (within the joint ranges) and its velocity (within the limits), planned within the
+    /// budget. Where none is found, or `m` breaks the constraints, the robot is held at rest where
+    /// it is, blocked.
+    fn reanchor(
+        &mut self,
+        device: &Device,
+        worlds: &Worlds,
+        now: f32,
+        m: &JointState,
+        off: f32,
+    ) -> Result<Tick> {
+        let n = self.robot.dof();
+        let position: Vec<f32> = (0..n)
+            .map(|j| {
+                let (lo, hi) = self.robot.bounds(j);
+                m.position[j].clamp(lo, hi)
+            })
+            .collect();
+        let velocity: Vec<f32> = (0..n)
+            .map(|j| {
+                let most = self.robot.max_velocity()[j];
+                m.velocity[j].clamp(-most, most)
+            })
+            .collect();
+        let moving = velocity.iter().any(|&v| v != 0.0);
+        let motion = StartMotion {
+            velocity,
+            acceleration: vec![0.0; n],
+        };
+        self.next = None;
+        self.began = now;
+        let keeps = constraint::breach(&self.robot, &self.o.constraints, &position).is_none();
+        let planned = if keeps {
+            let problem = PlanProblem {
+                world: self.world,
+                start: position.clone(),
+                goal: self.goal.clone(),
+                start_motion: moving.then(|| motion.clone()),
+                hold: vec![],
+                constraints: self.o.constraints.clone(),
+            };
+            let options = PlanOptions {
+                time_budget: Some(Duration::from_secs_f32(self.o.budget.max(1e-3))),
+                ..self.o.plan
+            };
+            let result = crate::plan(device, worlds, &[problem], &options)?;
+            result.best(0).and_then(|path| {
+                let timed = if moving {
+                    Trajectory::moving(&self.robot, path, &motion)
+                } else {
+                    Trajectory::try_new(&self.robot, path, 1.0)
+                };
+                timed.ok()
+            })
+        } else {
+            None
+        };
+        let mut state = JointState::new(n);
+        if let Some(trajectory) = planned {
+            self.trajectory = trajectory;
+            self.stopping = false;
+            self.trajectory.at(0.0, &mut state);
+            return Ok(Tick {
+                state,
+                status: FollowStatus::Reanchored { off },
+            });
+        }
+        // Held where it is: a motion that does not move, at the measured position.
+        let still: Vec<f32> = position.iter().copied().cycle().take(7 * n).collect();
+        self.trajectory = Trajectory::try_new(&self.robot, &still, 1.0)?;
+        self.stopping = true;
+        state.position = position;
+        Ok(Tick {
+            state,
+            status: FollowStatus::Blocked,
+        })
     }
 
     /// When, on the caller's clock, the robot first collides along `stretches`, each sampled

@@ -15,13 +15,15 @@ Guide: [robots.md](robots.md).
 | `Robot::load(path, &RobotOptions)` | A robot from URDF, MJCF or OpenUSD (feature `usd`). |
 | `Robot::from_urdf(text, &RobotOptions)` | A robot from a URDF's text, as ROS publishes it on `/robot_description`. |
 | `Robot::assemble(&[Part], &RobotOptions)` | One robot from several descriptions, such as two arms at a table; each `Part` has a name prefix and a base pose. |
-| `RobotOptions` | The base link, the hands (`ee_links`), the default configuration, locked joints, joint limits and their scales, `package://` directories, an SRDF, OpenUSD variants, and the collision spheres. |
+| `RobotOptions` | The base link, the hands (`ee_links`) and their fingers where they are part of the palm (`finger_links`), the default configuration, locked joints, joint limits and their scales, `package://` directories, an SRDF, OpenUSD variants, and the collision spheres, with tighter tolerances for some links (`sphere_tolerances`). |
 | `JointLimits` | One joint's position, velocity, acceleration and jerk limits, replacing its description's. |
 | `CollisionModel` | Collision spheres and self-collision settings by link: `load` and `save` a file, `assemble` the model of an assembled robot. |
 | `SphereOptions`, `SphereGeometry` | How spheres are fitted when no collision model is given: the budget, the tolerance, and collision or visual geometry. |
 | `Robot::attach(&AttachedObject)`, `Robot::detach(name)` | The robot holding an object fixed to one of its links, or without it. |
 | `dof`, `joint_names`, `lower`, `upper`, `continuous`, `default_q`, `max_velocity`, `max_acceleration`, `max_jerk` | The robot's joints and their limits. |
-| `hands`, `hand_joints(hand)`, `hand_links(hand)`, `finger_links(hand)`, `ee_pose(q, hand)`, `link_pose(q, link)` | Hands and forward kinematics; `hand_links` names a hand and its fingers, for allowed contacts, and `finger_links` its fingers alone. |
+| `hands`, `hand_joints(hand)`, `hand_links(hand)`, `finger_links(hand)`, `tip(hand)`, `ee_pose(q, hand)`, `link_pose(q, link)` | Hands and forward kinematics; `hand_links` names a hand and its fingers, for allowed contacts, `finger_links` its fingers alone, and `tip` how far its spheres reach past its frame. |
+| `spheres(q)`, `reach()` | Every collision sphere at a configuration, and a bound on how far they reach from the base in any. |
+| `qualify()` | How well the spheres fit the geometry (`Qualification`): per link (`LinkQualification`) the `overhang`, the `uncovered` share of the surface and the `thickness`, and each hand's tip ([guide](robots.md#qualifying-a-robot)). |
 | `breach(constraints, q)` | Why a configuration breaks `HandConstraint`s, if it does, tested as `plan` tests its start and goals: to keep only goals that keep them before planning. |
 | `MeshModel::try_new(&robot)`, `MeshModel::clearance` | Clearances on the links' meshes instead of the spheres, to check plans against the real geometry: a `Clearance` (`world`, `self_collision`) per configuration. |
 
@@ -34,6 +36,7 @@ Guide: [perception.md](perception.md).
 | `World::new(obstacles)` | One scene: a list of obstacles. |
 | `World::remove(obstacle)` | Takes an obstacle out, as a hand picking it up does, and renumbers the touches of those after it. |
 | `World::touch`, `Touch::new(obstacle, links)` | Links allowed to touch an obstacle, such as the hand that grasps it ([allowed contacts](perception.md#allowed-contacts)). |
+| `World::always_touching(&robot)` | The touches of links that touch an obstacle in every configuration, as a link turning just above the base touches its table. |
 | `World::load(path, &SdfOptions)` | A scene's static geometry from MJCF or OpenUSD (feature `usd`). |
 | `Obstacle::cuboid`, `sphere`, `cylinder`, `capsule` | Axis-aligned shapes. `placed(pose)` moves and turns one, `pose()` returns its frame, `distance(p)` its signed distance and gradient (`Distance`). |
 | `Obstacle::from_grid(grid)`, `Obstacle::from(grid)` | A distance grid as an obstacle, in the world's frame. |
@@ -55,6 +58,8 @@ Guide: [devices.md](devices.md).
 | `Device::upload(&[World])` | The `Worlds` every batched call takes, prepared for this device. `Worlds` derefs to `[World]`. |
 | `Device::with_robot(&robot)` | A device for a changed robot, such as one holding an object, on the same GPU or threads; uploaded worlds work on both. |
 | `Device::evaluate` | Collision cost, gradient and clearances for a batch of configurations (`Evaluation`), weighted by `CollisionWeights`. |
+| `Device::contacts` | What each configuration of a batch comes within a distance of, nearest first (`Contact`): a link and an obstacle, or two links, with the distance between them. |
+| `Device::warmup` | Builds the kernels a GPU builds on first use and runs one small call of each kind, before anything is timed. |
 
 ## Inverse kinematics
 
@@ -66,6 +71,7 @@ Guide: [planning.md](planning.md#inverse-kinematics).
 | `IkProblem::new(world, target)` | A one-handed robot's hand at `target`. The fields `targets` (a pose or `None` per hand), `seed` (where seed 0 starts) and `hold` (joints that stay where the seed has them) cover the rest. |
 | `IkOptions` | Seeds per problem, iterations, tolerances and collision weights. |
 | `IkResult::best(problem)`, `nearest(problem, q)`, `solved()` | The seed with the most clearance, the seed nearest `q`, and every solved problem. |
+| `ik::failures(&device, &worlds, &result, &IkOptions)` | Why each unsolved problem has no solution (`IkFailure`): out of reach, or reached only in collision, with its contacts. |
 
 ## Planning
 
@@ -78,12 +84,13 @@ Guide: [planning.md](planning.md#planning-a-path).
 | `HandConstraint::new(hand, pose)` | Where a hand may be along the whole path, measured from `pose` ([guide](planning.md#constraints-along-the-path)): set `tilt` (its z axis within a cone), `twist` (its turn about that axis) and `position` (a box), all free by default, and `relative_to` another hand to measure them in its frame. `RrtProblem`, `Pick`, `Place`, `Sequence` and `FollowerOptions` take them too. |
 | `PlanOptions` | Control points, optimization seeds and iterations, the search (`rrt`: `RrtOptions`), shortcutting (`shortcut`: `ShortcutOptions`) and a `time_budget`. |
 | `PlanResult::best(problem)`, `solved()` | The shortest valid path's control points, and every solved problem. Every seed's control points are in `paths`, empty where a seed has none. |
+| `PlanResult::failures` | Per problem, why it has no valid path (`PlanFailure`): the start or the goal collides (with its contacts), no path, no valid spline, or out of time ([guide](planning.md#why-a-problem-failed)). |
 | `rrt::connect`, `shortcut::shortcut` | The search and the shortcutting that `plan` runs, on their own, for waypoint paths. |
-| `follow(&device, &worlds, &[ToolPath], &ToolPathOptions)` | A hand moved in straight lines through poses ([guide](planning.md#moving-the-hand-along-a-path)): per path, the `fraction` it covers, why it `stopped` short (`ToolPathStop`), and the motion's control points (`ToolPathResult`). |
-| `pick(&device, &worlds, &[Pick], &TaskOptions)`, `place(.., &[Place], ..)` | A whole task in one call ([guide](planning.md#picking-up-and-setting-down)): per task, a `TaskPlan` for every candidate that gets through, quickest first (`transit`, `approach` and `depart` trajectories, the `candidate`, what is `held` or `placed`, `end`), or a `TaskFailure` with each candidate's step and reason (`CandidateStop`). |
+| `follow(&device, &worlds, &[ToolPath], &ToolPathOptions)` | A hand moved in straight lines through poses ([guide](planning.md#moving-the-hand-along-a-path)): per path, the `fraction` it covers, why it `stopped` short (`ToolPathStop`) and what a collision there is with (`contacts`), and the motion's control points (`ToolPathResult`). |
+| `pick(&device, &worlds, &[Pick], &TaskOptions)`, `place(.., &[Place], ..)` | A whole task in one call ([guide](planning.md#picking-up-and-setting-down)): per task, a `TaskPlan` for every candidate that gets through, quickest first (`transit`, `approach` and `depart` trajectories, the `candidate`, what is `held` or `placed`, `end`), or a `TaskFailure` with each candidate's step, reason and contacts (`CandidateStop`). |
 | `Pick::new(world, start, object, grasps)`, `Place::new(world, start, held, poses)` | Hand 0 (a pick) or the holding hand (a place), 10 cm straight moves in and away, no `support` and no `constraints` on the transit; a place's `idle` takes the other arms elsewhere on its transit. |
 | `TaskOptions` | IK, planning and tool path options, the straight moves' speed cap (`tool_speed`, `f32::INFINITY` for none) and how much of each they must make (`min_fraction`). |
-| `grasps(&obstacle, &GraspOptions)`, `place_poses(&obstacle, pose, turns)`, `Held::attachment(&robot)` | Grasps of a box, ball, cylinder or capsule for a parallel gripper; an object's symmetric turns at one spot; a held object as an `AttachedObject`. |
+| `grasps(&obstacle, &GraspOptions)`, `place_poses(&obstacle, pose, turns)`, `Held::attachment(&robot)` | Grasps of a box, ball, cylinder or capsule for a parallel gripper, keeping the fingertips (`tip`) above a `floor` if given, or why there are none; an object's symmetric turns at one spot; a held object as an `AttachedObject`. |
 | `join(&device, &worlds, &[Sequence], &JoinOptions)` | Consecutive motions run without stopping between them ([guide](planning.md#joining-motions)): per sequence, one path for each stretch the robot moves without stopping, and each join's blend radius, `None` where it stops (`JoinResult`). `Sequence::blends` gives each join's radius, 0 to stop, and `Sequence::constraints` what every blend keeps. |
 
 ## Timing
@@ -95,7 +102,7 @@ Guide: [planning.md](planning.md#executable-trajectories).
 | `Trajectory::try_new(&robot, control_points, speed_scale)` | A rest-to-rest trajectory within the robot's velocity, acceleration and jerk limits. |
 | `Trajectory::with_hand_speed(&robot, control_points, &HandSpeed)` | The same, with a hand under caps on its speed and on how fast it turns. |
 | `Trajectory::moving(&robot, control_points, &StartMotion)` | A trajectory that starts in motion, for a path planned with `start_motion`. |
-| `duration()`, `at(t, &mut JointState)`, `sample(hz)` | Its length in seconds, the state at a time without allocating, and samples at a fixed rate (`JointTrajectory`). |
+| `duration()`, `at(t, &mut JointState)`, `sample(hz)`, `start()`, `end()` | Its length in seconds, the state at a time without allocating, samples at a fixed rate (`JointTrajectory`), and the configurations it starts at and comes to rest at. |
 | `stop(&robot, t)` | A controlled stop along the path from time `t`. |
 | `check(&robot)`, `check_from(&robot, &start)` | Verifying a trajectory before running it. |
 
@@ -106,9 +113,9 @@ Guide: [planning.md](planning.md#live-motion).
 | | |
 |---|---|
 | `Follower::try_new(&robot, world, trajectory, now, FollowerOptions)` | Follows a trajectory from time `now`, on the caller's clock. |
-| `follower.tick(&device, &worlds, now)` | The state to command at `now`, and what the follower did (`Tick`, `FollowStatus`): following, replanned to take over `at` a time, stopping, colliding `at` a time with no stop short of it, arrived, or blocked at rest. |
+| `follower.tick(&device, &worlds, now, measured)` | The state to command at `now`, given the state the robot was measured in if known, and what the follower did (`Tick`, `FollowStatus`): following, replanned to take over `at` a time, re-anchored on a measured state farther than its tolerance, stopping, colliding `at` a time with no stop short of it, arrived, or blocked at rest. |
 | `follower.trajectory()`, `began()` | The trajectory it follows now, and when it began on the caller's clock. |
-| `FollowerOptions` | A replan's time `budget`, the spacing of the checks along the rest of the motion (`check_every`), the `plan` options, and the `constraints` replans keep. |
+| `FollowerOptions` | A replan's time `budget`, the spacing of the checks along the rest of the motion (`check_every`), the `plan` options, the `constraints` replans keep, and how far a measured state may be from the trajectory (`tolerance`). |
 | `servo(&device, &worlds, world, &state, target, &ServoOptions)` | One control step of a hand toward a pose (`ServoStep`): the next state, the `ServoStatus` (normal, slowing, halted with its clearance while braking, or arrived) and the error. |
 | `ServoOptions` | The hand, the period `dt`, the `gain`, the `linear` and `angular` caps, the `slow_within` and `halt_within` clearances, and the `damping`. |
 

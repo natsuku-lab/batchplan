@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::description::Geometry;
 use crate::error::{Error, Result};
+use crate::rng::Rng;
 use crate::robot::Robot;
 use crate::sdf::{self, SdfGrid, SdfOptions};
 use crate::types::Pose;
@@ -103,6 +104,10 @@ pub struct Distance {
     pub gradient: Vec3,
 }
 
+/// Random configurations [`World::always_touching`] tests besides the default one, and their seed.
+const ALWAYS_SAMPLES: usize = 1000;
+const ALWAYS_SEED: u64 = 11;
+
 /// Value returned for clearances when there is nothing to collide with.
 pub(crate) const FAR: f32 = 1e30;
 
@@ -134,6 +139,63 @@ impl World {
             }
         }
         Ok(self.obstacles.remove(obstacle))
+    }
+
+    /// Touches for the links of `robot` that touch an obstacle in every configuration, as the
+    /// links just above a robot's base rest on the table it stands on: from rest there, every
+    /// plan's start would collide. Add them to [`World::touch`]. MoveIt's setup assistant finds
+    /// link pairs that always collide the same way, by sampling: a link counts where its spheres
+    /// overlap the obstacle at the default configuration and at each of 1,000 random ones within
+    /// the joint limits. Links no joint moves are never checked against the world, so they are
+    /// left out; so are links the world already lets touch the obstacle. One touch per obstacle
+    /// that has any, in obstacle order.
+    #[must_use]
+    pub fn always_touching(&self, robot: &Robot) -> Vec<Touch> {
+        let mut rng = Rng::new(ALWAYS_SEED);
+        // Within `lower` and `upper`: a continuous joint's are the turn it samples from.
+        let samples =
+            std::iter::once(robot.default_q.clone()).chain((0..ALWAYS_SAMPLES).map(|_| {
+                (0..robot.dof())
+                    .map(|j| rng.range(robot.lower[j], robot.upper[j]))
+                    .collect::<Vec<f32>>()
+            }));
+        let allowed = |obstacle: usize, link: &str| {
+            self.touch
+                .iter()
+                .any(|t| t.obstacle == obstacle && t.links.iter().any(|l| l == link))
+        };
+        // Per obstacle, the moving links with spheres that touch it in every sample so far.
+        let mut touching: Vec<Vec<usize>> = (0..self.obstacles.len())
+            .map(|k| {
+                (0..robot.links.len())
+                    .filter(|&l| robot.sphere_ranges[l][1] > 0 && !robot.links[l].chain.is_empty())
+                    .filter(|&l| !allowed(k, &robot.links[l].name))
+                    .collect()
+            })
+            .collect();
+        for q in samples {
+            if touching.iter().all(Vec::is_empty) {
+                break;
+            }
+            let fk = robot.fk(&q);
+            for (obstacle, links) in self.obstacles.iter().zip(&mut touching) {
+                links.retain(|&link| {
+                    let [first, count] = robot.sphere_ranges[link];
+                    robot.spheres[first as usize..(first + count) as usize]
+                        .iter()
+                        .any(|s| {
+                            let center = fk.rot[link] * s.center + fk.pos[link];
+                            obstacle.distance(center).value < s.radius
+                        })
+                });
+            }
+        }
+        touching
+            .into_iter()
+            .enumerate()
+            .filter(|(_, links)| !links.is_empty())
+            .map(|(k, links)| Touch::new(k, links.into_iter().map(|l| robot.links[l].name.clone())))
+            .collect()
     }
 
     /// The static collision geometry of a scene file: MJCF (`.xml`, `.mjcf`) geoms in the world

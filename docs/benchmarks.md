@@ -337,6 +337,8 @@ Every device solves the same 484 of 512 targets and plans all 484.
 
 Ranges cover runs after a warm-up run. The first run after the GPU idles is up to 30% slower, and the M4 Pro's GPU, which also drives its display, varies with what is on screen.
 
+Uploading the 512 worlds, which the example times first, took 0.1–0.2 ms on the M4 Pro on either device, at the commit that added `Device::warmup`: preparing each obstacle for the CPU's checks and, on the GPU, one buffer write. A distance grid adds its values, uploaded once however many worlds share it.
+
 By batch size, end to end, in solved problems per second (medians of three runs; the M4 Pro's at 0.2.0):
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU | Radeon 8060S | Ryzen CPU |

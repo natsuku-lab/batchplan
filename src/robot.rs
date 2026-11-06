@@ -13,7 +13,7 @@ use crate::description::{
     self, Curve, Geometry, JointDesc, JointType, LinkDesc, RobotDescription, Shape, TriMesh,
 };
 use crate::error::{self, Error, ensure_input, input};
-use crate::spheres::{self, SphereGeometry, SphereOptions};
+use crate::spheres::{self, Qualification, SphereGeometry, SphereOptions};
 use crate::types::Pose;
 use crate::world::Obstacle;
 
@@ -245,6 +245,11 @@ pub struct RobotOptions {
     /// joints above it. Set it for robots with grippers, and name each hand of a robot with
     /// several.
     pub ee_links: Vec<String>,
+    /// Per hand, by its link in `ee_links`: the links it grips with, for a hand whose fingers are
+    /// not the links below its palm, as a gripper whose fixed jaw is part of the palm's link
+    /// (then name the palm too). [`Robot::finger_links`] returns them; hands left out keep the
+    /// links below their palm.
+    pub finger_links: HashMap<String, Vec<String>>,
     /// Defaults to zero for every joint whose limits contain zero, else the middle of its range.
     pub default_q: Option<Vec<f32>>,
     /// Joints held at a value and removed from planning (mimics of a locked joint follow it).
@@ -261,6 +266,12 @@ pub struct RobotOptions {
     pub collision_model: Option<CollisionModel>,
     /// How spheres are fitted when there is no `collision_model`.
     pub spheres: SphereOptions,
+    /// Per link, by name: how far its spheres may reach beyond its geometry (meters), in place of
+    /// `spheres.tolerance`, as fingers fitted tighter than the arm so they can grasp small objects.
+    /// Each link's spheres reach as far as its tolerance, or where the budget cannot reach every
+    /// tolerance, as far as every tolerance scaled up by one factor: a tighter link costs the
+    /// others overhang.
+    pub sphere_tolerances: HashMap<String, f32>,
     /// A MoveIt SRDF's text, whose disabled collision pairs are added to the collision model's.
     pub srdf: Option<String>,
     /// OpenUSD variant selections, as (variant set, variant), used where the file authors none.
@@ -288,12 +299,14 @@ impl Default for RobotOptions {
         Self {
             base_link: None,
             ee_links: vec![],
+            finger_links: HashMap::new(),
             default_q: None,
             lock_joints: HashMap::new(),
             joint_limits: HashMap::new(),
             package_dirs: vec![],
             collision_model: None,
             spheres: SphereOptions::default(),
+            sphere_tolerances: HashMap::new(),
             srdf: None,
             variants: vec![],
             max_velocity: 2.0,
@@ -330,8 +343,12 @@ pub struct Robot {
     pub(crate) sphere_ranges: Vec<[u32; 2]>,
     /// Links whose frames are the IK target frames, one per hand.
     pub(crate) ee_links: Vec<usize>,
+    /// Per hand, the finger links `RobotOptions::finger_links` names, if it names any.
+    fingers: Vec<Option<Vec<usize>>>,
     pub(crate) default_q: Vec<f32>,
     collision_model: CollisionModel,
+    /// How spheres are fitted to its links (`RobotOptions::spheres`), which `qualify` samples by.
+    sphere_options: SphereOptions,
     /// Names of attached objects, each a fixed link at the end of `links`.
     attached: Vec<String>,
     /// The descriptions it was loaded from.
@@ -506,7 +523,7 @@ impl Robot {
         }
         let mut model = match &o.collision_model {
             Some(model) => model.clone(),
-            None => robot.fit_collision_model(&o.spheres)?,
+            None => robot.fit_collision_model(&o.spheres, &o.sphere_tolerances)?,
         };
         if let Some(srdf) = &o.srdf {
             for (a, b) in crate::urdf::srdf_disabled_pairs(srdf)? {
@@ -518,7 +535,23 @@ impl Robot {
     }
 
     /// Fits spheres to every link's geometry, then finds the link pairs not worth checking.
-    fn fit_collision_model(&mut self, o: &SphereOptions) -> Result<CollisionModel> {
+    fn fit_collision_model(
+        &mut self,
+        o: &SphereOptions,
+        tolerances: &HashMap<String, f32>,
+    ) -> Result<CollisionModel> {
+        if let Some(name) = tolerances
+            .keys()
+            .find(|n| !self.links.iter().any(|l| &l.name == *n))
+        {
+            bail!("sphere_tolerances names '{name}', which is not a link of the robot");
+        }
+        if let Some((name, t)) = tolerances
+            .iter()
+            .find(|(_, t)| !(t.is_finite() && **t > 0.0))
+        {
+            bail!("the sphere tolerance of '{name}' must be positive, got {t}");
+        }
         let meshes: Vec<Vec<TriMesh>> = self
             .links
             .iter()
@@ -531,7 +564,12 @@ impl Robot {
             "a budget of {} spheres cannot cover {with_geometry} links with geometry",
             o.budget
         );
-        let (fitted, overhang) = spheres::fit(&meshes, o, /* parallel */ true);
+        let tolerances: Vec<f32> = self
+            .links
+            .iter()
+            .map(|link| tolerances.get(&link.name).copied().unwrap_or(o.tolerance))
+            .collect();
+        let (fitted, overhang) = spheres::fit(&meshes, &tolerances, o, /* parallel */ true);
         let source = format!(
             "fitted by batchplan: spheres reach up to {:.1} mm beyond the geometry",
             overhang * 1e3
@@ -673,6 +711,7 @@ impl Robot {
                     .collect::<error::Result<Vec<TriMesh>>>()?;
                 let (fitted, _) = spheres::fit(
                     &[meshes],
+                    &[object.spheres.tolerance],
                     &object.spheres,
                     rayon::current_thread_index().is_some(),
                 );
@@ -913,23 +952,36 @@ impl Robot {
         })
     }
 
-    /// Names of the links hand `hand` grips with, for [`Touch`](crate::Touch): the first link at
-    /// or above its frame that has collision spheres (the Panda's `panda_hand`, above its tool
-    /// frame) and every link below that one: its fingers, and any object it holds.
+    /// Names of the links of hand `hand`, for [`Touch`](crate::Touch): the first link at or
+    /// above its frame that has collision spheres (the Panda's `panda_hand`, above its tool frame)
+    /// and every link below that one, its fingers and any object it holds, with the fingers
+    /// [`RobotOptions::finger_links`] names.
     #[must_use]
     pub fn hand_links(&self, hand: usize) -> Vec<&str> {
-        self.below_hand(hand, /* with_palm */ true)
+        let below = self.below_hand(hand, /* with_palm */ true);
+        let named = self.fingers[hand].iter().flatten();
+        let links =
+            (0..self.links.len()).filter(|i| below.contains(i) || named.clone().any(|f| f == i));
+        links.map(|i| self.links[i].name.as_str()).collect()
     }
 
-    /// Names of the links below the first of [`Robot::hand_links`] that have collision spheres:
-    /// hand `hand`'s fingers (and any object it holds), without its palm. Empty for a hand with
-    /// none, such as a suction cup or a bare flange, whose frames below the palm are only frames.
+    /// Names of the links hand `hand` grips with: those [`RobotOptions::finger_links`] names for
+    /// it, or else the links below the first of [`Robot::hand_links`] that have collision spheres,
+    /// its fingers (and any object it holds) without its palm. Empty for a hand with none, such as
+    /// a suction cup or a bare flange, whose frames below the palm are only frames.
     #[must_use]
     pub fn finger_links(&self, hand: usize) -> Vec<&str> {
-        self.below_hand(hand, /* with_palm */ false)
+        let links = match &self.fingers[hand] {
+            Some(named) => named.clone(),
+            None => self.below_hand(hand, /* with_palm */ false),
+        };
+        links
+            .into_iter()
+            .map(|i| self.links[i].name.as_str())
+            .collect()
     }
 
-    fn below_hand(&self, hand: usize, with_palm: bool) -> Vec<&str> {
+    fn below_hand(&self, hand: usize, with_palm: bool) -> Vec<usize> {
         let ancestors = |link: usize| std::iter::successors(Some(link), |&l| self.links[l].parent);
         let spheres = |link: usize| self.sphere_ranges[link][1] > 0;
         let frame = self.ee_links[hand];
@@ -937,7 +989,6 @@ impl Robot {
         (0..self.links.len())
             .filter(|&i| ancestors(i).any(|a| a == palm))
             .filter(|&i| with_palm || (i != palm && spheres(i)))
-            .map(|i| self.links[i].name.as_str())
             .collect()
     }
 
@@ -959,6 +1010,71 @@ impl Robot {
     pub fn link_pose(&self, q: &[f32], link: &str) -> Option<Pose> {
         let i = self.links.iter().position(|l| l.name == link)?;
         Some(self.pose_of(&self.fk(q), i))
+    }
+
+    /// How far hand `hand`'s spheres reach past its IK frame along the frame's z axis at the
+    /// default configuration (meters): how much deeper than a grasp the fingertips go, for
+    /// [`GraspOptions::tip`](crate::GraspOptions::tip). Negative where every sphere stays short of
+    /// the frame.
+    #[must_use]
+    pub fn tip(&self, hand: usize) -> f32 {
+        let fk = self.fk(&self.default_q);
+        let frame = self.ee_links[hand];
+        let (rot, pos) = (fk.rot[frame], fk.pos[frame]);
+        let links = self.hand_links(hand);
+        let hand_spheres = self
+            .spheres
+            .iter()
+            .filter(|s| links.contains(&self.links[s.link].name.as_str()));
+        hand_spheres
+            .map(|s| {
+                let center = fk.rot[s.link] * s.center + fk.pos[s.link];
+                rot.z_axis.dot(center - pos) + s.radius
+            })
+            .fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    /// How well the collision spheres fit the robot's geometry, link by link, and how far each
+    /// hand's reach past its frame: what to check before planning with a new robot or a
+    /// hand-tuned collision model ([`Qualification`]). Measured against the geometry spheres are
+    /// fitted to ([`RobotOptions::spheres`]), with its seed; reads mesh files, so it takes about
+    /// as long as fitting. An `Error::Load` where a mesh cannot be read.
+    pub fn qualify(&self) -> error::Result<Qualification> {
+        let mut links = vec![];
+        for (i, link) in self.links.iter().enumerate() {
+            let [first, count] = self.sphere_ranges[i];
+            if count == 0 || link.shapes.is_empty() {
+                continue;
+            }
+            let meshes = link
+                .shapes
+                .iter()
+                .map(Shape::mesh)
+                .collect::<Result<Vec<TriMesh>>>()
+                .map_err(|e| Error::Load {
+                    path: self
+                        .parts
+                        .first()
+                        .map(|p| p.path.clone())
+                        .unwrap_or_default(),
+                    message: format!("link '{}': {e:#}", link.name),
+                })?;
+            let own = &self.spheres[first as usize..(first + count) as usize];
+            let spheres: Vec<[f32; 4]> = own
+                .iter()
+                .map(|s| [s.center.x, s.center.y, s.center.z, s.radius])
+                .collect();
+            links.extend(spheres::measure(
+                &link.name,
+                &meshes,
+                &spheres,
+                &self.sphere_options,
+            ));
+        }
+        Ok(Qualification {
+            links,
+            tips: (0..self.hands()).map(|h| self.tip(h)).collect(),
+        })
     }
 
     /// Every collision sphere at configuration `q`, in the robot's frame, as `[x, y, z, radius]`,
@@ -1577,6 +1693,25 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
             })
             .collect::<anyhow::Result<_>>()?
     };
+    let mut fingers = vec![None; ee_links.len()];
+    for (hand, named) in &o.finger_links {
+        let at = ee_links
+            .iter()
+            .position(|&e| links[e].name == *hand)
+            .with_context(|| {
+                format!("finger_links names '{hand}', which is not a hand's ee_link")
+            })?;
+        let found = named
+            .iter()
+            .map(|name| {
+                link_index
+                    .get(name)
+                    .copied()
+                    .with_context(|| format!("unknown finger link '{name}' of hand '{hand}'"))
+            })
+            .collect::<anyhow::Result<Vec<usize>>>()?;
+        fingers[at] = Some(found);
+    }
     let default_q = match &o.default_q {
         Some(q) => {
             ensure!(
@@ -1639,8 +1774,10 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
         link_bounds: vec![],
         sphere_ranges: vec![],
         ee_links,
+        fingers,
         default_q,
         collision_model: CollisionModel::default(),
+        sphere_options: o.spheres,
         attached: vec![],
         parts: vec![],
     })

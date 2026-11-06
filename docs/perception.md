@@ -14,6 +14,10 @@ A `World` is a list of obstacles, and the links allowed to touch some of them. W
 
 `Obstacle::cuboid(center, half_extents)`, `sphere`, `cylinder` and `capsule` build the primitives axis-aligned, and `.placed(pose)` moves and turns one. `Obstacle::from(grid)` puts a grid in world coordinates, where grids built from points and depth images belong. Primitives are exact.
 
+## Changing a scene
+
+Uploaded `Worlds` never change: a scene that changes is uploaded again. To move one obstacle, change it in your `World` (`world.obstacles[k] = moved`) and upload the worlds; to take one out, `World::remove`, which keeps every touch on its obstacle. Every call after that takes the new `Worlds`, and the old ones stay valid for calls already holding them. An upload prepares each obstacle for the CPU's checks and, on a GPU, writes one buffer: 512 tabletop worlds took 0.1–0.2 ms on the M4 Pro ([Benchmarks](benchmarks.md#gpu-and-cpu-throughput)). A distance grid adds its values, uploaded once however many worlds share its `Arc`. So uploading per motion or per camera frame is cheap; what costs is building a grid from a depth image, not uploading it. Worlds work on every device made from the one they were uploaded to with `Device::with_robot`, as long as their touches name links both robots have.
+
 ## Allowed contacts
 
 A grasp touches what it grasps. `World::touch` lists links that may touch particular obstacles, as MoveIt's allowed collision matrix does for a scene: contact between them is not a collision, while every other link still keeps clear of the obstacle, and the touching links of every other obstacle. IK, planning, trajectory optimization, `Device::evaluate` and `MeshModel` all skip those pairs. `robot.hand_links(hand)` names a hand's links: the first link at or above its frame with collision spheres, and everything below it, its fingers included.
@@ -42,7 +46,7 @@ fn main() -> Result<(), Error> {
 }
 ```
 
-Link names are resolved when the worlds are uploaded, against the device's robot; an unknown name, or an obstacle index past the end, is an input error. A held object is a link of the robot holding it ([holding objects](robots.md#holding-objects)), so a world where it may rest on a table is uploaded to the device for that robot.
+Link names are resolved when the worlds are uploaded, against the device's robot; an unknown name, or an obstacle index past the end, is an input error. A held object is a link of the robot holding it ([holding objects](robots.md#holding-objects)), so a world where it may rest on a table is uploaded to the device for that robot. Links that touch the table a robot stands on in every configuration need a touch too: `world.always_touching(&robot)` finds them ([mounted robots](robots.md#collision-spheres)).
 
 ## Scenes
 

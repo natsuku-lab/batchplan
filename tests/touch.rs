@@ -279,3 +279,136 @@ fn worlds_without_touches_serialize_as_before() {
     let old: World = serde_json::from_value(plain).unwrap();
     assert!(old.touch.is_empty());
 }
+
+#[test]
+fn links_that_touch_their_table_in_every_configuration_are_found() {
+    let robot = Robot::load(
+        common::asset("so101/so101_new_calib.urdf"),
+        &Default::default(),
+    )
+    .unwrap();
+    // A table whose top is a centimeter above the base's foot, through the spheres of the link
+    // that turns on the base; a post beside the arm that some motions reach.
+    let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.19), Vec3::new(0.5, 0.5, 0.2));
+    let post = Obstacle::cuboid(Vec3::new(0.25, 0.0, 0.1), Vec3::new(0.02, 0.02, 0.1));
+    // A block the gripper is in at the default configuration, and only near it.
+    let at_rest = robot.link_pose(robot.default_q(), "gripper_link").unwrap();
+    let block = Obstacle::sphere(at_rest.position, 0.03);
+    // A slab under the table, 3.5 cm below the shoulder's spheres whatever the arm does.
+    let below = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.33), Vec3::new(0.5, 0.5, 0.3));
+    let with_block = World::new(vec![table.clone(), post.clone(), block, below]);
+    assert_eq!(
+        with_block.always_touching(&robot),
+        vec![Touch::new(0, ["shoulder_link"])]
+    );
+    let world = World::new(vec![table, post]);
+    let touches = world.always_touching(&robot);
+    assert_eq!(touches, vec![Touch::new(0, ["shoulder_link"])]);
+    // Without them, nothing can be planned from rest; with them, it can.
+    let start = robot.default_q().to_vec();
+    let mut goal = start.clone();
+    goal[0] += 1.0;
+    let problem = PlanProblem::new(0, start, goal);
+    let mounted = World {
+        touch: touches,
+        ..world.clone()
+    };
+    for d in devices(&robot) {
+        let worlds = d.upload(&[world.clone(), mounted.clone()]).unwrap();
+        let o = PlanOptions::default();
+        let bare = batchplan::plan(&d, &worlds, std::slice::from_ref(&problem), &o).unwrap();
+        assert!(
+            matches!(
+                bare.failures[0],
+                Some(batchplan::PlanFailure::StartCollides { .. })
+            ),
+            "{}: {:?}",
+            d.name(),
+            bare.failures[0]
+        );
+        let on_table = PlanProblem {
+            world: 1,
+            ..problem.clone()
+        };
+        let planned = batchplan::plan(&d, &worlds, &[on_table], &o).unwrap();
+        assert!(planned.best(0).is_some(), "{}", d.name());
+    }
+    // Touches the world already has are not found again.
+    assert!(mounted.always_touching(&robot).is_empty());
+    // A turntable turns without limit, its table always in a slab level with it.
+    let dir = std::env::temp_dir().join(format!("batchplan-turntable-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("turntable.urdf"), TURNTABLE).unwrap();
+    let turntable = Robot::load(dir.join("turntable.urdf"), &Default::default()).unwrap();
+    assert_eq!(turntable.continuous(), [true, false]);
+    let slab = Obstacle::cuboid(Vec3::new(0.0, 0.0, 0.04), Vec3::new(1.0, 1.0, 0.1));
+    let touches = World::new(vec![slab]).always_touching(&turntable);
+    assert!(
+        touches.len() == 1 && touches[0].links.iter().any(|l| l == "table"),
+        "{touches:?}"
+    );
+}
+
+/// A turntable arm: a continuous joint about z carrying a 40 cm table along x, and an arm.
+const TURNTABLE: &str = r#"<robot name="turntable">
+  <link name="base"/>
+  <link name="table"><collision><origin xyz="0.2 0 0.05"/><geometry><box size="0.4 0.06 0.06"/></geometry></collision></link>
+  <link name="arm"><collision><origin xyz="0.1 0 0"/><geometry><box size="0.2 0.05 0.05"/></geometry></collision></link>
+  <joint name="turn" type="continuous"><parent link="base"/><child link="table"/><origin xyz="0 0 0.1"/><axis xyz="0 0 1"/></joint>
+  <joint name="shoulder" type="revolute"><parent link="table"/><child link="arm"/><origin xyz="0.4 0 0.05"/>
+    <axis xyz="0 1 0"/><limit lower="-1" upper="1" velocity="2" effort="1"/></joint>
+</robot>"#;
+
+#[test]
+fn fingers_named_in_the_options_are_the_hands_fingers() {
+    let path = common::asset("so101/so101_new_calib.urdf");
+    let frame = "gripper_frame_link";
+    let bare = batchplan::RobotOptions {
+        ee_links: vec![frame.into()],
+        ..Default::default()
+    };
+    // The SO-101's fixed jaw is part of its palm's link: only the moving jaw is below it.
+    let robot = Robot::load(&path, &bare).unwrap();
+    assert_eq!(robot.finger_links(0), ["moving_jaw_so101_v1_link"]);
+    let jaws = ["gripper_link", "moving_jaw_so101_v1_link"];
+    let named = batchplan::RobotOptions {
+        finger_links: [(frame.to_string(), jaws.map(String::from).to_vec())].into(),
+        collision_model: Some(robot.collision_model().clone()),
+        ..bare.clone()
+    };
+    let named = Robot::load(&path, &named).unwrap();
+    assert_eq!(named.finger_links(0), jaws);
+    let mut hand = named.hand_links(0);
+    hand.sort_unstable();
+    assert_eq!(hand, [frame, "gripper_link", "moving_jaw_so101_v1_link"]);
+    // A block against the fixed jaw, between the jaws: the named fingers may touch it.
+    let q = robot.default_q();
+    let palm = robot.link_pose(q, "gripper_link").unwrap();
+    let tool = robot.ee_pose(q, 0);
+    let block = Obstacle::sphere(palm.position.lerp(tool.position, 0.5), 0.015);
+    for (robot, free) in [(&robot, false), (&named, true)] {
+        let device = Device::cpu(robot).unwrap();
+        let world = touching(vec![block.clone()], 0, &robot.finger_links(0));
+        assert_eq!(
+            world_clearance(&device, &world, q) >= 0.0,
+            free,
+            "{:?}",
+            robot.finger_links(0)
+        );
+    }
+    // Names that are not a hand, or not a link, are load errors.
+    for (hand, link) in [("wrist_link", "gripper_link"), (frame, "jaw")] {
+        let wrong = batchplan::RobotOptions {
+            finger_links: [(hand.to_string(), vec![link.to_string()])].into(),
+            ..bare.clone()
+        };
+        let err = Robot::load(&path, &wrong).unwrap_err();
+        assert!(
+            matches!(err, Error::Load { .. })
+                && err
+                    .to_string()
+                    .contains(if hand == frame { link } else { hand }),
+            "{err}"
+        );
+    }
+}
