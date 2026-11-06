@@ -181,8 +181,11 @@ fn relocked_joints_move_their_links_as_a_robot_loaded_there() {
     </robot>"#;
     let path = dir.join("relock.urdf");
     std::fs::write(&path, urdf).unwrap();
+    // The collision model fitted with the leader free, as relocking it needs.
+    let free = Robot::load(&path, &RobotOptions::default()).unwrap();
     let locked = |value: f32| RobotOptions {
         lock_joints: HashMap::from([("leader".into(), value)]),
+        collision_model: Some(free.collision_model().clone()),
         ..Default::default()
     };
     let robot = Robot::load(&path, &locked(0.2)).unwrap();
@@ -247,6 +250,42 @@ fn relocked_joints_move_their_links_as_a_robot_loaded_there() {
     assert!(mimic.contains("'double' was not locked"), "{mimic}");
     let nan = message(HashMap::from([("leader".into(), f32::NAN)]));
     assert!(nan.contains("not a finite value"), "{nan}");
+}
+
+/// A model fitted with a joint locked ignores pairs found at that value alone, so the joint stays
+/// where it was locked, through a model saved and loaded again too; the same robot loaded with a
+/// model fitted with the joint free relocks it.
+#[test]
+fn joints_locked_when_the_model_was_fitted_are_not_relocked() {
+    let path = common::asset(SO101);
+    let locked = |model: Option<CollisionModel>| RobotOptions {
+        lock_joints: HashMap::from([("elbow_flex".into(), 0.3)]),
+        collision_model: model,
+        ..Default::default()
+    };
+    let fitted = Robot::load(&path, &locked(None)).unwrap();
+    assert!(
+        fitted
+            .collision_model()
+            .locked_joints
+            .contains("elbow_flex")
+    );
+    let saved = scratch("locked_model").join("model.json");
+    fitted.collision_model().save(&saved).unwrap();
+    let reloaded =
+        Robot::load(&path, &locked(Some(CollisionModel::load(&saved).unwrap()))).unwrap();
+    let moved = HashMap::from([("elbow_flex".into(), -1.0)]);
+    for robot in [&fitted, &reloaded] {
+        let message = format!("{}", robot.relock(&moved).unwrap_err());
+        assert!(
+            message.contains("'elbow_flex' was locked when the collision model was fitted"),
+            "{message}"
+        );
+    }
+    let free = Robot::load(&path, &RobotOptions::default()).unwrap();
+    assert!(free.collision_model().locked_joints.is_empty());
+    let robot = Robot::load(&path, &locked(Some(free.collision_model().clone()))).unwrap();
+    assert!(robot.relock(&moved).is_ok());
 }
 
 /// A sphere where the 2F-85's fingers meet as they close.
@@ -807,6 +846,17 @@ fn load_errors_name_the_problem() {
         },
     );
     assert!(message.contains("unknown joint 'finger'"), "{message}");
+    let message = err(
+        &panda,
+        RobotOptions {
+            lock_joints: HashMap::from([("panda_joint4".into(), f32::NAN)]),
+            ..common::panda_options()
+        },
+    );
+    assert!(
+        message.contains("lock joint 'panda_joint4' at NaN, not a finite value"),
+        "{message}"
+    );
     let message = err(
         &panda,
         RobotOptions {

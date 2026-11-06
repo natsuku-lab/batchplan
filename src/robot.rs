@@ -1,7 +1,7 @@
 //! Robot model: a kinematic tree with collision spheres, built from a robot description file.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail, ensure};
@@ -205,6 +205,10 @@ pub struct CollisionModel {
     /// Link pairs never checked against each other. Names of links the robot lacks are skipped.
     #[serde(default)]
     pub self_collision_ignore: BTreeMap<String, Vec<String>>,
+    /// Joints that were locked when the fit found the pairs it ignores, which it sampled only at
+    /// their locked values: [`Robot::relock`] refuses to move them.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub locked_joints: BTreeSet<String>,
 }
 
 impl CollisionModel {
@@ -251,6 +255,7 @@ impl CollisionModel {
                     .iter()
                     .map(|(link, others)| (named(link), others.iter().map(named).collect())),
             );
+            out.locked_joints.extend(m.locked_joints.iter().map(named));
         }
         out
     }
@@ -621,6 +626,7 @@ impl Robot {
         }
         self.set_collision_model(model.clone())?;
         model.self_collision_ignore = spheres::ignore_pairs(self, &meshes, o);
+        model.locked_joints = self.locked.iter().map(|l| l.joint.clone()).collect();
         Ok(model)
     }
 
@@ -800,18 +806,26 @@ impl Robot {
     }
 
     /// This robot with joints it was loaded with locked (`RobotOptions::lock_joints`) held at
-    /// new values, as a torso that has moved: the links they carry move, and nothing else changes.
+    /// new values, as a torso that has moved: the links they carry move, and nothing else changes,
+    /// as if loaded there with the same collision model.
     /// [`Device::with_robot`](crate::Device::with_robot) makes a device for it without building
-    /// anything, so worlds uploaded stay valid. Joints not named keep their values. The pairs of
-    /// links the collision model ignores stay ignored, and a fitted model ignores pairs that never
-    /// touch across sampled configurations at the values it was fitted at: for joints that will
-    /// move, fit it with them free and load with it ([`RobotOptions::collision_model`]). Errors if
-    /// a joint was not locked or a value is not finite.
+    /// anything, so worlds uploaded stay valid. Joints not named keep their values. A model fitted
+    /// with a joint locked found the pairs it ignores at that joint's value alone, so pairs that
+    /// meet only at others would go unchecked: for joints that will move, fit the model with them
+    /// free and load with it ([`RobotOptions::collision_model`]). Errors if a joint was not locked,
+    /// was locked when the collision model was fitted ([`CollisionModel::locked_joints`]), or a
+    /// value is not finite.
     pub fn relock(&self, joints: &HashMap<String, f32>) -> error::Result<Robot> {
         for (name, &value) in joints {
             ensure_input!(
                 self.locked.iter().any(|l| l.joint == *name),
                 "joint '{name}' was not locked when the robot was loaded"
+            );
+            ensure_input!(
+                !self.collision_model.locked_joints.contains(name),
+                "joint '{name}' was locked when the collision model was fitted, so the pairs it \
+                 ignores were found at that value alone: fit it with the joint free, then load \
+                 with that model (RobotOptions::collision_model)"
             );
             ensure_input!(
                 value.is_finite(),
@@ -1525,13 +1539,17 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
             }
         }
     };
-    for name in o.lock_joints.keys() {
+    for (name, value) in &o.lock_joints {
         let j = joint_index
             .get(name.as_str())
             .with_context(|| format!("cannot lock unknown joint '{name}'"))?;
         ensure!(
             desc.joints[*j].kind != JointType::Fixed,
             "cannot lock fixed joint '{name}'"
+        );
+        ensure!(
+            value.is_finite(),
+            "cannot lock joint '{name}' at {value}, not a finite value"
         );
     }
     // Each moving joint resolved to the joint that drives it, and the curve from that joint's value

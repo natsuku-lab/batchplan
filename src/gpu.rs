@@ -785,7 +785,7 @@ fn pipeline(
     })
 }
 
-/// The robot as the kernels read it./// The robot as the kernels read it.
+/// The robot as the kernels read it.
 #[derive(Clone)]
 struct RobotBuffers {
     links: wgpu::Buffer,
@@ -2037,8 +2037,10 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/assets/ur5e/ur_description/urdf/ur5e.urdf"
         );
+        let free = Robot::load(path, &crate::RobotOptions::default()).expect("the UR5e loads");
         let o = crate::RobotOptions {
             lock_joints: HashMap::from([("shoulder_pan_joint".into(), 0.0)]),
+            collision_model: Some(free.collision_model().clone()),
             ..Default::default()
         };
         let robot = Robot::load(path, &o).expect("the UR5e loads");

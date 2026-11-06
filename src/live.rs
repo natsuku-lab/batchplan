@@ -4,9 +4,9 @@
 //! A `Follower` checks the rest of its motion against the worlds it is given at every tick. When
 //! the rest collides, it plans again from the state the robot will be in once the planning time
 //! (and a lead, for a controller elsewhere) has passed, starting in motion, and switches to the new
-//! trajectory then; when no plan arrives
-//! in time, or the collision comes sooner than that, it stops on the path it is on
-//! ([`Trajectory::stop`]), checks the stop too, and reports itself blocked at rest. `servo` takes
+//! trajectory then; when no plan arrives in time, or the collision comes sooner than that, it
+//! stops on the path it is on ([`Trajectory::stop`]), checks the stop too, and reports itself
+//! blocked at rest. `servo` takes
 //! one control step toward a hand pose: damped least squares on the hand's Jacobian, within the
 //! joints' velocity, acceleration and jerk limits, slowed and then braked to rest where braking
 //! from the state it commands would bring the robot too close to an obstacle, and braking each
@@ -34,7 +34,10 @@ pub struct FollowerOptions {
     pub budget: f32,
     /// The time a replan has after its budget to reach the robot before it takes over (seconds): 0,
     /// for a controller in the same process. A controller elsewhere, sent each replan as
-    /// [`FollowStatus::Replanned`] hands it over, needs about as long as sending takes.
+    /// [`FollowStatus::Replanned`] hands it over, needs about as long as sending takes. Only
+    /// replans wait for it: a stop, a re-anchor and a collision take effect at the tick that
+    /// reports them, so such a controller stops the robot itself on `Stopping` or `Collides`, which
+    /// also drop a replan it was sent, and takes up a `Reanchored` trajectory as soon as it can.
     pub lead: f32,
     /// Spacing in time of the checks along the rest of the motion (seconds), at least 1 ms: 20 ms.
     pub check_every: f32,
