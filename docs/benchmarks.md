@@ -550,6 +550,16 @@ batchplan's paths were 12% longer than cuRobo's at the median where both solved 
 | Run per-path passes as cooperative workgroups | 15,900 → 22,800 | 7,130 → 7,660 |
 | Give small batches several invocations per configuration | batch-1 latency 21 → 16 ms | 44 → 29 ms |
 
+- **Lanes for IK.** Up to 4,096 configurations, every kernel gave each configuration 8 invocations. For IK, where that pays depends on the robot. IK of 32 to 512 problems (32 seeds each) on a tabletop, with 1 and 8 invocations per configuration, crossed over at:
+
+  | Panda's spheres | Radeon 8060S | M4 Pro |
+  |---|---|---|
+  | 61 (cuRobo's) | about 1,500 configurations | about 2,100 |
+  | 128 (fitted) | about 3,300 | about 5,500 |
+  | 507 (fitted) | about 16,000–20,000 | past 16,384, where 8 were still 35% faster |
+
+  IK now splits up to 32 configurations per sphere, and never without the push away from obstacles, which checks no collisions: there, 8 invocations only repeat the kinematics. The IK that tells why 16 picks' failed grasps failed solves 114 problems without the push (3,648 configurations); with 8 invocations it took 13–16 ms on the M4 Pro's GPU, and 16 picks went from 66 ms in 0.6.1 to 74 ms in 0.7.0, which sends it fewer problems than 0.6.1 did. Heavy robots keep 8 past 4,096, where 1 was up to twice as slow (1,009 against 498 ms for 8,192 configurations of the 507-sphere Panda on the M4 Pro).
+
 - **Per-robot kernels.** On Mesa's RADV, per-link arrays cost 3–5 KB of scratch memory per invocation; writing the kernels per robot removed it ([why](architecture.md#the-gpu)).
 - **Grids.** [Building distance grids on the GPU](perception.md#building-grids-on-the-gpu), with an integer distance transform, made a 640×480 depth image's 1 cm grid 11× faster on the Radeon (21.1–22.7 → 1.9–2.0 ms) and 3.3× faster on the M4 Pro.
 - **Mesh checks.** A branch-and-bound search took mesh clearance from 620 to 110 µs per Panda configuration.

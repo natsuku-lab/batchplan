@@ -116,7 +116,7 @@ The robot is a set of spheres; obstacles are boxes, spheres, cylinders, capsules
 
 - **The twin.** `kernels.wgsl` and `cpu.rs` implement the same functions: kinematics, the collision cost and gradient, the IK step, the optimizer's passes.
 - **Layouts declared once.** Every struct the GPU reads is declared in Rust with `shader_struct!` and its WGSL generated from that, with shared constants written in from their Rust values.
-- **Kernels written per robot.** `robot_wgsl` writes the kinematics, Jacobians and collision cost link by link, each in its own variable: run-time-indexed arrays spill to scratch memory on Mesa's RADV, and writing them out made GPU planning 4.8× faster on a Radeon and 2.7× on an M4 Pro. Small batches give each configuration 8 invocations that split its sphere loops.
+- **Kernels written per robot.** `robot_wgsl` writes the kinematics, Jacobians and collision cost link by link, each in its own variable: run-time-indexed arrays spill to scratch memory on Mesa's RADV, and writing them out made GPU planning 4.8× faster on a Radeon and 2.7× on an M4 Pro. Small batches give each configuration 8 invocations that split its sphere loops: below 4,096 configurations, and for IK up to 32 configurations per collision sphere of the robot, since how far splitting pays grows with the robot's collision work. IK without the push away from obstacles checks no collisions, so it never splits.
 - **Trajectory optimization** is L-BFGS with a parallel line search, five passes per round, split across submissions to stay under driver watchdogs.
 
 ## Tool paths, joins and tasks
