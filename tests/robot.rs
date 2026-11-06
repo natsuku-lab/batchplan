@@ -5,13 +5,13 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionModel, CollisionWeights, Device, Error, JointLimits, Obstacle, PlanOptions,
-    PlanProblem, Robot, RobotOptions, SphereOptions, Trajectory, World,
+    CollisionModel, CollisionWeights, Device, Error, JointLimits, Obstacle, Part, PlanOptions,
+    PlanProblem, Pose, Robot, RobotOptions, SphereOptions, Trajectory, World,
 };
 use glam::{DMat3, DVec3, Mat3, Quat, Vec3};
 use mesh_loader::Loader;
@@ -253,38 +253,89 @@ fn relocked_joints_move_their_links_as_a_robot_loaded_there() {
 }
 
 /// A model fitted with a joint locked ignores pairs found at that value alone, so the joint stays
-/// where it was locked, through a model saved and loaded again too; the same robot loaded with a
-/// model fitted with the joint free relocks it.
+/// where it was locked: relocking it is refused, and so is loading the model with it free or locked
+/// elsewhere, through a model saved and loaded again and two arms assembled from it too. The same
+/// robot loaded with a model fitted with the joint free relocks it.
 #[test]
-fn joints_locked_when_the_model_was_fitted_are_not_relocked() {
+fn joints_locked_when_the_model_was_fitted_stay_there() {
     let path = common::asset(SO101);
-    let locked = |model: Option<CollisionModel>| RobotOptions {
-        lock_joints: HashMap::from([("elbow_flex".into(), 0.3)]),
+    let locked = |value: Option<f32>, model: Option<CollisionModel>| RobotOptions {
+        lock_joints: value
+            .map(|v| ("elbow_flex".to_string(), v))
+            .into_iter()
+            .collect(),
         collision_model: model,
         ..Default::default()
     };
-    let fitted = Robot::load(&path, &locked(None)).unwrap();
-    assert!(
-        fitted
-            .collision_model()
-            .locked_joints
-            .contains("elbow_flex")
+    let fitted = Robot::load(&path, &locked(Some(0.3), None)).unwrap();
+    assert_eq!(
+        fitted.collision_model().locked_joints,
+        BTreeMap::from([("elbow_flex".to_string(), 0.3)])
     );
     let saved = scratch("locked_model").join("model.json");
     fitted.collision_model().save(&saved).unwrap();
-    let reloaded =
-        Robot::load(&path, &locked(Some(CollisionModel::load(&saved).unwrap()))).unwrap();
+    let model = CollisionModel::load(&saved).unwrap();
+    let reloaded = Robot::load(&path, &locked(Some(0.3), Some(model.clone()))).unwrap();
     let moved = HashMap::from([("elbow_flex".into(), -1.0)]);
     for robot in [&fitted, &reloaded] {
         let message = format!("{}", robot.relock(&moved).unwrap_err());
         assert!(
-            message.contains("'elbow_flex' was locked when the collision model was fitted"),
+            message.contains("'elbow_flex' was locked at 0.3 when the collision model was fitted"),
             "{message}"
         );
     }
+    for elsewhere in [None, Some(-1.0)] {
+        let message = format!(
+            "{:#}",
+            Robot::load(&path, &locked(elsewhere, Some(model.clone()))).unwrap_err()
+        );
+        assert!(
+            message.contains("fitted with joint 'elbow_flex' locked at 0.3"),
+            "{message}"
+        );
+    }
+
+    // Two arms from the model: each arm's joint, by its prefixed name.
+    let arm = |prefix: &str, y: f32| Part {
+        path: path.clone().into(),
+        prefix: prefix.into(),
+        base: Pose::new(Vec3::new(0.0, y, 0.0), Quat::IDENTITY),
+    };
+    let parts = [arm("left_", 0.2), arm("right_", -0.2)];
+    let both = |left: f32| RobotOptions {
+        lock_joints: HashMap::from([
+            ("left_elbow_flex".into(), left),
+            ("right_elbow_flex".into(), 0.3),
+        ]),
+        collision_model: Some(CollisionModel::assemble(&[
+            ("left_", &model),
+            ("right_", &model),
+        ])),
+        ..Default::default()
+    };
+    let pair = Robot::assemble(&parts, &both(0.3)).unwrap();
+    let message = format!(
+        "{}",
+        pair.relock(&HashMap::from([("left_elbow_flex".into(), -1.0)]))
+            .unwrap_err()
+    );
+    assert!(
+        message.contains("'left_elbow_flex' was locked at 0.3"),
+        "{message}"
+    );
+    let message = format!("{:#}", Robot::assemble(&parts, &both(-1.0)).unwrap_err());
+    assert!(
+        message.contains("joint 'left_elbow_flex' locked at 0.3"),
+        "{message}"
+    );
+
     let free = Robot::load(&path, &RobotOptions::default()).unwrap();
     assert!(free.collision_model().locked_joints.is_empty());
-    let robot = Robot::load(&path, &locked(Some(free.collision_model().clone()))).unwrap();
+    let robot = Robot::load(
+        &path,
+        &locked(Some(0.3), Some(free.collision_model().clone())),
+    )
+    .unwrap();
     assert!(robot.relock(&moved).is_ok());
 }
 

@@ -1,7 +1,7 @@
 //! Robot model: a kinematic tree with collision spheres, built from a robot description file.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail, ensure};
@@ -205,10 +205,11 @@ pub struct CollisionModel {
     /// Link pairs never checked against each other. Names of links the robot lacks are skipped.
     #[serde(default)]
     pub self_collision_ignore: BTreeMap<String, Vec<String>>,
-    /// Joints that were locked when the fit found the pairs it ignores, which it sampled only at
-    /// their locked values: [`Robot::relock`] refuses to move them.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub locked_joints: BTreeSet<String>,
+    /// Joints locked while fitting, at their values. The fit found the pairs it ignores with them
+    /// there alone, so a robot loaded with the model must lock them there, and [`Robot::relock`]
+    /// leaves them. Models saved before batchplan 0.8.0 have none: refit them for joints that move.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub locked_joints: BTreeMap<String, f32>,
 }
 
 impl CollisionModel {
@@ -255,7 +256,8 @@ impl CollisionModel {
                     .iter()
                     .map(|(link, others)| (named(link), others.iter().map(named).collect())),
             );
-            out.locked_joints.extend(m.locked_joints.iter().map(named));
+            out.locked_joints
+                .extend(m.locked_joints.iter().map(|(j, v)| (named(j), *v)));
         }
         out
     }
@@ -563,8 +565,25 @@ impl Robot {
             }
         }
         let mut model = match &o.collision_model {
-            Some(model) => model.clone(),
-            None => robot.fit_collision_model(&o.spheres, &o.sphere_tolerances)?,
+            Some(model) => {
+                let moved = model
+                    .locked_joints
+                    .iter()
+                    .find(|&(joint, value)| o.lock_joints.get(joint) != Some(value));
+                if let Some((joint, value)) = moved {
+                    bail!(
+                        "the collision model was fitted with joint '{joint}' locked at {value}, so \
+                         the pairs it ignores were found there alone: lock it there, or fit the \
+                         model with it free"
+                    );
+                }
+                model.clone()
+            }
+            None => {
+                let mut model = robot.fit_collision_model(&o.spheres, &o.sphere_tolerances)?;
+                model.locked_joints = o.lock_joints.iter().map(|(j, v)| (j.clone(), *v)).collect();
+                model
+            }
         };
         if let Some(srdf) = &o.srdf {
             for (a, b) in crate::urdf::srdf_disabled_pairs(srdf)? {
@@ -626,7 +645,6 @@ impl Robot {
         }
         self.set_collision_model(model.clone())?;
         model.self_collision_ignore = spheres::ignore_pairs(self, &meshes, o);
-        model.locked_joints = self.locked.iter().map(|l| l.joint.clone()).collect();
         Ok(model)
     }
 
@@ -813,20 +831,22 @@ impl Robot {
     /// with a joint locked found the pairs it ignores at that joint's value alone, so pairs that
     /// meet only at others would go unchecked: for joints that will move, fit the model with them
     /// free and load with it ([`RobotOptions::collision_model`]). Errors if a joint was not locked,
-    /// was locked when the collision model was fitted ([`CollisionModel::locked_joints`]), or a
-    /// value is not finite.
+    /// is moved from where it was locked when the collision model was fitted
+    /// ([`CollisionModel::locked_joints`]), or a value is not finite.
     pub fn relock(&self, joints: &HashMap<String, f32>) -> error::Result<Robot> {
         for (name, &value) in joints {
             ensure_input!(
                 self.locked.iter().any(|l| l.joint == *name),
                 "joint '{name}' was not locked when the robot was loaded"
             );
-            ensure_input!(
-                !self.collision_model.locked_joints.contains(name),
-                "joint '{name}' was locked when the collision model was fitted, so the pairs it \
-                 ignores were found at that value alone: fit it with the joint free, then load \
-                 with that model (RobotOptions::collision_model)"
-            );
+            if let Some(&fitted) = self.collision_model.locked_joints.get(name) {
+                ensure_input!(
+                    value == fitted,
+                    "joint '{name}' was locked at {fitted} when the collision model was fitted, so \
+                     the pairs it ignores were found there alone: fit it with the joint free, then \
+                     load with that model (RobotOptions::collision_model)"
+                );
+            }
             ensure_input!(
                 value.is_finite(),
                 "joint '{name}' locked at {value}, not a finite value"
