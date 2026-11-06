@@ -136,6 +136,40 @@ pub(crate) struct Link {
     pub(crate) shapes: Vec<Shape>,
 }
 
+/// A link a locked joint moves (`RobotOptions::lock_joints`), its own joint folded into its
+/// origin: what [`Robot::relock`] folds in again at another value.
+#[derive(Clone, Debug)]
+struct LockedLink {
+    /// The locked joint: the link's joint, or the joint it mimics.
+    joint: String,
+    link: usize,
+    /// The link's joint frame before its motion.
+    origin: Transform,
+    axis: Vec3,
+    prismatic: bool,
+    /// The link's joint's value from the locked joint's.
+    curve: Curve,
+}
+
+impl LockedLink {
+    /// The link's origin with the locked joint at `value`.
+    fn origin(&self, value: f32) -> Transform {
+        let value = self.curve.value(value);
+        let motion = if self.prismatic {
+            Transform {
+                rot: Mat3::IDENTITY,
+                trans: self.axis * value,
+            }
+        } else {
+            Transform {
+                rot: Mat3::from_axis_angle(self.axis, value),
+                trans: Vec3::ZERO,
+            }
+        };
+        self.origin.mul(&motion)
+    }
+}
+
 /// A pair of links checked for self-collision: sphere pairs `first..first + count` of
 /// `Robot::self_pairs`.
 #[derive(Clone, Copy, Debug)]
@@ -351,6 +385,8 @@ pub struct Robot {
     sphere_options: SphereOptions,
     /// Names of attached objects, each a fixed link at the end of `links`.
     attached: Vec<String>,
+    /// The links locked joints move.
+    locked: Vec<LockedLink>,
     /// The descriptions it was loaded from.
     parts: Vec<Part>,
 }
@@ -760,6 +796,34 @@ impl Robot {
         robot
             .set_collision_model(model)
             .map_err(|e| input!("{e:#}"))?;
+        Ok(robot)
+    }
+
+    /// This robot with joints it was loaded with locked (`RobotOptions::lock_joints`) held at
+    /// new values, as a torso that has moved: the links they carry move, and nothing else changes.
+    /// [`Device::with_robot`](crate::Device::with_robot) makes a device for it without building
+    /// anything, so worlds uploaded stay valid. Joints not named keep their values. The pairs of
+    /// links the collision model ignores stay ignored, and a fitted model ignores pairs that never
+    /// touch across sampled configurations at the values it was fitted at: for joints that will
+    /// move, fit it with them free and load with it ([`RobotOptions::collision_model`]). Errors if
+    /// a joint was not locked or a value is not finite.
+    pub fn relock(&self, joints: &HashMap<String, f32>) -> error::Result<Robot> {
+        for (name, &value) in joints {
+            ensure_input!(
+                self.locked.iter().any(|l| l.joint == *name),
+                "joint '{name}' was not locked when the robot was loaded"
+            );
+            ensure_input!(
+                value.is_finite(),
+                "joint '{name}' locked at {value}, not a finite value"
+            );
+        }
+        let mut robot = self.clone();
+        for held in &self.locked {
+            if let Some(&value) = joints.get(&held.joint) {
+                robot.links[held.link].origin = held.origin(value);
+            }
+        }
         Ok(robot)
     }
 
@@ -1577,6 +1641,7 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
         shapes: vec![],
     };
     let mut links = vec![root];
+    let mut locked = vec![];
     let mut link_index: HashMap<String, usize> = HashMap::from([(base, 0)]);
     for &j in &order {
         let joint = &desc.joints[j];
@@ -1585,20 +1650,17 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
         let kind = if moving(j) {
             let (leader, curve) = driver(j)?;
             let prismatic = joint.kind == JointType::Prismatic;
-            if let Some(&locked) = o.lock_joints.get(&desc.joints[leader].name) {
-                let value = curve.value(locked);
-                let motion = if prismatic {
-                    Transform {
-                        rot: Mat3::IDENTITY,
-                        trans: joint.axis * value,
-                    }
-                } else {
-                    Transform {
-                        rot: Mat3::from_axis_angle(joint.axis, value),
-                        trans: Vec3::ZERO,
-                    }
+            if let Some(&value) = o.lock_joints.get(&desc.joints[leader].name) {
+                let held = LockedLink {
+                    joint: desc.joints[leader].name.clone(),
+                    link: links.len(),
+                    origin,
+                    axis: joint.axis,
+                    prismatic,
+                    curve,
                 };
-                origin = origin.mul(&motion);
+                origin = held.origin(value);
+                locked.push(held);
                 JointKind::Fixed
             } else {
                 let dof = *dof_of.get(&leader).with_context(|| {
@@ -1779,6 +1841,7 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
         collision_model: CollisionModel::default(),
         sphere_options: o.spheres,
         attached: vec![],
+        locked,
         parts: vec![],
     })
 }

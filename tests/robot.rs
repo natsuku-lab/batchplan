@@ -150,6 +150,105 @@ fn mimic_limits_and_velocities_constrain_the_leader() {
     assert!(double.angle_between(Quat::from_rotation_y(1.1)) < 1e-6);
 }
 
+/// Every link's pose in `a` and `b` at `q`, within 1e-6.
+fn same_poses(a: &Robot, b: &Robot, q: &[f32], links: &[&str]) {
+    for link in links {
+        let (pa, pb) = (a.link_pose(q, link).unwrap(), b.link_pose(q, link).unwrap());
+        assert!(
+            (pa.position - pb.position).length() < 1e-6
+                && pa.rotation.dot(pb.rotation).abs() > 1.0 - 1e-6,
+            "{link}: {pa:?} against {pb:?}"
+        );
+    }
+}
+
+/// Relocking moves the links a locked joint carries, its mimic joints' links included, to where a
+/// robot loaded with the new value has them, and leaves the other locked joints alone.
+#[test]
+fn relocked_joints_move_their_links_as_a_robot_loaded_there() {
+    let dir = scratch("relock");
+    let urdf = r#"<robot name="relock">
+      <link name="base"/><link name="a"/><link name="b"/><link name="c"/><link name="d"/>
+      <joint name="leader" type="revolute"><parent link="base"/><child link="a"/><axis xyz="0 0 1"/>
+        <origin xyz="0.1 0 0.2"/><limit lower="-1" upper="1" velocity="2" effort="1"/></joint>
+      <joint name="double" type="revolute"><parent link="base"/><child link="b"/><axis xyz="0 1 0"/>
+        <origin xyz="0 0.3 0" rpy="0.2 0 0"/>
+        <limit lower="-2" upper="2" velocity="1" effort="1"/><mimic joint="leader" multiplier="2" offset="0.5"/></joint>
+      <joint name="flipped" type="prismatic"><parent link="a"/><child link="c"/><axis xyz="1 0 0"/>
+        <limit lower="-1" upper="1" velocity="5" effort="1"/><mimic joint="leader" multiplier="-1"/></joint>
+      <joint name="free" type="revolute"><parent link="c"/><child link="d"/><axis xyz="0 1 0"/>
+        <origin xyz="0 0 0.1"/><limit lower="-2" upper="2" velocity="1" effort="1"/></joint>
+    </robot>"#;
+    let path = dir.join("relock.urdf");
+    std::fs::write(&path, urdf).unwrap();
+    let locked = |value: f32| RobotOptions {
+        lock_joints: HashMap::from([("leader".into(), value)]),
+        ..Default::default()
+    };
+    let robot = Robot::load(&path, &locked(0.2)).unwrap();
+    assert_eq!(robot.joint_names(), ["free"]);
+    let relocked = robot
+        .relock(&HashMap::from([("leader".into(), -0.4)]))
+        .unwrap();
+    let loaded = Robot::load(&path, &locked(-0.4)).unwrap();
+    let links = ["base", "a", "b", "c", "d"];
+    same_poses(&relocked, &loaded, &[0.7], &links);
+    // Each mimic joint at its own value of the leader's: double = 2 (-0.4) + 0.5 = -0.3 about y,
+    // flipped = 0.4 along a's x.
+    let b = relocked.link_pose(&[0.7], "b").unwrap();
+    let turned = Quat::from_rotation_x(0.2) * Quat::from_rotation_y(-0.3);
+    assert!(b.rotation.dot(turned).abs() > 1.0 - 1e-6, "{b:?}");
+    let c = relocked.link_pose(&[0.7], "c").unwrap().position;
+    let slid = Vec3::new(0.1, 0.0, 0.2) + Quat::from_rotation_z(-0.4) * Vec3::new(0.4, 0.0, 0.0);
+    assert!((c - slid).length() < 1e-6, "{c} against {slid}");
+    let moved = robot.link_pose(&[0.7], "d").unwrap().position;
+    let there = relocked.link_pose(&[0.7], "d").unwrap().position;
+    assert!(
+        (moved - there).length() > 0.05,
+        "the lock moves d: {moved} against {there}"
+    );
+
+    // The Panda with its first joint and fingers locked: relocking one finger and the first joint
+    // keeps the other finger, and moves the spheres with their links.
+    let panda = |joint1: f32, finger: f32| {
+        let mut o = common::panda_options();
+        o.lock_joints.insert("panda_joint1".into(), joint1);
+        o.default_q = None;
+        o.lock_joints.insert("panda_finger_joint1".into(), finger);
+        Robot::load(common::asset("franka/franka_panda.urdf"), &o).unwrap()
+    };
+    let relocked = panda(0.3, 0.04)
+        .relock(&HashMap::from([
+            ("panda_joint1".into(), -0.8),
+            ("panda_finger_joint1".into(), 0.01),
+        ]))
+        .unwrap();
+    let loaded = panda(-0.8, 0.01);
+    let q = [-0.6, 0.2, 0.4, -2.0, 0.3, 1.4];
+    let names = [
+        "panda_link1",
+        "panda_link4",
+        "ee_link",
+        "panda_leftfinger",
+        "panda_rightfinger",
+    ];
+    same_poses(&relocked, &loaded, &q, &names);
+    let (a, b) = (relocked.spheres(&q), loaded.spheres(&q));
+    assert_eq!(a.len(), b.len());
+    for (sa, sb) in a.iter().zip(&b) {
+        let gap = (0..4).map(|k| (sa[k] - sb[k]).abs()).fold(0.0, f32::max);
+        assert!(gap < 1e-6, "{sa:?} against {sb:?}");
+    }
+
+    let message = |joints: HashMap<String, f32>| format!("{}", robot.relock(&joints).unwrap_err());
+    let free = message(HashMap::from([("free".into(), 0.1)]));
+    assert!(free.contains("'free' was not locked"), "{free}");
+    let mimic = message(HashMap::from([("double".into(), 0.1)]));
+    assert!(mimic.contains("'double' was not locked"), "{mimic}");
+    let nan = message(HashMap::from([("leader".into(), f32::NAN)]));
+    assert!(nan.contains("not a finite value"), "{nan}");
+}
+
 /// A sphere where the 2F-85's fingers meet as they close.
 fn between_the_fingers(robot: &Robot) -> World {
     let tip = |side: &str, q: f32| {

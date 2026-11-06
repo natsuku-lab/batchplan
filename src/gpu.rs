@@ -2029,6 +2029,35 @@ mod tests {
         assert!(gpu.kernels.constrained.get().is_some() && gpu.grids.get().is_some());
     }
 
+    /// A robot relocked (`Robot::relock`) differs only in the link origins the kernels read from
+    /// buffers, so a device for it reuses the kernels built.
+    #[test]
+    fn a_relocked_robot_shares_the_kernels_built() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/ur5e/ur_description/urdf/ur5e.urdf"
+        );
+        let o = crate::RobotOptions {
+            lock_joints: HashMap::from([("shoulder_pan_joint".into(), 0.0)]),
+            ..Default::default()
+        };
+        let robot = Robot::load(path, &o).expect("the UR5e loads");
+        let gpu = match GpuBackend::new(&robot, None) {
+            Ok(gpu) => gpu,
+            Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => {
+                eprintln!("skipping GPU: {e}");
+                return;
+            }
+            Err(e) => panic!("no GPU: {e}"),
+        };
+        let relocked = robot
+            .relock(&HashMap::from([("shoulder_pan_joint".into(), 1.2)]))
+            .expect("the joint was locked");
+        let shared =
+            kernels_for(&gpu.device, &gpu.info, &gpu.built, &relocked).expect("the kernels build");
+        assert!(Arc::ptr_eq(&shared, &gpu.kernels));
+    }
+
     #[test]
     fn baseline_webgpu_limits_are_rejected_with_the_reason() {
         let unmet = unmet_limits(&wgpu::Limits::defaults());

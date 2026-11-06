@@ -4,6 +4,7 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use batchplan::rng::Rng;
@@ -25,6 +26,61 @@ fn devices(robot: &Robot) -> Vec<Device> {
         Err(e) => panic!("no GPU: {e}"),
     }
     devices
+}
+
+/// A device made for a relocked robot with `with_robot` checks collisions as one made for a robot
+/// loaded with those values, against worlds uploaded before.
+#[test]
+fn a_relocked_robot_collides_where_one_loaded_there_does() {
+    let panda = |joint1: f32| {
+        let mut o = common::panda_options();
+        o.lock_joints.insert("panda_joint1".into(), joint1);
+        o.default_q = None;
+        Robot::load(common::asset("franka/franka_panda.urdf"), &o).unwrap()
+    };
+    let robot = panda(0.0);
+    let relocked = robot
+        .relock(&HashMap::from([("panda_joint1".into(), 0.9)]))
+        .unwrap();
+    let loaded = panda(0.9);
+    // A box beside the arm turned 0.9 rad, clear of it unturned.
+    let q = [0.3, 0.0, -2.0, 0.0, 1.8, 0.8];
+    let hand = loaded.ee_pose(&q, 0).position;
+    let world = World::new(vec![Obstacle::cuboid(hand, Vec3::splat(0.05))]);
+    let w = CollisionWeights {
+        world: 10.0,
+        self_collision: 10.0,
+        margin: 0.02,
+        self_margin: 0.01,
+    };
+    for device in devices(&robot) {
+        let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
+        let unturned = device.evaluate(&worlds, &[0], &q, &w).unwrap();
+        assert!(unturned.collision_free(0), "{device:?}: clear before");
+        let turned = device.with_robot(&relocked).unwrap();
+        let fresh = Device::cpu(&loaded).unwrap();
+        let fresh_worlds = fresh.upload(std::slice::from_ref(&world)).unwrap();
+        let (a, b) = (
+            turned.evaluate(&worlds, &[0], &q, &w).unwrap(),
+            fresh.evaluate(&fresh_worlds, &[0], &q, &w).unwrap(),
+        );
+        assert!(!a.collision_free(0), "{device:?}: the box is in the way");
+        let close = |x: f32, y: f32| (x - y).abs() <= 1e-4 * (1.0 + y.abs());
+        assert!(
+            close(a.world_clearance[0], b.world_clearance[0])
+                && close(a.self_clearance[0], b.self_clearance[0])
+                && close(a.cost[0], b.cost[0]),
+            "{device:?}: {a:?} against {b:?}"
+        );
+        for (ga, gb) in a.gradient.iter().zip(&b.gradient) {
+            assert!(
+                close(*ga, *gb),
+                "{device:?}: {:?} against {:?}",
+                a.gradient,
+                b.gradient
+            );
+        }
+    }
 }
 
 #[test]
