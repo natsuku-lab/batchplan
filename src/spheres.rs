@@ -4,9 +4,16 @@
 //! candidate spheres that touch the surface, and a greedy cover picks the candidates that reach
 //! the most surface samples. The overhang allowed while covering is each link's tolerance, scaled
 //! by one factor searched for across the whole robot, and a final inflation grows spheres until
-//! every sample is inside one.
+//! every sample is inside one. Samples no candidate reaches, on parts too thin for the grid, get
+//! candidates of their own along their inward normals, and dense samples the inflation would grow
+//! a sphere more than twice the overhang to reach join the samples the cover is chosen on: so no
+//! sphere of closed geometry reaches farther than twice its link's scaled tolerance, which falls as
+//! the budget grows. Where the budget reaches the tolerances, it holds every link within its own.
+//! Parts thinner than `MIN_TANGENT_DEPTH`, and vertices whose averaged normal leads out of the
+//! geometry, get no candidates of their own and may reach a little past those bounds.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use glam::{Quat, UVec3, Vec3};
 use parry3d::math::Pose;
@@ -75,16 +82,33 @@ impl Default for SphereOptions {
 }
 
 const SURFACE_SAMPLES: usize = 1500;
-/// Samples every final sphere set must contain; denser than the ones the cover is chosen from.
+/// Surface each sample every final sphere set must contain stands for (square meters): one per
+/// 3 x 3 mm, from `DENSE_SAMPLES` to `MAX_DENSE_SAMPLES` per link. Surface between them may lie
+/// outside the spheres by about their spacing where a sphere crosses it steeply.
+const DENSE_AREA: f32 = 9e-6;
 const DENSE_SAMPLES: usize = 20_000;
+const MAX_DENSE_SAMPLES: usize = 80_000;
 const MAX_VERTEX_SAMPLES: usize = 1500;
 const MAX_CANDIDATES: usize = 1500;
 const MAX_VOXELS: usize = 200_000;
 /// Bisection steps of the overhang search.
-const SEARCH_STEPS: usize = 24;
+const SEARCH_STEPS: usize = 16;
+/// Bisection steps of a search near an earlier one's scale, within a factor of 2 of it.
+const NEAR_STEPS: usize = 10;
+/// Refinements of a cover, and searches after refining, at most.
+const MAX_REFINEMENTS: usize = 8;
+/// The shallowest center a sample's own candidate is looked for at (meters).
+const MIN_TANGENT_DEPTH: f32 = 1e-4;
+/// How far, in overhangs, a sphere may grow past what a cover reaches where the budget holds the
+/// tolerances back. Holding growth to one overhang raises the overhang the budget allows for every
+/// sphere, and a cover with tighter spheres grown in a few places checks fewer false contacts:
+/// fitted to the Panda at 64 spheres, one overhang left a fifth of MotionBenchMaker's problems with
+/// both ends free, against two fifths with two.
+const BOUND_GROWTH: f32 = 2.0;
 
-/// Area-weighted random points on the surface of `meshes`.
-fn surface_samples(meshes: &[TriMesh], count: usize, rng: &mut Rng) -> Vec<Vec3> {
+/// Area-weighted random points on the surface of `meshes`, each with its triangle's outward unit
+/// normal.
+fn surface_samples(meshes: &[TriMesh], count: usize, rng: &mut Rng) -> Vec<(Vec3, Vec3)> {
     let triangles: Vec<[Vec3; 3]> = meshes
         .iter()
         .flat_map(|m| m.triangles.iter().map(|&t| m.corners(t)))
@@ -105,9 +129,37 @@ fn surface_samples(meshes: &[TriMesh], count: usize, rng: &mut Rng) -> Vec<Vec3>
                 .partition_point(|&x| x < pick)
                 .min(triangles.len() - 1)];
             let (r1, r2) = (rng.uniform().sqrt(), rng.uniform());
-            a * (1.0 - r1) + b * (r1 * (1.0 - r2)) + c * (r1 * r2)
+            let point = a * (1.0 - r1) + b * (r1 * (1.0 - r2)) + c * (r1 * r2);
+            (point, (b - a).cross(c - a).normalize_or_zero())
         })
         .collect()
+}
+
+/// Every vertex of `meshes` with its outward unit normal: the area-weighted mean of its
+/// triangles' normals.
+fn vertex_normals(meshes: &[TriMesh]) -> Vec<(Vec3, Vec3)> {
+    let mut out = vec![];
+    for m in meshes {
+        let mut normals = vec![Vec3::ZERO; m.vertices.len()];
+        for &t in &m.triangles {
+            let [a, b, c] = m.corners(t);
+            let n = (b - a).cross(c - a);
+            for i in t {
+                normals[i as usize] += n;
+            }
+        }
+        let vertices = m.vertices.iter().zip(normals);
+        out.extend(vertices.map(|(&v, n)| (v, n.normalize_or_zero())));
+    }
+    out
+}
+
+/// Whether the sphere `(c, r)` reaches `p` within `overhang` beyond its radius: the one test the
+/// cover, its refinement and the samples' own candidates share, so a candidate made to reach a
+/// sample is one the cover counts as reaching it.
+#[inline]
+fn reaches(p: Vec3, (c, r): (Vec3, f32), overhang: f32) -> bool {
+    (p - c).length_squared() <= (r + overhang) * (r + overhang)
 }
 
 /// The largest sphere centered at `p` inside any of `solids`, if `p` is inside one.
@@ -126,10 +178,15 @@ fn inscribed(solids: &[ParryMesh], p: Vec3) -> Option<(Vec3, f32)> {
 
 /// One link's surface samples and candidate spheres (center, largest radius inside the geometry).
 struct LinkFit {
-    /// Points the cover is chosen to reach: mesh vertices and random surface points.
+    /// Points the cover is chosen to reach: mesh vertices and random surface points, then the
+    /// dense samples covers missed (`refined_cover`).
     samples: Vec<Vec3>,
-    /// Surface points the final spheres must contain.
-    dense: Vec<Vec3>,
+    /// Each sample's outward unit normal (zero where the surface has none).
+    normals: Vec<Vec3>,
+    /// Surface points the final spheres must contain, with their outward unit normals.
+    dense: Vec<(Vec3, Vec3)>,
+    /// Per dense sample, whether it has joined `samples`.
+    joined: Vec<bool>,
     candidates: Vec<(Vec3, f32)>,
     /// The geometry, as parry tests points against it.
     solids: Vec<ParryMesh>,
@@ -141,17 +198,24 @@ struct LinkFit {
 
 impl LinkFit {
     fn new(meshes: &[TriMesh], o: &SphereOptions, rng: &mut Rng, parallel: bool) -> Option<Self> {
-        let vertices: Vec<Vec3> = meshes
-            .iter()
-            .flat_map(|m| m.vertices.iter().copied())
-            .collect();
+        let vertices = vertex_normals(meshes);
         let stride = vertices.len().div_ceil(MAX_VERTEX_SAMPLES).max(1);
-        let mut samples: Vec<Vec3> = vertices.into_iter().step_by(stride).collect();
-        samples.extend(surface_samples(meshes, SURFACE_SAMPLES, rng));
-        if samples.is_empty() {
+        let mut sampled: Vec<(Vec3, Vec3)> = vertices.into_iter().step_by(stride).collect();
+        sampled.extend(surface_samples(meshes, SURFACE_SAMPLES, rng));
+        if sampled.is_empty() {
             return None;
         }
-        let dense = surface_samples(meshes, DENSE_SAMPLES, rng);
+        let (samples, normals): (Vec<Vec3>, Vec<Vec3>) = sampled.into_iter().unzip();
+        let area: f32 = meshes
+            .iter()
+            .flat_map(|m| {
+                m.triangles
+                    .iter()
+                    .map(|&t| description::triangle_area(m.corners(t)))
+            })
+            .sum();
+        let count = ((area / DENSE_AREA) as usize).clamp(DENSE_SAMPLES, MAX_DENSE_SAMPLES);
+        let dense = surface_samples(meshes, count, rng);
         let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
             | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
             | TriMeshFlags::ORIENTED;
@@ -194,6 +258,8 @@ impl LinkFit {
         let stride = candidates.len().div_ceil(MAX_CANDIDATES).max(1);
         Some(Self {
             samples,
+            normals,
+            joined: vec![false; dense.len()],
             dense,
             candidates: candidates.into_iter().step_by(stride).collect(),
             solids,
@@ -229,7 +295,7 @@ impl LinkFit {
                 .iter()
                 .any(|s| p.distance(Vec3::new(s[0], s[1], s[2])) <= s[3] * (1.0 + 1e-5))
         };
-        let outside = self.dense.len() - self.dense.iter().filter(inside).count();
+        let outside = self.dense.iter().filter(|(p, _)| !inside(&p)).count();
         LinkQualification {
             link: link.to_string(),
             spheres: spheres.len(),
@@ -241,13 +307,19 @@ impl LinkFit {
 
     /// Greedy cover: candidates reaching each sample within `overhang` beyond their radius,
     /// picked by how many uncovered samples they reach, up to `limit` of them. Returns the picks
-    /// and whether they reach every sample.
-    fn greedy(&self, overhang: f32, limit: usize) -> (Vec<usize>, bool) {
+    /// and the samples they leave: without a limit, those no candidate reaches.
+    fn greedy(&self, overhang: f32, limit: usize) -> (Vec<usize>, Vec<usize>) {
         let words = self.samples.len().div_ceil(64);
+        // Samples by x, so each candidate tests only those within its reach along x.
+        let mut by_x: Vec<usize> = (0..self.samples.len()).collect();
+        by_x.sort_by(|&a, &b| self.samples[a].x.total_cmp(&self.samples[b].x));
+        let xs: Vec<f32> = by_x.iter().map(|&i| self.samples[i].x).collect();
         let reached = |&(c, r): &(Vec3, f32)| {
             let mut bits = vec![0u64; words];
-            for (i, s) in self.samples.iter().enumerate() {
-                if (*s - c).length() <= r + overhang {
+            let first = xs.partition_point(|&x| x < c.x - (r + overhang));
+            let last = xs.partition_point(|&x| x <= c.x + (r + overhang));
+            for &i in &by_x[first..last] {
+                if reaches(self.samples[i], (c, r), overhang) {
                     bits[i / 64] |= 1 << (i % 64);
                 }
             }
@@ -262,34 +334,116 @@ impl LinkFit {
         if !self.samples.len().is_multiple_of(64) {
             uncovered[words - 1] = (1u64 << (self.samples.len() % 64)) - 1;
         }
+        // Lazy greedy (Minoux): a candidate's gain only falls as samples get covered, so a gain
+        // computed earlier bounds its gain now, and the top of the heap, recomputed and still on
+        // top, is the best. Ties go to the larger sphere, then the lower index, as a full scan's.
+        let gain = |i: usize, uncovered: &[u64]| -> u32 {
+            cover[i]
+                .iter()
+                .zip(uncovered)
+                .map(|(c, u)| (c & u).count_ones())
+                .sum()
+        };
+        // Radii are distances, never negative, so their bits order as they do.
+        let key = |i: usize, gain: u32| (gain, self.candidates[i].1.to_bits(), Reverse(i));
+        let mut heap: BinaryHeap<(u32, u32, Reverse<usize>)> = (0..self.candidates.len())
+            .map(|i| key(i, gain(i, &uncovered)))
+            .filter(|k| k.0 > 0)
+            .collect();
         let mut picks = vec![];
-        while picks.len() < limit && uncovered.iter().any(|&u| u != 0) {
-            let gain = |i: usize| {
-                cover[i]
-                    .iter()
-                    .zip(&uncovered)
-                    .map(|(c, u)| (c & u).count_ones())
-                    .sum::<u32>()
-            };
-            let (best, best_gain) = (0..self.candidates.len())
-                .map(|i| (i, gain(i)))
-                .max_by(|a, b| {
-                    let radius = |i: usize| self.candidates[i].1;
-                    a.1.cmp(&b.1)
-                        .then(radius(a.0).total_cmp(&radius(b.0)))
-                        .then(b.0.cmp(&a.0))
-                })
-                .expect("at least one candidate");
-            if best_gain == 0 {
-                break;
+        while picks.len() < limit
+            && let Some((bound, _, Reverse(best))) = heap.pop()
+        {
+            let now = gain(best, &uncovered);
+            if now < bound {
+                if now > 0 {
+                    heap.push(key(best, now));
+                }
+                continue;
             }
             picks.push(best);
             for (u, c) in uncovered.iter_mut().zip(&cover[best]) {
                 *u &= !c;
             }
         }
-        let complete = uncovered.iter().all(|&u| u == 0);
-        (picks, complete)
+        let left = (0..self.samples.len())
+            .filter(|&i| uncovered[i / 64] & (1 << (i % 64)) != 0)
+            .collect();
+        (picks, left)
+    }
+
+    /// A greedy cover at `overhang` that reaches every dense sample within `growth` times
+    /// `overhang`, at most `MAX_REFINEMENTS` times refined: samples no candidate reaches get
+    /// candidates of their own ([`LinkFit::tangent`]), and dense samples the cover leaves farther
+    /// join the samples.
+    fn refined_cover(&mut self, overhang: f32, growth: f32) -> Vec<usize> {
+        let any_reaches =
+            |spheres: &[(Vec3, f32)], p: Vec3| spheres.iter().any(|&s| reaches(p, s, overhang));
+        let mut picks = vec![];
+        for _ in 0..=MAX_REFINEMENTS {
+            let left;
+            (picks, left) = self.greedy(overhang, usize::MAX);
+            // One candidate reaches many neighbouring samples: those an added one reaches get
+            // none.
+            let mut added: Vec<(Vec3, f32)> = vec![];
+            for i in left {
+                let (p, n) = (self.samples[i], self.normals[i]);
+                if !any_reaches(&added, p)
+                    && let Some(candidate) = self.tangent(p, n, overhang)
+                {
+                    added.push(candidate);
+                }
+            }
+            if !added.is_empty() {
+                self.candidates.extend(added);
+                continue;
+            }
+            // Dense samples that joined and are still missed are those no candidate reaches.
+            let picked: Vec<(Vec3, f32)> = picks.iter().map(|&i| self.candidates[i]).collect();
+            let missed = |&i: &usize| {
+                let p = self.dense[i].0;
+                !self.joined[i] && !picked.iter().any(|&s| reaches(p, s, growth * overhang))
+            };
+            let dense = 0..self.dense.len();
+            let missed: Vec<usize> = if self.parallel {
+                dense.into_par_iter().filter(missed).collect()
+            } else {
+                dense.filter(missed).collect()
+            };
+            if missed.is_empty() {
+                break;
+            }
+            for i in missed {
+                let (p, n) = self.dense[i];
+                self.samples.push(p);
+                self.normals.push(n);
+                self.joined[i] = true;
+            }
+        }
+        picks
+    }
+
+    /// The largest sphere inside the geometry that reaches surface point `p` within `overhang`
+    /// beyond its radius, as `greedy` tests it, centered along its inward normal `-n`: the deepest
+    /// center that does, halving the depth from the larger of the link's largest inscribed radius
+    /// and the overhang, down to `MIN_TANGENT_DEPTH`. `None` where `n` is zero or no such center
+    /// lies inside, as where a vertex's averaged normal leads out of the geometry.
+    fn tangent(&self, p: Vec3, n: Vec3, overhang: f32) -> Option<(Vec3, f32)> {
+        if n == Vec3::ZERO {
+            return None;
+        }
+        let mut depth = self.largest.max(overhang).max(MIN_TANGENT_DEPTH);
+        loop {
+            if let Some(candidate) = inscribed(&self.solids, p - n * depth)
+                && reaches(p, candidate, overhang)
+            {
+                return Some(candidate);
+            }
+            if depth <= MIN_TANGENT_DEPTH {
+                return None;
+            }
+            depth = (0.5 * depth).max(MIN_TANGENT_DEPTH);
+        }
     }
 
     /// The picked spheres, grown until every sample is inside one, and the largest growth. Each
@@ -305,7 +459,8 @@ impl LinkFit {
             picks.to_vec()
         };
         let mut spheres: Vec<(Vec3, f32)> = picks.iter().map(|&i| self.candidates[i]).collect();
-        for &s in self.samples.iter().chain(&self.dense) {
+        let dense = self.dense.iter().map(|(p, _)| p);
+        for &s in self.samples.iter().chain(dense) {
             if spheres.iter().any(|&(c, r)| (s - c).length() <= r) {
                 continue;
             }
@@ -353,9 +508,10 @@ pub struct LinkQualification {
     /// How far its spheres reach beyond its geometry, at most (meters): a sphere's radius less
     /// how deep its center lies inside.
     pub overhang: f32,
-    /// The share of its geometry's surface outside every sphere, from 20,000 fresh samples: a
-    /// fraction of a percent for fitted spheres, which cover their own samples, and more where a
-    /// hand-tuned model leaves gaps.
+    /// The share of its geometry's surface outside every sphere, from fresh samples, one per
+    /// 3 x 3 mm of it (20,000 to 80,000): up to about 2% for fitted spheres, which cover their own
+    /// samples and leave slivers about a millimeter deep between them where held tight, and more
+    /// where a hand-tuned model leaves gaps.
     pub uncovered: f32,
     /// How thick its geometry is where thickest (meters): the largest sphere inside it, across. A
     /// link thinner than its spheres' overhang is mostly sphere.
@@ -370,35 +526,42 @@ pub(crate) fn measure(
     spheres: &[[f32; 4]],
     o: &SphereOptions,
 ) -> Option<LinkQualification> {
+    // Samples the fit did not draw: its rng starts at `o.rng_seed`.
     let fit = LinkFit::new(
         meshes,
         o,
-        &mut Rng::new(o.rng_seed),
+        &mut Rng::new(o.rng_seed.wrapping_add(1)),
         /* parallel */ true,
     )?;
     Some(fit.measure(link, spheres))
 }
 
 /// The smallest scale, from 1 up, of every link's tolerance (`tolerances`, per link) at which the
-/// greedy covers of all links fit in `o.budget` spheres.
-fn search_scale(fits: &[Option<LinkFit>], tolerances: &[f32], o: &SphereOptions) -> f32 {
-    let needed = |scale: f32| {
+/// greedy covers of all links fit in `o.budget` spheres. `near`, the scale of an earlier search of
+/// the same links, narrows the search to around it.
+fn search_scale(
+    fits: &[Option<LinkFit>],
+    tolerances: &[f32],
+    o: &SphereOptions,
+    near: Option<f32>,
+) -> f32 {
+    let fits_budget = |scale: f32| {
         let mut total = 0;
         for (f, &tolerance) in fits.iter().zip(tolerances) {
             let Some(f) = f else { continue };
-            let (picks, complete) = f.greedy(tolerance * scale, o.budget + 1 - total);
-            total += picks.len() + usize::from(!complete);
+            let (picks, left) = f.greedy(tolerance * scale, o.budget + 1 - total);
+            total += picks.len() + usize::from(!left.is_empty());
             if total > o.budget {
-                break;
+                return false;
             }
         }
-        total
+        true
     };
-    if needed(1.0) <= o.budget {
+    if fits_budget(1.0) {
         return 1.0;
     }
-    // Bisect between the tolerances and a scale at which one sphere covers any link.
-    let (mut lo, mut hi) = (1.0f32, 1.0f32);
+    // A scale at which one sphere covers any link.
+    let mut top = 1.0f32;
     for (f, &tolerance) in fits.iter().zip(tolerances) {
         let Some(f) = f else { continue };
         let (lo_corner, hi_corner) = f
@@ -407,49 +570,108 @@ fn search_scale(fits: &[Option<LinkFit>], tolerances: &[f32], o: &SphereOptions)
             .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(a, b), &p| {
                 (a.min(p), b.max(p))
             });
-        hi = hi.max((hi_corner - lo_corner).length() / tolerance);
+        top = top.max((hi_corner - lo_corner).length() / tolerance);
     }
-    for _ in 0..SEARCH_STEPS {
-        let mid = 0.5 * (lo + hi);
-        if needed(mid) <= o.budget {
-            hi = mid
-        } else {
-            lo = mid
+    let (mut lo, mut hi, steps) = match near {
+        Some(near) => {
+            let (mut lo, mut hi) = ((0.5 * near).max(1.0), (2.0 * near).min(top));
+            while hi < top && !fits_budget(hi) {
+                (lo, hi) = (hi, (2.0 * hi).min(top));
+            }
+            while lo > 1.0 && fits_budget(lo) {
+                (lo, hi) = ((0.5 * lo).max(1.0), lo);
+            }
+            (lo, hi, NEAR_STEPS)
         }
+        None => (1.0, top, SEARCH_STEPS),
+    };
+    for _ in 0..steps {
+        let mid = (lo * hi).sqrt();
+        if fits_budget(mid) { hi = mid } else { lo = mid }
     }
     hi
 }
 
-/// Spheres `[x, y, z, radius]` for each link's meshes (in the link frame), at most `o.budget` in
-/// total, and how far the largest one reaches beyond the surface it touches. Each link's overhang
-/// is its tolerance (`tolerances`, per link) when the budget allows, otherwise every tolerance
-/// scaled up by the smallest factor the budget can achieve. With `parallel`, the work runs on the
-/// current rayon pool; without, on the calling thread alone, without registering it with any pool.
+/// Spheres fitted to links ([`fit`]).
+pub(crate) struct Fitted {
+    /// Per link, spheres `[x, y, z, radius]` in its frame.
+    pub(crate) spheres: Vec<Vec<[f32; 4]>>,
+    /// How far the farthest reaches beyond the surface it touches (meters).
+    pub(crate) overhang: f32,
+    /// What every link's tolerance was scaled by for the budget: 1 where it reached them.
+    pub(crate) scale: f32,
+}
+
+/// Spheres for each link's meshes (in the link frame), at most `o.budget` in total. Each closed
+/// link's overhang is its tolerance (`tolerances`, per link) when the budget allows, otherwise at
+/// most twice its tolerance scaled up by the smallest factor the budget can achieve, but for the
+/// parts the module doc names. With `parallel`,
+/// the work runs on the current rayon pool; without, on the calling thread alone, without
+/// registering it with any pool.
 pub(crate) fn fit(
     links: &[Vec<TriMesh>],
     tolerances: &[f32],
     o: &SphereOptions,
     parallel: bool,
-) -> (Vec<Vec<[f32; 4]>>, f32) {
+) -> Fitted {
     debug_assert!(o.check().is_ok(), "callers check the options");
     debug_assert_eq!(links.len(), tolerances.len());
     let mut rng = Rng::new(o.rng_seed);
-    let fits: Vec<Option<LinkFit>> = links
+    let mut fits: Vec<Option<LinkFit>> = links
         .iter()
         .map(|m| LinkFit::new(m, o, &mut rng, parallel))
         .collect();
-    let scale = search_scale(&fits, tolerances, o);
+
+    // Cover every link at the scale the budget allows, refining each cover until spheres grow by
+    // at most `BOUND_GROWTH` overhangs to reach every dense sample. Refining adds samples, so the
+    // covers may outgrow the budget: then search again from that scale, which only grows.
+    let cover = |fits: &mut [Option<LinkFit>], scale: f32, growth: f32| -> Vec<Vec<usize>> {
+        fits.iter_mut()
+            .zip(tolerances)
+            .map(|(f, &tolerance)| {
+                f.as_mut()
+                    .map_or(vec![], |f| f.refined_cover(tolerance * scale, growth))
+            })
+            .collect()
+    };
+    let total = |picks: &[Vec<usize>]| picks.iter().map(Vec::len).sum::<usize>();
+    let mut scale = search_scale(&fits, tolerances, o, None);
+    let mut picks: Option<Vec<Vec<usize>>> = None;
+    for _ in 0..MAX_REFINEMENTS {
+        let covers = cover(&mut fits, scale, BOUND_GROWTH);
+        if total(&covers) <= o.budget {
+            picks = Some(covers);
+            break;
+        }
+        scale = search_scale(&fits, tolerances, o, Some(scale));
+    }
+    // Past the refinements, the covers the last search counted, which keep to the budget.
+    let mut picks = picks.unwrap_or_else(|| {
+        fits.iter()
+            .zip(tolerances)
+            .map(|(f, &tolerance)| {
+                f.as_ref()
+                    .map_or(vec![], |f| f.greedy(tolerance * scale, usize::MAX).0)
+            })
+            .collect()
+    });
+    // Where the budget reaches the tolerances, it may hold every link within its own.
+    if scale == 1.0 {
+        let strict = cover(&mut fits, 1.0, 1.0);
+        if total(&strict) <= o.budget {
+            picks = strict;
+        }
+    }
     let fitted: Vec<(Vec<[f32; 4]>, f32)> = fits
         .iter()
-        .zip(tolerances)
-        .map(|(f, &tolerance)| {
-            f.as_ref().map_or((vec![], 0.0), |f| {
-                f.spheres(&f.greedy(tolerance * scale, usize::MAX).0)
-            })
-        })
+        .zip(&picks)
+        .map(|(f, picks)| f.as_ref().map_or((vec![], 0.0), |f| f.spheres(picks)))
         .collect();
-    let reach = fitted.iter().map(|f| f.1).fold(0.0, f32::max);
-    (fitted.into_iter().map(|f| f.0).collect(), reach)
+    Fitted {
+        overhang: fitted.iter().map(|f| f.1).fold(0.0, f32::max),
+        spheres: fitted.into_iter().map(|f| f.0).collect(),
+        scale,
+    }
 }
 
 /// Spheres for an attached object's `shapes` (in its link's frame) without fitting, if every shape
@@ -633,4 +855,87 @@ pub(crate) fn ignore_pairs(
             .push(robot.links[b].name.clone());
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::description::Geometry;
+
+    /// The candidate a full scan of every candidate's gain picks next: the most samples, ties to
+    /// the larger sphere, then the lower index.
+    fn full_scan(fit: &LinkFit, overhang: f32, limit: usize) -> Vec<usize> {
+        let reached: Vec<Vec<bool>> = fit
+            .candidates
+            .iter()
+            .map(|&(c, r)| {
+                let reach = r + overhang;
+                fit.samples
+                    .iter()
+                    .map(|&s| (s - c).length_squared() <= reach * reach)
+                    .collect()
+            })
+            .collect();
+        let mut uncovered = vec![true; fit.samples.len()];
+        let mut picks = vec![];
+        while picks.len() < limit {
+            let gain = |i: usize| {
+                (0..uncovered.len())
+                    .filter(|&s| uncovered[s] && reached[i][s])
+                    .count()
+            };
+            let (best, most) = (0..fit.candidates.len())
+                .map(|i| (i, gain(i)))
+                .max_by(|a, b| {
+                    let radius = |i: usize| fit.candidates[i].1;
+                    a.1.cmp(&b.1)
+                        .then(radius(a.0).total_cmp(&radius(b.0)))
+                        .then(b.0.cmp(&a.0))
+                })
+                .expect("the shapes have interior candidates");
+            if most == 0 {
+                break;
+            }
+            for (s, covered) in uncovered.iter_mut().enumerate() {
+                *covered &= !reached[best][s];
+            }
+            picks.push(best);
+        }
+        picks
+    }
+
+    /// Lazy greedy picks what a full scan does, at every overhang and limit: a box and a thin
+    /// cylinder give candidates of many sizes, and spheres of one size tie.
+    #[test]
+    fn lazy_greedy_picks_as_a_full_scan_does() {
+        let mut mesh = Geometry::Box {
+            half: Vec3::new(0.04, 0.02, 0.01),
+        }
+        .mesh()
+        .expect("a box meshes");
+        let mut fin = Geometry::Cylinder {
+            radius: 0.004,
+            half_length: 0.03,
+        }
+        .mesh()
+        .expect("a cylinder meshes");
+        for v in &mut fin.vertices {
+            *v += Vec3::new(0.0, 0.0, 0.04);
+        }
+        mesh.append(fin);
+        let o = SphereOptions::default();
+        let fit = LinkFit::new(&[mesh], &o, &mut Rng::new(3), /* parallel */ false)
+            .expect("the shapes have surface");
+        for overhang in [0.0005, 0.002, 0.01, 0.05] {
+            for limit in [3, usize::MAX] {
+                let (picks, _) = fit.greedy(overhang, limit);
+                assert!(!picks.is_empty(), "every overhang needs a sphere at least");
+                assert_eq!(
+                    picks,
+                    full_scan(&fit, overhang, limit),
+                    "overhang {overhang}"
+                );
+            }
+        }
+    }
 }

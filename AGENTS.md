@@ -73,7 +73,7 @@ fn main() -> Result<(), Error> {
 
 ### Lifecycle
 
-- **Robot.** `Robot::load` fits collision spheres unless given a model, in a fraction of a second; save `robot.collision_model()` and pass it back as `RobotOptions::collision_model` to load the same spheres every time.
+- **Robot.** `Robot::load` fits collision spheres unless given a model: a fraction of a second for an arm at the default budget, seconds for thousands of spheres; save `robot.collision_model()` and pass it back as `RobotOptions::collision_model` to load the same spheres every time.
 - **Device.** One per robot (`Device::gpu`, falling back to `Device::cpu`), made once: never inside a control loop or per request. `device.warmup()` before timing anything ([devices](docs/devices.md#make-once-warm-up-reuse)).
 - **Worlds.** `device.upload(&worlds)` once per scene. Uploads are cheap (0.1–0.2 ms for 512 tabletop worlds), so a scene that changes is uploaded again; there is no partial update ([changing a scene](docs/perception.md#changing-a-scene)).
 - **Locked joints that move**, as a torso or head the robot plans without: `robot.relock(&values)` then `device.with_robot(&relocked)`, which compiles nothing and keeps the uploaded worlds. Fit the collision model with those joints free and load with it: a model records the joints it was fitted with locked, whose pairs that meet only at other values would go unchecked, and `relock` refuses to move them ([robots](docs/robots.md#kinematics)).

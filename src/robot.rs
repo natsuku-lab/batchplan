@@ -629,16 +629,18 @@ impl Robot {
             .iter()
             .map(|link| tolerances.get(&link.name).copied().unwrap_or(o.tolerance))
             .collect();
-        let (fitted, overhang) = spheres::fit(&meshes, &tolerances, o, /* parallel */ true);
+        let fitted = spheres::fit(&meshes, &tolerances, o, /* parallel */ true);
         let source = format!(
-            "fitted by batchplan: spheres reach up to {:.1} mm beyond the geometry",
-            overhang * 1e3
+            "fitted by batchplan: spheres reach up to {:.1} mm beyond the geometry, with every \
+             tolerance scaled by {:.2} for the budget",
+            fitted.overhang * 1e3,
+            fitted.scale
         );
         let mut model = CollisionModel {
             source: Some(source),
             ..Default::default()
         };
-        for (link, fitted) in self.links.iter().zip(fitted) {
+        for (link, fitted) in self.links.iter().zip(fitted.spheres) {
             if !fitted.is_empty() {
                 model.spheres.insert(link.name.clone(), fitted);
             }
@@ -769,13 +771,13 @@ impl Robot {
                     .iter()
                     .map(|shape| shape.mesh().map_err(|e| input!("{e:#}")))
                     .collect::<error::Result<Vec<TriMesh>>>()?;
-                let (fitted, _) = spheres::fit(
+                let fitted = spheres::fit(
                     &[meshes],
                     &[object.spheres.tolerance],
                     &object.spheres,
                     rayon::current_thread_index().is_some(),
                 );
-                fitted.into_iter().flatten().collect()
+                fitted.spheres.into_iter().flatten().collect()
             }
         };
         let mut robot = self.clone();
