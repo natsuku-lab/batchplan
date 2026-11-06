@@ -66,6 +66,13 @@ fn malformed_batches_are_errors_on_every_device() {
             ),
             "{name}: contacts of a configuration that is not finite"
         );
+        assert!(
+            matches!(
+                d.evaluate(&worlds, &[0], &unknown, &none),
+                Err(Error::Input(_))
+            ),
+            "{name}: a configuration that is not finite"
+        );
         let target = robot.ee_pose(&q, 0);
         assert!(
             batchplan::solve_ik(

@@ -314,8 +314,8 @@ impl Device {
     }
 
     /// Collision cost, its gradient and clearances for each configuration in `q` (`[items, dof]`)
-    /// against `worlds[item_world[item]]`. Errors if `q` does not hold `dof` values per item, an
-    /// item names a world outside `worlds`, or `worlds` were uploaded to another device.
+    /// against `worlds[item_world[item]]`. Errors if `q` does not hold `dof` finite values per
+    /// item, an item names a world outside `worlds`, or `worlds` were uploaded to another device.
     pub fn evaluate(
         &self,
         worlds: &Worlds,
@@ -324,6 +324,7 @@ impl Device {
         w: &CollisionWeights,
     ) -> Result<Evaluation> {
         self.check_batch(worlds, item_world, q.len(), self.robot().dof())?;
+        finite(q, self.robot().dof())?;
         self.backend.evaluate(worlds, item_world, q, w)
     }
 
@@ -349,13 +350,7 @@ impl Device {
             within.is_finite(),
             "contacts within a finite distance, got {within}"
         );
-        if let Some(i) = q.iter().position(|v| !v.is_finite()) {
-            return Err(input!(
-                "item {} has a configuration value that is not finite: {}",
-                i / robot.dof(),
-                q[i]
-            ));
-        }
+        finite(q, robot.dof())?;
         let checked = self.backend.checked(worlds);
         let contacts = |(q, &world): (&[f32], &u32)| {
             crate::cpu::contacts(robot, &checked[world as usize], &robot.fk(q), within)
@@ -538,6 +533,19 @@ impl Device {
         }
         Ok(())
     }
+}
+
+/// That every value of the configurations `q` (`[items, dof]`) is finite: a NaN compares as clear of
+/// everything.
+fn finite(q: &[f32], dof: usize) -> Result<()> {
+    if let Some(i) = q.iter().position(|v| !v.is_finite()) {
+        return Err(input!(
+            "item {} has a configuration value that is not finite: {}",
+            i / dof,
+            q[i]
+        ));
+    }
+    Ok(())
 }
 
 /// The parallel inner loops each device implements. Algorithm modules own seeding, validation
