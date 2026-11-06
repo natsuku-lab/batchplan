@@ -20,6 +20,7 @@ Guide: [robots.md](robots.md).
 | `CollisionModel` | Collision spheres and self-collision settings by link: `load` and `save` a file, `assemble` the model of an assembled robot. |
 | `SphereOptions`, `SphereGeometry` | How spheres are fitted when no collision model is given: the budget, the tolerance, and collision or visual geometry. |
 | `Robot::attach(&AttachedObject)`, `Robot::detach(name)` | The robot holding an object fixed to one of its links, or without it. |
+| `Robot::relock(&joints)` | The robot with joints it locked at load held at new values, as a torso that moved ([guide](robots.md#kinematics)). |
 | `dof`, `joint_names`, `lower`, `upper`, `continuous`, `default_q`, `max_velocity`, `max_acceleration`, `max_jerk` | The robot's joints and their limits. |
 | `hands`, `hand_joints(hand)`, `hand_links(hand)`, `finger_links(hand)`, `tip(hand)`, `ee_pose(q, hand)`, `link_pose(q, link)` | Hands and forward kinematics; `hand_links` names a hand and its fingers, for allowed contacts, `finger_links` its fingers alone, and `tip` how far its spheres reach past its frame. |
 | `spheres(q)`, `reach()` | Every collision sphere at a configuration, and a bound on how far they reach from the base in any. |
@@ -113,9 +114,9 @@ Guide: [planning.md](planning.md#live-motion).
 | | |
 |---|---|
 | `Follower::try_new(&robot, world, trajectory, now, FollowerOptions)` | Follows a trajectory from time `now`, on the caller's clock. |
-| `follower.tick(&device, &worlds, now, measured)` | The state to command at `now`, given the state the robot was measured in if known, and what the follower did (`Tick`, `FollowStatus`): following, replanned to take over `at` a time, re-anchored on a measured state farther than its tolerance, stopping, colliding `at` a time with no stop short of it, arrived, or blocked at rest. |
+| `follower.tick(&device, &worlds, now, measured)` | The state to command at `now`, given the state the robot was measured in if known, and what the follower did (`Tick`, `FollowStatus`): following, replanned to a `trajectory` that takes over `at` a time, re-anchored on a measured state farther than its tolerance, stopping, colliding `at` a time with no stop short of it, arrived, or blocked at rest. |
 | `follower.trajectory()`, `began()` | The trajectory it follows now, and when it began on the caller's clock. |
-| `FollowerOptions` | A replan's time `budget`, the spacing of the checks along the rest of the motion (`check_every`), the `plan` options, the `constraints` replans keep, and how far a measured state may be from the trajectory (`tolerance`). |
+| `FollowerOptions` | A replan's time `budget` and the `lead` it then has to reach the robot before it takes over, the spacing of the checks along the rest of the motion (`check_every`), the `plan` options, the `constraints` replans keep, and how far a measured state may be from the trajectory (`tolerance`). |
 | `servo(&device, &worlds, world, &state, target, &ServoOptions)` | One control step of a hand toward a pose (`ServoStep`): the next state, the `ServoStatus` (normal, slowing, halted with its clearance while braking, or arrived) and the error. |
 | `ServoOptions` | The hand, the period `dt`, the `gain`, the `linear` and `angular` caps, the `slow_within` and `halt_within` clearances, and the `damping`. |
 

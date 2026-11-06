@@ -3,7 +3,8 @@
 //!
 //! A `Follower` checks the rest of its motion against the worlds it is given at every tick. When
 //! the rest collides, it plans again from the state the robot will be in once the planning time
-//! has passed, starting in motion, and switches to the new trajectory then; when no plan arrives
+//! (and a lead, for a controller elsewhere) has passed, starting in motion, and switches to the new
+//! trajectory then; when no plan arrives
 //! in time, or the collision comes sooner than that, it stops on the path it is on
 //! ([`Trajectory::stop`]), checks the stop too, and reports itself blocked at rest. `servo` takes
 //! one control step toward a hand pose: damped least squares on the hand's Jacobian, within the
@@ -28,9 +29,13 @@ use crate::types::{Pose, StartMotion};
 /// How a [`Follower`] checks and replans.
 #[derive(Clone, Debug)]
 pub struct FollowerOptions {
-    /// The time a replan may take (seconds): it starts from where the robot will be once this has
-    /// passed. 50 ms.
+    /// The time a replan may take (seconds): 50 ms. It starts from where the robot will be once
+    /// this and `lead` have passed.
     pub budget: f32,
+    /// The time a replan has after its budget to reach the robot before it takes over (seconds): 0,
+    /// for a controller in the same process. A controller elsewhere, sent each replan as
+    /// [`FollowStatus::Replanned`] hands it over, needs about as long as sending takes.
+    pub lead: f32,
     /// Spacing in time of the checks along the rest of the motion (seconds), at least 1 ms: 20 ms.
     pub check_every: f32,
     /// How replans are planned; their time budget is `budget`.
@@ -50,6 +55,7 @@ impl Default for FollowerOptions {
     fn default() -> Self {
         Self {
             budget: 0.05,
+            lead: 0.0,
             check_every: 0.02,
             plan: PlanOptions::default(),
             constraints: vec![],
@@ -64,11 +70,14 @@ impl Default for FollowerOptions {
 pub enum FollowStatus {
     /// On its trajectory, the rest of it clear.
     Following,
-    /// The rest of the motion collided; a new trajectory takes over at `at` (seconds, on the
-    /// caller's clock), from the state the old one reaches then.
+    /// The rest of the motion collided; `trajectory` takes over at `at` (seconds, on the caller's
+    /// clock), from the state the old one reaches then. Until then the follower keeps commanding
+    /// the old one, and [`Follower::trajectory`] is still it.
     Replanned {
         /// When the new trajectory takes over.
         at: f32,
+        /// The new trajectory, which begins at `at`.
+        trajectory: Trajectory,
     },
     /// No way around in time: stopping on its path, the stop clear.
     Stopping,
@@ -147,10 +156,13 @@ impl Follower {
         ensure_input!(
             o.budget.is_finite()
                 && o.budget >= 0.0
+                && o.lead.is_finite()
+                && o.lead >= 0.0
                 && o.check_every >= 1e-3
                 && o.check_every.is_finite(),
-            "a follower needs a finite budget of at least 0 and finite checks at least 1 ms apart, got {} s and {} s",
+            "a follower needs a finite budget and lead of at least 0 and finite checks at least 1 ms apart, got {} s, {} s and {} s",
             o.budget,
+            o.lead,
             o.check_every
         );
         ensure_input!(
@@ -195,8 +207,8 @@ impl Follower {
     /// The state to command at `now`, given the state the robot was `measured` in, if known.
     /// First, when the measured state is farther from the trajectory than the tolerance, a new
     /// trajectory from it ([`FollowStatus::Reanchored`]); then, when the rest of the motion
-    /// collides in `worlds`, a replan from the state the robot will be in at `now + budget`, or a
-    /// controlled stop when none is found in time or the collision comes sooner. A tick that
+    /// collides in `worlds`, a replan from the state the robot will be in at `now + budget + lead`,
+    /// or a controlled stop when none is found in time or the collision comes sooner. A tick that
     /// replans takes as long as the plan does, up to `budget`.
     pub fn tick(
         &mut self,
@@ -282,7 +294,7 @@ impl Follower {
         // A pending replan that collides is dropped for a stop: another would start after the
         // takeover, on the stretch of this trajectory that was found to collide.
         let pending = self.next.take().is_some();
-        let start = t + self.o.budget;
+        let start = t + self.o.budget + self.o.lead;
         let mut from = JointState::new(n);
         self.trajectory.at(start.min(duration), &mut from);
         // Between the states its plan was checked at, the trajectory may stray past a bound.
@@ -310,10 +322,13 @@ impl Follower {
                 && let Ok(next) = Trajectory::moving(&self.robot, path, &motion)
             {
                 let at = self.began + start;
-                self.next = Some((next, at));
+                self.next = Some((next.clone(), at));
                 return Ok(Tick {
                     state,
-                    status: FollowStatus::Replanned { at },
+                    status: FollowStatus::Replanned {
+                        at,
+                        trajectory: next,
+                    },
                 });
             }
         }

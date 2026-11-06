@@ -60,12 +60,28 @@ fn clear(device: &Device, worlds: &Worlds, q: &[f32]) -> bool {
 
 #[test]
 fn a_box_in_the_path_is_replanned_around_from_the_predicted_state() {
+    replans_around_a_box(0.0);
+}
+
+/// A lead moves the takeover later by itself, and the plan from where the robot is then.
+#[test]
+fn a_lead_gives_a_replan_time_to_travel_before_it_takes_over() {
+    replans_around_a_box(0.1);
+}
+
+/// The sweep with a box dropped ahead of the hand: the follower replans `budget + lead` ahead of
+/// the tick that sees it, hands the replan over in its status, and arrives on it.
+fn replans_around_a_box(lead: f32) {
     let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let first = sweep(&robot, &device);
     let duration = first.duration();
-    let mut follower =
-        Follower::try_new(&robot, 0, first.clone(), 0.0, FollowerOptions::default()).unwrap();
+    let o = FollowerOptions {
+        lead,
+        ..Default::default()
+    };
+    let budget = o.budget;
+    let mut follower = Follower::try_new(&robot, 0, first.clone(), 0.0, o).unwrap();
     let mut worlds = device.upload(&[World::default()]).unwrap();
     let inserted = 0.3 * duration;
     let (mut replanned, mut statuses) = (None, vec![]);
@@ -91,8 +107,18 @@ fn a_box_in_the_path_is_replanned_around_from_the_predicted_state() {
             "at {t:.2} s the robot collides ({:?})",
             tick.status
         );
-        if let FollowStatus::Replanned { at } = tick.status {
-            replanned = Some((before, began, at));
+        if let FollowStatus::Replanned { at, trajectory } = &tick.status {
+            assert!(
+                (at - (t + budget + lead)).abs() < 1e-5,
+                "a replan seen at {t} takes over at {at}, not {}",
+                t + budget + lead
+            );
+            assert_eq!(
+                *follower.trajectory(),
+                before,
+                "the old trajectory runs until {at}"
+            );
+            replanned = Some((before, began, *at, trajectory.clone()));
         }
         statuses.push(tick.status.clone());
         if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
@@ -105,9 +131,14 @@ fn a_box_in_the_path_is_replanned_around_from_the_predicted_state() {
         Some(&FollowStatus::Arrived),
         "{statuses:?}"
     );
-    let (old, began, at) = replanned.expect("the box made it replan");
-    // The replan takes over from the state the old trajectory reaches when it does.
+    let (old, began, at, handed) = replanned.expect("the box made it replan");
+    // The replan its status handed over takes over, from the state the old trajectory reaches
+    // when it does.
     let (new, new_began) = (follower.trajectory(), follower.began());
+    assert_eq!(
+        *new, handed,
+        "the replan that took over is the one handed over"
+    );
     assert!((new_began - at).abs() < 1e-6, "{new_began} against {at}");
     let n = robot.dof();
     let (mut was, mut is) = (JointState::new(n), JointState::new(n));
@@ -425,6 +456,7 @@ fn a_box_ahead_of_the_takeover_stops_the_robot_before_it() {
     let big = box_at(&robot, &first, 0.6 * duration);
     let mut worlds = device.upload(&[World::default()]).unwrap();
     let (mut t, mut takeover, mut statuses) = (0.0, None, vec![]);
+    let mut replan: Option<Trajectory> = None;
     while t < 4.0 * duration {
         if (t - 0.1 * duration).abs() < DT / 2.0 {
             worlds = device.upload(&[World::new(vec![big.clone()])]).unwrap();
@@ -450,9 +482,7 @@ fn a_box_ahead_of_the_takeover_stops_the_robot_before_it() {
                 blocked > 0,
                 "the box blocks the old trajectory before the takeover"
             );
-            let mut ahead = follower.clone();
-            ahead.tick(&device, &worlds, at, None).unwrap();
-            let replan = ahead.trajectory();
+            let replan = replan.as_ref().expect("the replan was handed over");
             let along = (0..=100).map(|k| replan.duration() * k as f32 / 100.0);
             for s in along {
                 assert!(clear(&device, &worlds, &state_at(replan, s).position));
@@ -464,8 +494,11 @@ fn a_box_ahead_of_the_takeover_stops_the_robot_before_it() {
             "at {t:.2} s the robot collides ({:?})",
             tick.status
         );
-        if let FollowStatus::Replanned { at } = tick.status {
-            takeover.get_or_insert(at);
+        if let FollowStatus::Replanned { at, trajectory } = &tick.status
+            && takeover.is_none()
+        {
+            takeover = Some(*at);
+            replan = Some(trajectory.clone());
         }
         statuses.push(tick.status.clone());
         if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
@@ -498,18 +531,14 @@ fn a_pending_replan_that_collides_is_dropped_for_a_stop() {
     let big = box_at(&robot, &first, 0.6 * duration);
     let mut worlds = device.upload(&[World::new(vec![big.clone()])]).unwrap();
     let mut t = 0.1 * duration;
-    let at = loop {
+    let (at, replan) = loop {
         let tick = follower.tick(&device, &worlds, t, None).unwrap();
-        if let FollowStatus::Replanned { at } = tick.status {
-            break at;
+        if let FollowStatus::Replanned { at, trajectory } = tick.status {
+            break (at, trajectory);
         }
         assert_eq!(tick.status, FollowStatus::Following);
         t += DT;
     };
-    // The replan, read from a copy that has switched to it.
-    let mut ahead = follower.clone();
-    ahead.tick(&device, &worlds, at, None).unwrap();
-    let replan = ahead.trajectory().clone();
     // A box on the replan a second after it takes over, clear of the old trajectory before.
     let hand = robot.ee_pose(&state_at(&replan, 1.0).position, 0).position;
     let small = Obstacle::cuboid(hand, Vec3::splat(0.04));
@@ -654,6 +683,20 @@ fn non_finite_and_degenerate_inputs_are_errors() {
         0.0,
         fine
     )));
+    // A lead that is negative or not a number would take a replan over before it was planned.
+    for lead in [-0.01, f32::NAN] {
+        let early = FollowerOptions {
+            lead,
+            ..Default::default()
+        };
+        assert!(input(Follower::try_new(
+            &robot,
+            0,
+            trajectory.clone(),
+            0.0,
+            early
+        )));
+    }
     // Options `plan` refuses would fail the first replan, with the robot moving.
     let defaults = PlanOptions::default();
     let unplannable = FollowerOptions {

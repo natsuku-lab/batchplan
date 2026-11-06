@@ -227,8 +227,9 @@ impl Device {
     /// A device for `robot` on the same hardware: it shares this device's GPU or threads, and
     /// worlds uploaded to either work on both, except that worlds with touches need the links
     /// both robots have to match by name ([`Device::upload`]). Use it when the robot changes, as
-    /// when it picks up an object ([`Robot::attach`]), without starting a device or uploading
-    /// worlds again.
+    /// when it picks up an object ([`Robot::attach`]) or a locked joint moves ([`Robot::relock`]),
+    /// without starting a device or uploading worlds again. A GPU device builds kernels for a robot
+    /// of a shape it has not seen; a relocked robot keeps its shape.
     pub fn with_robot(&self, robot: &Robot) -> Result<Self> {
         Ok(Self {
             id: self.id,
@@ -264,8 +265,9 @@ impl Device {
     /// constrained trajectory optimization and for distance grids), then runs one small call of
     /// each kind on the device's threads and GPU: a collision check, IK and a step of trajectory
     /// optimization. Call it once after making the device and before timing anything. A device
-    /// made with [`Device::with_robot`] for the same robot shares what it built; one for a changed
-    /// robot, such as one holding an object, builds kernels of its own, so warm it up too. Buffers
+    /// made with [`Device::with_robot`] for a robot of the same shape (the same one, or one
+    /// relocked) shares what it built; one for a robot of another shape, such as one holding an
+    /// object, builds kernels of its own, so warm it up too. Buffers
     /// grow to the largest batch they have carried, so warm up with batches the size of those you
     /// time too.
     pub fn warmup(&self) -> Result<()> {
