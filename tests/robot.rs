@@ -435,13 +435,13 @@ fn mimic_gripper_evaluates_the_same_on_every_device() {
 
 /// Collision geometry of every link of a URDF as triangles in the link frame, loaded
 /// independently of the library. `package://` paths resolve below `package_root`'s parent.
-fn link_triangles(path: &str, package_root: &Path) -> HashMap<String, Vec<[Vec3; 3]>> {
+fn link_triangles(path: &str, package_root: &Path) -> BTreeMap<String, Vec<[Vec3; 3]>> {
     let urdf = urdf_rs::read_file(common::asset(path)).unwrap();
     let dir = Path::new(&common::asset(path))
         .parent()
         .unwrap()
         .to_path_buf();
-    let mut out = HashMap::new();
+    let mut out = BTreeMap::new();
     for link in &urdf.links {
         let mut triangles = vec![];
         for c in &link.collision {
@@ -1449,6 +1449,141 @@ fn a_hands_tip_is_how_far_its_spheres_reach_past_its_frame() {
     );
     assert!((robot.tip(0) - farthest).abs() < 1e-6);
     assert_eq!(robot.qualify().unwrap().tips, [robot.tip(0)]);
+}
+
+/// Fitted spheres keep every link within its tolerance when the budget allows it, and otherwise
+/// reach less far as the budget grows: the SO-101's jaws, held to 1 mm, are thin enough that a
+/// cover chosen on too few samples or candidates misses parts of them, which spheres then grow to
+/// reach.
+#[test]
+fn fitted_spheres_keep_each_links_tolerance_and_reach_less_as_the_budget_grows() {
+    let jaws = ["gripper_link", "moving_jaw_so101_v1_link"];
+    let fit = |budget: usize, jaw: f32| {
+        let options = RobotOptions {
+            spheres: SphereOptions {
+                budget,
+                ..Default::default()
+            },
+            sphere_tolerances: jaws.iter().map(|l| (l.to_string(), jaw)).collect(),
+            ..Default::default()
+        };
+        let robot = Robot::load(common::asset(SO101), &options).unwrap();
+        let spheres: usize = robot.collision_model().spheres.values().map(Vec::len).sum();
+        assert!(spheres <= budget, "{spheres} spheres");
+        (spheres, robot.qualify().unwrap().links)
+    };
+    let tolerance = |link: &str, jaw: f32| {
+        if jaws.contains(&link) {
+            jaw
+        } else {
+            SphereOptions::default().tolerance
+        }
+    };
+    // A budget that reaches the tolerances: every link keeps its own.
+    let (spheres, links) = fit(2048, 0.003);
+    assert!(
+        spheres < 2048,
+        "the budget was the limit: {spheres} spheres"
+    );
+    for l in &links {
+        assert!(
+            l.overhang <= tolerance(&l.link, 0.003) + 1e-5,
+            "{} reaches {:.2} mm past its geometry",
+            l.link,
+            l.overhang * 1e3
+        );
+    }
+    // A box with a fin 0.15 mm thick, thinner than the grid and than a quarter of the tolerance:
+    // the fin's samples get candidates of their own, and keep to it too.
+    let dir = scratch("fin");
+    let urdf = r#"<robot name="fin">
+      <link name="base"/>
+      <link name="body">
+        <collision><geometry><box size="0.05 0.05 0.05"/></geometry></collision>
+        <collision><origin xyz="0.003 0.055 0"/><geometry><box size="0.00015 0.06 0.04"/></geometry></collision>
+      </link>
+      <joint name="turn" type="revolute"><parent link="base"/><child link="body"/><axis xyz="0 0 1"/>
+        <limit lower="-1" upper="1" velocity="1" effort="1"/></joint>
+    </robot>"#;
+    std::fs::write(dir.join("fin.urdf"), urdf).unwrap();
+    let options = RobotOptions {
+        spheres: SphereOptions {
+            budget: 256,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let fin = Robot::load(dir.join("fin.urdf"), &options).unwrap();
+    let spheres: usize = fin.collision_model().spheres.values().map(Vec::len).sum();
+    assert!(spheres < 256, "the budget was the limit: {spheres} spheres");
+    let body = &fin.qualify().unwrap().links[0];
+    assert!(
+        body.overhang <= SphereOptions::default().tolerance + 1e-5,
+        "the finned box reaches {:.2} mm past its geometry",
+        body.overhang * 1e3
+    );
+    // Budgets that do not: the jaws held to 1 mm reach less far with every doubling.
+    let mut before = f32::INFINITY;
+    for budget in [128, 256, 512] {
+        let (_, links) = fit(budget, 0.001);
+        let jaw = links
+            .iter()
+            .filter(|l| jaws.contains(&l.link.as_str()))
+            .map(|l| l.overhang)
+            .fold(0.0, f32::max);
+        assert!(
+            jaw < 0.9 * before,
+            "at {budget} spheres the jaws reach {:.2} mm, at half as many {:.2} mm",
+            jaw * 1e3,
+            before * 1e3
+        );
+        before = jaw;
+    }
+}
+
+/// Where the budget holds the tolerances back, no link's spheres reach farther than twice its
+/// tolerance scaled by what the fit reports: on two wide thin plates, whose few cover samples lie
+/// centimeters apart, spheres grown to take in the dense samples between them would reach farther.
+#[test]
+fn spheres_reach_at_most_twice_their_scaled_tolerance() {
+    let dir = scratch("plates");
+    let urdf = r#"<robot name="plates">
+      <link name="base"/>
+      <link name="wide"><collision><geometry><box size="0.9 0.6 0.004"/></geometry></collision></link>
+      <link name="tall"><collision><origin xyz="0 0 0.3"/><geometry><box size="0.6 0.004 0.3"/></geometry></collision></link>
+      <joint name="turn" type="revolute"><parent link="base"/><child link="wide"/><axis xyz="0 0 1"/>
+        <limit lower="-1" upper="1" velocity="1" effort="1"/></joint>
+      <joint name="tilt" type="revolute"><parent link="wide"/><child link="tall"/><axis xyz="1 0 0"/>
+        <limit lower="-1" upper="1" velocity="1" effort="1"/></joint>
+    </robot>"#;
+    std::fs::write(dir.join("plates.urdf"), urdf).unwrap();
+    for budget in [256, 1024] {
+        let options = RobotOptions {
+            spheres: SphereOptions {
+                budget,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let robot = Robot::load(dir.join("plates.urdf"), &options).unwrap();
+        let source = robot.collision_model().source.clone().unwrap();
+        let scale: f32 = source
+            .split("scaled by ")
+            .nth(1)
+            .and_then(|s| s.split(' ').next())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("no scale in {source:?}"));
+        assert!(scale > 1.0, "the budget reached the tolerances: {source}");
+        let bound = 2.0 * scale * SphereOptions::default().tolerance;
+        for l in robot.qualify().unwrap().links {
+            assert!(
+                l.overhang <= 1.01 * bound,
+                "at {budget} spheres {} reaches {:.1} mm, past twice {scale} times its tolerance",
+                l.link,
+                l.overhang * 1e3
+            );
+        }
+    }
 }
 
 #[test]
