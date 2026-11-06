@@ -34,7 +34,8 @@ pub struct IkOptions {
     /// Largest rotation error of a successful seed (radians).
     pub rotation_tolerance: f32,
     /// Seed of the random starting configurations. Each problem draws its own from it and its
-    /// targets and seed, so a problem's solutions do not depend on the others in its batch.
+    /// targets and seed, so a problem's starting configurations do not depend on the others in its
+    /// batch.
     pub rng_seed: u64,
 }
 

@@ -49,18 +49,21 @@ fn lanes_for(configurations: usize) -> u32 {
     }
 }
 
-/// IK configurations per collision sphere up to which IK gives each configuration `SHARED_LANES`
-/// lanes. Splitting a configuration's checks pays up to a batch size that grows with the robot's
-/// collision work: measured at 25–40 configurations per sphere on a Radeon 8060S and 34–60 on an
-/// M4 Pro (docs/benchmarks.md#gpu-kernels).
-const IK_SHARED_PER_SPHERE: usize = 32;
+/// IK configurations per collision sphere up to which IK that pushes away from obstacles keeps
+/// `SHARED_LANES` lanes past the `lanes_for` bound. Splitting a configuration's checks pays up to
+/// a batch size that grows with the robot's collision work: the crossover was about 26
+/// configurations per sphere on a Radeon 8060S at 128 spheres and 32–40 at 507, and 34 to past 32
+/// on an M4 Pro, so robots with many spheres keep their lanes past 4,096 configurations
+/// (docs/benchmarks.md#how-the-speed-came).
+const IK_SHARED_PER_SPHERE: usize = 25;
 
-/// Lanes per configuration for IK on `configurations` of a robot with `spheres` collision spheres.
+/// Lanes per configuration for IK that pushes away from obstacles, on `configurations` of a robot
+/// with `spheres` collision spheres.
 fn ik_lanes(configurations: usize, spheres: usize) -> u32 {
     if configurations <= IK_SHARED_PER_SPHERE * spheres {
         SHARED_LANES
     } else {
-        1
+        lanes_for(configurations)
     }
 }
 /// Storage buffers in bind group 0: bindings 1..=9 are read-only, 10..=12 read-write (see
@@ -680,9 +683,10 @@ impl GridBuffers {
 /// The compiled kernels for one robot shape.
 struct Kernels {
     layout0: wgpu::BindGroupLayout,
-    /// One lane per configuration, for large batches.
+    /// One lane per configuration, for large batches and IK without the push (`ik_lanes`).
     single: CollisionKernels,
-    /// SHARED_LANES per configuration, for batches too small to fill the GPU with one.
+    /// SHARED_LANES per configuration, for batches too small to fill the GPU with one, and IK of
+    /// robots with many spheres (`ik_lanes`).
     shared: CollisionKernels,
     traj_search: wgpu::ComputePipeline,
     traj_grad: wgpu::ComputePipeline,
@@ -711,7 +715,7 @@ struct CollisionKernels {
 }
 
 impl Kernels {
-    /// The collision kernels for `lanes` (from `lanes_for`).
+    /// The collision kernels for `lanes` (from `lanes_for` or `ik_lanes`).
     fn collision(&self, lanes: u32) -> &CollisionKernels {
         if lanes == 1 {
             &self.single
