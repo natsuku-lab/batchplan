@@ -48,6 +48,21 @@ fn lanes_for(configurations: usize) -> u32 {
         1
     }
 }
+
+/// IK configurations per collision sphere up to which IK gives each configuration `SHARED_LANES`
+/// lanes. Splitting a configuration's checks pays up to a batch size that grows with the robot's
+/// collision work: measured at 25–40 configurations per sphere on a Radeon 8060S and 34–60 on an
+/// M4 Pro (docs/benchmarks.md#gpu-kernels).
+const IK_SHARED_PER_SPHERE: usize = 32;
+
+/// Lanes per configuration for IK on `configurations` of a robot with `spheres` collision spheres.
+fn ik_lanes(configurations: usize, spheres: usize) -> u32 {
+    if configurations <= IK_SHARED_PER_SPHERE * spheres {
+        SHARED_LANES
+    } else {
+        1
+    }
+}
 /// Storage buffers in bind group 0: bindings 1..=9 are read-only, 10..=12 read-write (see
 /// kernels.wgsl).
 const READ_ONLY_STORAGE: u32 = 9;
@@ -1760,7 +1775,12 @@ impl GpuBackend {
         if items == 0 {
             return Ok(vec![]);
         }
-        let lanes = lanes_for(items);
+        // Lanes split the collision checks, which IK makes only to push away from obstacles.
+        let lanes = if o.collision_step > 0.0 {
+            ik_lanes(items, self.robot.spheres.len())
+        } else {
+            1
+        };
         let mut params = self.params(items, &o.collision);
         params.damping = o.damping;
         params.rotation_weight = o.rotation_weight;
