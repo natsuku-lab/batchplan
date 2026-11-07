@@ -45,7 +45,10 @@ fixes; you leave their working tree as you found it.
   allocation, dispatch and `#[inline]` rules. A change to one comes with an A/B of every class it
   touches; a missing or one-sided measurement is a finding.
 - **Docs.** Every claim near the change matches the code, numbers come from named runs, changed
-  guide examples were run, and `CLAUDE.md` gains only lasting rules.
+  guide examples were run, and `CLAUDE.md` gains only lasting rules. A change a user would notice
+  has its line under `## [Unreleased]` in `CHANGELOG.md`, marked **Breaking:** where it breaks code
+  written against the last release: `cargo semver-checks --release-type minor` fails on it (it
+  says major, which before 1.0 is the next minor version), or a call now behaves differently.
 - **Public repo.** Committed files carry no hostnames, usernames, emails or local paths.
 
 ## Report

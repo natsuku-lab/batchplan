@@ -1,13 +1,29 @@
 name: Release
 
-# A version tag (v0.2.0) publishes its commit to crates.io. crates.io trusts this workflow in the
-# `release` environment (trusted publishing), so no token is stored anywhere.
+# A version tag (v0.10.0, or a pre-release such as v0.10.0-beta.1) publishes its commit to
+# crates.io. crates.io trusts this workflow in the `release` environment (trusted publishing), so
+# no token is stored anywhere.
 on:
   push:
     tags: ['v*']
 
 jobs:
+  # A patch must break nothing. The check builds the crate's dependencies afresh, outside the
+  # lockfile, so it runs apart from the job that can publish.
+  semver:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks@0.51.0
+      # Against the latest release on crates.io at or below this version, pre-releases skipped.
+      - run: cargo semver-checks
+
   publish:
+    needs: semver
     runs-on: ubuntu-24.04
     environment: release
     permissions:
