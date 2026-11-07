@@ -22,7 +22,8 @@ use crate::device::{Contact, Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Search, Wanted};
 use crate::error::{Result, ensure_input, input};
 use crate::ik::{self, IkFailure, IkOptions, IkProblem, IkResult};
-use crate::robot::{AttachedObject, Robot};
+use crate::robot::{self, AttachedObject, Robot};
+use crate::spheres::SphereOptions;
 use crate::timing::{HandSpeed, Trajectory};
 use crate::tool_path::{self, ToolPath, ToolPathOptions, ToolPathStop};
 use crate::trajopt::{self, PlanOptions, PlanProblem};
@@ -155,6 +156,42 @@ impl Held {
             spheres: Default::default(),
         })
     }
+
+    /// `robot` holding the object as [`Held::attachment`] attaches it, with `spheres` fitted to
+    /// the object in its own frame and placed by the grasp, as attaching it would place them.
+    fn holding(&self, robot: &Robot, spheres: &[[f32; 4]]) -> Result<Robot> {
+        let placed = robot::placed_spheres(spheres, self.grasp.inverse());
+        robot.attach_with(&self.attachment(robot)?, || Ok(placed))
+    }
+}
+
+/// A device for `robot` holding each of `helds`, built in parallel. Each object is fitted once, in
+/// its own frame, and its spheres placed by each grasp of it, where attaching each would fit them
+/// again.
+fn holders(device: &Device, robot: &Robot, helds: &[&Held]) -> Result<Vec<Device>> {
+    // Each object at its own origin, as `Held::attachment` places it, with the options it fits by.
+    let mut objects: Vec<(Obstacle, SphereOptions)> = vec![];
+    let mut object_of = Vec::with_capacity(helds.len());
+    for held in helds {
+        let object = held.object.placed(Pose::IDENTITY);
+        let options = held.attachment(robot)?.spheres;
+        object_of.push(match objects.iter().position(|(o, _)| *o == object) {
+            Some(k) => k,
+            None => {
+                objects.push((object, options));
+                objects.len() - 1
+            }
+        });
+    }
+    device.install(|| {
+        let fitted: Vec<Vec<[f32; 4]>> = objects
+            .par_iter()
+            .map(|(object, options)| robot::object_spheres(std::slice::from_ref(object), options))
+            .collect::<Result<_>>()?;
+        let each = helds.par_iter().zip(&object_of);
+        each.map(|(held, &k)| device.with_robot(&held.holding(robot, &fitted[k])?))
+            .collect()
+    })
 }
 
 /// How [`pick`] and [`place`] solve, follow, plan and time their steps.
@@ -453,9 +490,8 @@ pub fn pick(
                 None => alike.push((holding, vec![c])),
             }
         }
-        let holder = |holding: &Held| -> Result<Device> {
-            device.with_robot(&robot.attach(&holding.attachment(robot)?)?)
-        };
+        let holding: Vec<&Held> = alike.iter().map(|(h, _)| h).collect();
+        let holders = holders(device, robot, &holding)?;
         // The worlds a hand lifts in: each without its object, the held link of that hand's
         // tasks touching their supports.
         let lifting = |hand: usize| {
@@ -475,21 +511,19 @@ pub fn pick(
                 .collect::<Result<Vec<World>>>()
         };
         let mut lifted: Vec<(usize, Worlds)> = vec![];
-        for (holding, _) in &alike {
+        for ((holding, _), holder) in alike.iter().zip(&holders) {
             if lifted.iter().all(|(hand, _)| *hand != holding.hand) {
-                lifted.push((
-                    holding.hand,
-                    holder(holding)?.upload(&lifting(holding.hand)?)?,
-                ));
+                lifted.push((holding.hand, holder.upload(&lifting(holding.hand)?)?));
             }
         }
         device.install(|| {
-            alike.par_iter_mut().try_for_each(|(holding, group)| {
+            let groups = alike.par_iter_mut().zip(&holders);
+            groups.try_for_each(|((holding, group), holder)| {
                 let (_, uploaded) = lifted
                     .iter()
                     .find(|(hand, _)| *hand == holding.hand)
                     .expect("every hand that lifts has its worlds");
-                straight(&holder(holding)?, uploaded, group, &by_task, Leg::Away, o)?;
+                straight(holder, uploaded, group, &by_task, Leg::Away, o)?;
                 // Contacts name obstacles as the task's world does, which still holds the object.
                 for c in group.iter_mut() {
                     let object = tasks[c.task].object;
@@ -579,6 +613,11 @@ pub fn place(
             !matches!(t.held.object, Obstacle::Sdf { .. }),
             "task {i}: the held object is a distance grid, which cannot be held"
         );
+        // In its own frame, as it is attached and set down.
+        let object = t.held.object.placed(Pose::IDENTITY);
+        object
+            .check()
+            .map_err(|e| input!("task {i}: the held object: {e}, got {:?}", t.held.object))?;
         check_poses(i, "held grasp", std::slice::from_ref(&t.held.grasp))?;
         check_poses(i, "pose", &t.poses)?;
         ensure_input!(
@@ -606,12 +645,7 @@ pub fn place(
         };
         holder_of.push(h);
     }
-    let holders: Vec<Device> = device.install(|| {
-        helds
-            .par_iter()
-            .map(|held| device.with_robot(&robot.attach(&held.attachment(robot)?)?))
-            .collect::<Result<_>>()
-    })?;
+    let holders = holders(device, robot, &helds)?;
     let mut candidates = vec![];
     for (t, task) in tasks.iter().enumerate() {
         for (index, &pose) in task.poses.iter().enumerate() {
@@ -1543,4 +1577,76 @@ fn check_support(i: usize, world: &World, support: &[usize], object: Option<usiz
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::robot::{CollisionModel, RobotOptions};
+
+    /// Pick and place hold each object as attaching [`Held::attachment`] holds it, collision model
+    /// and all: a cylinder and a capsule, each at two grasps whose rotations are not their own
+    /// inverses, fitted once each.
+    #[test]
+    fn holders_hold_an_object_as_attaching_it_does() {
+        let fingers = [
+            ("panda_finger_joint1".to_string(), 0.04),
+            ("panda_finger_joint2".to_string(), 0.04),
+        ];
+        let options = RobotOptions {
+            ee_links: vec!["ee_link".into()],
+            lock_joints: HashMap::from(fingers),
+            collision_model: Some(
+                CollisionModel::load("assets/franka/panda_collision.json").unwrap(),
+            ),
+            ..Default::default()
+        };
+        let robot = Robot::load("assets/franka/franka_panda.urdf", &options).unwrap();
+        let device = Device::cpu(&robot).unwrap();
+        let objects = [
+            Obstacle::Cylinder {
+                center: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                radius: 0.03,
+                half_height: 0.06,
+            },
+            Obstacle::Capsule {
+                center: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                radius: 0.025,
+                half_length: 0.04,
+            },
+        ];
+        let grasps = [
+            Pose::new(
+                Vec3::new(0.01, -0.02, 0.03),
+                Quat::from_rotation_x(1.1) * Quat::from_rotation_y(0.4),
+            ),
+            Pose::new(
+                Vec3::new(0.0, 0.01, -0.02),
+                Quat::from_rotation_z(2.0) * Quat::from_rotation_x(0.7),
+            ),
+        ];
+        let helds: Vec<Held> = objects
+            .iter()
+            .flat_map(|object| {
+                grasps.map(|grasp| Held {
+                    hand: 0,
+                    object: object.clone(),
+                    grasp,
+                })
+            })
+            .collect();
+        let held_refs: Vec<&Held> = helds.iter().collect();
+        let holding = holders(&device, &robot, &held_refs).unwrap();
+        for (held, holder) in helds.iter().zip(&holding) {
+            let attached = robot.attach(&held.attachment(&robot).unwrap()).unwrap();
+            assert!(
+                holder.robot().collision_model() == attached.collision_model(),
+                "{held:?}"
+            );
+        }
+    }
 }

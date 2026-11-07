@@ -816,6 +816,71 @@ fn a_place_names_the_object_it_sets_down_after_its_worlds_obstacles() {
     );
 }
 
+/// A held object collides where its grasp holds it, whatever else the call holds: a bar taken from
+/// the side near its foot meets a slab over its top as it lifts, in the same call as a cube taken
+/// from above, and taken near its top too, it clears a higher slab the foot's grasp would lift it
+/// into.
+#[test]
+fn a_held_object_collides_where_its_grasp_holds_it() {
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let o = TaskOptions::default();
+    let half = Vec3::new(0.02, 0.02, 0.15);
+    let bar = Obstacle::cuboid(Vec3::new(0.45, 0.2, half.z), half);
+    // From -x, closing along y, `height` above the bar's foot.
+    let (toward, closing) = (Vec3::X, Vec3::Y);
+    let side = |height: f32| {
+        Pose::new(
+            Vec3::new(0.0, 0.0, height - half.z),
+            Quat::from_mat3(&Mat3::from_cols(closing.cross(toward), closing, toward)),
+        )
+    };
+    let slab = Obstacle::cuboid(Vec3::new(0.45, 0.2, 0.35), Vec3::new(0.05, 0.05, 0.01));
+    let cube = scene(vec![]);
+    let table = cube.obstacles[TABLE].clone();
+    let lift = |more: Vec<Obstacle>| {
+        let mut obstacles = vec![table.clone(), bar.clone()];
+        obstacles.extend(more);
+        World::new(obstacles)
+    };
+    let tasks = [
+        pick_from(&robot, vec![top()]),
+        Pick {
+            world: 1,
+            ..pick_from(&robot, vec![side(0.08)])
+        },
+    ];
+    let outcomes = |bar_world: World| {
+        let worlds = device.upload(&[cube.clone(), bar_world]).unwrap();
+        batchplan::pick(&device, &worlds, &tasks, &o)
+            .unwrap()
+            .outcomes
+    };
+    let free = outcomes(lift(vec![]));
+    assert!(free.iter().all(Result::is_ok), "{free:?}");
+    let blocked = outcomes(lift(vec![slab]));
+    assert!(blocked[0].is_ok(), "{:?}", blocked[0]);
+    let f = blocked[1].as_ref().unwrap_err();
+    let held_at_slab = |t: &Contact| matches!(t, Contact::World { link, obstacle, .. } if link == "held by hand 0" && *obstacle == 2);
+    assert!(
+        f.candidates
+            .iter()
+            .all(|c| c.step == TaskStep::Depart && c.contacts.iter().any(held_at_slab)),
+        "{:?}",
+        f.candidates
+    );
+    // Both grasps of the bar under a slab from 0.46 m: lifted 10 cm, its top reaches 0.40 m from
+    // either, and 0.50 m where the foot's grasp held it from 18 cm up.
+    let high = Obstacle::cuboid(Vec3::new(0.45, 0.2, 0.47), Vec3::new(0.05, 0.05, 0.01));
+    let worlds = device.upload(&[lift(vec![high])]).unwrap();
+    let both = pick_from(&robot, vec![side(0.08), side(0.18)]);
+    let plans = batchplan::pick(&device, &worlds, &[both], &o)
+        .unwrap()
+        .outcomes
+        .remove(0);
+    assert_eq!(plans.map(|p| p.len()), Ok(2));
+}
+
 #[test]
 fn ik_takes_the_solution_nearest_the_start() {
     // With one candidate, a task's IK is the same batch as solving its pose alone. From starts
@@ -1169,7 +1234,15 @@ fn malformed_tasks_are_input_errors() {
     let holding = device
         .with_robot(&robot.attach(&held.attachment(&robot).unwrap()).unwrap())
         .unwrap();
-    let place = Place::new(0, robot.default_q(), held, vec![Pose::IDENTITY]);
+    let place = Place::new(0, robot.default_q(), held.clone(), vec![Pose::IDENTITY]);
     let result = batchplan::place(&holding, &worlds, &[place], &o);
+    assert!(matches!(result, Err(Error::Input(_))), "{result:?}");
+    // Two places of an object whose size is not finite, so no two copies of it compare equal.
+    let not_finite = Held {
+        object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(f32::NAN, HALF.y, HALF.z)),
+        ..held
+    };
+    let place = Place::new(0, robot.default_q(), not_finite, vec![Pose::IDENTITY]);
+    let result = batchplan::place(&device, &worlds, &[place.clone(), place], &o);
     assert!(matches!(result, Err(Error::Input(_))), "{result:?}");
 }

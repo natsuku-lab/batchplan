@@ -10,10 +10,21 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Changed
 
+- **Breaking:** `Robot::attach` refuses a shape whose size is negative or not finite, or whose
+  rotation is not a unit quaternion to within 1e-3, as uploading a world does, naming the shape.
+  0.9.0 attached such shapes with spheres that did not cover them. Normalize a rotation read
+  with few digits, such as (0, 0, 0.71, 0.71), before attaching it.
 - The model's `source` also gives the largest of each link's reach over its own tolerance.
+- `Robot::attach` fits a single shape in its own frame and places its spheres by the shape's
+  pose, so where it sits on its link no longer changes them, and `pick`, `place` and attaching
+  `Held::attachment` give a held object the same spheres.
+- `pick` and `place` fit each held object once and place its spheres by each grasp, where they
+  attached it at each grasp and fitted it again: picks of cylinders and capsules spend less of
+  their time attaching.
 
 ### Fixed
 
+- `place` refuses a held object whose size is not finite, as an input error naming its task.
 - A pick's contacts where it lifts the object name obstacles as the task's world numbers them:
   every obstacle after the picked one came back one index too low.
 - Where the budget reaches every tolerance but cannot hold each link within its own, what it has

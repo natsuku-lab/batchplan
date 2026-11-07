@@ -446,7 +446,8 @@ impl Obstacle {
         }
     }
 
-    fn check(&self) -> Result<()> {
+    /// Why this obstacle cannot be collision-checked, if it cannot.
+    pub(crate) fn check(&self) -> Result<()> {
         let size = |v: f32| v.is_finite() && v >= 0.0;
         let pose = |center: Vec3, rotation: Quat| {
             center.is_finite() && rotation.is_finite() && (rotation.length() - 1.0).abs() < 1e-3
