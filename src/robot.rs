@@ -631,9 +631,10 @@ impl Robot {
             .collect();
         let fitted = spheres::fit(&meshes, &tolerances, o, /* parallel */ true);
         let source = format!(
-            "fitted by batchplan: spheres reach up to {:.1} mm beyond the geometry, with every \
-             tolerance scaled by {:.2} for the budget",
+            "fitted by batchplan: spheres reach up to {:.1} mm beyond the geometry and up to {:.2} \
+             times their link's tolerance, with every tolerance scaled by {:.2} for the budget",
             fitted.overhang * 1e3,
+            fitted.relative_overhang,
             fitted.scale
         );
         let mut model = CollisionModel {

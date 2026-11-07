@@ -8,10 +8,24 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+### Changed
+
+- The model's `source` also gives the largest of each link's reach over its own tolerance.
+
 ### Fixed
 
 - A pick's contacts where it lifts the object name obstacles as the task's world numbers them:
   every obstacle after the picked one came back one index too low.
+- Where the budget reaches every tolerance but cannot hold each link within its own, what it has
+  left holds the spheres tighter. It used to go unspent, with spheres reaching up to twice their
+  link's tolerance. A stand of two boxes held to 2 cm (`tests/robot.rs`) reached 36.6 mm with 379
+  of 512 spheres, and now 24.1 mm with 502; the Panda at 1,200 spheres reached 9.5 mm against
+  5 mm, and now 5.8 mm. The search for the least growth makes such fits two to three times as
+  long: the Panda's at 1,200 spheres takes 0.20 s, where it took 0.10 s, and the stand's at 512
+  0.13 s, where it took 0.05 s.
+- Covers are refined until they reach every surface sample, where they stopped after 8 rounds,
+  so large boxes keep to their tolerance where the budget allows: the stand reached 25.7 mm at
+  1,024 spheres, and now 20.0 mm.
 
 ## [0.9.0] - 2026-11-06
 
