@@ -8,7 +8,7 @@ mod common;
 use batchplan::rng::Rng;
 use batchplan::{
     AttachedObject, CollisionWeights, Device, Error, IkOptions, IkProblem, Obstacle, PlanOptions,
-    PlanProblem, Robot, SphereOptions, Trajectory, World,
+    PlanProblem, Pose, Robot, SphereOptions, Trajectory, World,
 };
 use glam::{Mat3, Quat, Vec3};
 
@@ -147,6 +147,26 @@ fn attaching_reports_what_is_wrong() {
         }),
         "unknown touch link"
     );
+    let shape = |shape: Obstacle| AttachedObject {
+        shapes: vec![shape],
+        ..held_box(&FINGERS)
+    };
+    assert!(
+        input(shape(Obstacle::cuboid(
+            Vec3::ZERO,
+            Vec3::new(f32::NAN, 0.02, 0.02)
+        ))),
+        "a size that is not finite"
+    );
+    assert!(
+        input(shape(Obstacle::Cylinder {
+            center: Vec3::ZERO,
+            rotation: Quat::from_xyzw(0.0, 0.0, 0.0, 0.95),
+            radius: 0.03,
+            half_height: 0.05,
+        })),
+        "a rotation that is not a unit quaternion"
+    );
     let held = robot.attach(&held_box(&FINGERS)).unwrap();
     assert!(matches!(
         held.attach(&AttachedObject {
@@ -242,6 +262,43 @@ fn devices_for_an_attached_robot_plan_in_worlds_already_uploaded() {
             differs(&mine.self_clearance, &e.self_clearance) < 1e-4,
             "{}",
             d.name()
+        );
+    }
+}
+
+/// A single shape is fitted in its own frame, so its spheres move with it: a cylinder held upright
+/// and tilted in the hand has the same spheres, tilted.
+#[test]
+fn a_held_shape_has_the_same_spheres_wherever_it_sits_on_its_link() {
+    let robot = common::panda().unwrap();
+    let upright = Obstacle::Cylinder {
+        center: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        radius: 0.03,
+        half_height: 0.08,
+    };
+    let pose = Pose::new(
+        Vec3::new(0.0, 0.02, 0.1),
+        Quat::from_rotation_x(1.2) * Quat::from_rotation_z(0.3),
+    );
+    let spheres = |shape: Obstacle| {
+        let held = robot
+            .attach(&AttachedObject {
+                shapes: vec![shape],
+                spheres: SphereOptions::default(),
+                ..held_box(&FINGERS)
+            })
+            .unwrap();
+        held.collision_model().spheres["box"].clone()
+    };
+    let (own, turned) = (spheres(upright.clone()), spheres(upright.placed(pose)));
+    assert!(own.len() > 1, "{own:?}");
+    assert_eq!(own.len(), turned.len());
+    for (o, t) in own.iter().zip(&turned) {
+        let moved = pose.position + pose.rotation * Vec3::new(o[0], o[1], o[2]);
+        assert!(
+            moved.distance(Vec3::new(t[0], t[1], t[2])) < 1e-6 && (o[3] - t[3]).abs() < 1e-7,
+            "{o:?} moved to {moved}, but the turned shape has {t:?}"
         );
     }
 }

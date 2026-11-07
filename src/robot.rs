@@ -422,7 +422,8 @@ pub struct AttachedObject {
     pub shapes: Vec<Obstacle>,
     /// Other links it may touch.
     pub touch_links: Vec<String>,
-    /// How spheres are fitted to the shapes; a held object rarely needs more than 8 to 16.
+    /// How spheres are fitted to the shapes; a held object rarely needs more than 8 to 16. A single
+    /// shape is fitted in its own frame, so where it sits on `link` does not change its spheres.
     pub spheres: SphereOptions,
 }
 
@@ -736,8 +737,20 @@ impl Robot {
     }
 
     /// This robot holding `object`. Errors if the link is unknown or an attached object, the name
-    /// is taken, or the robot would exceed the kernel limits.
+    /// is taken, a shape is a distance grid, has a size that is negative or not finite, or a
+    /// rotation that is not a unit quaternion (as [`Device::upload`](crate::Device::upload) refuses
+    /// it), or the robot would exceed the kernel limits.
     pub fn attach(&self, object: &AttachedObject) -> error::Result<Robot> {
+        self.attach_with(object, || object_spheres(&object.shapes, &object.spheres))
+    }
+
+    /// [`Robot::attach`], with `spheres` giving the object's spheres in `link`'s frame once the
+    /// object checks out: [`Held`](crate::Held) fits its object once for every grasp of it.
+    pub(crate) fn attach_with(
+        &self,
+        object: &AttachedObject,
+        spheres: impl FnOnce() -> error::Result<Vec<[f32; 4]>>,
+    ) -> error::Result<Robot> {
         let link = |name: &str| self.links.iter().position(|l| l.name == name);
         let parent = link(&object.link).ok_or_else(|| input!("unknown link '{}'", object.link))?;
         ensure_input!(
@@ -754,33 +767,19 @@ impl Robot {
             return Err(input!("unknown touch link '{t}'"));
         }
         object.spheres.check().map_err(Error::Input)?;
+        // Distance grids are refused first, so a shape's error never prints a grid.
         let shapes = object
             .shapes
             .iter()
             .map(attached_shape)
             .collect::<error::Result<Vec<Shape>>>()?;
+        for (k, shape) in object.shapes.iter().enumerate() {
+            shape
+                .check()
+                .map_err(|e| input!("'{}' shape {k}: {e}, got {shape:?}", object.name))?;
+        }
         ensure_input!(!shapes.is_empty(), "'{}' has no shapes", object.name);
-        // Boxes and spheres are covered directly; other shapes are fitted. Attaching happens inside
-        // control processes: fit on the caller's rayon pool if it has one, otherwise on the calling
-        // thread alone, never on the global pool. (A one-thread pool on the calling thread would
-        // leave it registered with rayon for good, and every parallel loop it started afterwards
-        // would run on that one thread.)
-        let fitted = match spheres::cover_primitives(&object.shapes, &object.spheres) {
-            Some(covered) => covered,
-            None => {
-                let meshes = shapes
-                    .iter()
-                    .map(|shape| shape.mesh().map_err(|e| input!("{e:#}")))
-                    .collect::<error::Result<Vec<TriMesh>>>()?;
-                let fitted = spheres::fit(
-                    &[meshes],
-                    &[object.spheres.tolerance],
-                    &object.spheres,
-                    rayon::current_thread_index().is_some(),
-                );
-                fitted.spheres.into_iter().flatten().collect()
-            }
-        };
+        let fitted = spheres()?;
         let mut robot = self.clone();
         let chain = robot.links[parent].chain.clone();
         robot.links.push(Link {
@@ -1885,6 +1884,51 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
         locked,
         parts: vec![],
     })
+}
+
+/// Spheres for an attached object's `shapes`, in their frame: boxes and spheres covered directly,
+/// other shapes fitted. One shape is covered in its own frame and its spheres placed by its pose,
+/// so where it sits on its link does not change them.
+pub(crate) fn object_spheres(
+    shapes: &[Obstacle],
+    o: &SphereOptions,
+) -> error::Result<Vec<[f32; 4]>> {
+    o.check().map_err(Error::Input)?;
+    if let [shape] = shapes {
+        let own = covered(std::slice::from_ref(&shape.placed(Pose::IDENTITY)), o)?;
+        return Ok(placed_spheres(&own, shape.pose()));
+    }
+    covered(shapes, o)
+}
+
+/// `spheres` (`[x, y, z, radius]`) moved from a frame into the one `pose` is given in.
+pub(crate) fn placed_spheres(spheres: &[[f32; 4]], pose: Pose) -> Vec<[f32; 4]> {
+    let place = |s: &[f32; 4]| {
+        let c = pose.position + pose.rotation * Vec3::new(s[0], s[1], s[2]);
+        [c.x, c.y, c.z, s[3]]
+    };
+    spheres.iter().map(place).collect()
+}
+
+/// [`object_spheres`] for `shapes` as they are placed. Attaching happens inside control processes:
+/// fit on the caller's rayon pool if it has one, otherwise on the calling thread alone, never on
+/// the global pool. (A one-thread pool on the calling thread would leave it registered with rayon
+/// for good, and every parallel loop it started afterwards would run on that one thread.)
+fn covered(shapes: &[Obstacle], o: &SphereOptions) -> error::Result<Vec<[f32; 4]>> {
+    if let Some(covered) = spheres::cover_primitives(shapes, o) {
+        return Ok(covered);
+    }
+    let meshes = shapes
+        .iter()
+        .map(|shape| attached_shape(shape)?.mesh().map_err(|e| input!("{e:#}")))
+        .collect::<error::Result<Vec<TriMesh>>>()?;
+    let fitted = spheres::fit(
+        &[meshes],
+        &[o.tolerance],
+        o,
+        rayon::current_thread_index().is_some(),
+    );
+    Ok(fitted.spheres.into_iter().flatten().collect())
 }
 
 /// An attached object's shape, placed in its link's frame.
