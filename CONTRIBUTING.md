@@ -68,6 +68,51 @@ or say in the pull request why a finding does not apply.
 [CLAUDE.md](CLAUDE.md) holds the design rules, invariants and working rules, for people and coding
 agents alike; [architecture.md](docs/architecture.md) says how the code fits together.
 
+## Releases
+
+Merging is not releasing. Changes collect on `main` and ship together, so a version stands for a
+batch of changes rather than for each one.
+
+- **The changelog.** A change a user would notice adds a line to `## [Unreleased]` in
+  [CHANGELOG.md](CHANGELOG.md), under Keep a Changelog's headings (Added, Changed, Removed,
+  Fixed). Mark with **Breaking:** whatever
+  breaks code written against the last release.
+- **Before a release.** A project that needs a merged change before it ships pins its commit,
+  `batchplan = { git = "https://github.com/natsuku-lab/batchplan", rev = "<commit>" }`, and goes
+  back to a version when the release is out. crates.io takes no crate with a git dependency, so
+  this is for applications and unpublished crates. To try the changes from crates.io, cut a
+  pre-release: `0.10.0-beta.1`, then `0.10.0-beta.2`. Cargo picks a pre-release only for a
+  requirement that names one, so users of `0.9` never get it. One beta may break the last, and a
+  requirement of one takes the next, so a project trying a beta pins it exactly
+  (`batchplan = "=0.10.0-beta.1"`).
+- **Patch or minor.** `cargo semver-checks --release-type minor`
+  (`cargo install cargo-semver-checks --locked`) fails on a change to the interface that breaks
+  the latest release on crates.io. It calls such a change major, which before 1.0 means the next
+  minor version. A call that now behaves differently can break callers too, which only a reader
+  sees. A batch that breaks nothing is a patch, even one that adds to the interface. Breaking
+  changes wait on `main` for the next minor version.
+- **When.** A patch whenever a fix should reach crates.io users. A minor release at most every
+  two weeks, once a beta of it has run in the projects that use batchplan,
+  [batchplan-ros](https://github.com/natsuku-lab/batchplan-ros) among them. A patch for a release
+  that `main` has moved past with breaking changes goes on a branch from that release's last tag
+  (`0.9.x` from `v0.9.0`). Changes reach the branch by pull request, so CI runs on them, and their
+  changelog lines go to `main` too.
+- **Cutting one.**
+  1. Set `version` in `Cargo.toml`. The next build of each crate updates `Cargo.lock` and
+     `demos/Cargo.lock`, and `scripts/check.sh` builds both.
+  2. For a release, not a beta, move the lines under `## [Unreleased]` to a new
+     `## [0.10.0] - date`, and point the compare links at the end of the file at it.
+  3. Commit it as `batchplan 0.10.0`, to `main` or by pull request to a release's branch, and
+     wait for CI.
+  4. `git tag -a v0.10.0 -m "batchplan 0.10.0" && git push origin v0.10.0`. The release workflow
+     checks that the tag names the version and that `cargo semver-checks` passes, then publishes to
+     crates.io.
+  5. After a release, move batchplan-ros to it.
+- **1.0** waits for an interface we mean to keep. Two-digit minor versions until then are usual
+  for Rust crates: nalgebra, glam and rapier are past 0.30. One decision comes first: how options
+  and problems grow. Today a new field breaks callers' struct literals, and after 1.0 each one would
+  take a major version.
+
 ## License
 
 Contributions are dual-licensed under MIT or Apache-2.0, as the project is, unless you say

@@ -317,7 +317,7 @@ A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster 
 - **Timing.** Jerk is kept within its limit by smoothing the time-optimal profile, lowering its speed caps where the smoothed map overshoots and stretching what remains, which costs time where a path turns sharply at speed: a wide blend through a sharp turn gains little over stopping ([joining motions](docs/benchmarks.md#joining-motions)). `Trajectory::check` samples each trajectory at a fixed density, so it can miss a short jerk overshoot between its samples.
 - **Small batches on a GPU.** A GPU call costs about 10 ms however small the batch, so below a few hundred problems per call the CPU is faster ([Batches and the GPU](#batches-and-the-gpu)). Planning itself runs on CPU threads on either device.
 - **Generated pick-and-place and handovers.** `datagen`'s episodes grasp upright boxes from above and have no recoveries; `pick` and `place` themselves take other shapes and grasps. Camera videos come from replaying the episodes in MuJoCo, kinematically: no physics checks the grasps.
-- **Maturity.** batchplan is before 1.0, and its interface may change between minor versions. It is tested on AMD (Vulkan) and Apple (Metal) GPUs; on NVIDIA, only earlier versions ran (on a T4).
+- **Maturity.** batchplan is before 1.0, and its interface may change between minor versions ([changelog](CHANGELOG.md)). It is tested on AMD (Vulkan) and Apple (Metal) GPUs; on NVIDIA, only earlier versions ran (on a T4).
 
 ## License
 

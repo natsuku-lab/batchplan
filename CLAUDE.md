@@ -19,7 +19,7 @@ cargo clippy --release --all-targets [--features lerobot,usd | --no-default-feat
 cargo build --release --lib --target aarch64-unknown-linux-gnu --no-default-features     # the CPU-only robot build CI checks
 cargo doc --no-deps --features lerobot,usd                      # keep at zero warnings
 scripts/check.sh                                                # every lint CI runs (rustfmt stable and nightly, clippy in each feature set, docs), on the library and demos/, warnings denied; run before every push
-git tag -a v0.1.1 -m "batchplan 0.1.1" && git push origin v0.1.1   # a release: bump Cargo.toml's version, wait for CI on main, tag; release.yml publishes to crates.io
+git tag -a v0.10.0 -m "batchplan 0.10.0" && git push origin v0.10.0   # a release or a beta (v0.10.0-beta.1), cut as CONTRIBUTING.md#releases says; release.yml runs cargo semver-checks and publishes to crates.io
 cargo run --release --example bench -- 512                      # GPU vs CPU throughput; BENCH_LLVMPIPE=1 adds the WGSL kernels on Mesa's CPU Vulkan driver
 scripts/fetch_benchmark.sh && cargo run --release --example benchmark   # MotionBenchMaker + MπNets (2,600 Panda problems), GPU and CPU
 cargo run --release --example benchmark -- --spheres vamp --check <paths.json>...   # the earlier comparison's judge (`--save` writes batchplan's; scripts/compare_planners.py and scripts/cpp_planners.cc the others')
@@ -100,6 +100,7 @@ How the pieces work is in [`docs/architecture.md`](docs/architecture.md) and eac
 - `AGENTS.md` is for coding agents that use the library: conventions, lifecycle, a task-to-call table, qualifying a robot, the output contract, a diagnosis checklist and footguns, each linking to the page that owns it. A change to what an agent must know (a convention, a failure reason, a call's cost) updates it too.
 - Every Rust block in the README, `AGENTS.md` and the guides compiles as a doctest (`lib.rs`, `mod guides`; the README and `training-data.md` need `--features lerobot`). Mark them `rust,no_run` and run each once by hand when it changes.
 - Numbers in the docs come from runs you can name: `docs/benchmarks.md` says how each was measured and how to reproduce it. When a change moves a number, rerun it and update every page that quotes it.
+- A change a user would notice adds a line to `## [Unreleased]` in `CHANGELOG.md`, with **Breaking:** on what breaks code written against the last release. Merging is not releasing: releases batch what `main` collects (`CONTRIBUTING.md#releases`).
 - This file holds lasting rules, not a log of changes: how the code works belongs in `docs/architecture.md` and the modules' doc comments. No page quotes test counts or lists the test files, which every new test would change.
 
 ## Style
