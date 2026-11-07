@@ -249,9 +249,12 @@ fn a_task_none_of_whose_grasps_gets_through_says_where_and_why_each_stopped() {
     };
     let f = pick_in(&device, scene(vec![]), unsupported, &o).unwrap_err();
     assert!(stops(&f, TaskStep::Depart, collides), "{f}");
+    assert!(names(&f, TABLE), "{:?}", f.candidates);
     let lid = Obstacle::cuboid(Vec3::new(0.45, 0.2, 0.068), Vec3::new(0.01, 0.015, 0.004));
     let f = pick_in(&device, scene(vec![lid.clone()]), tops(), &o).unwrap_err();
     assert!(stops(&f, TaskStep::Depart, collides), "{f}");
+    // Named as the task's world numbers it, where the lid comes after the box.
+    assert!(names(&f, 2), "{:?}", f.candidates);
     // Every grasp of the box: those from its sides stop at the grasp, those from above lifting.
     let all = batchplan::grasps(
         &Obstacle::cuboid(Vec3::ZERO, HALF),
@@ -776,6 +779,41 @@ fn the_fingers_may_touch_what_they_let_go_of() {
     };
     let placed = batchplan::place(&device, &after, &[place], &o).unwrap();
     placed.outcomes[0].as_ref().unwrap();
+}
+
+/// A place's contacts number the obstacles as its world does, and the object it sets down after
+/// them: backing off from a box held 5 cm deep, the palm still touches it.
+#[test]
+fn a_place_names_the_object_it_sets_down_after_its_worlds_obstacles() {
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let world = World::new(vec![scene(vec![]).obstacles[TABLE].clone()]);
+    let tall = Vec3::new(HALF.x, HALF.y, 0.06);
+    let held = Held {
+        hand: 0,
+        object: Obstacle::cuboid(Vec3::ZERO, tall),
+        grasp: Pose::new(Vec3::Z * 0.01, top_across().rotation),
+    };
+    let to = Pose::new(Vec3::new(0.45, 0.0, tall.z), Quat::IDENTITY);
+    let place = Place {
+        support: vec![TABLE],
+        ..Place::new(0, robot.default_q(), held, vec![to])
+    };
+    let set_down = world.obstacles.len();
+    let worlds = device.upload(&[world]).unwrap();
+    let f = batchplan::place(&device, &worlds, &[place], &TaskOptions::default())
+        .unwrap()
+        .outcomes
+        .remove(0)
+        .unwrap_err();
+    let palm = |t: &Contact| matches!(t, Contact::World { link, obstacle, .. } if link == "panda_hand" && *obstacle == set_down);
+    assert!(
+        f.candidates
+            .iter()
+            .all(|c| c.step == TaskStep::Depart && c.contacts.iter().any(palm)),
+        "{:?}",
+        f.candidates
+    );
 }
 
 #[test]

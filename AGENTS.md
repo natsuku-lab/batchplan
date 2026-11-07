@@ -120,7 +120,7 @@ Check these before raising budgets:
 2. **The start.** `PlanFailure::StartCollides { contacts }` names each link and obstacle, or pair of links. A link touching the table in every configuration needs a touch (`always_touching`); a start inside a held object's spheres needs the object attached.
 3. **The goal.** `PlanFailure::GoalCollides`; for IK, `ik::failures` tells `Unreachable` from `Collides { contacts }`.
 4. **The search.** `NoPath`: more `rrt.max_iterations`, or the way is blocked. `NoSpline`: more `control_points`, or a slower start motion. `OutOfTime`: a longer `time_budget`.
-5. **Tasks.** A `TaskFailure` prints where and why every candidate stopped; each `CandidateStop` has the step, the reason and the contacts. `grasps` says why it found none. Grasps near a support need `GraspOptions::tip` and `floor`.
+5. **Tasks.** A `TaskFailure` prints where and why every candidate stopped; each `CandidateStop` has the step, the reason and the contacts, whose obstacles are numbered as in the task's world; in a place, `world.obstacles.len()` is the object where it is set down. `grasps` says why it found none. Grasps near a support need `GraspOptions::tip` and `floor`.
 
 ### Footguns
 
