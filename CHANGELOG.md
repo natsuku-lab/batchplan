@@ -8,6 +8,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-07
+
 ### Changed
 
 - **Breaking:** `Robot::attach` refuses a shape whose size is negative or not finite, or whose
@@ -78,6 +80,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 Earlier releases have no notes beyond their commits.
 
-[Unreleased]: https://github.com/natsuku-lab/batchplan/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/natsuku-lab/batchplan/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/natsuku-lab/batchplan/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/natsuku-lab/batchplan/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/natsuku-lab/batchplan/compare/v0.7.0...v0.8.0
