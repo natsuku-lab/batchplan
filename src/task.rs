@@ -256,7 +256,8 @@ pub struct CandidateStop {
     /// For a collision, what collides ([`Device::contacts`]), nearest first: at the start, at the
     /// IK solution with the most clearance that reaches the grasp or release, holding the object
     /// at the solution nearest the rest where every one collides holding it (a place), or at the
-    /// straight move's next step. Empty for the rest.
+    /// straight move's next step. Empty for the rest. Obstacles are numbered as in the task's
+    /// world; in a place, `world.obstacles.len()` is the object where it is set down.
     pub contacts: Vec<Contact>,
 }
 
@@ -488,7 +489,19 @@ pub fn pick(
                     .iter()
                     .find(|(hand, _)| *hand == holding.hand)
                     .expect("every hand that lifts has its worlds");
-                straight(&holder(holding)?, uploaded, group, &by_task, Leg::Away, o)
+                straight(&holder(holding)?, uploaded, group, &by_task, Leg::Away, o)?;
+                // Contacts name obstacles as the task's world does, which still holds the object.
+                for c in group.iter_mut() {
+                    let object = tasks[c.task].object;
+                    for contact in &mut c.contacts {
+                        if let Contact::World { obstacle, .. } = contact
+                            && *obstacle >= object
+                        {
+                            *obstacle += 1;
+                        }
+                    }
+                }
+                Ok::<_, crate::Error>(())
             })
         })?;
     }

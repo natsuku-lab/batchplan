@@ -8,6 +8,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+### Fixed
+
+- A pick's contacts where it lifts the object name obstacles as the task's world numbers them:
+  every obstacle after the picked one came back one index too low.
+
 ## [0.9.0] - 2026-11-06
 
 ### Changed
