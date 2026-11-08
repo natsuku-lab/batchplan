@@ -315,6 +315,42 @@ def test_robots_report_their_joints_reach_and_links(ur5e_robot):
     assert ur5e_robot.link_pose(q, "no_such_link") is None
 
 
+def test_two_arms_assemble_into_one_robot():
+    panda = ASSETS / "franka/franka_panda.urdf"
+    model = bp.CollisionModel.load(ASSETS / "franka/panda_collision.json")
+    parts = [
+        bp.Part(panda, "left_", bp.Pose((0.0, 0.35, 0.0))),
+        bp.Part(panda, "right_", bp.Pose((0.0, -0.35, 0.0))),
+    ]
+    both = bp.CollisionModel.assemble([("left_", model), ["right_", model]])
+    assert len(both.spheres) == 2 * len(model.spheres)
+    assert all(link.startswith(("left_", "right_")) for link in both.spheres)
+    for link, others in both.self_collision_ignore.items():
+        side = link.split("_")[0]
+        assert all(o.startswith(side + "_") for o in others), (link, others)
+    fingers = {f"{p}panda_finger_joint{j}": 0.04 for p in ("left_", "right_") for j in (1, 2)}
+    options = bp.RobotOptions(
+        ee_links=["left_ee_link", "right_ee_link"], lock_joints=fingers, collision_model=both
+    )
+    robot = bp.Robot.assemble(parts, options)
+    assert (robot.dof, robot.hands) == (14, 2) and robot.parts == tuple(parts)
+    assert all(n.startswith(("left_", "right_")) for n in robot.joint_names)
+    q = robot.default_q
+    left, right = robot.ee_pose(q, 0), robot.ee_pose(q, 1)
+    assert math.isclose(left.position[1] - right.position[1], 0.7, abs_tol=1e-5), (
+        "bases 70 cm apart"
+    )
+    device = bp.Device.cpu(robot)
+    worlds = device.upload([bp.World()])
+    result = bp.solve_ik(device, worlds, [bp.IkProblem(0, targets=[left, right])])
+    assert result.success.any(), "both hands reach where they stand"
+
+    with pytest.raises(bp.InputError, match="pair"):
+        bp.CollisionModel.assemble([("left_", model, 1)])
+    loaded = bp.Robot.load(panda, bp.RobotOptions(collision_model=model))
+    assert loaded.parts == (bp.Part(panda),), "one part, unprefixed, at the origin"
+
+
 def test_writing_and_gpus_fail_as_their_kinds(ur5e_robot, tmp_path):
     with pytest.raises(bp.WriteError):
         ur5e_robot.collision_model.save(tmp_path / "missing" / "model.json")
@@ -387,6 +423,12 @@ def test_a_table_up_to_the_shoulder_is_always_touched(ur5e_robot):
     assert touches and all(t.obstacle == 0 for t in touches), touches
 
 
+def two_ur5e():
+    """Two UR5e parts a meter apart, to fit spheres for."""
+    path = ASSETS / "ur5e/ur_description/urdf/ur5e.urdf"
+    return [bp.Part(path, "a_"), bp.Part(path, "b_", bp.Pose((0.0, 1.0, 0.0)))]
+
+
 def targets(robot, problems):
     return [bp.IkProblem(p.world, robot.ee_pose(p.goal)) for p in problems]
 
@@ -440,6 +482,7 @@ LONG_CALLS = {
     "plan": (4000, lambda r, d, w, p: lambda: bp.plan(d, w, p)),
     "ik_failures": (1000, failures_of),
     "Robot.load": (1, lambda *_: lambda: [ur5e() for _ in range(3)]),
+    "Robot.assemble": (1, lambda *_: lambda: bp.Robot.assemble(two_ur5e())),
 }
 
 
@@ -456,11 +499,16 @@ def test_calls_let_other_threads_run(tasks_robot, call):
     began, took = [], []
 
     def work():
+        # A call that raises ends the loop below too, and fails the test after it.
         began.append(time.perf_counter())
         started.set()
-        run()
-        took.append(time.perf_counter() - began[0])
-        done.set()
+        try:
+            run()
+            took.append(time.perf_counter() - began[0])
+        except Exception as e:
+            took.append(e)
+        finally:
+            done.set()
 
     worker = threading.Thread(target=work)
     worker.start()
@@ -469,6 +517,8 @@ def test_calls_let_other_threads_run(tasks_robot, call):
     while not done.is_set():
         last = time.perf_counter()
     worker.join()
+    if isinstance(took[0], Exception):
+        raise took[0]
     assert took[0] > 0.1, f"{call} is long enough to tell: {took[0]:.3f} s"
     assert first - began[0] < took[0] / 4, "the main thread resumed while the call ran"
     assert last - first > took[0] / 2, "and kept running through it"
