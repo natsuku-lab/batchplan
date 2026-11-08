@@ -92,7 +92,7 @@ How the pieces work is in [`docs/architecture.md`](docs/architecture.md) and eac
 - **No fixed size limits on robots.** Per-configuration state lives in buffers sized to the robot and reused per thread; hot loops neither allocate nor clear.
 - **Searches allocate nothing per query** (they reuse the buffer their thread lends them) and are built on the thread that runs them (`edges::Deferred`): glibc's allocator serializes a batch's threads otherwise.
 - **SIMD dispatch happens once** per search or run of eight configurations, and everything between the dispatch and the vector operations is `#[inline(always)]` code without closures: a closure loses the dispatched level and runs about seven times slower.
-- **Results do not depend on the batch or the device.** Searches run on CPU threads on both devices with the same checks, and without a time budget nothing reads the clock.
+- **Results do not depend on the batch or the device.** Searches run on CPU threads on both devices with the same checks, and without a time budget nothing reads the clock. IK is the exception: a GPU rounds it unlike the CPU, and by the batch's size (its lane count), so plans to poses, which `plan` solves IK for, inherit that.
 - **Continuous joints** are checked and clamped with `Robot::bounds` / `Robot::within`, never `lower` / `upper`.
 - **Timing does not depend on how finely a path is split.** A path split at its spans' middles (`spline::split`) is the same curve and must time within 3% of it (`a_split_path_takes_as_long`): `join` splits paths to space them alike, and tool paths are dense.
 

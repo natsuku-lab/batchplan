@@ -10,6 +10,20 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- **Breaking:** `plan` takes the hands' poses as a goal: `PlanProblem::goal` is a `Goal`, a
+  configuration (`Goal::Joints`) or a pose or `None` per hand (`Goal::Poses`), and
+  `PlanProblem::new` takes either, a `Pose` for a one-handed robot. `plan` solves IK for every
+  pose goal of the call in one batch, seeded from each start and keeping its held joints, what it
+  holds and its constraints, and plans to the collision-free solution nearest the start up to
+  whole turns. Poses no seed reaches collision-free are solved again with four times the seeds, up
+  to sixteen times, while a `time_budget` lasts; those still unreached fail as
+  `PlanFailure::GoalUnreachable`, or `GoalCollides` where IK reaches them only in collision.
+  `PlanOptions::goal_ik` sets that IK. `PlanProblem::new` takes a configuration as a `Vec<f32>`,
+  `&[f32]`, `&Vec<f32>`, `[f32; N]` or `&[f32; N]`; convert any other form with `to_vec()`. Code
+  reading a goal as a slice reads `goal.joints()`, a struct literal wraps a configuration in
+  `Goal::Joints`, and code that writes out every field of `PlanOptions` needs the new one. The benchmark's ik+plan mode plans to the
+  goal pose this way. In Python, `PlanProblem` takes a `Pose`, or a `Pose` or `None` per hand, as
+  its goal, beside `PlanOptions.goal_ik` and `PlanFailure.GoalUnreachable`.
 - Python bindings, in `python/`: the `batchplan` package, built with maturin
   ([Python](docs/python.md)). Robots, assembled ones among them, obstacles and worlds, devices, IK
   (`solve_ik`, `ik_failures`), planning with hand constraints (`plan`), timing (`Trajectory`),
@@ -77,6 +91,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Fixed
 
+- `plan` refuses a start or a joint goal that is not finite. A continuous joint's range has no
+  limits, so a start at infinity there passed the limit check and planned a path of infinite
+  control points marked valid.
 - `Trajectory::at` and `Trajectory::sample` keep each position between the control points it
   blends, so a path that runs along a joint limit never samples past it. Rounding left samples a
   unit or two in the last place past (up to 4.8e-7 rad), which limit checks with no tolerance

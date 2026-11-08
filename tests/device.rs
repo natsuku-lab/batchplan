@@ -351,7 +351,7 @@ fn warming_up_builds_what_first_calls_would_and_changes_no_result() {
     };
     let goals: Vec<IkProblem> = problems
         .iter()
-        .map(|p| IkProblem::new(p.world, robot.ee_pose(&p.goal, 0)))
+        .map(|p| IkProblem::new(p.world, robot.ee_pose(p.goal.joints().unwrap(), 0)))
         .collect();
     let run = |d: &Device| {
         let worlds = d.upload(&scene).unwrap();
@@ -941,7 +941,12 @@ fn plans_from_a_moving_start_continue_its_motion() {
             );
             let mut end = JointState::new(n);
             trajectory.at(trajectory.duration(), &mut end);
-            assert_eq!(end.position, s.problem.goal, "{}", d.name());
+            assert_eq!(
+                end.position,
+                s.problem.goal.joints().unwrap(),
+                "{}",
+                d.name()
+            );
         }
     }
 }
@@ -1163,7 +1168,9 @@ fn optimization_seeds_start_with_the_searched_path_and_the_straight_line() {
             for (t, q) in path(2).chunks(n).enumerate() {
                 let u = (t.saturating_sub(2) as f32 / (points - 5) as f32).min(1.0);
                 let off = (0..n)
-                    .map(|j| (q[j] - (p.start[j] + u * (p.goal[j] - p.start[j]))).abs())
+                    .map(|j| {
+                        (q[j] - (p.start[j] + u * (p.goal.joints().unwrap()[j] - p.start[j]))).abs()
+                    })
                     .fold(0.0, f32::max);
                 assert!(
                     off < 1e-5,

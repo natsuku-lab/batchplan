@@ -63,8 +63,8 @@ Each snippet below is a whole program. Its paths point at test robots in this re
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
 use batchplan::{
-    Device, Error, IkOptions, IkProblem, Obstacle, PlanOptions, PlanProblem, Pose, Robot,
-    RobotOptions, Trajectory, World,
+    Device, Error, Obstacle, PlanOptions, PlanProblem, Pose, Robot, RobotOptions, Trajectory,
+    World,
 };
 
 fn main() -> Result<(), Error> {
@@ -80,18 +80,12 @@ fn main() -> Result<(), Error> {
     let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.02), Vec3::new(1.0, 1.0, 0.02));
     let worlds = device.upload(&[World::new(vec![table])])?;
 
-    // IK for a batch of gripper poses...
+    // A collision-free motion to each of a batch of gripper poses, in one call: IK from the start
+    // finds where each ends, the nearest collision-free solution.
     let down = Quat::from_rotation_x(std::f32::consts::PI);
-    let goals: Vec<IkProblem> = [Vec3::new(0.4, 0.2, 0.3), Vec3::new(0.3, -0.3, 0.4)]
+    let problems: Vec<PlanProblem> = [Vec3::new(0.4, 0.2, 0.3), Vec3::new(0.3, -0.3, 0.4)]
         .into_iter()
-        .map(|position| IkProblem::new(0, Pose::new(position, down)))
-        .collect();
-    let ik = batchplan::solve_ik(&device, &worlds, &goals, &IkOptions::default())?;
-
-    // ...then a collision-free motion to every solution, in one call.
-    let problems: Vec<PlanProblem> = ik
-        .solved()
-        .map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution))
+        .map(|position| PlanProblem::new(0, robot.default_q(), Pose::new(position, down)))
         .collect();
     let plans = batchplan::plan(&device, &worlds, &problems, &PlanOptions::default())?;
 

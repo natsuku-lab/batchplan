@@ -70,7 +70,12 @@ fn batches_build_their_searches_on_the_threads_that_run_them() {
         .map(|p| RrtProblem {
             world: p.world,
             start: p.start.clone(),
-            goals: vec![p.goal.clone()],
+            goals: vec![
+                p.goal
+                    .joints()
+                    .expect("reaches end at configurations")
+                    .to_vec(),
+            ],
             hold: vec![],
             constraints: vec![],
         })

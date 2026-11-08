@@ -9,8 +9,8 @@ Build the robot and its device once, warm the device, upload each scene once, an
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
 use batchplan::{
-    Device, Error, IkOptions, IkProblem, Obstacle, PlanFailure, PlanOptions, PlanProblem, Pose,
-    Robot, RobotOptions, Trajectory, World,
+    Device, Error, Obstacle, PlanFailure, PlanOptions, PlanProblem, Pose, Robot, RobotOptions,
+    Trajectory, World,
 };
 
 fn main() -> Result<(), Error> {
@@ -38,14 +38,8 @@ fn main() -> Result<(), Error> {
     // in `robot.joint_names()` order.
     let target = Pose::new(Vec3::new(0.4, 0.2, 0.3), Quat::from_xyzw(1.0, 0.0, 0.0, 0.0));
     let start = robot.default_q();
-    let ik_options = IkOptions::default();
-    let ik = batchplan::solve_ik(&device, &worlds, &[IkProblem::new(0, target)], &ik_options)?;
-    let Some(goal) = ik.best(0) else {
-        let why = batchplan::ik::failures(&device, &worlds, &ik, &ik_options)?;
-        println!("no IK solution: {:?}", why[0]);
-        return Ok(());
-    };
-    let problem = PlanProblem::new(0, start, goal);
+    // IK from the start finds where the path ends: the nearest collision-free solution.
+    let problem = PlanProblem::new(0, start, target);
     let plans = batchplan::plan(&device, &worlds, &[problem], &PlanOptions::default())?;
     match (plans.best(0), &plans.failures[0]) {
         (Some(path), _) => {
@@ -57,6 +51,7 @@ fn main() -> Result<(), Error> {
         (None, Some(PlanFailure::StartCollides { contacts })) => {
             println!("the start collides: {contacts:?}");
         }
+        (None, Some(PlanFailure::GoalUnreachable)) => println!("no IK seed reaches the pose"),
         (None, why) => println!("no plan: {why:?}"),
     }
     Ok(())
@@ -86,7 +81,7 @@ fn main() -> Result<(), Error> {
 |---|---|---|
 | Forward kinematics | `robot.ee_pose(q, hand)`, `robot.link_pose(q, link)`, `robot.spheres(q)` | [robots](docs/robots.md) |
 | Configurations for hand poses | `solve_ik`; `ik::failures` for why one has none | [IK](docs/planning.md#inverse-kinematics) |
-| A collision-free path between configurations | `plan`, then `Trajectory::try_new` | [planning](docs/planning.md#planning-a-path) |
+| A collision-free path to a configuration or a hand pose | `plan`, then `Trajectory::try_new` | [planning](docs/planning.md#planning-a-path) |
 | The hand along straight lines | `follow` | [tool paths](docs/planning.md#moving-the-hand-along-a-path) |
 | A hand kept upright, in a box or relative to another hand | `HandConstraint` on the problem | [constraints](docs/planning.md#constraints-along-the-path) |
 | Picking up and setting down | `grasps`, `pick`, `place` | [tasks](docs/planning.md#picking-up-and-setting-down) |
@@ -95,7 +90,7 @@ fn main() -> Result<(), Error> {
 | Obstacles from depth images or point clouds | `SdfGrid`, `OccupancyMap`, `DepthImage::robot_mask` | [perception](docs/perception.md) |
 | Training data | `datagen`, `npy::export`, `lerobot::export` | [training data](docs/training-data.md) |
 
-IK finds configurations; a plan finds the path to one. Every call takes many problems, each naming its world: batch them rather than calling once per problem, since each GPU call has a fixed cost.
+IK finds configurations; a plan finds the path to one, or to a pose, solving IK from the start itself. Solve IK first only to choose among its solutions. Every call takes many problems, each naming its world: batch them rather than calling once per problem, since each GPU call has a fixed cost.
 
 ### Qualify the robot
 
@@ -110,7 +105,7 @@ A robot that loads may still have spheres unfit to plan with. Before planning wi
 
 - `ik.best(i)`, `plans.best(i)` and `solved()` return only valid answers; `IkResult::success` and `PlanResult::valid` are per seed, problem-major (`problem * seeds + seed`).
 - A plan is B-spline control points, not a trajectory: time it with `Trajectory::try_new` (`Trajectory::moving` from a moving start), sample it with `at` or `sample`, and `check` it before it runs on hardware. Never send control points to a controller.
-- Plans do not depend on the batch or the device; with a `time_budget`, they depend on the machine's speed. IK starts every problem from the same seeds in any batch, but a GPU rounds differently from the CPU, and differently on either side of where it switches how many invocations share a configuration (4,096 configurations, more for robots with many spheres), so solutions there can differ slightly.
+- Plans do not depend on the batch or the device; with a `time_budget`, they depend on the machine's speed. IK starts every problem from the same seeds in any batch, but a GPU rounds differently from the CPU, and differently on either side of where it switches how many invocations share a configuration (4,096 configurations, more for robots with many spheres), so solutions there can differ slightly, and so can plans to poses, which end where IK solves them.
 
 ### Diagnose a failed request, in order
 
@@ -118,7 +113,7 @@ Check these before raising budgets:
 
 1. **The input.** An `Error::Input` names what was refused and the value given: shapes, joint order, unit quaternions, joint limits (starts and goals must be within them), frames.
 2. **The start.** `PlanFailure::StartCollides { contacts }` names each link and obstacle, or pair of links. A link touching the table in every configuration needs a touch (`always_touching`); a start inside a held object's spheres needs the object attached.
-3. **The goal.** `PlanFailure::GoalCollides`; for IK, `ik::failures` tells `Unreachable` from `Collides { contacts }`.
+3. **The goal.** `PlanFailure::GoalCollides`, and for a pose goal `GoalUnreachable`, which more `PlanOptions::goal_ik` iterations may fix; for IK, `ik::failures` tells `Unreachable` from `Collides { contacts }`.
 4. **The search.** `NoPath`: more `rrt.max_iterations`, or the way is blocked. `NoSpline`: more `control_points`, or a slower start motion. `OutOfTime`: a longer `time_budget`.
 5. **Tasks.** A `TaskFailure` prints where and why every candidate stopped; each `CandidateStop` has the step, the reason and the contacts, whose obstacles are numbered as in the task's world; in a place, `world.obstacles.len()` is the object where it is set down. `grasps` says why it found none. Grasps near a support need `GraspOptions::tip` and `floor`, which keeps the open fingers over it too; from above, they keep at least `overlap` of the fingers (1 cm) in the object, so an object whose top is less than that over the floor has none.
 

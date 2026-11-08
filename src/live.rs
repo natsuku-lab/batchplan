@@ -23,7 +23,7 @@ use crate::device::{CollisionWeights, Contact, Device, Worlds};
 use crate::error::{Result, ensure_input};
 use crate::robot::Robot;
 use crate::timing::{JointState, Trajectory};
-use crate::trajopt::{PlanOptions, PlanProblem};
+use crate::trajopt::{Goal, PlanOptions, PlanProblem};
 use crate::types::{Pose, StartMotion};
 
 /// How a [`Follower`] checks and replans.
@@ -351,7 +351,7 @@ impl Follower {
             let problem = PlanProblem {
                 world: self.world,
                 start: from.position.clone(),
-                goal: self.goal.clone(),
+                goal: Goal::Joints(self.goal.clone()),
                 start_motion: Some(motion.clone()),
                 hold: vec![],
                 constraints: self.o.constraints.clone(),
@@ -441,7 +441,7 @@ impl Follower {
             let problem = PlanProblem {
                 world: self.world,
                 start: position.clone(),
-                goal: self.goal.clone(),
+                goal: Goal::Joints(self.goal.clone()),
                 start_motion: moving.then(|| motion.clone()),
                 hold: vec![],
                 constraints: self.o.constraints.clone(),

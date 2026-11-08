@@ -2,8 +2,8 @@
 
 Planning in batchplan is three steps. IK and planning are batched calls on a [`Device`](devices.md); timing runs on each path:
 
-1. **IK** (`solve_ik`) turns target poses into joint configurations.
-2. **Planning** (`plan`) finds a collision-free path from a start to a goal configuration (the straight line, bent if an obstacle only grazes it, else RRT-Connect), then shortens and smooths it into a B-spline. Trajectory optimization can polish it further.
+1. **IK** (`solve_ik`) turns target poses into joint configurations. `plan` runs it itself for a goal given as a pose.
+2. **Planning** (`plan`) finds a collision-free path from a start to a goal, a configuration or the hand's pose (the straight line, bent if an obstacle only grazes it, else RRT-Connect), then shortens and smooths it into a B-spline. Trajectory optimization can polish it further.
 3. **Timing** (`Trajectory::try_new`) turns the path into a trajectory a controller can run, within the robot's velocity, acceleration and jerk limits.
 
 Every call takes many problems, each naming its world, so one call can cover thousands of scenes.
@@ -11,8 +11,7 @@ Every call takes many problems, each naming its world, so one call can cover tho
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
 use batchplan::{
-    Device, Error, IkOptions, IkProblem, PlanOptions, PlanProblem, Pose, Robot, RobotOptions,
-    Trajectory, World,
+    Device, Error, PlanOptions, PlanProblem, Pose, Robot, RobotOptions, Trajectory, World,
 };
 
 fn main() -> Result<(), Error> {
@@ -26,18 +25,13 @@ fn main() -> Result<(), Error> {
     // Several targets in one call; each problem names its world.
     let down = Quat::from_rotation_x(std::f32::consts::PI);
     let targets = [Vec3::new(0.4, 0.2, 0.3), Vec3::new(0.3, -0.3, 0.4)];
-    let goals: Vec<IkProblem> = targets
+    let problems: Vec<PlanProblem> = targets
         .iter()
-        .map(|&p| IkProblem::new(0, Pose::new(p, down)))
-        .collect();
-    let ik = batchplan::solve_ik(&device, &worlds, &goals, &IkOptions::default())?;
-
-    // `solved()` yields each problem that has a solution, with its world, so they cannot be mixed up.
-    let problems: Vec<PlanProblem> = ik
-        .solved()
-        .map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution))
+        .map(|&p| PlanProblem::new(0, robot.default_q(), Pose::new(p, down)))
         .collect();
     let result = batchplan::plan(&device, &worlds, &problems, &PlanOptions::default())?;
+
+    // `solved()` yields each problem that has a path, with its world, so they cannot be mixed up.
     for s in result.solved() {
         let trajectory = Trajectory::try_new(&robot, s.solution, 1.0)?;
         println!("problem {}: {:.2} s", s.index, trajectory.duration());
@@ -59,6 +53,8 @@ fn main() -> Result<(), Error> {
 ## Planning a path
 
 `PlanProblem::new(world, start, goal)` plans from rest with every joint free to move; set the other fields on top of it (`PlanProblem { hold, ..PlanProblem::new(world, start, goal) }`). `holding` plans with an object in a hand, each problem its own ([holding objects](robots.md#holding-objects)); `IkProblem` and `ToolPath` take it too.
+
+A goal (`Goal`) is a configuration or the hands' poses. `PlanProblem::new` takes a `Pose` for a one-handed robot, and `Goal::Poses` takes a pose or `None` per hand (`RobotOptions::ee_links`); for `None`, the joints only that hand moves stay where `start` has them. `plan` solves IK for every pose goal of the call in one batch, seeded from each start, keeping its `hold`, its `holding` and its `constraints` (`PlanOptions::goal_ik` sets the seeds, iterations and tolerances). The path ends at the collision-free solution nearest the start, counting each solution at its nearest whole turn, as the path reaches it ([goals a turn away](#goals-a-turn-away)). Poses no seed reaches collision-free are solved again with four times the seeds, up to sixteen times: in clutter, more seeds reach what the first miss. The first round counts toward a `time_budget` and always runs; later rounds do not start once the budget has passed, and their problems fail as `OutOfTime`. `PlanResult::problems` keeps the goals as given. To choose among the solutions yourself, by clearance or by branch, solve IK ([above](#inverse-kinematics)) and plan to the configuration.
 
 A plan into a grasp ends with the fingers around the object: let the hand touch it ([allowed contacts](perception.md#allowed-contacts)), and the rest of the arm still keeps clear of it.
 
@@ -95,7 +91,7 @@ Continuous joints are unbounded, and joints whose range spans more than a turn (
 
 ### Time budgets and determinism
 
-`PlanOptions::time_budget` stops every search and the optimization once it passes, and returns the valid paths found so far. Without a budget nothing checks the clock, and two runs give bit-identical results, on either device.
+`PlanOptions::time_budget` stops every search and the optimization once it passes, and returns the valid paths found so far. Without a budget nothing checks the clock, and two runs give bit-identical results, on either device. A plan to a pose ends where IK solves it, and a GPU rounds IK unlike the CPU, and by the batch's size, so its plan there can end slightly away from the CPU's and from the same problem's in another batch.
 
 ### Why a problem failed
 
@@ -104,7 +100,8 @@ Continuous joints are unbounded, and joints whose range spans more than a turn (
 | `PlanFailure` | What stopped it | What to try |
 |---|---|---|
 | `StartCollides { contacts }` | the start collides, with what `contacts` lists | plan from a free state; a link that always touches the table needs a [touch](perception.md#allowed-contacts) |
-| `GoalCollides { contacts }` | the goal collides, and so does every equivalent a turn away | another IK solution or goal |
+| `GoalCollides { contacts }` | the goal collides, and so does every equivalent a turn away; for a pose goal, IK reaches the poses only in collision | another IK solution or goal |
+| `GoalUnreachable` | no IK seed reaches the goal's poses within the tolerances, keeping the held joints and constraints | a pose within reach, or more `goal_ik` iterations |
 | `NoPath` | the search drew `rrt.max_iterations` samples without joining start and goal | more samples, or the way is blocked |
 | `NoSpline` | a path was found, but no spline along it checked valid or followed the start's motion | more `control_points`, or a start moving slower |
 | `OutOfTime` | the `time_budget` ran out first | a longer budget |

@@ -90,7 +90,7 @@ pub use task::{
 };
 pub use timing::{HandSpeed, JointState, Trajectory};
 pub use tool_path::{ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, follow};
-pub use trajopt::{PlanFailure, PlanOptions, PlanProblem, PlanResult, plan};
+pub use trajopt::{Goal, PlanFailure, PlanOptions, PlanProblem, PlanResult, plan};
 pub use types::{JointTrajectory, Pose, Solved, StartMotion};
 pub use world::{Distance, Obstacle, Touch, World};
 

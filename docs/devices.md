@@ -42,7 +42,7 @@ The kernels use only core features: 32-bit floats, and no subgroups, float atomi
 | Other NVIDIA cards and Jetson, Intel, DX12 on Windows | Untested |
 
 What runs where:
-- **Planning** searches each problem on CPU threads, with SIMD collision checks, on either device: branchy, early-exit searches suit CPUs, and both devices then plan identically.
+- **Planning** searches each problem on CPU threads, with SIMD collision checks, on either device: branchy, early-exit searches suit CPUs, and both devices then plan identically to the same configurations. A goal given as a pose ends where the device's IK solves it, and a GPU's IK rounds differently.
 - **The GPU** wins on large, dense batches: IK seeds, trajectory optimization and distance grids.
 - **For one problem at a time,** the CPU device is often as fast, because each GPU call pays a fixed setup and readback cost.
 
