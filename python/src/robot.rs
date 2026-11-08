@@ -121,6 +121,22 @@ value_class! {
             py.detach(|| batchplan::CollisionModel::load(path)).or_raise().map(Self)
         }
 
+        /// The model of a robot made with `Robot.assemble`, from each part's own model and the
+        /// prefix its names take, as `(prefix, model)` pairs: two arms fitted once share one
+        /// model. Links of different parts are always checked against each other.
+        #[staticmethod]
+        fn assemble(parts: &Bound<'_, PyAny>) -> PyResult<Self> {
+            let items = field::items(parts)?;
+            let parts = items.iter().map(|part| {
+                let (prefix, model): (String, Bound<'_, PyAny>) = part.extract()?;
+                Ok((prefix, batchplan::CollisionModel::from_py(&model)?))
+            });
+            let parts: Vec<(String, batchplan::CollisionModel)> = parts.collect::<PyResult<_>>()?;
+            let named: Vec<(&str, &batchplan::CollisionModel)> =
+                parts.iter().map(|(p, m)| (p.as_str(), m)).collect();
+            Ok(Self(batchplan::CollisionModel::assemble(&named)))
+        }
+
         /// Writes the model as JSON.
         fn save(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
             py.detach(|| self.0.save(path)).or_raise()
@@ -131,6 +147,37 @@ value_class! {
         }
     }
 }
+
+value_class! {
+    /// A robot description placed in a robot made of several (see `Robot.assemble`).
+    Part(batchplan::Part) {
+        /// The description file: URDF or MJCF.
+        path: PathBuf,
+        /// Prefixed to every link and joint name of the description, such as `left_`.
+        prefix: String,
+        /// Where the description's root link sits in the robot's frame.
+        base: batchplan::Pose,
+    }
+    methods {
+        /// The description at `path`, its names prefixed with `prefix`, its root at `base` (the
+        /// robot's origin if not given).
+        #[new]
+        #[pyo3(signature = (path, prefix = String::new(), base = None))]
+        fn new(path: PathBuf, prefix: String, base: Option<&Pose>) -> Self {
+            Self(batchplan::Part {
+                path,
+                prefix,
+                base: base.map_or(batchplan::Pose::IDENTITY, |b| b.0),
+            })
+        }
+
+        fn __eq__(&self, other: &Self) -> bool {
+            self.0 == other.0
+        }
+    }
+}
+
+crate::field::tuple_field!(batchplan::Part);
 
 value_class! {
     /// How `Robot.load` builds a robot from its description.
@@ -208,6 +255,31 @@ impl Robot {
         py.detach(|| batchplan::Robot::load(path, &options))
             .or_raise()
             .map(Self)
+    }
+
+    /// A robot made of several descriptions, such as two arms at a table: each part's link and
+    /// joint names get its prefix, its root link is fixed at its base, and the parts hang from one
+    /// root link, `world`. The options name links and joints with their prefixes; give each arm's
+    /// hand in `ee_links`.
+    #[staticmethod]
+    #[pyo3(signature = (parts, options = None))]
+    fn assemble(
+        py: Python<'_>,
+        parts: &Bound<'_, PyAny>,
+        options: Option<&RobotOptions>,
+    ) -> PyResult<Self> {
+        let parts = Vec::<batchplan::Part>::from_py(parts)?;
+        let options = options.map_or_else(batchplan::RobotOptions::default, |o| o.0.clone());
+        py.detach(|| batchplan::Robot::assemble(&parts, &options))
+            .or_raise()
+            .map(Self)
+    }
+
+    /// The descriptions the robot was loaded from: one for `Robot.load`, its parts for
+    /// `Robot.assemble`.
+    #[getter]
+    fn parts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.0.parts().to_vec().to_py(py)
     }
 
     /// A robot from a URDF's text, as ROS publishes it on `/robot_description`.
