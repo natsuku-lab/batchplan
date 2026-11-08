@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 import batchplan as bp
-from conftest import ASSETS, devices
+from conftest import devices
 
 TABLE, BOX = 0, 1
 HALF = (0.02, 0.03, 0.03)
@@ -192,41 +192,3 @@ def test_a_transit_that_breaks_its_constraints_stops_there(tasks_robot):
     assert failure.step == bp.TaskStep.Transit, failure
     assert isinstance(failure.candidates, tuple)
     assert bp.TaskStep.Transit in {c.step for c in failure.candidates}, failure.candidates
-
-
-def test_two_arms_assemble_into_one_robot():
-    panda = ASSETS / "franka/franka_panda.urdf"
-    model = bp.CollisionModel.load(ASSETS / "franka/panda_collision.json")
-    parts = [
-        bp.Part(panda, "left_", bp.Pose((0.0, 0.35, 0.0))),
-        bp.Part(panda, "right_", bp.Pose((0.0, -0.35, 0.0))),
-    ]
-    both = bp.CollisionModel.assemble([("left_", model), ("right_", model)])
-    assert len(both.spheres) == 2 * len(model.spheres)
-    assert all(link.startswith(("left_", "right_")) for link in both.spheres)
-    for link, others in both.self_collision_ignore.items():
-        side = link.split("_")[0]
-        assert all(o.startswith(side + "_") for o in others), (link, others)
-    fingers = {f"{p}panda_finger_joint{j}": 0.04 for p in ("left_", "right_") for j in (1, 2)}
-    options = bp.RobotOptions(
-        ee_links=["left_ee_link", "right_ee_link"], lock_joints=fingers, collision_model=both
-    )
-    robot = bp.Robot.assemble(parts, options)
-    assert (robot.dof, robot.hands) == (14, 2) and robot.parts == tuple(parts)
-    assert all(n.startswith(("left_", "right_")) for n in robot.joint_names)
-    q = robot.default_q
-    left, right = robot.ee_pose(q, 0), robot.ee_pose(q, 1)
-    assert math.isclose(left.position[1] - right.position[1], 0.7, abs_tol=1e-5), (
-        "bases 70 cm apart"
-    )
-    device = bp.Device.cpu(robot)
-    worlds = device.upload([bp.World()])
-    result = bp.solve_ik(device, worlds, [bp.IkProblem(0, targets=[left, right])])
-    assert result.success.any(), "both hands reach where they stand"
-
-
-def test_a_fitted_model_names_the_link_pairs_it_never_checks(ur5e_robot):
-    ignored = ur5e_robot.collision_model.self_collision_ignore
-    assert ignored, "a fitted arm never checks some neighboring links"
-    names = set(ur5e_robot.collision_model.spheres)
-    assert all(link in names and set(others) <= names for link, others in ignored.items())

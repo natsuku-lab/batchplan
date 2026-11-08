@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::error::{InputError, OrRaise};
-use crate::field::{self, Field, value_class};
+use crate::field::{self, Field, tuple_field, value_class};
 use crate::world::Pose;
 
 /// Which link geometry spheres are fitted to.
@@ -126,12 +126,7 @@ value_class! {
         /// model. Links of different parts are always checked against each other.
         #[staticmethod]
         fn assemble(parts: &Bound<'_, PyAny>) -> PyResult<Self> {
-            let items = field::items(parts)?;
-            let parts = items.iter().map(|part| {
-                let (prefix, model): (String, Bound<'_, PyAny>) = part.extract()?;
-                Ok((prefix, batchplan::CollisionModel::from_py(&model)?))
-            });
-            let parts: Vec<(String, batchplan::CollisionModel)> = parts.collect::<PyResult<_>>()?;
+            let parts = Vec::<(String, batchplan::CollisionModel)>::from_py(parts)?;
             let named: Vec<(&str, &batchplan::CollisionModel)> =
                 parts.iter().map(|(p, m)| (p.as_str(), m)).collect();
             Ok(Self(batchplan::CollisionModel::assemble(&named)))
@@ -177,10 +172,10 @@ value_class! {
     }
 }
 
-crate::field::tuple_field!(batchplan::Part);
+tuple_field!(batchplan::Part, (String, batchplan::CollisionModel));
 
 value_class! {
-    /// How `Robot.load` builds a robot from its description.
+    /// How `Robot.load` and `Robot.assemble` build a robot from its description.
     RobotOptions(batchplan::RobotOptions) {
         /// Root of the planned tree; defaults to the description's root link.
         base_link: Option<String>,
