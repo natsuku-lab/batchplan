@@ -916,11 +916,13 @@ pub struct GraspOptions {
     /// How far the fingers reach past the IK frame along its z axis (meters), as
     /// [`Robot::tip`] measures it: 0.
     pub tip: f32,
-    /// A height the hand's frame and fingertips stay above, in the frame the object is placed in
-    /// (meters): the top of the table it stands on, and room to spare. A grasp from above that
-    /// would take them lower holds the object less deep, its frame above the object if need be,
-    /// and one that leaves less than `overlap` of the fingers in it is left out, as are grasps
-    /// from below. `None` for no floor.
+    /// A height the hand's frame and its open fingers stay above, in the frame the object is
+    /// placed in (meters): the top of the table it stands on, and room to spare, for the fingers'
+    /// thickness too. The fingers are taken `opening` apart and reaching `tip` past the frame, so
+    /// one sits lower where the closing direction is not level. A grasp from above that would take
+    /// them lower holds the object less deep, its frame above the object if need be, and one that
+    /// leaves less than `overlap` of the fingers in it is left out, as are grasps from below and
+    /// from the side whose lower finger would be under the floor. `None` for no floor.
     pub floor: Option<f32>,
     /// The least the fingers reach into the object, from their tips, in a grasp from above over a
     /// `floor` (meters): 1 cm, as MoveIt Grasps' minimum depth for the Panda. An object whose top
@@ -947,17 +949,18 @@ impl Default for GraspOptions {
 /// a box its size; a cylinder or capsule from `turns` directions around its side, closing around
 /// it or along it, and from `turns` turns at each end. With a `floor`, the object's pose places
 /// it: pass a world's obstacle as it stands. An `Error::Input` saying why where no grasp fits: the
-/// object is wider than the fingers open every way, or every grasp would take the fingertips
+/// object is wider than the fingers open every way, or every grasp would take the open fingers
 /// below the floor or hold less than `overlap` of them.
 pub fn grasps(object: &Obstacle, o: &GraspOptions) -> Result<Vec<Pose>> {
     ensure_input!(
         o.opening > 0.0
+            && o.opening.is_finite()
             && o.depth >= 0.0
             && o.turns > 0
             && o.tip.is_finite()
             && o.overlap > 0.0
             && o.overlap.is_finite(),
-        "grasps need a positive opening, a depth of at least 0, a turn, a finite tip and a finite positive overlap, got {} m, {} m, {}, {} m and {} m",
+        "grasps need a finite positive opening, a depth of at least 0, a turn, a finite tip and a finite positive overlap, got {} m, {} m, {}, {} m and {} m",
         o.opening,
         o.depth,
         o.turns,
@@ -977,25 +980,36 @@ pub fn grasps(object: &Obstacle, o: &GraspOptions) -> Result<Vec<Pose>> {
     let fits = |width: f32| width <= o.opening;
     let placed = object.pose();
     // The hand's z axis along `toward`, its fingers closing along `closing`, `depth` in from a
-    // surface `surface` from the frame's origin, or less where that takes the fingertips below the
-    // floor; none where that leaves less than `overlap` of the fingers in the object.
+    // surface `surface` from the frame's origin, or less where that takes the frame or an open
+    // finger below the floor; none where that leaves less than `overlap` of the fingers in the
+    // object.
     let mut fitting = 0;
     let mut grasp = |toward: Vec3, closing: Vec3, surface: f32| {
         fitting += 1;
         let rotation = Quat::from_mat3(&Mat3::from_cols(closing.cross(toward), closing, toward));
         let mut depth = o.depth.min(surface);
         if let Some(floor) = o.floor {
-            // The height of a point `reach` along the hand's z axis from its frame, at a depth `d`;
-            // the lowest of the frame and the fingertips sets how deep a grasp from above goes.
+            // The frame, and the lower open fingertip: `tip` along the hand's z axis and
+            // `opening / 2` across, lower where the closing direction is not level. `height` is
+            // that of a point `reach` along the z axis and `below` under it, at a depth `d`; the
+            // lowest sets how deep a grasp from above goes.
             let down = (placed.rotation * toward).z;
-            let height = |d: f32, reach: f32| placed.position.z + down * (d - surface + reach);
-            let lowest = if down < 0.0 { o.tip.max(0.0) } else { 0.0 };
-            if down < -1e-6 && height(depth, lowest) < floor {
-                depth = surface - lowest + (floor - placed.position.z) / down;
+            let spread = (placed.rotation * closing).z.abs() * o.opening / 2.0;
+            let points = [(0.0, 0.0), (o.tip, spread)];
+            let height = |d: f32, (reach, below): (f32, f32)| {
+                placed.position.z + down * (d - surface + reach) - below
+            };
+            if down < -1e-6 {
+                for (reach, below) in points {
+                    if height(depth, (reach, below)) < floor {
+                        depth = surface - reach + (floor + below - placed.position.z) / down;
+                    }
+                }
             }
             let shallow = down < -1e-6 && depth + o.tip < o.overlap;
+            let under = points.iter().any(|&p| height(depth, p) < floor - 1e-6);
             // From below, the rest of the hand would be lower still.
-            if down > 1e-6 || shallow || height(depth, lowest) < floor - 1e-6 {
+            if down > 1e-6 || shallow || under {
                 return None;
             }
         }
@@ -1060,8 +1074,9 @@ pub fn grasps(object: &Obstacle, o: &GraspOptions) -> Result<Vec<Pose>> {
             )
         } else {
             input!(
-                "no grasp keeps the hand above the floor at {:.3} m: each of the {fitting} that fit between the fingers would take the frame or the fingertips, {:.1} cm past it, lower, or hold less than {:.1} cm of the fingers",
+                "no grasp keeps the hand above the floor at {:.3} m: each of the {fitting} that fit between the fingers would take the frame or the open fingers, {:.1} cm apart and reaching {:.1} cm past it, lower, or hold less than {:.1} cm of the fingers",
                 o.floor.unwrap_or_default(),
+                o.opening * 100.0,
                 o.tip * 100.0,
                 o.overlap * 100.0
             )

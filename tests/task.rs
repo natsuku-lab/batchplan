@@ -1000,6 +1000,16 @@ fn grasps_fit_between_the_fingers_and_face_into_the_object() {
     assert_eq!(err, "a distance grid has no grasps");
 }
 
+/// The lowest of a grasp's frame and its open fingertips, `o.tip` past the frame and
+/// `o.opening` apart, with `object` placed as it stands.
+fn lowest(object: &Obstacle, grasp: &Pose, o: &GraspOptions) -> f32 {
+    let at = object.pose().mul_pose(*grasp);
+    let (out, closing) = (at.rotation * Vec3::Z, at.rotation * Vec3::Y);
+    let fingers =
+        [1.0, -1.0].map(|side| at.position + out * o.tip + closing * side * o.opening / 2.0);
+    fingers.iter().map(|p| p.z).fold(at.position.z, f32::min)
+}
+
 #[test]
 fn grasps_keep_the_hand_above_the_floor_or_say_why_there_are_none() {
     // A 2.5 cm cube on a table whose top is at z = 0, fingertips 12 mm past the frame.
@@ -1015,13 +1025,9 @@ fn grasps_keep_the_hand_above_the_floor_or_say_why_there_are_none() {
         at.mul_pose(*g).position.z + (at.rotation * g.rotation * Vec3::Z).z * reach
     };
     let down = |g: &Pose| (at.rotation * g.rotation * Vec3::Z).z;
-    assert!(
-        grasps
-            .iter()
-            .all(|g| height(g, 0.0) >= 0.002 - 1e-5 && height(g, o.tip) >= 0.002 - 1e-5)
-    );
-    // From above, as deep as keeps the fingertips at the floor; from the sides, the full depth;
-    // from below, none.
+    assert!(grasps.iter().all(|g| lowest(&cube, g, &o) >= 0.002 - 1e-5));
+    // From above, as deep as keeps the fingertips at the floor; from the sides, the full depth,
+    // closing level: closing upright, the lower finger would be in the table. From below, none.
     let from_above: Vec<&Pose> = grasps.iter().filter(|g| down(g) < -0.5).collect();
     assert_eq!(from_above.len(), 4);
     assert!(
@@ -1030,14 +1036,16 @@ fn grasps_keep_the_hand_above_the_floor_or_say_why_there_are_none() {
             .all(|g| (height(g, o.tip) - 0.002).abs() < 1e-5)
     );
     let from_sides: Vec<&Pose> = grasps.iter().filter(|g| down(g).abs() < 0.5).collect();
-    assert_eq!(from_sides.len(), 16);
+    assert_eq!(from_sides.len(), 8);
     let held = o.depth.min(0.0125);
+    let level = |g: &&Pose| (at.rotation * g.rotation * Vec3::Y).z.abs() < 1e-6;
     assert!(
         from_sides
             .iter()
-            .all(|g| (cube.distance(at.mul_pose(**g).position).value + held).abs() < 1e-4)
+            .all(|g| level(g)
+                && (cube.distance(at.mul_pose(**g).position).value + held).abs() < 1e-4)
     );
-    assert_eq!(grasps.len(), 20, "none from below");
+    assert_eq!(grasps.len(), 12, "none from below");
     // With no floor, every face's grasps at the full depth, the fingertips in the table.
     let anywhere = batchplan::grasps(&cube, &GraspOptions { floor: None, ..o }).unwrap();
     assert_eq!(anywhere.len(), 24);
@@ -1096,7 +1104,7 @@ fn a_flat_box_is_grasped_from_above_by_as_much_of_the_fingers_as_reaches_in() {
             .iter()
             .all(|g| (height(g, o.tip) - 0.005).abs() < 1e-5 && height(g, 0.0) > top)
     );
-    assert_eq!(grasps.len(), 14, "12 from the sides");
+    assert_eq!(grasps.len(), 6, "4 from the sides, closing level");
     // Asked to hold more of the fingers than reach in, none from above.
     let deeper = GraspOptions {
         overlap: top - 0.005 + 1e-3,
@@ -1104,10 +1112,16 @@ fn a_flat_box_is_grasped_from_above_by_as_much_of_the_fingers_as_reaches_in() {
     };
     let grasps = batchplan::grasps(&object, &deeper).unwrap();
     assert!(grasps.iter().all(|g| down(g) > -0.5), "{grasps:?}");
-    assert_eq!(grasps.len(), 12);
-    // An overlap must be positive and finite, and the object one that can be checked.
-    for overlap in [-0.01, 0.0, f32::NAN, f32::INFINITY] {
-        let bad = GraspOptions { overlap, ..o };
+    assert_eq!(grasps.len(), 4);
+    // An overlap and an opening must be positive and finite, and the object one that can be
+    // checked.
+    let wrong = [-0.01, 0.0, f32::NAN, f32::INFINITY].map(|bad| [(bad, 0.08), (0.01, bad)]);
+    for (overlap, opening) in wrong.concat() {
+        let bad = GraspOptions {
+            overlap,
+            opening,
+            ..o
+        };
         assert!(matches!(
             batchplan::grasps(&object, &bad),
             Err(Error::Input(_))
@@ -1252,6 +1266,52 @@ fn a_flat_package_on_a_table_is_picked_from_above_by_its_top() {
             "{name}: {failure}"
         );
         assert!(pick(&from_above).is_ok(), "{name}");
+    }
+}
+
+#[test]
+fn a_bar_over_a_plate_is_gripped_tilted_with_the_open_fingers_kept_off_the_plate() {
+    // A bar 1 cm in radius lying along y, its top 3.7 cm over the plate, as a drawer's handle out
+    // of its front. Tilted about the bar, an open finger swings down toward the plate.
+    let robot = panda();
+    let (tip, floor) = (robot.tip(0), 0.005);
+    let middle = Vec3::new(0.5, 0.1, 0.027);
+    let bar = Obstacle::cylinder(middle, 0.01, 0.06)
+        .placed(Pose::new(middle, Quat::from_rotation_x(PI / 2.0)));
+    let o = GraspOptions {
+        tip,
+        floor: Some(floor),
+        turns: 16,
+        ..GraspOptions::default()
+    };
+    let grasps = batchplan::grasps(&bar, &o).unwrap();
+    assert!(grasps.iter().all(|g| lowest(&bar, g, &o) >= floor - 1e-5));
+    let down = |g: &Pose| (bar.pose().rotation * g.rotation * Vec3::Z).z;
+    let tilted: Vec<Pose> = grasps
+        .iter()
+        .copied()
+        .filter(|g| (-0.99..-0.01).contains(&down(g)))
+        .collect();
+    assert!(!tilted.is_empty(), "{grasps:?}");
+    // Held as far out as keeps the lower finger at the floor, and no farther.
+    assert!(
+        tilted
+            .iter()
+            .all(|g| (lowest(&bar, g, &o) - floor).abs() < 1e-5)
+    );
+    let world = World::new(vec![scene(vec![]).obstacles[TABLE].clone(), bar]);
+    for device in devices(&robot) {
+        let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
+        let task = Pick {
+            support: vec![TABLE],
+            ..Pick::new(0, robot.default_q(), 1, tilted.clone())
+        };
+        let outcome = batchplan::pick(&device, &worlds, &[task], &TaskOptions::default())
+            .unwrap()
+            .outcomes
+            .remove(0);
+        let through = outcome.unwrap_or_else(|f| panic!("{}: {f}", device.name()));
+        assert_eq!(through.len(), tilted.len(), "{}", device.name());
     }
 }
 

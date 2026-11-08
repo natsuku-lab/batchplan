@@ -33,6 +33,16 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   repeated on every tick of the stop while it is clear, and what the robot collides with at
   `at`. A graze a GPU device's check finds just outside what its CPU threads list names the
   nearest within 0.1 mm. They said only that something collided. `Stopping` was a unit variant.
+- **Breaking:** `grasps` keeps the open fingers above `GraspOptions::floor` too, `opening` apart
+  and reaching `tip` past the frame, where it kept only the frame and the point between the
+  fingertips. A grasp tilted about a bar over a support, as a drawer's handle, swung one open
+  finger into it: of a bar whose top is 3.7 cm over a plate, every one of the 12 grasps tilted
+  from above at 16 turns put a Panda's finger into the plate. They are now held as far out as
+  keeps the finger over the floor, and left out where that holds less than `overlap`: the 4 left
+  all pick it. Grasps from the side that close upright on an object standing on the table, their
+  lower finger below the table's top, are left out too, so an object only those fit, such as a
+  box too wide across its top to grasp from above, gets an `Error::Input` where it got them. An
+  infinite `opening` is an `Error::Input`.
 
 ### Fixed
 
