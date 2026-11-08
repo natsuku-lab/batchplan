@@ -165,33 +165,59 @@ impl Held {
     }
 }
 
-/// A device for `robot` holding each of `helds`, built in parallel. Each object is fitted once, in
-/// its own frame, and its spheres placed by each grasp of it, where attaching each would fit them
-/// again.
+/// A device for `robot` holding each of `helds`, built in parallel, its spheres as [`Fitted`]
+/// fits them.
 fn holders(device: &Device, robot: &Robot, helds: &[&Held]) -> Result<Vec<Device>> {
-    // Each object at its own origin, as `Held::attachment` places it, with the options it fits by.
-    let mut objects: Vec<(Obstacle, SphereOptions)> = vec![];
-    let mut object_of = Vec::with_capacity(helds.len());
-    for held in helds {
-        let object = held.object.placed(Pose::IDENTITY);
-        let options = held.attachment(robot)?.spheres;
-        object_of.push(match objects.iter().position(|(o, _)| *o == object) {
-            Some(k) => k,
-            None => {
-                objects.push((object, options));
-                objects.len() - 1
-            }
-        });
-    }
+    let fitted = Fitted::new(device, robot, helds)?;
     device.install(|| {
-        let fitted: Vec<Vec<[f32; 4]>> = objects
-            .par_iter()
-            .map(|(object, options)| robot::object_spheres(std::slice::from_ref(object), options))
-            .collect::<Result<_>>()?;
-        let each = helds.par_iter().zip(&object_of);
-        each.map(|(held, &k)| device.with_robot(&held.holding(robot, &fitted[k])?))
+        let each = helds.par_iter().enumerate();
+        each.map(|(k, held)| fitted.holder(device, robot, k, held))
             .collect()
     })
+}
+
+/// Held objects' spheres: each object fitted once, in its own frame, to be placed by each grasp of
+/// it where attaching each would fit them again.
+struct Fitted {
+    /// Per object, its spheres.
+    spheres: Vec<Vec<[f32; 4]>>,
+    /// Per held object, which of them it has.
+    object_of: Vec<usize>,
+}
+
+impl Fitted {
+    /// Fits each object among `helds` once, in parallel.
+    fn new(device: &Device, robot: &Robot, helds: &[&Held]) -> Result<Self> {
+        // Each object at its own origin, as `Held::attachment` places it, with the options it fits
+        // by.
+        let mut objects: Vec<(Obstacle, SphereOptions)> = vec![];
+        let mut object_of = Vec::with_capacity(helds.len());
+        for held in helds {
+            let object = held.object.placed(Pose::IDENTITY);
+            let options = held.attachment(robot)?.spheres;
+            object_of.push(match objects.iter().position(|(o, _)| *o == object) {
+                Some(k) => k,
+                None => {
+                    objects.push((object, options));
+                    objects.len() - 1
+                }
+            });
+        }
+        let spheres = device.install(|| {
+            objects
+                .par_iter()
+                .map(|(object, options)| {
+                    robot::object_spheres(std::slice::from_ref(object), options)
+                })
+                .collect::<Result<_>>()
+        })?;
+        Ok(Self { spheres, object_of })
+    }
+
+    /// A device for `robot` holding `held`, the `k`th of the held objects fitted.
+    fn holder(&self, device: &Device, robot: &Robot, k: usize, held: &Held) -> Result<Device> {
+        device.with_robot(&held.holding(robot, &self.spheres[self.object_of[k]])?)
+    }
 }
 
 /// How [`pick`] and [`place`] solve, follow, plan and time their steps.
@@ -491,7 +517,8 @@ pub fn pick(
             }
         }
         let holding: Vec<&Held> = alike.iter().map(|(h, _)| h).collect();
-        let holders = holders(device, robot, &holding)?;
+        let fitted = Fitted::new(device, robot, &holding)?;
+        let holder = |k: usize, held: &Held| fitted.holder(device, robot, k, held);
         // The worlds a hand lifts in: each without its object, the held link of that hand's
         // tasks touching their supports.
         let lifting = |hand: usize| {
@@ -511,19 +538,30 @@ pub fn pick(
                 .collect::<Result<Vec<World>>>()
         };
         let mut lifted: Vec<(usize, Worlds)> = vec![];
-        for ((holding, _), holder) in alike.iter().zip(&holders) {
+        for (k, (holding, _)) in alike.iter().enumerate() {
             if lifted.iter().all(|(hand, _)| *hand != holding.hand) {
-                lifted.push((holding.hand, holder.upload(&lifting(holding.hand)?)?));
+                lifted.push((
+                    holding.hand,
+                    holder(k, holding)?.upload(&lifting(holding.hand)?)?,
+                ));
             }
         }
         device.install(|| {
-            let groups = alike.par_iter_mut().zip(&holders);
-            groups.try_for_each(|((holding, group), holder)| {
+            let groups = alike.par_iter_mut().enumerate();
+            groups.try_for_each(|(k, (holding, group))| {
                 let (_, uploaded) = lifted
                     .iter()
                     .find(|(hand, _)| *hand == holding.hand)
                     .expect("every hand that lifts has its worlds");
-                straight(holder, uploaded, group, &by_task, Leg::Away, o)?;
+                // Built where it is used, so that building one overlaps the other groups' moves.
+                straight(
+                    &holder(k, holding)?,
+                    uploaded,
+                    group,
+                    &by_task,
+                    Leg::Away,
+                    o,
+                )?;
                 // Contacts name obstacles as the task's world does, which still holds the object.
                 for c in group.iter_mut() {
                     let object = tasks[c.task].object;

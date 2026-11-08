@@ -27,6 +27,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Fixed
 
+- `pick` builds each holding device where it moves with it again, so building one overlaps the
+  other grasps' moves. 0.10.0 built them all first, which cost picks on a GPU device about 1.5%:
+  64 picks of the tasks example (`cargo run --release --example tasks -- 64`) took 185.5 ms on
+  an M4 Pro and take 183.2 ms now, against 181.5 ms in 0.9.0 (medians of seven alternated runs).
+  The rest of that gap is in grasping and moving in, whose code did not change.
 - `grasps` refuses an object whose size is negative or not finite, or whose rotation is not a
   unit quaternion, naming it, as uploading a world does.
 
