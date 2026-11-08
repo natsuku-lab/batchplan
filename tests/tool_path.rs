@@ -38,6 +38,7 @@ fn path(robot: &Robot, waypoints: Vec<Pose>) -> ToolPath {
         start: robot.default_q().to_vec(),
         hand: 0,
         waypoints,
+        holding: None,
     }
 }
 
@@ -278,6 +279,7 @@ fn the_motion_through_a_singularity_stays_on_the_line() {
             start: start.clone(),
             hand: 0,
             waypoints: vec![to],
+            holding: None,
         };
         for (iterations, through) in [(300, false), (1000, true)] {
             let o = ToolPathOptions {

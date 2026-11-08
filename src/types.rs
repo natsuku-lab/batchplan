@@ -35,6 +35,13 @@ impl Pose {
         }
     }
 
+    /// Whether it is finite with a unit rotation (to 1e-3).
+    pub(crate) fn is_unit(&self) -> bool {
+        self.position.is_finite()
+            && self.rotation.is_finite()
+            && (self.rotation.length() - 1.0).abs() < 1e-3
+    }
+
     /// The frame this pose is given in, in this pose's frame.
     #[must_use]
     pub fn inverse(self) -> Pose {

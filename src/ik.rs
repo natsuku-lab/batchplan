@@ -8,7 +8,9 @@
 use crate::error::{Result, ensure_input, input};
 
 use crate::device::{self, CollisionWeights, Contact, Device, Worlds};
+use crate::held::{self, Held};
 use crate::rng::Rng;
+use crate::robot::Robot;
 use crate::types::{Pose, Solved};
 
 /// How [`solve_ik`] searches.
@@ -75,11 +77,14 @@ pub struct IkProblem {
     /// Joints that stay where the seed has them, in every seed, even where a targeted hand moves
     /// on them: a mobile base placed beside a table while its arms reach.
     pub hold: Vec<usize>,
+    /// An object a hand holds, as a pick leaves it: checked as part of the robot, as attaching it
+    /// ([`Held::attachment`]) would check it. `None` holds nothing.
+    pub holding: Option<Held>,
 }
 
 impl IkProblem {
     /// A one-handed robot's hand at `target` in world `world`, seeded from its default
-    /// configuration.
+    /// configuration, holding nothing.
     #[must_use]
     pub fn new(world: u32, target: Pose) -> Self {
         Self {
@@ -87,6 +92,7 @@ impl IkProblem {
             targets: vec![Some(target)],
             seed: None,
             hold: Vec::new(),
+            holding: None,
         }
     }
 }
@@ -117,6 +123,46 @@ pub struct IkResult {
 }
 
 impl IkResult {
+    /// The results for groups of `problems` (`parts`, each with its problems' indices), as one.
+    fn gather(
+        problems: &[IkProblem],
+        dof: usize,
+        seeds: usize,
+        parts: Vec<(Vec<usize>, Self)>,
+    ) -> Self {
+        let mut parts = parts;
+        if parts.len() == 1 && parts[0].0.len() == problems.len() {
+            let (_, whole) = parts.remove(0);
+            return whole;
+        }
+        let items = problems.len() * seeds;
+        let mut out = Self {
+            problems: problems.to_vec(),
+            dof,
+            seeds,
+            q: vec![0.0; items * dof],
+            position_error: vec![0.0; items],
+            rotation_error: vec![0.0; items],
+            world_clearance: vec![0.0; items],
+            self_clearance: vec![0.0; items],
+            success: vec![false; items],
+        };
+        for (mine, part) in parts {
+            for (k, &p) in mine.iter().enumerate() {
+                let (to, from) = (p * seeds..(p + 1) * seeds, k * seeds..(k + 1) * seeds);
+                out.q[to.start * dof..to.end * dof]
+                    .copy_from_slice(&part.q[from.start * dof..from.end * dof]);
+                out.position_error[to.clone()].copy_from_slice(&part.position_error[from.clone()]);
+                out.rotation_error[to.clone()].copy_from_slice(&part.rotation_error[from.clone()]);
+                out.world_clearance[to.clone()]
+                    .copy_from_slice(&part.world_clearance[from.clone()]);
+                out.self_clearance[to.clone()].copy_from_slice(&part.self_clearance[from.clone()]);
+                out.success[to].copy_from_slice(&part.success[from]);
+            }
+        }
+        out
+    }
+
     /// Item `item`'s configuration.
     #[must_use]
     pub fn solution(&self, item: usize) -> &[f32] {
@@ -233,15 +279,24 @@ pub fn failures(
             }
         }
     }
-    let item_world: Vec<u32> = colliding.iter().map(|&(_, w, _)| w).collect();
-    let q: Vec<f32> = colliding.iter().flat_map(|&(_, _, q)| q).copied().collect();
-    let contacts = device.contacts(worlds, &item_world, &q, 0.0)?;
+    // What each collides with, holding what its problem holds.
+    let holds: Vec<Option<&Held>> = colliding
+        .iter()
+        .map(|&(p, _, _)| result.problems[p].holding.as_ref())
+        .collect();
+    let parts = held::by_hold(device, &holds, |on, mine| {
+        let item_world: Vec<u32> = mine.iter().map(|&k| colliding[k].1).collect();
+        let q: Vec<f32> = mine.iter().flat_map(|&k| colliding[k].2).copied().collect();
+        on.contacts(worlds, &item_world, &q, 0.0)
+    })?;
     let mut out: Vec<Option<IkFailure>> = vec![None; result.problems.len()];
     for &p in &failed {
         out[p] = Some(IkFailure::Unreachable);
     }
-    for ((p, _, _), contacts) in colliding.into_iter().zip(contacts) {
-        out[p] = Some(IkFailure::Collides { contacts });
+    for (mine, contacts) in parts {
+        for (&k, contacts) in mine.iter().zip(contacts) {
+            out[colliding[k].0] = Some(IkFailure::Collides { contacts });
+        }
     }
     Ok(out)
 }
@@ -259,14 +314,30 @@ fn reaching(result: &IkResult, problem: usize, o: &IkOptions) -> Option<usize> {
 }
 
 /// Seed 0 starts from the problem's seed or else the robot's default configuration, the rest with
-/// the joints the targeted hands move drawn uniformly within joint limits.
+/// the joints the targeted hands move drawn uniformly within joint limits. Problems that hold an
+/// object ([`IkProblem::holding`]) run as a batch for each object and grasp, in parallel, on the
+/// device's hardware; `device` must not hold one in that hand already.
 pub fn solve_ik(
     device: &Device,
     worlds: &Worlds,
     problems: &[IkProblem],
     o: &IkOptions,
 ) -> Result<IkResult> {
-    let robot = device.robot();
+    check(device.robot(), worlds, problems, o)?;
+    let holds: Vec<Option<&Held>> = problems.iter().map(|p| p.holding.as_ref()).collect();
+    let parts = held::by_hold(device, &holds, |on, items| {
+        solved(on, worlds, &held::subset(problems, items), o)
+    })?;
+    Ok(IkResult::gather(
+        problems,
+        device.robot().dof(),
+        o.seeds,
+        parts,
+    ))
+}
+
+/// Whether `problems` and `o` can be solved for `robot` in `worlds`.
+fn check(robot: &Robot, worlds: &Worlds, problems: &[IkProblem], o: &IkOptions) -> Result<()> {
     let n = robot.dof();
     ensure_input!(o.seeds > 0, "need at least one seed");
     let positive = |v: f32| v.is_finite() && v > 0.0;
@@ -283,15 +354,16 @@ pub fn solve_ik(
             p.targets.len() == hands && p.targets.iter().any(Option::is_some),
             "IK problem {i}: needs a target, or None, for each of the robot's {hands} hands, and at least one target"
         );
-        for target in p.targets.iter().flatten() {
-            let (position, rotation) = (target.position, target.rotation);
-            ensure_input!(
-                position.is_finite()
-                    && rotation.is_finite()
-                    && (rotation.length() - 1.0).abs() < 1e-3,
-                "IK problem {i}: targets need a finite position and a unit-quaternion rotation"
-            );
-        }
+        ensure_input!(
+            (p.world as usize) < worlds.len(),
+            "IK problem {i} references world {} of {}",
+            p.world,
+            worlds.len()
+        );
+        ensure_input!(
+            p.targets.iter().flatten().all(Pose::is_unit),
+            "IK problem {i}: targets need a finite position and a unit-quaternion rotation"
+        );
         if let Some(seed) = &p.seed {
             ensure_input!(
                 seed.len() == n && seed.iter().all(|v| v.is_finite()),
@@ -303,7 +375,23 @@ pub fn solve_ik(
                 "IK problem {i}: holds joint {j} of a robot with {n}"
             ));
         }
+        if let Some(held) = &p.holding {
+            held.check(robot, worlds, &format!("IK problem {i}"))?;
+        }
     }
+    Ok(())
+}
+
+/// [`solve_ik`] for `problems`, checked, holding what `device` holds.
+fn solved(
+    device: &Device,
+    worlds: &Worlds,
+    problems: &[IkProblem],
+    o: &IkOptions,
+) -> Result<IkResult> {
+    let robot = device.robot();
+    let n = robot.dof();
+    let hands = robot.hands();
     let items = problems.len() * o.seeds;
     let mut q = Vec::with_capacity(items * n);
     let mut item_world = Vec::with_capacity(items);

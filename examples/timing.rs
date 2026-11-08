@@ -97,6 +97,7 @@ fn main() -> Result<()> {
                 start,
                 hand: 0,
                 waypoints: vec![Pose::new(to, pose.rotation)],
+                holding: None,
             }
         })
         .collect();

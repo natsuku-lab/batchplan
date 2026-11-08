@@ -21,9 +21,9 @@ use crate::constraint::{self, HandConstraint};
 use crate::device::{Contact, Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Search, Wanted};
 use crate::error::{Result, ensure_input, input};
+use crate::held::{self, Fitted, Held};
 use crate::ik::{self, IkFailure, IkOptions, IkProblem, IkResult};
-use crate::robot::{self, AttachedObject, Robot};
-use crate::spheres::SphereOptions;
+use crate::robot::Robot;
 use crate::timing::{HandSpeed, Trajectory};
 use crate::tool_path::{self, ToolPath, ToolPathOptions, ToolPathStop};
 use crate::trajopt::{self, PlanOptions, PlanProblem};
@@ -120,103 +120,6 @@ impl Place {
             support: vec![],
             constraints: vec![],
         }
-    }
-}
-
-/// An object a hand holds.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Held {
-    /// The hand holding it.
-    pub hand: usize,
-    /// Its shape in its own frame: centered at the origin, unrotated.
-    pub object: Obstacle,
-    /// The hand's IK frame in the object's frame: the grasp that holds it.
-    pub grasp: Pose,
-}
-
-impl Held {
-    /// The object as `robot` holds it, for [`Robot::attach`]: fixed to the hand's IK frame as the
-    /// link `"held by hand {hand}"`, and free to touch the hand's links ([`Robot::hand_links`]).
-    pub fn attachment(&self, robot: &Robot) -> Result<AttachedObject> {
-        ensure_input!(
-            self.hand < robot.hands(),
-            "hand {} of {}",
-            self.hand,
-            robot.hands()
-        );
-        Ok(AttachedObject {
-            name: held_link(self.hand),
-            link: robot.links[robot.ee_links[self.hand]].name.clone(),
-            shapes: vec![self.object.placed(self.grasp.inverse())],
-            touch_links: robot
-                .hand_links(self.hand)
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            spheres: Default::default(),
-        })
-    }
-
-    /// `robot` holding the object as [`Held::attachment`] attaches it, with `spheres` fitted to
-    /// the object in its own frame and placed by the grasp, as attaching it would place them.
-    fn holding(&self, robot: &Robot, spheres: &[[f32; 4]]) -> Result<Robot> {
-        let placed = robot::placed_spheres(spheres, self.grasp.inverse());
-        robot.attach_with(&self.attachment(robot)?, || Ok(placed))
-    }
-}
-
-/// A device for `robot` holding each of `helds`, built in parallel, its spheres as [`Fitted`]
-/// fits them.
-fn holders(device: &Device, robot: &Robot, helds: &[&Held]) -> Result<Vec<Device>> {
-    let fitted = Fitted::new(device, robot, helds)?;
-    device.install(|| {
-        let each = helds.par_iter().enumerate();
-        each.map(|(k, held)| fitted.holder(device, robot, k, held))
-            .collect()
-    })
-}
-
-/// Held objects' spheres: each object fitted once, in its own frame, to be placed by each grasp of
-/// it where attaching each would fit them again.
-struct Fitted {
-    /// Per object, its spheres.
-    spheres: Vec<Vec<[f32; 4]>>,
-    /// Per held object, which of them it has.
-    object_of: Vec<usize>,
-}
-
-impl Fitted {
-    /// Fits each object among `helds` once, in parallel.
-    fn new(device: &Device, robot: &Robot, helds: &[&Held]) -> Result<Self> {
-        // Each object at its own origin, as `Held::attachment` places it, with the options it fits
-        // by.
-        let mut objects: Vec<(Obstacle, SphereOptions)> = vec![];
-        let mut object_of = Vec::with_capacity(helds.len());
-        for held in helds {
-            let object = held.object.placed(Pose::IDENTITY);
-            let options = held.attachment(robot)?.spheres;
-            object_of.push(match objects.iter().position(|(o, _)| *o == object) {
-                Some(k) => k,
-                None => {
-                    objects.push((object, options));
-                    objects.len() - 1
-                }
-            });
-        }
-        let spheres = device.install(|| {
-            objects
-                .par_iter()
-                .map(|(object, options)| {
-                    robot::object_spheres(std::slice::from_ref(object), options)
-                })
-                .collect::<Result<_>>()
-        })?;
-        Ok(Self { spheres, object_of })
-    }
-
-    /// A device for `robot` holding `held`, the `k`th of the held objects fitted.
-    fn holder(&self, device: &Device, robot: &Robot, k: usize, held: &Held) -> Result<Device> {
-        device.with_robot(&held.holding(robot, &self.spheres[self.object_of[k]])?)
     }
 }
 
@@ -529,7 +432,7 @@ pub fn pick(
                     w.remove(t.object)?;
                     if t.hand == hand {
                         let shifted = |s: usize| if s > t.object { s - 1 } else { s };
-                        let link = held_link(hand);
+                        let link = held::held_link(hand);
                         let touches = t.support.iter().map(|&s| Touch::new(shifted(s), [&link]));
                         w.touch.extend(touches);
                     }
@@ -642,21 +545,7 @@ pub fn place(
                 ));
             }
         }
-        let link = held_link(t.held.hand);
-        ensure_input!(
-            robot.links.iter().all(|l| l.name != link),
-            "task {i}: the robot already has '{link}': place with the device that does not hold it"
-        );
-        ensure_input!(
-            !matches!(t.held.object, Obstacle::Sdf { .. }),
-            "task {i}: the held object is a distance grid, which cannot be held"
-        );
-        // In its own frame, as it is attached and set down.
-        let object = t.held.object.placed(Pose::IDENTITY);
-        object
-            .check()
-            .map_err(|e| input!("task {i}: the held object: {e}, got {:?}", t.held.object))?;
-        check_poses(i, "held grasp", std::slice::from_ref(&t.held.grasp))?;
+        t.held.check(robot, worlds, &format!("task {i}"))?;
         check_poses(i, "pose", &t.poses)?;
         ensure_input!(
             t.lower.is_finite()
@@ -683,7 +572,7 @@ pub fn place(
         };
         holder_of.push(h);
     }
-    let holders = holders(device, robot, &helds)?;
+    let holders = held::holders(device, robot, &helds)?;
     let mut candidates = vec![];
     for (t, task) in tasks.iter().enumerate() {
         for (index, &pose) in task.poses.iter().enumerate() {
@@ -725,7 +614,7 @@ pub fn place(
             .map(|t| {
                 let mut w = worlds[t.world as usize].clone();
                 if t.held.hand == hand {
-                    let link = held_link(hand);
+                    let link = held::held_link(hand);
                     w.touch
                         .extend(t.support.iter().map(|&s| Touch::new(s, [&link])));
                 }
@@ -1262,6 +1151,7 @@ fn solve(
                 .collect(),
             seed: Some(c.rest.clone()),
             hold: vec![],
+            holding: None,
         })
         .collect();
     ik::solve_ik(device, worlds, &problems, o)
@@ -1405,6 +1295,7 @@ fn straight(
                 Leg::In => c.poses[0],
                 Leg::Away => c.poses[2],
             }],
+            holding: None,
         })
         .collect();
     let result = tool_path::follow(device, worlds, &paths, &o.tool_path)?;
@@ -1547,11 +1438,6 @@ pub(crate) fn fingers(robot: &Robot, hand: usize) -> Vec<&str> {
     }
 }
 
-/// The link the object hand `hand` holds becomes.
-fn held_link(hand: usize) -> String {
-    format!("held by hand {hand}")
-}
-
 /// What `task`'s grasp `index` leaves the hand holding.
 fn held(task: &Pick, worlds: &Worlds, index: usize) -> Held {
     Held {
@@ -1573,19 +1459,12 @@ pub(crate) fn behind(pose: Pose, distance: f32) -> Pose {
 /// rotation.
 fn check_poses(i: usize, what: &str, poses: &[Pose]) -> Result<()> {
     ensure_input!(!poses.is_empty(), "task {i} has no {what}s");
-    if let Some((k, p)) = poses.iter().enumerate().find(|(_, p)| !unit(p)) {
+    if let Some((k, p)) = poses.iter().enumerate().find(|(_, p)| !p.is_unit()) {
         return Err(input!(
             "task {i}: {what} {k} must be finite with a unit rotation, got {p:?}"
         ));
     }
     Ok(())
-}
-
-/// Whether `pose` is finite with a unit rotation.
-fn unit(pose: &Pose) -> bool {
-    pose.position.is_finite()
-        && pose.rotation.is_finite()
-        && (pose.rotation.length() - 1.0).abs() < 1e-3
 }
 
 fn check_options(o: &TaskOptions) -> Result<()> {
@@ -1652,76 +1531,4 @@ fn check_support(i: usize, world: &World, support: &[usize], object: Option<usiz
         ));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use super::*;
-    use crate::robot::{CollisionModel, RobotOptions};
-
-    /// Pick and place hold each object as attaching [`Held::attachment`] holds it, collision model
-    /// and all: a cylinder and a capsule, each at two grasps whose rotations are not their own
-    /// inverses, fitted once each.
-    #[test]
-    fn holders_hold_an_object_as_attaching_it_does() {
-        let fingers = [
-            ("panda_finger_joint1".to_string(), 0.04),
-            ("panda_finger_joint2".to_string(), 0.04),
-        ];
-        let options = RobotOptions {
-            ee_links: vec!["ee_link".into()],
-            lock_joints: HashMap::from(fingers),
-            collision_model: Some(
-                CollisionModel::load("assets/franka/panda_collision.json").unwrap(),
-            ),
-            ..Default::default()
-        };
-        let robot = Robot::load("assets/franka/franka_panda.urdf", &options).unwrap();
-        let device = Device::cpu(&robot).unwrap();
-        let objects = [
-            Obstacle::Cylinder {
-                center: Vec3::ZERO,
-                rotation: Quat::IDENTITY,
-                radius: 0.03,
-                half_height: 0.06,
-            },
-            Obstacle::Capsule {
-                center: Vec3::ZERO,
-                rotation: Quat::IDENTITY,
-                radius: 0.025,
-                half_length: 0.04,
-            },
-        ];
-        let grasps = [
-            Pose::new(
-                Vec3::new(0.01, -0.02, 0.03),
-                Quat::from_rotation_x(1.1) * Quat::from_rotation_y(0.4),
-            ),
-            Pose::new(
-                Vec3::new(0.0, 0.01, -0.02),
-                Quat::from_rotation_z(2.0) * Quat::from_rotation_x(0.7),
-            ),
-        ];
-        let helds: Vec<Held> = objects
-            .iter()
-            .flat_map(|object| {
-                grasps.map(|grasp| Held {
-                    hand: 0,
-                    object: object.clone(),
-                    grasp,
-                })
-            })
-            .collect();
-        let held_refs: Vec<&Held> = helds.iter().collect();
-        let holding = holders(&device, &robot, &held_refs).unwrap();
-        for (held, holder) in helds.iter().zip(&holding) {
-            let attached = robot.attach(&held.attachment(&robot).unwrap()).unwrap();
-            assert!(
-                holder.robot().collision_model() == attached.collision_model(),
-                "{held:?}"
-            );
-        }
-    }
 }

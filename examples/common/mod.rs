@@ -429,6 +429,7 @@ pub fn tray_grip(
         targets: vec![Some(left), Some(right)],
         seed: Some(seed.to_vec()),
         hold: vec![],
+        holding: None,
     };
     let solved = batchplan::solve_ik(device, worlds, &[problem], &IkOptions::default())?;
     Ok(solved.nearest(0, seed).map(<[f32]>::to_vec))

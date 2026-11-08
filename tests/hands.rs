@@ -107,6 +107,7 @@ fn ik_reaches_both_hands_targets_at_once() {
             targets: vec![Some(robot.ee_pose(q, 0)), Some(robot.ee_pose(q, 1))],
             seed: None,
             hold: vec![],
+            holding: None,
         })
         .collect();
     let o = IkOptions::default();
@@ -165,6 +166,7 @@ fn the_collision_push_keeps_both_hands_at_their_targets() {
         targets: vec![Some(robot.ee_pose(&q, 0)), Some(robot.ee_pose(&q, 1))],
         seed: Some(q.clone()),
         hold: vec![],
+        holding: None,
     };
     let o = IkOptions {
         seeds: 1,
@@ -221,6 +223,7 @@ fn the_collision_push_keeps_both_hands_at_their_targets() {
         targets: vec![Some(robot.ee_pose(&q, 0)), Some(robot.ee_pose(&q, 1))],
         seed: Some(q.clone()),
         hold: vec![],
+        holding: None,
     };
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
@@ -263,6 +266,7 @@ fn ik_holds_the_joints_a_problem_names() {
                         .collect(),
                     seed: Some(seed.clone()),
                     hold: hold.clone(),
+                    holding: None,
                 }
             })
             .collect();
@@ -335,6 +339,7 @@ fn ik_solves_hands_that_share_joints_together() {
             targets: vec![Some(robot.ee_pose(q, 0)), Some(robot.ee_pose(q, 1))],
             seed: None,
             hold: vec![],
+            holding: None,
         })
         .collect();
     let o = IkOptions::default();
@@ -384,6 +389,7 @@ fn a_hand_without_a_target_holds_its_arm() {
             targets: vec![Some(robot.ee_pose(&w[1], 0)), None],
             seed: Some(w[0].clone()),
             hold: vec![],
+            holding: None,
         })
         .collect();
     for d in devices(&robot) {
@@ -425,6 +431,7 @@ fn reach_demonstrations_need_a_first_hand_target() {
         targets: vec![None, Some(robot.ee_pose(robot.default_q(), 1))],
         seed: None,
         hold: vec![],
+        holding: None,
     }];
     let err = datagen::demonstrations(&cpu, &worlds, &goals, &DemoOptions::default()).unwrap_err();
     assert!(
@@ -482,6 +489,7 @@ fn over_the_wall(robot: &Robot, cpu: &Device) -> (World, Vec<PlanProblem>) {
                 start_motion: None,
                 hold: right.clone(),
                 constraints: vec![],
+                holding: None,
             }
         })
         .collect();

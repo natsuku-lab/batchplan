@@ -273,6 +273,7 @@ fn main() -> Result<()> {
                         }),
                         hold: vec![],
                         constraints: vec![],
+                        holding: None,
                     })
                     .collect();
                 let options = PlanOptions {

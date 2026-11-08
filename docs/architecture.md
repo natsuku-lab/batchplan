@@ -42,6 +42,7 @@ src/
 ├── tool_path.rs     # follow: the hand in straight lines through poses
 ├── join.rs          # join: consecutive motions without stopping between them
 ├── task.rs          # pick and place: a whole task in one call
+├── held.rs          # Held: a held object's spheres, its devices, problems grouped by hold
 ├── timing.rs        # Trajectory: a path timed within the limits; stops; moving starts
 ├── topp.rs          # time-optimal timing (TOPP-RA), smoothed for jerk
 ├── live.rs          # Follower and servo: running a motion while the world changes
@@ -124,6 +125,7 @@ The robot is a set of spheres; obstacles are boxes, spheres, cylinders, capsules
 - **`follow`** splits a path into poses a step apart and solves each by damped least squares from the configuration before, halving a step whose joint motion strays from the path; eight halvings is a jump. A spline then passes through the configurations, checked densely; a collision cuts the motion back.
 - **`join`** blends consecutive rest-to-rest paths: it drops the control points around each join within the blend radius at the hand, bridges the gap with a curve tangent to both paths whose curvature rises from zero, and checks only the spans that changed. A blend is kept only where it makes the stretch so far and the next motion finish sooner than stopping between them, so no stretch takes longer than its motions apart. Paths are first split at their spans' middles (the same curve) until they are spaced alike, because timing follows a path best where its pace is even.
 - **`pick` and `place`** run every task's grasps or place poses as candidates through the same steps, each one batch across every task: start, IK at the grasp or release, the straight move in (followed backward), the straight move away, the planned transit. Each step allows only its own contacts (the fingers on the object, the held object on its support). A held object is a link attached to the robot, so lifts and carries run on a device for the holding robot. Each object's spheres are fitted once, in its own frame, and placed by each grasp of it, where attaching it at each grasp would fit it again.
+- **Holding per problem.** `plan`, `solve_ik` and `follow` check every problem, then group them by `holding` (`held::by_hold`) and run each group on a device holding its object, made with `with_robot`, in parallel, gathering the results back in the problems' order. Seeds come from each problem's own values, so a group gives each problem what a batch of it alone would. A device keeps the spheres fitted to the latest 64 held objects (`held::Fits`), shared with the devices made from it, so a call holding a round object does not fit it again.
 
 ## Timing
 

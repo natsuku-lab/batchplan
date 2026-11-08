@@ -1102,6 +1102,7 @@ fn seeded_ik_stays_on_the_branch_it_starts_from() {
             targets: vec![Some(target)],
             seed: Some(here.clone()),
             hold: vec![],
+            holding: None,
         };
         let ik = batchplan::solve_ik(&d, &worlds, &[seeded], &one_seed).unwrap();
         let q = ik

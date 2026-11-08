@@ -905,6 +905,7 @@ fn ik_takes_the_solution_nearest_the_start() {
             targets: vec![Some(at)],
             seed: Some(start.to_vec()),
             hold: vec![],
+            holding: None,
         };
         let solved =
             batchplan::solve_ik(&device, &uploaded, &[problem], &IkOptions::default()).unwrap();

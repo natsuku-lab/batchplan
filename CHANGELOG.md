@@ -10,6 +10,15 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- **Breaking:** `PlanProblem::holding`, `IkProblem::holding` and `ToolPath::holding`: an object a
+  hand holds (a `Held`, as `TaskPlan::held` gives it), per problem. One `plan`, `solve_ik` or
+  `follow` call takes problems holding nothing, different objects, or one object by different
+  grasps, and gives each what a device holding its object alone gives: it groups them by what
+  they hold and runs a batch per group, in parallel, on the device's GPU or threads. Holding per
+  problem took a device and a call per hold. Pass the device without the object; one already
+  holding a `Held` in that hand is an `Error::Input`. Code that writes out every field of
+  `IkProblem`, `PlanProblem` or `ToolPath` needs the new one (`holding: None`).
+- `SphereOptions` implements `PartialEq`.
 - **Breaking:** `GraspOptions::overlap`, 1 cm by default: the least the fingers reach into the
   object in a grasp from above over a `floor`. An object flatter than `tip` and the floor's
   clearance is now held from above with the fingertips at the floor and the frame over its top,
@@ -27,6 +36,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Changed
 
+- **Breaking:** `Held` is `batchplan::Held`, no longer also `batchplan::task::Held`.
+- A device keeps the spheres it fits to held objects, the latest 64, and shares them with the
+  devices `with_robot` makes from it. `pick`, `place` and every call holding a cylinder or a
+  capsule fitted it again, which takes milliseconds; a box or a ball is covered in microseconds.
 - **Breaking:** `FollowStatus::Stopping { contacts }` and `FollowStatus::Collides { at, contacts }`
   name what is in the way, as `Device::contacts` lists it: what the rest of the motion collided
   with where it was first found to, numbered as in the worlds of the tick the stop began at and

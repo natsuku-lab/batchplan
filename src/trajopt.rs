@@ -20,6 +20,7 @@ use crate::cpu::PathOptimizer;
 use crate::device::{CollisionWeights, Contact, Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Keep, Optimize, Search};
 use crate::error::{Result, ensure_input};
+use crate::held::{self, Held};
 use crate::rng::Rng;
 use crate::robot::{Fk, Robot};
 use crate::rrt::{self, Ahead, Connect, End, RrtOptions, RrtProblem, Sampling};
@@ -159,10 +160,13 @@ pub struct PlanProblem {
     /// Where the hands must stay along the whole path, as a tray carried upright; `start` and
     /// `goal` must keep them. Every state the path is checked at keeps them.
     pub constraints: Vec<HandConstraint>,
+    /// An object a hand holds along the path, as a pick leaves it: checked as part of the robot,
+    /// as attaching it ([`Held::attachment`]) would check it. `None` holds nothing.
+    pub holding: Option<Held>,
 }
 
 impl PlanProblem {
-    /// From `start` at rest to `goal` in world `world`, every joint free to move.
+    /// From `start` at rest to `goal` in world `world`, every joint free to move, holding nothing.
     pub fn new(world: u32, start: impl Into<Vec<f32>>, goal: impl Into<Vec<f32>>) -> Self {
         Self {
             world,
@@ -171,6 +175,7 @@ impl PlanProblem {
             start_motion: None,
             hold: Vec::new(),
             constraints: Vec::new(),
+            holding: None,
         }
     }
 }
@@ -221,6 +226,36 @@ pub struct PlanResult {
 }
 
 impl PlanResult {
+    /// The results for groups of `problems` (`parts`, each with its problems' indices), as one.
+    fn gather(problems: &[PlanProblem], seeds: usize, parts: Vec<(Vec<usize>, Self)>) -> Self {
+        let mut parts = parts;
+        if parts.len() == 1 && parts[0].0.len() == problems.len() {
+            let (_, whole) = parts.remove(0);
+            return whole;
+        }
+        let items = problems.len() * seeds;
+        let mut out = Self {
+            problems: problems.to_vec(),
+            seeds,
+            paths: vec![Vec::new(); items],
+            valid: vec![false; items],
+            length: vec![f32::INFINITY; items],
+            failures: vec![None; problems.len()],
+        };
+        for (mine, mut part) in parts {
+            for (k, &pi) in mine.iter().enumerate() {
+                for s in 0..seeds {
+                    let (to, from) = (pi * seeds + s, k * seeds + s);
+                    out.paths[to] = std::mem::take(&mut part.paths[from]);
+                    out.valid[to] = part.valid[from];
+                    out.length[to] = part.length[from];
+                }
+                out.failures[pi] = part.failures[k].take();
+            }
+        }
+        out
+    }
+
     /// The shortest valid seed.
     #[must_use]
     pub fn best(&self, problem: usize) -> Option<&[f32]> {
@@ -248,7 +283,9 @@ impl PlanResult {
 
 /// Plans a collision-free path for each problem, all in one batch: a search, shortcuts and
 /// smoothing, then a B-spline fitted along it and checked; with [`PlanOptions::seeds`], trajectory
-/// optimization too. [`PlanResult::solved`] yields each solved problem's best path.
+/// optimization too. [`PlanResult::solved`] yields each solved problem's best path. Problems that
+/// hold an object ([`PlanProblem::holding`]) run as a batch for each object and grasp, in parallel,
+/// on the device's hardware; `device` must not hold one in that hand already.
 pub fn plan(
     device: &Device,
     worlds: &Worlds,
@@ -256,7 +293,16 @@ pub fn plan(
     o: &PlanOptions,
 ) -> Result<PlanResult> {
     let deadline = o.time_budget.map(|budget| Instant::now() + budget);
-    let robot = device.robot();
+    check(device.robot(), worlds, problems, o)?;
+    let holds: Vec<Option<&Held>> = problems.iter().map(|p| p.holding.as_ref()).collect();
+    let parts = held::by_hold(device, &holds, |on, items| {
+        planned(on, worlds, &held::subset(problems, items), o, deadline)
+    })?;
+    Ok(PlanResult::gather(problems, 1 + o.seeds, parts))
+}
+
+/// Whether `problems` and `o` can be planned for `robot` in `worlds`.
+fn check(robot: &Robot, worlds: &Worlds, problems: &[PlanProblem], o: &PlanOptions) -> Result<()> {
     let n = robot.dof();
     o.check()?;
     for (pi, p) in problems.iter().enumerate() {
@@ -304,7 +350,22 @@ pub fn plan(
                 "problem {pi}: the start motion exceeds the velocity or acceleration limits"
             );
         }
+        if let Some(held) = &p.holding {
+            held.check(robot, worlds, &format!("problem {pi}"))?;
+        }
     }
+    Ok(())
+}
+
+/// [`plan`] for `problems`, checked, holding what `device` holds, to `deadline`.
+fn planned(
+    device: &Device,
+    worlds: &Worlds,
+    problems: &[PlanProblem],
+    o: &PlanOptions,
+    deadline: Option<Instant>,
+) -> Result<PlanResult> {
+    let robot = device.robot();
     let seeds = 1 + o.seeds;
     let mut result = PlanResult {
         problems: problems.to_vec(),
@@ -1707,6 +1768,7 @@ mod tests {
             start_motion: None,
             hold: hold.to_vec(),
             constraints: vec![],
+            holding: None,
         };
         let (held, free) = (
             search_goals(&robot, &problem(&hold)),
