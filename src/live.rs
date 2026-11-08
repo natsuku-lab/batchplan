@@ -6,10 +6,11 @@
 //! (and a lead, for a controller elsewhere) has passed, starting in motion, and switches to the new
 //! trajectory then; when no plan arrives in time, or the collision comes sooner than that, it stops
 //! on the path it is on ([`Trajectory::stop`]), checks the stop too, and reports itself blocked at
-//! rest. `servo` takes one control step toward a hand pose: damped least squares on the hand's
-//! Jacobian, within the joints' velocity, acceleration and jerk limits, slowed and then braked to
-//! rest where braking from the state it commands would bring the robot too close to an obstacle,
-//! and braking each joint in time to rest within its range.
+//! rest. One that keeps its path, as along a tool path, stops without planning. `servo` takes one
+//! control step toward a hand pose: damped least squares on the hand's Jacobian, within the
+//! joints' velocity, acceleration and jerk limits, slowed and then braked to rest where braking
+//! from the state it commands would bring the robot too close to an obstacle, and braking each
+//! joint in time to rest within its range.
 
 use std::f32::consts::{PI, TAU};
 use std::time::Duration;
@@ -48,10 +49,17 @@ pub struct FollowerOptions {
     pub constraints: Vec<HandConstraint>,
     /// How far a joint of the measured state a tick is given may be from where the trajectory has
     /// it at that tick (radians, or meters for a prismatic joint) before the follower plans again
-    /// from the measured state: 0.2. Set it above how far the robot lags its commands at speed.
-    /// Within it, as a servo settles short under load, plans continue from the trajectory's own
-    /// states, so commands do not step.
+    /// from the measured state, or holds the robot there without `replan`: 0.2. Set it above how
+    /// far the robot lags its commands at speed. Within it, as a servo settles short under load,
+    /// plans continue from the trajectory's own states, so commands do not step.
     pub tolerance: f32,
+    /// Whether it plans a new motion to the goal where the rest of its motion collides or the
+    /// robot is measured past `tolerance`: on. Off, it keeps the trajectory's path, as a motion
+    /// along a tool path ([`crate::follow`]) must, which a replan would leave: where the rest
+    /// collides, it stops on the path ([`FollowStatus::Stopping`]), and past `tolerance` it holds
+    /// the robot where it is measured ([`FollowStatus::Blocked`]). `budget`, `lead`, `plan` and
+    /// `constraints` shape replans only.
+    pub replan: bool,
 }
 
 impl Default for FollowerOptions {
@@ -63,6 +71,7 @@ impl Default for FollowerOptions {
             plan: PlanOptions::default(),
             constraints: vec![],
             tolerance: 0.2,
+            replan: true,
         }
     }
 }
@@ -82,7 +91,8 @@ pub enum FollowStatus {
         /// The new trajectory, which begins at `at`.
         trajectory: Trajectory,
     },
-    /// No way around in time: stopping on its path, the stop clear.
+    /// No way around in time, or none sought without [`FollowerOptions::replan`]: stopping on its
+    /// path, the stop clear.
     Stopping,
     /// The motion it is on collides at `at` (seconds, on the caller's clock) and no stop within
     /// the limits ends short of it: stop the robot some other way.
@@ -93,7 +103,8 @@ pub enum FollowStatus {
     /// At the goal, at rest.
     Arrived,
     /// At rest short of the goal after a stop: plan again from here, or give up. A follower that
-    /// cannot plan from a measured state it re-anchors on holds the robot there, blocked.
+    /// cannot or does not plan from a measured state past its tolerance holds the robot there,
+    /// blocked.
     Blocked,
     /// The measured state was farther from the trajectory than `FollowerOptions::tolerance`, by
     /// `off` at its farthest joint, as an arm held back or pushed: a new trajectory from the
@@ -140,8 +151,8 @@ struct Stretch<'a> {
 impl Follower {
     /// Follows `trajectory` in world `world` of the worlds each tick is given, from time `now`,
     /// toward where it ends. Plan options that [`crate::plan`] refuses are refused here, before a
-    /// replan would fail with the robot moving, and so are constraints the trajectory's goal
-    /// breaks.
+    /// replan would fail with the robot moving, and so, where it replans, are constraints the
+    /// trajectory's goal breaks.
     pub fn try_new(
         robot: &Robot,
         world: u32,
@@ -178,7 +189,9 @@ impl Follower {
         let points = &trajectory.control_points;
         let goal = points[points.len() - trajectory.dof..].to_vec();
         // A replan's goal must keep them, or planning refuses it with the robot moving.
-        if let Some(why) = constraint::breach(robot, &o.constraints, &goal) {
+        if o.replan
+            && let Some(why) = constraint::breach(robot, &o.constraints, &goal)
+        {
             return Err(crate::error::input!(
                 "the trajectory's goal breaks the follower's constraints: {why}"
             ));
@@ -209,10 +222,11 @@ impl Follower {
 
     /// The state to command at `now`, given the state the robot was `measured` in, if known.
     /// First, when the measured state is farther from the trajectory than the tolerance, a new
-    /// trajectory from it ([`FollowStatus::Reanchored`]); then, when the rest of the motion
-    /// collides in `worlds`, a replan from the state the robot will be in at `now + budget + lead`,
-    /// or a controlled stop when none is found in time or the collision comes sooner. A tick that
-    /// replans takes as long as the plan does, up to `budget`.
+    /// trajectory from it ([`FollowStatus::Reanchored`]), or a hold there where it does not
+    /// replan; then, when the rest of the motion collides in `worlds`, a replan from the state the
+    /// robot will be in at `now + budget + lead`, or a controlled stop when none is found in time,
+    /// the collision comes sooner or it does not replan. A tick that replans takes as long as the
+    /// plan does, up to `budget`.
     pub fn tick(
         &mut self,
         device: &Device,
@@ -303,7 +317,7 @@ impl Follower {
         // Between the states its plan was checked at, the trajectory may stray past a bound.
         let keeps =
             || constraint::breach(&self.robot, &self.o.constraints, &from.position).is_none();
-        if !pending && self.began + start < hit && start < duration && keeps() {
+        if self.o.replan && !pending && self.began + start < hit && start < duration && keeps() {
             let motion = StartMotion {
                 velocity: from.velocity.clone(),
                 acceleration: from.acceleration.clone(),
@@ -335,8 +349,8 @@ impl Follower {
                 });
             }
         }
-        // No way around in time: stop on the path. A path that ends sooner than any stop would
-        // runs to its end, the quickest way to rest.
+        // No way around in time, or none wanted: stop on the path. A path that ends sooner than any
+        // stop would runs to its end, the quickest way to rest.
         let Ok(stop) = self.trajectory.stop(&self.robot, t) else {
             return Ok(Tick {
                 state,
@@ -362,8 +376,8 @@ impl Follower {
 
     /// A new trajectory to the goal from the measured state `m`, taking over now: from its
     /// position (within the joint ranges) and its velocity (within the limits), planned within the
-    /// budget. Where none is found, or `m` breaks the constraints, the robot is held at rest where
-    /// it is, blocked.
+    /// budget. Where none is found, `m` breaks the constraints or the follower does not replan, the
+    /// robot is held at rest where it is, blocked.
     fn reanchor(
         &mut self,
         device: &Device,
@@ -393,7 +407,7 @@ impl Follower {
         self.next = None;
         self.began = now;
         let keeps = constraint::breach(&self.robot, &self.o.constraints, &position).is_none();
-        let planned = if keeps {
+        let planned = if self.o.replan && keeps {
             let problem = PlanProblem {
                 world: self.world,
                 start: position.clone(),
