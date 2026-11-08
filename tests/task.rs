@@ -994,6 +994,10 @@ fn grasps_fit_between_the_fingers_and_face_into_the_object() {
     let grid = SdfGrid::try_new([2, 2, 2], 0.1, Vec3::ZERO, &[1.0; 8]).unwrap();
     let grid = Obstacle::from_grid(grid);
     assert!(matches!(batchplan::grasps(&grid, &o), Err(Error::Input(_))));
+    // Refused as a grid however it is placed, without its values in the message.
+    let skewed = grid.placed(Pose::new(Vec3::ZERO, Quat::from_xyzw(0.0, 0.0, 0.0, 2.0)));
+    let err = batchplan::grasps(&skewed, &o).unwrap_err().to_string();
+    assert_eq!(err, "a distance grid has no grasps");
 }
 
 #[test]
@@ -1056,6 +1060,199 @@ fn grasps_keep_the_hand_above_the_floor_or_say_why_there_are_none() {
         err.to_string().contains("10.0 cm across") && err.to_string().contains("8.0 cm"),
         "{err}"
     );
+}
+
+/// An 8.8 x 4.8 cm package `height` tall, standing at `x, y` on a table whose top is at z = 0.
+fn package(x: f32, y: f32, height: f32) -> Obstacle {
+    let half = Vec3::new(0.044, 0.024, height / 2.0);
+    Obstacle::cuboid(Vec3::new(x, y, half.z), half)
+}
+
+#[test]
+fn a_flat_box_is_grasped_from_above_by_as_much_of_the_fingers_as_reaches_in() {
+    // A package 1.85 cm tall, fingertips 2 cm past the frame and a floor 5 mm over the table: at
+    // the package's top the frame would put them 6.5 mm below the floor, and above it they reach
+    // 13.5 mm in.
+    let object = package(0.4, 0.0, 0.0185);
+    let o = GraspOptions {
+        tip: 0.02,
+        floor: Some(0.005),
+        ..GraspOptions::default()
+    };
+    let top = 0.0185;
+    assert!(top - o.tip < 0.005 && top - 0.005 > o.overlap);
+    let grasps = batchplan::grasps(&object, &o).unwrap();
+    let at = object.pose();
+    let height = |g: &Pose, reach: f32| {
+        at.mul_pose(*g).position.z + (at.rotation * g.rotation * Vec3::Z).z * reach
+    };
+    let down = |g: &Pose| (at.rotation * g.rotation * Vec3::Z).z;
+    // From above, closing across its 4.8 cm both ways round: the fingertips at the floor, the
+    // frame over the top.
+    let from_above: Vec<&Pose> = grasps.iter().filter(|g| down(g) < -0.5).collect();
+    assert_eq!(from_above.len(), 2, "{grasps:?}");
+    assert!(
+        from_above
+            .iter()
+            .all(|g| (height(g, o.tip) - 0.005).abs() < 1e-5 && height(g, 0.0) > top)
+    );
+    assert_eq!(grasps.len(), 14, "12 from the sides");
+    // Asked to hold more of the fingers than reach in, none from above.
+    let deeper = GraspOptions {
+        overlap: top - 0.005 + 1e-3,
+        ..o
+    };
+    let grasps = batchplan::grasps(&object, &deeper).unwrap();
+    assert!(grasps.iter().all(|g| down(g) > -0.5), "{grasps:?}");
+    assert_eq!(grasps.len(), 12);
+    // An overlap must be positive and finite, and the object one that can be checked.
+    for overlap in [-0.01, 0.0, f32::NAN, f32::INFINITY] {
+        let bad = GraspOptions { overlap, ..o };
+        assert!(matches!(
+            batchplan::grasps(&object, &bad),
+            Err(Error::Input(_))
+        ));
+    }
+    let inside_out = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, -0.02, 0.02));
+    let err = batchplan::grasps(&inside_out, &o).unwrap_err();
+    assert!(
+        matches!(err, Error::Input(_)) && err.to_string().contains("object to grasp"),
+        "{err}"
+    );
+}
+
+#[test]
+fn every_grasp_from_above_over_a_floor_keeps_the_overlap_in_the_object() {
+    let from_above = |grasps: &[Pose]| -> Vec<Pose> {
+        grasps
+            .iter()
+            .copied()
+            .filter(|g| (g.rotation * Vec3::Z).z < -0.5)
+            .collect()
+    };
+    // An 8 mm package, the fingertips at the frame: at most 8 mm of them can ever reach in, short
+    // of the 1 cm overlap, whether the floor holds the grasp less deep (5 mm) or not (2 mm).
+    let flat = package(0.4, 0.0, 0.008);
+    for floor in [0.002, 0.005] {
+        let o = GraspOptions {
+            floor: Some(floor),
+            ..GraspOptions::default()
+        };
+        // Over the high floor the side grasps' frames, at its middle, are below the floor too.
+        let grasps = batchplan::grasps(&flat, &o).unwrap_or_default();
+        assert!(from_above(&grasps).is_empty(), "floor {floor}: {grasps:?}");
+        // With a 2.5 mm overlap: from above at the full depth over the low floor, the middle, and
+        // over the high one 3 mm in, the fingertips at the floor.
+        let shallow = GraspOptions {
+            overlap: 0.0025,
+            ..o
+        };
+        let grasps = from_above(&batchplan::grasps(&flat, &shallow).unwrap());
+        let depth = if floor < 0.004 { 0.004 } else { 0.003 };
+        assert_eq!(grasps.len(), 2, "floor {floor}");
+        assert!(
+            grasps
+                .iter()
+                .all(|g| (flat.pose().mul_pose(*g).position.z - (0.008 - depth)).abs() < 1e-5),
+            "floor {floor}: {grasps:?}"
+        );
+    }
+    // Fingertips 2 mm short of the frame, a 2.4 cm package and a floor at 13 mm: the frame stops
+    // at the floor, 11 mm in, and the fingers reach only 9 mm in.
+    let o = GraspOptions {
+        tip: -0.002,
+        floor: Some(0.013),
+        ..GraspOptions::default()
+    };
+    let grasps = batchplan::grasps(&package(0.4, 0.0, 0.024), &o).unwrap_or_default();
+    assert!(from_above(&grasps).is_empty(), "{grasps:?}");
+    let grasps = batchplan::grasps(
+        &package(0.4, 0.0, 0.024),
+        &GraspOptions {
+            overlap: 0.009,
+            ..o
+        },
+    )
+    .unwrap();
+    assert_eq!(from_above(&grasps).len(), 2);
+    // Tilted a hair, as a simulator or perception reports it, the package is grasped as level:
+    // with the floor over its middle, nowhere.
+    let tilted = package(0.4, 0.0, 0.0185).placed(Pose::new(
+        Vec3::new(0.4, 0.0, 0.00925),
+        Quat::from_rotation_y(-5e-7),
+    ));
+    let o = GraspOptions {
+        tip: 0.0124,
+        floor: Some(0.01),
+        ..GraspOptions::default()
+    };
+    let grasps = batchplan::grasps(&tilted, &o).unwrap_or_default();
+    let at = tilted.pose();
+    let far = grasps
+        .iter()
+        .map(|g| at.mul_pose(*g).position.distance(at.position))
+        .fold(0.0, f32::max);
+    assert!(far < 0.05, "a grasp {far} m from the package");
+}
+
+#[test]
+fn a_flat_package_on_a_table_is_picked_from_above_by_its_top() {
+    let robot = panda();
+    let (tip, floor, top) = (robot.tip(0), 0.005, 0.016);
+    let object = package(0.45, 0.1, top);
+    let o = GraspOptions {
+        tip,
+        floor: Some(floor),
+        ..GraspOptions::default()
+    };
+    // Lower than the fingertips reach past the frame and the floor, but taller than the floor and
+    // the overlap.
+    assert!(
+        top < tip + floor && top - floor > o.overlap,
+        "the fingertips reach {tip} m past the frame"
+    );
+    let (from_above, from_sides): (Vec<Pose>, Vec<Pose>) = batchplan::grasps(&object, &o)
+        .unwrap()
+        .into_iter()
+        .partition(|g| (g.rotation * Vec3::Z).z < -0.5);
+    let on_table = |c: &CandidateStop| {
+        c.contacts.iter().any(|t| {
+            matches!(
+                t,
+                Contact::World {
+                    obstacle: TABLE,
+                    ..
+                }
+            )
+        })
+    };
+    let world = World::new(vec![scene(vec![]).obstacles[TABLE].clone(), object]);
+    for device in devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
+        let pick = |grasps: &[Pose]| {
+            let task = Pick {
+                support: vec![TABLE],
+                ..Pick::new(0, robot.default_q(), 1, grasps.to_vec())
+            };
+            batchplan::pick(&device, &worlds, &[task], &TaskOptions::default())
+                .unwrap()
+                .outcomes
+                .remove(0)
+        };
+        // From the sides, the hand meets the table where it reaches.
+        let failure = pick(&from_sides).unwrap_err();
+        let colliding: Vec<&CandidateStop> = failure
+            .candidates
+            .iter()
+            .filter(|c| !c.contacts.is_empty())
+            .collect();
+        assert!(
+            !colliding.is_empty() && colliding.iter().all(|c| on_table(c)),
+            "{name}: {failure}"
+        );
+        assert!(pick(&from_above).is_ok(), "{name}");
+    }
 }
 
 #[test]

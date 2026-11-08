@@ -10,11 +10,25 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- **Breaking:** `GraspOptions::overlap`, 1 cm by default: the least the fingers reach into the
+  object in a grasp from above over a `floor`. An object flatter than `tip` and the floor's
+  clearance is now held from above with the fingertips at the floor and the frame over its top,
+  as long as its top is at least `overlap` over the floor. `grasps` left out every grasp from
+  above of such an object: an 8.8 x 4.8 x 1.85 cm package got only grasps from the sides, which
+  put the hand into the table. Every grasp from above over a floor now keeps at least `overlap`
+  of the fingers in the object, where it kept the frame inside it, so with `tip` under 1 cm (the
+  default 0 among them) some it returned are left out. Code that writes out every field of
+  `GraspOptions` needs the new one.
 - **Breaking:** `FollowerOptions::replan`, on by default. Off, a `Follower` keeps its
   trajectory's path, as a motion along a tool path must: where the rest of the motion collides,
   it stops on the path, and where the robot is measured past `tolerance`, it holds it there,
   `Blocked`. In either case it used to plan a free-space motion to the goal, off the path. Code
   that writes out every field of `FollowerOptions` needs the new one.
+
+### Fixed
+
+- `grasps` refuses an object whose size is negative or not finite, or whose rotation is not a
+  unit quaternion, naming it, as uploading a world does.
 
 ## [0.10.0] - 2026-11-07
 
