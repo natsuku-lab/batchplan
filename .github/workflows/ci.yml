@@ -53,7 +53,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: python
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3  # tags only exact versions since v8
       - run: cargo fmt --check
       - run: rustup toolchain install nightly --profile minimal -c rustfmt
       - run: cargo +nightly fmt --check -- --config imports_granularity=Module,hex_literal_case=Lower,format_macro_matchers=true
