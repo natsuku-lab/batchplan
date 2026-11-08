@@ -972,6 +972,32 @@ fn load_errors_name_the_problem() {
         },
     );
     assert!(message.contains("link 'gripper'"), "{message}");
+    // A sphere that reaches less than nothing, or nowhere, would check as farther from what it
+    // touches than it is.
+    for sphere in [[0.0, 0.0, 0.0, -0.05], [f32::NAN, 0.0, 0.0, 0.05]] {
+        let mut model = common::panda_options().collision_model.unwrap();
+        model.spheres.insert("panda_hand".into(), vec![sphere]);
+        let message = err(
+            &panda,
+            RobotOptions {
+                collision_model: Some(model),
+                ..common::panda_options()
+            },
+        );
+        assert!(message.contains("of link 'panda_hand'"), "{message}");
+    }
+    let mut model = common::panda_options().collision_model.unwrap();
+    model
+        .self_collision_buffer
+        .insert("panda_hand".into(), f32::INFINITY);
+    let message = err(
+        &panda,
+        RobotOptions {
+            collision_model: Some(model),
+            ..common::panda_options()
+        },
+    );
+    assert!(message.contains("buffer of link 'panda_hand'"), "{message}");
 }
 
 #[test]

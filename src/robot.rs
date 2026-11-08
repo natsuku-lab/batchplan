@@ -666,6 +666,23 @@ impl Robot {
         {
             bail!("collision spheres given for link '{name}', which is not part of the robot");
         }
+        let malformed = model.spheres.iter().find_map(|(name, spheres)| {
+            let bad = |s: &&[f32; 4]| !(s.iter().all(|v| v.is_finite()) && s[3] >= 0.0);
+            spheres.iter().find(bad).map(|s| (name, s))
+        });
+        if let Some((name, s)) = malformed {
+            bail!(
+                "collision sphere {s:?} of link '{name}' needs a finite center and a finite radius \
+                 of at least 0"
+            );
+        }
+        if let Some((name, b)) = model
+            .self_collision_buffer
+            .iter()
+            .find(|(_, b)| !b.is_finite())
+        {
+            bail!("the self-collision buffer of link '{name}' must be finite, got {b}");
+        }
         let mut spheres = vec![];
         for (li, link) in self.links.iter().enumerate() {
             let buffer = model
