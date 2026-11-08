@@ -12,9 +12,10 @@ mod common;
 use batchplan::glam::{Quat, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionWeights, Device, Error, FollowStatus, Follower, FollowerOptions, HandConstraint,
-    HandSpeed, JointState, Obstacle, PlanOptions, PlanProblem, Pose, Robot, RobotOptions,
-    RrtOptions, ServoOptions, ServoStatus, ToolPath, ToolPathOptions, Trajectory, World, Worlds,
+    CollisionWeights, Contact, Device, Error, FollowStatus, Follower, FollowerOptions,
+    HandConstraint, HandSpeed, JointState, Obstacle, PlanOptions, PlanProblem, Pose, Robot,
+    RobotOptions, RrtOptions, ServoOptions, ServoStatus, ToolPath, ToolPathOptions, Trajectory,
+    World, Worlds,
 };
 
 const DT: f32 = 0.02;
@@ -50,6 +51,29 @@ fn box_at(robot: &Robot, trajectory: &Trajectory, t: f32) -> Obstacle {
         robot.ee_pose(&state.position, 0).position,
         Vec3::splat(0.05),
     )
+}
+
+/// Whether `contacts` name a link against obstacle `obstacle`, and nothing else.
+fn names(contacts: &[Contact], obstacle: usize) -> bool {
+    let named = |c: &Contact| match c {
+        Contact::World {
+            obstacle: o,
+            distance,
+            ..
+        } => *o == obstacle && *distance <= 0.0,
+        _ => false,
+    };
+    !contacts.is_empty() && contacts.iter().all(named)
+}
+
+fn devices(robot: &Robot) -> Vec<Device> {
+    let mut devices = vec![Device::cpu(robot).unwrap()];
+    match Device::gpu(robot) {
+        Ok(gpu) => devices.push(gpu),
+        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
+        Err(e) => panic!("no GPU: {e}"),
+    }
+    devices
 }
 
 fn clear(device: &Device, worlds: &Worlds, q: &[f32]) -> bool {
@@ -154,46 +178,50 @@ fn replans_around_a_box(lead: f32) {
 #[test]
 fn with_no_time_to_replan_the_robot_stops_before_the_box() {
     let robot = common::panda().unwrap();
-    let device = Device::cpu(&robot).unwrap();
-    let first = sweep(&robot, &device);
-    let duration = first.duration();
-    // A replan would take longer than the motion has left.
-    let o = FollowerOptions {
-        budget: duration,
-        ..Default::default()
-    };
-    let mut follower = Follower::try_new(&robot, 0, first.clone(), 0.0, o).unwrap();
-    let mut worlds = device.upload(&[World::default()]).unwrap();
-    let inserted = 0.2 * duration;
-    let (mut t, mut statuses, mut stop) = (0.0, vec![], None);
-    while t < 4.0 * duration {
-        if (t - inserted).abs() < DT / 2.0 {
-            worlds = device
-                .upload(&[World::new(vec![box_at(&robot, &first, 0.8 * duration)])])
-                .unwrap();
+    // The checks run on the device, and what they found is named on its CPU threads.
+    for device in devices(&robot) {
+        let first = sweep(&robot, &device);
+        let duration = first.duration();
+        // A replan would take longer than the motion has left.
+        let o = FollowerOptions {
+            budget: duration,
+            ..Default::default()
+        };
+        let mut follower = Follower::try_new(&robot, 0, first.clone(), 0.0, o).unwrap();
+        let mut worlds = device.upload(&[World::default()]).unwrap();
+        let inserted = 0.2 * duration;
+        let (mut t, mut statuses, mut stop) = (0.0, vec![], None);
+        while t < 4.0 * duration {
+            if (t - inserted).abs() < DT / 2.0 {
+                worlds = device
+                    .upload(&[World::new(vec![box_at(&robot, &first, 0.8 * duration)])])
+                    .unwrap();
+            }
+            let tick = follower.tick(&device, &worlds, t, None).unwrap();
+            assert!(
+                clear(&device, &worlds, &tick.state.position),
+                "at {t:.2} s the robot collides ({:?})",
+                tick.status
+            );
+            // Every tick of the stop names the box it is for.
+            if let FollowStatus::Stopping { contacts } = &tick.status {
+                assert!(names(contacts, 0), "{contacts:?}");
+                stop.get_or_insert_with(|| (follower.trajectory().clone(), tick.state.clone()));
+            }
+            statuses.push(tick.status.clone());
+            if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
+                break;
+            }
+            t += DT;
         }
-        let tick = follower.tick(&device, &worlds, t, None).unwrap();
-        assert!(
-            clear(&device, &worlds, &tick.state.position),
-            "at {t:.2} s the robot collides ({:?})",
-            tick.status
+        assert_eq!(
+            statuses.last(),
+            Some(&FollowStatus::Blocked),
+            "{statuses:?}"
         );
-        if tick.status == FollowStatus::Stopping && stop.is_none() {
-            stop = Some((follower.trajectory().clone(), tick.state.clone()));
-        }
-        statuses.push(tick.status.clone());
-        if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
-            break;
-        }
-        t += DT;
+        let (stop, from) = stop.expect("it stopped");
+        stop.check_from(&robot, &from).unwrap();
     }
-    assert_eq!(
-        statuses.last(),
-        Some(&FollowStatus::Blocked),
-        "{statuses:?}"
-    );
-    let (stop, from) = stop.expect("it stopped");
-    stop.check_from(&robot, &from).unwrap();
 }
 
 /// Servo steps from `start` toward `target` until it arrives or rests, at most `steps` of them:
@@ -551,48 +579,187 @@ fn a_pending_replan_that_collides_is_dropped_for_a_stop() {
         s += 0.01;
     }
     let tick = follower.tick(&device, &worlds, t + DT, None).unwrap();
-    assert_eq!(tick.status, FollowStatus::Stopping);
+    assert!(
+        matches!(&tick.status, FollowStatus::Stopping { contacts } if names(contacts, 1)),
+        "the stop is for the small box: {:?}",
+        tick.status
+    );
+}
+
+#[test]
+fn a_stop_that_runs_into_another_box_names_it() {
+    let robot = common::panda().unwrap();
+    for device in devices(&robot) {
+        let first = sweep(&robot, &device);
+        let duration = first.duration();
+        let o = FollowerOptions {
+            budget: duration,
+            ..Default::default()
+        };
+        let mut follower = Follower::try_new(&robot, 0, first.clone(), 0.0, o).unwrap();
+        let ahead = box_at(&robot, &first, 0.8 * duration);
+        let worlds = device.upload(&[World::new(vec![ahead.clone()])]).unwrap();
+        let t = 0.2 * duration;
+        let tick = follower.tick(&device, &worlds, t, None).unwrap();
+        assert!(
+            matches!(&tick.status, FollowStatus::Stopping { contacts } if names(contacts, 0)),
+            "{:?}",
+            tick.status
+        );
+        // A second box where the stop comes to rest: the stop runs into it, not the first.
+        let stop = follower.trajectory().clone();
+        let rest = box_at(&robot, &stop, stop.duration());
+        let worlds = device.upload(&[World::new(vec![ahead, rest])]).unwrap();
+        let tick = follower.tick(&device, &worlds, t + DT, None).unwrap();
+        assert!(
+            matches!(&tick.status, FollowStatus::Collides { contacts, .. } if names(contacts, 1)),
+            "{}: {:?}",
+            device.name(),
+            tick.status
+        );
+    }
+}
+
+#[test]
+fn a_motion_too_near_its_end_to_stop_names_what_it_collides_with() {
+    let robot = common::panda().unwrap();
+    for device in devices(&robot) {
+        // At full speed, 0.2 s from the end of the path, with a box over the hand at the goal:
+        // the path ends sooner than any stop would, so it runs to its end, into the box.
+        let first = sweep_at(&robot, &device, 1.0);
+        let duration = first.duration();
+        let mut follower =
+            Follower::try_new(&robot, 0, first.clone(), 0.0, FollowerOptions::default()).unwrap();
+        let worlds = device
+            .upload(&[World::new(vec![box_at(&robot, &first, duration)])])
+            .unwrap();
+        let tick = follower
+            .tick(&device, &worlds, duration - 0.2, None)
+            .unwrap();
+        assert!(
+            matches!(&tick.status, FollowStatus::Collides { contacts, .. } if names(contacts, 0)),
+            "{}: {:?}",
+            device.name(),
+            tick.status
+        );
+    }
+}
+
+/// On every device, a ball stepped 10 nm at a time through the radius at which it first touches
+/// the rest of the motion: each stop names the ball, though a GPU device's check may find a graze
+/// its CPU threads' contacts put a hair outside.
+#[test]
+fn a_graze_is_named_on_every_device() {
+    let robot = common::panda().unwrap();
+    let cpu = Device::cpu(&robot).unwrap();
+    let first = sweep(&robot, &cpu);
+    let duration = first.duration();
+    let o = FollowerOptions {
+        budget: duration,
+        ..Default::default()
+    };
+    let t = 0.2 * duration;
+    let ahead = robot
+        .ee_pose(&state_at(&first, 0.6 * duration).position, 0)
+        .position;
+    let center = ahead - Vec3::new(0.0, 0.0, 0.12);
+    // The radius at which a ball there first touches the samples the follower checks.
+    let point = cpu
+        .upload(&[World::new(vec![Obstacle::sphere(center, 0.0)])])
+        .unwrap();
+    let mut touch = f32::INFINITY;
+    for k in 0.. {
+        let at = (t + k as f32 * o.check_every).min(duration);
+        let near = cpu
+            .contacts(&point, &[0], &state_at(&first, at).position, 1.0)
+            .unwrap();
+        let ball = near[0]
+            .iter()
+            .filter(|c| matches!(c, Contact::World { .. }))
+            .map(Contact::distance);
+        touch = ball.fold(touch, f32::min);
+        if at >= duration {
+            break;
+        }
+    }
+    assert!(touch.is_finite() && touch > 0.01, "{touch}");
+    for device in devices(&robot) {
+        let mut stopped = 0;
+        for step in -50..50 {
+            let radius = touch + step as f32 * 1e-8;
+            let ball = World::new(vec![Obstacle::sphere(center, radius)]);
+            let worlds = device.upload(&[ball]).unwrap();
+            let mut follower = Follower::try_new(&robot, 0, first.clone(), 0.0, o.clone()).unwrap();
+            match follower.tick(&device, &worlds, t, None).unwrap().status {
+                FollowStatus::Stopping { contacts } | FollowStatus::Collides { contacts, .. } => {
+                    assert!(!contacts.is_empty(), "{}: radius {radius}", device.name());
+                    stopped += 1;
+                }
+                FollowStatus::Following => {}
+                status => panic!("{status:?}"),
+            }
+        }
+        assert!(
+            stopped > 10 && stopped < 90,
+            "{}: {stopped} of 100",
+            device.name()
+        );
+    }
 }
 
 #[test]
 fn a_stop_that_cannot_end_short_of_a_box_reports_the_collision() {
     let robot = common::panda().unwrap();
-    let device = Device::cpu(&robot).unwrap();
-    // At full speed, with a box 0.2 s ahead: too close to stop for.
-    let first = sweep_at(&robot, &device, 1.0);
-    let duration = first.duration();
-    let mut follower =
-        Follower::try_new(&robot, 0, first.clone(), 0.0, FollowerOptions::default()).unwrap();
-    let mut worlds = device.upload(&[World::default()]).unwrap();
-    let (mut t, mut reported, mut collided) = (0.0, None, None);
-    while t < 4.0 * duration {
-        if (t - 0.4 * duration).abs() < 0.005 {
-            let hand = robot
-                .ee_pose(&state_at(&first, t + 0.2).position, 0)
-                .position;
-            worlds = device
-                .upload(&[World::new(vec![Obstacle::cuboid(hand, Vec3::splat(0.01))])])
-                .unwrap();
-            assert!(clear(&device, &worlds, &state_at(&first, t).position));
+    for device in devices(&robot) {
+        let name = device.name();
+        // At full speed, with a box 0.2 s ahead: too close to stop for.
+        let first = sweep_at(&robot, &device, 1.0);
+        let duration = first.duration();
+        let mut follower =
+            Follower::try_new(&robot, 0, first.clone(), 0.0, FollowerOptions::default()).unwrap();
+        let mut worlds = device.upload(&[World::default()]).unwrap();
+        let (mut t, mut reported, mut collided) = (0.0, None, None);
+        while t < 4.0 * duration {
+            if (t - 0.4 * duration).abs() < 0.005 {
+                let hand = robot
+                    .ee_pose(&state_at(&first, t + 0.2).position, 0)
+                    .position;
+                worlds = device
+                    .upload(&[World::new(vec![Obstacle::cuboid(hand, Vec3::splat(0.01))])])
+                    .unwrap();
+                assert!(clear(&device, &worlds, &state_at(&first, t).position));
+            }
+            let tick = follower.tick(&device, &worlds, t, None).unwrap();
+            if let FollowStatus::Collides { at, contacts } = &tick.status {
+                // What the motion it is on meets at `at`, where its stop samples on its own clock.
+                let q = state_at(follower.trajectory(), at - follower.began()).position;
+                let there = device.contacts(&worlds, &[0], &q, 0.0).unwrap().remove(0);
+                let same = there.len() == contacts.len()
+                    && there
+                        .iter()
+                        .zip(contacts)
+                        .all(|(a, b)| (a.distance() - b.distance()).abs() < 1e-5);
+                assert!(
+                    names(contacts, 0) && same,
+                    "{name}: {contacts:?} against {there:?}"
+                );
+                reported.get_or_insert(*at);
+            }
+            if !clear(&device, &worlds, &tick.state.position) {
+                collided.get_or_insert(t);
+            }
+            if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
+                break;
+            }
+            t += 0.01;
         }
-        let tick = follower.tick(&device, &worlds, t, None).unwrap();
-        if let FollowStatus::Collides { at } = tick.status {
-            reported.get_or_insert(at);
-        }
-        if !clear(&device, &worlds, &tick.state.position) {
-            collided.get_or_insert(t);
-        }
-        if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
-            break;
-        }
-        t += 0.01;
+        let collided = collided.expect("no stop ends short of the box");
+        let at = reported.expect("the follower reports the collision");
+        assert!(
+            (at - collided).abs() <= FollowerOptions::default().check_every + 0.01,
+            "{name}: it reports a collision at {at} s; the robot collides at {collided} s"
+        );
     }
-    let collided = collided.expect("no stop ends short of the box");
-    let at = reported.expect("the follower reports the collision");
-    assert!(
-        (at - collided).abs() <= FollowerOptions::default().check_every + 0.01,
-        "it reports a collision at {at} s; the robot collides at {collided} s"
-    );
 }
 
 #[test]
@@ -744,12 +911,13 @@ fn a_follower_that_keeps_its_path_stops_on_it_where_the_rest_collides() {
     );
     // Keeping its path, it stops on the line short of the box, at rest.
     let (statuses, hand) = run(false);
+    let stopping =
+        |s: &FollowStatus| matches!(s, FollowStatus::Stopping { contacts } if names(contacts, 0));
     assert!(
-        statuses.contains(&FollowStatus::Stopping)
-            && statuses.iter().all(|s| matches!(
-                s,
-                FollowStatus::Following | FollowStatus::Stopping | FollowStatus::Blocked
-            )),
+        statuses.iter().any(stopping)
+            && statuses.iter().all(|s| {
+                matches!(s, FollowStatus::Following | FollowStatus::Blocked) || stopping(s)
+            }),
         "{statuses:?}"
     );
     assert_eq!(statuses.last(), Some(&FollowStatus::Blocked));
@@ -990,7 +1158,9 @@ fn replans_keep_the_constraints_the_trajectory_was_planned_with() {
             .fold(0.0, f32::max);
         if constraints == [elsewhere] {
             assert!(
-                statuses.contains(&FollowStatus::Stopping)
+                statuses
+                    .iter()
+                    .any(|s| matches!(s, FollowStatus::Stopping { .. }))
                     && statuses.last() == Some(&FollowStatus::Blocked),
                 "{statuses:?}"
             );

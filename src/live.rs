@@ -5,12 +5,12 @@
 //! the rest collides, it plans again from the state the robot will be in once the planning time
 //! (and a lead, for a controller elsewhere) has passed, starting in motion, and switches to the new
 //! trajectory then; when no plan arrives in time, or the collision comes sooner than that, it stops
-//! on the path it is on ([`Trajectory::stop`]), checks the stop too, and reports itself blocked at
-//! rest. One that keeps its path, as along a tool path, stops without planning. `servo` takes one
-//! control step toward a hand pose: damped least squares on the hand's Jacobian, within the
-//! joints' velocity, acceleration and jerk limits, slowed and then braked to rest where braking
-//! from the state it commands would bring the robot too close to an obstacle, and braking each
-//! joint in time to rest within its range.
+//! on the path it is on ([`Trajectory::stop`]), naming what it stops for, checks the stop too, and
+//! reports itself blocked at rest. One that keeps its path, as along a tool path, stops without
+//! planning. `servo` takes one control step toward a hand pose: damped least squares on the hand's
+//! Jacobian, within the joints' velocity, acceleration and jerk limits, slowed and then braked to
+//! rest where braking from the state it commands would bring the robot too close to an obstacle,
+//! and braking each joint in time to rest within its range.
 
 use std::f32::consts::{PI, TAU};
 use std::time::Duration;
@@ -19,7 +19,7 @@ use glam::Vec3;
 
 use crate::constraint::{self, HandConstraint};
 use crate::cpu::Reach;
-use crate::device::{CollisionWeights, Device, Worlds};
+use crate::device::{CollisionWeights, Contact, Device, Worlds};
 use crate::error::{Result, ensure_input};
 use crate::robot::Robot;
 use crate::timing::{JointState, Trajectory};
@@ -93,12 +93,22 @@ pub enum FollowStatus {
     },
     /// No way around in time, or none sought without [`FollowerOptions::replan`]: stopping on its
     /// path, the stop clear.
-    Stopping,
+    Stopping {
+        /// What the rest of the motion collided with where it was first found to, which the stop
+        /// is for, as [`Device::contacts`] lists it: nearest first, its obstacles numbered as in
+        /// the worlds given to the tick the stop began at. The same at every tick of the stop
+        /// while the stop is clear. Where a GPU device's check finds a graze its CPU threads put
+        /// a hair outside, the nearest contact, less than 0.1 mm away.
+        contacts: Vec<Contact>,
+    },
     /// The motion it is on collides at `at` (seconds, on the caller's clock) and no stop within
     /// the limits ends short of it: stop the robot some other way.
     Collides {
         /// When the robot collides.
         at: f32,
+        /// What it collides with then, as [`Device::contacts`] lists it, its obstacles numbered as
+        /// in the worlds given to this tick; at a graze, as for [`FollowStatus::Stopping`].
+        contacts: Vec<Contact>,
     },
     /// At the goal, at rest.
     Arrived,
@@ -136,7 +146,20 @@ pub struct Follower {
     /// A replan and the time it takes over.
     next: Option<(Trajectory, f32)>,
     stopping: bool,
+    /// What the stop it is on is for.
+    stopped_for: Vec<Contact>,
     o: FollowerOptions,
+}
+
+/// How far apart a GPU device's clearances and its CPU threads' may be (meters), as the parity
+/// tests hold them.
+const GRAZE: f32 = 1e-4;
+
+/// Where the robot first collides along the rest of its motion: when, on the caller's clock, and
+/// what with.
+struct Hit {
+    at: f32,
+    contacts: Vec<Contact>,
 }
 
 /// A stretch of a trajectory to check: from `from` to `to` on its own clock, which began at
@@ -204,6 +227,7 @@ impl Follower {
             began: now,
             next: None,
             stopping: false,
+            stopped_for: vec![],
             o,
         })
     }
@@ -296,7 +320,9 @@ impl Follower {
         let hit = self.first_collision(device, worlds, &rest)?;
         let Some(hit) = hit else {
             let status = if self.stopping {
-                FollowStatus::Stopping
+                FollowStatus::Stopping {
+                    contacts: self.stopped_for.clone(),
+                }
             } else {
                 FollowStatus::Following
             };
@@ -305,7 +331,7 @@ impl Follower {
         if self.stopping {
             return Ok(Tick {
                 state,
-                status: FollowStatus::Collides { at: hit },
+                status: hit.collides(),
             });
         }
         // A pending replan that collides is dropped for a stop: another would start after the
@@ -317,7 +343,7 @@ impl Follower {
         // Between the states its plan was checked at, the trajectory may stray past a bound.
         let keeps =
             || constraint::breach(&self.robot, &self.o.constraints, &from.position).is_none();
-        if self.o.replan && !pending && self.began + start < hit && start < duration && keeps() {
+        if self.o.replan && !pending && self.began + start < hit.at && start < duration && keeps() {
             let motion = StartMotion {
                 velocity: from.velocity.clone(),
                 acceleration: from.acceleration.clone(),
@@ -354,12 +380,13 @@ impl Follower {
         let Ok(stop) = self.trajectory.stop(&self.robot, t) else {
             return Ok(Tick {
                 state,
-                status: FollowStatus::Collides { at: hit },
+                status: hit.collides(),
             });
         };
         self.trajectory = stop;
         self.began = now;
         self.stopping = true;
+        self.stopped_for = hit.contacts;
         self.trajectory.at(0.0, &mut state);
         let rest = [Stretch {
             trajectory: &self.trajectory,
@@ -368,8 +395,10 @@ impl Follower {
             to: self.trajectory.duration(),
         }];
         let status = match self.first_collision(device, worlds, &rest)? {
-            Some(at) => FollowStatus::Collides { at },
-            None => FollowStatus::Stopping,
+            Some(hit) => hit.collides(),
+            None => FollowStatus::Stopping {
+                contacts: self.stopped_for.clone(),
+            },
         };
         Ok(Tick { state, status })
     }
@@ -453,14 +482,14 @@ impl Follower {
         })
     }
 
-    /// When, on the caller's clock, the robot first collides along `stretches`, each sampled
-    /// `check_every` apart and at its end, in one batch.
+    /// Where the robot first collides along `stretches`, each sampled `check_every` apart and at
+    /// its end, in one batch.
     fn first_collision(
         &self,
         device: &Device,
         worlds: &Worlds,
         stretches: &[Stretch<'_>],
-    ) -> Result<Option<f32>> {
+    ) -> Result<Option<Hit>> {
         let mut times = vec![];
         let mut q = vec![];
         let mut sample = JointState::new(self.robot.dof());
@@ -477,9 +506,29 @@ impl Follower {
         }
         let items = vec![self.world; times.len()];
         let e = device.evaluate(worlds, &items, &q, &CollisionWeights::NONE)?;
-        Ok((0..times.len())
-            .find(|&i| !e.collision_free(i))
-            .map(|i| times[i]))
+        let Some(i) = (0..times.len()).find(|&i| !e.collision_free(i)) else {
+            return Ok(None);
+        };
+        // A GPU device's check may find a graze its CPU threads' contacts put a hair outside: the
+        // nearest then, from as far out as the two devices' clearances may differ.
+        let n = self.robot.dof();
+        let mut near = device.contacts(worlds, &[self.world], &q[i * n..(i + 1) * n], GRAZE)?;
+        let mut contacts = near.remove(0);
+        let colliding = contacts.iter().take_while(|c| c.distance() <= 0.0).count();
+        contacts.truncate(colliding.max(1));
+        Ok(Some(Hit {
+            at: times[i],
+            contacts,
+        }))
+    }
+}
+
+impl Hit {
+    fn collides(self) -> FollowStatus {
+        FollowStatus::Collides {
+            at: self.at,
+            contacts: self.contacts,
+        }
     }
 }
 

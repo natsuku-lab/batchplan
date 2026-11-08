@@ -25,6 +25,15 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   `Blocked`. In either case it used to plan a free-space motion to the goal, off the path. Code
   that writes out every field of `FollowerOptions` needs the new one.
 
+### Changed
+
+- **Breaking:** `FollowStatus::Stopping { contacts }` and `FollowStatus::Collides { at, contacts }`
+  name what is in the way, as `Device::contacts` lists it: what the rest of the motion collided
+  with where it was first found to, numbered as in the worlds of the tick the stop began at and
+  repeated on every tick of the stop while it is clear, and what the robot collides with at
+  `at`. A graze a GPU device's check finds just outside what its CPU threads list names the
+  nearest within 0.1 mm. They said only that something collided. `Stopping` was a unit variant.
+
 ### Fixed
 
 - `pick` builds each holding device where it moves with it again, so building one overlaps the
