@@ -1672,11 +1672,11 @@ impl Backend for CpuBackend {
         held: &[bool],
         q: &mut [f32],
         o: &IkOptions,
-    ) -> Result<Vec<[f32; 2]>> {
+    ) -> Result<Vec<[f32; 4]>> {
         let (n, hands) = (self.robot.dof(), self.robot.hands());
         let prepared: &CpuWorlds = worlds.prepared();
         let hand_joints: Vec<Vec<usize>> = (0..hands).map(|h| self.robot.hand_joints(h)).collect();
-        Ok(self.pool.install(|| {
+        let errors: Vec<[f32; 2]> = self.pool.install(|| {
             q.par_chunks_mut(n)
                 .enumerate()
                 .zip(item_world.par_iter().zip(targets.par_chunks(hands)))
@@ -1718,7 +1718,10 @@ impl Backend for CpuBackend {
                     },
                 )
                 .collect()
-        }))
+        });
+        let clear = self.clearance(worlds, item_world, q)?;
+        let items = errors.iter().zip(&clear);
+        Ok(items.map(|(e, c)| [e[0], e[1], c[0], c[1]]).collect())
     }
 
     fn trajopt(

@@ -440,13 +440,13 @@ fn solved(
             }
         }
     }
-    let err = device.ik(worlds, &item_world, &targets, &held, &mut q, o)?;
-    let clear = device.clearance(worlds, &item_world, &q)?;
-    let success = (0..items)
-        .map(|i| {
-            err[i][0] < o.position_tolerance
-                && err[i][1] < o.rotation_tolerance
-                && device::collision_free(clear[i])
+    let solved = device.ik(worlds, &item_world, &targets, &held, &mut q, o)?;
+    let success = solved
+        .iter()
+        .map(|s| {
+            s[0] < o.position_tolerance
+                && s[1] < o.rotation_tolerance
+                && device::collision_free([s[2], s[3]])
         })
         .collect();
     Ok(IkResult {
@@ -454,10 +454,10 @@ fn solved(
         dof: n,
         seeds: o.seeds,
         q,
-        position_error: err.iter().map(|e| e[0]).collect(),
-        rotation_error: err.iter().map(|e| e[1]).collect(),
-        world_clearance: clear.iter().map(|c| c[0]).collect(),
-        self_clearance: clear.iter().map(|c| c[1]).collect(),
+        position_error: solved.iter().map(|s| s[0]).collect(),
+        rotation_error: solved.iter().map(|s| s[1]).collect(),
+        world_clearance: solved.iter().map(|s| s[2]).collect(),
+        self_clearance: solved.iter().map(|s| s[3]).collect(),
         success,
     })
 }
