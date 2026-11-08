@@ -672,16 +672,24 @@ impl Robot {
         });
         if let Some((name, s)) = malformed {
             bail!(
-                "collision sphere {s:?} of link '{name}' needs a finite center and a finite radius \
-                 of at least 0"
+                "collision sphere {s:?} of link '{name}' (given, or fitted to its geometry) needs a \
+                 finite center and a finite radius of at least 0"
             );
         }
-        if let Some((name, b)) = model
-            .self_collision_buffer
-            .iter()
-            .find(|(_, b)| !b.is_finite())
-        {
-            bail!("the self-collision buffer of link '{name}' must be finite, got {b}");
+        // A buffer may shrink a link's spheres for self-collision, but not below nothing.
+        for (name, &b) in &model.self_collision_buffer {
+            let smallest = model
+                .spheres
+                .get(name)
+                .into_iter()
+                .flatten()
+                .map(|s| s[3])
+                .fold(f32::INFINITY, f32::min);
+            ensure!(
+                b.is_finite() && (smallest.is_infinite() || b >= -smallest),
+                "the self-collision buffer of link '{name}' must be finite and at least minus its \
+                 smallest sphere's radius ({smallest}), got {b}"
+            );
         }
         let mut spheres = vec![];
         for (li, link) in self.links.iter().enumerate() {
