@@ -10,6 +10,15 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- Python bindings, in `python/`: the `batchplan` package, built with maturin
+  ([Python](docs/python.md)). Robots, obstacles and worlds, devices, IK (`solve_ik`,
+  `ik_failures`), planning with hand constraints (`plan`), timing (`Trajectory`), tool paths
+  (`follow`), whole tasks (`pick`, `place`, `grasps`, `place_poses`) and held objects, with NumPy
+  arrays in and out, `batchplan::Error`'s kinds as exception classes, and the interpreter released
+  while each call works. Values are frozen and changed with `replace(**changes)`, as Rust's struct
+  update syntax does. Install it from the repository with
+  `pip install "git+https://github.com/natsuku-lab/batchplan#subdirectory=python"`, which needs a
+  Rust toolchain.
 - **Breaking:** `PlanProblem::holding`, `IkProblem::holding` and `ToolPath::holding`: an object a
   hand holds (a `Held`, as `TaskPlan::held` gives it), per problem. One `plan`, `solve_ik` or
   `follow` call takes problems holding nothing, different objects, or one object by different

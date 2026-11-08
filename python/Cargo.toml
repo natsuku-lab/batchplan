@@ -1,0 +1,46 @@
+# Python bindings, a crate of their own so the library never depends on PyO3. maturin builds it
+# into the `batchplan` package (pyproject.toml).
+[package]
+name = "batchplan-python"
+version = "0.11.0-beta.1"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+batchplan = { path = ".." }
+numpy = "0.30"
+pyo3 = { version = "0.30", features = ["abi3-py310", "extension-module"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+# Rules of Google's Rust style guide that clippy checks, as in the library.
+wildcard_imports = "warn"
+enum_glob_use = "warn"
+needless_for_each = "warn"
+undocumented_unsafe_blocks = "warn"
+format_push_string = "warn"
+redundant_clone = "warn"
+ref_option = "warn"
+# Bun's rules that the library keeps too.
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+needless_collect = "warn"
+or_fun_call = "warn"
+implicit_clone = "warn"
+assigning_clones = "warn"
+allow_attributes_without_reason = "warn"
+unwrap_used = "warn"
+# The root clippy.toml bans reading the environment in the library; the bindings read none either.
+disallowed_methods = "allow"
+
+[profile.release]
+debug = 1

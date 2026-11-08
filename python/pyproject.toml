@@ -1,0 +1,47 @@
+[build-system]
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
+
+[project]
+name = "batchplan"
+description = "Batched, collision-aware robot motion generation: IK, motion planning and pick-and-place tasks for thousands of problems at once, on any GPU or CPU threads"
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+dependencies = ["numpy>=1.24"]
+dynamic = ["version"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff==0.17.4"]
+
+[tool.maturin]
+module-name = "batchplan._native"
+profile = "release"
+
+[tool.uv]
+# Rebuild the extension when the bindings or the library change.
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "Cargo.toml" },
+  { file = "src/**/*.rs" },
+  { file = "../Cargo.toml" },
+  { file = "../src/**/*" },
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# pycodestyle, Pyflakes, isort, bugbear, pyupgrade, simplify and ruff's own; Google docstrings.
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "D"]
+ignore = ["D100", "D103", "D104"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["batchplan", "conftest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
