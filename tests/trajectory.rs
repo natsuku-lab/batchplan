@@ -138,6 +138,48 @@ fn trajectories_stay_within_limits_everywhere() {
     );
 }
 
+/// Samples of paths that run along each joint's upper, then lower, limit for a stretch, starting
+/// and ending at rest: blends of control points at the limit round past it unless each is held to
+/// the points it blends.
+#[test]
+fn samples_of_a_path_along_a_limit_stay_within_it() {
+    let robot = common::panda().unwrap();
+    let n = robot.dof();
+    let (lower, upper) = (robot.lower(), robot.upper());
+    let mut rng = Rng::new(7);
+    let mut past = 0.0f32;
+    for trial in 0..4 * n {
+        let held = trial % n;
+        let mut points: Vec<Vec<f32>> = (0..4)
+            .map(|_| {
+                let q = robot.default_q().iter().enumerate();
+                q.map(|(j, &v)| (v + rng.range(-0.3, 0.3)).clamp(lower[j], upper[j]))
+                    .collect()
+            })
+            .collect();
+        let limit = if trial < 2 * n {
+            upper[held]
+        } else {
+            lower[held]
+        };
+        for p in &mut points {
+            p[held] = limit;
+        }
+        let (first, last) = (points[0].clone(), points[3].clone());
+        let cp = [vec![first; 3], points, vec![last; 3]].concat().concat();
+        let samples = Trajectory::try_new(&robot, &cp, 1.0)
+            .unwrap()
+            .sample(2000.0)
+            .unwrap();
+        for q in samples.positions.chunks(n) {
+            for j in 0..n {
+                past = past.max(q[j] - upper[j]).max(lower[j] - q[j]);
+            }
+        }
+    }
+    assert!(past <= 0.0, "a sample lies {past} rad past a limit");
+}
+
 #[test]
 fn slower_speed_scales_stretch_time() {
     let robot = common::panda().unwrap();

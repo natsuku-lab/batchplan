@@ -236,6 +236,17 @@ impl Trajectory {
         let v = s - span as f32;
         let cp = &self.control_points;
         spline::blend(cp, n, span, spline::basis(v), &mut out.position);
+        // The spline lies between the least and greatest of the four points it blends, which
+        // rounding can leave: past a joint limit the points touch. Points that are all NaN leave
+        // the position NaN.
+        for (j, p) in out.position.iter_mut().enumerate() {
+            let c = |i: usize| cp[(span + i) * n + j];
+            let lo = c(0).min(c(1)).min(c(2).min(c(3)));
+            let hi = c(0).max(c(1)).max(c(2).max(c(3)));
+            if lo <= hi {
+                *p = p.clamp(lo, hi);
+            }
+        }
         spline::blend(cp, n, span, spline::basis_d1(v), &mut out.velocity);
         spline::blend(cp, n, span, spline::basis_d2(v), &mut out.acceleration);
         for j in 0..n {

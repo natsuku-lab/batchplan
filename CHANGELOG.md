@@ -74,6 +74,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Fixed
 
+- `Trajectory::at` and `Trajectory::sample` keep each position between the control points it
+  blends, so a path that runs along a joint limit never samples past it. Rounding left samples a
+  unit or two in the last place past (up to 4.8e-7 rad), which limit checks with no tolerance
+  refuse.
 - `pick` builds each holding device where it moves with it again, so building one overlaps the
   other grasps' moves. 0.10.0 built them all first, which cost picks on a GPU device about 1.5%:
   64 picks of the tasks example (`cargo run --release --example tasks -- 64`) took 185.5 ms on
