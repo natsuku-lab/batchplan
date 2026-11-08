@@ -9,7 +9,7 @@ create_exception!(
     batchplan,
     Error,
     PyException,
-    "Every error batchplan raises."
+    "Every error batchplan reports; its subclasses are `batchplan::Error`'s kinds."
 );
 create_exception!(
     batchplan,

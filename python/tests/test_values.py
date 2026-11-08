@@ -114,3 +114,22 @@ def test_a_world_without_an_obstacle_renumbers_the_touches_after_it():
     assert len(world.obstacles) == 3, "the world it was made from keeps its obstacles"
     with pytest.raises(bp.InputError):
         world.without(3)
+
+
+def test_cylinders_take_their_radius_and_half_height_in_order():
+    cylinder = bp.Obstacle.cylinder((0.0, 0.0, 0.0), 0.1, 0.5)
+    assert math.isclose(cylinder.distance((0.2, 0.0, 0.0)).value, 0.1, abs_tol=1e-6)
+    assert math.isclose(cylinder.distance((0.0, 0.0, 0.55)).value, 0.05, abs_tol=1e-6)
+
+
+def test_distances_point_away_from_the_surface():
+    distance = bp.Obstacle.sphere((0.0, 0.0, 0.0), 0.1).distance((0.3, 0.0, 0.0))
+    assert math.isclose(distance.value, 0.2, abs_tol=1e-6)
+    np.testing.assert_allclose(distance.gradient, (1.0, 0.0, 0.0), atol=1e-6)
+
+
+def test_joint_states_keep_what_they_are_given():
+    state = bp.JointState([0.1, 0.2], [0.3, 0.4], [0.5, 0.6])
+    np.testing.assert_allclose(state.velocity, (0.3, 0.4))
+    np.testing.assert_allclose(state.acceleration, (0.5, 0.6))
+    np.testing.assert_array_equal(bp.JointState([0.1, 0.2]).acceleration, (0.0, 0.0))

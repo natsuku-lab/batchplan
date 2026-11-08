@@ -2,7 +2,7 @@
 
 use pyo3::exceptions::{PyIndexError, PyTypeError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyTuple};
 
 use crate::device::{CollisionWeights, Device, Worlds};
 use crate::error::OrRaise;
@@ -223,7 +223,7 @@ impl IkResult {
     }
 
     /// Every problem with a successful seed, with its best configuration.
-    fn solved(&self, py: Python<'_>) -> PyResult<Vec<Solved>> {
+    fn solved<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let solved = self.result.solved().map(|s| {
             Ok(Solved {
                 index: s.index,
@@ -231,7 +231,7 @@ impl IkResult {
                 solution: field::array(py, s.solution, &[s.solution.len()])?.unbind(),
             })
         });
-        solved.collect()
+        PyTuple::new(py, solved.collect::<PyResult<Vec<_>>>()?)
     }
 
     fn __len__(&self) -> usize {
@@ -299,13 +299,13 @@ pub(crate) fn solve_ik(
 /// did, so it runs only when asked for, here.
 #[pyfunction]
 #[pyo3(name = "ik_failures", signature = (device, worlds, result, options = None))]
-pub(crate) fn failures(
-    py: Python<'_>,
+pub(crate) fn failures<'py>(
+    py: Python<'py>,
     device: &Device,
     worlds: &Worlds,
     result: &IkResult,
     options: Option<&IkOptions>,
-) -> PyResult<Vec<Option<IkFailure>>> {
+) -> PyResult<Bound<'py, PyTuple>> {
     let options = options.map(|o| o.0).unwrap_or_default();
     let failures = py
         .detach(|| batchplan::ik::failures(&device.device, &worlds.0, &result.result, &options))
@@ -324,7 +324,7 @@ pub(crate) fn failures(
         })
         .transpose()
     });
-    mirrored.collect()
+    PyTuple::new(py, mirrored.collect::<PyResult<Vec<_>>>()?)
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

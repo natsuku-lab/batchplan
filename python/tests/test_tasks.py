@@ -50,6 +50,9 @@ def test_a_picked_box_is_carried_and_set_down(tasks_robot):
         lifted = tasks_robot.ee_pose(plan.depart.end)
         np.testing.assert_allclose(lifted.position, at.position + task.lift, atol=2e-3)
         assert plan.held.hand == 0 and plan.held.grasp == grasp
+        attached = plan.held.attachment(tasks_robot)
+        assert (attached.name, attached.link) == ("held by hand 0", "ee_link"), attached
+        assert set(attached.touch_links) == set(tasks_robot.hand_links(0)), "it may touch the hand"
         motions = plan.transit.duration + plan.approach.duration + plan.depart.duration
         assert math.isclose(plan.duration, motions, rel_tol=1e-5)
         assert str(plan.duration) == str(np.float32(plan.duration)), "f32 as written"
@@ -64,6 +67,14 @@ def test_a_picked_box_is_carried_and_set_down(tasks_robot):
         assert isinstance(placed, tuple) and placed, f"{placed} on {device}"
         np.testing.assert_allclose(placed[0].placed.pose.position, spot.position, atol=2e-3)
 
+        slow = bp.TaskOptions(tool_speed=0.02)
+        lowered = bp.place(device, without, [place], slow).outcomes[0][0]
+        assert lowered.approach.duration > 3 * placed[0].approach.duration, "2 cm/s against 10"
+        result = bp.pick(device, worlds, [task], slow)
+        assert len(result.problems) == 1 and result.problems[0].object == BOX
+        crawl = result.outcomes[0][0]
+        assert crawl.approach.duration > 3 * plan.approach.duration, "2 cm/s against 10 cm/s"
+
 
 def test_a_task_no_grasp_gets_through_says_where_each_stopped(tasks_robot):
     device = bp.Device.cpu(tasks_robot)
@@ -75,6 +86,7 @@ def test_a_task_no_grasp_gets_through_says_where_each_stopped(tasks_robot):
     assert failure.step == bp.TaskStep.Reach
     assert failure.at(bp.TaskStep.Reach) == len(grasps)
     assert all(isinstance(c.why, bp.ToolPathStop.Unreachable) for c in failure.candidates)
+    assert all(c.step == bp.TaskStep.Reach and c.contacts == () for c in failure.candidates)
     assert "reach" in str(failure).lower(), str(failure)
 
 
@@ -88,6 +100,10 @@ def test_a_tool_path_goes_as_far_as_it_is_clear(tasks_robot):
     assert result.fraction[0] == 1.0 and result.stopped == (None,)
     reached = tasks_robot.ee_pose(result.paths[0][-1])
     np.testing.assert_allclose(reached.position, down.position, atol=2e-3)
+    coarse = bp.follow(device, clear, [bp.ToolPath(0, q, [down])], bp.ToolPathOptions(step=0.05))
+    assert len(coarse.paths[0]) < len(result.paths[0]), "longer steps, fewer points"
+    with pytest.raises(bp.InputError, match="hand"):
+        bp.follow(device, clear, [bp.ToolPath(0, q, [down], hand=1)])
 
     # A slab whose top is 5 cm below the hand, halfway down its path.
     block = bp.Obstacle.cuboid(hand.position - np.array((0.0, 0.0, 0.07)), (0.1, 0.1, 0.02))
@@ -120,7 +136,7 @@ def test_holding_and_constraints_reach_the_planner(tasks_robot):
 
 def test_an_attached_object_moves_with_the_hand(tasks_robot):
     q = tasks_robot.default_q
-    ball = bp.Obstacle.sphere((0.0, 0.0, 0.05), 0.03)
+    ball = bp.Obstacle.sphere((0.0, 0.0, 0.2), 0.03)  # 20 cm past the hand: past its fingers
     held = tasks_robot.attach(bp.AttachedObject("ball", "panda_hand", [ball]))
     assert len(held.spheres(q)) > len(tasks_robot.spheres(q))
     assert held.link_pose(q, "ball") is not None
@@ -131,6 +147,29 @@ def test_an_attached_object_moves_with_the_hand(tasks_robot):
     assert holding.robot is held
     result = bp.solve_ik(holding, worlds, [bp.IkProblem(0, tasks_robot.ee_pose(q))])
     assert result.success.any()
+    # An obstacle where only the ball reaches collides on the device made for the held robot.
+    # The object's frame is the hand link's; the ball sits 20 cm out from it.
+    at_ball = held.link_pose(q, "ball").mul_pose(bp.Pose((0.0, 0.0, 0.2))).position
+    shelf = holding.upload([bp.World([bp.Obstacle.sphere(at_ball, 0.02)])])
+    away = q.copy()
+    away[0] += 0.5
+    move = [bp.PlanProblem(0, q, away)]
+    failure = bp.plan(holding, shelf, move).failures[0]
+    assert isinstance(failure, bp.PlanFailure.StartCollides), failure
+    assert any(c.link == "ball" for c in failure.contacts), failure.contacts
+    assert bp.plan(device, shelf, move).failures[0] is None, "the bare hand clears it"
+
+
+def test_grasps_into_the_table_name_what_they_collide_with(tasks_robot):
+    # Without the table as the box's support, the fingers that reach it collide with it.
+    device = bp.Device.cpu(tasks_robot)
+    worlds = device.upload([scene()])
+    task = bp.Pick(0, tasks_robot.default_q, BOX, box_grasps(tasks_robot))
+    failure = bp.pick(device, worlds, [task]).outcomes[0]
+    assert isinstance(failure, bp.TaskFailure)
+    colliding = [c for c in failure.candidates if c.contacts]
+    assert colliding, failure.candidates
+    assert all(c.contacts[0].obstacle in (TABLE, BOX) for c in colliding)
 
 
 def test_a_transit_that_breaks_its_constraints_stops_there(tasks_robot):
@@ -152,3 +191,4 @@ def test_a_transit_that_breaks_its_constraints_stops_there(tasks_robot):
     assert isinstance(failure, bp.TaskFailure)
     assert failure.step == bp.TaskStep.Transit, failure
     assert isinstance(failure.candidates, tuple)
+    assert bp.TaskStep.Transit in {c.step for c in failure.candidates}, failure.candidates

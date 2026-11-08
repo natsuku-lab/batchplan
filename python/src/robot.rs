@@ -11,8 +11,8 @@ use crate::field::{self, Field, value_class};
 use crate::world::Pose;
 
 /// Which link geometry spheres are fitted to.
-#[pyclass(module = "batchplan", frozen, eq, eq_int)]
-#[derive(Clone, Copy, PartialEq)]
+#[pyclass(module = "batchplan", frozen, eq, eq_int, hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum SphereGeometry {
     /// The links' collision geometry.
     Collision,
@@ -318,34 +318,36 @@ impl Robot {
 
     /// The joints that move hand `hand`, root first: the actuated joints of its chain (a mimic
     /// joint counts as its leader).
-    fn hand_joints(&self, hand: usize) -> PyResult<Vec<usize>> {
+    fn hand_joints<'py>(&self, py: Python<'py>, hand: usize) -> PyResult<Bound<'py, PyAny>> {
         self.check_hand(hand)?;
-        Ok(self.0.hand_joints(hand))
+        self.0.hand_joints(hand).to_py(py)
     }
 
     /// Names of the links of hand `hand`, for `Touch`: the first link at or above its frame that
     /// has collision spheres and every link below that one, its fingers and any object it holds.
-    fn hand_links(&self, hand: usize) -> PyResult<Vec<String>> {
+    fn hand_links<'py>(&self, py: Python<'py>, hand: usize) -> PyResult<Bound<'py, PyAny>> {
         self.check_hand(hand)?;
-        Ok(self
+        let links: Vec<String> = self
             .0
             .hand_links(hand)
             .into_iter()
             .map(String::from)
-            .collect())
+            .collect();
+        links.to_py(py)
     }
 
     /// Names of the links hand `hand` grips with: those `RobotOptions.finger_links` names for it,
     /// or else its links below the palm that have collision spheres. Empty for a hand with none,
     /// such as a suction cup or a bare flange.
-    fn finger_links(&self, hand: usize) -> PyResult<Vec<String>> {
+    fn finger_links<'py>(&self, py: Python<'py>, hand: usize) -> PyResult<Bound<'py, PyAny>> {
         self.check_hand(hand)?;
-        Ok(self
+        let links: Vec<String> = self
             .0
             .finger_links(hand)
             .into_iter()
             .map(String::from)
-            .collect())
+            .collect();
+        links.to_py(py)
     }
 
     /// How far hand `hand`'s spheres reach past its IK frame along the frame's z axis at the

@@ -192,8 +192,12 @@ value_class! {
 
         /// The links that touch an obstacle in every configuration, as a link turning just
         /// above the base touches its table.
-        fn always_touching(&self, robot: &crate::robot::Robot) -> Vec<Touch> {
-            self.0.always_touching(&robot.0).into_iter().map(Touch).collect()
+        fn always_touching<'py>(
+            &self,
+            py: Python<'py>,
+            robot: &crate::robot::Robot,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            self.0.always_touching(&robot.0).to_py(py)
         }
     }
 }

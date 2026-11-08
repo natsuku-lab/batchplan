@@ -40,10 +40,10 @@ for s in plans.solved():
 The names are Rust's: `Robot.load`, `Device.upload`, `solve_ik`, `IkResult.best`, `plan`, `PlanResult.solved`, `pick`, `follow`. [The API page](api.md) lists them by task, and each guide explains what they do. What differs:
 
 - **Values are frozen.** Poses, obstacles, worlds, problems and options can't change in place: `options.replace(seeds=4)` returns a copy with a field changed, as Rust's struct update syntax does, and `world.without(i)` is Rust's `World::remove` on a copy. Constructors take the fields Rust's `new` does, and any others by keyword: `bp.PlanProblem(0, start, goal, hold=[0])`, `bp.PlanOptions(seeds=2)`. Defaults are Rust's.
-- **Arrays come out read-only.** Configurations, control points `(points, dof)` and per-seed results `(problems, seeds, ...)` are `float32` NumPy arrays; copy one to change it. Anything array-like goes in. A result builds each array once, so reading `result.q[i]` in a loop costs nothing more.
+- **Arrays come out read-only.** Configurations, control points `(points, dof)` and per-seed results `(problems, seeds, ...)` are NumPy arrays, `float32` (`bool` for flags such as `success` and `valid`); copy one to change it. Anything array-like goes in. A result builds each array once, so reading `result.q[i]` in a loop costs nothing more.
 - **Rotations are unit quaternions, scalar last:** `(x, y, z, w)`, as ROS, SciPy and glam order them.
 - **No-argument accessors are properties:** `robot.dof`, `robot.default_q`, `trajectory.duration`, `device.name`.
-- **Sequences come out as tuples, and maps as read-only views:** `world.obstacles`, `result.failures`, a task's plans, `options.lock_joints`.
+- **Sequences come out as tuples, and maps as read-only views:** `world.obstacles`, `result.failures`, `result.solved()`, `bp.grasps(...)`, a task's plans, `options.lock_joints`.
 - **Failures and contacts are classes per kind,** for `isinstance` or `match`: `bp.PlanFailure.StartCollides(contacts)`, `bp.Contact.World(link, obstacle, distance)`, `bp.ToolPathStop.Collision(at)`.
 
 ## Picking up and setting down
@@ -78,7 +78,7 @@ else:
 
 ## Errors
 
-Every error is a `bp.Error`; each kind of `batchplan::Error` is its own subclass, to catch one or all: `InputError` (what the call was given), `LoadError` (a file), `GpuError`, `ThreadsError`, `UnsafeError` (a trajectory past a limit) and `WriteError`.
+Every error batchplan reports is a `bp.Error`; each kind of `batchplan::Error` is its own subclass, to catch one or all: `InputError` (what the call was given), `LoadError` (a file), `GpuError`, `ThreadsError`, `UnsafeError` (a trajectory past a limit) and `WriteError`. An argument of the wrong type, an index out of range or a number past what its field holds raises Python's own `TypeError`, `IndexError` or `OverflowError` before batchplan sees it.
 
 ```python
 import batchplan as bp
@@ -98,4 +98,4 @@ Every call lets go of the interpreter while it works, so other Python threads ru
 
 ## What it binds
 
-Robots (`Robot.load`, `from_urdf`, `attach`, `detach`, `relock`, forward kinematics and spheres), obstacles and worlds (`World.without`, `always_touching`), devices, IK, planning with hand constraints, timing, tool paths (`follow`), whole tasks (`pick`, `place`, `grasps`, `place_poses`) and held objects (`Held`, per problem as `holding`). Not yet: training data (`datagen`, the NumPy and LeRobot exports), live motion (`Follower`, `servo`), joining motions (`join`), distance grids and perception, `MeshModel`, `Robot.qualify`, `Robot.assemble`, `Device.evaluate` and `Device.contacts`. OpenUSD files need the library's `usd` feature, which these builds leave out.
+Robots (`Robot.load`, `from_urdf`, `attach`, `detach`, `relock`, forward kinematics and spheres), obstacles and worlds (`World.without`, `always_touching`), devices, IK, planning with hand constraints, timing, tool paths (`follow`), whole tasks (`pick`, `place`, `grasps`, `place_poses`) and held objects (`Held`, per problem as `holding`). Not yet: training data (`datagen`, the NumPy and LeRobot exports), live motion (`Follower`, `servo`), joining motions (`join`), distance grids and perception, `World.load`, `MeshModel`, `Robot.qualify`, `Robot.breach`, `Robot.assemble`, `Device.evaluate` and `Device.contacts`. OpenUSD files need the library's `usd` feature, which these builds leave out.

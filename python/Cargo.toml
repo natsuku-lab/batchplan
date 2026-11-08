@@ -17,7 +17,6 @@ numpy = "0.30"
 pyo3 = { version = "0.30", features = ["abi3-py310", "extension-module"] }
 
 [lints.rust]
-missing_debug_implementations = "allow"
 unsafe_code = "forbid"
 
 [lints.clippy]

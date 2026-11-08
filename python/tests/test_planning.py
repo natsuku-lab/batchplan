@@ -46,6 +46,8 @@ def test_ik_reports_each_seed_as_forward_kinematics_measures_it(ur5e_robot):
         angle = 2 * math.acos(min(1.0, abs(float(np.dot(reached.rotation, target.rotation)))))
         assert math.isclose(position, distance, abs_tol=1e-4), (position, distance)
         assert math.isclose(rotation, angle, abs_tol=2e-3), (rotation, angle)
+    assert (result.seeds, result.dof) == (32, ur5e_robot.dof)
+    assert bp.solve_ik(device, worlds, [bp.IkProblem(0, target)], bp.IkOptions(seeds=4)).seeds == 4
     assert np.all(result.world_clearance > 1e20), "nothing to collide with is far away"
     assert np.all(result.self_clearance < 1.0), "the links are near one another"
     with pytest.raises(IndexError):
@@ -77,13 +79,41 @@ def test_plans_run_from_start_to_goal_and_time_within_limits(ur5e_robot):
         assert path.shape[1] == ur5e_robot.dof
         trajectory = bp.Trajectory(ur5e_robot, path)
         trajectory.check(ur5e_robot)
+        assert trajectory.dof == ur5e_robot.dof
         np.testing.assert_allclose(trajectory.start, ur5e_robot.default_q, atol=1e-6)
         np.testing.assert_allclose(trajectory.end, goal, atol=1e-6)
         samples = trajectory.sample(100.0)
         assert samples.positions.shape == (len(samples), ur5e_robot.dof)
         assert math.isclose(samples.duration, trajectory.duration, rel_tol=1e-6)
+        for i in (0, len(samples) // 3, len(samples) // 2):
+            state = trajectory.at(i * samples.dt)
+            np.testing.assert_allclose(samples.positions[i], state.position, atol=1e-5)
+            np.testing.assert_allclose(samples.velocities[i], state.velocity, atol=1e-4)
+            np.testing.assert_allclose(samples.accelerations[i], state.acceleration, atol=1e-3)
+        spans = len(trajectory.time_points) - 3
+        assert math.isclose(trajectory.knot_interval * spans, trajectory.duration, rel_tol=1e-5)
+        half = bp.Trajectory(ur5e_robot, path, 0.5)
+        assert math.isclose(half.duration, 2 * trajectory.duration, rel_tol=1e-4)
         mid = trajectory.at(trajectory.duration / 2)
         assert np.any(mid.velocity != 0), "the state halfway is moving"
+
+
+def test_results_name_each_problem_and_its_world(ur5e_robot):
+    device = bp.Device.cpu(ur5e_robot)
+    worlds = device.upload([bp.World(), bp.World([TABLE])])
+    targets = [bp.Pose((0.4, 0.2, 0.3), DOWN), bp.Pose((0.3, -0.3, 0.4), DOWN)]
+    ik = bp.solve_ik(device, worlds, [bp.IkProblem(1, targets[0]), bp.IkProblem(0, targets[1])])
+    assert [(s.index, s.problem.world) for s in ik.solved()] == [(0, 1), (1, 0)]
+    problems = [
+        bp.PlanProblem(s.problem.world, ur5e_robot.default_q, s.solution) for s in ik.solved()
+    ]
+    plans = bp.plan(device, worlds, problems)
+    assert [s.problem.world for s in plans.solved()] == [1, 0]
+    assert plans.seeds == 1
+    assert bp.plan(device, worlds, problems, bp.PlanOptions(seeds=2)).seeds == 3
+    for i in range(len(problems)):
+        np.testing.assert_array_equal(plans.paths[i], plans.best(i))
+    assert np.all(np.isfinite(plans.length[plans.valid])) and np.all(plans.length[plans.valid] > 0)
 
 
 def test_held_joints_stay_along_the_path(ur5e_robot):
@@ -108,7 +138,7 @@ def test_a_start_in_collision_names_what_it_touches(ur5e_robot):
     result = bp.plan(device, worlds, [bp.PlanProblem(0, ur5e_robot.default_q, goal)])
     failure = result.failures[0]
     assert isinstance(failure, bp.PlanFailure.StartCollides)
-    assert result.best(0) is None and result.solved() == []
+    assert result.best(0) is None and result.solved() == ()
     contact = failure.contacts[0]
     assert isinstance(contact, bp.Contact.World)
     assert contact.obstacle == 1 and contact.distance < 0
@@ -124,7 +154,10 @@ def test_unreachable_targets_say_so(ur5e_robot):
     problems = [bp.IkProblem(0, bp.Pose((3.0, 0.0, 0.3), DOWN))]
     result = bp.solve_ik(device, worlds, problems)
     failures = bp.ik_failures(device, worlds, result)
-    assert isinstance(failures[0], bp.IkFailure.Unreachable)
+    assert isinstance(failures, tuple) and isinstance(failures[0], bp.IkFailure.Unreachable)
+    # Within ten meters of the target, a seed reaches it.
+    loose = bp.IkOptions(position_tolerance=10.0, rotation_tolerance=10.0)
+    assert isinstance(bp.ik_failures(device, worlds, result, loose)[0], bp.IkFailure.Collides)
 
 
 def test_errors_raise_their_kind():
@@ -192,6 +225,7 @@ def test_a_folded_arm_names_both_links_it_folds_onto(ur5e_robot):
     contacts = result.failures[0].contacts
     pairs = [c.links for c in contacts if isinstance(c, bp.Contact.SelfCollision)]
     assert ("upper_arm_link", "wrist_2_link") in pairs, contacts
+    assert all(c.distance < 0 for c in contacts), "a folded arm overlaps itself"
 
 
 def test_ik_says_what_a_target_collides_with(ur5e_robot):
@@ -250,6 +284,45 @@ def test_options_given_as_maps_reach_the_robot(ur5e_robot):
     assert from_text.dof == 5
 
 
+TURNTABLE = """<robot name="turntable">
+  <link name="base"/>
+  <link name="table"><collision><origin xyz="0.2 0 0.05"/>
+    <geometry><box size="0.4 0.06 0.06"/></geometry></collision></link>
+  <link name="arm"><collision><origin xyz="0.1 0 0"/>
+    <geometry><box size="0.2 0.05 0.05"/></geometry></collision></link>
+  <joint name="turn" type="continuous"><parent link="base"/><child link="table"/>
+    <origin xyz="0 0 0.1"/><axis xyz="0 0 1"/></joint>
+  <joint name="shoulder" type="revolute"><parent link="table"/><child link="arm"/>
+    <origin xyz="0.4 0 0.05"/><axis xyz="0 1 0"/>
+    <limit lower="-1" upper="1" velocity="2" effort="1"/></joint>
+</robot>"""
+
+
+def test_robots_report_their_joints_reach_and_links(ur5e_robot):
+    turntable = bp.Robot.from_urdf(TURNTABLE)
+    assert turntable.name == "turntable" and ur5e_robot.name == "ur5e"
+    assert turntable.continuous.tolist() == [True, False]
+    q = ur5e_robot.default_q
+    assert not ur5e_robot.continuous.any() and ur5e_robot.continuous.dtype == bool
+    assert 1.0 < ur5e_robot.reach < 1.5, "the UR5e reaches about 1.3 m"
+    assert ur5e_robot.hand_joints(0) == tuple(range(6))
+    assert 0.0 < ur5e_robot.tip(0) < 0.1
+    np.testing.assert_allclose(ur5e_robot.link_pose(q, "base_link").position, 0.0, atol=1e-6)
+    tool, hand = ur5e_robot.link_pose(q, "tool0"), ur5e_robot.ee_pose(q)
+    np.testing.assert_allclose(tool.position, hand.position, atol=1e-6)
+    assert same_rotation(tool.rotation, hand.rotation)
+    assert np.linalg.norm(ur5e_robot.link_pose(q, "wrist_1_link").position - hand.position) > 0.1
+    assert ur5e_robot.link_pose(q, "no_such_link") is None
+
+
+def test_writing_and_gpus_fail_as_their_kinds(ur5e_robot, tmp_path):
+    with pytest.raises(bp.WriteError):
+        ur5e_robot.collision_model.save(tmp_path / "missing" / "model.json")
+    with pytest.raises(bp.GpuError):
+        bp.Device.gpu(ur5e_robot, name="no adapter has this name")
+    assert bp.Device.cpu(ur5e_robot, threads=2).name.startswith("cpu")
+
+
 def test_hands_name_their_links_and_fingers(tasks_robot):
     links, fingers = tasks_robot.hand_links(0), tasks_robot.finger_links(0)
     assert "panda_hand" in links and "panda_hand" not in fingers
@@ -291,6 +364,13 @@ def test_trajectories_start_moving_stop_and_cap_the_hand(ur5e_robot):
 
     slow = bp.Trajectory.with_hand_speed(ur5e_robot, still.control_points, bp.HandSpeed(0, 0.05))
     assert slow.duration > 2 * still.duration, "a 5 cm/s cap slows a long reach"
+    wrist = start.copy()
+    wrist[5] += 2.0
+    turn = bp.plan(device, worlds, [bp.PlanProblem(0, start, wrist)]).best(0)
+    uncapped = bp.Trajectory(ur5e_robot, turn)
+    turning = bp.HandSpeed(0, angular=0.2)
+    capped = bp.Trajectory.with_hand_speed(ur5e_robot, turn, turning)
+    assert capped.duration > 2 * uncapped.duration, "0.2 rad/s slows two radians of the wrist"
 
     slowed = bp.Robot.load(
         ASSETS / "ur5e/ur_description/urdf/ur5e.urdf", bp.RobotOptions(velocity_scale=0.1)
@@ -340,9 +420,20 @@ def picks(robot, device, _worlds, problems):
     return lambda: bp.pick(device, worlds, tasks)
 
 
+def places(robot, device, _worlds, problems):
+    """`place`, of a box held from above, from each reach's start."""
+    box = bp.Obstacle.cuboid((0.0, 0.0, 0.0), (0.02, 0.03, 0.03))
+    held = bp.Held(0, box, bp.grasps(box, bp.GraspOptions(tip=robot.tip(0)))[0])
+    worlds = device.upload([bp.World()])
+    poses = bp.place_poses(box, bp.Pose((0.45, 0.0, 0.03)), 4)
+    tasks = [bp.Place(0, robot.default_q, held, poses) for _ in problems]
+    return lambda: bp.place(device, worlds, tasks)
+
+
 # Each call, with enough reaches that it takes a while on two threads: per call, the reaches and
 # what makes the call to time from them.
 LONG_CALLS = {
+    "place": (128, places),
     "follow": (8000, tool_paths),
     "pick": (16, picks),
     "solve_ik": (300, lambda r, d, w, p: lambda: bp.solve_ik(d, w, targets(r, p))),

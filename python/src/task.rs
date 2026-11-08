@@ -171,8 +171,8 @@ value_class! {
 tuple_field!(batchplan::Pick, batchplan::Place);
 
 /// A task's steps, in order.
-#[pyclass(module = "batchplan", frozen, eq, eq_int, ord)]
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
+#[pyclass(module = "batchplan", frozen, eq, eq_int, ord, hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd)]
 pub(crate) enum TaskStep {
     /// The start, checked for collision.
     Start,
@@ -459,19 +459,28 @@ pub(crate) fn place(
 /// fits.
 #[pyfunction]
 #[pyo3(signature = (object, options = None))]
-pub(crate) fn grasps(object: &Obstacle, options: Option<&GraspOptions>) -> PyResult<Vec<Pose>> {
+pub(crate) fn grasps<'py>(
+    py: Python<'py>,
+    object: &Obstacle,
+    options: Option<&GraspOptions>,
+) -> PyResult<Bound<'py, PyTuple>> {
     let options = options.map(|o| o.0).unwrap_or_default();
     let found = batchplan::grasps(&object.0, &options).or_raise()?;
-    Ok(found.into_iter().map(Pose).collect())
+    PyTuple::new(py, found.into_iter().map(Pose))
 }
 
 /// Poses that set `object` down at `pose` alike, for `Place.poses`: `pose` turned about the
 /// object's own z axis by its symmetries. A box gives 2, or 4 where its x and y sides match; a
 /// ball, cylinder or capsule `turns` (at least 1); a distance grid `pose` alone.
 #[pyfunction]
-pub(crate) fn place_poses(object: &Obstacle, pose: &Pose, turns: usize) -> Vec<Pose> {
+pub(crate) fn place_poses<'py>(
+    py: Python<'py>,
+    object: &Obstacle,
+    pose: &Pose,
+    turns: usize,
+) -> PyResult<Bound<'py, PyTuple>> {
     let poses = batchplan::place_poses(&object.0, pose.0, turns);
-    poses.into_iter().map(Pose).collect()
+    PyTuple::new(py, poses.into_iter().map(Pose))
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

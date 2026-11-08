@@ -341,7 +341,7 @@ impl PlanResult {
 
     /// Every problem with a valid seed, with its best path's control points `(points, dof)`;
     /// `Trajectory` times one for execution.
-    fn solved(&self, py: Python<'_>) -> PyResult<Vec<Solved>> {
+    fn solved<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let solved = self.result.solved().map(|s| {
             Ok(Solved {
                 index: s.index,
@@ -349,7 +349,7 @@ impl PlanResult {
                 solution: self.points(py, s.solution)?.unbind(),
             })
         });
-        solved.collect()
+        PyTuple::new(py, solved.collect::<PyResult<Vec<_>>>()?)
     }
 
     fn __len__(&self) -> usize {

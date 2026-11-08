@@ -58,6 +58,8 @@ jobs:
       - run: rustup toolchain install nightly --profile minimal -c rustfmt
       - run: cargo +nightly fmt --check -- --config imports_granularity=Module,hex_literal_case=Lower,format_macro_matchers=true
       - run: cargo clippy --all-targets
+      # rustfmt leaves the bodies of `value_class!` alone; their lines are held to 100 columns here.
+      - run: "! grep -n '.\\{101,\\}' src/*.rs"
       - run: uv run --only-group dev ruff check .
       - run: uv run --only-group dev ruff format --check .
       - run: uv run pytest
