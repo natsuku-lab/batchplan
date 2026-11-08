@@ -36,6 +36,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Changed
 
+- **Breaking:** `Robot::load`, `Robot::from_urdf` and `Robot::assemble` refuse a collision
+  model whose spheres have a non-finite center or radius or a negative one, or whose
+  self-collision buffer for a link is not finite or would shrink one of its spheres below nothing,
+  naming the link and the value (`Error::Load`; `Error::Input` from `from_urdf`). Spheres fitted to
+  geometry that is not finite, or so large it overflows, are refused alike. Such models loaded
+  before, and a sphere smaller than nothing checked as farther from what it touched than it was.
 - **Breaking:** `Held` is `batchplan::Held`, no longer also `batchplan::task::Held`.
 - A device keeps the spheres it fits to held objects, the latest 64, and shares them with the
   devices `with_robot` makes from it. `pick`, `place` and every call holding a cylinder or a

@@ -972,6 +972,47 @@ fn load_errors_name_the_problem() {
         },
     );
     assert!(message.contains("link 'gripper'"), "{message}");
+    // A sphere that reaches less than nothing, or nowhere, would check as farther from what it
+    // touches than it is.
+    for (sphere, value) in [
+        ([0.0, 0.0, 0.0, -0.05], "-0.05"),
+        ([f32::NAN, 0.0, 0.0, 0.05], "NaN"),
+    ] {
+        let mut model = common::panda_options().collision_model.unwrap();
+        model.spheres.insert("panda_hand".into(), vec![sphere]);
+        let message = err(
+            &panda,
+            RobotOptions {
+                collision_model: Some(model),
+                ..common::panda_options()
+            },
+        );
+        assert!(
+            message.contains("of link 'panda_hand'") && message.contains(value),
+            "{message}"
+        );
+    }
+    // A buffer may shrink the hand's spheres (the smallest is 2.2 cm in radius), not past nothing.
+    for (buffer, refused) in [(f32::INFINITY, true), (-0.05, true), (-0.01, false)] {
+        let mut model = common::panda_options().collision_model.unwrap();
+        model
+            .self_collision_buffer
+            .insert("panda_hand".into(), buffer);
+        let options = RobotOptions {
+            collision_model: Some(model),
+            ..common::panda_options()
+        };
+        if refused {
+            let message = err(&panda, options);
+            let named = format!("got {buffer}");
+            assert!(
+                message.contains("buffer of link 'panda_hand'") && message.contains(&named),
+                "{message}"
+            );
+        } else {
+            Robot::load(&panda, &options).unwrap();
+        }
+    }
 }
 
 #[test]
