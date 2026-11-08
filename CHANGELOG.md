@@ -8,6 +8,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+### Added
+
+- **Breaking:** `FollowerOptions::replan`, on by default. Off, a `Follower` keeps its
+  trajectory's path, as a motion along a tool path must: where the rest of the motion collides,
+  it stops on the path, and where the robot is measured past `tolerance`, it holds it there,
+  `Blocked`. In either case it used to plan a free-space motion to the goal, off the path. Code
+  that writes out every field of `FollowerOptions` needs the new one.
+
 ## [0.10.0] - 2026-11-07
 
 ### Changed

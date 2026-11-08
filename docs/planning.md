@@ -396,6 +396,7 @@ A `Follower` runs a trajectory while the world changes. Each `tick(&device, &wor
 - **Before a takeover:** the rest of the motion is the current trajectory up to the takeover, then the replan. If either collides, the replan is dropped and the robot stops.
 - **Stopping, then blocked:** when no plan arrives in time, or the collision comes sooner than `budget + lead`, it takes the controlled stop along its path and reports `Blocked` at rest. Plan again from there, or give up.
 - **Collides:** the stop is checked too. When no stop within the limits ends short of the collision, the status is `Collides { at }`, with the time it comes: stop the robot some other way.
+- **Keeping the path:** with `replan` off, it never plans, for a motion that must stay on its path, as one along a tool path (`follow`, timed with `HandSpeed`) must: a replan would leave it for a free-space motion at full speed. Where the rest collides, it stops on its path and reports `Blocked` at rest; measured past `tolerance`, it holds the robot where it is, `Blocked`. Follow the rest of the path again from there, or give up.
 
 `servo(&device, &worlds, world, &state, target, &ServoOptions)` is one control step of the hand toward a pose that may move, as MoveIt Servo does. The step works like this:
 - **Velocity:** the hand moves at the pose's error times `gain`, within the `linear` and `angular` caps, by damped least squares on its Jacobian. It turns the shorter way round.

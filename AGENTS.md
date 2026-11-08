@@ -78,7 +78,7 @@ fn main() -> Result<(), Error> {
 - **Worlds.** `device.upload(&worlds)` once per scene. Uploads are cheap (0.1–0.2 ms for 512 tabletop worlds), so a scene that changes is uploaded again; there is no partial update ([changing a scene](docs/perception.md#changing-a-scene)).
 - **Locked joints that move**, as a torso or head the robot plans without: `robot.relock(&values)` then `device.with_robot(&relocked)`, which compiles nothing and keeps the uploaded worlds. Fit the collision model with those joints free and load with it: a model records the joints it was fitted with locked, whose pairs that meet only at other values would go unchecked, and `relock` refuses to move them ([robots](docs/robots.md#kinematics)).
 - **Held objects.** `robot.attach(&AttachedObject)` then `device.with_robot(&held)`: the same GPU or threads, and the uploaded worlds still work. The held robot's GPU kernels are its own: warm its device up too before timing it. `robot.detach(name)` reverses it. Attachment is collision only: there is no payload mass or inertia, so timing a heavy carry ignores the load; slow it with a speed scale ([trajectories](docs/planning.md#executable-trajectories)).
-- **Live loops** call `Follower::tick` or `servo` each period and nothing that builds: pass the measured state to `tick` so a robot held back or pushed is followed from where it is. A controller in another process takes each replan from `FollowStatus::Replanned { at, trajectory }`, with `FollowerOptions::lead` for the time sending it takes ([live motion](docs/planning.md#live-motion)).
+- **Live loops** call `Follower::tick` or `servo` each period and nothing that builds: pass the measured state to `tick` so a robot held back or pushed is followed from where it is (held there, `Blocked`, with `FollowerOptions::replan` off). A controller in another process takes each replan from `FollowStatus::Replanned { at, trajectory }`, with `FollowerOptions::lead` for the time sending it takes ([live motion](docs/planning.md#live-motion)).
 
 ### Choose the call
 
@@ -130,3 +130,4 @@ Check these before raising budgets:
 - `grasps` returns poses in the object's frame; with a `floor`, pass the obstacle as it stands in the world.
 - `Robot::lower` and `upper` are ranges; continuous joints turn without limit and wrap.
 - `Follower::tick` with `None` trusts the trajectory; on hardware, pass the measured state.
+- A `Follower` on a tool path (`follow`) needs `FollowerOptions::replan` off: a replan leaves the path for a free-space motion to its end. Off, a collision ahead stops it on the path and a robot past `tolerance` is held where it is, both `Blocked` at rest ([live motion](docs/planning.md#live-motion)).

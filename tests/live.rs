@@ -1,6 +1,7 @@
 //! Live motion through its interface: a follower replans around a box moved into its path and
 //! takes over from the state the robot is in then, stops on its path when there is no time or its
-//! replan collides, and says so when no stop is short enough; replans keep the trajectory's
+//! replan collides, and says so when no stop is short enough; one that keeps its path, as along a
+//! tool path, stops on it and holds a robot held back where it is; replans keep the trajectory's
 //! constraints, and stop where they cannot start inside them; servo steps slow and halt before a
 //! wall without entering it, reach a free target and brake joints before their ends, within the
 //! limits.
@@ -12,8 +13,8 @@ use batchplan::glam::{Quat, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{
     CollisionWeights, Device, Error, FollowStatus, Follower, FollowerOptions, HandConstraint,
-    JointState, Obstacle, PlanOptions, PlanProblem, Pose, Robot, RobotOptions, RrtOptions,
-    ServoOptions, ServoStatus, Trajectory, World, Worlds,
+    HandSpeed, JointState, Obstacle, PlanOptions, PlanProblem, Pose, Robot, RobotOptions,
+    RrtOptions, ServoOptions, ServoStatus, ToolPath, ToolPathOptions, Trajectory, World, Worlds,
 };
 
 const DT: f32 = 0.02;
@@ -658,6 +659,140 @@ fn a_robot_held_far_back_is_followed_from_where_it_is() {
     ));
 }
 
+/// The hand moved 30 cm forward from the Panda's default configuration at 10 cm/s, as `follow`
+/// moves it: the trajectory and the line's ends.
+fn line(robot: &Robot, device: &Device) -> (Trajectory, Vec3, Vec3) {
+    let worlds = device.upload(&[World::default()]).unwrap();
+    let from = robot.ee_pose(robot.default_q(), 0);
+    let to = Pose::new(from.position + Vec3::new(0.3, 0.0, 0.0), from.rotation);
+    let path = ToolPath {
+        world: 0,
+        start: robot.default_q().to_vec(),
+        hand: 0,
+        waypoints: vec![to],
+    };
+    let result = batchplan::follow(device, &worlds, &[path], &ToolPathOptions::default()).unwrap();
+    assert_eq!(result.fraction[0], 1.0, "{:?}", result.stopped[0]);
+    let speed = HandSpeed {
+        hand: 0,
+        linear: 0.1,
+        angular: f32::INFINITY,
+    };
+    let trajectory = Trajectory::with_hand_speed(robot, &result.paths[0], &speed).unwrap();
+    (trajectory, from.position, to.position)
+}
+
+/// The distance from `p` to the segment from `a` to `b`.
+fn off_segment(p: Vec3, a: Vec3, b: Vec3) -> f32 {
+    let t = ((p - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+    p.distance(a + (b - a) * t)
+}
+
+#[test]
+fn a_follower_that_keeps_its_path_stops_on_it_where_the_rest_collides() {
+    let robot = common::panda().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let (line, from, to) = line(&robot, &device);
+    let duration = line.duration();
+    let free = device.upload(&[World::default()]).unwrap();
+    let middle = (from + to) / 2.0;
+    let blocked = device
+        .upload(&[World::new(vec![Obstacle::cuboid(
+            middle,
+            Vec3::splat(0.04),
+        )])])
+        .unwrap();
+    assert!(
+        !clear(&device, &blocked, &state_at(&line, duration / 2.0).position)
+            && clear(&device, &blocked, &line.start())
+            && clear(&device, &blocked, &line.end()),
+        "the box blocks the line, and not its ends"
+    );
+    // The line with the box dropped onto its middle a tenth of the way along: the statuses, and
+    // the hand's positions.
+    let run = |replan: bool| {
+        let o = FollowerOptions {
+            replan,
+            ..Default::default()
+        };
+        let mut follower = Follower::try_new(&robot, 0, line.clone(), 0.0, o).unwrap();
+        let (mut t, mut statuses, mut hand) = (0.0, vec![], vec![]);
+        while t < 4.0 * duration {
+            let worlds = if t < duration / 10.0 { &free } else { &blocked };
+            let tick = follower.tick(&device, worlds, t, None).unwrap();
+            assert!(
+                clear(&device, worlds, &tick.state.position),
+                "at {t:.2} s the robot collides ({:?})",
+                tick.status
+            );
+            hand.push(robot.ee_pose(&tick.state.position, 0).position);
+            statuses.push(tick.status.clone());
+            if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
+                break;
+            }
+            t += DT;
+        }
+        (statuses, hand)
+    };
+    // Replanning, it would leave the line for a way around the box.
+    let (statuses, _) = run(true);
+    assert!(
+        statuses
+            .iter()
+            .any(|s| matches!(s, FollowStatus::Replanned { .. })),
+        "{statuses:?}"
+    );
+    // Keeping its path, it stops on the line short of the box, at rest.
+    let (statuses, hand) = run(false);
+    assert!(
+        statuses.contains(&FollowStatus::Stopping)
+            && statuses.iter().all(|s| matches!(
+                s,
+                FollowStatus::Following | FollowStatus::Stopping | FollowStatus::Blocked
+            )),
+        "{statuses:?}"
+    );
+    assert_eq!(statuses.last(), Some(&FollowStatus::Blocked));
+    let off = hand
+        .iter()
+        .map(|&p| off_segment(p, from, to))
+        .fold(0.0, f32::max);
+    assert!(off < 2e-3, "the hand strays {off} m from the line");
+}
+
+#[test]
+fn a_follower_that_keeps_its_path_holds_a_robot_held_far_back_where_it_is() {
+    let robot = common::panda().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[World::default()]).unwrap();
+    let (line, ..) = line(&robot, &device);
+    let t = line.duration() / 2.0;
+    let mut held = state_at(&line, t);
+    held.position[0] -= 0.3;
+    assert!(held.velocity.iter().any(|&v| v.abs() > 0.01), "it moves");
+    // Replanning, it would follow from there on a new motion.
+    let mut follower =
+        Follower::try_new(&robot, 0, line.clone(), 0.0, FollowerOptions::default()).unwrap();
+    let tick = follower.tick(&device, &worlds, t, Some(&held)).unwrap();
+    assert!(
+        matches!(tick.status, FollowStatus::Reanchored { .. }),
+        "{:?}",
+        tick.status
+    );
+    // Keeping its path, it holds the robot there at rest.
+    let o = FollowerOptions {
+        replan: false,
+        ..Default::default()
+    };
+    let mut follower = Follower::try_new(&robot, 0, line, 0.0, o).unwrap();
+    for (now, measured) in [(t, Some(&held)), (t + DT, None)] {
+        let tick = follower.tick(&device, &worlds, now, measured).unwrap();
+        assert_eq!(tick.status, FollowStatus::Blocked);
+        assert_eq!(tick.state.position, held.position);
+        assert!(tick.state.velocity.iter().all(|&v| v == 0.0));
+    }
+}
+
 #[test]
 fn non_finite_and_degenerate_inputs_are_errors() {
     let robot = common::panda().unwrap();
@@ -747,6 +882,13 @@ fn non_finite_and_degenerate_inputs_are_errors() {
             kept
         )));
     }
+    // Without replans, the goal may lie outside them.
+    let unplanned = FollowerOptions {
+        constraints: vec![far],
+        replan: false,
+        ..Default::default()
+    };
+    Follower::try_new(&robot, 0, trajectory, 0.0, unplanned).unwrap();
     let state = JointState {
         position: robot.default_q().to_vec(),
         ..JointState::new(robot.dof())
