@@ -41,6 +41,29 @@ jobs:
       - run: cargo +nightly fmt --check -- --config imports_granularity=Module,hex_literal_case=Lower,format_macro_matchers=true
       - run: cargo clippy --release --all-targets
 
+  # The Python bindings, a crate of their own, tested through the package on llvmpipe as below.
+  python:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: python
+      - uses: astral-sh/setup-uv@v10
+      - run: cargo fmt --check
+      - run: rustup toolchain install nightly --profile minimal -c rustfmt
+      - run: cargo +nightly fmt --check -- --config imports_granularity=Module,hex_literal_case=Lower,format_macro_matchers=true
+      - run: cargo clippy --all-targets
+      - run: uv run --only-group dev ruff check .
+      - run: uv run --only-group dev ruff format --check .
+      - run: uv run pytest
+        env:
+          BATCHPLAN_REQUIRE_GPU: 1
+
   # The WGSL kernels run on Mesa's llvmpipe, a Vulkan driver on the CPU, so the GPU tests run too.
   test:
     runs-on: ubuntu-24.04

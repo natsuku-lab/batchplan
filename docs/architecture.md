@@ -58,7 +58,7 @@ src/
 └── rng.rs           # the generator every algorithm seeds from
 ```
 
-Modules are grouped by what they do, in the order a call meets them. `demos/` is a crate of its own (Rerun), so the library never depends on a viewer.
+Modules are grouped by what they do, in the order a call meets them. `demos/` is a crate of its own (Rerun), so the library never depends on a viewer, and so is `python/`, the Python bindings (PyO3), so it never depends on Python.
 
 ## How it fits together
 

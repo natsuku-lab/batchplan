@@ -39,6 +39,7 @@ cargo run --release --example control_loop -- [seconds]         # a planner thre
 cargo run --release --features lerobot --example datagen -- --lerobot data/lerobot_demo 512 20   # --pick-place for pick-and-place, --file-mb N to split files sooner
 REMOTE=user@host SSH_OPTS='...' scripts/sync.sh '<command>'     # rsync to ~/batchplan on a GPU box and run there
 (cd demos && cargo clippy --release --all-targets && cargo run --release --bin handover -- 16 --save handover.rrd)   # Rerun demos: handover, pick, tasks, perception, replan (demos/README.md)
+(cd python && BATCHPLAN_REQUIRE_GPU=1 uv run pytest)            # the Python bindings (python/, PyO3 and maturin), built and tested through `import batchplan`
 ```
 
 Checking a LeRobot export with the real package needs a git-ignored `.venv`:
@@ -77,6 +78,7 @@ These decisions are settled. Keep to them unless the user decides otherwise.
 - **USD stays optional.** The `openusd` crates are pinned exactly (`=0.7.0`, pre-1.0) and only built with feature `usd`.
 - **Standalone, with optional bridges.**
   - The core has no middleware and reads no environment variables; only tests and examples do (`BATCHPLAN_REQUIRE_GPU`, `BENCH_LLVMPIPE`).
+  - The Python bindings are a crate of their own (`python/`), an adapter over the public API: each value class holds the Rust value and names every field (`value_class!`), so a field added in Rust fails to build there until it is bound.
   - LeRobot export is behind the `lerobot` cargo feature, so the Arrow/Parquet dependencies stay optional.
 
 ## Invariants when editing

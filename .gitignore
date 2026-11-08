@@ -3,3 +3,6 @@ data/
 .venv*/
 CLAUDE.local.md
 __pycache__/
+# The extension an editable install builds into the Python package.
+python/batchplan/*.so
+python/batchplan/*.pyd

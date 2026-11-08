@@ -1,6 +1,6 @@
 # Agent instructions
 
-This file is for coding agents that use batchplan in a program. To change batchplan itself, read [`CLAUDE.md`](CLAUDE.md): its design rules, invariants and working rules. The guides under [`docs/`](docs/README.md) explain each topic in full; this page gathers what an agent needs first and links to them.
+This file is for coding agents that use batchplan in a program. To change batchplan itself, read [`CLAUDE.md`](CLAUDE.md): its design rules, invariants and working rules. The guides under [`docs/`](docs/README.md) explain each topic in full; this page gathers what an agent needs first and links to them. From Python, the `batchplan` package makes the same calls by the same names; [Python](docs/python.md) says how they map and what it binds so far.
 
 ## Use batchplan: make once, warm up, reuse
 

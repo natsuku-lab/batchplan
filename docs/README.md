@@ -13,6 +13,7 @@ The [README](../README.md) is the front door: what batchplan is, how to install 
 | [`perception.md`](perception.md) | Obstacles and scenes; distance grids from meshes, point clouds and depth images; masking the robot out of a camera's view; fusing frames into an occupancy map; building grids on the GPU. |
 | [`training-data.md`](training-data.md) | Reaches with recoveries, pick-and-place episodes, handovers between two arms, reset states, and exporting to NumPy or LeRobot v3.0. |
 | [`devices.md`](devices.md) | GPU and CPU devices, which GPUs work, and running inside a robot's control process. |
+| [`python.md`](python.md) | The `batchplan` Python package: installing it, how its calls map to Rust's (frozen values, read-only arrays, quaternions scalar last, exceptions per error kind), threads, and what it binds so far. |
 | [`benchmarks.md`](benchmarks.md) | batchplan against VAMP, OMPL, cuRobo, RoboPlan and MoveIt 2, GPU against CPU, spheres against meshes, what made it fast, and how to reproduce each number. |
 
 ## Working on batchplan

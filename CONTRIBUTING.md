@@ -12,7 +12,8 @@ cargo test --release --no-default-features                            # the CPU-
 cargo clippy --release --all-targets --features lerobot,usd           # zero warnings; CI denies them
 cargo doc --no-deps --features lerobot,usd                            # zero warnings
 (cd demos && cargo clippy --release --all-targets)                    # the Rerun demos, a crate of their own
-scripts/check.sh                                                      # every lint CI runs, on both crates: run it before pushing
+(cd python && BATCHPLAN_REQUIRE_GPU=1 uv run pytest)                  # the Python bindings, built and tested through the package
+scripts/check.sh                                                      # every lint CI runs, on every crate: run it before pushing
 ```
 
 CI runs the same on Linux, with the GPU kernels on Mesa's llvmpipe, and builds on macOS, Windows
@@ -98,8 +99,9 @@ batch of changes rather than for each one.
   (`0.9.x` from `v0.9.0`). Changes reach the branch by pull request, so CI runs on them, and their
   changelog lines go to `main` too.
 - **Cutting one.**
-  1. Set `version` in `Cargo.toml`. The next build of each crate updates `Cargo.lock` and
-     `demos/Cargo.lock`, and `scripts/check.sh` builds both.
+  1. Set `version` in `Cargo.toml` and `python/Cargo.toml` (the Python package's). The next build
+     of each crate updates `Cargo.lock`, `demos/Cargo.lock` and `python/Cargo.lock`, and
+     `scripts/check.sh` builds all three.
   2. For a release, not a beta, move the lines under `## [Unreleased]` to a new
      `## [0.10.0] - date`, and point the compare links at the end of the file at it.
   3. Commit it as `batchplan 0.10.0`, to `main` or by pull request to a release's branch, and

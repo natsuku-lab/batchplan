@@ -37,7 +37,10 @@ Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-la
 
 ```bash
 cargo add batchplan                        # --features lerobot,usd for the optional features below
+pip install "git+https://github.com/natsuku-lab/batchplan#subdirectory=python"   # from Python (a Rust toolchain builds it)
 ```
+
+From Python, the `batchplan` package binds the same calls, with NumPy arrays in and out ([Python](docs/python.md)).
 
 | Cargo feature | Default | Adds |
 |---|---|---|
