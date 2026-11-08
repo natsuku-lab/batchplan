@@ -8,11 +8,12 @@ use rayon::prelude::*;
 
 use crate::device::{self, Device, Worlds};
 use crate::error::{Result, ensure_input, input};
+use crate::held::Held;
 use crate::ik::{self, IkOptions, IkProblem};
 use crate::rng::Rng;
 use crate::robot::{AttachedObject, Robot};
 use crate::spline;
-use crate::task::{self, Held, Pick, Place, TaskOptions, TaskPlan, TaskResult};
+use crate::task::{self, Pick, Place, TaskOptions, TaskPlan, TaskResult};
 use crate::timing::{HandSpeed, Trajectory};
 use crate::tool_path::{self, ToolPath};
 use crate::trajopt::{self, PlanOptions, PlanProblem, PlanResult};
@@ -914,6 +915,7 @@ pub fn handover(
                 targets,
                 seed: Some(e.up.end().to_vec()),
                 hold: vec![],
+                holding: None,
             }
         })
         .collect();
@@ -988,6 +990,7 @@ pub fn handover(
         start: start.to_vec(),
         hand,
         waypoints: vec![to],
+        holding: None,
     };
     let taking = going.iter().map(|e| {
         let object = standing[e.standing as usize]

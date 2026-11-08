@@ -40,6 +40,7 @@ fn main() -> Result<()> {
         start: start.clone(),
         hand: 0,
         waypoints: vec![to],
+        holding: None,
     };
     let moves: Vec<ToolPath> = (0..64)
         .map(|_| path(Pose::new(hand.position + direction() * 0.1, hand.rotation)))

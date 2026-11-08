@@ -837,6 +837,7 @@ fn line(robot: &Robot, device: &Device) -> (Trajectory, Vec3, Vec3) {
         start: robot.default_q().to_vec(),
         hand: 0,
         waypoints: vec![to],
+        holding: None,
     };
     let result = batchplan::follow(device, &worlds, &[path], &ToolPathOptions::default()).unwrap();
     assert_eq!(result.fraction[0], 1.0, "{:?}", result.stopped[0]);

@@ -355,6 +355,7 @@ impl Follower {
                 start_motion: Some(motion.clone()),
                 hold: vec![],
                 constraints: self.o.constraints.clone(),
+                holding: None,
             };
             let options = PlanOptions {
                 time_budget: Some(Duration::from_secs_f32(self.o.budget.max(1e-3))),
@@ -444,6 +445,7 @@ impl Follower {
                 start_motion: moving.then(|| motion.clone()),
                 hold: vec![],
                 constraints: self.o.constraints.clone(),
+                holding: None,
             };
             let options = PlanOptions {
                 time_budget: Some(Duration::from_secs_f32(self.o.budget.max(1e-3))),

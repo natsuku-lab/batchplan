@@ -69,7 +69,7 @@ Guide: [planning.md](planning.md#inverse-kinematics).
 | | |
 |---|---|
 | `solve_ik(&device, &worlds, &[IkProblem], &IkOptions)` | Collision-free IK from many seeds per target (`IkResult`). |
-| `IkProblem::new(world, target)` | A one-handed robot's hand at `target`. The fields `targets` (a pose or `None` per hand), `seed` (where seed 0 starts) and `hold` (joints that stay where the seed has them) cover the rest. |
+| `IkProblem::new(world, target)` | A one-handed robot's hand at `target`. The fields `targets` (a pose or `None` per hand), `seed` (where seed 0 starts), `hold` (joints that stay where the seed has them) and `holding` (an object a hand holds, a `Held`) cover the rest. |
 | `IkOptions` | Seeds per problem, iterations, tolerances and collision weights. |
 | `IkResult::best(problem)`, `nearest(problem, q)`, `solved()` | The seed with the most clearance, the seed nearest `q`, and every solved problem. |
 | `ik::failures(&device, &worlds, &result, &IkOptions)` | Why each unsolved problem has no solution (`IkFailure`): out of reach, or reached only in collision, with its contacts. |
@@ -81,7 +81,7 @@ Guide: [planning.md](planning.md#planning-a-path).
 | | |
 |---|---|
 | `plan(&device, &worlds, &[PlanProblem], &PlanOptions)` | Collision-free B-spline paths, one search per problem (`PlanResult`). |
-| `PlanProblem::new(world, start, goal)` | From `start` at rest to `goal`. The fields `hold` (joints that stay still), `start_motion` (a `StartMotion`, to replan from a moving state) and `constraints` (below) cover the rest. |
+| `PlanProblem::new(world, start, goal)` | From `start` at rest to `goal`. The fields `hold` (joints that stay still), `start_motion` (a `StartMotion`, to replan from a moving state), `constraints` (below) and `holding` (an object a hand holds, a `Held`) cover the rest. Problems of one call may each hold their own ([holding objects](robots.md#holding-objects)), as may IK problems and tool paths. |
 | `HandConstraint::new(hand, pose)` | Where a hand may be along the whole path, measured from `pose` ([guide](planning.md#constraints-along-the-path)): set `tilt` (its z axis within a cone), `twist` (its turn about that axis) and `position` (a box), all free by default, and `relative_to` another hand to measure them in its frame. `RrtProblem`, `Pick`, `Place`, `Sequence` and `FollowerOptions` take them too. |
 | `PlanOptions` | Control points, optimization seeds and iterations, the search (`rrt`: `RrtOptions`), shortcutting (`shortcut`: `ShortcutOptions`) and a `time_budget`. |
 | `PlanResult::best(problem)`, `solved()` | The shortest valid path's control points, and every solved problem. Every seed's control points are in `paths`, empty where a seed has none. |

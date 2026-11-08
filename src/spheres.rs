@@ -39,7 +39,7 @@ pub enum SphereGeometry {
 }
 
 /// How spheres are fitted to a robot's links.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SphereOptions {
     /// Spheres for the whole robot.
     pub budget: usize,

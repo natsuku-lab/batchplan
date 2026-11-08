@@ -19,6 +19,7 @@ use rayon::prelude::*;
 
 use crate::constraint::Region;
 use crate::error::{Result, ensure_input, input};
+use crate::held::Fits;
 
 use crate::cpu::{CpuBackend, CpuWorlds};
 use crate::edges::Search;
@@ -133,6 +134,8 @@ pub(crate) fn collision_free(c: [f32; 2]) -> bool {
 pub struct Device {
     id: u64,
     backend: Box<dyn Backend>,
+    /// Held objects' spheres, shared with the devices made from this one.
+    fits: Arc<Fits>,
 }
 
 impl fmt::Debug for Device {
@@ -160,6 +163,14 @@ impl fmt::Debug for Worlds {
         f.debug_struct("Worlds")
             .field("worlds", &self.worlds.len())
             .finish_non_exhaustive()
+    }
+}
+
+impl Worlds {
+    /// The name link `link` had on the robot these worlds were uploaded for, where a world lets
+    /// links touch obstacles and the robot had that link.
+    pub(crate) fn link_name(&self, link: usize) -> Option<&str> {
+        self.links.get(link).map(String::as_str)
     }
 }
 
@@ -221,6 +232,7 @@ impl Device {
         Self {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             backend,
+            fits: Arc::default(),
         }
     }
 
@@ -234,6 +246,7 @@ impl Device {
         Ok(Self {
             id: self.id,
             backend: self.backend.with_robot(robot)?,
+            fits: self.fits.clone(),
         })
     }
 
@@ -366,6 +379,11 @@ impl Device {
                 .map(contacts)
                 .collect()
         }))
+    }
+
+    /// The spheres fitted to held objects on this device's hardware.
+    pub(crate) fn fits(&self) -> &Fits {
+        &self.fits
     }
 
     /// Runs `op` on this device's threads, so that its parallel loops run there too.

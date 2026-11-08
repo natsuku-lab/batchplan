@@ -93,6 +93,7 @@ fn main() -> Result<()> {
             start: start.to_vec(),
             hand: 0,
             waypoints: vec![to],
+            holding: None,
         };
         let followed = batchplan::follow(&device, &worlds, &[path], &o)?;
         Ok((followed.fraction[0] == 1.0).then(|| followed.paths[0].clone()))

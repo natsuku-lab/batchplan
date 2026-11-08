@@ -482,6 +482,7 @@ fn ik_steps_of_hands_sharing_joints_match_cpu() {
                 targets: vec![Some(robot.ee_pose(&aim, 0)), Some(robot.ee_pose(&aim, 1))],
                 seed: Some(random(&mut rng)),
                 hold: vec![],
+                holding: None,
             }
         })
         .collect();

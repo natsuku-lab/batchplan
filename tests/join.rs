@@ -58,6 +58,7 @@ fn corner(device: &Device, worlds: &Worlds, down: f32, side: f32) -> (Vec<Vec<f3
             start: from.clone(),
             hand: 0,
             waypoints: vec![Pose::new(to, start.rotation)],
+            holding: None,
         };
         let followed = batchplan::follow(device, worlds, &[path], &o).unwrap();
         assert_eq!(followed.fraction[0], 1.0, "{:?}", followed.stopped[0]);

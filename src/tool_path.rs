@@ -10,6 +10,7 @@ use crate::cpu::Reach;
 use crate::device::{Contact, Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Search};
 use crate::error::{Result, ensure_input};
+use crate::held::{self, Held};
 use crate::ik::IkOptions;
 use crate::lanes::LANES;
 use crate::robot::Robot;
@@ -27,6 +28,9 @@ pub struct ToolPath {
     pub hand: usize,
     /// Poses the hand passes through after its start, in the robot's frame.
     pub waypoints: Vec<Pose>,
+    /// An object a hand holds, as a pick leaves it: checked as part of the robot, as attaching it
+    /// ([`Held::attachment`]) would check it. `None` holds nothing.
+    pub holding: Option<Held>,
 }
 
 /// How [`follow`] tracks a path.
@@ -86,6 +90,33 @@ pub struct ToolPathResult {
     pub contacts: Vec<Vec<Contact>>,
 }
 
+impl ToolPathResult {
+    /// The results for groups of `paths` (`parts`, each with its paths' indices), as one.
+    fn gather(paths: &[ToolPath], parts: Vec<(Vec<usize>, Self)>) -> Self {
+        let mut parts = parts;
+        if parts.len() == 1 && parts[0].0.len() == paths.len() {
+            let (_, whole) = parts.remove(0);
+            return whole;
+        }
+        let mut out = Self {
+            problems: paths.to_vec(),
+            fraction: vec![0.0; paths.len()],
+            stopped: vec![None; paths.len()],
+            paths: vec![vec![]; paths.len()],
+            contacts: vec![vec![]; paths.len()],
+        };
+        for (mine, mut part) in parts {
+            for (k, &i) in mine.iter().enumerate() {
+                out.fraction[i] = part.fraction[k];
+                out.stopped[i] = part.stopped[k];
+                out.paths[i] = std::mem::take(&mut part.paths[k]);
+                out.contacts[i] = std::mem::take(&mut part.contacts[k]);
+            }
+        }
+        out
+    }
+}
+
 /// Why a tool path's motion stops short.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
@@ -111,14 +142,25 @@ pub enum ToolPathStop {
 }
 
 /// Follows each path from its start as far as it goes ([`ToolPathResult`]), its steps checked for
-/// collision in its world. Paths run in parallel on the device's threads.
+/// collision in its world. Paths run in parallel on the device's threads. Paths that hold an object
+/// ([`ToolPath::holding`]) run as a batch for each object and grasp, in parallel, on the device's
+/// hardware; `device` must not hold one in that hand already.
 pub fn follow(
     device: &Device,
     worlds: &Worlds,
     paths: &[ToolPath],
     o: &ToolPathOptions,
 ) -> Result<ToolPathResult> {
-    let robot = device.robot();
+    check(device.robot(), worlds, paths, o)?;
+    let holds: Vec<Option<&Held>> = paths.iter().map(|p| p.holding.as_ref()).collect();
+    let parts = held::by_hold(device, &holds, |on, items| {
+        followed(on, worlds, &held::subset(paths, items), o)
+    })?;
+    Ok(ToolPathResult::gather(paths, parts))
+}
+
+/// Whether `paths` and `o` can be followed by `robot` in `worlds`.
+fn check(robot: &Robot, worlds: &Worlds, paths: &[ToolPath], o: &ToolPathOptions) -> Result<()> {
     let n = robot.dof();
     let steps = MIN_STEP..f32::INFINITY;
     ensure_input!(
@@ -164,7 +206,22 @@ pub fn follow(
             p.waypoints.iter().all(finite) && p.start.iter().all(|v| v.is_finite()),
             "path {i} is not finite"
         );
+        if let Some(held) = &p.holding {
+            held.check(robot, worlds, &format!("path {i}"))?;
+        }
     }
+    Ok(())
+}
+
+/// [`follow`] for `paths`, checked, holding what `device` holds.
+fn followed(
+    device: &Device,
+    worlds: &Worlds,
+    paths: &[ToolPath],
+    o: &ToolPathOptions,
+) -> Result<ToolPathResult> {
+    let robot = device.robot();
+    let n = robot.dof();
     let mut searches: Vec<_> = paths
         .iter()
         .map(|path| Deferred::new(None, move || Follow::new(robot, path, o)))

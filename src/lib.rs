@@ -40,6 +40,7 @@ mod edges;
 pub mod error;
 #[cfg(feature = "gpu")]
 mod gpu;
+mod held;
 pub mod ik;
 pub mod join;
 mod lanes;
@@ -71,6 +72,7 @@ pub mod world;
 pub use constraint::HandConstraint;
 pub use device::{CollisionWeights, Contact, Device, Evaluation, Worlds};
 pub use error::Error;
+pub use held::Held;
 pub use ik::{IkFailure, IkOptions, IkProblem, IkResult, solve_ik};
 pub use join::{JoinOptions, JoinResult, Sequence, join};
 pub use live::{
@@ -83,7 +85,7 @@ pub use sdf::{DepthImage, Intrinsics, Occlusion, OccupancyMap, RobotMask, SdfGri
 pub use shortcut::ShortcutOptions;
 pub use spheres::{LinkQualification, Qualification, SphereGeometry, SphereOptions};
 pub use task::{
-    CandidateStop, GraspOptions, Held, Pick, Place, TaskFailure, TaskOptions, TaskPlan, TaskResult,
+    CandidateStop, GraspOptions, Pick, Place, TaskFailure, TaskOptions, TaskPlan, TaskResult,
     TaskStep, grasps, pick, place, place_poses,
 };
 pub use timing::{HandSpeed, JointState, Trajectory};
