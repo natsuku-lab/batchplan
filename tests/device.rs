@@ -10,7 +10,8 @@ use std::time::Duration;
 use batchplan::rng::Rng;
 use batchplan::{
     CollisionWeights, Device, Error, IkOptions, IkProblem, JointState, Obstacle, PlanOptions,
-    PlanProblem, Pose, Robot, RobotOptions, RrtOptions, StartMotion, Trajectory, World,
+    PlanProblem, Pose, Robot, RobotOptions, RrtOptions, ShortcutOptions, StartMotion, Trajectory,
+    World,
 };
 use glam::{Quat, Vec3};
 
@@ -1192,6 +1193,233 @@ fn optimization_seeds_start_with_the_searched_path_and_the_straight_line() {
                 .iter()
                 .all(|p| p.is_empty() || p.len() == per_path),
             "{}: a path has other than the options' control points",
+            d.name()
+        );
+    }
+}
+
+/// Reaches under a slab from the Panda's default configuration, as MotionBenchMaker's picks under a
+/// table: the slab's world and the problems.
+fn reaches_under_a_slab(robot: &Robot) -> (World, Vec<PlanProblem>) {
+    let slab = Obstacle::cuboid(Vec3::new(0.6, 0.0, 0.35), Vec3::new(0.25, 0.5, 0.02));
+    let floor = Obstacle::cuboid(Vec3::new(0.5, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02));
+    let start = robot.default_q().to_vec();
+    let mut rng = Rng::new(3);
+    let side = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+    let under = (0..64)
+        .map(|_| {
+            let at = Vec3::new(
+                rng.range(0.45, 0.75),
+                rng.range(-0.35, 0.35),
+                rng.range(0.12, 0.23),
+            );
+            PlanProblem::new(0, start.clone(), Pose::new(at, side))
+        })
+        .collect();
+    (World::new(vec![slab, floor]), under)
+}
+
+/// An optimized seed no step moves is valid where the searched spline it copies is, and as long:
+/// optimized seeds are validated at the samples searched splines are checked at, keeping the margin
+/// they keep (2 mm, or none with `shortcut.clearance` 0), ramped from the curve's ends (where a
+/// moving start is, not its first control point).
+#[test]
+fn unmoved_optimized_seeds_are_valid_where_their_searched_splines_are() {
+    let robot = panda();
+    let n = robot.dof();
+    let (slab, under) = reaches_under_a_slab(&robot);
+    let start = robot.default_q().to_vec();
+    let mut velocity = vec![0.0; n];
+    velocity[0] = 2.0;
+    // A sphere 0.3 mm behind the hand as it starts moving away.
+    let hand = robot.ee_pose(&start, 0).position;
+    let ahead: Vec<f32> = start
+        .iter()
+        .zip(&velocity)
+        .map(|(q, v)| q + 1e-3 * v)
+        .collect();
+    let away = (robot.ee_pose(&ahead, 0).position - hand).normalize();
+    let behind = |gap: f32| World::new(vec![Obstacle::sphere(hand - away * (0.03 + gap), 0.03)]);
+    let cpu = Device::cpu(&robot).unwrap();
+    let near = CollisionWeights {
+        margin: 0.01,
+        ..CollisionWeights::NONE
+    };
+    let clearance = |gap: f32| {
+        let worlds = cpu.upload(&[behind(gap)]).unwrap();
+        cpu.evaluate(&worlds, &[0], &start, &near)
+            .unwrap()
+            .world_clearance[0]
+    };
+    let (mut lo, mut hi) = (-0.1, 0.2);
+    for _ in 0..40 {
+        let mid = 0.5 * (lo + hi);
+        if clearance(mid) < 3e-4 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    assert!(
+        clearance(hi) < 1e-3,
+        "the start is {} m from the sphere",
+        clearance(hi)
+    );
+    let sphere = behind(hi);
+    let mut goal = start.clone();
+    goal[0] += 1.5;
+    goal[3] += 0.3;
+    let moving = PlanProblem {
+        start_motion: Some(StartMotion {
+            velocity,
+            acceleration: vec![0.0; n],
+        }),
+        ..PlanProblem::new(0, start, goal)
+    };
+    let unmoved = PlanOptions {
+        seeds: 1,
+        iterations: 0,
+        ..Default::default()
+    };
+    let loose = PlanOptions {
+        shortcut: ShortcutOptions {
+            clearance: 0.0,
+            ..Default::default()
+        },
+        ..unmoved
+    };
+    let cases = [
+        ("under a slab", &slab, &under[..], &unmoved),
+        ("under a slab, no clearance", &slab, &under[..], &loose),
+        (
+            "moving away from a sphere",
+            &sphere,
+            std::slice::from_ref(&moving),
+            &unmoved,
+        ),
+    ];
+    for d in devices(&robot) {
+        for (case, world, problems, o) in cases {
+            let worlds = d.upload(std::slice::from_ref(world)).unwrap();
+            let result = batchplan::plan(&d, &worlds, problems, o).unwrap();
+            let mut compared = 0;
+            for p in 0..problems.len() {
+                let (spline, seed) = (2 * p, 2 * p + 1);
+                // Problems searched straight are not optimized.
+                if !result.valid[spline] || result.paths[seed].is_empty() {
+                    continue;
+                }
+                compared += 1;
+                assert!(
+                    result.paths[seed] == result.paths[spline]
+                        && result.valid[seed]
+                        && result.length[seed] == result.length[spline],
+                    "{}, {case}: problem {p}'s searched spline is valid at {} rad; its unmoved copy \
+                     valid {} at {} rad",
+                    d.name(),
+                    result.length[spline],
+                    result.valid[seed],
+                    result.length[seed]
+                );
+            }
+            assert!(compared > 0, "{}, {case}: nothing optimized", d.name());
+        }
+    }
+}
+
+/// Joint-space distance.
+fn apart(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y) * (x - y))
+        .sum::<f32>()
+        .sqrt()
+}
+
+/// The spline through control points `cp` (`[points, n]`) sampled as searched splines are checked:
+/// every span at `per_span` evenly spaced points, or at more where it moves farther, so that
+/// neighbouring samples lie at most `spacing` apart; then its end.
+fn checked_samples(cp: &[f32], n: usize, per_span: usize, spacing: f32) -> Vec<f32> {
+    let point = |i: usize| &cp[i * n..(i + 1) * n];
+    let mut out = vec![];
+    for span in 0..cp.len() / n - 3 {
+        // At most three times the span's Bezier control polygon's longest edge per unit of u.
+        let speed = (0.5 * apart(point(span), point(span + 2)))
+            .max(apart(point(span + 1), point(span + 2)))
+            .max(0.5 * apart(point(span + 1), point(span + 3)));
+        let count = per_span.max((speed / spacing).ceil() as usize);
+        for s in 0..count {
+            let w = basis(s as f64 / count as f64);
+            let q = (0..n).map(|j| {
+                (0..4)
+                    .map(|i| w[i] as f32 * cp[(span + i) * n + j])
+                    .sum::<f32>()
+            });
+            out.extend(q);
+        }
+    }
+    out.extend_from_slice(point(cp.len() / n - 1));
+    out
+}
+
+/// Optimized seeds are valid exactly where they keep the spline margin from the world (2 mm, ramped
+/// from the curve's ends) and are clear of themselves, at the samples searched splines are checked
+/// at. Optimization pulls seeds to reaches under a slab taut along its edge, and the margin alone
+/// rejects some.
+#[test]
+fn optimized_seeds_are_valid_where_they_keep_the_spline_margin() {
+    const MARGIN: f32 = 0.002;
+    let robot = panda();
+    let n = robot.dof();
+    let (slab, under) = reaches_under_a_slab(&robot);
+    let o = PlanOptions {
+        seeds: 8,
+        // Part way, more of them sit within the margin.
+        iterations: 30,
+        ..Default::default()
+    };
+    let seeds = 1 + o.seeds;
+    let (k, spacing) = (o.validate_substeps, o.shortcut.resolution);
+    let near = CollisionWeights {
+        margin: 0.01,
+        ..CollisionWeights::NONE
+    };
+    for d in devices(&robot) {
+        let worlds = d.upload(std::slice::from_ref(&slab)).unwrap();
+        let result = batchplan::plan(&d, &worlds, &under, &o).unwrap();
+        let (mut kept, mut short) = (0, 0);
+        let optimized = (0..result.paths.len()).filter(|&i| i % seeds > 0);
+        for item in optimized.filter(|&i| !result.paths[i].is_empty()) {
+            let q = checked_samples(&result.paths[item], n, k, spacing);
+            let items = q.len() / n;
+            let e = d.evaluate(&worlds, &vec![0; items], &q, &near).unwrap();
+            let ends = [&q[..n], &q[q.len() - n..]];
+            let (mut excess, mut clear) = (f32::INFINITY, true);
+            for (i, s) in q.chunks(n).enumerate() {
+                let from_end = apart(s, ends[0]).min(apart(s, ends[1]));
+                let margin = MARGIN * (from_end / o.shortcut.clearance_ramp).min(1.0);
+                let (world, own) = (e.world_clearance[i], e.self_clearance[i]);
+                excess = excess.min((world - margin).min(own));
+                clear &= world >= 0.0 && own >= 0.0;
+            }
+            // Rounding decides within a hundredth of a millimeter.
+            if excess.abs() < 1e-5 {
+                continue;
+            }
+            assert_eq!(
+                result.valid[item],
+                excess > 0.0,
+                "{}: problem {}'s seed {} keeps {excess} m past the margin",
+                d.name(),
+                item / seeds,
+                item % seeds
+            );
+            kept += usize::from(excess > 0.0);
+            short += usize::from(excess < 0.0 && clear);
+        }
+        assert!(
+            kept > 0 && short > 0,
+            "{}: {kept} seeds keep the margin, {short} clear of the world do not",
             d.name()
         );
     }

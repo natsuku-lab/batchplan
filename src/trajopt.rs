@@ -60,7 +60,8 @@ pub struct PlanOptions {
     /// Collision cost of the optimization. Repairs of stuck splines keep their own weights and a
     /// 2 cm margin.
     pub collision: CollisionWeights,
-    /// Samples per span used to validate the result.
+    /// Samples per span splines are checked at, at least: more where samples would lie farther
+    /// apart than `shortcut.resolution`.
     pub validate_substeps: usize,
     /// Seed of the optimization seeds' random via points. Each problem draws its own from it and
     /// its start and goal, so a problem's plan does not depend on the others in its batch, except
@@ -1461,8 +1462,11 @@ fn optimize(
     Ok(())
 }
 
-/// The smallest clearance along each path, sampled densely along the curve, NaN where a sample
-/// breaks the path's constraints (`item_bounds`), and its length.
+/// The smallest clearance along each path past what it must keep, at the samples searched splines
+/// are checked at (`spline::checked`): from the world, the least margin searched splines keep
+/// (`shortcut.clearance`, at most `SPLINE_MARGIN`), ramped from the curve's ends as the shortcuts
+/// ramp theirs; from itself, none. NaN where a sample breaks the path's constraints
+/// (`item_bounds`). And each path's length at those samples, as searched splines' are measured.
 fn validate(
     device: &Device,
     worlds: &Worlds,
@@ -1473,25 +1477,31 @@ fn validate(
 ) -> Result<(Vec<f32>, Vec<f32>)> {
     let (n, items) = (paths.dof, paths.len());
     let k = o.validate_substeps.max(1);
-    let samples = (paths.points - 3) * k + 1;
-    let mut dense = vec![0.0; items * samples * n];
-    for (item, out) in dense.chunks_mut(samples * n).enumerate() {
-        spline::dense(paths.path(item), n, k, out);
+    let (mut dense, mut dense_world, mut from) = (vec![], vec![], vec![0]);
+    let (mut samples, mut starts) = (vec![], vec![]);
+    for (item, &world) in item_world.iter().enumerate() {
+        let (cp, spacing) = (paths.path(item), o.shortcut.resolution);
+        spline::checked(cp, n, k, spacing, &mut samples, &mut starts);
+        dense.extend_from_slice(&samples);
+        dense_world.extend(std::iter::repeat_n(world, samples.len() / n));
+        from.push(dense.len() / n);
     }
-    let dense_world: Vec<u32> = item_world
-        .iter()
-        .flat_map(|&w| std::iter::repeat_n(w, samples))
-        .collect();
-    let clear = device.clearance(worlds, &dense_world, &dense)?;
+    let item = |i: usize| &dense[from[i] * n..from[i + 1] * n];
+    let margin = o.shortcut.clearance.min(SPLINE_MARGIN);
+    // Clearances exact up to the margin: past it, a link's bounding sphere's gap stands in.
+    let gated = CollisionWeights {
+        margin,
+        ..CollisionWeights::NONE
+    };
+    let clear = device.evaluate(worlds, &dense_world, &dense, &gated)?;
     let robot = device.robot();
     let keeps: Vec<bool> = device.install(|| {
-        item_bounds
-            .par_iter()
-            .zip(dense.par_chunks(samples * n))
-            .map(|(bounds, dense)| {
-                bounds.as_ref().is_none_or(|b| {
+        (0..items)
+            .into_par_iter()
+            .map(|i| {
+                item_bounds[i].as_ref().is_none_or(|b| {
                     let mut fk = Fk::new(robot.links.len());
-                    dense.chunks(n).all(|q| {
+                    item(i).chunks(n).all(|q| {
                         robot.fk_into(q, &mut fk);
                         b.contains(&fk)
                     })
@@ -1500,12 +1510,21 @@ fn validate(
             .collect()
     });
     let min_clearance = (0..items)
-        .map(|item| {
-            if !keeps[item] {
+        .map(|i| {
+            if !keeps[i] {
                 return f32::NAN;
             }
-            (item * samples..(item + 1) * samples)
-                .map(|i| clear[i][0].min(clear[i][1]))
+            let q = item(i);
+            let keep = Keep {
+                clearance: margin,
+                ramp: o.shortcut.clearance_ramp,
+                ends: vec![q[..n].to_vec(), q[q.len() - n..].to_vec()],
+            };
+            (from[i]..from[i + 1])
+                .map(|s| {
+                    let world = clear.world_clearance[s] - keep.margin(&dense[s * n..(s + 1) * n]);
+                    world.min(clear.self_clearance[s])
+                })
                 // NaN marks the path invalid rather than vanishing in a minimum.
                 .fold(f32::INFINITY, |m, c| {
                     if m.is_nan() || c.is_nan() {
@@ -1516,9 +1535,7 @@ fn validate(
                 })
         })
         .collect();
-    let lengths = (0..items)
-        .map(|item| shortcut::length(&dense[item * samples * n..(item + 1) * samples * n], n))
-        .collect();
+    let lengths = (0..items).map(|i| shortcut::length(item(i), n)).collect();
     Ok((min_clearance, lengths))
 }
 
