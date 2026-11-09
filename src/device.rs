@@ -454,7 +454,7 @@ impl Device {
         held: &[bool],
         q: &mut [f32],
         o: &IkOptions,
-    ) -> Result<Vec<[f32; 2]>> {
+    ) -> Result<Vec<[f32; 4]>> {
         self.check_batch(worlds, item_world, q.len(), self.robot().dof())?;
         let hands = self.robot().hands();
         ensure_input!(
@@ -596,7 +596,9 @@ pub(crate) trait Backend: Send + Sync {
     fn search(&self, worlds: &Worlds, searches: &mut [&mut dyn Search], deadline: Option<Instant>);
     /// Runs IK in place on `q` (`[items, dof]`) toward `targets` (`[items, hands]`, `None` for a
     /// hand held still), the joints `held` marks (`[items, dof]`, or empty for none) staying put;
-    /// returns each item's largest `[position error, rotation error]` over its targeted hands.
+    /// returns each item's largest position and rotation errors over its targeted hands, then
+    /// the `[world, self]` clearance of its final configuration (as `clearance` gives it):
+    /// `[position error, rotation error, world clearance, self clearance]`.
     fn ik(
         &self,
         worlds: &Worlds,
@@ -605,7 +607,7 @@ pub(crate) trait Backend: Send + Sync {
         held: &[bool],
         q: &mut [f32],
         o: &IkOptions,
-    ) -> Result<Vec<[f32; 2]>>;
+    ) -> Result<Vec<[f32; 4]>>;
     /// Optimizes each path's control points in place, holding the three at each end fixed, and
     /// stops between rounds once `deadline` passes.
     fn trajopt(

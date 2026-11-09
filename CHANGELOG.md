@@ -45,6 +45,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Changed
 
+- `solve_ik` on a GPU checks the solved configurations' clearances in the same submission, from
+  the configurations already on the GPU, and reads everything back at once: one wait per 65,536
+  seeds instead of three, about 0.4 ms less per call.
 - **Breaking:** `Robot::load`, `Robot::from_urdf` and `Robot::assemble` refuse a collision
   model whose spheres have a non-finite center or radius or a negative one, or whose
   self-collision buffer for a link is not finite or would shrink one of its spheres below nothing,

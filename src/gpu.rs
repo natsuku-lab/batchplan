@@ -1274,16 +1274,26 @@ impl GpuBackend {
             .map_err(|e| Error::Gpu(e.to_string()))
     }
 
-    fn read<T: Pod>(&self, buf: &wgpu::Buffer, len: usize) -> Result<Vec<T>> {
-        let size = (len * std::mem::size_of::<T>()) as u64;
+    /// Submits `enc` with copies of `parts` (buffers and their lengths in `T`s) into one staging
+    /// buffer, and reads them all back after one wait.
+    fn read_after<T: Pod, const N: usize>(
+        &self,
+        mut enc: wgpu::CommandEncoder,
+        parts: [(&wgpu::Buffer, usize); N],
+    ) -> Result<[Vec<T>; N]> {
+        let size = std::mem::size_of::<T>() as u64;
+        let total: usize = parts.iter().map(|&(_, len)| len).sum();
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
-            size,
+            size: (total as u64 * size).max(size),
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        enc.copy_buffer_to_buffer(buf, 0, &staging, 0, size);
+        let mut offset = 0;
+        for &(buf, len) in &parts {
+            enc.copy_buffer_to_buffer(buf, 0, &staging, offset, len as u64 * size);
+            offset += len as u64 * size;
+        }
         self.queue.submit([enc.finish()]);
         let (tx, rx) = std::sync::mpsc::channel();
         staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
@@ -1297,9 +1307,21 @@ impl GpuBackend {
             .slice(..)
             .get_mapped_range()
             .map_err(|e| Error::Gpu(e.to_string()))?;
-        let out = bytemuck::cast_slice(&mapped).to_vec();
+        let values: &[T] = bytemuck::cast_slice(&mapped);
+        let mut start = 0;
+        let out = parts.map(|(_, len)| {
+            let part = values[start..start + len].to_vec();
+            start += len;
+            part
+        });
         drop(mapped);
         staging.unmap();
+        Ok(out)
+    }
+
+    fn read<T: Pod>(&self, buf: &wgpu::Buffer, len: usize) -> Result<Vec<T>> {
+        let enc = self.device.create_command_encoder(&Default::default());
+        let [out] = self.read_after(enc, [(buf, len)])?;
         Ok(out)
     }
 
@@ -1423,7 +1445,7 @@ impl Backend for GpuBackend {
         held: &[bool],
         q: &mut [f32],
         o: &IkOptions,
-    ) -> Result<Vec<[f32; 2]>> {
+    ) -> Result<Vec<[f32; 4]>> {
         let worlds: &GpuWorlds = worlds.prepared();
         let (n, hands) = (self.robot.dof(), self.robot.hands());
         let mut errors = Vec::with_capacity(item_world.len());
@@ -1774,7 +1796,7 @@ impl GpuBackend {
         (item_world, targets, held): (&[u32], &[Option<Pose>], &[bool]),
         q: &mut [f32],
         o: &IkOptions,
-    ) -> Result<Vec<[f32; 2]>> {
+    ) -> Result<Vec<[f32; 4]>> {
         let items = item_world.len();
         if items == 0 {
             return Ok(vec![]);
@@ -1847,12 +1869,38 @@ impl GpuBackend {
                 dispatch(pass, items * lanes as usize);
             });
         }
-        q.copy_from_slice(&self.read(&q_buf, q.len())?);
-        Ok(self
-            .read::<f32>(&out, items * 2)?
-            .chunks(2)
-            .map(|e| [e[0], e[1]])
-            .collect())
+        // The final configurations' clearances in the same queue, from the configurations already
+        // on the GPU, and everything read back through one buffer: one wait per chunk.
+        let clear_params = self.uniform(&self.params(items, &CollisionWeights::NONE));
+        let clear_out = storage_zeroed(&self.device, "clearance", items * 2);
+        let clear_bg = self.bind_main(&CallBuffers {
+            params: &clear_params,
+            worlds,
+            item_world: &world_buf,
+            targets: &target_buf,
+            q: &q_buf,
+            aux: &held_buf,
+            out: &clear_out,
+        });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            let clear_lanes = lanes_for(items);
+            pass.set_pipeline(&self.kernels.collision(clear_lanes).clearance);
+            pass.set_bind_group(0, &clear_bg, &[]);
+            dispatch(&mut pass, items * clear_lanes as usize);
+        }
+        let [solved, errors, clear] = self.read_after(
+            enc,
+            [
+                (&q_buf, q.len()),
+                (&out, items * 2),
+                (&clear_out, items * 2),
+            ],
+        )?;
+        q.copy_from_slice(&solved);
+        let items = errors.chunks(2).zip(clear.chunks(2));
+        Ok(items.map(|(e, c)| [e[0], e[1], c[0], c[1]]).collect())
     }
 
     /// Optimizes the paths `traj` holds, one per item of `item_world`, each keeping its constraints
