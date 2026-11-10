@@ -519,8 +519,8 @@ fn replanning_while_moving_is_timed_about_as_fast_as_from_rest() {
         replanned += 1;
     }
     assert!(replanned >= 10, "only {replanned} replanned");
-    // Slowing the profile right after the start, which cannot slow that soon, loses the rounds:
-    // 1.870 on average without the easing, 1.815 with it: the bound sits midway.
+    // 1.813 on average. A time map kept on the quarter-density measure alone, never measured at
+    // the full density, takes 1.851: the bound sits between.
     let mean = against_rest / replanned as f32;
     assert!(mean < 1.845, "{mean} times as long as from rest on average");
 }
@@ -598,6 +598,155 @@ fn paths_planned_from_a_moving_start_run_from_it() {
             }
         }
     }
+}
+
+#[test]
+fn a_moving_start_is_timed_where_a_coarse_measure_finds_no_map() {
+    // A path `plan` returned for the SO-101 from halfway along a motion (seed 17's 23rd replan in
+    // `paths_planned_from_a_moving_start_run_from_it`). Turning candidates down at a quarter of
+    // the checking density alone steers the timing away from every map that fits.
+    let robot = Robot::load(
+        common::asset("so101/so101_new_calib.urdf"),
+        &RobotOptions::default(),
+    )
+    .unwrap();
+    let state = JointState {
+        position: vec![
+            0.3351964,
+            -0.82430524,
+            0.24536689,
+            -0.71683973,
+            1.3519034,
+            0.6695086,
+        ],
+        velocity: vec![
+            1.0468822, 1.4234978, 1.343335, -1.3973533, 2.6722677, -1.9513334,
+        ],
+        acceleration: vec![
+            -0.031902675,
+            -0.043385915,
+            -0.040934008,
+            0.042589433,
+            -0.08144881,
+            0.05946624,
+        ],
+    };
+    #[rustfmt::skip] // one control point per row
+    let path = [
+        -0.22735098, -1.5892296, -0.4764807, 0.03403575, -0.084054455, 1.7180675,
+        0.3367152, -0.82223976, 0.24731562, -0.7188673, 1.355781, 0.6666776,
+        0.8916687, -0.06764277, 0.9594195, -1.459605, 2.7723513, -0.36772642,
+        0.33694562, -0.71867406, 0.19489802, -0.7650671, 1.285549, 0.6531232,
+        0.2518697, -0.72754353, 0.03119972, -0.69898456, 0.9951236, 0.79812276,
+        0.22435135, -0.659929, -0.057733312, -0.70893735, 0.8528402, 0.8360644,
+        0.187403, -0.6051369, -0.15876673, -0.70630324, 0.6864857, 0.891583,
+        0.15045464, -0.5503448, -0.25980014, -0.70366913, 0.52013135, 0.9471016,
+        0.11350629, -0.49555272, -0.36083353, -0.701035, 0.35377687, 1.0026202,
+        0.076557934, -0.4407606, -0.46186697, -0.6984009, 0.1874224, 1.0581388,
+        0.039609578, -0.3859685, -0.56290036, -0.69576675, 0.021067973, 1.1136575,
+        0.0026612019, -0.3311764, -0.6639338, -0.69313264, -0.14528643, 1.1691761,
+        -0.03428713, -0.27638435, -0.76496714, -0.69049853, -0.31164074, 1.2246946,
+        -0.07123551, -0.22159225, -0.8660006, -0.6878644, -0.47799528, 1.2802132,
+        -0.10818383, -0.1668002, -0.9670339, -0.68523026, -0.6443497, 1.3357319,
+        -0.14513218, -0.112008095, -1.0680672, -0.68259615, -0.810704, 1.3912504,
+        -0.18208054, -0.05721599, -1.1691008, -0.67996204, -0.9770586, 1.446769,
+        -0.21902892, -0.0024238816, -1.2701341, -0.67732793, -1.1434128, 1.5022876,
+        -0.25597724, 0.05236822, -1.3711675, -0.6746938, -1.3097675, 1.5578063,
+        -0.29292563, 0.10716028, -1.4722009, -0.67205966, -1.4761219, 1.6133249,
+        -0.33050013, 0.16288093, -1.5749465, -0.6693809, -1.6452954, 1.6697843,
+        -0.36682236, 0.21674442, -1.6742678, -0.66679144, -1.8088307, 1.7243621,
+        -0.36682236, 0.21674442, -1.6742678, -0.66679144, -1.8088307, 1.7243621,
+        -0.36682236, 0.21674442, -1.6742678, -0.66679144, -1.8088307, 1.7243621,
+    ];
+    let motion = StartMotion {
+        velocity: state.velocity.clone(),
+        acceleration: state.acceleration.clone(),
+    };
+    let trajectory = Trajectory::moving(&robot, &path, &motion).unwrap();
+    trajectory.check_from(&robot, &state).unwrap();
+}
+
+#[test]
+fn a_moving_start_keeps_its_limits_between_the_samples_checked() {
+    // A path `plan` returned for the SO-101 from 15% of the way along a motion. Its timing keeps
+    // the limits at every sample `check_from` reads. Where it crosses the path's knots,
+    // acceleration has a corner and jerk jumps: held only at evenly spaced samples, or with one
+    // sample at each crossing rather than one either side, its jerk reaches 1.038 times a limit.
+    let robot = Robot::load(
+        common::asset("so101/so101_new_calib.urdf"),
+        &RobotOptions::default(),
+    )
+    .unwrap();
+    let motion = StartMotion {
+        velocity: vec![
+            0.24729584,
+            0.25957254,
+            -0.6956112,
+            0.7756721,
+            -0.19901524,
+            -0.19785903,
+        ],
+        acceleration: vec![
+            1.1482126,
+            1.2052137,
+            -3.2297754,
+            3.6015053,
+            -0.9240415,
+            -0.91867447,
+        ],
+    };
+    #[rustfmt::skip] // one control point per row
+    let path = [
+        0.25124088, 0.3646535, 0.85718244, -1.0552261, -0.61234355, 1.0622548,
+        0.2607916, 0.37467834, 0.83031774, -1.0252695, -0.6200297, 1.0546134,
+        0.44307217, 0.566008, 0.31758595, -0.45352513, -0.7667228, 0.9087724,
+        0.24289702, 0.43632713, 0.654251, -0.8623696, -0.59685236, 0.9772505,
+        0.19621414, 0.46775845, 0.55916214, -0.7897677, -0.5505072, 0.922921,
+        0.14953128, 0.49918973, 0.46407327, -0.7171658, -0.504162, 0.8685915,
+        0.10284838, 0.53062105, 0.36898434, -0.6445639, -0.45781678, 0.8142619,
+        0.0561655, 0.56205237, 0.27389544, -0.571962, -0.4114716, 0.75993234,
+        0.009482652, 0.5934837, 0.17880666, -0.4993601, -0.36512646, 0.7056029,
+        -0.037200212, 0.624915, 0.08371776, -0.42675823, -0.3187813, 0.6512733,
+        -0.08388314, 0.6563463, -0.011371195, -0.35415626, -0.27243605, 0.59694374,
+        -0.13056603, 0.68777764, -0.106460094, -0.28155434, -0.22609088, 0.54261416,
+        -0.1772489, 0.71920896, -0.201549, -0.20895243, -0.17974567, 0.4882846,
+        -0.22393176, 0.7506403, -0.29663783, -0.13635051, -0.1334005, 0.43395507,
+        -0.2706146, 0.7820716, -0.39172655, -0.06374872, -0.087055385, 0.37962562,
+        -0.3172975, 0.8135029, -0.4868155, 0.008853257, -0.04071021, 0.32529604,
+        -0.36398032, 0.8449342, -0.58190435, 0.08145505, 0.0056349635, 0.27096653,
+        -0.41066328, 0.8763656, -0.6769934, 0.1540572, 0.051980257, 0.2166369,
+        -0.45734617, 0.90779686, -0.77208227, 0.226659, 0.09832543, 0.16230732,
+        -0.50402904, 0.9392282, -0.8671712, 0.29926103, 0.1446706, 0.10797775,
+        -0.550712, 0.9706595, -0.96226007, 0.37186283, 0.19101578, 0.053648233,
+        -0.5973948, 1.0020908, -1.0573488, 0.4444648, 0.23736095, -0.0006812662,
+        -0.5973948, 1.0020908, -1.0573488, 0.4444648, 0.23736095, -0.0006812662,
+        -0.5973948, 1.0020908, -1.0573488, 0.4444648, 0.23736095, -0.0006812662,
+    ];
+    let trajectory = Trajectory::moving(&robot, &path, &motion).unwrap();
+    // Jerk by differences of acceleration: finer steps than these read f32 rounding.
+    let (samples, mut state) = (4_000, JointState::new(robot.dof()));
+    let step = trajectory.duration() / samples as f32;
+    let (mut acceleration, mut jerk) = (0.0f32, 0.0f32);
+    let mut last: Option<Vec<f32>> = None;
+    for sample in 0..=samples {
+        trajectory.at(step * sample as f32, &mut state);
+        for (j, a) in state.acceleration.iter().enumerate() {
+            acceleration = acceleration.max(a.abs() / robot.max_acceleration()[j]);
+            if let Some(last) = &last {
+                jerk = jerk.max(((a - last[j]) / step).abs() / robot.max_jerk()[j]);
+            }
+        }
+        last = Some(state.acceleration.clone());
+    }
+    assert!(
+        jerk > 0.9,
+        "the path does not come near a jerk limit: {jerk}"
+    );
+    assert!(
+        acceleration < 1.001,
+        "{acceleration} times an acceleration limit"
+    );
+    assert!(jerk < 1.001, "{jerk} times a jerk limit");
 }
 
 #[test]
@@ -856,14 +1005,14 @@ fn motions_can_be_stopped_before_they_brake_for_their_end() {
         }
     }
     // With a stop's velocity held to the margin under the limit at its start too, none of those
-    // at a limit stops (16 on an M4 Pro, 6 of them stopped; 3 other sets of worlds: 9 of 12, 20 of
+    // at a limit stops (19 on an M4 Pro, 9 of them stopped; 3 other sets of worlds: 9 of 12, 20 of
     // 25, 13 of 17).
     assert!(fast >= 8, "only {fast} states at a velocity limit");
     assert!(
         4 * fast_stopped >= fast,
         "{fast_stopped} of {fast} at a velocity limit stop"
     );
-    // Braking at once only, 153 of 960 are refused; with the starting jerks, 42 (32-52 over three
+    // Braking at once only, 153 of 960 are refused; with the starting jerks, 52 (32-52 over three
     // other sets of worlds).
     assert!(early >= 600, "only {early} stops asked for early on");
     assert!(
@@ -871,7 +1020,7 @@ fn motions_can_be_stopped_before_they_brake_for_their_end() {
         "{early_refused} of {early} stops in a motion's first fifth refused"
     );
     // Carrying on only where braking at once finds no stop at all, 66 take longer than going on;
-    // none does.
+    // one does.
     assert!(
         50 * early_slow <= early,
         "{early_slow} of {early} stops in a motion's first fifth take longer than going on"
