@@ -1,13 +1,14 @@
 # Benchmarks
 
-The numbers on this page come from four machines:
+The numbers on this page come from five machines:
 
 - an **Apple M4 Pro**: 14 CPU cores and a 20-core GPU, on Metal;
 - an **AMD Ryzen AI Max+ 395** CPU (16 cores, 32 threads) with a **Radeon 8060S** GPU, on Vulkan through Mesa's RADV driver, under Ubuntu 26.04;
 - an **NVIDIA T4** GPU with 8 threads of a 2.5 GHz Xeon (an AWS g4dn.2xlarge), for cuRobo, which needs CUDA, under Ubuntu 24.04;
-- an **NVIDIA A10G** GPU with 4 threads of an AMD EPYC 7R32 (an AWS g5.xlarge), for RoboKit, under Ubuntu 24.04.
+- an **NVIDIA A10G** GPU with 4 threads of an AMD EPYC 7R32 (an AWS g5.xlarge), for RoboKit, under Ubuntu 24.04;
+- an **NVIDIA RTX 4090** GPU with 13 threads of an AMD EPYC 75F3 (a rented container, Ubuntu 22.04), for RoboKit and batchplan on one machine.
 
-The load was checked before each run. Every command to reproduce them is [at the end](#reproducing).
+The load was checked before each run on the first two; the rented machines ran nothing else of ours, and what their other tenants ran is not known. Every command to reproduce them is [at the end](#reproducing).
 
 ## Against other planners
 
@@ -300,7 +301,7 @@ By their own checks, VAMP solved 98.6% (98.5% with 2 rad steps), OMPL 90.5%, Rob
 
 ## Against RoboKit
 
-[RoboKit](https://github.com/openrobokit/robokit) (736f112) ships a benchmark of inverse kinematics and one of motion planning to pose goals, both judged by its own scorer. Its harnesses ran unchanged, and batchplan (9d49051) ran inside them: the same targets and problems, warm-ups and judge. `scripts/robokit/` holds the adapters ([commands](#reproducing)). Everything ran on one AWS g5.xlarge, five runs each, but the two rows timed under 150 rad/s³, which ran on a second, and the four sampled 31 times per plan, on a third: an NVIDIA A10G (driver 595.112.07; RoboKit on CUDA, batchplan on Vulkan) and 4 threads of an AMD EPYC 7R32.
+[RoboKit](https://github.com/openrobokit/robokit) (736f112) ships a benchmark of inverse kinematics and one of motion planning to pose goals, both judged by its own scorer. Its harnesses ran unchanged, and batchplan (9d49051) ran inside them: the same targets and problems, warm-ups and judge. `scripts/robokit/` holds the adapters ([commands](#reproducing)). The first tables ran on one AWS g5.xlarge, five runs each, but the two rows timed under 150 rad/s³, which ran on a second, and the four sampled 31 times per plan, on a third: an NVIDIA A10G (driver 595.112.07; RoboKit on CUDA, batchplan on Vulkan) and 4 threads of an AMD EPYC 7R32.
 
 **Motion planning.** The 2,590 problems of MotionBenchMaker (799) and MπNets (1,791), each a start configuration and a goal pose among obstacles, planned one at a time. The judge is the benchmark's, with cuRobo's checks: the goal reached, no collision, and velocity, acceleration (15 rad/s²) and jerk (500 rad/s³) within limits, by 5-point stencils on each plan's own samples (batchplan's 25 ms apart or less, or 31 per plan in the last four rows; RoboKit's 31 per plan) interpolated onto 25 ms. Success allows joint positions 0.2 rad past their limits, as cuRobo's benchmark does, and "strict" allows none. For batchplan one `plan` call takes each pose goal, and the path is timed 1% under the judge's limits. Each planner's timer covers planning and timing the trajectory; building the scene is outside it for both. As run, the adapter counted one sample too many on about one batchplan motion in eight, which lengthens that motion by a step (25 ms at most) in the table's first seven rows; the adapter in `scripts/robokit/` no longer does, nor did it for the rows sampled 31 times per plan.
 
@@ -323,6 +324,20 @@ By their own checks, VAMP solved 98.6% (98.5% with 2 rad steps), OMPL 90.5%, Rob
 - **Motions.** Searched and shortcut, batchplan's motions take 3% longer than RoboKit's at the median, over paths of the same median length; with four optimized seeds, 4–5% less, over paths 3.5% shorter.
 - **Jerk.** The first five rows are timed under different limits: batchplan's motions under the judge's 500 rad/s³, which they keep along the whole curve and whose samples read 245; RoboKit plans under 150 rad/s³, and its read 126. Timed under 150 too (`RobotOptions::max_jerk`, a second run on the same kind of instance), batchplan's read 125 and take 20% longer than RoboKit's, or 10% with four optimized seeds: at the same jerk RoboKit's motions are the shorter.
 - **Sampling.** The judge's jerk is a reading of the samples it is given, and sparser samples read lower. Sampled 31 times per plan as RoboKit's are (`BATCHPLAN_FRAMES=31`), the same motions read 186 rad/s³ where 25 ms samples read 245, and motions timed under 300 rad/s³ read 147–152: with four optimized seeds those take 1.201 s at the median against RoboKit's 1.220 s, for 17.4 ms of planning on average against 23.5 and 18.9 at the median against 18.9, and read 152 against 126. At 31 samples batchplan's success reads 2 to 5 problems under RoboKit's: in the first of these rows' runs, four motions of 2.7–4.6 s, whose samples are 90–150 ms apart, read past a limit, and all else that failed did not reach its goal.
+
+On one machine for both, a rented NVIDIA RTX 4090 (driver 595.91.07; 13 threads of an AMD EPYC 75F3; RoboKit 736f112 on CUDA; batchplan 75ec9fb on Vulkan with [#32](https://github.com/natsuku-lab/batchplan/pull/32)'s first change, which moves no motion), five runs each, batchplan sampled 31 times per plan and timed under a share of the judge's acceleration limit (`BATCHPLAN_ACCELERATION`):
+
+| Planner | Success (strict) | Time per problem, mean / median / 98th | Motion (median) | Path (median) | Jerk (median) |
+|---|---|---|---|---|---|
+| RoboKit | 99.61% (99.61%) | 15.3 / 12.4 / 45.9 ms | 1.219 s | 3.291 rad | 126 rad/s³ |
+| batchplan, 4 optimized seeds | 99.50% (99.50%) | 12.4 / 13.2 / 32.2 ms | 1.159 s | 3.178 rad | 178 rad/s³ |
+| batchplan, 4 optimized seeds, acceleration × 0.8 | 99.46% (99.46%) | 12.6 / 13.3 / 32.8 ms | 1.208 s | 3.178 rad | 145 rad/s³ |
+| batchplan, 4 optimized seeds, acceleration × 0.7 | 99.46% (99.42%) | 12.5 / 13.2 / 32.5 ms | 1.242 s | 3.178 rad | 125 rad/s³ |
+| batchplan, acceleration × 0.7 | 99.54% (99.54%) | 3.8 / 3.4 / 6.4 ms | 1.338 s | 3.292 rad | 143 rad/s³ |
+
+- **At an equal jerk reading RoboKit's motions are the shorter, by 1.9%** (1.219 s against 1.242 s at 126 and 125 rad/s³), for about the same planning time (12.4 ms against 13.2 at the median, 15.3 against 12.5 on average). At an equal duration batchplan's read rougher (145 at 1.208 s).
+- **With four optimized seeds, a lower acceleration limit smooths the reading for less time than a lower jerk limit.** Timed under jerk limits of 250 and 220 rad/s³ instead, the optimized motions take 1.218 s and 1.241 s and read 145 and 133 (those two runs also had #32's second change and kernels built without shader runtime checks, which change the last bits of a GPU's results).
+- **Without optimization** batchplan answers in a quarter of the time, with motions 10% longer than RoboKit's that read 14% rougher. There a jerk limit of 250 rad/s³ does better than the acceleration share: the same 1.338 s, reading 137 (built as the two runs above).
 
 **Inverse kinematics.** The benchmark's Panda targets without obstacles, one batched solve, in milliseconds (success): a target is solved within 5 mm and 0.05 rad. batchplan runs its defaults, 64 seeds of 30 steps.
 
@@ -649,6 +664,7 @@ uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchpla
 BATCHPLAN_SEEDS=4 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu-4   # batchplan-cpu likewise
 BATCHPLAN_JERK=150 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu-j150   # timed under RoboKit's jerk limit
 BATCHPLAN_FRAMES=31 BATCHPLAN_JERK=300 BATCHPLAN_SEEDS=4 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu-4-j300-f31   # sampled as RoboKit's plans are
+BATCHPLAN_FRAMES=31 BATCHPLAN_ACCELERATION=0.7 BATCHPLAN_SEEDS=4 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu-4-a07-f31   # under 0.7 of the acceleration limit
 
 # Tool paths, and picks and places on random tabletops
 cargo run --release --example tool_paths
