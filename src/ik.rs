@@ -21,12 +21,13 @@ pub struct IkOptions {
     pub seeds: usize,
     /// Damped-least-squares steps per seed, at most: one that has come to rest takes no more.
     pub iterations: u32,
-    /// Of `iterations`, the steps every seed takes before only each problem's `kept` nearest go
-    /// on; 0 (or `iterations` and more) for every seed to take them all. A few steps tell which
-    /// seeds are closing on the target, and the rest cost a fraction of the work.
+    /// Of `iterations`, the steps every seed takes before only `kept` of each problem's go on;
+    /// 0 (or `iterations` and more) for every seed to take them all. Most seeds that will arrive
+    /// have by then, and the rest of the steps go to the few that are closing in.
     pub screening: u32,
-    /// Seeds per problem that go on past `screening`: those nearest their targets then, the
-    /// collision-free first. The others are returned as the screening left them.
+    /// Seeds per problem that go on past `screening`: of those not yet at their targets within
+    /// the tolerances and clear of collision, the nearest, the collision-free first. The others
+    /// are returned as the screening left them.
     pub kept: usize,
     /// Damped-least-squares damping (lambda).
     pub damping: f32,
@@ -500,15 +501,13 @@ fn solved(
     };
     let mut solved = device.ik(worlds, &item_world, &targets, &held, &mut q, &first)?;
     if staged {
-        // Each problem's `kept` seeds nearest their targets after the screening, the
-        // collision-free first, take the remaining steps as a batch of their own.
-        let cost = |s: &[f32; 4]| {
-            let blocked = if device::collision_free([s[2], s[3]]) {
-                0.0
-            } else {
-                f32::MAX
-            };
-            (s[0] + o.rotation_weight * s[1]).max(blocked)
+        // Of each problem's seeds that have not arrived, the `kept` nearest their targets, the
+        // collision-free first, take the remaining steps as a batch of their own. A problem with
+        // fewer left takes arrived ones along, which stay at rest, so every problem sends as many.
+        let rank = |s: &[f32; 4]| {
+            let clear = device::collision_free([s[2], s[3]]);
+            let arrived = clear && s[0] < o.position_tolerance && s[1] < o.rotation_tolerance;
+            (arrived, !clear, s[0] + o.rotation_weight * s[1])
         };
         let mut chosen = Vec::with_capacity(problems.len() * o.kept);
         let mut order: Vec<usize> = Vec::with_capacity(o.seeds);
@@ -516,8 +515,11 @@ fn solved(
             order.clear();
             order.extend(p * o.seeds..(p + 1) * o.seeds);
             order.sort_by(|&a, &b| {
-                cost(&solved[a])
-                    .total_cmp(&cost(&solved[b]))
+                let ((arrived_a, blocked_a, error_a), (arrived_b, blocked_b, error_b)) =
+                    (rank(&solved[a]), rank(&solved[b]));
+                (arrived_a, blocked_a)
+                    .cmp(&(arrived_b, blocked_b))
+                    .then(error_a.total_cmp(&error_b))
                     .then(a.cmp(&b))
             });
             chosen.extend_from_slice(&order[..o.kept]);

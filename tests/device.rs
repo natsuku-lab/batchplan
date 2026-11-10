@@ -535,6 +535,83 @@ fn ik_steps_move_a_seed_or_leave_it_at_rest() {
     }
 }
 
+/// Past the screening only each problem's nearest seeds go on: the others stay as the screening
+/// left them, those that go on were the nearest then, and what every seed taking every step
+/// solves is still solved.
+#[test]
+fn ik_refines_the_seeds_nearest_after_the_screening() {
+    let robot = panda();
+    let n = robot.dof();
+    let mut rng = Rng::new(4);
+    let scene: Vec<World> = (0..48).map(|_| common::tabletop(&mut rng)).collect();
+    let problems: Vec<IkProblem> = scene
+        .iter()
+        .enumerate()
+        .map(|(i, world)| IkProblem::new(i as u32, common::grasp_target(world, &mut rng)))
+        .collect();
+    let o = IkOptions::default();
+    assert!(o.screening > 0 && o.screening < o.iterations && o.kept < o.seeds);
+    for d in devices(&robot) {
+        let worlds = d.upload(&scene).unwrap();
+        let solve = |o: &IkOptions| batchplan::solve_ik(&d, &worlds, &problems, o).unwrap();
+        let every = |iterations: u32| IkOptions {
+            iterations,
+            screening: 0,
+            ..o
+        };
+        let (screened, staged, full) = (
+            solve(&every(o.screening)),
+            solve(&o),
+            solve(&every(o.iterations)),
+        );
+        // How near a seed that had not arrived was after the screening, as the choice ranks them:
+        // any collision-free seed before any that is not.
+        let cost = |i: usize| {
+            let error = screened.position_error[i] + o.rotation_weight * screened.rotation_error[i];
+            let clear = screened.world_clearance[i] >= 0.0 && screened.self_clearance[i] >= 0.0;
+            if clear { error } else { 1e6 + error }
+        };
+        let mut went_on = 0;
+        for p in 0..problems.len() {
+            let seeds = p * o.seeds..(p + 1) * o.seeds;
+            let moved = |i: &usize| staged.q[i * n..(i + 1) * n] != screened.q[i * n..(i + 1) * n];
+            let refined: Vec<usize> = seeds.clone().filter(moved).collect();
+            assert!(
+                refined.len() <= o.kept,
+                "{}: problem {p} refined {refined:?}",
+                d.name()
+            );
+            assert!(
+                refined.iter().all(|&i| !screened.success[i]),
+                "{}: problem {p} sends on a seed that had arrived",
+                d.name()
+            );
+            let farthest = refined.iter().map(|&i| cost(i)).fold(0.0, f32::max);
+            let left = seeds.filter(|i| !refined.contains(i) && !screened.success[*i]);
+            // A seed stuck short of its target does not move when sent on either: only seeds left
+            // behind while nearer than one that went on would be a wrong choice.
+            let nearer = left.filter(|&i| cost(i) < farthest).count();
+            assert!(
+                nearer + refined.len() <= o.kept,
+                "{}: problem {p} left {nearer} seeds nearer than one it refined",
+                d.name()
+            );
+            went_on += refined.len();
+            assert!(
+                full.best(p).is_none() || staged.best(p).is_some(),
+                "{}: problem {p} is solved only when every seed takes every step",
+                d.name()
+            );
+        }
+        assert!(
+            went_on > problems.len(),
+            "{}: only {went_on} seeds went on",
+            d.name()
+        );
+        assert!(staged.solved().count() > problems.len() / 2, "{}", d.name());
+    }
+}
+
 /// A problem's IK solves alike alone and in a batch: each problem draws its random seeds alike.
 #[test]
 fn ik_does_not_depend_on_the_batch() {
