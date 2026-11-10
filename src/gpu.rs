@@ -919,7 +919,7 @@ fn build_kernels(
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     // Every loop of these kernels counts to a bound (`kernel_loops_are_counted`), so none can run
     // forever, and the counter naga would add to each to make sure of that is left out: it costs
-    // IK a fifth to a quarter of its time (an M4 Pro, an RTX 4090). Bounds checks stay.
+    // IK 10-28% of its time (most without collision spheres). Bounds checks stay.
     let checks = wgpu::ShaderRuntimeChecks {
         force_loop_bounding: false,
         ..wgpu::ShaderRuntimeChecks::checked()
@@ -932,8 +932,10 @@ fn build_kernels(
         unsafe_code,
         reason = "wgpu takes shaders without its loop bounding only from callers who vouch for them"
     )]
-    // SAFETY: the one check left out guards against infinite loops, and these kernels have none:
-    // each loop is a `for` whose counter steps by a positive constant toward its bound.
+    // SAFETY: the one check left out guards against infinite loops, and these kernels have none.
+    // Each loop is a `for` whose body leaves its counter alone and whose step is `++`, a shift
+    // down to zero, or `LANES` or `WORKGROUP` (1, 8 or 64) toward a bound that counts elements of
+    // a buffer this backend sized, or steps the options bound: far below where a `u32` wraps.
     let module = unsafe { device.create_shader_module_trusted(descriptor, checks) };
 
     let buffer_entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
@@ -2117,16 +2119,28 @@ mod tests {
     }
 
     /// The kernels are built without naga's loop bounding, which is sound only while none of their
-    /// loops can run forever: each must be a `for` with a condition and a step.
+    /// loops can run forever: each must be a `for` with a bound and a step that moves toward it.
     #[test]
     fn kernel_loops_are_counted() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/assets/ur5e/ur_description/urdf/ur5e.urdf"
         );
-        let robot = Robot::load(path, &crate::RobotOptions::default()).expect("the UR5e loads");
+        let options = crate::RobotOptions::default();
+        let one = Robot::load(path, &options).expect("the UR5e loads");
+        // Two arms have more link pairs than are written out one by one, so their kernel loops
+        // over the pairs.
+        let arm = |prefix: &str, y: f32| crate::Part {
+            path: path.into(),
+            prefix: prefix.into(),
+            base: crate::Pose::new(Vec3::new(0.0, y, 0.0), Quat::IDENTITY),
+        };
+        let two = Robot::assemble(&[arm("left_", 0.4), arm("right_", -0.4)], &options)
+            .expect("two UR5e arms assemble");
+        assert!(two.self_link_pairs.len() > UNROLLED_LINK_PAIRS);
         let sources = [
-            robot_wgsl(&robot),
+            robot_wgsl(&one),
+            robot_wgsl(&two),
             include_str!("kernels.wgsl").to_owned(),
             include_str!("grid.wgsl").to_owned(),
         ];
@@ -2141,20 +2155,24 @@ mod tests {
                     !words.contains(&"while") && !words.contains(&"loop"),
                     "a loop that is not a counted `for`: {line}"
                 );
-                let Some(header) = line.split("for (").nth(1) else {
+                if !words.contains(&"for") {
                     continue;
-                };
+                }
+                // `for (start; condition; step)` on one line, with or without the space.
+                let header = line.split_once('(').map_or("", |(_, rest)| rest);
                 let parts: Vec<&str> = header.split(';').collect();
+                let steps = ["++", "+= LANES", "+= WORKGROUP", ">>= 1u"];
                 let counted = parts.len() == 3
                     && parts[1].contains(['<', '>'])
-                    && ["++", "+=", ">>=", "--"]
-                        .iter()
-                        .any(|step| parts[2].contains(step));
-                assert!(counted, "a `for` without a bound or a step: {line}");
+                    && steps.iter().any(|step| parts[2].contains(step));
+                assert!(counted, "a `for` without a bound or a known step: {line}");
                 loops += 1;
             }
         }
-        assert!(loops > 50, "only {loops} loops found: the scan misses them");
+        assert!(
+            loops > 100,
+            "only {loops} loops found: the scan misses them"
+        );
     }
 
     /// A robot relocked (`Robot::relock`) differs only in the link origins the kernels read from
