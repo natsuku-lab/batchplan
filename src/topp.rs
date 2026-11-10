@@ -562,7 +562,9 @@ fn narrow(lower: (f64, f64), upper: (f64, f64), x: &mut (f64, f64)) -> bool {
     true
 }
 
-/// The path's joint velocity, acceleration and jerk where the time map is at `u` of span `m`.
+/// The path's joint velocities, accelerations and jerks where the time map is at `u` of span `m`,
+/// written to `out` in that order (`[3, n]`), and the path position there.
+#[inline]
 pub(crate) fn derivatives(
     cp: &[f32],
     n: usize,
@@ -570,8 +572,8 @@ pub(crate) fn derivatives(
     points: &[f32],
     m: usize,
     u: f32,
-    out: &mut [[f32; 3]],
-) {
+    out: &mut [f32],
+) -> f32 {
     let spans = cp.len() / n - 3;
     let at = |w: [f32; 4]| (0..4).map(|i| w[i] * points[m + i]).sum::<f32>();
     let (s, sd, sdd, sddd) = (
@@ -585,15 +587,23 @@ pub(crate) fn derivatives(
         spline::basis_d1(s - span as f32),
         spline::basis_d2(s - span as f32),
     );
-    for (j, o) in out.iter_mut().enumerate().take(n) {
-        let path = |w: [f32; 4]| (0..4).map(|i| w[i] * cp[(span + i) * n + j]).sum::<f32>();
-        let (p1, p2, p3) = (path(w1), path(w2), path(BASIS_D3));
-        *o = [
-            p1 * sd,
-            p2 * sd * sd + p1 * sdd,
-            p3 * sd * sd * sd + 3.0 * p2 * sd * sdd + p1 * sddd,
-        ];
+    // Index loops over the joints, each control point's row contiguous, so they vectorize.
+    let rows = &cp[span * n..(span + 4) * n];
+    let (c0, rest) = rows.split_at(n);
+    let (c1, rest) = rest.split_at(n);
+    let (c2, c3) = rest.split_at(n);
+    let (velocity, rest) = out.split_at_mut(n);
+    let (acceleration, jerk) = rest.split_at_mut(n);
+    let w3 = BASIS_D3;
+    for j in 0..n {
+        let p1 = w1[0] * c0[j] + w1[1] * c1[j] + w1[2] * c2[j] + w1[3] * c3[j];
+        let p2 = w2[0] * c0[j] + w2[1] * c1[j] + w2[2] * c2[j] + w2[3] * c3[j];
+        let p3 = w3[0] * c0[j] + w3[1] * c1[j] + w3[2] * c2[j] + w3[3] * c3[j];
+        velocity[j] = p1 * sd;
+        acceleration[j] = p2 * sd * sd + p1 * sdd;
+        jerk[j] = p3 * sd * sd * sd + 3.0 * p2 * sd * sdd + p1 * sddd;
     }
+    s
 }
 
 /// Whether the time map `points` at `knot` seconds per span, which starts in a given motion at
@@ -652,10 +662,12 @@ fn assess(
         robot.max_acceleration(),
         robot.max_jerk(),
     ];
-    let targets: Vec<[f32; 3]> = (0..n)
-        .map(|j| std::array::from_fn(|order| limits[order][j] * target))
+    // Each order's limits, one after another as `derivatives` writes them (`[3, n]`).
+    let targets: Vec<f32> = limits
+        .iter()
+        .flat_map(|limit| limit.iter().map(|l| l * target))
         .collect();
-    let mut out = vec![[0.0f32; 3]; n];
+    let mut out = vec![0.0f32; 3 * n];
     let (mut k, mut overshoots) = (1.0f32, vec![]);
     // A ratio's root raises k only if the ratio exceeds k to the root's power. Below these powers,
     // shaded down past rounding, the root is not taken.
@@ -691,18 +703,18 @@ fn assess(
         });
         let evenly = (0..=samples).map(|sample| sample as f32 / samples as f32);
         for u in evenly.chain(crossings) {
-            derivatives(cp, n, knot, points, m, u, &mut out);
+            let s = derivatives(cp, n, knot, points, m, u, &mut out);
             let map = |w: [f32; 4]| (0..4).map(|i| w[i] * points[m + i]).sum::<f32>();
             // How much more than `target` the limits are here: from the full ones at a given
             // start to none after the ramp.
             let (relief, eased_orders) = eased.map_or((1.0, 0), |(from, orders)| {
-                let along = ((map(spline::basis(u)) - from) / START_RAMP).clamp(0.0, 1.0);
+                let along = ((s - from) / START_RAMP).clamp(0.0, 1.0);
                 ((target + (1.0 - target) * (1.0 - along)) / target, orders)
             });
             let mut factor = 1.0f32;
             if let Some(hand) = hand {
                 let speed = map(spline::basis_d1(u)).abs() / knot;
-                let rates = hand.at(map(spline::basis(u)));
+                let rates = hand.at(s);
                 for (rate, limit) in rates.into_iter().zip(hand.limits) {
                     let ratio = rate * speed / (limit * target * relief);
                     if ratio > k {
@@ -714,24 +726,30 @@ fn assess(
                     }
                 }
             }
-            for (d, limit) in out.iter().zip(&targets) {
-                for order in 0..3 {
-                    let relief = if order < eased_orders { relief } else { 1.0 };
-                    let ratio = d[order].abs() / (limit[order] * relief);
-                    if ratio > floor[order] {
-                        let root = ratio.powf(1.0 / (order + 1) as f32);
-                        if root > k {
-                            k = root;
-                            floor = floors(k);
-                        }
+            // The largest ratio of each order over the joints: a larger ratio has the larger root
+            // and the smaller factor, so only an order's largest can set k or the factor.
+            let mut most = [0.0f32; 3];
+            for order in 0..3 {
+                let relief = if order < eased_orders { relief } else { 1.0 };
+                let (d, limit) = (&out[order * n..][..n], &targets[order * n..][..n]);
+                for j in 0..n {
+                    most[order] = most[order].max(d[j].abs() / (limit[j] * relief));
+                }
+            }
+            for (order, ratio) in most.into_iter().enumerate() {
+                if ratio > floor[order] {
+                    let root = ratio.powf(1.0 / (order + 1) as f32);
+                    if root > k {
+                        k = root;
+                        floor = floors(k);
                     }
-                    if ratio > 1.0 {
-                        factor = factor.min(ratio.powf(-2.0 / (order + 1) as f32));
-                    }
+                }
+                if ratio > 1.0 {
+                    factor = factor.min(ratio.powf(-2.0 / (order + 1) as f32));
                 }
             }
             if factor < 1.0 {
-                overshoots.push((map(spline::basis(u)), factor * 0.98));
+                overshoots.push((s, factor * 0.98));
             }
         }
         if k > beaten {

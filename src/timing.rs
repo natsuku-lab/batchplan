@@ -580,7 +580,7 @@ impl Trajectory {
         let names = ["velocity", "acceleration", "jerk"];
         let uniform = *tp == linear(points - 3);
         if !uniform && h > 0.0 {
-            let mut out = vec![[0.0f32; 3]; n];
+            let mut out = vec![0.0f32; 3 * n];
             for m in 0..tp.len() - 3 {
                 for sample in 0..=CHECK_SAMPLES {
                     topp::derivatives(
@@ -592,9 +592,9 @@ impl Trajectory {
                         sample as f32 / CHECK_SAMPLES as f32,
                         &mut out,
                     );
-                    for (j, d) in out.iter().enumerate() {
+                    for j in 0..n {
                         for order in 0..3 {
-                            let (peak, limit) = (d[order].abs(), limits[order][j]);
+                            let (peak, limit) = (out[order * n + j].abs(), limits[order][j]);
                             // False for NaN too.
                             let within = peak <= limit * (1.0 + 1e-3);
                             ensure_safe!(
