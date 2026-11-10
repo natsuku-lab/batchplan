@@ -1847,9 +1847,8 @@ impl GpuBackend {
         params.first_seed = first as u32;
         let params_buf = self.uniform(&params);
         let world_buf = storage(&self.device, "item world", item_world);
-        // Per problem (`P.per_target` items, the first entered at its seed `P.first_seed`) and hand:
-        // the position with w = 1 when the hand has a
-        // target, then the rotation's columns.
+        // Per problem (`P.per_target` items, the first entered at its seed `P.first_seed`) and
+        // hand: the position with w = 1 when the hand has a target, then the rotation's columns.
         let target_data: Vec<[f32; 4]> = targets
             .iter()
             .flat_map(|t| match t {

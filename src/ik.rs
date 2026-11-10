@@ -350,7 +350,7 @@ impl IkOptions {
             "{what} needs a positive max_step and rotation_weight and a non-negative damping"
         );
         ensure_input!(
-            self.collision_step < f32::INFINITY,
+            self.collision_step.is_finite(),
             "{what} needs a finite collision_step, got {}",
             self.collision_step
         );

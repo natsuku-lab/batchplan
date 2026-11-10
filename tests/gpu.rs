@@ -414,6 +414,7 @@ fn ik_seeds_past_a_chunk_reach_their_own_targets() {
     let problems = ik_problems(&scene, 5);
     let o = IkOptions {
         seeds: 4000,
+        iterations: 10,
         ..Default::default()
     };
     assert!(
