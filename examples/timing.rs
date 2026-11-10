@@ -1,7 +1,8 @@
 //! How long timing takes and how long the trajectories it gives last, on the Panda, by kind of
 //! path: paths planned from rest, paths replanned from halfway along them while moving, and the
-//! hand's straight moves. Timing runs on the calling thread; each kind is timed five times and
-//! the fastest pass kept.
+//! hand's straight moves; then the planned motions stopped a quarter of the way along
+//! (`Trajectory::stop`). Timing runs on the calling thread; each kind is timed five times and the
+//! fastest pass kept.
 //!
 //!   cargo run --release --example timing
 
@@ -127,6 +128,29 @@ fn main() -> Result<()> {
         "{:<34}{:>8}{duration:>14.4}{cost:>12.1}",
         "replanned while moving",
         moving.len()
+    );
+    // Stops: how long each takes to come to rest, and to find. Those refused are left out.
+    let trajectories = planned
+        .iter()
+        .map(|p| Ok(Trajectory::try_new(&robot, p, 1.0)?))
+        .collect::<Result<Vec<Trajectory>>>()?;
+    let (mut fastest, mut total, mut stopped) = (f64::INFINITY, 0.0, 0);
+    for _ in 0..PASSES {
+        let start = Instant::now();
+        (total, stopped) = (0.0, 0);
+        for trajectory in &trajectories {
+            if let Ok(stop) = trajectory.stop(&robot, 0.25 * trajectory.duration()) {
+                total += f64::from(stop.duration());
+                stopped += 1;
+            }
+        }
+        fastest = fastest.min(start.elapsed().as_secs_f64());
+    }
+    println!(
+        "{:<34}{stopped:>8}{:>14.4}{:>12.1}",
+        "stopped a quarter of the way",
+        total / f64::from(stopped.max(1)),
+        1e6 * fastest / trajectories.len() as f64
     );
     Ok(())
 }

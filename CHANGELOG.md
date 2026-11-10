@@ -103,6 +103,18 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   the straight line from the start: the line was measured from the path's first control point,
   which lies behind a moving start, so paths that bent by half as much again were left
   unoptimized.
+- `Trajectory::stop` stops a motion from more of the states it passes through, and sooner. It
+  refused where a joint ran within 0.6% of its velocity limit, since a stop's velocity was held
+  to the margin under the limit even where it starts, and often while a motion still gathered
+  speed, since braking at once breaks the jerk limit there, or stopped only by creeping to the
+  path's end. It now also tries carrying on for one span with the motion's jerk, half of it or
+  none before braking, and keeps the stop that ends soonest along the path. Trajectories timed
+  up to the limits pass through such states more often. Through the first fifth of 48 planned
+  Panda motions, 42 of 960 stops are refused where 153 were and none takes longer than going on
+  where 66 did; of 16 states at a velocity limit, 6 stop where none did. A quarter of the way
+  along 438 motions, stops last 0.633 s where they lasted 0.646, and take 0.86 ms to find where
+  they took 0.73 (`examples/timing.rs`, which now times them, on an M4 Pro). A `Follower` that
+  must stop where none is found keeps to its trajectory, which comes to rest at the path's end.
 - Optimized seeds (`PlanOptions::seeds`) are validated as searched splines are checked: at samples no
   farther apart than `shortcut.resolution`, keeping the margin from the world searched splines keep
   away from their ends (2 mm, or `shortcut.clearance` if less). Validation kept no margin and

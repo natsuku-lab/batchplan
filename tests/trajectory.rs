@@ -825,3 +825,55 @@ fn a_trajectory_starts_and_ends_where_its_motion_does() {
         "the stop runs to the path's end"
     );
 }
+
+/// A trajectory can be stopped from the states it passes through before it brakes for its own
+/// end: at a joint's velocity limit, since a stop's velocity limit is the full one where it
+/// starts; and while it still gathers speed, since a stop may carry on with the jerk it has before
+/// braking, which also stops sooner than a map that brakes at once and creeps to the path's end.
+#[test]
+fn motions_can_be_stopped_before_they_brake_for_their_end() {
+    let robot = common::panda().unwrap();
+    let n = robot.dof();
+    let (mut early, mut early_refused, mut early_slow) = (0, 0, 0);
+    let (mut fast, mut fast_stopped) = (0, 0);
+    let mut state = JointState::new(n);
+    for path in planned(&robot, 48) {
+        let trajectory = Trajectory::try_new(&robot, &path, 1.0).unwrap();
+        // Every hundredth of the first 60%: later, more and more are braking already.
+        for k in 1..=60 {
+            let t = 0.01 * k as f32 * trajectory.duration();
+            trajectory.at(t, &mut state);
+            let ratios = state.velocity.iter().zip(robot.max_velocity());
+            let at_limit = ratios.map(|(v, l)| v.abs() / l).fold(0.0, f32::max) > 0.995;
+            let stop = trajectory.stop(&robot, t);
+            early += usize::from(k <= 20);
+            early_refused += usize::from(k <= 20 && stop.is_err());
+            fast += usize::from(at_limit);
+            fast_stopped += usize::from(at_limit && stop.is_ok());
+            let Ok(stop) = stop else { continue };
+            stop.check_from(&robot, &state).unwrap();
+            early_slow += usize::from(k <= 20 && stop.duration() > trajectory.duration() - t);
+        }
+    }
+    // With a stop's velocity held to the margin under the limit at its start too, none of those
+    // at a limit stops (16 on an M4 Pro, 6 of them stopped; 3 other sets of worlds: 9 of 12, 20 of
+    // 25, 13 of 17).
+    assert!(fast >= 8, "only {fast} states at a velocity limit");
+    assert!(
+        4 * fast_stopped >= fast,
+        "{fast_stopped} of {fast} at a velocity limit stop"
+    );
+    // Braking at once only, 153 of 960 are refused; with the starting jerks, 42 (32-52 over three
+    // other sets of worlds).
+    assert!(early >= 600, "only {early} stops asked for early on");
+    assert!(
+        10 * early_refused <= early,
+        "{early_refused} of {early} stops in a motion's first fifth refused"
+    );
+    // Carrying on only where braking at once finds no stop at all, 66 take longer than going on;
+    // none does.
+    assert!(
+        50 * early_slow <= early,
+        "{early_slow} of {early} stops in a motion's first fifth take longer than going on"
+    );
+}
