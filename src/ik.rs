@@ -509,20 +509,39 @@ fn solved(
             let arrived = clear && s[0] < o.position_tolerance && s[1] < o.rotation_tolerance;
             (arrived, !clear, s[0] + o.rotation_weight * s[1])
         };
-        let mut chosen = Vec::with_capacity(problems.len() * o.kept);
-        let mut order: Vec<usize> = Vec::with_capacity(o.seeds);
-        for p in 0..problems.len() {
-            order.clear();
-            order.extend(p * o.seeds..(p + 1) * o.seeds);
-            order.sort_by(|&a, &b| {
-                let ((arrived_a, blocked_a, error_a), (arrived_b, blocked_b, error_b)) =
-                    (rank(&solved[a]), rank(&solved[b]));
-                (arrived_a, blocked_a)
-                    .cmp(&(arrived_b, blocked_b))
-                    .then(error_a.total_cmp(&error_b))
-                    .then(a.cmp(&b))
+        let choose = |p: usize, chosen: &mut [usize]| {
+            let mut best: Vec<((bool, bool, f32), usize)> = Vec::with_capacity(o.kept);
+            let first = p * o.seeds;
+            let seeds = solved[first..first + o.seeds].iter().enumerate();
+            for (s, seed) in seeds {
+                let (ranked, item) = (rank(seed), first + s);
+                // Items come in order, so one that ties an earlier one goes after it.
+                let at = best.partition_point(|&((arrived, blocked, error), _)| {
+                    (arrived, blocked)
+                        .cmp(&(ranked.0, ranked.1))
+                        .then(error.total_cmp(&ranked.2))
+                        .is_le()
+                });
+                if at < o.kept {
+                    best.truncate(o.kept - 1);
+                    best.insert(at, (ranked, item));
+                }
+            }
+            for (slot, &(_, item)) in chosen.iter_mut().zip(&best) {
+                *slot = item;
+            }
+        };
+        let mut chosen = vec![0; problems.len() * o.kept];
+        if items < SEEDED_ALONE {
+            for (p, slots) in chosen.chunks_mut(o.kept).enumerate() {
+                choose(p, slots);
+            }
+        } else {
+            use rayon::prelude::*;
+            device.install(|| {
+                let each = chosen.par_chunks_mut(o.kept).enumerate();
+                each.for_each(|(p, slots)| choose(p, slots));
             });
-            chosen.extend_from_slice(&order[..o.kept]);
         }
         let mut refined: Vec<f32> = Vec::with_capacity(chosen.len() * n);
         let mut refined_held = Vec::with_capacity(if holding { chosen.len() * n } else { 0 });
