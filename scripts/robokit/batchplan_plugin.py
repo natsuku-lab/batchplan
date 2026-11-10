@@ -31,8 +31,8 @@ SEEDS = int(os.environ.get("BATCHPLAN_SEEDS", "0"))  # optimized seeds per probl
 MARGIN = float(os.environ.get("BATCHPLAN_MARGIN", "0.99"))
 # The jerk limit trajectories are timed under: the judge's 500, or less for smoother motions.
 JERK = float(os.environ.get("BATCHPLAN_JERK", "500"))
-# The share of the judge's acceleration limit trajectories are timed under: less reads smoother to
-# the judge's five-point jerk for less time than a lower jerk limit costs.
+# The share of the judge's acceleration limit trajectories are timed under: with optimized seeds,
+# less reads smoother to the judge's five-point jerk for less time than a lower jerk limit costs.
 ACCELERATION = float(os.environ.get("BATCHPLAN_ACCELERATION", "1"))
 # Samples per plan, as RoboKit returns a fixed count (31); 0 samples at most 25 ms apart.
 FRAMES = int(os.environ.get("BATCHPLAN_FRAMES", "0"))
