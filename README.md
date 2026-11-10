@@ -258,17 +258,17 @@ Lengths and durations are relative to batchplan's, on the problems both solve va
 
 ### Batches and the GPU
 
-Planning runs on CPU threads on either device; IK and trajectory optimization also run on the GPU. Each call here solves IK and plans a batch of tabletop grasps, end to end, in solved problems per second (the M4 Pro's at 0.2.0):
+Planning runs on CPU threads on either device; IK and trajectory optimization also run on the GPU. Each call here solves IK and plans a batch of tabletop grasps, end to end, in solved problems per second (the M4 Pro's at 0.2.0, with IK's defaults then, 32 seeds of 60 steps):
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU (14 cores) | Radeon 8060S GPU | Ryzen AI Max+ 395 CPU (16 cores) |
 |---|---|---|---|---|
-| 1 | 114 | **1,752** | 142 | **1,403** |
-| 8 | 878 | **2,835** | 1,055 | **4,259** |
-| 64 | 2,577 | **4,149** | 3,938 | **6,107** |
-| 512 | **8,611** | 4,882 | **16,348** | 6,233 |
-| 4,096 | **10,763** | 4,643 | **21,245** | 6,372 |
+| 1 | 114 | **1,752** | 259 | **1,826** |
+| 8 | 878 | **2,835** | 1,943 | **4,362** |
+| 64 | 2,577 | **4,149** | 4,269 | **6,050** |
+| 512 | **8,611** | 4,882 | **17,521** | 6,832 |
+| 4,096 | **10,763** | 4,643 | **20,977** | 7,084 |
 
-A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster on the CPU; from a few hundred problems per call the GPU overtakes it, and at 4,096 it solves 2.3–3.3 times as many.
+A GPU call costs 4 ms on the Radeon (10 ms on the M4 Pro at 0.2.0), so one problem at a time runs 7–15 times faster on the CPU; from a few hundred problems per call the GPU overtakes it, and at 4,096 it solves 2.3–3 times as many.
 
 ### When another library fits better
 
@@ -312,7 +312,7 @@ A GPU call costs about 10 ms, so one problem at a time runs 9–15 times faster 
 - **Payloads.** A held object collides as part of the robot, but has no mass: timing keeps the joints' limits whatever the robot carries.
 - **Joints.** Each closed loop must have exactly one actuated joint. Ball and floating joints are expanded into Euler angles, which lose a direction of motion where the middle angle reaches ±90°.
 - **Timing.** Jerk is kept within its limit by smoothing the time-optimal profile, slowing it where the smoothed map overshoots and stretching what remains, which costs time where a path turns sharply at speed: a wide blend through a sharp turn gains little over stopping ([joining motions](docs/benchmarks.md#joining-motions)). `Trajectory::check` samples each trajectory at a fixed density, so it can miss a short jerk overshoot between its samples.
-- **Small batches on a GPU.** A GPU call costs about 10 ms however small the batch, so below a few hundred problems per call the CPU is faster ([Batches and the GPU](#batches-and-the-gpu)). Planning itself runs on CPU threads on either device.
+- **Small batches on a GPU.** A GPU call costs milliseconds however small the batch (4 on a Radeon 8060S), so below a few hundred problems per call the CPU is faster ([Batches and the GPU](#batches-and-the-gpu)). Planning itself runs on CPU threads on either device.
 - **Generated pick-and-place and handovers.** `datagen`'s episodes grasp upright boxes from above and have no recoveries; `pick` and `place` themselves take other shapes and grasps. Camera videos come from replaying the episodes in MuJoCo, kinematically: no physics checks the grasps.
 - **Maturity.** batchplan is before 1.0, and its interface may change between minor versions ([changelog](CHANGELOG.md)). It is tested on AMD (Vulkan) and Apple (Metal) GPUs; on NVIDIA, only earlier versions ran (on a T4).
 

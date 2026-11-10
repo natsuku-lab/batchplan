@@ -484,7 +484,7 @@ fn episodes_stay_on_one_arm_configuration() {
         "{} of 64 episodes; the joints travel {median:.1} rad in the median one",
         demos.len()
     );
-    // 11.1 rad on an M4 Pro; 15.4 when the grasp took the solution with the most clearance. The
+    // 11.9 rad on an M4 Pro; 17.6 when the grasp took the solution with the most clearance. The
     // threshold leaves room for other machines.
     assert!(
         median < 13.5,
@@ -627,7 +627,7 @@ fn carries_keep_moving_around_obstacles() {
         "{} of 512 episodes; {stopped} carries stop on their way",
         demos.len()
     );
-    // 5 on an M4 Pro, at corners no blend clears; 43 when splines keep every stop the fitting
+    // 2 on an M4 Pro, at corners no blend clears; 57 when splines keep every stop the fitting
     // pinned.
     assert!(stopped <= 20, "{stopped} carries stop on their way");
 }

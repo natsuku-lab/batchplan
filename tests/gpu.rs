@@ -486,10 +486,12 @@ fn ik_steps_of_hands_sharing_joints_match_cpu() {
             }
         })
         .collect();
+    // The GPU's rounding grows with the step (about 1.7e-4 of it): a 0.3 rad step keeps the bound.
     let o = IkOptions {
         seeds: 1,
         iterations: 1,
-        ..Default::default()
+        max_step: 0.3,
+        ..IkOptions::default()
     };
     let (on_cpu, on_gpu) = (cpu.upload(&scene).unwrap(), gpu.upload(&scene).unwrap());
     let a = batchplan::solve_ik(&cpu, &on_cpu, &problems, &o).unwrap();
@@ -675,7 +677,7 @@ fn trajopt_directions_match_cpu_element_wise() {
         &cpu,
         &cpu.upload(&worlds).unwrap(),
         &ik_problems(&worlds, 9),
-        &IkOptions::default(),
+        &common::fixture_ik(),
     )
     .unwrap();
     let reaches: Vec<PlanProblem> = ik

@@ -42,7 +42,7 @@ fn main() -> Result<(), Error> {
 
 ## Inverse kinematics
 
-`solve_ik` runs damped least squares from many seeds per target (32 by default), with the collision gradient projected into the Jacobian's null space so seeds slide away from obstacles without leaving the target. A seed succeeds when it is within `position_tolerance` (1 mm) and `rotation_tolerance` (0.01 rad) of the target and collision-free.
+`solve_ik` runs damped least squares from many seeds per target (64 by default, 30 steps each), with the collision gradient projected into the Jacobian's null space so seeds slide away from obstacles without leaving the target. A step that would move no joint by more than 1e-6 rad is not taken, so a seed that has come to rest stays exactly there, and CPU threads skip the rest of its steps. A seed succeeds when it is within `position_tolerance` (1 mm) and `rotation_tolerance` (0.01 rad) of the target and collision-free.
 
 - `IkProblem::new(world, target)` targets a one-handed robot's hand from the default pose; the fields below cover the rest.
 - `ik.best(problem)` is the successful seed with the most obstacle clearance; `ik.solved()` yields every solved problem with that configuration.
@@ -442,7 +442,7 @@ fn main() -> Result<(), Error> {
 
 | Option | Default | What it trades |
 |---|---|---|
-| `IkOptions::seeds` | 32 | More seeds find more and better-cleared solutions, at proportional cost. |
+| `IkOptions::seeds` | 64 | More seeds find more and better-cleared solutions, at proportional cost. |
 | `PlanOptions::rrt.max_iterations` | 10,000 | Samples a search draws without its clearance before it gives up, after up to 500 with it: more solve rarer problems, and unsolvable ones take longer to give up. |
 | `PlanOptions::rrt.clearance`, `shortcut.clearance` | 1.5 cm, 1 cm | Distance searches and shortcuts keep from obstacles, away from the path's ends. More in shortcuts keeps paths clear of geometry the spheres miss, but makes them longer. |
 | `PlanOptions::shortcut.passes` | 3 | Shortcut and smoothing passes: more give shorter paths, at some time. |

@@ -457,6 +457,82 @@ fn evaluation_does_not_depend_on_the_batch() {
     }
 }
 
+/// An IK step moves a seed by more than a few of an `f32`'s steps or not at all, on either device:
+/// one that would move no joint by more than 1e-6 rad is not taken, so a seed that comes to rest
+/// stays exactly there (and the CPU skips its remaining steps).
+#[test]
+fn ik_steps_move_a_seed_or_leave_it_at_rest() {
+    let robot = panda();
+    let n = robot.dof();
+    let scene = [common::tabletop(&mut Rng::new(4))];
+    let mut rng = Rng::new(9);
+    let problems: Vec<IkProblem> = (0..8)
+        .map(|_| IkProblem::new(0, common::grasp_target(&scene[0], &mut rng)))
+        .collect();
+    for d in devices(&robot) {
+        let worlds = d.upload(&scene).unwrap();
+        let after = |iterations: u32| {
+            let o = IkOptions {
+                iterations,
+                ..IkOptions::default()
+            };
+            batchplan::solve_ik(&d, &worlds, &problems, &o).unwrap().q
+        };
+        let (mut rested, mut moved) = (0, 0);
+        for steps in [10, 30, 60] {
+            let (before, one_more) = (after(steps), after(steps + 1));
+            for (seed, (a, b)) in before.chunks(n).zip(one_more.chunks(n)).enumerate() {
+                let step = a
+                    .iter()
+                    .zip(b)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, f32::max);
+                assert!(
+                    step == 0.0 || step > 1e-6,
+                    "{}: step {} moves seed {seed} by {step} rad",
+                    d.name(),
+                    steps + 1
+                );
+                rested += usize::from(step == 0.0);
+                moved += usize::from(step > 0.0);
+            }
+        }
+        // A seed the CPU stopped stepping is one a further step leaves exactly where it is: solved
+        // again from there, it comes back bit for bit. (On the CPU alone: a GPU batch of another
+        // size can take another lane variant, which rounds differently.)
+        if d.name().starts_with("cpu") {
+            let (ended, one_more) = (after(60), after(61));
+            let mut again = 0;
+            for (seed, (a, b)) in ended.chunks(n).zip(one_more.chunks(n)).enumerate() {
+                if a != b {
+                    continue;
+                }
+                let from = IkProblem {
+                    seed: Some(a.to_vec()),
+                    ..problems[seed / IkOptions::default().seeds].clone()
+                };
+                let one = IkOptions {
+                    seeds: 1,
+                    iterations: 1,
+                    ..IkOptions::default()
+                };
+                let stepped = batchplan::solve_ik(&d, &worlds, &[from], &one).unwrap();
+                assert_eq!(
+                    stepped.q, a,
+                    "a step moves seed {seed}, which the CPU stopped"
+                );
+                again += 1;
+            }
+            assert!(again > 100, "only {again} seeds at rest after 60 steps");
+        }
+        assert!(
+            rested > 100 && moved > 100,
+            "{}: {rested} steps left a seed at rest, {moved} moved one",
+            d.name()
+        );
+    }
+}
+
 /// A problem's IK solves alike alone and in a batch: each problem draws its random seeds alike.
 #[test]
 fn ik_does_not_depend_on_the_batch() {

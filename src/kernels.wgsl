@@ -433,9 +433,19 @@ fn ik_step(world: u32, lid: u32, lane: u32) {
     if (largest > P.max_step) {
         scale = P.max_step / largest;
     }
+    // A step that would move no joint by more than IK_REST is not taken: the configuration is at
+    // rest, where every later step finds it again.
+    var moved = 0.0;
     for (var j = 0u; j < n; j++) {
         let lim = limits[j];
-        q[j] = clamp(q[j] + dq[j] * scale, lim.x, lim.y);
+        let next = clamp(q[j] + dq[j] * scale, lim.x, lim.y);
+        moved = max(moved, abs(next - q[j]));
+        dq[j] = next;
+    }
+    if (moved > IK_REST) {
+        for (var j = 0u; j < n; j++) {
+            q[j] = dq[j];
+        }
     }
 }
 

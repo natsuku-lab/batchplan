@@ -273,7 +273,7 @@ fn constrained_splines_stay_within_the_joint_ranges() {
     // The IK solution with the most clearance in the zone's corner, not the one nearest the ready
     // pose: its third joint at its limit.
     let corner = IkProblem::new(0, Pose::new(common::zone_corner(), common::upright(0.0)));
-    let start = batchplan::solve_ik(&device, &worlds, &[corner], &Default::default())
+    let start = batchplan::solve_ik(&device, &worlds, &[corner], &common::fixture_ik())
         .unwrap()
         .best(0)
         .expect("the corner is in reach")
