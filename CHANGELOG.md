@@ -62,14 +62,15 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 - Trajectories are sooner: time-optimal timing uses the full velocity and acceleration limits,
   and where its smoothed time map overshoots a limit, slows the profile there instead of
   stretching the whole motion for it. Planned Panda motions take 6.6% less time on average, the
-  hand's straight moves 3.0%, replans from a moving start 6.1%, and the 2,600 benchmark
+  hand's straight moves 3.0%, replans from a moving start 5.7%, and the 2,600 benchmark
   problems' motions 5.0%, within the same limits (`Trajectory::check`); more joins are worth
   blending. Timing costs less than it did: a path from rest 7% less, and one from a moving
-  start 57% less (500 µs where 1,168), timed once with its start at the full limits and its
-  candidate time maps turned down at a quarter of the checking density. A moving start no
-  timing fits costs more to turn down (2.2 ms where 1.6 on a Panda), so a batch of Panda
-  replans whose slowest problem tries many such paths takes a fifth longer, while one at a
-  time they take what they did and the SO-101's take a third of it
+  start 54% less (540 µs where 1,167), timed once with its start at the full limits and its
+  candidate time maps turned down at a quarter of the checking density. A moving start's
+  timing is also held to its limits where it crosses the path's knots, between the samples
+  checked. A moving start no timing fits costs more to turn down (2.4 ms where 1.6 on a
+  Panda), so Panda replans whose candidates are mostly such paths take 10% longer one at a
+  time and 30% longer as a batch, while the SO-101's take a third of the time they did
   ([Benchmarks](docs/benchmarks.md#timing-up-to-the-limits)).
 - **Breaking:** `IkOptions::default()` is 64 seeds of 30 steps of at most 1 rad, where it was 32
   seeds of 60 steps of at most 0.3 rad: at 0.3 rad, about half the seeds ran out of steps before

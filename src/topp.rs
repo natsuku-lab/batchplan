@@ -111,8 +111,7 @@ impl HandRates {
 /// lowered speeds leave the start's out of reach. Candidates are turned down at a quarter of the
 /// checking density first; where that finds no map, the path is timed again with every candidate
 /// measured at the full density, which steers the refinement to maps the coarse measure misses.
-/// With `hand`, the hand's speed keeps under its caps as the joints keep their
-/// limits.
+/// With `hand`, the hand's speed keeps under its caps as the joints keep their limits.
 pub(crate) fn time_map(
     robot: &Robot,
     cp: &[f32],
@@ -313,9 +312,9 @@ fn timed_map(
     // profile runs under them, as it does braking into a path's end.
     let mut lowered = vec![f64::INFINITY; stages + 1];
     let mut best: Option<(f32, Vec<f32>)> = None;
-    // A given start's candidate needing the least stretch, for `restretched`: that stretch (measured
-    // at the density that turned it down: the full one where it passed at a quarter or with
-    // `full`), its knot and its points. `restretched` measures again at the full density.
+    // A given start's candidate needing the least stretch, for `restretched`: that stretch
+    // (measured at the density that turned it down: the full one where it passed at a quarter or
+    // with `full`), its knot and its points. `restretched` measures again at the full density.
     let mut nearest: Option<(f32, f32, Vec<f32>)> = None;
     let swing = (0..n)
         .map(|j| f64::from(robot.max_acceleration()[j] / robot.max_jerk()[j]))
@@ -410,13 +409,13 @@ fn timed_map(
                     beaten,
                 )
             };
-            let first = if full {
+            let screened = if full {
                 CHECK_SAMPLES
             } else {
                 CHECK_SAMPLES / 4
             };
-            let mut assessed = measured(first);
-            if start_speed.is_some() && first < CHECK_SAMPLES && assessed.0 <= 1.0 {
+            let mut assessed = measured(screened);
+            if start_speed.is_some() && screened < CHECK_SAMPLES && assessed.0 <= 1.0 {
                 assessed = measured(CHECK_SAMPLES);
             }
             let (stretch, overshoots) = assessed;
@@ -531,7 +530,7 @@ fn restretched(
         if needed <= 1.0 {
             return Some((knot, points));
         }
-        if needed >= last {
+        if needed > last {
             return None;
         }
         last = needed;
@@ -662,9 +661,35 @@ fn assess(
     // shaded down past rounding, the root is not taken.
     let floors = |k: f32| [k, k * k, k * k * k].map(|power| power * (1.0 - 1e-4));
     let mut floor = floors(k);
+    // A given start's map is not stretched past what its samples need, so at the full density
+    // it is also measured where it crosses the path's knots: acceleration has corners there, which
+    // samples either side of one read up to 0.35% under.
+    let corners = eased.is_some() && samples == CHECK_SAMPLES;
     for m in 0..points.len() - 3 {
-        for sample in 0..=samples {
-            let u = sample as f32 / samples as f32;
+        let along = |u: f32| {
+            let w = spline::basis(u);
+            (0..4).map(|i| w[i] * points[m + i]).sum::<f32>()
+        };
+        let crossed = if corners {
+            along(0.0).ceil() as i32..along(1.0).floor() as i32 + 1
+        } else {
+            0..0
+        };
+        // Where the map reaches each path knot in this span, by bisection: it only rises.
+        let crossings = crossed.map(|path_knot| {
+            let (mut before, mut after) = (0.0f32, 1.0f32);
+            for _ in 0..24 {
+                let middle = 0.5 * (before + after);
+                if along(middle) < path_knot as f32 {
+                    before = middle;
+                } else {
+                    after = middle;
+                }
+            }
+            0.5 * (before + after)
+        });
+        let evenly = (0..=samples).map(|sample| sample as f32 / samples as f32);
+        for u in evenly.chain(crossings) {
             derivatives(cp, n, knot, points, m, u, &mut out);
             let map = |w: [f32; 4]| (0..4).map(|i| w[i] * points[m + i]).sum::<f32>();
             // How much more than `target` the limits are here: from the full ones at a given
