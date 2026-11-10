@@ -108,26 +108,36 @@ impl HandRates {
 /// change the start). Where no map fits so, it is timed again with the start held to the full
 /// limits, easing over `START_RAMP` path spans to those that leave the stretch's margin, the map
 /// stretched with its start set again (`restretched`), and the refinement ending, rather than
-/// failing, where lowered speeds leave the start's out of reach. With `hand`, the hand's speed
-/// keeps under its caps as the joints keep their limits.
+/// failing, where lowered speeds leave the start's out of reach. Both tries turn candidates down
+/// at a quarter of the checking density first; where neither finds a map, both run again with
+/// every candidate measured at the full density, which steers the refinement to maps the coarse
+/// measure misses. With `hand`, the hand's speed keeps under its caps as the joints keep their
+/// limits.
 pub(crate) fn time_map(
     robot: &Robot,
     cp: &[f32],
     start_speed: Option<f64>,
     hand: Option<&HandRates>,
 ) -> Option<(f32, Vec<f32>)> {
-    timed_map(robot, cp, start_speed, hand, /* eased */ false).or_else(|| {
-        start_speed.and_then(|_| timed_map(robot, cp, start_speed, hand, /* eased */ true))
-    })
+    let Some(_) = start_speed else {
+        return timed_map(
+            robot, cp, None, hand, /* eased */ false, /* full */ false,
+        );
+    };
+    [(false, false), (true, false), (false, true), (true, true)]
+        .into_iter()
+        .find_map(|(eased, full)| timed_map(robot, cp, start_speed, hand, eased, full))
 }
 
-/// [`time_map`], with `eased` its second try at a given start.
+/// [`time_map`], with `eased` its second try at a given start, and `full` measuring each of a
+/// given start's candidates at the full checking density rather than at a quarter of it first.
 fn timed_map(
     robot: &Robot,
     cp: &[f32],
     start_speed: Option<f64>,
     hand: Option<&HandRates>,
     eased: bool,
+    full: bool,
 ) -> Option<(f32, Vec<f32>)> {
     let n = robot.dof();
     let spans = cp.len() / n - 3;
@@ -309,8 +319,9 @@ fn timed_map(
     // profile runs under them, as it does braking into a path's end.
     let mut lowered = vec![f64::INFINITY; stages + 1];
     let mut best: Option<(f32, Vec<f32>)> = None;
-    // A given start's candidate needing the least stretch, for `restretched`: that stretch, its
-    // knot and its points.
+    // A given start's candidate needing the least stretch, for `restretched`: that stretch (as
+    // measured at the density that turned it down, a quarter of the full one unless `full`), its
+    // knot and its points. `restretched` measures again at the full density.
     let mut nearest: Option<(f32, f32, Vec<f32>)> = None;
     let swing = (0..n)
         .map(|j| f64::from(robot.max_acceleration()[j] / robot.max_jerk()[j]))
@@ -404,8 +415,13 @@ fn timed_map(
                     beaten,
                 )
             };
-            let mut assessed = measured(CHECK_SAMPLES / 4);
-            if start_speed.is_some() && assessed.0 <= 1.0 {
+            let coarse = if full {
+                CHECK_SAMPLES
+            } else {
+                CHECK_SAMPLES / 4
+            };
+            let mut assessed = measured(coarse);
+            if start_speed.is_some() && coarse < CHECK_SAMPLES && assessed.0 <= 1.0 {
                 assessed = measured(CHECK_SAMPLES);
             }
             let (stretch, overshoots) = assessed;

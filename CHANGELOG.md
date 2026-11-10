@@ -62,7 +62,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 - Trajectories are sooner: time-optimal timing uses the full velocity and acceleration limits,
   and where its smoothed time map overshoots a limit, slows the profile there instead of
   stretching the whole motion for it. Planned Panda motions take 6.6% less time on average, the
-  hand's straight moves 3.0%, replans from a moving start 5.9%, and the 2,600 benchmark
+  hand's straight moves 3.0%, replans from a moving start 6.1%, and the 2,600 benchmark
   problems' motions 5.0%, within the same limits (`Trajectory::check`); more joins are worth
   blending. Timing costs no more than it did: a moving start's candidate time maps are
   turned down at a quarter of the checking density, and only one that keeps the limits there is
