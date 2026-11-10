@@ -427,8 +427,11 @@ fn boxes_that_cannot_be_set_down_as_asked_are_set_down_turned() {
         });
     }
     let cpu = Device::cpu(&robot).unwrap();
-    let demos =
-        datagen::pick_and_place(&cpu, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
+    // Whether a place pose can be reached as asked is IK's to find: with the IK this fixture was
+    // built on, so that the same two need the turn wherever it runs.
+    let mut o = PickPlaceOptions::default();
+    o.task.ik = common::fixture_ik();
+    let demos = datagen::pick_and_place(&cpu, &worlds, &tasks, &o).unwrap();
     let done: Vec<u32> = demos.iter().map(|d| d.world).collect();
     assert_eq!(done, [0, 1, 2, 3]);
     for demo in &demos {
