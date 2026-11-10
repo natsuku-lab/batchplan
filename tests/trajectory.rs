@@ -750,6 +750,78 @@ fn a_moving_start_keeps_its_limits_between_the_samples_checked() {
 }
 
 #[test]
+fn a_replan_keeps_the_start_only_the_timings_second_pass_fits() {
+    // Two UR5e replans from fast starts among posts whose spline follows the start motion only
+    // once it stops at every waypoint, and then only by the timing's second pass at the first
+    // knot interval tried: left out there, neither is planned.
+    let ur5e = Robot::load(
+        common::asset("ur5e/ur_description/urdf/ur5e.urdf"),
+        &RobotOptions::default(),
+    )
+    .unwrap();
+    let cpu = Device::cpu(&ur5e).unwrap();
+    let (scene, _) = common::far_reaches(&ur5e, &cpu, 4, /* above_table */ true);
+    let worlds = cpu.upload(&scene).unwrap();
+    let cases = [
+        (
+            1,
+            [
+                -6.0853887, -1.1014895, 0.9422271, -6.1463857, -4.681736, -3.8040044,
+            ],
+            [
+                0.057526644,
+                0.38948536,
+                -0.08450991,
+                -0.8712345,
+                -0.8916578,
+                -0.41459402,
+            ],
+            [
+                -3.190817, 5.4199834, -0.5299742, 5.873759, 1.9869857, 1.662416,
+            ],
+        ),
+        (
+            3,
+            [
+                6.1318765, -2.096115, 1.3915989, -3.4039252, -4.8458357, -1.5567546,
+            ],
+            [
+                0.5194375,
+                -0.8530892,
+                -0.8761967,
+                -0.09256578,
+                -2.7561107,
+                -1.8844876,
+            ],
+            [
+                3.9170928, -3.049145, 2.2163622, -3.614392, 5.3634467, 0.3522582,
+            ],
+        ),
+    ];
+    for (world, start, velocity, goal) in cases {
+        let state = JointState {
+            position: start.to_vec(),
+            velocity: velocity.to_vec(),
+            acceleration: vec![0.0; 6],
+        };
+        let motion = StartMotion {
+            velocity: state.velocity.clone(),
+            acceleration: state.acceleration.clone(),
+        };
+        let problem = PlanProblem {
+            start_motion: Some(motion.clone()),
+            ..PlanProblem::new(world, start.to_vec(), goal.to_vec())
+        };
+        let plans = batchplan::plan(&cpu, &worlds, &[problem], &PlanOptions::default()).unwrap();
+        let path = plans
+            .best(0)
+            .unwrap_or_else(|| panic!("world {world}: {:?}", plans.failures[0]));
+        let trajectory = Trajectory::moving(&ur5e, path, &motion).unwrap();
+        trajectory.check_from(&ur5e, &state).unwrap();
+    }
+}
+
+#[test]
 fn scaled_limits_slow_every_motion() {
     let robot = common::panda().unwrap();
     // Half speed: velocity by a half, acceleration by its square, jerk by its cube.
