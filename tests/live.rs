@@ -1142,7 +1142,11 @@ fn replans_keep_the_constraints_the_trajectory_was_planned_with() {
             let tick = follower.tick(&device, worlds, t, None).unwrap();
             assert!(
                 clear(&device, worlds, &tick.state.position),
-                "at {t:.2} s it collides"
+                "at {t:.2} s of {duration:.2} it collides, {} constraints: {:?} after {:?}, at {:?}",
+                constraints.len(),
+                tick.status,
+                statuses.last(),
+                tick.state.position
             );
             most = most.max(tilt(&robot, &tick.state.position));
             statuses.push(tick.status.clone());
