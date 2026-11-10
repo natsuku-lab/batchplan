@@ -105,13 +105,13 @@ impl HandRates {
 /// A time map for `cp`: seconds per span and control points, or `None` when the path does not
 /// move or cannot be timed. With `start_speed`, the map starts at that ṡ (spans per second) with
 /// no s̈, to continue a motion already under way, and is not stretched as a whole (that would
-/// change the start). Where no map fits so, it is timed again with the start held to the full
-/// limits, easing over `START_RAMP` path spans to those that leave the stretch's margin, the map
-/// stretched with its start set again (`restretched`), and the refinement ending, rather than
-/// failing, where lowered speeds leave the start's out of reach. Both tries turn candidates down
-/// at a quarter of the checking density first; where neither finds a map, both run again with
-/// every candidate measured at the full density, which steers the refinement to maps the coarse
-/// measure misses. With `hand`, the hand's speed keeps under its caps as the joints keep their
+/// change the start). The start is held to the full limits, easing over `START_RAMP` path spans
+/// to those that leave the stretch's margin; where no candidate fits, the nearest is stretched
+/// with its start set again (`restretched`); and the refinement ends, rather than failing, where
+/// lowered speeds leave the start's out of reach. Candidates are turned down at a quarter of the
+/// checking density first; where that finds no map, the path is timed again with every candidate
+/// measured at the full density, which steers the refinement to maps the coarse measure misses.
+/// With `hand`, the hand's speed keeps under its caps as the joints keep their
 /// limits.
 pub(crate) fn time_map(
     robot: &Robot,
@@ -119,24 +119,18 @@ pub(crate) fn time_map(
     start_speed: Option<f64>,
     hand: Option<&HandRates>,
 ) -> Option<(f32, Vec<f32>)> {
-    let Some(_) = start_speed else {
-        return timed_map(
-            robot, cp, None, hand, /* eased */ false, /* full */ false,
-        );
-    };
-    [(false, false), (true, false), (false, true), (true, true)]
-        .into_iter()
-        .find_map(|(eased, full)| timed_map(robot, cp, start_speed, hand, eased, full))
+    timed_map(robot, cp, start_speed, hand, /* full */ false).or_else(|| {
+        start_speed.and_then(|_| timed_map(robot, cp, start_speed, hand, /* full */ true))
+    })
 }
 
-/// [`time_map`], with `eased` its second try at a given start, and `full` measuring each of a
-/// given start's candidates at the full checking density rather than at a quarter of it first.
+/// [`time_map`], with `full` measuring each of a given start's candidates at the full checking
+/// density rather than at a quarter of it first.
 fn timed_map(
     robot: &Robot,
     cp: &[f32],
     start_speed: Option<f64>,
     hand: Option<&HandRates>,
-    eased: bool,
     full: bool,
 ) -> Option<(f32, Vec<f32>)> {
     let n = robot.dof();
@@ -319,9 +313,9 @@ fn timed_map(
     // profile runs under them, as it does braking into a path's end.
     let mut lowered = vec![f64::INFINITY; stages + 1];
     let mut best: Option<(f32, Vec<f32>)> = None;
-    // A given start's candidate needing the least stretch, for `restretched`: that stretch (as
-    // measured at the density that turned it down, a quarter of the full one unless `full`), its
-    // knot and its points. `restretched` measures again at the full density.
+    // A given start's candidate needing the least stretch, for `restretched`: that stretch (measured
+    // at the density that turned it down: the full one where it passed at a quarter or with
+    // `full`), its knot and its points. `restretched` measures again at the full density.
     let mut nearest: Option<(f32, f32, Vec<f32>)> = None;
     let swing = (0..n)
         .map(|j| f64::from(robot.max_acceleration()[j] / robot.max_jerk()[j]))
@@ -332,10 +326,10 @@ fn timed_map(
         REFINEMENTS
     };
     for _ in 0..rounds {
-        // Lowered speeds can leave a given start's no longer controllable: eased, the rounds
-        // then stop, keeping what the earlier ones found.
+        // Lowered speeds can leave a given start's no longer controllable: the rounds then stop,
+        // keeping what the earlier ones found.
         let Some((t, x)) = profile(&lowered) else {
-            if eased {
+            if start_speed.is_some() {
                 break;
             }
             return None;
@@ -392,7 +386,8 @@ fn timed_map(
             // is stretched at the full density below. A given start cannot be stretched: its
             // candidates are held to limits that leave the margin, and one that keeps them at the
             // quarter density is measured again at the full one, whose samples include those, so
-            // none is kept unchecked and most are turned down at a quarter of the cost.
+            // none is kept unchecked and most are turned down at a quarter of the cost. With
+            // `full`, each is measured at the full density from the first.
             let target = match start_speed {
                 None => 1.0,
                 Some(_) => 1.0 / (STRETCH_MARGIN * STRETCH_MARGIN),
@@ -411,17 +406,17 @@ fn timed_map(
                     &points,
                     samples,
                     target,
-                    eased.then_some((0.0, 3)),
+                    start_speed.map(|_| (0.0, 3)),
                     beaten,
                 )
             };
-            let coarse = if full {
+            let first = if full {
                 CHECK_SAMPLES
             } else {
                 CHECK_SAMPLES / 4
             };
-            let mut assessed = measured(coarse);
-            if start_speed.is_some() && coarse < CHECK_SAMPLES && assessed.0 <= 1.0 {
+            let mut assessed = measured(first);
+            if start_speed.is_some() && first < CHECK_SAMPLES && assessed.0 <= 1.0 {
                 assessed = measured(CHECK_SAMPLES);
             }
             let (stretch, overshoots) = assessed;
@@ -476,8 +471,8 @@ fn timed_map(
     }
     let (knot, points) = match (best, start_speed) {
         (Some(best), _) => best,
-        (None, Some(speed)) if eased => return restretched(robot, cp, hand, speed, nearest?),
-        (None, _) => return None,
+        (None, Some(speed)) => return restretched(robot, cp, hand, speed, nearest?),
+        (None, None) => return None,
     };
     match start_speed {
         None => {
@@ -503,7 +498,8 @@ fn timed_map(
 /// cannot do: that would slow its start too. Its first three points are set again for the start
 /// speed at the longer knot interval, so it starts with that speed and no change of pace, and the
 /// rest runs slower. `nearest` is the candidate needing the least stretch: that stretch, its knot
-/// interval and its points. `None` if the start's points would overtake the map's next.
+/// interval and its points. `None` if the start's points would overtake the map's next, or a
+/// stretch leaves more to take out than the one before it did: it is not converging.
 fn restretched(
     robot: &Robot,
     cp: &[f32],
@@ -513,6 +509,7 @@ fn restretched(
 ) -> Option<(f32, Vec<f32>)> {
     let (mut stretch, tau, mut points) = nearest;
     let target = 1.0 / (STRETCH_MARGIN * STRETCH_MARGIN);
+    let mut last = f32::INFINITY;
     for _ in 0..RESTRETCHES {
         let knot = tau * stretch * STRETCH_MARGIN;
         let lead = (f64::from(knot) * speed) as f32;
@@ -534,6 +531,10 @@ fn restretched(
         if needed <= 1.0 {
             return Some((knot, points));
         }
+        if needed >= last {
+            return None;
+        }
+        last = needed;
         stretch *= needed;
     }
     None

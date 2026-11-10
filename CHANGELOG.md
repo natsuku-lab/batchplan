@@ -64,9 +64,13 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   stretching the whole motion for it. Planned Panda motions take 6.6% less time on average, the
   hand's straight moves 3.0%, replans from a moving start 6.1%, and the 2,600 benchmark
   problems' motions 5.0%, within the same limits (`Trajectory::check`); more joins are worth
-  blending. Timing costs no more than it did: a moving start's candidate time maps are
-  turned down at a quarter of the checking density, and only one that keeps the limits there is
-  measured at the full one ([Benchmarks](docs/benchmarks.md#timing-up-to-the-limits)).
+  blending. Timing costs less than it did: a path from rest 7% less, and one from a moving
+  start 57% less (500 µs where 1,168), timed once with its start at the full limits and its
+  candidate time maps turned down at a quarter of the checking density. A moving start no
+  timing fits costs more to turn down (2.2 ms where 1.6 on a Panda), so a batch of Panda
+  replans whose slowest problem tries many such paths takes a fifth longer, while one at a
+  time they take what they did and the SO-101's take a third of it
+  ([Benchmarks](docs/benchmarks.md#timing-up-to-the-limits)).
 - **Breaking:** `IkOptions::default()` is 64 seeds of 30 steps of at most 1 rad, where it was 32
   seeds of 60 steps of at most 0.3 rad: at 0.3 rad, about half the seeds ran out of steps before
   converging. The same problems solve. Results carry 64 seeds per problem, and `TaskOptions`,

@@ -519,8 +519,8 @@ fn replanning_while_moving_is_timed_about_as_fast_as_from_rest() {
         replanned += 1;
     }
     assert!(replanned >= 10, "only {replanned} replanned");
-    // Slowing the profile right after the start, which cannot slow that soon, loses the rounds:
-    // 1.873 on average without the easing, 1.810 with it: the bound sits midway.
+    // 1.810 on average. A time map kept on the quarter-density measure alone, never measured at
+    // the full density, takes 1.851: the bound sits between.
     let mean = against_rest / replanned as f32;
     assert!(mean < 1.845, "{mean} times as long as from rest on average");
 }
