@@ -214,7 +214,7 @@ From here, the [guides](#where-to-find-things) go further: planning around [what
 | [Worlds and perception](docs/perception.md) | Obstacles, allowed contacts, scenes, distance grids, depth images, masking the robot, and fused occupancy maps. |
 | [Training data](docs/training-data.md) | Reaches with recoveries, pick-and-place, handovers between two arms, reset states, and exporting to NumPy or LeRobot. |
 | [Devices](docs/devices.md) | GPU or CPU, which GPUs work, and running inside a robot's control process. |
-| [Benchmarks](docs/benchmarks.md) | Against VAMP, OMPL, RoboPlan and MoveIt 2 on one robot model, GPU against CPU, spheres against meshes, and how to reproduce them. |
+| [Benchmarks](docs/benchmarks.md) | Against VAMP, OMPL, RoboPlan and MoveIt 2 on one robot model, RoboKit in its own benchmark, GPU against CPU, spheres against meshes, and how to reproduce them. |
 | [Demos](demos/) | Handovers, pick-and-place, depth cameras and replanning, live in Rerun, and GIFs of tasks and tool paths. |
 
 ## How it compares

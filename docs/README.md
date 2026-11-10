@@ -14,7 +14,7 @@ The [README](../README.md) is the front door: what batchplan is, how to install 
 | [`training-data.md`](training-data.md) | Reaches with recoveries, pick-and-place episodes, handovers between two arms, reset states, and exporting to NumPy or LeRobot v3.0. |
 | [`devices.md`](devices.md) | GPU and CPU devices, which GPUs work, and running inside a robot's control process. |
 | [`python.md`](python.md) | The `batchplan` Python package: installing it, how its calls map to Rust's (frozen values, read-only arrays, quaternions scalar last, exceptions per error kind), threads, and what it binds so far. |
-| [`benchmarks.md`](benchmarks.md) | batchplan against VAMP, OMPL, cuRobo, RoboPlan and MoveIt 2, GPU against CPU, spheres against meshes, what made it fast, and how to reproduce each number. |
+| [`benchmarks.md`](benchmarks.md) | batchplan against VAMP, OMPL, cuRobo, RoboPlan, MoveIt 2 and RoboKit, GPU against CPU, spheres against meshes, what made it fast, and how to reproduce each number. |
 
 ## Working on batchplan
 

@@ -1,10 +1,11 @@
 # Benchmarks
 
-The numbers on this page come from three machines:
+The numbers on this page come from four machines:
 
 - an **Apple M4 Pro**: 14 CPU cores and a 20-core GPU, on Metal;
 - an **AMD Ryzen AI Max+ 395** CPU (16 cores, 32 threads) with a **Radeon 8060S** GPU, on Vulkan through Mesa's RADV driver, under Ubuntu 26.04;
-- an **NVIDIA T4** GPU with 8 threads of a 2.5 GHz Xeon (an AWS g4dn.2xlarge), for cuRobo, which needs CUDA, under Ubuntu 24.04.
+- an **NVIDIA T4** GPU with 8 threads of a 2.5 GHz Xeon (an AWS g4dn.2xlarge), for cuRobo, which needs CUDA, under Ubuntu 24.04;
+- an **NVIDIA A10G** GPU with 4 threads of an AMD EPYC 7R32 (an AWS g5.xlarge), for RoboKit, under Ubuntu 24.04.
 
 The load was checked before each run. Every command to reproduce them is [at the end](#reproducing).
 
@@ -297,6 +298,39 @@ By their own checks, VAMP solved 98.6% (98.5% with 2 rad steps), OMPL 90.5%, Rob
 - **The timing boundaries differ.** batchplan's covers `plan`, excluding `Trajectory::try_new`. VAMP's and OMPL's cover building the scene, planning and simplifying, from C++. cuRobo's covers loading the world and `plan_cspace`, with the GPU synchronized. RoboPlan's covers RRT planning and shortcutting from Python, excluding scene setup and trajectory generation. MoveIt 2's covers its planning call from Python, including its configured simplification, time parameterization and validation. An equivalent-output comparison needs these stages measured separately.
 </details>
 
+## Against RoboKit
+
+[RoboKit](https://github.com/openrobokit/robokit) (736f112) ships a benchmark of inverse kinematics and one of motion planning to pose goals, both judged by its own scorer. Its harnesses ran unchanged, and batchplan (9d49051) ran inside them: the same targets and problems, warm-ups and judge. `scripts/robokit/` holds the adapters ([commands](#reproducing)). Everything ran on one AWS g5.xlarge, five runs each, but the two rows timed under 150 rad/s³, which ran on a second: an NVIDIA A10G (driver 595.112.07; RoboKit on CUDA, batchplan on Vulkan) and 4 threads of an AMD EPYC 7R32.
+
+**Motion planning.** The 2,590 problems of MotionBenchMaker (799) and MπNets (1,791), each a start configuration and a goal pose among obstacles, planned one at a time. The judge is the benchmark's, with cuRobo's checks: the goal reached, no collision, and velocity, acceleration (15 rad/s²) and jerk (500 rad/s³) within limits, by 5-point stencils on each plan's own samples (batchplan's 25 ms apart or less, RoboKit's 31 per plan) interpolated onto 25 ms. Success allows joint positions 0.2 rad past their limits, as cuRobo's benchmark does, and "strict" allows none. For batchplan one `plan` call takes each pose goal, and the path is timed 1% under the judge's limits. Each planner's timer covers planning and timing the trajectory; building the scene is outside it for both. As run, the adapter counted one sample too many on about one batchplan motion in eight, which lengthens that motion by a step (25 ms at most) in these tables; the adapter in `scripts/robokit/` no longer does.
+
+| Planner | Success (strict) | Time per problem, mean / median / 98th | Motion (median) | Path (median) | Jerk (median) |
+|---|---|---|---|---|---|
+| RoboKit, A10G | 99.59% (99.59%) | 23.5 / 18.9 / 67.6 ms | 1.220 s | 3.293 rad | 126 rad/s³ |
+| batchplan, 4 CPU threads | 99.61% (99.61%) | 5.8 / 5.4 / 10.3 ms | 1.260 s | 3.293 rad | 245 rad/s³ |
+| batchplan, A10G | 99.58% (99.58%) | 5.3 / 4.9 / 8.6 ms | 1.257 s | 3.293 rad | 245 rad/s³ |
+| batchplan, 4 optimized seeds, 4 CPU threads | 99.61% (99.61%) | 139.6 / 137.4 / 515 ms | 1.168 s | 3.179 rad | 239 rad/s³ |
+| batchplan, 4 optimized seeds, A10G | 99.58% (99.58%) | 17.7 / 19.2 / 47.7 ms | 1.164 s | 3.180 rad | 239 rad/s³ |
+| batchplan timed under 150 rad/s³, A10G | 99.61% (99.61%) | 5.1 / 4.7 / 8.6 ms | 1.468 s | 3.293 rad | 125 rad/s³ |
+| batchplan timed under 150 rad/s³, 4 optimized seeds, A10G | 99.61% (99.61%) | 17.5 / 19.3 / 47.8 ms | 1.344 s | 3.180 rad | 116 rad/s³ |
+
+- **Success** is the same to within one problem. Every planner solves all of MotionBenchMaker; on MπNets RoboKit solves 99.41%, batchplan 99.44% on the CPU and 99.39% on the A10G.
+- **Time.** Without optimization batchplan answers in a quarter of the time on either device. With four optimized seeds (`PlanOptions::seeds`) on the A10G it takes 17.7 ms on average against RoboKit's 23.5, and 19.2 against 18.9 at the median; on four CPU threads the optimization adds about 134 ms.
+- **Motions.** Searched and shortcut, batchplan's motions take 3% longer than RoboKit's at the median, over paths of the same median length; with four optimized seeds, 4–5% less, over paths 3.5% shorter.
+- **Jerk.** The first five rows are timed under different limits: batchplan's motions under the judge's 500 rad/s³, which they keep along the whole curve and whose samples read 245; RoboKit plans under 150 rad/s³, and its read 126. Timed under 150 too (`RobotOptions::max_jerk`, a second run on the same kind of instance), batchplan's read 125 and take 20% longer than RoboKit's, or 10% with four optimized seeds: at the same jerk RoboKit's motions are the shorter.
+
+**Inverse kinematics.** The benchmark's Panda targets without obstacles, one batched solve, in milliseconds (success): a target is solved within 5 mm and 0.05 rad. batchplan runs its defaults, 64 seeds of 30 steps.
+
+| Targets per call | RoboKit, A10G | batchplan, A10G | batchplan, 4 CPU threads | cuRobo, A10G | PyRoKi, A10G |
+|---|---|---|---|---|---|
+| 1 | 0.77 (100%) | 1.64 (100%) | 0.80 (100%) | 7.7 (100%) | 10.7 (100%) |
+| 10 | 0.74 (100%) | 1.64 (100%) | 6.2 (100%) | 8.0 (100%) | 15.6 (100%) |
+| 100 | 1.38 (100%) | 2.79 (100%) | 59.7 (100%) | 15.6 (99.8%) | 23.1 (100%) |
+| 1,000 | 9.4 (99.94%) | 14.6 (100%) | 587 (100%) | 94.3 (99.94%) | 156 (99.88%) |
+| 2,000 | 18.5 (99.91%) | 29.3 (99.98%) | 1,171 (99.98%) | 174 (99.92%) | 312 (99.89%) |
+
+RoboKit's IK is the quickest on the A10G at every batch size: about twice as quick as batchplan's up to 100 targets per call, and 1.6 times at 1,000 and 2,000. One target takes batchplan's CPU threads 0.80 ms against RoboKit's 0.77. batchplan solves every target up to 1,000 per call. With 16 seeds it takes 4.7 ms for 1,000 targets and 8.1 ms for 2,000 on the A10G, and solves 99.6% of them.
+
 ## The 2,600 problems on every device
 
 `examples/benchmark.rs` runs every set in two modes:
@@ -586,6 +620,16 @@ batchplan's paths were 12% longer than cuRobo's at the median where both solved 
 ```bash
 # GPU against CPU
 cargo run --release --example bench -- 512
+
+# RoboKit's own benchmarks with batchplan as a solver, on an NVIDIA GPU with CUDA 12: RoboKit 736f112 checked out
+# beside batchplan (../robokit), with a Rust toolchain and a Vulkan loader (libvulkan1) for batchplan's package
+cp scripts/robokit/*.py ../robokit/ && cd ../robokit
+uv run scripts/benchmark/ik/run_benchmark.py                                   # RoboKit, cuRobo, PyRoKi
+uv run scripts/benchmark/motion_plan/benchmark.py --config robokit-primitive --runs 5 --output-dir out/robokit
+uv run batchplan_ik.py --device gpu                                            # or --device cpu, --seeds 16
+uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu
+BATCHPLAN_SEEDS=4 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu-4   # batchplan-cpu likewise
+BATCHPLAN_JERK=150 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu-j150   # timed under RoboKit's jerk limit
 
 # Tool paths, and picks and places on random tabletops
 cargo run --release --example tool_paths
