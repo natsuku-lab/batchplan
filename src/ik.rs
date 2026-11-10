@@ -336,18 +336,27 @@ pub fn solve_ik(
     ))
 }
 
+impl IkOptions {
+    /// An `Error::Input` naming the first option IK cannot run with; `what` names the options in
+    /// it (`IK`, or `plan`'s `goal_ik`).
+    pub(crate) fn check(&self, what: &str) -> Result<()> {
+        ensure_input!(self.seeds > 0, "{what} needs at least one seed");
+        let positive = |v: f32| v.is_finite() && v > 0.0;
+        ensure_input!(
+            positive(self.max_step)
+                && positive(self.rotation_weight)
+                && self.damping.is_finite()
+                && self.damping >= 0.0,
+            "{what} needs a positive max_step and rotation_weight and a non-negative damping"
+        );
+        Ok(())
+    }
+}
+
 /// Whether `problems` and `o` can be solved for `robot` in `worlds`.
 fn check(robot: &Robot, worlds: &Worlds, problems: &[IkProblem], o: &IkOptions) -> Result<()> {
     let n = robot.dof();
-    ensure_input!(o.seeds > 0, "need at least one seed");
-    let positive = |v: f32| v.is_finite() && v > 0.0;
-    ensure_input!(
-        positive(o.max_step)
-            && positive(o.rotation_weight)
-            && o.damping.is_finite()
-            && o.damping >= 0.0,
-        "IK needs a positive max_step and rotation_weight and a non-negative damping"
-    );
+    o.check("IK")?;
     let hands = robot.hands();
     for (i, p) in problems.iter().enumerate() {
         ensure_input!(

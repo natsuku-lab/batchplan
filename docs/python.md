@@ -24,11 +24,9 @@ table = bp.Obstacle.cuboid((0.0, 0.0, -0.02), (1.0, 1.0, 0.02))
 worlds = device.upload([bp.World([table])])
 
 down = (1.0, 0.0, 0.0, 0.0)  # half a turn about x, scalar last
-goals = [bp.IkProblem(0, bp.Pose(p, down)) for p in [(0.4, 0.2, 0.3), (0.3, -0.3, 0.4)]]
-ik = bp.solve_ik(device, worlds, goals)
-
-problems = [bp.PlanProblem(s.problem.world, robot.default_q, s.solution) for s in ik.solved()]
-plans = bp.plan(device, worlds, problems)
+targets = [(0.4, 0.2, 0.3), (0.3, -0.3, 0.4)]
+problems = [bp.PlanProblem(0, robot.default_q, bp.Pose(p, down)) for p in targets]
+plans = bp.plan(device, worlds, problems)  # IK from the start finds where each path ends
 for s in plans.solved():
     trajectory = bp.Trajectory(robot, s.solution)
     samples = trajectory.sample(100.0)  # positions, velocities, accelerations: (samples, dof)
@@ -42,6 +40,7 @@ The names are Rust's: `Robot.load`, `Device.upload`, `solve_ik`, `IkResult.best`
 - **Values are frozen.** Poses, obstacles, worlds, problems and options can't change in place: `options.replace(seeds=4)` returns a copy with a field changed, as Rust's struct update syntax does, and `world.without(i)` is Rust's `World::remove` on a copy. Constructors take the fields Rust's `new` does, and any others by keyword: `bp.PlanProblem(0, start, goal, hold=[0])`, `bp.PlanOptions(seeds=2)`. Defaults are Rust's.
 - **Arrays come out read-only.** Configurations, control points `(points, dof)` and per-seed results `(problems, seeds, ...)` are NumPy arrays, `float32` (`bool` for flags such as `success` and `valid`); copy one to change it. Anything array-like goes in. A result builds each array once, so reading `result.q[i]` in a loop costs nothing more.
 - **Rotations are unit quaternions, scalar last:** `(x, y, z, w)`, as ROS, SciPy and glam order them.
+- **A plan's goal is a configuration or poses:** an array, a `Pose` for a one-handed robot, or a `Pose` or `None` per hand, as Rust's `Goal` is. `problem.goal` gives poses back as that tuple.
 - **No-argument accessors are properties:** `robot.dof`, `robot.default_q`, `trajectory.duration`, `device.name`.
 - **Sequences come out as tuples, and maps as read-only views:** `world.obstacles`, `result.failures`, `result.solved()`, `bp.grasps(...)`, a task's plans, `options.lock_joints`.
 - **Failures and contacts are classes per kind,** for `isinstance` or `match`: `bp.PlanFailure.StartCollides(contacts)`, `bp.Contact.World(link, obstacle, distance)`, `bp.ToolPathStop.Collision(at)`.

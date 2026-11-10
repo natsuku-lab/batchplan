@@ -292,10 +292,11 @@ pub fn reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
 pub fn blocked_reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
     let (mut scene, problems) = reaches(robot);
     for p in &problems {
+        let goal = p.goal.joints().expect("reaches end at configurations");
         let middle: Vec<f32> = p
             .start
             .iter()
-            .zip(&p.goal)
+            .zip(goal)
             .map(|(a, b)| 0.5 * (a + b))
             .collect();
         let center = robot.ee_pose(&middle, 0).position;
@@ -306,7 +307,8 @@ pub fn blocked_reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
     let cpu = Device::cpu(robot).expect("the CPU device starts");
     let worlds = cpu.upload(&scene).expect("boxes and balls upload");
     let free = |p: &PlanProblem| {
-        let ends = [&p.start[..], &p.goal[..]].concat();
+        let goal = p.goal.joints().expect("reaches end at configurations");
+        let ends = [&p.start[..], goal].concat();
         let e = cpu
             .evaluate(&worlds, &[p.world, p.world], &ends, &CollisionWeights::NONE)
             .expect("two configurations in one world");

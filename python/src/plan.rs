@@ -5,12 +5,13 @@ use std::time::Duration;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::device::{Device, Worlds};
 use crate::error::OrRaise;
 use crate::field::{self, Field, tuple_field, value_class};
 use crate::solved::{Cached, Solved};
+use crate::world::Pose;
 
 value_class! {
     /// How the search for each path runs: RRT-Connect after the straight line.
@@ -103,9 +104,14 @@ value_class! {
         rrt: batchplan::RrtOptions,
         /// Shortening and smoothing the path found.
         shortcut: batchplan::ShortcutOptions,
+        /// IK for pose goals: its seeds, iterations and tolerances. Problems it finds no
+        /// collision-free solution for are solved again with four times the seeds, up to sixteen
+        /// times.
+        goal_ik: batchplan::IkOptions,
         /// Seconds after which optimizing and searching stop and the best valid paths so far are
-        /// returned; validation still runs after it. Results then depend on machine speed; without
-        /// a budget they are the same on every run.
+        /// returned; validation still runs after it. Pose goals' first round of IK counts toward
+        /// it and always runs; their later rounds do not start once it has passed. Results then
+        /// depend on machine speed; without a budget they are the same on every run.
         time_budget: Option<Duration>,
     }
     methods {
@@ -141,16 +147,25 @@ value_class! {
 }
 
 value_class! {
-    /// A path from a start to a goal configuration, in one world.
+    /// A path from a start to a goal, a configuration or a pose per hand, in one world.
     PlanProblem(batchplan::PlanProblem) {
         /// The world's index in the batch.
         world: u32,
         /// Where the path starts.
         start: Vec<f32>,
-        /// Where the path ends, up to whole turns: continuous joints turn the short way (or the
-        /// long way, if that is the one that is free), and a joint whose range spans more than a
-        /// turn may end a turn away from this value when that is nearer or free.
-        goal: Vec<f32>,
+        /// Where the path ends: a configuration, or a pose per hand.
+        ///
+        /// A configuration is reached up to whole turns: continuous joints turn the short way (or
+        /// the long way, if that is the one that is free), and a joint whose range spans more than
+        /// a turn may end a turn away from this value when that is nearer or free.
+        ///
+        /// Poses are a `Pose` for a robot with one hand, or a `Pose` or `None` per hand (for
+        /// `None`, the joints only that hand moves stay where `start` has them), and come back as
+        /// that tuple. `plan`
+        /// solves IK for them from `start` (`PlanOptions.goal_ik`, with more seeds where those
+        /// find nothing collision-free), and the path ends at the collision-free solution nearest
+        /// `start`, up to whole turns, that keeps the problem's constraints.
+        goal: batchplan::Goal,
         /// How the robot is already moving at `start`, to replan mid-motion; `None` starts at
         /// rest.
         start_motion: Option<batchplan::StartMotion>,
@@ -165,7 +180,8 @@ value_class! {
         holding: Option<batchplan::Held>,
     }
     methods {
-        /// From `start` at rest to `goal` in world `world`, every joint free to move.
+        /// From `start` at rest to `goal` (a configuration or poses) in world `world`, every joint
+        /// free to move.
         #[new]
         #[pyo3(signature = (world, start, goal, **changes))]
         fn new(
@@ -174,8 +190,11 @@ value_class! {
             goal: &Bound<'_, PyAny>,
             changes: Option<&Bound<'_, PyDict>>,
         ) -> PyResult<Self> {
-            let problem =
-                batchplan::PlanProblem::new(world, Vec::from_py(start)?, Vec::from_py(goal)?);
+            let problem = batchplan::PlanProblem::new(
+                world,
+                Vec::<f32>::from_py(start)?,
+                batchplan::Goal::from_py(goal)?,
+            );
             Ok(Self(Self::changed(problem, changes)?))
         }
     }
@@ -183,13 +202,50 @@ value_class! {
 
 tuple_field!(batchplan::PlanProblem);
 
+/// A configuration from any array-like, or poses: a `Pose`, or a sequence holding a `Pose` or
+/// `None` per hand, which is how poses go out.
+impl Field for batchplan::Goal {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match self {
+            batchplan::Goal::Joints(q) => q.to_py(py),
+            batchplan::Goal::Poses(targets) => targets.to_py(py),
+        }
+    }
+
+    fn from_py(value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if let Ok(pose) = value.cast::<Pose>() {
+            return Ok(batchplan::Goal::Poses(vec![Some(pose.get().0)]));
+        }
+        // A scalar, a configuration of one joint, has no items.
+        let Ok(items) = field::items(value) else {
+            return Ok(batchplan::Goal::Joints(field::floats(value)?));
+        };
+        if items
+            .iter()
+            .any(|v| v.is_none() || v.is_instance_of::<Pose>())
+        {
+            let targets = items.iter().map(Option::<batchplan::Pose>::from_py);
+            return Ok(batchplan::Goal::Poses(targets.collect::<PyResult<_>>()?));
+        }
+        // From the items, since an iterator has given them up.
+        let q = field::floats(PyList::new(value.py(), items)?.as_any())?;
+        Ok(batchplan::Goal::Joints(q))
+    }
+}
+
 /// Why a problem of a `PlanResult` has no valid path, the first thing that stopped it.
 #[pyclass(module = "batchplan", frozen)]
 pub(crate) enum PlanFailure {
     /// The start collides, with `contacts`, nearest first: plan from a free state.
     StartCollides { contacts: Py<PyAny> },
-    /// The goal collides, and so does every equivalent of it a whole turn away.
+    /// The goal collides, and so does every equivalent of it a whole turn away; for a pose
+    /// goal, IK reaches the poses only in collision, at the solution with the most clearance.
+    /// `contacts` says with what, nearest first.
     GoalCollides { contacts: Py<PyAny> },
+    /// No configuration IK finds reaches the goal's poses within its tolerances, keeping the
+    /// problem's held joints and constraints: they lie beyond the arm's reach or its joint limits,
+    /// or need more seeds or iterations than `PlanOptions.goal_ik` gives.
+    GoalUnreachable(),
     /// The search drew every sample it may (`RrtOptions.max_iterations`) without joining the
     /// start to the goal: the way is blocked, or too narrow for the samples given.
     NoPath(),
@@ -218,6 +274,7 @@ impl PlanFailure {
                     contacts.bind(py).repr()?
                 )
             }
+            Self::GoalUnreachable() => "PlanFailure.GoalUnreachable()".to_owned(),
             Self::NoPath() => "PlanFailure.NoPath()".to_owned(),
             Self::NoSpline() => "PlanFailure.NoSpline()".to_owned(),
             Self::OutOfTime() => "PlanFailure.OutOfTime()".to_owned(),
@@ -235,6 +292,7 @@ impl PlanFailure {
             batchplan::PlanFailure::GoalCollides { contacts } => Self::GoalCollides {
                 contacts: contacts.to_py(py)?.unbind(),
             },
+            batchplan::PlanFailure::GoalUnreachable => Self::GoalUnreachable(),
             batchplan::PlanFailure::NoPath => Self::NoPath(),
             batchplan::PlanFailure::NoSpline => Self::NoSpline(),
             batchplan::PlanFailure::OutOfTime => Self::OutOfTime(),

@@ -65,7 +65,7 @@ fn a_one_thread_device_works_on_its_one_thread() {
         .map(|p| RrtProblem {
             world: p.world,
             start: p.start.clone(),
-            goals: vec![p.goal.clone()],
+            goals: vec![p.goal.joints().unwrap().to_vec()],
             hold: vec![],
             constraints: vec![],
         })

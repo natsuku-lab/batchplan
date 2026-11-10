@@ -21,13 +21,14 @@ use crate::device::{CollisionWeights, Contact, Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Keep, Optimize, Search};
 use crate::error::{Result, ensure_input};
 use crate::held::{self, Held};
+use crate::ik::{self, IkFailure, IkOptions, IkProblem};
 use crate::rng::Rng;
 use crate::robot::{Fk, Robot};
 use crate::rrt::{self, Ahead, Connect, End, RrtOptions, RrtProblem, Sampling};
 use crate::shortcut::{self, ShortcutOptions, Simplify};
 use crate::spline;
 use crate::timing::{JointState, Trajectory};
-use crate::types::{JointPaths, Solved, StartMotion};
+use crate::types::{JointPaths, Pose, Solved, StartMotion};
 
 /// How [`plan`] searches, shortens, fits and optimizes paths.
 #[derive(Clone, Copy, Debug)]
@@ -62,17 +63,23 @@ pub struct PlanOptions {
     /// Samples per span used to validate the result.
     pub validate_substeps: usize,
     /// Seed of the optimization seeds' random via points. Each problem draws its own from it and
-    /// its start and goal, so a problem's plan does not depend on the others in its batch.
+    /// its start and goal, so a problem's plan does not depend on the others in its batch, except
+    /// that a GPU's IK for pose goals rounds by the batch's size (as `solve_ik` there does).
     pub rng_seed: u64,
     /// Searching for each path: RRT-Connect after the straight line.
     pub rrt: RrtOptions,
     /// Shortening and smoothing the path found.
     pub shortcut: ShortcutOptions,
+    /// IK for pose goals ([`Goal::Poses`]): its seeds, iterations and tolerances. Problems it finds
+    /// no collision-free solution for are solved again with four times the seeds, up to sixteen
+    /// times.
+    pub goal_ik: IkOptions,
     /// Stop optimizing and searching once this much time has passed, and return the best valid
     /// paths so far. The budget is checked between rounds (on a GPU, between submissions of
     /// several rounds), and validation still runs after it; optimization does not start once it
-    /// has passed. Results then depend on machine speed; without a budget they are the same on
-    /// every run.
+    /// has passed. Pose goals' first round of IK counts toward it and always runs; their later
+    /// rounds do not start once it has passed. Results then depend on machine speed; without a
+    /// budget they are the same on every run.
     pub time_budget: Option<Duration>,
 }
 
@@ -105,6 +112,7 @@ impl Default for PlanOptions {
                 ..RrtOptions::default()
             },
             shortcut: ShortcutOptions::default(),
+            goal_ik: IkOptions::default(),
             time_budget: None,
         }
     }
@@ -132,23 +140,21 @@ impl PlanOptions {
             "the initial step must be positive, got {}",
             self.initial_step
         );
+        self.goal_ik.check("goal_ik")?;
         self.rrt.check()?;
         self.shortcut.check()
     }
 }
 
-/// A path from a start to a goal configuration, in one world.
+/// A path from a start to a goal, in one world.
 #[derive(Clone, Debug)]
 pub struct PlanProblem {
     /// The world's index in the batch.
     pub world: u32,
     /// Where the path starts.
     pub start: Vec<f32>,
-    /// Where the path ends, up to whole turns: continuous joints turn the short way (or the long
-    /// way, if that is the one that is free), and a joint whose range spans more than a turn may
-    /// end a turn away from this value when that is nearer or free. Every such end is the same
-    /// pose.
-    pub goal: Vec<f32>,
+    /// Where the path ends: a configuration, or poses of the hands, which `plan` solves IK for.
+    pub goal: Goal,
     /// How the robot is already moving at `start`, to replan mid-motion; `None` starts at rest.
     /// The path's first three control points then continue that motion, and
     /// [`crate::Trajectory::moving`] times it.
@@ -166,8 +172,9 @@ pub struct PlanProblem {
 }
 
 impl PlanProblem {
-    /// From `start` at rest to `goal` in world `world`, every joint free to move, holding nothing.
-    pub fn new(world: u32, start: impl Into<Vec<f32>>, goal: impl Into<Vec<f32>>) -> Self {
+    /// From `start` at rest to `goal` in world `world`, every joint free to move, holding nothing:
+    /// a configuration (`Vec<f32>`, `&[f32]`) or one hand's pose (`Pose`).
+    pub fn new(world: u32, start: impl Into<Vec<f32>>, goal: impl Into<Goal>) -> Self {
         Self {
             world,
             start: start.into(),
@@ -180,6 +187,73 @@ impl PlanProblem {
     }
 }
 
+/// Where a path ends.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Goal {
+    /// A configuration, reached up to whole turns: continuous joints turn the short way (or the
+    /// long way, if that is the one that is free), and a joint whose range spans more than a turn
+    /// may end a turn away from this value when that is nearer or free. Every such end is the same
+    /// pose.
+    Joints(Vec<f32>),
+    /// Each hand's pose (see `RobotOptions::ee_links`), or `None` for a hand without one: the
+    /// joints only that hand moves stay where `start` has them. `plan` solves IK for them from
+    /// `start` ([`PlanOptions::goal_ik`],
+    /// with more seeds where those find nothing collision-free), and the path ends at the
+    /// collision-free solution nearest `start`, up to whole turns, that keeps the problem's
+    /// constraints.
+    Poses(Vec<Option<Pose>>),
+}
+
+impl Goal {
+    /// The configuration of a joint goal, or `None` for a pose goal.
+    #[must_use]
+    pub fn joints(&self) -> Option<&[f32]> {
+        match self {
+            Goal::Joints(q) => Some(q),
+            Goal::Poses(_) => None,
+        }
+    }
+}
+
+/// What `plan`'s internals say of a goal they plan to: every pose goal is a configuration by then.
+const RESOLVED: &str = "plan solves pose goals into configurations before it plans";
+
+impl From<Vec<f32>> for Goal {
+    fn from(q: Vec<f32>) -> Self {
+        Goal::Joints(q)
+    }
+}
+
+impl From<&[f32]> for Goal {
+    fn from(q: &[f32]) -> Self {
+        Goal::Joints(q.to_vec())
+    }
+}
+
+impl From<&Vec<f32>> for Goal {
+    fn from(q: &Vec<f32>) -> Self {
+        Goal::Joints(q.clone())
+    }
+}
+
+impl<const N: usize> From<[f32; N]> for Goal {
+    fn from(q: [f32; N]) -> Self {
+        Goal::Joints(q.to_vec())
+    }
+}
+
+impl<const N: usize> From<&[f32; N]> for Goal {
+    fn from(q: &[f32; N]) -> Self {
+        Goal::Joints(q.to_vec())
+    }
+}
+
+impl From<Pose> for Goal {
+    fn from(pose: Pose) -> Self {
+        Goal::Poses(vec![Some(pose)])
+    }
+}
+
 /// Why a problem of a [`PlanResult`] has no valid path, the first thing that stopped it.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
@@ -189,11 +263,16 @@ pub enum PlanFailure {
         /// What it collides with, nearest first.
         contacts: Vec<Contact>,
     },
-    /// The goal collides, and so does every equivalent of it a whole turn away.
+    /// The goal collides, and so does every equivalent of it a whole turn away; for a pose goal,
+    /// IK reaches the poses only in collision, at the solution with the most clearance.
     GoalCollides {
         /// What the goal collides with, nearest first.
         contacts: Vec<Contact>,
     },
+    /// No configuration IK finds reaches the goal's poses within its tolerances, keeping the
+    /// problem's held joints and constraints: they lie beyond the arm's reach or its joint limits,
+    /// or need more seeds or iterations than [`PlanOptions::goal_ik`] gives.
+    GoalUnreachable,
     /// The search drew every sample it may ([`RrtOptions::max_iterations`]) without joining the
     /// start to the goal: the way is blocked, or too narrow for the samples given.
     NoPath,
@@ -294,11 +373,130 @@ pub fn plan(
 ) -> Result<PlanResult> {
     let deadline = o.time_budget.map(|budget| Instant::now() + budget);
     check(device.robot(), worlds, problems, o)?;
-    let holds: Vec<Option<&Held>> = problems.iter().map(|p| p.holding.as_ref()).collect();
+    let goals = resolve(device, worlds, problems, o, deadline)?;
+    // Problems whose pose goals IK found no way to reach fail before planning.
+    let planning: Vec<usize> = (0..problems.len())
+        .filter(|&pi| goals.failures[pi].is_none())
+        .collect();
+    let resolved = held::subset(&goals.problems, &planning);
+    let holds: Vec<Option<&Held>> = resolved.iter().map(|p| p.holding.as_ref()).collect();
     let parts = held::by_hold(device, &holds, |on, items| {
-        planned(on, worlds, &held::subset(problems, items), o, deadline)
+        planned(on, worlds, &held::subset(&resolved, items), o, deadline)
     })?;
-    Ok(PlanResult::gather(problems, 1 + o.seeds, parts))
+    let parts = parts.into_iter().map(|(items, part)| {
+        let items = items.into_iter().map(|i| planning[i]).collect();
+        (items, part)
+    });
+    let mut result = PlanResult::gather(problems, 1 + o.seeds, parts.collect());
+    // The problems as given, pose goals and all.
+    result.problems = problems.to_vec();
+    for (pi, failure) in goals.failures.into_iter().enumerate() {
+        if failure.is_some() {
+            result.failures[pi] = failure;
+        }
+    }
+    Ok(result)
+}
+
+/// Problems with every goal a configuration, and why those whose pose goals IK found no way to
+/// reach have none.
+struct Resolved {
+    problems: Vec<PlanProblem>,
+    failures: Vec<Option<PlanFailure>>,
+}
+
+/// Each round of goal IK that leaves problems without a collision-free solution solves those again
+/// with four times the seeds, up to sixteen times `PlanOptions::goal_ik`'s.
+const GOAL_SEED_GROWTH: usize = 4;
+const GOAL_SEED_LIMIT: usize = 16;
+
+/// Turns each pose goal of `problems` into the configuration it ends at: IK in one batch from the
+/// start, keeping the problem's held joints and what it holds, and of the solutions that keep its
+/// constraints, the nearest the start up to whole turns, as the path ends at the nearest of each
+/// solution's turns (`search_goals`). Problems IK finds nothing collision-free for are solved again
+/// with more seeds, until `deadline`; those still without one fail, as `GoalCollides` where IK
+/// reached the poses in collision and `GoalUnreachable` otherwise, or `OutOfTime`.
+fn resolve(
+    device: &Device,
+    worlds: &Worlds,
+    problems: &[PlanProblem],
+    o: &PlanOptions,
+    deadline: Option<Instant>,
+) -> Result<Resolved> {
+    let robot = device.robot();
+    let mut out = Resolved {
+        problems: problems.to_vec(),
+        failures: vec![None; problems.len()],
+    };
+    let mut open: Vec<usize> = (0..problems.len())
+        .filter(|&pi| matches!(problems[pi].goal, Goal::Poses(_)))
+        .collect();
+    let mut seeds = o.goal_ik.seeds;
+    while !open.is_empty() {
+        let ik_options = IkOptions { seeds, ..o.goal_ik };
+        let ik_problems: Vec<IkProblem> = open
+            .iter()
+            .map(|&pi| {
+                let p = &problems[pi];
+                let Goal::Poses(targets) = &p.goal else {
+                    unreachable!("only pose goals are open")
+                };
+                IkProblem {
+                    world: p.world,
+                    targets: targets.clone(),
+                    seed: Some(p.start.clone()),
+                    hold: p.hold.clone(),
+                    holding: p.holding.clone(),
+                }
+            })
+            .collect();
+        let solved = ik::solve_ik(device, worlds, &ik_problems, &ik_options)?;
+        let mut still = vec![];
+        for (k, &pi) in open.iter().enumerate() {
+            let p = &problems[pi];
+            let distance = |q: &[f32]| -> f32 {
+                let nearest = &robot.goal_variants(&p.start, q)[0];
+                nearest
+                    .iter()
+                    .zip(&p.start)
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum()
+            };
+            let nearest = (k * seeds..(k + 1) * seeds)
+                .filter(|&i| solved.success[i])
+                .map(|i| solved.solution(i))
+                .filter(|q| constraint::breach(robot, &p.constraints, q).is_none())
+                .min_by(|a, b| distance(a).total_cmp(&distance(b)));
+            match nearest {
+                Some(q) => out.problems[pi].goal = Goal::Joints(q.to_vec()),
+                None => still.push((k, pi)),
+            }
+        }
+        if still.is_empty() {
+            break;
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            for (_, pi) in still {
+                out.failures[pi] = Some(PlanFailure::OutOfTime);
+            }
+            break;
+        }
+        if seeds >= o.goal_ik.seeds * GOAL_SEED_LIMIT {
+            let failed = ik::failures(device, worlds, &solved, &ik_options)?;
+            for (k, pi) in still {
+                out.failures[pi] = Some(match &failed[k] {
+                    Some(IkFailure::Collides { contacts }) => PlanFailure::GoalCollides {
+                        contacts: contacts.clone(),
+                    },
+                    _ => PlanFailure::GoalUnreachable,
+                });
+            }
+            break;
+        }
+        open = still.into_iter().map(|(_, pi)| pi).collect();
+        seeds *= GOAL_SEED_GROWTH;
+    }
+    Ok(out)
 }
 
 /// Whether `problems` and `o` can be planned for `robot` in `worlds`.
@@ -313,20 +511,44 @@ fn check(robot: &Robot, worlds: &Worlds, problems: &[PlanProblem], o: &PlanOptio
             worlds.len()
         );
         ensure_input!(
-            p.start.len() == n && p.goal.len() == n,
-            "problem {pi}: start/goal must have {n} values"
+            p.start.len() == n && p.start.iter().all(|v| v.is_finite()) && robot.within(&p.start),
+            "problem {pi}: the start must have {n} finite values within the joint limits"
+        );
+        // A pose goal's IK keeps the held joints where the start has them.
+        let goal = match &p.goal {
+            Goal::Joints(q) => q,
+            Goal::Poses(_) => &p.start,
+        };
+        ensure_input!(
+            goal.len() == n && goal.iter().all(|v| v.is_finite()) && robot.within(goal),
+            "problem {pi}: the goal must have {n} finite values within the joint limits"
         );
         ensure_input!(
-            robot.within(&p.start) && robot.within(&p.goal),
-            "problem {pi}: start and goal must be within the joint limits"
-        );
-        ensure_input!(
-            crate::rrt::holds(&p.start, &p.goal, &p.hold),
+            crate::rrt::holds(&p.start, goal, &p.hold),
             "problem {pi}: held joints must be joints of the robot, with the start's values in the goal"
         );
+        if let Goal::Poses(targets) = &p.goal {
+            ensure_input!(
+                targets.len() == robot.hands() && targets.iter().any(Option::is_some),
+                "problem {pi}: a pose goal needs a pose or None for each of the robot's {} hands, \
+                 and at least one pose, got {}",
+                robot.hands(),
+                targets.len()
+            );
+            if let Some(pose) = targets.iter().flatten().find(|t| !t.is_unit()) {
+                return Err(crate::error::input!(
+                    "problem {pi}: a pose goal needs a finite position and a unit-quaternion \
+                     rotation, got {pose:?}"
+                ));
+            }
+        }
         if !p.constraints.is_empty() {
             constraint::check(robot, &p.constraints, &format!("problem {pi}"))?;
-            for (end, q) in [("start", &p.start), ("goal", &p.goal)] {
+            let mut ends = vec![("start", &p.start)];
+            if let Goal::Joints(q) = &p.goal {
+                ends.push(("goal", q));
+            }
+            for (end, q) in ends {
                 if let Some(why) = constraint::breach(robot, &p.constraints, q) {
                     return Err(crate::error::input!(
                         "problem {pi}: the {end} breaks its constraints: {why}"
@@ -357,7 +579,8 @@ fn check(robot: &Robot, worlds: &Worlds, problems: &[PlanProblem], o: &PlanOptio
     Ok(())
 }
 
-/// [`plan`] for `problems`, checked, holding what `device` holds, to `deadline`.
+/// [`plan`] for `problems`, checked and with joint goals, holding what `device` holds, to
+/// `deadline`.
 fn planned(
     device: &Device,
     worlds: &Worlds,
@@ -439,7 +662,7 @@ fn planned(
         .iter()
         .flat_map(|&(pi, end)| match end {
             End::Start => &problems[pi].start,
-            End::Goal => &problems[pi].goal,
+            End::Goal => problems[pi].goal.joints().expect(RESOLVED),
         })
         .copied()
         .collect();
@@ -628,7 +851,8 @@ fn covers_splines(rrt: &RrtOptions, shortcut: &ShortcutOptions) -> bool {
 /// Every equivalent of `problem`'s goal a whole turn away (`Robot::goal_variants`) that leaves its
 /// held joints where they start.
 fn search_goals(robot: &Robot, problem: &PlanProblem) -> Vec<Vec<f32>> {
-    let mut goals = robot.goal_variants(&problem.start, &problem.goal);
+    let goal = problem.goal.joints().expect(RESOLVED);
+    let mut goals = robot.goal_variants(&problem.start, goal);
     goals.retain(|g| crate::rrt::holds(&problem.start, g, &problem.hold));
     goals
 }
@@ -1192,9 +1416,10 @@ fn optimize(
         let bounds = constrained.then(|| Arc::new(Region::new(robot, &p.constraints)));
         item_inset.extend(std::iter::repeat_n(inset, o.seeds));
         item_bounds.extend(std::iter::repeat_n(bounds, o.seeds));
-        let goals = robot.goal_variants(&p.start, &p.goal);
+        let goal = p.goal.joints().expect(RESOLVED);
+        let goals = robot.goal_variants(&p.start, goal);
         let lines_from = usize::from(searched[pi].is_some());
-        let mut rng = Rng::for_problem(o.rng_seed, p.start.iter().chain(&p.goal).copied());
+        let mut rng = Rng::for_problem(o.rng_seed, p.start.iter().chain(goal).copied());
         for s in 0..o.seeds {
             let path = paths.path_mut(w * o.seeds + s);
             match &searched[pi] {
@@ -1764,7 +1989,7 @@ mod tests {
         let problem = |hold: &[usize]| PlanProblem {
             world: 0,
             start: start.clone(),
-            goal: goal.clone(),
+            goal: Goal::Joints(goal.clone()),
             start_motion: None,
             hold: hold.to_vec(),
             constraints: vec![],

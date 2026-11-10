@@ -21,7 +21,7 @@
 //!
 //! For every set and device it reports two modes:
 //! - **plan**: plan from the start to the set's first IK solution (planning only);
-//! - **ik+plan**: solve IK for the goal pose, then plan to the best solution.
+//! - **ik+plan**: plan to the goal pose, which `plan` solves IK for from the start.
 //!
 //! A problem succeeds when the final `panda_hand` position is within 1 cm of the goal, every joint
 //! is within its limits, and an independent CPU check at 4x the planner's validation density finds
@@ -373,36 +373,17 @@ fn percentile(v: &mut [f64], p: f64) -> f64 {
     }
 }
 
-fn ik_problems(problems: &[Problem]) -> Vec<IkProblem> {
-    problems
-        .iter()
-        .enumerate()
-        .map(|(i, p)| IkProblem::new(i as u32, p.hand_goal()))
-        .collect()
-}
-
-/// IK for every goal, then a plan from each start to its best IK solution.
+/// A plan from each start to its goal pose.
 fn ik_and_plan(
     device: &Device,
     worlds: &Worlds,
     problems: &[Problem],
     o: &PlanOptions,
 ) -> Result<PlanResult> {
-    let ik = batchplan::solve_ik(
-        device,
-        worlds,
-        &ik_problems(problems),
-        &IkOptions::default(),
-    )?;
-    let plans: Vec<PlanProblem> = ik
-        .solved()
-        .map(|s| {
-            PlanProblem::new(
-                s.problem.world,
-                problems[s.problem.world as usize].start.clone(),
-                s.solution,
-            )
-        })
+    let plans: Vec<PlanProblem> = problems
+        .iter()
+        .enumerate()
+        .map(|(i, p)| PlanProblem::new(i as u32, p.start.clone(), p.hand_goal()))
         .collect();
     Ok(batchplan::plan(device, worlds, &plans, o)?)
 }

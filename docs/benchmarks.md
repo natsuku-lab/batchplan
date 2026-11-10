@@ -302,24 +302,24 @@ By their own checks, VAMP solved 98.6% (98.5% with 2 rad steps), OMPL 90.5%, Rob
 `examples/benchmark.rs` runs every set in two modes:
 
 - **plan:** plan from the start to the set's first IK solution, as in the comparison above;
-- **IK + plan:** solve IK for the goal pose, then plan to the solution with the most clearance.
+- **IK + plan:** plan to the goal pose: `plan` solves IK from the start and ends at the nearest collision-free solution ([pose goals](planning.md#planning-a-path)).
 
-It checks success as above, on cuRobo's spheres, which ship with batchplan. Timings are medians of three runs; the M4 Pro's GPU also drives its display. The M4 Pro rows are batchplan 0.2.0's, the Ryzen and Radeon rows ef619b1's. "Free ends" counts the problems whose start and given IK solution are collision-free on these spheres, which caps what planning can reach. Throughput runs each set as one batch; time per problem covers the first 20 problems of each set, one at a time.
+It checks success as above, on cuRobo's spheres, which ship with batchplan. The M4 Pro's timings are medians of three runs, and its GPU also drives its display; the Ryzen's and the Radeon's are one run, with the machine's load at 5 from other work. Every row is 5fae1ca's. "Free ends" counts the problems whose start and given IK solution are collision-free on these spheres, which caps what planning can reach. Throughput runs each set as one batch; time per problem covers the first 20 problems of each set, one at a time.
 
 | Device | Free ends | Plan | IK + plan | IK + plan, clear on meshes | Plan, problems/s | Plan, time per problem (median / p98) | IK + plan, problems/s | IK + plan, time per problem (mean / p98) |
 |---|---|---|---|---|---|---|---|---|
-| M4 Pro CPU, 14 threads | 98.1% | 98.0% | 97.0% | 89.8% | 21,098 | 0.2 / 1.9 ms | 2,557 | 1 / 3 ms |
-| M4 Pro GPU | 98.1% | 98.0% | 97.0% | 90.0% | 19,444 | 0.2 / 2.0 ms | 2,046 | 10 / 28 ms |
-| Ryzen AI Max+ 395, 32 threads | 98.1% | 97.9% | 97.1% | 89.6% | **35,751** | **0.1 / 1.1 ms** | **3,023** | **1 / 2 ms** |
-| Radeon 8060S | 98.1% | 97.9% | 97.0% | 89.7% | 31,093 | 0.2 / 1.5 ms | 1,898 | 11 / 36 ms |
+| M4 Pro CPU, 14 threads | 98.1% | 97.9% | 98.3% | 91.6% | 23,404 | 0.2 / 1.6 ms | 2,384 | 1 / 2 ms |
+| M4 Pro GPU | 98.1% | 97.9% | 98.3% | 91.5% | 22,114 | 0.2 / 1.6 ms | 1,953 | 10 / 24 ms |
+| Ryzen AI Max+ 395, 32 threads | 98.1% | 97.9% | 98.3% | 91.6% | 33,862 | **0.1 / 1.4 ms** | **2,477** | **1 / 2 ms** |
+| Radeon 8060S | 98.1% | 97.9% | 98.3% | 91.7% | **34,616** | 0.2 / 1.2 ms | 1,544 | 11 / 37 ms |
 
 Searching near the straight line and straightening cost 7% of batched throughput on the Ryzen and 14% on the M4 Pro. Idle threads now help the longest searches along ([below](#how-the-speed-came)), which more than pays it back. In three alternating rounds against the version before helpers, the Ryzen's batches plan 21,796 against 18,116 problems/s (22,806 against 17,869 on VAMP's spheres), with every path the same. On the M4 Pro they plan 19,898 against 15,779 in three rotating rounds; in six rotating rounds of 15 batches of each set, all the sets' batches take 122.1 ms against 154.4. Single problems plan as fast as before at the median (0.126 against 0.126 ms on the Ryzen, 0.172 against 0.173 on the M4 Pro) and within 3% at the 98th percentile (1.39 against 1.39 ms on the Ryzen, 1.48 against 1.46 on VAMP's spheres, 1.69 against 1.74 on the M4 Pro). The slowest plans in 21.2 ms against 30.9 on the Ryzen, and 26 against 46 on the M4 Pro.
 
 Planning runs on each device's own CPU threads, so the devices plan alike. IK runs on the device, where the GPU pays a fixed cost per call (about 10 ms for one problem) that the CPU does not.
 
-The motions stay within the Panda's limits: over the sets, median motions take 2.0–3.3 s, peak accelerations reach 4.9 rad/s² against a 5 rad/s² limit, and peak jerks 40–46 rad/s³ against 50.
+The motions stay within the Panda's limits: over the sets, median motions take 1.3–3.3 s, peak accelerations reach 4.9 rad/s² against a 5 rad/s² limit, and peak jerks 40–47 rad/s³ against 50.
 
-Planning alone clears the meshes in 92.9–93.0% of the problems. IK + plan clears them less often: its goals are chosen on the spheres too, so some of them touch the meshes.
+Planning alone clears the meshes in 92.9% of the problems. IK + plan clears them less often, in 91.5–91.7%: its goals are chosen on the spheres too, so some of them touch the meshes.
 
 ## GPU and CPU throughput
 

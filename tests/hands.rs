@@ -479,13 +479,13 @@ fn over_the_wall(robot: &Robot, cpu: &Device) -> (World, Vec<PlanProblem>) {
         .iter()
         .zip(&far)
         .map(|(a, b)| {
-            let goal = (0..n)
+            let goal: Vec<f32> = (0..n)
                 .map(|j| if left.contains(&j) { b[j] } else { a[j] })
                 .collect();
             PlanProblem {
                 world: 0,
                 start: a.clone(),
-                goal,
+                goal: goal.into(),
                 start_motion: None,
                 hold: right.clone(),
                 constraints: vec![],
@@ -509,7 +509,7 @@ fn searches_hold_an_arm_still() {
         .map(|p| RrtProblem {
             world: 0,
             start: p.start.clone(),
-            goals: vec![p.goal.clone()],
+            goals: vec![p.goal.joints().unwrap().to_vec()],
             hold: p.hold.clone(),
             constraints: vec![],
         })

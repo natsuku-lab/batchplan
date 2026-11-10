@@ -29,7 +29,7 @@ fn searches(problems: &[PlanProblem]) -> Vec<RrtProblem> {
         .map(|p| RrtProblem {
             world: p.world,
             start: p.start.clone(),
-            goals: vec![p.goal.clone()],
+            goals: vec![p.goal.joints().unwrap().to_vec()],
             hold: vec![],
             constraints: vec![],
         })
@@ -92,7 +92,7 @@ fn rrt_paths_are_collision_free_under_a_denser_check() {
         for (p, path) in problems.iter().zip(&found.paths) {
             let Some(path) = path else { continue };
             assert!(
-                path[..n] == p.start[..] && path[path.len() - n..] == p.goal[..],
+                path[..n] == p.start[..] && path[path.len() - n..] == *p.goal.joints().unwrap(),
                 "{}: wrong ends",
                 d.name()
             );
@@ -230,7 +230,11 @@ fn resolutions_that_cannot_be_checked_at_are_input_errors() {
     let cpu = Device::cpu(&robot).unwrap();
     let worlds = cpu.upload(&[World::default()]).unwrap();
     let problem = PlanProblem::new(0, vec![0.0; 6], vec![0.5, 0.0, -0.4, 0.0, 0.3, 0.0]);
-    let line = [problem.start.clone(), problem.goal.clone()].concat();
+    let line = [
+        problem.start.clone(),
+        problem.goal.joints().unwrap().to_vec(),
+    ]
+    .concat();
     fn refused<T: std::fmt::Debug>(r: Result<T, Error>, what: &str) {
         assert!(
             matches!(&r, Err(Error::Input(m)) if m.contains("resolution")),
@@ -378,6 +382,30 @@ fn travel(path: &[f32], n: usize) -> Vec<f32> {
 }
 
 #[test]
+fn a_continuous_joint_at_infinity_is_an_input_error() {
+    // A continuous joint's range has no limits, so only finiteness rules infinity out.
+    let dir = std::env::temp_dir().join(format!("batchplan-infinite-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("turntable.urdf"), TURNTABLE).unwrap();
+    let robot = Robot::load(dir.join("turntable.urdf"), &RobotOptions::default()).unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[World::default()]).unwrap();
+    let infinite = vec![f32::INFINITY, 0.0];
+    for (start, goal, end) in [
+        (infinite.clone(), vec![0.0, 0.0], "start"),
+        (vec![0.0, 0.0], infinite, "goal"),
+    ] {
+        let problem = PlanProblem::new(0, start, goal);
+        let e = batchplan::plan(&device, &worlds, &[problem], &PlanOptions::default());
+        let e = e.unwrap_err().to_string();
+        assert!(
+            e.contains(&format!("the {end} must have 2 finite values")),
+            "{e}"
+        );
+    }
+}
+
+#[test]
 fn continuous_joints_turn_the_short_way_unless_it_is_blocked() {
     let dir = std::env::temp_dir().join(format!("batchplan-turntable-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -420,7 +448,7 @@ fn continuous_joints_turn_the_short_way_unless_it_is_blocked() {
         // The final pose is the goal's.
         let (end, goal) = (
             robot.ee_pose(&path[path.len() - 2..], 0),
-            robot.ee_pose(&problem.goal, 0),
+            robot.ee_pose(problem.goal.joints().unwrap(), 0),
         );
         assert!(
             (end.position - goal.position).length() < 1e-4,
@@ -456,7 +484,7 @@ fn continuous_joints_turn_the_short_way_unless_it_is_blocked() {
         let search = RrtProblem {
             world: 0,
             start: problem.start.clone(),
-            goals: vec![problem.goal.clone()],
+            goals: vec![problem.goal.joints().unwrap().to_vec()],
             hold: vec![],
             constraints: vec![],
         };
@@ -656,7 +684,10 @@ fn plans_around_a_ball_on_the_straight_line_stay_near_it() {
     let excess: Vec<f32> = result
         .solved()
         .map(|s| {
-            let straight = length(&[&s.problem.start[..], &s.problem.goal[..]].concat(), n);
+            let straight = length(
+                &[&s.problem.start[..], s.problem.goal.joints().unwrap()].concat(),
+                n,
+            );
             let dense = Trajectory::try_new(&robot, s.solution, 1.0)
                 .unwrap()
                 .sample(100.0)

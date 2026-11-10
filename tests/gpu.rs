@@ -559,7 +559,7 @@ fn gpu_plans_are_collision_free_under_cpu_check() {
             &samples.positions[samples.positions.len() - n..],
         );
         assert!(
-            first == &prob.start[..] && last == &prob.goal[..],
+            first == &prob.start[..] && last == prob.goal.joints().unwrap(),
             "the trajectory does not run start to goal"
         );
         dense.extend(&samples.positions);
@@ -596,7 +596,7 @@ fn block_straight_lines(
         let middle: Vec<f32> = p
             .start
             .iter()
-            .zip(&p.goal)
+            .zip(p.goal.joints().unwrap())
             .map(|(a, b)| 0.5 * (a + b))
             .collect();
         let center = robot.ee_pose(&middle, 0).position;
@@ -607,7 +607,7 @@ fn block_straight_lines(
     let cpu = Device::cpu(robot).unwrap();
     let worlds = cpu.upload(scene).unwrap();
     let free = |p: &PlanProblem| {
-        let ends = [&p.start[..], &p.goal[..]].concat();
+        let ends = [&p.start[..], p.goal.joints().unwrap()].concat();
         let e = cpu
             .evaluate(&worlds, &[p.world, p.world], &ends, &CollisionWeights::NONE)
             .unwrap();

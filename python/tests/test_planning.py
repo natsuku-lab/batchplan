@@ -160,6 +160,50 @@ def test_unreachable_targets_say_so(ur5e_robot):
     assert isinstance(bp.ik_failures(device, worlds, result, loose)[0], bp.IkFailure.Collides)
 
 
+def test_a_pose_goal_ends_with_the_hand_at_the_pose(ur5e_robot):
+    target = bp.Pose((0.4, 0.2, 0.3), DOWN)
+    problem = bp.PlanProblem(0, ur5e_robot.default_q, target)
+    assert problem.goal == (target,), "poses come back as one per hand"
+    for device in devices(ur5e_robot):
+        worlds = device.upload([bp.World([TABLE])])
+        result = bp.plan(device, worlds, [problem])
+        reached = ur5e_robot.ee_pose(result.best(0)[-1])
+        np.testing.assert_allclose(reached.position, target.position, atol=1.5e-3)
+        assert same_rotation(reached.rotation, target.rotation), device
+        assert result.problems[0].goal == (target,), "the problems as given"
+
+
+def test_goals_are_configurations_or_a_pose_per_hand(ur5e_robot):
+    start = ur5e_robot.default_q
+    target = bp.Pose((0.4, 0.2, 0.3), DOWN)
+    joints = bp.PlanProblem(0, start, list(start))
+    assert isinstance(joints.goal, np.ndarray) and np.array_equal(joints.goal, start)
+    assert bp.PlanProblem(0, start, iter(start)).goal.shape == start.shape
+    assert bp.PlanProblem(0, [0.0], 0.5).goal.tolist() == [0.5], "one joint's configuration"
+    assert bp.PlanProblem(0, [0.0], np.float32(0.5)).goal.tolist() == [0.5]
+    poses = bp.PlanProblem(0, start, [target])
+    assert poses.goal == (target,) and poses.replace(goal=poses.goal).goal == (target,)
+    assert bp.PlanProblem(0, start, (target, None)).goal == (target, None)
+    with pytest.raises(TypeError):
+        bp.PlanProblem(0, start, [target, 1.0])
+    device = bp.Device.cpu(ur5e_robot)
+    worlds = device.upload([bp.World()])
+    with pytest.raises(bp.InputError, match=r"problem 0.*hands"):
+        bp.plan(device, worlds, [bp.PlanProblem(0, start, (target, None))])
+
+
+def test_pose_goals_out_of_reach_say_so(ur5e_robot):
+    device = bp.Device.cpu(ur5e_robot)
+    worlds = device.upload([bp.World()])
+    far = bp.PlanProblem(0, ur5e_robot.default_q, bp.Pose((3.0, 0.0, 0.3), DOWN))
+    failure = bp.plan(device, worlds, [far]).failures[0]
+    assert isinstance(failure, bp.PlanFailure.GoalUnreachable)
+    assert repr(failure) == "PlanFailure.GoalUnreachable()"
+    # Within ten meters of the pose, a seed of the goal's IK reaches it.
+    loose = bp.PlanOptions(goal_ik=bp.IkOptions(position_tolerance=10.0, rotation_tolerance=10.0))
+    assert bp.plan(device, worlds, [far], loose).failures == (None,)
+
+
 def test_errors_raise_their_kind():
     robot_path = ASSETS / "ur5e/ur_description/urdf/ur5e.urdf"
     with pytest.raises(bp.LoadError, match=r"missing\.urdf"):

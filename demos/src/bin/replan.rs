@@ -181,7 +181,11 @@ fn main() -> Result<()> {
                 motions[*i] = Motion {
                     trajectory: Some(Trajectory::try_new(&robot, path, SPEED)?),
                     began: t,
-                    goal: p.goal.clone(),
+                    goal: p
+                        .goal
+                        .joints()
+                        .expect("the demo plans to configurations")
+                        .to_vec(),
                     hold: p.start.clone(),
                     resume: None,
                 };
@@ -266,7 +270,7 @@ fn main() -> Result<()> {
                     .map(|&i| PlanProblem {
                         world: i as u32,
                         start: now[i].position.clone(),
-                        goal: motions[i].goal.clone(),
+                        goal: motions[i].goal.clone().into(),
                         start_motion: Some(StartMotion {
                             velocity: now[i].velocity.clone(),
                             acceleration: now[i].acceleration.clone(),
