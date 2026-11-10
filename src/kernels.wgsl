@@ -262,7 +262,7 @@ fn load_goals(item: u32) {
         moving[j] = false;
     }
     for (var h = 0u; h < HANDS; h++) {
-        let t = (item * HANDS + h) * 4u;
+        let t = (item / P.per_target * HANDS + h) * 4u;
         goal_pos[h] = targets[t];
         goal_rot[h] = mat3x3<f32>(targets[t + 1u].xyz, targets[t + 2u].xyz, targets[t + 3u].xyz);
         if (goal_pos[h].w > 0.5) {

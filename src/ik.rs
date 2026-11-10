@@ -404,7 +404,8 @@ fn solved(
     let items = problems.len() * o.seeds;
     let mut q = Vec::with_capacity(items * n);
     let mut item_world = Vec::with_capacity(items);
-    let mut targets = Vec::with_capacity(items * hands);
+    // Each problem's targets once: its seeds share them.
+    let mut targets = Vec::with_capacity(problems.len() * hands);
     let hand_joints: Vec<Vec<usize>> = (0..hands).map(|h| robot.hand_joints(h)).collect();
     let mut moved = vec![false; n];
     // Per item and joint, whether it is held; empty when no problem holds one.
@@ -429,44 +430,55 @@ fn solved(
             }) => [1.0, v.x, v.y, v.z, r.x, r.y, r.z, r.w],
             None => [0.0; 8],
         });
+        targets.extend_from_slice(&p.targets);
         let mut rng = Rng::for_problem(o.rng_seed, aims.chain(start.iter().copied()));
         for s in 0..o.seeds {
-            if s == 0 {
-                q.extend_from_slice(start);
-            } else {
-                q.extend((0..n).map(|j| {
-                    if moved[j] {
-                        rng.range(robot.lower[j], robot.upper[j])
-                    } else {
-                        start[j]
-                    }
-                }));
+            let seed = q.len();
+            q.extend_from_slice(start);
+            if s > 0 {
+                for j in (0..n).filter(|&j| moved[j]) {
+                    q[seed + j] = rng.range(robot.lower[j], robot.upper[j]);
+                }
             }
             item_world.push(p.world);
-            targets.extend_from_slice(&p.targets);
             if holding {
                 held.extend((0..n).map(|j| p.hold.contains(&j)));
             }
         }
     }
-    let solved = device.ik(worlds, &item_world, &targets, &held, &mut q, o)?;
-    let success = solved
-        .iter()
-        .map(|s| {
-            s[0] < o.position_tolerance
-                && s[1] < o.rotation_tolerance
-                && device::collision_free([s[2], s[3]])
-        })
-        .collect();
-    Ok(IkResult {
+    // A robot without collision spheres has nothing to push away from: its push is zero, and
+    // leaving the step out leaves out its solve.
+    let unpushed = IkOptions {
+        collision_step: 0.0,
+        ..*o
+    };
+    let stepped = if robot.spheres.is_empty() {
+        &unpushed
+    } else {
+        o
+    };
+    let solved = device.ik(worlds, &item_world, &targets, &held, &mut q, stepped)?;
+    let mut result = IkResult {
         problems: problems.to_vec(),
         dof: n,
         seeds: o.seeds,
         q,
-        position_error: solved.iter().map(|s| s[0]).collect(),
-        rotation_error: solved.iter().map(|s| s[1]).collect(),
-        world_clearance: solved.iter().map(|s| s[2]).collect(),
-        self_clearance: solved.iter().map(|s| s[3]).collect(),
-        success,
-    })
+        position_error: Vec::with_capacity(items),
+        rotation_error: Vec::with_capacity(items),
+        world_clearance: Vec::with_capacity(items),
+        self_clearance: Vec::with_capacity(items),
+        success: Vec::with_capacity(items),
+    };
+    for [position, rotation, world, own] in solved {
+        result.position_error.push(position);
+        result.rotation_error.push(rotation);
+        result.world_clearance.push(world);
+        result.self_clearance.push(own);
+        result.success.push(
+            position < o.position_tolerance
+                && rotation < o.rotation_tolerance
+                && device::collision_free([world, own]),
+        );
+    }
+    Ok(result)
 }

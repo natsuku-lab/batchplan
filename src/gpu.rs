@@ -107,6 +107,7 @@ shader_struct! {
         acceleration_weight: f32, velocity_weight: f32, initial_step: f32, history: u32,
         damping: f32, rotation_weight: f32, max_step: f32, collision_step: f32,
         samples: u32, constraints: u32, constraint_weight: f32, held: u32,
+        per_target: u32, pad0: u32, pad1: u32, pad2: u32,
     }
 }
 
@@ -1465,17 +1466,24 @@ impl Backend for GpuBackend {
     ) -> Result<Vec<[f32; 4]>> {
         let worlds: &GpuWorlds = worlds.prepared();
         let (n, hands) = (self.robot.dof(), self.robot.hands());
+        // Items to a problem, whose targets they share.
+        let seeds = (item_world.len() * hands)
+            .checked_div(targets.len())
+            .unwrap_or(1);
         let mut errors = Vec::with_capacity(item_world.len());
+        // Whole problems to a chunk: their items share the problem's targets.
+        let problems = (IK_CHUNK / seeds).max(1);
+        let chunk = problems * seeds;
         let chunks = item_world
-            .chunks(IK_CHUNK)
-            .zip(targets.chunks(IK_CHUNK * hands))
-            .zip(q.chunks_mut(IK_CHUNK * n))
+            .chunks(chunk)
+            .zip(targets.chunks(problems * hands))
+            .zip(q.chunks_mut(chunk * n))
             .enumerate();
         for (c, ((chunk_world, chunk_targets), chunk_q)) in chunks {
-            let start = c * IK_CHUNK * n;
+            let start = c * chunk * n;
             let chunk_held = held.get(start..start + chunk_q.len()).unwrap_or_default();
             let call = (chunk_world, chunk_targets, chunk_held);
-            errors.extend(self.ik_chunk(worlds, call, chunk_q, o)?);
+            errors.extend(self.ik_chunk(worlds, call, seeds, chunk_q, o)?);
         }
         Ok(errors)
     }
@@ -1811,6 +1819,7 @@ impl GpuBackend {
         &self,
         worlds: &GpuWorlds,
         (item_world, targets, held): (&[u32], &[Option<Pose>], &[bool]),
+        seeds: usize,
         q: &mut [f32],
         o: &IkOptions,
     ) -> Result<Vec<[f32; 4]>> {
@@ -1830,10 +1839,11 @@ impl GpuBackend {
         params.max_step = o.max_step;
         params.collision_step = o.collision_step;
         params.held = u32::from(!held.is_empty());
+        params.per_target = seeds as u32;
         let params_buf = self.uniform(&params);
         let world_buf = storage(&self.device, "item world", item_world);
-        // Per item and hand: the position with w = 1 when the hand has a target, then the
-        // rotation's columns.
+        // Per problem (`P.per_target` items) and hand: the position with w = 1 when the hand has a
+        // target, then the rotation's columns.
         let target_data: Vec<[f32; 4]> = targets
             .iter()
             .flat_map(|t| match t {
