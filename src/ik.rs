@@ -391,6 +391,10 @@ fn check(robot: &Robot, worlds: &Worlds, problems: &[IkProblem], o: &IkOptions) 
     Ok(())
 }
 
+/// Seeds (items) under which a batch is seeded on the calling thread: handing fewer to the
+/// device's pool costs more than it saves.
+const SEEDED_ALONE: usize = 4096;
+
 /// [`solve_ik`] for `problems`, checked, holding what `device` holds.
 fn solved(
     device: &Device,
@@ -402,17 +406,23 @@ fn solved(
     let n = robot.dof();
     let hands = robot.hands();
     let items = problems.len() * o.seeds;
-    let mut q = Vec::with_capacity(items * n);
-    let mut item_world = Vec::with_capacity(items);
     // Each problem's targets once: its seeds share them.
-    let mut targets = Vec::with_capacity(problems.len() * hands);
-    let hand_joints: Vec<Vec<usize>> = (0..hands).map(|h| robot.hand_joints(h)).collect();
-    let mut moved = vec![false; n];
+    let targets: Vec<Option<Pose>> = problems.iter().flat_map(|p| p.targets.clone()).collect();
+    let item_world: Vec<u32> = problems
+        .iter()
+        .flat_map(|p| std::iter::repeat_n(p.world, o.seeds))
+        .collect();
     // Per item and joint, whether it is held; empty when no problem holds one.
     let holding = problems.iter().any(|p| !p.hold.is_empty());
-    let mut held = Vec::with_capacity(if holding { items * n } else { 0 });
-    for p in problems {
-        moved.fill(false);
+    let flags = problems
+        .iter()
+        .flat_map(|p| (0..o.seeds * n).map(|i| p.hold.contains(&(i % n))));
+    let held: Vec<bool> = if holding { flags.collect() } else { vec![] };
+    let hand_joints: Vec<Vec<usize>> = (0..hands).map(|h| robot.hand_joints(h)).collect();
+    // A problem's seeds: its own start, then random configurations of the joints its targets
+    // move, drawn from its own generator, so they do not depend on where it is in the batch.
+    let seed = |p: &IkProblem, seeds: &mut [f32]| {
+        let mut moved = vec![false; n];
         let targeted = p.targets.iter().enumerate().filter(|(_, t)| t.is_some());
         for (h, _) in targeted {
             for &j in &hand_joints[h] {
@@ -430,21 +440,28 @@ fn solved(
             }) => [1.0, v.x, v.y, v.z, r.x, r.y, r.z, r.w],
             None => [0.0; 8],
         });
-        targets.extend_from_slice(&p.targets);
         let mut rng = Rng::for_problem(o.rng_seed, aims.chain(start.iter().copied()));
-        for s in 0..o.seeds {
-            let seed = q.len();
-            q.extend_from_slice(start);
+        for (s, q) in seeds.chunks_mut(n).enumerate() {
+            q.copy_from_slice(start);
             if s > 0 {
                 for j in (0..n).filter(|&j| moved[j]) {
-                    q[seed + j] = rng.range(robot.lower[j], robot.upper[j]);
+                    q[j] = rng.range(robot.lower[j], robot.upper[j]);
                 }
             }
-            item_world.push(p.world);
-            if holding {
-                held.extend((0..n).map(|j| p.hold.contains(&j)));
-            }
         }
+    };
+    let mut q = vec![0.0; items * n];
+    let each = q.chunks_mut(o.seeds * n).zip(problems);
+    if items < SEEDED_ALONE {
+        for (seeds, p) in each {
+            seed(p, seeds);
+        }
+    } else {
+        use rayon::prelude::*;
+        device.install(|| {
+            let each = q.par_chunks_mut(o.seeds * n).zip(problems);
+            each.for_each(|(seeds, p)| seed(p, seeds));
+        });
     }
     // A robot without collision spheres has nothing to push away from: its push is zero, and
     // leaving the step out leaves out its solve.

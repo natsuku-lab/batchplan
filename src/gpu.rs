@@ -2082,8 +2082,12 @@ fn dispatch_groups(pass: &mut wgpu::ComputePass, groups: usize) {
 /// hold one element of its array type even when the batch has none (e.g. a world with no
 /// obstacles).
 fn storage<T: Pod>(device: &wgpu::Device, label: &str, data: &[T]) -> wgpu::Buffer {
-    let mut bytes = bytemuck::cast_slice(data).to_vec();
-    bytes.resize(bytes.len().max(std::mem::size_of::<T>()).max(16), 0);
+    // Padded only where there is too little to bind: large batches are not copied for it.
+    let least = std::mem::size_of::<T>().max(16);
+    let mut bytes = std::borrow::Cow::Borrowed(bytemuck::cast_slice::<T, u8>(data));
+    if bytes.len() < least {
+        bytes.to_mut().resize(least, 0);
+    }
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some(label),
         contents: &bytes,
