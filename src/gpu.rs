@@ -917,10 +917,24 @@ fn build_kernels(
     .concat();
     // Turn shader and pipeline validation failures into errors instead of panics.
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+    // Every loop of these kernels counts to a bound (`kernel_loops_are_counted`), so none can run
+    // forever, and the counter naga would add to each to make sure of that is left out: it costs
+    // IK a fifth to a quarter of its time (an M4 Pro, an RTX 4090). Bounds checks stay.
+    let checks = wgpu::ShaderRuntimeChecks {
+        force_loop_bounding: false,
+        ..wgpu::ShaderRuntimeChecks::checked()
+    };
+    let descriptor = wgpu::ShaderModuleDescriptor {
         label: Some("batchplan kernels"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
-    });
+    };
+    #[expect(
+        unsafe_code,
+        reason = "wgpu takes shaders without its loop bounding only from callers who vouch for them"
+    )]
+    // SAFETY: the one check left out guards against infinite loops, and these kernels have none:
+    // each loop is a `for` whose counter steps by a positive constant toward its bound.
+    let module = unsafe { device.create_shader_module_trusted(descriptor, checks) };
 
     let buffer_entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
         binding,
@@ -2100,6 +2114,47 @@ mod tests {
         assert!(gpu.kernels.constrained.get().is_none() && gpu.grids.get().is_none());
         gpu.build_all().expect("the kernels build");
         assert!(gpu.kernels.constrained.get().is_some() && gpu.grids.get().is_some());
+    }
+
+    /// The kernels are built without naga's loop bounding, which is sound only while none of their
+    /// loops can run forever: each must be a `for` with a condition and a step.
+    #[test]
+    fn kernel_loops_are_counted() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/ur5e/ur_description/urdf/ur5e.urdf"
+        );
+        let robot = Robot::load(path, &crate::RobotOptions::default()).expect("the UR5e loads");
+        let sources = [
+            robot_wgsl(&robot),
+            include_str!("kernels.wgsl").to_owned(),
+            include_str!("grid.wgsl").to_owned(),
+        ];
+        let mut loops = 0;
+        for source in &sources {
+            let code = source.lines().filter(|l| !l.trim_start().starts_with("//"));
+            for line in code {
+                let words: Vec<&str> = line
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .collect();
+                assert!(
+                    !words.contains(&"while") && !words.contains(&"loop"),
+                    "a loop that is not a counted `for`: {line}"
+                );
+                let Some(header) = line.split("for (").nth(1) else {
+                    continue;
+                };
+                let parts: Vec<&str> = header.split(';').collect();
+                let counted = parts.len() == 3
+                    && parts[1].contains(['<', '>'])
+                    && ["++", "+=", ">>=", "--"]
+                        .iter()
+                        .any(|step| parts[2].contains(step));
+                assert!(counted, "a `for` without a bound or a step: {line}");
+                loops += 1;
+            }
+        }
+        assert!(loops > 50, "only {loops} loops found: the scan misses them");
     }
 
     /// A robot relocked (`Robot::relock`) differs only in the link origins the kernels read from
