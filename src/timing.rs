@@ -136,7 +136,13 @@ impl Trajectory {
         let spans = control_points.len() / n - 3;
         let (mut knot, mut points) = (h, linear(spans));
         if h > 0.0
-            && let Some((tau, map)) = topp::time_map(robot, control_points, None, rates.as_ref())
+            && let Some((tau, map)) = topp::time_map(
+                robot,
+                control_points,
+                None,
+                rates.as_ref(),
+                /* thorough */ true,
+            )
             && tau * ((map.len() - 3) as f32) < h * spans as f32
         {
             (knot, points) = (tau, map);
@@ -154,6 +160,16 @@ impl Trajectory {
     /// encode. Errors with [`Error::Unsafe`] if no timing of the path from that motion keeps the
     /// limits, as when it cannot brake in time.
     pub fn moving(robot: &Robot, control_points: &[f32], motion: &StartMotion) -> Result<Self> {
+        Self::moving_by(robot, control_points, motion, /* thorough */ true)
+    }
+
+    /// [`Self::moving`]; without `thorough`, by the timing's first pass alone.
+    pub(crate) fn moving_by(
+        robot: &Robot,
+        control_points: &[f32],
+        motion: &StartMotion,
+        thorough: bool,
+    ) -> Result<Self> {
         let n = robot.dof();
         ensure_input!(
             motion.velocity.len() == n && motion.acceleration.len() == n,
@@ -172,7 +188,7 @@ impl Trajectory {
             time_points,
         };
         let uniform = (uniform_knot(robot, control_points) <= h0).then(|| at(h0, linear(spans)));
-        let optimal = topp::time_map(robot, control_points, Some(1.0 / h0 as f64), None)
+        let optimal = topp::time_map(robot, control_points, Some(1.0 / h0 as f64), None, thorough)
             .map(|(knot, map)| at(knot, map));
         [uniform, optimal]
             .into_iter()

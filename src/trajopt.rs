@@ -694,6 +694,11 @@ enum Stopped {
 /// `Trajectory::moving` from exactly that state, keeping every limit and joint range there as
 /// `Trajectory::check_from` checks. Momentum can carry a joint out of its range in the first span.
 fn runs_from_start(robot: &Robot, problem: &PlanProblem, path: &[f32]) -> bool {
+    runs_by(robot, problem, path, /* thorough */ true)
+}
+
+/// [`runs_from_start`]; without `thorough`, by the timing's first pass alone.
+fn runs_by(robot: &Robot, problem: &PlanProblem, path: &[f32], thorough: bool) -> bool {
     let Some(m) = &problem.start_motion else {
         return true;
     };
@@ -702,7 +707,8 @@ fn runs_from_start(robot: &Robot, problem: &PlanProblem, path: &[f32]) -> bool {
         velocity: m.velocity.clone(),
         acceleration: m.acceleration.clone(),
     };
-    Trajectory::moving(robot, path, m).is_ok_and(|t| t.check_from(robot, &start).is_ok())
+    Trajectory::moving_by(robot, path, m, thorough)
+        .is_ok_and(|t| t.check_from(robot, &start).is_ok())
 }
 
 /// Iterations RRT-Connect gets to find a path keeping the clearance before it searches without.
@@ -886,9 +892,13 @@ fn next_fit(
             // A spline that cannot follow the start motion may at a longer knot interval, or once
             // it stops at every waypoint.
             let goal = &path[path.len() - n..];
+            // A spline that stops at every waypoint, the retry of one that follows the motion by
+            // neither of the timing's passes, is timed by the first pass alone: the second has
+            // not timed such a retry (none of 224 over 1,400 replans) and costs most of a refusal.
+            let stops = fit.pins.iter().all(|&p| p == EXACT);
             let follows = START_KNOTS.iter().any(|&longer| {
                 continue_motion(robot, &problem.start, goal, m, longer, &mut fit.spline);
-                runs_from_start(robot, problem, &fit.spline)
+                runs_by(robot, problem, &fit.spline, /* thorough */ !stops)
             });
             if !follows {
                 if fit.pins.iter().all(|&p| p == EXACT) {

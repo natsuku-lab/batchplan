@@ -111,15 +111,19 @@ impl HandRates {
 /// lowered speeds leave the start's out of reach. Candidates are turned down at a quarter of the
 /// checking density first; where that finds no map, the path is timed again with every candidate
 /// measured at the full density, which steers the refinement to maps the coarse measure misses.
-/// With `hand`, the hand's speed keeps under its caps as the joints keep their limits.
+/// Without `thorough`, that second pass is left out. With `hand`, the hand's speed keeps under its
+/// caps as the joints keep their limits.
 pub(crate) fn time_map(
     robot: &Robot,
     cp: &[f32],
     start_speed: Option<f64>,
     hand: Option<&HandRates>,
+    thorough: bool,
 ) -> Option<(f32, Vec<f32>)> {
     timed_map(robot, cp, start_speed, hand, /* full */ false).or_else(|| {
-        start_speed.and_then(|_| timed_map(robot, cp, start_speed, hand, /* full */ true))
+        start_speed
+            .filter(|_| thorough)
+            .and_then(|_| timed_map(robot, cp, start_speed, hand, /* full */ true))
     })
 }
 
