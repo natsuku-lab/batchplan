@@ -1106,23 +1106,33 @@ fn replans_keep_the_constraints_the_trajectory_was_planned_with() {
         let d: f32 = g.iter().zip(&start).map(|(a, b)| (a - b) * (a - b)).sum();
         d
     };
-    let goal = goals
-        .iter()
-        .max_by(|a, b| far(a).total_cmp(&far(b)))
-        .unwrap()
-        .clone();
-    let problem = PlanProblem {
-        constraints: vec![upright],
-        ..PlanProblem::new(0, start, goal)
-    };
-    let plans = batchplan::plan(&device, &empty, &[problem], &PlanOptions::default()).unwrap();
-    let first = Trajectory::try_new(&robot, plans.best(0).expect("an upright reach"), 0.5).unwrap();
+    // The farthest goal whose reach the box, where the hand will be at 60%, appears clear of: the
+    // robot is 30% along when it does, and a reach that turns back on itself would be inside it.
+    let mut by_distance: Vec<&Vec<f32>> = goals.iter().collect();
+    by_distance.sort_by(|a, b| far(b).total_cmp(&far(a)));
+    let mut found = None;
+    for goal in by_distance {
+        let problem = PlanProblem {
+            constraints: vec![upright],
+            ..PlanProblem::new(0, start.clone(), goal.clone())
+        };
+        let plans = batchplan::plan(&device, &empty, &[problem], &PlanOptions::default()).unwrap();
+        let Some(path) = plans.best(0) else { continue };
+        let first = Trajectory::try_new(&robot, path, 0.5).unwrap();
+        let mut blocked = scene.clone();
+        blocked
+            .obstacles
+            .push(box_at(&robot, &first, 0.6 * first.duration()));
+        let blocked = device.upload(&[blocked]).unwrap();
+        let mut state = JointState::new(robot.dof());
+        first.at(0.3 * first.duration() + DT, &mut state);
+        if clear(&device, &blocked, &state.position) {
+            found = Some((first, blocked));
+            break;
+        }
+    }
+    let (first, blocked) = found.expect("an upright reach the box appears clear of");
     let duration = first.duration();
-    let mut blocked = scene;
-    blocked
-        .obstacles
-        .push(box_at(&robot, &first, 0.6 * duration));
-    let blocked = device.upload(&[blocked]).unwrap();
     // Within a centimeter of where the goal has the hand: the goal keeps it, a replan's start not.
     let points = &first.control_points;
     let end = robot.ee_pose(&points[points.len() - robot.dof()..], 0);
