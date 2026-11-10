@@ -407,8 +407,8 @@ fn boxes_that_cannot_be_set_down_as_asked_are_set_down_turned() {
     let robot = common::panda().unwrap();
     let half = Vec3::new(0.02, 0.03, 0.03);
     let table = Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02));
-    // (The box's yaw, the place pose's): the second and the fourth need the half turn, as do
-    // their neighbours a quarter radian off, on an M4 Pro and a Ryzen alike.
+    // (The box's yaw, the place pose's): with `fixture_ik` the second and the fourth need the half
+    // turn, on an M4 Pro, a Ryzen and CI's runner.
     let yaws = [(0.0, 0.0), (0.75, -1.75), (0.5, 0.5), (0.25, 2.75)];
     let mut worlds = vec![];
     let mut tasks = vec![];
@@ -427,8 +427,8 @@ fn boxes_that_cannot_be_set_down_as_asked_are_set_down_turned() {
         });
     }
     let cpu = Device::cpu(&robot).unwrap();
-    // Whether a place pose can be reached as asked is IK's to find: with the IK this fixture was
-    // built on, so that the same two need the turn wherever it runs.
+    // Whether a place pose can be reached as asked is IK's to find, and differs by its options
+    // and a little by platform: these four were chosen under this IK.
     let mut o = PickPlaceOptions::default();
     o.task.ik = common::fixture_ik();
     let demos = datagen::pick_and_place(&cpu, &worlds, &tasks, &o).unwrap();

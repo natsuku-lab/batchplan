@@ -77,7 +77,8 @@ jobs:
       - run: cargo test --release --features lerobot,usd --no-fail-fast
         env:
           BATCHPLAN_REQUIRE_GPU: 1
-      - run: cargo test --release --no-default-features
+      - run: cargo test --release --no-default-features --no-fail-fast
+        if: ${{ !cancelled() }}
 
   # Robot computers without a usable GPU: the CPU-only build.
   aarch64:

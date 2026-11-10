@@ -1106,8 +1106,47 @@ fn replans_keep_the_constraints_the_trajectory_was_planned_with() {
         let d: f32 = g.iter().zip(&start).map(|(a, b)| (a - b) * (a - b)).sum();
         d
     };
-    // The farthest goal whose reach the box, where the hand will be at 60%, appears clear of: the
-    // robot is 30% along when it does, and a reach that turns back on itself would be inside it.
+    // A follower of `first` under `constraints`, shown `blocked` from 30% of the way: its statuses,
+    // its largest tilt at a tick and along the trajectory it ends on, and whether a tick collided.
+    let follow = |first: &Trajectory, blocked: &Worlds, constraints: &[HandConstraint]| {
+        let duration = first.duration();
+        let o = FollowerOptions {
+            constraints: constraints.to_vec(),
+            ..FollowerOptions::default()
+        };
+        let mut follower = Follower::try_new(&robot, 0, first.clone(), 0.0, o).unwrap();
+        let (mut t, mut statuses, mut most, mut collided) = (0.0, vec![], 0.0f32, None);
+        while t < 4.0 * duration {
+            let worlds = if t < 0.3 * duration { &empty } else { blocked };
+            let tick = follower.tick(&device, worlds, t, None).unwrap();
+            if collided.is_none() && !clear(&device, worlds, &tick.state.position) {
+                collided = Some(format!("at {t:.2} s of {duration:.2}: {:?}", tick.status));
+            }
+            most = most.max(tilt(&robot, &tick.state.position));
+            statuses.push(tick.status.clone());
+            if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
+                break;
+            }
+            t += DT;
+        }
+        let timed = follower.trajectory().sample(1000.0).unwrap();
+        let replan = timed
+            .positions
+            .chunks(robot.dof())
+            .map(|q| tilt(&robot, q))
+            .fold(0.0, f32::max);
+        (statuses, most, replan, collided)
+    };
+    let replanned = |statuses: &[FollowStatus]| {
+        statuses
+            .iter()
+            .any(|s| matches!(s, FollowStatus::Replanned { .. }))
+            && statuses.last() == Some(&FollowStatus::Arrived)
+    };
+    // The scene: the farthest upright reach that a box, dropped where the hand will be at 60% and
+    // shown at 30%, turns a follower free to tilt around, tilting well past the bound. Which goals
+    // IK finds differs by platform; a reach that turns back on itself has the hand in the box as
+    // it appears, and others leave no way round in time.
     let mut by_distance: Vec<&Vec<f32>> = goals.iter().collect();
     by_distance.sort_by(|a, b| far(b).total_cmp(&far(a)));
     let mut found = None;
@@ -1124,83 +1163,39 @@ fn replans_keep_the_constraints_the_trajectory_was_planned_with() {
             .obstacles
             .push(box_at(&robot, &first, 0.6 * first.duration()));
         let blocked = device.upload(&[blocked]).unwrap();
-        let mut state = JointState::new(robot.dof());
-        first.at(0.3 * first.duration() + DT, &mut state);
-        if clear(&device, &blocked, &state.position) {
+        let (statuses, _, replan, collided) = follow(&first, &blocked, &[]);
+        if collided.is_none() && replanned(&statuses) && replan > 2.0 * bound {
             found = Some((first, blocked));
             break;
         }
     }
-    let (first, blocked) = found.expect("an upright reach the box appears clear of");
-    let duration = first.duration();
-    // Within a centimeter of where the goal has the hand: the goal keeps it, a replan's start not.
+    let (first, blocked) = found.expect("an upright reach a free follower replans around a box on");
+
+    // Keeping the trajectory's constraint, the replan stays upright, at its ticks and along it.
+    let (statuses, most, replan, collided) = follow(&first, &blocked, &[upright]);
+    assert_eq!(collided, None, "upright, it collides");
+    assert!(replanned(&statuses), "{statuses:?}");
+    assert!(
+        most <= bound + 1e-4 && replan <= bound + 1e-4,
+        "the follower tilts {:.2}° at its ticks, {:.2}° along its replan",
+        most.to_degrees(),
+        replan.to_degrees()
+    );
+    // Within a centimeter of where the goal has the hand: the goal keeps it, a replan's start not,
+    // so the follower stops.
     let points = &first.control_points;
     let end = robot.ee_pose(&points[points.len() - robot.dof()..], 0);
     let elsewhere = HandConstraint {
         position: Vec3::splat(0.01),
         ..HandConstraint::new(0, end)
     };
-    for constraints in [vec![upright], vec![], vec![elsewhere]] {
-        let o = FollowerOptions {
-            constraints: constraints.clone(),
-            ..FollowerOptions::default()
-        };
-        let mut follower = Follower::try_new(&robot, 0, first.clone(), 0.0, o).unwrap();
-        let (mut t, mut statuses, mut most) = (0.0, vec![], 0.0f32);
-        while t < 4.0 * duration {
-            let worlds = if t < 0.3 * duration { &empty } else { &blocked };
-            let tick = follower.tick(&device, worlds, t, None).unwrap();
-            assert!(
-                clear(&device, worlds, &tick.state.position),
-                "at {t:.2} s of {duration:.2} it collides, {} constraints: {:?} after {:?}, at {:?}",
-                constraints.len(),
-                tick.status,
-                statuses.last(),
-                tick.state.position
-            );
-            most = most.max(tilt(&robot, &tick.state.position));
-            statuses.push(tick.status.clone());
-            if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
-                break;
-            }
-            t += DT;
-        }
-        let timed = follower.trajectory().sample(1000.0).unwrap();
-        let replan = timed
-            .positions
-            .chunks(robot.dof())
-            .map(|q| tilt(&robot, q))
-            .fold(0.0, f32::max);
-        if constraints == [elsewhere] {
-            assert!(
-                statuses
-                    .iter()
-                    .any(|s| matches!(s, FollowStatus::Stopping { .. }))
-                    && statuses.last() == Some(&FollowStatus::Blocked),
-                "{statuses:?}"
-            );
-            continue;
-        }
-        assert!(
-            statuses
-                .iter()
-                .any(|s| matches!(s, FollowStatus::Replanned { .. }))
-                && statuses.last() == Some(&FollowStatus::Arrived),
-            "{statuses:?}"
-        );
-        if constraints.is_empty() {
-            assert!(
-                replan > 2.0 * bound,
-                "the free replan tilts only {:.2}°",
-                replan.to_degrees()
-            );
-        } else {
-            assert!(
-                most <= bound + 1e-4 && replan <= bound + 1e-4,
-                "the follower tilts {:.2}° at its ticks, {:.2}° along its replan",
-                most.to_degrees(),
-                replan.to_degrees()
-            );
-        }
-    }
+    let (statuses, _, _, collided) = follow(&first, &blocked, &[elsewhere]);
+    assert_eq!(collided, None, "held near the goal, it collides");
+    assert!(
+        statuses
+            .iter()
+            .any(|s| matches!(s, FollowStatus::Stopping { .. }))
+            && statuses.last() == Some(&FollowStatus::Blocked),
+        "{statuses:?}"
+    );
 }
