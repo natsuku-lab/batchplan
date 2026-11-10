@@ -99,6 +99,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Fixed
 
+- A plan from a moving start is optimized (`PlanOptions::seeds`) unless its path is within 2% of
+  the straight line from the start: the line was measured from the path's first control point,
+  which lies behind a moving start, so paths that bent by half as much again were left
+  unoptimized.
 - Optimized seeds (`PlanOptions::seeds`) are validated as searched splines are checked: at samples no
   farther apart than `shortcut.resolution`, keeping the margin from the world searched splines keep
   away from their ends (2 mm, or `shortcut.clearance` if less). Validation kept no margin and
