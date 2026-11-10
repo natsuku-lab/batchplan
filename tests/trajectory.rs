@@ -520,7 +520,7 @@ fn replanning_while_moving_is_timed_about_as_fast_as_from_rest() {
     }
     assert!(replanned >= 10, "only {replanned} replanned");
     // Slowing the profile right after the start, which cannot slow that soon, loses the rounds:
-    // 1.870 on average without the easing, 1.815 with it: the bound sits midway.
+    // 1.873 on average without the easing, 1.810 with it: the bound sits midway.
     let mean = against_rest / replanned as f32;
     assert!(mean < 1.845, "{mean} times as long as from rest on average");
 }

@@ -474,12 +474,12 @@ Straight lines most of the way across the Panda's front took 1.20–1.22 times a
 |---|---|---|
 | Planned from rest (438), mean duration | 2.323 s | 2.171 s (6.6% sooner) |
 | The hand's straight moves (121) | 1.057 s | 1.025 s (3.0% sooner) |
-| Replanned while moving (61) | 3.763 s | 3.542 s (5.9% sooner) |
-| Timing each, one thread: from rest, straight moves, moving | 302, 201, 969 µs | 273, 189, 1,257 µs |
+| Replanned while moving (61) | 3.763 s | 3.535 s (6.1% sooner) |
+| Timing each, one thread: from rest, straight moves | 302, 201 µs | 273, 189 µs |
 | The 2,600 problems' motions, per set | | 2.2–7.1% sooner, 5.0% on average |
 | The 2,600 problems, `ik+plan` per second, 14 threads | 1,733, 2,441, 2,421 | 2,437, 2,465, 2,426 |
 
-Paths, their lengths and what is solved are unchanged, and more [joins](#joining-motions) are worth blending: 29, 52 and 45 of the reBot's 60 at 2, 5 and 10 cm, where 20, 47 and 40 were. A motion from a moving start costs more to time: its rounds now change the profile where they used to leave it. On one of the Ryzen's threads, three rotating runs each started with the machine's load under 6, timing took 343, 248 and 1,165 µs before and 320, 238 and 1,513 µs at e4946f6, for the durations above (1.026 s for the hand's moves); a stop a quarter of the way along a planned motion (`Trajectory::stop`) lasts 0.633 s and takes 1.1 ms to find.
+Paths, their lengths and what is solved are unchanged, and more [joins](#joining-motions) are worth blending: 29, 52 and 45 of the reBot's 60 at 2, 5 and 10 cm, where 20, 47 and 40 were. The rounds that slow the profile now change it where they used to leave it, which made a moving start, whose rounds are twice as many, cost 30% more to time. Its candidate time maps are now turned down at a quarter of the checking density, and only one that keeps the limits there is measured at the full one, whose samples include those. On one of the Ryzen's threads, three rotating runs each started with the machine's load under 6, timing took 346, 248 and 1,170 µs before; it takes 320, 238 and 699 µs, for the durations above (1.026 s for the hand's moves, and 3.535 s from a moving start); a stop a quarter of the way along a planned motion (`Trajectory::stop`) lasts 0.633 s and takes 1.1 ms to find.
 
 ## Tracking on the SO-101's servos
 

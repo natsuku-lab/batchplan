@@ -378,28 +378,37 @@ fn timed_map(
                 points[..3].copy_from_slice(&[-lead, 0.0, lead]);
             }
             // Candidates are compared and located at a quarter of the checking density; the winner
-            // is stretched at the full density below. A given start cannot be stretched, so its
-            // candidates are measured at the full density against limits that leave the margin.
-            let (samples, target) = match start_speed {
-                None => (CHECK_SAMPLES / 4, 1.0),
-                Some(_) => (CHECK_SAMPLES, 1.0 / (STRETCH_MARGIN * STRETCH_MARGIN)),
+            // is stretched at the full density below. A given start cannot be stretched: its
+            // candidates are held to limits that leave the margin, and one that keeps them at the
+            // quarter density is measured again at the full one, whose samples include those, so
+            // none is kept unchecked and most are turned down at a quarter of the cost.
+            let target = match start_speed {
+                None => 1.0,
+                Some(_) => 1.0 / (STRETCH_MARGIN * STRETCH_MARGIN),
             };
             // Candidates share the profile, so one needing more stretch than the round's best takes
             // longer, and its assessment can stop there (with room for the duration's rounding).
             let beaten = round
                 .as_ref()
                 .map_or(f32::INFINITY, |(r, ..)| r * (1.0 + 1e-4));
-            let (stretch, overshoots) = assess(
-                robot,
-                cp,
-                hand,
-                tau as f32,
-                &points,
-                samples,
-                target,
-                eased.then_some((0.0, 3)),
-                beaten,
-            );
+            let measured = |samples: usize| {
+                assess(
+                    robot,
+                    cp,
+                    hand,
+                    tau as f32,
+                    &points,
+                    samples,
+                    target,
+                    eased.then_some((0.0, 3)),
+                    beaten,
+                )
+            };
+            let mut assessed = measured(CHECK_SAMPLES / 4);
+            if start_speed.is_some() && assessed.0 <= 1.0 {
+                assessed = measured(CHECK_SAMPLES);
+            }
+            let (stretch, overshoots) = assessed;
             let knot = tau as f32 * stretch;
             let duration = |knot: f32, points: &[f32]| knot * (points.len() - 3) as f32;
             let usable = start_speed.is_none() || stretch <= 1.0;
