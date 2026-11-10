@@ -398,13 +398,13 @@ The pick that fails has every grasp blocked by clutter or out of reach. A pick's
 
 | Blend radius | reBot B601-DM, 60 sequences: joined | Sooner, mean (most) | SO-101, 34 sequences: joined | Sooner, mean (most) |
 |---|---|---|---|---|
-| 2 cm | 20 | 1.1% (9.5%) | 20 | 4.5% (15.4%) |
-| 5 cm | 47 | 4.9% (14.1%) | 33 | 7.5% (18.4%) |
-| 10 cm | 40 | 4.7% (20.5%) | 30 | 6.4% (17.9%) |
+| 2 cm | 29 | 1.9% (8.8%) | 29 | 4.7% (15.2%) |
+| 5 cm | 52 | 5.8% (15.0%) | 33 | 8.3% (17.0%) |
+| 10 cm | 45 | 5.6% (19.9%) | 29 | 7.1% (18.3%) |
 
-No sequence finished later than its motions one after another. Joining a batch took 15–19 ms for the reBot's 60 and 7–10 ms for the SO-101's 34. The joins that keep their stops turn back on themselves or turn tightly at speed, where a blend is no sooner. Wide blends through sharp turns lose to the timing: TOPP-RA's profile through them is sooner than stopping, but keeping jerk within its limit, by smoothing the profile, lowering its caps where the smoothed map overshoots and stretching what remains, gives the gain back, so such corners keep narrow blends.
+No sequence finished later than its motions one after another. Joining a batch took 15–19 ms for the reBot's 60 and 7–10 ms for the SO-101's 34. The joins that keep their stops turn back on themselves or turn tightly at speed, where a blend is no sooner. Wide blends through sharp turns lose to the timing: TOPP-RA's profile through them is sooner than stopping, but keeping jerk within its limit, by smoothing the profile, slowing it where the smoothed map overshoots and stretching what remains, gives the gain back, so such corners keep narrow blends.
 
-`join` splits paths so their control points are spaced alike, and timing used to slow finely split paths: in `a_split_path_takes_as_long`'s three planned Panda paths, split twice, by 21–41%. Where every time map sized by the path needs more than 10% stretch, timing now also tries maps whose spans last about as long as the jerk limit takes to swing acceleration, and past 30% lets them choose where the caps come down; those paths now time within 3% of the whole. Against the previous commit, on one Ryzen thread (`examples/timing.rs`, three alternating runs):
+`join` splits paths so their control points are spaced alike, and timing used to slow finely split paths: in `a_split_path_takes_as_long`'s three planned Panda paths, split twice, by 21–41%. Where every time map sized by the path needs more than 10% stretch, timing now also tries maps whose spans last about as long as the jerk limit takes to swing acceleration, and past 30% lets them choose where the profile slows; those paths then timed within 3% of the whole. Against the previous commit, on one Ryzen thread (`examples/timing.rs`, three alternating runs):
 
 | | Paths | Duration | Timing each |
 |---|---|---|---|
@@ -416,7 +416,7 @@ Some straight moves finish later than before, while more finish sooner. In the [
 
 ## Replanning while moving
 
-`examples/timing.rs` replans 61 planned Panda motions to new goals from halfway along them, where joints move at up to their limits (about 3 rad/s together), and times them with `Trajectory::moving`. Timing used to give up on such a start when its smoothed time map overshot a limit: the map could not be stretched without slowing the start, and lowered caps near the start left its speed out of reach. It then fell back to uniform timing at the pace the path's first span was fitted to, 18–23 s for most. Now, where that first try finds no timing, a second one gives the start the full limits, easing to the headroom over two path spans, stretches the map with its first points set again for the start's speed, and ends the refinement with what the earlier rounds found where lowered caps cannot start at that speed. Starts the first try times keep their timing exactly; the cost is the second try, on the starts the first gave up on. Against the previous commit, on the Ryzen, three alternating runs:
+`examples/timing.rs` replans 61 planned Panda motions to new goals from halfway along them, where joints move at up to their limits (about 3 rad/s together), and times them with `Trajectory::moving`. Timing used to give up on such a start when its smoothed time map overshot a limit: the map could not be stretched without slowing the start, and lowered caps near the start left its speed out of reach. It then fell back to uniform timing at the pace the path's first span was fitted to, 18–23 s for most. Since then, where that first try finds no timing, a second one gives the start the full limits, easing over two path spans to those the rest keeps, stretches the map with its first points set again for the start's speed, and ends the refinement with what the earlier rounds found where a slowed profile cannot start at that speed. Starts the first try times keep their timing exactly; the cost is the second try, on the starts the first gave up on. Against the previous commit, on the Ryzen, three alternating runs:
 
 | | Before | Now |
 |---|---|---|
@@ -428,7 +428,24 @@ Some straight moves finish later than before, while more finish sooner. In the [
 | The same, as one batch on 32 threads | 48 ms | 59 ms |
 | The same, one at a time | 8.0 ms | 6.6 ms |
 
-Paths planned from rest (2.3 s on average) and the hand's straight moves time exactly as before, and the handover episodes are the same bit for bit on both devices, at the same pace (466 against 464 episodes/s on the Ryzen, 476 on the Radeon, four alternating runs). `plan` also no longer returns a path from a moving start that cannot run from it: where momentum carried a joint out of its range in the first span, it tries longer first spans, and otherwise leaves the problem unsolved. On 32 threads the batch waits on its longest search, which that lengthens, so it no longer gains from the threads beyond 14.
+Paths planned from rest (2.3 s on average then) and the hand's straight moves time exactly as before, and the handover episodes are the same bit for bit on both devices, at the same pace (466 against 464 episodes/s on the Ryzen, 476 on the Radeon, four alternating runs). `plan` also no longer returns a path from a moving start that cannot run from it: where momentum carried a joint out of its range in the first span, it tries longer first spans, and otherwise leaves the problem unsolved. On 32 threads the batch waits on its longest search, which that lengthens, so it no longer gains from the threads beyond 14.
+
+## Timing up to the limits
+
+Time-optimal timing used to keep 5% under every velocity and acceleration limit, to leave room for smoothing its profile into the time map, and then stretched the whole map by what the smoothing still overshot. On a straight line that overshoot is where the motion brakes into its end, and the rounds meant to cure it lowered speed caps the profile was already under there, so the whole motion ran about 7% slower for it. Now the profile uses the full limits; where the smoothed map overshoots one, it is solved again going slower than it did there, half a map span either side; and the stretch takes out only what remains. Every trajectory still keeps its limits along the whole curve (`Trajectory::check`).
+
+Straight lines most of the way across the Panda's front took 1.20–1.22 times as long as their slowest joint needs at its velocity and acceleration limits alone; they now take 1.13–1.17 times (1.15 on average), the rest being the jerk limit's (`tests/trajectory.rs`). `examples/timing.rs` and the 2,600 problems against the previous commit, on the M4 Pro, three alternating runs:
+
+| | Before | Now |
+|---|---|---|
+| Planned from rest (438), mean duration | 2.323 s | 2.171 s (6.6% sooner) |
+| The hand's straight moves (121) | 1.057 s | 1.025 s (3.0% sooner) |
+| Replanned while moving (61) | 3.763 s | 3.542 s (5.9% sooner) |
+| Timing each, one thread: from rest, straight moves, moving | 302, 201, 969 µs | 273, 189, 1,257 µs |
+| The 2,600 problems' motions, per set | | 2.2–7.1% sooner, 5.0% on average |
+| The 2,600 problems, `ik+plan` per second, 14 threads | 1,733, 2,441, 2,421 | 2,437, 2,465, 2,426 |
+
+Paths, their lengths and what is solved are unchanged, and more [joins](#joining-motions) are worth blending: 29, 52 and 45 of the reBot's 60 at 2, 5 and 10 cm, where 20, 47 and 40 were. A motion from a moving start costs more to time: its rounds now change the profile where they used to leave it.
 
 ## Tracking on the SO-101's servos
 

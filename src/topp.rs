@@ -12,8 +12,9 @@
 //!
 //! The resulting `s(t)` has steps in `s̈`, so unbounded jerk. The time map that replaces it is a
 //! uniform cubic B-spline `σ(t)` whose control points are `s` at their Greville points, which
-//! smooths it while keeping it monotone; the map is then stretched in time just enough that
-//! velocity, acceleration and jerk, sampled densely, keep their limits.
+//! smooths it while keeping it monotone. Where the smoothed map overshoots a limit, the profile is
+//! solved again going slower there; the map is then stretched in time just enough that velocity,
+//! acceleration and jerk, sampled densely, keep their limits.
 
 use glam::Vec3;
 
@@ -24,9 +25,6 @@ use crate::spline::{self, BASIS_D3};
 const STAGES_PER_SPAN: usize = 12;
 /// Samples of a hand's rates per path span: a multiple of the stages, so every stage has one.
 const HAND_SAMPLES_PER_SPAN: usize = 4 * STAGES_PER_SPAN;
-/// Fraction of each velocity and acceleration limit the time-optimal profile may use, leaving room
-/// for the smoothing.
-const HEADROOM: f64 = 0.95;
 /// Samples per time-map span when stretching and checking a time map.
 pub(crate) const CHECK_SAMPLES: usize = 64;
 /// A smoothing candidate: its stretch, where it overshoots (path position, factor on x) and its
@@ -36,19 +34,20 @@ type Candidate = (f32, Vec<(f32, f32)>, usize);
 /// Extra stretch beyond what the samples need, for the curve between them (sampling 4x denser
 /// finds acceleration 0.13% over without it).
 const STRETCH_MARGIN: f32 = 1.003;
-/// Rounds of lowering the caps where the smoothed map overshoots.
+/// Rounds of slowing the profile where the smoothed map overshoots.
 const REFINEMENTS: usize = 3;
 /// Rounds of stretching a given start's map at most, each by what the last one still needed.
 const RESTRETCHES: usize = 4;
-/// Path spans over which a given start's limits ease from the full ones to the headroom: its
-/// motion is not ours to choose, may use the full limits, and cannot change at once.
+/// Path spans over which a given start's limits ease from the full ones to those that leave the
+/// stretch's margin, and its speeds come down as far as elsewhere: its motion is not ours to
+/// choose, may use the full limits, and cannot change at once.
 const START_RAMP: f32 = 2.0;
 /// Time-map span lengths tried, in multiples of the longest time a joint's jerk limit takes to
 /// change its acceleration by its acceleration limit.
 const SWING: [f64; 5] = [0.5, 0.7, 1.0, 1.4, 2.0];
 /// The stretch every map sized by the path must need before maps sized by the limits are tried,
-/// and before they also choose where the caps come down. Below the second they only compete to be
-/// the result; past it, the rounds lower different caps. Either way the result is sooner on
+/// and before they also choose where the profile slows. Below the second they only compete to be
+/// the result; past it, the rounds slow different stages. Either way the result is sooner on
 /// average, but not for every path: candidates are compared at a quarter of the checking density.
 const SWUNG_AFTER: f32 = 1.1;
 const STEERED_AFTER: f32 = 1.3;
@@ -106,11 +105,11 @@ impl HandRates {
 /// A time map for `cp`: seconds per span and control points, or `None` when the path does not
 /// move or cannot be timed. With `start_speed`, the map starts at that ṡ (spans per second) with
 /// no s̈, to continue a motion already under way, and is not stretched as a whole (that would
-/// change the start). Where no map fits so, it is timed again with the start's limits easing from
-/// the full ones over `START_RAMP` path spans, the map stretched with its start set again
-/// (`restretched`), and the refinement ending, rather than failing, where lowered caps leave the
-/// start's speed out of reach. With `hand`, the hand's speed keeps under its caps as the joints
-/// keep their limits.
+/// change the start). Where no map fits so, it is timed again with the start held to the full
+/// limits, easing over `START_RAMP` path spans to those that leave the stretch's margin, the map
+/// stretched with its start set again (`restretched`), and the refinement ending, rather than
+/// failing, where lowered speeds leave the start's out of reach. With `hand`, the hand's speed
+/// keeps under its caps as the joints keep their limits.
 pub(crate) fn time_map(
     robot: &Robot,
     cp: &[f32],
@@ -169,25 +168,16 @@ fn timed_map(
             third.push(largest);
         }
     }
-    let vmax: Vec<f64> = robot
-        .max_velocity()
-        .iter()
-        .map(|&v| v as f64 * HEADROOM)
-        .collect();
+    let vmax: Vec<f64> = robot.max_velocity().iter().map(|&v| f64::from(v)).collect();
     let amax: Vec<f64> = robot
         .max_acceleration()
         .iter()
-        .map(|&a| a as f64 * HEADROOM)
+        .map(|&a| f64::from(a))
         .collect();
-    let jmax: Vec<f64> = robot
-        .max_jerk()
-        .iter()
-        .map(|&j| j as f64 * HEADROOM)
-        .collect();
+    let jmax: Vec<f64> = robot.max_jerk().iter().map(|&j| f64::from(j)).collect();
 
     // Each stage's bounds on u for state x, as lines u = slope x + offset, and the largest x the
-    // velocity and jerk limits and the joints that do not move allow, before scaling. A given start
-    // is held to the full limits rather than the headroom: it is not ours to choose.
+    // velocity and jerk limits and the joints that do not move allow.
     let stage_bounds: Vec<Bounds> = (0..=stages)
         .map(|i| {
             let mut b = Bounds {
@@ -196,16 +186,8 @@ fn timed_map(
                 cap: f64::INFINITY,
                 own: None,
             };
-            let full = if eased {
-                let along = (i as f64 * step / f64::from(START_RAMP)).min(1.0);
-                1.0 + (1.0 / HEADROOM - 1.0) * (1.0 - along)
-            } else if i == 0 && start_speed.is_some() {
-                1.0 / HEADROOM
-            } else {
-                1.0
-            };
             for j in 0..n {
-                let (vmax, amax, jmax) = (vmax[j] * full, amax[j] * full, jmax[j] * full);
+                let (vmax, amax, jmax) = (vmax[j], amax[j], jmax[j]);
                 let at = i * n + j;
                 // Jerk's speed term, the path's third derivative times ṡ³, caps ṡ like velocity
                 // does.
@@ -228,8 +210,6 @@ fn timed_map(
                     b.cap = b.cap.min(c / d.abs());
                 }
             }
-            // A hand's caps take no headroom: smoothing barely raises a speed the profile keeps,
-            // and the stretch takes out what it does.
             if let Some(hand) = hand {
                 let rates = hand.at((i as f64 * step) as f32);
                 for (rate, limit) in rates.into_iter().zip(hand.limits) {
@@ -272,17 +252,17 @@ fn timed_map(
         (lo <= hi + 1e-12).then_some((lo, hi.max(lo)))
     };
 
-    // The time-optimal profile under the caps scaled by `scale`: each stage's time and x. A planned
-    // path's three equal control points at each end make it rest there whatever ṡ is, so the
-    // profile may start and end at any speed its caps allow.
-    let profile = |scale: &[f64]| -> Option<(Vec<f64>, Vec<f64>)> {
+    // The time-optimal profile with x at most `lowered` at each stage: each stage's time and x. A
+    // planned path's three equal control points at each end make it rest there whatever ṡ is, so
+    // the profile may start and end at any speed its caps allow.
+    let profile = |lowered: &[f64]| -> Option<(Vec<f64>, Vec<f64>)> {
         // Backward: controllable intervals, from anything within the caps at the end.
         let mut controllable = vec![(0.0f64, 0.0f64); stages + 1];
         let last = &stage_bounds[stages];
-        controllable[stages] = feasible(last, None, last.cap * scale[stages])?;
+        controllable[stages] = feasible(last, None, last.cap.min(lowered[stages]))?;
         for i in (0..stages).rev() {
             let b = &stage_bounds[i];
-            controllable[i] = feasible(b, Some(controllable[i + 1]), b.cap * scale[i])?;
+            controllable[i] = feasible(b, Some(controllable[i + 1]), b.cap.min(lowered[i]))?;
         }
         // Forward: from the given start or the fastest one, the largest u each stage allows, except
         // that a given start keeps s̈ as near 0 as it can.
@@ -322,10 +302,12 @@ fn timed_map(
         (t[stages].is_finite() && t[stages] > 0.0).then_some((t, x))
     };
 
-    // Where the smoothed map overshoots a limit, the caps of the stages around it come down by what
-    // that limit needs (x is speed squared: velocity needs 1/r², acceleration 1/r, jerk r^(-2/3)),
-    // and the profile is solved again; whatever overshoot remains is taken out by stretching.
-    let mut scale = vec![1.0f64; stages + 1];
+    // Where the smoothed map overshoots a limit, the stages around it may go no faster than the
+    // profile did there, less what that limit needs (x is speed squared: velocity needs 1/r²,
+    // acceleration 1/r, jerk r^(-2/3)), and the profile is solved again; whatever overshoot remains
+    // is taken out by stretching. Lowering the stages' caps instead would change nothing where the
+    // profile runs under them, as it does braking into a path's end.
+    let mut lowered = vec![f64::INFINITY; stages + 1];
     let mut best: Option<(f32, Vec<f32>)> = None;
     // A given start's candidate needing the least stretch, for `restretched`: that stretch, its
     // knot and its points.
@@ -339,9 +321,9 @@ fn timed_map(
         REFINEMENTS
     };
     for _ in 0..rounds {
-        // Lowered caps can leave a given start's speed no longer controllable: eased, the rounds
+        // Lowered speeds can leave a given start's no longer controllable: eased, the rounds
         // then stop, keeping what the earlier ones found.
-        let Some((t, x)) = profile(&scale) else {
+        let Some((t, x)) = profile(&lowered) else {
             if eased {
                 break;
             }
@@ -435,8 +417,9 @@ fn timed_map(
         if stretch <= 1.0 {
             break;
         }
-        // Two map spans either side, in stages at the profile's average pace.
-        let reach = (2 * STAGES_PER_SPAN * spans).div_ceil(m) as isize;
+        // Half a map span either side, in stages at the profile's average pace: wider, and the
+        // slowing costs more time than the stretch it saves.
+        let reach = (STAGES_PER_SPAN * spans).div_ceil(2 * m) as isize;
         let mut factor = vec![1.0f64; stages + 1];
         for (s, f) in overshoots {
             let center = (s as f64 / step).round() as isize;
@@ -444,12 +427,18 @@ fn timed_map(
                 factor[i as usize] = factor[i as usize].min(f as f64);
             }
         }
-        // A given start speed stays.
+        // A given start's speed stays, and the speeds after it come down only as it can slow to
+        // them: by nothing at the start, easing to all of it over `START_RAMP` path spans.
         if start_speed.is_some() {
-            factor[0] = 1.0;
+            for (i, f) in factor.iter_mut().enumerate() {
+                let along = (i as f64 * step / f64::from(START_RAMP)).min(1.0);
+                *f = 1.0 - (1.0 - *f) * along;
+            }
         }
-        for (sc, f) in scale.iter_mut().zip(factor) {
-            *sc *= f;
+        for ((cap, f), x) in lowered.iter_mut().zip(factor).zip(&x) {
+            if f < 1.0 {
+                *cap = cap.min(x * f);
+            }
         }
     }
     let (knot, points) = match (best, start_speed) {

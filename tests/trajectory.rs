@@ -371,6 +371,59 @@ fn time_optimal_timing_beats_uniform_timing_within_the_limits() {
     );
 }
 
+/// A straight line is timed close to the soonest its slowest joint could cover its distance: the
+/// time map is not stretched as a whole for what its smoothing overshoots braking into the end.
+#[test]
+fn straight_lines_take_little_longer_than_their_slowest_joint_needs() {
+    let robot = common::panda().unwrap();
+    let n = robot.dof();
+    let (velocity, acceleration) = (robot.max_velocity(), robot.max_acceleration());
+    let mut rng = Rng::new(7);
+    let (mut ratios, mut cruising) = (vec![], 0);
+    for _ in 0..16 {
+        // Most of a sweep across the front, long enough to cruise at a velocity limit.
+        let start = [-1.2, -0.6, 0.0, -2.2, 0.0, 1.6, 0.8];
+        let across = [1.2, -0.4, 0.3, -2.0, 0.3, 1.9, 0.5];
+        let part = rng.range(0.7, 1.0);
+        let end: Vec<f32> = (0..n)
+            .map(|j| start[j] + part * (across[j] - start[j]))
+            .collect();
+        // Ends tripled, so it rests there; the rest evenly spaced.
+        let points: usize = 24;
+        let mut path = Vec::with_capacity(points * n);
+        for i in 0..points {
+            let u = i.saturating_sub(2).min(points - 5) as f32 / (points - 5) as f32;
+            path.extend((0..n).map(|j| start[j] + u * (end[j] - start[j])));
+        }
+        // Rest to rest at the acceleration limit, cruising at the velocity limit if it gets there:
+        // no joint can cover its distance sooner.
+        let soonest = (0..n)
+            .map(|j| {
+                let (d, v, a) = ((end[j] - start[j]).abs(), velocity[j], acceleration[j]);
+                cruising += usize::from(d > v * v / a);
+                if d > v * v / a {
+                    d / v + v / a
+                } else {
+                    2.0 * (d / a).sqrt()
+                }
+            })
+            .fold(0.0, f32::max);
+        let trajectory = Trajectory::try_new(&robot, &path, 1.0).unwrap();
+        trajectory.check(&robot).unwrap();
+        ratios.push(trajectory.duration() / soonest);
+    }
+    assert!(cruising > 0, "no joint reaches its velocity limit");
+    assert!(
+        ratios.iter().all(|&r| r >= 1.0),
+        "sooner than a joint can move: {ratios:?}"
+    );
+    // The rest is the jerk limit's: the acceleration cannot change at once.
+    assert!(
+        ratios.iter().all(|&r| r < 1.19),
+        "longer than the limits need: {ratios:?}"
+    );
+}
+
 #[test]
 fn moving_starts_are_timed_from_their_motion_or_refused() {
     let robot = common::panda().unwrap();
@@ -433,7 +486,7 @@ fn replanning_while_moving_is_timed_about_as_fast_as_from_rest() {
         .collect();
     let plans = batchplan::plan(&cpu, &worlds, &problems, &PlanOptions::default()).unwrap();
     let mut state = JointState::new(n);
-    let mut replanned = 0;
+    let (mut replanned, mut against_rest) = (0, 0.0);
     for s in plans.solved().take(12) {
         let trajectory = Trajectory::try_new(&robot, s.solution, 1.0).unwrap();
         trajectory.at(0.5 * trajectory.duration(), &mut state);
@@ -462,9 +515,14 @@ fn replanning_while_moving_is_timed_about_as_fast_as_from_rest() {
             s.index,
             moving.duration()
         );
+        against_rest += moving.duration() / from_rest;
         replanned += 1;
     }
     assert!(replanned >= 10, "only {replanned} replanned");
+    // Slowing the profile right after the start, which cannot slow that soon, loses the rounds:
+    // 1.87 on average without the easing, 1.77 with it.
+    let mean = against_rest / replanned as f32;
+    assert!(mean < 1.82, "{mean} times as long as from rest on average");
 }
 
 #[test]
