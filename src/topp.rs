@@ -390,7 +390,15 @@ fn timed_map(
                 .as_ref()
                 .map_or(f32::INFINITY, |(r, ..)| r * (1.0 + 1e-4));
             let (stretch, overshoots) = assess(
-                robot, cp, hand, tau as f32, &points, samples, target, eased, beaten,
+                robot,
+                cp,
+                hand,
+                tau as f32,
+                &points,
+                samples,
+                target,
+                eased.then_some((0.0, 3)),
+                beaten,
             );
             let knot = tau as f32 * stretch;
             let duration = |knot: f32, points: &[f32]| knot * (points.len() - 3) as f32;
@@ -456,7 +464,7 @@ fn timed_map(
                 &points,
                 CHECK_SAMPLES,
                 1.0,
-                /* eased */ false,
+                /* eased from */ None,
                 f32::INFINITY,
             );
             Some((knot * stretch * STRETCH_MARGIN, points))
@@ -495,7 +503,7 @@ fn restretched(
             &points,
             CHECK_SAMPLES,
             target,
-            /* eased */ true,
+            /* eased from */ Some((0.0, 3)),
             f32::INFINITY,
         );
         if needed <= 1.0 {
@@ -563,9 +571,17 @@ pub(crate) fn derivatives(
     }
 }
 
-/// Whether the time map `points` at `knot` seconds per span keeps every joint's velocity,
-/// acceleration and jerk within its limits, less the margin a map that cannot stretch leaves.
-pub(crate) fn within_limits(robot: &Robot, cp: &[f32], knot: f32, points: &[f32]) -> bool {
+/// Whether the time map `points` at `knot` seconds per span, which starts in a given motion at
+/// path position `from`, keeps every joint's velocity, acceleration and jerk within its limits,
+/// less the margin a map that cannot stretch leaves. The velocity it starts with is not the map's
+/// to choose: its limit is the full one there, easing to the margin over `START_RAMP` path spans.
+pub(crate) fn within_limits(
+    robot: &Robot,
+    cp: &[f32],
+    knot: f32,
+    points: &[f32],
+    from: f32,
+) -> bool {
     assess(
         robot,
         cp,
@@ -574,8 +590,10 @@ pub(crate) fn within_limits(robot: &Robot, cp: &[f32], knot: f32, points: &[f32]
         points,
         CHECK_SAMPLES,
         1.0 / (STRETCH_MARGIN * STRETCH_MARGIN),
-        /* eased */ false,
-        f32::INFINITY,
+        // The velocity alone: the map sets the stop's acceleration and jerk from its start on.
+        Some((from, 1)),
+        // Past the limits at all, it does not fit: no need to find by how much.
+        1.0,
     )
     .0 <= 1.0
 }
@@ -583,8 +601,10 @@ pub(crate) fn within_limits(robot: &Robot, cp: &[f32], knot: f32, points: &[f32]
 /// How much longer the time map must take for every joint's sampled velocity, acceleration and jerk
 /// to keep its limits, and the hand's speed its caps (velocity scales with 1/k, acceleration 1/k²,
 /// jerk 1/k³; at least 1), and where it overshoots: each such sample's path position and the factor
-/// on x that limit needs there. The limits are `target` of the robot's; with `eased`, a given
-/// start's, they ease from the full limits at the start to `target` over `START_RAMP` path spans.
+/// on x that limit needs there. The limits are `target` of the robot's; with `eased`, the path
+/// position of a given start and how many of velocity, acceleration and jerk it eases, those ease
+/// from the full limits there to `target` over `START_RAMP` path spans, and a hand's caps with
+/// them.
 /// Once the stretch passes `beaten`, it returns what it has found.
 #[expect(
     clippy::too_many_arguments,
@@ -598,7 +618,7 @@ fn assess(
     points: &[f32],
     samples: usize,
     target: f32,
-    eased: bool,
+    eased: Option<(f32, usize)>,
     beaten: f32,
 ) -> (f32, Vec<(f32, f32)>) {
     let n = robot.dof();
@@ -623,12 +643,10 @@ fn assess(
             let map = |w: [f32; 4]| (0..4).map(|i| w[i] * points[m + i]).sum::<f32>();
             // How much more than `target` the limits are here: from the full ones at a given
             // start to none after the ramp.
-            let relief = if eased {
-                let along = (map(spline::basis(u)) / START_RAMP).clamp(0.0, 1.0);
-                (target + (1.0 - target) * (1.0 - along)) / target
-            } else {
-                1.0
-            };
+            let (relief, eased_orders) = eased.map_or((1.0, 0), |(from, orders)| {
+                let along = ((map(spline::basis(u)) - from) / START_RAMP).clamp(0.0, 1.0);
+                ((target + (1.0 - target) * (1.0 - along)) / target, orders)
+            });
             let mut factor = 1.0f32;
             if let Some(hand) = hand {
                 let speed = map(spline::basis_d1(u)).abs() / knot;
@@ -646,6 +664,7 @@ fn assess(
             }
             for (d, limit) in out.iter().zip(&targets) {
                 for order in 0..3 {
+                    let relief = if order < eased_orders { relief } else { 1.0 };
                     let ratio = d[order].abs() / (limit[order] * relief);
                     if ratio > floor[order] {
                         let root = ratio.powf(1.0 / (order + 1) as f32);

@@ -298,11 +298,23 @@ impl Trajectory {
         }
     }
 
+    /// The time map's third derivative at time `t`, constant along each of its spans.
+    fn map_jerk(&self, t: f32) -> f32 {
+        let (h, maps) = (self.knot_interval, self.time_points.len() - 3);
+        if h <= 0.0 {
+            return 0.0;
+        }
+        let m = ((t.max(0.0) / h) as usize).min(maps - 1);
+        let third: f32 = (0..4).map(|i| BASIS_D3[i] * self.time_points[m + i]).sum();
+        third / (h * h * h)
+    }
+
     /// This trajectory from time `t` on, braking to rest along its path: a controlled stop, on a
     /// path already checked, for when the motion must not go on (an obstacle appeared, a replan
     /// failed). It starts in exactly the state at `t` and stops as soon along the path as a time
-    /// map braking at an even rate within the limits allows; verify it with
-    /// [`Trajectory::check_from`]. It keeps the joints' limits; caps on a hand's speed
+    /// map allows that brakes at an even rate within the limits, at once or after carrying on as
+    /// the motion was going for one of its spans; verify it with [`Trajectory::check_from`]. It
+    /// keeps the joints' limits; caps on a hand's speed
     /// ([`Trajectory::with_hand_speed`]) are not kept. Errors with [`Error::Unsafe`] if no such
     /// stop ends before the path does, where this trajectory comes to rest anyway.
     pub fn stop(&self, robot: &Robot, t: f32) -> Result<Self> {
@@ -317,15 +329,15 @@ impl Trajectory {
         // nothing to brake, so the map stands still.
         let mut state = JointState::new(self.dof);
         self.at(t, &mut state);
-        let (v0, a0) = if state
+        let (v0, a0, j0) = if state
             .velocity
             .iter()
             .chain(&state.acceleration)
             .all(|x| x.abs() < 1e-6)
         {
-            (0.0, 0.0)
+            (0.0, 0.0, 0.0)
         } else {
-            (v0, a0)
+            (v0, a0, self.map_jerk(t))
         };
         // The path from the span the stop starts in: dropping k control points shifts s by exactly
         // k, and a map near zero keeps its start's derivatives precise in f32.
@@ -335,58 +347,72 @@ impl Trajectory {
         let (s0, spans) = (s0 - k as f32, (self.spans() - k) as f32);
         // The map of `m` spans braking hardest within the limits (see `stop_map`): knot intervals
         // double until one keeps the limits, then bisect between it and the last that did not.
-        // The `m` that stops soonest along the path wins.
+        // Each `m` brakes from its start, or after a span that carries on with the trajectory's
+        // jerk, half of it or none: from a state near a jerk limit, as while a motion still
+        // gathers speed, braking at once breaks it. The map that stops soonest along the path wins.
         let mut points = [0.0f32; STOP_MAX_SPANS + 3];
-        let mut best: Option<(f32, f32, usize)> = None;
-        let fits = |tau: f32, m: usize, map: &mut [f32]| {
-            let end = stop_map(s0, v0, a0, m, tau, map);
+        let mut best: Option<(f32, f32, usize, Option<f32>)> = None;
+        let fits = |tau: f32, m: usize, jerk: Option<f32>, map: &mut [f32]| {
+            let end = stop_map(s0, v0, a0, jerk, m, tau, map);
             (
                 end,
                 end <= spans + 1e-4 * spans.max(1.0)
                     && runs_forward(map)
-                    && topp::within_limits(robot, cp, tau, map),
+                    && topp::within_limits(robot, cp, tau, map, s0),
             )
         };
-        for m in STOP_SPANS {
-            let map = &mut points[..m + 3];
-            let (mut fail, mut tau) = (0.0f32, STOP_FIRST_KNOT);
-            let found = loop {
-                let (end, ok) = fits(tau, m, map);
-                if ok {
-                    break true;
-                }
-                if end > spans || tau > STOP_LAST_KNOT || best.is_some_and(|(e, ..)| end >= e) {
-                    break false;
-                }
-                (fail, tau) = (tau, 2.0 * tau);
-            };
-            if !found {
-                continue;
-            }
-            for _ in 0..STOP_BISECTIONS {
-                let middle = if fail > 0.0 {
-                    (fail * tau).sqrt()
-                } else {
-                    0.5 * tau
+        // Braking at once, then with the starting jerks that differ: one where the map has none;
+        // maps of two spans have no point to carry one.
+        let later: &[Option<f32>] = if j0 == 0.0 {
+            &[Some(0.0)]
+        } else {
+            &[Some(j0), Some(0.5 * j0), Some(0.0)]
+        };
+        for jerks in [&[None][..], later] {
+            let spans_tried = STOP_SPANS
+                .into_iter()
+                .filter(|&m| m > 2 || jerks[0].is_none());
+            for (m, jerk) in spans_tried.flat_map(|m| jerks.iter().map(move |&jerk| (m, jerk))) {
+                let map = &mut points[..m + 3];
+                let (mut fail, mut tau) = (0.0f32, STOP_FIRST_KNOT);
+                let found = loop {
+                    let (end, ok) = fits(tau, m, jerk, map);
+                    if ok {
+                        break true;
+                    }
+                    if end > spans || tau > STOP_LAST_KNOT || best.is_some_and(|(e, ..)| end >= e) {
+                        break false;
+                    }
+                    (fail, tau) = (tau, 2.0 * tau);
                 };
-                if fits(middle, m, map).1 {
-                    tau = middle
-                } else {
-                    fail = middle
+                if !found {
+                    continue;
                 }
-            }
-            let end = stop_map(s0, v0, a0, m, tau, map);
-            if best.is_none_or(|(e, ..)| end < e) {
-                best = Some((end, tau, m));
+                for _ in 0..STOP_BISECTIONS {
+                    let middle = if fail > 0.0 {
+                        (fail * tau).sqrt()
+                    } else {
+                        0.5 * tau
+                    };
+                    if fits(middle, m, jerk, map).1 {
+                        tau = middle
+                    } else {
+                        fail = middle
+                    }
+                }
+                let end = stop_map(s0, v0, a0, jerk, m, tau, map);
+                if best.is_none_or(|(e, ..)| end < e) {
+                    best = Some((end, tau, m, jerk));
+                }
             }
         }
-        let Some((_, tau, m)) = best else {
+        let Some((_, tau, m, jerk)) = best else {
             return Err(Error::Unsafe(format!(
                 "no stop from {t} s ends before the path does; the trajectory comes to rest there"
             )));
         };
         let mut map = vec![0.0f32; m + 3];
-        stop_map(s0, v0, a0, m, tau, &mut map);
+        stop_map(s0, v0, a0, jerk, m, tau, &mut map);
         Ok(Self {
             dof: n,
             control_points: cp.to_vec(),
@@ -647,15 +673,30 @@ fn runs_forward(tp: &[f32]) -> bool {
 }
 
 /// A stop's time map of `m` spans at `tau` seconds each into `map` (`m + 3` points): the first
-/// three continue (s, ṡ, s̈); the steps between points, its rate, then fall evenly to zero, and
-/// the last three are equal, so it ends at rest. Returns where it stops.
-fn stop_map(s0: f32, v0: f32, a0: f32, m: usize, tau: f32, map: &mut [f32]) -> f32 {
+/// three continue (s, ṡ, s̈), and with `j0` (and more than two spans) the fourth its third
+/// derivative too, so its first span carries on as the motion was going; the steps between points,
+/// its rate, then fall evenly to zero, and the last three are equal, so it ends at rest. Returns
+/// where it stops.
+fn stop_map(
+    s0: f32,
+    v0: f32,
+    a0: f32,
+    j0: Option<f32>,
+    m: usize,
+    tau: f32,
+    map: &mut [f32],
+) -> f32 {
     map[0] = s0 - v0 * tau + a0 * tau * tau / 3.0;
     map[1] = s0 - a0 * tau * tau / 6.0;
     map[2] = s0 + v0 * tau + a0 * tau * tau / 3.0;
-    let second = map[2] - map[1];
-    for k in 2..m {
-        map[k + 1] = map[k] + second * (m - k) as f32 / (m - 1) as f32;
+    let mut from = 2;
+    if let Some(j0) = j0.filter(|_| m > 2) {
+        map[3] = j0 * tau * tau * tau + map[0] - 3.0 * map[1] + 3.0 * map[2];
+        from = 3;
+    }
+    let step = map[from] - map[from - 1];
+    for k in from..m {
+        map[k + 1] = map[k] + step * (m - k) as f32 / (m - from + 1) as f32;
     }
     let end = map[m];
     map[m + 1..].fill(end);
