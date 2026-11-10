@@ -258,17 +258,17 @@ Lengths and durations are relative to batchplan's, on the problems both solve va
 
 ### Batches and the GPU
 
-Planning runs on CPU threads on either device; IK and trajectory optimization also run on the GPU. Each call here solves IK and plans a batch of tabletop grasps, end to end, in solved problems per second (the M4 Pro's at 0.2.0, with IK's defaults then, 32 seeds of 60 steps):
+Planning runs on CPU threads on either device; IK and trajectory optimization also run on the GPU. Each call here solves IK and plans a batch of tabletop grasps, end to end, in solved problems per second:
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU (14 cores) | Radeon 8060S GPU | Ryzen AI Max+ 395 CPU (16 cores) |
 |---|---|---|---|---|
-| 1 | 114 | **1,752** | 259 | **1,826** |
-| 8 | 878 | **2,835** | 1,943 | **4,362** |
-| 64 | 2,577 | **4,149** | 4,269 | **6,050** |
-| 512 | **8,611** | 4,882 | **17,521** | 6,832 |
-| 4,096 | **10,763** | 4,643 | **20,977** | 7,084 |
+| 1 | 80 | **1,413** | 259 | **1,826** |
+| 8 | 581 | **3,219** | 1,943 | **4,362** |
+| 64 | 1,993 | **4,576** | 4,269 | **6,050** |
+| 512 | **8,166** | 5,403 | **17,521** | 6,832 |
+| 4,096 | **10,583** | 5,285 | **20,977** | 7,084 |
 
-A GPU call costs 4 ms on the Radeon (10 ms on the M4 Pro at 0.2.0), so one problem at a time runs 7–15 times faster on the CPU; from a few hundred problems per call the GPU overtakes it, and at 4,096 it solves 2.3–3 times as many.
+A GPU call costs 4 ms on the Radeon (12 ms on the M4 Pro), so one problem at a time runs 7–18 times faster on the CPU; from a few hundred problems per call the GPU overtakes it, and at 4,096 it solves 2–3 times as many.
 
 ### When another library fits better
 

@@ -300,9 +300,9 @@ By their own checks, VAMP solved 98.6% (98.5% with 2 rad steps), OMPL 90.5%, Rob
 
 ## Against RoboKit
 
-[RoboKit](https://github.com/openrobokit/robokit) (736f112) ships a benchmark of inverse kinematics and one of motion planning to pose goals, both judged by its own scorer. Its harnesses ran unchanged, and batchplan (9d49051) ran inside them: the same targets and problems, warm-ups and judge. `scripts/robokit/` holds the adapters ([commands](#reproducing)). Everything ran on one AWS g5.xlarge, five runs each, but the two rows timed under 150 rad/s³, which ran on a second: an NVIDIA A10G (driver 595.112.07; RoboKit on CUDA, batchplan on Vulkan) and 4 threads of an AMD EPYC 7R32.
+[RoboKit](https://github.com/openrobokit/robokit) (736f112) ships a benchmark of inverse kinematics and one of motion planning to pose goals, both judged by its own scorer. Its harnesses ran unchanged, and batchplan (9d49051) ran inside them: the same targets and problems, warm-ups and judge. `scripts/robokit/` holds the adapters ([commands](#reproducing)). Everything ran on one AWS g5.xlarge, five runs each, but the two rows timed under 150 rad/s³, which ran on a second, and the four sampled 31 times per plan, on a third: an NVIDIA A10G (driver 595.112.07; RoboKit on CUDA, batchplan on Vulkan) and 4 threads of an AMD EPYC 7R32.
 
-**Motion planning.** The 2,590 problems of MotionBenchMaker (799) and MπNets (1,791), each a start configuration and a goal pose among obstacles, planned one at a time. The judge is the benchmark's, with cuRobo's checks: the goal reached, no collision, and velocity, acceleration (15 rad/s²) and jerk (500 rad/s³) within limits, by 5-point stencils on each plan's own samples (batchplan's 25 ms apart or less, RoboKit's 31 per plan) interpolated onto 25 ms. Success allows joint positions 0.2 rad past their limits, as cuRobo's benchmark does, and "strict" allows none. For batchplan one `plan` call takes each pose goal, and the path is timed 1% under the judge's limits. Each planner's timer covers planning and timing the trajectory; building the scene is outside it for both. As run, the adapter counted one sample too many on about one batchplan motion in eight, which lengthens that motion by a step (25 ms at most) in these tables; the adapter in `scripts/robokit/` no longer does.
+**Motion planning.** The 2,590 problems of MotionBenchMaker (799) and MπNets (1,791), each a start configuration and a goal pose among obstacles, planned one at a time. The judge is the benchmark's, with cuRobo's checks: the goal reached, no collision, and velocity, acceleration (15 rad/s²) and jerk (500 rad/s³) within limits, by 5-point stencils on each plan's own samples (batchplan's 25 ms apart or less, or 31 per plan in the last four rows; RoboKit's 31 per plan) interpolated onto 25 ms. Success allows joint positions 0.2 rad past their limits, as cuRobo's benchmark does, and "strict" allows none. For batchplan one `plan` call takes each pose goal, and the path is timed 1% under the judge's limits. Each planner's timer covers planning and timing the trajectory; building the scene is outside it for both. As run, the adapter counted one sample too many on about one batchplan motion in eight, which lengthens that motion by a step (25 ms at most) in the table's first seven rows; the adapter in `scripts/robokit/` no longer does, nor did it for the rows sampled 31 times per plan.
 
 | Planner | Success (strict) | Time per problem, mean / median / 98th | Motion (median) | Path (median) | Jerk (median) |
 |---|---|---|---|---|---|
@@ -313,11 +313,16 @@ By their own checks, VAMP solved 98.6% (98.5% with 2 rad steps), OMPL 90.5%, Rob
 | batchplan, 4 optimized seeds, A10G | 99.58% (99.58%) | 17.7 / 19.2 / 47.7 ms | 1.164 s | 3.180 rad | 239 rad/s³ |
 | batchplan timed under 150 rad/s³, A10G | 99.61% (99.61%) | 5.1 / 4.7 / 8.6 ms | 1.468 s | 3.293 rad | 125 rad/s³ |
 | batchplan timed under 150 rad/s³, 4 optimized seeds, A10G | 99.61% (99.61%) | 17.5 / 19.3 / 47.8 ms | 1.344 s | 3.180 rad | 116 rad/s³ |
+| batchplan, 31 samples per plan, A10G | 99.46% (99.46%) | 5.2 / 4.8 / 8.5 ms | 1.255 s | 3.292 rad | 186 rad/s³ |
+| batchplan, 31 samples per plan, 4 optimized seeds, A10G | 99.50% (99.50%) | 17.6 / 19.1 / 47.5 ms | 1.159 s | 3.178 rad | 178 rad/s³ |
+| batchplan timed under 300 rad/s³, 31 samples per plan, A10G | 99.38% (99.38%) | 5.2 / 4.8 / 8.7 ms | 1.311 s | 3.290 rad | 147 rad/s³ |
+| batchplan timed under 300 rad/s³, 31 samples per plan, 4 optimized seeds, A10G | 99.46% (99.46%) | 17.4 / 18.9 / 47.4 ms | 1.201 s | 3.178 rad | 152 rad/s³ |
 
-- **Success** is the same to within one problem. Every planner solves all of MotionBenchMaker; on MπNets RoboKit solves 99.41%, batchplan 99.44% on the CPU and 99.39% on the A10G.
+- **Success** at 25 ms samples (the first seven rows) is the same to within one problem. Every planner solves all of MotionBenchMaker; on MπNets RoboKit solves 99.41%, batchplan 99.44% on the CPU and 99.39% on the A10G.
 - **Time.** Without optimization batchplan answers in a quarter of the time on either device. With four optimized seeds (`PlanOptions::seeds`) on the A10G it takes 17.7 ms on average against RoboKit's 23.5, and 19.2 against 18.9 at the median; on four CPU threads the optimization adds about 134 ms.
 - **Motions.** Searched and shortcut, batchplan's motions take 3% longer than RoboKit's at the median, over paths of the same median length; with four optimized seeds, 4–5% less, over paths 3.5% shorter.
 - **Jerk.** The first five rows are timed under different limits: batchplan's motions under the judge's 500 rad/s³, which they keep along the whole curve and whose samples read 245; RoboKit plans under 150 rad/s³, and its read 126. Timed under 150 too (`RobotOptions::max_jerk`, a second run on the same kind of instance), batchplan's read 125 and take 20% longer than RoboKit's, or 10% with four optimized seeds: at the same jerk RoboKit's motions are the shorter.
+- **Sampling.** The judge's jerk is a reading of the samples it is given, and sparser samples read lower. Sampled 31 times per plan as RoboKit's are (`BATCHPLAN_FRAMES=31`), the same motions read 186 rad/s³ where 25 ms samples read 245, and motions timed under 300 rad/s³ read 147–152: with four optimized seeds those take 1.201 s at the median against RoboKit's 1.220 s, for 17.4 ms of planning on average against 23.5 and 18.9 at the median against 18.9, and read 152 against 126. At 31 samples batchplan's success reads 2 to 5 problems under RoboKit's: in the first of these rows' runs, four motions of 2.7–4.6 s, whose samples are 90–150 ms apart, read past a limit, and all else that failed did not reach its goal.
 
 **Inverse kinematics.** The benchmark's Panda targets without obstacles, one batched solve, in milliseconds (success): a target is solved within 5 mm and 0.05 rad. batchplan runs its defaults, 64 seeds of 30 steps.
 
@@ -338,12 +343,12 @@ RoboKit's IK is the quickest on the A10G at every batch size: about twice as qui
 - **plan:** plan from the start to the set's first IK solution, as in the comparison above;
 - **IK + plan:** plan to the goal pose: `plan` solves IK from the start and ends at the nearest collision-free solution ([pose goals](planning.md#planning-a-path)).
 
-It checks success as above, on cuRobo's spheres, which ship with batchplan. The M4 Pro's timings are medians of three runs at 5fae1ca, with IK's defaults then (32 seeds of 60 steps), and its GPU also drives its display; the Ryzen's and the Radeon's are medians of three runs with the code of 9d49051, each started with the machine's load under 6, and taken without `--meshes`, which only their mesh column was run with: in runs with it, in another session, IK + plan read 3,048 and 2,510 problems/s. The M4 Pro's were taken with it, so its rows and theirs are not measured alike. "Free ends" counts the problems whose start and given IK solution are collision-free on these spheres, which caps what planning can reach. Throughput runs each set as one batch; time per problem covers the first 20 problems of each set, one at a time.
+It checks success as above, on cuRobo's spheres, which ship with batchplan. The timings are medians of three runs, each started with the machine's load under 6: the M4 Pro's with the code of bf2f5b9 (its GPU also drives its display), the Ryzen's and the Radeon's with the code of 9d49051. All were taken without `--meshes`, which only the mesh column was run with: in runs with it, in another session, the Ryzen's and the Radeon's IK + plan read 3,048 and 2,510 problems/s. "Free ends" counts the problems whose start and given IK solution are collision-free on these spheres, which caps what planning can reach. Throughput runs each set as one batch; time per problem covers the first 20 problems of each set, one at a time.
 
 | Device | Free ends | Plan | IK + plan | IK + plan, clear on meshes | Plan, problems/s | Plan, time per problem (median / p98) | IK + plan, problems/s | IK + plan, time per problem (mean / p98) |
 |---|---|---|---|---|---|---|---|---|
-| M4 Pro CPU, 14 threads | 98.1% | 97.9% | 98.3% | 91.6% | 23,404 | 0.2 / 1.6 ms | 2,384 | 1 / 2 ms |
-| M4 Pro GPU | 98.1% | 97.9% | 98.3% | 91.5% | 22,114 | 0.2 / 1.6 ms | 1,953 | 10 / 24 ms |
+| M4 Pro CPU, 14 threads | 98.1% | 97.9% | 98.3% | 92.1% | 19,278 | 0.2 / 2.7 ms | 2,565 | 1 / 6 ms |
+| M4 Pro GPU | 98.1% | 97.9% | 98.3% | 92.2% | 22,734 | 0.2 / 1.4 ms | 3,300 | 5 / 14 ms |
 | Ryzen AI Max+ 395, 32 threads | 98.1% | 97.9% | 98.3% | 92.2% | 38,158 | 0.1 / 1.1 ms | 3,344 | 1 / 2 ms |
 | Radeon 8060S | 98.1% | 97.9% | 98.3% | 92.1% | 34,121 | 0.1 / 1.1 ms | 6,225 | 5 / 8 ms |
 
@@ -353,7 +358,7 @@ Planning runs on each device's own CPU threads, so the devices plan alike. IK ru
 
 The motions stay within the Panda's limits: over the sets, median motions take 1.3–3.2 s, peak accelerations reach 4.9 rad/s² against a 5 rad/s² limit, and peak jerks 44–46 rad/s³ against 50.
 
-Planning alone clears the meshes in 92.9% of the problems. IK + plan clears them less often, in 91.5–92.2%: its goals are chosen on the spheres too, so some of them touch the meshes.
+Planning alone clears the meshes in 92.9% of the problems. IK + plan clears them less often, in 92.1–92.2%: its goals are chosen on the spheres too, so some of them touch the meshes.
 
 ## GPU and CPU throughput
 
@@ -367,23 +372,23 @@ Every device solves the same 484 of 512 targets and plans all 484.
 | Machine | IK seeds/s, GPU / CPU | Planning, problems/s | End to end, GPU | End to end, CPU |
 |---|---|---|---|---|
 | Ryzen AI Max+ 395 and Radeon 8060S | 1,237,000–1,424,000 / 449,000–467,000 | 197,000–336,000 | **17,171–19,602 problems/s** | 6,507–6,707 problems/s (32 threads) |
-| M4 Pro (0.2.0, at 32 seeds × 60 iterations) | 291,000–321,000 / 168,000–171,000 | 108,000–181,000 | **8,046–8,782 problems/s** | 4,845–4,913 problems/s (14 threads) |
+| M4 Pro | 558,000–591,000 / 282,000–381,000 | 95,000–183,000 | **7,771–8,254 problems/s** | 3,984–5,453 problems/s (14 threads) |
 
-The M4 Pro's ranges cover runs after a warm-up run; the Ryzen's and the Radeon's, three runs each started with the machine's load under 6 (three more, straight after a half-hour benchmark, read about 9% lower). The first run after the GPU idles is up to 30% slower, and the M4 Pro's GPU, which also drives its display, varies with what is on screen.
+Each range covers three runs, each started with the machine's load under 6, the M4 Pro's at bf2f5b9 (on the Ryzen and the Radeon, three more, straight after a half-hour benchmark, read about 9% lower). The first run after the GPU idles is up to 30% slower, and the M4 Pro's GPU, which also drives its display, varies with what is on screen.
 
-Uploading the 512 worlds, which the example times first, took 0.1–0.2 ms on the M4 Pro on either device, at the commit that added `Device::warmup`: preparing each obstacle for the CPU's checks and, on the GPU, one buffer write. A distance grid adds its values, uploaded once however many worlds share it.
+Uploading the 512 worlds, which the example times first, takes 0.1 ms on the M4 Pro's CPU and 0.2 ms on its GPU: preparing each obstacle for the CPU's checks and, on the GPU, one buffer write. A distance grid adds its values, uploaded once however many worlds share it.
 
-By batch size, end to end, in solved problems per second (medians of three runs, the Ryzen's and the Radeon's in a later session than the table above; the M4 Pro's at 0.2.0, with IK's defaults then, 32 seeds of 60 steps):
+By batch size, end to end, in solved problems per second (medians of three runs: the M4 Pro's in the session of the table above, the Ryzen's and the Radeon's in a later one than theirs):
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU | Radeon 8060S | Ryzen CPU |
 |---|---|---|---|---|
-| 1 | 114 | **1,752** | 259 | **1,826** |
-| 8 | 878 | **2,835** | 1,943 | **4,362** |
-| 64 | 2,577 | **4,149** | 4,269 | **6,050** |
-| 512 | **8,611** | 4,882 | **17,521** | 6,832 |
-| 4,096 | **10,763** | 4,643 | **20,977** | 7,084 |
+| 1 | 80 | **1,413** | 259 | **1,826** |
+| 8 | 581 | **3,219** | 1,943 | **4,362** |
+| 64 | 1,993 | **4,576** | 4,269 | **6,050** |
+| 512 | **8,166** | 5,403 | **17,521** | 6,832 |
+| 4,096 | **10,583** | 5,285 | **20,977** | 7,084 |
 
-A GPU call costs 4 ms on the Radeon (10 ms on the M4 Pro at 0.2.0), so one problem at a time runs 7–15 times faster on the CPU. On the M4 Pro that cost varies from run to run: one problem's IK took 8 to 20 ms within one session, on batchplan 0.1.0 as on this version. The CPU fills its cores by 64 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.3 (M4 Pro) to 3.0 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 1.8 (M4 Pro, at 0.2.0) to 2.8 times (Radeon: 25 against 71 ms for 512 targets).
+A GPU call costs 4 ms on the Radeon (12 ms on the M4 Pro), so one problem at a time runs 7–18 times faster on the CPU. On the M4 Pro that cost varies from run to run and with how recently the GPU worked: one problem's IK took 8 to 20 ms within one session on batchplan 0.1.0 and 11 to 13 ms in these runs, one call after a warm-up, while the 2,600 problems' calls, one after another, take 5 ms each end to end. The CPU fills its cores by 64 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.0 (M4 Pro) to 3.0 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 1.6 (M4 Pro: 56 against 87 ms for 512 targets) to 2.8 times (Radeon: 25 against 71 ms).
 
 ## Tool paths
 
@@ -392,7 +397,7 @@ A GPU call costs 4 ms on the Radeon (10 ms on the M4 Pro at 0.2.0), so one probl
 | Machine | One move, one thread | 64 moves | 64 pours |
 |---|---|---|---|
 | Ryzen AI Max+ 395, 32 threads (at 2c98826) | 0.042 ms | 0.27 ms | 0.20 ms |
-| M4 Pro, 14 threads (load 4) | 0.048 ms | 0.42 ms | 0.27 ms |
+| M4 Pro, 14 threads (at bf2f5b9, the median of three runs) | 0.035 ms | 0.37 ms | 0.24 ms |
 
 Against the version before the audit that pinned the spline to the joint limits, weighed rotation in placing a sample along the path and kept the search's buffers as fields, in five alternating runs on the Ryzen: a move on one thread takes 2% longer (0.0416 against 0.0407 ms), batches of 64 moves 7% less time (0.265 against 0.284 ms), and pours 36% less (0.197 against 0.308 ms), since they no longer stop on the way. Counted with `perf stat`, a call of the 64 moves on one thread runs 0.3% more instructions (53.1 million against 52.9 million): the rest of the 2% is fewer instructions per cycle. Along the way, `perf` showed batches 7% slower while each search's buffers lived until the caller dropped it: 32 threads' allocations all freed on one thread, which glibc does slowly. A search now frees them on its own thread when it finishes.
 
@@ -415,16 +420,16 @@ Against the version before the audit that pinned the spline to the joint limits,
 
 ## Picking and placing
 
-`examples/tasks.rs` picks a box out of clutter on 64 random tabletops and sets it down at a free spot: a table, a box 3–7 cm wide and 4–10 cm tall, 2–5 more boxes up to 30 cm tall, and a spot 12 cm clear of them. Each `pick` tries every grasp `grasps` proposes for the box (16 or 24), each `place` both of its turns at the spot (`place_poses`). Times are the best of five calls of each size, the median of three runs, after a first call that compiles the GPU's kernels: the M4 Pro's on an idle machine, the Ryzen's and the Radeon's in runs each started with the machine's load under 6. The M4 Pro rows are 2c98826's, before a place ran each held object's candidates in parallel.
+`examples/tasks.rs` picks a box out of clutter on 64 random tabletops and sets it down at a free spot: a table, a box 3–7 cm wide and 4–10 cm tall, 2–5 more boxes up to 30 cm tall, and a spot 12 cm clear of them. Each `pick` tries every grasp `grasps` proposes for the box (16 or 24), each `place` both of its turns at the spot (`place_poses`). Times are the best of five calls of each size, the median of three runs, after a first call that compiles the GPU's kernels, each run started with the machine's load under 6. The M4 Pro rows are bf2f5b9's.
 
 | Device | Pick, 1 task | 16 | 64 | Place, 1 task | 16 | Through |
 |---|---|---|---|---|---|---|
 | Ryzen AI Max+ 395, 32 threads | 6.8 ms | 82 ms | 323 ms | 2.4 ms | 12.1 ms | 63 of 64 picks, every place |
 | Radeon 8060S | 9.6 ms | 31 ms | 107 ms | 6.7 ms | 17.2 ms | the same |
-| M4 Pro, 14 threads | 7.4 ms | 112 ms | 434 ms | 2.2 ms | 18.1 ms | the same |
-| M4 Pro's GPU | 15.3 ms | 59 ms | 193 ms | 9.4 ms | 24.9 ms | the same |
+| M4 Pro, 14 threads | 7.4 ms | 92 ms | 374 ms | 2.2 ms | 12.5 ms | the same |
+| M4 Pro's GPU | 10.3 ms | 48 ms | 175 ms | 5.8 ms | 19.1 ms | the same |
 
-The pick that fails has every grasp blocked by clutter or out of reach. A pick's time is mostly IK at the grasps (24 problems of 64 seeds each; the M4 Pro's times above were measured at 32), which the GPU speeds up from 16 tasks on. A place solves IK for the robot alone in one batch: where the hand lets go fixes where the object is, so each task's solutions are then checked holding its object, on the CPU's lanes. Holding each object in its own IK call took 198 ms for 16 places on the M4 Pro's GPU, against 25 ms at 2c98826. Each held object's candidates are a batch of their own at every step, and the batches run in parallel: run one after another, 16 places took 15.9 ms on the Ryzen and 21.5 ms on the Radeon, in alternating runs with the same plans.
+The pick that fails has every grasp blocked by clutter or out of reach. A pick's time is mostly IK at the grasps (24 problems of 64 seeds each), which the GPU speeds up from 16 tasks on. A place solves IK for the robot alone in one batch: where the hand lets go fixes where the object is, so each task's solutions are then checked holding its object, on the CPU's lanes. Holding each object in its own IK call took 198 ms for 16 places on the M4 Pro's GPU, against 25 ms at 2c98826. Each held object's candidates are a batch of their own at every step, and the batches run in parallel: run one after another, 16 places took 15.9 ms on the Ryzen and 21.5 ms on the Radeon, in alternating runs with the same plans.
 
 ## Joining motions
 
@@ -487,32 +492,32 @@ Paths, their lengths and what is solved are unchanged, and more [joins](#joining
 
 | 165 motions | Duration | 5 V, gain 16 | 5 V, gain 32 | 7.4 V, gain 16 | 7.4 V, gain 32 |
 |---|---|---|---|---|---|
-| Limits as given | 1.74 s | 16.6° (6.3%) | 8.4° (6.3%) | 11.3° | 5.6° |
-| Speed × 0.75 | 2.32 s | 13.0° (0.6%) | 6.6° (0.5%) | 8.8° | 4.4° |
-| Acceleration × 0.5 | 2.26 s | 13.3° (0.5%) | 6.6° (0.5%) | 9.0° | 4.5° |
-| Jerk × 0.25 | 2.39 s | 14.1° (1.9%) | 7.0° (1.7%) | 9.4° | 4.7° |
+| Limits as given | 1.70 s | 16.5° (7.4%) | 8.3° (7.3%) | 11.3° | 5.6° |
+| Speed × 0.75 | 2.26 s | 13.0° (0.8%) | 6.5° (0.7%) | 8.7° | 4.4° |
+| Acceleration × 0.5 | 2.15 s | 13.5° (0.8%) | 6.8° (0.7%) | 9.2° | 4.6° |
+| Jerk × 0.25 | 2.35 s | 14.2° (1.5%) | 7.0° (1.4%) | 9.5° | 4.6° |
 
-The share of steps with a servo at its PWM limit is in brackets; at 7.4 V none were. On the Ryzen, before timing used the full limits ([above](#timing-up-to-the-limits)): motions are now a few percent shorter, and have not been replayed through the servo model.
+The share of steps with a servo at its PWM limit is in brackets; at 7.4 V none were. On the Ryzen, at 9d49051.
 
 - **Speed, not jerk, sets how far the arm lags.** At about the same duration, a quarter of the jerk limit tracks no better than a slower speed or acceleration.
-- **At 5 V the SO-101 cannot keep up with its limits at full speed.** Its servos sit at the PWM limit on 6.3% of steps, and the worst motion lags 58°; at 0.75 of the speed, 0.6% and 32°. `Trajectory::try_new`'s speed scale, or `RobotOptions::velocity_scale`, slows it.
-- **[Joined](#joining-motions) pick-like sequences track as their motions do one after another:** 16.4° against 16.7° at 5 V, finishing 7% sooner.
+- **At 5 V the SO-101 cannot keep up with its limits at full speed.** Its servos sit at the PWM limit on 7.4% of steps, and the worst motion lags 58°; at 0.75 of the speed, 0.8% and 29°. `Trajectory::try_new`'s speed scale, or `RobotOptions::velocity_scale`, slows it.
+- **[Joined](#joining-motions) pick-like sequences track as their motions do one after another:** 16.2° against 16.6° at 5 V, joined within 5 cm, finishing 8% sooner.
 
 ## Bimanual handovers
 
 `examples/handover/` generates the [handover episodes](training-data.md#handovers) for two reBot B601-DM arms 44 cm apart at a table. In each task one arm picks up a block lying in front of it and hands it over between the arms, and the other arm sets it down in front of itself. The blocks are 24–28 cm long, in four sizes; the block, meeting and place poses vary in position and yaw, and 0–2 small boxes stand elsewhere on the table. Three tables in four are divided down the middle, a quarter each by a low wall (6–8 cm) that the block is lifted over, a screen 16–18 cm tall with an opening 8.5–10.5 cm wide, and a row of posts as tall. The block cannot be lifted over the tall ones, so the hands meet at one end of their reach and the block lies, and is set down, toward the other: it is carried along the divider to the gap and back. Planned without its divider, the block alone would pass through it on 267 of the 372 divided tables (79 of 120 walls, 82 of 118 screens, 106 of 134 rows of posts). Half the tasks go left to right. Every step is batched over all the tasks: the giver's `pick`, IK for both hands at the meeting pose, one plan moving both arms there, the straight moves of the handover, and the taker's `place`, whose transit moves both arms (the giver going home); then the episodes' sampling.
 
-| 512 tasks | M4 Pro GPU (0.2.0) | M4 Pro CPU, 14 threads (0.2.0) | Radeon 8060S | Ryzen CPU (32 threads) |
+| 512 tasks | M4 Pro GPU | M4 Pro CPU, 14 threads | Radeon 8060S | Ryzen CPU (32 threads) |
 |---|---|---|---|---|
 | Handovers | 510 of 512 | 510 of 512 | 510 of 512 | 510 of 512 |
-| Time | 1.52–1.53 s | 1.65–1.67 s | 0.81–0.90 s | 0.97–1.19 s |
-| Episodes/s | 333–336 | 305–308 | 566–628 | 428–525 |
+| Time | 0.86–0.87 s | 1.06–1.07 s | 0.81–0.90 s | 0.97–1.19 s |
+| Episodes/s | 584–596 | 478–483 | 566–628 | 428–525 |
 
-The 510 episodes hold 111 minutes of motion at 30 fps (110 on the CPU device), 12.7 s each at the median. The two tasks lost fail IK at the grasp. The M4 Pro's times are three runs each after a warm-up, with IK's defaults then (32 seeds of 60 steps); the Radeon's and the Ryzen's are three runs each started with the machine's load under 6. Against 2c98826, which planned the moves in and away and lifted and lowered the block unchecked, alternating runs took 1.14–1.16 s on the Radeon and 1.12–1.15 s on the Ryzen, with the same 510 handovers and a 12.8 s median episode then.
+The 510 episodes hold 111 minutes of motion at 30 fps (110 on the CPU devices and on the M4 Pro's GPU), 12.7 s each at the median. The two tasks lost fail IK at the grasp. The times are three runs on each device, each started with the machine's load under 6, the M4 Pro's at bf2f5b9. Against 2c98826, which planned the moves in and away and lifted and lowered the block unchecked, alternating runs took 1.14–1.16 s on the Radeon and 1.12–1.15 s on the Ryzen, with the same 510 handovers and a 12.8 s median episode then.
 
 Searches draw up to 30,000 samples, against `plan`'s default 10,000: with the block clear of the other hand, the hardest moves of both arms at once, past a divider, need more, and five tasks were lost without them. IK where the taker lets go keeps 4 of its seeds, since it starts from where the carry starts: with 32, the run was 0.18 s slower on the Radeon and 0.21 s on the Ryzen. The blocks come in four sizes because each size needs its own carried spheres and so plans in batches of its own: at 0.2.0, sizes drawn from a continuous range took 3.65–3.67 s on the M4 Pro's GPU, against 1.52 s.
 
-Rendering the episodes' camera videos in MuJoCo (`scripts/replay_mujoco.py`, three 640×480 cameras) takes about 14 ms a frame on the M4 Pro: 85 s for 16 episodes (6,075 frames) that take 0.17 s to generate.
+Rendering the episodes' camera videos in MuJoCo (`scripts/replay_mujoco.py`, three 640×480 cameras) takes about 14 ms a frame on the M4 Pro: 85 s for 16 episodes (6,075 frames, on an earlier version); 16 episodes take 0.13 s to generate.
 
 ## Spheres and meshes
 
@@ -630,6 +635,7 @@ uv run batchplan_ik.py --device gpu                                            #
 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu
 BATCHPLAN_SEEDS=4 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu-4   # batchplan-cpu likewise
 BATCHPLAN_JERK=150 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu-j150   # timed under RoboKit's jerk limit
+BATCHPLAN_FRAMES=31 BATCHPLAN_JERK=300 BATCHPLAN_SEEDS=4 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu-4-j300-f31   # sampled as RoboKit's plans are
 
 # Tool paths, and picks and places on random tabletops
 cargo run --release --example tool_paths
