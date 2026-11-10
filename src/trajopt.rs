@@ -899,8 +899,8 @@ fn next_fit(
             // knot interval alone: that pass costs most of a refusal, and where it times a retry
             // it does so there.
             let stops = fit.pins.iter().all(|&p| p == EXACT);
-            let knots = START_KNOTS.iter().enumerate();
-            let follows = knots.into_iter().any(|(k, &longer)| {
+            let mut knots = START_KNOTS.iter().enumerate();
+            let follows = knots.any(|(k, &longer)| {
                 continue_motion(robot, &problem.start, goal, m, longer, &mut fit.spline);
                 runs_from_start(
                     robot,
