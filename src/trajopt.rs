@@ -1398,9 +1398,12 @@ fn optimize(
         let searched = &result.paths[item];
         result.valid[item]
             && searched.len() == points * n
+            // From the start itself: a moving start's first control point lies behind it.
             && result.length[item]
-                <= rrt::distance(&searched[..n], &searched[searched.len() - n..])
-                    * (1.0 + OPTIMIZE_SLACK)
+                <= rrt::distance(
+                    &result.problems[pi].start,
+                    &searched[searched.len() - n..],
+                ) * (1.0 + OPTIMIZE_SLACK)
     };
     let wanted: Vec<usize> = (0..result.problems.len())
         .filter(|&pi| !near_straight(pi))
