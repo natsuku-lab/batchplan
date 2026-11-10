@@ -59,6 +59,16 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Changed
 
+- Batched IK spends less time around the solve: a problem's seeds share its targets instead
+  of each carrying a copy, large batches are seeded on the device's threads, buffers go to the
+  GPU without an extra copy, and a robot without collision spheres skips the collision push,
+  which is zero for it. The same results, bit for bit. In RoboKit's IK benchmark on an RTX 4090
+  (a Panda, collision off, 64 seeds of 30 steps), 1,000 targets take 4.5 ms where they took
+  10.8, 2,000 take 9.1 ms where 23.2, and one takes 0.9 ms where 1.26
+  ([Benchmarks](docs/benchmarks.md#against-robokit)).
+- **Breaking:** `IkOptions::collision_step` must be finite: an infinite or NaN one is an input
+  error. NaN and negative infinity used to mean no push, and positive infinity solved nothing
+  (the CPU left every seed where it started).
 - IK on a GPU takes 10-28% less time: the kernels are built without the counter naga adds to
   every loop to rule out infinite ones, which theirs cannot be (the crate's one `unsafe`). One
   target's 64 seeds of 30 steps take 1.01 ms where they took 1.27 on an M4 Pro for a Panda

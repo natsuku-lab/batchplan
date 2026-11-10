@@ -401,6 +401,44 @@ fn touches_past_the_first_word_match_cpu() {
     ));
 }
 
+/// A problem's seeds share its targets, and a batch goes to the GPU in chunks of 65,536 items that
+/// begin partway through a problem: every seed that succeeds reaches its own problem's target.
+#[test]
+fn ik_seeds_past_a_chunk_reach_their_own_targets() {
+    let Some((robot, gpu, _)) = setup() else {
+        return;
+    };
+    // 34 problems with targets of their own: the second chunk begins 1,536 seeds into the 17th
+    // and runs on through the 33rd.
+    let scene = worlds(34, 4);
+    let problems = ik_problems(&scene, 5);
+    let o = IkOptions {
+        seeds: 4000,
+        iterations: 10,
+        ..Default::default()
+    };
+    assert!(
+        problems.len() * o.seeds > 2 * 65_536 && 65_536 % o.seeds != 0,
+        "no chunk begins partway through a problem and goes on into the next"
+    );
+    let on_gpu = gpu.upload(&scene).unwrap();
+    let result = batchplan::solve_ik(&gpu, &on_gpu, &problems, &o).unwrap();
+    let mut past = 0;
+    let succeeded = (0..result.success.len()).filter(|&i| result.success[i]);
+    for i in succeeded {
+        let target = problems[i / o.seeds].targets[0].expect("one hand");
+        let reached = robot.ee_pose(result.solution(i), 0).position;
+        assert!(
+            (reached - target.position).length() < o.position_tolerance * 1.01,
+            "seed {i} of problem {} ends {reached} from its target {}",
+            i / o.seeds,
+            target.position
+        );
+        past += usize::from(i >= 65_536);
+    }
+    assert!(past > 100, "only {past} seeds past the first chunk succeed");
+}
+
 #[test]
 fn ik_matches_cpu() {
     let Some((robot, gpu, cpu)) = setup() else {

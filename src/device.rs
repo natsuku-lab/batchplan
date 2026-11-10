@@ -456,12 +456,14 @@ impl Device {
         o: &IkOptions,
     ) -> Result<Vec<[f32; 4]>> {
         self.check_batch(worlds, item_world, q.len(), self.robot().dof())?;
-        let hands = self.robot().hands();
+        let (items, hands) = (item_world.len(), self.robot().hands());
+        let problems = targets.len() / hands;
         ensure_input!(
-            targets.len() == item_world.len() * hands,
-            "{} IK targets for {} items of {hands} hands",
-            targets.len(),
-            item_world.len()
+            targets.len() == problems * hands
+                && (items == 0) == (problems == 0)
+                && items % problems.max(1) == 0,
+            "{} IK targets for {items} items of {hands} hands",
+            targets.len()
         );
         ensure_input!(
             held.is_empty() || held.len() == q.len(),
@@ -594,8 +596,9 @@ pub(crate) trait Backend: Send + Sync {
     fn clearance(&self, worlds: &Worlds, item_world: &[u32], q: &[f32]) -> Result<Vec<[f32; 2]>>;
     /// Runs every search to its end, or to `deadline`, each on one CPU thread (see `edges`).
     fn search(&self, worlds: &Worlds, searches: &mut [&mut dyn Search], deadline: Option<Instant>);
-    /// Runs IK in place on `q` (`[items, dof]`) toward `targets` (`[items, hands]`, `None` for a
-    /// hand held still), the joints `held` marks (`[items, dof]`, or empty for none) staying put;
+    /// Runs IK in place on `q` (`[items, dof]`) toward `targets` (`[problems, hands]`, `None` for a
+    /// hand held still; each problem's consecutive items, as many to every problem, share its
+    /// targets), the joints `held` marks (`[items, dof]`, or empty for none) staying put;
     /// returns each item's largest position and rotation errors over its targeted hands, then
     /// the `[world, self]` clearance of its final configuration (as `clearance` gives it):
     /// `[position error, rotation error, world clearance, self clearance]`.

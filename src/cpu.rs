@@ -1686,15 +1686,20 @@ impl Backend for CpuBackend {
         o: &IkOptions,
     ) -> Result<Vec<[f32; 4]>> {
         let (n, hands) = (self.robot.dof(), self.robot.hands());
+        // Items to a problem, whose targets they share.
+        let seeds = (item_world.len() * hands)
+            .checked_div(targets.len())
+            .unwrap_or(1);
         let prepared: &CpuWorlds = worlds.prepared();
         let hand_joints: Vec<Vec<usize>> = (0..hands).map(|h| self.robot.hand_joints(h)).collect();
         let errors: Vec<[f32; 2]> = self.pool.install(|| {
             q.par_chunks_mut(n)
                 .enumerate()
-                .zip(item_world.par_iter().zip(targets.par_chunks(hands)))
+                .zip(item_world.par_iter())
                 .map_init(
                     || (Scratch::new(&self.robot), vec![None; hands]),
-                    |(scratch, goals), ((item, qi), (&s, item_targets))| {
+                    |(scratch, goals), ((item, qi), &s)| {
+                        let item_targets = &targets[item / seeds * hands..][..hands];
                         let world = &prepared[s as usize];
                         scratch.moving.fill(false);
                         for (h, (goal, target)) in goals.iter_mut().zip(item_targets).enumerate() {

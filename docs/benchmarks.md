@@ -336,6 +336,18 @@ By their own checks, VAMP solved 98.6% (98.5% with 2 rad steps), OMPL 90.5%, Rob
 
 RoboKit's IK is the quickest on the A10G at every batch size: about twice as quick as batchplan's up to 100 targets per call, and 1.6 times at 1,000 and 2,000. One target takes batchplan's CPU threads 0.80 ms against RoboKit's 0.77. batchplan solves every target up to 1,000 per call. With 16 seeds it takes 4.7 ms for 1,000 targets and 8.1 ms for 2,000 on the A10G, and solves 99.6% of them.
 
+Since then a problem's seeds share its targets, large batches are seeded on the device's threads, buffers are uploaded without a copy, and a robot without collision spheres, as this benchmark's is, skips the collision push. The same harness on a rented NVIDIA RTX 4090 (driver 595.91.07, Vulkan; 13 threads of an AMD EPYC 75F3; RoboKit 736f112; five runs, and batchplan's GPU columns the mean of two such), in milliseconds:
+
+| Targets per call | RoboKit, RTX 4090 | batchplan at 75ec9fb, RTX 4090 | batchplan with the changes, RTX 4090 | batchplan, 13 CPU threads |
+|---|---|---|---|---|
+| 1 | 0.57 | 1.26 | 0.89 | 0.33–0.40 |
+| 10 | 0.55 | 1.20 | 0.94 | 1.4–1.5 |
+| 100 | 0.79 | 1.58 | 1.36 | 11.8–13.1 |
+| 1,000 | 3.18 | 10.8 | 4.46 | 108–111 |
+| 2,000 | 7.08 | 23.2 | 9.12 | 215–218 |
+
+RoboKit's IK is still the quicker on the GPU, by 1.3 to 1.7 times where it was 2.0 to 3.4; for one target batchplan's CPU device is the quickest of all.
+
 ## The 2,600 problems on every device
 
 `examples/benchmark.rs` runs every set in two modes:
