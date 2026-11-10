@@ -349,6 +349,11 @@ impl IkOptions {
                 && self.damping >= 0.0,
             "{what} needs a positive max_step and rotation_weight and a non-negative damping"
         );
+        ensure_input!(
+            self.collision_step < f32::INFINITY,
+            "{what} needs a finite collision_step, got {}",
+            self.collision_step
+        );
         Ok(())
     }
 }
@@ -444,7 +449,8 @@ fn solved(
         for (s, q) in seeds.chunks_mut(n).enumerate() {
             q.copy_from_slice(start);
             if s > 0 {
-                for j in (0..n).filter(|&j| moved[j]) {
+                let drawn = (0..n).filter(|&j| moved[j]);
+                for j in drawn {
                     q[j] = rng.range(robot.lower[j], robot.upper[j]);
                 }
             }

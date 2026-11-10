@@ -14,8 +14,8 @@
 @group(0) @binding(5) var<storage, read> obstacles: array<Obstacle>;
 @group(0) @binding(6) var<storage, read> world_ranges: array<vec2<u32>>;
 @group(0) @binding(7) var<storage, read> item_world: array<u32>;
-// IK targets: 4 vec4 per item and hand (position with w = 1 when the hand has a target, rotation
-// columns).
+// IK targets: 4 vec4 per problem and hand (position with w = 1 when the hand has a target, rotation
+// columns); a problem's P.per_target items share them.
 @group(0) @binding(8) var<storage, read> targets: array<vec4<f32>>;
 // Touch sets (see Obstacle.r0.w), then distance grids, two half floats per word (Obstacle.grid).
 @group(0) @binding(9) var<storage, read> world_data: array<u32>;
@@ -262,7 +262,7 @@ fn load_goals(item: u32) {
         moving[j] = false;
     }
     for (var h = 0u; h < HANDS; h++) {
-        let t = (item / P.per_target * HANDS + h) * 4u;
+        let t = ((item + P.first_seed) / P.per_target * HANDS + h) * 4u;
         goal_pos[h] = targets[t];
         goal_rot[h] = mat3x3<f32>(targets[t + 1u].xyz, targets[t + 2u].xyz, targets[t + 3u].xyz);
         if (goal_pos[h].w > 0.5) {
