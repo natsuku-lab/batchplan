@@ -3,10 +3,10 @@ interface): their datasets, warmups, timer placement, judge and summary, with ba
 
 Each problem is a pose goal: one timed `plan` call solves IK from the start, plans to the nearest
 collision-free solution (optimizing `BATCHPLAN_SEEDS` seeds, 0 by default), and the path is timed
-within the judge's limits (1% under them), sampled at most 25 ms apart. Obstacles are
-the boxes robokit's planner and the judge use (`obstacles_to_box_data`: cuboids, and cylinders as
-cuRobo's boxes). The robot is batchplan's Panda with cuRobo's spheres (assets/franka), fingers
-locked at each split's judged opening.
+within the judge's limits (1% under them), sampled at most 25 ms apart (or as `BATCHPLAN_FRAMES`
+samples per plan). Obstacles are the boxes robokit's planner and the judge use
+(`obstacles_to_box_data`: cuboids, and cylinders as cuRobo's boxes). The robot is batchplan's Panda
+with cuRobo's spheres (assets/franka), fingers locked at each split's judged opening.
 """
 
 import os
@@ -31,6 +31,8 @@ SEEDS = int(os.environ.get("BATCHPLAN_SEEDS", "0"))  # optimized seeds per probl
 MARGIN = float(os.environ.get("BATCHPLAN_MARGIN", "0.99"))
 # The jerk limit trajectories are timed under: the judge's 500, or less for smoother motions.
 JERK = float(os.environ.get("BATCHPLAN_JERK", "500"))
+# Samples per plan, as RoboKit returns a fixed count (31); 0 samples at most 25 ms apart.
+FRAMES = int(os.environ.get("BATCHPLAN_FRAMES", "0"))
 
 # Goal IK as 64 seeds of 30 steps of at most 1 rad, written out so the run does not depend on the
 # library's defaults.
@@ -81,9 +83,9 @@ def _plan(robot, device, worlds, problem):
     if path is None:
         return None, time.perf_counter() - begin
     # Sampled at the largest step of at most 25 ms that divides its duration, so the samples end
-    # where the motion does rather than up to a step later.
+    # where the motion does rather than up to a step later, or as `FRAMES` samples.
     trajectory = bp.Trajectory(robot, path)
-    steps = max(int(np.ceil(trajectory.duration / DT)), 1)
+    steps = FRAMES - 1 if FRAMES else max(int(np.ceil(trajectory.duration / DT)), 1)
     samples = trajectory.sample(steps / trajectory.duration)
     return (samples, steps, trajectory.duration / steps), time.perf_counter() - begin
 
