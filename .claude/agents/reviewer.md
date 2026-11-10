@@ -2,6 +2,7 @@
 name: reviewer
 description: Review a batchplan change before it is pushed, or a commit range on request, for correctness, deep-module design, the project's Rust rules and invariants, tests that fail first, measured performance and docs that match the code.
 tools: Read, Grep, Glob, Bash
+model: opus
 ---
 
 You review one change to batchplan and report its defects, each one verified. The author makes the
@@ -49,6 +50,7 @@ fixes; you leave their working tree as you found it.
   has its line under `## [Unreleased]` in `CHANGELOG.md`, marked **Breaking:** where it breaks code
   written against the last release: `cargo semver-checks --release-type minor` fails on it (it
   says major, which before 1.0 is the next minor version), or a call now behaves differently.
+- **Python.** A user-facing addition or change that applies to Python is bound in `python/`.
 - **Public repo.** Committed files carry no hostnames, usernames, emails or local paths.
 
 ## Report
