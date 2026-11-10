@@ -95,7 +95,8 @@ value_class! {
         velocity_weight: f32,
         /// Collision cost of the optimization.
         collision: batchplan::CollisionWeights,
-        /// Samples per span used to validate the result.
+        /// Samples per span splines are checked at, at least: more where samples would lie
+        /// farther apart than `shortcut.resolution`.
         validate_substeps: usize,
         /// Seed of the optimization seeds' random via points. Each problem draws its own from it
         /// and its start and goal, so a problem's plan does not depend on the others in its batch.

@@ -91,6 +91,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Fixed
 
+- Optimized seeds (`PlanOptions::seeds`) are validated as searched splines are checked: at samples no
+  farther apart than `shortcut.resolution`, keeping the margin from the world searched splines keep
+  away from their ends (2 mm, or `shortcut.clearance` if less). Validation kept no margin and
+  sampled each span `validate_substeps` times however far it moved, so optimization, which pulls
+  paths taut against obstacles, returned valid paths that collided between samples, as on picks
+  under a table. Their lengths, which `best` compares, are measured at those samples too.
 - `plan` refuses a start or a joint goal that is not finite. A continuous joint's range has no
   limits, so a start at infinity there passed the limit check and planned a path of infinite
   control points marked valid.

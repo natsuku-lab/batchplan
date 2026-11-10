@@ -51,6 +51,7 @@ pub(crate) fn blend(cp: &[f32], dof: usize, span: usize, weights: [f32; 4], out:
 
 /// The spline at `per_span` evenly spaced points of every span plus its exact end, written into
 /// `out`, which holds `[(points - 3) * per_span + 1, dof]`.
+#[cfg(test)]
 pub(crate) fn dense(cp: &[f32], dof: usize, per_span: usize, out: &mut [f32]) {
     let spans = cp.len() / dof - 3;
     for span in 0..spans {

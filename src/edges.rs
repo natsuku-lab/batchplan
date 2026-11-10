@@ -56,7 +56,7 @@ pub(crate) struct Keep {
 }
 
 impl Keep {
-    fn margin(&self, q: &[f32]) -> f32 {
+    pub(crate) fn margin(&self, q: &[f32]) -> f32 {
         let nearest = self
             .ends
             .iter()
