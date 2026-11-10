@@ -338,7 +338,7 @@ RoboKit's IK is the quickest on the A10G at every batch size: about twice as qui
 
 Since then a problem's seeds share its targets, large batches are seeded on the device's threads, buffers are uploaded without a copy, and a robot without collision spheres, as this benchmark's is, skips the collision push. The same harness on a rented NVIDIA RTX 4090 (driver 595.91.07, Vulkan; 13 threads of an AMD EPYC 75F3; RoboKit 736f112; five runs, and batchplan's GPU columns the mean of two such), in milliseconds:
 
-| Targets per call | RoboKit, RTX 4090 | batchplan at c86b3f9, RTX 4090 | batchplan with the changes, RTX 4090 | batchplan, 13 CPU threads |
+| Targets per call | RoboKit, RTX 4090 | batchplan at 75ec9fb, RTX 4090 | batchplan with the changes, RTX 4090 | batchplan, 13 CPU threads |
 |---|---|---|---|---|
 | 1 | 0.57 | 1.26 | 0.89 | 0.33–0.40 |
 | 10 | 0.55 | 1.20 | 0.94 | 1.4–1.5 |
