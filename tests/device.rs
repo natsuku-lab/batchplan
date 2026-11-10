@@ -471,9 +471,11 @@ fn ik_steps_move_a_seed_or_leave_it_at_rest() {
         .collect();
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
+        // Every seed takes every step: none is left behind after a screening.
         let after = |iterations: u32| {
             let o = IkOptions {
                 iterations,
+                screening: 0,
                 ..IkOptions::default()
             };
             batchplan::solve_ik(&d, &worlds, &problems, &o).unwrap().q

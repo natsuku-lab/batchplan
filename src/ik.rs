@@ -21,6 +21,13 @@ pub struct IkOptions {
     pub seeds: usize,
     /// Damped-least-squares steps per seed, at most: one that has come to rest takes no more.
     pub iterations: u32,
+    /// Of `iterations`, the steps every seed takes before only each problem's `kept` nearest go
+    /// on; 0 (or `iterations` and more) for every seed to take them all. A few steps tell which
+    /// seeds are closing on the target, and the rest cost a fraction of the work.
+    pub screening: u32,
+    /// Seeds per problem that go on past `screening`: those nearest their targets then, the
+    /// collision-free first. The others are returned as the screening left them.
+    pub kept: usize,
     /// Damped-least-squares damping (lambda).
     pub damping: f32,
     /// Meters of position error equivalent to one radian of rotation error.
@@ -46,6 +53,8 @@ impl Default for IkOptions {
         Self {
             seeds: 64,
             iterations: 30,
+            screening: 8,
+            kept: 4,
             damping: 0.02,
             rotation_weight: 0.5,
             max_step: 1.0,
@@ -341,6 +350,10 @@ impl IkOptions {
     /// it (`IK`, or `plan`'s `goal_ik`).
     pub(crate) fn check(&self, what: &str) -> Result<()> {
         ensure_input!(self.seeds > 0, "{what} needs at least one seed");
+        ensure_input!(
+            self.kept > 0,
+            "{what} needs at least one seed kept past the screening"
+        );
         let positive = |v: f32| v.is_finite() && v > 0.0;
         ensure_input!(
             positive(self.max_step)
@@ -480,7 +493,61 @@ fn solved(
     } else {
         o
     };
-    let solved = device.ik(worlds, &item_world, &targets, &held, &mut q, stepped)?;
+    let staged = o.screening > 0 && o.screening < o.iterations && o.kept < o.seeds;
+    let first = IkOptions {
+        iterations: if staged { o.screening } else { o.iterations },
+        ..*stepped
+    };
+    let mut solved = device.ik(worlds, &item_world, &targets, &held, &mut q, &first)?;
+    if staged {
+        // Each problem's `kept` seeds nearest their targets after the screening, the
+        // collision-free first, take the remaining steps as a batch of their own.
+        let cost = |s: &[f32; 4]| {
+            let blocked = if device::collision_free([s[2], s[3]]) {
+                0.0
+            } else {
+                f32::MAX
+            };
+            (s[0] + o.rotation_weight * s[1]).max(blocked)
+        };
+        let mut chosen = Vec::with_capacity(problems.len() * o.kept);
+        let mut order: Vec<usize> = Vec::with_capacity(o.seeds);
+        for p in 0..problems.len() {
+            order.clear();
+            order.extend(p * o.seeds..(p + 1) * o.seeds);
+            order.sort_by(|&a, &b| {
+                cost(&solved[a])
+                    .total_cmp(&cost(&solved[b]))
+                    .then(a.cmp(&b))
+            });
+            chosen.extend_from_slice(&order[..o.kept]);
+        }
+        let mut refined: Vec<f32> = Vec::with_capacity(chosen.len() * n);
+        let mut refined_held = Vec::with_capacity(if holding { chosen.len() * n } else { 0 });
+        for &item in &chosen {
+            refined.extend_from_slice(&q[item * n..(item + 1) * n]);
+            if holding {
+                refined_held.extend_from_slice(&held[item * n..(item + 1) * n]);
+            }
+        }
+        let refined_world: Vec<u32> = chosen.iter().map(|&item| item_world[item]).collect();
+        let rest = IkOptions {
+            iterations: o.iterations - o.screening,
+            ..*stepped
+        };
+        let again = device.ik(
+            worlds,
+            &refined_world,
+            &targets,
+            &refined_held,
+            &mut refined,
+            &rest,
+        )?;
+        for ((&item, row), seed) in chosen.iter().zip(again).zip(refined.chunks(n)) {
+            q[item * n..(item + 1) * n].copy_from_slice(seed);
+            solved[item] = row;
+        }
+    }
     let mut result = IkResult {
         problems: problems.to_vec(),
         dof: n,
