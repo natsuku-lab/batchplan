@@ -59,6 +59,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Changed
 
+- IK on a GPU takes 10-28% less time: the kernels are built without the counter naga adds to
+  every loop to rule out infinite ones, which theirs cannot be (the crate's one `unsafe`). One
+  target's 64 seeds of 30 steps take 1.01 ms where they took 1.27 on an M4 Pro for a Panda
+  without collision spheres (2.83 ms where 3.33 with them), and 0.53 ms where 0.74 on an RTX
+  4090 (about 1.2 ms where 1.33). A GPU's results round differently for it, as they do from
+  driver to driver ([Benchmarks](docs/benchmarks.md#how-the-speed-came)).
 - Trajectories are sooner: time-optimal timing uses the full velocity and acceleration limits,
   and where its smoothed time map overshoots a limit, slows the profile there instead of
   stretching the whole motion for it. Planned Panda motions take 6.6% less time on average, the
