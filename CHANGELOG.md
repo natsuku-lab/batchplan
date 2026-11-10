@@ -68,8 +68,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   start 52% less (555 µs where 1,164), timed once with its start at the full limits and its
   candidate time maps turned down at a quarter of the checking density. A moving start's
   timing and a stop's are also held to their limits either side of where they cross the
-  path's knots, between the samples checked, where jerk could pass its limit by up to 12%
-  (18% in a stop): a stop costs 10% more to find, and of 960 asked early in planned Panda
+  path's knots, between the samples checked, where jerk could pass its limit by up to 12%, and
+  in a stop acceleration by up to 20% and jerk by 19%: a stop costs 10% more to find, and of 960 asked early in planned Panda
   motions 52 are refused where 40 were. A moving start no timing fits costs more to turn
   down (2.4 ms where 1.6 on a Panda), so Panda replans whose candidates are mostly such
   paths take 9% longer one at a time and 20% longer as a batch, while the SO-101's take a
@@ -130,9 +130,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   path's end. It now also tries carrying on for one span with the motion's jerk, half of it or
   none before braking, and keeps the stop that ends soonest along the path. Trajectories timed
   up to the limits pass through such states more often. Through the first fifth of 48 planned
-  Panda motions, 42 of 960 stops are refused where 153 were and none takes longer than going on
-  where 66 did; of 16 states at a velocity limit, 6 stop where none did. A quarter of the way
-  along 438 motions, stops last 0.633 s where they lasted 0.646, and take 0.86 ms to find where
+  Panda motions, 52 of 960 stops are refused where 153 were and one takes longer than going on
+  where 66 did; of 19 states at a velocity limit, 9 stop where none did. A quarter of the way
+  along 438 motions, stops last 0.633 s where they lasted 0.646, and take 0.89 ms to find where
   they took 0.73 (`examples/timing.rs`, which now times them, on an M4 Pro). A `Follower` that
   must stop where none is found keeps to its trajectory, which comes to rest at the path's end.
 - Optimized seeds (`PlanOptions::seeds`) are validated as searched splines are checked: at samples no
