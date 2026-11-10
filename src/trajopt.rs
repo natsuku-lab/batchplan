@@ -635,7 +635,14 @@ fn planned(
     let stuck: Vec<usize> = device.install(|| {
         optimized
             .into_par_iter()
-            .filter(|&item| !runs_from_start(robot, &problems[item / seeds], &result.paths[item]))
+            .filter(|&item| {
+                !runs_from_start(
+                    robot,
+                    &problems[item / seeds],
+                    &result.paths[item],
+                    /* thorough */ true,
+                )
+            })
             .collect()
     });
     for item in stuck {
@@ -693,7 +700,8 @@ enum Stopped {
 /// Whether `path` can run from `problem`'s start: from rest, or from its moving start timed by
 /// `Trajectory::moving` from exactly that state, keeping every limit and joint range there as
 /// `Trajectory::check_from` checks. Momentum can carry a joint out of its range in the first span.
-fn runs_from_start(robot: &Robot, problem: &PlanProblem, path: &[f32]) -> bool {
+/// Without `thorough`, the timing's first pass alone decides (see `topp::time_map`).
+fn runs_from_start(robot: &Robot, problem: &PlanProblem, path: &[f32], thorough: bool) -> bool {
     let Some(m) = &problem.start_motion else {
         return true;
     };
@@ -702,7 +710,8 @@ fn runs_from_start(robot: &Robot, problem: &PlanProblem, path: &[f32]) -> bool {
         velocity: m.velocity.clone(),
         acceleration: m.acceleration.clone(),
     };
-    Trajectory::moving(robot, path, m).is_ok_and(|t| t.check_from(robot, &start).is_ok())
+    Trajectory::moving_by(robot, path, m, thorough)
+        .is_ok_and(|t| t.check_from(robot, &start).is_ok())
 }
 
 /// Iterations RRT-Connect gets to find a path keeping the clearance before it searches without.
@@ -886,12 +895,25 @@ fn next_fit(
             // A spline that cannot follow the start motion may at a longer knot interval, or once
             // it stops at every waypoint.
             let goal = &path[path.len() - n..];
-            let follows = START_KNOTS.iter().any(|&longer| {
+            // The retry that stops at every waypoint gets the timing's second pass at its first
+            // knot interval alone: that pass costs most of a refusal, and where it times a retry
+            // it does so there.
+            let stops = fit.pins.iter().all(|&p| p == EXACT);
+            let mut knots = START_KNOTS.iter().enumerate();
+            let follows = knots.any(|(k, &longer)| {
                 continue_motion(robot, &problem.start, goal, m, longer, &mut fit.spline);
-                runs_from_start(robot, problem, &fit.spline)
+                runs_from_start(
+                    robot,
+                    problem,
+                    &fit.spline,
+                    /* thorough */ !stops || k == 0,
+                )
             });
             if !follows {
-                if fit.pins.iter().all(|&p| p == EXACT) {
+                // Stopping at every waypoint changes the spline only where an inner waypoint is
+                // not pinned so already: the ends' pins are not read.
+                let mut inner = fit.pins.iter().skip(1).rev().skip(1);
+                if inner.all(|&p| p == EXACT) {
                     fit.path += 1;
                     fit.restart();
                 } else {
@@ -1317,7 +1339,9 @@ impl Search for Planning<'_> {
             Phase::Repair(repair) => {
                 let n = self.robot.dof();
                 let (spline, dense) = repair.checking.take().expect("answers follow checks");
-                if answer == dense.len() / n && runs_from_start(self.robot, self.problem, &spline) {
+                if answer == dense.len() / n
+                    && runs_from_start(self.robot, self.problem, &spline, /* thorough */ true)
+                {
                     self.chosen = Some((spline, shortcut::length(&dense, n)));
                     self.phase = Phase::Done;
                 } else if repair.optimizer.finished() {

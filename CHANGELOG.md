@@ -74,7 +74,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   refused where 40 were. Replans from a moving start take 11% less time one at a time on a
   Panda and 70% less on an SO-101; a batch of 96 Panda replans takes 65 ms where it took 61
   (within the runs' spread), since a moving start no timing fits costs more to turn down
-  (2.0 ms where 1.6) ([Benchmarks](docs/benchmarks.md#timing-up-to-the-limits)).
+  (2.0 ms where 1.6). A spline that cannot follow the start motion is then tried again,
+  stopping at every waypoint, with less of that timing, which takes a further quarter off a
+  Panda's replans one at a time and a sixth off the SO-101's (an M4 Pro)
+  ([Benchmarks](docs/benchmarks.md#timing-up-to-the-limits)).
 - **Breaking:** `IkOptions::default()` is 64 seeds of 30 steps of at most 1 rad, where it was 32
   seeds of 60 steps of at most 0.3 rad: at 0.3 rad, about half the seeds ran out of steps before
   converging. The same problems solve. Results carry 64 seeds per problem, and `TaskOptions`,
