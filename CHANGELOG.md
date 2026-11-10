@@ -65,12 +65,15 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   hand's straight moves 3.0%, replans from a moving start 5.7%, and the 2,600 benchmark
   problems' motions 5.0%, within the same limits (`Trajectory::check`); more joins are worth
   blending. Timing costs less than it did: a path from rest 7% less, and one from a moving
-  start 54% less (540 µs where 1,167), timed once with its start at the full limits and its
+  start 52% less (555 µs where 1,164), timed once with its start at the full limits and its
   candidate time maps turned down at a quarter of the checking density. A moving start's
-  timing is also held to its limits where it crosses the path's knots, between the samples
-  checked. A moving start no timing fits costs more to turn down (2.4 ms where 1.6 on a
-  Panda), so Panda replans whose candidates are mostly such paths take 10% longer one at a
-  time and 30% longer as a batch, while the SO-101's take a third of the time they did
+  timing and a stop's are also held to their limits either side of where they cross the
+  path's knots, between the samples checked, where jerk could pass its limit by up to 12%
+  (18% in a stop): a stop costs 10% more to find, and of 960 asked early in planned Panda
+  motions 52 are refused where 40 were. A moving start no timing fits costs more to turn
+  down (2.4 ms where 1.6 on a Panda), so Panda replans whose candidates are mostly such
+  paths take 9% longer one at a time and 20% longer as a batch, while the SO-101's take a
+  third of the time they did one at a time and two fifths as a batch
   ([Benchmarks](docs/benchmarks.md#timing-up-to-the-limits)).
 - **Breaking:** `IkOptions::default()` is 64 seeds of 30 steps of at most 1 rad, where it was 32
   seeds of 60 steps of at most 0.3 rad: at 0.3 rad, about half the seeds ran out of steps before

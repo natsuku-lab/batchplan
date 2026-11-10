@@ -662,8 +662,8 @@ fn assess(
     let floors = |k: f32| [k, k * k, k * k * k].map(|power| power * (1.0 - 1e-4));
     let mut floor = floors(k);
     // A given start's map is not stretched past what its samples need, so at the full density
-    // it is also measured where it crosses the path's knots: acceleration has corners there, which
-    // samples either side of one read up to 0.35% under.
+    // it is also measured either side of where it crosses the path's knots: acceleration has
+    // corners there and jerk jumps, which the even samples read up to 0.35% and 12% under.
     let corners = eased.is_some() && samples == CHECK_SAMPLES;
     for m in 0..points.len() - 3 {
         let along = |u: f32| {
@@ -675,8 +675,9 @@ fn assess(
         } else {
             0..0
         };
-        // Where the map reaches each path knot in this span, by bisection: it only rises.
-        let crossings = crossed.map(|path_knot| {
+        // Just before and after the map reaches each path knot in this span, by bisection: it
+        // only rises.
+        let crossings = crossed.flat_map(|path_knot| {
             let (mut before, mut after) = (0.0f32, 1.0f32);
             for _ in 0..24 {
                 let middle = 0.5 * (before + after);
@@ -686,7 +687,7 @@ fn assess(
                     after = middle;
                 }
             }
-            0.5 * (before + after)
+            [before, after]
         });
         let evenly = (0..=samples).map(|sample| sample as f32 / samples as f32);
         for u in evenly.chain(crossings) {

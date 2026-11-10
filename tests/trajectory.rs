@@ -990,14 +990,14 @@ fn motions_can_be_stopped_before_they_brake_for_their_end() {
         }
     }
     // With a stop's velocity held to the margin under the limit at its start too, none of those
-    // at a limit stops (16 on an M4 Pro, 6 of them stopped; 3 other sets of worlds: 9 of 12, 20 of
+    // at a limit stops (19 on an M4 Pro, 9 of them stopped; 3 other sets of worlds: 9 of 12, 20 of
     // 25, 13 of 17).
     assert!(fast >= 8, "only {fast} states at a velocity limit");
     assert!(
         4 * fast_stopped >= fast,
         "{fast_stopped} of {fast} at a velocity limit stop"
     );
-    // Braking at once only, 153 of 960 are refused; with the starting jerks, 42 (32-52 over three
+    // Braking at once only, 153 of 960 are refused; with the starting jerks, 52 (32-52 over three
     // other sets of worlds).
     assert!(early >= 600, "only {early} stops asked for early on");
     assert!(
@@ -1005,7 +1005,7 @@ fn motions_can_be_stopped_before_they_brake_for_their_end() {
         "{early_refused} of {early} stops in a motion's first fifth refused"
     );
     // Carrying on only where braking at once finds no stop at all, 66 take longer than going on;
-    // none does.
+    // one does.
     assert!(
         50 * early_slow <= early,
         "{early_slow} of {early} stops in a motion's first fifth take longer than going on"
