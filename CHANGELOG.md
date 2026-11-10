@@ -66,7 +66,18 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   problems' motions 5.0%, within the same limits (`Trajectory::check`); more joins are worth
   blending. Timing a motion from a moving start costs about 30% more (1.3 ms)
   ([Benchmarks](docs/benchmarks.md#timing-up-to-the-limits)).
-
+- **Breaking:** `IkOptions::default()` is 64 seeds of 30 steps of at most 1 rad, where it was 32
+  seeds of 60 steps of at most 0.3 rad: at 0.3 rad, about half the seeds ran out of steps before
+  converging. The same problems solve. Results carry 64 seeds per problem, and `TaskOptions`,
+  `DemoOptions`, `PickPlaceOptions` and `PlanOptions::goal_ik` inherit the new IK; pass the old
+  values to keep the old results.
+- **Breaking:** An IK step that would move no joint by more than 1e-6 rad is not taken, on the
+  CPU and the GPU alike: a seed that has come to rest stays exactly there, and CPU threads skip
+  its remaining steps, which makes their IK about a fifth faster. Seeds can differ from before
+  by a few microradians. Together with the new defaults, the 2,600 benchmark problems plan to
+  pose goals 1.8 times as fast in batches on a Radeon 8060S (6,225 against 3,489 per second, and
+  in 5 ms instead of 9 for one) and 1.18 times as fast on 32 CPU threads (3,344 against 2,836);
+  IK for 512 tabletop targets takes 71 ms instead of 84 on those threads.
 - `solve_ik` on a GPU checks the solved configurations' clearances in the same submission, from
   the configurations already on the GPU, and reads everything back at once: one wait per 65,536
   seeds instead of three, about 0.4 ms less per call.

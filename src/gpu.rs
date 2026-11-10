@@ -898,6 +898,7 @@ fn build_kernels(
         &format!("const CUBOID: u32 = {CUBOID}u;\nconst SPHERE: u32 = {SPHERE}u;\n"),
         &format!("const CYLINDER: u32 = {CYLINDER}u;\nconst CAPSULE: u32 = {CAPSULE}u;\nconst SDF: u32 = {SDF}u;\n"),
         &format!("const WORKGROUP: u32 = {WORKGROUP}u;\n"),
+        &format!("const IK_REST: f32 = {:?};\n", cpu::IK_REST),
         &format!(
             "const MAX_HISTORY: u32 = {MAX_HISTORY}u;\nconst LINE_STEPS: u32 = {}u;\n\
              fn line_search(c: u32) -> f32 {{\n    var steps = array<f32, {}>({});\n    return steps[c];\n}}\n",

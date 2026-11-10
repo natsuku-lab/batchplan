@@ -19,7 +19,7 @@ pub struct IkOptions {
     /// Starting configurations per problem: the problem's seed or the robot's default
     /// configuration, then random ones within the joint limits.
     pub seeds: usize,
-    /// Damped-least-squares steps per seed.
+    /// Damped-least-squares steps per seed, at most: one that has come to rest takes no more.
     pub iterations: u32,
     /// Damped-least-squares damping (lambda).
     pub damping: f32,
@@ -44,11 +44,11 @@ pub struct IkOptions {
 impl Default for IkOptions {
     fn default() -> Self {
         Self {
-            seeds: 32,
-            iterations: 60,
+            seeds: 64,
+            iterations: 30,
             damping: 0.02,
             rotation_weight: 0.5,
-            max_step: 0.3,
+            max_step: 1.0,
             collision_step: 0.05,
             collision: CollisionWeights {
                 world: 100.0,

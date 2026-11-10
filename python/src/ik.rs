@@ -16,7 +16,7 @@ value_class! {
         /// Starting configurations per problem: the problem's seed or the robot's default
         /// configuration, then random ones within the joint limits.
         seeds: usize,
-        /// Damped-least-squares steps per seed.
+        /// Damped-least-squares steps per seed, at most: one that has come to rest takes no more.
         iterations: u32,
         /// Damped-least-squares damping (lambda).
         damping: f32,

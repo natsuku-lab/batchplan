@@ -87,6 +87,17 @@ pub fn two_pandas() -> Result<Robot, batchplan::Error> {
     Robot::assemble(&parts, &options)
 }
 
+/// The IK these fixtures' starts and goals come from, fixed so they, and the numbers measured on
+/// them, do not move with `IkOptions::default()`: 32 seeds of 60 steps of at most 0.3 rad.
+pub fn fixture_ik() -> IkOptions {
+    IkOptions {
+        seeds: 32,
+        iterations: 60,
+        max_step: 0.3,
+        ..IkOptions::default()
+    }
+}
+
 /// A table at z = 0 (the robot base height) with 2-6 random boxes in front of the robot.
 pub fn tabletop(rng: &mut Rng) -> World {
     let mut obstacles = vec![Obstacle::cuboid(
@@ -277,7 +288,7 @@ pub fn reaches(robot: &Robot) -> (Vec<World>, Vec<PlanProblem>) {
         &cpu,
         &cpu.upload(&scene).expect("boxes upload"),
         &goals,
-        &IkOptions::default(),
+        &fixture_ik(),
     )
     .expect("IK takes tabletop targets");
     let problems = ik
@@ -361,7 +372,7 @@ pub fn upright_reaches(
         seed: Some(ready.to_vec()),
         ..IkProblem::new(0, Pose::new(zone_corner(), upright(0.0)))
     };
-    let start = batchplan::solve_ik(device, worlds, &[first], &IkOptions::default())?
+    let start = batchplan::solve_ik(device, worlds, &[first], &fixture_ik())?
         .nearest(0, ready)
         .expect("the start is in reach")
         .to_vec();
@@ -392,7 +403,7 @@ pub fn upright_goals(
             }
         })
         .collect();
-    let ik = batchplan::solve_ik(device, worlds, &targets, &IkOptions::default())?;
+    let ik = batchplan::solve_ik(device, worlds, &targets, &fixture_ik())?;
     Ok((0..count)
         .filter_map(|i| ik.nearest(i, start).map(<[f32]>::to_vec))
         .collect())
@@ -433,7 +444,7 @@ pub fn tray_grip(
         hold: vec![],
         holding: None,
     };
-    let solved = batchplan::solve_ik(device, worlds, &[problem], &IkOptions::default())?;
+    let solved = batchplan::solve_ik(device, worlds, &[problem], &fixture_ik())?;
     Ok(solved.nearest(0, seed).map(<[f32]>::to_vec))
 }
 

@@ -315,7 +315,7 @@ It checks success as above, on cuRobo's spheres, which ship with batchplan. The 
 
 Searching near the straight line and straightening cost 7% of batched throughput on the Ryzen and 14% on the M4 Pro. Idle threads now help the longest searches along ([below](#how-the-speed-came)), which more than pays it back. In three alternating rounds against the version before helpers, the Ryzen's batches plan 21,796 against 18,116 problems/s (22,806 against 17,869 on VAMP's spheres), with every path the same. On the M4 Pro they plan 19,898 against 15,779 in three rotating rounds; in six rotating rounds of 15 batches of each set, all the sets' batches take 122.1 ms against 154.4. Single problems plan as fast as before at the median (0.126 against 0.126 ms on the Ryzen, 0.172 against 0.173 on the M4 Pro) and within 3% at the 98th percentile (1.39 against 1.39 ms on the Ryzen, 1.48 against 1.46 on VAMP's spheres, 1.69 against 1.74 on the M4 Pro). The slowest plans in 21.2 ms against 30.9 on the Ryzen, and 26 against 46 on the M4 Pro.
 
-Planning runs on each device's own CPU threads, so the devices plan alike. IK runs on the device, where the GPU pays a fixed cost per call (about 10 ms for one problem) that the CPU does not.
+Planning runs on each device's own CPU threads, so the devices plan alike. IK runs on the device, where the GPU pays a fixed cost per call (milliseconds for one problem) that the CPU does not.
 
 The motions stay within the Panda's limits: over the sets, median motions take 1.3–3.3 s, peak accelerations reach 4.9 rad/s² against a 5 rad/s² limit, and peak jerks 40–47 rad/s³ against 50.
 
@@ -325,31 +325,31 @@ Planning alone clears the meshes in 92.9% of the problems. IK + plan clears them
 
 `examples/bench.rs` solves IK and plans for 512 random scenes, each a table with 2–6 boxes and one top-down grasp target:
 
-- **IK:** 32 seeds × 60 iterations per target;
+- **IK:** 64 seeds × 30 iterations per target;
 - **planning:** default `PlanOptions`.
 
 Every device solves the same 484 of 512 targets and plans all 484.
 
 | Machine | IK seeds/s, GPU / CPU | Planning, problems/s | End to end, GPU | End to end, CPU |
 |---|---|---|---|---|
-| Ryzen AI Max+ 395 and Radeon 8060S | 571,000–634,000 / 213,000–216,000 | 226,000–408,000 | **15,690–17,353 problems/s** | 6,193–6,274 problems/s (32 threads) |
-| M4 Pro (0.2.0) | 291,000–321,000 / 168,000–171,000 | 108,000–181,000 | **8,046–8,782 problems/s** | 4,845–4,913 problems/s (14 threads) |
+| Ryzen AI Max+ 395 and Radeon 8060S | 1,237,000–1,424,000 / 449,000–467,000 | 197,000–315,000 | **17,171–19,602 problems/s** | 6,507–6,707 problems/s (32 threads) |
+| M4 Pro (0.2.0, at 32 seeds × 60 iterations) | 291,000–321,000 / 168,000–171,000 | 108,000–181,000 | **8,046–8,782 problems/s** | 4,845–4,913 problems/s (14 threads) |
 
 Ranges cover runs after a warm-up run. The first run after the GPU idles is up to 30% slower, and the M4 Pro's GPU, which also drives its display, varies with what is on screen.
 
 Uploading the 512 worlds, which the example times first, took 0.1–0.2 ms on the M4 Pro on either device, at the commit that added `Device::warmup`: preparing each obstacle for the CPU's checks and, on the GPU, one buffer write. A distance grid adds its values, uploaded once however many worlds share it.
 
-By batch size, end to end, in solved problems per second (medians of three runs; the M4 Pro's at 0.2.0):
+By batch size, end to end, in solved problems per second (medians of three runs, the Ryzen's and the Radeon's in a later session than the table above; the M4 Pro's at 0.2.0, with IK's defaults then, 32 seeds of 60 steps):
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU | Radeon 8060S | Ryzen CPU |
 |---|---|---|---|---|
-| 1 | 114 | **1,752** | 142 | **1,403** |
-| 8 | 878 | **2,835** | 1,055 | **4,259** |
-| 64 | 2,577 | **4,149** | 3,938 | **6,107** |
-| 512 | **8,611** | 4,882 | **16,348** | 6,233 |
-| 4,096 | **10,763** | 4,643 | **21,245** | 6,372 |
+| 1 | 114 | **1,752** | 259 | **1,826** |
+| 8 | 878 | **2,835** | 1,943 | **4,362** |
+| 64 | 2,577 | **4,149** | 4,269 | **6,050** |
+| 512 | **8,611** | 4,882 | **17,521** | 6,832 |
+| 4,096 | **10,763** | 4,643 | **20,977** | 7,084 |
 
-A GPU call costs about 10 ms, so one problem at a time runs 10–15 times faster on the CPU. On the M4 Pro that cost varies from run to run: one problem's IK took 8 to 20 ms within one session, on batchplan 0.1.0 as on this version. The CPU fills its cores by 64 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.3 (M4 Pro) to 3.3 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 1.8 to 2.8 times.
+A GPU call costs 4 ms on the Radeon (10 ms on the M4 Pro at 0.2.0), so one problem at a time runs 7–15 times faster on the CPU. On the M4 Pro that cost varies from run to run: one problem's IK took 8 to 20 ms within one session, on batchplan 0.1.0 as on this version. The CPU fills its cores by 64 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.3 (M4 Pro) to 3.0 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 1.8 (M4 Pro, at 0.2.0) to 2.8 times (Radeon: 25 against 71 ms for 512 targets).
 
 ## Tool paths
 
@@ -390,7 +390,7 @@ Against the version before the audit that pinned the spline to the joint limits,
 | M4 Pro, 14 threads | 7.4 ms | 112 ms | 434 ms | 2.2 ms | 18.1 ms | the same |
 | M4 Pro's GPU | 15.3 ms | 59 ms | 193 ms | 9.4 ms | 24.9 ms | the same |
 
-The pick that fails has every grasp blocked by clutter or out of reach. A pick's time is mostly IK at the grasps (24 problems of 32 seeds each), which the GPU speeds up from 16 tasks on. A place solves IK for the robot alone in one batch: where the hand lets go fixes where the object is, so each task's solutions are then checked holding its object, on the CPU's lanes. Holding each object in its own IK call took 198 ms for 16 places on the M4 Pro's GPU, against 25 ms at 2c98826. Each held object's candidates are a batch of their own at every step, and the batches run in parallel: run one after another, 16 places took 15.9 ms on the Ryzen and 21.5 ms on the Radeon, in alternating runs with the same plans.
+The pick that fails has every grasp blocked by clutter or out of reach. A pick's time is mostly IK at the grasps (24 problems of 64 seeds each; the times above were measured at 32), which the GPU speeds up from 16 tasks on. A place solves IK for the robot alone in one batch: where the hand lets go fixes where the object is, so each task's solutions are then checked holding its object, on the CPU's lanes. Holding each object in its own IK call took 198 ms for 16 places on the M4 Pro's GPU, against 25 ms at 2c98826. Each held object's candidates are a batch of their own at every step, and the batches run in parallel: run one after another, 16 places took 15.9 ms on the Ryzen and 21.5 ms on the Radeon, in alternating runs with the same plans.
 
 ## Joining motions
 
@@ -471,12 +471,12 @@ The share of steps with a servo at its PWM limit is in brackets; at 7.4 V none w
 | 512 tasks | M4 Pro GPU (0.2.0) | M4 Pro CPU, 14 threads (0.2.0) | Radeon 8060S | Ryzen CPU (32 threads) |
 |---|---|---|---|---|
 | Handovers | 510 of 512 | 510 of 512 | 510 of 512 | 510 of 512 |
-| Time | 1.52–1.53 s | 1.65–1.67 s | 1.06–1.07 s | 1.09–1.10 s |
-| Episodes/s | 333–336 | 305–308 | 478–480 | 463–468 |
+| Time | 1.52–1.53 s | 1.65–1.67 s | 0.81–0.90 s | 0.97–1.19 s |
+| Episodes/s | 333–336 | 305–308 | 566–628 | 428–525 |
 
-The 510 episodes hold 112 minutes of motion at 30 fps, 12.8 s each at the median. The two tasks lost fail IK at the grasp. Times are three runs each after a warm-up. Against 2c98826, which planned the moves in and away and lifted and lowered the block unchecked, alternating runs took 1.14–1.16 s on the Radeon and 1.12–1.15 s on the Ryzen, with the same 510 handovers and the same 12.8 s median episode.
+The 510 episodes hold 111 minutes of motion at 30 fps (110 on the CPU device), 12.7 s each at the median. The two tasks lost fail IK at the grasp. The M4 Pro's times are three runs each after a warm-up, with IK's defaults then (32 seeds of 60 steps); the Radeon's and the Ryzen's are three runs each started with the machine's load under 6. Against 2c98826, which planned the moves in and away and lifted and lowered the block unchecked, alternating runs took 1.14–1.16 s on the Radeon and 1.12–1.15 s on the Ryzen, with the same 510 handovers and a 12.8 s median episode then.
 
-Searches draw up to 30,000 samples, against `plan`'s default 10,000: with the block clear of the other hand, the hardest moves of both arms at once, past a divider, need more, and five tasks were lost without them. IK where the taker lets go keeps 4 of the 32 seeds, since it starts from where the carry starts: 32 make the run 0.18 s slower on the Radeon and 0.21 s on the Ryzen. The blocks come in four sizes because each size needs its own carried spheres and so plans in batches of its own: at 0.2.0, sizes drawn from a continuous range took 3.65–3.67 s on the M4 Pro's GPU, against 1.52 s.
+Searches draw up to 30,000 samples, against `plan`'s default 10,000: with the block clear of the other hand, the hardest moves of both arms at once, past a divider, need more, and five tasks were lost without them. IK where the taker lets go keeps 4 of its seeds, since it starts from where the carry starts: with 32, the run was 0.18 s slower on the Radeon and 0.21 s on the Ryzen. The blocks come in four sizes because each size needs its own carried spheres and so plans in batches of its own: at 0.2.0, sizes drawn from a continuous range took 3.65–3.67 s on the M4 Pro's GPU, against 1.52 s.
 
 Rendering the episodes' camera videos in MuJoCo (`scripts/replay_mujoco.py`, three 640×480 cameras) takes about 14 ms a frame on the M4 Pro: 85 s for 16 episodes (6,075 frames) that take 0.17 s to generate.
 

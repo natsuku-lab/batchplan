@@ -737,14 +737,19 @@ fn add_jt(jac: &[f32], x: &[f32], out: &mut [f32]) {
     }
 }
 
+/// The largest joint change, in radians or meters, of an IK step that is not taken: a few times
+/// what an `f32` resolves at a joint's range. The GPU's kernels are generated with it.
+pub(crate) const IK_REST: f32 = 1e-6;
+
 /// One damped-least-squares IK step toward the targeted hands' poses (`targets`, one per hand),
 /// then a collision push in the null space of their Jacobian: with `J` the targeted hands'
 /// Jacobians stacked and `A = J J^T + damping^2 I`, the step is `J^T A^-1 e` toward the targets,
 /// and the joints `moving` marks take `-collision_step (g - J^T A^-1 J g)`. Hands on separate arms
 /// make `A` block-diagonal, so each solves alone, its own 6 x 6 system; hands that share joints (a
 /// mobile base, a torso) solve together, or each would move the shared joints for itself in full.
-/// Joints no targeted hand moves stay where they are. Mirrors `ik_step` in kernels.wgsl, pass for
-/// pass.
+/// Joints no targeted hand moves stay where they are. A step that would move no joint by more than
+/// `IK_REST` is not taken: the configuration is at rest, where every later step would find it
+/// again. Returns whether it moved. Mirrors `ik_step` in kernels.wgsl, pass for pass.
 fn ik_step(
     robot: &Robot,
     world: &CpuWorld,
@@ -752,7 +757,7 @@ fn ik_step(
     q: &mut [f32],
     o: &IkOptions,
     s: &mut Scratch,
-) {
+) -> bool {
     let n = q.len();
     robot.fk_into(q, &mut s.fk);
     let Scratch {
@@ -843,10 +848,17 @@ fn ik_step(
     } else {
         1.0
     };
+    let mut moved = 0.0f32;
     for j in 0..n {
         let (lo, hi) = robot.bounds(j);
-        q[j] = (q[j] + dq[j] * scale).clamp(lo, hi);
+        let next = (q[j] + dq[j] * scale).clamp(lo, hi);
+        moved = moved.max((next - q[j]).abs());
+        dq[j] = next;
     }
+    if moved > IK_REST {
+        q.copy_from_slice(dq);
+    }
+    moved > IK_REST
 }
 
 /// Damped least squares toward one hand's pose with nothing else in the step: how a tool path
@@ -1698,8 +1710,11 @@ impl Backend for CpuBackend {
                         for (m, &h) in scratch.moving.iter_mut().zip(item_held) {
                             *m &= !h;
                         }
+                        // A seed at rest stays there, so its remaining steps are skipped.
                         for _ in 0..o.iterations {
-                            ik_step(&self.robot, world, goals, qi, o, scratch);
+                            if !ik_step(&self.robot, world, goals, qi, o, scratch) {
+                                break;
+                            }
                         }
                         self.robot.fk_into(qi, &mut scratch.fk);
                         let mut worst = [0.0f32; 2];

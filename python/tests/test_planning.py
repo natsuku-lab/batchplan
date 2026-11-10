@@ -24,7 +24,7 @@ def test_ik_reaches_each_target(ur5e_robot):
     for device in devices(ur5e_robot):
         worlds = device.upload([bp.World([TABLE])])
         result = bp.solve_ik(device, worlds, [bp.IkProblem(0, t) for t in targets])
-        assert result.q.shape == (2, 32, ur5e_robot.dof)
+        assert result.q.shape == (2, 64, ur5e_robot.dof)
         solved = result.solved()
         assert [s.index for s in solved] == [0, 1], device
         for s, target in zip(solved, targets, strict=True):
@@ -46,7 +46,7 @@ def test_ik_reports_each_seed_as_forward_kinematics_measures_it(ur5e_robot):
         angle = 2 * math.acos(min(1.0, abs(float(np.dot(reached.rotation, target.rotation)))))
         assert math.isclose(position, distance, abs_tol=1e-4), (position, distance)
         assert math.isclose(rotation, angle, abs_tol=2e-3), (rotation, angle)
-    assert (result.seeds, result.dof) == (32, ur5e_robot.dof)
+    assert (result.seeds, result.dof) == (64, ur5e_robot.dof)
     assert bp.solve_ik(device, worlds, [bp.IkProblem(0, target)], bp.IkOptions(seeds=4)).seeds == 4
     assert np.all(result.world_clearance > 1e20), "nothing to collide with is far away"
     assert np.all(result.self_clearance < 1.0), "the links are near one another"
