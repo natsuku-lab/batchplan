@@ -83,7 +83,8 @@ if isinstance(outcome, bp.TaskFailure):
 else:
     plan = outcome[0]  # the quickest of the grasps that got through
     print(f"{plan.duration:.2f} s, holding by grasp {plan.candidate}")
-    # Run plan.transit and plan.approach, close the gripper, then run plan.depart.
+    # Run plan.transit and plan.approach, close the gripper, then run plan.depart. A task with
+    # transit=False has no plan.transit: plan.begin is where a way planned apart must end.
 ```
 
 ## Errors

@@ -56,6 +56,24 @@ def test_a_picked_box_is_carried_and_set_down(tasks_robot):
         motions = plan.transit.duration + plan.approach.duration + plan.depart.duration
         assert math.isclose(plan.duration, motions, rel_tol=1e-5)
         assert str(plan.duration) == str(np.float32(plan.duration)), "f32 as written"
+        assert [m.duration for m in plan.motions] == [
+            plan.transit.duration,
+            plan.approach.duration,
+            plan.depart.duration,
+        ]
+        np.testing.assert_array_equal(plan.begin, plan.transit.end)
+
+        # The moves alone, each step in a world it names: no transit, from a start left unchecked.
+        alone = task.replace(transit=False, transit_world=0, depart_world=0)
+        assert (alone.transit, alone.transit_world, alone.depart_world) == (False, 0, 0)
+        assert (task.transit, task.transit_world, task.depart_world) == (True, None, None)
+        moves = bp.pick(device, worlds, [alone]).outcomes[0][0]
+        assert moves.transit is None and len(moves.motions) == 2
+        assert isinstance(moves.motions, tuple)
+        np.testing.assert_array_equal(moves.begin, moves.approach.start)
+        assert math.isclose(
+            moves.duration, moves.approach.duration + moves.depart.duration, rel_tol=1e-5
+        )
 
         # Set it down 20 cm along y, in the world without it.
         without = device.upload([bp.World(scene().obstacles[:BOX])])

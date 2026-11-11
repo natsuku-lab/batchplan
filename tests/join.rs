@@ -1,17 +1,19 @@
 //! Joining motions without stopping (`join`), on every device: the joined motion turns within the
 //! blend radius of each join and is the motions themselves elsewhere, finishes sooner than the
-//! motions one after another and never later, keeps the limits and the sequence's constraints, and
-//! refuses sequences whose motions do not meet. Falling back from blends that collide is tested in `src/join.rs`.
+//! motions one after another and never later, keeps the limits and the sequence's constraints,
+//! checks its blends with what a hand holds, and refuses sequences whose motions do not meet.
+//! Falling back from blends that collide is tested in `src/join.rs`.
 
 #[path = "../examples/common/mod.rs"]
 mod common;
 
 use batchplan::rng::Rng;
 use batchplan::{
-    Device, Error, HandConstraint, JoinOptions, JoinResult, PlanOptions, PlanProblem, Pose, Robot,
-    Sequence, ToolPath, ToolPathOptions, Trajectory, World, Worlds,
+    CollisionWeights, Device, Error, HandConstraint, Held, JoinOptions, JoinResult, Obstacle,
+    PlanOptions, PlanProblem, Pose, Robot, Sequence, ToolPath, ToolPathOptions, Trajectory, World,
+    Worlds,
 };
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 fn panda() -> Robot {
     common::panda().unwrap()
@@ -37,6 +39,7 @@ fn join(device: &Device, worlds: &Worlds, paths: Vec<Vec<f32>>, blend: f32) -> J
         blends: vec![blend; paths.len() - 1],
         paths,
         constraints: vec![],
+        holding: None,
     };
     batchplan::join(device, worlds, &[sequence], &JoinOptions::default()).unwrap()
 }
@@ -267,6 +270,7 @@ fn malformed_sequences_are_input_errors() {
         blends: vec![BLEND; paths.len().saturating_sub(1)],
         paths,
         constraints: vec![],
+        holding: None,
     };
 
     let mut apart = paths.clone();
@@ -315,6 +319,28 @@ fn malformed_sequences_are_input_errors() {
     assert!(
         input(elsewhere, &o),
         "a constraint on a hand the robot lacks"
+    );
+    let ball = |hand: usize| Held {
+        hand,
+        object: Obstacle::sphere(Vec3::ZERO, 0.02),
+        grasp: Pose::IDENTITY,
+    };
+    let in_no_hand = Sequence {
+        holding: Some(ball(1)),
+        ..sequence(paths.clone())
+    };
+    assert!(input(in_no_hand, &o), "an object in a hand the robot lacks");
+    // On a device that holds one already, the hand cannot hold another.
+    let attached = robot.attach(&ball(0).attachment(&robot).unwrap()).unwrap();
+    let holder = device.with_robot(&attached).unwrap();
+    let another = Sequence {
+        holding: Some(ball(0)),
+        ..sequence(paths.clone())
+    };
+    let refused = batchplan::join(&holder, &worlds, &[another], &o);
+    assert!(
+        matches!(&refused, Err(Error::Input(why)) if why.contains("sequence 0")),
+        "{refused:?}"
     );
     for resolution in [f32::INFINITY, f32::NAN, 1e-30, 0.0] {
         let unchecked = JoinOptions { resolution };
@@ -371,6 +397,7 @@ fn longer_sequences_never_finish_later_than_their_motions() {
                 paths: paths.clone(),
                 blends: vec![blend; paths.len() - 1],
                 constraints: vec![],
+                holding: None,
             })
             .collect();
         let joined =
@@ -471,6 +498,7 @@ fn each_join_turns_within_its_own_radius() {
             paths: paths.clone(),
             blends,
             constraints: vec![],
+            holding: None,
         })
         .collect();
     let joined = batchplan::join(&device, &worlds, &sequences, &JoinOptions::default()).unwrap();
@@ -539,6 +567,7 @@ fn a_stop_separates_the_joins_either_side_of_it() {
             paths: paths.to_vec(),
             blends,
             constraints: vec![],
+            holding: None,
         };
         let sequences = [
             sequence(&paths, vec![r, 0.0, r]),
@@ -602,6 +631,7 @@ fn blends_keep_the_sequence_constraints() {
                 blends: vec![0.3; paths.len() - 1],
                 paths: paths.clone(),
                 constraints,
+                holding: None,
             };
             let joined =
                 batchplan::join(&device, &worlds, &[sequence], &JoinOptions::default()).unwrap();
@@ -624,6 +654,92 @@ fn blends_keep_the_sequence_constraints() {
             device.name(),
             kept.to_degrees(),
             free.to_degrees()
+        );
+    }
+}
+
+#[test]
+fn a_blend_is_checked_with_what_the_hand_holds() {
+    let robot = panda();
+    let n = robot.dof();
+    // A ball carried 6 cm past the hand's frame through a turn of 60 degrees, and one standing
+    // inside the turn at its height: the motions pass it, the hand passes over it, and the blend
+    // the motions join within takes the carried ball through it.
+    let held = Held {
+        hand: 0,
+        object: Obstacle::sphere(Vec3::ZERO, 0.02),
+        grasp: Pose::new(Vec3::Z * -0.06, Quat::IDENTITY),
+    };
+    let ready = robot.ee_pose(robot.default_q(), 0);
+    let down = ready.rotation * Vec3::Z;
+    let first = ready.rotation * Vec3::X;
+    let second = Quat::from_axis_angle(down, 60f32.to_radians()) * first;
+    let corner = ready.position + first * 0.25;
+    let inward = (second - first).normalize();
+    let standing = Obstacle::sphere(corner + down * 0.06 + inward * 0.055, 0.02);
+    for device in devices(&robot) {
+        let name = device.name();
+        let worlds = device
+            .upload(&[World::new(vec![standing.clone()])])
+            .unwrap();
+        let mut from = robot.default_q().to_vec();
+        let mut paths = vec![];
+        for to in [corner, corner + second * 0.25] {
+            let path = ToolPath {
+                world: 0,
+                start: from.clone(),
+                hand: 0,
+                waypoints: vec![Pose::new(to, ready.rotation)],
+                holding: Some(held.clone()),
+            };
+            let o = ToolPathOptions::default();
+            let followed = batchplan::follow(&device, &worlds, &[path], &o).unwrap();
+            assert_eq!(
+                followed.fraction[0], 1.0,
+                "{name}: the motions clear the ball"
+            );
+            let p = followed.paths[0].clone();
+            from = p[p.len() - n..].to_vec();
+            paths.push(p);
+        }
+        let sequence = |holding: Option<Held>| Sequence {
+            world: 0,
+            paths: paths.clone(),
+            blends: vec![0.15],
+            constraints: vec![],
+            holding,
+        };
+        // The one that holds the ball first: each comes back in its place.
+        let sequences = [sequence(Some(held.clone())), sequence(None)];
+        let o = JoinOptions::default();
+        let joined = batchplan::join(&device, &worlds, &sequences, &o).unwrap();
+        let (carrying, bare) = (joined.blends[0][0], joined.blends[1][0]);
+        assert!(
+            bare > Some(0.1),
+            "{name}: the bare hand turns wide, {bare:?}"
+        );
+        assert!(
+            carrying < bare,
+            "{name}: {carrying:?} holding the ball, {bare:?} without"
+        );
+        // Carried along each, the ball hits the one standing on the bare hand's path alone.
+        let attached = robot.attach(&held.attachment(&robot).unwrap()).unwrap();
+        let holder = device.with_robot(&attached).unwrap();
+        let clearance = |stretches: &[Vec<f32>]| {
+            let q: Vec<f32> = stretches.iter().flat_map(|p| samples(&robot, p)).collect();
+            let weights = CollisionWeights::default();
+            let checked = holder.evaluate(&worlds, &vec![0; q.len() / n], &q, &weights);
+            let nearest = checked.unwrap().world_clearance.into_iter();
+            nearest.fold(f32::INFINITY, f32::min)
+        };
+        let (carried, alone) = (clearance(&joined.paths[0]), clearance(&joined.paths[1]));
+        assert!(
+            alone < -0.005,
+            "{name}: the wide blend clears the ball by {alone} m"
+        );
+        assert!(
+            carried >= 0.0,
+            "{name}: the ball is carried {carried} m into the other"
         );
     }
 }

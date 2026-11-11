@@ -213,6 +213,7 @@ fn main() -> Result<()> {
                     paths: paths.clone(),
                     blends: vec![blend],
                     constraints: vec![],
+                    holding: None,
                 })
                 .collect();
             let joined = batchplan::join(&device, &worlds, &joining, &JoinOptions::default())?;
