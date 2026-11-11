@@ -97,7 +97,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   Panda without collision spheres, and 1.74 ms where 2.72 with them; 1,000 targets take 1.9 and
   25.5 ms where 3.9 and 30.8; 256 plans with 4 optimized seeds take 97 ms where 113, and 16
   take 12.2 ms where 16.9; on a Radeon 8060S one target takes 0.18 ms where 1.12, and 1.10 ms
-  where 2.70. A GPU's IK
+  where 2.70. In RoboKit's IK benchmark on an RTX 4090 one target takes 0.33–0.42 ms and ten
+  0.35–0.43, where RoboKit takes 0.57–0.59 and 0.55–0.56
+  ([Benchmarks](docs/benchmarks.md#against-robokit)). The crate has no `unsafe` again: the
+  kernels are built with every check naga makes. A GPU's IK
   results move in their last places, so a seed in thousands arrives or does not
   ([Benchmarks](docs/benchmarks.md#how-the-speed-came)).
 - Trajectories are sooner: time-optimal timing uses the full velocity and acceleration limits,

@@ -6,7 +6,7 @@ The numbers on this page come from five machines:
 - an **AMD Ryzen AI Max+ 395** CPU (16 cores, 32 threads) with a **Radeon 8060S** GPU, on Vulkan through Mesa's RADV driver, under Ubuntu 26.04;
 - an **NVIDIA T4** GPU with 8 threads of a 2.5 GHz Xeon (an AWS g4dn.2xlarge), for cuRobo, which needs CUDA, under Ubuntu 24.04;
 - an **NVIDIA A10G** GPU with 4 threads of an AMD EPYC 7R32 (an AWS g5.xlarge), for RoboKit, under Ubuntu 24.04;
-- an **NVIDIA RTX 4090** GPU with 13 threads of an AMD EPYC 75F3 (a rented container, Ubuntu 22.04), for RoboKit and batchplan on one machine, and a second such with 48 threads of an AMD EPYC 9254 where a table says so.
+- an **NVIDIA RTX 4090** GPU with 13 threads of an AMD EPYC 75F3 (a rented container, Ubuntu 22.04), for RoboKit and batchplan on one machine, a second such with 48 threads of an AMD EPYC 9254 and a third on a shared EPYC 75F3 where a table says so.
 
 The load was checked before each run on the first two; the rented machines ran nothing else of ours, and what their other tenants ran is not known. Every command to reproduce them is [at the end](#reproducing).
 
@@ -374,10 +374,25 @@ IK now [screens its seeds](planning.md#inverse-kinematics): all 64 take 8 steps,
 | 2,000 | 6.81 (99.91%) | 7.21–10.24 (99.98%) | 6.13–6.32 (99.96%) | 5.65–5.82 (99.96%) |
 
 - **From 1,000 targets per call batchplan is level with RoboKit or quicker,** by 10% at 2,000 with its defaults and 16% with 20 steps (`IkOptions { iterations: 20, .. }`), and solves a few more of them.
-- **Up to 100 targets RoboKit is the quicker,** by 7–46% against batchplan's 20 steps (most runs 13–19%) and by a third and more against its defaults. So few seeds do not fill the GPU, so a call takes as long as its steps take one after another, and leaving most seeds behind saves nothing. RoboKit takes 16 steps where batchplan's default is 30. With every seed taking 20 steps (`screening: 0`), batchplan takes 0.58, 0.57 and 0.84 ms for 1, 10 and 100 targets.
+- **Up to 100 targets RoboKit was the quicker,** by 7–46% against batchplan's 20 steps (most runs 13–19%) and by a third and more against its defaults. So few seeds do not fill the GPU, so a call takes as long as its steps take one after another, and leaving most seeds behind saves nothing. RoboKit takes 16 steps where batchplan's default is 30. With every seed taking 20 steps (`screening: 0`), batchplan takes 0.58, 0.57 and 0.84 ms for 1, 10 and 100 targets.
 - **Small calls since.** In that session the screening cost these sizes 0.05–0.1 ms: it ran as six submissions with a pass for the seeds' clearances halfway. Since then a small call is one submission; its buffers are kept from the call before; and where the steps do not push away from collisions, as for this robot without spheres, the seeds are chosen by their errors alone and their clearances found once, at the end. No result of the default IK changes with any of it. This is measured on the M4 Pro and not yet on an NVIDIA GPU. On the M4 Pro, with ac861c5's build and this change's in turn (random reachable targets in an empty world for the Panda with its 61 spheres and without any, 60 calls of `solve_ik` each; the medians of five rounds, less one round each build lost to other load), one target without spheres takes 1.02–1.03 ms where it took 1.02–1.07, and ten 1.04–1.06 where 1.05–1.09; with spheres and no push, 1.16–1.18 where 1.16–1.19, and 1.17–1.19 where 1.17–1.19; with the push (three rounds), 2.71–2.74 where 2.89, and 2.53–2.56 where 3.27–3.31.
 - **With collision spheres, on the M4 Pro** (the Panda's 61, random reachable targets in an empty world, the default and `screening: 0` in turn in one process, the machine under other load): 1,000 targets take 36–39 ms where they took 68–82, and the CPU's 14 threads 95 ms where 212, with 945 solved where 944.
 - **Where the time goes.** For this robot with collision spheres, a call of one target with no steps takes 0.17 ms on this machine and each step about 35 µs (about 12 µs without spheres). At 1,000 targets, of 5.7 ms with 20 steps, the GPU works for 2.6 ms; seeding takes 0.5 ms, reading the results back 0.7 ms, and copying and assembling them 1.1 ms, which has since been cut to one copy.
+
+With the kernels' short loops written out ([how](#how-the-speed-came)) and the kernels built with every check naga makes, on a third rented RTX 4090 (driver 595.91.07, Vulkan; an AMD EPYC 75F3 shared with other tenants, its load between 25 and 43 through the session; RoboKit 736f112 and batchplan in turn, four rounds of five runs each), in milliseconds:
+
+| Targets per call | RoboKit | batchplan, 30 steps (the default) | batchplan, 20 steps |
+|---|---|---|---|
+| 1 | 0.57–0.59 | 0.33–0.42 | 0.32–0.40 |
+| 10 | 0.55–0.56 | 0.35–0.43 | 0.34–0.38 |
+| 100 | 0.78–0.79 | 0.70–1.00 | 0.67–1.22 |
+| 1,000 | 3.14–3.16 | 2.80 in three rounds, 7.6 in one | 2.8–3.0 in two rounds, 6.1 in two |
+| 2,000 | 6.81–7.09 | 5.5–8.0 in three rounds, 10.7 in one | 5.6–6.5 in two rounds, 11 in two |
+
+- **One target and ten take batchplan's defaults about 40% less time than RoboKit,** solving all of them.
+- **At 1,000 and 2,000 targets batchplan is the quicker while the host's processors are free,** and takes twice as long in the rounds where they were not: seeding 64,000 seeds, copying and assembling their results is work on the host, where RoboKit's seeds never leave the GPU. At 100 targets the two are level.
+- **The same session's other measures** (the Panda with its 61 spheres; the build before and this one): one target with the push away from obstacles takes 0.72 ms where it took 1.11, 1,000 take 4.3 ms where 5.3, and without spheres one takes 0.19 ms where 0.57; 16 plans with 4 optimized seeds take 6.8 ms where 10.3, and 256 take 33 ms as before. Built without naga's loop counters, the same kernels gain 3% at most.
+- **Motion plans** in RoboKit's harness with these kernels (4 optimized seeds, 31 frames, five runs): timed under 0.7 of the acceleration limit, 99.58% (99.54% strict) in 12.2 / 12.1 / 33.8 ms with motions of 1.253 s that read 124.5; under the full limit, 99.58% (99.58%), 1.172 s, reading 174.
 
 ## The 2,600 problems on every device
 
