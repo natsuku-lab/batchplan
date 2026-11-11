@@ -3,13 +3,18 @@ requires = ["maturin>=1.16,<2"]
 build-backend = "maturin"
 
 [project]
-name = "batchplan"
+name = "batches"
 description = "Batched, collision-aware robot motion generation: IK, motion planning and pick-and-place tasks for thousands of problems at once, on any GPU or CPU threads"
 requires-python = ">=3.10"
 license = "MIT OR Apache-2.0"
-license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+license-files = ["licenses/LICENSE-MIT", "licenses/LICENSE-APACHE"]
+readme = "PYPI_README.md"
 dependencies = ["numpy>=1.24"]
 dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/natsuku-lab/batchplan"
+Documentation = "https://github.com/natsuku-lab/batchplan/blob/main/docs/python.md"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff==0.17.4"]

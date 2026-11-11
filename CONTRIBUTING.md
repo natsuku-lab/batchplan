@@ -107,8 +107,17 @@ batch of changes rather than for each one.
   3. Commit it as `batchplan 0.10.0`, to `main` or by pull request to a release's branch, and
      wait for CI.
   4. `git tag -a v0.10.0 -m "batchplan 0.10.0" && git push origin v0.10.0`. The release workflow
-     checks that the tag names the version and that `cargo semver-checks` passes, then publishes to
-     crates.io.
+     checks that the tag names both crates' versions and that `cargo semver-checks` passes. It
+     builds and tests Python wheels for Linux (x86-64 and ARM64), macOS (Intel and Apple Silicon)
+     and Windows (x86-64), and builds and tests the source distribution. Once these pass, it
+     publishes the Rust crate to crates.io, then the Python package to PyPI as `batches`.
+     Rust's `0.10.0-beta.1` becomes Python's `0.10.0b1`; the import remains `batchplan`.
+     Both registries use trusted publishing through `.github/workflows/release.yml` in the
+     `release` environment, restricted to `v*` tags. No upload token is stored in GitHub.
+     Pull requests that change Python packaging run the builds without publishing; a manual
+     run also only builds. If PyPI fails after crates.io succeeds, rerun the failed job, not
+     the completed crates.io job. Published versions cannot be replaced: fix a bad release
+     with a new version and tag.
   5. After a release, move batchplan-ros to it.
 - **1.0** waits for an interface we mean to keep. Two-digit minor versions until then are usual
   for Rust crates: nalgebra, glam and rapier are past 0.30. One decision comes first: how options
