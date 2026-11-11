@@ -1547,6 +1547,76 @@ pub(crate) fn run_searches(
     });
 }
 
+impl CpuBackend {
+    /// `iterations` IK steps at most on each item of a call (its worlds, the items' worlds, the
+    /// problems' targets and the joints held), as [`Backend::ik`] describes, every item to the end.
+    fn ik_steps(
+        &self,
+        (worlds, item_world, targets, held): (&Worlds, &[u32], &[Option<Pose>], &[bool]),
+        q: &mut [f32],
+        iterations: u32,
+        o: &IkOptions,
+    ) -> Result<Vec<[f32; 4]>> {
+        let (n, hands) = (self.robot.dof(), self.robot.hands());
+        // Items to a problem, whose targets they share.
+        let seeds = (item_world.len() * hands)
+            .checked_div(targets.len())
+            .unwrap_or(1);
+        let prepared: &CpuWorlds = worlds.prepared();
+        let hand_joints: Vec<Vec<usize>> = (0..hands).map(|h| self.robot.hand_joints(h)).collect();
+        let errors: Vec<[f32; 2]> = self.pool.install(|| {
+            q.par_chunks_mut(n)
+                .enumerate()
+                .zip(item_world.par_iter())
+                .map_init(
+                    || (Scratch::new(&self.robot), vec![None; hands]),
+                    |(scratch, goals), ((item, qi), &s)| {
+                        let item_targets = &targets[item / seeds * hands..][..hands];
+                        let world = &prepared[s as usize];
+                        scratch.moving.fill(false);
+                        for (h, (goal, target)) in goals.iter_mut().zip(item_targets).enumerate() {
+                            *goal = target.map(|t| (t.position, Mat3::from_quat(t.rotation)));
+                            if goal.is_some() {
+                                for &j in &hand_joints[h] {
+                                    scratch.moving[j] = true;
+                                }
+                            }
+                        }
+                        let item_held = held.get(item * n..(item + 1) * n).unwrap_or_default();
+                        scratch.holding = item_held.contains(&true);
+                        for (m, &h) in scratch.moving.iter_mut().zip(item_held) {
+                            *m &= !h;
+                        }
+                        // A seed at rest stays there, so its remaining steps are skipped.
+                        for _ in 0..iterations {
+                            if !ik_step(&self.robot, world, goals, qi, o, scratch) {
+                                break;
+                            }
+                        }
+                        self.robot.fk_into(qi, &mut scratch.fk);
+                        let mut worst = [0.0f32; 2];
+                        for (h, goal) in goals.iter().enumerate() {
+                            if let Some(goal) = goal {
+                                let (_, pos_err, rot_err) = pose_error(
+                                    &scratch.fk,
+                                    self.robot.ee_links[h],
+                                    goal,
+                                    o.rotation_weight,
+                                );
+                                worst = [worst[0].max(pos_err), worst[1].max(rot_err)];
+                            }
+                        }
+                        worst
+                    },
+                )
+                .collect()
+        });
+        let clear = self.clearance(worlds, item_world, q)?;
+        let items = errors.iter().zip(&clear);
+        Ok(items.map(|(e, c)| [e[0], e[1], c[0], c[1]]).collect())
+    }
+}
+
 impl Backend for CpuBackend {
     fn name(&self) -> String {
         format!("cpu ({} threads)", self.pool.current_num_threads())
@@ -1685,63 +1755,67 @@ impl Backend for CpuBackend {
         q: &mut [f32],
         o: &IkOptions,
     ) -> Result<Vec<[f32; 4]>> {
-        let (n, hands) = (self.robot.dof(), self.robot.hands());
-        // Items to a problem, whose targets they share.
-        let seeds = (item_world.len() * hands)
-            .checked_div(targets.len())
-            .unwrap_or(1);
-        let prepared: &CpuWorlds = worlds.prepared();
-        let hand_joints: Vec<Vec<usize>> = (0..hands).map(|h| self.robot.hand_joints(h)).collect();
-        let errors: Vec<[f32; 2]> = self.pool.install(|| {
-            q.par_chunks_mut(n)
-                .enumerate()
-                .zip(item_world.par_iter())
-                .map_init(
-                    || (Scratch::new(&self.robot), vec![None; hands]),
-                    |(scratch, goals), ((item, qi), &s)| {
-                        let item_targets = &targets[item / seeds * hands..][..hands];
-                        let world = &prepared[s as usize];
-                        scratch.moving.fill(false);
-                        for (h, (goal, target)) in goals.iter_mut().zip(item_targets).enumerate() {
-                            *goal = target.map(|t| (t.position, Mat3::from_quat(t.rotation)));
-                            if goal.is_some() {
-                                for &j in &hand_joints[h] {
-                                    scratch.moving[j] = true;
-                                }
-                            }
-                        }
-                        let item_held = held.get(item * n..(item + 1) * n).unwrap_or_default();
-                        scratch.holding = item_held.contains(&true);
-                        for (m, &h) in scratch.moving.iter_mut().zip(item_held) {
-                            *m &= !h;
-                        }
-                        // A seed at rest stays there, so its remaining steps are skipped.
-                        for _ in 0..o.iterations {
-                            if !ik_step(&self.robot, world, goals, qi, o, scratch) {
-                                break;
-                            }
-                        }
-                        self.robot.fk_into(qi, &mut scratch.fk);
-                        let mut worst = [0.0f32; 2];
-                        for (h, goal) in goals.iter().enumerate() {
-                            if let Some(goal) = goal {
-                                let (_, pos_err, rot_err) = pose_error(
-                                    &scratch.fk,
-                                    self.robot.ee_links[h],
-                                    goal,
-                                    o.rotation_weight,
-                                );
-                                worst = [worst[0].max(pos_err), worst[1].max(rot_err)];
-                            }
-                        }
-                        worst
-                    },
-                )
-                .collect()
+        let call = (worlds, item_world, targets, held);
+        if !o.screens() {
+            return self.ik_steps(call, q, o.iterations, o);
+        }
+        let n = self.robot.dof();
+        let mut solved = self.ik_steps(call, q, o.screening, o)?;
+        // Each problem's `kept` seeds that stand first take the remaining steps as a batch of
+        // their own; one that ties another goes after it.
+        let choose = |(p, chosen): (usize, &mut [usize])| {
+            let mut best: Vec<((u8, f32), usize)> = Vec::with_capacity(o.kept);
+            let first = p * o.seeds;
+            let seeds = solved[first..first + o.seeds].iter().enumerate();
+            for (s, seed) in seeds {
+                let standing = o.standing(seed);
+                let at = best.partition_point(|&((class, error), _)| {
+                    class
+                        .cmp(&standing.0)
+                        .then(error.total_cmp(&standing.1))
+                        .is_le()
+                });
+                if at < o.kept {
+                    best.truncate(o.kept - 1);
+                    best.insert(at, (standing, first + s));
+                }
+            }
+            for (slot, &(_, item)) in chosen.iter_mut().zip(&best) {
+                *slot = item;
+            }
+        };
+        let mut chosen = vec![0; item_world.len() / o.seeds * o.kept];
+        if item_world.len() < SMALL_BATCH {
+            chosen.chunks_mut(o.kept).enumerate().for_each(choose);
+        } else {
+            self.pool
+                .install(|| chosen.par_chunks_mut(o.kept).enumerate().for_each(choose));
+        }
+        let mut refined: Vec<f32> = Vec::with_capacity(chosen.len() * n);
+        let mut refined_held = Vec::with_capacity(if held.is_empty() {
+            0
+        } else {
+            refined.capacity()
         });
-        let clear = self.clearance(worlds, item_world, q)?;
-        let items = errors.iter().zip(&clear);
-        Ok(items.map(|(e, c)| [e[0], e[1], c[0], c[1]]).collect())
+        for &item in &chosen {
+            refined.extend_from_slice(&q[item * n..(item + 1) * n]);
+            if !held.is_empty() {
+                refined_held.extend_from_slice(&held[item * n..(item + 1) * n]);
+            }
+        }
+        let refined_world: Vec<u32> = chosen.iter().map(|&item| item_world[item]).collect();
+        let call = (
+            worlds,
+            refined_world.as_slice(),
+            targets,
+            refined_held.as_slice(),
+        );
+        let again = self.ik_steps(call, &mut refined, o.iterations - o.screening, o)?;
+        for ((&item, row), seed) in chosen.iter().zip(again).zip(refined.chunks(n)) {
+            q[item * n..(item + 1) * n].copy_from_slice(seed);
+            solved[item] = row;
+        }
+        Ok(solved)
     }
 
     fn trajopt(

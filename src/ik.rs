@@ -22,8 +22,9 @@ pub struct IkOptions {
     /// Damped-least-squares steps per seed, at most: one that has come to rest takes no more.
     pub iterations: u32,
     /// Of `iterations`, the steps every seed takes before only `kept` of each problem's go on;
-    /// 0 (or `iterations` and more) for every seed to take them all. Most seeds that will arrive
-    /// have by then, and the rest of the steps go to the few that are closing in.
+    /// 0 (or `iterations` and more) for every seed to take them all, as they do with more than
+    /// 65,536 seeds per problem. Most seeds that will arrive have by then, and the rest of the
+    /// steps go to the few that are closing in.
     pub screening: u32,
     /// Seeds per problem that go on past `screening`: of those not yet at their targets within
     /// the tolerances and clear of collision, the nearest, the collision-free first. The others
@@ -47,6 +48,35 @@ pub struct IkOptions {
     /// targets and seed, so a problem's starting configurations do not depend on the others in its
     /// batch.
     pub rng_seed: u64,
+}
+
+/// Seeds per problem past which none are screened: a GPU takes that many at once, and a problem's
+/// seeds are chosen among together.
+pub(crate) const SCREENED_SEEDS: usize = 1 << 16;
+/// The error a seed without one (not a number) is ranked by, as the kernels rank it.
+const FAR: f32 = 1e30;
+
+impl IkOptions {
+    /// Whether only `kept` of a problem's seeds go on past the `screening`.
+    pub(crate) fn screens(&self) -> bool {
+        self.screening > 0
+            && self.screening < self.iterations
+            && self.kept < self.seeds
+            && self.seeds <= SCREENED_SEEDS
+    }
+
+    /// Where a seed stands after the screening, from its `[position error, rotation error, world
+    /// clearance, self clearance]`: the smaller goes on first. Seeds still on their way come
+    /// before those in collision, and those that have arrived last (they would stay at rest);
+    /// within each, the nearest first.
+    pub(crate) fn standing(&self, seed: &[f32; 4]) -> (u8, f32) {
+        let clear = device::collision_free([seed[2], seed[3]]);
+        let arrived =
+            clear && seed[0] < self.position_tolerance && seed[1] < self.rotation_tolerance;
+        let error = seed[0] + self.rotation_weight * seed[1];
+        let class = if arrived { 2 } else { u8::from(!clear) };
+        (class, if error < FAR { error } else { FAR })
+    }
 }
 
 impl Default for IkOptions {
@@ -494,81 +524,7 @@ fn solved(
     } else {
         o
     };
-    let staged = o.screening > 0 && o.screening < o.iterations && o.kept < o.seeds;
-    let first = IkOptions {
-        iterations: if staged { o.screening } else { o.iterations },
-        ..*stepped
-    };
-    let mut solved = device.ik(worlds, &item_world, &targets, &held, &mut q, &first)?;
-    if staged {
-        // Of each problem's seeds that have not arrived, the `kept` nearest their targets, the
-        // collision-free first, take the remaining steps as a batch of their own. A problem with
-        // fewer left takes arrived ones along, which stay at rest, so every problem sends as many.
-        let rank = |s: &[f32; 4]| {
-            let clear = device::collision_free([s[2], s[3]]);
-            let arrived = clear && s[0] < o.position_tolerance && s[1] < o.rotation_tolerance;
-            (arrived, !clear, s[0] + o.rotation_weight * s[1])
-        };
-        let choose = |p: usize, chosen: &mut [usize]| {
-            let mut best: Vec<((bool, bool, f32), usize)> = Vec::with_capacity(o.kept);
-            let first = p * o.seeds;
-            let seeds = solved[first..first + o.seeds].iter().enumerate();
-            for (s, seed) in seeds {
-                let (ranked, item) = (rank(seed), first + s);
-                // Items come in order, so one that ties an earlier one goes after it.
-                let at = best.partition_point(|&((arrived, blocked, error), _)| {
-                    (arrived, blocked)
-                        .cmp(&(ranked.0, ranked.1))
-                        .then(error.total_cmp(&ranked.2))
-                        .is_le()
-                });
-                if at < o.kept {
-                    best.truncate(o.kept - 1);
-                    best.insert(at, (ranked, item));
-                }
-            }
-            for (slot, &(_, item)) in chosen.iter_mut().zip(&best) {
-                *slot = item;
-            }
-        };
-        let mut chosen = vec![0; problems.len() * o.kept];
-        if items < SEEDED_ALONE {
-            for (p, slots) in chosen.chunks_mut(o.kept).enumerate() {
-                choose(p, slots);
-            }
-        } else {
-            use rayon::prelude::*;
-            device.install(|| {
-                let each = chosen.par_chunks_mut(o.kept).enumerate();
-                each.for_each(|(p, slots)| choose(p, slots));
-            });
-        }
-        let mut refined: Vec<f32> = Vec::with_capacity(chosen.len() * n);
-        let mut refined_held = Vec::with_capacity(if holding { chosen.len() * n } else { 0 });
-        for &item in &chosen {
-            refined.extend_from_slice(&q[item * n..(item + 1) * n]);
-            if holding {
-                refined_held.extend_from_slice(&held[item * n..(item + 1) * n]);
-            }
-        }
-        let refined_world: Vec<u32> = chosen.iter().map(|&item| item_world[item]).collect();
-        let rest = IkOptions {
-            iterations: o.iterations - o.screening,
-            ..*stepped
-        };
-        let again = device.ik(
-            worlds,
-            &refined_world,
-            &targets,
-            &refined_held,
-            &mut refined,
-            &rest,
-        )?;
-        for ((&item, row), seed) in chosen.iter().zip(again).zip(refined.chunks(n)) {
-            q[item * n..(item + 1) * n].copy_from_slice(seed);
-            solved[item] = row;
-        }
-    }
+    let solved = device.ik(worlds, &item_world, &targets, &held, &mut q, stepped)?;
     let mut result = IkResult {
         problems: problems.to_vec(),
         dof: n,

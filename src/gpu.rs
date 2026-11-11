@@ -108,7 +108,8 @@ shader_struct! {
         acceleration_weight: f32, velocity_weight: f32, initial_step: f32, history: u32,
         damping: f32, rotation_weight: f32, max_step: f32, collision_step: f32,
         samples: u32, constraints: u32, constraint_weight: f32, held: u32,
-        per_target: u32, first_seed: u32, pad0: u32, pad1: u32,
+        per_target: u32, first_seed: u32, kept: u32, chosen: u32,
+        position_tolerance: f32, rotation_tolerance: f32, pad0: u32, pad1: u32,
     }
 }
 
@@ -690,6 +691,7 @@ struct Kernels {
     /// SHARED_LANES per configuration, for batches too small to fill the GPU with one, and IK of
     /// robots with many spheres (`ik_lanes`).
     shared: CollisionKernels,
+    ik_select: wgpu::ComputePipeline,
     traj_search: wgpu::ComputePipeline,
     traj_grad: wgpu::ComputePipeline,
     lbfgs_direction: wgpu::ComputePipeline,
@@ -985,6 +987,7 @@ fn build_kernels(
             shared.join().expect("pipeline creation does not panic"),
         )
     });
+    let ik_select = pipeline("ik_select", 1);
     let traj_search = pipeline("traj_search", 1);
     let traj_grad = pipeline("traj_grad", 1);
     let lbfgs_direction = pipeline("lbfgs_direction", 1);
@@ -999,6 +1002,7 @@ fn build_kernels(
         layout0,
         single,
         shared,
+        ik_select,
         traj_search,
         traj_grad,
         lbfgs_direction,
@@ -1472,14 +1476,21 @@ impl Backend for GpuBackend {
             .checked_div(targets.len())
             .unwrap_or(1);
         let mut errors = Vec::with_capacity(item_world.len());
+        // Seeds are chosen among a problem's (`IkOptions::screens`), so a chunk then holds whole
+        // problems.
+        let chunk = if o.screens() {
+            IK_CHUNK / seeds * seeds
+        } else {
+            IK_CHUNK
+        };
         let chunks = item_world
-            .chunks(IK_CHUNK)
-            .zip(q.chunks_mut(IK_CHUNK * n))
+            .chunks(chunk)
+            .zip(q.chunks_mut(chunk * n))
             .enumerate();
         for (c, (chunk_world, chunk_q)) in chunks {
             // The targets of the problems the chunk's items belong to, the first of which it may
             // enter partway through its seeds.
-            let (start, end) = (c * IK_CHUNK, c * IK_CHUNK + chunk_world.len());
+            let (start, end) = (c * chunk, c * chunk + chunk_world.len());
             let problems = start / seeds..(end - 1) / seeds + 1;
             let chunk_targets = &targets[problems.start * hands..problems.end * hands];
             let chunk_held = held
@@ -1869,7 +1880,13 @@ impl GpuBackend {
         let flags: Vec<f32> = held.iter().map(|&h| f32::from(u8::from(h))).collect();
         let held_buf = storage(&self.device, "held", &flags);
         let q_buf = storage(&self.device, "q", q);
-        let out = storage_zeroed(&self.device, "ik errors", items * 2);
+        // Past the items' results in both outputs, the seeds chosen to go on (`P.chosen`).
+        let slots = if o.screens() {
+            items / seeds * o.kept
+        } else {
+            0
+        };
+        let out = storage_zeroed(&self.device, "ik errors", items * 2 + slots);
         let bg = self.bind_main(&CallBuffers {
             params: &params_buf,
             worlds,
@@ -1879,49 +1896,89 @@ impl GpuBackend {
             aux: &held_buf,
             out: &out,
         });
-        let mut done = 0;
-        while done < o.iterations {
-            params.iterations = IK_ITERS_PER_SUBMIT.min(o.iterations - done);
-            self.queue
-                .write_buffer(&params_buf, 0, bytemuck::bytes_of(&params));
-            self.submit_pass(|pass| {
-                pass.set_pipeline(&self.kernels.collision(lanes).ik);
-                pass.set_bind_group(0, &bg, &[]);
-                dispatch(pass, items * lanes as usize);
-            });
-            done += params.iterations;
-        }
-        if o.iterations == 0 {
-            params.iterations = 0;
-            self.queue
-                .write_buffer(&params_buf, 0, bytemuck::bytes_of(&params));
-            self.submit_pass(|pass| {
-                pass.set_pipeline(&self.kernels.collision(lanes).ik);
-                pass.set_bind_group(0, &bg, &[]);
-                dispatch(pass, items * lanes as usize);
-            });
-        }
+        // `steps` IK steps of the call's `configurations` as `params` has them, a bounded number
+        // per submission; none still writes the errors.
+        let run = |params: &mut GpuParams, lanes: u32, configurations: usize, steps: u32| {
+            let mut left = steps;
+            loop {
+                params.iterations = IK_ITERS_PER_SUBMIT.min(left);
+                self.queue
+                    .write_buffer(&params_buf, 0, bytemuck::bytes_of(params));
+                self.submit_pass(|pass| {
+                    pass.set_pipeline(&self.kernels.collision(lanes).ik);
+                    pass.set_bind_group(0, &bg, &[]);
+                    dispatch(pass, configurations * lanes as usize);
+                });
+                left -= params.iterations;
+                if left == 0 {
+                    break;
+                }
+            }
+        };
         // The final configurations' clearances in the same queue, from the configurations already
         // on the GPU, and everything read back through one buffer: one wait per chunk.
-        let clear_params = self.uniform(&self.params(items, &CollisionWeights::NONE));
-        let clear_out = storage_zeroed(&self.device, "clearance", items * 2);
-        let clear_bg = self.bind_main(&CallBuffers {
-            params: &clear_params,
-            worlds,
-            item_world: &world_buf,
-            targets: &target_buf,
-            q: &q_buf,
-            aux: &held_buf,
-            out: &clear_out,
-        });
+        let clear_out = storage_zeroed(&self.device, "clearance", items * 2 + slots);
+        let clearances = |configurations: usize, chosen: u32| {
+            let mut params = self.params(configurations, &CollisionWeights::NONE);
+            params.chosen = chosen;
+            let bg = self.bind_main(&CallBuffers {
+                params: &self.uniform(&params),
+                worlds,
+                item_world: &world_buf,
+                targets: &target_buf,
+                q: &q_buf,
+                aux: &held_buf,
+                out: &clear_out,
+            });
+            let lanes = lanes_for(configurations);
+            move |pass: &mut wgpu::ComputePass| {
+                pass.set_pipeline(&self.kernels.collision(lanes).clearance);
+                pass.set_bind_group(0, &bg, &[]);
+                dispatch(pass, configurations * lanes as usize);
+            }
+        };
+        let last = if slots == 0 {
+            run(&mut params, lanes, items, o.iterations);
+            clearances(items, 0)
+        } else {
+            // Every seed's screening and clearance; then each seed finds its place among its
+            // problem's, from the errors and clearances; then those chosen take the other steps.
+            run(&mut params, lanes, items, o.screening);
+            self.submit_pass(clearances(items, 0));
+            let chosen = (items * 2) as u32;
+            let mut choice = self.params(items, &CollisionWeights::NONE);
+            choice.per_target = seeds as u32;
+            choice.kept = o.kept as u32;
+            choice.chosen = chosen;
+            choice.rotation_weight = o.rotation_weight;
+            choice.position_tolerance = o.position_tolerance;
+            choice.rotation_tolerance = o.rotation_tolerance;
+            let choice_bg = self.bind_main(&CallBuffers {
+                params: &self.uniform(&choice),
+                worlds,
+                item_world: &world_buf,
+                targets: &target_buf,
+                q: &out,
+                aux: &clear_out,
+                out: &q_buf,
+            });
+            self.submit_pass(|pass| {
+                pass.set_pipeline(&self.kernels.ik_select);
+                pass.set_bind_group(0, &choice_bg, &[]);
+                dispatch(pass, items);
+            });
+            let lanes = if o.collision_step > 0.0 {
+                ik_lanes(slots, self.robot.spheres.len())
+            } else {
+                1
+            };
+            params.n_items = slots as u32;
+            params.chosen = chosen;
+            run(&mut params, lanes, slots, o.iterations - o.screening);
+            clearances(slots, chosen)
+        };
         let mut enc = self.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = enc.begin_compute_pass(&Default::default());
-            let clear_lanes = lanes_for(items);
-            pass.set_pipeline(&self.kernels.collision(clear_lanes).clearance);
-            pass.set_bind_group(0, &clear_bg, &[]);
-            dispatch(&mut pass, items * clear_lanes as usize);
-        }
+        last(&mut enc.begin_compute_pass(&Default::default()));
         let [solved, errors, clear] = self.read_after(
             enc,
             [
