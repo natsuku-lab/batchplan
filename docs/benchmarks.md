@@ -6,7 +6,7 @@ The numbers on this page come from five machines:
 - an **AMD Ryzen AI Max+ 395** CPU (16 cores, 32 threads) with a **Radeon 8060S** GPU, on Vulkan through Mesa's RADV driver, under Ubuntu 26.04;
 - an **NVIDIA T4** GPU with 8 threads of a 2.5 GHz Xeon (an AWS g4dn.2xlarge), for cuRobo, which needs CUDA, under Ubuntu 24.04;
 - an **NVIDIA A10G** GPU with 4 threads of an AMD EPYC 7R32 (an AWS g5.xlarge), for RoboKit, under Ubuntu 24.04;
-- an **NVIDIA RTX 4090** GPU with 13 threads of an AMD EPYC 75F3 (a rented container, Ubuntu 22.04), for RoboKit and batchplan on one machine, and a second such with 48 threads of an AMD EPYC 9254 where a table says so.
+- an **NVIDIA RTX 4090** GPU with 13 threads of an AMD EPYC 75F3 (a rented container, Ubuntu 22.04), for RoboKit and batchplan on one machine, a second such with 48 threads of an AMD EPYC 9254 and a third on a shared EPYC 75F3 where a table says so.
 
 The load was checked before each run on the first two; the rented machines ran nothing else of ours, and what their other tenants ran is not known. Every command to reproduce them is [at the end](#reproducing).
 
@@ -374,10 +374,25 @@ IK now [screens its seeds](planning.md#inverse-kinematics): all 64 take 8 steps,
 | 2,000 | 6.81 (99.91%) | 7.21–10.24 (99.98%) | 6.13–6.32 (99.96%) | 5.65–5.82 (99.96%) |
 
 - **From 1,000 targets per call batchplan is level with RoboKit or quicker,** by 10% at 2,000 with its defaults and 16% with 20 steps (`IkOptions { iterations: 20, .. }`), and solves a few more of them.
-- **Up to 100 targets RoboKit is the quicker,** by 7–46% against batchplan's 20 steps (most runs 13–19%) and by a third and more against its defaults. So few seeds do not fill the GPU, so a call takes as long as its steps take one after another, and leaving most seeds behind saves nothing. RoboKit takes 16 steps where batchplan's default is 30. With every seed taking 20 steps (`screening: 0`), batchplan takes 0.58, 0.57 and 0.84 ms for 1, 10 and 100 targets.
+- **Up to 100 targets RoboKit was the quicker,** by 7–46% against batchplan's 20 steps (most runs 13–19%) and by a third and more against its defaults. So few seeds do not fill the GPU, so a call takes as long as its steps take one after another, and leaving most seeds behind saves nothing. RoboKit takes 16 steps where batchplan's default is 30. With every seed taking 20 steps (`screening: 0`), batchplan takes 0.58, 0.57 and 0.84 ms for 1, 10 and 100 targets.
 - **Small calls since.** In that session the screening cost these sizes 0.05–0.1 ms: it ran as six submissions with a pass for the seeds' clearances halfway. Since then a small call is one submission; its buffers are kept from the call before; and where the steps do not push away from collisions, as for this robot without spheres, the seeds are chosen by their errors alone and their clearances found once, at the end. No result of the default IK changes with any of it. This is measured on the M4 Pro and not yet on an NVIDIA GPU. On the M4 Pro, with ac861c5's build and this change's in turn (random reachable targets in an empty world for the Panda with its 61 spheres and without any, 60 calls of `solve_ik` each; the medians of five rounds, less one round each build lost to other load), one target without spheres takes 1.02–1.03 ms where it took 1.02–1.07, and ten 1.04–1.06 where 1.05–1.09; with spheres and no push, 1.16–1.18 where 1.16–1.19, and 1.17–1.19 where 1.17–1.19; with the push (three rounds), 2.71–2.74 where 2.89, and 2.53–2.56 where 3.27–3.31.
 - **With collision spheres, on the M4 Pro** (the Panda's 61, random reachable targets in an empty world, the default and `screening: 0` in turn in one process, the machine under other load): 1,000 targets take 36–39 ms where they took 68–82, and the CPU's 14 threads 95 ms where 212, with 945 solved where 944.
 - **Where the time goes.** For this robot with collision spheres, a call of one target with no steps takes 0.17 ms on this machine and each step about 35 µs (about 12 µs without spheres). At 1,000 targets, of 5.7 ms with 20 steps, the GPU works for 2.6 ms; seeding takes 0.5 ms, reading the results back 0.7 ms, and copying and assembling them 1.1 ms, which has since been cut to one copy.
+
+With the kernels' short loops written out ([how](#how-the-speed-came)) and the kernels built with every check naga makes, on a third rented RTX 4090 (driver 595.91.07, Vulkan; an AMD EPYC 75F3 shared with other tenants, its load between 25 and 43 through the session; RoboKit 736f112 and batchplan in turn, four rounds of five runs each), in milliseconds:
+
+| Targets per call | RoboKit | batchplan, 30 steps (the default) | batchplan, 20 steps |
+|---|---|---|---|
+| 1 | 0.57–0.59 | 0.33–0.42 | 0.32–0.40 |
+| 10 | 0.55–0.56 | 0.35–0.43 | 0.34–0.38 |
+| 100 | 0.78–0.79 | 0.70–1.00 | 0.67–1.22 |
+| 1,000 | 3.14–3.16 | 2.80 in three rounds, 7.6 in one | 2.8–3.0 in two rounds, 6.1 in two |
+| 2,000 | 6.81–7.09 | 5.5–8.0 in three rounds, 10.7 in one | 5.6–6.5 in two rounds, 11 in two |
+
+- **One target and ten take batchplan's defaults about 40% less time than RoboKit,** solving all of them.
+- **At 1,000 and 2,000 targets batchplan is the quicker while the host's processors are free,** and takes twice as long in the rounds where they were not: seeding 64,000 seeds, copying and assembling their results is work on the host, where RoboKit's seeds never leave the GPU. At 100 targets the two are level.
+- **The same session's other measures** (the Panda with its 61 spheres; the build before and this one): one target with the push away from obstacles takes 0.72 ms where it took 1.11, 1,000 take 4.3 ms where 5.3, and without spheres one takes 0.19 ms where 0.57; 16 plans with 4 optimized seeds take 6.8 ms where 10.3, and 256 take 33 ms as before. Built without naga's loop counters, the same kernels gain 3% at most.
+- **Motion plans** in RoboKit's harness with these kernels (4 optimized seeds, 31 frames, five runs): timed under 0.7 of the acceleration limit, 99.58% (99.54% strict) in 12.2 / 12.1 / 33.8 ms with motions of 1.253 s that read 124.5; under the full limit, 99.58% (99.58%), 1.172 s, reading 174.
 
 ## The 2,600 problems on every device
 
@@ -421,7 +436,7 @@ Each range covers three runs, each started with the machine's load under 6, with
 
 Uploading the 512 worlds, which the example times first, takes 0.1 ms on the M4 Pro's CPU and 0.2 ms on its GPU: preparing each obstacle for the CPU's checks and, on the GPU, one buffer write. A distance grid adds its values, uploaded once however many worlds share it.
 
-By batch size, end to end, in solved problems per second (medians of three runs, in the sessions of the table above):
+By batch size, end to end, in solved problems per second (medians of three runs, in the sessions of the table above; both tables were measured before the kernels' loops were [written out](#how-the-speed-came), which makes a GPU's IK quicker again):
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU | Radeon 8060S | Ryzen CPU |
 |---|---|---|---|---|
@@ -661,8 +676,24 @@ batchplan's paths were 12% longer than cuRobo's at the median where both solved 
 - **Per-robot kernels.** On Mesa's RADV, per-link arrays cost 3–5 KB of scratch memory per invocation; writing the kernels per robot removed it ([why](architecture.md#the-gpu)).
 - **Grids.** [Building distance grids on the GPU](perception.md#building-grids-on-the-gpu), with an integer distance transform, made a 640×480 depth image's 1 cm grid 11× faster on the Radeon (21.1–22.7 → 1.9–2.0 ms) and 3.3× faster on the M4 Pro.
 - **Mesh checks.** A branch-and-bound search took mesh clearance from 620 to 110 µs per Panda configuration.
-- **Loop counters.** naga adds a counter to every shader loop so that none can run forever. The kernels' loops all count to a bound, so their module is built without it (`create_shader_module_trusted`, the crate's one `unsafe`; a test scans the kernels for any other kind of loop). One target's default IK (64 seeds of 30 steps, 300 calls, median) took 1.27 ms and takes 1.01 on the M4 Pro for a Panda without collision spheres, 3.33 and 2.83 ms with them; on an RTX 4090, 0.74 and 0.53 ms, and 1.33 and about 1.2. Built both ways in one process on the M4 Pro and called in turn, IK of 32 and 512 targets takes 4–10% less, `evaluate` of 512 and 65,536 configurations between 9% less and 0.5% more, and 128 plans with 4 optimized seeds 2–7% less.
-- **Not adopted.** Shader modules without bounds checks as well would add nothing on the M4 Pro and under a tenth on the RTX 4090 (0.53 to 0.48 ms), and need every index proven in range. Reusing every call's buffers: creating, filling and binding them takes 0.36 ms of 53 ms for 16,384 seeds on the M4 Pro, and large ones are made around their data, which saves a copy. Small IK calls do reuse theirs (up to 64 KiB each), which saves them 0.04–0.07 ms of about a millisecond. Grid buffers, which are megabytes, are reused.
+- **Loops written out.** naga counts the rounds of every shader loop, so that none can run forever. For IK's linear algebra, loops of six or seven rounds around a multiplication, the counting cost more than the work. One hand's damped least squares is written out term by term for each robot (`least_squares_wgsl`), and the kernels' loops of a known count, over the joints, the hands and the line search's steps, are written out when the kernels are built (`loops_written_out`); the source keeps its loops. `examples/latency.rs` on the M4 Pro, the build before the four changes listed here and the one after them in turn (four rounds, each started with the load under 5; medians), in milliseconds:
+
+  | Targets per call | No spheres | Spheres, no push | Spheres and the push | Two hands that share joints, the push |
+  |---|---|---|---|---|
+  | 1 | 1.14 → 0.34 | 1.23 → 0.39 | 2.03 → 0.92 | 4.31 → 3.59 |
+  | 10 | 1.13 → 0.34 | 1.24 → 0.40 | 2.89 → 1.81 | 5.73 → 4.74 |
+  | 100 | 1.41 → 0.61 | 1.70 → 0.85 | 5.59 → 4.38 | 8.91 → 7.65 |
+  | 1,000 | 3.83 → 1.72 | 5.93 → 2.98 | 30.0 → 22.1 | 52.0 → 42.2 |
+
+  Its 16 plans with 4 optimized seeds take 15.9 ms where they took 23.7, its 256 take 83.1 ms where 93.8, and its UR5e's 1,000 targets among clutter 23.7 ms where 30.0 (that row in three rounds of its own). A round now and then reads 0.8 ms or more for one target without spheres, in either build: the M4's GPU varies over calls this short. On the Radeon 8060S, measured before the two changes that follow and on other random targets (three rounds, each started with its load under 6), 1, 10, 100 and 1,000 targets without spheres take 0.18, 0.20, 0.37 and 1.22 ms where they took 1.12, 1.14, 1.34 and 3.85, and with the push 1.10, 0.97, 1.84 and 10.4 ms where 2.70, 2.51, 3.51 and 17.3. A GPU's results move in their last places, IK's and trajectory optimization's alike.
+
+  The kernels keep every check naga makes. For a while they were built without the loop counters, through wgpu's `unsafe` way to vouch for a shader, which made IK 10–28% faster then. What the counters still cost, from this build and one that differs only in vouching for its shaders, in turn (three rounds of the same example on the M4 Pro): nothing for IK without spheres, for `evaluate` and for a Panda of 399 spheres; up to 4% for IK with spheres (22.1 against 21.3 ms for 1,000 targets with the push); 4–7% for optimized plans (83.3 against 79.2 ms for the 256, 128.7 against 120.3 for 256 past a ball in the way); and 13–20% for two hands that share joints (42.2 against 37.2 ms for 1,000 targets), whose stacked system keeps loops of run-time counts.
+
+  Three of the example's kinds are slower than the build before, in the four rounds of the table. IK with the push for a Panda fitted with 399 spheres, among tabletops' clutter, takes 191 ms for 300 targets where it took 184, and 469 ms for 1,000 where 446: that came with the written-out algebra, the counters still off, and its cause is not found. 256 plans to goals past a ball, with 4 optimized seeds, take 129.3 ms where 123.5, which is the counters. `evaluate` of 16,384 configurations reads 1.23 ms where 1.19 (1.5–4% over three sets of rounds).
+- **A link of many spheres takes them two to a round.** Where a link of the robot's own has 24 spheres or more, or two of them 128 sphere pairs, the loop over them takes two rounds at a time, the second where there is still one to take: half the rounds for naga to count, and the same spheres in the same order. It brought the 399-sphere Panda above from 204 ms to 191 for 300 targets, and from 491 to 471 for 1,000 (three rounds in turn). The two counts are where no robot of the example is slower than with one to a round (IK with the push, 1,000 targets, three rounds in turn): its UR5e among clutter takes 23.7 ms where it took 24.5, and the Panda, none of whose links reach them, is unchanged. From 16 spheres and 64 pairs the Panda's hand, 18 spheres and 72 pairs with each of four links, pairs up and its IK takes 22.0 ms where 21.8; from 24 and 64 the UR5e takes 24.7 where 24.5. The objects a robot holds keep one to a round whatever their size, so that holding another builds no kernels.
+- **One lane takes the step.** A small batch gives each configuration eight invocations, which split its collision gradient. Each then worked out the same step from it: the Jacobian, the least squares, the limits. Now the first does, and the others take the configuration from it; the collision gradient is found before the step either way. The Panda's results are the same bit for bit, and two UR5e arms' move in their last places, the reordered step being rounded otherwise. With the push, 1,000 targets take 22.2 ms where they took 24.8 on the M4 Pro, and 42.4 ms where 45.9 for two hands that share joints (three rounds in turn).
+- **Paths that are done.** The CPU's trajectory optimization stops a path at a steepest-descent search that finds nothing better: no later round can change it. A GPU ran every round for every path. Its kernels now leave such a path out, which changes no path: of the 180 optimizations the CPU runs to their end for `examples/latency.rs`'s two batches of plans, 151 end before the last round, at round 60 of 100 on average. The plans' times are with the table above; the Radeon is not measured yet.
+- **Not adopted.** Shader modules without naga's checks, which wgpu builds only through `unsafe`: what the loop counters cost is above; without bounds checks as well, nothing more on the M4 Pro and under a tenth on an RTX 4090, with every index to prove in range. Taking a workgroup's strided loops several rounds at a time, or their first rounds out of the loop; one loop over a world's obstacles with every link inside it (4% slower without the counters). Reusing every call's buffers: creating, filling and binding them takes 0.36 ms of 53 ms for 16,384 seeds on the M4 Pro, and large ones are made around their data, which saves a copy. Small IK calls do reuse theirs (up to 64 KiB each), which saves them 0.04–0.07 ms of about a millisecond. Grid buffers, which are megabytes, are reused.
 
 ## Reproducing
 
@@ -688,6 +719,7 @@ cargo run --release --example tasks -- 64
 
 # Joining pick-like motions on one reBot (after scripts/fetch_rebot.sh), or the SO-101; timing by kind of path
 cargo run --release --example join [-- so101]
+cargo run --release --example latency             # one call's time by kind, on the GPU; -- --cpu on the CPU
 cargo run --release --example timing
 
 # Tracking on the SO-101's servos, on BAM's model of them
