@@ -10,6 +10,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- Publish the Python bindings as `batches` on PyPI (`import batchplan`). Version tags publish
+  the Rust crate and Python wheels and source together, using trusted publishing.
+
 - **Breaking:** `plan` takes the hands' poses as a goal: `PlanProblem::goal` is a `Goal`, a
   configuration (`Goal::Joints`) or a pose or `None` per hand (`Goal::Poses`), and
   `PlanProblem::new` takes either, a `Pose` for a one-handed robot. `plan` solves IK for every
@@ -175,6 +178,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   infinite `opening` is an `Error::Input`.
 
 ### Fixed
+
+- GPU devices on Windows using the FXC DX12 shader compiler can build the hand-frame kernels.
 
 - A plan from a moving start is optimized (`PlanOptions::seeds`) unless its path is within 2% of
   the straight line from the start: the line was measured from the path's first control point,

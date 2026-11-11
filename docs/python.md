@@ -4,13 +4,24 @@ The `batchplan` package binds the library for Python: the same calls, batches an
 
 ## Installing
 
-From the repository, with a Rust toolchain ([rustup](https://rustup.rs)):
+Install [batches from PyPI](https://pypi.org/project/batches/):
+
+```bash
+pip install --pre batches
+```
+
+The distribution is named `batches`; the import is `batchplan`. Python 3.10 or newer is required.
+The initial `0.11.0b1` release contains source only, so installing it needs a Rust toolchain
+([rustup](https://rustup.rs)). `--pre` includes beta releases; omit it when you want only stable
+releases once those are available.
+
+For changes on `main` that have not reached PyPI, build from the repository:
 
 ```bash
 pip install "git+https://github.com/natsuku-lab/batchplan#subdirectory=python"
 ```
 
-Python 3.10 or newer; CI builds and tests it on Linux. To work on the bindings, `cd python && uv run pytest` builds them and runs their tests.
+To work on the bindings, `cd python && uv run pytest` builds them and runs their tests.
 
 ## A whole program
 
