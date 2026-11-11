@@ -98,15 +98,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   On an M4 Pro, one target's default IK takes 0.34 ms where it took 1.14 for a Panda without
   collision spheres, and 0.92 ms where 2.03 with them; 1,000 targets take 1.7 and 22.1 ms where
   3.8 and 30.0; 256 plans with 4 optimized seeds take 83 ms where 94, and 16 take 15.9 ms where
-  23.7
-  (`examples/latency.rs`). On a Radeon 8060S, before the last two of these changes, one
-  target took 0.18 ms where 1.12, and 1.10 ms where 2.70. In RoboKit's IK benchmark on an RTX 4090 one target takes 0.33–0.42 ms and ten
-  0.35–0.43, where RoboKit takes 0.57–0.59 and 0.55–0.56
-  ([Benchmarks](docs/benchmarks.md#against-robokit)). The crate has no `unsafe`: the kernels
-  are built with every check naga makes, the loop counters among them, which cost optimized
-  plans 4–7% and IK for hands that share joints 13–20% of their time on an M4 Pro. Three
-  kinds of call are slower than before: IK with the push for a robot of several hundred
-  spheres (4–5%), plans to goals past an obstacle (5%) and `evaluate` (1.5–4%)
+  23.7 (`examples/latency.rs`). On a Radeon 8060S, before the last two of these changes, one
+  target took 0.18 ms where 1.12, and 1.10 ms where 2.70. In RoboKit's IK benchmark on an RTX
+  4090 one target takes 0.33–0.42 ms and ten 0.35–0.43, where RoboKit takes 0.57–0.59 and
+  0.55–0.56 ([Benchmarks](docs/benchmarks.md#against-robokit)). The crate has no `unsafe`: the
+  kernels are built with every check naga makes, the loop counters among them, which on an M4
+  Pro make optimized plans 4–7% slower and IK for hands that share joints 13–20%. Three kinds of
+  call are slower than before: IK with the push for a robot of several hundred spheres (4–5%),
+  plans to goals past an obstacle (5%) and `evaluate` (1.5–4%)
   ([Benchmarks](docs/benchmarks.md#how-the-speed-came)). A GPU's results move in their last
   places, IK's and trajectory optimization's alike: a seed in thousands arrives or does not.
 - Trajectories are sooner: time-optimal timing uses the full velocity and acceleration limits,

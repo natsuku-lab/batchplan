@@ -1,12 +1,12 @@
 //! How long one call takes on a device, by kind of call, on the Panda: IK of 1 to 1,000 targets
-//! without collision spheres, with them and no push away from obstacles, with the push, and with
-//! a second hand on its fourth link, so that the hands share joints; `evaluate` of 512 and 16,384
+//! without collision spheres, with them and no push away from obstacles, with the push, and with a
+//! second hand on its fourth link, so that the hands share joints; `evaluate` of 512 and 16,384
 //! configurations; plans of 16 and 256 problems with 4 optimized seeds. Then the two kinds that
 //! spend longest in the collision code: IK with the push for a Panda fitted with several hundred
 //! spheres, among tabletops' clutter, and plans to goals past a ball in the way; and a UR5e's IK
-//! among the same clutter, a robot of other links and spheres. Each kind is
-//! called many times and its median and best kept: a GPU's pace over calls this short varies, so
-//! compare builds by running them in turn.
+//! among the same clutter, a robot of other links and spheres. Each kind is called many times and
+//! its median and best kept: a GPU's pace over calls this short varies, so compare builds by
+//! running them in turn.
 //!
 //!   cargo run --release --example latency [-- --cpu]
 
