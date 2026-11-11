@@ -617,7 +617,8 @@ fn pose_error(
 }
 
 /// Hand `h`'s Jacobian into `jac` (6 x dof, row-major) and its damped normal matrix, factored, into
-/// `a`; with `moving`, only those joints' columns. Mirrors `hand_system` in kernels.wgsl.
+/// `a`; with `moving`, only those joints' columns. Mirrors `hand_system`, which `gpu.rs` writes
+/// per robot (`least_squares_wgsl`).
 #[inline]
 fn hand_system(
     robot: &Robot,

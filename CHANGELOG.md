@@ -86,12 +86,28 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 - **Breaking:** `IkOptions::collision_step` must be finite: an infinite or NaN one is an input
   error. NaN and negative infinity used to mean no push, and positive infinity solved nothing
   (the CPU left every seed where it started).
-- IK on a GPU takes 10-28% less time: the kernels are built without the counter naga adds to
-  every loop to rule out infinite ones, which theirs cannot be (the crate's one `unsafe`). One
-  target's 64 seeds of 30 steps take 1.01 ms where they took 1.27 on an M4 Pro for a Panda
-  without collision spheres (2.83 ms where 3.33 with them), and 0.53 ms where 0.74 on an RTX
-  4090 (about 1.2 ms where 1.33). A GPU's results round differently for it, as they do from
-  driver to driver ([Benchmarks](docs/benchmarks.md#how-the-speed-came)).
+- GPU kernels leave naga fewer loops to count, and trajectory optimization on a GPU leaves out
+  paths that are done. naga counts the rounds of every shader loop to rule out endless ones,
+  which cost IK's short loops more than their work. One hand's damped least squares is now
+  written out term by term for each robot, as its kinematics are, and the kernels' loops of a
+  known count (over the joints, the hands, the line search's steps) are written out when the
+  kernels are built. A path whose optimization is over, a steepest-descent search having found
+  nothing better, takes no part in later rounds, as the CPU's already stopped. Of the lanes a
+  small batch gives each configuration, one works out the IK step and the others take the
+  configuration from it, and a robot's own link of 24 spheres or more takes them two to a round.
+  On an M4 Pro, one target's default IK takes 0.34 ms where it took 1.14 for a Panda without
+  collision spheres, and 0.92 ms where 2.03 with them; 1,000 targets take 1.7 and 22.1 ms where
+  3.8 and 30.0; 256 plans with 4 optimized seeds take 83 ms where 94, and 16 take 15.9 ms where
+  23.7 (`examples/latency.rs`). On a Radeon 8060S, before the last two of these changes, one
+  target took 0.18 ms where 1.12, and 1.10 ms where 2.70. In RoboKit's IK benchmark on an RTX
+  4090 one target takes 0.33–0.42 ms and ten 0.35–0.43, where RoboKit takes 0.57–0.59 and
+  0.55–0.56 ([Benchmarks](docs/benchmarks.md#against-robokit)). The crate has no `unsafe`: the
+  kernels are built with every check naga makes, the loop counters among them, which on an M4
+  Pro make optimized plans 4–7% slower and IK for hands that share joints 13–20%. Three kinds of
+  call are slower than before: IK with the push for a robot of several hundred spheres (4–5%),
+  plans to goals past an obstacle (5%) and `evaluate` (1.5–4%)
+  ([Benchmarks](docs/benchmarks.md#how-the-speed-came)). A GPU's results move in their last
+  places, IK's and trajectory optimization's alike: a seed in thousands arrives or does not.
 - Trajectories are sooner: time-optimal timing uses the full velocity and acceleration limits,
   and where its smoothed time map overshoots a limit, slows the profile there instead of
   stretching the whole motion for it. Planned Panda motions take 6.6% less time on average, the

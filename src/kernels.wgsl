@@ -3,8 +3,9 @@
 // MAX_HISTORY, LINE_STEPS and line_search) and the shared structs (Params, Link, Sphere, Obstacle),
 // generated from their Rust definitions so the two sides cannot drift apart, and the code written
 // for the robot (`robot_wgsl`): MAX_DOF, JAC_LEN, HANDS, fk(), ee_pos(h), ee_rot(h),
-// ee_jacobian(h), mark_moving(h), collision(), and STACKED with the stacked system's sizes (STACK,
-// STACK_JAC, STACK_CHOL).
+// ee_jacobian(h), mark_moving(h), collision(), one hand's damped least squares written out term
+// by term (hold_columns, hand_system, chol6, chol6_solve, pose_step, null_part), and STACKED with
+// the stacked system's sizes (STACK, STACK_JAC, STACK_CHOL).
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read> links: array<Link>;
@@ -146,43 +147,6 @@ fn rot_log(r: mat3x3<f32>) -> vec4<f32> {
     return vec4<f32>(normalize(axis) * theta, theta);
 }
 
-fn chol6() {
-    for (var i = 0u; i < 6u; i++) {
-        for (var j = 0u; j <= i; j++) {
-            var s = chol[i * 6u + j];
-            for (var k = 0u; k < j; k++) {
-                s -= chol[i * 6u + k] * chol[j * 6u + k];
-            }
-            if (i == j) {
-                chol[i * 6u + j] = sqrt(max(s, 1e-12));
-            } else {
-                chol[i * 6u + j] = s / chol[j * 6u + j];
-            }
-        }
-    }
-}
-
-fn chol6_solve(b: array<f32, 6>) -> array<f32, 6> {
-    var y: array<f32, 6>;
-    for (var i = 0u; i < 6u; i++) {
-        var s = b[i];
-        for (var k = 0u; k < i; k++) {
-            s -= chol[i * 6u + k] * y[k];
-        }
-        y[i] = s / chol[i * 6u + i];
-    }
-    var x: array<f32, 6>;
-    for (var ii = 0; ii < 6; ii++) {
-        let i = u32(5 - ii);
-        var s = y[i];
-        for (var k = i + 1u; k < 6u; k++) {
-            s -= chol[k * 6u + i] * x[k];
-        }
-        x[i] = s / chol[i * 6u + i];
-    }
-    return x;
-}
-
 // The targeted hands' Jacobians into stack_jac and their damped normal matrix, factored, into
 // stack_chol; returns the rows. Mirrors `stack_system` in cpu.rs.
 fn stack_system() -> u32 {
@@ -278,76 +242,6 @@ fn load_goals(item: u32) {
     }
 }
 
-// With joints held (P.held), zeroes the columns of jac `moving` leaves out: theirs.
-fn hold_columns() {
-    if (P.held == 1u) {
-        for (var j = 0u; j < P.n_dof; j++) {
-            if (!moving[j]) {
-                for (var r = 0u; r < 6u; r++) {
-                    jac[r * MAX_DOF + j] = 0.0;
-                }
-            }
-        }
-    }
-}
-
-// Hand h's Jacobian into `jac`, and its damped normal matrix, factored, into `chol`.
-fn hand_system(h: u32) {
-    let n = P.n_dof;
-    ee_jacobian(h);
-    hold_columns();
-    for (var r = 0u; r < 6u; r++) {
-        for (var c = 0u; c <= r; c++) {
-            var s = 0.0;
-            for (var j = 0u; j < n; j++) {
-                s += jac[r * MAX_DOF + j] * jac[c * MAX_DOF + j];
-            }
-            if (r == c) {
-                s += P.damping * P.damping;
-            }
-            chol[r * 6u + c] = s;
-            chol[c * 6u + r] = s;
-        }
-    }
-    chol6();
-}
-
-// Hand h's step toward its target, J^T (J J^T + damping^2 I)^-1 e, into `dq`.
-fn pose_step(h: u32, dq: ptr<function, array<f32, MAX_DOF>>) {
-    let ep = goal_pos[h].xyz - ee_pos(h);
-    let eo = rot_log(goal_rot[h] * transpose(ee_rot(h))).xyz * P.rotation_weight;
-    hand_system(h);
-    let y = chol6_solve(array<f32, 6>(ep.x, ep.y, ep.z, eo.x, eo.y, eo.z));
-    for (var j = 0u; j < P.n_dof; j++) {
-        var s = 0.0;
-        for (var r = 0u; r < 6u; r++) {
-            s += jac[r * MAX_DOF + j] * y[r];
-        }
-        (*dq)[j] += s;
-    }
-}
-
-// J^T (J J^T + damping^2 I)^-1 J grad for the system in jac and chol, into `push`.
-fn null_part(push: ptr<function, array<f32, MAX_DOF>>) {
-    let n = P.n_dof;
-    var jg: array<f32, 6>;
-    for (var r = 0u; r < 6u; r++) {
-        var s = 0.0;
-        for (var j = 0u; j < n; j++) {
-            s += jac[r * MAX_DOF + j] * grad[j];
-        }
-        jg[r] = s;
-    }
-    let z = chol6_solve(jg);
-    for (var j = 0u; j < n; j++) {
-        var s = 0.0;
-        for (var r = 0u; r < 6u; r++) {
-            s += jac[r * MAX_DOF + j] * z[r];
-        }
-        (*push)[j] += s;
-    }
-}
-
 // One damped-least-squares step toward the targeted hands' poses, then a collision push in the
 // null space of their stacked Jacobian J: `moving` joints take
 // -collision_step (grad - J^T (J J^T + damping^2 I)^-1 J grad). Hands on separate arms solve each
@@ -356,97 +250,105 @@ fn null_part(push: ptr<function, array<f32, MAX_DOF>>) {
 fn ik_step(world: u32, lid: u32, lane: u32) {
     let n = P.n_dof;
     fk();
-    var dq: array<f32, MAX_DOF>;
-    // One hand, the usual case, keeps its system in jac and chol for the push: a loop over hands
-    // around this code costs 4-10% of IK throughput on an M4 Pro's GPU. HANDS is a constant, so
-    // only one branch is compiled.
-    var last = 0u;
-    var rows = 0u;
-    if (HANDS == 1u) {
-        pose_step(0u, &dq);
-    } else if (STACKED) {
-        rows = stack_system();
-        var e: array<f32, STACK>;
-        var r = 0u;
-        for (var h = 0u; h < HANDS; h++) {
-            if (goal_pos[h].w > 0.5) {
-                let ep = goal_pos[h].xyz - ee_pos(h);
-                let eo = rot_log(goal_rot[h] * transpose(ee_rot(h))).xyz * P.rotation_weight;
-                e[r] = ep.x;
-                e[r + 1u] = ep.y;
-                e[r + 2u] = ep.z;
-                e[r + 3u] = eo.x;
-                e[r + 4u] = eo.y;
-                e[r + 5u] = eo.z;
-                r += 6u;
-            }
-        }
-        stack_solve(e, rows, &dq);
-    } else {
-        for (var h = 0u; h < HANDS; h++) {
-            if (goal_pos[h].w > 0.5) {
-                pose_step(h, &dq);
-                last = h;
-            }
-        }
-    }
-    if (P.collision_step > 0.0) {
+    let pushes = P.collision_step > 0.0;
+    if (pushes) {
         for (var j = 0u; j < n; j++) {
             grad[j] = 0.0;
         }
         collision(world, P.w_world, P.w_self, P.margin, P.self_margin, true, lane);
         group_grad(lid);
-        var push: array<f32, MAX_DOF>;
+    }
+    // The lanes of a configuration split its collision gradient; the step from it is one piece of
+    // work, which the first lane does and the others take the configuration from.
+    if (lane == 0u) {
+        var dq: array<f32, MAX_DOF>;
+        // One hand, the usual case, keeps its system in jac and chol for the push: a loop over hands
+        // around this code costs 4-10% of IK throughput on an M4 Pro's GPU. HANDS is a constant, so
+        // only one branch is compiled.
+        var last = 0u;
+        var rows = 0u;
         if (HANDS == 1u) {
-            null_part(&push);
+            pose_step(0u, &dq);
         } else if (STACKED) {
-            var jg: array<f32, STACK>;
-            for (var r = 0u; r < rows; r++) {
-                var s = 0.0;
-                for (var j = 0u; j < n; j++) {
-                    s += stack_jac[r * MAX_DOF + j] * grad[j];
-                }
-                jg[r] = s;
-            }
-            stack_solve(jg, rows, &push);
-        } else {
-            // The last hand's system is still in jac and chol: its part first, then the others'.
-            null_part(&push);
+            rows = stack_system();
+            var e: array<f32, STACK>;
+            var r = 0u;
             for (var h = 0u; h < HANDS; h++) {
-                if (goal_pos[h].w > 0.5 && h != last) {
-                    hand_system(h);
-                    null_part(&push);
+                if (goal_pos[h].w > 0.5) {
+                    let ep = goal_pos[h].xyz - ee_pos(h);
+                    let eo = rot_log(goal_rot[h] * transpose(ee_rot(h))).xyz * P.rotation_weight;
+                    e[r] = ep.x;
+                    e[r + 1u] = ep.y;
+                    e[r + 2u] = ep.z;
+                    e[r + 3u] = eo.x;
+                    e[r + 4u] = eo.y;
+                    e[r + 5u] = eo.z;
+                    r += 6u;
+                }
+            }
+            stack_solve(e, rows, &dq);
+        } else {
+            for (var h = 0u; h < HANDS; h++) {
+                if (goal_pos[h].w > 0.5) {
+                    pose_step(h, &dq);
+                    last = h;
                 }
             }
         }
+        if (pushes) {
+            var push: array<f32, MAX_DOF>;
+            if (HANDS == 1u) {
+                null_part(&push);
+            } else if (STACKED) {
+                var jg: array<f32, STACK>;
+                for (var r = 0u; r < rows; r++) {
+                    var s = 0.0;
+                    for (var j = 0u; j < n; j++) {
+                        s += stack_jac[r * MAX_DOF + j] * grad[j];
+                    }
+                    jg[r] = s;
+                }
+                stack_solve(jg, rows, &push);
+            } else {
+                // The last hand's system is still in jac and chol: its part first, then the others'.
+                null_part(&push);
+                for (var h = 0u; h < HANDS; h++) {
+                    if (goal_pos[h].w > 0.5 && h != last) {
+                        hand_system(h);
+                        null_part(&push);
+                    }
+                }
+            }
+            for (var j = 0u; j < n; j++) {
+                if (moving[j]) {
+                    dq[j] -= P.collision_step * (grad[j] - push[j]);
+                }
+            }
+        }
+        var largest = 0.0;
         for (var j = 0u; j < n; j++) {
-            if (moving[j]) {
-                dq[j] -= P.collision_step * (grad[j] - push[j]);
+            largest = max(largest, abs(dq[j]));
+        }
+        var scale = 1.0;
+        if (largest > P.max_step) {
+            scale = P.max_step / largest;
+        }
+        // A step that would move no joint by more than IK_REST is not taken: the configuration is at
+        // rest, where every later step finds it again.
+        var moved = 0.0;
+        for (var j = 0u; j < n; j++) {
+            let lim = limits[j];
+            let next = clamp(q[j] + dq[j] * scale, lim.x, lim.y);
+            moved = max(moved, abs(next - q[j]));
+            dq[j] = next;
+        }
+        if (moved > IK_REST) {
+            for (var j = 0u; j < n; j++) {
+                q[j] = dq[j];
             }
         }
     }
-    var largest = 0.0;
-    for (var j = 0u; j < n; j++) {
-        largest = max(largest, abs(dq[j]));
-    }
-    var scale = 1.0;
-    if (largest > P.max_step) {
-        scale = P.max_step / largest;
-    }
-    // A step that would move no joint by more than IK_REST is not taken: the configuration is at
-    // rest, where every later step finds it again.
-    var moved = 0.0;
-    for (var j = 0u; j < n; j++) {
-        let lim = limits[j];
-        let next = clamp(q[j] + dq[j] * scale, lim.x, lim.y);
-        moved = max(moved, abs(next - q[j]));
-        dq[j] = next;
-    }
-    if (moved > IK_REST) {
-        for (var j = 0u; j < n; j++) {
-            q[j] = dq[j];
-        }
-    }
+    lead(lid);
 }
 
 // Collision kernels give each configuration LANES consecutive invocations, which split its
@@ -512,6 +414,26 @@ fn group_grad(lid: u32) {
     }
 }
 
+// Gives every lane of a configuration the configuration its first lane has in `q`.
+fn lead(lid: u32) {
+    let lanes = LANES;
+    let n = P.n_dof;
+    if (lanes == 1u) {
+        return;
+    }
+    workgroupBarrier();
+    if ((lid & (lanes - 1u)) == 0u) {
+        for (var j = 0u; j < n; j++) {
+            grads[lid * MAX_DOF + j] = q[j];
+        }
+    }
+    workgroupBarrier();
+    let first = (lid & ~(lanes - 1u)) * MAX_DOF;
+    for (var j = 0u; j < n; j++) {
+        q[j] = grads[first + j];
+    }
+}
+
 // One configuration per lane group: out = [world clearance, self clearance, cost, grad...].
 @compute @workgroup_size(WORKGROUP)
 fn evaluate_main(
@@ -574,7 +496,8 @@ fn clearance_main(
 }
 
 // One IK seed per lane group; runs P.iterations steps, writes q back and [pos err, rot err]. The
-// lanes split each step's collision gradient and otherwise do the same work.
+// lanes split each step's collision gradient; the first takes the step and gives the others the
+// configuration (lead).
 @compute @workgroup_size(WORKGROUP)
 fn ik_main(
     @builtin(global_invocation_id) gid: vec3<u32>,
@@ -670,11 +593,11 @@ fn path_samples() -> u32 {
 // Each path's L-BFGS state in aux, in this order: the collision gradient per sample, the
 // collision cost per line-search step and sample, then per control point the gradient, the
 // previous gradient, the direction, the pending step, the step history and the gradient-change
-// history, then five scalars: cost, history count, newest slot, started, pending. Mirrors
+// history, then six scalars: cost, history count, newest slot, started, pending, over. Mirrors
 // lbfgs_stride in gpu.rs and the Lbfgs struct in cpu.rs.
 fn lbfgs_stride() -> u32 {
     let tn = P.points * P.n_dof;
-    return path_samples() * P.n_dof + LINE_STEPS * path_samples() + (4u + 2u * P.history) * tn + 5u;
+    return path_samples() * P.n_dof + LINE_STEPS * path_samples() + (4u + 2u * P.history) * tn + 6u;
 }
 
 fn costs_at(item: u32) -> u32 {
@@ -707,6 +630,13 @@ fn changes_at(item: u32, slot: u32) -> u32 {
 
 fn scalars_at(item: u32) -> u32 {
     return steps_at(item, 2u * P.history);
+}
+
+// Where path `item`'s state says whether its optimization is over: a steepest-descent search
+// that found nothing better leaves later rounds nothing to change, so they skip the path, as
+// cpu.rs ends its rounds.
+fn over_at(item: u32) -> u32 {
+    return scalars_at(item) + 5u;
 }
 
 // The trajectory kernels built to keep constraints (gpu.rs builds them when a constrained path is
@@ -820,16 +750,16 @@ fn constraint_cost(item: u32, gradient: bool) -> f32 {
             hand_angular += g * axis;
             frame_angular -= g * axis;
         }
-        let n = dot(r[0], s[1]) - dot(r[1], s[0]);
+        let sn = dot(r[0], s[1]) - dot(r[1], s[0]);
         let dn = dot(r[0], s[0]) + dot(r[1], s[1]);
-        let h2 = n * n + dn * dn;
-        let over = angle_past(abs(n), dn, yc.w);
+        let h2 = sn * sn + dn * dn;
+        let over = angle_past(abs(sn), dn, yc.w);
         if (h2 > 1e-12 && over > 0.0) {
-            let residual = select(-over, over, n >= 0.0);
+            let residual = select(-over, over, sn >= 0.0);
             cost += w * residual * residual;
             let m20 = dot(r[0], s[2]);
             let m21 = dot(r[1], s[2]);
-            let rate = vec3<f32>((n * m21 - dn * m20) / h2, -(dn * m21 + n * m20) / h2, 1.0);
+            let rate = vec3<f32>((sn * m21 - dn * m20) / h2, -(dn * m21 + sn * m20) / h2, 1.0);
             let g = 2.0 * w * residual;
             hand_angular += g * (s * rate);
             frame_angular -= g * (s * rate);
@@ -873,17 +803,22 @@ fn traj_costs(
     let span = sample / P.samples;
     let w = basis(sample_u(sample % P.samples));
     let alpha = line_search(c);
-    for (var j = 0u; j < P.n_dof; j++) {
-        q[j] = w.x * candidate(item, span, j, alpha) + w.y * candidate(item, span + 1u, j, alpha)
-            + w.z * candidate(item, span + 2u, j, alpha) + w.w * candidate(item, span + 3u, j, alpha);
-    }
-    fk();
-    var part = collision(item_world[item], P.w_world, P.w_self, P.margin, P.self_margin, false, at.y);
-    if (CONSTRAINED && at.y == 0u) {
-        part.x += constraint_cost(item, false);
+    // A path whose optimization is over is left out; its lanes still meet at the barriers.
+    let going = aux[over_at(item)] < 0.5;
+    var part = vec3<f32>(0.0);
+    if (going) {
+        for (var j = 0u; j < P.n_dof; j++) {
+            q[j] = w.x * candidate(item, span, j, alpha) + w.y * candidate(item, span + 1u, j, alpha)
+                + w.z * candidate(item, span + 2u, j, alpha) + w.w * candidate(item, span + 3u, j, alpha);
+        }
+        fk();
+        part = collision(item_world[item], P.w_world, P.w_self, P.margin, P.self_margin, false, at.y);
+        if (CONSTRAINED && at.y == 0u) {
+            part.x += constraint_cost(item, false);
+        }
     }
     let c3 = group_collision(lid, part);
-    if (at.z == 1u && at.y == 0u) {
+    if (going && at.z == 1u && at.y == 0u) {
         aux[costs_at(item) + c * per_item + sample] = c3.x;
     }
 }
@@ -952,6 +887,9 @@ fn traj_search(
     let tn = P.points;
     let per_item = path_samples();
     let sc = scalars_at(item);
+    if (uniform_aux(lid, over_at(item)) > 0.5) {
+        return;
+    }
     var part = vec4<f32>(0.0);
     for (var s = lid; s < per_item; s += WORKGROUP) {
         for (var c = 0u; c < LINE_STEPS; c++) {
@@ -976,6 +914,7 @@ fn traj_search(
     }
     let totals = workgroup_sum(lid, part);
     let started = uniform_aux(lid, sc + 3u) > 0.5;
+    let steepest = uniform_aux(lid, sc + 1u) < 0.5;
     var cost = uniform_aux(lid, sc);
     var best = -1;
     for (var c = 0u; c < LINE_STEPS; c++) {
@@ -988,6 +927,9 @@ fn traj_search(
         if (lid == 0u) {
             aux[sc + 4u] = 0.0;
             aux[sc + 1u] = 0.0;
+            if (steepest) {
+                aux[over_at(item)] = 1.0;
+            }
         }
         return;
     }
@@ -1032,6 +974,9 @@ fn lbfgs_direction(
     let end = (P.points - 3u) * P.n_dof;
     let m = P.history;
     let sc = scalars_at(item);
+    if (uniform_aux(lid, over_at(item)) > 0.5) {
+        return;
+    }
     let g = grad_at(item);
     let gp = prev_grad_at(item);
     let d = dir_at(item);
@@ -1131,17 +1076,23 @@ fn traj_samples(
     let w = basis(sample_u(idx % P.samples));
     let n = P.n_dof;
     let base = (item * P.points + span) * n;
+    // A path whose optimization is over is left out; its lanes still meet at the barriers.
+    let going = aux[over_at(item)] < 0.5;
     for (var j = 0u; j < n; j++) {
-        q[j] = w.x * qbuf[base + j] + w.y * qbuf[base + n + j] + w.z * qbuf[base + 2u * n + j] + w.w * qbuf[base + 3u * n + j];
         grad[j] = 0.0;
     }
-    fk();
-    collision(item_world[item], P.w_world, P.w_self, P.margin, P.self_margin, true, at.y);
-    if (CONSTRAINED && at.y == 0u) {
-        _ = constraint_cost(item, true);
+    if (going) {
+        for (var j = 0u; j < n; j++) {
+            q[j] = w.x * qbuf[base + j] + w.y * qbuf[base + n + j] + w.z * qbuf[base + 2u * n + j] + w.w * qbuf[base + 3u * n + j];
+        }
+        fk();
+        collision(item_world[item], P.w_world, P.w_self, P.margin, P.self_margin, true, at.y);
+        if (CONSTRAINED && at.y == 0u) {
+            _ = constraint_cost(item, true);
+        }
     }
     group_grad(lid);
-    if (at.z == 1u && at.y == 0u) {
+    if (going && at.z == 1u && at.y == 0u) {
         let sample = idx % per_item;
         for (var j = 0u; j < n; j++) {
             aux[item * lbfgs_stride() + sample * n + j] = grad[j];
@@ -1160,6 +1111,9 @@ fn traj_grad(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgro
         return;
     }
     let item = idx / free;
+    if (aux[over_at(item)] > 0.5) {
+        return;
+    }
     let t = idx % free + 3u;
     let n = P.n_dof;
     let spans = tn - 3u;

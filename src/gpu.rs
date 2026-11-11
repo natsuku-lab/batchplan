@@ -176,12 +176,237 @@ shader_struct! {
     }
 }
 
+/// Rounds of a loop written out at most: longer ones stay loops.
+const WRITTEN_OUT: usize = 32;
+
+/// `source` with its loops of a known count written out: the body of each
+/// `for (var x = 0u; x < count; x++) {` once per round, with `x` its number, where `count` is a
+/// number, the joints (`n`, `P.n_dof` or `MAX_DOF`: `dof`), `HANDS` (`hands`) or `LINE_STEPS`, up
+/// to `WRITTEN_OUT`, and the body neither breaks nor continues. naga counts every loop's rounds
+/// to rule out endless ones, and these loops are short and many: counting them costs IK a quarter
+/// of its time. The source keeps its loops, to read beside `cpu.rs`.
+fn loops_written_out(source: &str, dof: usize, hands: usize) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let count = |bound: &str| {
+        let rounds = match bound {
+            "n" | "P.n_dof" | "MAX_DOF" => dof,
+            "HANDS" => hands,
+            "LINE_STEPS" => LINE_SEARCH.len(),
+            literal => literal.strip_suffix('u')?.parse().ok()?,
+        };
+        (rounds <= WRITTEN_OUT).then_some(rounds)
+    };
+    let mut out = String::with_capacity(source.len() * 2);
+    write_out(&lines, &count, &mut out);
+    out
+}
+
+/// The variable and rounds of a loop [`loops_written_out`] writes out, from its first line.
+fn counted<'a>(line: &'a str, count: &dyn Fn(&str) -> Option<usize>) -> Option<(&'a str, usize)> {
+    let rest = line.trim_start().strip_prefix("for (var ")?;
+    let (variable, rest) = rest.split_once(" = 0u; ")?;
+    let rest = rest.strip_prefix(variable)?.strip_prefix(" < ")?;
+    let (bound, rest) = rest.split_once("; ")?;
+    (rest == format!("{variable}++) {{")).then_some((variable, count(bound)?))
+}
+
+/// `text` with `name`, where it stands alone (no letter, digit, underscore or member dot beside
+/// it), replaced by `value`, appended to `out`.
+fn renamed(text: &str, name: &str, value: &str, out: &mut String) {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut from = 0;
+    while let Some(found) = text[from..].find(name) {
+        let (start, end) = (from + found, from + found + name.len());
+        let before = text[..start].chars().next_back();
+        let alone = !before.is_some_and(|c| word(c) || c == '.')
+            && !text[end..].chars().next().is_some_and(word);
+        out.push_str(&text[from..start]);
+        out.push_str(if alone { value } else { name });
+        from = end;
+    }
+    out.push_str(&text[from..]);
+}
+
+/// [`loops_written_out`] for `lines`, appended to `out`; `count` gives a bound's rounds.
+fn write_out(lines: &[&str], count: &dyn Fn(&str) -> Option<usize>, out: &mut String) {
+    let depth = |line: &str| {
+        let braces = |brace: char| line.chars().filter(|&c| c == brace).count() as isize;
+        braces('{') - braces('}')
+    };
+    let mut at = 0;
+    while at < lines.len() {
+        let line = lines[at];
+        at += 1;
+        let Some((variable, rounds)) = counted(line, count) else {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+        // The body: the lines up to the brace that closes the loop.
+        let (first, mut open) = (at, 1);
+        while open > 0 {
+            open += depth(lines[at]);
+            at += 1;
+        }
+        let (body, close) = (&lines[first..at - 1], lines[at - 1]);
+        let mut inner = String::new();
+        write_out(body, count, &mut inner);
+        let leaves = |l: &&str| l.contains("break;") || l.contains("continue;");
+        if body.iter().any(leaves) {
+            out.extend([line, "\n", &inner, close, "\n"]);
+            continue;
+        }
+        let indent = &line[..line.len() - line.trim_start().len()];
+        for round in 0..rounds {
+            out.extend([indent, "{\n"]);
+            renamed(&inner, variable, &format!("{round}u"), out);
+            out.extend([indent, "}\n"]);
+        }
+    }
+}
+
+/// Spheres on a link of the robot's own, and sphere pairs of a pair of them, from which their
+/// loops take two rounds at a time: naga counts a loop's rounds, and a link of many spheres has
+/// many. No robot measured is slower from these counts than with one round at a time; from 16
+/// and 64, cuRobo's Panda, whose hand has 18 spheres and 72 pairs with each of four links, ran
+/// 1% slower, and from 24 and 64 a UR5e 1% (docs/benchmarks.md#how-the-speed-came). What a
+/// robot holds is left out whatever its size, so that holding another object builds no kernels.
+const PAIRED_SPHERES: u32 = 24;
+const PAIRED_PAIRS: u32 = 128;
+
+/// `source` with each `for (var x = a; x < b; x += LANES) {` taking two rounds at a time, the
+/// second where it is still below `b`: the same rounds in the same order, half as many counted.
+fn rounds_paired(source: &str) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut out = String::with_capacity(source.len() * 2);
+    let header = |line: &str| {
+        let rest = line.trim_start().strip_prefix("for (var ")?;
+        let (variable, rest) = rest.split_once(" = ")?;
+        let (_, rest) = rest.split_once("; ")?;
+        let rest = rest.strip_prefix(variable)?.strip_prefix(" < ")?;
+        let (bound, rest) = rest.split_once("; ")?;
+        let strided = rest == format!("{variable} += LANES) {{");
+        strided.then(|| (variable.to_owned(), bound.to_owned()))
+    };
+    let mut at = 0;
+    while at < lines.len() {
+        let line = lines[at];
+        at += 1;
+        let Some((variable, bound)) = header(line) else {
+            out.extend([line, "\n"]);
+            continue;
+        };
+        // The body: the lines up to the brace that closes the loop.
+        let (first, mut open) = (at, 1);
+        while open > 0 {
+            let braces = |brace: char| lines[at].matches(brace).count() as isize;
+            open += braces('{') - braces('}');
+            at += 1;
+        }
+        let body = lines[first..at - 1].join("\n") + "\n";
+        let (head, close) = (line.trim_end_matches("LANES) {"), lines[at - 1]);
+        let second = format!("({variable} + LANES)");
+        out.extend([head, "2u * LANES) {\n{\n", &body, "}\n"]);
+        out.extend(["if (", &second, " < ", &bound, ") {\n"]);
+        renamed(&body, &variable, &second, &mut out);
+        out.extend(["}\n", close, "\n"]);
+    }
+    out
+}
+
+/// One hand's damped least squares for a robot of `dof` joints, every sum written out term by
+/// term: the loops they would be are short and many, and naga counts each loop's iterations to
+/// rule out endless ones, which cost IK a quarter of its time. Mirrors, in `cpu.rs`, the columns
+/// `hand_jacobian` leaves out, `hand_system`, `chol6`, `chol6_solve`, and `add_jt` as `ik_step`
+/// uses it for the step and for the push, in their order of operations.
+fn least_squares_wgsl(dof: usize) -> String {
+    use std::fmt::Write;
+    let jac = |r: usize, j: usize| format!("jac[{}u]", r * dof + j);
+    let chol = |i: usize, j: usize| format!("chol[{}u]", i * 6 + j);
+    let mut w = String::from(
+        "\n// With joints held (P.held), zeroes the columns of jac `moving` leaves out: theirs.\nfn hold_columns() {\n    if (P.held == 1u) {\n",
+    );
+    for j in 0..dof {
+        let _ = writeln!(w, "        if (!moving[{j}u]) {{");
+        for r in 0..6 {
+            let _ = writeln!(w, "            {} = 0.0;", jac(r, j));
+        }
+        w += "        }\n";
+    }
+    w += "    }\n}\n\n// Factors the damped normal matrix in `chol` in place (Cholesky, lower).\nfn chol6() {\n    var s: f32;\n";
+    for i in 0..6 {
+        for j in 0..=i {
+            let _ = writeln!(w, "    s = {};", chol(i, j));
+            for k in 0..j {
+                let _ = writeln!(w, "    s -= {} * {};", chol(i, k), chol(j, k));
+            }
+            if i == j {
+                let _ = writeln!(w, "    {} = sqrt(max(s, 1e-12));", chol(i, j));
+            } else {
+                let _ = writeln!(w, "    {} = s / {};", chol(i, j), chol(j, j));
+            }
+        }
+    }
+    w += "}\n\n// (J J^T + damping^2 I)^-1 b, by the factors in `chol`.\nfn chol6_solve(b: array<f32, 6>) -> array<f32, 6> {\n    var s: f32;\n";
+    for i in 0..6 {
+        let _ = writeln!(w, "    s = b[{i}u];");
+        for k in 0..i {
+            let _ = writeln!(w, "    s -= {} * y{k};", chol(i, k));
+        }
+        let _ = writeln!(w, "    let y{i} = s / {};", chol(i, i));
+    }
+    for i in (0..6).rev() {
+        let _ = writeln!(w, "    s = y{i};");
+        for k in i + 1..6 {
+            let _ = writeln!(w, "    s -= {} * x{k};", chol(k, i));
+        }
+        let _ = writeln!(w, "    let x{i} = s / {};", chol(i, i));
+    }
+    w += "    return array<f32, 6>(x0, x1, x2, x3, x4, x5);\n}\n\n// Hand h's Jacobian into `jac`, and its damped normal matrix, factored, into `chol`.\nfn hand_system(h: u32) {\n    ee_jacobian(h);\n    hold_columns();\n    var s: f32;\n";
+    for r in 0..6 {
+        for c in 0..=r {
+            w += "    s = 0.0;\n";
+            for j in 0..dof {
+                let _ = writeln!(w, "    s += {} * {};", jac(r, j), jac(c, j));
+            }
+            if r == c {
+                w += "    s += P.damping * P.damping;\n";
+            }
+            let _ = writeln!(w, "    {} = s;\n    {} = s;", chol(r, c), chol(c, r));
+        }
+    }
+    w += "    chol6();\n}\n\n// Hand h's step toward its target, J^T (J J^T + damping^2 I)^-1 e, into `dq`.\nfn pose_step(h: u32, dq: ptr<function, array<f32, MAX_DOF>>) {\n    let ep = goal_pos[h].xyz - ee_pos(h);\n    let eo = rot_log(goal_rot[h] * transpose(ee_rot(h))).xyz * P.rotation_weight;\n    hand_system(h);\n    let y = chol6_solve(array<f32, 6>(ep.x, ep.y, ep.z, eo.x, eo.y, eo.z));\n    var s: f32;\n";
+    let transposed = |w: &mut String, x: &str, out: &str| {
+        for j in 0..dof {
+            w.push_str("    s = 0.0;\n");
+            for r in 0..6 {
+                let _ = writeln!(w, "    s += {} * {x}[{r}u];", jac(r, j));
+            }
+            let _ = writeln!(w, "    (*{out})[{j}u] += s;");
+        }
+    };
+    transposed(&mut w, "y", "dq");
+    w += "}\n\n// J^T (J J^T + damping^2 I)^-1 J grad for the system in jac and chol, into `push`.\nfn null_part(push: ptr<function, array<f32, MAX_DOF>>) {\n    var s: f32;\n    var jg: array<f32, 6>;\n";
+    for r in 0..6 {
+        w += "    s = 0.0;\n";
+        for j in 0..dof {
+            let _ = writeln!(w, "    s += {} * grad[{j}u];", jac(r, j));
+        }
+        let _ = writeln!(w, "    jg[{r}u] = s;");
+    }
+    w += "    let z = chol6_solve(jg);\n";
+    transposed(&mut w, "z", "push");
+    w += "}\n";
+    w
+}
+
 /// The robot-specific part of the kernels: forward kinematics, the end effector's Jacobian and
 /// the collision cost, written out link by link. Each link's frame (`rot_i`, `pos_i`) and collision
 /// wrench (`force_i`, `moment_i`, about the world origin) is its own private variable indexed only
 /// by constants, so it stays in registers; private arrays indexed at run time end up in scratch
 /// memory on some drivers. Sphere and sphere-pair ranges are read from the buffers, so robots that
-/// differ only in their spheres share kernels.
+/// differ only in the spheres of what they hold share kernels, as do robots whose own links'
+/// spheres stay on one side of `PAIRED_SPHERES` and `PAIRED_PAIRS`.
 fn robot_wgsl(robot: &Robot) -> String {
     use std::fmt::Write;
     let links = &robot.links;
@@ -295,7 +520,10 @@ fn robot_wgsl(robot: &Robot) -> String {
     });
     w += "}\n\n// Hand h's Jacobian into `jac` (6 x MAX_DOF, row-major; rotation rows scaled by\n";
     w += "// P.rotation_weight), its moving joints root first, mimic joints adding into their leader.\n";
-    w += "fn ee_jacobian(h: u32) {\n    for (var k = 0u; k < JAC_LEN; k++) {\n        jac[k] = 0.0;\n    }\n";
+    w += "fn ee_jacobian(h: u32) {\n";
+    for k in 0..6 * dof {
+        let _ = writeln!(w, "    jac[{k}u] = 0.0;");
+    }
     cases(&mut w, &|w, ee| {
         for (i, d) in robot.chain(ee) {
             let _ = writeln!(
@@ -320,7 +548,9 @@ fn robot_wgsl(robot: &Robot) -> String {
             w.push_str("            }\n");
         }
     });
-    w += "}\n\n// Marks in `moving` the joints hand h moves.\nfn mark_moving(h: u32) {\n";
+    w += "}\n";
+    w += &least_squares_wgsl(dof);
+    w += "\n// Marks in `moving` the joints hand h moves.\nfn mark_moving(h: u32) {\n";
     cases(&mut w, &|w, ee| {
         for (_, d) in robot.chain(ee) {
             let _ = writeln!(w, "            moving[{d}u] = true;");
@@ -368,8 +598,9 @@ fn collision(
     for i in checked {
         // The link's word and bit in a touch set.
         let (word, bit) = (i / 32, 1u32 << (i % 32));
+        let mut block = String::new();
         let _ = write!(
-            w,
+            block,
             r"    {{
         let bl = links[{i}u].bound;
         let bc = rot_{i} * bl.xyz + pos_{i};
@@ -409,6 +640,10 @@ fn collision(
     }}
 "
         );
+        if i < robot.own_links() && robot.sphere_ranges[i][1] >= PAIRED_SPHERES {
+            block = rounds_paired(&block);
+        }
+        w += &block;
     }
     w += "    // Likewise for link pairs whose bounding spheres are farther apart than the self margin.\n";
     w += "    let gate = max(self_margin, 0.0);\n";
@@ -464,12 +699,16 @@ fn collision(
             let link = [lp.a, lp.b];
             let frame = |e: usize| (format!("rot_{}", link[e]), format!("pos_{}", link[e]));
             let wrench = |e: usize| (format!("force_{}", link[e]), format!("moment_{}", link[e]));
-            let body = pair(
+            let mut body = pair(
                 &format!("{l}u"),
                 [&format!("{}u", lp.a), &format!("{}u", lp.b)],
                 &frame,
                 &wrench,
             );
+            let own = (lp.a.max(lp.b) as usize) < robot.own_links();
+            if own && lp.count >= PAIRED_PAIRS {
+                body = rounds_paired(&body);
+            }
             let _ = write!(w, "    {{\n{body}    }}\n");
         }
     } else {
@@ -896,7 +1135,8 @@ fn kernels_for(
     if let Some(kernels) = built.get(&robot_source) {
         return Ok(kernels.clone());
     }
-    let kernels = Arc::new(build_kernels(device, info, &robot_source)?);
+    let counts = (robot.dof(), robot.hands());
+    let kernels = Arc::new(build_kernels(device, info, &robot_source, counts)?);
     built.insert(robot_source, kernels.clone());
     Ok(kernels)
 }
@@ -905,6 +1145,7 @@ fn build_kernels(
     device: &wgpu::Device,
     info: &wgpu::AdapterInfo,
     robot_source: &str,
+    (dof, hands): (usize, usize),
 ) -> Result<Kernels> {
     // Constants and shared structs are generated from their Rust definitions.
     let source = [
@@ -925,32 +1166,17 @@ fn build_kernels(
         GpuSphere::WGSL,
         GpuObstacle::WGSL,
         robot_source,
-        include_str!("kernels.wgsl"),
+        &loops_written_out(include_str!("kernels.wgsl"), dof, hands),
         include_str!("grid.wgsl"),
     ]
     .concat();
     // Turn shader and pipeline validation failures into errors instead of panics.
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    // Every loop of these kernels counts to a bound (`kernel_loops_are_counted`), so none can run
-    // forever, and the counter naga would add to each to make sure of that is left out: it costs
-    // IK 10-28% of its time (most without collision spheres). Bounds checks stay.
-    let checks = wgpu::ShaderRuntimeChecks {
-        force_loop_bounding: false,
-        ..wgpu::ShaderRuntimeChecks::checked()
-    };
     let descriptor = wgpu::ShaderModuleDescriptor {
         label: Some("batchplan kernels"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     };
-    #[expect(
-        unsafe_code,
-        reason = "wgpu takes shaders without its loop bounding only from callers who vouch for them"
-    )]
-    // SAFETY: the one check left out guards against infinite loops, and these kernels have none.
-    // Each loop is a `for` whose body leaves its counter alone and whose step is `++`, a shift
-    // down to zero, or `LANES` or `WORKGROUP` (1, 8 or 64) toward a bound that counts elements of
-    // a buffer this backend sized, or steps the options bound: far below where a `u32` wraps.
-    let module = unsafe { device.create_shader_module_trusted(descriptor, checks) };
+    let module = device.create_shader_module(descriptor);
 
     let buffer_entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
         binding,
@@ -1883,7 +2109,7 @@ fn transform_steps<'a>(
 /// Floats of L-BFGS state per path; must match `lbfgs_stride` in kernels.wgsl.
 fn lbfgs_stride(points: usize, n: usize, o: &PlanOptions) -> usize {
     let samples = (points - 3) * o.samples_per_span;
-    samples * n + LINE_SEARCH.len() * samples + (4 + 2 * o.history) * points * n + 5
+    samples * n + LINE_SEARCH.len() * samples + (4 + 2 * o.history) * points * n + 6
 }
 
 impl GpuBackend {
@@ -2324,61 +2550,150 @@ mod tests {
         assert!(gpu.kernels.constrained.get().is_some() && gpu.grids.get().is_some());
     }
 
-    /// The kernels are built without naga's loop bounding, which is sound only while none of their
-    /// loops can run forever: each must be a `for` with a bound and a step that moves toward it.
+    /// What a robot holds changes none of its kernels' code, however many spheres cover it: a
+    /// device warmed up holding one object builds nothing when it holds another.
     #[test]
-    fn kernel_loops_are_counted() {
+    fn a_held_object_of_any_size_shares_the_kernels() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/assets/ur5e/ur_description/urdf/ur5e.urdf"
         );
-        let options = crate::RobotOptions::default();
-        let one = Robot::load(path, &options).expect("the UR5e loads");
-        // Two arms have more link pairs than are written out one by one, so their kernel loops
-        // over the pairs.
-        let arm = |prefix: &str, y: f32| crate::Part {
-            path: path.into(),
-            prefix: prefix.into(),
-            base: crate::Pose::new(Vec3::new(0.0, y, 0.0), Quat::IDENTITY),
+        let robot = Robot::load(path, &crate::RobotOptions::default()).expect("the UR5e loads");
+        let holding = |shape: crate::Obstacle| {
+            let held = robot
+                .attach(&crate::AttachedObject {
+                    name: "box".into(),
+                    link: "tool0".into(),
+                    shapes: vec![shape],
+                    touch_links: vec![],
+                    spheres: crate::SphereOptions::default(),
+                })
+                .expect("the box attaches");
+            let spheres = held.sphere_ranges.last().expect("the box's link")[1];
+            (spheres, robot_wgsl(&held))
         };
-        let two = Robot::assemble(&[arm("left_", 0.4), arm("right_", -0.4)], &options)
-            .expect("two UR5e arms assemble");
-        assert!(two.self_link_pairs.len() > UNROLLED_LINK_PAIRS);
-        let sources = [
-            robot_wgsl(&one),
-            robot_wgsl(&two),
-            include_str!("kernels.wgsl").to_owned(),
-            include_str!("grid.wgsl").to_owned(),
-        ];
-        let mut loops = 0;
-        for source in &sources {
-            let code = source.lines().filter(|l| !l.trim_start().starts_with("//"));
-            for line in code {
-                let words: Vec<&str> = line
-                    .split(|c: char| !c.is_alphanumeric() && c != '_')
-                    .collect();
-                assert!(
-                    !words.contains(&"while") && !words.contains(&"loop"),
-                    "a loop that is not a counted `for`: {line}"
-                );
-                if !words.contains(&"for") {
-                    continue;
-                }
-                // `for (start; condition; step)` on one line, with or without the space.
-                let header = line.split_once('(').map_or("", |(_, rest)| rest);
-                let parts: Vec<&str> = header.split(';').collect();
-                let steps = ["++", "+= LANES", "+= WORKGROUP", ">>= 1u"];
-                let counted = parts.len() == 3
-                    && parts[1].contains(['<', '>'])
-                    && steps.iter().any(|step| parts[2].contains(step));
-                assert!(counted, "a `for` without a bound or a known step: {line}");
-                loops += 1;
-            }
-        }
+        let ball = crate::Obstacle::sphere(Vec3::ZERO, 0.02);
+        let cube = crate::Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.1));
+        let ((few, small), (many, large)) = (holding(ball), holding(cube));
         assert!(
-            loops > 100,
-            "only {loops} loops found: the scan misses them"
+            few < PAIRED_SPHERES && many >= PAIRED_SPHERES,
+            "{few} and {many} spheres lie on one side of where a link's loops pair up"
         );
+        assert!(small == large, "the larger box changes the kernels' code");
+    }
+
+    /// A lane's loop over a link's spheres takes its rounds two at a time, the second where the
+    /// link still has a sphere for it; other loops stay.
+    #[test]
+    fn a_strided_loop_takes_its_rounds_in_pairs() {
+        let source = "\
+for (var k = 0u; k < range.y; k++) {
+    for (var s = first + lane; s < first + count; s += LANES) {
+        let sp = spheres[s];
+        cost += sp.c.w;
+    }
+}
+";
+        let paired = rounds_paired(source);
+        assert!(
+            paired.contains("for (var k = 0u; k < range.y; k++) {"),
+            "{paired}"
+        );
+        assert!(
+            paired.contains("for (var s = first + lane; s < first + count; s += 2u * LANES) {"),
+            "{paired}"
+        );
+        assert!(paired.contains("let sp = spheres[s];"), "{paired}");
+        assert!(
+            paired.contains("if ((s + LANES) < first + count) {"),
+            "{paired}"
+        );
+        // The second round reads its own sphere; `sp` and `spheres` keep their names.
+        assert!(
+            paired.contains("let sp = spheres[(s + LANES)];"),
+            "{paired}"
+        );
+        assert_eq!(paired.matches("cost += sp.c.w;").count(), 2, "{paired}");
+        let braces = |brace: char| paired.matches(brace).count();
+        assert_eq!(braces('{'), braces('}'));
+    }
+
+    /// Loops of a known count are written out, their variable numbered where it stands alone;
+    /// loops that leave early, and loops of other counts, stay.
+    #[test]
+    fn loops_of_a_known_count_are_written_out() {
+        let source = "\
+fn f() {
+    for (var j = 0u; j < n; j++) {
+        jac[j] = cross(sj.c, obj) * 2.0;
+    }
+    for (var h = 0u; h < HANDS; h++) {
+        for (var j = 0u; j < P.n_dof; j++) {
+            x[h * 3u + j] = 0.0;
+        }
+    }
+    for (var c = 0u; c < LINE_STEPS; c++) {
+        if (skip) {
+            continue;
+        }
+        for (var j = 0u; j < MAX_DOF; j++) {
+            y[j] = f32(c);
+        }
+    }
+    for (var c = 0u; c < 2u; c++) {
+        part[c] += sp.c.w * f32(c);
+    }
+    for (var k = 0u; k < range.y; k++) {
+        z[k] = 1.0;
+    }
+}
+";
+        let written = loops_written_out(source, 2, 2);
+        // The joints' loop: `j` alone is numbered, not in `jac`, `sj`, `obj` or the member `.c`.
+        assert!(
+            written.contains("jac[0u] = cross(sj.c, obj) * 2.0;"),
+            "{written}"
+        );
+        assert!(
+            written.contains("jac[1u] = cross(sj.c, obj) * 2.0;"),
+            "{written}"
+        );
+        // A loop in a loop, both written out.
+        for (h, j) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            let line = format!("x[{h}u * 3u + {j}u] = 0.0;");
+            assert!(written.contains(&line), "{line} is missing from {written}");
+        }
+        // A loop that continues stays, and the loop inside it is written out with its variable.
+        assert!(
+            written.contains("for (var c = 0u; c < LINE_STEPS; c++) {"),
+            "{written}"
+        );
+        assert!(written.contains("y[0u] = f32(c);") && written.contains("y[1u] = f32(c);"));
+        // A variable named as a member is: the member keeps its name.
+        assert!(
+            written.contains("part[1u] += sp.c.w * f32(1u);"),
+            "{written}"
+        );
+        // A count only known at run time stays a loop.
+        assert!(
+            written.contains("for (var k = 0u; k < range.y; k++) {"),
+            "{written}"
+        );
+        let loops = |text: &str| text.matches("for (").count();
+        assert_eq!((loops(source), loops(&written)), (7, 2), "{written}");
+        // The kernels have such loops, and none over the joints is left in what is built.
+        let kernels = include_str!("kernels.wgsl");
+        let over_joints = "for (var j = 0u; j < n; j++) {";
+        assert!(kernels.matches(over_joints).count() > 10);
+        let built = loops_written_out(kernels, 7, 1);
+        assert!(!built.contains(over_joints) && !built.contains("j < P.n_dof; j++"));
+        // `n` is the joints wherever the kernels name it: loops to `n` are written out as such.
+        let named = kernels.matches("let n = ").count();
+        assert_eq!(named, kernels.matches("let n = P.n_dof;").count());
+        assert!(named > 5);
+        // Braces still pair up.
+        let braces = |text: &str, brace: char| text.matches(brace).count();
+        assert_eq!(braces(&built, '{'), braces(&built, '}'));
     }
 
     /// A robot relocked (`Robot::relock`) differs only in the link origins the kernels read from

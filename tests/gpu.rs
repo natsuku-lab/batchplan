@@ -401,6 +401,60 @@ fn touches_past_the_first_word_match_cpu() {
     ));
 }
 
+/// A small batch gives each configuration several lanes, which split its collision gradient and
+/// step as one: its seeds end where they do in a batch large enough for one lane each, up to the
+/// lanes' rounding.
+#[test]
+fn ik_lanes_step_as_one_configuration() {
+    let Some((robot, gpu, _)) = setup() else {
+        return;
+    };
+    let n = robot.dof();
+    let scene = worlds(8, 4);
+    let few = ik_problems(&scene, 5);
+    // The same problems again and again, and half of each one's seeds kept after a short
+    // screening: neither the screening (65,536 seeds) nor the seeds that go on (32,768) are few
+    // enough for lanes, which up to 4,096 configurations get, and the seeds that go on have most
+    // of their way to go, in lanes where there are few. An odd count of steps after the
+    // screening: configurations taken from the neighbouring seed's lanes and back would cancel
+    // over an even one.
+    let many: Vec<IkProblem> = few.iter().cycle().take(1024).cloned().collect();
+    let o = IkOptions {
+        iterations: 31,
+        screening: 2,
+        kept: 32,
+        ..IkOptions::default()
+    };
+    let on_gpu = gpu.upload(&scene).unwrap();
+    let laned = batchplan::solve_ik(&gpu, &on_gpu, &few, &o).unwrap();
+    let single = batchplan::solve_ik(&gpu, &on_gpu, &many, &o).unwrap();
+    let seeds = few.len() * o.seeds;
+    let apart = |i: usize| {
+        let (a, b) = (laned.solution(i), single.solution(i));
+        (0..n).map(|j| (a[j] - b[j]).abs()).fold(0.0, f32::max)
+    };
+    // The push away from obstacles moved some of them: without it the lanes would have nothing to
+    // split.
+    let unpushed = IkOptions {
+        collision_step: 0.0,
+        ..o
+    };
+    let plain = batchplan::solve_ik(&gpu, &on_gpu, &few, &unpushed).unwrap();
+    let pushed = (0..seeds)
+        .filter(|&i| laned.solution(i) != plain.solution(i))
+        .count();
+    let together = (0..seeds).filter(|&i| apart(i) < 1e-2).count();
+    eprintln!("{pushed} of {seeds} seeds pushed, {together} end within 0.01 rad");
+    assert!(
+        pushed > seeds / 4,
+        "only {pushed} of {seeds} seeds are pushed"
+    );
+    assert!(
+        together * 100 >= seeds * 95,
+        "only {together} of {seeds} seeds end where one lane each puts them"
+    );
+}
+
 /// A problem's seeds share its targets, and a batch goes to the GPU in chunks of 65,536 items that
 /// begin partway through a problem: every seed that succeeds reaches its own problem's target.
 #[test]
@@ -921,79 +975,89 @@ fn trajopt_lowers_the_cost_as_far_as_the_cpu() {
         return;
     };
     let n = robot.dof();
-    let mut scene = worlds(32, 12);
-    let ik = batchplan::solve_ik(
-        &cpu,
-        &cpu.upload(&scene).unwrap(),
-        &ik_problems(&scene, 13),
-        &IkOptions::default(),
-    )
-    .unwrap();
-    let reaches: Vec<PlanProblem> = ik
-        .solved()
-        .map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution))
-        .collect();
-    let problems = block_straight_lines(&robot, &mut scene, reaches);
-    let on_cpu = cpu.upload(&scene).unwrap();
-    let o = PlanOptions {
-        seeds: 8,
-        ..Default::default()
-    };
-    let (points, k) = (o.control_points, o.samples_per_span);
-    let cost = |paths: &[f32]| -> f64 {
-        let (mut q, mut item_world, mut smooth) = (vec![], vec![], 0.0f64);
-        for (item, cp) in paths.chunks(points * n).enumerate() {
-            for span in 0..points - 3 {
-                for s in 0..k {
-                    let w = basis((s as f32 + 0.5) / k as f32);
-                    q.extend(
-                        (0..n).map(|j| (0..4).map(|i| w[i] * cp[(span + i) * n + j]).sum::<f32>()),
-                    );
-                    item_world.push(problems[item / (1 + o.seeds)].world);
+    // Two sets of scenes, pooled: one alone leaves the bound below little room.
+    let (mut start, mut a, mut b, mut paths) = (0.0, 0.0, 0.0, 0);
+    for (obstacles, targets) in [(12, 13), (22, 23)] {
+        let mut scene = worlds(32, obstacles);
+        let ik = batchplan::solve_ik(
+            &cpu,
+            &cpu.upload(&scene).unwrap(),
+            &ik_problems(&scene, targets),
+            &IkOptions::default(),
+        )
+        .unwrap();
+        let reaches: Vec<PlanProblem> = ik
+            .solved()
+            .map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution))
+            .collect();
+        let problems = block_straight_lines(&robot, &mut scene, reaches);
+        let on_cpu = cpu.upload(&scene).unwrap();
+        let o = PlanOptions {
+            seeds: 8,
+            ..Default::default()
+        };
+        let (points, k) = (o.control_points, o.samples_per_span);
+        let cost =
+            |paths: &[f32]| -> f64 {
+                let (mut q, mut item_world, mut smooth) = (vec![], vec![], 0.0f64);
+                for (item, cp) in paths.chunks(points * n).enumerate() {
+                    for span in 0..points - 3 {
+                        for s in 0..k {
+                            let w = basis((s as f32 + 0.5) / k as f32);
+                            q.extend((0..n).map(|j| {
+                                (0..4).map(|i| w[i] * cp[(span + i) * n + j]).sum::<f32>()
+                            }));
+                            item_world.push(problems[item / (1 + o.seeds)].world);
+                        }
+                    }
+                    let p = |t: usize, j: usize| cp[t * n + j] as f64;
+                    for j in 0..n {
+                        smooth += (0..points - 1)
+                            .map(|t| o.velocity_weight as f64 * (p(t + 1, j) - p(t, j)).powi(2))
+                            .sum::<f64>();
+                        smooth += (1..points - 1)
+                            .map(|t| {
+                                o.acceleration_weight as f64
+                                    * (p(t + 1, j) - 2.0 * p(t, j) + p(t - 1, j)).powi(2)
+                            })
+                            .sum::<f64>();
+                    }
                 }
-            }
-            let p = |t: usize, j: usize| cp[t * n + j] as f64;
-            for j in 0..n {
-                smooth += (0..points - 1)
-                    .map(|t| o.velocity_weight as f64 * (p(t + 1, j) - p(t, j)).powi(2))
-                    .sum::<f64>();
-                smooth += (1..points - 1)
-                    .map(|t| {
-                        o.acceleration_weight as f64
-                            * (p(t + 1, j) - 2.0 * p(t, j) + p(t - 1, j)).powi(2)
-                    })
-                    .sum::<f64>();
-            }
-        }
-        let e = cpu
-            .evaluate(&on_cpu, &item_world, &q, &o.collision)
-            .unwrap();
-        e.cost.iter().map(|&c| c as f64).sum::<f64>() + smooth
-    };
-    let per_path = points * robot.dof();
-    let seeds = batchplan::plan(
-        &cpu,
-        &on_cpu,
-        &problems,
-        &PlanOptions { iterations: 0, ..o },
-    )
-    .unwrap();
-    let seeds = back_to_back(seeds.paths, per_path);
-    let on_cpu_paths = batchplan::plan(&cpu, &on_cpu, &problems, &o).unwrap();
-    let on_cpu_paths = back_to_back(on_cpu_paths.paths, per_path);
-    let on_gpu_paths = batchplan::plan(&gpu, &gpu.upload(&scene).unwrap(), &problems, &o).unwrap();
-    let on_gpu_paths = back_to_back(on_gpu_paths.paths, per_path);
-    let (start, a, b) = (cost(&seeds), cost(&on_cpu_paths), cost(&on_gpu_paths));
-    eprintln!(
-        "trajectory cost of {} paths: seeds {start:.0}, CPU {a:.0}, GPU {b:.0}",
-        seeds.len() / (points * n)
-    );
+                let e = cpu
+                    .evaluate(&on_cpu, &item_world, &q, &o.collision)
+                    .unwrap();
+                e.cost.iter().map(|&c| c as f64).sum::<f64>() + smooth
+            };
+        let per_path = points * robot.dof();
+        let seeds = batchplan::plan(
+            &cpu,
+            &on_cpu,
+            &problems,
+            &PlanOptions { iterations: 0, ..o },
+        )
+        .unwrap();
+        let seeds = back_to_back(seeds.paths, per_path);
+        let on_cpu_paths = batchplan::plan(&cpu, &on_cpu, &problems, &o).unwrap();
+        let on_cpu_paths = back_to_back(on_cpu_paths.paths, per_path);
+        let on_gpu_paths =
+            batchplan::plan(&gpu, &gpu.upload(&scene).unwrap(), &problems, &o).unwrap();
+        let on_gpu_paths = back_to_back(on_gpu_paths.paths, per_path);
+        start += cost(&seeds);
+        a += cost(&on_cpu_paths);
+        b += cost(&on_gpu_paths);
+        paths += seeds.len() / (points * n);
+    }
+    eprintln!("trajectory cost of {paths} paths: seeds {start:.0}, CPU {a:.0}, GPU {b:.0}");
     assert!(
         a < 0.2 * start && b < 0.2 * start,
         "optimization barely lowered the cost: {start} -> {a}, {b}"
     );
+    // The devices round differently, and a rounding's worth of change moves a set's total by up
+    // to 1.7% either way; over both sets the GPU ended at most 0.3% above the CPU through such
+    // changes. A GPU that ended a path's optimization at any search that found nothing better,
+    // where only a steepest-descent one ends it, ended 13% above.
     assert!(
-        (a - b).abs() < 0.05 * a,
-        "the devices end at different costs: {a} and {b}"
+        b - a < 0.02 * a,
+        "the GPU ends at a higher cost than the CPU: {b} against {a}"
     );
 }
