@@ -268,8 +268,8 @@ fn write_out(lines: &[&str], count: &dyn Fn(&str) -> Option<usize>, out: &mut St
 /// One hand's damped least squares for a robot of `dof` joints, every sum written out term by
 /// term: the loops they would be are short and many, and naga counts each loop's iterations to
 /// rule out endless ones, which cost IK a quarter of its time. Mirrors, in `cpu.rs`, the columns
-/// `ik_step` holds, `hand_system`, `chol6`, `chol_solve`, and the products of `pose_step` and
-/// `null_part`, in their order of operations.
+/// `hand_jacobian` leaves out, `hand_system`, `chol6`, `chol6_solve`, and `add_jt` as `ik_step`
+/// uses it for the step and for the push, in their order of operations.
 fn least_squares_wgsl(dof: usize) -> String {
     use std::fmt::Write;
     let jac = |r: usize, j: usize| format!("jac[{}u]", r * dof + j);
@@ -2560,6 +2560,10 @@ fn f() {
         assert!(kernels.matches(over_joints).count() > 10);
         let built = loops_written_out(kernels, 7, 1);
         assert!(!built.contains(over_joints) && !built.contains("j < P.n_dof; j++"));
+        // `n` is the joints wherever the kernels name it: loops to `n` are written out as such.
+        let named = kernels.matches("let n = ").count();
+        assert_eq!(named, kernels.matches("let n = P.n_dof;").count());
+        assert!(named > 5);
         // Braces still pair up.
         let braces = |text: &str, brace: char| text.matches(brace).count();
         assert_eq!(braces(&built, '{'), braces(&built, '}'));

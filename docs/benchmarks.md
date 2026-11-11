@@ -436,7 +436,7 @@ Each range covers three runs, each started with the machine's load under 6, with
 
 Uploading the 512 worlds, which the example times first, takes 0.1 ms on the M4 Pro's CPU and 0.2 ms on its GPU: preparing each obstacle for the CPU's checks and, on the GPU, one buffer write. A distance grid adds its values, uploaded once however many worlds share it.
 
-By batch size, end to end, in solved problems per second (medians of three runs, in the sessions of the table above):
+By batch size, end to end, in solved problems per second (medians of three runs, in the sessions of the table above; both tables were measured before the kernels' loops were [written out](#how-the-speed-came), which makes a GPU's IK quicker again):
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU | Radeon 8060S | Ryzen CPU |
 |---|---|---|---|---|
@@ -676,7 +676,7 @@ batchplan's paths were 12% longer than cuRobo's at the median where both solved 
 - **Per-robot kernels.** On Mesa's RADV, per-link arrays cost 3–5 KB of scratch memory per invocation; writing the kernels per robot removed it ([why](architecture.md#the-gpu)).
 - **Grids.** [Building distance grids on the GPU](perception.md#building-grids-on-the-gpu), with an integer distance transform, made a 640×480 depth image's 1 cm grid 11× faster on the Radeon (21.1–22.7 → 1.9–2.0 ms) and 3.3× faster on the M4 Pro.
 - **Mesh checks.** A branch-and-bound search took mesh clearance from 620 to 110 µs per Panda configuration.
-- **Loops written out.** naga counts the rounds of every shader loop, so that none can run forever. For IK's linear algebra, loops of six or seven rounds around a multiplication, the counting cost more than the work. One hand's damped least squares is written out term by term for each robot (`least_squares_wgsl`), and the kernels' loops of a known count, over the joints, the hands and the line search's steps, are written out when the kernels are built (`loops_written_out`); the source keeps its loops. The default IK, the build before and this one in turn (60 calls each; the medians of four rounds on the M4 Pro, and of three on the Radeon, each started with its load under 6, at an earlier commit of this change with the same IK kernels), in milliseconds:
+- **Loops written out.** naga counts the rounds of every shader loop, so that none can run forever. For IK's linear algebra, loops of six or seven rounds around a multiplication, the counting cost more than the work. One hand's damped least squares is written out term by term for each robot (`least_squares_wgsl`), and the kernels' loops of a known count, over the joints, the hands and the line search's steps, are written out when the kernels are built (`loops_written_out`); the source keeps its loops. The default IK of `examples/latency.rs`, the build before and this one in turn (60 calls each; the medians of four rounds on the M4 Pro, and of three on the Radeon, each started with its load under 6), in milliseconds:
 
   | Targets per call | M4 Pro, no spheres | M4 Pro, with the push | Radeon 8060S, no spheres | Radeon 8060S, with the push |
   |---|---|---|---|---|
@@ -685,8 +685,10 @@ batchplan's paths were 12% longer than cuRobo's at the median where both solved 
   | 100 | 1.39 → 0.64 | 5.52 → 4.27 | 1.34 → 0.37 | 3.51 → 1.84 |
   | 1,000 | 3.93 → 1.9 | 30.8 → 25.5 | 3.85 → 1.22 | 17.3 → 10.4 |
 
-  On the M4 Pro one round in five of the build without spheres read 0.8 ms for one target, and with spheres and no push it reads 0.5 to 1.1 ms where the build before read 1.2: its GPU's pace varies more over calls this short. A robot whose two hands share joints takes 4.3, 8.0 and 45.9 ms for 1, 100 and 1,000 targets where it took 4.9, 9.0 and 52.3; `evaluate` is unchanged. The kernels keep every check naga makes: for a release they were built without the loop counters, through wgpu's `unsafe` way to vouch for a shader, which made IK 10–28% faster then and makes it no faster now.
-- **Paths that are done.** The CPU's trajectory optimization stops a path at a steepest-descent search that finds nothing better: no later round can change it. A GPU ran every round for every path. Its kernels now leave such a path out, which changes no path: of 200 optimized here, 161 are done before the last round, at round 66 of 100 on average. 256 plans with 4 optimized seeds take 97 ms where they took 113 on the M4 Pro, and 16 take 12.2 ms where 16.9; the Radeon is not measured yet.
+  On the M4 Pro one round in five of the build without spheres read 0.8 ms for one target, and with spheres and no push it reads 0.5 to 1.1 ms where the build before read 1.2: its GPU's pace varies more over calls this short. A Panda given a second hand on its fourth link, so that its hands share joints, takes 4.3, 8.0 and 45.9 ms for 1, 100 and 1,000 targets where it took 4.9, 9.0 and 52.3; `evaluate` is unchanged. A GPU's results move in their last places, IK's and trajectory optimization's alike.
+
+  The kernels keep every check naga makes. For a while they were built without the loop counters, through wgpu's `unsafe` way to vouch for a shader, which made IK 10–28% faster then; with the loops written out it makes these calls no faster. Two kinds of call are slower than that build made them, the collision code's loops over a world's obstacles and a link's spheres being counted again: IK with the push for a Panda of 399 fitted spheres (300 targets take 187 ms where they took 174, on the M4 Pro) and plans to far goals around an obstacle (256 with 4 optimized seeds take 125.6 ms where they took 118.7).
+- **Paths that are done.** The CPU's trajectory optimization stops a path at a steepest-descent search that finds nothing better: no later round can change it. A GPU ran every round for every path. Its kernels now leave such a path out, which changes no path: of the 200 paths the CPU optimizes for `examples/latency.rs`'s plans, 161 are done before the last round, at round 66 of 100 on average. `examples/latency.rs`'s 256 plans with 4 optimized seeds take 97 ms where they took 113 on the M4 Pro, and its 16 take 12.2 ms where 16.9; the Radeon is not measured yet. How much it saves depends on how soon the paths are done: plans to far goals around an obstacle gain 5%.
 - **Not adopted.** Shader modules without naga's checks, which wgpu builds only through `unsafe`: without the loop counters, large batches of optimized plans would take 3–6% less (112 against 119 ms for 256 plans on the M4 Pro before paths that are done were left out), and nothing else measurably less; without bounds checks as well, nothing on the M4 Pro and under a tenth on an RTX 4090, with every index to prove in range. Taking a workgroup's strided loops several rounds at a time, or their first rounds out of the loop; one loop over a world's obstacles with every link inside it (4% slower without the counters). Reusing every call's buffers: creating, filling and binding them takes 0.36 ms of 53 ms for 16,384 seeds on the M4 Pro, and large ones are made around their data, which saves a copy. Small IK calls do reuse theirs (up to 64 KiB each), which saves them 0.04–0.07 ms of about a millisecond. Grid buffers, which are megabytes, are reused.
 
 ## Reproducing
@@ -713,6 +715,7 @@ cargo run --release --example tasks -- 64
 
 # Joining pick-like motions on one reBot (after scripts/fetch_rebot.sh), or the SO-101; timing by kind of path
 cargo run --release --example join [-- so101]
+cargo run --release --example latency             # one call's time by kind, on the GPU; -- --cpu on the CPU
 cargo run --release --example timing
 
 # Tracking on the SO-101's servos, on BAM's model of them

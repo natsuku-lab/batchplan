@@ -721,16 +721,16 @@ fn constraint_cost(item: u32, gradient: bool) -> f32 {
             hand_angular += g * axis;
             frame_angular -= g * axis;
         }
-        let n = dot(r[0], s[1]) - dot(r[1], s[0]);
+        let sn = dot(r[0], s[1]) - dot(r[1], s[0]);
         let dn = dot(r[0], s[0]) + dot(r[1], s[1]);
-        let h2 = n * n + dn * dn;
-        let over = angle_past(abs(n), dn, yc.w);
+        let h2 = sn * sn + dn * dn;
+        let over = angle_past(abs(sn), dn, yc.w);
         if (h2 > 1e-12 && over > 0.0) {
-            let residual = select(-over, over, n >= 0.0);
+            let residual = select(-over, over, sn >= 0.0);
             cost += w * residual * residual;
             let m20 = dot(r[0], s[2]);
             let m21 = dot(r[1], s[2]);
-            let rate = vec3<f32>((n * m21 - dn * m20) / h2, -(dn * m21 + n * m20) / h2, 1.0);
+            let rate = vec3<f32>((sn * m21 - dn * m20) / h2, -(dn * m21 + sn * m20) / h2, 1.0);
             let g = 2.0 * w * residual;
             hand_angular += g * (s * rate);
             frame_angular -= g * (s * rate);
