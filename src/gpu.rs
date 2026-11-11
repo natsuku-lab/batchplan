@@ -1301,9 +1301,20 @@ impl GpuBackend {
     /// buffer, and reads them all back after one wait.
     fn read_after<T: Pod, const N: usize>(
         &self,
-        mut enc: wgpu::CommandEncoder,
+        enc: wgpu::CommandEncoder,
         parts: [(&wgpu::Buffer, usize); N],
     ) -> Result<[Vec<T>; N]> {
+        self.read_into(enc, parts, |parts: [&[T]; N]| parts.map(<[T]>::to_vec))
+    }
+
+    /// [`Self::read_after`], handing the parts to `take` where they are mapped rather than
+    /// copying each out first.
+    fn read_into<T: Pod, R, const N: usize>(
+        &self,
+        mut enc: wgpu::CommandEncoder,
+        parts: [(&wgpu::Buffer, usize); N],
+        take: impl FnOnce([&[T]; N]) -> R,
+    ) -> Result<R> {
         let size = std::mem::size_of::<T>() as u64;
         let total: usize = parts.iter().map(|&(_, len)| len).sum();
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1332,11 +1343,11 @@ impl GpuBackend {
             .map_err(|e| Error::Gpu(e.to_string()))?;
         let values: &[T] = bytemuck::cast_slice(&mapped);
         let mut start = 0;
-        let out = parts.map(|(_, len)| {
-            let part = values[start..start + len].to_vec();
+        let out = take(parts.map(|(_, len)| {
+            let part = &values[start..start + len];
             start += len;
             part
-        });
+        }));
         drop(mapped);
         staging.unmap();
         Ok(out)
@@ -1498,7 +1509,7 @@ impl Backend for GpuBackend {
                 .unwrap_or_default();
             let call = (chunk_world, chunk_targets, chunk_held);
             let group = (seeds, start % seeds);
-            errors.extend(self.ik_chunk(worlds, call, group, chunk_q, o)?);
+            self.ik_chunk(worlds, call, group, chunk_q, o, &mut errors)?;
         }
         Ok(errors)
     }
@@ -1837,10 +1848,11 @@ impl GpuBackend {
         (seeds, first): (usize, usize),
         q: &mut [f32],
         o: &IkOptions,
-    ) -> Result<Vec<[f32; 4]>> {
+        results: &mut Vec<[f32; 4]>,
+    ) -> Result<()> {
         let items = item_world.len();
         if items == 0 {
-            return Ok(vec![]);
+            return Ok(());
         }
         // Lanes split the collision checks, which IK makes only to push away from obstacles.
         let lanes = if o.collision_step > 0.0 {
@@ -1979,17 +1991,16 @@ impl GpuBackend {
         };
         let mut enc = self.device.create_command_encoder(&Default::default());
         last(&mut enc.begin_compute_pass(&Default::default()));
-        let [solved, errors, clear] = self.read_after(
-            enc,
-            [
-                (&q_buf, q.len()),
-                (&out, items * 2),
-                (&clear_out, items * 2),
-            ],
-        )?;
-        q.copy_from_slice(&solved);
-        let items = errors.chunks(2).zip(clear.chunks(2));
-        Ok(items.map(|(e, c)| [e[0], e[1], c[0], c[1]]).collect())
+        let parts = [
+            (&q_buf, q.len()),
+            (&out, items * 2),
+            (&clear_out, items * 2),
+        ];
+        self.read_into(enc, parts, |[solved, errors, clear]: [&[f32]; 3]| {
+            q.copy_from_slice(solved);
+            let items = errors.chunks(2).zip(clear.chunks(2));
+            results.extend(items.map(|(e, c)| [e[0], e[1], c[0], c[1]]));
+        })
     }
 
     /// Optimizes the paths `traj` holds, one per item of `item_world`, each keeping its constraints

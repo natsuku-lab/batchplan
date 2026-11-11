@@ -525,27 +525,21 @@ fn solved(
         o
     };
     let solved = device.ik(worlds, &item_world, &targets, &held, &mut q, stepped)?;
-    let mut result = IkResult {
+    let column = |c: usize| solved.iter().map(|seed| seed[c]).collect();
+    let arrived = |seed: &[f32; 4]| {
+        seed[0] < o.position_tolerance
+            && seed[1] < o.rotation_tolerance
+            && device::collision_free([seed[2], seed[3]])
+    };
+    Ok(IkResult {
         problems: problems.to_vec(),
         dof: n,
         seeds: o.seeds,
         q,
-        position_error: Vec::with_capacity(items),
-        rotation_error: Vec::with_capacity(items),
-        world_clearance: Vec::with_capacity(items),
-        self_clearance: Vec::with_capacity(items),
-        success: Vec::with_capacity(items),
-    };
-    for [position, rotation, world, own] in solved {
-        result.position_error.push(position);
-        result.rotation_error.push(rotation);
-        result.world_clearance.push(world);
-        result.self_clearance.push(own);
-        result.success.push(
-            position < o.position_tolerance
-                && rotation < o.rotation_tolerance
-                && device::collision_free([world, own]),
-        );
-    }
-    Ok(result)
+        position_error: column(0),
+        rotation_error: column(1),
+        world_clearance: column(2),
+        self_clearance: column(3),
+        success: solved.iter().map(arrived).collect(),
+    })
 }
