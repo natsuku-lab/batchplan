@@ -285,15 +285,22 @@ fn robot_wgsl(robot: &Robot) -> String {
         body(w, hands[0]);
         w.push_str("        }\n    }\n");
     };
-    w += "\nfn ee_pos(h: u32) -> vec3<f32> {\n";
-    cases(&mut w, &|w, ee| {
-        let _ = writeln!(w, "            return pos_{ee};");
-    });
-    w += "}\n\nfn ee_rot(h: u32) -> mat3x3<f32> {\n";
-    cases(&mut w, &|w, ee| {
-        let _ = writeln!(w, "            return rot_{ee};");
-    });
-    w += "}\n\n// Hand h's Jacobian into `jac` (6 x MAX_DOF, row-major; rotation rows scaled by\n";
+    // FXC needs a return after the switch even when its default case returns.
+    for (name, ty, field) in [
+        ("ee_pos", "vec3<f32>", "pos"),
+        ("ee_rot", "mat3x3<f32>", "rot"),
+    ] {
+        let _ = writeln!(w, "\nfn {name}(h: u32) -> {ty} {{\n    switch h {{");
+        for (h, &ee) in hands.iter().enumerate().skip(1) {
+            let _ = writeln!(w, "        case {h}u: {{ return {field}_{ee}; }}");
+        }
+        let _ = writeln!(
+            w,
+            "        default: {{}}\n    }}\n    return {field}_{};\n}}",
+            hands[0]
+        );
+    }
+    w += "\n// Hand h's Jacobian into `jac` (6 x MAX_DOF, row-major; rotation rows scaled by\n";
     w += "// P.rotation_weight), its moving joints root first, mimic joints adding into their leader.\n";
     w += "fn ee_jacobian(h: u32) {\n    for (var k = 0u; k < JAC_LEN; k++) {\n        jac[k] = 0.0;\n    }\n";
     cases(&mut w, &|w, ee| {

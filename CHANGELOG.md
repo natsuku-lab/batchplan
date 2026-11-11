@@ -158,6 +158,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Fixed
 
+- GPU devices on Windows using the FXC DX12 shader compiler can build the hand-frame kernels.
+
 - A plan from a moving start is optimized (`PlanOptions::seeds`) unless its path is within 2% of
   the straight line from the start: the line was measured from the path's first control point,
   which lies behind a moving start, so paths that bent by half as much again were left
