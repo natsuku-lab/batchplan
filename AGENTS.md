@@ -113,7 +113,7 @@ Check these before raising budgets:
 
 1. **The input.** An `Error::Input` names what was refused and the value given: shapes, joint order, unit quaternions, joint limits (starts and goals must be within them), frames.
 2. **The start.** `PlanFailure::StartCollides { contacts }` names each link and obstacle, or pair of links. A link touching the table in every configuration needs a touch (`always_touching`); a start inside a held object's spheres needs the object attached.
-3. **The goal.** `PlanFailure::GoalCollides`, and for a pose goal `GoalUnreachable`, which more `PlanOptions::goal_ik` iterations may fix; for IK, `ik::failures` tells `Unreachable` from `Collides { contacts }`.
+3. **The goal.** `PlanFailure::GoalCollides`, and for a pose goal `GoalUnreachable`, which more `PlanOptions::goal_ik` iterations may fix, or more seeds `kept` past its screening (`screening: 0` gives every seed every iteration); for IK, `ik::failures` tells `Unreachable` from `Collides { contacts }`.
 4. **The search.** `NoPath`: more `rrt.max_iterations`, or the way is blocked. `NoSpline`: more `control_points`, or a slower start motion. `OutOfTime`: a longer `time_budget`.
 5. **Tasks.** A `TaskFailure` prints where and why every candidate stopped; each `CandidateStop` has the step, the reason and the contacts, whose obstacles are numbered as in the task's world; in a place, `world.obstacles.len()` is the object where it is set down. `grasps` says why it found none. Grasps near a support need `GraspOptions::tip` and `floor`, which keeps the open fingers over it too; from above, they keep at least `overlap` of the fingers (1 cm) in the object, so an object whose top is less than that over the floor has none.
 

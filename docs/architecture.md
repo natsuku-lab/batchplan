@@ -119,6 +119,7 @@ The robot is a set of spheres; obstacles are boxes, spheres, cylinders, capsules
 - **Layouts declared once.** Every struct the GPU reads is declared in Rust with `shader_struct!` and its WGSL generated from that, with shared constants written in from their Rust values.
 - **Kernels written per robot.** `robot_wgsl` writes the kinematics, Jacobians and collision cost link by link, each in its own variable: run-time-indexed arrays spill to scratch memory on Mesa's RADV, and writing them out made GPU planning 4.8× faster on a Radeon and 2.7× on an M4 Pro. Small batches give each configuration 8 invocations that split its sphere loops: up to 4,096 configurations, and IK of robots with many spheres up to 25 configurations per sphere, since how far splitting pays grows with the robot's collision work. IK without the push away from obstacles checks no collisions, so it never splits.
 - **Trajectory optimization** is L-BFGS with a parallel line search, five passes per round, split across submissions to stay under driver watchdogs.
+- **IK** is one round trip per chunk of 65,536 seeds: the screening steps, a pass in which every seed finds its place among its problem's (`ik_select`), the remaining steps of the seeds chosen, through their indices, and the clearances, read back together. Passes share a submission up to the work of 16 steps of a full chunk, so a small call of up to 64 steps is one submission, and its buffers (up to 64 KiB each) are kept for the next small call.
 
 ## Tool paths, joins and tasks
 

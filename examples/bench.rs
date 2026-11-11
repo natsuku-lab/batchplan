@@ -36,8 +36,13 @@ fn main() -> Result<()> {
     let ik_opts = IkOptions::default();
     let plan_opts = PlanOptions::default();
     println!(
-        "{count} worlds (table + 2-6 boxes), IK {} seeds x {} iters, plans searched, shortcut and smoothed ({} passes) into {} control points\n",
-        ik_opts.seeds, ik_opts.iterations, plan_opts.shortcut.passes, plan_opts.control_points
+        "{count} worlds (table + 2-6 boxes), IK {} seeds x {} iters ({} of them past the first {}), plans searched, shortcut and smoothed ({} passes) into {} control points\n",
+        ik_opts.seeds,
+        ik_opts.iterations,
+        ik_opts.kept,
+        ik_opts.screening,
+        plan_opts.shortcut.passes,
+        plan_opts.control_points
     );
     for device in &devices {
         device.warmup()?;

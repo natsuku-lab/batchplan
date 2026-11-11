@@ -59,6 +59,23 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Changed
 
+- **Breaking:** IK screens its seeds. Every seed takes `IkOptions::screening` steps (8 by
+  default), then only `IkOptions::kept` of each problem's (4) take the rest of `iterations`: those
+  not yet at their targets, the nearest first, then seeds that have arrived. Where the steps push
+  away from collisions (`collision_step` above 0, for a robot with collision spheres),
+  collision-free seeds go before the others; elsewhere whether a seed collides after the
+  screening says little about where it ends, and they go by their errors alone. The seeds left behind are returned as the screening left
+  them. Code that writes out every field of `IkOptions` needs the two new ones, and
+  `screening: 0` is the IK of before, as are problems of more than 32,768 seeds. On a GPU the
+  screening, the choice and the remaining steps are one round trip, a small call is one
+  submission, and its buffers are kept for the next. On an M4 Pro, 1,000 targets for a Panda
+  with collision spheres take 36–39 ms where they took 68–82, and its CPU threads 95 ms where
+  212, with 945 solved where 944; one target and ten take no longer than before, with the push
+  or without. In RoboKit's IK benchmark on an RTX 4090 (a Panda without spheres), 1,000 targets
+  take 3.1–3.3 ms where they took 3.6–3.7 and 2,000 take 6.1–6.3 ms where 7.2; 10 took
+  0.77–0.80 ms where 0.71 before the changes for small calls, which are not measured there
+  ([Benchmarks](docs/benchmarks.md#against-robokit)). The 2,600 pose-goal problems solve as
+  before (98.3%). In Python, `IkOptions.screening` and `IkOptions.kept`.
 - Batched IK spends less time around the solve: a problem's seeds share its targets instead
   of each carrying a copy, large batches are seeded on the device's threads, buffers go to the
   GPU without an extra copy, and a robot without collision spheres skips the collision push,

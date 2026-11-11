@@ -21,6 +21,18 @@ pub struct IkOptions {
     pub seeds: usize,
     /// Damped-least-squares steps per seed, at most: one that has come to rest takes no more.
     pub iterations: u32,
+    /// Of `iterations`, the steps every seed takes before only `kept` of each problem's go on;
+    /// 0 (or `iterations` and more) for every seed to take them all, as they do with more than
+    /// 32,768 seeds per problem. Most seeds that will arrive have by then, and the rest of the
+    /// steps go to the few that are closing in.
+    pub screening: u32,
+    /// Seeds per problem that go on past `screening`: those not yet at their targets within the
+    /// tolerances, the nearest first, then seeds that have arrived, most of which stay at rest.
+    /// Where the steps push away from collisions (`collision_step` above 0, for a robot with
+    /// collision spheres), collision-free seeds go before the others, and a seed in collision
+    /// has not arrived; elsewhere whether a seed collides after the screening says little
+    /// about where it ends, and they go by their errors alone. The others are returned as the screening left them.
+    pub kept: usize,
     /// Damped-least-squares damping (lambda).
     pub damping: f32,
     /// Meters of position error equivalent to one radian of rotation error.
@@ -41,11 +53,49 @@ pub struct IkOptions {
     pub rng_seed: u64,
 }
 
+/// Seeds per problem past which none are screened: a GPU ranks each of a problem's seeds against
+/// all of them, which past this many costs more than the steps it saves (one target's 65,536
+/// seeds took an M4 Pro's GPU 80 ms screened and 66 ms not; 32,768 took 30 and 36).
+pub(crate) const SCREENED_SEEDS: usize = 1 << 15;
+/// The error a seed without one (not a number) is ranked by, as the kernels rank it.
+const FAR: f32 = 1e30;
+
+impl IkOptions {
+    /// Whether only `kept` of a problem's seeds go on past the `screening`.
+    pub(crate) fn screens(&self) -> bool {
+        self.screening > 0
+            && self.screening < self.iterations
+            && self.kept < self.seeds
+            && self.seeds <= SCREENED_SEEDS
+    }
+
+    /// Whether the steps push away from collisions: only then does the choice after the
+    /// screening count them.
+    pub(crate) fn pushes(&self) -> bool {
+        self.collision_step > 0.0
+    }
+
+    /// Where a seed stands after the screening, from its `[position error, rotation error, world
+    /// clearance, self clearance]` (the clearances zero where the steps do not push): the smaller
+    /// goes on first. Seeds still on their way come before those in collision, and those that
+    /// have arrived last (most would stay at rest); within each, the nearest first.
+    pub(crate) fn standing(&self, seed: &[f32; 4]) -> (u8, f32) {
+        let clear = device::collision_free([seed[2], seed[3]]);
+        let arrived =
+            clear && seed[0] < self.position_tolerance && seed[1] < self.rotation_tolerance;
+        let error = seed[0] + self.rotation_weight * seed[1];
+        let class = if arrived { 2 } else { u8::from(!clear) };
+        (class, if error < FAR { error } else { FAR })
+    }
+}
+
 impl Default for IkOptions {
     fn default() -> Self {
         Self {
             seeds: 64,
             iterations: 30,
+            screening: 8,
+            kept: 4,
             damping: 0.02,
             rotation_weight: 0.5,
             max_step: 1.0,
@@ -341,6 +391,10 @@ impl IkOptions {
     /// it (`IK`, or `plan`'s `goal_ik`).
     pub(crate) fn check(&self, what: &str) -> Result<()> {
         ensure_input!(self.seeds > 0, "{what} needs at least one seed");
+        ensure_input!(
+            self.kept > 0,
+            "{what} needs at least one seed kept past the screening"
+        );
         let positive = |v: f32| v.is_finite() && v > 0.0;
         ensure_input!(
             positive(self.max_step)
@@ -481,27 +535,21 @@ fn solved(
         o
     };
     let solved = device.ik(worlds, &item_world, &targets, &held, &mut q, stepped)?;
-    let mut result = IkResult {
+    let column = |c: usize| solved.iter().map(|seed| seed[c]).collect();
+    let arrived = |seed: &[f32; 4]| {
+        seed[0] < o.position_tolerance
+            && seed[1] < o.rotation_tolerance
+            && device::collision_free([seed[2], seed[3]])
+    };
+    Ok(IkResult {
         problems: problems.to_vec(),
         dof: n,
         seeds: o.seeds,
         q,
-        position_error: Vec::with_capacity(items),
-        rotation_error: Vec::with_capacity(items),
-        world_clearance: Vec::with_capacity(items),
-        self_clearance: Vec::with_capacity(items),
-        success: Vec::with_capacity(items),
-    };
-    for [position, rotation, world, own] in solved {
-        result.position_error.push(position);
-        result.rotation_error.push(rotation);
-        result.world_clearance.push(world);
-        result.self_clearance.push(own);
-        result.success.push(
-            position < o.position_tolerance
-                && rotation < o.rotation_tolerance
-                && device::collision_free([world, own]),
-        );
-    }
-    Ok(result)
+        position_error: column(0),
+        rotation_error: column(1),
+        world_clearance: column(2),
+        self_clearance: column(3),
+        success: solved.iter().map(arrived).collect(),
+    })
 }

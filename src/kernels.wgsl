@@ -541,6 +541,16 @@ fn evaluate_main(
     }
 }
 
+// The item a call's configuration `config` is: itself, or, of an IK problem's seeds, the one
+// chosen to go on (P.chosen: where ik_select wrote them, past the items' results in outbuf).
+fn item_of(config: u32) -> u32 {
+    var item = config;
+    if (P.chosen > 0u) {
+        item = u32(outbuf[P.chosen + config]);
+    }
+    return item;
+}
+
 // One configuration per lane group: out = [world clearance, self clearance], without cost or
 // gradient.
 @compute @workgroup_size(WORKGROUP)
@@ -550,7 +560,7 @@ fn clearance_main(
     @builtin(local_invocation_index) lid: u32,
 ) {
     let at = lane_of(item_index(gid, nwg), P.n_items);
-    let item = at.x;
+    let item = item_of(at.x);
     let n = P.n_dof;
     for (var j = 0u; j < n; j++) {
         q[j] = qbuf[item * n + j];
@@ -572,7 +582,7 @@ fn ik_main(
     @builtin(local_invocation_index) lid: u32,
 ) {
     let at = lane_of(item_index(gid, nwg), P.n_items);
-    let item = at.x;
+    let item = item_of(at.x);
     let n = P.n_dof;
     for (var j = 0u; j < n; j++) {
         q[j] = qbuf[item * n + j];
@@ -597,6 +607,45 @@ fn ik_main(
         }
         outbuf[item * 2u] = errors.x;
         outbuf[item * 2u + 1u] = errors.y;
+    }
+}
+
+// Where seed `item` stands after the screening (the smaller goes on first), from its errors in
+// qbuf and, where the steps push away from collisions (P.collision_step above 0), its clearances
+// in aux: seeds on their way before those in collision, those that have
+// arrived last, and its error, FAR when it is not a number.
+fn standing(item: u32) -> vec2<f32> {
+    let position = qbuf[item * 2u];
+    let rotation = qbuf[item * 2u + 1u];
+    let clear = P.collision_step <= 0.0 || (aux[item * 2u] >= 0.0 && aux[item * 2u + 1u] >= 0.0);
+    let arrived = clear && position < P.position_tolerance && rotation < P.rotation_tolerance;
+    let error = position + P.rotation_weight * rotation;
+    return vec2<f32>(select(select(0.0, 1.0, !clear), 2.0, arrived), select(FAR, error, error < FAR));
+}
+
+// One IK seed per invocation, after the screening, with the items' [pos err, rot err] bound as
+// qbuf and their clearances as aux: counts the seeds of its problem (P.per_target consecutive
+// items) that stand before it, one that ties it going first if it is earlier, and, among the first
+// P.kept, writes its index at that place among its problem's, at P.chosen in both.
+@compute @workgroup_size(WORKGROUP)
+fn ik_select(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let item = item_index(gid, nwg);
+    if (item >= P.n_items) {
+        return;
+    }
+    let problem = item / P.per_target;
+    let mine = standing(item);
+    var place = 0u;
+    for (var s = 0u; s < P.per_target; s++) {
+        let other = problem * P.per_target + s;
+        let theirs = standing(other);
+        let before = theirs.x < mine.x || (theirs.x == mine.x && (theirs.y < mine.y || (theirs.y == mine.y && other < item)));
+        place += u32(before);
+    }
+    if (place < P.kept) {
+        let at = P.chosen + problem * P.kept + place;
+        qbuf[at] = f32(item);
+        aux[at] = f32(item);
     }
 }
 

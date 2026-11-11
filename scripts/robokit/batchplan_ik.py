@@ -100,9 +100,17 @@ def main():
     parser.add_argument("--seeds", type=int, default=64)
     parser.add_argument("--iterations", type=int, default=30)
     parser.add_argument("--max-step", type=float, default=1.0)
+    parser.add_argument("--screening", type=int, default=8)
+    parser.add_argument("--kept", type=int, default=4)
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
-    options = bp.IkOptions(seeds=args.seeds, iterations=args.iterations, max_step=args.max_step)
+    options = bp.IkOptions(
+        seeds=args.seeds,
+        iterations=args.iterations,
+        max_step=args.max_step,
+        screening=args.screening,
+        kept=args.kept,
+    )
     rows = []
     for batch in [int(b) for b in args.batch_sizes.split(",")]:
         helper = BatchplanIK(batch, args.device, options)

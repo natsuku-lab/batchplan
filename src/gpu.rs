@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -74,7 +75,13 @@ const READ_WRITE_STORAGE: u32 = 3;
 /// Upper bounds on work per queue submission, to stay clear of driver watchdogs.
 const EVAL_CHUNK: usize = 1 << 18;
 const IK_ITERS_PER_SUBMIT: u32 = 16;
+/// Steps of IK per pass and per submission at most, however few items take them: a step of a
+/// batch too small to fill the GPU takes as long as one of a batch that does.
+const IK_MOST_STEPS: u32 = 64;
 const IK_CHUNK: usize = 1 << 16;
+/// The largest buffer kept for later calls, and how many are.
+const SPARE_BYTES: u64 = 1 << 16;
+const SPARE_BUFFERS: usize = 64;
 const TRAJ_ITERS_PER_SUBMIT: u32 = 8;
 const TRAJ_CHUNK: usize = 1 << 13;
 
@@ -108,7 +115,8 @@ shader_struct! {
         acceleration_weight: f32, velocity_weight: f32, initial_step: f32, history: u32,
         damping: f32, rotation_weight: f32, max_step: f32, collision_step: f32,
         samples: u32, constraints: u32, constraint_weight: f32, held: u32,
-        per_target: u32, first_seed: u32, pad0: u32, pad1: u32,
+        per_target: u32, first_seed: u32, kept: u32, chosen: u32,
+        position_tolerance: f32, rotation_tolerance: f32, pad0: u32, pad1: u32,
     }
 }
 
@@ -552,6 +560,9 @@ pub(crate) struct GpuBackend {
     /// The device's CPU work (searches, preparing depth images) runs here, never on rayon's global
     /// pool, so a host's own parallel work cannot hold it past a time budget.
     pool: Arc<ThreadPool>,
+    /// Small buffers of calls that are over, for the next small call: making a dozen costs a
+    /// small IK call more than filling them. Shared by the backends `with_robot` derives.
+    spare: Arc<Mutex<Vec<wgpu::Buffer>>>,
 }
 
 /// Building distance grids (grids.wgsl), which needs no robot.
@@ -690,6 +701,7 @@ struct Kernels {
     /// SHARED_LANES per configuration, for batches too small to fill the GPU with one, and IK of
     /// robots with many spheres (`ik_lanes`).
     shared: CollisionKernels,
+    ik_select: wgpu::ComputePipeline,
     traj_search: wgpu::ComputePipeline,
     traj_grad: wgpu::ComputePipeline,
     lbfgs_direction: wgpu::ComputePipeline,
@@ -985,6 +997,7 @@ fn build_kernels(
             shared.join().expect("pipeline creation does not panic"),
         )
     });
+    let ik_select = pipeline("ik_select", 1);
     let traj_search = pipeline("traj_search", 1);
     let traj_grad = pipeline("traj_grad", 1);
     let lbfgs_direction = pipeline("lbfgs_direction", 1);
@@ -999,6 +1012,7 @@ fn build_kernels(
         layout0,
         single,
         shared,
+        ik_select,
         traj_search,
         traj_grad,
         lbfgs_direction,
@@ -1115,6 +1129,7 @@ impl GpuBackend {
             grid_buffers,
             lanes,
             pool,
+            spare: Arc::default(),
         })
     }
 
@@ -1245,6 +1260,40 @@ impl GpuBackend {
             })
     }
 
+    /// A buffer of `usage` with room for `bytes`: one kept from an earlier call where a small one
+    /// fits (its contents are whatever that call left), or a new one.
+    fn lend(&self, usage: wgpu::BufferUsages, bytes: u64) -> wgpu::Buffer {
+        let bytes = bytes.max(16);
+        if bytes <= SPARE_BYTES {
+            let mut spare = self.spare.lock().expect("no panic holds the spare buffers");
+            let fits = |b: &wgpu::Buffer| b.usage() == usage && b.size() >= bytes;
+            if let Some(i) = spare.iter().position(fits) {
+                return spare.swap_remove(i);
+            }
+        }
+        let size = if bytes <= SPARE_BYTES {
+            bytes.next_power_of_two().max(256)
+        } else {
+            bytes
+        };
+        self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Keeps the small ones of `buffers`, whose work is over, for later calls.
+    fn give_back(&self, buffers: impl IntoIterator<Item = wgpu::Buffer>) {
+        let mut spare = self.spare.lock().expect("no panic holds the spare buffers");
+        for b in buffers {
+            if b.size() <= SPARE_BYTES && spare.len() < SPARE_BUFFERS {
+                spare.push(b);
+            }
+        }
+    }
+
     fn bind_main(&self, b: &CallBuffers) -> wgpu::BindGroup {
         let buffers = [
             b.params,
@@ -1297,17 +1346,27 @@ impl GpuBackend {
     /// buffer, and reads them all back after one wait.
     fn read_after<T: Pod, const N: usize>(
         &self,
-        mut enc: wgpu::CommandEncoder,
+        enc: wgpu::CommandEncoder,
         parts: [(&wgpu::Buffer, usize); N],
     ) -> Result<[Vec<T>; N]> {
+        self.read_into(enc, parts, |parts: [&[T]; N]| parts.map(<[T]>::to_vec))
+    }
+
+    /// [`Self::read_after`], handing the parts to `take` where they are mapped rather than
+    /// copying each out first.
+    fn read_into<T: Pod, R, const N: usize>(
+        &self,
+        mut enc: wgpu::CommandEncoder,
+        parts: [(&wgpu::Buffer, usize); N],
+        take: impl FnOnce([&[T]; N]) -> R,
+    ) -> Result<R> {
         let size = std::mem::size_of::<T>() as u64;
         let total: usize = parts.iter().map(|&(_, len)| len).sum();
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readback"),
-            size: (total as u64 * size).max(size),
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let bytes = (total as u64 * size).max(size);
+        let staging = self.lend(
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            bytes,
+        );
         let mut offset = 0;
         for &(buf, len) in &parts {
             enc.copy_buffer_to_buffer(buf, 0, &staging, offset, len as u64 * size);
@@ -1315,26 +1374,29 @@ impl GpuBackend {
         }
         self.queue.submit([enc.finish()]);
         let (tx, rx) = std::sync::mpsc::channel();
-        staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
+        staging
+            .slice(..bytes)
+            .map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
         self.wait()?;
         rx.recv()
             .map_err(|e| Error::Gpu(e.to_string()))?
             .map_err(|e| Error::Gpu(e.to_string()))?;
         let mapped = staging
-            .slice(..)
+            .slice(..bytes)
             .get_mapped_range()
             .map_err(|e| Error::Gpu(e.to_string()))?;
         let values: &[T] = bytemuck::cast_slice(&mapped);
         let mut start = 0;
-        let out = parts.map(|(_, len)| {
-            let part = values[start..start + len].to_vec();
+        let out = take(parts.map(|(_, len)| {
+            let part = &values[start..start + len];
             start += len;
             part
-        });
+        }));
         drop(mapped);
         staging.unmap();
+        self.give_back([staging]);
         Ok(out)
     }
 
@@ -1472,14 +1534,21 @@ impl Backend for GpuBackend {
             .checked_div(targets.len())
             .unwrap_or(1);
         let mut errors = Vec::with_capacity(item_world.len());
+        // Seeds are chosen among a problem's (`IkOptions::screens`), so a chunk then holds whole
+        // problems.
+        let chunk = if o.screens() {
+            IK_CHUNK / seeds * seeds
+        } else {
+            IK_CHUNK
+        };
         let chunks = item_world
-            .chunks(IK_CHUNK)
-            .zip(q.chunks_mut(IK_CHUNK * n))
+            .chunks(chunk)
+            .zip(q.chunks_mut(chunk * n))
             .enumerate();
         for (c, (chunk_world, chunk_q)) in chunks {
             // The targets of the problems the chunk's items belong to, the first of which it may
             // enter partway through its seeds.
-            let (start, end) = (c * IK_CHUNK, c * IK_CHUNK + chunk_world.len());
+            let (start, end) = (c * chunk, c * chunk + chunk_world.len());
             let problems = start / seeds..(end - 1) / seeds + 1;
             let chunk_targets = &targets[problems.start * hands..problems.end * hands];
             let chunk_held = held
@@ -1487,7 +1556,7 @@ impl Backend for GpuBackend {
                 .unwrap_or_default();
             let call = (chunk_world, chunk_targets, chunk_held);
             let group = (seeds, start % seeds);
-            errors.extend(self.ik_chunk(worlds, call, group, chunk_q, o)?);
+            self.ik_chunk(worlds, call, group, chunk_q, o, &mut errors)?;
         }
         Ok(errors)
     }
@@ -1826,10 +1895,11 @@ impl GpuBackend {
         (seeds, first): (usize, usize),
         q: &mut [f32],
         o: &IkOptions,
-    ) -> Result<Vec<[f32; 4]>> {
+        results: &mut Vec<[f32; 4]>,
+    ) -> Result<()> {
         let items = item_world.len();
         if items == 0 {
-            return Ok(vec![]);
+            return Ok(());
         }
         // Lanes split the collision checks, which IK makes only to push away from obstacles.
         let lanes = if o.collision_step > 0.0 {
@@ -1845,8 +1915,26 @@ impl GpuBackend {
         params.held = u32::from(!held.is_empty());
         params.per_target = seeds as u32;
         params.first_seed = first as u32;
-        let params_buf = self.uniform(&params);
-        let world_buf = storage(&self.device, "item world", item_world);
+        // A small call's buffers are ones kept from earlier calls, filled through the queue;
+        // a large one's are made around their data, which saves a copy.
+        let storage_usage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST;
+        let small = std::mem::size_of_val(q) as u64 <= SPARE_BYTES;
+        let lent = RefCell::new(Vec::new());
+        let lend = |usage: wgpu::BufferUsages, bytes: &[u8], room: usize| {
+            let buffer = self.lend(usage, room as u64);
+            if !bytes.is_empty() {
+                self.queue.write_buffer(&buffer, 0, bytes);
+            }
+            lent.borrow_mut().push(buffer.clone());
+            buffer
+        };
+        let world_buf = if small {
+            lend(storage_usage, bytemuck::cast_slice(item_world), 4 * items)
+        } else {
+            storage(&self.device, "item world", item_world)
+        };
         // Per problem (`P.per_target` items, the first entered at its seed `P.first_seed`) and
         // hand: the position with w = 1 when the hand has a target, then the rotation's columns.
         let target_data: Vec<[f32; 4]> = targets
@@ -1864,75 +1952,174 @@ impl GpuBackend {
                 None => [[0.0; 4]; 4],
             })
             .collect();
-        let target_buf = storage(&self.device, "targets", &target_data);
+        let target_buf = if small {
+            let bytes: &[u8] = bytemuck::cast_slice(&target_data);
+            lend(storage_usage, bytes, bytes.len())
+        } else {
+            storage(&self.device, "targets", &target_data)
+        };
         // Per item and joint, 1 where it is held (`P.held`).
         let flags: Vec<f32> = held.iter().map(|&h| f32::from(u8::from(h))).collect();
-        let held_buf = storage(&self.device, "held", &flags);
-        let q_buf = storage(&self.device, "q", q);
-        let out = storage_zeroed(&self.device, "ik errors", items * 2);
-        let bg = self.bind_main(&CallBuffers {
-            params: &params_buf,
-            worlds,
-            item_world: &world_buf,
-            targets: &target_buf,
-            q: &q_buf,
-            aux: &held_buf,
-            out: &out,
-        });
-        let mut done = 0;
-        while done < o.iterations {
-            params.iterations = IK_ITERS_PER_SUBMIT.min(o.iterations - done);
-            self.queue
-                .write_buffer(&params_buf, 0, bytemuck::bytes_of(&params));
-            self.submit_pass(|pass| {
-                pass.set_pipeline(&self.kernels.collision(lanes).ik);
-                pass.set_bind_group(0, &bg, &[]);
-                dispatch(pass, items * lanes as usize);
-            });
-            done += params.iterations;
-        }
-        if o.iterations == 0 {
-            params.iterations = 0;
-            self.queue
-                .write_buffer(&params_buf, 0, bytemuck::bytes_of(&params));
-            self.submit_pass(|pass| {
-                pass.set_pipeline(&self.kernels.collision(lanes).ik);
-                pass.set_bind_group(0, &bg, &[]);
-                dispatch(pass, items * lanes as usize);
-            });
-        }
-        // The final configurations' clearances in the same queue, from the configurations already
-        // on the GPU, and everything read back through one buffer: one wait per chunk.
-        let clear_params = self.uniform(&self.params(items, &CollisionWeights::NONE));
-        let clear_out = storage_zeroed(&self.device, "clearance", items * 2);
-        let clear_bg = self.bind_main(&CallBuffers {
-            params: &clear_params,
-            worlds,
-            item_world: &world_buf,
-            targets: &target_buf,
-            q: &q_buf,
-            aux: &held_buf,
-            out: &clear_out,
-        });
+        let (held_buf, q_buf) = if small {
+            let (flags, seeded): (&[u8], &[u8]) =
+                (bytemuck::cast_slice(&flags), bytemuck::cast_slice(q));
+            (
+                lend(storage_usage, flags, flags.len()),
+                lend(storage_usage, seeded, seeded.len()),
+            )
+        } else {
+            (
+                storage(&self.device, "held", &flags),
+                storage(&self.device, "q", q),
+            )
+        };
+        // Past the items' results in both outputs, the seeds chosen to go on (`P.chosen`).
+        let slots = if o.screens() {
+            items / seeds * o.kept
+        } else {
+            0
+        };
+        // Every float of both that is read is written first.
+        let floats = items * 2 + slots;
+        let (out, clear_out) = if small {
+            (
+                lend(storage_usage, &[], 4 * floats),
+                lend(storage_usage, &[], 4 * floats),
+            )
+        } else {
+            (
+                storage_zeroed(&self.device, "ik errors", floats),
+                storage_zeroed(&self.device, "clearance", floats),
+            )
+        };
+        let uniform_usage = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
+        let bind =
+            |params: &GpuParams, q: &wgpu::Buffer, aux: &wgpu::Buffer, out: &wgpu::Buffer| {
+                let bytes = bytemuck::bytes_of(params);
+                self.bind_main(&CallBuffers {
+                    params: &lend(uniform_usage, bytes, bytes.len()),
+                    worlds,
+                    item_world: &world_buf,
+                    targets: &target_buf,
+                    q,
+                    aux,
+                    out,
+                })
+            };
+        // Passes share a submission up to the work of `IK_ITERS_PER_SUBMIT` steps of a full chunk
+        // and `IK_MOST_STEPS` steps, so a small call is one submission; everything is read back
+        // through one buffer after one wait.
+        let budget = IK_ITERS_PER_SUBMIT as usize * IK_CHUNK;
         let mut enc = self.device.create_command_encoder(&Default::default());
-        {
+        // The open submission's work (steps times configurations) and steps.
+        let mut open = (0usize, 0u32);
+        // `steps` IK steps of the call's `configurations` as `params` has them (`chosen`: where
+        // their indices are, or 0). No steps still write the errors.
+        let mut stage = |enc: &mut wgpu::CommandEncoder,
+                         params: &mut GpuParams,
+                         lanes: u32,
+                         configurations: usize,
+                         steps: u32| {
+            let most = (budget / configurations) as u32;
+            let most = most.clamp(IK_ITERS_PER_SUBMIT, IK_MOST_STEPS);
+            let mut left = steps;
+            loop {
+                params.iterations = most.min(left);
+                let work = params.iterations as usize * configurations;
+                if open.1 > 0
+                    && (open.0 + work > budget || open.1 + params.iterations > IK_MOST_STEPS)
+                {
+                    let next = self.device.create_command_encoder(&Default::default());
+                    self.queue.submit([std::mem::replace(enc, next).finish()]);
+                    open = (0, 0);
+                }
+                let bg = bind(params, &q_buf, &held_buf, &out);
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&self.kernels.collision(lanes).ik);
+                pass.set_bind_group(0, &bg, &[]);
+                dispatch(&mut pass, configurations * lanes as usize);
+                open = (open.0 + work, open.1 + params.iterations);
+                left -= params.iterations;
+                if left == 0 {
+                    break;
+                }
+            }
+        };
+        // The clearances of the call's `configurations` (`chosen`, as above), from the
+        // configurations already on the GPU.
+        let clearances = |enc: &mut wgpu::CommandEncoder, configurations: usize, chosen: u32| {
+            let mut clear = self.params(configurations, &CollisionWeights::NONE);
+            clear.chosen = chosen;
+            let bg = bind(&clear, &q_buf, &held_buf, &clear_out);
+            let lanes = lanes_for(configurations);
             let mut pass = enc.begin_compute_pass(&Default::default());
-            let clear_lanes = lanes_for(items);
-            pass.set_pipeline(&self.kernels.collision(clear_lanes).clearance);
-            pass.set_bind_group(0, &clear_bg, &[]);
-            dispatch(&mut pass, items * clear_lanes as usize);
+            pass.set_pipeline(&self.kernels.collision(lanes).clearance);
+            pass.set_bind_group(0, &bg, &[]);
+            dispatch(&mut pass, configurations * lanes as usize);
+        };
+        if slots == 0 {
+            stage(&mut enc, &mut params, lanes, items, o.iterations);
+            clearances(&mut enc, items, 0);
+        } else {
+            // Every seed's screening; then each seed finds its place among its problem's, from
+            // the errors and clearances; then those chosen take the other steps. The choice counts
+            // collisions where the steps push away from them (`IkOptions::pushes`): elsewhere the
+            // kernel leaves the clearances unread, which a small call's buffer still has from
+            // the call before, and all are found at the end.
+            stage(&mut enc, &mut params, lanes, items, o.screening);
+            if o.pushes() {
+                clearances(&mut enc, items, 0);
+            }
+            let chosen = (items * 2) as u32;
+            let mut choice = self.params(items, &CollisionWeights::NONE);
+            choice.per_target = seeds as u32;
+            choice.kept = o.kept as u32;
+            choice.chosen = chosen;
+            choice.rotation_weight = o.rotation_weight;
+            choice.position_tolerance = o.position_tolerance;
+            choice.rotation_tolerance = o.rotation_tolerance;
+            choice.collision_step = f32::from(u8::from(o.pushes()));
+            // The errors and the clearances where the kernel reads and writes, and the
+            // configurations where it writes nothing.
+            let choice_bg = bind(&choice, &out, &clear_out, &q_buf);
+            {
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&self.kernels.ik_select);
+                pass.set_bind_group(0, &choice_bg, &[]);
+                dispatch(&mut pass, items);
+            }
+            let lanes = if o.pushes() {
+                ik_lanes(slots, self.robot.spheres.len())
+            } else {
+                1
+            };
+            params.n_items = slots as u32;
+            params.chosen = chosen;
+            stage(
+                &mut enc,
+                &mut params,
+                lanes,
+                slots,
+                o.iterations - o.screening,
+            );
+            if o.pushes() {
+                clearances(&mut enc, slots, chosen);
+            } else {
+                clearances(&mut enc, items, 0);
+            }
         }
-        let [solved, errors, clear] = self.read_after(
-            enc,
-            [
-                (&q_buf, q.len()),
-                (&out, items * 2),
-                (&clear_out, items * 2),
-            ],
-        )?;
-        q.copy_from_slice(&solved);
-        let items = errors.chunks(2).zip(clear.chunks(2));
-        Ok(items.map(|(e, c)| [e[0], e[1], c[0], c[1]]).collect())
+        let parts = [
+            (&q_buf, q.len()),
+            (&out, items * 2),
+            (&clear_out, items * 2),
+        ];
+        self.read_into(enc, parts, |[solved, errors, clear]: [&[f32]; 3]| {
+            q.copy_from_slice(solved);
+            let items = errors.chunks(2).zip(clear.chunks(2));
+            results.extend(items.map(|(e, c)| [e[0], e[1], c[0], c[1]]));
+        })?;
+        self.give_back(lent.take());
+        Ok(())
     }
 
     /// Optimizes the paths `traj` holds, one per item of `item_world`, each keeping its constraints

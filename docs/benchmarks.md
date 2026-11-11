@@ -6,7 +6,7 @@ The numbers on this page come from five machines:
 - an **AMD Ryzen AI Max+ 395** CPU (16 cores, 32 threads) with a **Radeon 8060S** GPU, on Vulkan through Mesa's RADV driver, under Ubuntu 26.04;
 - an **NVIDIA T4** GPU with 8 threads of a 2.5 GHz Xeon (an AWS g4dn.2xlarge), for cuRobo, which needs CUDA, under Ubuntu 24.04;
 - an **NVIDIA A10G** GPU with 4 threads of an AMD EPYC 7R32 (an AWS g5.xlarge), for RoboKit, under Ubuntu 24.04;
-- an **NVIDIA RTX 4090** GPU with 13 threads of an AMD EPYC 75F3 (a rented container, Ubuntu 22.04), for RoboKit and batchplan on one machine.
+- an **NVIDIA RTX 4090** GPU with 13 threads of an AMD EPYC 75F3 (a rented container, Ubuntu 22.04), for RoboKit and batchplan on one machine, and a second such with 48 threads of an AMD EPYC 9254 where a table says so.
 
 The load was checked before each run on the first two; the rented machines ran nothing else of ours, and what their other tenants ran is not known. Every command to reproduce them is [at the end](#reproducing).
 
@@ -335,7 +335,7 @@ On one machine for both, a rented NVIDIA RTX 4090 (driver 595.91.07; 13 threads 
 | batchplan, 4 optimized seeds, acceleration × 0.7 | 99.46% (99.42%) | 12.5 / 13.2 / 32.5 ms | 1.242 s | 3.178 rad | 125 rad/s³ |
 | batchplan, acceleration × 0.7 | 99.54% (99.54%) | 3.8 / 3.4 / 6.4 ms | 1.338 s | 3.292 rad | 143 rad/s³ |
 
-- **At an equal jerk reading RoboKit's motions are the shorter, by 1.9%** (1.219 s against 1.242 s at 126 and 125 rad/s³), for about the same planning time (12.4 ms against 13.2 at the median, 15.3 against 12.5 on average). At an equal duration batchplan's read rougher (145 at 1.208 s).
+- **At an equal jerk reading RoboKit's motions are the shorter, by 1.9%** (1.219 s against 1.242 s at 126 and 125 rad/s³), for about the same planning time (12.4 ms against 13.2 at the median, 15.3 against 12.5 on average). At an equal duration batchplan's read rougher (145 at 1.208 s). With goal IK that screens its seeds (the second RTX 4090 of the IK table below, RoboKit not run again), the acceleration × 0.7 run solves as many as RoboKit, 99.61% (99.58% strict), in 11.7 / 12.3 / 31.0 ms, with motions of 1.253 s over 3.200 rad that read 124: the goals it plans to differ, and the motions are 2.8% longer than RoboKit's.
 - **With four optimized seeds, a lower acceleration limit smooths the reading for less time than a lower jerk limit.** Timed under jerk limits of 250 and 220 rad/s³ instead, the optimized motions take 1.218 s and 1.241 s and read 145 and 133 (those two runs also had #32's second change and kernels built without shader runtime checks, which change the last bits of a GPU's results).
 - **Without optimization** batchplan answers in a quarter of the time, with motions 10% longer than RoboKit's that read 14% rougher. There a jerk limit of 250 rad/s³ does better than the acceleration share: the same 1.338 s, reading 137 (built as the two runs above).
 
@@ -362,6 +362,22 @@ Since then a problem's seeds share its targets, large batches are seeded on the 
 | 2,000 | 7.08 | 23.2 | 9.12 | 215–218 |
 
 RoboKit's IK is still the quicker on the GPU, by 1.3 to 1.7 times where it was 2.0 to 3.4; for one target batchplan's CPU device is the quickest of all.
+
+IK now [screens its seeds](planning.md#inverse-kinematics): all 64 take 8 steps, then 4 per target take the rest, in one round trip on a GPU. On another rented RTX 4090 (driver 595.91.07, Vulkan; 48 threads of an AMD EPYC 9254; RoboKit 736f112 and batchplan in one session; five runs, each batchplan column the range of two to six such), in milliseconds (success):
+
+| Targets per call | RoboKit | batchplan before (ac861c5) | batchplan, 30 steps (the default) | batchplan, 20 steps |
+|---|---|---|---|---|
+| 1 | 0.56 (100%) | 0.69–0.71 (100%) | 0.75–0.95 (100%) | 0.60–0.82 (100%) |
+| 10 | 0.53 (100%) | 0.71 (100%) | 0.77–0.80 (100%) | 0.62–0.63 (100%) |
+| 100 | 0.76 (100%) | 0.97–1.00 (100%) | 1.06–1.09 (100%) | 0.88–0.92 (100%) |
+| 1,000 | 3.14 (99.94%) | 3.58–3.72 (100%) | 3.05–3.28 (99.98%) | 2.99–3.10 (99.98%) |
+| 2,000 | 6.81 (99.91%) | 7.21–10.24 (99.98%) | 6.13–6.32 (99.96%) | 5.65–5.82 (99.96%) |
+
+- **From 1,000 targets per call batchplan is level with RoboKit or quicker,** by 10% at 2,000 with its defaults and 16% with 20 steps (`IkOptions { iterations: 20, .. }`), and solves a few more of them.
+- **Up to 100 targets RoboKit is the quicker,** by 7–46% against batchplan's 20 steps (most runs 13–19%) and by a third and more against its defaults. So few seeds do not fill the GPU, so a call takes as long as its steps take one after another, and leaving most seeds behind saves nothing. RoboKit takes 16 steps where batchplan's default is 30. With every seed taking 20 steps (`screening: 0`), batchplan takes 0.58, 0.57 and 0.84 ms for 1, 10 and 100 targets.
+- **Small calls since.** In that session the screening cost these sizes 0.05–0.1 ms: it ran as six submissions with a pass for the seeds' clearances halfway. Since then a small call is one submission; its buffers are kept from the call before; and where the steps do not push away from collisions, as for this robot without spheres, the seeds are chosen by their errors alone and their clearances found once, at the end. No result of the default IK changes with any of it. This is measured on the M4 Pro and not yet on an NVIDIA GPU. On the M4 Pro, with ac861c5's build and this change's in turn (random reachable targets in an empty world for the Panda with its 61 spheres and without any, 60 calls of `solve_ik` each; the medians of five rounds, less one round each build lost to other load), one target without spheres takes 1.02–1.03 ms where it took 1.02–1.07, and ten 1.04–1.06 where 1.05–1.09; with spheres and no push, 1.16–1.18 where 1.16–1.19, and 1.17–1.19 where 1.17–1.19; with the push (three rounds), 2.71–2.74 where 2.89, and 2.53–2.56 where 3.27–3.31.
+- **With collision spheres, on the M4 Pro** (the Panda's 61, random reachable targets in an empty world, the default and `screening: 0` in turn in one process, the machine under other load): 1,000 targets take 36–39 ms where they took 68–82, and the CPU's 14 threads 95 ms where 212, with 945 solved where 944.
+- **Where the time goes.** For this robot with collision spheres, a call of one target with no steps takes 0.17 ms on this machine and each step about 35 µs (about 12 µs without spheres). At 1,000 targets, of 5.7 ms with 20 steps, the GPU works for 2.6 ms; seeding takes 0.5 ms, reading the results back 0.7 ms, and copying and assembling them 1.1 ms, which has since been cut to one copy.
 
 ## The 2,600 problems on every device
 
@@ -391,31 +407,31 @@ Planning alone clears the meshes in 92.9% of the problems. IK + plan clears them
 
 `examples/bench.rs` solves IK and plans for 512 random scenes, each a table with 2–6 boxes and one top-down grasp target:
 
-- **IK:** 64 seeds × 30 iterations per target;
+- **IK:** 64 seeds per target and 30 iterations at most, 4 of the seeds past the first 8 (the defaults);
 - **planning:** default `PlanOptions`.
 
 Every device solves the same 484 of 512 targets and plans all 484.
 
-| Machine | IK seeds/s, GPU / CPU | Planning, problems/s | End to end, GPU | End to end, CPU |
+| Machine | IK seeds/s, GPU / CPU (64 per target, 4 of them past the first 8 steps) | Planning, problems/s | End to end, GPU | End to end, CPU |
 |---|---|---|---|---|
-| Ryzen AI Max+ 395 and Radeon 8060S | 1,237,000–1,424,000 / 449,000–467,000 | 197,000–336,000 | **17,171–19,602 problems/s** | 6,507–6,707 problems/s (32 threads) |
-| M4 Pro | 558,000–591,000 / 282,000–381,000 | 95,000–183,000 | **7,771–8,254 problems/s** | 3,984–5,453 problems/s (14 threads) |
+| Ryzen AI Max+ 395 and Radeon 8060S | 2,240,000–2,630,000 / 1,027,000–1,061,000 | 263,000–362,000 | **29,857–35,078 problems/s** | 14,341–14,981 problems/s (32 threads) |
+| M4 Pro | 939,000–1,564,000 / 609,000–833,000 | 148,000–156,000 | **12,679–20,032 problems/s** | 8,485–11,408 problems/s (14 threads) |
 
-Each range covers three runs, each started with the machine's load under 6, the M4 Pro's at bf2f5b9 (on the Ryzen and the Radeon, three more, straight after a half-hour benchmark, read about 9% lower). The first run after the GPU idles is up to 30% slower, and the M4 Pro's GPU, which also drives its display, varies with what is on screen.
+Each range covers three runs, each started with the machine's load under 6, with IK that screens its seeds ([#34](https://github.com/natsuku-lab/batchplan/pull/34); before it, with every seed taking every step, the Radeon solved 17,171–19,602 problems per second and the M4 Pro's GPU 7,771–8,254). The M4 Pro's three ran one after another as its load fell to 6, and the first is its slowest. The first run after the GPU idles is up to 30% slower, and the M4 Pro's GPU, which also drives its display, varies with what is on screen.
 
 Uploading the 512 worlds, which the example times first, takes 0.1 ms on the M4 Pro's CPU and 0.2 ms on its GPU: preparing each obstacle for the CPU's checks and, on the GPU, one buffer write. A distance grid adds its values, uploaded once however many worlds share it.
 
-By batch size, end to end, in solved problems per second (medians of three runs: the M4 Pro's in the session of the table above, the Ryzen's and the Radeon's in a later one than theirs):
+By batch size, end to end, in solved problems per second (medians of three runs, in the sessions of the table above):
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU | Radeon 8060S | Ryzen CPU |
 |---|---|---|---|---|
-| 1 | 80 | **1,413** | 259 | **1,826** |
-| 8 | 581 | **3,219** | 1,943 | **4,362** |
-| 64 | 1,993 | **4,576** | 4,269 | **6,050** |
-| 512 | **8,166** | 5,403 | **17,521** | 6,832 |
-| 4,096 | **10,583** | 5,285 | **20,977** | 7,084 |
+| 1 | 83 | **2,583** | 292 | **3,145** |
+| 8 | 1,263 | **4,602** | 1,959 | **6,617** |
+| 64 | 3,796 | **7,140** | 8,289 | **11,755** |
+| 512 | **14,676** | 10,135 | **33,196** | 14,588 |
+| 4,096 | **20,622** | 10,441 | **37,740** | 14,422 |
 
-A GPU call costs 4 ms on the Radeon (12 ms on the M4 Pro), so one problem at a time runs 7–18 times faster on the CPU. On the M4 Pro that cost varies from run to run and with how recently the GPU worked: one problem's IK took 8 to 20 ms within one session on batchplan 0.1.0 and 11 to 13 ms in these runs, one call after a warm-up, while the 2,600 problems' calls, one after another, take 5 ms each end to end. The CPU fills its cores by 64 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.0 (M4 Pro) to 3.0 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 1.6 (M4 Pro: 56 against 87 ms for 512 targets) to 2.8 times (Radeon: 25 against 71 ms).
+A GPU call costs 3.4 ms on the Radeon (12 ms on the M4 Pro), so one problem at a time runs 11–31 times faster on the CPU. On the M4 Pro that cost varies from run to run and with how recently the GPU worked: one problem's IK took 8 to 20 ms within one session on batchplan 0.1.0 and 11 to 13 ms in these runs, one call after a warm-up, while the 2,600 problems' calls, one after another, take 5 ms each end to end. The CPU fills its cores by 512 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.0 (M4 Pro) to 2.6 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 1.5 (M4 Pro: 30 against 44 ms for 512 targets, the middle runs) to 2.5 times (Radeon: 13 against 32 ms).
 
 ## Tool paths
 
@@ -646,7 +662,7 @@ batchplan's paths were 12% longer than cuRobo's at the median where both solved 
 - **Grids.** [Building distance grids on the GPU](perception.md#building-grids-on-the-gpu), with an integer distance transform, made a 640×480 depth image's 1 cm grid 11× faster on the Radeon (21.1–22.7 → 1.9–2.0 ms) and 3.3× faster on the M4 Pro.
 - **Mesh checks.** A branch-and-bound search took mesh clearance from 620 to 110 µs per Panda configuration.
 - **Loop counters.** naga adds a counter to every shader loop so that none can run forever. The kernels' loops all count to a bound, so their module is built without it (`create_shader_module_trusted`, the crate's one `unsafe`; a test scans the kernels for any other kind of loop). One target's default IK (64 seeds of 30 steps, 300 calls, median) took 1.27 ms and takes 1.01 on the M4 Pro for a Panda without collision spheres, 3.33 and 2.83 ms with them; on an RTX 4090, 0.74 and 0.53 ms, and 1.33 and about 1.2. Built both ways in one process on the M4 Pro and called in turn, IK of 32 and 512 targets takes 4–10% less, `evaluate` of 512 and 65,536 configurations between 9% less and 0.5% more, and 128 plans with 4 optimized seeds 2–7% less.
-- **Not adopted.** Shader modules without bounds checks as well would add nothing on the M4 Pro and under a tenth on the RTX 4090 (0.53 to 0.48 ms), and need every index proven in range. Reusing each call's buffers would save under 1.5%: creating, filling and binding them takes 0.04–0.07 ms of a 4.5–18 ms IK call for one target on the M4 Pro, and 0.36 ms of 53 ms for 16,384 seeds. Grid buffers, which are megabytes, are reused.
+- **Not adopted.** Shader modules without bounds checks as well would add nothing on the M4 Pro and under a tenth on the RTX 4090 (0.53 to 0.48 ms), and need every index proven in range. Reusing every call's buffers: creating, filling and binding them takes 0.36 ms of 53 ms for 16,384 seeds on the M4 Pro, and large ones are made around their data, which saves a copy. Small IK calls do reuse theirs (up to 64 KiB each), which saves them 0.04–0.07 ms of about a millisecond. Grid buffers, which are megabytes, are reused.
 
 ## Reproducing
 
@@ -659,7 +675,7 @@ cargo run --release --example bench -- 512
 cp scripts/robokit/*.py ../robokit/ && cd ../robokit
 uv run scripts/benchmark/ik/run_benchmark.py                                   # RoboKit, cuRobo, PyRoKi
 uv run scripts/benchmark/motion_plan/benchmark.py --config robokit-primitive --runs 5 --output-dir out/robokit
-uv run batchplan_ik.py --device gpu                                            # or --device cpu, --seeds 16
+uv run batchplan_ik.py --device gpu                                            # or --device cpu, --seeds 16, --iterations 20, --screening 0
 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu
 BATCHPLAN_SEEDS=4 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu-4   # batchplan-cpu likewise
 BATCHPLAN_JERK=150 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu-j150   # timed under RoboKit's jerk limit

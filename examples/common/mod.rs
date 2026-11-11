@@ -88,11 +88,13 @@ pub fn two_pandas() -> Result<Robot, batchplan::Error> {
 }
 
 /// The IK these fixtures' starts and goals come from, fixed so they, and the numbers measured on
-/// them, do not move with `IkOptions::default()`: 32 seeds of 60 steps of at most 0.3 rad.
+/// them, do not move with `IkOptions::default()`: 32 seeds, each taking all of 60 steps of at
+/// most 0.3 rad.
 pub fn fixture_ik() -> IkOptions {
     IkOptions {
         seeds: 32,
         iterations: 60,
+        screening: 0,
         max_step: 0.3,
         ..IkOptions::default()
     }
