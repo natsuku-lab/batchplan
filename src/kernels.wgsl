@@ -496,7 +496,8 @@ fn clearance_main(
 }
 
 // One IK seed per lane group; runs P.iterations steps, writes q back and [pos err, rot err]. The
-// lanes split each step's collision gradient and otherwise do the same work.
+// lanes split each step's collision gradient; the first takes the step and gives the others the
+// configuration (lead).
 @compute @workgroup_size(WORKGROUP)
 fn ik_main(
     @builtin(global_invocation_id) gid: vec3<u32>,

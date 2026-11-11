@@ -830,6 +830,12 @@ impl Robot {
         Ok(robot)
     }
 
+    /// How many of `links` are the robot's own: the objects it holds are links after them.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn own_links(&self) -> usize {
+        self.links.len() - self.attached.len()
+    }
+
     /// This robot without the attached object `name`.
     pub fn detach(&self, name: &str) -> error::Result<Robot> {
         let index = self

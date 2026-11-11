@@ -412,10 +412,16 @@ fn ik_lanes_step_as_one_configuration() {
     let n = robot.dof();
     let scene = worlds(8, 4);
     let few = ik_problems(&scene, 5);
-    // The same problems again and again: enough that neither the screening nor the seeds that go
-    // on are few enough for lanes.
-    let many: Vec<IkProblem> = few.iter().cycle().take(400).cloned().collect();
-    let o = IkOptions::default();
+    // The same problems again and again, and half of each one's seeds kept after a short
+    // screening: neither the screening (65,536 seeds) nor the seeds that go on (32,768) are few
+    // enough for lanes, which up to 4,096 configurations get, and the seeds that go on have most
+    // of their way to go, in lanes where there are few.
+    let many: Vec<IkProblem> = few.iter().cycle().take(1024).cloned().collect();
+    let o = IkOptions {
+        screening: 2,
+        kept: 32,
+        ..IkOptions::default()
+    };
     let on_gpu = gpu.upload(&scene).unwrap();
     let laned = batchplan::solve_ik(&gpu, &on_gpu, &few, &o).unwrap();
     let single = batchplan::solve_ik(&gpu, &on_gpu, &many, &o).unwrap();

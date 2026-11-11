@@ -1,8 +1,11 @@
 //! How long one call takes on a device, by kind of call, on the Panda: IK of 1 to 1,000 targets
-//! without collision spheres, with them and no push away from obstacles, and with the push;
-//! `evaluate` of 512 and 16,384 configurations; plans of 16 and 256 problems with 4 optimized
-//! seeds. Each kind is called many times and its median and best kept: a GPU's pace over calls
-//! this short varies, so compare builds by running them in turn.
+//! without collision spheres, with them and no push away from obstacles, with the push, and with
+//! a second hand on its fourth link, so that the hands share joints; `evaluate` of 512 and 16,384
+//! configurations; plans of 16 and 256 problems with 4 optimized seeds. Then the two kinds that
+//! spend longest in the collision code: IK with the push for a Panda fitted with several hundred
+//! spheres, among tabletops' clutter, and plans to goals past a ball in the way. Each kind is
+//! called many times and its median and best kept: a GPU's pace over calls this short varies, so
+//! compare builds by running them in turn.
 //!
 //!   cargo run --release --example latency [-- --cpu]
 
@@ -14,8 +17,8 @@ use std::time::Instant;
 use anyhow::Result;
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionModel, CollisionWeights, Device, IkOptions, IkProblem, PlanOptions, PlanProblem,
-    Robot, RobotOptions, World,
+    CollisionModel, CollisionWeights, Device, IkOptions, IkProblem, Obstacle, PlanOptions,
+    PlanProblem, Robot, RobotOptions, SphereOptions, World,
 };
 
 /// The median and the best of `calls` runs of `call`, in milliseconds.
@@ -47,6 +50,13 @@ fn main() -> Result<()> {
         },
     )?;
     let panda = common::panda()?;
+    let two_hands = Robot::load(
+        common::asset("franka/franka_panda.urdf"),
+        &RobotOptions {
+            ee_links: vec!["panda_hand".into(), "panda_link4".into()],
+            ..common::panda_options()
+        },
+    )?;
     let n = panda.dof();
     let mut rng = Rng::new(3);
     let mut random = |robot: &Robot| -> Vec<f32> {
@@ -57,6 +67,7 @@ fn main() -> Result<()> {
         ("no spheres", &bare, true),
         ("spheres, no push", &panda, false),
         ("spheres and the push", &panda, true),
+        ("two hands, the push", &two_hands, true),
     ] {
         let device = device(robot)?;
         let worlds = device.upload(&[World::default()])?;
@@ -70,7 +81,14 @@ fn main() -> Result<()> {
         };
         for count in [1, 10, 100, 1000] {
             let problems: Vec<IkProblem> = (0..count)
-                .map(|_| IkProblem::new(0, robot.ee_pose(&random(robot), 0)))
+                .map(|_| {
+                    let q = random(robot);
+                    let hands = 0..robot.hands();
+                    IkProblem {
+                        targets: hands.map(|hand| Some(robot.ee_pose(&q, hand))).collect(),
+                        ..IkProblem::new(0, robot.ee_pose(&q, 0))
+                    }
+                })
                 .collect();
             let mut solved = 0;
             let (median, best) = timed(60, || {
@@ -98,14 +116,14 @@ fn main() -> Result<()> {
         })?;
         println!("evaluate {count:>6} configurations: median {median:8.3} ms, best {best:8.3}");
     }
+    let options = PlanOptions {
+        seeds: 4,
+        ..PlanOptions::default()
+    };
     for count in [16, 256] {
         let problems: Vec<PlanProblem> = (0..count)
             .map(|i| PlanProblem::new((i % 64) as u32, panda.default_q(), random(&panda)))
             .collect();
-        let options = PlanOptions {
-            seeds: 4,
-            ..PlanOptions::default()
-        };
         let mut solved = 0;
         let (median, best) = timed(8, || {
             solved = batchplan::plan(&device, &worlds, &problems, &options)?
@@ -117,5 +135,67 @@ fn main() -> Result<()> {
             "plans, {count:>3} problems of 4 optimized seeds: median {median:8.2} ms, best {best:8.2}, {solved} solved ({n} joints)"
         );
     }
+    let many = Robot::load(
+        common::asset("franka/franka_panda.urdf"),
+        &RobotOptions {
+            collision_model: None,
+            spheres: SphereOptions {
+                budget: 400,
+                ..SphereOptions::default()
+            },
+            ..common::panda_options()
+        },
+    )?;
+    let spheres = many.spheres(many.default_q()).len();
+    let cluttered = device.with_robot(&many)?;
+    for count in [300, 1000] {
+        let problems: Vec<IkProblem> = (0..count)
+            .map(|i| IkProblem::new((i % 64) as u32, many.ee_pose(&random(&many), 0)))
+            .collect();
+        let mut solved = 0;
+        let (median, best) = timed(8, || {
+            solved = batchplan::solve_ik(&cluttered, &worlds, &problems, &IkOptions::default())?
+                .solved()
+                .count();
+            Ok(())
+        })?;
+        println!(
+            "IK, {spheres} spheres, the push, clutter {count:>5} targets: median {median:8.2} ms, best {best:8.2}, {solved} solved"
+        );
+    }
+    // A ball where the hand is halfway along the straight line to each goal, kept where it leaves
+    // both ends free. The CPU chooses, so that every build and device times the same problems.
+    let chooser = Device::cpu(&panda)?;
+    let (mut balls, mut problems) = (Vec::new(), Vec::new());
+    while problems.len() < 256 {
+        let (start, goal) = (panda.default_q(), random(&panda));
+        let halfway: Vec<f32> = start
+            .iter()
+            .zip(&goal)
+            .map(|(a, b)| 0.5 * (a + b))
+            .collect();
+        let ball = World::new(vec![Obstacle::sphere(
+            panda.ee_pose(&halfway, 0).position,
+            0.08,
+        )]);
+        let alone = chooser.upload(std::slice::from_ref(&ball))?;
+        let ends = [start, &goal[..]].concat();
+        let at_ends = chooser.evaluate(&alone, &[0, 0], &ends, &CollisionWeights::NONE)?;
+        if at_ends.collision_free(0) && at_ends.collision_free(1) {
+            problems.push(PlanProblem::new(balls.len() as u32, start, goal));
+            balls.push(ball);
+        }
+    }
+    let worlds = device.upload(&balls)?;
+    let mut solved = 0;
+    let (median, best) = timed(8, || {
+        solved = batchplan::plan(&device, &worlds, &problems, &options)?
+            .solved()
+            .count();
+        Ok(())
+    })?;
+    println!(
+        "plans past a ball, 256 problems of 4 optimized seeds: median {median:8.2} ms, best {best:8.2}, {solved} solved"
+    );
     Ok(())
 }

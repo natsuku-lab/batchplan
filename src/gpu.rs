@@ -265,11 +265,13 @@ fn write_out(lines: &[&str], count: &dyn Fn(&str) -> Option<usize>, out: &mut St
     }
 }
 
-/// Spheres on a link, and sphere pairs of a pair of links, from which their loops take two rounds
-/// at a time: naga counts a loop's rounds, and a link of many spheres has many. Fewer, and the
-/// second round's test costs more than the count it saves (the Panda's 61 spheres: 2-4% slower).
-const PAIRED_SPHERES: u32 = 16;
-const PAIRED_PAIRS: u32 = 64;
+/// Spheres on a link of the robot's own, and sphere pairs of a pair of them, from which their
+/// loops take two rounds at a time: naga counts a loop's rounds, and a link of many spheres has
+/// many. Fewer, and the second round's test costs more than the count it saves: cuRobo's Panda,
+/// whose hand has 18 spheres and 72 pairs with each of four links, ran 1-4% slower paired. What
+/// a robot holds is left out whatever its size, so that holding another object builds no kernels.
+const PAIRED_SPHERES: u32 = 24;
+const PAIRED_PAIRS: u32 = 128;
 
 /// `source` with each `for (var x = a; x < b; x += LANES) {` taking two rounds at a time, the
 /// second where it is still below `b`: the same rounds in the same order, half as many counted.
@@ -402,7 +404,8 @@ fn least_squares_wgsl(dof: usize) -> String {
 /// wrench (`force_i`, `moment_i`, about the world origin) is its own private variable indexed only
 /// by constants, so it stays in registers; private arrays indexed at run time end up in scratch
 /// memory on some drivers. Sphere and sphere-pair ranges are read from the buffers, so robots that
-/// differ only in their spheres share kernels.
+/// differ only in the spheres of what they hold share kernels, as do robots whose own links'
+/// spheres stay on one side of `PAIRED_SPHERES` and `PAIRED_PAIRS`.
 fn robot_wgsl(robot: &Robot) -> String {
     use std::fmt::Write;
     let links = &robot.links;
@@ -636,7 +639,7 @@ fn collision(
     }}
 "
         );
-        if robot.sphere_ranges[i][1] >= PAIRED_SPHERES {
+        if i < robot.own_links() && robot.sphere_ranges[i][1] >= PAIRED_SPHERES {
             block = rounds_paired(&block);
         }
         w += &block;
@@ -701,7 +704,8 @@ fn collision(
                 &frame,
                 &wrench,
             );
-            if lp.count >= PAIRED_PAIRS {
+            let own = (lp.a.max(lp.b) as usize) < robot.own_links();
+            if own && lp.count >= PAIRED_PAIRS {
                 body = rounds_paired(&body);
             }
             let _ = write!(w, "    {{\n{body}    }}\n");
@@ -2543,6 +2547,38 @@ mod tests {
         assert!(gpu.kernels.constrained.get().is_none() && gpu.grids.get().is_none());
         gpu.build_all().expect("the kernels build");
         assert!(gpu.kernels.constrained.get().is_some() && gpu.grids.get().is_some());
+    }
+
+    /// What a robot holds changes none of its kernels' code, however many spheres cover it: a
+    /// device warmed up holding one object builds nothing when it holds another.
+    #[test]
+    fn a_held_object_of_any_size_shares_the_kernels() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/ur5e/ur_description/urdf/ur5e.urdf"
+        );
+        let robot = Robot::load(path, &crate::RobotOptions::default()).expect("the UR5e loads");
+        let holding = |shape: crate::Obstacle| {
+            let held = robot
+                .attach(&crate::AttachedObject {
+                    name: "box".into(),
+                    link: "tool0".into(),
+                    shapes: vec![shape],
+                    touch_links: vec![],
+                    spheres: crate::SphereOptions::default(),
+                })
+                .expect("the box attaches");
+            let spheres = held.sphere_ranges.last().expect("the box's link")[1];
+            (spheres, robot_wgsl(&held))
+        };
+        let ball = crate::Obstacle::sphere(Vec3::ZERO, 0.02);
+        let cube = crate::Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.1));
+        let ((few, small), (many, large)) = (holding(ball), holding(cube));
+        assert!(
+            few < PAIRED_SPHERES && many >= PAIRED_SPHERES,
+            "{few} and {many} spheres lie on one side of where a link's loops pair up"
+        );
+        assert!(small == large, "the larger box changes the kernels' code");
     }
 
     /// A lane's loop over a link's spheres takes its rounds two at a time, the second where the
