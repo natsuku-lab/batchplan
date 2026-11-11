@@ -6,7 +6,7 @@ The numbers on this page come from five machines:
 - an **AMD Ryzen AI Max+ 395** CPU (16 cores, 32 threads) with a **Radeon 8060S** GPU, on Vulkan through Mesa's RADV driver, under Ubuntu 26.04;
 - an **NVIDIA T4** GPU with 8 threads of a 2.5 GHz Xeon (an AWS g4dn.2xlarge), for cuRobo, which needs CUDA, under Ubuntu 24.04;
 - an **NVIDIA A10G** GPU with 4 threads of an AMD EPYC 7R32 (an AWS g5.xlarge), for RoboKit, under Ubuntu 24.04;
-- an **NVIDIA RTX 4090** GPU with 13 threads of an AMD EPYC 75F3 (a rented container, Ubuntu 22.04), for RoboKit and batchplan on one machine.
+- an **NVIDIA RTX 4090** GPU with 13 threads of an AMD EPYC 75F3 (a rented container, Ubuntu 22.04), for RoboKit and batchplan on one machine, and a second such with 48 threads of an AMD EPYC 9254 where a table says so.
 
 The load was checked before each run on the first two; the rented machines ran nothing else of ours, and what their other tenants ran is not known. Every command to reproduce them is [at the end](#reproducing).
 
@@ -335,7 +335,7 @@ On one machine for both, a rented NVIDIA RTX 4090 (driver 595.91.07; 13 threads 
 | batchplan, 4 optimized seeds, acceleration × 0.7 | 99.46% (99.42%) | 12.5 / 13.2 / 32.5 ms | 1.242 s | 3.178 rad | 125 rad/s³ |
 | batchplan, acceleration × 0.7 | 99.54% (99.54%) | 3.8 / 3.4 / 6.4 ms | 1.338 s | 3.292 rad | 143 rad/s³ |
 
-- **At an equal jerk reading RoboKit's motions are the shorter, by 1.9%** (1.219 s against 1.242 s at 126 and 125 rad/s³), for about the same planning time (12.4 ms against 13.2 at the median, 15.3 against 12.5 on average). At an equal duration batchplan's read rougher (145 at 1.208 s).
+- **At an equal jerk reading RoboKit's motions are the shorter, by 1.9%** (1.219 s against 1.242 s at 126 and 125 rad/s³), for about the same planning time (12.4 ms against 13.2 at the median, 15.3 against 12.5 on average). At an equal duration batchplan's read rougher (145 at 1.208 s). With goal IK that screens its seeds (the second RTX 4090 of the IK table below, RoboKit not run again), the acceleration × 0.7 run solves as many as RoboKit, 99.61% (99.58% strict), in 11.7 / 12.3 / 31.0 ms, with motions of 1.253 s over 3.200 rad that read 124: the goals it plans to differ, and the motions are 2.8% longer than RoboKit's.
 - **With four optimized seeds, a lower acceleration limit smooths the reading for less time than a lower jerk limit.** Timed under jerk limits of 250 and 220 rad/s³ instead, the optimized motions take 1.218 s and 1.241 s and read 145 and 133 (those two runs also had #32's second change and kernels built without shader runtime checks, which change the last bits of a GPU's results).
 - **Without optimization** batchplan answers in a quarter of the time, with motions 10% longer than RoboKit's that read 14% rougher. There a jerk limit of 250 rad/s³ does better than the acceleration share: the same 1.338 s, reading 137 (built as the two runs above).
 
@@ -362,6 +362,20 @@ Since then a problem's seeds share its targets, large batches are seeded on the 
 | 2,000 | 7.08 | 23.2 | 9.12 | 215–218 |
 
 RoboKit's IK is still the quicker on the GPU, by 1.3 to 1.7 times where it was 2.0 to 3.4; for one target batchplan's CPU device is the quickest of all.
+
+IK now [screens its seeds](planning.md#inverse-kinematics): all 64 take 8 steps, then 4 per target take the rest, in one round trip on a GPU. On another rented RTX 4090 (driver 595.91.07, Vulkan; 48 threads of an AMD EPYC 9254; RoboKit 736f112 and batchplan in one session; five runs, each batchplan column the range of two to six such), in milliseconds (success):
+
+| Targets per call | RoboKit | batchplan before (ac861c5) | batchplan, 30 steps (the default) | batchplan, 20 steps |
+|---|---|---|---|---|
+| 1 | 0.56 (100%) | 0.69–0.71 (100%) | 0.75–0.95 (100%) | 0.60–0.82 (100%) |
+| 10 | 0.53 (100%) | 0.71 (100%) | 0.77–0.80 (100%) | 0.62–0.63 (100%) |
+| 100 | 0.76 (100%) | 0.97–1.00 (100%) | 1.06–1.09 (100%) | 0.88–0.92 (100%) |
+| 1,000 | 3.14 (99.94%) | 3.58–3.72 (100%) | 3.05–3.28 (99.98%) | 2.99–3.10 (99.98%) |
+| 2,000 | 6.81 (99.91%) | 7.21–10.24 (99.98%) | 6.13–6.32 (99.96%) | 5.65–5.82 (99.96%) |
+
+- **From 1,000 targets per call batchplan is level with RoboKit or quicker,** by 10% at 2,000 with its defaults and 16% with 20 steps (`IkOptions { iterations: 20, .. }`), and solves a few more of them.
+- **Up to 100 targets RoboKit is the quicker,** by 13–19% against batchplan's 20 steps and by 40% and more against its defaults. So few seeds do not fill the GPU, so a call takes as long as its steps take one after another, and leaving most seeds behind saves nothing: the screening costs these sizes 0.05–0.1 ms here. (Measured before the screening's passes shared their submissions with the steps', which changes no result.) RoboKit takes 16 steps where batchplan's default is 30. With every seed taking 20 steps (`screening: 0`), batchplan takes 0.58, 0.57 and 0.84 ms for 1, 10 and 100 targets.
+- **Where the time goes.** For this robot with collision spheres, a call of one target with no steps takes 0.17 ms on this machine and each step about 35 µs (about 12 µs without spheres). At 1,000 targets, of 5.7 ms with 20 steps, the GPU works for 2.6 ms; seeding takes 0.5 ms, reading the results back 0.7 ms, and copying and assembling them 1.1 ms, which has since been cut to one copy.
 
 ## The 2,600 problems on every device
 
@@ -659,7 +673,7 @@ cargo run --release --example bench -- 512
 cp scripts/robokit/*.py ../robokit/ && cd ../robokit
 uv run scripts/benchmark/ik/run_benchmark.py                                   # RoboKit, cuRobo, PyRoKi
 uv run scripts/benchmark/motion_plan/benchmark.py --config robokit-primitive --runs 5 --output-dir out/robokit
-uv run batchplan_ik.py --device gpu                                            # or --device cpu, --seeds 16
+uv run batchplan_ik.py --device gpu                                            # or --device cpu, --seeds 16, --iterations 20, --screening 0
 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu
 BATCHPLAN_SEEDS=4 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu-4   # batchplan-cpu likewise
 BATCHPLAN_JERK=150 uv run batchplan_mp.py --config batchplan-gpu --runs 5 --output-dir out/batchplan-gpu-j150   # timed under RoboKit's jerk limit
