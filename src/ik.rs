@@ -27,9 +27,11 @@ pub struct IkOptions {
     /// steps go to the few that are closing in.
     pub screening: u32,
     /// Seeds per problem that go on past `screening`: those not yet at their targets within the
-    /// tolerances and clear of collision, the nearest and the collision-free first, then seeds
-    /// that have arrived, most of which stay at rest. The others are returned as the screening
-    /// left them.
+    /// tolerances, the nearest first, then seeds that have arrived, most of which stay at rest.
+    /// Where the steps push away from collisions (`collision_step` above 0, for a robot with
+    /// collision spheres), collision-free seeds go before the others, and a seed in collision
+    /// has not arrived; elsewhere no step frees a seed from a collision, and they go by their
+    /// errors alone. The others are returned as the screening left them.
     pub kept: usize,
     /// Damped-least-squares damping (lambda).
     pub damping: f32,
@@ -67,10 +69,16 @@ impl IkOptions {
             && self.seeds <= SCREENED_SEEDS
     }
 
+    /// Whether the steps push away from collisions: only then can they change which seeds
+    /// collide, and only then does the choice after the screening count collisions.
+    pub(crate) fn pushes(&self) -> bool {
+        self.collision_step > 0.0
+    }
+
     /// Where a seed stands after the screening, from its `[position error, rotation error, world
-    /// clearance, self clearance]`: the smaller goes on first. Seeds still on their way come
-    /// before those in collision, and those that have arrived last (most would stay at rest);
-    /// within each, the nearest first.
+    /// clearance, self clearance]` (the clearances zero where the steps do not push): the smaller
+    /// goes on first. Seeds still on their way come before those in collision, and those that
+    /// have arrived last (most would stay at rest); within each, the nearest first.
     pub(crate) fn standing(&self, seed: &[f32; 4]) -> (u8, f32) {
         let clear = device::collision_free([seed[2], seed[3]]);
         let arrived =

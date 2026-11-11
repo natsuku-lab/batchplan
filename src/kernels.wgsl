@@ -611,12 +611,13 @@ fn ik_main(
 }
 
 // Where seed `item` stands after the screening (the smaller goes on first), from its errors in
-// qbuf and its clearances in aux: seeds on their way before those in collision, those that have
+// qbuf and, where the steps push away from collisions (P.collision_step above 0), its clearances
+// in aux: seeds on their way before those in collision, those that have
 // arrived last, and its error, FAR when it is not a number.
 fn standing(item: u32) -> vec2<f32> {
     let position = qbuf[item * 2u];
     let rotation = qbuf[item * 2u + 1u];
-    let clear = aux[item * 2u] >= 0.0 && aux[item * 2u + 1u] >= 0.0;
+    let clear = P.collision_step <= 0.0 || (aux[item * 2u] >= 0.0 && aux[item * 2u + 1u] >= 0.0);
     let arrived = clear && position < P.position_tolerance && rotation < P.rotation_tolerance;
     let error = position + P.rotation_weight * rotation;
     return vec2<f32>(select(select(0.0, 1.0, !clear), 2.0, arrived), select(FAR, error, error < FAR));

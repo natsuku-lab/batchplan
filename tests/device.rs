@@ -552,6 +552,22 @@ fn ik_steps_move_a_seed_or_leave_it_at_rest() {
 /// solves is still solved.
 #[test]
 fn ik_refines_the_seeds_nearest_after_the_screening() {
+    refines_the_nearest(IkOptions::default());
+}
+
+/// Without the push away from collisions no step frees a seed from one, so the seeds that go on
+/// are the nearest by their errors alone, in collision or not.
+#[test]
+fn ik_without_the_push_refines_the_seeds_nearest_by_error_alone() {
+    refines_the_nearest(IkOptions {
+        collision_step: 0.0,
+        ..IkOptions::default()
+    });
+}
+
+/// Solves grasps on cluttered tabletops with `o` on every device and checks which seeds went on
+/// past the screening.
+fn refines_the_nearest(o: IkOptions) {
     let robot = panda();
     let n = robot.dof();
     let mut rng = Rng::new(4);
@@ -561,8 +577,8 @@ fn ik_refines_the_seeds_nearest_after_the_screening() {
         .enumerate()
         .map(|(i, world)| IkProblem::new(i as u32, common::grasp_target(world, &mut rng)))
         .collect();
-    let o = IkOptions::default();
     assert!(o.screening > 0 && o.screening < o.iterations && o.kept < o.seeds);
+    let pushes = o.collision_step > 0.0;
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let solve = |o: &IkOptions| batchplan::solve_ik(&d, &worlds, &problems, o).unwrap();
@@ -576,14 +592,26 @@ fn ik_refines_the_seeds_nearest_after_the_screening() {
             solve(&o),
             solve(&every(o.iterations)),
         );
+        let clear =
+            |i: usize| screened.world_clearance[i] >= 0.0 && screened.self_clearance[i] >= 0.0;
+        let error =
+            |i: usize| screened.position_error[i] + o.rotation_weight * screened.rotation_error[i];
         // How near a seed that had not arrived was after the screening, as the choice ranks them:
-        // any collision-free seed before any that is not.
+        // where IK pushes, any collision-free seed before any that is not.
         let cost = |i: usize| {
-            let error = screened.position_error[i] + o.rotation_weight * screened.rotation_error[i];
-            let clear = screened.world_clearance[i] >= 0.0 && screened.self_clearance[i] >= 0.0;
-            if clear { error } else { 1e6 + error }
+            if pushes && !clear(i) {
+                1e6 + error(i)
+            } else {
+                error(i)
+            }
         };
-        let mut went_on = 0;
+        // Arrived, as the choice sees it: collisions count where IK pushes away from them.
+        let arrived = |i: usize| {
+            screened.position_error[i] < o.position_tolerance
+                && screened.rotation_error[i] < o.rotation_tolerance
+                && (clear(i) || !pushes)
+        };
+        let (mut went_on, mut colliding) = (0, 0);
         for p in 0..problems.len() {
             let seeds = p * o.seeds..(p + 1) * o.seeds;
             let moved = |i: &usize| staged.q[i * n..(i + 1) * n] != screened.q[i * n..(i + 1) * n];
@@ -599,7 +627,7 @@ fn ik_refines_the_seeds_nearest_after_the_screening() {
                 d.name()
             );
             let farthest = refined.iter().map(|&i| cost(i)).fold(0.0, f32::max);
-            let left = seeds.filter(|i| !refined.contains(i) && !screened.success[*i]);
+            let left = seeds.filter(|i| !refined.contains(i) && !arrived(*i));
             // A seed stuck short of its target does not move when sent on either: only seeds left
             // behind while nearer than one that went on would be a wrong choice.
             let nearer = left.filter(|&i| cost(i) < farthest).count();
@@ -609,16 +637,23 @@ fn ik_refines_the_seeds_nearest_after_the_screening() {
                 d.name()
             );
             went_on += refined.len();
+            colliding += refined.iter().filter(|&&i| !clear(i)).count();
         }
         assert!(
             went_on > problems.len(),
             "{}: only {went_on} seeds went on",
             d.name()
         );
+        // Without the push, seeds in collision go on too: counting collisions would send others.
+        assert!(
+            pushes || colliding > 4,
+            "{}: only {colliding} of the seeds that went on were in collision",
+            d.name()
+        );
         // The seeds left behind rarely cost a problem its solution.
         let (staged, full) = (staged.solved().count(), full.solved().count());
         assert!(
-            staged > problems.len() / 2 && staged + 1 >= full,
+            staged + 1 >= full && (staged > problems.len() / 2 || !pushes),
             "{}: {staged} problems solved, {full} when every seed takes every step",
             d.name()
         );

@@ -1549,14 +1549,15 @@ pub(crate) fn run_searches(
 
 impl CpuBackend {
     /// `iterations` IK steps at most on each item of a call (its worlds, the items' worlds, the
-    /// problems' targets and the joints held), as [`Backend::ik`] describes, every item to the end.
+    /// problems' targets and the joints held), every item to the end: each item's largest
+    /// position and rotation errors over its targeted hands.
     fn ik_steps(
         &self,
         (worlds, item_world, targets, held): (&Worlds, &[u32], &[Option<Pose>], &[bool]),
         q: &mut [f32],
         iterations: u32,
         o: &IkOptions,
-    ) -> Result<Vec<[f32; 4]>> {
+    ) -> Result<Vec<[f32; 2]>> {
         let (n, hands) = (self.robot.dof(), self.robot.hands());
         // Items to a problem, whose targets they share.
         let seeds = (item_world.len() * hands)
@@ -1611,9 +1612,7 @@ impl CpuBackend {
                 )
                 .collect()
         });
-        let clear = self.clearance(worlds, item_world, q)?;
-        let items = errors.iter().zip(&clear);
-        Ok(items.map(|(e, c)| [e[0], e[1], c[0], c[1]]).collect())
+        Ok(errors)
     }
 }
 
@@ -1756,11 +1755,24 @@ impl Backend for CpuBackend {
         o: &IkOptions,
     ) -> Result<Vec<[f32; 4]>> {
         let call = (worlds, item_world, targets, held);
+        let rows = |errors: Vec<[f32; 2]>, clear: &[[f32; 2]]| -> Vec<[f32; 4]> {
+            let items = errors.iter().zip(clear);
+            items.map(|(e, c)| [e[0], e[1], c[0], c[1]]).collect()
+        };
         if !o.screens() {
-            return self.ik_steps(call, q, o.iterations, o);
+            let errors = self.ik_steps(call, q, o.iterations, o)?;
+            return Ok(rows(errors, &self.clearance(worlds, item_world, q)?));
         }
         let n = self.robot.dof();
-        let mut solved = self.ik_steps(call, q, o.screening, o)?;
+        // The choice counts collisions where the steps push away from them. Elsewhere no step
+        // changes which seeds collide for the better, so the seeds stand by their errors alone,
+        // and the clearances are found once, at the end.
+        let errors = self.ik_steps(call, q, o.screening, o)?;
+        let mut solved = if o.pushes() {
+            rows(errors, &self.clearance(worlds, item_world, q)?)
+        } else {
+            rows(errors, &vec![[0.0; 2]; item_world.len()])
+        };
         // Each problem's `kept` seeds that stand first take the remaining steps as a batch of
         // their own; one that ties another goes after it.
         let choose = |(p, chosen): (usize, &mut [usize])| {
@@ -1812,10 +1824,21 @@ impl Backend for CpuBackend {
             targets,
             refined_held.as_slice(),
         );
-        let again = self.ik_steps(call, &mut refined, o.iterations - o.screening, o)?;
+        let errors = self.ik_steps(call, &mut refined, o.iterations - o.screening, o)?;
+        let again = if o.pushes() {
+            rows(errors, &self.clearance(worlds, &refined_world, &refined)?)
+        } else {
+            rows(errors, &vec![[0.0; 2]; chosen.len()])
+        };
         for ((&item, row), seed) in chosen.iter().zip(again).zip(refined.chunks(n)) {
             q[item * n..(item + 1) * n].copy_from_slice(seed);
             solved[item] = row;
+        }
+        if !o.pushes() {
+            let clear = self.clearance(worlds, item_world, q)?;
+            for (row, c) in solved.iter_mut().zip(clear) {
+                row[2..].copy_from_slice(&c);
+            }
         }
         Ok(solved)
     }

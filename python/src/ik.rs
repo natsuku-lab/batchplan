@@ -22,9 +22,10 @@ value_class! {
         /// on; 0 (or `iterations` and more) for every seed to take them all, as they do with
         /// more than 32,768 seeds per problem.
         screening: u32,
-        /// Seeds per problem that go on past `screening`: those not yet at their targets within
-        /// the tolerances and clear of collision, the nearest and the collision-free first, then
-        /// seeds that have arrived. The others are returned as the screening left them.
+        /// Seeds per problem that go on past `screening`: those not yet at their targets, the
+        /// nearest first, then seeds that have arrived; collision-free seeds before the others
+        /// where the steps push away from collisions. The others are returned as the screening
+        /// left them.
         kept: usize,
         /// Damped-least-squares damping (lambda).
         damping: f32,
