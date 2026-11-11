@@ -265,6 +265,52 @@ fn write_out(lines: &[&str], count: &dyn Fn(&str) -> Option<usize>, out: &mut St
     }
 }
 
+/// Spheres on a link, and sphere pairs of a pair of links, from which their loops take two rounds
+/// at a time: naga counts a loop's rounds, and a link of many spheres has many. Fewer, and the
+/// second round's test costs more than the count it saves (the Panda's 61 spheres: 2-4% slower).
+const PAIRED_SPHERES: u32 = 16;
+const PAIRED_PAIRS: u32 = 64;
+
+/// `source` with each `for (var x = a; x < b; x += LANES) {` taking two rounds at a time, the
+/// second where it is still below `b`: the same rounds in the same order, half as many counted.
+fn rounds_paired(source: &str) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut out = String::with_capacity(source.len() * 2);
+    let header = |line: &str| {
+        let rest = line.trim_start().strip_prefix("for (var ")?;
+        let (variable, rest) = rest.split_once(" = ")?;
+        let (_, rest) = rest.split_once("; ")?;
+        let rest = rest.strip_prefix(variable)?.strip_prefix(" < ")?;
+        let (bound, rest) = rest.split_once("; ")?;
+        let strided = rest == format!("{variable} += LANES) {{");
+        strided.then(|| (variable.to_owned(), bound.to_owned()))
+    };
+    let mut at = 0;
+    while at < lines.len() {
+        let line = lines[at];
+        at += 1;
+        let Some((variable, bound)) = header(line) else {
+            out.extend([line, "\n"]);
+            continue;
+        };
+        // The body: the lines up to the brace that closes the loop.
+        let (first, mut open) = (at, 1);
+        while open > 0 {
+            let braces = |brace: char| lines[at].matches(brace).count() as isize;
+            open += braces('{') - braces('}');
+            at += 1;
+        }
+        let body = lines[first..at - 1].join("\n") + "\n";
+        let (head, close) = (line.trim_end_matches("LANES) {"), lines[at - 1]);
+        let second = format!("({variable} + LANES)");
+        out.extend([head, "2u * LANES) {\n{\n", &body, "}\n"]);
+        out.extend(["if (", &second, " < ", &bound, ") {\n"]);
+        renamed(&body, &variable, &second, &mut out);
+        out.extend(["}\n", close, "\n"]);
+    }
+    out
+}
+
 /// One hand's damped least squares for a robot of `dof` joints, every sum written out term by
 /// term: the loops they would be are short and many, and naga counts each loop's iterations to
 /// rule out endless ones, which cost IK a quarter of its time. Mirrors, in `cpu.rs`, the columns
@@ -548,8 +594,9 @@ fn collision(
     for i in checked {
         // The link's word and bit in a touch set.
         let (word, bit) = (i / 32, 1u32 << (i % 32));
+        let mut block = String::new();
         let _ = write!(
-            w,
+            block,
             r"    {{
         let bl = links[{i}u].bound;
         let bc = rot_{i} * bl.xyz + pos_{i};
@@ -589,6 +636,10 @@ fn collision(
     }}
 "
         );
+        if robot.sphere_ranges[i][1] >= PAIRED_SPHERES {
+            block = rounds_paired(&block);
+        }
+        w += &block;
     }
     w += "    // Likewise for link pairs whose bounding spheres are farther apart than the self margin.\n";
     w += "    let gate = max(self_margin, 0.0);\n";
@@ -644,12 +695,15 @@ fn collision(
             let link = [lp.a, lp.b];
             let frame = |e: usize| (format!("rot_{}", link[e]), format!("pos_{}", link[e]));
             let wrench = |e: usize| (format!("force_{}", link[e]), format!("moment_{}", link[e]));
-            let body = pair(
+            let mut body = pair(
                 &format!("{l}u"),
                 [&format!("{}u", lp.a), &format!("{}u", lp.b)],
                 &frame,
                 &wrench,
             );
+            if lp.count >= PAIRED_PAIRS {
+                body = rounds_paired(&body);
+            }
             let _ = write!(w, "    {{\n{body}    }}\n");
         }
     } else {
@@ -2489,6 +2543,42 @@ mod tests {
         assert!(gpu.kernels.constrained.get().is_none() && gpu.grids.get().is_none());
         gpu.build_all().expect("the kernels build");
         assert!(gpu.kernels.constrained.get().is_some() && gpu.grids.get().is_some());
+    }
+
+    /// A lane's loop over a link's spheres takes its rounds two at a time, the second where the
+    /// link still has a sphere for it; other loops stay.
+    #[test]
+    fn a_strided_loop_takes_its_rounds_in_pairs() {
+        let source = "\
+for (var k = 0u; k < range.y; k++) {
+    for (var s = first + lane; s < first + count; s += LANES) {
+        let sp = spheres[s];
+        cost += sp.c.w;
+    }
+}
+";
+        let paired = rounds_paired(source);
+        assert!(
+            paired.contains("for (var k = 0u; k < range.y; k++) {"),
+            "{paired}"
+        );
+        assert!(
+            paired.contains("for (var s = first + lane; s < first + count; s += 2u * LANES) {"),
+            "{paired}"
+        );
+        assert!(paired.contains("let sp = spheres[s];"), "{paired}");
+        assert!(
+            paired.contains("if ((s + LANES) < first + count) {"),
+            "{paired}"
+        );
+        // The second round reads its own sphere; `sp` and `spheres` keep their names.
+        assert!(
+            paired.contains("let sp = spheres[(s + LANES)];"),
+            "{paired}"
+        );
+        assert_eq!(paired.matches("cost += sp.c.w;").count(), 2, "{paired}");
+        let braces = |brace: char| paired.matches(brace).count();
+        assert_eq!(braces('{'), braces('}'));
     }
 
     /// Loops of a known count are written out, their variable numbered where it stands alone;

@@ -401,6 +401,51 @@ fn touches_past_the_first_word_match_cpu() {
     ));
 }
 
+/// A small batch gives each configuration several lanes, which split its collision gradient and
+/// step as one: its seeds end where they do in a batch large enough for one lane each, up to the
+/// lanes' rounding.
+#[test]
+fn ik_lanes_step_as_one_configuration() {
+    let Some((robot, gpu, _)) = setup() else {
+        return;
+    };
+    let n = robot.dof();
+    let scene = worlds(8, 4);
+    let few = ik_problems(&scene, 5);
+    // The same problems again and again: enough that neither the screening nor the seeds that go
+    // on are few enough for lanes.
+    let many: Vec<IkProblem> = few.iter().cycle().take(400).cloned().collect();
+    let o = IkOptions::default();
+    let on_gpu = gpu.upload(&scene).unwrap();
+    let laned = batchplan::solve_ik(&gpu, &on_gpu, &few, &o).unwrap();
+    let single = batchplan::solve_ik(&gpu, &on_gpu, &many, &o).unwrap();
+    let seeds = few.len() * o.seeds;
+    let apart = |i: usize| {
+        let (a, b) = (laned.solution(i), single.solution(i));
+        (0..n).map(|j| (a[j] - b[j]).abs()).fold(0.0, f32::max)
+    };
+    // The push away from obstacles moved some of them: without it the lanes would have nothing to
+    // split.
+    let unpushed = IkOptions {
+        collision_step: 0.0,
+        ..o
+    };
+    let plain = batchplan::solve_ik(&gpu, &on_gpu, &few, &unpushed).unwrap();
+    let pushed = (0..seeds)
+        .filter(|&i| laned.solution(i) != plain.solution(i))
+        .count();
+    let together = (0..seeds).filter(|&i| apart(i) < 1e-2).count();
+    eprintln!("{pushed} of {seeds} seeds pushed, {together} end within 0.01 rad");
+    assert!(
+        pushed > seeds / 4,
+        "only {pushed} of {seeds} seeds are pushed"
+    );
+    assert!(
+        together * 100 >= seeds * 95,
+        "only {together} of {seeds} seeds end where one lane each puts them"
+    );
+}
+
 /// A problem's seeds share its targets, and a batch goes to the GPU in chunks of 65,536 items that
 /// begin partway through a problem: every seed that succeeds reaches its own problem's target.
 #[test]

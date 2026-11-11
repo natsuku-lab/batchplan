@@ -92,9 +92,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   written out term by term for each robot, as its kinematics are, and the kernels' loops of a
   known count (over the joints, the hands, the line search's steps) are written out when the
   kernels are built. A path whose optimization is over, a steepest-descent search having found
-  nothing better, takes no part in later rounds, as the CPU's already stopped. On an M4 Pro,
+  nothing better, takes no part in later rounds, as the CPU's already stopped. Of the lanes a
+  small batch gives each configuration, one works out the IK step and the others take the
+  configuration from it, and a link of 16 spheres or more takes them two to a round. On an M4 Pro,
   one target's default IK takes 0.33 ms where it took 1.05 for a Panda without collision
-  spheres, and 1.74 ms where 2.72 with them; 1,000 targets take 1.9 and 25.5 ms where 3.9 and
+  spheres, and 1.74 ms where 2.72 with them; 1,000 targets take 1.9 and 22.5 ms where 3.9 and
   30.8; 256 plans with 4 optimized seeds take 97 ms where 113, and 16 take 12.2 ms where 16.9
   (`examples/latency.rs`). On a Radeon 8060S one target takes 0.18 ms where 1.12, and 1.10 ms
   where 2.70. In RoboKit's IK benchmark on an RTX 4090 one target takes 0.33–0.42 ms and ten
@@ -102,7 +104,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   ([Benchmarks](docs/benchmarks.md#against-robokit)). The crate has no `unsafe`: the kernels
   are built with every check naga makes. Against a build without its loop counters, IK with
   the push for a robot of several
-  hundred spheres takes 8% longer, and plans to far goals around obstacles 6%
+  hundred spheres takes 4–6% longer, and plans to far goals around obstacles 6%
   ([Benchmarks](docs/benchmarks.md#how-the-speed-came)). A GPU's results move in their last
   places, IK's and trajectory optimization's alike: a seed in thousands arrives or does not.
 - Trajectories are sooner: time-optimal timing uses the full velocity and acceleration limits,

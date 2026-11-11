@@ -250,97 +250,105 @@ fn load_goals(item: u32) {
 fn ik_step(world: u32, lid: u32, lane: u32) {
     let n = P.n_dof;
     fk();
-    var dq: array<f32, MAX_DOF>;
-    // One hand, the usual case, keeps its system in jac and chol for the push: a loop over hands
-    // around this code costs 4-10% of IK throughput on an M4 Pro's GPU. HANDS is a constant, so
-    // only one branch is compiled.
-    var last = 0u;
-    var rows = 0u;
-    if (HANDS == 1u) {
-        pose_step(0u, &dq);
-    } else if (STACKED) {
-        rows = stack_system();
-        var e: array<f32, STACK>;
-        var r = 0u;
-        for (var h = 0u; h < HANDS; h++) {
-            if (goal_pos[h].w > 0.5) {
-                let ep = goal_pos[h].xyz - ee_pos(h);
-                let eo = rot_log(goal_rot[h] * transpose(ee_rot(h))).xyz * P.rotation_weight;
-                e[r] = ep.x;
-                e[r + 1u] = ep.y;
-                e[r + 2u] = ep.z;
-                e[r + 3u] = eo.x;
-                e[r + 4u] = eo.y;
-                e[r + 5u] = eo.z;
-                r += 6u;
-            }
-        }
-        stack_solve(e, rows, &dq);
-    } else {
-        for (var h = 0u; h < HANDS; h++) {
-            if (goal_pos[h].w > 0.5) {
-                pose_step(h, &dq);
-                last = h;
-            }
-        }
-    }
-    if (P.collision_step > 0.0) {
+    let pushes = P.collision_step > 0.0;
+    if (pushes) {
         for (var j = 0u; j < n; j++) {
             grad[j] = 0.0;
         }
         collision(world, P.w_world, P.w_self, P.margin, P.self_margin, true, lane);
         group_grad(lid);
-        var push: array<f32, MAX_DOF>;
+    }
+    // The lanes of a configuration split its collision gradient; the step from it is one piece of
+    // work, which the first lane does and the others take the configuration from.
+    if (lane == 0u) {
+        var dq: array<f32, MAX_DOF>;
+        // One hand, the usual case, keeps its system in jac and chol for the push: a loop over hands
+        // around this code costs 4-10% of IK throughput on an M4 Pro's GPU. HANDS is a constant, so
+        // only one branch is compiled.
+        var last = 0u;
+        var rows = 0u;
         if (HANDS == 1u) {
-            null_part(&push);
+            pose_step(0u, &dq);
         } else if (STACKED) {
-            var jg: array<f32, STACK>;
-            for (var r = 0u; r < rows; r++) {
-                var s = 0.0;
-                for (var j = 0u; j < n; j++) {
-                    s += stack_jac[r * MAX_DOF + j] * grad[j];
-                }
-                jg[r] = s;
-            }
-            stack_solve(jg, rows, &push);
-        } else {
-            // The last hand's system is still in jac and chol: its part first, then the others'.
-            null_part(&push);
+            rows = stack_system();
+            var e: array<f32, STACK>;
+            var r = 0u;
             for (var h = 0u; h < HANDS; h++) {
-                if (goal_pos[h].w > 0.5 && h != last) {
-                    hand_system(h);
-                    null_part(&push);
+                if (goal_pos[h].w > 0.5) {
+                    let ep = goal_pos[h].xyz - ee_pos(h);
+                    let eo = rot_log(goal_rot[h] * transpose(ee_rot(h))).xyz * P.rotation_weight;
+                    e[r] = ep.x;
+                    e[r + 1u] = ep.y;
+                    e[r + 2u] = ep.z;
+                    e[r + 3u] = eo.x;
+                    e[r + 4u] = eo.y;
+                    e[r + 5u] = eo.z;
+                    r += 6u;
+                }
+            }
+            stack_solve(e, rows, &dq);
+        } else {
+            for (var h = 0u; h < HANDS; h++) {
+                if (goal_pos[h].w > 0.5) {
+                    pose_step(h, &dq);
+                    last = h;
                 }
             }
         }
+        if (pushes) {
+            var push: array<f32, MAX_DOF>;
+            if (HANDS == 1u) {
+                null_part(&push);
+            } else if (STACKED) {
+                var jg: array<f32, STACK>;
+                for (var r = 0u; r < rows; r++) {
+                    var s = 0.0;
+                    for (var j = 0u; j < n; j++) {
+                        s += stack_jac[r * MAX_DOF + j] * grad[j];
+                    }
+                    jg[r] = s;
+                }
+                stack_solve(jg, rows, &push);
+            } else {
+                // The last hand's system is still in jac and chol: its part first, then the others'.
+                null_part(&push);
+                for (var h = 0u; h < HANDS; h++) {
+                    if (goal_pos[h].w > 0.5 && h != last) {
+                        hand_system(h);
+                        null_part(&push);
+                    }
+                }
+            }
+            for (var j = 0u; j < n; j++) {
+                if (moving[j]) {
+                    dq[j] -= P.collision_step * (grad[j] - push[j]);
+                }
+            }
+        }
+        var largest = 0.0;
         for (var j = 0u; j < n; j++) {
-            if (moving[j]) {
-                dq[j] -= P.collision_step * (grad[j] - push[j]);
+            largest = max(largest, abs(dq[j]));
+        }
+        var scale = 1.0;
+        if (largest > P.max_step) {
+            scale = P.max_step / largest;
+        }
+        // A step that would move no joint by more than IK_REST is not taken: the configuration is at
+        // rest, where every later step finds it again.
+        var moved = 0.0;
+        for (var j = 0u; j < n; j++) {
+            let lim = limits[j];
+            let next = clamp(q[j] + dq[j] * scale, lim.x, lim.y);
+            moved = max(moved, abs(next - q[j]));
+            dq[j] = next;
+        }
+        if (moved > IK_REST) {
+            for (var j = 0u; j < n; j++) {
+                q[j] = dq[j];
             }
         }
     }
-    var largest = 0.0;
-    for (var j = 0u; j < n; j++) {
-        largest = max(largest, abs(dq[j]));
-    }
-    var scale = 1.0;
-    if (largest > P.max_step) {
-        scale = P.max_step / largest;
-    }
-    // A step that would move no joint by more than IK_REST is not taken: the configuration is at
-    // rest, where every later step finds it again.
-    var moved = 0.0;
-    for (var j = 0u; j < n; j++) {
-        let lim = limits[j];
-        let next = clamp(q[j] + dq[j] * scale, lim.x, lim.y);
-        moved = max(moved, abs(next - q[j]));
-        dq[j] = next;
-    }
-    if (moved > IK_REST) {
-        for (var j = 0u; j < n; j++) {
-            q[j] = dq[j];
-        }
-    }
+    lead(lid);
 }
 
 // Collision kernels give each configuration LANES consecutive invocations, which split its
@@ -403,6 +411,26 @@ fn group_grad(lid: u32) {
     let first = (lid & ~(lanes - 1u)) * MAX_DOF;
     for (var j = 0u; j < n; j++) {
         grad[j] = grads[first + j];
+    }
+}
+
+// Gives every lane of a configuration the configuration its first lane has in `q`.
+fn lead(lid: u32) {
+    let lanes = LANES;
+    let n = P.n_dof;
+    if (lanes == 1u) {
+        return;
+    }
+    workgroupBarrier();
+    if ((lid & (lanes - 1u)) == 0u) {
+        for (var j = 0u; j < n; j++) {
+            grads[lid * MAX_DOF + j] = q[j];
+        }
+    }
+    workgroupBarrier();
+    let first = (lid & ~(lanes - 1u)) * MAX_DOF;
+    for (var j = 0u; j < n; j++) {
+        q[j] = grads[first + j];
     }
 }
 
