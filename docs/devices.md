@@ -31,7 +31,7 @@ Make one device per robot, upload each scene once, and reuse both for every call
 
 ## Which GPUs
 
-The kernels use only core features: 32-bit floats, and no subgroups, float atomics or extensions. Any adapter wgpu exposes through Vulkan, Metal or DX12 should work if it allows 12 storage buffers per shader stage and 64-wide compute workgroups. Desktop drivers allow far more; browser WebGPU and some embedded GPUs do not. `Device::gpu` skips adapters that fall short; if none qualifies, its error names each adapter and what it lacks. OpenGL adapters are not used. `Device::gpu_named(&robot, "radeon")` picks an adapter by name.
+The kernels use only core features: 32-bit floats, and no subgroups, float atomics or extensions. Any adapter wgpu exposes through Vulkan, Metal or DX12 should work if it allows 12 storage buffers per shader stage and 64-wide compute workgroups. Desktop drivers allow far more; browser WebGPU and some embedded GPUs do not. `Device::gpu` skips adapters that fall short; if none qualifies, its error names each adapter and what it lacks. OpenGL adapters are not used, nor is DX12's software renderer, which every Windows machine has: a machine with no other adapter gets the error, and `Device::cpu`. A DX12 adapter's kernels are compiled as wgpu compiles them: by DXC if `dxcompiler.dll` is on the path, and otherwise by Microsoft's older FXC, which took 3.6 minutes to make a device on the software renderer where DXC took 7 s, and whose kernels returned a grasp half a metre off there. `Device::gpu_named(&robot, "radeon")` picks an adapter by name.
 
 | Adapter | Status |
 |---|---|
@@ -40,6 +40,7 @@ The kernels use only core features: 32-bit floats, and no subgroups, float atomi
 | NVIDIA Tesla T4, driver 595.91 (Vulkan), Ubuntu 24.04 | Verified at an early version (14 tests); not re-run since |
 | Mesa llvmpipe (Vulkan on the CPU) | Verified in CI |
 | Other NVIDIA cards and Jetson, Intel, DX12 on Windows | Untested |
+| DX12's software renderer (WARP, "Microsoft Basic Render Driver") | Not used unless named: on four cores it had not finished one pick after 82 minutes, where the CPU device takes 16 ms |
 
 What runs where:
 - **Planning** searches each problem on CPU threads, with SIMD collision checks, on either device: branchy, early-exit searches suit CPUs, and both devices then plan identically to the same configurations. A goal given as a pose ends where the device's IK solves it, and a GPU's IK rounds differently.

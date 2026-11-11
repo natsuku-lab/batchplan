@@ -86,6 +86,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 - **Breaking:** `IkOptions::collision_step` must be finite: an infinite or NaN one is an input
   error. NaN and negative infinity used to mean no push, and positive infinity solved nothing
   (the CPU left every seed where it started).
+- **Breaking:** `Device::gpu` no longer chooses DX12's software renderer (WARP, "Microsoft Basic
+  Render Driver"), which every Windows machine has: it fails as it does where there is no
+  adapter, naming the renderer it left out, so `Device::gpu(..).or_else(|_| Device::cpu(..))`
+  falls to the CPU device. On a four-core machine that renderer had not finished one pick after
+  82 minutes, where the CPU device takes 16 ms. `Device::gpu_named` still takes it by name.
 - GPU kernels leave naga fewer loops to count, and trajectory optimization on a GPU leaves out
   paths that are done. naga counts the rounds of every shader loop to rule out endless ones,
   which cost IK's short loops more than their work. One hand's damped least squares is now
