@@ -155,6 +155,14 @@ value_class! {
             Ok(Self(batchplan::Touch::new(obstacle, Vec::<String>::from_py(links)?)))
         }
 
+        /// Lets what hand `hand` holds touch obstacle `obstacle`, as an object rests on what it
+        /// is set down on: the object of a problem's `holding`. The device that holds nothing
+        /// takes it, for one hand in an upload.
+        #[staticmethod]
+        fn held(obstacle: usize, hand: usize) -> Self {
+            Self(batchplan::Touch::held(obstacle, hand))
+        }
+
         fn __eq__(&self, other: &Self) -> bool {
             self.0 == other.0
         }

@@ -36,7 +36,7 @@ Guide: [perception.md](perception.md).
 |---|---|
 | `World::new(obstacles)` | One scene: a list of obstacles. |
 | `World::remove(obstacle)` | Takes an obstacle out, as a hand picking it up does, and renumbers the touches of those after it. |
-| `World::touch`, `Touch::new(obstacle, links)` | Links allowed to touch an obstacle, such as the hand that grasps it ([allowed contacts](perception.md#allowed-contacts)). |
+| `World::touch`, `Touch::new(obstacle, links)`, `Touch::held(obstacle, hand)` | Links allowed to touch an obstacle, such as the hand that grasps it ([allowed contacts](perception.md#allowed-contacts)), or what a hand comes to hold, as an object set down on a table ([holding objects](robots.md#holding-objects)). |
 | `World::always_touching(&robot)` | The touches of links that touch an obstacle in every configuration, as a link turning just above the base touches its table. |
 | `World::load(path, &SdfOptions)` | A scene's static geometry from MJCF or OpenUSD (feature `usd`). |
 | `Obstacle::cuboid`, `sphere`, `cylinder`, `capsule` | Axis-aligned shapes. `placed(pose)` moves and turns one, `pose()` returns its frame, `distance(p)` its signed distance and gradient (`Distance`). |

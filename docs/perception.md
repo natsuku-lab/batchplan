@@ -46,7 +46,7 @@ fn main() -> Result<(), Error> {
 }
 ```
 
-Link names are resolved when the worlds are uploaded, against the device's robot; an unknown name, or an obstacle index past the end, is an input error. A held object is a link of the robot holding it ([holding objects](robots.md#holding-objects)), so a world where it may rest on a table is uploaded to the device for that robot. Links that touch the table a robot stands on in every configuration need a touch too: `world.always_touching(&robot)` finds them ([mounted robots](robots.md#collision-spheres)).
+Link names are resolved when the worlds are uploaded, against the device's robot; an unknown name, or an obstacle index past the end, is an input error. A held object is a link of the robot holding it ([holding objects](robots.md#holding-objects)): a world where it may rest on a table names it with `Touch::held(obstacle, hand)` on the device that holds nothing, or by its link on the device for a robot that holds it. Links that touch the table a robot stands on in every configuration need a touch too: `world.always_touching(&robot)` finds them ([mounted robots](robots.md#collision-spheres)).
 
 ## Scenes
 

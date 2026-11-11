@@ -63,12 +63,13 @@ impl Held {
             robot.links.iter().all(|l| l.name != link),
             "{what}: the robot already has '{link}': pass the device that does not hold it"
         );
-        // Worlds whose touches were resolved for a robot holding something name its link.
+        // Worlds name the link after the robot's own where they let what a hand comes to hold
+        // touch something (`Touch::held`), or were uploaded for a robot holding something.
         if let Some(was) = worlds.link_name(robot.links.len())
             && was != link
         {
             return Err(input!(
-                "{what}: holds an object in hand {}, but these worlds let links touch obstacles and were uploaded for a robot holding '{was}': upload them to a device holding nothing, or one in hand {}",
+                "{what}: holds an object in hand {}, but these worlds let '{was}' touch obstacles, the link after the robot's own: name what hand {} holds in them (`Touch::held`), or upload them without that touch",
                 self.hand,
                 self.hand
             ));
@@ -297,6 +298,40 @@ mod tests {
             ..Default::default()
         };
         Robot::load("assets/franka/franka_panda.urdf", &options).unwrap()
+    }
+
+    /// What a hand comes to hold is the link after the robot's own: with 64 of its own, the
+    /// first of a touch set's second word, which a world that names it makes room for.
+    #[test]
+    fn a_held_objects_touch_fits_past_a_robot_of_64_links() {
+        let mut robot = panda();
+        let base = robot.links[0].name.clone();
+        for k in robot.links.len()..64 {
+            let ball = AttachedObject {
+                name: format!("ball {k}"),
+                link: base.clone(),
+                shapes: vec![Obstacle::sphere(Vec3::new(0.0, 0.0, -1.0), 0.01)],
+                touch_links: vec![],
+                spheres: SphereOptions::default(),
+            };
+            robot = robot.attach(&ball).expect("a ball attaches");
+        }
+        assert_eq!(robot.links.len(), 64);
+        let slab = Obstacle::cuboid(Vec3::new(0.5, 0.0, 0.2), Vec3::splat(0.1));
+        let world = crate::World {
+            touch: vec![crate::Touch::held(0, 0)],
+            ..crate::World::new(vec![slab.clone(), slab])
+        };
+        let sets = world.touch_sets(&robot).expect("the touch resolves");
+        assert!(
+            sets.contains(0, 64),
+            "what the hand holds may touch the first slab"
+        );
+        let others = (0..64).any(|link| sets.contains(0, link) || sets.contains(1, link));
+        assert!(
+            !others && !sets.contains(1, 64),
+            "and nothing else may touch either"
+        );
     }
 
     /// Devices on one GPU or thread pool fit a held object once and keep it, the least recently
