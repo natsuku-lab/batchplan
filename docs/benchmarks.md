@@ -374,7 +374,8 @@ IK now [screens its seeds](planning.md#inverse-kinematics): all 64 take 8 steps,
 | 2,000 | 6.81 (99.91%) | 7.21–10.24 (99.98%) | 6.13–6.32 (99.96%) | 5.65–5.82 (99.96%) |
 
 - **From 1,000 targets per call batchplan is level with RoboKit or quicker,** by 10% at 2,000 with its defaults and 16% with 20 steps (`IkOptions { iterations: 20, .. }`), and solves a few more of them.
-- **Up to 100 targets RoboKit is the quicker,** by 13–19% against batchplan's 20 steps and by 40% and more against its defaults. So few seeds do not fill the GPU, so a call takes as long as its steps take one after another, and leaving most seeds behind saves nothing: the screening costs these sizes 0.05–0.1 ms here. (Measured before the screening's passes shared their submissions with the steps', which changes no result.) RoboKit takes 16 steps where batchplan's default is 30. With every seed taking 20 steps (`screening: 0`), batchplan takes 0.58, 0.57 and 0.84 ms for 1, 10 and 100 targets.
+- **Up to 100 targets RoboKit is the quicker,** by 7–46% against batchplan's 20 steps (most runs 13–19%) and by a third and more against its defaults. So few seeds do not fill the GPU, so a call takes as long as its steps take one after another, and leaving most seeds behind saves nothing: the screening costs these sizes 0.05–0.1 ms here. (Measured before the screening's passes shared their submissions with the steps', which changes no result.) RoboKit takes 16 steps where batchplan's default is 30. With every seed taking 20 steps (`screening: 0`), batchplan takes 0.58, 0.57 and 0.84 ms for 1, 10 and 100 targets.
+- **With collision spheres, on the M4 Pro** (the Panda's 61, random reachable targets in an empty world, the default and `screening: 0` in turn in one process, the machine under other load): 1,000 targets take 36–39 ms where they took 68–82, and the CPU's 14 threads 95 ms where 212, with 945 solved where 944; one target takes 2.8–3.0 ms where 2.9–3.5. Without the push away from obstacles, one target and ten take 0.1 ms longer than before (1.28 against 1.19 ms, 1.33 against 1.22).
 - **Where the time goes.** For this robot with collision spheres, a call of one target with no steps takes 0.17 ms on this machine and each step about 35 µs (about 12 µs without spheres). At 1,000 targets, of 5.7 ms with 20 steps, the GPU works for 2.6 ms; seeding takes 0.5 ms, reading the results back 0.7 ms, and copying and assembling them 1.1 ms, which has since been cut to one copy.
 
 ## The 2,600 problems on every device
@@ -405,7 +406,7 @@ Planning alone clears the meshes in 92.9% of the problems. IK + plan clears them
 
 `examples/bench.rs` solves IK and plans for 512 random scenes, each a table with 2–6 boxes and one top-down grasp target:
 
-- **IK:** 64 seeds × 30 iterations per target;
+- **IK:** 64 seeds per target and 30 iterations at most, 4 of the seeds past the first 8 (the defaults);
 - **planning:** default `PlanOptions`.
 
 Every device solves the same 484 of 512 targets and plans all 484.

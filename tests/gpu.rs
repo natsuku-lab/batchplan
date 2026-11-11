@@ -412,9 +412,11 @@ fn ik_seeds_past_a_chunk_reach_their_own_targets() {
     // and runs on through the 33rd.
     let scene = worlds(34, 4);
     let problems = ik_problems(&scene, 5);
+    // Every seed takes every step: chunks of seeds being screened hold whole problems.
     let o = IkOptions {
         seeds: 4000,
         iterations: 10,
+        screening: 0,
         ..Default::default()
     };
     assert!(
@@ -437,6 +439,49 @@ fn ik_seeds_past_a_chunk_reach_their_own_targets() {
         past += usize::from(i >= 65_536);
     }
     assert!(past > 100, "only {past} seeds past the first chunk succeed");
+}
+
+/// Seeds are chosen among a problem's, so a batch being screened goes to the GPU in chunks of
+/// whole problems: past the first chunk too, no problem sends on more seeds than are kept.
+#[test]
+fn ik_screens_whole_problems_past_a_chunk() {
+    let Some((robot, gpu, _)) = setup() else {
+        return;
+    };
+    let n = robot.dof();
+    let scene = worlds(34, 4);
+    let problems = ik_problems(&scene, 5);
+    let o = IkOptions {
+        seeds: 4000,
+        iterations: 10,
+        ..Default::default()
+    };
+    assert!(
+        o.screening > 0 && o.screening < o.iterations && o.kept < o.seeds,
+        "nothing is screened"
+    );
+    assert!(
+        problems.len() * o.seeds > 2 * 65_536 && 65_536 % o.seeds != 0,
+        "chunks of 65,536 seeds would not split a problem"
+    );
+    let on_gpu = gpu.upload(&scene).unwrap();
+    let solve = |o: &IkOptions| batchplan::solve_ik(&gpu, &on_gpu, &problems, o).unwrap();
+    let screened = solve(&IkOptions {
+        iterations: o.screening,
+        screening: 0,
+        ..o
+    });
+    let staged = solve(&o);
+    let mut went_on = 0;
+    for p in 0..problems.len() {
+        let seeds = p * o.seeds..(p + 1) * o.seeds;
+        let moved = seeds
+            .filter(|&i| staged.q[i * n..(i + 1) * n] != screened.q[i * n..(i + 1) * n])
+            .count();
+        assert!(moved <= o.kept, "problem {p} sent {moved} seeds on");
+        went_on += moved;
+    }
+    assert!(went_on > problems.len(), "only {went_on} seeds went on");
 }
 
 #[test]

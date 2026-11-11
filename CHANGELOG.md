@@ -60,13 +60,13 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 ### Changed
 
 - **Breaking:** IK screens its seeds. Every seed takes `IkOptions::screening` steps (8 by
-  default), then only `IkOptions::kept` of each problem's (4) take the rest of `iterations`: of
-  those not yet at their targets, the nearest, the collision-free first. The others are returned
-  as the screening left them. Code that writes out every field of `IkOptions` needs the two new
-  ones, and `screening: 0` is the IK of before, as are problems of more than 65,536 seeds. On a
-  GPU the screening, the choice and the remaining steps are one round trip. On an M4 Pro, a
-  Panda with collision spheres: one target takes 2.8 ms where it took 4.0, and 1,000 targets 36 ms
-  where 68, with 945 solved where 944. On CPU threads 1,000 targets take half the time. In
+  default), then only `IkOptions::kept` of each problem's (4) take the rest of `iterations`: those
+  not yet at their targets, the nearest and the collision-free first, then seeds that have
+  arrived. The others are returned as the screening left them. Code that writes out every field of `IkOptions` needs the two new
+  ones, and `screening: 0` is the IK of before, as are problems of more than 32,768 seeds. On a
+  GPU the screening, the choice and the remaining steps are one round trip. On an M4 Pro, 1,000
+  targets for a Panda with collision spheres take 36–39 ms where they took 68–82, and its CPU
+  threads 95 ms where 212, with 945 solved where 944. In
   RoboKit's IK benchmark on an RTX 4090 (a Panda without spheres), 1,000 targets take 3.1–3.3 ms
   where they took 3.6–3.7 and 2,000 take 6.1–6.3 ms where 7.2, while 10 take 0.77–0.80 ms where
   0.71: so few seeds are not sped up by leaving most behind

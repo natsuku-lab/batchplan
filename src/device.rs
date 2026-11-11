@@ -601,7 +601,9 @@ pub(crate) trait Backend: Send + Sync {
     /// targets), the joints `held` marks (`[items, dof]`, or empty for none) staying put;
     /// returns each item's largest position and rotation errors over its targeted hands, then
     /// the `[world, self]` clearance of its final configuration (as `clearance` gives it):
-    /// `[position error, rotation error, world clearance, self clearance]`.
+    /// `[position error, rotation error, world clearance, self clearance]`. Where the options
+    /// screen (`IkOptions::screens`), items are `IkOptions::seeds` to a problem, and past the
+    /// screening only `kept` of each problem's take steps (`IkOptions::standing`).
     fn ik(
         &self,
         worlds: &Worlds,

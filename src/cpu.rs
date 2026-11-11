@@ -1786,7 +1786,9 @@ impl Backend for CpuBackend {
         };
         let mut chosen = vec![0; item_world.len() / o.seeds * o.kept];
         if item_world.len() < SMALL_BATCH {
-            chosen.chunks_mut(o.kept).enumerate().for_each(choose);
+            for problem in chosen.chunks_mut(o.kept).enumerate() {
+                choose(problem);
+            }
         } else {
             self.pool
                 .install(|| chosen.par_chunks_mut(o.kept).enumerate().for_each(choose));

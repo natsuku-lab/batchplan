@@ -610,7 +610,6 @@ fn ik_main(
     }
 }
 
-// Uniform cubic B-spline weights of a span's four control points at u in [0, 1]. Mirrors spline.rs.
 // Where seed `item` stands after the screening (the smaller goes on first), from its errors in
 // qbuf and its clearances in aux: seeds on their way before those in collision, those that have
 // arrived last, and its error, FAR when it is not a number.
@@ -649,6 +648,7 @@ fn ik_select(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgro
     }
 }
 
+// Uniform cubic B-spline weights of a span's four control points at u in [0, 1]. Mirrors spline.rs.
 fn basis(u: f32) -> vec4<f32> {
     let v = 1.0 - u;
     let u2 = u * u;

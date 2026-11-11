@@ -23,12 +23,13 @@ pub struct IkOptions {
     pub iterations: u32,
     /// Of `iterations`, the steps every seed takes before only `kept` of each problem's go on;
     /// 0 (or `iterations` and more) for every seed to take them all, as they do with more than
-    /// 65,536 seeds per problem. Most seeds that will arrive have by then, and the rest of the
+    /// 32,768 seeds per problem. Most seeds that will arrive have by then, and the rest of the
     /// steps go to the few that are closing in.
     pub screening: u32,
-    /// Seeds per problem that go on past `screening`: of those not yet at their targets within
-    /// the tolerances and clear of collision, the nearest, the collision-free first. The others
-    /// are returned as the screening left them.
+    /// Seeds per problem that go on past `screening`: those not yet at their targets within the
+    /// tolerances and clear of collision, the nearest and the collision-free first, then seeds
+    /// that have arrived, most of which stay at rest. The others are returned as the screening
+    /// left them.
     pub kept: usize,
     /// Damped-least-squares damping (lambda).
     pub damping: f32,
@@ -50,9 +51,10 @@ pub struct IkOptions {
     pub rng_seed: u64,
 }
 
-/// Seeds per problem past which none are screened: a GPU takes that many at once, and a problem's
-/// seeds are chosen among together.
-pub(crate) const SCREENED_SEEDS: usize = 1 << 16;
+/// Seeds per problem past which none are screened: a GPU ranks each of a problem's seeds against
+/// all of them, which past this many costs more than the steps it saves (one target's 65,536
+/// seeds took an M4 Pro's GPU 80 ms screened and 66 ms not; 32,768 took 30 and 36).
+pub(crate) const SCREENED_SEEDS: usize = 1 << 15;
 /// The error a seed without one (not a number) is ranked by, as the kernels rank it.
 const FAR: f32 = 1e30;
 
@@ -67,7 +69,7 @@ impl IkOptions {
 
     /// Where a seed stands after the screening, from its `[position error, rotation error, world
     /// clearance, self clearance]`: the smaller goes on first. Seeds still on their way come
-    /// before those in collision, and those that have arrived last (they would stay at rest);
+    /// before those in collision, and those that have arrived last (most would stay at rest);
     /// within each, the nearest first.
     pub(crate) fn standing(&self, seed: &[f32; 4]) -> (u8, f32) {
         let clear = device::collision_free([seed[2], seed[3]]);

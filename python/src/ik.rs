@@ -19,11 +19,12 @@ value_class! {
         /// Damped-least-squares steps per seed, at most: one that has come to rest takes no more.
         iterations: u32,
         /// Of `iterations`, the steps every seed takes before only `kept` of each problem's go
-        /// on; 0 (or `iterations` and more) for every seed to take them all.
+        /// on; 0 (or `iterations` and more) for every seed to take them all, as they do with
+        /// more than 32,768 seeds per problem.
         screening: u32,
-        /// Seeds per problem that go on past `screening`: of those not yet at their targets
-        /// within the tolerances and clear of collision, the nearest, the collision-free first.
-        /// The others are returned as the screening left them.
+        /// Seeds per problem that go on past `screening`: those not yet at their targets within
+        /// the tolerances and clear of collision, the nearest and the collision-free first, then
+        /// seeds that have arrived. The others are returned as the screening left them.
         kept: usize,
         /// Damped-least-squares damping (lambda).
         damping: f32,
