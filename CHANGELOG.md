@@ -30,6 +30,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   problems with `holding` then rest their objects on what they are set down on in one call
   against one upload, as a device holding the object does with the world uploaded to it;
   problems that hold nothing are checked as without it. In Python, `Touch.held`.
+- `time(&device, &paths, speed_scale)` times many planned paths in one call on the device's
+  threads, each as `Trajectory::try_new` times one, and gives each path's trajectory or error in
+  order. In Python, `time(device, paths, speed_scale=1.0)`.
 
 - Publish the Python bindings as `batches` on PyPI (`import batchplan`). Version tags publish
   the Rust crate and Python wheels and source together, using trusted publishing.

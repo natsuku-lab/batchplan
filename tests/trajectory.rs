@@ -180,6 +180,41 @@ fn samples_of_a_path_along_a_limit_stay_within_it() {
     assert!(past <= 0.0, "a sample lies {past} rad past a limit");
 }
 
+/// A call's paths are timed in one call as each is alone, in their order, a path that cannot be
+/// timed giving its own error among them.
+#[test]
+fn many_paths_are_timed_in_one_call_as_each_alone() {
+    let robot = common::panda().unwrap();
+    let mut paths = planned(&robot, 16);
+    paths.insert(3, vec![0.0; 5]);
+    let paths: Vec<&[f32]> = paths.iter().map(Vec::as_slice).collect();
+    let devices = [
+        Device::cpu(&robot).unwrap(),
+        Device::cpu_threads(&robot, 3).unwrap(),
+    ];
+    for device in devices {
+        let name = device.name();
+        for count in [paths.len(), 1, 0] {
+            let timed = batchplan::time(&device, &paths[..count], 0.5);
+            assert_eq!(timed.len(), count, "{name}");
+            for (i, (timed, path)) in timed.iter().zip(&paths).enumerate() {
+                match (timed, Trajectory::try_new(&robot, path, 0.5)) {
+                    (Ok(timed), Ok(alone)) => assert_eq!(*timed, alone, "{name}: path {i}"),
+                    (Err(Error::Input(_)), Err(Error::Input(_))) => assert_eq!(i, 3, "{name}"),
+                    (timed, alone) => panic!("{name}: path {i}: {timed:?} against {alone:?}"),
+                }
+            }
+        }
+        // The paths differ, so one's trajectory in another's place would show.
+        let timed = batchplan::time(&device, &paths, 0.5);
+        let durations: Vec<f32> = timed.iter().flatten().map(Trajectory::duration).collect();
+        assert!(
+            durations.windows(2).any(|w| w[0] != w[1]),
+            "{name}: {durations:?}"
+        );
+    }
+}
+
 #[test]
 fn slower_speed_scales_stretch_time() {
     let robot = common::panda().unwrap();

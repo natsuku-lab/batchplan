@@ -12,12 +12,27 @@
 //!   densely along it, keep their limits.
 
 use crate::error::{Error, Result, ensure_input};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::device::Device;
 use crate::robot::Robot;
 use crate::spline::{self, BASIS_D3};
 use crate::topp::{self, CHECK_SAMPLES};
 use crate::types::{JointTrajectory, StartMotion};
+
+/// Times each of `paths` as [`Trajectory::try_new`] times one, on the device's threads: the paths
+/// a call planned, timed in one call. Each path's own trajectory or error, in the paths' order.
+#[must_use]
+pub fn time(device: &Device, paths: &[&[f32]], speed_scale: f32) -> Vec<Result<Trajectory>> {
+    let robot = device.robot();
+    let one = |path: &&[f32]| Trajectory::try_new(robot, path, speed_scale);
+    // One path is not worth handing over.
+    if paths.len() < 2 {
+        return paths.iter().map(one).collect();
+    }
+    device.install(|| paths.par_iter().map(one).collect())
+}
 
 /// Joint position, velocity and acceleration at one instant.
 #[derive(Clone, Debug, Default, PartialEq)]

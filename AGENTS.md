@@ -81,7 +81,7 @@ fn main() -> Result<(), Error> {
 |---|---|---|
 | Forward kinematics | `robot.ee_pose(q, hand)`, `robot.link_pose(q, link)`, `robot.spheres(q)` | [robots](docs/robots.md) |
 | Configurations for hand poses | `solve_ik`; `ik::failures` for why one has none | [IK](docs/planning.md#inverse-kinematics) |
-| A collision-free path to a configuration or a hand pose | `plan`, then `Trajectory::try_new` | [planning](docs/planning.md#planning-a-path) |
+| A collision-free path to a configuration or a hand pose | `plan`, then `time` (one path: `Trajectory::try_new`) | [planning](docs/planning.md#planning-a-path) |
 | The hand along straight lines | `follow` | [tool paths](docs/planning.md#moving-the-hand-along-a-path) |
 | A hand kept upright, in a box or relative to another hand | `HandConstraint` on the problem | [constraints](docs/planning.md#constraints-along-the-path) |
 | Picking up and setting down | `grasps`, `pick`, `place` | [tasks](docs/planning.md#picking-up-and-setting-down) |
@@ -105,7 +105,7 @@ A robot that loads may still have spheres unfit to plan with. Before planning wi
 ### Read results
 
 - `ik.best(i)`, `plans.best(i)` and `solved()` return only valid answers; `IkResult::success` and `PlanResult::valid` are per seed, problem-major (`problem * seeds + seed`).
-- A plan is B-spline control points, not a trajectory: time it with `Trajectory::try_new` (`Trajectory::moving` from a moving start), sample it with `at` or `sample`, and `check` it before it runs on hardware. Never send control points to a controller.
+- A plan is B-spline control points, not a trajectory: time a call's paths together with `time`, or one with `Trajectory::try_new` (`Trajectory::moving` from a moving start), sample it with `at` or `sample`, and `check` it before it runs on hardware. Never send control points to a controller.
 - Plans do not depend on the batch or the device; with a `time_budget`, they depend on the machine's speed. IK starts every problem from the same seeds in any batch, but a GPU rounds differently from the CPU, and differently on either side of where it switches how many invocations share a configuration (4,096 configurations, more for robots with many spheres), so solutions there can differ slightly, and so can plans to poses, which end where IK solves them.
 
 ### Diagnose a failed request, in order
