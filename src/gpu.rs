@@ -178,23 +178,13 @@ shader_struct! {
 
 /// Rounds of a loop written out at most: longer ones stay loops.
 const WRITTEN_OUT: usize = 32;
-/// Rounds of a loop over a workgroup's share written out before the loop takes the rest: a
-/// path's values are few to a thread (two, for a Panda's default path), so most never loop.
-const PEELED: usize = 2;
 
-/// `source` with fewer loop rounds for naga to count, which it does for every loop to rule out
-/// endless ones, at the cost of a quarter of IK's time and a twentieth of an optimized plan's:
-/// - a loop of a known count, `for (var x = 0u; x < count; x++) {`, becomes its body once per
-///   round, with `x` its number; `count` is a number, the joints (`n`, `P.n_dof` or `MAX_DOF`:
-///   `dof`), `HANDS` (`hands`) or `LINE_STEPS`, up to `WRITTEN_OUT`;
-/// - a loop halving the workgroup, `for (var x = WORKGROUP / 2u; x > 0u; x >>= 1u) {`, likewise,
-///   once per half;
-/// - a loop over a workgroup's share, `for (var x = a; x < b; x += WORKGROUP) {`, has its first
-///   `PEELED` rounds written out, each where it is still below `b`, and loops over the rest:
-///   the same rounds in the same order.
-///
-/// Loops that break or continue stay as they are. The source keeps its loops, to read beside
-/// `cpu.rs`.
+/// `source` with its loops of a known count written out: the body of each
+/// `for (var x = 0u; x < count; x++) {` once per round, with `x` its number, where `count` is a
+/// number, the joints (`n`, `P.n_dof` or `MAX_DOF`: `dof`), `HANDS` (`hands`) or `LINE_STEPS`, up
+/// to `WRITTEN_OUT`, and the body neither breaks nor continues. naga counts every loop's rounds
+/// to rule out endless ones, and these loops are short and many: counting them costs IK a quarter
+/// of its time. The source keeps its loops, to read beside `cpu.rs`.
 fn loops_written_out(source: &str, dof: usize, hands: usize) -> String {
     let lines: Vec<&str> = source.lines().collect();
     let count = |bound: &str| {
@@ -211,30 +201,13 @@ fn loops_written_out(source: &str, dof: usize, hands: usize) -> String {
     out
 }
 
-/// A loop [`loops_written_out`] rewrites, from its first line: its variable, and its rounds or
-/// its start and bound.
-enum Rewritten<'a> {
-    Counted(&'a str, usize),
-    Shared(&'a str, &'a str, &'a str),
-    Halved(&'a str),
-}
-
-impl<'a> Rewritten<'a> {
-    fn of(line: &'a str, count: &dyn Fn(&str) -> Option<usize>) -> Option<Self> {
-        let rest = line.trim_start().strip_prefix("for (var ")?;
-        let (variable, rest) = rest.split_once(" = ")?;
-        if rest == format!("WORKGROUP / 2u; {variable} > 0u; {variable} >>= 1u) {{") {
-            return Some(Self::Halved(variable));
-        }
-        let (start, rest) = rest.split_once("; ")?;
-        let rest = rest.strip_prefix(variable)?.strip_prefix(" < ")?;
-        let (bound, rest) = rest.split_once("; ")?;
-        let step = rest.strip_prefix(variable)?;
-        if step == "++) {" && start == "0u" {
-            return Some(Self::Counted(variable, count(bound)?));
-        }
-        (step == " += WORKGROUP) {").then_some(Self::Shared(variable, start, bound))
-    }
+/// The variable and rounds of a loop [`loops_written_out`] writes out, from its first line.
+fn counted<'a>(line: &'a str, count: &dyn Fn(&str) -> Option<usize>) -> Option<(&'a str, usize)> {
+    let rest = line.trim_start().strip_prefix("for (var ")?;
+    let (variable, rest) = rest.split_once(" = 0u; ")?;
+    let rest = rest.strip_prefix(variable)?.strip_prefix(" < ")?;
+    let (bound, rest) = rest.split_once("; ")?;
+    (rest == format!("{variable}++) {{")).then_some((variable, count(bound)?))
 }
 
 /// `text` with `name`, where it stands alone (no letter, digit, underscore or member dot beside
@@ -264,7 +237,7 @@ fn write_out(lines: &[&str], count: &dyn Fn(&str) -> Option<usize>, out: &mut St
     while at < lines.len() {
         let line = lines[at];
         at += 1;
-        let Some(rewritten) = Rewritten::of(line, count) else {
+        let Some((variable, rounds)) = counted(line, count) else {
             out.push_str(line);
             out.push('\n');
             continue;
@@ -280,37 +253,14 @@ fn write_out(lines: &[&str], count: &dyn Fn(&str) -> Option<usize>, out: &mut St
         write_out(body, count, &mut inner);
         let leaves = |l: &&str| l.contains("break;") || l.contains("continue;");
         if body.iter().any(leaves) {
-            out.push_str(&format!("{line}\n{inner}{close}\n"));
+            out.extend([line, "\n", &inner, close, "\n"]);
             continue;
         }
         let indent = &line[..line.len() - line.trim_start().len()];
-        match rewritten {
-            Rewritten::Counted(variable, rounds) => {
-                for round in 0..rounds {
-                    out.push_str(&format!("{indent}{{\n"));
-                    renamed(&inner, variable, &format!("{round}u"), out);
-                    out.push_str(&format!("{indent}}}\n"));
-                }
-            }
-            Rewritten::Halved(variable) => {
-                let halves = (0..WORKGROUP.ilog2()).map(|k| WORKGROUP >> (k + 1));
-                for half in halves {
-                    out.push_str(&format!("{indent}{{\n"));
-                    renamed(&inner, variable, &format!("{half}u"), out);
-                    out.push_str(&format!("{indent}}}\n"));
-                }
-            }
-            Rewritten::Shared(variable, start, bound) => {
-                for round in 0..PEELED {
-                    let at = format!("(({start}) + {round}u * WORKGROUP)");
-                    out.push_str(&format!("{indent}if ({at} < {bound}) {{\n"));
-                    renamed(&inner, variable, &at, out);
-                    out.push_str(&format!("{indent}}}\n"));
-                }
-                out.push_str(&format!(
-                    "{indent}for (var {variable} = ({start}) + {PEELED}u * WORKGROUP; {variable} < {bound}; {variable} += WORKGROUP) {{\n{inner}{close}\n"
-                ));
-            }
+        for round in 0..rounds {
+            out.extend([indent, "{\n"]);
+            renamed(&inner, variable, &format!("{round}u"), out);
+            out.extend([indent, "}\n"]);
         }
     }
 }
