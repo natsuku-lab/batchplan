@@ -519,10 +519,10 @@ def places(robot, device, _worlds, problems):
 # Each call, with enough reaches that it takes a while on two threads: per call, the reaches and
 # what makes the call to time from them.
 LONG_CALLS = {
-    "place": (128, places),
+    "place": (1024, places),
     "follow": (8000, tool_paths),
     "pick": (16, picks),
-    "solve_ik": (300, lambda r, d, w, p: lambda: bp.solve_ik(d, w, targets(r, p))),
+    "solve_ik": (2400, lambda r, d, w, p: lambda: bp.solve_ik(d, w, targets(r, p))),
     "plan": (4000, lambda r, d, w, p: lambda: bp.plan(d, w, p)),
     "ik_failures": (1000, failures_of),
     "Robot.load": (1, lambda *_: lambda: [ur5e() for _ in range(3)]),
