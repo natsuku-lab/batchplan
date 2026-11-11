@@ -176,6 +176,219 @@ shader_struct! {
     }
 }
 
+/// Rounds of a loop written out at most: longer ones stay loops.
+const WRITTEN_OUT: usize = 32;
+/// Rounds of a strided loop taken together.
+const TOGETHER: usize = 4;
+
+/// `source` with fewer loop rounds for naga to count, which it does for every loop to rule out
+/// endless ones, at the cost of a quarter of IK's time and a twentieth of an optimized plan's:
+/// - a loop of a known count, `for (var x = 0u; x < count; x++) {`, becomes its body once per
+///   round, with `x` its number; `count` is a number, the joints (`n`, `P.n_dof` or `MAX_DOF`:
+///   `dof`), `HANDS` (`hands`) or `LINE_STEPS`, up to `WRITTEN_OUT`;
+/// - a strided loop, `for (var x = a; x < b; x += s) {`, takes `TOGETHER` of its rounds at a
+///   time, each after the first where it is still below `b`: the same rounds in the same order.
+///
+/// Loops that break or continue stay as they are. The source keeps its loops, to read beside
+/// `cpu.rs`.
+fn loops_written_out(source: &str, dof: usize, hands: usize) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let count = |bound: &str| {
+        let rounds = match bound {
+            "n" | "P.n_dof" | "MAX_DOF" => dof,
+            "HANDS" => hands,
+            "LINE_STEPS" => LINE_SEARCH.len(),
+            literal => literal.strip_suffix('u')?.parse().ok()?,
+        };
+        (rounds <= WRITTEN_OUT).then_some(rounds)
+    };
+    let mut out = String::with_capacity(source.len() * 2);
+    write_out(&lines, &count, &mut out);
+    out
+}
+
+/// A loop [`loops_written_out`] rewrites, from its first line: its variable, and its rounds or
+/// its bound and stride.
+enum Rewritten<'a> {
+    Counted(&'a str, usize),
+    Strided(&'a str, &'a str, &'a str),
+}
+
+impl<'a> Rewritten<'a> {
+    fn of(line: &'a str, count: &dyn Fn(&str) -> Option<usize>) -> Option<Self> {
+        let rest = line.trim_start().strip_prefix("for (var ")?;
+        let (variable, rest) = rest.split_once(" = ")?;
+        let (start, rest) = rest.split_once("; ")?;
+        let rest = rest.strip_prefix(variable)?.strip_prefix(" < ")?;
+        let (bound, rest) = rest.split_once("; ")?;
+        let step = rest.strip_prefix(variable)?;
+        if step == "++) {" && start == "0u" {
+            return Some(Self::Counted(variable, count(bound)?));
+        }
+        let stride = step.strip_prefix(" += ")?.strip_suffix(") {")?;
+        Some(Self::Strided(variable, bound, stride))
+    }
+}
+
+/// `text` with `name`, where it stands alone (no letter, digit, underscore or member dot beside
+/// it), replaced by `value`, appended to `out`.
+fn renamed(text: &str, name: &str, value: &str, out: &mut String) {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut from = 0;
+    while let Some(found) = text[from..].find(name) {
+        let (start, end) = (from + found, from + found + name.len());
+        let before = text[..start].chars().next_back();
+        let alone = !before.is_some_and(|c| word(c) || c == '.')
+            && !text[end..].chars().next().is_some_and(word);
+        out.push_str(&text[from..start]);
+        out.push_str(if alone { value } else { name });
+        from = end;
+    }
+    out.push_str(&text[from..]);
+}
+
+/// [`loops_written_out`] for `lines`, appended to `out`; `count` gives a bound's rounds.
+fn write_out(lines: &[&str], count: &dyn Fn(&str) -> Option<usize>, out: &mut String) {
+    let depth = |line: &str| {
+        let braces = |brace: char| line.chars().filter(|&c| c == brace).count() as isize;
+        braces('{') - braces('}')
+    };
+    let mut at = 0;
+    while at < lines.len() {
+        let line = lines[at];
+        at += 1;
+        let Some(rewritten) = Rewritten::of(line, count) else {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+        // The body: the lines up to the brace that closes the loop.
+        let (first, mut open) = (at, 1);
+        while open > 0 {
+            open += depth(lines[at]);
+            at += 1;
+        }
+        let (body, close) = (&lines[first..at - 1], lines[at - 1]);
+        let mut inner = String::new();
+        write_out(body, count, &mut inner);
+        let leaves = |l: &&str| l.contains("break;") || l.contains("continue;");
+        if body.iter().any(leaves) {
+            out.push_str(&format!("{line}\n{inner}{close}\n"));
+            continue;
+        }
+        let indent = &line[..line.len() - line.trim_start().len()];
+        match rewritten {
+            Rewritten::Counted(variable, rounds) => {
+                for round in 0..rounds {
+                    out.push_str(&format!("{indent}{{\n"));
+                    renamed(&inner, variable, &format!("{round}u"), out);
+                    out.push_str(&format!("{indent}}}\n"));
+                }
+            }
+            Rewritten::Strided(variable, bound, stride) => {
+                let head = line
+                    .strip_suffix(&format!("{stride}) {{"))
+                    .expect("the header ends so");
+                out.push_str(&format!("{head}{TOGETHER}u * ({stride})) {{\n"));
+                out.push_str(&format!("{indent}    {{\n{inner}{indent}    }}\n"));
+                for round in 1..TOGETHER {
+                    let ahead = format!("({variable} + {round}u * ({stride}))");
+                    out.push_str(&format!("{indent}    if ({ahead} < {bound}) {{\n"));
+                    renamed(&inner, variable, &ahead, out);
+                    out.push_str(&format!("{indent}    }}\n"));
+                }
+                out.push_str(&format!("{close}\n"));
+            }
+        }
+    }
+}
+
+/// One hand's damped least squares for a robot of `dof` joints, every sum written out term by
+/// term: the loops they would be are short and many, and naga counts each loop's iterations to
+/// rule out endless ones, which cost IK a quarter of its time. Mirrors, in `cpu.rs`, the columns
+/// `ik_step` holds, `hand_system`, `chol6`, `chol_solve`, and the products of `pose_step` and
+/// `null_part`, in their order of operations.
+fn least_squares_wgsl(dof: usize) -> String {
+    use std::fmt::Write;
+    let jac = |r: usize, j: usize| format!("jac[{}u]", r * dof + j);
+    let chol = |i: usize, j: usize| format!("chol[{}u]", i * 6 + j);
+    let mut w = String::from(
+        "\n// With joints held (P.held), zeroes the columns of jac `moving` leaves out: theirs.\nfn hold_columns() {\n    if (P.held == 1u) {\n",
+    );
+    for j in 0..dof {
+        let _ = writeln!(w, "        if (!moving[{j}u]) {{");
+        for r in 0..6 {
+            let _ = writeln!(w, "            {} = 0.0;", jac(r, j));
+        }
+        w += "        }\n";
+    }
+    w += "    }\n}\n\n// Factors the damped normal matrix in `chol` in place (Cholesky, lower).\nfn chol6() {\n    var s: f32;\n";
+    for i in 0..6 {
+        for j in 0..=i {
+            let _ = writeln!(w, "    s = {};", chol(i, j));
+            for k in 0..j {
+                let _ = writeln!(w, "    s -= {} * {};", chol(i, k), chol(j, k));
+            }
+            if i == j {
+                let _ = writeln!(w, "    {} = sqrt(max(s, 1e-12));", chol(i, j));
+            } else {
+                let _ = writeln!(w, "    {} = s / {};", chol(i, j), chol(j, j));
+            }
+        }
+    }
+    w += "}\n\n// (J J^T + damping^2 I)^-1 b, by the factors in `chol`.\nfn chol6_solve(b: array<f32, 6>) -> array<f32, 6> {\n    var s: f32;\n";
+    for i in 0..6 {
+        let _ = writeln!(w, "    s = b[{i}u];");
+        for k in 0..i {
+            let _ = writeln!(w, "    s -= {} * y{k};", chol(i, k));
+        }
+        let _ = writeln!(w, "    let y{i} = s / {};", chol(i, i));
+    }
+    for i in (0..6).rev() {
+        let _ = writeln!(w, "    s = y{i};");
+        for k in i + 1..6 {
+            let _ = writeln!(w, "    s -= {} * x{k};", chol(k, i));
+        }
+        let _ = writeln!(w, "    let x{i} = s / {};", chol(i, i));
+    }
+    w += "    return array<f32, 6>(x0, x1, x2, x3, x4, x5);\n}\n\n// Hand h's Jacobian into `jac`, and its damped normal matrix, factored, into `chol`.\nfn hand_system(h: u32) {\n    ee_jacobian(h);\n    hold_columns();\n    var s: f32;\n";
+    for r in 0..6 {
+        for c in 0..=r {
+            w += "    s = 0.0;\n";
+            for j in 0..dof {
+                let _ = writeln!(w, "    s += {} * {};", jac(r, j), jac(c, j));
+            }
+            if r == c {
+                w += "    s += P.damping * P.damping;\n";
+            }
+            let _ = writeln!(w, "    {} = s;\n    {} = s;", chol(r, c), chol(c, r));
+        }
+    }
+    w += "    chol6();\n}\n\n// Hand h's step toward its target, J^T (J J^T + damping^2 I)^-1 e, into `dq`.\nfn pose_step(h: u32, dq: ptr<function, array<f32, MAX_DOF>>) {\n    let ep = goal_pos[h].xyz - ee_pos(h);\n    let eo = rot_log(goal_rot[h] * transpose(ee_rot(h))).xyz * P.rotation_weight;\n    hand_system(h);\n    let y = chol6_solve(array<f32, 6>(ep.x, ep.y, ep.z, eo.x, eo.y, eo.z));\n    var s: f32;\n";
+    let transposed = |w: &mut String, x: &str, out: &str| {
+        for j in 0..dof {
+            w.push_str("    s = 0.0;\n");
+            for r in 0..6 {
+                let _ = writeln!(w, "    s += {} * {x}[{r}u];", jac(r, j));
+            }
+            let _ = writeln!(w, "    (*{out})[{j}u] += s;");
+        }
+    };
+    transposed(&mut w, "y", "dq");
+    w += "}\n\n// J^T (J J^T + damping^2 I)^-1 J grad for the system in jac and chol, into `push`.\nfn null_part(push: ptr<function, array<f32, MAX_DOF>>) {\n    var s: f32;\n    var jg: array<f32, 6>;\n";
+    for r in 0..6 {
+        w += "    s = 0.0;\n";
+        for j in 0..dof {
+            let _ = writeln!(w, "    s += {} * grad[{j}u];", jac(r, j));
+        }
+        let _ = writeln!(w, "    jg[{r}u] = s;");
+    }
+    w += "    let z = chol6_solve(jg);\n";
+    transposed(&mut w, "z", "push");
+    w += "}\n";
+    w
+}
+
 /// The robot-specific part of the kernels: forward kinematics, the end effector's Jacobian and
 /// the collision cost, written out link by link. Each link's frame (`rot_i`, `pos_i`) and collision
 /// wrench (`force_i`, `moment_i`, about the world origin) is its own private variable indexed only
@@ -295,7 +508,10 @@ fn robot_wgsl(robot: &Robot) -> String {
     });
     w += "}\n\n// Hand h's Jacobian into `jac` (6 x MAX_DOF, row-major; rotation rows scaled by\n";
     w += "// P.rotation_weight), its moving joints root first, mimic joints adding into their leader.\n";
-    w += "fn ee_jacobian(h: u32) {\n    for (var k = 0u; k < JAC_LEN; k++) {\n        jac[k] = 0.0;\n    }\n";
+    w += "fn ee_jacobian(h: u32) {\n";
+    for k in 0..6 * dof {
+        let _ = writeln!(w, "    jac[{k}u] = 0.0;");
+    }
     cases(&mut w, &|w, ee| {
         for (i, d) in robot.chain(ee) {
             let _ = writeln!(
@@ -320,7 +536,9 @@ fn robot_wgsl(robot: &Robot) -> String {
             w.push_str("            }\n");
         }
     });
-    w += "}\n\n// Marks in `moving` the joints hand h moves.\nfn mark_moving(h: u32) {\n";
+    w += "}\n";
+    w += &least_squares_wgsl(dof);
+    w += "\n// Marks in `moving` the joints hand h moves.\nfn mark_moving(h: u32) {\n";
     cases(&mut w, &|w, ee| {
         for (_, d) in robot.chain(ee) {
             let _ = writeln!(w, "            moving[{d}u] = true;");
@@ -896,7 +1114,8 @@ fn kernels_for(
     if let Some(kernels) = built.get(&robot_source) {
         return Ok(kernels.clone());
     }
-    let kernels = Arc::new(build_kernels(device, info, &robot_source)?);
+    let counts = (robot.dof(), robot.hands());
+    let kernels = Arc::new(build_kernels(device, info, &robot_source, counts)?);
     built.insert(robot_source, kernels.clone());
     Ok(kernels)
 }
@@ -905,6 +1124,7 @@ fn build_kernels(
     device: &wgpu::Device,
     info: &wgpu::AdapterInfo,
     robot_source: &str,
+    (dof, hands): (usize, usize),
 ) -> Result<Kernels> {
     // Constants and shared structs are generated from their Rust definitions.
     let source = [
@@ -924,8 +1144,8 @@ fn build_kernels(
         GpuLink::WGSL,
         GpuSphere::WGSL,
         GpuObstacle::WGSL,
-        robot_source,
-        include_str!("kernels.wgsl"),
+        &loops_written_out(robot_source, dof, hands),
+        &loops_written_out(include_str!("kernels.wgsl"), dof, hands),
         include_str!("grid.wgsl"),
     ]
     .concat();

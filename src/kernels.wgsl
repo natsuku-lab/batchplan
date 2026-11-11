@@ -3,8 +3,9 @@
 // MAX_HISTORY, LINE_STEPS and line_search) and the shared structs (Params, Link, Sphere, Obstacle),
 // generated from their Rust definitions so the two sides cannot drift apart, and the code written
 // for the robot (`robot_wgsl`): MAX_DOF, JAC_LEN, HANDS, fk(), ee_pos(h), ee_rot(h),
-// ee_jacobian(h), mark_moving(h), collision(), and STACKED with the stacked system's sizes (STACK,
-// STACK_JAC, STACK_CHOL).
+// ee_jacobian(h), mark_moving(h), collision(), one hand's damped least squares written out term
+// by term (hold_columns, hand_system, chol6, chol6_solve, pose_step, null_part), and STACKED with
+// the stacked system's sizes (STACK, STACK_JAC, STACK_CHOL).
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read> links: array<Link>;
@@ -146,43 +147,6 @@ fn rot_log(r: mat3x3<f32>) -> vec4<f32> {
     return vec4<f32>(normalize(axis) * theta, theta);
 }
 
-fn chol6() {
-    for (var i = 0u; i < 6u; i++) {
-        for (var j = 0u; j <= i; j++) {
-            var s = chol[i * 6u + j];
-            for (var k = 0u; k < j; k++) {
-                s -= chol[i * 6u + k] * chol[j * 6u + k];
-            }
-            if (i == j) {
-                chol[i * 6u + j] = sqrt(max(s, 1e-12));
-            } else {
-                chol[i * 6u + j] = s / chol[j * 6u + j];
-            }
-        }
-    }
-}
-
-fn chol6_solve(b: array<f32, 6>) -> array<f32, 6> {
-    var y: array<f32, 6>;
-    for (var i = 0u; i < 6u; i++) {
-        var s = b[i];
-        for (var k = 0u; k < i; k++) {
-            s -= chol[i * 6u + k] * y[k];
-        }
-        y[i] = s / chol[i * 6u + i];
-    }
-    var x: array<f32, 6>;
-    for (var ii = 0; ii < 6; ii++) {
-        let i = u32(5 - ii);
-        var s = y[i];
-        for (var k = i + 1u; k < 6u; k++) {
-            s -= chol[k * 6u + i] * x[k];
-        }
-        x[i] = s / chol[i * 6u + i];
-    }
-    return x;
-}
-
 // The targeted hands' Jacobians into stack_jac and their damped normal matrix, factored, into
 // stack_chol; returns the rows. Mirrors `stack_system` in cpu.rs.
 fn stack_system() -> u32 {
@@ -275,76 +239,6 @@ fn load_goals(item: u32) {
                 moving[j] = false;
             }
         }
-    }
-}
-
-// With joints held (P.held), zeroes the columns of jac `moving` leaves out: theirs.
-fn hold_columns() {
-    if (P.held == 1u) {
-        for (var j = 0u; j < P.n_dof; j++) {
-            if (!moving[j]) {
-                for (var r = 0u; r < 6u; r++) {
-                    jac[r * MAX_DOF + j] = 0.0;
-                }
-            }
-        }
-    }
-}
-
-// Hand h's Jacobian into `jac`, and its damped normal matrix, factored, into `chol`.
-fn hand_system(h: u32) {
-    let n = P.n_dof;
-    ee_jacobian(h);
-    hold_columns();
-    for (var r = 0u; r < 6u; r++) {
-        for (var c = 0u; c <= r; c++) {
-            var s = 0.0;
-            for (var j = 0u; j < n; j++) {
-                s += jac[r * MAX_DOF + j] * jac[c * MAX_DOF + j];
-            }
-            if (r == c) {
-                s += P.damping * P.damping;
-            }
-            chol[r * 6u + c] = s;
-            chol[c * 6u + r] = s;
-        }
-    }
-    chol6();
-}
-
-// Hand h's step toward its target, J^T (J J^T + damping^2 I)^-1 e, into `dq`.
-fn pose_step(h: u32, dq: ptr<function, array<f32, MAX_DOF>>) {
-    let ep = goal_pos[h].xyz - ee_pos(h);
-    let eo = rot_log(goal_rot[h] * transpose(ee_rot(h))).xyz * P.rotation_weight;
-    hand_system(h);
-    let y = chol6_solve(array<f32, 6>(ep.x, ep.y, ep.z, eo.x, eo.y, eo.z));
-    for (var j = 0u; j < P.n_dof; j++) {
-        var s = 0.0;
-        for (var r = 0u; r < 6u; r++) {
-            s += jac[r * MAX_DOF + j] * y[r];
-        }
-        (*dq)[j] += s;
-    }
-}
-
-// J^T (J J^T + damping^2 I)^-1 J grad for the system in jac and chol, into `push`.
-fn null_part(push: ptr<function, array<f32, MAX_DOF>>) {
-    let n = P.n_dof;
-    var jg: array<f32, 6>;
-    for (var r = 0u; r < 6u; r++) {
-        var s = 0.0;
-        for (var j = 0u; j < n; j++) {
-            s += jac[r * MAX_DOF + j] * grad[j];
-        }
-        jg[r] = s;
-    }
-    let z = chol6_solve(jg);
-    for (var j = 0u; j < n; j++) {
-        var s = 0.0;
-        for (var r = 0u; r < 6u; r++) {
-            s += jac[r * MAX_DOF + j] * z[r];
-        }
-        (*push)[j] += s;
     }
 }
 
