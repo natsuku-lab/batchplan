@@ -415,9 +415,12 @@ fn ik_lanes_step_as_one_configuration() {
     // The same problems again and again, and half of each one's seeds kept after a short
     // screening: neither the screening (65,536 seeds) nor the seeds that go on (32,768) are few
     // enough for lanes, which up to 4,096 configurations get, and the seeds that go on have most
-    // of their way to go, in lanes where there are few.
+    // of their way to go, in lanes where there are few. An odd count of steps after the
+    // screening: configurations taken from the neighbouring seed's lanes and back would cancel
+    // over an even one.
     let many: Vec<IkProblem> = few.iter().cycle().take(1024).cloned().collect();
     let o = IkOptions {
+        iterations: 31,
         screening: 2,
         kept: 32,
         ..IkOptions::default()

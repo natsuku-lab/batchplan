@@ -267,9 +267,10 @@ fn write_out(lines: &[&str], count: &dyn Fn(&str) -> Option<usize>, out: &mut St
 
 /// Spheres on a link of the robot's own, and sphere pairs of a pair of them, from which their
 /// loops take two rounds at a time: naga counts a loop's rounds, and a link of many spheres has
-/// many. Fewer, and the second round's test costs more than the count it saves: cuRobo's Panda,
-/// whose hand has 18 spheres and 72 pairs with each of four links, ran 1-4% slower paired. What
-/// a robot holds is left out whatever its size, so that holding another object builds no kernels.
+/// many. No robot measured is slower from these counts than with one round at a time; from 16
+/// and 64, cuRobo's Panda, whose hand has 18 spheres and 72 pairs with each of four links, ran
+/// 1% slower, and from 24 and 64 a UR5e 1% (docs/benchmarks.md#how-the-speed-came). What a
+/// robot holds is left out whatever its size, so that holding another object builds no kernels.
 const PAIRED_SPHERES: u32 = 24;
 const PAIRED_PAIRS: u32 = 128;
 

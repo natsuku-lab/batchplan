@@ -3,7 +3,8 @@
 //! a second hand on its fourth link, so that the hands share joints; `evaluate` of 512 and 16,384
 //! configurations; plans of 16 and 256 problems with 4 optimized seeds. Then the two kinds that
 //! spend longest in the collision code: IK with the push for a Panda fitted with several hundred
-//! spheres, among tabletops' clutter, and plans to goals past a ball in the way. Each kind is
+//! spheres, among tabletops' clutter, and plans to goals past a ball in the way; and a UR5e's IK
+//! among the same clutter, a robot of other links and spheres. Each kind is
 //! called many times and its median and best kept: a GPU's pace over calls this short varies, so
 //! compare builds by running them in turn.
 //!
@@ -186,16 +187,34 @@ fn main() -> Result<()> {
             balls.push(ball);
         }
     }
-    let worlds = device.upload(&balls)?;
+    let past_balls = device.upload(&balls)?;
     let mut solved = 0;
     let (median, best) = timed(8, || {
-        solved = batchplan::plan(&device, &worlds, &problems, &options)?
+        solved = batchplan::plan(&device, &past_balls, &problems, &options)?
             .solved()
             .count();
         Ok(())
     })?;
     println!(
         "plans past a ball, 256 problems of 4 optimized seeds: median {median:8.2} ms, best {best:8.2}, {solved} solved"
+    );
+    let ur5e = Robot::load(
+        common::asset("ur5e/ur_description/urdf/ur5e.urdf"),
+        &RobotOptions::default(),
+    )?;
+    let cluttered = device.with_robot(&ur5e)?;
+    let problems: Vec<IkProblem> = (0..1000)
+        .map(|i| IkProblem::new((i % 64) as u32, ur5e.ee_pose(&random(&ur5e), 0)))
+        .collect();
+    let mut solved = 0;
+    let (median, best) = timed(30, || {
+        solved = batchplan::solve_ik(&cluttered, &worlds, &problems, &IkOptions::default())?
+            .solved()
+            .count();
+        Ok(())
+    })?;
+    println!(
+        "IK, a UR5e, the push, clutter       1000 targets: median {median:8.2} ms, best {best:8.2}, {solved} solved"
     );
     Ok(())
 }

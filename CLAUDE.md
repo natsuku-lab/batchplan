@@ -32,7 +32,7 @@ cargo run --release --example tool_paths                        # straight moves
 cargo run --release --example constraints [-- 64 5 --zone]      # the gripper kept upright past a pillar (solved, time, largest tilt, optimized, against unconstrained), and two arms carrying a tray level
 cargo run --release --example tasks -- 64                       # picks and places on random tabletops: how many get through, where the rest stop, per batch size
 cargo run --release --example join [-- so101]                  # pick-like motions joined without stopping (one reBot, or the SO-101): how much sooner, per blend radius
-cargo run --release --example latency [-- --cpu]                # one call's time by kind: IK by batch size without spheres, without the push, with it and for two hands that share joints, evaluate, optimized plans
+cargo run --release --example latency [-- --cpu]                # one call's time by kind: IK by batch size without spheres, without the push, with it and for two hands that share joints, evaluate, optimized plans, then IK for a Panda of 399 spheres and a UR5e among clutter and plans past a ball
 cargo run --release --example timing                            # timing's cost and the trajectories' durations, by kind of path, on one thread
 cargo run --release --example so101_tracking -- data/so101_tracking && .venv-so101/bin/python scripts/so101_tracking.py data/so101_tracking   # the SO-101 on BAM's servo model (docs/benchmarks.md#tracking-on-the-so-101s-servos)
 cargo run --release --example depth [-- --cpu]                  # a distance grid from a rendered depth image, then plans around it
