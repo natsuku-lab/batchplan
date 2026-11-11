@@ -30,8 +30,8 @@ pub struct IkOptions {
     /// tolerances, the nearest first, then seeds that have arrived, most of which stay at rest.
     /// Where the steps push away from collisions (`collision_step` above 0, for a robot with
     /// collision spheres), collision-free seeds go before the others, and a seed in collision
-    /// has not arrived; elsewhere no step frees a seed from a collision, and they go by their
-    /// errors alone. The others are returned as the screening left them.
+    /// has not arrived; elsewhere whether a seed collides after the screening says little
+    /// about where it ends, and they go by their errors alone. The others are returned as the screening left them.
     pub kept: usize,
     /// Damped-least-squares damping (lambda).
     pub damping: f32,
@@ -69,8 +69,8 @@ impl IkOptions {
             && self.seeds <= SCREENED_SEEDS
     }
 
-    /// Whether the steps push away from collisions: only then can they change which seeds
-    /// collide, and only then does the choice after the screening count collisions.
+    /// Whether the steps push away from collisions: only then does the choice after the
+    /// screening count them.
     pub(crate) fn pushes(&self) -> bool {
         self.collision_step > 0.0
     }

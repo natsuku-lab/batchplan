@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -1920,7 +1921,7 @@ impl GpuBackend {
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST;
         let small = std::mem::size_of_val(q) as u64 <= SPARE_BYTES;
-        let lent = std::cell::RefCell::new(Vec::new());
+        let lent = RefCell::new(Vec::new());
         let lend = |usage: wgpu::BufferUsages, bytes: &[u8], room: usize| {
             let buffer = self.lend(usage, room as u64);
             if !bytes.is_empty() {
@@ -2063,8 +2064,8 @@ impl GpuBackend {
             // Every seed's screening; then each seed finds its place among its problem's, from
             // the errors and clearances; then those chosen take the other steps. The choice counts
             // collisions where the steps push away from them (`IkOptions::pushes`): elsewhere the
-            // clearances it reads are the zeros the buffer starts with, and all are found at the
-            // end.
+            // kernel leaves the clearances unread, which a small call's buffer still has from
+            // the call before, and all are found at the end.
             stage(&mut enc, &mut params, lanes, items, o.screening);
             if o.pushes() {
                 clearances(&mut enc, items, 0);

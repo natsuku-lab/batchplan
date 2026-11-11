@@ -1764,9 +1764,9 @@ impl Backend for CpuBackend {
             return Ok(rows(errors, &self.clearance(worlds, item_world, q)?));
         }
         let n = self.robot.dof();
-        // The choice counts collisions where the steps push away from them. Elsewhere no step
-        // changes which seeds collide for the better, so the seeds stand by their errors alone,
-        // and the clearances are found once, at the end.
+        // The choice counts collisions where the steps push away from them. Elsewhere whether a
+        // seed collides after the screening says little about where it ends, so the seeds stand
+        // by their errors alone, and the clearances are found once, at the end.
         let errors = self.ik_steps(call, q, o.screening, o)?;
         let mut solved = if o.pushes() {
             rows(errors, &self.clearance(worlds, item_world, q)?)

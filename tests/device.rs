@@ -385,31 +385,43 @@ fn ik_reports_the_clearances_evaluate_finds() {
     let robot = panda();
     let scene = [common::tabletop(&mut Rng::new(4))];
     let mut rng = Rng::new(9);
-    let problems: Vec<IkProblem> = (0..16)
+    let problems: Vec<IkProblem> = (0..48)
         .map(|_| IkProblem::new(0, common::grasp_target(&scene[0], &mut rng)))
         .collect();
+    let unpushed = IkOptions {
+        collision_step: 0.0,
+        ..IkOptions::default()
+    };
     for d in devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
-        let ik = batchplan::solve_ik(&d, &worlds, &problems, &IkOptions::default()).unwrap();
-        let items = ik.q.len() / robot.dof();
-        let e = d
-            .evaluate(&worlds, &vec![0; items], &ik.q, &CollisionWeights::NONE)
-            .unwrap();
-        let close = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-6);
-        assert!(
-            close(&ik.world_clearance, &e.world_clearance),
-            "{}: world clearance",
-            d.name()
-        );
-        assert!(
-            close(&ik.self_clearance, &e.self_clearance),
-            "{}: self clearance",
-            d.name()
-        );
-        assert!(
-            !close(&ik.world_clearance, &ik.self_clearance),
-            "world and self clearance should differ"
-        );
+        // With the push and without it, which finds the clearances once at the end; a few
+        // problems after a call that pushed, whose buffers a GPU uses again, and many.
+        for (o, count) in [
+            (IkOptions::default(), 16),
+            (unpushed, 16),
+            (unpushed, 48),
+            (IkOptions::default(), 48),
+        ] {
+            let ik = batchplan::solve_ik(&d, &worlds, &problems[..count], &o).unwrap();
+            let items = ik.q.len() / robot.dof();
+            let e = d
+                .evaluate(&worlds, &vec![0; items], &ik.q, &CollisionWeights::NONE)
+                .unwrap();
+            let close = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-6);
+            let call = format!("{}, {count} problems, step {}", d.name(), o.collision_step);
+            assert!(
+                close(&ik.world_clearance, &e.world_clearance),
+                "{call}: world clearance"
+            );
+            assert!(
+                close(&ik.self_clearance, &e.self_clearance),
+                "{call}: self clearance"
+            );
+            assert!(
+                !close(&ik.world_clearance, &ik.self_clearance),
+                "world and self clearance should differ"
+            );
+        }
     }
 }
 
@@ -555,14 +567,43 @@ fn ik_refines_the_seeds_nearest_after_the_screening() {
     refines_the_nearest(IkOptions::default());
 }
 
-/// Without the push away from collisions no step frees a seed from one, so the seeds that go on
-/// are the nearest by their errors alone, in collision or not.
+/// Without the push away from collisions the seeds that go on are the nearest by their errors
+/// alone, in collision or not.
 #[test]
 fn ik_without_the_push_refines_the_seeds_nearest_by_error_alone() {
     refines_the_nearest(IkOptions {
         collision_step: 0.0,
         ..IkOptions::default()
     });
+}
+
+/// A small call's buffers are the last call's on a GPU: IK without the push solves alike after a
+/// call that pushed, whose clearances are still in them, and on a device that has solved nothing.
+#[test]
+fn ik_without_the_push_reads_nothing_of_the_call_before() {
+    let robot = panda();
+    let scene = [common::tabletop(&mut Rng::new(4))];
+    let mut rng = Rng::new(9);
+    let problems: Vec<IkProblem> = (0..16)
+        .map(|_| IkProblem::new(0, common::grasp_target(&scene[0], &mut rng)))
+        .collect();
+    let unpushed = IkOptions {
+        collision_step: 0.0,
+        ..IkOptions::default()
+    };
+    for (used, fresh) in devices(&robot).into_iter().zip(devices(&robot)) {
+        let solve = |d: &Device, o: &IkOptions| {
+            let worlds = d.upload(&scene).unwrap();
+            batchplan::solve_ik(d, &worlds, &problems, o).unwrap()
+        };
+        let pushed = solve(&used, &IkOptions::default());
+        // Collisions the choice would count, were it to read them.
+        let colliding = (0..pushed.success.len())
+            .filter(|&i| pushed.world_clearance[i] < 0.0 || pushed.self_clearance[i] < 0.0);
+        assert!(colliding.count() > problems.len(), "{}", used.name());
+        let (after, alone) = (solve(&used, &unpushed), solve(&fresh, &unpushed));
+        assert_eq!(after.q, alone.q, "{}", used.name());
+    }
 }
 
 /// Solves grasps on cluttered tabletops with `o` on every device and checks which seeds went on
@@ -653,7 +694,7 @@ fn refines_the_nearest(o: IkOptions) {
         // The seeds left behind rarely cost a problem its solution.
         let (staged, full) = (staged.solved().count(), full.solved().count());
         assert!(
-            staged + 1 >= full && (staged > problems.len() / 2 || !pushes),
+            staged + 1 >= full && staged > problems.len() / 2,
             "{}: {staged} problems solved, {full} when every seed takes every step",
             d.name()
         );

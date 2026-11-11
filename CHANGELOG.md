@@ -63,8 +63,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   default), then only `IkOptions::kept` of each problem's (4) take the rest of `iterations`: those
   not yet at their targets, the nearest first, then seeds that have arrived. Where the steps push
   away from collisions (`collision_step` above 0, for a robot with collision spheres),
-  collision-free seeds go before the others; elsewhere no step frees a seed from a collision,
-  and they go by their errors alone. The seeds left behind are returned as the screening left
+  collision-free seeds go before the others; elsewhere whether a seed collides after the
+  screening says little about where it ends, and they go by their errors alone. The seeds left behind are returned as the screening left
   them. Code that writes out every field of `IkOptions` needs the two new ones, and
   `screening: 0` is the IK of before, as are problems of more than 32,768 seeds. On a GPU the
   screening, the choice and the remaining steps are one round trip, a small call is one
