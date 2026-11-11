@@ -1270,57 +1270,73 @@ struct CallBuffers<'call> {
     out: &'call wgpu::Buffer,
 }
 
+/// Whether an adapter is DX12's software renderer (WARP, "Microsoft Basic Render Driver"), which
+/// every Windows machine has. On a four-core machine it took 185 s to warm up and had not
+/// finished one pick after 82 minutes, where the CPU device picks in 16 ms. Mesa's llvmpipe, the
+/// software Vulkan the tests run on, is no such adapter.
+fn software_dx12(info: &wgpu::AdapterInfo) -> bool {
+    info.backend == wgpu::Backend::Dx12 && info.device_type == wgpu::DeviceType::Cpu
+}
+
+/// Which of `adapters`, each with its limits, runs the kernels: the first whose name contains
+/// `name` (any if `None`) and whose limits suffice, discrete GPUs before integrated ones before
+/// the rest. OpenGL adapters are skipped, and DX12's software renderer unless it is named.
+fn choose(adapters: &[(wgpu::AdapterInfo, wgpu::Limits)], name: Option<&str>) -> Result<usize> {
+    let wanted = name.map(str::to_lowercase);
+    let rank = |t: wgpu::DeviceType| match t {
+        wgpu::DeviceType::DiscreteGpu => 0,
+        wgpu::DeviceType::IntegratedGpu => 1,
+        wgpu::DeviceType::VirtualGpu => 2,
+        wgpu::DeviceType::Cpu => 3,
+        wgpu::DeviceType::Other => 4,
+    };
+    let mut rejected = vec![];
+    let mut accepted = vec![];
+    for (index, (info, _)) in adapters.iter().enumerate() {
+        match &wanted {
+            _ if info.backend == wgpu::Backend::Gl => {}
+            Some(wanted) if !info.name.to_lowercase().contains(wanted) => {}
+            None if software_dx12(info) => rejected.push(format!(
+                "{} ({:?}) is a software renderer, which did not finish a pick in over an \
+                 hour: it is used only when named",
+                info.name, info.backend
+            )),
+            _ => accepted.push(index),
+        }
+    }
+    accepted.sort_by_key(|&index| rank(adapters[index].0.device_type));
+    for index in accepted {
+        let (info, limits) = &adapters[index];
+        let unmet = unmet_limits(limits);
+        if unmet.is_empty() {
+            return Ok(index);
+        }
+        rejected.push(format!(
+            "{} ({:?}) lacks {}",
+            info.name,
+            info.backend,
+            unmet.join(", ")
+        ));
+    }
+    Err(match (&rejected[..], name) {
+        ([], Some(name)) => Error::Gpu(format!(
+            "no Vulkan, Metal or DX12 adapter named like '{name}'"
+        )),
+        ([], None) => Error::Gpu("no Vulkan, Metal or DX12 adapter found".into()),
+        _ => Error::Gpu(format!(
+            "no GPU adapter can run the kernels:\n  {}",
+            rejected.join("\n  ")
+        )),
+    })
+}
+
 impl GpuBackend {
-    /// Uses the first adapter whose name contains `name` (any adapter if `None`), preferring
-    /// discrete, then integrated GPUs. OpenGL adapters are skipped.
+    /// Uses the adapter `choose` picks among those this machine has, by `name` if given.
     pub(crate) fn new(robot: &Robot, name: Option<&str>) -> Result<Self> {
-        let wanted = name.map(str::to_lowercase);
-        let accept = |info: &wgpu::AdapterInfo| {
-            info.backend != wgpu::Backend::Gl
-                && wanted
-                    .as_ref()
-                    .is_none_or(|w| info.name.to_lowercase().contains(w))
-        };
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let rank = |t: wgpu::DeviceType| match t {
-            wgpu::DeviceType::DiscreteGpu => 0,
-            wgpu::DeviceType::IntegratedGpu => 1,
-            wgpu::DeviceType::VirtualGpu => 2,
-            wgpu::DeviceType::Cpu => 3,
-            wgpu::DeviceType::Other => 4,
-        };
-        let mut adapters: Vec<_> =
-            pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
-                .into_iter()
-                .filter(|a| accept(&a.get_info()))
-                .collect();
-        adapters.sort_by_key(|a| rank(a.get_info().device_type));
-        let mut rejected = vec![];
-        let adapter = adapters
-            .into_iter()
-            .find(|a| {
-                let unmet = unmet_limits(&a.limits());
-                if !unmet.is_empty() {
-                    let info = a.get_info();
-                    rejected.push(format!(
-                        "{} ({:?}) lacks {}",
-                        info.name,
-                        info.backend,
-                        unmet.join(", ")
-                    ));
-                }
-                unmet.is_empty()
-            })
-            .ok_or_else(|| match (&rejected[..], name) {
-                ([], Some(name)) => Error::Gpu(format!(
-                    "no Vulkan, Metal or DX12 adapter named like '{name}'"
-                )),
-                ([], None) => Error::Gpu("no Vulkan, Metal or DX12 adapter found".into()),
-                _ => Error::Gpu(format!(
-                    "no GPU adapter can run the kernels:\n  {}",
-                    rejected.join("\n  ")
-                )),
-            })?;
+        let mut all = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+        let described: Vec<_> = all.iter().map(|a| (a.get_info(), a.limits())).collect();
+        let adapter = all.swap_remove(choose(&described, name)?);
         let info = adapter.get_info();
         let adapter_limits = adapter.limits();
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -2725,6 +2741,79 @@ fn f() {
         let shared =
             kernels_for(&gpu.device, &gpu.info, &gpu.built, &relocked).expect("the kernels build");
         assert!(Arc::ptr_eq(&shared, &gpu.kernels));
+    }
+
+    /// An adapter as wgpu describes it, with limits that suffice or WebGPU's defaults.
+    fn adapter(
+        name: &str,
+        backend: wgpu::Backend,
+        device_type: wgpu::DeviceType,
+        suffices: bool,
+    ) -> (wgpu::AdapterInfo, wgpu::Limits) {
+        let info = wgpu::AdapterInfo {
+            name: name.into(),
+            ..wgpu::AdapterInfo::new(device_type, backend)
+        };
+        let limits = wgpu::Limits {
+            max_storage_buffers_per_shader_stage: if suffices { 16 } else { 8 },
+            ..wgpu::Limits::defaults()
+        };
+        (info, limits)
+    }
+
+    /// DX12's software renderer, which every Windows machine has, is chosen only by name: a
+    /// machine with nothing else gets an error that says so, and the CPU device. A real adapter
+    /// goes before it, Mesa's software Vulkan is still chosen, and discrete GPUs come first.
+    #[test]
+    fn the_software_renderer_of_dx12_is_chosen_only_by_name() {
+        use wgpu::{Backend, DeviceType};
+
+        let warp = adapter(
+            "Microsoft Basic Render Driver",
+            Backend::Dx12,
+            DeviceType::Cpu,
+            true,
+        );
+        let radeon = adapter("AMD Radeon", Backend::Dx12, DeviceType::IntegratedGpu, true);
+        let geforce = adapter(
+            "NVIDIA GeForce",
+            Backend::Vulkan,
+            DeviceType::DiscreteGpu,
+            true,
+        );
+        let weak = adapter(
+            "Old Intel",
+            Backend::Vulkan,
+            DeviceType::IntegratedGpu,
+            false,
+        );
+        let llvmpipe = adapter("llvmpipe (LLVM 20)", Backend::Vulkan, DeviceType::Cpu, true);
+        let message =
+            |adapters: &[(wgpu::AdapterInfo, wgpu::Limits)], name: Option<&str>| match choose(
+                adapters, name,
+            ) {
+                Err(Error::Gpu(message)) => message,
+                other => panic!("an adapter was chosen, or another error: {other:?}"),
+            };
+        let alone = [warp.clone()];
+        let said = message(&alone, None);
+        assert!(
+            said.contains("Basic Render Driver") && said.contains("only when named"),
+            "{said}"
+        );
+        assert_eq!(choose(&alone, Some("basic render")).unwrap(), 0);
+        let said = message(&[warp.clone(), weak.clone()], None);
+        assert!(
+            said.contains("only when named") && said.contains("Old Intel"),
+            "{said}"
+        );
+        assert!(said.contains("storage buffers"), "{said}");
+        assert_eq!(message(&[], None), "no Vulkan, Metal or DX12 adapter found");
+        let said = message(&alone, Some("radeon"));
+        assert_eq!(said, "no Vulkan, Metal or DX12 adapter named like 'radeon'");
+        assert_eq!(choose(&[warp.clone(), radeon.clone()], None).unwrap(), 1);
+        assert_eq!(choose(&[warp, radeon, geforce], None).unwrap(), 2);
+        assert_eq!(choose(&[weak, llvmpipe], None).unwrap(), 1);
     }
 
     #[test]
