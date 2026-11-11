@@ -88,11 +88,11 @@ fn check_pick(robot: &Robot, start: &[f32], plan: &TaskPlan, at: Pose, lift: Vec
     let n = robot.dof();
     let first = |t: &Trajectory| t.control_points[..n].to_vec();
     let last = |t: &Trajectory| t.control_points[t.control_points.len() - n..].to_vec();
-    for t in [&plan.transit, &plan.approach, &plan.depart] {
+    for t in plan.motions() {
         t.check(robot).unwrap();
     }
-    assert_eq!(first(&plan.transit), start);
-    assert_eq!(last(&plan.transit), first(&plan.approach));
+    assert_eq!(first(transit(plan)), start);
+    assert_eq!(last(transit(plan)), plan.begin());
     assert_eq!(last(&plan.approach), first(&plan.depart));
     let grasped = robot.ee_pose(&last(&plan.approach), 0);
     assert!(
@@ -102,6 +102,11 @@ fn check_pick(robot: &Robot, start: &[f32], plan: &TaskPlan, at: Pose, lift: Vec
     assert!(grasped.rotation.angle_between(at.rotation) < 2e-2);
     let lifted = robot.ee_pose(&last(&plan.depart), 0);
     assert!(lifted.position.distance(at.position + lift) < 2e-3);
+}
+
+/// The transit of a task that plans it.
+fn transit(plan: &TaskPlan) -> &Trajectory {
+    plan.transit.as_ref().expect("the task plans its transit")
 }
 
 fn pick_in(
@@ -165,7 +170,7 @@ fn the_quickest_grasp_that_gets_through_wins() {
             )
             .unwrap()
             .remove(0);
-            let motions = |p: &TaskPlan| [p.transit.clone(), p.approach.clone(), p.depart.clone()];
+            let motions = |p: &TaskPlan| p.motions().cloned().collect::<Vec<_>>();
             assert_eq!(
                 motions(&alone),
                 motions(plan),
@@ -228,7 +233,7 @@ fn a_task_none_of_whose_grasps_gets_through_says_where_and_why_each_stopped() {
     let plans = pick_in(&device, scene(vec![block]), from_high(), &shorter).unwrap();
     let n = robot.dof();
     let begins = robot.ee_pose(&plans[0].approach.control_points[..n], 0);
-    let transit = &plans[0].transit.control_points;
+    let transit = &transit(&plans[0]).control_points;
     let arrives = robot.ee_pose(&transit[transit.len() - n..], 0);
     assert!(begins.position.distance(arrives.position) < 1e-5);
     let grasp_height = HALF.z * 2.0 - 0.02;
@@ -386,7 +391,7 @@ fn a_picked_box_is_set_down_where_there_is_room() {
         let backed = robot.ee_pose(&last(&plan.depart), 0);
         let back = at.position - at.rotation * Vec3::Z * task.retreat;
         assert!(backed.position.distance(back) < 2e-3, "{name}");
-        for t in [&plan.transit, &plan.approach, &plan.depart] {
+        for t in plan.motions() {
             t.check(&robot).unwrap();
         }
         // Without the table to set it on, it cannot be let go of there.
@@ -462,10 +467,10 @@ fn a_place_carries_the_box_upright() {
         let plans = carried.unwrap().outcomes.remove(0).unwrap();
         let free = batchplan::place(&device, &after, &[place(vec![level], vec![])], &o);
         let loose = free.unwrap().outcomes.remove(0).unwrap();
-        plans[0].transit.check(&robot).unwrap();
+        transit(&plans[0]).check(&robot).unwrap();
         let (kept, tipping) = (
-            most_tilt(&robot, &plans[0].transit),
-            most_tilt(&robot, &loose[0].transit),
+            most_tilt(&robot, transit(&plans[0])),
+            most_tilt(&robot, transit(&loose[0])),
         );
         assert!(
             kept <= bound + 1e-4 && tipping > 2.0 * bound,
@@ -486,10 +491,10 @@ fn a_place_carries_the_box_upright() {
             "{name}: only the level pose"
         );
         for p in plans {
-            let ends = &p.transit.control_points[p.transit.control_points.len() - n..];
+            let points = &transit(p).control_points;
             assert_eq!(
-                ends,
-                &p.approach.control_points[..n],
+                &points[points.len() - n..],
+                p.begin(),
                 "{name}: a transit ends elsewhere"
             );
         }
@@ -502,7 +507,7 @@ fn a_place_carries_the_box_upright() {
             start: robot.default_q().to_vec(),
             ..place(vec![level], vec![upright])
         };
-        match batchplan::place(&device, &after, &[tilted_start], &o) {
+        match batchplan::place(&device, &after, std::slice::from_ref(&tilted_start), &o) {
             Err(Error::Input(m)) => {
                 assert!(
                     m.contains("task 0: the start breaks its constraints"),
@@ -511,6 +516,13 @@ fn a_place_carries_the_box_upright() {
             }
             other => panic!("{name}: a tilted start should be an input error, got {other:?}"),
         }
+        // Without its transit a task has no path to keep them along, and its start is a seed.
+        let alone = Place {
+            transit: false,
+            ..tilted_start
+        };
+        let moves = batchplan::place(&device, &after, &[alone], &o);
+        assert!(moves.is_ok(), "{name}: {moves:?}");
     }
 }
 
@@ -666,16 +678,16 @@ fn a_place_takes_the_other_arms_where_they_wait() {
             .all(|(a, b)| (a - b).abs() < 1e-5)
     };
     let (waiting, turned) = (plans[0], plans[1]);
-    for t in [&waiting.transit, &waiting.approach, &waiting.depart] {
+    for t in waiting.motions() {
         assert!(rows(t).iter().all(|r| at(r, &start)));
     }
-    let transit = rows(&turned.transit);
+    let transit = rows(transit(turned));
     assert!(at(&transit[0], &start));
     assert!(at(transit.last().unwrap(), &idle));
     for t in [&turned.approach, &turned.depart] {
         assert!(rows(t).iter().all(|r| at(r, &idle)));
     }
-    let motions = |p: &TaskPlan| [p.transit.clone(), p.approach.clone(), p.depart.clone()];
+    let motions = |p: &TaskPlan| p.motions().cloned().collect::<Vec<_>>();
     assert_eq!(motions(plans[2]), motions(turned));
     // A configuration of the wrong length, or with an idle joint past its limits or not a number,
     // is refused; the left arm's joints may be anything.
@@ -1399,17 +1411,299 @@ fn place_poses_turn_an_object_onto_itself() {
     }
 }
 
+/// Whether every candidate of `f` stopped at `step`, colliding with obstacle `with` among others,
+/// or for no stated reason where `with` is none.
+fn all_stop(f: &TaskFailure, step: TaskStep, with: Option<usize>) -> bool {
+    f.candidates.iter().all(|c| {
+        let named = match with {
+            Some(k) => {
+                let hits =
+                    |t: &Contact| matches!(t, Contact::World { obstacle, .. } if *obstacle == k);
+                matches!(c.why, Some(ToolPathStop::Collision { .. })) && c.contacts.iter().any(hits)
+            }
+            None => c.why.is_none(),
+        };
+        c.step == step && named
+    })
+}
+
+/// `base` with a ball at a finger of the hand at `start`, clear of what the fingers hold, three
+/// times: no link may touch anything, the hand's links may touch obstacle `post` and the ball, and
+/// they may touch the ball alone.
+fn stepped(robot: &Robot, mut base: World, start: &[f32], post: usize) -> [World; 3] {
+    let hand = robot.ee_pose(start, 0);
+    base.obstacles.push(Obstacle::sphere(
+        hand.position + hand.rotation * Vec3::Y * 0.05,
+        0.015,
+    ));
+    let ball = base.obstacles.len() - 1;
+    let links = robot.hand_links(0);
+    let mut loose = base.clone();
+    loose.touch = vec![
+        Touch::new(post, links.clone()),
+        Touch::new(ball, links.clone()),
+    ];
+    let mut past_the_ball = base.clone();
+    past_the_ball.touch = vec![Touch::new(ball, links)];
+    [base, loose, past_the_ball]
+}
+
+const STRICT: u32 = 0;
+const LOOSE: u32 = 1;
+const PAST_THE_BALL: u32 = 2;
+
+#[test]
+fn each_step_runs_in_the_world_its_task_names() {
+    let robot = panda();
+    let o = TaskOptions::default();
+    let home = Pose::new(Vec3::new(0.45, 0.2, HALF.z), Quat::IDENTITY);
+    for device in devices(&robot) {
+        let name = device.name();
+        // A finger of the grasp comes down on the post, which only the loose world lets it touch,
+        // and a finger of the start is in the ball, which only the strict world keeps it from.
+        let (the_post, ball) = (2, 3);
+        let worlds = stepped(&robot, scene(vec![post()]), robot.default_q(), the_post);
+        let worlds = device.upload(&worlds).unwrap();
+        let loose = Pick {
+            world: LOOSE,
+            ..pick_from(&robot, vec![top()])
+        };
+        // Begun a centimeter back, the move in begins with the finger on the post already.
+        let near = Pick {
+            approach: 0.01,
+            ..loose.clone()
+        };
+        let tasks = [
+            loose.clone(),
+            Pick {
+                depart_world: Some(STRICT),
+                ..loose.clone()
+            },
+            Pick {
+                world: STRICT,
+                transit_world: Some(LOOSE),
+                depart_world: Some(LOOSE),
+                ..loose.clone()
+            },
+            Pick {
+                transit_world: Some(STRICT),
+                ..loose.clone()
+            },
+            near.clone(),
+            Pick {
+                transit_world: Some(PAST_THE_BALL),
+                ..near
+            },
+        ];
+        let picked = batchplan::pick(&device, &worlds, &tasks, &o)
+            .unwrap()
+            .outcomes;
+        let stopped = |k: usize| {
+            picked[k]
+                .as_ref()
+                .expect_err("a step in a stricter world stops")
+        };
+        assert!(picked[0].is_ok(), "{name}: {:?}", picked[0]);
+        assert!(
+            all_stop(stopped(1), TaskStep::Depart, Some(the_post)),
+            "{name}: {:?}",
+            picked[1]
+        );
+        assert!(
+            all_stop(stopped(2), TaskStep::Reach, Some(the_post)),
+            "{name}: {:?}",
+            picked[2]
+        );
+        assert!(
+            all_stop(stopped(3), TaskStep::Start, Some(ball)),
+            "{name}: {:?}",
+            picked[3]
+        );
+        assert!(picked[4].is_ok(), "{name}: {:?}", picked[4]);
+        assert!(
+            all_stop(stopped(5), TaskStep::Transit, None),
+            "{name}: {:?}",
+            picked[5]
+        );
+
+        // Set down again where it stood, from the same start: the same finger on the same post
+        // and in the same ball, which the box in the hand keeps clear of.
+        let lifted = &picked[0].as_ref().unwrap()[0];
+        let (the_post, ball) = (1, 2);
+        let mut after = scene(vec![post()]);
+        after.remove(BOX).unwrap();
+        let worlds = stepped(&robot, after, robot.default_q(), the_post);
+        let worlds = device.upload(&worlds).unwrap();
+        let loose = Place {
+            support: vec![TABLE],
+            ..Place::new(
+                LOOSE,
+                robot.default_q(),
+                lifted.held.clone().unwrap(),
+                vec![home],
+            )
+        };
+        let near = Place {
+            lower: Vec3::Z * -0.01,
+            ..loose.clone()
+        };
+        let tasks = [
+            loose.clone(),
+            Place {
+                depart_world: Some(STRICT),
+                ..loose.clone()
+            },
+            Place {
+                world: STRICT,
+                transit_world: Some(LOOSE),
+                depart_world: Some(LOOSE),
+                ..loose.clone()
+            },
+            Place {
+                transit_world: Some(STRICT),
+                ..loose.clone()
+            },
+            near.clone(),
+            Place {
+                transit_world: Some(PAST_THE_BALL),
+                ..near
+            },
+        ];
+        let placed = batchplan::place(&device, &worlds, &tasks, &o)
+            .unwrap()
+            .outcomes;
+        let stopped = |k: usize| {
+            placed[k]
+                .as_ref()
+                .expect_err("a step in a stricter world stops")
+        };
+        assert!(placed[0].is_ok(), "{name}: {:?}", placed[0]);
+        assert!(
+            all_stop(stopped(1), TaskStep::Depart, Some(the_post)),
+            "{name}: {:?}",
+            placed[1]
+        );
+        assert!(
+            all_stop(stopped(2), TaskStep::Reach, Some(the_post)),
+            "{name}: {:?}",
+            placed[2]
+        );
+        assert!(
+            all_stop(stopped(3), TaskStep::Start, Some(ball)),
+            "{name}: {:?}",
+            placed[3]
+        );
+        assert!(placed[4].is_ok(), "{name}: {:?}", placed[4]);
+        assert!(
+            all_stop(stopped(5), TaskStep::Transit, None),
+            "{name}: {:?}",
+            placed[5]
+        );
+    }
+}
+
+#[test]
+fn a_task_without_its_transit_gives_its_moves_alone() {
+    let robot = panda();
+    let o = TaskOptions::default();
+    let n = robot.dof();
+    // The moves of `alone`, a task without its transit, are those of `whole`, the same task
+    // with it, candidate by candidate, and it keeps every candidate `whole` does.
+    let same_moves = |whole: &[TaskPlan], alone: &[TaskPlan], name: &str| {
+        assert!(!whole.is_empty(), "{name}");
+        for plan in whole {
+            let moves = alone.iter().find(|m| m.candidate == plan.candidate);
+            let moves = moves.unwrap_or_else(|| panic!("{name}: candidate {}", plan.candidate));
+            assert_eq!(
+                moves.approach.control_points, plan.approach.control_points,
+                "{name}"
+            );
+            assert_eq!(
+                moves.depart.control_points, plan.depart.control_points,
+                "{name}"
+            );
+            let points = &transit(plan).control_points;
+            assert_eq!(moves.begin(), &points[points.len() - n..], "{name}");
+        }
+        for moves in alone {
+            assert!(moves.transit.is_none(), "{name}");
+            assert_eq!(moves.motions().count(), 2, "{name}");
+            let both = moves.approach.duration() + moves.depart.duration();
+            assert_eq!(moves.duration(), both, "{name}");
+        }
+        let quickest_first = alone.windows(2).all(|w| w[0].duration() <= w[1].duration());
+        assert!(quickest_first, "{name}");
+    };
+    for device in devices(&robot) {
+        let name = device.name();
+        let whole = pick_from(&robot, vec![top(), top_reversed(), top_across()]);
+        let alone = Pick {
+            transit: false,
+            ..whole.clone()
+        };
+        let picked = pick_in(&device, scene(vec![]), whole.clone(), &o).unwrap();
+        let moves = pick_in(&device, scene(vec![]), alone.clone(), &o).unwrap();
+        same_moves(&picked, &moves, &name);
+
+        // A start in a ball stops the task that leaves it, and only seeds the other's grasps;
+        // tasks of both kinds share a call.
+        let [blocked, ..] = stepped(&robot, scene(vec![]), &whole.start, 0);
+        let worlds = device.upload(&[blocked]).unwrap();
+        let outcomes = batchplan::pick(&device, &worlds, &[whole, alone], &o)
+            .unwrap()
+            .outcomes;
+        let f = outcomes[0].as_ref().expect_err("the start is in the ball");
+        assert!(all_stop(f, TaskStep::Start, Some(2)), "{name}: {f:?}");
+        let moves = outcomes[1].as_ref().unwrap();
+        assert!(
+            !moves.is_empty() && moves.iter().all(|m| m.transit.is_none()),
+            "{name}"
+        );
+
+        // A place alike, from where the lift left the box.
+        let lifted = &picked[0];
+        let mut after = scene(vec![]);
+        after.remove(BOX).unwrap();
+        let after = device.upload(&[after]).unwrap();
+        let there = Pose::new(Vec3::new(0.45, -0.2, HALF.z), Quat::IDENTITY);
+        let whole = Place {
+            support: vec![TABLE],
+            ..Place::new(0, lifted.end(), lifted.held.clone().unwrap(), vec![there])
+        };
+        let alone = Place {
+            transit: false,
+            ..whole.clone()
+        };
+        let place = |task: Place| {
+            let result = batchplan::place(&device, &after, &[task], &o).unwrap();
+            result.outcomes.into_iter().next().unwrap().unwrap()
+        };
+        same_moves(&place(whole), &place(alone), &name);
+    }
+}
+
 #[test]
 fn malformed_tasks_are_input_errors() {
     let robot = panda();
     let device = Device::cpu(&robot).unwrap();
-    let worlds = device.upload(&[scene(vec![])]).unwrap();
+    let worlds = device
+        .upload(&[scene(vec![]), scene(vec![post()])])
+        .unwrap();
     let o = TaskOptions::default();
     let good = pick_from(&robot, vec![top()]);
     let unnormalized = Pose::new(top().position, top().rotation * 1.5);
     let bad = [
         Pick {
-            world: 1,
+            world: 2,
+            ..good.clone()
+        },
+        Pick {
+            transit_world: Some(2),
+            ..good.clone()
+        },
+        // A step's world holds the task's obstacles: this one has one more.
+        Pick {
+            depart_world: Some(1),
             ..good.clone()
         },
         Pick {

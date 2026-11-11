@@ -10,6 +10,21 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- **Breaking:** a `Pick` or `Place` can leave its transit out and run each step in a world of its
+  own. With `transit: false` a task solves its grasps or releases and its two straight moves
+  alone, without checking its start, and keeps every candidate that passes them, so a program of
+  tasks solves all its moves in two calls and the ways between them in one `plan`
+  (`TaskPlan::begin` and `end` are where a way ends and the next begins), then joins them.
+  `transit_world` and `depart_world` name the worlds of the start and the planned path and of the
+  move away where they are not the task's `world`: the same obstacles, shaped or touched
+  otherwise, as a transit that touches nothing the grasp may. `TaskPlan::transit` is an `Option`,
+  `None` for a task without one, and `TaskPlan::motions` gives a plan's motions in order. Code
+  reading `plan.transit` unwraps it or reads `plan.motions()`, and a struct literal that writes
+  out every field of `Pick` or `Place` needs the three new ones. In Python, `Pick` and `Place`
+  take `transit`, `transit_world` and `depart_world`, and `TaskPlan` has `motions` and `begin`.
+- **Breaking:** `join` checks a sequence's blends with what a hand holds: `Sequence::holding`, a
+  pick's `Held`, as `PlanProblem::holding`, so a carry joins into the move in of its place on the
+  device without the object. A `Sequence` literal needs the new field (`holding: None`).
 - Publish the Python bindings as `batches` on PyPI (`import batchplan`). Version tags publish
   the Rust crate and Python wheels and source together, using trusted publishing.
 

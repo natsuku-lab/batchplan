@@ -10,6 +10,12 @@
 //! backward from there, so they end exactly there), the moves away, then planned paths for those
 //! still going. Every candidate that passes every step comes back, quickest first. When none does,
 //! each candidate's step and reason come back instead.
+//!
+//! A task may leave its transit out (`transit: false`) and give the two straight moves alone: a
+//! program of many tasks solves all their moves in one call, plans the ways between them in one
+//! [`plan`](crate::plan) and joins them ([`join`](crate::join())). Each step may run in a world of
+//! its own (`transit_world`, `depart_world`), so that what the hand may touch at the grasp is not
+//! what it may touch on the way there.
 
 use std::f32::consts::TAU;
 use std::fmt;
@@ -33,10 +39,21 @@ use crate::world::{Obstacle, Touch, World};
 /// A hand picking up one obstacle of its world.
 #[derive(Clone, Debug)]
 pub struct Pick {
-    /// The world's index in the batch.
+    /// The world's index in the batch: the one the hand grasps and moves in in, and every other
+    /// step's unless that names its own.
     pub world: u32,
+    /// The world the start is checked and the transit planned in, where it is another: as many
+    /// obstacles as `world` has, in its order, shaped or touched ([`World::touch`]) otherwise.
+    pub transit_world: Option<u32>,
+    /// The world the object is lifted in, where it is another, likewise.
+    pub depart_world: Option<u32>,
     /// Where the robot starts, at rest.
     pub start: Vec<f32>,
+    /// Whether the path from the start to where the move in begins is planned: true. Without it
+    /// the plans hold the two straight moves alone ([`TaskPlan::begin`] is where a way to them
+    /// ends), and the start, which is not checked for collision, only says which solution of a
+    /// grasp is nearest and where the joints other hands move wait.
+    pub transit: bool,
     /// The hand that picks it up.
     pub hand: usize,
     /// The object: an obstacle of the world, by index. A distance grid cannot be picked up.
@@ -52,7 +69,7 @@ pub struct Pick {
     pub support: Vec<usize>,
     /// Where the hands must stay along the transit ([`HandConstraint`]), as MTC's Connect stage
     /// takes path constraints. The start must keep them; a grasp whose move in begins where they
-    /// break stops at the transit.
+    /// break stops at the transit. A task without its transit has no use for them.
     pub constraints: Vec<HandConstraint>,
 }
 
@@ -63,7 +80,10 @@ impl Pick {
     pub fn new(world: u32, start: impl Into<Vec<f32>>, object: usize, grasps: Vec<Pose>) -> Self {
         Self {
             world,
+            transit_world: None,
+            depart_world: None,
             start: start.into(),
+            transit: true,
             hand: 0,
             object,
             grasps,
@@ -78,10 +98,21 @@ impl Pick {
 /// A hand setting down the object it holds.
 #[derive(Clone, Debug)]
 pub struct Place {
-    /// The world's index in the batch. The held object is not one of its obstacles.
+    /// The world's index in the batch: the one the hand moves in in to where it lets go, and
+    /// every other step's unless that names its own. The held object is not one of its obstacles.
     pub world: u32,
+    /// The world the start is checked and the transit planned in, where it is another: as many
+    /// obstacles as `world` has, in its order, shaped or touched ([`World::touch`]) otherwise.
+    pub transit_world: Option<u32>,
+    /// The world the hand backs off in, where it is another, likewise.
+    pub depart_world: Option<u32>,
     /// Where the robot starts, at rest, holding the object.
     pub start: Vec<f32>,
+    /// Whether the path from the start to where the move in begins is planned: true. Without it
+    /// the plans hold the two straight moves alone ([`TaskPlan::begin`] is where a way to them
+    /// ends), and the start, which is not checked for collision, only says which solution of a
+    /// release is nearest and where the joints other hands move wait, unless `idle` says so.
+    pub transit: bool,
     /// Where the joints only other hands move go on the transit, as a configuration of which only
     /// those joints count: another arm going home while this one carries the object to where it
     /// goes. They wait there through the moves in and away. None keeps them where `start` has
@@ -100,7 +131,7 @@ pub struct Place {
     pub support: Vec<usize>,
     /// Where the hands must stay along the transit ([`HandConstraint`]), as a cup carried upright
     /// to where it goes. The start must keep them; a pose whose move in begins where they break
-    /// stops at the transit.
+    /// stops at the transit. A task without its transit has no use for them.
     pub constraints: Vec<HandConstraint>,
 }
 
@@ -111,7 +142,10 @@ impl Place {
     pub fn new(world: u32, start: impl Into<Vec<f32>>, held: Held, poses: Vec<Pose>) -> Self {
         Self {
             world,
+            transit_world: None,
+            depart_world: None,
             start: start.into(),
+            transit: true,
             idle: None,
             held,
             poses,
@@ -157,7 +191,7 @@ impl Default for TaskOptions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum TaskStep {
-    /// The start, checked for collision.
+    /// The start, checked for collision. A task without its transit skips it.
     Start,
     /// IK at the grasp, or where the hand lets go.
     Reach,
@@ -165,7 +199,8 @@ pub enum TaskStep {
     Approach,
     /// The straight move away: lifting the object, or backing off from it.
     Depart,
-    /// The planned path from the start to where the move in begins.
+    /// The planned path from the start to where the move in begins. A task without its transit
+    /// skips it.
     Transit,
 }
 
@@ -183,8 +218,9 @@ const STEPS: [TaskStep; 5] = [
 pub struct TaskPlan {
     /// The candidate: its index among the task's grasps or poses.
     pub candidate: usize,
-    /// The planned path from the start to where the move in begins.
-    pub transit: Trajectory,
+    /// The planned path from the start to where the move in begins; none for a task that leaves
+    /// its transit out.
+    pub transit: Option<Trajectory>,
     /// The straight move in. The gripper closes (pick) or opens (place) at its end.
     pub approach: Trajectory,
     /// The straight move away: holding the object after a pick.
@@ -196,10 +232,22 @@ pub struct TaskPlan {
 }
 
 impl TaskPlan {
-    /// Seconds the three motions take, one after another.
+    /// Its motions in the order they run: the transit if it has one, the move in, the move away.
+    pub fn motions(&self) -> impl Iterator<Item = &Trajectory> {
+        self.transit.iter().chain([&self.approach, &self.depart])
+    }
+
+    /// Seconds its motions take, one after another.
     #[must_use]
     pub fn duration(&self) -> f32 {
-        self.transit.duration() + self.approach.duration() + self.depart.duration()
+        self.motions().map(Trajectory::duration).sum()
+    }
+
+    /// Where the move in begins, its first control point: where the transit ends, or a way planned
+    /// apart must.
+    #[must_use]
+    pub fn begin(&self) -> &[f32] {
+        &self.approach.control_points[..self.approach.dof]
     }
 
     /// Where the departure comes to rest, its last control point: the start of the next task.
@@ -329,7 +377,7 @@ pub fn pick(
     let robot = device.robot();
     check_options(o)?;
     for (i, t) in tasks.iter().enumerate() {
-        let world = check_task(robot, worlds, i, t.world, &t.start, t.hand, &t.constraints)?;
+        let world = check_task(robot, worlds, i, &Steps::of_pick(t), &t.start, t.hand)?;
         let object = world.obstacles.get(t.object).ok_or_else(|| {
             input!(
                 "task {i}: obstacle {} of {}",
@@ -364,10 +412,11 @@ pub fn pick(
                 at,
                 Pose::new(at.position + task.lift, at.rotation),
             ];
+            let steps = Steps::of_pick(task);
             candidates.push(Candidate::new(
                 t,
                 index,
-                task.world,
+                &steps,
                 task.hand,
                 &task.start,
                 poses,
@@ -376,7 +425,10 @@ pub fn pick(
     }
 
     // Starts clear of everything, the object included.
-    let worlds_of: Vec<u32> = tasks.iter().map(|t| t.world).collect();
+    let worlds_of: Vec<u32> = tasks
+        .iter()
+        .map(|t| Steps::of_pick(t).transit_world)
+        .collect();
     start(
         device,
         worlds,
@@ -428,7 +480,7 @@ pub fn pick(
             tasks
                 .iter()
                 .map(|t| {
-                    let mut w = worlds[t.world as usize].clone();
+                    let mut w = worlds[Steps::of_pick(t).depart_world as usize].clone();
                     w.remove(t.object)?;
                     if t.hand == hand {
                         let shifted = |s: usize| if s > t.object { s - 1 } else { s };
@@ -514,15 +566,7 @@ pub fn place(
     let robot = device.robot();
     check_options(o)?;
     for (i, t) in tasks.iter().enumerate() {
-        let world = check_task(
-            robot,
-            worlds,
-            i,
-            t.world,
-            &t.start,
-            t.held.hand,
-            &t.constraints,
-        )?;
+        let world = check_task(robot, worlds, i, &Steps::of_place(t), &t.start, t.held.hand)?;
         if let Some(idle) = &t.idle {
             ensure_input!(
                 idle.len() == robot.dof(),
@@ -583,7 +627,8 @@ pub fn place(
                 behind(at, task.retreat),
             ];
             let hand = task.held.hand;
-            let mut c = Candidate::new(t, index, task.world, hand, &task.start, poses);
+            let steps = Steps::of_place(task);
+            let mut c = Candidate::new(t, index, &steps, hand, &task.start, poses);
             if let Some(idle) = &task.idle {
                 for j in robot.idle_joints(hand) {
                     c.rest[j] = idle[j];
@@ -594,7 +639,10 @@ pub fn place(
     }
 
     // Starts clear of everything, holding the object.
-    let worlds_of: Vec<u32> = tasks.iter().map(|t| t.world).collect();
+    let worlds_of: Vec<u32> = tasks
+        .iter()
+        .map(|t| Steps::of_place(t).transit_world)
+        .collect();
     let mut starting = by_holder(live(&mut candidates, TaskStep::Start), &holder_of, &holders);
     device.install(|| {
         starting
@@ -727,7 +775,7 @@ pub fn place(
             .iter()
             .map(|c| {
                 let t = &tasks[c.task];
-                let mut w = worlds[t.world as usize].clone();
+                let mut w = worlds[Steps::of_place(t).depart_world as usize].clone();
                 w.obstacles.push(t.held.object.placed(t.poses[c.index]));
                 let object = w.obstacles.len() - 1;
                 w.touch
@@ -1000,6 +1048,10 @@ struct Candidate {
     index: usize,
     /// Its task's world in the batch given.
     world: u32,
+    /// The world its start is checked and its transit planned in.
+    transit_world: u32,
+    /// Whether its task plans the transit, and so checks the start.
+    transits: bool,
     hand: usize,
     start: Vec<f32>,
     /// Where the joints only other hands move wait after the transit: the start, but for a
@@ -1025,7 +1077,7 @@ impl Candidate {
     fn new(
         task: usize,
         index: usize,
-        world: u32,
+        steps: &Steps<'_>,
         hand: usize,
         start: &[f32],
         poses: [Pose; 3],
@@ -1033,7 +1085,9 @@ impl Candidate {
         Self {
             task,
             index,
-            world,
+            world: steps.world,
+            transit_world: steps.transit_world,
+            transits: steps.transit,
             hand,
             start: start.to_vec(),
             rest: start.to_vec(),
@@ -1074,23 +1128,32 @@ fn by_holder<'a>(
     groups
 }
 
-/// Whether each of `starting` starts clear of its task's world (`worlds_of`).
+/// Whether each of `starting` starts clear of its task's transit world (`worlds_of`). One whose
+/// task plans no transit passes unchecked.
 fn start(
     device: &Device,
     worlds: &Worlds,
     starting: &mut [&mut Candidate],
     worlds_of: &[u32],
 ) -> Result<()> {
-    if starting.is_empty() {
+    let mut checked = vec![];
+    for c in starting.iter_mut() {
+        if c.transits {
+            checked.push(c);
+        } else {
+            c.passed += 1;
+        }
+    }
+    if checked.is_empty() {
         return Ok(());
     }
-    let lists = starting
+    let lists = checked
         .iter()
         .map(|c| (worlds_of[c.task], c.start.clone()))
         .collect();
     let free = first_free(device, worlds, lists)?;
     let mut colliding = vec![];
-    for (c, free) in starting.iter_mut().zip(free) {
+    for (c, free) in checked.into_iter().zip(free) {
         if free.is_some() {
             c.passed += 1;
         } else {
@@ -1319,7 +1382,8 @@ fn straight(
 
 /// A planned path from each candidate's start to where its move in begins, the joints only other
 /// hands move held where they rest there already, keeping its task's `constraints`. A candidate
-/// whose move in begins where they break gets none.
+/// whose move in begins where they break gets none. One whose task plans no transit passes
+/// without one.
 fn transit(
     device: &Device,
     worlds: &Worlds,
@@ -1329,10 +1393,13 @@ fn transit(
 ) -> Result<()> {
     let robot = device.robot();
     let n = robot.dof();
+    for c in live.iter_mut().filter(|c| !c.transits) {
+        c.passed += 1;
+    }
     let keeping: Vec<usize> = (0..live.len())
         .filter(|&k| {
             let c = &live[k];
-            constraint::breach(robot, constraints[c.task], &c.approach[..n]).is_none()
+            c.transits && constraint::breach(robot, constraints[c.task], &c.approach[..n]).is_none()
         })
         .collect();
     if keeping.is_empty() {
@@ -1349,7 +1416,7 @@ fn transit(
                     .filter(|&j| c.rest[j] == c.start[j])
                     .collect(),
                 constraints: constraints[c.task].to_vec(),
-                ..PlanProblem::new(c.world, c.start.clone(), &c.approach[..n])
+                ..PlanProblem::new(c.transit_world, c.start.clone(), &c.approach[..n])
             }
         })
         .collect();
@@ -1387,7 +1454,10 @@ fn choose(
         let (held, placed) = leaves(c);
         Ok(TaskPlan {
             candidate: c.index,
-            transit: Trajectory::try_new(robot, &c.transit, 1.0)?,
+            transit: match c.transits {
+                true => Some(Trajectory::try_new(robot, &c.transit, 1.0)?),
+                false => None,
+            },
             approach: Trajectory::with_hand_speed(robot, &c.approach, &speed)?,
             depart: Trajectory::with_hand_speed(robot, &c.depart, &speed)?,
             held,
@@ -1481,24 +1551,70 @@ fn check_options(o: &TaskOptions) -> Result<()> {
     Ok(())
 }
 
-/// Task `i`'s world, after checking its index, start and hand.
+/// The world each step of a task runs in, and whether it plans its transit.
+struct Steps<'a> {
+    world: u32,
+    transit_world: u32,
+    depart_world: u32,
+    transit: bool,
+    constraints: &'a [HandConstraint],
+}
+
+impl<'a> Steps<'a> {
+    fn of_pick(t: &'a Pick) -> Self {
+        Self {
+            world: t.world,
+            transit_world: t.transit_world.unwrap_or(t.world),
+            depart_world: t.depart_world.unwrap_or(t.world),
+            transit: t.transit,
+            constraints: &t.constraints,
+        }
+    }
+
+    fn of_place(t: &'a Place) -> Self {
+        Self {
+            world: t.world,
+            transit_world: t.transit_world.unwrap_or(t.world),
+            depart_world: t.depart_world.unwrap_or(t.world),
+            transit: t.transit,
+            constraints: &t.constraints,
+        }
+    }
+}
+
+/// Task `i`'s world, after checking its steps' worlds, its start and its hand.
 fn check_task<'a>(
     robot: &Robot,
     worlds: &'a Worlds,
     i: usize,
-    world: u32,
+    steps: &Steps<'_>,
     start: &[f32],
     hand: usize,
-    constraints: &[HandConstraint],
 ) -> Result<&'a World> {
+    let world = steps.world;
     let w = worlds
         .get(world as usize)
         .ok_or_else(|| input!("task {i}: world {world} of {}", worlds.len()))?;
+    for (step, other) in [
+        ("transit", steps.transit_world),
+        ("depart", steps.depart_world),
+    ] {
+        let o = worlds
+            .get(other as usize)
+            .ok_or_else(|| input!("task {i}: {step} world {other} of {}", worlds.len()))?;
+        ensure_input!(
+            o.obstacles.len() == w.obstacles.len(),
+            "task {i}: {step} world {other} has {} obstacles and world {world} {}; a step's \
+             world holds the same obstacles, in the same order",
+            o.obstacles.len(),
+            w.obstacles.len()
+        );
+    }
     ensure_input!(
         start.len() == robot.dof(),
         "task {i}: a start of {} joints, not {}",
-        robot.dof(),
-        start.len()
+        start.len(),
+        robot.dof()
     );
     ensure_input!(
         start.iter().all(|v| v.is_finite()),
@@ -1513,8 +1629,10 @@ fn check_task<'a>(
         "task {i}: hand {hand} of {}",
         robot.hands()
     );
-    constraint::check(robot, constraints, &format!("task {i}"))?;
-    if let Some(why) = constraint::breach(robot, constraints, start) {
+    constraint::check(robot, steps.constraints, &format!("task {i}"))?;
+    if steps.transit
+        && let Some(why) = constraint::breach(robot, steps.constraints, start)
+    {
         return Err(input!("task {i}: the start breaks its constraints: {why}"));
     }
     Ok(w)

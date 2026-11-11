@@ -696,13 +696,7 @@ pub fn pick_and_place(
     let mut rng = Rng::new(o.rng_seed);
     let motions: Vec<(&Trajectory, f32)> = done
         .iter()
-        .flat_map(|(_, up, down, _)| {
-            [&up.transit, &up.approach, &up.depart].into_iter().chain([
-                &down.transit,
-                &down.approach,
-                &down.depart,
-            ])
-        })
+        .flat_map(|(_, up, down, _)| up.motions().chain(down.motions()))
         .map(|t| (t, rng.range(o.speed_scale.0, o.speed_scale.1)))
         .collect();
     let mut sampled = sampled(device, &motions, o.dt)?.into_iter();
@@ -1086,12 +1080,7 @@ pub fn handover(
     let motions: Vec<(&Trajectory, f32)> = done
         .iter()
         .zip(&exchanges)
-        .flat_map(|((e, down, _), exchange)| {
-            [&e.up.transit, &e.up.approach, &e.up.depart]
-                .into_iter()
-                .chain(exchange)
-                .chain([&down.transit, &down.approach, &down.depart])
-        })
+        .flat_map(|((e, down, _), exchange)| e.up.motions().chain(exchange).chain(down.motions()))
         .map(|t| (t, rng.range(o.speed_scale.0, o.speed_scale.1)))
         .collect();
     let mut sampled = sampled(device, &motions, o.dt)?.into_iter();

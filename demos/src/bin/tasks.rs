@@ -137,12 +137,16 @@ fn episode(robot: &Robot, start: Pose, picked: &TaskPlan, placed: &TaskPlan) -> 
     };
     let mut e = Episode::new();
     let still = |pose: Pose| move |_: &[f32]| pose;
-    e.run(robot, &picked.transit, OPEN, &still(start))?;
-    e.run(robot, &picked.approach, OPEN, &still(start))?;
+    let reaching = picked.transit.iter().chain([&picked.approach]);
+    for motion in reaching {
+        e.run(robot, motion, OPEN, &still(start))?;
+    }
     e.grip(OPEN, closed, start);
     e.run(robot, &picked.depart, closed, &carried)?;
-    e.run(robot, &placed.transit, closed, &carried)?;
-    e.run(robot, &placed.approach, closed, &carried)?;
+    let carrying = placed.transit.iter().chain([&placed.approach]);
+    for motion in carrying {
+        e.run(robot, motion, closed, &carried)?;
+    }
     e.grip(closed, OPEN, set_down);
     e.run(robot, &placed.depart, OPEN, &still(set_down))?;
     Ok(e)

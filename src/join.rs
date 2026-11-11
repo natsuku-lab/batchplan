@@ -26,6 +26,7 @@ use crate::constraint::{self, HandConstraint, Region};
 use crate::device::{Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Search};
 use crate::error::{Result, ensure_input};
+use crate::held::{self, Held};
 use crate::robot::Robot;
 use crate::rrt;
 use crate::spline::{self, basis};
@@ -47,6 +48,9 @@ pub struct Sequence {
     /// blends all break them stops. The paths should keep them already, as `plan` keeps a
     /// problem's.
     pub constraints: Vec<HandConstraint>,
+    /// An object a hand holds through the sequence, as a pick leaves it: every blend is checked
+    /// with it, as attaching it ([`Held::attachment`]) would check it. `None` holds nothing.
+    pub holding: Option<Held>,
 }
 
 /// How [`join`] checks its blends.
@@ -92,7 +96,9 @@ const MEET: f32 = 1e-5;
 
 /// Joins each sequence's motions into one path that passes each join without stopping, within the
 /// blend radius of it, where that is sooner and collision-free in the sequence's world
-/// ([`JoinResult`]). Sequences run in parallel on the device's threads.
+/// ([`JoinResult`]). Sequences run in parallel on the device's threads; those that hold an object
+/// ([`Sequence::holding`]) run as a batch for each object and grasp, on a device holding it, and
+/// `device` must not hold one in that hand already.
 pub fn join(
     device: &Device,
     worlds: &Worlds,
@@ -117,6 +123,9 @@ pub fn join(
             sequence.paths.len()
         );
         constraint::check(robot, &sequence.constraints, &format!("sequence {i}"))?;
+        if let Some(held) = &sequence.holding {
+            held.check(robot, worlds, &format!("sequence {i}"))?;
+        }
         for (k, &radius) in sequence.blends.iter().enumerate() {
             ensure_input!(
                 radius >= 0.0 && radius.is_finite(),
@@ -150,22 +159,32 @@ pub fn join(
             }
         }
     }
-    let mut searches: Vec<_> = sequences
-        .iter()
-        .map(|sequence| Deferred::new(None, move || Joining::new(robot, sequence, o)))
-        .collect();
-    let mut running: Vec<&mut dyn Search> =
-        searches.iter_mut().map(|s| s as &mut dyn Search).collect();
-    device.search(worlds, &mut running, None)?;
+    // A robot holding an object keeps its joints and their limits, so the bare robot times every
+    // blend; only the collision checks run on the device that holds it.
+    let holds: Vec<Option<&Held>> = sequences.iter().map(|s| s.holding.as_ref()).collect();
+    let parts = held::by_hold(device, &holds, |on, items| {
+        let mut searches: Vec<_> = items
+            .iter()
+            .map(|&i| Deferred::new(None, move || Joining::new(robot, &sequences[i], o)))
+            .collect();
+        let mut running: Vec<&mut dyn Search> =
+            searches.iter_mut().map(|s| s as &mut dyn Search).collect();
+        on.search(worlds, &mut running, None)?;
+        Ok(searches
+            .into_iter()
+            .map(Deferred::into_inner)
+            .collect::<Vec<_>>())
+    })?;
     let mut result = JoinResult {
         problems: sequences.to_vec(),
-        paths: Vec::with_capacity(sequences.len()),
-        blends: Vec::with_capacity(sequences.len()),
+        paths: vec![vec![]; sequences.len()],
+        blends: vec![vec![]; sequences.len()],
     };
-    for search in searches {
-        let done = search.into_inner();
-        result.paths.push(done.stretches());
-        result.blends.push(done.blends);
+    for (items, joined) in parts {
+        for (i, done) in items.into_iter().zip(joined) {
+            result.paths[i] = done.stretches();
+            result.blends[i] = done.blends;
+        }
     }
     Ok(result)
 }
@@ -650,6 +669,7 @@ mod tests {
             paths,
             blends: vec![blend],
             constraints: vec![],
+            holding: None,
         }
     }
 

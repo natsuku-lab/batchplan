@@ -218,7 +218,7 @@ fn main() -> Result<(), Error> {
 
 ## Picking up and setting down
 
-`pick(&device, &worlds, &[Pick], &TaskOptions)` and `place(&device, &worlds, &[Place], &TaskOptions)` each do a whole task in one call: three motions from rest to rest. The `transit` is a planned path from the start to where the hand begins to move in, the `approach` a straight move in (to the grasp, or down to where the object goes), and the `depart` a straight move away (lifting the object, or backing off from it). Close or open the gripper between the approach and the departure. Every motion is checked with the fingers where the start has them, so open them first.
+`pick(&device, &worlds, &[Pick], &TaskOptions)` and `place(&device, &worlds, &[Place], &TaskOptions)` each do a whole task in one call: three motions from rest to rest, or the last two alone for a task that leaves its transit out. The `transit` is a planned path from the start to where the hand begins to move in, the `approach` a straight move in (to the grasp, or down to where the object goes), and the `depart` a straight move away (lifting the object, or backing off from it). Close or open the gripper between the approach and the departure. Every motion is checked with the fingers where the start has them, so open them first.
 
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
@@ -286,6 +286,42 @@ fn main() -> Result<(), Error> {
 
   Every candidate that passes every step comes back, quickest first (`TaskPlan::candidate` says which). So a place batched over each surviving grasp's `end` and `held` finds the quickest pick and place together, in two calls. The straight moves keep the hand under `TaskOptions::tool_speed` (10 cm/s), and must make `min_fraction` of their length (all of it): less lets an obstacle shorten a move in or away rather than rule the candidate out, while a move stopped short by anything else (out of reach, a jump) still rules it out.
 - **What may touch.** At the grasp and moving in, the fingers (`Robot::finger_links`, or the whole hand where it has no links with collision spheres below its palm) may touch the object; the palm may not, so a grasp set too deep fails. The held object may touch what it rests on as it leaves (`Pick::support`) and what it is set on as it arrives (`Place::support`). Backing off, the fingers may touch the object where it now stands. Everything else collides.
+- **A world per step.** A task's `world` is the one the hand grasps or lets go in, and each other step's unless that names its own: `transit_world` for the start and the planned path, `depart_world` for the move away. Each holds the task's obstacles, in the same order, shaped or touched (`World::touch`) otherwise, so a hand that may lean on the bin an object stands in at the grasp plans its way there touching nothing, or around the bin as measured where the grasp sees it as a box. Several ways of allowing a task are several tasks of one call, and the first of them with a plan is the one to run.
+- **Moves without the way to them.** A task with `transit: false` runs steps 2 to 4 alone and keeps every candidate that passes them: its plans hold the two straight moves (`TaskPlan::transit` is `None`, `TaskPlan::motions` gives what there is in order), `TaskPlan::begin` is where a way to them must end and `TaskPlan::end` where the next begins. Its start is not checked for collision, and its constraints, which are the transit's, are not applied: the start only says which solution of a grasp or release is nearest and where the joints other hands move wait (a place's `idle` still says the latter where it is given). So a program of many tasks need not plan them one after another: every pick's moves solve in one call and every place's in a second (each holding what its pick's grasp holds, in the world its step of the program leaves), and every way between them is one `plan`, the carries `holding` their objects. `join` then runs each way on into the move in after it, a carry with its `holding`:
+
+  ```rust,no_run
+  # use batchplan::{Device, Error, JoinOptions, Pick, PlanOptions, PlanProblem, Sequence, TaskOptions, Worlds};
+  # fn run(device: &Device, worlds: &Worlds, picks: Vec<Pick>) -> Result<(), Error> {
+  // Every pick's moves in one call, none planning its way from its start.
+  let picks: Vec<Pick> = picks.into_iter().map(|p| Pick { transit: false, ..p }).collect();
+  let moves = batchplan::pick(device, worlds, &picks, &TaskOptions::default())?;
+  // The way to each task's quickest moves, in one more.
+  let mut quickest = vec![];
+  let mut ways = vec![];
+  for (task, outcome) in picks.iter().zip(&moves.outcomes) {
+      if let Ok(plans) = outcome {
+          let world = task.transit_world.unwrap_or(task.world);
+          ways.push(PlanProblem::new(world, task.start.clone(), plans[0].begin()));
+          quickest.push(&plans[0]);
+      }
+  }
+  let planned = batchplan::plan(device, worlds, &ways, &PlanOptions::default())?;
+  // Each way found runs on into its move in without stopping, where that is sooner.
+  let sequences: Vec<Sequence> = planned
+      .solved()
+      .map(|way| Sequence {
+          world: way.problem.world,
+          paths: vec![way.solution.to_vec(), quickest[way.index].approach.control_points.clone()],
+          blends: vec![0.05],
+          constraints: vec![],
+          holding: None,
+      })
+      .collect();
+  let joined = batchplan::join(device, worlds, &sequences, &JoinOptions::default())?;
+  # let _ = joined;
+  # Ok(())
+  # }
+  ```
 - **What the hand holds.** A pick's plan holds a `Held` (`TaskPlan::held`): the object in its own frame and the grasp. `place` takes it and attaches the object itself, to the device without it, and so do `plan`, `solve_ik` and `follow` for a problem's `holding` ([holding objects](robots.md#holding-objects)); `Held::attachment(&robot)` gives the `AttachedObject` for a device that holds it ([`Robot::attach`](robots.md)). A place's plan gives the object where it now stands (`TaskPlan::placed`), to add to the world, and `TaskPlan::end` is where the next task starts. `World::remove` takes the object out of its world for the place, renumbering the touches.
 - **Other arms.** A pick or place moves its hand's joints alone; the joints only other hands move wait where the start has them. A place's transit can take them elsewhere at the same time (`Place::idle`), as another arm going home while this one carries the object, and they wait there through the moves in and away: IK at the release starts from there.
 - **Proposals.** `grasps(&obstacle, &GraspOptions)` proposes grasps for a box, ball, cylinder or capsule, in its frame: the hand facing each side, closing across what fits between its fingers (`opening`, 8 cm), `depth` (2 cm) in from the surface. They suit a parallel gripper whose IK frame lies between its fingertips, its z axis pointing out of the hand and its y axis along the closing direction, as the Panda's `ee_link`. Where no grasp fits, `grasps` says why: the object is wider than the fingers open every way, or a floor rules out every grasp. `place_poses(&obstacle, pose, turns)` gives an object's symmetric turns at one spot: 2 for a box (4 with a square footprint), `turns` for a round object.
@@ -306,6 +342,7 @@ let sequence = Sequence {
     paths: vec![transit, approach],
     blends: vec![0.05],
     constraints: vec![],
+    holding: None,
 };
 let joined = batchplan::join(device, &worlds, &[sequence], &JoinOptions::default())?;
 // One path per stretch the robot moves without stopping: here one, unless the join stopped.
@@ -320,8 +357,9 @@ for path in &joined.paths[0] {
 - **The blend.** Near a join, the joined path leaves the motions only while every hand is within the join's radius of where it is at the join (0 stops there), and is the motions themselves elsewhere: a tool path stays on its line outside the blend. Inside it, the path follows a curve that sets out and arrives along both motions without curving there, so jerk-limited timing can follow it at speed.
 - **Kept only where it is sooner.** Each join weighs three blends: the widest within the radius, one dropping half as many control points, and the narrowest. Those that make the stretch so far and the next motion finish sooner than with a stop between them are checked for collision, soonest first, and the first that is free is kept. A turn back, or a tight turn at speed, rarely gains, and keeps its stop. `JoinResult::blends` gives each join's radius, `None` where it stops. Joining never makes a sequence take longer.
 - **The result.** Per sequence, one path for each stretch the robot moves without stopping, to time with `Trajectory::try_new`. A stretch of one motion is that motion as given.
+- **Holding an object.** A sequence's `holding` (a pick's `Held`) is carried through it: every blend is checked with the object in the hand, as `plan` and `follow` check a problem's, on the device without it. A carry joins into the move in of its place this way.
 - **What it gains.** On pick-like sequences, a transit into a straight move in and a straight move out into the next transit, a 5 cm radius finished 5.8% sooner on average on a reBot B601 (15% at most) and 8.4% on an SO-101 (17%), and joining 60 of them took 15 ms on 32 threads ([Benchmarks](benchmarks.md#joining-motions)). Motions that carry on in about the same direction gain more; a sharp turn needs most of a stop's braking anyway.
-- **Limits.** Each stretch has one timing, so a hand speed cap (`Trajectory::with_hand_speed`) caps all of it, and `pick` and `place` still stop between their steps. Each join times the stretch so far, so joining a long sequence costs more per join than a short one.
+- **Limits.** Each stretch has one timing, so a hand speed cap (`Trajectory::with_hand_speed`) caps all of it, and `pick` and `place` still stop between their steps; a task without its transit leaves the way to its moves to join with them. Each join times the stretch so far, so joining a long sequence costs more per join than a short one.
 
 ## Executable trajectories
 

@@ -74,10 +74,21 @@ value_class! {
 value_class! {
     /// A hand picking up one obstacle of its world.
     Pick(batchplan::Pick) {
-        /// The world's index in the batch.
+        /// The world's index in the batch: the one the hand grasps and moves in in, and every
+        /// other step's unless that names its own.
         world: u32,
+        /// The world the start is checked and the transit planned in, where it is another: as
+        /// many obstacles as `world` has, in its order, shaped or touched otherwise.
+        transit_world: Option<u32>,
+        /// The world the object is lifted in, where it is another, likewise.
+        depart_world: Option<u32>,
         /// Where the robot starts, at rest.
         start: Vec<f32>,
+        /// Whether the path from the start to where the move in begins is planned: `True`.
+        /// Without it the plans hold the two straight moves alone (`TaskPlan.begin` is where a
+        /// way to them ends), and the start, which is not checked for collision, only says which
+        /// solution of a grasp is nearest and where the joints other hands move wait.
+        transit: bool,
         /// The hand that picks it up.
         hand: usize,
         /// The object: an obstacle of the world, by index. A distance grid cannot be picked up.
@@ -93,7 +104,8 @@ value_class! {
         /// Obstacles the object rests on, by index: it may touch them as it leaves.
         support: Vec<usize>,
         /// Where the hands must stay along the transit. The start must keep them; a grasp whose
-        /// move in begins where they break stops at the transit.
+        /// move in begins where they break stops at the transit. A task without its transit has
+        /// no use for them.
         constraints: Vec<batchplan::HandConstraint>,
     }
     methods {
@@ -122,10 +134,23 @@ value_class! {
 value_class! {
     /// A hand setting down the object it holds.
     Place(batchplan::Place) {
-        /// The world's index in the batch. The held object is not one of its obstacles.
+        /// The world's index in the batch: the one the hand moves in in to where it lets go, and
+        /// every other step's unless that names its own. The held object is not one of its
+        /// obstacles.
         world: u32,
+        /// The world the start is checked and the transit planned in, where it is another: as
+        /// many obstacles as `world` has, in its order, shaped or touched otherwise.
+        transit_world: Option<u32>,
+        /// The world the hand backs off in, where it is another, likewise.
+        depart_world: Option<u32>,
         /// Where the robot starts, at rest, holding the object.
         start: Vec<f32>,
+        /// Whether the path from the start to where the move in begins is planned: `True`.
+        /// Without it the plans hold the two straight moves alone (`TaskPlan.begin` is where a
+        /// way to them ends), and the start, which is not checked for collision, only says which
+        /// solution of a release is nearest and where the joints other hands move wait, unless
+        /// `idle` says so.
+        transit: bool,
         /// Where the joints only other hands move go on the transit, as a configuration of which
         /// only those joints count: another arm going home while this one carries the object.
         /// `None` keeps them where `start` has them.
@@ -142,7 +167,8 @@ value_class! {
         /// Obstacles the object is set on, by index: it may touch them as it arrives.
         support: Vec<usize>,
         /// Where the hands must stay along the transit, as a cup carried upright. The start must
-        /// keep them; a pose whose move in begins where they break stops at the transit.
+        /// keep them; a pose whose move in begins where they break stops at the transit. A task
+        /// without its transit has no use for them.
         constraints: Vec<batchplan::HandConstraint>,
     }
     methods {
@@ -226,10 +252,25 @@ impl TaskPlan {
         self.0.candidate
     }
 
-    /// The planned path from the start to where the move in begins.
+    /// The planned path from the start to where the move in begins; `None` for a task that
+    /// leaves its transit out.
     #[getter]
-    fn transit(&self) -> Trajectory {
-        Trajectory(self.0.transit.clone())
+    fn transit(&self) -> Option<Trajectory> {
+        self.0.transit.clone().map(Trajectory)
+    }
+
+    /// Its motions in the order they run: the transit if it has one, the move in, the move away.
+    #[getter]
+    fn motions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let motions: Vec<Trajectory> = self.0.motions().cloned().map(Trajectory).collect();
+        PyTuple::new(py, motions)
+    }
+
+    /// Where the move in begins, its first control point: where the transit ends, or a way
+    /// planned apart must.
+    #[getter]
+    fn begin<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.0.begin().to_vec().to_py(py)
     }
 
     /// The straight move in. The gripper closes (pick) or opens (place) at its end.
@@ -256,7 +297,7 @@ impl TaskPlan {
         self.0.placed.clone().map(Obstacle)
     }
 
-    /// Seconds the three motions take, one after another.
+    /// Seconds its motions take, one after another.
     #[getter]
     fn duration(&self) -> f64 {
         field::shortest(self.0.duration())
