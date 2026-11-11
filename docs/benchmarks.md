@@ -411,26 +411,26 @@ Planning alone clears the meshes in 92.9% of the problems. IK + plan clears them
 
 Every device solves the same 484 of 512 targets and plans all 484.
 
-| Machine | IK seeds/s, GPU / CPU | Planning, problems/s | End to end, GPU | End to end, CPU |
+| Machine | IK seeds/s, GPU / CPU (64 per target, 4 of them past the first 8 steps) | Planning, problems/s | End to end, GPU | End to end, CPU |
 |---|---|---|---|---|
-| Ryzen AI Max+ 395 and Radeon 8060S | 1,237,000–1,424,000 / 449,000–467,000 | 197,000–336,000 | **17,171–19,602 problems/s** | 6,507–6,707 problems/s (32 threads) |
-| M4 Pro | 558,000–591,000 / 282,000–381,000 | 95,000–183,000 | **7,771–8,254 problems/s** | 3,984–5,453 problems/s (14 threads) |
+| Ryzen AI Max+ 395 and Radeon 8060S | 2,240,000–2,630,000 / 1,027,000–1,061,000 | 263,000–362,000 | **29,857–35,078 problems/s** | 14,341–14,981 problems/s (32 threads) |
+| M4 Pro | 939,000–1,564,000 / 609,000–833,000 | 148,000–156,000 | **12,679–20,032 problems/s** | 8,485–11,408 problems/s (14 threads) |
 
-Each range covers three runs, each started with the machine's load under 6, the M4 Pro's at bf2f5b9 (on the Ryzen and the Radeon, three more, straight after a half-hour benchmark, read about 9% lower). The first run after the GPU idles is up to 30% slower, and the M4 Pro's GPU, which also drives its display, varies with what is on screen.
+Each range covers three runs, each started with the machine's load under 6, with IK that screens its seeds ([#34](https://github.com/natsuku-lab/batchplan/pull/34); before it, with every seed taking every step, the Radeon solved 17,171–19,602 problems per second and the M4 Pro's GPU 7,771–8,254). The M4 Pro's three ran one after another as its load fell to 6, and the first is its slowest. The first run after the GPU idles is up to 30% slower, and the M4 Pro's GPU, which also drives its display, varies with what is on screen.
 
 Uploading the 512 worlds, which the example times first, takes 0.1 ms on the M4 Pro's CPU and 0.2 ms on its GPU: preparing each obstacle for the CPU's checks and, on the GPU, one buffer write. A distance grid adds its values, uploaded once however many worlds share it.
 
-By batch size, end to end, in solved problems per second (medians of three runs: the M4 Pro's in the session of the table above, the Ryzen's and the Radeon's in a later one than theirs):
+By batch size, end to end, in solved problems per second (medians of three runs, in the sessions of the table above):
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU | Radeon 8060S | Ryzen CPU |
 |---|---|---|---|---|
-| 1 | 80 | **1,413** | 259 | **1,826** |
-| 8 | 581 | **3,219** | 1,943 | **4,362** |
-| 64 | 1,993 | **4,576** | 4,269 | **6,050** |
-| 512 | **8,166** | 5,403 | **17,521** | 6,832 |
-| 4,096 | **10,583** | 5,285 | **20,977** | 7,084 |
+| 1 | 83 | **2,583** | 292 | **3,145** |
+| 8 | 1,263 | **4,602** | 1,959 | **6,617** |
+| 64 | 3,796 | **7,140** | 8,289 | **11,755** |
+| 512 | **14,676** | 10,135 | **33,196** | 14,588 |
+| 4,096 | **20,622** | 10,441 | **37,740** | 14,422 |
 
-A GPU call costs 4 ms on the Radeon (12 ms on the M4 Pro), so one problem at a time runs 7–18 times faster on the CPU. On the M4 Pro that cost varies from run to run and with how recently the GPU worked: one problem's IK took 8 to 20 ms within one session on batchplan 0.1.0 and 11 to 13 ms in these runs, one call after a warm-up, while the 2,600 problems' calls, one after another, take 5 ms each end to end. The CPU fills its cores by 64 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.0 (M4 Pro) to 3.0 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 1.6 (M4 Pro: 56 against 87 ms for 512 targets) to 2.8 times (Radeon: 25 against 71 ms).
+A GPU call costs 3.4 ms on the Radeon (12 ms on the M4 Pro), so one problem at a time runs 11–31 times faster on the CPU. On the M4 Pro that cost varies from run to run and with how recently the GPU worked: one problem's IK took 8 to 20 ms within one session on batchplan 0.1.0 and 11 to 13 ms in these runs, one call after a warm-up, while the 2,600 problems' calls, one after another, take 5 ms each end to end. The CPU fills its cores by 512 problems. The GPU keeps gaining, overtakes the CPU between 64 and 512 problems, and at 4,096 solves 2.0 (M4 Pro) to 2.6 (Radeon) times as many problems per second. These tabletop reaches are easy, mostly straight lines: planning all 484 takes a few milliseconds, so IK sets the pace, and the GPU speeds IK up 1.5 (M4 Pro: 30 against 44 ms for 512 targets, the middle runs) to 2.5 times (Radeon: 13 against 32 ms).
 
 ## Tool paths
 
