@@ -25,8 +25,7 @@
 
 // The library's own rules: from Google's Rust style guide, documented public items, `#[must_use]`
 // pure functions, and `expect` with its reason rather than `unwrap` outside tests; and internals
-// `pub(crate)`, no `unsafe` but the kernels' shader module (gpu.rs), and no environment variables
-// read (clippy.toml).
+// `pub(crate)`, no `unsafe`, and no environment variables read (clippy.toml).
 #![warn(missing_docs, missing_debug_implementations, unreachable_pub)]
 #![deny(unsafe_code)]
 #![warn(clippy::must_use_candidate, clippy::return_self_not_must_use)]

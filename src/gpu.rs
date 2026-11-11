@@ -1113,26 +1113,11 @@ fn build_kernels(
     .concat();
     // Turn shader and pipeline validation failures into errors instead of panics.
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    // Every loop of these kernels counts to a bound (`kernel_loops_are_counted`), so none can run
-    // forever, and the counter naga would add to each to make sure of that is left out: it costs
-    // IK 10-28% of its time (most without collision spheres). Bounds checks stay.
-    let checks = wgpu::ShaderRuntimeChecks {
-        force_loop_bounding: false,
-        ..wgpu::ShaderRuntimeChecks::checked()
-    };
     let descriptor = wgpu::ShaderModuleDescriptor {
         label: Some("batchplan kernels"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     };
-    #[expect(
-        unsafe_code,
-        reason = "wgpu takes shaders without its loop bounding only from callers who vouch for them"
-    )]
-    // SAFETY: the one check left out guards against infinite loops, and these kernels have none.
-    // Each loop is a `for` whose body leaves its counter alone and whose step is `++`, a shift
-    // down to zero, or `LANES` or `WORKGROUP` (1, 8 or 64) toward a bound that counts elements of
-    // a buffer this backend sized, or steps the options bound: far below where a `u32` wraps.
-    let module = unsafe { device.create_shader_module_trusted(descriptor, checks) };
+    let module = device.create_shader_module(descriptor);
 
     let buffer_entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
         binding,
@@ -2065,7 +2050,7 @@ fn transform_steps<'a>(
 /// Floats of L-BFGS state per path; must match `lbfgs_stride` in kernels.wgsl.
 fn lbfgs_stride(points: usize, n: usize, o: &PlanOptions) -> usize {
     let samples = (points - 3) * o.samples_per_span;
-    samples * n + LINE_SEARCH.len() * samples + (4 + 2 * o.history) * points * n + 5
+    samples * n + LINE_SEARCH.len() * samples + (4 + 2 * o.history) * points * n + 6
 }
 
 impl GpuBackend {
@@ -2506,61 +2491,78 @@ mod tests {
         assert!(gpu.kernels.constrained.get().is_some() && gpu.grids.get().is_some());
     }
 
-    /// The kernels are built without naga's loop bounding, which is sound only while none of their
-    /// loops can run forever: each must be a `for` with a bound and a step that moves toward it.
+    /// Loops of a known count are written out, their variable numbered where it stands alone;
+    /// loops that leave early, and loops of other counts, stay.
     #[test]
-    fn kernel_loops_are_counted() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/assets/ur5e/ur_description/urdf/ur5e.urdf"
-        );
-        let options = crate::RobotOptions::default();
-        let one = Robot::load(path, &options).expect("the UR5e loads");
-        // Two arms have more link pairs than are written out one by one, so their kernel loops
-        // over the pairs.
-        let arm = |prefix: &str, y: f32| crate::Part {
-            path: path.into(),
-            prefix: prefix.into(),
-            base: crate::Pose::new(Vec3::new(0.0, y, 0.0), Quat::IDENTITY),
-        };
-        let two = Robot::assemble(&[arm("left_", 0.4), arm("right_", -0.4)], &options)
-            .expect("two UR5e arms assemble");
-        assert!(two.self_link_pairs.len() > UNROLLED_LINK_PAIRS);
-        let sources = [
-            robot_wgsl(&one),
-            robot_wgsl(&two),
-            include_str!("kernels.wgsl").to_owned(),
-            include_str!("grid.wgsl").to_owned(),
-        ];
-        let mut loops = 0;
-        for source in &sources {
-            let code = source.lines().filter(|l| !l.trim_start().starts_with("//"));
-            for line in code {
-                let words: Vec<&str> = line
-                    .split(|c: char| !c.is_alphanumeric() && c != '_')
-                    .collect();
-                assert!(
-                    !words.contains(&"while") && !words.contains(&"loop"),
-                    "a loop that is not a counted `for`: {line}"
-                );
-                if !words.contains(&"for") {
-                    continue;
-                }
-                // `for (start; condition; step)` on one line, with or without the space.
-                let header = line.split_once('(').map_or("", |(_, rest)| rest);
-                let parts: Vec<&str> = header.split(';').collect();
-                let steps = ["++", "+= LANES", "+= WORKGROUP", ">>= 1u"];
-                let counted = parts.len() == 3
-                    && parts[1].contains(['<', '>'])
-                    && steps.iter().any(|step| parts[2].contains(step));
-                assert!(counted, "a `for` without a bound or a known step: {line}");
-                loops += 1;
-            }
+    fn loops_of_a_known_count_are_written_out() {
+        let source = "\
+fn f() {
+    for (var j = 0u; j < n; j++) {
+        jac[j] = cross(sj.c, obj) * 2.0;
+    }
+    for (var h = 0u; h < HANDS; h++) {
+        for (var j = 0u; j < P.n_dof; j++) {
+            x[h * 3u + j] = 0.0;
         }
+    }
+    for (var c = 0u; c < LINE_STEPS; c++) {
+        if (skip) {
+            continue;
+        }
+        for (var j = 0u; j < MAX_DOF; j++) {
+            y[j] = f32(c);
+        }
+    }
+    for (var c = 0u; c < 2u; c++) {
+        part[c] += sp.c.w * f32(c);
+    }
+    for (var k = 0u; k < range.y; k++) {
+        z[k] = 1.0;
+    }
+}
+";
+        let written = loops_written_out(source, 2, 2);
+        // The joints' loop: `j` alone is numbered, not in `jac`, `sj`, `obj` or the member `.c`.
         assert!(
-            loops > 100,
-            "only {loops} loops found: the scan misses them"
+            written.contains("jac[0u] = cross(sj.c, obj) * 2.0;"),
+            "{written}"
         );
+        assert!(
+            written.contains("jac[1u] = cross(sj.c, obj) * 2.0;"),
+            "{written}"
+        );
+        // A loop in a loop, both written out.
+        for (h, j) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            let line = format!("x[{h}u * 3u + {j}u] = 0.0;");
+            assert!(written.contains(&line), "{line} is missing from {written}");
+        }
+        // A loop that continues stays, and the loop inside it is written out with its variable.
+        assert!(
+            written.contains("for (var c = 0u; c < LINE_STEPS; c++) {"),
+            "{written}"
+        );
+        assert!(written.contains("y[0u] = f32(c);") && written.contains("y[1u] = f32(c);"));
+        // A variable named as a member is: the member keeps its name.
+        assert!(
+            written.contains("part[1u] += sp.c.w * f32(1u);"),
+            "{written}"
+        );
+        // A count only known at run time stays a loop.
+        assert!(
+            written.contains("for (var k = 0u; k < range.y; k++) {"),
+            "{written}"
+        );
+        let loops = |text: &str| text.matches("for (").count();
+        assert_eq!((loops(source), loops(&written)), (7, 2), "{written}");
+        // The kernels have such loops, and none over the joints is left in what is built.
+        let kernels = include_str!("kernels.wgsl");
+        let over_joints = "for (var j = 0u; j < n; j++) {";
+        assert!(kernels.matches(over_joints).count() > 10);
+        let built = loops_written_out(kernels, 7, 1);
+        assert!(!built.contains(over_joints) && !built.contains("j < P.n_dof; j++"));
+        // Braces still pair up.
+        let braces = |text: &str, brace: char| text.matches(brace).count();
+        assert_eq!(braces(&built, '{'), braces(&built, '}'));
     }
 
     /// A robot relocked (`Robot::relock`) differs only in the link origins the kernels read from

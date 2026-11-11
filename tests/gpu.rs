@@ -992,8 +992,11 @@ fn trajopt_lowers_the_cost_as_far_as_the_cpu() {
         a < 0.2 * start && b < 0.2 * start,
         "optimization barely lowered the cost: {start} -> {a}, {b}"
     );
+    // The devices round differently and still end within 0.01% of each other here (764.5 against
+    // 764.6 on an M4 Pro). A GPU that ended a path's optimization at any search that found nothing
+    // better, where only a steepest-descent one ends it, ended 0.6% higher.
     assert!(
-        (a - b).abs() < 0.05 * a,
+        (a - b).abs() < 0.003 * a,
         "the devices end at different costs: {a} and {b}"
     );
 }

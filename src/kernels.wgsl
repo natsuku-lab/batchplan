@@ -564,11 +564,11 @@ fn path_samples() -> u32 {
 // Each path's L-BFGS state in aux, in this order: the collision gradient per sample, the
 // collision cost per line-search step and sample, then per control point the gradient, the
 // previous gradient, the direction, the pending step, the step history and the gradient-change
-// history, then five scalars: cost, history count, newest slot, started, pending. Mirrors
+// history, then six scalars: cost, history count, newest slot, started, pending, over. Mirrors
 // lbfgs_stride in gpu.rs and the Lbfgs struct in cpu.rs.
 fn lbfgs_stride() -> u32 {
     let tn = P.points * P.n_dof;
-    return path_samples() * P.n_dof + LINE_STEPS * path_samples() + (4u + 2u * P.history) * tn + 5u;
+    return path_samples() * P.n_dof + LINE_STEPS * path_samples() + (4u + 2u * P.history) * tn + 6u;
 }
 
 fn costs_at(item: u32) -> u32 {
@@ -601,6 +601,13 @@ fn changes_at(item: u32, slot: u32) -> u32 {
 
 fn scalars_at(item: u32) -> u32 {
     return steps_at(item, 2u * P.history);
+}
+
+// Where path `item`'s state says whether its optimization is over: a steepest-descent search
+// that found nothing better leaves later rounds nothing to change, so they skip the path, as
+// cpu.rs ends its rounds.
+fn over_at(item: u32) -> u32 {
+    return scalars_at(item) + 5u;
 }
 
 // The trajectory kernels built to keep constraints (gpu.rs builds them when a constrained path is
@@ -767,17 +774,22 @@ fn traj_costs(
     let span = sample / P.samples;
     let w = basis(sample_u(sample % P.samples));
     let alpha = line_search(c);
-    for (var j = 0u; j < P.n_dof; j++) {
-        q[j] = w.x * candidate(item, span, j, alpha) + w.y * candidate(item, span + 1u, j, alpha)
-            + w.z * candidate(item, span + 2u, j, alpha) + w.w * candidate(item, span + 3u, j, alpha);
-    }
-    fk();
-    var part = collision(item_world[item], P.w_world, P.w_self, P.margin, P.self_margin, false, at.y);
-    if (CONSTRAINED && at.y == 0u) {
-        part.x += constraint_cost(item, false);
+    // A path whose optimization is over is left out; its lanes still meet at the barriers.
+    let going = aux[over_at(item)] < 0.5;
+    var part = vec3<f32>(0.0);
+    if (going) {
+        for (var j = 0u; j < P.n_dof; j++) {
+            q[j] = w.x * candidate(item, span, j, alpha) + w.y * candidate(item, span + 1u, j, alpha)
+                + w.z * candidate(item, span + 2u, j, alpha) + w.w * candidate(item, span + 3u, j, alpha);
+        }
+        fk();
+        part = collision(item_world[item], P.w_world, P.w_self, P.margin, P.self_margin, false, at.y);
+        if (CONSTRAINED && at.y == 0u) {
+            part.x += constraint_cost(item, false);
+        }
     }
     let c3 = group_collision(lid, part);
-    if (at.z == 1u && at.y == 0u) {
+    if (going && at.z == 1u && at.y == 0u) {
         aux[costs_at(item) + c * per_item + sample] = c3.x;
     }
 }
@@ -846,6 +858,9 @@ fn traj_search(
     let tn = P.points;
     let per_item = path_samples();
     let sc = scalars_at(item);
+    if (uniform_aux(lid, over_at(item)) > 0.5) {
+        return;
+    }
     var part = vec4<f32>(0.0);
     for (var s = lid; s < per_item; s += WORKGROUP) {
         for (var c = 0u; c < LINE_STEPS; c++) {
@@ -870,6 +885,7 @@ fn traj_search(
     }
     let totals = workgroup_sum(lid, part);
     let started = uniform_aux(lid, sc + 3u) > 0.5;
+    let steepest = uniform_aux(lid, sc + 1u) < 0.5;
     var cost = uniform_aux(lid, sc);
     var best = -1;
     for (var c = 0u; c < LINE_STEPS; c++) {
@@ -882,6 +898,9 @@ fn traj_search(
         if (lid == 0u) {
             aux[sc + 4u] = 0.0;
             aux[sc + 1u] = 0.0;
+            if (steepest) {
+                aux[over_at(item)] = 1.0;
+            }
         }
         return;
     }
@@ -926,6 +945,9 @@ fn lbfgs_direction(
     let end = (P.points - 3u) * P.n_dof;
     let m = P.history;
     let sc = scalars_at(item);
+    if (uniform_aux(lid, over_at(item)) > 0.5) {
+        return;
+    }
     let g = grad_at(item);
     let gp = prev_grad_at(item);
     let d = dir_at(item);
@@ -1025,17 +1047,23 @@ fn traj_samples(
     let w = basis(sample_u(idx % P.samples));
     let n = P.n_dof;
     let base = (item * P.points + span) * n;
+    // A path whose optimization is over is left out; its lanes still meet at the barriers.
+    let going = aux[over_at(item)] < 0.5;
     for (var j = 0u; j < n; j++) {
-        q[j] = w.x * qbuf[base + j] + w.y * qbuf[base + n + j] + w.z * qbuf[base + 2u * n + j] + w.w * qbuf[base + 3u * n + j];
         grad[j] = 0.0;
     }
-    fk();
-    collision(item_world[item], P.w_world, P.w_self, P.margin, P.self_margin, true, at.y);
-    if (CONSTRAINED && at.y == 0u) {
-        _ = constraint_cost(item, true);
+    if (going) {
+        for (var j = 0u; j < n; j++) {
+            q[j] = w.x * qbuf[base + j] + w.y * qbuf[base + n + j] + w.z * qbuf[base + 2u * n + j] + w.w * qbuf[base + 3u * n + j];
+        }
+        fk();
+        collision(item_world[item], P.w_world, P.w_self, P.margin, P.self_margin, true, at.y);
+        if (CONSTRAINED && at.y == 0u) {
+            _ = constraint_cost(item, true);
+        }
     }
     group_grad(lid);
-    if (at.z == 1u && at.y == 0u) {
+    if (going && at.z == 1u && at.y == 0u) {
         let sample = idx % per_item;
         for (var j = 0u; j < n; j++) {
             aux[item * lbfgs_stride() + sample * n + j] = grad[j];
@@ -1054,6 +1082,9 @@ fn traj_grad(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgro
         return;
     }
     let item = idx / free;
+    if (aux[over_at(item)] > 0.5) {
+        return;
+    }
     let t = idx % free + 3u;
     let n = P.n_dof;
     let spans = tn - 3u;
