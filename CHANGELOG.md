@@ -17,6 +17,13 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   it too. `None`, the default, caps both moves all along, as before, to the bit. A `TaskOptions`
   literal needs the new field (`tool_speed_near: None`). In Python,
   `TaskOptions(tool_speed_near=0.02)`.
+- **Breaking:** a `Follower` can follow a motion that joins a way to a move in, replanning only
+  the way: `FollowerOptions::detour` takes a `Detour { from, until, then }`. The follower keeps
+  the path before `from` and after `until`. Where the rest of the motion collides within that
+  window, it plans to `then`'s first state (the move in as planned apart), from no sooner than
+  `from`, then takes up `then` from rest there and reports `FollowStatus::Resumed { at,
+  trajectory }`; along `then` it keeps the path. `None`, the default, changes nothing. A
+  `FollowerOptions` literal needs the new field (`detour: None`).
 
 - `CollisionModel::to_json` and `CollisionModel::from_json` give and take the JSON text `save`
   and `load` write and read, for a model sent where no file goes. In Python, `model.to_json()`

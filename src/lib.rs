@@ -76,7 +76,8 @@ pub use held::Held;
 pub use ik::{IkFailure, IkOptions, IkProblem, IkResult, solve_ik};
 pub use join::{JoinOptions, JoinResult, Sequence, join};
 pub use live::{
-    FollowStatus, Follower, FollowerOptions, ServoOptions, ServoStatus, ServoStep, Tick, servo,
+    Detour, FollowStatus, Follower, FollowerOptions, ServoOptions, ServoStatus, ServoStep, Tick,
+    servo,
 };
 pub use meshes::{Clearance, MeshModel};
 pub use robot::{AttachedObject, CollisionModel, JointLimits, Part, Robot, RobotOptions};

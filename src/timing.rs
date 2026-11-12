@@ -269,6 +269,24 @@ impl Trajectory {
         self.control_points.len() / self.dof - 3
     }
 
+    /// When this trajectory passes where `stop`, a [`Trajectory::stop`] of it, comes to rest: the
+    /// time its map first reaches the stop's last path parameter.
+    pub(crate) fn time_where_stopped(&self, stop: &Self) -> f32 {
+        // A stop drops the spans before the one it starts in, which shifts its path parameter.
+        let dropped = (self.control_points.len() - stop.control_points.len()) / self.dof;
+        let s = dropped as f32 + stop.map_at(stop.duration()).0;
+        let (mut early, mut late) = (0.0, self.duration());
+        for _ in 0..32 {
+            let middle = 0.5 * (early + late);
+            if self.map_at(middle).0 < s {
+                early = middle;
+            } else {
+                late = middle;
+            }
+        }
+        late
+    }
+
     /// Seconds from its start to where it comes to rest.
     #[must_use]
     pub fn duration(&self) -> f32 {

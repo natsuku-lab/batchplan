@@ -12,10 +12,10 @@ mod common;
 use batchplan::glam::{Quat, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionWeights, Contact, Device, Error, FollowStatus, Follower, FollowerOptions,
-    HandConstraint, HandSpeed, JointState, Obstacle, PlanOptions, PlanProblem, Pose, Robot,
-    RobotOptions, RrtOptions, ServoOptions, ServoStatus, ToolPath, ToolPathOptions, Trajectory,
-    World, Worlds,
+    CollisionWeights, Contact, Detour, Device, Error, FollowStatus, Follower, FollowerOptions,
+    HandConstraint, HandSpeed, JoinOptions, JointState, Obstacle, PlanOptions, PlanProblem, Pose,
+    Robot, RobotOptions, RrtOptions, Sequence, ServoOptions, ServoStatus, ToolPath,
+    ToolPathOptions, Trajectory, World, Worlds,
 };
 
 const DT: f32 = 0.02;
@@ -1199,4 +1199,659 @@ fn replans_keep_the_constraints_the_trajectory_was_planned_with() {
             && statuses.last() == Some(&FollowStatus::Blocked),
         "{statuses:?}"
     );
+}
+
+/// A way joined into a move in, as a harness joins a transit into a pick's straight move: the
+/// sweep's start to the ready pose, joined within 3 cm into a straight move 10 cm down from
+/// there. Returns the joined trajectory, the move in timed alone (the detour's `then`), when the
+/// joined trajectory has the hand 4 cm into the move (past the blend), and the move's ends.
+fn joined_into_a_move_in(
+    robot: &Robot,
+    device: &Device,
+) -> (Trajectory, Trajectory, f32, Vec3, Vec3) {
+    let worlds = device.upload(&[World::default()]).unwrap();
+    let ready = robot.ee_pose(robot.default_q(), 0);
+    let (top, bottom) = (ready.position, ready.position - Vec3::Z * 0.1);
+    let path = ToolPath {
+        world: 0,
+        start: robot.default_q().to_vec(),
+        hand: 0,
+        waypoints: vec![Pose::new(bottom, ready.rotation)],
+        holding: None,
+    };
+    let moved = batchplan::follow(device, &worlds, &[path], &ToolPathOptions::default()).unwrap();
+    assert_eq!(moved.fraction[0], 1.0, "{:?}", moved.stopped[0]);
+    let move_in = moved.paths[0].clone();
+    let problem = PlanProblem::new(0, FROM.to_vec(), robot.default_q().to_vec());
+    let way = batchplan::plan(device, &worlds, &[problem], &PlanOptions::default()).unwrap();
+    let way = way.best(0).expect("the way plans").to_vec();
+    let sequence = Sequence {
+        world: 0,
+        paths: vec![way, move_in.clone()],
+        blends: vec![0.03],
+        constraints: vec![],
+        holding: None,
+    };
+    let joined = batchplan::join(device, &worlds, &[sequence], &JoinOptions::default()).unwrap();
+    assert_eq!(joined.paths[0].len(), 1, "the way and the move in join");
+    let joined = Trajectory::try_new(robot, &joined.paths[0][0], 0.5).unwrap();
+    let then = Trajectory::try_new(robot, &move_in, 0.5).unwrap();
+    let mut state = JointState::new(robot.dof());
+    let until = (0..)
+        .map(|k| k as f32 * 1e-3)
+        .find(|&t| {
+            joined.at(t, &mut state);
+            robot.ee_pose(&state.position, 0).position.distance(bottom) < 0.06
+        })
+        .expect("the joined motion reaches the move in");
+    (joined, then, until, top, bottom)
+}
+
+/// Follows `trajectory` with `o` from time 0, in `free` until `dropped` and then with `boxed`:
+/// each tick's status and the hand's position, until it arrives or is blocked.
+fn follow_through(
+    robot: &Robot,
+    device: &Device,
+    trajectory: &Trajectory,
+    o: FollowerOptions,
+    (free, boxed, dropped): (&Worlds, &Worlds, f32),
+) -> (Vec<FollowStatus>, Vec<Vec3>, Follower) {
+    let mut follower = Follower::try_new(robot, 0, trajectory.clone(), 0.0, o).unwrap();
+    let (mut t, mut statuses, mut hand) = (0.0, vec![], vec![]);
+    while t < 6.0 * trajectory.duration() {
+        let worlds = if t < dropped { free } else { boxed };
+        let tick = follower.tick(device, worlds, t, None).unwrap();
+        assert!(
+            clear(device, worlds, &tick.state.position),
+            "at {t:.2} s the robot collides ({:?})",
+            tick.status
+        );
+        hand.push(robot.ee_pose(&tick.state.position, 0).position);
+        statuses.push(tick.status.clone());
+        if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
+            break;
+        }
+        t += DT;
+    }
+    (statuses, hand, follower)
+}
+
+/// A detour around a box on the way: the follower plans to where the move in starts, not to the
+/// grasp, takes up the move in there from rest, and keeps its path to the end.
+#[test]
+fn a_detour_goes_around_the_way_and_takes_up_the_move_in_from_rest() {
+    let robot = common::panda().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let (joined, then, until, top, bottom) = joined_into_a_move_in(&robot, &device);
+    let free = device.upload(&[World::default()]).unwrap();
+    // Over the hand 40% of the way along the window: the way's first 30% barely moves the hand,
+    // and its second half is near where the move in starts, where no detour could end.
+    let boxed = World::new(vec![box_at(&robot, &joined, 0.4 * until)]);
+    let boxed = device.upload(&[boxed]).unwrap();
+    let o = FollowerOptions {
+        detour: Some(Detour {
+            from: 0.0,
+            until,
+            then: then.clone(),
+        }),
+        ..Default::default()
+    };
+    let worlds = (&free, &boxed, 0.05 * until);
+    let (statuses, hand, follower) = follow_through(&robot, &device, &joined, o, worlds);
+    assert_eq!(
+        statuses.last(),
+        Some(&FollowStatus::Arrived),
+        "{statuses:?}"
+    );
+    let detour = statuses.iter().find_map(|s| match s {
+        FollowStatus::Replanned { trajectory, .. } => Some(trajectory.clone()),
+        _ => None,
+    });
+    let detour = detour.expect("the box made it detour");
+    let n = robot.dof();
+    let end = &detour.control_points[detour.control_points.len() - n..];
+    assert_eq!(
+        end,
+        &then.control_points[..n],
+        "the detour ends where the move in starts"
+    );
+    let resumed = statuses
+        .iter()
+        .position(|s| matches!(s, FollowStatus::Resumed { trajectory, .. } if *trajectory == then));
+    let resumed = resumed.expect("the move in is taken up after the detour");
+    assert_eq!(*follower.trajectory(), then, "it arrives along the move in");
+    let off = hand[resumed..]
+        .iter()
+        .map(|&p| off_segment(p, top, bottom))
+        .fold(0.0, f32::max);
+    assert!(off < 2e-3, "the hand strays {off} m from the move in");
+    assert!(
+        hand.last().unwrap().distance(bottom) < 2e-3,
+        "it ends at the grasp"
+    );
+    // Halfway down the move in after the detour, a box dropped where the hand is 9 cm in stops it
+    // on its path: no second detour.
+    let mut state = JointState::new(n);
+    then.at(0.9 * then.duration(), &mut state);
+    let late = robot.ee_pose(&state.position, 0).position;
+    let o = FollowerOptions {
+        detour: Some(Detour {
+            from: 0.0,
+            until,
+            then: then.clone(),
+        }),
+        ..Default::default()
+    };
+    let both = World::new(vec![
+        box_at(&robot, &joined, 0.4 * until),
+        Obstacle::cuboid(late, Vec3::splat(0.03)),
+    ]);
+    let both = device.upload(&[both]).unwrap();
+    let mut follower = Follower::try_new(&robot, 0, joined.clone(), 0.0, o).unwrap();
+    let (mut t, mut kept, mut statuses) = (0.0, None, vec![]);
+    while t < 6.0 * joined.duration() {
+        let halfway = kept.is_some_and(|at: f32| t > at + 0.5 * then.duration());
+        let worlds = match (t < 0.05 * until, halfway) {
+            (true, _) => &free,
+            (false, false) => &boxed,
+            (false, true) => &both,
+        };
+        let tick = follower.tick(&device, worlds, t, None).unwrap();
+        assert!(
+            clear(&device, worlds, &tick.state.position),
+            "at {t:.2} s ({:?})",
+            tick.status
+        );
+        if let FollowStatus::Resumed { at, .. } = tick.status {
+            kept = Some(at);
+        }
+        statuses.push(tick.status.clone());
+        if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
+            break;
+        }
+        t += DT;
+    }
+    let after = statuses
+        .iter()
+        .position(|s| matches!(s, FollowStatus::Resumed { .. }));
+    let after = &statuses[after.expect("the move in is taken up")..];
+    assert!(
+        after
+            .iter()
+            .any(|s| matches!(s, FollowStatus::Stopping { .. }))
+            && !after
+                .iter()
+                .any(|s| matches!(s, FollowStatus::Replanned { .. }))
+            && after.last() == Some(&FollowStatus::Blocked),
+        "{after:?}"
+    );
+}
+
+/// The path is kept outside the detour's window: a box on the move in, past where the window
+/// closes, stops the robot on its path though it may replan; so does a box on the way the robot
+/// reaches before the window opens. A detour for a box within the window takes over no sooner
+/// than the window opens.
+#[test]
+fn outside_its_window_a_detour_keeps_the_path() {
+    let robot = common::panda().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let (joined, then, until, _, _) = joined_into_a_move_in(&robot, &device);
+    let free = device.upload(&[World::default()]).unwrap();
+    let duration = joined.duration();
+    let seen = 0.05 * duration;
+    let o = |from: f32| FollowerOptions {
+        detour: Some(Detour {
+            from,
+            until,
+            then: then.clone(),
+        }),
+        ..Default::default()
+    };
+    // A box where the hand is at `at`, seen at `seen`, and when the joined motion first reaches
+    // it; on the move in a smaller one, which only the hand reaches.
+    let boxed_at = |at: f32, from: f32| {
+        let mut state = JointState::new(robot.dof());
+        joined.at(at, &mut state);
+        let hand = robot.ee_pose(&state.position, 0).position;
+        let half = if at > until { 0.03 } else { 0.05 };
+        let boxed = World::new(vec![Obstacle::cuboid(hand, Vec3::splat(half))]);
+        let boxed = device.upload(&[boxed]).unwrap();
+        let reached = (0..)
+            .map(|k| k as f32 * 1e-2)
+            .find(|&t| !clear(&device, &boxed, &state_at(&joined, t).position))
+            .expect("the joined motion reaches the box");
+        let statuses = follow_through(&robot, &device, &joined, o(from), (&free, &boxed, seen)).0;
+        (statuses, reached)
+    };
+    let stops = |statuses: &[FollowStatus]| {
+        statuses
+            .iter()
+            .any(|s| matches!(s, FollowStatus::Stopping { .. }))
+            && !statuses
+                .iter()
+                .any(|s| matches!(s, FollowStatus::Replanned { .. }))
+            && statuses.last() == Some(&FollowStatus::Blocked)
+    };
+    // The box where the hand is 9 cm into the move in.
+    let (statuses, reached) = boxed_at(until + 0.8 * (duration - until), 0.0);
+    assert!(reached > until, "the robot reaches the box at {reached} s");
+    assert!(stops(&statuses), "a box on the move in: {statuses:?}");
+    // The box over the hand 40% of the way along the window, which the robot first reaches at
+    // 25%, the window opening at 60%.
+    let (statuses, reached) = boxed_at(0.4 * until, 0.6 * until);
+    assert!(
+        reached < 0.6 * until,
+        "the robot reaches the box at {reached} s"
+    );
+    assert!(stops(&statuses), "a box before the window: {statuses:?}");
+    // The window opening at 20%: the box is detoured from when it opens, later than the budget
+    // alone would have it.
+    let from = 0.2 * until;
+    let (statuses, reached) = boxed_at(0.4 * until, from);
+    assert!(reached > from, "the robot reaches the box at {reached} s");
+    let at = statuses.iter().find_map(|s| match s {
+        FollowStatus::Replanned { at, .. } => Some(*at),
+        _ => None,
+    });
+    let at = at.expect("a box within the window is detoured");
+    assert!(
+        (at - from).abs() < 1e-4 && at > seen + FollowerOptions::default().budget + DT,
+        "the detour takes over at {at} s, the window opening at {from} s"
+    );
+}
+
+/// Held back within the window, the robot is followed from where it is to where the move in
+/// starts; held back on the move in, it is held where it is.
+#[test]
+fn a_detour_reanchors_within_its_window_and_holds_on_the_move_in() {
+    let robot = common::panda().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let (joined, then, until, _, _) = joined_into_a_move_in(&robot, &device);
+    let worlds = device.upload(&[World::default()]).unwrap();
+    let o = FollowerOptions {
+        detour: Some(Detour {
+            from: 0.0,
+            until,
+            then: then.clone(),
+        }),
+        ..Default::default()
+    };
+    let n = robot.dof();
+    let mut follower = Follower::try_new(&robot, 0, joined.clone(), 0.0, o).unwrap();
+    // Halfway along the way, measured where it started.
+    let held = JointState {
+        position: joined.start(),
+        ..JointState::new(n)
+    };
+    let tick = follower
+        .tick(&device, &worlds, 0.5 * until, Some(&held))
+        .unwrap();
+    assert!(
+        matches!(tick.status, FollowStatus::Reanchored { .. }),
+        "{:?}",
+        tick.status
+    );
+    let to = &follower.trajectory().control_points;
+    assert_eq!(
+        &to[to.len() - n..],
+        &then.control_points[..n],
+        "to where the move in starts"
+    );
+    // Through the move in, then measured where the detour started.
+    let mut t = 0.5 * until;
+    let mut on_then = false;
+    while t < 0.5 * until + 6.0 * joined.duration() {
+        let tick = follower.tick(&device, &worlds, t, None).unwrap();
+        if matches!(tick.status, FollowStatus::Resumed { .. }) {
+            on_then = true;
+            t += 0.5 * then.duration();
+            let tick = follower.tick(&device, &worlds, t, Some(&held)).unwrap();
+            assert_eq!(tick.status, FollowStatus::Blocked, "held on the move in");
+            break;
+        }
+        t += DT;
+    }
+    assert!(on_then, "the move in is taken up");
+    // The window opening at 60%: held back at 50%, the robot is held where it is.
+    let o = FollowerOptions {
+        detour: Some(Detour {
+            from: 0.6 * until,
+            until,
+            then,
+        }),
+        ..Default::default()
+    };
+    let mut follower = Follower::try_new(&robot, 0, joined, 0.0, o).unwrap();
+    let tick = follower
+        .tick(&device, &worlds, 0.5 * until, Some(&held))
+        .unwrap();
+    assert_eq!(
+        tick.status,
+        FollowStatus::Blocked,
+        "held before the window opens"
+    );
+}
+
+/// A detour that cannot be followed is refused: without replanning, with a window that does not
+/// run forward from 0 within the trajectory, a `then` that `Trajectory::check` refuses (of other
+/// joints, starting in motion, too short to evaluate, or with no finite timing), or one whose
+/// first state, the replans' goal, breaks the follower's constraints.
+#[test]
+fn malformed_detours_are_input_errors() {
+    let robot = common::panda().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let (joined, then, until, _, bottom) = joined_into_a_move_in(&robot, &device);
+    let detour = Detour {
+        from: 0.0,
+        until,
+        then: then.clone(),
+    };
+    let refused = |o: FollowerOptions| {
+        let made = Follower::try_new(&robot, 0, joined.clone(), 0.0, o);
+        matches!(made, Err(Error::Input(_)))
+    };
+    let with = |detour: Detour| FollowerOptions {
+        detour: Some(detour),
+        ..Default::default()
+    };
+    assert!(
+        !refused(with(detour.clone())),
+        "a detour that can be followed"
+    );
+    assert!(refused(FollowerOptions {
+        replan: false,
+        ..with(detour.clone())
+    }));
+    // The hand kept within 5 cm of the move in's bottom: the trajectory's end keeps it, and the
+    // move in's first state, 10 cm up, breaks it.
+    let low = HandConstraint {
+        position: Vec3::new(f32::INFINITY, f32::INFINITY, 0.05),
+        ..HandConstraint::new(0, Pose::new(bottom, Quat::IDENTITY))
+    };
+    let kept_low = |detour: Option<Detour>| FollowerOptions {
+        constraints: vec![low],
+        detour,
+        ..Default::default()
+    };
+    assert!(!refused(kept_low(None)), "the trajectory's end keeps it");
+    assert!(
+        refused(kept_low(Some(detour.clone()))),
+        "then's start breaks it"
+    );
+    for (from, until) in [
+        (-0.1, until),
+        (until, 0.5 * until),
+        (0.0, f32::NAN),
+        (f32::NAN, until),
+        (0.0, f32::INFINITY),
+        (0.0, joined.duration() + 0.1),
+    ] {
+        assert!(
+            refused(with(Detour {
+                from,
+                until,
+                ..detour.clone()
+            })),
+            "{from} s to {until} s"
+        );
+    }
+    let mut other = then.clone();
+    other.dof = 6;
+    let mut moving = then.clone();
+    moving.control_points[0] += 0.01;
+    let mut short = then.clone();
+    short.control_points.truncate(3 * robot.dof());
+    let mut untimed = then;
+    untimed.knot_interval = f32::NAN;
+    let thens = [
+        (other, "six joints"),
+        (moving, "a then that starts moving"),
+        (short, "three control points"),
+        (untimed, "no knot interval"),
+    ];
+    for (then, what) in thens {
+        let detour = Detour {
+            then,
+            ..detour.clone()
+        };
+        assert!(refused(with(detour)), "{what}");
+    }
+}
+
+/// Along a detour the follower replans and re-anchors toward where `then` starts, as on any
+/// motion, and stops where it can find no way: a box moved onto the detour is gone around, a push
+/// re-anchors to `then`'s start, and a box over `then`'s start stops it short, blocked and never
+/// resumed. With a lead, `then` waits for it.
+#[test]
+fn along_a_detour_the_follower_replans_reanchors_and_stops() {
+    let robot = common::panda().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let n = robot.dof();
+    let (joined, then, until, top, _) = joined_into_a_move_in(&robot, &device);
+    let first = World::new(vec![box_at(&robot, &joined, 0.4 * until)]);
+    let lead = 0.1;
+    let o = FollowerOptions {
+        lead,
+        detour: Some(Detour {
+            from: 0.0,
+            until,
+            then: then.clone(),
+        }),
+        ..Default::default()
+    };
+    // Through the first detour's takeover, then the obstacles of `after(detour, where the robot
+    // is)` with the first box from the next tick, and, if `pushed`, measured once 0.3 rad off on
+    // the first or fourth joint, whichever way is clear: the statuses from then on.
+    let run = |after: &dyn Fn(&Trajectory, &[f32]) -> World, pushed: bool| {
+        let boxed = device.upload(std::slice::from_ref(&first)).unwrap();
+        let mut follower = Follower::try_new(&robot, 0, joined.clone(), 0.0, o.clone()).unwrap();
+        let (mut t, mut detour, mut statuses) = (0.0, None::<(Trajectory, f32)>, vec![]);
+        let mut second: Option<Worlds> = None;
+        let mut push = pushed;
+        let mut state = JointState::new(n);
+        while t < 8.0 * joined.duration() {
+            let worlds = second.as_ref().unwrap_or(&boxed);
+            let measured = match &detour {
+                Some((d, at)) if t > at + DT && push => {
+                    push = false;
+                    d.at(t - at, &mut state);
+                    let pushes = [(0, 0.3), (0, -0.3), (3, 0.3), (3, -0.3)].map(|(j, by)| {
+                        let mut off = JointState::new(n);
+                        off.position = state.position.clone();
+                        off.position[j] += by;
+                        off
+                    });
+                    let clear = |p: &&JointState| clear(&device, worlds, &p.position);
+                    Some(pushes.iter().find(clear).expect("a clear push").clone())
+                }
+                _ => None,
+            };
+            let tick = follower
+                .tick(&device, worlds, t, measured.as_ref())
+                .unwrap();
+            assert!(
+                clear(&device, worlds, &tick.state.position),
+                "at {t:.2} s ({:?})",
+                tick.status
+            );
+            if detour.is_some() {
+                statuses.push((t, tick.status.clone()));
+            }
+            if let (None, FollowStatus::Replanned { at, trajectory }) = (&detour, &tick.status) {
+                detour = Some((trajectory.clone(), *at));
+            }
+            if second.is_none() && detour.as_ref().is_some_and(|(_, at)| t > at + DT) {
+                let (d, _) = detour.as_ref().unwrap();
+                let mut both = first.clone();
+                both.obstacles
+                    .extend(after(d, &tick.state.position).obstacles);
+                second = Some(device.upload(&[both]).unwrap());
+            }
+            if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
+                break;
+            }
+            t += DT;
+        }
+        statuses
+    };
+    let ends_at_then = |s: &FollowStatus| match s {
+        FollowStatus::Replanned { trajectory, .. } => {
+            let p = &trajectory.control_points;
+            p[p.len() - n..] == then.control_points[..n]
+        }
+        _ => false,
+    };
+    // A box over the detour, 5 or 3 cm, as far along it as is clear of the robot and of where
+    // `then` starts, moved there once the detour has taken over.
+    let middle = |d: &Trajectory, at: &[f32]| {
+        let over = |k: usize, half: f32| {
+            let mut state = JointState::new(n);
+            d.at(0.1 * k as f32 * d.duration(), &mut state);
+            let hand = robot.ee_pose(&state.position, 0).position;
+            World::new(vec![Obstacle::cuboid(hand, Vec3::splat(half))])
+        };
+        let candidates = (3..9).rev().flat_map(|k| [over(k, 0.05), over(k, 0.03)]);
+        let mut fits = candidates.filter(|w| {
+            let w = device.upload(std::slice::from_ref(w)).unwrap();
+            clear(&device, &w, at) && clear(&device, &w, &then.control_points[..n])
+        });
+        fits.next()
+            .expect("a box over the detour clear of the robot")
+    };
+    let statuses = run(&middle, false);
+    assert!(
+        statuses.iter().any(|(_, s)| ends_at_then(s)),
+        "replanned along the detour: {statuses:?}"
+    );
+    assert_eq!(
+        statuses.last().map(|(_, s)| s),
+        Some(&FollowStatus::Arrived),
+        "{statuses:?}"
+    );
+    let (t, at) = statuses
+        .iter()
+        .find_map(|(t, s)| match s {
+            FollowStatus::Resumed { at, .. } => Some((*t, *at)),
+            _ => None,
+        })
+        .expect("the move in taken up");
+    assert!(
+        (at - (t + lead)).abs() < 1e-5,
+        "resumed at {at} s from a tick at {t} s, lead {lead}"
+    );
+    // Pushed along the detour.
+    let nothing = |_: &Trajectory, _: &[f32]| World::default();
+    let statuses = run(&nothing, true);
+    let reanchored = statuses
+        .iter()
+        .position(|(_, s)| matches!(s, FollowStatus::Reanchored { .. }))
+        .expect("re-anchored along the detour");
+    assert!(
+        statuses[reanchored..]
+            .iter()
+            .any(|(_, s)| matches!(s, FollowStatus::Resumed { .. })),
+        "and resumed after: {statuses:?}"
+    );
+    // A box over where `then` starts: no way there, so the detour stops short of it.
+    let over_then =
+        |_: &Trajectory, _: &[f32]| World::new(vec![Obstacle::cuboid(top, Vec3::splat(0.05))]);
+    let blocked = device.upload(&[over_then(&then, &[])]).unwrap();
+    assert!(
+        !clear(&device, &blocked, &then.control_points[..n]),
+        "the box blocks then's start"
+    );
+    let statuses = run(&over_then, false);
+    assert!(
+        statuses
+            .iter()
+            .any(|(_, s)| matches!(s, FollowStatus::Stopping { .. }))
+            && !statuses
+                .iter()
+                .any(|(_, s)| matches!(s, FollowStatus::Resumed { .. }))
+            && statuses.last().map(|(_, s)| s) == Some(&FollowStatus::Blocked),
+        "{statuses:?}"
+    );
+}
+
+/// On the move in of the trajectory it was given, past the window, a push holds the robot where
+/// it is, and so does a second push after it: the window is read where the robot left the
+/// trajectory, not from the hold. So it is after a stop that begins within the window and comes to
+/// rest past it: read where the stop rests, not where it began or from the stop.
+#[test]
+fn past_its_window_a_detour_holds_a_pushed_robot_however_often() {
+    let robot = common::panda().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let (joined, then, until, _, bottom) = joined_into_a_move_in(&robot, &device);
+    let worlds = device.upload(&[World::default()]).unwrap();
+    let o = FollowerOptions {
+        detour: Some(Detour {
+            from: 0.0,
+            until,
+            then,
+        }),
+        ..Default::default()
+    };
+    let mut follower = Follower::try_new(&robot, 0, joined.clone(), 0.0, o.clone()).unwrap();
+    let mut t = 0.0;
+    while t < until + DT {
+        follower.tick(&device, &worlds, t, None).unwrap();
+        t += DT;
+    }
+    // Each push lands past the tolerance from the last hold, so each is a push of its own, and
+    // the second comes a tick after the first hold began.
+    let mut midway = JointState::new(robot.dof());
+    joined.at(0.5 * until, &mut midway);
+    let pushes = [joined.start(), midway.position];
+    let apart = (0..robot.dof()).map(|j| (pushes[0][j] - pushes[1][j]).abs());
+    assert!(apart.fold(0.0, f32::max) > 0.5, "the pushes are apart");
+    for (push, position) in pushes.into_iter().enumerate() {
+        let pushed = JointState {
+            position,
+            ..JointState::new(robot.dof())
+        };
+        let tick = follower.tick(&device, &worlds, t, Some(&pushed)).unwrap();
+        assert_eq!(tick.status, FollowStatus::Blocked, "push {push} at {t} s");
+        assert_eq!(
+            tick.state.position, pushed.position,
+            "held where pushed {push}"
+        );
+        t += DT;
+    }
+    // A box on the move in, seen just before the window closes.
+    let ahead = state_at(&joined, until + 0.8 * (joined.duration() - until)).position;
+    let ahead = Obstacle::cuboid(robot.ee_pose(&ahead, 0).position, Vec3::splat(0.03));
+    let boxed = device.upload(&[World::new(vec![ahead])]).unwrap();
+    let mut follower = Follower::try_new(&robot, 0, joined.clone(), 0.0, o).unwrap();
+    let (mut t, mut stopped) = (0.0, None);
+    let rest = loop {
+        let seen = if t < until - 0.03 { &worlds } else { &boxed };
+        let tick = follower.tick(&device, seen, t, None).unwrap();
+        match tick.status {
+            FollowStatus::Following => {}
+            FollowStatus::Stopping { .. } => {
+                stopped.get_or_insert(t);
+            }
+            FollowStatus::Blocked => break tick.state.position,
+            status => panic!("at {t} s: {status:?}"),
+        }
+        t += DT;
+    };
+    assert!(
+        stopped.is_some_and(|at| at < until),
+        "the stop begins within the window, at {stopped:?} s"
+    );
+    let from_bottom = |q: &[f32]| robot.ee_pose(q, 0).position.distance(bottom);
+    assert!(
+        from_bottom(&rest) < from_bottom(&state_at(&joined, until).position),
+        "the stop comes to rest past the window"
+    );
+    let pushed = JointState {
+        position: joined.start(),
+        ..JointState::new(robot.dof())
+    };
+    let tick = follower
+        .tick(&device, &boxed, t + DT, Some(&pushed))
+        .unwrap();
+    assert_eq!(tick.status, FollowStatus::Blocked, "pushed once stopped");
+    assert_eq!(tick.state.position, pushed.position, "held where pushed");
 }
