@@ -30,13 +30,14 @@ use crate::types::{Pose, StartMotion};
 #[derive(Clone, Debug)]
 pub struct FollowerOptions {
     /// The time a replan may take (seconds): 50 ms. It starts from where the robot will be once
-    /// this and `lead` have passed.
+    /// this and `lead` have passed, or with a [`Detour`], no sooner than its window opens.
     pub budget: f32,
     /// The time a replan has after its budget to reach the robot before it takes over (seconds): 0,
     /// for a controller in the same process. A controller elsewhere, sent each replan as
     /// [`FollowStatus::Replanned`] hands it over, needs about as long as sending takes. Only
-    /// replans wait for it: a stop, a re-anchor and a collision take effect at the tick that
-    /// reports them, and each drops a replan sent before. On `Stopping`, `Collides` or `Blocked`
+    /// replans and the start of a detour's `then` ([`FollowStatus::Resumed`]) wait for it: a stop,
+    /// a re-anchor and a collision take effect at the tick that reports them, and each drops a
+    /// replan sent before. On `Stopping`, `Collides` or `Blocked`
     /// such a controller stops the robot itself; on `Reanchored` it takes up
     /// [`Follower::trajectory`] from [`Follower::began`] as soon as it can.
     pub lead: f32,
@@ -60,6 +61,32 @@ pub struct FollowerOptions {
     /// the robot where it is measured ([`FollowStatus::Blocked`]). `budget`, `lead`, `plan` and
     /// `constraints` shape replans only.
     pub replan: bool,
+    /// Where the path may change, for a trajectory that joins a motion whose path may change to
+    /// one whose path must not ([`crate::join()`]): `None`, all of it, as `replan` says. With a
+    /// [`Detour`], the follower replans only where the rest of its motion collides within the
+    /// detour's window, or anywhere along a detour, takes the replan over no sooner than the
+    /// window opens, plans it to the first state of the detour's `then`, and takes up `then` from
+    /// rest there ([`FollowStatus::Resumed`]). Elsewhere, and along `then`, it keeps the path, as
+    /// without `replan`; a robot measured past `tolerance` is planned from likewise. It needs
+    /// `replan` on.
+    pub detour: Option<Detour>,
+}
+
+/// A detour a [`Follower`] may take from a trajectory that joins a motion whose path may change
+/// with one whose path must not: a way joined into the straight move to a grasp, or a move away
+/// joined into the next way.
+#[derive(Clone, Debug)]
+pub struct Detour {
+    /// When the window opens, on the trajectory's own clock (seconds): before it the path is
+    /// kept, as along a move away joined into what follows.
+    pub from: f32,
+    /// When it closes (seconds): from then on the path is kept, as along the move in a way is
+    /// joined into.
+    pub until: f32,
+    /// What follows a detour, from rest at its first state, its path kept: the motion whose path
+    /// must not change, as planned apart (a task's move in, without its transit). It must pass
+    /// [`Trajectory::check`], so it starts at rest.
+    pub then: Trajectory,
 }
 
 impl Default for FollowerOptions {
@@ -72,6 +99,7 @@ impl Default for FollowerOptions {
             constraints: vec![],
             tolerance: 0.2,
             replan: true,
+            detour: None,
         }
     }
 }
@@ -109,6 +137,15 @@ pub enum FollowStatus {
         /// What it collides with then, as [`Device::contacts`] lists it, its obstacles numbered as
         /// in the worlds given to this tick; at a graze, as for [`FollowStatus::Stopping`].
         contacts: Vec<Contact>,
+    },
+    /// At rest at the end of a detour ([`FollowerOptions::detour`]): `trajectory`, the detour's
+    /// `then`, takes over at `at` (seconds, on the caller's clock), from rest, its path kept.
+    /// From then [`Follower::trajectory`] is it.
+    Resumed {
+        /// When `then` takes over.
+        at: f32,
+        /// The detour's `then`.
+        trajectory: Trajectory,
     },
     /// At the goal, at rest.
     Arrived,
@@ -148,7 +185,22 @@ pub struct Follower {
     stopping: bool,
     /// What the stop it is on is for.
     stopped_for: Vec<Contact>,
+    /// Where a follower with a detour is along it.
+    leg: Leg,
+    /// With a detour, where the robot left the trajectory it was given, on that trajectory's clock:
+    /// where a stop on its path comes to rest, or where a hold began. The detour's window is read
+    /// there from then on.
+    left: Option<f32>,
     o: FollowerOptions,
+}
+
+/// Where a follower with a [`Detour`] is: on the trajectory it was given, on a detour toward
+/// `then`'s first state, or on `then`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Leg {
+    Joined,
+    Detouring,
+    Kept,
 }
 
 /// How far apart a GPU device's clearances and its CPU threads' may be (meters), as the parity
@@ -173,9 +225,9 @@ struct Stretch<'a> {
 
 impl Follower {
     /// Follows `trajectory` in world `world` of the worlds each tick is given, from time `now`,
-    /// toward where it ends. Plan options that [`crate::plan`] refuses are refused here, before a
-    /// replan would fail with the robot moving, and so, where it replans, are constraints the
-    /// trajectory's goal breaks.
+    /// toward where it ends, or with a detour, toward the start of its `then` and along it. Plan
+    /// options that [`crate::plan`] refuses are refused here, before a replan would fail with the
+    /// robot moving, and so, where it replans, are constraints the goal of its replans breaks.
     pub fn try_new(
         robot: &Robot,
         world: u32,
@@ -209,14 +261,34 @@ impl Follower {
         );
         o.plan.check()?;
         constraint::check(robot, &o.constraints, "the follower")?;
+        let n = robot.dof();
         let points = &trajectory.control_points;
-        let goal = points[points.len() - trajectory.dof..].to_vec();
+        let mut goal = points[points.len() - trajectory.dof..].to_vec();
+        if let Some(detour) = &o.detour {
+            ensure_input!(o.replan, "a detour needs replan on");
+            let duration = trajectory.duration();
+            ensure_input!(
+                detour.from >= 0.0 && detour.from <= detour.until && detour.until <= duration,
+                "a detour's window runs forward within the trajectory's {duration} s, got {} s to {} s",
+                detour.from,
+                detour.until
+            );
+            detour
+                .then
+                .check(robot)
+                .map_err(|e| crate::error::input!("a detour's then: {e}"))?;
+            goal = detour.then.control_points[..n].to_vec();
+        }
         // A replan's goal must keep them, or planning refuses it with the robot moving.
         if o.replan
             && let Some(why) = constraint::breach(robot, &o.constraints, &goal)
         {
+            let goal = match o.detour {
+                Some(_) => "the detour's then starts where it",
+                None => "the trajectory's goal",
+            };
             return Err(crate::error::input!(
-                "the trajectory's goal breaks the follower's constraints: {why}"
+                "{goal} breaks the follower's constraints: {why}"
             ));
         }
         Ok(Self {
@@ -228,6 +300,8 @@ impl Follower {
             next: None,
             stopping: false,
             stopped_for: vec![],
+            leg: Leg::Joined,
+            left: None,
             o,
         })
     }
@@ -248,9 +322,9 @@ impl Follower {
     /// First, when the measured state is farther from the trajectory than the tolerance, a new
     /// trajectory from it ([`FollowStatus::Reanchored`]), or a hold there where it does not
     /// replan; then, when the rest of the motion collides in `worlds`, a replan from the state the
-    /// robot will be in at `now + budget + lead`, or a controlled stop when none is found in time,
-    /// the collision comes sooner or it does not replan. A tick that replans takes as long as the
-    /// plan does, up to `budget`.
+    /// robot will be in at `now + budget + lead` (with a [`Detour`], no sooner than its window
+    /// opens), or a controlled stop when none is found in time, the collision comes sooner or it
+    /// does not replan. A tick that replans takes as long as the plan does, up to `budget`.
     pub fn tick(
         &mut self,
         device: &Device,
@@ -271,6 +345,9 @@ impl Follower {
             let (trajectory, at) = self.next.take().expect("a replan to take over");
             self.trajectory = trajectory;
             self.began = at;
+            if self.o.detour.is_some() {
+                self.leg = Leg::Detouring;
+            }
         }
         let duration = self.trajectory.duration();
         let t = (now - self.began).max(0.0);
@@ -293,6 +370,21 @@ impl Follower {
             }
         }
         if t >= duration {
+            if !self.stopping
+                && self.leg == Leg::Detouring
+                && let Some(detour) = &self.o.detour
+            {
+                // At rest where `then` starts: it takes over from rest.
+                self.trajectory = detour.then.clone();
+                self.began = now + self.o.lead;
+                self.leg = Leg::Kept;
+                self.trajectory.at(0.0, &mut state);
+                let status = FollowStatus::Resumed {
+                    at: self.began,
+                    trajectory: self.trajectory.clone(),
+                };
+                return Ok(Tick { state, status });
+            }
             let status = if self.stopping {
                 FollowStatus::Blocked
             } else {
@@ -337,13 +429,26 @@ impl Follower {
         // A pending replan that collides is dropped for a stop: another would start after the
         // takeover, on the stretch of this trajectory that was found to collide.
         let pending = self.next.take().is_some();
-        let start = t + self.o.budget + self.o.lead;
+        let soonest = t + self.o.budget + self.o.lead;
+        // Whether it may replan, and from when: everywhere as `replan` says; with a detour, for a
+        // collision within its window and from no sooner than it opens, or anywhere along the
+        // detour, and nowhere along `then`.
+        let (may, start) = match (&self.o.detour, self.leg) {
+            (None, _) | (Some(_), Leg::Detouring) => (self.o.replan, soonest),
+            (Some(detour), Leg::Joined) => {
+                let start = soonest.max(detour.from);
+                let at = hit.at - self.began;
+                let within = detour.from <= at && at <= detour.until;
+                (within, start)
+            }
+            (Some(_), Leg::Kept) => (false, soonest),
+        };
         let mut from = JointState::new(n);
         self.trajectory.at(start.min(duration), &mut from);
         // Between the states its plan was checked at, the trajectory may stray past a bound.
         let keeps =
             || constraint::breach(&self.robot, &self.o.constraints, &from.position).is_none();
-        if self.o.replan && !pending && self.began + start < hit.at && start < duration && keeps() {
+        if may && !pending && self.began + start < hit.at && start < duration && keeps() {
             let motion = StartMotion {
                 velocity: from.velocity.clone(),
                 acceleration: from.acceleration.clone(),
@@ -384,6 +489,10 @@ impl Follower {
                 status: hit.collides(),
             });
         };
+        if self.o.detour.is_some() && self.leg == Leg::Joined {
+            let rests = self.trajectory.time_where_stopped(&stop);
+            self.left.get_or_insert(rests);
+        }
         self.trajectory = stop;
         self.began = now;
         self.stopping = true;
@@ -434,10 +543,18 @@ impl Follower {
             velocity,
             acceleration: vec![0.0; n],
         };
+        // As where the rest of the motion collides: with a detour, within its window or along
+        // the detour, and not along `then`. Off the trajectory it was given, where it left it.
+        let t = self.left.unwrap_or(now - self.began);
+        let may = match (&self.o.detour, self.leg) {
+            (None, _) | (Some(_), Leg::Detouring) => self.o.replan,
+            (Some(detour), Leg::Joined) => detour.from <= t && t <= detour.until,
+            (Some(_), Leg::Kept) => false,
+        };
         self.next = None;
         self.began = now;
         let keeps = constraint::breach(&self.robot, &self.o.constraints, &position).is_none();
-        let planned = if self.o.replan && keeps {
+        let planned = if may && keeps {
             let problem = PlanProblem {
                 world: self.world,
                 start: position.clone(),
@@ -467,6 +584,9 @@ impl Follower {
         if let Some(trajectory) = planned {
             self.trajectory = trajectory;
             self.stopping = false;
+            if self.o.detour.is_some() {
+                self.leg = Leg::Detouring;
+            }
             self.trajectory.at(0.0, &mut state);
             return Ok(Tick {
                 state,
@@ -474,6 +594,9 @@ impl Follower {
             });
         }
         // Held where it is: a motion that does not move, at the measured position.
+        if self.o.detour.is_some() && self.leg == Leg::Joined {
+            self.left.get_or_insert(t);
+        }
         let still: Vec<f32> = position.iter().copied().cycle().take(7 * n).collect();
         self.trajectory = Trajectory::try_new(&self.robot, &still, 1.0)?;
         self.stopping = true;
