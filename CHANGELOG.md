@@ -95,6 +95,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   by the dozen, so a grid in the world cost each call that many passes over its values. The
   searches' and tool paths' collision checks and the CPU device's `clearance` also look a grid
   up without its gradient, which they never read.
+- IK on the CPU device, and trajectory optimization's repairs on either, skip the self-collision
+  sphere pairs that cannot add to the cost: a sphere past the margin from another link's
+  bounding sphere is not checked against that link's spheres. Results are the same to the bit.
+  A robot fitted with many spheres gains most: a `place` of four holds on a Panda of 512 spheres
+  takes 11 ms on an M4 Pro where it took 18 ([Benchmarks](docs/benchmarks.md#how-the-speed-came)).
 - **Breaking:** IK screens its seeds. Every seed takes `IkOptions::screening` steps (8 by
   default), then only `IkOptions::kept` of each problem's (4) take the rest of `iterations`: those
   not yet at their targets, the nearest first, then seeds that have arrived. Where the steps push
