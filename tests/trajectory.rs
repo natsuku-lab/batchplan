@@ -1092,8 +1092,8 @@ fn peak(speeds: &[(bool, f32)], inside: bool) -> f32 {
 }
 
 /// A ball the hand only clips, or one a few millimeters across, slows the hand while it is
-/// inside and the motion by little: the cap is neither missed where the hand crosses between two
-/// of the timing's samples nor answered by slowing the whole motion.
+/// inside and the motion by no more than a stop there would: the cap is neither missed where the
+/// hand crosses between two of the timing's samples nor answered by slowing the whole motion.
 #[test]
 fn a_ball_the_hand_only_clips_slows_it_there_alone() {
     let robot = common::panda().unwrap();
@@ -1146,8 +1146,12 @@ fn a_ball_the_hand_only_clips_slows_it_there_alone() {
                 );
                 let (zoned, free, throughout) =
                     (zoned.duration(), free.duration(), throughout.duration());
+                // Slowing for the ball costs no more than stopping there and starting again, with
+                // the ball's width at the cap: far from what capping the whole motion costs.
                 assert!(
-                    zoned > free && zoned < free + 2.0 && zoned < 0.5 * throughout,
+                    zoned > free
+                        && zoned < 2.0 * free + 2.0 * radius / cap
+                        && zoned < 0.5 * throughout,
                     "{zoned} s past a ball of {radius} m, {free} s without, {throughout} s capped throughout"
                 );
             }
