@@ -1363,6 +1363,7 @@ fn straight(
                 Leg::In => c.poses[0],
                 Leg::Away => c.poses[2],
             }],
+            hold: vec![],
             holding: None,
         })
         .collect();

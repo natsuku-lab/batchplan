@@ -267,6 +267,7 @@ fn each_tool_path_holds_its_own_object() {
                     start: s.up.clone(),
                     hand: 0,
                     waypoints: vec![s.robot.ee_pose(s.goal(i), 0)],
+                    hold: vec![],
                     holding,
                 })
                 .collect();
@@ -275,6 +276,7 @@ fn each_tool_path_holds_its_own_object() {
                 assert_eq!(all.problems[i].holding, p.holding, "{name}: path {i}");
                 let holder = s.holder(&device, p.holding.as_ref());
                 let alone = ToolPath {
+                    hold: vec![],
                     holding: None,
                     ..p.clone()
                 };
@@ -422,6 +424,7 @@ fn a_world_lets_what_a_hand_comes_to_hold_touch_an_obstacle() {
             start: s.up.clone(),
             hand: 0,
             waypoints: vec![s.robot.ee_pose(&s.ready, 0)],
+            hold: vec![],
             holding: Some(held.clone()),
         };
         let paths = [lower(0), lower(1)];

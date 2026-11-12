@@ -47,6 +47,11 @@ value_class! {
         hand: usize,
         /// Poses the hand passes through after its start, in the robot's frame.
         waypoints: Vec<batchplan::Pose>,
+        /// Joints that stay where `start` has them along the whole path, as an arm that holds an
+        /// object another hand reaches for (`Robot.hand_joints` lists an arm's) where the two
+        /// share joints. The hand follows the path with the joints left; where they cannot keep
+        /// it on the path, its motion stops there.
+        hold: Vec<usize>,
         /// An object a hand holds, as a pick leaves it: checked as part of the robot, as
         /// attaching it (`Held.attachment`) would check it. `None` holds nothing.
         holding: Option<batchplan::Held>,
@@ -66,6 +71,7 @@ value_class! {
                 start: Vec::from_py(start)?,
                 hand: 0,
                 waypoints: Vec::from_py(waypoints)?,
+                hold: vec![],
                 holding: None,
             };
             Ok(Self(Self::changed(path, changes)?))
@@ -79,7 +85,8 @@ tuple_field!(batchplan::ToolPath);
 #[pyclass(module = "batchplan", frozen)]
 pub(crate) enum ToolPathStop {
     /// No configuration near the last one reaches this pose: it lies beyond the arm's reach or
-    /// its joint limits, or at a singularity the arm cannot step through.
+    /// its joint limits, at a singularity the arm cannot step through, or where the joints a path
+    /// holds (`ToolPath.hold`) leave too few to keep the hand on it.
     Unreachable { at: Py<PyAny> },
     /// The hand's next step collides.
     Collision { at: Py<PyAny> },

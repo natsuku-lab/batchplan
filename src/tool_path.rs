@@ -28,6 +28,11 @@ pub struct ToolPath {
     pub hand: usize,
     /// Poses the hand passes through after its start, in the robot's frame.
     pub waypoints: Vec<Pose>,
+    /// Joints that stay where `start` has them along the whole path, as an arm that holds an
+    /// object another hand reaches for (`Robot::hand_joints` lists an arm's) where the two share
+    /// joints. The hand follows the path with the joints left; where they cannot keep it on the
+    /// path, its motion stops there.
+    pub hold: Vec<usize>,
     /// An object a hand holds, as a pick leaves it: checked as part of the robot, as attaching it
     /// ([`Held::attachment`]) would check it. `None` holds nothing.
     pub holding: Option<Held>,
@@ -122,7 +127,8 @@ impl ToolPathResult {
 #[non_exhaustive]
 pub enum ToolPathStop {
     /// No configuration near the last one reaches this pose: it lies beyond the arm's reach or
-    /// its joint limits, or at a singularity the arm cannot step through.
+    /// its joint limits, at a singularity the arm cannot step through, or where the joints a path
+    /// holds ([`ToolPath::hold`]) leave too few to keep the hand on it.
     Unreachable {
         /// The pose it stops before.
         at: Pose,
@@ -201,6 +207,11 @@ fn check(robot: &Robot, worlds: &Worlds, paths: &[ToolPath], o: &ToolPathOptions
             worlds.len()
         );
         ensure_input!(!p.waypoints.is_empty(), "path {i} has no waypoints");
+        if let Some(&j) = p.hold.iter().find(|&&j| j >= n) {
+            return Err(crate::error::input!(
+                "path {i}: holds joint {j} of a robot with {n}"
+            ));
+        }
         let finite = |w: &Pose| w.position.is_finite() && w.rotation.is_finite();
         ensure_input!(
             p.waypoints.iter().all(finite) && p.start.iter().all(|v| v.is_finite()),
@@ -373,6 +384,8 @@ struct Follow<'a> {
     reach: Reach,
     /// Each step's IK, holding configurations to a tenth of the precisions.
     ik: IkOptions,
+    /// With joints held ([`ToolPath::hold`]), the joints that may move: every other one.
+    free: Option<Vec<bool>>,
     /// Each joint's range ([`Robot::bounds`]), which the spline's control points keep.
     bounds: Vec<(f32, f32)>,
     /// Configurations along the path (`[k, dof]`), the start's first, the point each reaches, and
@@ -424,6 +437,8 @@ impl<'a> Follow<'a> {
                 rotation_tolerance: o.rotation_precision * TOLERANCE,
                 ..IkOptions::default()
             },
+            free: (!path.hold.is_empty())
+                .then(|| (0..robot.dof()).map(|j| !path.hold.contains(&j)).collect()),
             bounds: (0..robot.dof()).map(|j| robot.bounds(j)).collect(),
             q: path.start.clone(),
             reached: vec![],
@@ -469,6 +484,7 @@ impl<'a> Follow<'a> {
             self.starts,
         ) = Default::default();
         self.bounds = vec![];
+        self.free = None;
     }
 
     fn fraction(&self) -> f32 {
@@ -498,6 +514,7 @@ impl<'a> Follow<'a> {
                     &to.target(),
                     &mut self.next,
                     &self.ik,
+                    self.free.as_deref(),
                 );
                 if !reached {
                     self.stop = Some(ToolPathStop::Unreachable { at: to.pose() });
@@ -601,6 +618,15 @@ impl<'a> Follow<'a> {
                 solve_one_four_one(&mut self.rhs, &mut self.scratch);
                 for (i, x) in self.rhs.iter().enumerate() {
                     self.solved[i * n + j] = *x;
+                }
+            }
+            // A held joint is the same in every configuration; the solve would round it.
+            if let Some(free) = &self.free {
+                let held = (0..n).filter(|&j| !free[j]);
+                for j in held {
+                    for i in 0..r {
+                        self.solved[i * n + j] = self.q[j];
+                    }
                 }
             }
             self.control.extend_from_slice(&self.solved);

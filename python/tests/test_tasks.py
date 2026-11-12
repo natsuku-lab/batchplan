@@ -128,6 +128,18 @@ def test_a_tool_path_goes_as_far_as_it_is_clear(tasks_robot):
     assert len(coarse.paths[0]) < len(result.paths[0]), "longer steps, fewer points"
     with pytest.raises(bp.InputError, match="hand"):
         bp.follow(device, clear, [bp.ToolPath(0, q, [down], hand=1)])
+    # Across from a base turned to 0.4 rad, which the free motion turns further.
+    turned = np.array(q, dtype=np.float32)
+    turned[0] = 0.4
+    start = tasks_robot.ee_pose(turned)
+    across = bp.Pose(start.position + np.array((0.0, 0.1, 0.0)), start.rotation)
+    free = bp.follow(device, clear, [bp.ToolPath(0, turned, [across])])
+    assert np.abs(free.paths[0][:, 0] - 0.4).max() > 0.01, "free, the base turns"
+    held = bp.follow(device, clear, [bp.ToolPath(0, turned, [across], hold=[0])])
+    assert held.fraction[0] == 1.0 and held.problems[0].hold == (0,)
+    assert np.all(held.paths[0][:, 0] == turned[0]), "the held base stays"
+    with pytest.raises(bp.InputError, match="holds joint 99"):
+        bp.follow(device, clear, [bp.ToolPath(0, q, [down], hold=[99])])
 
     # A slab whose top is 5 cm below the hand, halfway down its path.
     block = bp.Obstacle.cuboid(hand.position - np.array((0.0, 0.0, 0.07)), (0.1, 0.1, 0.02))

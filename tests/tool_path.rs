@@ -38,6 +38,7 @@ fn path(robot: &Robot, waypoints: Vec<Pose>) -> ToolPath {
         start: robot.default_q().to_vec(),
         hand: 0,
         waypoints,
+        hold: vec![],
         holding: None,
     }
 }
@@ -280,6 +281,7 @@ fn the_motion_through_a_singularity_stays_on_the_line() {
             start: start.clone(),
             hand: 0,
             waypoints: vec![to],
+            hold: vec![],
             holding: None,
         };
         for (iterations, through) in [(300, false), (1000, true)] {
@@ -488,6 +490,65 @@ fn turning_while_moving_a_little_keeps_the_precision_without_stopping() {
     }
 }
 
+/// Joints held stay where the start has them, to the bit, along the whole motion, and the hand
+/// follows its path with the joints left; where those cannot keep it on the path, the motion
+/// stops there.
+#[test]
+fn held_joints_stay_where_they_start() {
+    let robot = panda();
+    let n = robot.dof();
+    // The base turned to a value a solve would round, unlike `default_q`'s 0.
+    let mut at = robot.default_q().to_vec();
+    at[0] = 0.4;
+    let start = robot.ee_pose(&at, 0);
+    let across = Pose::new(start.position + Vec3::new(0.0, 0.1, 0.0), start.rotation);
+    let along = |hold: Vec<usize>| ToolPath {
+        start: at.clone(),
+        hold,
+        ..path(&robot, vec![across])
+    };
+    let o = ToolPathOptions::default();
+    let largest_turn = |control_points: &[f32], joints: &[usize]| {
+        let turns = control_points.chunks(n).flat_map(|q| {
+            joints
+                .iter()
+                .map(|&j| (q[j] - at[j]).abs())
+                .collect::<Vec<_>>()
+        });
+        turns.fold(0.0, f32::max)
+    };
+    for device in devices(&robot) {
+        let name = device.name();
+        // Free, the base turns for a move across.
+        let free = follow(&device, World::default(), &[along(vec![])]);
+        assert_eq!(free.fraction[0], 1.0, "{name}: {:?}", free.stopped[0]);
+        let turn = largest_turn(&free.paths[0], &[0]);
+        assert!(turn > 0.01, "{name}: free, the base turns {turn} rad");
+        let result = follow(&device, World::default(), &[along(vec![0])]);
+        assert_eq!(result.fraction[0], 1.0, "{name}: {:?}", result.stopped[0]);
+        assert_eq!(
+            largest_turn(&result.paths[0], &[0]),
+            0.0,
+            "{name}: the base turns"
+        );
+        for pose in hand_poses(&robot, &result.paths[0]) {
+            let off = off_segment(pose.position, start.position, across.position);
+            assert!(off <= o.precision + 1e-4, "{name}: {off} m off the line");
+        }
+        // The wrist alone cannot keep the hand's pose along the line.
+        let result = follow(&device, World::default(), &[along(vec![0, 1, 2, 3])]);
+        assert!(
+            result.fraction[0] < 0.1
+                && matches!(result.stopped[0], Some(ToolPathStop::Unreachable { .. })),
+            "{name}: {} of the way, {:?}",
+            result.fraction[0],
+            result.stopped[0]
+        );
+        let turn = largest_turn(&result.paths[0], &[0, 1, 2, 3]);
+        assert_eq!(turn, 0.0, "{name}: a held joint turns");
+    }
+}
+
 #[test]
 fn malformed_paths_are_input_errors() {
     let robot = panda();
@@ -528,6 +589,14 @@ fn malformed_paths_are_input_errors() {
             },
             o.clone(),
             "no waypoints",
+        ),
+        (
+            ToolPath {
+                hold: vec![2, 7],
+                ..good.clone()
+            },
+            o.clone(),
+            "holds joint 7 of a robot with 7",
         ),
         (
             ToolPath {

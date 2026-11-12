@@ -61,6 +61,7 @@ fn corner(device: &Device, worlds: &Worlds, down: f32, side: f32) -> (Vec<Vec<f3
             start: from.clone(),
             hand: 0,
             waypoints: vec![Pose::new(to, start.rotation)],
+            hold: vec![],
             holding: None,
         };
         let followed = batchplan::follow(device, worlds, &[path], &o).unwrap();
@@ -763,6 +764,7 @@ fn a_blend_is_checked_with_what_the_hand_holds() {
                 start: from.clone(),
                 hand: 0,
                 waypoints: vec![Pose::new(to, ready.rotation)],
+                hold: vec![],
                 holding: Some(held.clone()),
             };
             let o = ToolPathOptions::default();
