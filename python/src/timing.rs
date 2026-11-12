@@ -1,8 +1,11 @@
 //! Timing paths into trajectories.
 
 use numpy::{PyArray1, PyArrayMethods};
+use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
+use pyo3::types::PyTuple;
 
+use crate::device::Device;
 use crate::error::OrRaise;
 use crate::field::{self, Field, value_class};
 use crate::plan::StartMotion;
@@ -273,10 +276,33 @@ impl Trajectory {
     }
 }
 
+/// Times each of `paths` (control points, `(points, dof)` each) as `Trajectory` times one, on
+/// the device's threads: the paths a call planned, timed in one call. A tuple holding each path's
+/// trajectory, or the error it would raise alone, in the paths' order.
+#[pyfunction]
+#[pyo3(signature = (device, paths, speed_scale = 1.0))]
+pub(crate) fn time<'py>(
+    py: Python<'py>,
+    device: &Device,
+    paths: &Bound<'py, PyAny>,
+    speed_scale: f32,
+) -> PyResult<Bound<'py, PyTuple>> {
+    let paths = paths.try_iter()?.map(|path| field::floats(&path?));
+    let paths: Vec<Vec<f32>> = paths.collect::<PyResult<_>>()?;
+    let slices: Vec<&[f32]> = paths.iter().map(Vec::as_slice).collect();
+    let timed = py.detach(|| batchplan::time(&device.device, &slices, speed_scale));
+    let each = timed.into_iter().map(|timed| match timed.or_raise() {
+        Ok(trajectory) => Trajectory(trajectory).into_bound_py_any(py),
+        Err(error) => Ok(error.into_value(py).into_any().into_bound(py)),
+    });
+    PyTuple::new(py, each.collect::<PyResult<Vec<_>>>()?)
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<JointState>()?;
     m.add_class::<HandSpeed>()?;
     m.add_class::<JointTrajectory>()?;
     m.add_class::<Trajectory>()?;
+    m.add_function(wrap_pyfunction!(time, m)?)?;
     Ok(())
 }

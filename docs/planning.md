@@ -372,6 +372,7 @@ Either is slowed by `speed_scale` (1.0 is as fast as the limits allow). Limits c
 
 - **For control loops**: `trajectory.at(t, &mut state)` writes position, velocity and acceleration without allocating.
 - **For datasets**: `trajectory.sample(hz)` returns fixed-rate samples.
+- **Many at once**: `time(&device, &paths, speed_scale)` times every path of a call in one call on the device's threads, each as `Trajectory::try_new` times it, and gives each its trajectory or its error in order.
 - **For safety layers**: a `Trajectory` is plain serializable data. `trajectory.check(&robot)` refuses one that is non-finite, does not start and end at rest, leaves a joint range, runs backward, or exceeds a velocity, acceleration or jerk limit.
 - **Its ends**: `trajectory.start()` and `trajectory.end()` are where it starts and comes to rest: its first and last control points, or for a stop, where the stop begins and ends along the path.
 - **Payloads**: timing knows the joints' limits, not the load. A held object collides as part of the robot ([holding objects](robots.md#holding-objects)), but batchplan has no payload mass or inertia, so a heavy carry is timed as an empty one: slow it with `speed_scale` or the robot's limit scales.

@@ -52,14 +52,12 @@ fn a_one_thread_device_works_on_its_one_thread() {
         .solved()
         .map(|s| PlanProblem::new(s.problem.world, robot.default_q(), s.solution))
         .collect();
-    assert!(!problems.is_empty());
-    assert!(
-        batchplan::plan(&device, &worlds, &problems, &PlanOptions::default())
-            .unwrap()
-            .solved()
-            .count()
-            > 0
-    );
+    assert!(problems.len() >= 2, "{} reaches solved", problems.len());
+    let planned = batchplan::plan(&device, &worlds, &problems, &PlanOptions::default()).unwrap();
+    let planned: Vec<&[f32]> = planned.solved().map(|s| s.solution).collect();
+    assert!(planned.len() >= 2, "{} paths planned", planned.len());
+    let timed = batchplan::time(&device, &planned, 1.0);
+    assert!(timed.iter().all(Result::is_ok));
     let searches: Vec<RrtProblem> = problems
         .iter()
         .map(|p| RrtProblem {

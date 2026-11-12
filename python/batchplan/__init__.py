@@ -72,6 +72,10 @@ from batchplan._native import (
     plan,
     solve_ik,
 )
+from batchplan._native import (
+    # Kept out of `__all__`: `from batchplan import *` would replace Python's `time` module.
+    time as time,
+)
 
 __all__ = [
     "AttachedObject",

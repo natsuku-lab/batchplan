@@ -93,6 +93,11 @@ def test_plans_run_from_start_to_goal_and_time_within_limits(ur5e_robot):
         spans = len(trajectory.time_points) - 3
         assert math.isclose(trajectory.knot_interval * spans, trajectory.duration, rel_tol=1e-5)
         half = bp.Trajectory(ur5e_robot, path, 0.5)
+        # Many at once, on the device's threads: each as alone, an error in its place.
+        timed = bp.time(device, [path, path, path[:3]], 0.5)
+        assert isinstance(timed, tuple) and len(timed) == 3
+        assert timed[0].duration == half.duration == timed[1].duration
+        assert isinstance(timed[2], bp.InputError), timed[2]
         assert math.isclose(half.duration, 2 * trajectory.duration, rel_tol=1e-4)
         mid = trajectory.at(trajectory.duration / 2)
         assert np.any(mid.velocity != 0), "the state halfway is moving"
@@ -487,6 +492,12 @@ def failures_of(robot, device, worlds, problems):
     return lambda: bp.ik_failures(device, worlds, result)
 
 
+def timings(robot, device, worlds, problems):
+    """`time`, of the reaches' planned paths over and over."""
+    paths = [s.solution for s in bp.plan(device, worlds, problems).solved()]
+    return lambda: bp.time(device, paths * (6000 // len(paths)))
+
+
 def tool_paths(robot, device, worlds, problems):
     """`follow`, 10 cm down from each reach's start."""
     paths = []
@@ -524,6 +535,7 @@ LONG_CALLS = {
     "pick": (16, picks),
     "solve_ik": (2400, lambda r, d, w, p: lambda: bp.solve_ik(d, w, targets(r, p))),
     "plan": (4000, lambda r, d, w, p: lambda: bp.plan(d, w, p)),
+    "time": (32, timings),
     "ik_failures": (1000, failures_of),
     "Robot.load": (1, lambda *_: lambda: [ur5e() for _ in range(3)]),
     "Robot.assemble": (1, lambda *_: lambda: bp.Robot.assemble(two_ur5e())),
