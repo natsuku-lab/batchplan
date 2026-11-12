@@ -845,8 +845,9 @@ fn line(robot: &Robot, device: &Device) -> (Trajectory, Vec3, Vec3) {
         hand: 0,
         linear: 0.1,
         angular: f32::INFINITY,
+        near: None,
     };
-    let trajectory = Trajectory::with_hand_speed(robot, &result.paths[0], &speed).unwrap();
+    let trajectory = Trajectory::with_hand_speed(robot, &result.paths[0], &[speed]).unwrap();
     (trajectory, from.position, to.position)
 }
 

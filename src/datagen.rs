@@ -1063,6 +1063,7 @@ pub fn handover(
         hand,
         linear: o.task.tool_speed,
         angular: f32::INFINITY,
+        near: None,
     };
     let exchanges: Vec<[Trajectory; 3]> = device.install(|| {
         done.par_iter()
@@ -1070,8 +1071,8 @@ pub fn handover(
                 let t = &tasks[e.task];
                 Ok([
                     Trajectory::try_new(robot, &e.meet, 1.0)?,
-                    Trajectory::with_hand_speed(robot, &e.take, &speed(t.to))?,
-                    Trajectory::with_hand_speed(robot, &e.leave, &speed(t.from))?,
+                    Trajectory::with_hand_speed(robot, &e.take, &[speed(t.to)])?,
+                    Trajectory::with_hand_speed(robot, &e.leave, &[speed(t.from)])?,
                 ])
             })
             .collect::<Result<_>>()

@@ -202,8 +202,9 @@ fn main() -> Result<(), Error> {
             hand: 0,
             linear: 0.05,
             angular: f32::INFINITY,
+            near: None,
         };
-        let descent = Trajectory::with_hand_speed(&robot, &result.paths[0], &speed)?;
+        let descent = Trajectory::with_hand_speed(&robot, &result.paths[0], &[speed])?;
         println!("lowered in {:.2} s", descent.duration());
     }
     Ok(())
@@ -334,8 +335,10 @@ fn main() -> Result<(), Error> {
 `join(&device, &worlds, &sequences, &JoinOptions)` runs consecutive motions without stopping between them, as MoveIt's Pilz planner blends a motion sequence. A `Sequence` names its world, its paths in order, each rest-to-rest as `plan` and `follow` return them and starting where the one before ends, and a blend radius for each join, as each item of a Pilz sequence gives its own.
 
 ```rust,no_run
-# use batchplan::{Device, Error, JoinOptions, Sequence, Trajectory, World};
+# use batchplan::{Device, Error, HandSpeed, JoinOptions, Near, Sequence, Trajectory, World};
 # fn run(device: &Device, transit: Vec<f32>, approach: Vec<f32>) -> Result<(), Error> {
+let robot = device.robot();
+let grasp = robot.ee_pose(&approach[approach.len() - robot.dof()..], 0).position;
 let worlds = device.upload(&[World::default()])?;
 let sequence = Sequence {
     world: 0,
@@ -346,8 +349,15 @@ let sequence = Sequence {
 };
 let joined = batchplan::join(device, &worlds, &[sequence], &JoinOptions::default())?;
 // One path per stretch the robot moves without stopping: here one, unless the join stopped.
+// The hand comes as fast as the joints allow and covers the last 6 cm to the grasp at 5 cm/s.
+let arriving = HandSpeed {
+    hand: 0,
+    linear: 0.05,
+    angular: f32::INFINITY,
+    near: Some(Near { point: grasp, radius: 0.06 }),
+};
 for path in &joined.paths[0] {
-    let trajectory = Trajectory::try_new(device.robot(), path, 1.0)?;
+    let trajectory = Trajectory::with_hand_speed(robot, path, &[arriving])?;
     println!("{:.2} s", trajectory.duration());
 }
 # Ok(())
@@ -356,10 +366,11 @@ for path in &joined.paths[0] {
 
 - **The blend.** Near a join, the joined path leaves the motions only while every hand is within the join's radius of where it is at the join (0 stops there), and is the motions themselves elsewhere: a tool path stays on its line outside the blend. Inside it, the path follows a curve that sets out and arrives along both motions without curving there, so jerk-limited timing can follow it at speed.
 - **Kept only where it is sooner.** Each join weighs three blends: the widest within the radius, one dropping half as many control points, and the narrowest. Those that make the stretch so far and the next motion finish sooner than with a stop between them are checked for collision, soonest first, and the first that is free is kept. A turn back, or a tight turn at speed, rarely gains, and keeps its stop. `JoinResult::blends` gives each join's radius, `None` where it stops. Joining never makes a sequence take longer.
-- **The result.** Per sequence, one path for each stretch the robot moves without stopping, to time with `Trajectory::try_new`. A stretch of one motion is that motion as given.
+- **The result.** Per sequence, one path for each stretch the robot moves without stopping, to time with `Trajectory::try_new` or `with_hand_speed`. A stretch of one motion is that motion as given.
 - **Holding an object.** A sequence's `holding` (a pick's `Held`) is carried through it: every blend is checked with the object in the hand, as `plan` and `follow` check a problem's, on the device without it. A carry joins into the move in of its place this way.
 - **What it gains.** On pick-like sequences, a transit into a straight move in and a straight move out into the next transit, a 5 cm radius finished 5.8% sooner on average on a reBot B601 (15% at most) and 8.4% on an SO-101 (17%), and joining 60 of them took 15 ms on 32 threads ([Benchmarks](benchmarks.md#joining-motions)). Motions that carry on in about the same direction gain more; a sharp turn needs most of a stop's braking anyway.
-- **Limits.** Each stretch has one timing, so a hand speed cap (`Trajectory::with_hand_speed`) caps all of it, and `pick` and `place` still stop between their steps; a task without its transit leaves the way to its moves to join with them. Each join times the stretch so far, so joining a long sequence costs more per join than a short one.
+- **Arriving slowly.** Each stretch has one timing. For the hand to come fast and reach a grasp slowly, time the stretch with a cap that holds near the grasp alone (`HandSpeed::near`, [below](#executable-trajectories)): a cap without it slows the whole stretch.
+- **Limits.** `pick` and `place` still stop between their steps; a task without its transit leaves the way to its moves to join with them. Each join times the stretch so far, so joining a long sequence costs more per join than a short one.
 
 ## Executable trajectories
 
@@ -368,11 +379,13 @@ for path in &joined.paths[0] {
 - **Time-optimal** (TOPP-RA, Pham and Pham 2018): the fastest timing of the path under joint velocity and acceleration limits, plus a speed cap from the jerk limit, smoothed into a B-spline time map. Where the smoothed map overshoots a limit, the profile is solved again going slower there, and the map stretched by what overshoot remains. On planned Panda paths it takes 0.53 times as long as uniform timing on average and never longer (`tests/trajectory.rs`), at about 0.3 ms per trajectory on one of the Ryzen's threads (`examples/timing.rs`).
 - **Uniform**: `σ(t) = t / h`, with the smallest `h` that keeps every joint within its limits. Velocity, acceleration and jerk are then B-splines over the control points' differences, so the bound holds exactly along the whole curve.
 
-Either is slowed by `speed_scale` (1.0 is as fast as the limits allow). Limits come from `RobotOptions::joint_limits` for joints it names, then from the robot description when it has them (URDF 1.2 `acceleration` and `jerk`), otherwise from `RobotOptions` (5 rad/s² and 50 rad/s³ by default). `Trajectory::with_hand_speed(&robot, path, &HandSpeed)` keeps a hand under caps too: `linear` on its speed (m/s) and `angular` on how fast it turns (rad/s), where `f32::INFINITY` leaves one uncapped. Both timings keep them, and `check` checks the joints' limits only.
+Either is slowed by `speed_scale` (1.0 is as fast as the limits allow). Limits come from `RobotOptions::joint_limits` for joints it names, then from the robot description when it has them (URDF 1.2 `acceleration` and `jerk`), otherwise from `RobotOptions` (5 rad/s² and 50 rad/s³ by default). `Trajectory::with_hand_speed(&robot, path, &[HandSpeed])` keeps hands under caps too: `linear` on a hand's speed (m/s) and `angular` on how fast it turns (rad/s), where `f32::INFINITY` leaves one uncapped. Both timings keep them, and `check` checks the joints' limits only.
+
+A cap holds along the whole path, or, with `near: Some(Near { point, radius })`, only while the hand's frame is within `radius` of `point` (in the robot's frame): the motion slows as the hand enters that ball and runs as fast as the joints allow outside it. A ball as wide as the move to a grasp is long, around the grasp, covers that move and the first of the move away. Several caps hold together, each where it is, so one stretch from a grasp to a place can be slow at both ends.
 
 - **For control loops**: `trajectory.at(t, &mut state)` writes position, velocity and acceleration without allocating.
 - **For datasets**: `trajectory.sample(hz)` returns fixed-rate samples.
-- **Many at once**: `time(&device, &paths, speed_scale)` times every path of a call in one call on the device's threads, each as `Trajectory::try_new` times it, and gives each its trajectory or its error in order.
+- **Many at once**: `time(&device, &paths, speed_scale, &hand_speeds)` times every path of a call in one call on the device's threads, each as `Trajectory::try_new` times it, or under its own list of caps where `hand_speeds` gives one per path (`&[]` caps none), and gives each its trajectory or its error in order.
 - **For safety layers**: a `Trajectory` is plain serializable data. `trajectory.check(&robot)` refuses one that is non-finite, does not start and end at rest, leaves a joint range, runs backward, or exceeds a velocity, acceleration or jerk limit.
 - **Its ends**: `trajectory.start()` and `trajectory.end()` are where it starts and comes to rest: its first and last control points, or for a stop, where the stop begins and ends along the path.
 - **Payloads**: timing knows the joints' limits, not the load. A held object collides as part of the robot ([holding objects](robots.md#holding-objects)), but batchplan has no payload mass or inertia, so a heavy carry is timed as an empty one: slow it with `speed_scale` or the robot's limit scales.

@@ -87,6 +87,7 @@ fn main() -> Result<(), Error> {
 | Picking up and setting down | `grasps`, `pick`, `place` | [tasks](docs/planning.md#picking-up-and-setting-down) |
 | A program of picks and places planned together | `pick` and `place` with `transit: false`, then one `plan` and `join` | [tasks](docs/planning.md#picking-up-and-setting-down) |
 | Motions run without stopping between them | `join` | [joins](docs/planning.md#joining-motions) |
+| A motion that comes fast and arrives slowly | `Trajectory::with_hand_speed` with a cap near the grasp (`HandSpeed::near`); many paths: `time` | [timing](docs/planning.md#executable-trajectories) |
 | Running a motion while the world changes | `Follower`, `servo` | [live motion](docs/planning.md#live-motion) |
 | Obstacles from depth images or point clouds | `SdfGrid`, `OccupancyMap`, `DepthImage::robot_mask` | [perception](docs/perception.md) |
 | Training data | `datagen`, `npy::export`, `lerobot::export` | [training data](docs/training-data.md) |

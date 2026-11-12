@@ -12,6 +12,7 @@
 //!   densely along it, keep their limits.
 
 use crate::error::{Error, Result, ensure_input};
+use glam::Vec3;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -22,16 +23,32 @@ use crate::topp::{self, CHECK_SAMPLES};
 use crate::types::{JointTrajectory, StartMotion};
 
 /// Times each of `paths` as [`Trajectory::try_new`] times one, on the device's threads: the paths
-/// a call planned, timed in one call. Each path's own trajectory or error, in the paths' order.
-#[must_use]
-pub fn time(device: &Device, paths: &[&[f32]], speed_scale: f32) -> Vec<Result<Trajectory>> {
+/// a call planned, timed in one call. With `hand_speeds`, one list per path, each path keeps its
+/// hands under its list's caps as [`Trajectory::with_hand_speed`] does, before `speed_scale`
+/// slows it; without any (`&[]`), no path is capped. Each path's own trajectory or error, in the
+/// paths' order.
+pub fn time(
+    device: &Device,
+    paths: &[&[f32]],
+    speed_scale: f32,
+    hand_speeds: &[&[HandSpeed]],
+) -> Result<Vec<Result<Trajectory>>> {
+    ensure_input!(
+        hand_speeds.is_empty() || hand_speeds.len() == paths.len(),
+        "{} lists of hand speeds for {} paths",
+        hand_speeds.len(),
+        paths.len()
+    );
     let robot = device.robot();
-    let one = |path: &&[f32]| Trajectory::try_new(robot, path, speed_scale);
+    let one = |i: usize| {
+        let speeds = hand_speeds.get(i).copied().unwrap_or_default();
+        Trajectory::capped(robot, paths[i], speed_scale, speeds)
+    };
     // One path is not worth handing over.
     if paths.len() < 2 {
-        return paths.iter().map(one).collect();
+        return Ok((0..paths.len()).map(one).collect());
     }
-    device.install(|| paths.par_iter().map(one).collect())
+    Ok(device.install(|| (0..paths.len()).into_par_iter().map(one).collect()))
 }
 
 /// Joint position, velocity and acceleration at one instant.
@@ -67,6 +84,20 @@ pub struct HandSpeed {
     pub linear: f32,
     /// The largest rate at which it turns, radians per second.
     pub angular: f32,
+    /// Where the caps hold: while the hand's frame is this near a point, as on the last
+    /// centimeters to a grasp, with the rest of the path as fast as the joints allow. `None`
+    /// caps the whole path.
+    pub near: Option<Near>,
+}
+
+/// The part of a path a [`HandSpeed`] holds on: where the hand's frame is within `radius` of
+/// `point`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Near {
+    /// The point, in the robot's frame.
+    pub point: Vec3,
+    /// How far from it the caps reach, meters.
+    pub radius: f32,
 }
 
 /// A rest-to-rest joint trajectory: a path whose first three and last three control points are
@@ -97,37 +128,57 @@ impl Trajectory {
     /// Times a planned path (`[points, dof]` control points, at least 7) as fast as the robot's
     /// velocity, acceleration and jerk limits allow, then slows it by `speed_scale` in (0, 1].
     pub fn try_new(robot: &Robot, control_points: &[f32], speed_scale: f32) -> Result<Self> {
-        Self::timed(robot, control_points, speed_scale, None)
+        Self::timed(robot, control_points, speed_scale, &[])
     }
 
-    /// Times a planned path as fast as [`Trajectory::try_new`] does while hand `speed.hand` keeps
-    /// under `speed`'s caps too, as a tool moved along a path ([`crate::follow`]) may need.
-    /// [`Trajectory::check`] checks the joints' limits only.
+    /// Times a planned path as fast as [`Trajectory::try_new`] does while each of `speeds` keeps
+    /// its hand under its caps too: along the whole path, as a tool moved along one
+    /// ([`crate::follow`]) may need, or only near a point ([`HandSpeed::near`]), as a motion
+    /// joined into the move to a grasp needs to arrive slowly. Where several hold at once, the
+    /// hand keeps under each. [`Trajectory::check`] checks the joints' limits only.
     pub fn with_hand_speed(
         robot: &Robot,
         control_points: &[f32],
-        speed: &HandSpeed,
+        speeds: &[HandSpeed],
     ) -> Result<Self> {
-        ensure_input!(
-            speed.hand < robot.hands(),
-            "hand {} does not exist: the robot has {}",
-            speed.hand,
-            robot.hands()
-        );
-        ensure_input!(
-            speed.linear > 0.0 && speed.angular > 0.0,
-            "hand speed caps must be positive, got {} m/s and {} rad/s",
-            speed.linear,
-            speed.angular
-        );
-        Self::timed(robot, control_points, 1.0, Some(speed))
+        Self::capped(robot, control_points, 1.0, speeds)
+    }
+
+    /// [`Self::with_hand_speed`], then slowed by `speed_scale`.
+    fn capped(
+        robot: &Robot,
+        control_points: &[f32],
+        speed_scale: f32,
+        speeds: &[HandSpeed],
+    ) -> Result<Self> {
+        for speed in speeds {
+            ensure_input!(
+                speed.hand < robot.hands(),
+                "hand {} does not exist: the robot has {}",
+                speed.hand,
+                robot.hands()
+            );
+            ensure_input!(
+                speed.linear > 0.0 && speed.angular > 0.0,
+                "hand speed caps must be positive, got {} m/s and {} rad/s",
+                speed.linear,
+                speed.angular
+            );
+            if let Some(Near { point, radius }) = speed.near {
+                ensure_input!(
+                    point.is_finite() && radius.is_finite() && radius > 0.0,
+                    "a hand speed holds near a point within a positive radius, got {point} and {radius} m"
+                );
+            }
+        }
+        Self::timed(robot, control_points, speed_scale, speeds)
     }
 
     fn timed(
         robot: &Robot,
         control_points: &[f32],
         speed_scale: f32,
-        hand: Option<&HandSpeed>,
+        speeds: &[HandSpeed],
     ) -> Result<Self> {
         let n = robot.dof();
         ensure_input!(
@@ -140,10 +191,8 @@ impl Trajectory {
             first.chunks(n).all(|p| p == &first[..n]),
             "the path starts moving: time it with Trajectory::moving and its start motion"
         );
-        let rates = hand.map(|speed| {
-            let limits = [speed.linear, speed.angular];
-            topp::HandRates::new(robot, control_points, speed.hand, limits)
-        });
+        let rates =
+            (!speeds.is_empty()).then(|| topp::HandRates::new(robot, control_points, speeds));
         let h = rates
             .as_ref()
             .map_or(0.0, topp::HandRates::uniform_knot)
