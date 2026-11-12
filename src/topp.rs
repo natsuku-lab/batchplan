@@ -60,7 +60,8 @@ const STEERED_AFTER: f32 = 1.3;
 pub(crate) struct HandRates {
     rates: Vec<[f32; 2]>,
     /// Per stage of the timing, the largest rate of the caps that hold near a point at any
-    /// sample up to the stages either side; empty without such caps.
+    /// sample up to the stages either side: zero where none does, and empty for one cap along
+    /// the whole path.
     stages: Vec<[f32; 2]>,
     limits: [f32; 2],
 }
@@ -85,17 +86,14 @@ impl HandRates {
         let tightest =
             |of: fn(&HandSpeed) -> f32| caps.iter().map(of).fold(f32::INFINITY, f32::min);
         let limits = [tightest(|cap| cap.linear), tightest(|cap| cap.angular)];
-        let counts = |limit: f32, tightest: f32| match limit.is_finite() {
+        let share = |limit: f32, tightest: f32| match limit.is_finite() {
             true => tightest / limit,
             false => 0.0,
         };
-        let counts = caps.iter().map(|cap| {
-            [
-                counts(cap.linear, limits[0]),
-                counts(cap.angular, limits[1]),
-            ]
-        });
-        let counts: Vec<[f32; 2]> = counts.collect();
+        let counts: Vec<[f32; 2]> = caps
+            .iter()
+            .map(|cap| [share(cap.linear, limits[0]), share(cap.angular, limits[1])])
+            .collect();
         // The rates of the caps that hold near a point, apart: zero where the hand is away.
         let mut near = Vec::with_capacity(samples);
         along(robot, cp, |fk, dq| {
@@ -123,7 +121,7 @@ impl HandRates {
             near.push(within);
         });
         // A sample between two stages is checked against what holds either side of it, and the
-        // timing's speed runs straight from one stage to the next: so that it can keep under a
+        // timing's ṡ² runs straight from one stage to the next: so that it can keep under a
         // cap that begins or ends between two stages, a stage slows for what holds anywhere up
         // to the stages either side of it.
         const PER_STAGE: usize = HAND_SAMPLES_PER_SPAN / STAGES_PER_SPAN;

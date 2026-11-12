@@ -43,7 +43,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   so a way joined into the move to a grasp comes as fast as the joints allow and arrives slowly,
   and `Trajectory::with_hand_speed` takes several caps, each holding where it is. A `HandSpeed`
   literal needs `near: None`, and `with_hand_speed` takes a slice (`&[speed]`). A 15 cm way
-  joined into a 6 cm move capped at 5 cm/s takes 2.19 s where the two take 2.26 s one after the
+  joined into a 6 cm move capped at 5 cm/s takes 2.21 s where the two take 2.26 s one after the
   other and the joined path 4.41 s capped throughout (a Panda, `tests/join.rs`). In Python,
   `HandSpeed(hand, linear, angular, near=Near(point, radius))`, and `with_hand_speed` takes one
   cap or a list.

@@ -1210,13 +1210,11 @@ fn a_hand_speed_near_a_point_holds_there_alone() {
     let robot = common::panda().unwrap();
     let n = robot.dof();
     let cap = 0.05;
-    let mut zoned_paths = 0;
+    // A ball around each path's goal, which the hand enters, and one around its start, which it
+    // leaves: the timing slows for a ball from either side.
+    let mut zoned_paths = [0; 2];
     for path in &planned(&robot, 8) {
-        let goal = robot.ee_pose(&path[path.len() - n..], 0).position;
-        let near = Near {
-            point: goal,
-            radius: 0.1,
-        };
+        let ends = [&path[path.len() - n..], &path[..n]];
         let speed = |near: Option<Near>| HandSpeed {
             hand: 0,
             linear: cap,
@@ -1225,33 +1223,45 @@ fn a_hand_speed_near_a_point_holds_there_alone() {
         };
         let free = Trajectory::try_new(&robot, path, 1.0).unwrap();
         let whole = Trajectory::with_hand_speed(&robot, path, &[speed(None)]).unwrap();
-        let zoned = Trajectory::with_hand_speed(&robot, path, &[speed(Some(near))]).unwrap();
-        zoned.check(&robot).unwrap();
-        let speeds = hand_speeds(&robot, &zoned, 0, &near);
-        let (within, outside) = (peak(&speeds, true), peak(&speeds, false));
-        assert!(
-            within <= cap * (1.0 + 1e-3),
-            "{within} m/s near the goal under a cap of {cap}"
-        );
-        assert!(within > 0.9 * cap, "the cap does not bind: {within} m/s");
-        // The hand's travel inside the zone at the cap: what the cap must add, at least.
-        let dt = zoned.knot_interval / 256.0;
-        let inside: f32 = speeds.iter().filter(|(i, _)| *i).map(|(_, v)| v * dt).sum();
-        assert!(inside > 0.08, "{inside} m of the path within the zone");
-        if outside < 4.0 * cap {
-            // A motion too short to pick up speed before the zone shows nothing.
-            continue;
+        for (end, q) in ends.into_iter().enumerate() {
+            let near = Near {
+                point: robot.ee_pose(q, 0).position,
+                radius: 0.1,
+            };
+            let zoned = Trajectory::with_hand_speed(&robot, path, &[speed(Some(near))]).unwrap();
+            zoned.check(&robot).unwrap();
+            let speeds = hand_speeds(&robot, &zoned, 0, &near);
+            let (within, outside) = (peak(&speeds, true), peak(&speeds, false));
+            assert!(
+                within <= cap * (1.0 + 1e-3),
+                "end {end}: {within} m/s in the ball under a cap of {cap}"
+            );
+            assert!(
+                within > 0.9 * cap,
+                "end {end}: the cap does not bind: {within} m/s"
+            );
+            // The hand's travel inside the ball at the cap: what the cap must add, at least.
+            let dt = zoned.knot_interval / 256.0;
+            let inside: f32 = speeds.iter().filter(|(i, _)| *i).map(|(_, v)| v * dt).sum();
+            assert!(
+                inside > 0.08,
+                "end {end}: {inside} m of the path within the ball"
+            );
+            if outside < 4.0 * cap {
+                // A motion too short to pick up speed outside the ball shows nothing.
+                continue;
+            }
+            zoned_paths[end] += 1;
+            let (free, whole, zoned) = (free.duration(), whole.duration(), zoned.duration());
+            assert!(
+                zoned > free && zoned < free + 1.25 * inside / cap && zoned < 0.7 * whole,
+                "end {end}: {zoned} s with the cap in the ball, {free} s without, {whole} s under it throughout"
+            );
         }
-        zoned_paths += 1;
-        let (free, whole, zoned) = (free.duration(), whole.duration(), zoned.duration());
-        assert!(
-            zoned > free && zoned < free + 1.25 * inside / cap && zoned < 0.7 * whole,
-            "{zoned} s with the cap near the goal, {free} s without, {whole} s under it throughout"
-        );
     }
     assert!(
-        zoned_paths >= 4,
-        "{zoned_paths} paths reach speed before the zone"
+        zoned_paths.iter().all(|&paths| paths >= 4),
+        "{zoned_paths:?} paths reach speed outside the ball at their goal and at their start"
     );
 }
 
