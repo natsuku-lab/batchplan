@@ -9,8 +9,8 @@ use std::f32::consts::FRAC_PI_2;
 
 use batchplan::{
     Contact, Device, Error, Held, IkOptions, IkProblem, Obstacle, PlanFailure, PlanOptions,
-    PlanProblem, Pose, Robot, SdfGrid, ToolPath, ToolPathOptions, ToolPathStop, Touch, World,
-    Worlds,
+    PlanProblem, Pose, Robot, RobotOptions, SdfGrid, ToolPath, ToolPathOptions, ToolPathStop,
+    Touch, World, Worlds,
 };
 use glam::{Quat, Vec3};
 
@@ -352,6 +352,140 @@ fn each_plan_holds_its_own_object_through_optimization() {
     }
 }
 
+/// A world uploaded to the device that holds nothing lets what a hand comes to hold touch an
+/// obstacle (`Touch::held`): a problem holding there is checked as on a device holding its object,
+/// with the world uploaded to that one letting the held link touch it.
+#[test]
+fn a_world_lets_what_a_hand_comes_to_hold_touch_an_obstacle() {
+    let s = Scene::new();
+    let o = IkOptions::default();
+    let held = cube(0.0);
+    let resting = World {
+        touch: vec![Touch::held(SLAB, 0)],
+        ..s.world.clone()
+    };
+    for device in devices(&s.robot) {
+        let name = device.name();
+        // World 0 as it was, world 1 with the cube free to rest on the slab.
+        let worlds = device.upload(&[s.world.clone(), resting.clone()]).unwrap();
+        let at_ready = |world: u32, holding: Option<Held>| IkProblem {
+            seed: Some(s.up.clone()),
+            holding,
+            ..IkProblem::new(world, s.robot.ee_pose(&s.ready, 0))
+        };
+        let problems = [
+            at_ready(0, Some(held.clone())),
+            at_ready(1, Some(held.clone())),
+            at_ready(1, None),
+            at_ready(0, None),
+        ];
+        let all = batchplan::solve_ik(&device, &worlds, &problems, &o).unwrap();
+        assert!(all.best(0).is_none(), "{name}: the cube meets the slab");
+        assert!(
+            all.best(1).is_some(),
+            "{name}: the cube may rest on the slab"
+        );
+        // Nothing is held where nothing is: the two worlds are one to the bare hand.
+        let (n, seeds) = (all.dof, all.seeds);
+        let of = |i: usize| &all.q[i * seeds * n..(i + 1) * seeds * n];
+        assert!(all.best(2).is_some(), "{name}");
+        assert_eq!(of(2), of(3), "{name}");
+
+        // As the device holding the cube solves it, in the world uploaded to that one.
+        let holder = s.holder(&device, Some(&held));
+        let named = World {
+            touch: vec![Touch::new(SLAB, [HELD])],
+            ..s.world.clone()
+        };
+        let on_holder = holder.upload(&[s.world.clone(), named]).unwrap();
+        let one = batchplan::solve_ik(&holder, &on_holder, &[at_ready(1, None)], &o).unwrap();
+        assert_eq!(of(1), &one.q[..], "{name}");
+        let items = seeds..2 * seeds;
+        assert_eq!(all.success[items.clone()], one.success[..], "{name}");
+        assert_eq!(
+            all.world_clearance[items],
+            one.world_clearance[..],
+            "{name}"
+        );
+
+        // A plan and a straight move holding the cube end where it rests, in that world alone.
+        let down = |world: u32| PlanProblem {
+            holding: Some(held.clone()),
+            ..PlanProblem::new(world, s.up.clone(), s.ready.clone())
+        };
+        let plans = [down(0), down(1)];
+        let planned = batchplan::plan(&device, &worlds, &plans, &PlanOptions::default()).unwrap();
+        let solved: Vec<usize> = planned.solved().map(|p| p.index).collect();
+        assert_eq!(solved, [1], "{name}");
+        let lower = |world: u32| ToolPath {
+            world,
+            start: s.up.clone(),
+            hand: 0,
+            waypoints: vec![s.robot.ee_pose(&s.ready, 0)],
+            holding: Some(held.clone()),
+        };
+        let paths = [lower(0), lower(1)];
+        let o = ToolPathOptions::default();
+        let followed = batchplan::follow(&device, &worlds, &paths, &o).unwrap();
+        assert!(
+            followed.fraction[0] < 1.0,
+            "{name}: {:?}",
+            followed.fraction
+        );
+        assert_eq!(
+            followed.fraction[1], 1.0,
+            "{name}: {:?}",
+            followed.stopped[1]
+        );
+    }
+}
+
+/// One hand's held object per upload, and a problem that holds in another is refused.
+#[test]
+fn worlds_let_one_hands_held_object_touch_obstacles() {
+    let two_hands = RobotOptions {
+        ee_links: vec!["panda_hand".into(), "panda_link4".into()],
+        ..common::panda_options()
+    };
+    let robot = Robot::load(common::asset("franka/franka_panda.urdf"), &two_hands).unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let slab = Obstacle::cuboid(Vec3::new(0.5, 0.0, 0.2), Vec3::new(0.15, 0.15, 0.005));
+    let resting = |hand: usize| World {
+        touch: vec![Touch::held(0, hand)],
+        ..World::new(vec![slab.clone()])
+    };
+    let input = |e: Error, says: &str| {
+        assert!(
+            matches!(e, Error::Input(_)) && e.to_string().contains(says),
+            "{e}"
+        );
+    };
+    // Each hand's alone uploads; both in one upload, or in one world, do not.
+    for hand in 0..2 {
+        device.upload(&[resting(hand), resting(hand)]).unwrap();
+    }
+    input(
+        device.upload(&[resting(0), resting(1)]).unwrap_err(),
+        "world 1",
+    );
+    let both = World {
+        touch: vec![Touch::held(0, 0), Touch::held(0, 1)],
+        ..World::new(vec![slab.clone()])
+    };
+    input(device.upload(&[both]).unwrap_err(), "hands 0 and 1");
+    // A hand the robot lacks names no link.
+    input(device.upload(&[resting(2)]).unwrap_err(), "held by hand 2");
+    // Worlds for what hand 0 holds refuse a problem holding in hand 1.
+    let worlds = device.upload(&[resting(0)]).unwrap();
+    let q = robot.default_q().to_vec();
+    let problem = PlanProblem {
+        holding: Some(Held { hand: 1, ..bar() }),
+        ..PlanProblem::new(0, q.clone(), q)
+    };
+    let refused = batchplan::plan(&device, &worlds, &[problem], &PlanOptions::default());
+    input(refused.unwrap_err(), "held by hand 0");
+}
+
 #[test]
 fn a_hold_the_device_cannot_take_is_an_input_error_naming_its_problem() {
     let s = Scene::new();
@@ -428,5 +562,5 @@ fn a_hold_the_device_cannot_take_is_an_input_error_naming_its_problem() {
         },
     ];
     let e = batchplan::plan(&both, &touching, &problems, &PlanOptions::default()).unwrap_err();
-    input(e, "uploaded for a robot holding");
+    input(e, "let 'held by hand 0' touch obstacles");
 }

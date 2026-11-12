@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::description::Geometry;
 use crate::error::{Error, Result};
+use crate::held;
 use crate::rng::Rng;
 use crate::robot::Robot;
 use crate::sdf::{self, SdfGrid, SdfOptions};
@@ -73,8 +74,9 @@ pub struct World {
 
 /// Links that may touch one obstacle of a [`World`]. Their names are resolved when the world is
 /// uploaded, against the robot of the device it is uploaded to; devices made from that one with
-/// [`Device::with_robot`](crate::Device::with_robot) for an attached object keep them. A world in
-/// which a held object may touch something is uploaded to the device holding it.
+/// [`Device::with_robot`](crate::Device::with_robot) for an attached object keep them. What a
+/// problem's held object may touch is named with [`Touch::held`], on the device that holds
+/// nothing; a world uploaded to a device that holds an object names its link.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Touch {
     /// The obstacle's index in [`World::obstacles`].
@@ -90,6 +92,18 @@ impl Touch {
         Touch {
             obstacle,
             links: links.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Lets what hand `hand` holds touch obstacle `obstacle`, as an object rests on what it is set
+    /// down on: the object of a problem's `holding` ([`Held`](crate::Held)). The device that
+    /// holds nothing takes it, for one hand in an upload; problems that hold nothing are checked
+    /// as without it.
+    #[must_use]
+    pub fn held(obstacle: usize, hand: usize) -> Touch {
+        Touch {
+            obstacle,
+            links: vec![held::held_link(hand)],
         }
     }
 }
@@ -344,14 +358,15 @@ impl World {
         if self.touch.is_empty() {
             return Ok(LinkSets::default());
         }
-        let words = robot.links.len().div_ceil(64);
+        // What a hand may come to hold is the link after the robot's own, as holding it adds it.
+        let held = self.held_touch(robot)?.map(held::held_link);
+        let words = (robot.links.len() + usize::from(held.is_some())).div_ceil(64);
         let mut bits = vec![0u64; self.obstacles.len() * words];
         for (k, t) in self.touch.iter().enumerate() {
             for name in &t.links {
-                let link = robot
-                    .links
-                    .iter()
-                    .position(|l| &l.name == name)
+                let own = robot.links.iter().position(|l| &l.name == name);
+                let link = own
+                    .or_else(|| (held.as_ref() == Some(name)).then_some(robot.links.len()))
                     .ok_or_else(|| {
                         Error::Input(format!(
                             "touch {k}: robot '{}' has no link '{name}'",
@@ -362,6 +377,27 @@ impl World {
             }
         }
         Ok(LinkSets { bits, words })
+    }
+
+    /// The hand whose held object the world's touches name ([`Touch::held`]) though `robot` holds
+    /// nothing in it: one hand's at most, since what either holds is the same link after the
+    /// robot's own.
+    pub(crate) fn held_touch(&self, robot: &Robot) -> Result<Option<usize>> {
+        let mut held = None;
+        for hand in 0..robot.hands() {
+            let link = held::held_link(hand);
+            let named = self.touch.iter().any(|t| t.links.contains(&link));
+            if !named || robot.links.iter().any(|l| l.name == link) {
+                continue;
+            }
+            if let Some(other) = held.replace(hand) {
+                return Err(Error::Input(format!(
+                    "touches name what hands {other} and {hand} hold: a world lets one hand's \
+                     held object touch obstacles, on a device that holds nothing"
+                )));
+            }
+        }
+        Ok(held)
     }
 }
 

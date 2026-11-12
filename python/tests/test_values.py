@@ -63,6 +63,7 @@ def test_floats_read_back_as_written():
 
 def test_sequences_come_from_any_iterable_but_a_string():
     touch = bp.Touch(0, (link for link in ["a", "b"]))
+    assert bp.Touch.held(2, 1) == bp.Touch(2, ["held by hand 1"]), "what hand 1 comes to hold"
     assert touch.links == ("a", "b")
     with pytest.raises(TypeError, match="string"):
         bp.Touch(0, "panda_hand")

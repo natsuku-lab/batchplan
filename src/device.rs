@@ -19,7 +19,7 @@ use rayon::prelude::*;
 
 use crate::constraint::Region;
 use crate::error::{Result, ensure_input, input};
-use crate::held::Fits;
+use crate::held::{self, Fits};
 
 use crate::cpu::{CpuBackend, CpuWorlds};
 use crate::edges::Search;
@@ -154,7 +154,8 @@ pub struct Worlds {
     worlds: Vec<World>,
     prepared: Box<dyn Any + Send + Sync>,
     /// The uploading robot's links, by name, when a world lets some touch: the touch sets hold
-    /// their indices.
+    /// their indices. After them, what a hand comes to hold where a world names it
+    /// (`Touch::held`): the link a problem's `holding` adds.
     links: Vec<String>,
 }
 
@@ -168,7 +169,8 @@ impl fmt::Debug for Worlds {
 
 impl Worlds {
     /// The name link `link` had on the robot these worlds were uploaded for, where a world lets
-    /// links touch obstacles and the robot had that link.
+    /// links touch obstacles and the robot had that link, or the worlds name it as what a hand
+    /// comes to hold.
     pub(crate) fn link_name(&self, link: usize) -> Option<&str> {
         self.links.get(link).map(String::as_str)
     }
@@ -256,18 +258,36 @@ impl Device {
     /// last one attached, or holding another of the same name keeps the worlds valid; an object of
     /// another name at the same link does not. Errors if an obstacle has non-finite or negative
     /// sizes, a rotation that is not a unit quaternion, or a malformed distance grid, or if a
-    /// touch names an obstacle the world lacks or a link the robot lacks.
+    /// touch names an obstacle the world lacks or a link the robot lacks. What a hand comes to
+    /// hold ([`Touch::held`](crate::Touch::held)) is a link the robot gains with it: the worlds
+    /// of one upload name one hand's, and serve problems holding in that hand or holding nothing.
     pub fn upload(&self, worlds: &[World]) -> Result<Worlds> {
         for (i, w) in worlds.iter().enumerate() {
             w.check().map_err(|e| input!("world {i}: {e}"))?;
         }
         let touching = worlds.iter().any(|w| !w.touch.is_empty());
+        // The hand whose held object the worlds let touch something, where the robot holds none.
+        let mut held = None;
+        for (i, w) in worlds.iter().enumerate() {
+            let hand = w.held_touch(self.robot());
+            let Some(hand) = hand.map_err(|e| input!("world {i}: {e}"))? else {
+                continue;
+            };
+            ensure_input!(
+                held.is_none_or(|other| other == hand),
+                "world {i} lets what hand {hand} holds touch obstacles and an earlier world what \
+                 hand {} holds: one hand's per upload",
+                held.unwrap_or(hand)
+            );
+            held = Some(hand);
+        }
+        let own = self.robot().links.iter().map(|l| l.name.clone());
         Ok(Worlds {
             device: self.id,
             worlds: worlds.to_vec(),
             prepared: self.backend.upload(worlds)?,
             links: if touching {
-                self.robot().links.iter().map(|l| l.name.clone()).collect()
+                own.chain(held.map(held::held_link)).collect()
             } else {
                 vec![]
             },
@@ -519,8 +539,8 @@ impl Device {
             .find(|(_, (was, is))| **was != is.name)
         {
             return Err(input!(
-                "these worlds let links touch obstacles, and link {i} was '{was}' when they were \
-                 uploaded but is '{}' now: upload them again for this robot",
+                "these worlds let links touch obstacles, and name link {i} '{was}', which is \
+                 '{}' on this robot: upload them again for this robot",
                 is.name
             ));
         }

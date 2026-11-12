@@ -25,6 +25,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 - **Breaking:** `join` checks a sequence's blends with what a hand holds: `Sequence::holding`, a
   pick's `Held`, as `PlanProblem::holding`, so a carry joins into the move in of its place on the
   device without the object. A `Sequence` literal needs the new field (`holding: None`).
+- A world can let what a hand comes to hold touch an obstacle: `Touch::held(obstacle, hand)`, for
+  one hand in an upload, on the device that holds nothing. `solve_ik`, `follow` and `plan`
+  problems with `holding` then rest their objects on what they are set down on in one call
+  against one upload, as a device holding the object does with the world uploaded to it;
+  problems that hold nothing are checked as without it. In Python, `Touch.held`.
+
 - Publish the Python bindings as `batches` on PyPI (`import batchplan`). Version tags publish
   the Rust crate and Python wheels and source together, using trusted publishing.
 
