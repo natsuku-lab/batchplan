@@ -54,29 +54,12 @@ const SWUNG_AFTER: f32 = 1.1;
 const STEERED_AFTER: f32 = 1.3;
 
 /// How fast capped hands move along a path per unit of `s`, sampled densely, and the speeds they
-/// must keep under there: meters and radians, per unit of `s` and per second. A hand's speed is
-/// its rate times ṡ, so its caps are velocity limits on `s` alone. Per sample, for position and
-/// for rotation: the rate and the cap of the cap that slows `s` most there, among those that
-/// hold there ([`HandSpeed::near`]); a rate of zero under no cap where none does.
+/// must keep under: meters and radians, per unit of `s` and per second. A hand's speed is its
+/// rate times ṡ, so its caps are velocity limits on `s` alone. A sample's rate is the largest of
+/// the caps that hold there ([`HandSpeed::near`]), zero where none does.
 pub(crate) struct HandRates {
-    capped: Vec<[Capped; 2]>,
-}
-
-/// A hand's rate per unit of `s`, the speed it must keep under, and the seconds a unit of `s`
-/// takes at least for it to (their ratio).
-#[derive(Clone, Copy)]
-struct Capped {
-    rate: f32,
-    limit: f32,
-    least: f32,
-}
-
-impl Capped {
-    /// Whether `s` must run slower for this than for `other`; of two that slow it alike (as two
-    /// uncapped rates do), the larger rate.
-    fn slows_more_than(self, other: Self) -> bool {
-        self.least > other.least || (self.least == other.least && self.rate > other.rate)
-    }
+    rates: Vec<[f32; 2]>,
+    limits: [f32; 2],
 }
 
 impl HandRates {
@@ -85,12 +68,12 @@ impl HandRates {
         let spans = cp.len() / n - 3;
         let mut fk = Fk::new(robot.links.len());
         let (mut q, mut dq) = (vec![0.0f32; n], vec![0.0f32; n]);
-        let mut capped = Vec::with_capacity(spans * HAND_SAMPLES_PER_SPAN + 1);
-        let free = Capped {
-            rate: 0.0,
-            limit: f32::INFINITY,
-            least: 0.0,
-        };
+        // The tightest cap of each kind is the limit, and a looser cap's rates count for less
+        // by as much: one cap's rates are the hand's own.
+        let tightest =
+            |of: fn(&HandSpeed) -> f32| caps.iter().map(of).fold(f32::INFINITY, f32::min);
+        let limits = [tightest(|cap| cap.linear), tightest(|cap| cap.angular)];
+        let mut rates = Vec::with_capacity(spans * HAND_SAMPLES_PER_SPAN + 1);
         for k in 0..=spans * HAND_SAMPLES_PER_SPAN {
             let s = k as f32 / HAND_SAMPLES_PER_SPAN as f32;
             let span = (s as usize).min(spans - 1);
@@ -98,51 +81,47 @@ impl HandRates {
             spline::blend(cp, n, span, spline::basis(u), &mut q);
             spline::blend(cp, n, span, spline::basis_d1(u), &mut dq);
             robot.fk_into(&q, &mut fk);
-            let mut most = [free; 2];
+            let mut most = [0.0f32; 2];
             for cap in caps {
                 let at = fk.pos[robot.ee_links[cap.hand]];
                 let away = |near: Near| at.distance(near.point) > near.radius;
                 if cap.near.is_some_and(away) {
                     continue;
                 }
-                let rates = robot.hand_velocity(&fk, cap.hand, &dq).map(Vec3::length);
+                let rate = robot.hand_velocity(&fk, cap.hand, &dq).map(Vec3::length);
                 for (i, limit) in [cap.linear, cap.angular].into_iter().enumerate() {
-                    let capped = Capped {
-                        rate: rates[i],
-                        limit,
-                        least: rates[i] / limit,
+                    // A kind left uncapped counts for nothing.
+                    let counts = if limit.is_finite() {
+                        limits[i] / limit
+                    } else {
+                        0.0
                     };
-                    if capped.slows_more_than(most[i]) {
-                        most[i] = capped;
-                    }
+                    most[i] = most[i].max(rate[i] * counts);
                 }
             }
-            capped.push(most);
+            rates.push(most);
         }
-        Self { capped }
+        Self { rates, limits }
     }
 
-    /// For position and for rotation: the rate and the cap that slow `s` more of those sampled
-    /// either side of `s`.
-    fn at(&self, s: f32) -> [(f32, f32); 2] {
+    /// The larger of the rates sampled either side of `s`, for position and for rotation.
+    fn at(&self, s: f32) -> [f32; 2] {
         let k = s.max(0.0) * HAND_SAMPLES_PER_SPAN as f32;
-        let last = self.capped.len() - 1;
+        let last = self.rates.len() - 1;
         let (below, above) = (
             (k.floor() as usize).min(last),
             (k.ceil() as usize).min(last),
         );
-        std::array::from_fn(|i| {
-            let (b, a) = (self.capped[below][i], self.capped[above][i]);
-            let slower = if a.slows_more_than(b) { a } else { b };
-            (slower.rate, slower.limit)
-        })
+        std::array::from_fn(|i| self.rates[below][i].max(self.rates[above][i]))
     }
 
-    /// The smallest knot interval at which uniform timing keeps the hands under their caps.
+    /// The smallest knot interval at which uniform timing keeps the hand under its caps.
     pub(crate) fn uniform_knot(&self) -> f32 {
         let mut h = 0.0f32;
-        for capped in self.capped.iter().flatten() {
-            h = h.max(capped.least);
+        for rates in &self.rates {
+            for (rate, limit) in rates.iter().zip(self.limits) {
+                h = h.max(rate / limit);
+            }
         }
         h * STRETCH_MARGIN
     }
@@ -264,7 +243,8 @@ fn timed_map(
                 }
             }
             if let Some(hand) = hand {
-                for (rate, limit) in hand.at((i as f64 * step) as f32) {
+                let rates = hand.at((i as f64 * step) as f32);
+                for (rate, limit) in rates.into_iter().zip(hand.limits) {
                     if rate > 1e-9 {
                         b.cap = b.cap.min((f64::from(limit) / f64::from(rate)).powi(2));
                     }
@@ -763,7 +743,8 @@ fn assess(
             let mut factor = 1.0f32;
             if let Some(hand) = hand {
                 let speed = map(spline::basis_d1(u)).abs() / knot;
-                for (rate, limit) in hand.at(s) {
+                let rates = hand.at(s);
+                for (rate, limit) in rates.into_iter().zip(hand.limits) {
                     let ratio = rate * speed / (limit * target * relief);
                     if ratio > k {
                         k = ratio;

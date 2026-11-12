@@ -1177,6 +1177,29 @@ fn hand_speeds_hold_together_each_where_it_is() {
             alone(tight)
         );
     }
+    // A cap on the hand's speed near the goal with one on its turning throughout: each binds,
+    // though each leaves the other's kind uncapped.
+    let turning = HandSpeed {
+        hand: 0,
+        linear: f32::INFINITY,
+        angular: hand_motion(&robot, &alone(tight)).0[1] / 2.0,
+        near: None,
+    };
+    let mixed = Trajectory::with_hand_speed(&robot, path, &[tight, turning]).unwrap();
+    let turned = hand_motion(&robot, &mixed).0[1];
+    assert!(
+        turned <= turning.angular * (1.0 + 1e-3) && turned > 0.9 * turning.angular,
+        "the hand turns at {turned} rad/s under a cap of {}",
+        turning.angular
+    );
+    let speeds = hand_speeds(&robot, &mixed, &tight.near.unwrap());
+    let within = speeds.iter().filter(|(i, _)| *i).map(|(_, v)| *v);
+    let within = within.fold(0.0, f32::max);
+    assert!(
+        within <= tight.linear * (1.0 + 1e-3) && mixed.duration() > alone(tight).duration(),
+        "{within} m/s near the goal under a cap of {}",
+        tight.linear
+    );
     // A cap out of the hand's way, and no caps at all.
     let free = Trajectory::try_new(&robot, path, 1.0).unwrap();
     let away = zone(ends[1] + Vec3::new(0.0, 0.0, 2.0), 0.04);
