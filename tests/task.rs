@@ -104,9 +104,9 @@ fn check_pick(robot: &Robot, start: &[f32], plan: &TaskPlan, at: Pose, lift: Vec
     assert!(lifted.position.distance(at.position + lift) < 2e-3);
 }
 
-/// Where hand 0 is along `t`, 256 times per knot interval, and how fast it moves there: from the
-/// joint velocities, the hand's positions 5 ms of that motion either side.
-fn hand_speeds(robot: &Robot, t: &Trajectory) -> Vec<(Vec3, f32)> {
+/// Where hand `hand` is along `t`, 256 times per knot interval, and how fast it moves there: from
+/// the joint velocities, the hand's positions 5 ms of that motion either side.
+fn hand_speeds(robot: &Robot, t: &Trajectory, hand: usize) -> Vec<(Vec3, f32)> {
     let n = robot.dof();
     let samples = t.sample(256.0 / t.knot_interval).unwrap();
     let states = samples
@@ -117,7 +117,7 @@ fn hand_speeds(robot: &Robot, t: &Trajectory) -> Vec<(Vec3, f32)> {
     let each = states.map(|(q, dq)| {
         let moved = |by: f32| -> Vec3 {
             let q: Vec<f32> = q.iter().zip(dq).map(|(q, dq)| q + by * dq).collect();
-            robot.ee_pose(&q, 0).position
+            robot.ee_pose(&q, hand).position
         };
         (moved(0.0), moved(h).distance(moved(-h)) / (2.0 * h))
     });
@@ -201,61 +201,125 @@ fn the_quickest_grasp_that_gets_through_wins() {
     }
 }
 
-/// With `tool_speed_near`, the straight moves are capped near the grasp alone: the hand keeps
-/// under the cap within that distance of where it grasps, on the way in and on the way out, moves
-/// faster farther off, and the moves, the same paths, take less time than capped all along.
+/// A task's straight moves capped near where hand `hand` grasps or lets go (`near`) keep the
+/// paths they take capped all along (`along`): the hand keeps under `cap` within `radius` of
+/// there, on the way in and on the way out, moves faster farther off, and the moves take less
+/// time than capped all along.
+fn check_capped_near(robot: &Robot, hand: usize, near: &TaskPlan, along: &TaskPlan, what: &str) {
+    let (cap, radius) = (NEAR_CAP, NEAR_RADIUS);
+    let n = robot.dof();
+    let cp = &near.approach.control_points;
+    let contact = robot.ee_pose(&cp[cp.len() - n..], hand).position;
+    for (kind, moved, capped) in [
+        ("in", &near.approach, &along.approach),
+        ("away", &near.depart, &along.depart),
+    ] {
+        assert_eq!(
+            moved.control_points, capped.control_points,
+            "{what}: {kind}"
+        );
+        let speeds = hand_speeds(robot, moved, hand);
+        let fastest = |inside: bool| {
+            let of = speeds
+                .iter()
+                .filter(|(p, _)| (p.distance(contact) <= radius) == inside);
+            of.map(|(_, v)| *v).fold(0.0, f32::max)
+        };
+        let (within, beyond) = (fastest(true), fastest(false));
+        assert!(
+            within <= cap * (1.0 + 1e-3) && within > 0.9 * cap,
+            "{what}: {within} m/s moving {kind} near the contact under a cap of {cap}"
+        );
+        assert!(
+            beyond > 2.0 * cap,
+            "{what}: {beyond} m/s moving {kind} farther off"
+        );
+        assert!(
+            moved.duration() < 0.7 * capped.duration(),
+            "{what}: {} s moving {kind}, {} s capped all along",
+            moved.duration(),
+            capped.duration()
+        );
+    }
+}
+
+/// The straight moves' cap and where it holds, in the tests of `tool_speed_near`.
+const NEAR_CAP: f32 = 0.05;
+const NEAR_RADIUS: f32 = 0.02;
+
+/// `tool_speed` (`NEAR_CAP`) held near the contact alone, or all along.
+fn capped(near: bool) -> TaskOptions {
+    TaskOptions {
+        tool_speed: NEAR_CAP,
+        tool_speed_near: near.then_some(NEAR_RADIUS),
+        ..TaskOptions::default()
+    }
+}
+
+/// With `tool_speed_near`, the straight moves are capped near the grasp alone.
 #[test]
 fn the_straight_moves_can_be_capped_near_the_grasp_alone() {
     let robot = panda();
-    let n = robot.dof();
-    let (cap, radius) = (0.05, 0.02);
-    let o = |near: Option<f32>| TaskOptions {
-        tool_speed: cap,
-        tool_speed_near: near,
-        ..TaskOptions::default()
-    };
     let task = pick_from(&robot, vec![top_across()]);
     for device in devices(&robot) {
-        let name = device.name();
         let pick = |near| {
-            let plans = pick_in(&device, scene(vec![]), task.clone(), &o(near)).unwrap();
+            let plans = pick_in(&device, scene(vec![]), task.clone(), &capped(near)).unwrap();
             plans.into_iter().next().expect("the grasp gets through")
         };
-        let (along, near) = (pick(None), pick(Some(radius)));
-        let cp = &near.approach.control_points;
-        let grasp = robot.ee_pose(&cp[cp.len() - n..], 0).position;
-        for (kind, moved, capped) in [
-            ("in", &near.approach, &along.approach),
-            ("away", &near.depart, &along.depart),
-        ] {
-            assert_eq!(
-                moved.control_points, capped.control_points,
-                "{name}: {kind}"
-            );
-            let speeds = hand_speeds(&robot, moved);
-            let fastest = |inside: bool| {
-                let of = speeds
-                    .iter()
-                    .filter(|(p, _)| (p.distance(grasp) <= radius) == inside);
-                of.map(|(_, v)| *v).fold(0.0, f32::max)
-            };
-            let (within, beyond) = (fastest(true), fastest(false));
-            assert!(
-                within <= cap * (1.0 + 1e-3) && within > 0.9 * cap,
-                "{name}: {within} m/s moving {kind} near the grasp under a cap of {cap}"
-            );
-            assert!(
-                beyond > 2.0 * cap,
-                "{name}: {beyond} m/s moving {kind} farther off"
-            );
-            assert!(
-                moved.duration() < 0.7 * capped.duration(),
-                "{name}: {} s moving {kind}, {} s capped all along",
-                moved.duration(),
-                capped.duration()
-            );
-        }
+        check_capped_near(&robot, 0, &pick(true), &pick(false), &device.name());
     }
+}
+
+/// On two arms, the cap holds near where the hand that moves grasps or lets go: the second hand
+/// picks a box up and sets it down capped near its own grasp and release.
+#[test]
+fn on_two_arms_the_cap_holds_near_the_hand_that_moves() {
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let at = Vec3::new(0.45, -0.35, HALF.z);
+    let world = World::new(vec![
+        Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.9, 0.02)),
+        Obstacle::cuboid(at, HALF),
+    ]);
+    let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
+    let task = Pick {
+        hand: 1,
+        support: vec![TABLE],
+        ..Pick::new(0, robot.default_q(), 1, vec![top_across()])
+    };
+    let pick = |near: bool| {
+        let picked = batchplan::pick(&device, &worlds, std::slice::from_ref(&task), &capped(near));
+        let plans = picked
+            .unwrap()
+            .outcomes
+            .remove(0)
+            .expect("the grasp gets through");
+        plans.into_iter().next().expect("a plan")
+    };
+    let (near, along) = (pick(true), pick(false));
+    check_capped_near(&robot, 1, &near, &along, "pick");
+    let mut after = world;
+    after.remove(1).unwrap();
+    let after = device.upload(&[after]).unwrap();
+    let place = Place {
+        support: vec![TABLE],
+        ..Place::new(
+            0,
+            near.end(),
+            near.held.clone().unwrap(),
+            vec![Pose::new(at + Vec3::X * 0.15, Quat::IDENTITY)],
+        )
+    };
+    let set_down = |near: bool| {
+        let placed = batchplan::place(&device, &after, std::slice::from_ref(&place), &capped(near));
+        let plans = placed
+            .unwrap()
+            .outcomes
+            .remove(0)
+            .expect("the release gets through");
+        plans.into_iter().next().expect("a plan")
+    };
+    check_capped_near(&robot, 1, &set_down(true), &set_down(false), "place");
 }
 
 #[test]

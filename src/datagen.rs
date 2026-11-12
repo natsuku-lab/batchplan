@@ -1059,7 +1059,8 @@ pub fn handover(
 
     // The exchange's motions are timed as the tasks' are, then every motion is slowed by a speed
     // scale drawn in order and sampled on the device's threads.
-    // Near where the hand is at configuration `q` where the cap holds near a point.
+    // The cap on the exchange's straight moves; with `tool_speed_near`, it holds near hand
+    // `hand`'s position at `q`.
     let speed = |hand: usize, q: &[f32]| HandSpeed {
         hand,
         linear: o.task.tool_speed,
@@ -1069,7 +1070,6 @@ pub fn handover(
             radius,
         }),
     };
-    let n = robot.dof();
     let exchanges: Vec<[Trajectory; 3]> = device.install(|| {
         done.par_iter()
             .map(|(e, _, _)| {

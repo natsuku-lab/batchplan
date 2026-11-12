@@ -1451,7 +1451,8 @@ fn choose(
     // A robot holding an object keeps its joints and their limits, so the bare robot times every
     // motion. Timing is most of what is left to do, so the device's threads share it.
     let time = |c: &&Candidate| -> Result<TaskPlan> {
-        // The cap, near where the hand is at configuration `q` where it holds near a point.
+        // The cap on the straight moves; with `tool_speed_near`, it holds near the hand's
+        // position at `q`.
         let speed = |q: &[f32]| HandSpeed {
             hand: c.hand,
             linear: o.tool_speed,

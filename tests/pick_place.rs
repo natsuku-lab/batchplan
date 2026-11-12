@@ -872,11 +872,14 @@ fn a_handover_is_capped_near_the_block_alone() {
             (giver_open + 1..frames - 1).take_while(|&f| at(f, 0).distance(let_go) <= reach);
         let (coming, going): (Vec<usize>, Vec<usize>) = (coming.collect(), going.collect());
         for (hand, moves, block) in [(1, &coming, taken), (0, &going, let_go)] {
-            // The fastest the hand moves near the block, or farther from it.
+            // The fastest the hand moves near the block, or farther from it. A frame's speed spans
+            // the frames either side of it, so near counts only where those are near too.
+            let close = |f: usize| at(f, hand).distance(block) <= radius;
             let fastest = |near: bool| {
-                let there = moves
-                    .iter()
-                    .filter(|&&f| (at(f, hand).distance(block) <= radius) == near);
+                let there = moves.iter().filter(|&&f| match near {
+                    true => close(f - 1) && close(f) && close(f + 1),
+                    false => !close(f),
+                });
                 let (count, fastest) =
                     there.fold((0, 0.0f32), |(c, v), &f| (c + 1, v.max(speed(f, hand))));
                 assert!(count > 2, "hand {hand}: {count} frames (near: {near})");
