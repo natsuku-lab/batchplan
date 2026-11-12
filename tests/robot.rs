@@ -285,6 +285,12 @@ fn joints_locked_when_the_model_was_fitted_stay_there() {
     let saved = scratch("locked_model").join("model.json");
     fitted.collision_model().save(&saved).unwrap();
     let model = CollisionModel::load(&saved).unwrap();
+    // The same text without a file, and text that is no model refused as input.
+    let text = model.to_json();
+    assert_eq!(text, std::fs::read_to_string(&saved).unwrap());
+    assert_eq!(CollisionModel::from_json(&text).unwrap(), model);
+    let cut = CollisionModel::from_json(&text[..text.len() / 2]);
+    assert!(matches!(cut, Err(batchplan::Error::Input(_))), "{cut:?}");
     let reloaded = Robot::load(&path, &locked(Some(0.3), Some(model.clone()))).unwrap();
     let moved = HashMap::from([("elbow_flex".into(), -1.0)]);
     for robot in [&fitted, &reloaded] {

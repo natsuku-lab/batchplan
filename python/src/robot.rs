@@ -137,6 +137,17 @@ value_class! {
             py.detach(|| self.0.save(path)).or_raise()
         }
 
+        /// The model as the JSON text `save` writes, to send where no file goes.
+        fn to_json(&self) -> String {
+            self.0.to_json()
+        }
+
+        /// The model in JSON text, as `to_json` and `save` write it.
+        #[staticmethod]
+        fn from_json(text: &str) -> PyResult<Self> {
+            batchplan::CollisionModel::from_json(text).or_raise().map(Self)
+        }
+
         fn __eq__(&self, other: &Self) -> bool {
             self.0 == other.0
         }

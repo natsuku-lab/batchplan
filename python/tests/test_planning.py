@@ -420,6 +420,12 @@ def test_collision_models_save_and_load(tasks_robot, tmp_path):
     model.save(tmp_path / "model.json")
     loaded = bp.CollisionModel.load(tmp_path / "model.json")
     assert loaded == model and len(loaded.spheres) > 5
+    # The same text without a file.
+    text = model.to_json()
+    assert text == (tmp_path / "model.json").read_text()
+    assert bp.CollisionModel.from_json(text) == model
+    with pytest.raises(bp.InputError, match="collision model"):
+        bp.CollisionModel.from_json(text[: len(text) // 2])
 
 
 def test_trajectories_start_moving_stop_and_cap_the_hand(ur5e_robot):
