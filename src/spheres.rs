@@ -26,7 +26,7 @@ use rayon::prelude::*;
 use crate::description::{self, TriMesh};
 use crate::rng::Rng;
 use crate::robot::Robot;
-use crate::world::Obstacle;
+use crate::world::{self, Obstacle};
 
 /// Which link geometry spheres are fitted to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -752,6 +752,7 @@ pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option
                 half_extents,
                 rotation,
             } => {
+                let rotation = world::unit(rotation);
                 let cells = box_cells(half_extents, o.tolerance, per_box);
                 let cell = half_extents / cells.as_vec3();
                 // A hair wide, so rounding never leaves a corner uncovered.

@@ -233,6 +233,22 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Fixed
 
+- An obstacle whose rotation is a little off a unit quaternion (up to a thousandth is accepted)
+  is turned, not stretched. Its frame was built from the quaternion as given, which scaled it
+  by up to 0.4%: a 1.2 m box reached 2 mm past its ends, and a search, which first rules
+  obstacles out by bounding spheres of their stated size, could pass a configuration that
+  `evaluate` found 2 mm inside one. Frames are now built from the rotation made unit, on both
+  devices and in `Obstacle::distance`; a rotation that is unit to rounding is used as it is, so
+  results for those do not move. The same holds for a held object's shapes (`Robot::attach`
+  and a problem's `holding`), whose spheres sat up to 0.2% nearer or farther along the object,
+  for the obstacles `MeshModel::clearance` checks, and for a depth image's camera, whose
+  readings were placed 0.2% nearer or farther (5 mm at 3 m) in `SdfGrid::from_depth`,
+  `OccupancyMap::integrate` and `DepthImage::robot_mask`. A hold's grasp places its object by
+  the grasp made unit, and `Robot::assemble` a part by its base made unit. A camera's pose and
+  a part's base are now checked as other poses are: one that is not finite, or whose rotation
+  is more than a thousandth off unit, is an `Error::Input`, where it built a wrong grid or
+  robot without a word.
+
 - GPU devices on Windows using the FXC DX12 shader compiler can build the hand-frame kernels.
 
 - A plan from a moving start is optimized (`PlanOptions::seeds`) unless its path is within 2% of

@@ -39,7 +39,7 @@ impl Held {
         Ok(AttachedObject {
             name: held_link(self.hand),
             link: robot.links[robot.ee_links[self.hand]].name.clone(),
-            shapes: vec![self.object.placed(self.grasp.inverse())],
+            shapes: vec![self.object.placed(self.grasp.rigid().inverse())],
             touch_links: robot
                 .hand_links(self.hand)
                 .into_iter()
@@ -94,7 +94,7 @@ impl Held {
     /// `robot` holding the object as [`Held::attachment`] attaches it, with `spheres` fitted to
     /// the object in its own frame and placed by the grasp, as attaching it would place them.
     fn holding(&self, robot: &Robot, spheres: &[[f32; 4]]) -> Result<Robot> {
-        let placed = robot::placed_spheres(spheres, self.grasp.inverse());
+        let placed = robot::placed_spheres(spheres, self.grasp.rigid().inverse());
         robot.attach_with(&self.attachment(robot)?, || Ok(placed))
     }
 }
@@ -415,6 +415,39 @@ mod tests {
                 holder.robot().collision_model() == attached.collision_model(),
                 "{held:?}"
             );
+        }
+    }
+
+    /// A grasp whose rotation is a thousandth off unit holds the object where the unit one
+    /// does, attached to the robot and placed for a problem that holds it.
+    #[test]
+    fn a_grasp_not_quite_unit_holds_the_object_where_the_unit_one_does() {
+        let robot = panda();
+        let turn = Quat::from_rotation_y(1.6) * Quat::from_rotation_x(0.4);
+        let own = [[0.0, 0.0, 0.03, 0.03], [0.0, 0.0, -0.03, 0.03]];
+        let spheres = |rotation: Quat| {
+            let held = Held {
+                hand: 0,
+                object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.05)),
+                grasp: Pose::new(Vec3::new(0.0, 0.0, 0.28), rotation),
+            };
+            let attached = robot.attach(&held.attachment(&robot).unwrap()).unwrap();
+            let holding = held.holding(&robot, &own).unwrap();
+            [attached, holding].map(|r| r.collision_model().spheres[&held_link(0)].clone())
+        };
+        let unit = spheres(turn);
+        for norm in [0.9991f32, 1.0009] {
+            for (unit, scaled) in unit.iter().zip(spheres(turn * norm)) {
+                assert!(unit[0][..3].iter().any(|x| x.abs() > 0.2), "{unit:?}");
+                assert_eq!(unit.len(), scaled.len());
+                for (u, s) in unit.iter().zip(&scaled) {
+                    let apart = u.iter().zip(s).map(|(a, b)| (a - b).abs());
+                    assert!(
+                        apart.fold(0.0, f32::max) < 2e-5,
+                        "norm {norm}: {u:?} became {s:?}"
+                    );
+                }
+            }
         }
     }
 }

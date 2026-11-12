@@ -10,7 +10,7 @@ use fearless_simd::{Level, Simd, f32x8};
 use glam::{Mat3, Vec3};
 
 use crate::constraint::Region;
-use crate::cpu::{CpuWorld, GridBox, Prepared, STRETCH};
+use crate::cpu::{CpuWorld, GridBox, Prepared};
 use crate::robot::{JointKind, Robot};
 use crate::sdf;
 use crate::world::FAR;
@@ -864,7 +864,7 @@ fn grid_gap<S: Simd>(grid: &GridBox, p: V3<S>, radius: f32) -> F<S> {
         y: (l.y.abs() - grid.half.y).max(zero),
         z: (l.z.abs() - grid.half.z).max(zero),
     };
-    outside.length_squared().sqrt() - (radius * STRETCH - grid.sunk)
+    outside.length_squared().sqrt() - (radius - grid.sunk)
 }
 
 /// The lanes where a sphere of a link's, anywhere within its bounding sphere about `p`, may be
@@ -878,7 +878,7 @@ fn grid_reached<S: Simd>(grid: &GridBox, p: V3<S>, r: F<S>) -> fearless_simd::ma
         half: grid.half,
         upright: false,
     };
-    within(&around, p, r * STRETCH - grid.sunk)
+    within(&around, p, r - grid.sunk)
 }
 
 /// The lanes where `p` is nearer `o` than `r` (positive): its distance (`distance`) below `r`,
@@ -1298,19 +1298,16 @@ mod tests {
         );
     }
 
-    /// `keeps` with constraints agrees with `Region::contains` on states free of self-collision, at
-    /// the best SIMD level and the baseline, on states that keep each bound and states that break
-    /// it, in the world and relative to a second hand at the arm's fourth link.
-    /// A rotation a thousandth off a unit quaternion scales its matrix: the box test the searches
-    /// run before a grid's lookups reaches as far as those lookups, measured in the scaled
-    /// frame, would (`cpu::grid_gap`'s test is `cpu.rs`'s).
+    /// The box test the searches run before a grid's lookups reaches as far as those lookups
+    /// would, under a unit rotation and ones a thousandth off, which are made unit
+    /// (`cpu::grid_gap` is held to the same by the devices' tests).
     #[test]
-    fn a_grids_box_is_reached_under_a_rotation_not_quite_unit() {
+    fn a_grids_box_is_reached_as_far_as_its_lookups_read() {
         let origin = Vec3::new(-0.15, -0.15, -0.05);
         let grid = SdfGrid::try_new([4, 4, 2], 0.1, origin, &[0.0; 32]).expect("a grid");
         let center = Vec3::new(0.3, -0.2, 0.4);
-        for norm in [0.9991f32, 1.0009] {
-            let rot = Mat3::from_quat(Quat::from_xyzw(0.0, 0.0, norm, 0.0));
+        for norm in [1.0f32, 0.9991, 1.0009] {
+            let rot = world::frame(Quat::from_xyzw(0.0, 0.0, norm, 0.0));
             let grid_box = GridBox::of(&grid, rot, center);
             for (away, radius) in [(0.5f32, 0.3f32), (0.25, 0.2), (1.0, 0.9)] {
                 // A bounding sphere beside the slab, its nearest point just inside a margin.
@@ -1331,6 +1328,9 @@ mod tests {
         }
     }
 
+    /// `keeps` with constraints agrees with `Region::contains` on states free of self-collision, at
+    /// the best SIMD level and the baseline, on states that keep each bound and states that break
+    /// it, in the world and relative to a second hand at the arm's fourth link.
     #[test]
     fn lanes_keep_constraints_as_the_scalar_test_does() {
         use std::f32::consts::PI;

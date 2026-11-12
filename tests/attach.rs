@@ -368,3 +368,63 @@ fn held_boxes_and_balls_are_covered_without_fitting() {
         vec![[center.x, center.y, center.z, 0.03]]
     );
 }
+
+/// A held shape's rotation a thousandth off a unit quaternion, which is accepted, turns it as the
+/// unit one does: a long board, covered directly, and a long rod, fitted, keep their spheres
+/// where they were, alone, together, and the board with a ball (covered as they are placed).
+#[test]
+fn a_held_shape_turned_by_a_rotation_not_quite_unit_is_not_stretched() {
+    let robot = common::panda().unwrap();
+    let turn = Quat::from_rotation_y(1.6) * Quat::from_rotation_x(0.4);
+    let shapes = |rotation: Quat| {
+        let board = Obstacle::Cuboid {
+            center: Vec3::new(0.0, 0.0, 0.1),
+            half_extents: Vec3::new(0.6, 0.03, 0.01),
+            rotation,
+        };
+        let rod = Obstacle::Cylinder {
+            center: Vec3::new(0.0, 0.05, 0.1),
+            rotation,
+            radius: 0.02,
+            half_height: 0.6,
+        };
+        let ball = Obstacle::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.2),
+            radius: 0.03,
+        };
+        [
+            vec![board.clone()],
+            vec![rod.clone()],
+            vec![board.clone(), rod],
+            vec![board, ball],
+        ]
+    };
+    let spheres = |shapes: Vec<Obstacle>| {
+        let held = robot
+            .attach(&AttachedObject {
+                shapes,
+                spheres: SphereOptions::default(),
+                ..held_box(&FINGERS)
+            })
+            .unwrap();
+        held.collision_model().spheres["box"].clone()
+    };
+    for norm in [0.9991f32, 1.0009] {
+        for (unit, scaled) in shapes(turn).into_iter().zip(shapes(turn * norm)) {
+            let (unit, scaled) = (spheres(unit), spheres(scaled));
+            let reach = unit
+                .iter()
+                .map(|s| Vec3::new(s[0], s[1], s[2] - 0.1).length())
+                .fold(0.0, f32::max);
+            assert!(reach > 0.5, "the spheres reach {reach} from the hand");
+            assert_eq!(unit.len(), scaled.len());
+            for (u, s) in unit.iter().zip(&scaled) {
+                let apart = u.iter().zip(s).map(|(a, b)| (a - b).abs());
+                assert!(
+                    apart.fold(0.0, f32::max) < 2e-5,
+                    "norm {norm}: {u:?} became {s:?}"
+                );
+            }
+        }
+    }
+}

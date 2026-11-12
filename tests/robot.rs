@@ -1792,3 +1792,59 @@ fn links_given_a_tighter_tolerance_get_spheres_that_reach_less_far() {
         );
     }
 }
+
+/// A part's base places its part by its rotation made unit, and is checked as other poses are:
+/// a rotation a thousandth off unit puts the arm where the unit one does, and one that is not a
+/// rotation is refused.
+#[test]
+fn a_parts_base_turns_its_part_and_is_checked() {
+    let one = common::panda_options();
+    let assembled = |base: Pose| {
+        let part = Part {
+            path: common::asset("franka/franka_panda.urdf").into(),
+            prefix: "left_".into(),
+            base,
+        };
+        let locks = one.lock_joints.iter();
+        let options = RobotOptions {
+            lock_joints: locks.map(|(j, v)| (format!("left_{j}"), *v)).collect(),
+            collision_model: Some(CollisionModel::assemble(&[(
+                "left_",
+                one.collision_model.as_ref().unwrap(),
+            )])),
+            ..Default::default()
+        };
+        Robot::assemble(&[part], &options).map(|robot| robot.spheres(robot.default_q()))
+    };
+    let (at, turn) = (Vec3::new(0.0, 0.35, 0.0), Quat::from_rotation_z(2.5));
+    let unit = assembled(Pose::new(at, turn)).unwrap();
+    let reach = unit
+        .iter()
+        .map(|s| Vec3::new(s[0], s[1], s[2]).distance(at));
+    assert!(
+        reach.fold(0.0, f32::max) > 0.5,
+        "the arm reaches far from its base"
+    );
+    for norm in [0.9991f32, 1.0009] {
+        let scaled = assembled(Pose::new(at, turn * norm)).unwrap();
+        for (u, s) in unit.iter().zip(&scaled) {
+            let apart = u.iter().zip(s).map(|(a, b)| (a - b).abs());
+            assert!(
+                apart.fold(0.0, f32::max) < 2e-5,
+                "norm {norm}: {u:?} became {s:?}"
+            );
+        }
+    }
+    let bad = [
+        Pose::new(at, turn * 2.0),
+        Pose::new(at, Quat::from_xyzw(0.0, 0.0, 0.0, 0.0)),
+        Pose::new(Vec3::NAN, turn),
+    ];
+    for base in bad {
+        let refused = assembled(base);
+        assert!(
+            matches!(&refused, Err(Error::Input(m)) if m.contains("base")),
+            "{base:?}: {refused:?}"
+        );
+    }
+}

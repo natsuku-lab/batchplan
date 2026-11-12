@@ -591,7 +591,7 @@ impl Obstacle {
                 half_extents,
                 rotation,
             } => {
-                let r = Mat3::from_quat(rotation);
+                let r = frame(rotation);
                 box_distance(r, center, half_extents, p)
             }
             Obstacle::Sphere { center, radius } => sphere_distance(center, radius, p),
@@ -600,18 +600,18 @@ impl Obstacle {
                 rotation,
                 radius,
                 half_height,
-            } => cylinder_distance(Mat3::from_quat(rotation), center, radius, half_height, p),
+            } => cylinder_distance(frame(rotation), center, radius, half_height, p),
             Obstacle::Capsule {
                 center,
                 rotation,
                 radius,
                 half_length,
-            } => capsule_distance(Mat3::from_quat(rotation), center, radius, half_length, p),
+            } => capsule_distance(frame(rotation), center, radius, half_length, p),
             Obstacle::Sdf {
                 ref grid,
                 center,
                 rotation,
-            } => sdf_distance(Mat3::from_quat(rotation), center, grid, p),
+            } => sdf_distance(frame(rotation), center, grid, p),
         };
         Distance { value, gradient }
     }
@@ -671,6 +671,27 @@ pub(crate) fn cylinder_distance(
         (dz, axial)
     };
     (d, r * gl)
+}
+
+/// A rotation the checks accept, made unit. They accept a quaternion a thousandth off unit, and
+/// as it stands that one scales what it turns: by up to 0.2% applied to a vector, 0.4% as a
+/// matrix. Every distance, bounding sphere and gate measures in the frame it gives an obstacle, a
+/// held shape or a camera, so those take it from here. One that is unit to rounding is returned
+/// as it is.
+#[inline]
+pub(crate) fn unit(rotation: Quat) -> Quat {
+    let off = (rotation.length_squared() - 1.0).abs();
+    if off > 1e-6 {
+        rotation.normalize()
+    } else {
+        rotation
+    }
+}
+
+/// An obstacle's rotation as a matrix that keeps lengths ([`unit`]).
+#[inline]
+pub(crate) fn frame(rotation: Quat) -> Mat3 {
+    Mat3::from_quat(unit(rotation))
 }
 
 /// Must stay in sync with `obstacle_distance` in kernels.wgsl.
