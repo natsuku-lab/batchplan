@@ -158,9 +158,7 @@ impl GridBox {
         let half = grid.half_extent();
         Self {
             rot,
-            // Where the lookups, which turn by `rot`'s transpose, have the box's centre: `rot`
-            // is its inverse only if the rotation is a unit one.
-            mid: center + rot.transpose().inverse() * (grid.origin + half),
+            mid: center + rot * (grid.origin + half),
             half,
             sunk: grid.sunk(),
         }
@@ -240,7 +238,7 @@ pub(crate) fn prepare(robot: &Robot, worlds: &[World]) -> Result<CpuWorlds> {
                         half_extents,
                         rotation,
                     } => {
-                        let rot = Mat3::from_quat(rotation);
+                        let rot = world::frame(rotation);
                         let upright =
                             rot.z_axis == Vec3::Z && rot.x_axis.z == 0.0 && rot.y_axis.z == 0.0;
                         Prepared::Cuboid {
@@ -257,7 +255,7 @@ pub(crate) fn prepare(robot: &Robot, worlds: &[World]) -> Result<CpuWorlds> {
                         radius,
                         half_height,
                     } => Prepared::Cylinder {
-                        rot: Mat3::from_quat(rotation),
+                        rot: world::frame(rotation),
                         center,
                         radius,
                         half_height,
@@ -268,7 +266,7 @@ pub(crate) fn prepare(robot: &Robot, worlds: &[World]) -> Result<CpuWorlds> {
                         radius,
                         half_length,
                     } => Prepared::Capsule {
-                        rot: Mat3::from_quat(rotation),
+                        rot: world::frame(rotation),
                         center,
                         radius,
                         half_length,
@@ -280,7 +278,7 @@ pub(crate) fn prepare(robot: &Robot, worlds: &[World]) -> Result<CpuWorlds> {
                     } => {
                         grids = true;
                         Prepared::Sdf {
-                            rot: Mat3::from_quat(rotation),
+                            rot: world::frame(rotation),
                             center,
                             grid: grid.clone(),
                         }
@@ -436,14 +434,9 @@ pub(crate) fn grid_gap(grid: &GridBox, p: Vec3, radius: f32) -> f32 {
     world::box_distance(grid.rot, grid.mid, grid.half, p)
         .0
         .max(0.0)
-        - radius * STRETCH
+        - radius
         + grid.sunk
 }
-
-/// How much longer a length may be in an obstacle's frame than in the world's: a rotation may be
-/// a thousandth off a unit quaternion (`Obstacle::check`), and its matrix then scales by up to
-/// 0.4%. A radius measured in the world is this much longer where a grid's box is measured.
-pub(crate) const STRETCH: f32 = 1.005;
 
 /// Collision cost of the configuration behind `fk`; adds d(cost)/dq into `grad`.
 /// Without `GRADIENT` only the cost and clearances are computed, as the WGSL `gradient` flag does.
@@ -2096,34 +2089,25 @@ mod tests {
     use crate::robot::{CollisionModel, RobotOptions};
     use crate::world::{Obstacle, World};
 
-    /// A rotation a thousandth off a unit quaternion scales its matrix, and a grid's lookups
-    /// measure in the scaled frame: its box rules the grid out for a link only as far as no
-    /// lookup within the link's bounding sphere reads less.
+    /// A unit rotation's frame is its matrix as it stands, to the bit, so that no obstacle of a
+    /// world given unit rotations moves in its last places; one off unit is made unit.
     #[test]
-    fn a_grids_box_allows_for_a_rotation_not_quite_unit() {
-        // A slab of zeros: a lookup outside it reads how far it is from the box, in its frame.
-        let origin = Vec3::new(-0.15, -0.15, -0.05);
-        let grid = SdfGrid::try_new([4, 4, 2], 0.1, origin, &[0.0; 32]).expect("a grid");
-        let center = Vec3::new(0.3, -0.2, 0.4);
-        for norm in [0.9991f32, 1.0009] {
-            // Half a turn about z, which scales lengths across z the most.
-            let rot = Mat3::from_quat(Quat::from_xyzw(0.0, 0.0, norm, 0.0));
-            let scale = (rot * Vec3::X).length();
-            assert!(
-                (scale - 1.0).abs() > 3e-3,
-                "{norm} scales lengths by {scale}"
+    fn a_unit_rotations_frame_is_its_matrix_as_it_stands() {
+        let mut rng = Rng::new(2);
+        for _ in 0..1000 {
+            let axis = Vec3::new(
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(0.1, 1.0),
             );
-            let grid_box = GridBox::of(&grid, rot, center);
-            for (away, radius) in [(0.5f32, 0.3f32), (0.25, 0.2), (1.0, 0.9)] {
-                // A bounding sphere beside the slab along x, and its point nearest the slab.
-                let p = center + Vec3::X * (0.15 + away);
-                let nearest = p - Vec3::X * radius;
-                let read = world::sdf_distance(rot, center, &grid, nearest).0;
-                assert!(read > 0.0, "{nearest} is outside the slab");
-                let gap = grid_gap(&grid_box, p, radius);
+            let unit = Quat::from_axis_angle(axis.normalize(), rng.range(-3.0, 3.0))
+                * Quat::from_rotation_z(rng.range(-3.0, 3.0));
+            assert_eq!(world::frame(unit), Mat3::from_quat(unit), "{unit}");
+            let rigid = world::frame(unit * 1.0009);
+            for column in [rigid.x_axis, rigid.y_axis, rigid.z_axis] {
                 assert!(
-                    gap <= read,
-                    "norm {norm}: a gap of {gap} where a lookup reads {read}"
+                    (column.length() - 1.0).abs() < 1e-6,
+                    "{unit} scaled gives {rigid}"
                 );
             }
         }

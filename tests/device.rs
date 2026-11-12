@@ -10,8 +10,8 @@ use std::time::Duration;
 use batchplan::rng::Rng;
 use batchplan::{
     CollisionWeights, Device, Error, IkOptions, IkProblem, JointState, Obstacle, PlanOptions,
-    PlanProblem, Pose, Robot, RobotOptions, RrtOptions, ShortcutOptions, StartMotion, Trajectory,
-    World,
+    PlanProblem, Pose, Robot, RobotOptions, RrtOptions, SdfGrid, ShortcutOptions, StartMotion,
+    Trajectory, World,
 };
 use glam::{Quat, Vec3};
 
@@ -27,6 +27,84 @@ fn devices(robot: &Robot) -> Vec<Device> {
         Err(e) => panic!("no GPU: {e}"),
     }
     devices
+}
+
+/// A rotation a thousandth off a unit quaternion is accepted, and turns its obstacle as the unit
+/// one does: nothing is stretched. Each kind of obstacle that turns, long enough for a stretch of
+/// 0.4% to move its end by millimetres, measures the same from the same points and gives every
+/// configuration the same clearance and cost, on every device.
+#[test]
+fn an_obstacle_turned_by_a_rotation_not_quite_unit_is_not_stretched() {
+    let robot = panda();
+    let n = robot.dof();
+    let turn = Quat::from_rotation_z(3.0) * Quat::from_rotation_x(0.4);
+    let grid = {
+        let dims = [41u32, 3, 3];
+        let distances: Vec<f32> = (0..41 * 9).map(|k| 0.01 * ((k % 7) as f32 - 3.0)).collect();
+        let origin = Vec3::new(-0.6, -0.03, -0.03);
+        SdfGrid::try_new(dims, 0.03, origin, &distances).unwrap()
+    };
+    let at = Vec3::new(0.5, 0.1, 0.4);
+    let turned = |rotation: Quat| {
+        let long = Vec3::new(0.6, 0.02, 0.02);
+        World::new(vec![
+            Obstacle::cuboid(at, long).placed(Pose::new(at, rotation)),
+            Obstacle::cylinder(Vec3::ZERO, 0.02, 0.6)
+                .placed(Pose::new(at + Vec3::Y * 0.3, rotation)),
+            Obstacle::capsule(Vec3::ZERO, 0.02, 0.6)
+                .placed(Pose::new(at - Vec3::Y * 0.3, rotation)),
+            Obstacle::from_grid(grid.clone()).placed(Pose::new(at + Vec3::Z * 0.3, rotation)),
+        ])
+    };
+    for norm in [0.9991f32, 1.0009] {
+        let off = Quat::from_xyzw(turn.x * norm, turn.y * norm, turn.z * norm, turn.w * norm);
+        let (unit, scaled) = (turned(turn), turned(off));
+        let mut rng = Rng::new(9);
+        for (a, b) in unit.obstacles.iter().zip(&scaled.obstacles) {
+            for _ in 0..200 {
+                let p = at
+                    + Vec3::new(
+                        rng.range(-1.0, 1.0),
+                        rng.range(-1.0, 1.0),
+                        rng.range(-0.5, 0.8),
+                    );
+                let (da, db) = (a.distance(p).value, b.distance(p).value);
+                assert!((da - db).abs() < 2e-5, "{da} and {db} from {p}");
+            }
+        }
+        let q: Vec<f32> = (0..300 * n)
+            .map(|k| rng.range(robot.lower()[k % n], robot.upper()[k % n]))
+            .collect();
+        let weights = CollisionWeights {
+            margin: 0.05,
+            ..CollisionWeights::default()
+        };
+        for device in devices(&robot) {
+            let name = device.name();
+            let worlds = device.upload(&[unit.clone(), scaled.clone()]).unwrap();
+            let of = |world: u32| {
+                device
+                    .evaluate(&worlds, &vec![world; 300], &q, &weights)
+                    .unwrap()
+            };
+            let (as_unit, as_scaled) = (of(0), of(1));
+            let mut near = 0;
+            for i in 0..300 {
+                let (a, b) = (as_unit.world_clearance[i], as_scaled.world_clearance[i]);
+                assert!((a - b).abs() < 2e-5, "{name}: clearances {a} and {b}");
+                let (a, b) = (as_unit.cost[i], as_scaled.cost[i]);
+                assert!(
+                    (a - b).abs() <= 1e-4 * a.abs().max(1.0),
+                    "{name}: costs {a} and {b}"
+                );
+                near += usize::from(as_unit.world_clearance[i] < 0.05);
+            }
+            assert!(
+                near > 30,
+                "{name}: {near} of 300 within the margin of an obstacle"
+            );
+        }
+    }
 }
 
 /// A device made for a relocked robot with `with_robot` checks collisions as one made for a robot

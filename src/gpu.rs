@@ -430,13 +430,12 @@ const GATED: &str = "            var gap = 0.0;
 const GRID_GAP: &str = "
 // At least how far the distance grid o is from every point within `radius` of p, where that is
 // positive: by its box (o.r1.w: what its values outside the box may lie below the distance to
-// it), the radius longer by what a rotation not quite unit stretches it (cpu.rs's STRETCH).
-// Mirrors `grid_gap` in cpu.rs.
+// it). Mirrors `grid_gap` in cpu.rs.
 fn grid_gap(o: Obstacle, p: vec3<f32>, radius: f32) -> f32 {
     let v = p - o.center.xyz;
     let half = (vec3<f32>(f32(o.nx), f32(o.ny), f32(o.nz)) - 1.0) * (0.5 * o.half.w);
     let lp = vec3<f32>(dot(o.r0.xyz, v), dot(o.r1.xyz, v), dot(o.r2.xyz, v)) - (o.half.xyz + half);
-    return length(max(abs(lp) - half, vec3<f32>(0.0))) - radius * 1.005 + o.r1.w;
+    return length(max(abs(lp) - half, vec3<f32>(0.0))) - radius + o.r1.w;
 }
 ";
 
@@ -1513,7 +1512,7 @@ impl GpuBackend {
             ranges.push([obstacles.len() as u32, s.obstacles.len() as u32]);
             for (k, o) in s.obstacles.iter().enumerate() {
                 let rotated = |kind: u32, center: Vec3, half: [f32; 4], rotation: Quat| {
-                    let r = Mat3::from_quat(rotation);
+                    let r = world::frame(rotation);
                     GpuObstacle {
                         center: v4(center, kind as f32),
                         half,

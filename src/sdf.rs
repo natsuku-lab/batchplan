@@ -24,7 +24,7 @@ use crate::device::Device;
 use crate::error::{Error, Result, ensure_input, input};
 use crate::robot::Robot;
 use crate::types::Pose;
-use crate::world::Distance;
+use crate::world::{self, Distance};
 
 /// Grids with more points are refused; 2^26 half floats take 128 MiB.
 const MAX_POINTS: u64 = 1 << 26;
@@ -110,6 +110,15 @@ impl DepthImage<'_> {
             self.intrinsics
         );
         Ok(())
+    }
+
+    /// The image with its camera's rotation made unit ([`world::unit`]): one a little off unit
+    /// would scale every depth the grid points are compared at.
+    fn rigid(&self) -> Self {
+        Self {
+            camera: Pose::new(self.camera.position, world::unit(self.camera.rotation)),
+            ..*self
+        }
     }
 
     fn height(&self) -> usize {
@@ -208,6 +217,7 @@ impl DepthImage<'_> {
     /// touching the space it hides.
     pub fn robot_mask(&self, robot: &Robot, q: &[f32], padding: f32) -> Result<RobotMask> {
         self.check()?;
+        let to_camera = self.rigid().camera.rotation.inverse();
         ensure_input!(
             q.len() == robot.dof(),
             "q has {} values, the robot {} joints",
@@ -226,7 +236,6 @@ impl DepthImage<'_> {
             .iter()
             .map(|s| (fk.rot[s.link] * s.center + fk.pos[s.link]).extend(s.radius + padding))
             .collect();
-        let to_camera = self.camera.rotation.inverse();
         // Each sphere in the camera's frame, and the pixels it can cover: the projections of its
         // bounding box's sides at its near and far depths. The whole image when the camera is
         // inside or next to it.
@@ -706,6 +715,7 @@ impl SdfGrid {
         o: &SdfOptions,
     ) -> Result<Self> {
         image.check_with(robot)?;
+        let image = &image.rigid();
         let (lo, hi) = (0..image.depth.len())
             .into_par_iter()
             .filter_map(|i| image.point(i, robot, o.voxel))
@@ -1092,7 +1102,7 @@ impl OccupancyMap {
         robot: Option<&RobotMask>,
     ) -> Result<()> {
         image.check_with(robot)?;
-        device.integrate(&self.grid, &mut self.log_odds, image, robot)
+        device.integrate(&self.grid, &mut self.log_odds, &image.rigid(), robot)
     }
 
     /// The probability that the voxel holding `p` is occupied; `None` if it was never observed or

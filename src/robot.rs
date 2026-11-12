@@ -15,7 +15,7 @@ use crate::description::{
 use crate::error::{self, Error, ensure_input, input};
 use crate::spheres::{self, Qualification, SphereGeometry, SphereOptions};
 use crate::types::Pose;
-use crate::world::Obstacle;
+use crate::world::{self, Obstacle};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Transform {
@@ -1948,8 +1948,9 @@ pub(crate) fn object_spheres(
 
 /// `spheres` (`[x, y, z, radius]`) moved from a frame into the one `pose` is given in.
 pub(crate) fn placed_spheres(spheres: &[[f32; 4]], pose: Pose) -> Vec<[f32; 4]> {
+    let rotation = world::unit(pose.rotation);
     let place = |s: &[f32; 4]| {
-        let c = pose.position + pose.rotation * Vec3::new(s[0], s[1], s[2]);
+        let c = pose.position + rotation * Vec3::new(s[0], s[1], s[2]);
         [c.x, c.y, c.z, s[3]]
     };
     spheres.iter().map(place).collect()
@@ -1981,7 +1982,7 @@ fn attached_shape(shape: &Obstacle) -> error::Result<Shape> {
     use crate::world::Obstacle;
     let placed = |center: Vec3, rotation: Quat, geometry: Geometry| Shape {
         origin: Transform {
-            rot: Mat3::from_quat(rotation),
+            rot: world::frame(rotation),
             trans: center,
         },
         geometry,

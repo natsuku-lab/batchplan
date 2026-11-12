@@ -20,7 +20,7 @@ use crate::description::{Geometry, TriMesh};
 use crate::error::{Error, Result, ensure_input, input};
 use crate::robot::Robot;
 use crate::sdf::{self, SdfGrid};
-use crate::world::{FAR, LinkSets, Obstacle, World};
+use crate::world::{self, FAR, LinkSets, Obstacle, World};
 
 /// Points cover each link's surface for checks against distance grids: every surface point lies
 /// within this distance of one.
@@ -283,7 +283,11 @@ impl MeshModel {
 
 fn place(obstacle: &Obstacle) -> Placed {
     let solid = |centre: Vec3, rotation: Quat, shape: SharedShape, radius: f32| {
-        Placed::Solid(Pose::from_parts(centre, rotation), shape, (centre, radius))
+        Placed::Solid(
+            Pose::from_parts(centre, world::unit(rotation)),
+            shape,
+            (centre, radius),
+        )
     };
     match *obstacle {
         Obstacle::Cuboid {
@@ -327,6 +331,7 @@ fn place(obstacle: &Obstacle) -> Placed {
             center,
             rotation,
         } => {
+            let rotation = world::unit(rotation);
             let (lo, hi) = (grid.lower_corner(), grid.upper_corner());
             let around = (
                 center + rotation * ((lo + hi) / 2.0),

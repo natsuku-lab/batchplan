@@ -591,6 +591,85 @@ impl TableScene {
     }
 }
 
+/// A camera's rotation a thousandth off a unit quaternion turns the camera as the unit one does:
+/// the grid of what it sees from 3 m, where a depth 0.2% off is 5 mm, reads the same, and so do a
+/// map the image is fused into and the robot's depths in the image.
+#[test]
+fn a_camera_turned_by_a_rotation_not_quite_unit_sees_the_same() {
+    let o = SdfOptions {
+        voxel: 0.02,
+        padding: 0.15,
+    };
+    let k = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
+    let turn = Quat::from_rotation_x(PI + 0.2) * Quat::from_rotation_z(0.3);
+    let robot = common::panda().unwrap();
+    for device in devices() {
+        for norm in [0.9991f32, 1.0009] {
+            let seen = |rotation: Quat| {
+                let scene = TableScene {
+                    camera: Pose::new(Vec3::new(0.0, -0.6, 3.0), rotation),
+                    ..TableScene::new()
+                };
+                // What the camera sees does not depend on its rotation's length.
+                let depth = TableScene {
+                    camera: Pose::new(scene.camera.position, turn),
+                    ..TableScene::new()
+                }
+                .render(640, 480, k, true);
+                let image = scene.image(&depth, 640, k);
+                let grid =
+                    SdfGrid::from_depth(device, &image, None, Occlusion::Occupied, &o).unwrap();
+                let mut map = OccupancyMap::try_new(
+                    Vec3::new(-0.3, -0.3, -0.1),
+                    Vec3::new(0.3, 0.3, 0.3),
+                    0.02,
+                )
+                .unwrap();
+                map.integrate(device, &image, None).unwrap();
+                let mask = image.robot_mask(&robot, robot.default_q(), 0.02).unwrap();
+                (grid, map, mask.depth)
+            };
+            let (unit, unit_map, unit_mask) = seen(turn);
+            let (scaled, scaled_map, scaled_mask) = seen(turn * norm);
+            // The robot's depth in each pixel that sees it: the same but along its outline,
+            // where a ray grazes a sphere and its depth turns on the last place.
+            let (mut on_robot, mut moved) = (0, 0);
+            for (u, s) in unit_mask.iter().zip(&scaled_mask) {
+                on_robot += usize::from(u.is_finite() || s.is_finite());
+                let same = u == s || (u - s).abs() < 2e-4;
+                moved += usize::from(!same);
+            }
+            assert!(
+                on_robot > 500 && moved <= on_robot / 100,
+                "norm {norm}: the robot's depth moved in {moved} of its {on_robot} pixels"
+            );
+            let mut rng = Rng::new(8);
+            let mut near = 0;
+            for _ in 0..500 {
+                let p = Vec3::new(
+                    rng.range(-0.3, 0.3),
+                    rng.range(-0.3, 0.3),
+                    rng.range(-0.05, 0.3),
+                );
+                let (u, s) = (unit.distance(p).value, scaled.distance(p).value);
+                assert!((u - s).abs() < 2e-4, "norm {norm}: {u} and {s} at {p}");
+                near += usize::from(u.abs() < 0.05);
+                assert_eq!(
+                    unit_map.occupancy(p),
+                    scaled_map.occupancy(p),
+                    "norm {norm}: the map at {p}"
+                );
+            }
+            assert!(near > 50, "{near} points near a surface");
+        }
+    }
+}
+
 /// Checks a grid of the bare table: distances above it, the occlusion rule below it, free space
 /// outside the view.
 fn check_table(grid: &SdfGrid, behind: Occlusion, o: &SdfOptions, rng: &mut Rng) {

@@ -364,3 +364,56 @@ fn concave_links_are_measured_on_their_surface_not_their_hull() {
         .unwrap()[0];
     assert!((notch - 0.09).abs() < 1e-4, "the ball: {notch}");
 }
+
+/// An obstacle's rotation a thousandth off a unit quaternion, which is accepted, turns it as the
+/// unit one does: a long box and a long grid stand as far from the links' meshes either way.
+#[test]
+fn obstacles_turned_by_a_rotation_not_quite_unit_are_not_stretched() {
+    let robot = chain();
+    let meshes = MeshModel::try_new(&robot).unwrap();
+    let turn = Quat::from_rotation_z(1.6) * Quat::from_rotation_x(0.4);
+    let grid = {
+        let distances: Vec<f32> = (0..41 * 9).map(|k| 0.01 * ((k % 7) as f32 + 1.0)).collect();
+        let origin = Vec3::new(-0.6, -0.03, -0.03);
+        Arc::new(SdfGrid::try_new([41, 3, 3], 0.03, origin, &distances).unwrap())
+    };
+    let mut rng = Rng::new(6);
+    let q: Vec<f32> = (0..200 * 3).map(|_| rng.range(-3.0, 3.0)).collect();
+    for norm in [0.9991f32, 1.0009] {
+        let worlds: Vec<World> = [turn, turn * norm]
+            .into_iter()
+            .flat_map(|rotation| {
+                [
+                    world(Obstacle::Cuboid {
+                        center: Vec3::new(0.75, 0.2, 0.5),
+                        half_extents: Vec3::new(0.6, 0.02, 0.02),
+                        rotation,
+                    }),
+                    world(Obstacle::Sdf {
+                        grid: grid.clone(),
+                        center: Vec3::new(-0.75, 0.2, 0.5),
+                        rotation,
+                    }),
+                ]
+            })
+            .collect();
+        for kind in 0..2 {
+            let of = |world: u32| -> Vec<f32> {
+                let clearances = meshes.clearance(&worlds, &[world; 200], &q).unwrap();
+                clearances.iter().map(|c| c.world).collect()
+            };
+            let (unit, scaled) = (of(kind), of(kind + 2));
+            let near = unit.iter().filter(|&&c| c > 0.0 && c < 0.3).count();
+            assert!(
+                near > 30,
+                "kind {kind}: {near} configurations near the obstacle"
+            );
+            for (u, s) in unit.iter().zip(&scaled) {
+                assert!(
+                    (u - s).abs() < 2e-5,
+                    "norm {norm}, kind {kind}: {u} and {s}"
+                );
+            }
+        }
+    }
+}
