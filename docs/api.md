@@ -17,7 +17,7 @@ Guide: [robots.md](robots.md).
 | `Robot::assemble(&[Part], &RobotOptions)` | One robot from several descriptions, such as two arms at a table; each `Part` has a name prefix and a base pose. |
 | `RobotOptions` | The base link, the hands (`ee_links`) and their fingers where they are part of the palm (`finger_links`), the default configuration, locked joints, joint limits and their scales, `package://` directories, an SRDF, OpenUSD variants, and the collision spheres, with tighter tolerances for some links (`sphere_tolerances`). |
 | `JointLimits` | One joint's position, velocity, acceleration and jerk limits, replacing its description's. |
-| `CollisionModel` | Collision spheres and self-collision settings by link: `load` and `save` a file, `assemble` the model of an assembled robot. |
+| `CollisionModel` | Collision spheres and self-collision settings by link: `load` and `save` a file, `to_json` and `from_json` the same text, `assemble` the model of an assembled robot. |
 | `SphereOptions`, `SphereGeometry` | How spheres are fitted when no collision model is given: the budget, the tolerance, and collision or visual geometry. |
 | `Robot::attach(&AttachedObject)`, `Robot::detach(name)` | The robot holding an object fixed to one of its links, or without it. |
 | `Robot::relock(&joints)` | The robot with joints it locked at load held at new values, as a torso that moved ([guide](robots.md#kinematics)). |

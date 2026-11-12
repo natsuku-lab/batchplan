@@ -227,8 +227,22 @@ impl CollisionModel {
     /// Writes the model as JSON, to commit and hand-tune.
     pub fn save(&self, path: impl AsRef<Path>) -> error::Result<()> {
         let path = path.as_ref();
-        std::fs::write(path, serde_json::to_string_pretty(self)?)
+        std::fs::write(path, self.to_json())
             .map_err(|e| Error::Write(format!("writing {}: {e}", path.display())))
+    }
+
+    /// The model as the JSON text [`CollisionModel::save`] writes, to send where no file goes.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self)
+            .expect("its keys are strings and a number that is not finite is written as null")
+    }
+
+    /// The model in JSON text, as [`CollisionModel::to_json`] and [`CollisionModel::save`] write
+    /// it.
+    pub fn from_json(text: &str) -> error::Result<Self> {
+        serde_json::from_str(text)
+            .map_err(|e| Error::Input(format!("the collision model's JSON: {e}")))
     }
 
     /// The model of a robot made with [`Robot::assemble`], from each part's own model and the

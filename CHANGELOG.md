@@ -10,6 +10,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- `CollisionModel::to_json` and `CollisionModel::from_json` give and take the JSON text `save`
+  and `load` write and read, for a model sent where no file goes. In Python, `model.to_json()`
+  and `CollisionModel.from_json(text)`.
+
 - **Breaking:** a `Pick` or `Place` can leave its transit out and run each step in a world of its
   own. With `transit: false` a task solves its grasps or releases and its two straight moves
   alone, without checking its start, and keeps every candidate that passes them, so a program of
