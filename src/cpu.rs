@@ -447,10 +447,12 @@ pub(crate) const STRETCH: f32 = 1.005;
 
 /// Collision cost of the configuration behind `fk`; adds d(cost)/dq into `grad`.
 /// Without `GRADIENT` only the cost and clearances are computed, as the WGSL `gradient` flag does.
+/// Without `CLEARANCE` the self clearance returned is not the nearest pair's: sphere pairs that
+/// cannot add to the cost are skipped, and it is at least the nearest pair's.
 // Inlined into every caller: once the cost-only form had two callers, LLVM stopped inlining it into
 // the line search, which cost 5% of CPU planning.
 #[inline(always)]
-fn collision<const GRADIENT: bool>(
+fn collision<const GRADIENT: bool, const CLEARANCE: bool>(
     robot: &Robot,
     world: &CpuWorld,
     fk: &Fk,
@@ -459,9 +461,9 @@ fn collision<const GRADIENT: bool>(
     buffers: &mut CollisionBuffers,
 ) -> CollisionOut {
     if world.grids {
-        collision_among_grids::<GRADIENT>(robot, world, fk, w, grad, buffers)
+        collision_among_grids::<GRADIENT, CLEARANCE>(robot, world, fk, w, grad, buffers)
     } else {
-        collision_with::<GRADIENT, false>(robot, world, fk, w, grad, buffers)
+        collision_with::<GRADIENT, false, CLEARANCE>(robot, world, fk, w, grad, buffers)
     }
 }
 
@@ -469,7 +471,7 @@ fn collision<const GRADIENT: bool>(
 /// worlds without grids it doubles every caller, and `ik_step`, grown past what is inlined into
 /// the loop over its steps, made IK 7% slower in worlds without a grid.
 #[inline(never)]
-fn collision_among_grids<const GRADIENT: bool>(
+fn collision_among_grids<const GRADIENT: bool, const CLEARANCE: bool>(
     robot: &Robot,
     world: &CpuWorld,
     fk: &Fk,
@@ -477,14 +479,14 @@ fn collision_among_grids<const GRADIENT: bool>(
     grad: &mut [f32],
     buffers: &mut CollisionBuffers,
 ) -> CollisionOut {
-    collision_with::<GRADIENT, true>(robot, world, fk, w, grad, buffers)
+    collision_with::<GRADIENT, true, CLEARANCE>(robot, world, fk, w, grad, buffers)
 }
 
 /// `collision`, ruling distance grids out by their boxes with `GRIDS`. Without it the code is
 /// what worlds without grids ran before grids could be ruled out, instruction for instruction: a
 /// branch more in these loops slows them by percents, so the rule is compiled into a copy.
 #[inline(always)]
-fn collision_with<const GRADIENT: bool, const GRIDS: bool>(
+fn collision_with<const GRADIENT: bool, const GRIDS: bool, const CLEARANCE: bool>(
     robot: &Robot,
     world: &CpuWorld,
     fk: &Fk,
@@ -570,26 +572,56 @@ fn collision_with<const GRADIENT: bool, const GRIDS: bool>(
             smin = smin.min(gap);
             continue;
         }
-        for &[a, b] in &robot.self_pairs[lp.first as usize..(lp.first + lp.count) as usize] {
-            let (a, b) = (a as usize, b as usize);
-            let (sa, sb) = (&robot.spheres[a], &robot.spheres[b]);
-            let diff = sc[a] - sc[b];
-            let dist = diff.length();
-            let d = dist - (sa.radius + sa.self_buffer) - (sb.radius + sb.self_buffer);
-            smin = smin.min(d);
-            let pen = w.self_margin - d;
-            if pen > 0.0 && GRADIENT {
-                let u = if dist > 1e-9 { diff / dist } else { Vec3::X };
-                let g = 2.0 * w.self_collision * pen * u;
-                let (la, lb) = (lp.a as usize, lp.b as usize);
-                force[la] -= g;
-                moment[la] -= sc[a].cross(g);
-                force[lb] += g;
-                moment[lb] += sc[b].cross(g);
-                touched = true;
+        let pairs = &robot.self_pairs[lp.first as usize..(lp.first + lp.count) as usize];
+        // One sphere pair's part of the cost and of its links' wrenches: written into both loops
+        // below, so that the one over every pair is the code it was.
+        macro_rules! pair {
+            ($a:expr, $b:expr) => {{
+                let (a, b) = ($a as usize, $b as usize);
+                let (sa, sb) = (&robot.spheres[a], &robot.spheres[b]);
+                let diff = sc[a] - sc[b];
+                let dist = diff.length();
+                let d = dist - (sa.radius + sa.self_buffer) - (sb.radius + sb.self_buffer);
+                smin = smin.min(d);
+                let pen = w.self_margin - d;
+                if pen > 0.0 && GRADIENT {
+                    let u = if dist > 1e-9 { diff / dist } else { Vec3::X };
+                    let g = 2.0 * w.self_collision * pen * u;
+                    let (la, lb) = (lp.a as usize, lp.b as usize);
+                    force[la] -= g;
+                    moment[la] -= sc[a].cross(g);
+                    force[lb] += g;
+                    moment[lb] += sc[b].cross(g);
+                    touched = true;
+                }
+                if pen > 0.0 {
+                    cost += w.self_collision * pen * pen;
+                }
+            }};
+        }
+        if CLEARANCE {
+            for &[a, b] in pairs {
+                pair!(a, b);
             }
-            if pen > 0.0 {
-                cost += w.self_collision * pen * pen;
+            continue;
+        }
+        // The pairs come in runs, one sphere of link a with every sphere of link b
+        // (`Robot::self_pairs`). Where the clearance is not read, a sphere of a's past the margin
+        // from b's bounding sphere, and so from every sphere of b's, skips its run: such pairs
+        // add nothing to the cost or its gradient, and their number grows with the square of a
+        // robot's spheres. A hair past the margin, so that rounding never skips a pair that
+        // would have added.
+        let cb = at(lp.b, bb);
+        for run in pairs.chunks_exact(robot.sphere_ranges[lp.b as usize][1] as usize) {
+            let first = run[0][0] as usize;
+            debug_assert!(run.iter().all(|p| p[0] as usize == first));
+            let sa = &robot.spheres[first];
+            let near = (sc[first] - cb).length() - bb[3] - (sa.radius + sa.self_buffer);
+            if near > gate + 1e-5 {
+                continue;
+            }
+            for &[a, b] in run {
+                pair!(a, b);
             }
         }
     }
@@ -979,7 +1011,7 @@ fn ik_step(
     }
     if o.collision_step > 0.0 {
         grad.fill(0.0);
-        collision::<true>(robot, world, fk, &o.collision, grad, buffers);
+        collision::<true, false>(robot, world, fk, &o.collision, grad, buffers);
         push.fill(0.0);
         if stacked {
             let jg = &mut stack.rhs[..rows];
@@ -1162,7 +1194,7 @@ fn traj_sample_grad(
     );
     robot.fk_into(&scratch.q, &mut scratch.fk);
     out.fill(0.0);
-    collision::<true>(
+    collision::<true, false>(
         robot,
         world,
         &scratch.fk,
@@ -1255,7 +1287,7 @@ fn traj_cost(
         scratch.q[j] = w[0] * c(0) + w[1] * c(1) + w[2] * c(2) + w[3] * c(3);
     }
     robot.fk_into(&scratch.q, &mut scratch.fk);
-    let cost = collision::<false>(
+    let cost = collision::<false, false>(
         robot,
         world,
         &scratch.fk,
@@ -1850,7 +1882,7 @@ impl Backend for CpuBackend {
                     |scratch, ((((wc, sc), cost), g), (qi, &s))| {
                         self.robot.fk_into(qi, &mut scratch.fk);
                         let world = &prepared[s as usize];
-                        let c = collision::<true>(
+                        let c = collision::<true, true>(
                             &self.robot,
                             world,
                             &scratch.fk,
@@ -2093,6 +2125,95 @@ mod tests {
                     gap <= read,
                     "norm {norm}: a gap of {gap} where a lookup reads {read}"
                 );
+            }
+        }
+    }
+
+    /// Where the clearances are not read, a sphere past the margin from another link's bounding
+    /// sphere skips its pairs with that link's spheres: the cost and its gradient are the same to
+    /// the bit, in and out of self-collision.
+    #[test]
+    fn sphere_pairs_out_of_reach_add_nothing_to_the_cost_or_its_gradient() {
+        let model = CollisionModel::load("assets/franka/panda_collision.json").expect("the model");
+        // The model as it is, and with a sphere to a link: a bounding sphere then fits its
+        // sphere, so a skip a millimetre early would drop a pair that adds.
+        let mut tight = model.clone();
+        for spheres in tight.spheres.values_mut() {
+            spheres.truncate(1);
+        }
+        for (model, skips) in [(model, true), (tight, false)] {
+            let options = RobotOptions {
+                ee_links: vec!["panda_hand".into()],
+                collision_model: Some(model),
+                ..Default::default()
+            };
+            let robot =
+                Robot::load("assets/franka/franka_panda.urdf", &options).expect("the Panda");
+            let world = &prepare(&robot, &[World::default()]).expect("an empty world")[0];
+            let w = CollisionWeights {
+                self_collision: 1.0,
+                self_margin: 0.02,
+                ..CollisionWeights::NONE
+            };
+            let n = robot.dof();
+            let mut scratch = Scratch::new(&robot);
+            let mut rng = Rng::new(5);
+            let (mut colliding, mut skipped) = (0, 0);
+            for _ in 0..400 {
+                let q: Vec<f32> = (0..n)
+                    .map(|j| rng.range(robot.lower()[j], robot.upper()[j]))
+                    .collect();
+                robot.fk_into(&q, &mut scratch.fk);
+                let (mut every, mut near) = (vec![0.0; n], vec![0.0; n]);
+                let (fk, buffers) = (&scratch.fk, &mut scratch.collision);
+                let all = collision::<true, true>(&robot, world, fk, &w, &mut every, buffers);
+                let few = collision::<true, false>(&robot, world, fk, &w, &mut near, buffers);
+                assert_eq!(all.cost.to_bits(), few.cost.to_bits(), "at {q:?}");
+                let bits = |g: &[f32]| g.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+                assert_eq!(bits(&every), bits(&near), "at {q:?}");
+                colliding += usize::from(all.cost > 0.0);
+                // The nearest pair of all was skipped where the nearest visited is farther.
+                skipped += usize::from(few.self_clearance > all.self_clearance);
+            }
+            assert!(colliding > 20, "{colliding} of 400 in self-collision");
+            assert!(
+                !skips || skipped > 20,
+                "{skipped} of 400 skip their nearest pair"
+            );
+        }
+    }
+
+    /// The runs `collision` skips: a link pair's sphere pairs are every sphere of its first link
+    /// with every sphere of its second, one sphere of the first at a time, for a robot as loaded
+    /// and for one holding an object.
+    #[test]
+    fn a_link_pairs_sphere_pairs_come_one_sphere_of_its_first_link_at_a_time() {
+        let options = RobotOptions {
+            ee_links: vec!["panda_hand".into()],
+            collision_model: Some(
+                CollisionModel::load("assets/franka/panda_collision.json").expect("the model"),
+            ),
+            ..Default::default()
+        };
+        let robot = Robot::load("assets/franka/franka_panda.urdf", &options).expect("the Panda");
+        let held = crate::AttachedObject {
+            name: "bar".into(),
+            link: "panda_hand".into(),
+            shapes: vec![Obstacle::cuboid(Vec3::Z * 0.2, Vec3::new(0.02, 0.02, 0.1))],
+            touch_links: vec![],
+            spheres: crate::SphereOptions::default(),
+        };
+        let holding = robot.attach(&held).expect("the bar attaches");
+        for robot in [&robot, &holding] {
+            assert!(!robot.self_link_pairs.is_empty());
+            for lp in &robot.self_link_pairs {
+                let [first_a, count_a] = robot.sphere_ranges[lp.a as usize];
+                let [first_b, count_b] = robot.sphere_ranges[lp.b as usize];
+                assert_eq!(lp.count, count_a * count_b);
+                for k in 0..lp.count {
+                    let pair = robot.self_pairs[(lp.first + k) as usize];
+                    assert_eq!(pair, [first_a + k / count_b, first_b + k % count_b]);
+                }
             }
         }
     }
