@@ -25,6 +25,9 @@ Speed here is found by measuring and kept by proving no class got slower. CLAUDE
 - **A piece made faster alone can slow the kernel it lives in.** Writing IK's algebra out made IK without spheres 2-3x faster and a 399-sphere robot's 4-5% slower. Time the whole call.
 - **Private arrays indexed at run time inside a loop** do not compile under DX12's FXC (CI's Windows wheels). Index by constants.
 - **Code shape moves a kernel a few percent either way**, without pattern. Thresholds and orderings are chosen by measuring each robot.
+- **Code a call does not need stays out of its code.** A branch added for grids moved calls without grids by up to 10% either way on a GPU and 3% on the CPU; kernels of its own for worlds that hold a grid (`kernels_in`), and a second compiled copy of the CPU's checks (`collision_with`), left the rest as it was. Check with a dump of the generated kernel source and with the hot functions' sizes (`nm -n`), before and after: a copy inlined beside another can push its caller past what is inlined.
+- **A second set of kernels is built with the first**, side by side, when a robot's kernels are built. Built lazily it made first calls wait; built on the device's pool it held up searches; looked up per derived device it slowed every call that holds an object.
+- **Pipelines compile on the thread that asks.** Ask for each on a thread of its own (`together`): making a device went from 2.6 to 0.8 s cold. Measure compile times with the driver's shader cache defeated (change a constant in the source per run).
 - **The generated code must not depend on which object is held**, or picking up another compiles shaders inside a call.
 - **Lanes of one configuration share serial work.** They split the collision gradient; one takes the step and the others copy the configuration.
 

@@ -45,6 +45,54 @@ pub(crate) struct CpuBackend {
 }
 
 impl CpuBackend {
+    /// World and self clearance of each configuration of `q` in its world of `prepared`, ruling
+    /// distance grids out by their boxes with `GRIDS` (`Backend::clearance`).
+    fn clearances<const GRIDS: bool>(
+        &self,
+        prepared: &CpuWorlds,
+        item_world: &[u32],
+        q: &[f32],
+    ) -> Vec<[f32; 2]> {
+        let n = self.robot.dof();
+        let level = self.lanes.level();
+        let mut out = vec![[0.0; 2]; item_world.len()];
+        // Eight configurations at a time, in runs that share a world, each dispatched to the CPU's
+        // SIMD level inside the closure: a closure does not take on a dispatched caller's level.
+        let chunk = |scratch: &mut LaneScratch, (c, (q, worlds)): Lanes8<'_>| {
+            let mut start = 0;
+            while start < worlds.len() {
+                let w = worlds[start];
+                let end = start + worlds[start..].iter().take_while(|&&x| x == w).count();
+                let (world, q, c) = (
+                    &prepared[w as usize],
+                    &q[start * n..end * n],
+                    &mut c[start..end],
+                );
+                dispatch!(level, simd => {
+                    self.lanes.clearance_with::<_, GRIDS>(simd, world, q, c, scratch)
+                });
+                start = end;
+            }
+        };
+        if item_world.len() <= SMALL_BATCH {
+            // Handing a batch this small to the pool's threads costs more than checking it here.
+            let mut scratch = self.lanes.scratch();
+            let chunks = out
+                .chunks_mut(LANES)
+                .zip(q.chunks(n * LANES).zip(item_world.chunks(LANES)));
+            for c in chunks {
+                chunk(&mut scratch, c);
+            }
+        } else {
+            let chunks = out
+                .par_chunks_mut(LANES)
+                .zip(q.par_chunks(n * LANES).zip(item_world.par_chunks(LANES)));
+            self.pool
+                .install(|| chunks.for_each_init(|| self.lanes.scratch(), chunk));
+        }
+        out
+    }
+
     /// `threads` workers; 0 means one per core.
     pub(crate) fn new(robot: &Robot, threads: usize) -> Result<Self> {
         let pool = ThreadPoolBuilder::new()
@@ -92,9 +140,36 @@ pub(crate) enum Prepared {
     },
 }
 
+/// The box a distance grid's points fill (`mid`, `half`, turned by `rot`) and what the grid's
+/// values outside it are at least, less the distance to the box (`sunk`): what rules a grid out
+/// for a link far from it. Kept beside the obstacles (`CpuWorld::boxes`), so that an obstacle's
+/// record stays as small as the checks of worlds without grids have always scanned.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct GridBox {
+    pub(crate) rot: Mat3,
+    pub(crate) mid: Vec3,
+    pub(crate) half: Vec3,
+    pub(crate) sunk: f32,
+}
+
+impl GridBox {
+    /// The box of `grid` placed at `center`, turned by `rot`.
+    pub(crate) fn of(grid: &SdfGrid, rot: Mat3, center: Vec3) -> Self {
+        let half = grid.half_extent();
+        Self {
+            rot,
+            // Where the lookups, which turn by `rot`'s transpose, have the box's centre: `rot`
+            // is its inverse only if the rotation is a unit one.
+            mid: center + rot.transpose().inverse() * (grid.origin + half),
+            half,
+            sunk: grid.sunk(),
+        }
+    }
+}
+
 impl Prepared {
     /// A sphere around the obstacle, a hair wide, so a test against it never rules out what the
-    /// exact test would not; infinite for a distance grid.
+    /// exact test would not. A distance grid has none: its box rules it out (`grid_gap`).
     fn bounding_sphere(&self) -> BoundingSphere {
         let (center, radius) = match *self {
             Prepared::Cuboid { center, half, .. } => (center, half.length()),
@@ -132,8 +207,17 @@ pub(crate) struct BoundingSphere {
 /// obstacles, scan faster than the obstacles' whole records. With them, the links that may touch
 /// each obstacle, which every check skips.
 pub(crate) struct CpuWorld {
+    /// Whether an obstacle is a distance grid: the checks then run the copy of their code that
+    /// rules grids out, and otherwise the code worlds without grids have always run.
+    pub(crate) grids: bool,
+    /// Whether a world uploaded with this one holds a distance grid: a search, which learns its
+    /// world with its first query, chooses its copy of the checks by this, before any.
+    pub(crate) among_grids: bool,
     pub(crate) obstacles: Vec<Prepared>,
     pub(crate) bounds: Vec<BoundingSphere>,
+    /// In a world that holds a distance grid, each grid's box at its obstacle's index, unread for
+    /// the other obstacles; none in a world without one.
+    pub(crate) boxes: Vec<GridBox>,
     pub(crate) touch: LinkSets,
 }
 
@@ -142,10 +226,11 @@ pub(crate) type CpuWorlds = Vec<CpuWorld>;
 
 /// `worlds` for checks of `robot`, whose links their touches name.
 pub(crate) fn prepare(robot: &Robot, worlds: &[World]) -> Result<CpuWorlds> {
-    worlds
+    let prepared: Result<CpuWorlds> = worlds
         .iter()
         .enumerate()
         .map(|(i, s)| {
+            let mut grids = false;
             let obstacles: Vec<Prepared> = s
                 .obstacles
                 .iter()
@@ -192,24 +277,50 @@ pub(crate) fn prepare(robot: &Robot, worlds: &[World]) -> Result<CpuWorlds> {
                         ref grid,
                         center,
                         rotation,
-                    } => Prepared::Sdf {
-                        rot: Mat3::from_quat(rotation),
-                        center,
-                        grid: grid.clone(),
-                    },
+                    } => {
+                        grids = true;
+                        Prepared::Sdf {
+                            rot: Mat3::from_quat(rotation),
+                            center,
+                            grid: grid.clone(),
+                        }
+                    }
                 })
                 .collect();
+            // A world without a grid keeps no boxes: its upload does what it did before grids had
+            // them.
+            let box_of = |o: &Prepared| match *o {
+                Prepared::Sdf {
+                    rot,
+                    center,
+                    ref grid,
+                } => GridBox::of(grid, rot, center),
+                _ => GridBox::default(),
+            };
+            let boxes: Vec<GridBox> = match grids {
+                true => obstacles.iter().map(box_of).collect(),
+                false => vec![],
+            };
             let bounds = obstacles.iter().map(Prepared::bounding_sphere).collect();
             let touch = s
                 .touch_sets(robot)
                 .map_err(|e| Error::Input(format!("world {i}: {e}")))?;
             Ok(CpuWorld {
+                grids,
+                among_grids: false,
                 obstacles,
                 bounds,
+                boxes,
                 touch,
             })
         })
-        .collect()
+        .collect();
+    let mut prepared = prepared?;
+    let among_grids = prepared.iter().any(|world| world.grids);
+    for world in &mut prepared {
+        world.among_grids = among_grids;
+    }
+    Ok(prepared)
 }
 
 struct CollisionOut {
@@ -315,12 +426,65 @@ fn obstacle_distance(o: &Prepared, p: Vec3) -> (f32, Vec3) {
     }
 }
 
+/// At least how far a distance grid is from every point within `radius` of `p`, where that is
+/// positive: the distance of `p` from the grid's box less `radius`, and less what the grid's
+/// values outside the box may lie below the distance to it. A grid's values are interpolated, so
+/// its own distance from `p` bounds nothing. Mirrors `grid_gap` in the kernels of worlds with
+/// grids.
+#[inline(always)]
+pub(crate) fn grid_gap(grid: &GridBox, p: Vec3, radius: f32) -> f32 {
+    world::box_distance(grid.rot, grid.mid, grid.half, p)
+        .0
+        .max(0.0)
+        - radius * STRETCH
+        + grid.sunk
+}
+
+/// How much longer a length may be in an obstacle's frame than in the world's: a rotation may be
+/// a thousandth off a unit quaternion (`Obstacle::check`), and its matrix then scales by up to
+/// 0.4%. A radius measured in the world is this much longer where a grid's box is measured.
+pub(crate) const STRETCH: f32 = 1.005;
+
 /// Collision cost of the configuration behind `fk`; adds d(cost)/dq into `grad`.
 /// Without `GRADIENT` only the cost and clearances are computed, as the WGSL `gradient` flag does.
 // Inlined into every caller: once the cost-only form had two callers, LLVM stopped inlining it into
 // the line search, which cost 5% of CPU planning.
 #[inline(always)]
 fn collision<const GRADIENT: bool>(
+    robot: &Robot,
+    world: &CpuWorld,
+    fk: &Fk,
+    w: &CollisionWeights,
+    grad: &mut [f32],
+    buffers: &mut CollisionBuffers,
+) -> CollisionOut {
+    if world.grids {
+        collision_among_grids::<GRADIENT>(robot, world, fk, w, grad, buffers)
+    } else {
+        collision_with::<GRADIENT, false>(robot, world, fk, w, grad, buffers)
+    }
+}
+
+/// `collision` in a world that holds a distance grid. Out of line: inlined beside the copy for
+/// worlds without grids it doubles every caller, and `ik_step`, grown past what is inlined into
+/// the loop over its steps, made IK 7% slower in worlds without a grid.
+#[inline(never)]
+fn collision_among_grids<const GRADIENT: bool>(
+    robot: &Robot,
+    world: &CpuWorld,
+    fk: &Fk,
+    w: &CollisionWeights,
+    grad: &mut [f32],
+    buffers: &mut CollisionBuffers,
+) -> CollisionOut {
+    collision_with::<GRADIENT, true>(robot, world, fk, w, grad, buffers)
+}
+
+/// `collision`, ruling distance grids out by their boxes with `GRIDS`. Without it the code is
+/// what worlds without grids ran before grids could be ruled out, instruction for instruction: a
+/// branch more in these loops slows them by percents, so the rule is compiled into a copy.
+#[inline(always)]
+fn collision_with<const GRADIENT: bool, const GRIDS: bool>(
     robot: &Robot,
     world: &CpuWorld,
     fk: &Fk,
@@ -345,10 +509,10 @@ fn collision<const GRADIENT: bool>(
     let mut touched = false;
     let (mut cost, mut wmin, mut smin) = (0.0f32, FAR, FAR);
     // An obstacle farther from a link's bounding sphere than the margin cannot add cost through the
-    // link's spheres; the gap bounds their clearance from below. Distance grids are interpolated,
-    // not exact, so their spheres are always checked. Links no joint moves are not checked against
-    // the world: they touch it the same way in every configuration, as a mounted robot's base
-    // rests on its table. Links may touch the obstacles the world lets them.
+    // link's spheres; the gap bounds their clearance from below, a distance grid's by its box
+    // (`grid_gap`). Links no joint moves are not checked against the world: they touch it the
+    // same way in every configuration, as a mounted robot's base rests on its table. Links may
+    // touch the obstacles the world lets them.
     let world_gate = w.margin.max(0.0);
     for (link, &[first, count]) in robot.sphere_ranges.iter().enumerate() {
         if count == 0 || robot.links[link].chain.is_empty() {
@@ -359,6 +523,13 @@ fn collision<const GRADIENT: bool>(
         for (k, o) in world.obstacles.iter().enumerate() {
             if world.touch.contains(k, link) {
                 continue;
+            }
+            if GRIDS && matches!(o, Prepared::Sdf { .. }) {
+                let gap = grid_gap(&world.boxes[k], bc, b[3]);
+                if gap > world_gate {
+                    wmin = wmin.min(gap);
+                    continue;
+                }
             }
             if !matches!(o, Prepared::Sdf { .. }) {
                 let gap = obstacle_distance(o, bc).0 - b[3];
@@ -1695,43 +1866,14 @@ impl Backend for CpuBackend {
     }
 
     fn clearance(&self, worlds: &Worlds, item_world: &[u32], q: &[f32]) -> Result<Vec<[f32; 2]>> {
-        let n = self.robot.dof();
         let prepared: &CpuWorlds = worlds.prepared();
-        let level = self.lanes.level();
-        let mut out = vec![[0.0; 2]; item_world.len()];
-        // Eight configurations at a time, in runs that share a world, each dispatched to the CPU's
-        // SIMD level inside the closure: a closure does not take on a dispatched caller's level.
-        let chunk = |scratch: &mut LaneScratch, (c, (q, worlds)): Lanes8<'_>| {
-            let mut start = 0;
-            while start < worlds.len() {
-                let w = worlds[start];
-                let end = start + worlds[start..].iter().take_while(|&&x| x == w).count();
-                let (world, q, c) = (
-                    &prepared[w as usize],
-                    &q[start * n..end * n],
-                    &mut c[start..end],
-                );
-                dispatch!(level, simd => self.lanes.clearance(simd, world, q, c, scratch));
-                start = end;
-            }
-        };
-        if item_world.len() <= SMALL_BATCH {
-            // Handing a batch this small to the pool's threads costs more than checking it here.
-            let mut scratch = self.lanes.scratch();
-            let chunks = out
-                .chunks_mut(LANES)
-                .zip(q.chunks(n * LANES).zip(item_world.chunks(LANES)));
-            for c in chunks {
-                chunk(&mut scratch, c);
-            }
+        // One copy of the checks for the call: the one that rules distance grids out where a
+        // world uploaded holds one, and otherwise the one worlds without grids have always run.
+        if prepared.first().is_some_and(|world| world.among_grids) {
+            Ok(self.clearances::<true>(prepared, item_world, q))
         } else {
-            let chunks = out
-                .par_chunks_mut(LANES)
-                .zip(q.par_chunks(n * LANES).zip(item_world.par_chunks(LANES)));
-            self.pool
-                .install(|| chunks.for_each_init(|| self.lanes.scratch(), chunk));
+            Ok(self.clearances::<false>(prepared, item_world, q))
         }
-        Ok(out)
     }
 
     fn search(&self, worlds: &Worlds, searches: &mut [&mut dyn Search], deadline: Option<Instant>) {
@@ -1921,6 +2063,39 @@ mod tests {
     use crate::rng::Rng;
     use crate::robot::{CollisionModel, RobotOptions};
     use crate::world::{Obstacle, World};
+
+    /// A rotation a thousandth off a unit quaternion scales its matrix, and a grid's lookups
+    /// measure in the scaled frame: its box rules the grid out for a link only as far as no
+    /// lookup within the link's bounding sphere reads less.
+    #[test]
+    fn a_grids_box_allows_for_a_rotation_not_quite_unit() {
+        // A slab of zeros: a lookup outside it reads how far it is from the box, in its frame.
+        let origin = Vec3::new(-0.15, -0.15, -0.05);
+        let grid = SdfGrid::try_new([4, 4, 2], 0.1, origin, &[0.0; 32]).expect("a grid");
+        let center = Vec3::new(0.3, -0.2, 0.4);
+        for norm in [0.9991f32, 1.0009] {
+            // Half a turn about z, which scales lengths across z the most.
+            let rot = Mat3::from_quat(Quat::from_xyzw(0.0, 0.0, norm, 0.0));
+            let scale = (rot * Vec3::X).length();
+            assert!(
+                (scale - 1.0).abs() > 3e-3,
+                "{norm} scales lengths by {scale}"
+            );
+            let grid_box = GridBox::of(&grid, rot, center);
+            for (away, radius) in [(0.5f32, 0.3f32), (0.25, 0.2), (1.0, 0.9)] {
+                // A bounding sphere beside the slab along x, and its point nearest the slab.
+                let p = center + Vec3::X * (0.15 + away);
+                let nearest = p - Vec3::X * radius;
+                let read = world::sdf_distance(rot, center, &grid, nearest).0;
+                assert!(read > 0.0, "{nearest} is outside the slab");
+                let gap = grid_gap(&grid_box, p, radius);
+                assert!(
+                    gap <= read,
+                    "norm {norm}: a gap of {gap} where a lookup reads {read}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn lbfgs_direction_applies_the_bfgs_inverse_hessian() {

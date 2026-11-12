@@ -165,7 +165,8 @@ const SDF: u32 = 4;
 shader_struct! {
     /// `center.w` is the kind (`CUBOID`, `SPHERE`, ...). `half` holds the half extents of a cuboid,
     /// the radius (x) and half height or half length (y) of the round kinds, or a distance grid's
-    /// origin (xyz) and voxel size (w). r0..r2 are the world-from-local rotation columns. A grid
+    /// origin (xyz) and voxel size (w). r0..r2 are the world-from-local rotation columns; a grid's
+    /// `r1.w` is what its values outside its box may lie below the distance to it. A grid
     /// has `nx * ny * nz` points, two per `world_data` word from word `grid`. The links that may
     /// touch the obstacle are a bit set in `world_data` from word `r0.w` (a float, exact below
     /// 2^24, since touch sets come first): its length in words, then link `l` bit `l % 32` of the
@@ -400,6 +401,45 @@ fn least_squares_wgsl(dof: usize) -> String {
     w
 }
 
+/// The kernels' gate on a link's spheres against an obstacle, in worlds without distance grids:
+/// a grid, were there one, would have every sphere looked up.
+const UNGATED: &str = "            if (u32(o.center.w) != SDF) {
+                let gap = obstacle_distance(o, bc).w - bl.w;
+                if (gap > world_gate) {
+                    wmin = min(wmin, gap);
+                    continue;
+                }
+            }
+";
+
+/// The gate in worlds with distance grids, which rules a grid out by its box.
+const GATED: &str = "            var gap = 0.0;
+            if (u32(o.center.w) == SDF) {
+                gap = grid_gap(o, bc, bl.w);
+            } else {
+                gap = obstacle_distance(o, bc).w - bl.w;
+            }
+            if (gap > world_gate) {
+                wmin = min(wmin, gap);
+                continue;
+            }
+";
+
+/// At least how far a distance grid is from every point within a radius of another, by its box:
+/// the kernels' twin of `cpu::grid_gap`, in the kernels of worlds with grids alone.
+const GRID_GAP: &str = "
+// At least how far the distance grid o is from every point within `radius` of p, where that is
+// positive: by its box (o.r1.w: what its values outside the box may lie below the distance to
+// it), the radius longer by what a rotation not quite unit stretches it (cpu.rs's STRETCH).
+// Mirrors `grid_gap` in cpu.rs.
+fn grid_gap(o: Obstacle, p: vec3<f32>, radius: f32) -> f32 {
+    let v = p - o.center.xyz;
+    let half = (vec3<f32>(f32(o.nx), f32(o.ny), f32(o.nz)) - 1.0) * (0.5 * o.half.w);
+    let lp = vec3<f32>(dot(o.r0.xyz, v), dot(o.r1.xyz, v), dot(o.r2.xyz, v)) - (o.half.xyz + half);
+    return length(max(abs(lp) - half, vec3<f32>(0.0))) - radius * 1.005 + o.r1.w;
+}
+";
+
 /// The robot-specific part of the kernels: forward kinematics, the end effector's Jacobian and
 /// the collision cost, written out link by link. Each link's frame (`rot_i`, `pos_i`) and collision
 /// wrench (`force_i`, `moment_i`, about the world origin) is its own private variable indexed only
@@ -407,7 +447,7 @@ fn least_squares_wgsl(dof: usize) -> String {
 /// memory on some drivers. Sphere and sphere-pair ranges are read from the buffers, so robots that
 /// differ only in the spheres of what they hold share kernels, as do robots whose own links'
 /// spheres stay on one side of `PAIRED_SPHERES` and `PAIRED_PAIRS`.
-fn robot_wgsl(robot: &Robot) -> String {
+fn robot_wgsl(robot: &Robot, grids: bool) -> String {
     use std::fmt::Write;
     let links = &robot.links;
     let dof = robot.dof();
@@ -596,12 +636,19 @@ fn collision(
     }
     w += "    }\n";
     w += "    // An obstacle farther from a link's bounding sphere than the margin cannot add cost through\n";
-    w += "    // the link's spheres; the gap bounds their clearance from below. Distance grids are\n";
-    w += "    // interpolated, not exact, so their spheres are always checked. Links no joint moves are not\n";
-    w += "    // checked against the world (see `collision` in cpu.rs).\n";
+    if grids {
+        w += "    // the link's spheres; the gap bounds their clearance from below, a distance grid's by its\n";
+        w += "    // box (grid_gap). Links no joint moves are not checked against the world (see `collision`\n";
+        w += "    // in cpu.rs).\n";
+    } else {
+        w += "    // the link's spheres; the gap bounds their clearance from below. Distance grids are\n";
+        w += "    // interpolated, not exact, so their spheres are always checked. Links no joint moves are not\n";
+        w += "    // checked against the world (see `collision` in cpu.rs).\n";
+    }
     w += "    let world_gate = max(margin, 0.0);\n";
     let checked = (0..links.len())
         .filter(|&i| robot.sphere_ranges[i][1] > 0 && !robot.links[i].chain.is_empty());
+    let gate = if grids { GATED } else { UNGATED };
     for i in checked {
         // The link's word and bit in a touch set.
         let (word, bit) = (i / 32, 1u32 << (i % 32));
@@ -618,14 +665,7 @@ fn collision(
                 && (world_data[touch + {word}u + 1u] & {bit}u) != 0u) {{
                 continue;
             }}
-            if (u32(o.center.w) != SDF) {{
-                let gap = obstacle_distance(o, bc).w - bl.w;
-                if (gap > world_gate) {{
-                    wmin = min(wmin, gap);
-                    continue;
-                }}
-            }}
-            let first = links[{i}u].first_sphere;
+{gate}            let first = links[{i}u].first_sphere;
             for (var s = first + lane; s < first + links[{i}u].n_spheres; s += LANES) {{
                 let sp = spheres[s];
                 let c = rot_{i} * sp.c.xyz + pos_{i};
@@ -780,6 +820,9 @@ fn collision(
         }
     }
     w += "    }\n    return vec3<f32>(cost, wmin, smin);\n}\n";
+    if grids {
+        w += GRID_GAP;
+    }
     w
 }
 
@@ -793,10 +836,10 @@ pub(crate) struct GpuBackend {
     info: wgpu::AdapterInfo,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    kernels: Arc<Kernels>,
+    kernels: Arc<KernelSets>,
     /// Kernels built on this device, by their robot-specific source. Every backend derived with
     /// `with_robot` shares it, so attaching and detaching objects compiles each robot shape once.
-    built: Arc<Mutex<HashMap<String, Arc<Kernels>>>>,
+    built: Arc<Mutex<HashMap<String, Arc<KernelSets>>>>,
     buffers: RobotBuffers,
     /// The grid kernels, built on first use and shared like `built`.
     grids: Arc<OnceLock<GridKernels>>,
@@ -835,6 +878,8 @@ impl GridKernels {
             include_str!("grids.wgsl"),
         ]
         .concat();
+        // What the driver refuses is an error as what wgpu does is, as for `pipeline`.
+        let refused = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("grids"),
@@ -888,7 +933,9 @@ impl GridKernels {
             finish: pipeline("finish"),
             layout,
         };
-        if let Some(e) = pollster::block_on(scope.pop()) {
+        let invalid = pollster::block_on(scope.pop());
+        let refused = pollster::block_on(refused.pop());
+        if let Some(e) = invalid.or(refused) {
             return Err(Error::Gpu(format!(
                 "{} ({:?}) cannot build the grid kernels: {e}",
                 info.name, info.backend
@@ -955,8 +1002,53 @@ struct Kernels {
     module: wgpu::ShaderModule,
     layout: wgpu::PipelineLayout,
     /// The trajectory kernels that keep constraints, for one lane and SHARED_LANES, built the
-    /// first time a constrained path is optimized.
+    /// first time a constrained path is optimized (`KernelSets::constrain`).
     constrained: OnceLock<[TrajKernels; 2]>,
+}
+
+/// A robot's kernels twice: as uploads without distance grids run them, and with the code that
+/// rules a grid out by its box, as uploads that hold one do (`GpuBackend::kernels_in`).
+struct KernelSets {
+    plain: Kernels,
+    gated: Kernels,
+}
+
+impl KernelSets {
+    /// Builds both sets' trajectory kernels that keep constraints, side by side, unless they are
+    /// built. Both at once, so that the first constrained path among grids compiles nothing
+    /// where one without grids came first, and the other way round.
+    fn constrain(&self, device: &wgpu::Device, info: &wgpu::AdapterInfo) -> Result<()> {
+        let sets = [&self.plain, &self.gated];
+        if sets.iter().all(|set| set.constrained.get().is_some()) {
+            return Ok(());
+        }
+        let each = sets.into_iter().flat_map(|set| {
+            let lanes = [1, SHARED_LANES].into_iter();
+            lanes
+                .flat_map(move |lanes| ["traj_costs", "traj_samples"].map(move |e| (set, e, lanes)))
+        });
+        let pipelines = together(each.map(|(set, entry, lanes)| {
+            move || pipeline(device, &set.layout, &set.module, entry, lanes, true)
+        }));
+        let pipelines: std::result::Result<Vec<_>, _> = pipelines.into_iter().collect();
+        let mut pipelines = pipelines
+            .map_err(|e| {
+                Error::Gpu(format!(
+                    "{} ({:?}) cannot build the constrained trajectory kernels: {e}",
+                    info.name, info.backend
+                ))
+            })?
+            .into_iter();
+        let mut traj = || TrajKernels {
+            traj_costs: pipelines.next().expect("eight pipelines"),
+            traj_samples: pipelines.next().expect("eight pipelines"),
+        };
+        for set in sets {
+            let built = [traj(), traj()];
+            set.constrained.get_or_init(|| built);
+        }
+        Ok(())
+    }
 }
 
 /// The per-sample trajectory kernels, built to keep constraints.
@@ -985,53 +1077,32 @@ impl Kernels {
     }
 
     /// The per-sample trajectory kernels for `lanes`: costs, then gradients, keeping constraints
-    /// with `constrained`.
-    fn traj(
-        &self,
-        device: &wgpu::Device,
-        info: &wgpu::AdapterInfo,
-        lanes: u32,
-        constrained: bool,
-    ) -> Result<[&wgpu::ComputePipeline; 2]> {
+    /// with `constrained`, once `KernelSets::constrain` has built those.
+    fn traj(&self, lanes: u32, constrained: bool) -> [&wgpu::ComputePipeline; 2] {
         if !constrained {
             let c = self.collision(lanes);
-            return Ok([&c.traj_costs, &c.traj_samples]);
+            return [&c.traj_costs, &c.traj_samples];
         }
-        let built = match self.constrained.get() {
-            Some(built) => built,
-            None => {
-                let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-                let traj = |lanes: u32| TrajKernels {
-                    traj_costs: pipeline(
-                        device,
-                        &self.layout,
-                        &self.module,
-                        "traj_costs",
-                        lanes,
-                        true,
-                    ),
-                    traj_samples: pipeline(
-                        device,
-                        &self.layout,
-                        &self.module,
-                        "traj_samples",
-                        lanes,
-                        true,
-                    ),
-                };
-                let built = [traj(1), traj(SHARED_LANES)];
-                if let Some(e) = pollster::block_on(scope.pop()) {
-                    return Err(Error::Gpu(format!(
-                        "{} ({:?}) cannot build the constrained trajectory kernels: {e}",
-                        info.name, info.backend
-                    )));
-                }
-                self.constrained.get_or_init(|| built)
-            }
-        };
+        let built = self.constrained.get();
+        let built = built.expect("a constrained path's kernels are built before it is optimized");
         let t = &built[usize::from(lanes != 1)];
-        Ok([&t.traj_costs, &t.traj_samples])
+        [&t.traj_costs, &t.traj_samples]
     }
+}
+
+/// What each of `jobs` returns, in their order, each run on a thread of its own: for work a
+/// driver does on the calling thread, such as compiling a pipeline.
+fn together<T: Send>(jobs: impl Iterator<Item = impl FnOnce() -> T + Send>) -> Vec<T> {
+    std::thread::scope(|s| {
+        #[expect(
+            clippy::needless_collect,
+            reason = "every job starts before the first is waited for"
+        )]
+        let running: Vec<_> = jobs.map(|job| s.spawn(job)).collect();
+        let done = running.into_iter().map(|thread| thread.join());
+        done.map(|result| result.expect("the job does not panic"))
+            .collect()
+    })
 }
 
 /// The pipeline for kernel `entry` with `lanes` per configuration, keeping constraints with
@@ -1043,10 +1114,14 @@ fn pipeline(
     entry: &str,
     lanes: u32,
     constrained: bool,
-) -> wgpu::ComputePipeline {
+) -> std::result::Result<wgpu::ComputePipeline, wgpu::Error> {
     let lanes = ("LANES", f64::from(lanes));
     let constants = [lanes, ("CONSTRAINED", 1.0)];
-    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+    // A failure, wgpu's or the driver's, is an error, not a panic: wgpu keeps error scopes by
+    // thread, and each pipeline is built on one of its own (`together`).
+    let refused = device.push_error_scope(wgpu::ErrorFilter::Internal);
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let built = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some(entry),
         layout: Some(layout),
         module,
@@ -1061,7 +1136,13 @@ fn pipeline(
             zero_initialize_workgroup_memory: false,
         },
         cache: None,
-    })
+    });
+    let invalid = pollster::block_on(scope.pop());
+    let refused = pollster::block_on(refused.pop());
+    match invalid.or(refused) {
+        Some(error) => Err(error),
+        None => Ok(built),
+    }
 }
 
 /// The robot as the kernels read it.
@@ -1128,14 +1209,16 @@ impl RobotBuffers {
     }
 }
 
-/// The kernels for `robot`'s shape, built on `device` unless `built` already holds them.
+/// The kernels for `robot`'s shape, built on `device` unless `built` already holds them: those
+/// that uploads without distance grids run and, beside them, those that rule grids out, the two
+/// sets at once on threads of their own.
 fn kernels_for(
     device: &wgpu::Device,
     info: &wgpu::AdapterInfo,
-    built: &Mutex<HashMap<String, Arc<Kernels>>>,
+    built: &Mutex<HashMap<String, Arc<KernelSets>>>,
     robot: &Robot,
-) -> Result<Arc<Kernels>> {
-    let robot_source = robot_wgsl(robot);
+) -> Result<Arc<KernelSets>> {
+    let robot_source = robot_wgsl(robot, /* grids */ false);
     let mut built = built
         .lock()
         .expect("no thread panics while holding the kernel cache");
@@ -1143,7 +1226,16 @@ fn kernels_for(
         return Ok(kernels.clone());
     }
     let counts = (robot.dof(), robot.hands());
-    let kernels = Arc::new(build_kernels(device, info, &robot_source, counts)?);
+    let sources = [&robot_source, &robot_wgsl(robot, /* grids */ true)];
+    let mut sets = together(
+        sources
+            .into_iter()
+            .map(|source| move || build_kernels(device, info, source, counts)),
+    )
+    .into_iter();
+    let mut next = || sets.next().expect("two sets of kernels");
+    let (plain, gated) = (next()?, next()?);
+    let kernels = Arc::new(KernelSets { plain, gated });
     built.insert(robot_source, kernels.clone());
     Ok(kernels)
 }
@@ -1177,7 +1269,8 @@ fn build_kernels(
         include_str!("grid.wgsl"),
     ]
     .concat();
-    // Turn shader and pipeline validation failures into errors instead of panics.
+    // The module's and the layouts' validation failures become errors, not panics; each
+    // pipeline reports its own (`pipeline`).
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let descriptor = wgpu::ShaderModuleDescriptor {
         label: Some("batchplan kernels"),
@@ -1213,33 +1306,46 @@ fn build_kernels(
         bind_group_layouts: &[Some(&layout0)],
         immediate_size: 0,
     });
-    let pipeline =
-        |entry: &str, lanes: u32| pipeline(device, &pl_main, &module, entry, lanes, false);
-    let collision = |lanes: u32| CollisionKernels {
-        evaluate: pipeline("evaluate_main", lanes),
-        clearance: pipeline("clearance_main", lanes),
-        ik: pipeline("ik_main", lanes),
-        traj_costs: pipeline("traj_costs", lanes),
-        traj_samples: pipeline("traj_samples", lanes),
-    };
-    // Drivers compile each pipeline on the calling thread; the two sets compile side by side.
-    let (single, shared) = std::thread::scope(|s| {
-        let shared = s.spawn(|| collision(SHARED_LANES));
-        (
-            collision(1),
-            shared.join().expect("pipeline creation does not panic"),
-        )
-    });
-    let ik_select = pipeline("ik_select", 1);
-    let traj_search = pipeline("traj_search", 1);
-    let traj_grad = pipeline("traj_grad", 1);
-    let lbfgs_direction = pipeline("lbfgs_direction", 1);
-    if let Some(e) = pollster::block_on(scope.pop()) {
-        return Err(Error::Gpu(format!(
+    // Drivers compile each pipeline on the thread that asks for it, and each takes a tenth of a
+    // second or more: every pipeline is asked for on a thread of its own.
+    let collision = [
+        "evaluate_main",
+        "clearance_main",
+        "ik_main",
+        "traj_costs",
+        "traj_samples",
+    ];
+    let rest = ["ik_select", "traj_search", "traj_grad", "lbfgs_direction"];
+    let each = [1, SHARED_LANES]
+        .into_iter()
+        .flat_map(|lanes| collision.map(|entry| (entry, lanes)))
+        .chain(rest.map(|entry| (entry, 1)));
+    let cannot = |e: wgpu::Error| {
+        Error::Gpu(format!(
             "{} ({:?}) cannot build the kernels: {e}",
             info.name, info.backend
-        )));
+        ))
+    };
+    // The module's own failures first: every pipeline would repeat them.
+    if let Some(e) = pollster::block_on(scope.pop()) {
+        return Err(cannot(e));
     }
+    let built = together(each.map(|(entry, lanes)| {
+        let (pl_main, module) = (&pl_main, &module);
+        move || pipeline(device, pl_main, module, entry, lanes, false)
+    }));
+    let built: std::result::Result<Vec<_>, _> = built.into_iter().collect();
+    let mut built = built.map_err(cannot)?.into_iter();
+    let mut next = || built.next().expect("a pipeline for every entry");
+    let mut collision = || CollisionKernels {
+        evaluate: next(),
+        clearance: next(),
+        ik: next(),
+        traj_costs: next(),
+        traj_samples: next(),
+    };
+    let (single, shared) = (collision(), collision());
+    let (ik_select, traj_search, traj_grad, lbfgs_direction) = (next(), next(), next(), next());
 
     Ok(Kernels {
         layout0,
@@ -1258,6 +1364,8 @@ fn build_kernels(
 /// Worlds in device memory: every world's obstacles, each world's `[first, count]` range of them,
 /// and the distance grids they use, each stored once.
 struct GpuWorlds {
+    /// Whether a world holds a distance grid: their calls run the kernels that rule grids out.
+    grids: bool,
     obstacles: wgpu::Buffer,
     ranges: wgpu::Buffer,
     /// Distance grids and touch sets (`GpuObstacle`).
@@ -1450,12 +1558,14 @@ impl GpuBackend {
                             offset
                         });
                         let [nx, ny, nz] = grid.dims;
+                        let mut o = rotated(SDF, center, v4(grid.origin, grid.voxel), rotation);
+                        o.r1[3] = grid.sunk();
                         GpuObstacle {
                             nx,
                             ny,
                             nz,
                             grid: offset,
-                            ..rotated(SDF, center, v4(grid.origin, grid.voxel), rotation)
+                            ..o
                         }
                     }
                 });
@@ -1493,11 +1603,22 @@ impl GpuBackend {
             )));
         }
         Ok(GpuWorlds {
+            grids: cpu.first().is_some_and(|world| world.among_grids),
             obstacles: storage(&self.device, "obstacles", &obstacles),
             ranges: storage(&self.device, "world ranges", &ranges),
             data: storage(&self.device, "world data", &words),
             cpu,
         })
+    }
+
+    /// The kernels that calls in `worlds` run: those that rule grids out where one of the worlds
+    /// uploaded holds a grid, and otherwise those without that code.
+    fn kernels_in(&self, worlds: &GpuWorlds) -> &Kernels {
+        if worlds.grids {
+            &self.kernels.gated
+        } else {
+            &self.kernels.plain
+        }
     }
 
     fn uniform(&self, params: &GpuParams) -> wgpu::Buffer {
@@ -1543,7 +1664,7 @@ impl GpuBackend {
         }
     }
 
-    fn bind_main(&self, b: &CallBuffers) -> wgpu::BindGroup {
+    fn bind_main(&self, kernels: &Kernels, b: &CallBuffers) -> wgpu::BindGroup {
         let buffers = [
             b.params,
             &self.buffers.links,
@@ -1569,7 +1690,7 @@ impl GpuBackend {
             .collect();
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
-            layout: &self.kernels.layout0,
+            layout: &kernels.layout0,
             entries: &entries,
         })
     }
@@ -1673,18 +1794,22 @@ impl GpuBackend {
         let no_aux = storage::<f32>(&self.device, "unused aux", &[]);
         let q_buf = storage(&self.device, "q", q);
         let out = storage_zeroed(&self.device, "out", items * stride);
-        let bg = self.bind_main(&CallBuffers {
-            params: &params,
-            worlds,
-            item_world: &world_buf,
-            targets: &no_targets,
-            q: &q_buf,
-            aux: &no_aux,
-            out: &out,
-        });
+        let kernels = self.kernels_in(worlds);
+        let bg = self.bind_main(
+            kernels,
+            &CallBuffers {
+                params: &params,
+                worlds,
+                item_world: &world_buf,
+                targets: &no_targets,
+                q: &q_buf,
+                aux: &no_aux,
+                out: &out,
+            },
+        );
         self.submit_pass(|pass| {
             let lanes = lanes_for(items);
-            pass.set_pipeline(kernel(self.kernels.collision(lanes)));
+            pass.set_pipeline(kernel(kernels.collision(lanes)));
             pass.set_bind_group(0, &bg, &[]);
             dispatch(pass, items * lanes as usize);
         });
@@ -1920,11 +2045,14 @@ impl Backend for GpuBackend {
     }
 
     fn build_all(&self) -> Result<()> {
-        for lanes in [1, SHARED_LANES] {
-            self.kernels
-                .traj(&self.device, &self.info, lanes, /* constrained */ true)?;
-        }
-        self.grid_kernels().map(|_| ())
+        // The constrained kernels and the kernels that build grids, side by side.
+        let jobs: [&(dyn Fn() -> Result<()> + Sync); 2] = [
+            &|| self.kernels.constrain(&self.device, &self.info),
+            &|| self.grid_kernels().map(|_| ()),
+        ];
+        together(jobs.into_iter().map(|job| move || job()))
+            .into_iter()
+            .collect()
     }
 
     fn search(&self, worlds: &Worlds, searches: &mut [&mut dyn Search], deadline: Option<Instant>) {
@@ -2150,6 +2278,7 @@ impl GpuBackend {
         if items == 0 {
             return Ok(());
         }
+        let kernels = self.kernels_in(worlds);
         // Lanes split the collision checks, which IK makes only to push away from obstacles.
         let lanes = if o.collision_step > 0.0 {
             ik_lanes(items, self.robot.spheres.len())
@@ -2245,15 +2374,18 @@ impl GpuBackend {
         let bind =
             |params: &GpuParams, q: &wgpu::Buffer, aux: &wgpu::Buffer, out: &wgpu::Buffer| {
                 let bytes = bytemuck::bytes_of(params);
-                self.bind_main(&CallBuffers {
-                    params: &lend(uniform_usage, bytes, bytes.len()),
-                    worlds,
-                    item_world: &world_buf,
-                    targets: &target_buf,
-                    q,
-                    aux,
-                    out,
-                })
+                self.bind_main(
+                    kernels,
+                    &CallBuffers {
+                        params: &lend(uniform_usage, bytes, bytes.len()),
+                        worlds,
+                        item_world: &world_buf,
+                        targets: &target_buf,
+                        q,
+                        aux,
+                        out,
+                    },
+                )
             };
         // Passes share a submission up to the work of `IK_ITERS_PER_SUBMIT` steps of a full chunk
         // and `IK_MOST_STEPS` steps, so a small call is one submission; everything is read back
@@ -2284,7 +2416,7 @@ impl GpuBackend {
                 }
                 let bg = bind(params, &q_buf, &held_buf, &out);
                 let mut pass = enc.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&self.kernels.collision(lanes).ik);
+                pass.set_pipeline(&kernels.collision(lanes).ik);
                 pass.set_bind_group(0, &bg, &[]);
                 dispatch(&mut pass, configurations * lanes as usize);
                 open = (open.0 + work, open.1 + params.iterations);
@@ -2302,7 +2434,7 @@ impl GpuBackend {
             let bg = bind(&clear, &q_buf, &held_buf, &clear_out);
             let lanes = lanes_for(configurations);
             let mut pass = enc.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.kernels.collision(lanes).clearance);
+            pass.set_pipeline(&kernels.collision(lanes).clearance);
             pass.set_bind_group(0, &bg, &[]);
             dispatch(&mut pass, configurations * lanes as usize);
         };
@@ -2333,7 +2465,7 @@ impl GpuBackend {
             let choice_bg = bind(&choice, &out, &clear_out, &q_buf);
             {
                 let mut pass = enc.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&self.kernels.ik_select);
+                pass.set_pipeline(&kernels.ik_select);
                 pass.set_bind_group(0, &choice_bg, &[]);
                 dispatch(&mut pass, items);
             }
@@ -2399,9 +2531,11 @@ impl GpuBackend {
         // The constraints' gradients read the hands' Jacobians unscaled.
         params.rotation_weight = 1.0;
         let lanes = lanes_for(samples);
-        let [traj_costs, traj_samples] =
-            self.kernels
-                .traj(&self.device, &self.info, lanes, slots > 0)?;
+        if slots > 0 {
+            self.kernels.constrain(&self.device, &self.info)?;
+        }
+        let kernels = self.kernels_in(worlds);
+        let [traj_costs, traj_samples] = kernels.traj(lanes, slots > 0);
         let params_buf = self.uniform(&params);
         let world_buf = storage(&self.device, "item world", item_world);
         let constraints = storage(
@@ -2416,15 +2550,18 @@ impl GpuBackend {
             items * lbfgs_stride(points, self.robot.dof(), o),
         );
         let out = storage::<f32>(&self.device, "unused out", &[]);
-        let bg = self.bind_main(&CallBuffers {
-            params: &params_buf,
-            worlds,
-            item_world: &world_buf,
-            targets: &constraints,
-            q: &q_buf,
-            aux: &aux,
-            out: &out,
-        });
+        let bg = self.bind_main(
+            kernels,
+            &CallBuffers {
+                params: &params_buf,
+                worlds,
+                item_world: &world_buf,
+                targets: &constraints,
+                q: &q_buf,
+                aux: &aux,
+                out: &out,
+            },
+        );
         // The first round only prices the seeds: their directions are still zero.
         let rounds = o.iterations + 1;
         let mut k = 0;
@@ -2435,16 +2572,16 @@ impl GpuBackend {
                 for round in k..end {
                     pass.set_pipeline(traj_costs);
                     dispatch(pass, samples * LINE_SEARCH.len() * lanes as usize);
-                    pass.set_pipeline(&self.kernels.traj_search);
+                    pass.set_pipeline(&kernels.traj_search);
                     dispatch_groups(pass, items);
                     if round + 1 == rounds {
                         break;
                     }
                     pass.set_pipeline(traj_samples);
                     dispatch(pass, samples * lanes as usize);
-                    pass.set_pipeline(&self.kernels.traj_grad);
+                    pass.set_pipeline(&kernels.traj_grad);
                     dispatch(pass, items * (points - 6));
-                    pass.set_pipeline(&self.kernels.lbfgs_direction);
+                    pass.set_pipeline(&kernels.lbfgs_direction);
                     dispatch_groups(pass, items);
                 }
             });
@@ -2568,9 +2705,137 @@ mod tests {
             }
             Err(e) => panic!("no GPU: {e}"),
         };
-        assert!(gpu.kernels.constrained.get().is_none() && gpu.grids.get().is_none());
+        let (plain, gated) = (&gpu.kernels.plain, &gpu.kernels.gated);
+        assert!(plain.constrained.get().is_none() && gpu.grids.get().is_none());
+        assert!(gated.constrained.get().is_none());
         gpu.build_all().expect("the kernels build");
-        assert!(gpu.kernels.constrained.get().is_some() && gpu.grids.get().is_some());
+        assert!(plain.constrained.get().is_some() && gpu.grids.get().is_some());
+        assert!(gated.constrained.get().is_some());
+    }
+
+    /// A pipeline that cannot be built is an error where it is asked for, on whatever thread, as
+    /// a kernel wgpu refuses on some adapter would be.
+    #[test]
+    fn a_pipeline_that_cannot_be_built_is_an_error() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/ur5e/ur_description/urdf/ur5e.urdf"
+        );
+        let robot = Robot::load(path, &crate::RobotOptions::default()).expect("the UR5e loads");
+        let gpu = match GpuBackend::new(&robot, None) {
+            Ok(gpu) => gpu,
+            Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => {
+                eprintln!("skipping GPU: {e}");
+                return;
+            }
+            Err(e) => panic!("no GPU: {e}"),
+        };
+        let (device, kernels) = (&gpu.device, &gpu.kernels.plain);
+        let built = together(
+            ["evaluate_main", "no_such_kernel"]
+                .into_iter()
+                .map(|entry| {
+                    let constrained = false;
+                    move || {
+                        pipeline(
+                            device,
+                            &kernels.layout,
+                            &kernels.module,
+                            entry,
+                            1,
+                            constrained,
+                        )
+                    }
+                }),
+        );
+        assert!(built[0].is_ok() && built[1].is_err());
+
+        // What the driver refuses is an error too, where wgpu itself finds nothing wrong: Metal
+        // builds no function with 256 KB of its own variables.
+        let source = "override LANES: u32 = 1u;
+            @group(0) @binding(0) var<storage, read_write> sums: array<f32>;
+            @compute @workgroup_size(1)
+            fn wide(@builtin(global_invocation_id) id: vec3<u32>) {
+                var held: array<f32, 65536>;
+                for (var i = 0u; i < 65536u; i++) {
+                    held[i] = f32(i + id.x + LANES);
+                }
+                var sum = 0.0;
+                for (var i = 0u; i < 65536u; i++) {
+                    sum += held[(i * 7u) % 65536u];
+                }
+                sums[id.x] = sum;
+            }";
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("wide"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        let entries = [wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }];
+        let group = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &entries,
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[Some(&group)],
+            immediate_size: 0,
+        });
+        let constrained = false;
+        let wide = together(
+            [(); 1]
+                .into_iter()
+                .map(|()| || pipeline(device, &layout, &module, "wide", 1, constrained)),
+        );
+        assert!(
+            wide[0].is_err() || gpu.info.backend != wgpu::Backend::Metal,
+            "Metal refuses the function, which is an error and no panic"
+        );
+    }
+
+    /// Uploads without distance grids run kernels without the code that rules grids out; those
+    /// with a grid run the kernels built beside them, which have it.
+    #[test]
+    fn only_worlds_with_grids_run_the_kernels_that_rule_grids_out() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/ur5e/ur_description/urdf/ur5e.urdf"
+        );
+        let robot = Robot::load(path, &crate::RobotOptions::default()).expect("the UR5e loads");
+        let plain = robot_wgsl(&robot, /* grids */ false);
+        let gated = robot_wgsl(&robot, /* grids */ true);
+        assert!(!plain.contains("grid_gap") && gated.contains("grid_gap(o, bc, bl.w)"));
+        let gpu = match GpuBackend::new(&robot, None) {
+            Ok(gpu) => gpu,
+            Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => {
+                eprintln!("skipping GPU: {e}");
+                return;
+            }
+            Err(e) => panic!("no GPU: {e}"),
+        };
+        let boxes = World::new(vec![Obstacle::cuboid(
+            Vec3::new(0.5, 0.0, 0.2),
+            Vec3::splat(0.1),
+        )]);
+        let without = gpu
+            .upload_worlds(std::slice::from_ref(&boxes))
+            .expect("the world uploads");
+        assert!(!without.grids && std::ptr::eq(gpu.kernels_in(&without), &gpu.kernels.plain));
+        let grid = SdfGrid::try_new([2, 2, 2], 0.1, Vec3::ZERO, &[0.5; 8]).expect("a grid");
+        let mut with_a_grid = boxes;
+        with_a_grid.obstacles.push(Obstacle::from(grid));
+        let with = gpu
+            .upload_worlds(&[with_a_grid])
+            .expect("the world uploads");
+        assert!(with.grids && std::ptr::eq(gpu.kernels_in(&with), &gpu.kernels.gated));
     }
 
     /// What a robot holds changes none of its kernels' code, however many spheres cover it: a
@@ -2593,7 +2858,7 @@ mod tests {
                 })
                 .expect("the box attaches");
             let spheres = held.sphere_ranges.last().expect("the box's link")[1];
-            (spheres, robot_wgsl(&held))
+            (spheres, robot_wgsl(&held, /* grids */ false))
         };
         let ball = crate::Obstacle::sphere(Vec3::ZERO, 0.02);
         let cube = crate::Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.1));

@@ -4,22 +4,25 @@
 //! configurations; plans of 16 and 256 problems with 4 optimized seeds. Then the two kinds that
 //! spend longest in the collision code: IK with the push for a Panda fitted with several hundred
 //! spheres, among tabletops' clutter, and plans to goals past a ball in the way; and a UR5e's IK
-//! among the same clutter, a robot of other links and spheres. Each kind is called many times and
-//! its median and best kept: a GPU's pace over calls this short varies, so compare builds by
-//! running them in turn.
+//! among the same clutter, a robot of other links and spheres; and the Panda's IK among that
+//! clutter without a distance grid, with one that no link comes near and with one where the arm
+//! reaches. Each kind is called many times and its median and best kept: a GPU's pace over calls
+//! this short varies, so compare builds by running them in turn.
 //!
 //!   cargo run --release --example latency [-- --cpu]
 
 #[path = "common/mod.rs"]
 mod common;
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
+use batchplan::glam::{Quat, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{
     CollisionModel, CollisionWeights, Device, IkOptions, IkProblem, Obstacle, PlanOptions,
-    PlanProblem, Robot, RobotOptions, SphereOptions, World,
+    PlanProblem, Robot, RobotOptions, SdfGrid, SphereOptions, World,
 };
 
 /// The median and the best of `calls` runs of `call`, in milliseconds.
@@ -216,5 +219,59 @@ fn main() -> Result<()> {
     println!(
         "IK, a UR5e, the push, clutter       1000 targets: median {median:8.2} ms, best {best:8.2}, {solved} solved"
     );
+    // The Panda among the same clutter, and again with a distance grid in every world: a ball
+    // that no link comes near, two metres behind the arm, and the same ball beside the table,
+    // where the arm reaches.
+    let side = 20;
+    let distances: Vec<f32> = (0..side * side * side)
+        .map(|i| {
+            let at = Vec3::new(
+                (i % side) as f32,
+                (i / side % side) as f32,
+                (i / (side * side)) as f32,
+            );
+            ((at - 9.5) * 0.02).length() - 0.1
+        })
+        .collect();
+    let grid = Arc::new(SdfGrid::try_new(
+        [side as u32; 3],
+        0.02,
+        Vec3::ZERO,
+        &distances,
+    )?);
+    let with_the_ball_at = |center: Vec3| -> Vec<World> {
+        let worlds = tabletops.iter().map(|tabletop| {
+            let mut world = tabletop.clone();
+            world.obstacles.push(Obstacle::Sdf {
+                grid: grid.clone(),
+                center,
+                rotation: Quat::IDENTITY,
+            });
+            world
+        });
+        worlds.collect()
+    };
+    let apart = device.upload(&with_the_ball_at(Vec3::new(-2.0, 0.0, 0.3)))?;
+    let among = device.upload(&with_the_ball_at(Vec3::new(0.3, -0.5, 0.1)))?;
+    let problems: Vec<IkProblem> = (0..1000)
+        .map(|i| IkProblem::new((i % 64) as u32, panda.ee_pose(&random(&panda), 0)))
+        .collect();
+    let kinds = [
+        ("clutter", &worlds),
+        ("clutter, a grid apart", &apart),
+        ("clutter, a grid among", &among),
+    ];
+    for (kind, worlds) in kinds {
+        let mut solved = 0;
+        let (median, best) = timed(30, || {
+            solved = batchplan::solve_ik(&device, worlds, &problems, &IkOptions::default())?
+                .solved()
+                .count();
+            Ok(())
+        })?;
+        println!(
+            "IK, the push, {kind:<22} 1000 targets: median {median:8.2} ms, best {best:8.2}, {solved} solved"
+        );
+    }
     Ok(())
 }
