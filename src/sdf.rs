@@ -509,6 +509,10 @@ pub struct SdfGrid {
     pub(crate) voxel: f32,
     pub(crate) origin: Vec3,
     pub(crate) values: Vec<u16>,
+    /// The least value on the faces of the grid's box: a point outside the box is at least this
+    /// plus its distance to the box away, which rules the grid out for links far from it.
+    #[serde(skip)]
+    pub(crate) least_on_faces: f32,
 }
 
 /// A grid as serialized, checked like [`SdfGrid::try_new`] before it becomes one.
@@ -524,14 +528,7 @@ impl TryFrom<GridParts> for SdfGrid {
     type Error = Error;
 
     fn try_from(p: GridParts) -> Result<Self> {
-        let grid = SdfGrid {
-            dims: p.dims,
-            voxel: p.voxel,
-            origin: p.origin,
-            values: p.values,
-        };
-        grid.check()?;
-        Ok(grid)
+        SdfGrid::checked(p.dims, p.voxel, p.origin, p.values)
     }
 }
 
@@ -543,14 +540,45 @@ impl SdfGrid {
             .iter()
             .map(|&d| flush(f16::from_f32(d)).to_bits())
             .collect();
-        let grid = Self {
+        Self::checked(dims, voxel, origin, values)
+    }
+
+    /// The grid of `values` (half floats, x fastest), if it can be sampled.
+    fn checked(dims: [u32; 3], voxel: f32, origin: Vec3, values: Vec<u16>) -> Result<Self> {
+        let mut grid = Self {
             dims,
             voxel,
             origin,
             values,
+            least_on_faces: 0.0,
         };
         grid.check()?;
+        let [nx, ny, nz] = dims;
+        let mut least = f32::INFINITY;
+        for z in 0..nz {
+            for y in 0..ny {
+                let row = nx * (y + ny * z);
+                let whole = z == 0 || z == nz - 1 || y == 0 || y == ny - 1;
+                let step = if whole { 1 } else { nx - 1 };
+                for x in (0..nx).step_by(step as usize) {
+                    least = least.min(grid.value(row + x));
+                }
+            }
+        }
+        grid.least_on_faces = least;
         Ok(grid)
+    }
+
+    /// What a value outside the grid's box is at least, less the distance to the box: the least
+    /// on its faces where that is negative, and a hair for the rounding of the checks that rely
+    /// on it.
+    pub(crate) fn sunk(&self) -> f32 {
+        self.least_on_faces.min(0.0) - 1e-5
+    }
+
+    /// Half the extent of the grid's box, whose centre is `origin` plus this.
+    pub(crate) fn half_extent(&self) -> Vec3 {
+        (UVec3::from(self.dims) - 1).as_vec3() * (0.5 * self.voxel)
     }
 
     /// Why this grid cannot be sampled, if it cannot: the rules of [`SdfGrid::try_new`].
@@ -749,14 +777,7 @@ impl SdfGrid {
             .iter()
             .map(|&d| at_most(d - shift).to_bits())
             .collect();
-        let grid = Self {
-            dims: dims.into(),
-            voxel,
-            origin,
-            values,
-        };
-        grid.check()?;
-        Ok(grid)
+        Self::checked(dims.into(), voxel, origin, values)
     }
 
     /// Signed distances to the occupied voxels as solid cubes, from their centers' distances.
@@ -768,14 +789,7 @@ impl SdfGrid {
     }
 
     fn from_values(grid: &Layout, values: Vec<u16>) -> Result<Self> {
-        let grid = Self {
-            dims: grid.dims.into(),
-            voxel: grid.voxel,
-            origin: grid.origin,
-            values,
-        };
-        grid.check()?;
-        Ok(grid)
+        Self::checked(grid.dims.into(), grid.voxel, grid.origin, values)
     }
 }
 
@@ -1149,6 +1163,35 @@ mod tests {
             })
             .collect();
         (depth, k, camera)
+    }
+
+    /// The least value on a grid's faces is the least of its points with a coordinate at either
+    /// end: every face, and no point inside. Each face of an uneven grid holds the least in turn.
+    #[test]
+    fn the_least_on_a_grids_faces_is_found_on_every_face() {
+        let dims = [3u32, 4, 5];
+        let index = |x: u32, y: u32, z: u32| (x + dims[0] * (y + dims[1] * z)) as usize;
+        let faces = [
+            (0, 1, 2),
+            (2, 2, 1),
+            (1, 0, 3),
+            (1, 3, 2),
+            (1, 2, 0),
+            (1, 1, 4),
+        ];
+        for (x, y, z) in faces {
+            let mut distances = vec![0.5; 60];
+            // Lower inside, where it must not count, and lowest at one point of one face.
+            distances[index(1, 1, 2)] = -0.75;
+            distances[index(x, y, z)] = -0.25;
+            let grid = SdfGrid::try_new(dims, 0.1, Vec3::ZERO, &distances).unwrap();
+            assert_eq!(
+                grid.least_on_faces, -0.25,
+                "the face through ({x}, {y}, {z})"
+            );
+        }
+        let even = SdfGrid::try_new(dims, 0.1, Vec3::ZERO, &[0.5; 60]).unwrap();
+        assert_eq!(even.least_on_faces, 0.5);
     }
 
     /// Classification projects points in floating point, so a point within rounding of a pixel's

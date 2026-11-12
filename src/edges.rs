@@ -231,10 +231,18 @@ pub(crate) fn run(
     pause: Option<&dyn Fn() -> bool>,
     scratch: &mut EdgeScratch,
 ) -> bool {
-    // One dispatch for the whole search, so the checks inline at the CPU's SIMD level.
-    dispatch!(lanes.level(), simd => {
-        run_at(simd, search, robot, lanes, worlds, deadline, spread, pause, scratch)
-    })
+    // One dispatch for the whole search, so the checks inline at the CPU's SIMD level; and one
+    // choice of their copy, for worlds with distance grids or without, so that neither search
+    // carries the other's checks (`cpu::collision_with`).
+    if worlds.first().is_some_and(|world| world.among_grids) {
+        dispatch!(lanes.level(), simd => {
+            run_at::<_, true>(simd, search, robot, lanes, worlds, deadline, spread, pause, scratch)
+        })
+    } else {
+        dispatch!(lanes.level(), simd => {
+            run_at::<_, false>(simd, search, robot, lanes, worlds, deadline, spread, pause, scratch)
+        })
+    }
 }
 
 #[inline(always)]
@@ -242,7 +250,7 @@ pub(crate) fn run(
     clippy::too_many_arguments,
     reason = "the driver lends its state to each search, apart, so they borrow separately"
 )]
-fn run_at<S: Simd>(
+fn run_at<S: Simd, const GRIDS: bool>(
     simd: S,
     search: &mut dyn Search,
     robot: &Robot,
@@ -280,53 +288,66 @@ fn run_at<S: Simd>(
             continue;
         };
         let world = &worlds[query.world as usize];
-        let n = lanes.dof();
-        // Loops rather than closures: a closure is a function of its own, without the dispatched
-        // SIMD level, and the checks inside it would not inline.
-        let answer = match query.wanted {
-            // Edges in order, stopping at the answer: the first invalid one for a prefix, the
-            // first valid one otherwise; the count when none stops the scan.
-            Some(wanted) => {
-                let count = query.count(n);
-                let mut answer = count;
-                for i in 0..count {
-                    if edge_free(simd, lanes, world, query.edge(i, n), &query, scratch)
-                        == (wanted == Wanted::FirstValid)
-                    {
-                        answer = i;
-                        break;
-                    }
-                }
-                answer
-            }
-            None => {
-                let mut answer = query.edges.len() / n;
-                for (group, q) in query.edges.chunks(LANES * n).enumerate() {
-                    let mut margin = [0.0; LANES];
-                    if let Some(keep) = &query.keep {
-                        for (m, c) in margin.iter_mut().zip(q.chunks(n)) {
-                            *m = keep.margin(c);
-                        }
-                    }
-                    let region = query.region.as_deref();
-                    if !lanes.keeps(simd, world, q, margin, region, &mut scratch.lanes) {
-                        answer = group * LANES;
-                        break;
-                    }
-                }
-                answer
-            }
-        };
+        let answer = answered::<S, GRIDS>(simd, lanes, world, &query, scratch);
         search.answer(answer);
         scratch.buffer = query.edges;
     }
     false
 }
 
+/// The answer to `query` in its world, ruling distance grids out by their boxes with `GRIDS`.
+#[inline(always)]
+fn answered<S: Simd, const GRIDS: bool>(
+    simd: S,
+    lanes: &Lanes,
+    world: &CpuWorld,
+    query: &EdgeQuery,
+    scratch: &mut EdgeScratch,
+) -> usize {
+    let n = lanes.dof();
+    // Loops rather than closures: a closure is a function of its own, without the dispatched
+    // SIMD level, and the checks inside it would not inline.
+    match query.wanted {
+        // Edges in order, stopping at the answer: the first invalid one for a prefix, the
+        // first valid one otherwise; the count when none stops the scan.
+        Some(wanted) => {
+            let count = query.count(n);
+            let mut answer = count;
+            for i in 0..count {
+                let free =
+                    edge_free::<S, GRIDS>(simd, lanes, world, query.edge(i, n), query, scratch);
+                if free == (wanted == Wanted::FirstValid) {
+                    answer = i;
+                    break;
+                }
+            }
+            answer
+        }
+        None => {
+            let mut answer = query.edges.len() / n;
+            for (group, q) in query.edges.chunks(LANES * n).enumerate() {
+                let mut margin = [0.0; LANES];
+                if let Some(keep) = &query.keep {
+                    for (m, c) in margin.iter_mut().zip(q.chunks(n)) {
+                        *m = keep.margin(c);
+                    }
+                }
+                let region = query.region.as_deref();
+                let lanes_scratch = &mut scratch.lanes;
+                if !lanes.keeps_with::<S, GRIDS>(simd, world, q, margin, region, lanes_scratch) {
+                    answer = group * LANES;
+                    break;
+                }
+            }
+            answer
+        }
+    }
+}
+
 /// Whether the edge from `a` to `b` is collision-free at its states `query.spacing` apart, and
 /// keeps the query's clearance and constraints.
 #[inline(always)]
-fn edge_free<S: Simd>(
+fn edge_free<S: Simd, const GRIDS: bool>(
     simd: S,
     lanes: &Lanes,
     world: &CpuWorld,
@@ -351,14 +372,8 @@ fn edge_free<S: Simd>(
                 margin[l] = keep.margin(out);
             }
         }
-        if !lanes.keeps(
-            simd,
-            world,
-            &s.states,
-            margin,
-            query.region.as_deref(),
-            &mut s.lanes,
-        ) {
+        let region = query.region.as_deref();
+        if !lanes.keeps_with::<S, GRIDS>(simd, world, &s.states, margin, region, &mut s.lanes) {
             return false;
         }
     }

@@ -115,6 +115,22 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   adapter, naming the renderer it left out, so `Device::gpu(..).or_else(|_| Device::cpu(..))`
   falls to the CPU device. On a four-core machine that renderer had not finished one pick after
   82 minutes, where the CPU device takes 16 ms. `Device::gpu_named` still takes it by name.
+- A distance grid costs a link nothing while the link keeps away from the grid's box: the
+  collision checks rule the grid out by its box and the least value on the box's faces, as they
+  rule other obstacles out by their distance, where every sphere used to be looked up in every
+  grid. Among cluttered tabletops, IK for 1,000 targets with a grid 2 m from the arm in every
+  world takes 28.8 ms on an M4 Pro's GPU where it took 35.7, and 67 ms on its CPU where 107;
+  with the grid beside the table, 31.7 ms where 35.7, and 72 ms where 108
+  (`examples/latency.rs`). `world_clearance` for a link past the margin from a grid is a bound
+  from below, as it is for other obstacles. Uploads without a grid run the code they ran: the
+  rule is in kernels, and in copies of the CPU's checks, that only worlds uploaded with a grid
+  run ([Benchmarks](docs/benchmarks.md#how-the-speed-came)).
+- A GPU device is made sooner: its kernels' pipelines compile each on a thread of its own. With
+  the driver's shader cache empty, `Device::gpu` takes 1.4 s on an M4 Pro where it took 2.6,
+  though it now builds the kernels of uploads with grids as well, `Device::warmup` 0.7 s where
+  2.0, and `Device::with_robot` for a robot holding an object 1.7 s where 3.0. The second set
+  costs memory: a GPU device keeps 66 to 88 MB after it is made where it kept 35 to 37, and
+  about 20 MB for each held shape where 9.
 - GPU kernels leave naga fewer loops to count, and trajectory optimization on a GPU leaves out
   paths that are done. naga counts the rounds of every shader loop to rule out endless ones,
   which cost IK's short loops more than their work. One hand's damped least squares is now

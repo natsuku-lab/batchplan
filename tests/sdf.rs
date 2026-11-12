@@ -211,6 +211,111 @@ fn grid_collision_gradients_match_finite_differences() {
     }
 }
 
+/// A link far from a grid's box skips the grid, by what the values on the box's faces say of
+/// those outside it. The grid of a ball larger than its box has only negative values on its
+/// faces: links wholly outside the box collide with it, and every device reports what each
+/// sphere's own distance does, in clearance and in cost. The second grid is a solid box, zero on
+/// its faces, so that the bound is tight, and its rotation is as far from a unit quaternion as a
+/// world may have it, about a frame whose origin is metres from the grid: the box that rules the
+/// grid out must turn as the lookups do.
+#[test]
+fn a_grid_reaches_past_its_box_as_far_as_its_faces_say() {
+    let robot = common::panda().unwrap();
+    let n = robot.dof();
+    let (voxel, radius) = (0.02, 0.25);
+    let half = 4.5 * voxel;
+    let point = |i: usize| Vec3::new((i % 10) as f32, (i / 10 % 10) as f32, (i / 100) as f32);
+    let ball: Vec<f32> = (0..1000)
+        .map(|i| ((point(i) - 4.5) * voxel).length() - radius)
+        .collect();
+    let solid: Vec<f32> = (0..1000)
+        .map(|i| ((point(i) - 4.5).abs().max_element() - 4.5) * voxel)
+        .collect();
+    let mut rng = Rng::new(11);
+    let items = 6000;
+    let q: Vec<f32> = (0..items * n)
+        .map(|i| rng.range(robot.lower()[i % n], robot.upper()[i % n]))
+        .collect();
+    let item_world = vec![0; items];
+    let weights = CollisionWeights {
+        world: 1.0,
+        margin: 0.05,
+        ..CollisionWeights::NONE
+    };
+    let placements = [
+        (
+            &ball,
+            Vec3::ZERO,
+            Vec3::new(0.4, 0.25, 0.55),
+            Quat::from_rotation_x(0.4),
+        ),
+        (
+            &solid,
+            Vec3::new(2.9, -0.1, -0.1),
+            Vec3::new(3.4, 0.25, 0.65),
+            Quat::from_xyzw(0.0, 0.0, 0.99905, 0.0),
+        ),
+    ];
+    for (distances, origin, center, rotation) in placements {
+        let grid = SdfGrid::try_new([10, 10, 10], voxel, origin, distances).unwrap();
+        let obstacle = Obstacle::Sdf {
+            grid: Arc::new(grid),
+            center,
+            rotation,
+        };
+        // Each configuration's clearance and cost sphere by sphere, and whether a sphere's
+        // centre is in the box.
+        let frame = Mat3::from_quat(rotation).transpose();
+        let checked: Vec<(f32, f32, bool)> = q
+            .chunks(n)
+            .map(|q| {
+                let mut found = (f32::INFINITY, 0.0, false);
+                for s in robot.spheres(q) {
+                    let p = Vec3::new(s[0], s[1], s[2]);
+                    let local = frame * (p - center) - (origin + half);
+                    let clearance = obstacle.distance(p).value - s[3];
+                    let within = (weights.margin - clearance).max(0.0);
+                    found.0 = found.0.min(clearance);
+                    found.1 += weights.world * within * within;
+                    found.2 |= local.abs().max_element() <= half;
+                }
+                found
+            })
+            .collect();
+        let beyond = checked.iter().filter(|c| c.0 < -0.01 && !c.2).count();
+        let clear = checked.iter().filter(|c| c.0 > 0.06).count();
+        assert!(
+            beyond > 50 && clear > 50,
+            "{beyond} configurations collide from outside the box and {clear} are clear"
+        );
+        let world = World::new(vec![obstacle]);
+        for device in devices() {
+            let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
+            for weights in [CollisionWeights::NONE, weights] {
+                let found = device.evaluate(&worlds, &item_world, &q, &weights).unwrap();
+                for (i, &(least, cost, _)) in checked.iter().enumerate() {
+                    let reported = found.world_clearance[i];
+                    // Past the margin a device may report a bound from below; within it, the
+                    // distance.
+                    assert!(
+                        reported <= least + 1e-4
+                            && (least > weights.margin || (reported - least).abs() < 1e-4),
+                        "{}: configuration {i} is {least} m from the grid, reported {reported}",
+                        device.name()
+                    );
+                    let cost = if weights.world > 0.0 { cost } else { 0.0 };
+                    assert!(
+                        (found.cost[i] - cost).abs() <= 1e-3 * cost + 1e-6,
+                        "{}: configuration {i} costs {cost}, reported {}",
+                        device.name(),
+                        found.cost[i]
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn thin_walls_leak_through_raw_samples_but_not_through_built_grids() {
     // A 2 mm wall midway between grid points 1 cm apart. A second box sets where the grid starts.

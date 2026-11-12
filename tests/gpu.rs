@@ -401,6 +401,89 @@ fn touches_past_the_first_word_match_cpu() {
     ));
 }
 
+/// A device derived for another robot checks worlds with grids in kernels built for that robot,
+/// not in its parent's, which know nothing of what it holds: a rod held out into a solid grid
+/// collides on the derived GPU device as on the CPU's, where the bare robot is clear.
+#[test]
+fn a_derived_device_checks_grids_with_its_own_robots_kernels() {
+    let Some((robot, gpu, cpu)) = setup() else {
+        return;
+    };
+    let q = robot.default_q();
+    let hand = robot.ee_pose(q, 0);
+    // A solid box 20 cm wide as a grid, 30 cm out along the hand's z axis.
+    let (voxel, points) = (0.02, 11usize);
+    let distances: Vec<f32> = (0..points.pow(3))
+        .map(|i| {
+            let at = [i % points, i / points % points, i / (points * points)];
+            let deep = at
+                .map(|c| (c as f32 - 5.0).abs())
+                .into_iter()
+                .fold(0.0, f32::max);
+            (deep - 5.0) * voxel
+        })
+        .collect();
+    let grid = SdfGrid::try_new(
+        [points as u32; 3],
+        voxel,
+        Vec3::splat(-5.0 * voxel),
+        &distances,
+    )
+    .unwrap();
+    let world = World::new(vec![Obstacle::Sdf {
+        grid: Arc::new(grid),
+        center: hand.position + hand.rotation * Vec3::Z * 0.3,
+        rotation: Quat::IDENTITY,
+    }]);
+    let (on_gpu, on_cpu) = (
+        gpu.upload(std::slice::from_ref(&world)).unwrap(),
+        cpu.upload(std::slice::from_ref(&world)).unwrap(),
+    );
+    let holding = robot
+        .attach(&AttachedObject {
+            name: "rod".into(),
+            link: "ee_link".into(),
+            shapes: vec![Obstacle::cuboid(
+                Vec3::Z * 0.13,
+                Vec3::new(0.01, 0.01, 0.12),
+            )],
+            touch_links: robot.hand_links(0).iter().map(|l| l.to_string()).collect(),
+            spheres: SphereOptions::default(),
+        })
+        .unwrap();
+    let weights = CollisionWeights {
+        world: 1.0,
+        margin: 0.02,
+        ..CollisionWeights::NONE
+    };
+    // The device's own call among grids first: its kernels for grids are in use before another
+    // device derives from it.
+    let bare = cpu.evaluate(&on_cpu, &[0], q, &weights).unwrap();
+    let bare_gpu = gpu.evaluate(&on_gpu, &[0], q, &weights).unwrap();
+    assert!((bare_gpu.world_clearance[0] - bare.world_clearance[0]).abs() < 1e-4);
+    let (held_gpu, held_cpu) = (
+        gpu.with_robot(&holding).unwrap(),
+        cpu.with_robot(&holding).unwrap(),
+    );
+    let expected = held_cpu.evaluate(&on_cpu, &[0], q, &weights).unwrap();
+    assert!(
+        bare.world_clearance[0] > 0.02 && expected.world_clearance[0] < -0.02,
+        "the bare robot clears the grid by {} m and the rod by {} m",
+        bare.world_clearance[0],
+        expected.world_clearance[0]
+    );
+    let found = held_gpu.evaluate(&on_gpu, &[0], q, &weights).unwrap();
+    assert!(
+        (found.world_clearance[0] - expected.world_clearance[0]).abs() < 1e-4
+            && (found.cost[0] - expected.cost[0]).abs() < 1e-3 * expected.cost[0],
+        "the GPU finds the rod {} m from the grid at cost {}, the CPU {} m at cost {}",
+        found.world_clearance[0],
+        found.cost[0],
+        expected.world_clearance[0],
+        expected.cost[0]
+    );
+}
+
 /// A small batch gives each configuration several lanes, which split its collision gradient and
 /// step as one: its seeds end where they do in a batch large enough for one lane each, up to the
 /// lanes' rounding.

@@ -106,7 +106,7 @@ A search (RRT-Connect, simplification, a spline's check, a tool path, a join) is
 
 The robot is a set of spheres; obstacles are boxes, spheres, cylinders, capsules or distance grids. A configuration's cost sums the squared penetration of every sphere into every obstacle, and of every self-collision pair worth checking, within a margin.
 
-- **Gating.** Each link has a bounding sphere; an obstacle farther than the margin skips its spheres. Clearances stay exact up to the margin.
+- **Gating.** Each link has a bounding sphere; an obstacle farther than the margin skips its spheres, a distance grid by its box and the least value on the box's faces. Clearances stay exact up to the margin. On a GPU the grids' rule is in kernels that only uploads holding a grid run, so that uploads without one keep kernels without it.
 - **Gradients** accumulate a wrench per link; one reverse pass gives each joint its share.
 - **Links no joint moves** are not checked against the world.
 - **Allowed contacts** become one link bit set per obstacle at upload, which every check skips.

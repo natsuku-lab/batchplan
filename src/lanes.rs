@@ -10,7 +10,7 @@ use fearless_simd::{Level, Simd, f32x8};
 use glam::{Mat3, Vec3};
 
 use crate::constraint::Region;
-use crate::cpu::{CpuWorld, Prepared};
+use crate::cpu::{CpuWorld, GridBox, Prepared, STRETCH};
 use crate::robot::{JointKind, Robot};
 use crate::world::{self, FAR};
 
@@ -576,8 +576,27 @@ impl Lanes {
 
     /// World and self clearance of up to eight configurations (`[k, dof]`, `k = out.len()`), as
     /// `cpu::collision` computes them with no margins.
+    #[cfg(test)]
     #[inline(always)]
     pub(crate) fn clearance<S: Simd>(
+        &self,
+        simd: S,
+        world: &CpuWorld,
+        q: &[f32],
+        out: &mut [[f32; 2]],
+        s: &mut LaneScratch,
+    ) {
+        if world.grids {
+            self.clearance_with::<S, true>(simd, world, q, out, s);
+        } else {
+            self.clearance_with::<S, false>(simd, world, q, out, s);
+        }
+    }
+
+    /// `clearance`, ruling distance grids out by their boxes with `GRIDS`; without it, the code
+    /// worlds without grids have always run (`cpu::collision_with`).
+    #[inline(always)]
+    pub(crate) fn clearance_with<S: Simd, const GRIDS: bool>(
         &self,
         simd: S,
         world: &CpuWorld,
@@ -598,7 +617,17 @@ impl Lanes {
                     continue;
                 }
                 if matches!(o, Prepared::Sdf { .. }) {
-                    wmin = wmin.min(self.spheres_clearance(simd, o, first, end, s));
+                    if GRIDS {
+                        let gap = grid_gap(&world.boxes[k], bc, b[3]);
+                        let near = gap.simd_le(zero);
+                        wmin = wmin.min(if near.any_true() {
+                            near.select(self.spheres_clearance(simd, o, first, end, s), gap)
+                        } else {
+                            gap
+                        });
+                    } else {
+                        wmin = wmin.min(self.spheres_clearance(simd, o, first, end, s));
+                    }
                     continue;
                 }
                 let gap = distance(o, bc) - b[3];
@@ -661,8 +690,28 @@ impl Lanes {
     /// judges their clearance with a zero margin; stops at the first collision. The constraints
     /// come first, a few operations per hand; then links from the tip, where collisions are
     /// likeliest, each first through its bounding sphere.
+    #[cfg(test)]
     #[inline(always)]
     pub(crate) fn keeps<S: Simd>(
+        &self,
+        simd: S,
+        world: &CpuWorld,
+        q: &[f32],
+        margin: [f32; LANES],
+        region: Option<&Region>,
+        s: &mut LaneScratch,
+    ) -> bool {
+        if world.grids {
+            self.keeps_with::<S, true>(simd, world, q, margin, region, s)
+        } else {
+            self.keeps_with::<S, false>(simd, world, q, margin, region, s)
+        }
+    }
+
+    /// `keeps`, ruling distance grids out by their boxes with `GRIDS`; without it, the code
+    /// worlds without grids have always run (`cpu::collision_with`).
+    #[inline(always)]
+    pub(crate) fn keeps_with<S: Simd, const GRIDS: bool>(
         &self,
         simd: S,
         world: &CpuWorld,
@@ -696,6 +745,12 @@ impl Lanes {
                     continue;
                 }
                 // Within the link's bounding sphere's reach of an obstacle, check its spheres.
+                if GRIDS
+                    && matches!(o, Prepared::Sdf { .. })
+                    && !grid_reached(&world.boxes[k], bc, reach).any_true()
+                {
+                    continue;
+                }
                 if !matches!(o, Prepared::Sdf { .. }) && !within(o, bc, reach).any_true() {
                     continue;
                 }
@@ -796,6 +851,33 @@ fn inside<S: Simd>(simd: S, region: &Region, s: &LaneScratch) -> bool {
         }
     }
     true
+}
+
+/// `cpu::grid_gap` in every lane.
+#[inline(always)]
+fn grid_gap<S: Simd>(grid: &GridBox, p: V3<S>, radius: f32) -> F<S> {
+    let zero = F::splat(p.x.simd, 0.0);
+    let l = p.into_frame(&grid.rot, grid.mid);
+    let outside = V3 {
+        x: (l.x.abs() - grid.half.x).max(zero),
+        y: (l.y.abs() - grid.half.y).max(zero),
+        z: (l.z.abs() - grid.half.z).max(zero),
+    };
+    outside.length_squared().sqrt() - (radius * STRETCH - grid.sunk)
+}
+
+/// The lanes where a sphere of a link's, anywhere within its bounding sphere about `p`, may be
+/// nearer a distance grid than its margin, by the grid's box (`cpu::grid_gap`): `r` is the margin
+/// and the bounding sphere's radius.
+#[inline(always)]
+fn grid_reached<S: Simd>(grid: &GridBox, p: V3<S>, r: F<S>) -> fearless_simd::mask32x8<S> {
+    let around = Prepared::Cuboid {
+        rot: grid.rot,
+        center: grid.mid,
+        half: grid.half,
+        upright: false,
+    };
+    within(&around, p, r * STRETCH - grid.sunk)
 }
 
 /// The lanes where `p` is nearer `o` than `r` (positive): its distance (`distance`) below `r`,
@@ -1002,7 +1084,10 @@ mod tests {
     }
 
     /// Every obstacle kind around an arm's workspace scaled by `s`, a distance grid of a ball
-    /// among them.
+    /// among them, then the grid of a ball that reaches past its box: its faces' values are
+    /// negative, so links wholly outside the box collide with it. Last a solid box as a grid,
+    /// zero on its faces, turned by a quaternion as far from a unit one as a world may have, about
+    /// a frame whose origin is metres away.
     fn scene(s: f32) -> World {
         let tilt = Quat::from_rotation_x(0.4) * Quat::from_rotation_z(0.3);
         let (dims, voxel, origin) = ([20, 20, 20], 0.02 * s, Vec3::new(0.1, -0.5, 0.1) * s);
@@ -1015,6 +1100,21 @@ mod tests {
             })
             .collect();
         let grid = Arc::new(SdfGrid::try_new(dims, voxel, origin, &distances).unwrap());
+        let reaching: Vec<f32> = (0..1000)
+            .map(|i| {
+                let at = Vec3::new((i % 10) as f32, (i / 10 % 10) as f32, (i / 100) as f32);
+                ((at - 4.5) * voxel).length() - 0.25 * s
+            })
+            .collect();
+        let past_its_box = SdfGrid::try_new([10, 10, 10], voxel, Vec3::ZERO, &reaching).unwrap();
+        let solid: Vec<f32> = (0..1000)
+            .map(|i| {
+                let at = Vec3::new((i % 10) as f32, (i / 10 % 10) as f32, (i / 100) as f32);
+                ((at - 4.5).abs().max_element() - 4.5) * voxel
+            })
+            .collect();
+        let far_frame = Vec3::new(2.9, -0.1, -0.1) * s;
+        let solid = SdfGrid::try_new([10, 10, 10], voxel, far_frame, &solid).unwrap();
         let v = |x: f32, y: f32, z: f32| Vec3::new(x, y, z) * s;
         World::new(vec![
             Obstacle::Cuboid {
@@ -1045,6 +1145,16 @@ mod tests {
                 grid,
                 center: Vec3::ZERO,
                 rotation: Quat::IDENTITY,
+            },
+            Obstacle::Sdf {
+                grid: Arc::new(past_its_box),
+                center: v(-0.45, 0.25, 0.55),
+                rotation: tilt,
+            },
+            Obstacle::Sdf {
+                grid: Arc::new(solid),
+                center: v(3.3, -0.45, 0.75),
+                rotation: Quat::from_xyzw(0.0, 0.0, 0.99905, 0.0),
             },
         ])
     }
@@ -1188,6 +1298,36 @@ mod tests {
     /// `keeps` with constraints agrees with `Region::contains` on states free of self-collision, at
     /// the best SIMD level and the baseline, on states that keep each bound and states that break
     /// it, in the world and relative to a second hand at the arm's fourth link.
+    /// A rotation a thousandth off a unit quaternion scales its matrix: the box test the searches
+    /// run before a grid's lookups reaches as far as those lookups, measured in the scaled
+    /// frame, would (`cpu::grid_gap`'s test is `cpu.rs`'s).
+    #[test]
+    fn a_grids_box_is_reached_under_a_rotation_not_quite_unit() {
+        let origin = Vec3::new(-0.15, -0.15, -0.05);
+        let grid = SdfGrid::try_new([4, 4, 2], 0.1, origin, &[0.0; 32]).expect("a grid");
+        let center = Vec3::new(0.3, -0.2, 0.4);
+        for norm in [0.9991f32, 1.0009] {
+            let rot = Mat3::from_quat(Quat::from_xyzw(0.0, 0.0, norm, 0.0));
+            let grid_box = GridBox::of(&grid, rot, center);
+            for (away, radius) in [(0.5f32, 0.3f32), (0.25, 0.2), (1.0, 0.9)] {
+                // A bounding sphere beside the slab, its nearest point just inside a margin.
+                let p = center + Vec3::X * (0.15 + away);
+                let read = world::sdf_distance(rot, center, &grid, p - Vec3::X * radius).0;
+                let margin = read + 1e-4;
+                for level in [Level::new(), Level::baseline()] {
+                    let reached = fearless_simd::dispatch!(level, simd => {
+                        let reach = F::splat(simd, margin + radius);
+                        grid_reached(&grid_box, V3::splat(simd, p), reach).any_true()
+                    });
+                    assert!(
+                        reached,
+                        "norm {norm}: {read} from the slab, within {margin}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn lanes_keep_constraints_as_the_scalar_test_does() {
         use std::f32::consts::PI;
