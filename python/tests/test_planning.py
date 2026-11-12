@@ -455,6 +455,24 @@ def test_trajectories_start_moving_stop_and_cap_the_hand(ur5e_robot):
 
     slow = bp.Trajectory.with_hand_speed(ur5e_robot, still.control_points, bp.HandSpeed(0, 0.05))
     assert slow.duration > 2 * still.duration, "a 5 cm/s cap slows a long reach"
+    # The same cap near the goal alone: slower than none, far sooner than throughout; one cap or
+    # a list of them, and many paths timed at once, each under its own.
+    arrive = bp.Near(ur5e_robot.ee_pose(goal).position, 0.08)
+    assert arrive.radius == pytest.approx(0.08)
+    near = bp.HandSpeed(0, 0.05, near=arrive)
+    assert near.near.point == pytest.approx(arrive.point) and slow.duration > 0
+    arriving = bp.Trajectory.with_hand_speed(ur5e_robot, still.control_points, [near])
+    assert still.duration < arriving.duration < 0.7 * slow.duration
+    timed = bp.time(
+        device, [still.control_points] * 3, hand_speeds=[[], [near], near.replace(near=None)]
+    )
+    assert [t.duration for t in timed] == [still.duration, arriving.duration, slow.duration]
+    with pytest.raises(bp.InputError):
+        bp.time(device, [still.control_points] * 3, hand_speeds=[[near]])
+    with pytest.raises(bp.InputError):
+        bp.Trajectory.with_hand_speed(
+            ur5e_robot, still.control_points, bp.HandSpeed(0, 0.05, near=bp.Near(arrive.point, 0.0))
+        )
     wrist = start.copy()
     wrist[5] += 2.0
     turn = bp.plan(device, worlds, [bp.PlanProblem(0, start, wrist)]).best(0)

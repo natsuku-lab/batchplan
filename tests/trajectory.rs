@@ -9,9 +9,10 @@ use std::cell::Cell;
 
 use batchplan::rng::Rng;
 use batchplan::{
-    Device, Error, HandSpeed, IkProblem, JointState, PlanOptions, PlanProblem, Robot, RobotOptions,
-    StartMotion, Trajectory, World,
+    Device, Error, HandSpeed, IkProblem, JointState, Near, PlanOptions, PlanProblem, Robot,
+    RobotOptions, StartMotion, Trajectory, World,
 };
+use glam::Vec3;
 
 /// Counts allocations made by the current thread, so other test threads cannot interfere.
 struct CountingAllocator;
@@ -195,7 +196,7 @@ fn many_paths_are_timed_in_one_call_as_each_alone() {
     for device in devices {
         let name = device.name();
         for count in [paths.len(), 1, 0] {
-            let timed = batchplan::time(&device, &paths[..count], 0.5);
+            let timed = batchplan::time(&device, &paths[..count], 0.5, &[]).unwrap();
             assert_eq!(timed.len(), count, "{name}");
             for (i, (timed, path)) in timed.iter().zip(&paths).enumerate() {
                 match (timed, Trajectory::try_new(&robot, path, 0.5)) {
@@ -205,8 +206,61 @@ fn many_paths_are_timed_in_one_call_as_each_alone() {
                 }
             }
         }
+        // Each path under its own caps: none, one throughout, one near its end.
+        let caps: Vec<Vec<HandSpeed>> = (0..paths.len())
+            .map(|i| {
+                if paths[i].len() < 7 {
+                    return vec![];
+                }
+                let near = Near {
+                    point: robot.ee_pose(&paths[i][paths[i].len() - 7..], 0).position,
+                    radius: 0.1,
+                };
+                let cap = |near: Option<Near>| HandSpeed {
+                    hand: 0,
+                    linear: 0.1,
+                    angular: f32::INFINITY,
+                    near,
+                };
+                match i % 3 {
+                    0 => vec![],
+                    1 => vec![cap(None)],
+                    _ => vec![cap(Some(near))],
+                }
+            })
+            .collect();
+        let lists: Vec<&[HandSpeed]> = caps.iter().map(Vec::as_slice).collect();
+        let (full, half) = (
+            batchplan::time(&device, &paths, 1.0, &lists).unwrap(),
+            batchplan::time(&device, &paths, 0.5, &lists).unwrap(),
+        );
+        let mut slowed = 0;
+        for (i, path) in paths.iter().enumerate() {
+            let Ok(alone) = Trajectory::with_hand_speed(&robot, path, &caps[i]) else {
+                assert_eq!(i, 3, "{name}");
+                assert!(matches!(full[i], Err(Error::Input(_))), "{name}");
+                continue;
+            };
+            let (full, half) = (full[i].as_ref().unwrap(), half[i].as_ref().unwrap());
+            assert_eq!(*full, alone, "{name}: path {i}");
+            assert_eq!(half.time_points, alone.time_points, "{name}: path {i}");
+            assert_eq!(
+                half.knot_interval,
+                2.0 * alone.knot_interval,
+                "{name}: path {i}"
+            );
+            let free = Trajectory::try_new(&robot, path, 1.0).unwrap();
+            slowed += usize::from(alone.duration() > free.duration());
+            assert_eq!(caps[i].is_empty(), alone == free, "{name}: path {i}");
+        }
+        assert!(slowed >= 8, "{name}: {slowed} paths slowed by their caps");
+        // A list for some paths only is refused.
+        assert!(matches!(
+            batchplan::time(&device, &paths, 1.0, &lists[..2]),
+            Err(Error::Input(_))
+        ));
         // The paths differ, so one's trajectory in another's place would show.
-        let timed = batchplan::time(&device, &paths, 0.5);
+        let timed = batchplan::time(&device, &paths, 0.5, &[]).unwrap();
         let durations: Vec<f32> = timed.iter().flatten().map(Trajectory::duration).collect();
         assert!(
             durations.windows(2).any(|w| w[0] != w[1]),
@@ -950,8 +1004,9 @@ fn hand_speed_caps_hold_and_bind() {
                 hand: 0,
                 linear: cap[0],
                 angular: cap[1],
+                near: None,
             };
-            let trajectory = Trajectory::with_hand_speed(&robot, path, &speed).unwrap();
+            let trajectory = Trajectory::with_hand_speed(&robot, path, &[speed]).unwrap();
             trajectory.check(&robot).unwrap();
             let (peaks, totals) = hand_motion(&robot, &trajectory);
             // The least time the hand's travel and turn take at its caps.
@@ -979,10 +1034,11 @@ fn hand_speed_caps_hold_and_bind() {
         hand: 0,
         linear: f32::INFINITY,
         angular: f32::INFINITY,
+        near: None,
     };
     for path in &paths {
         assert_eq!(
-            Trajectory::with_hand_speed(&robot, path, &uncapped).unwrap(),
+            Trajectory::with_hand_speed(&robot, path, &[uncapped]).unwrap(),
             Trajectory::try_new(&robot, path, 1.0).unwrap()
         );
     }
@@ -992,11 +1048,162 @@ fn hand_speed_caps_hold_and_bind() {
             hand,
             linear,
             angular,
+            near: None,
         };
         assert!(matches!(
-            Trajectory::with_hand_speed(&robot, &paths[0], &speed),
+            Trajectory::with_hand_speed(&robot, &paths[0], &[speed]),
             Err(Error::Input(_))
         ));
+    }
+}
+
+/// Where the hand is and how fast it moves along `trajectory`, from central differences of its
+/// position sampled 64 times per knot interval; a speed is that of the stretch between the
+/// samples either side, and `near` whether all three are within `radius` of `point`.
+fn hand_speeds(robot: &Robot, trajectory: &Trajectory, near: &Near) -> Vec<(bool, f32)> {
+    let dt = trajectory.knot_interval / 64.0;
+    let samples = trajectory.sample(1.0 / dt).unwrap();
+    let at: Vec<Vec3> = samples
+        .positions
+        .chunks(robot.dof())
+        .map(|q| robot.ee_pose(q, 0).position)
+        .collect();
+    let windows = at.windows(3).map(|w| {
+        let inside = w.iter().all(|p| p.distance(near.point) <= near.radius);
+        (inside, w[2].distance(w[0]) / (2.0 * dt))
+    });
+    windows.collect()
+}
+
+/// A cap that holds near a point slows the hand there and nowhere else: a planned motion arrives
+/// at its goal under the cap, runs as fast as the joints allow before that, and takes little more
+/// than the capped stretch adds.
+#[test]
+fn a_hand_speed_near_a_point_holds_there_alone() {
+    let robot = common::panda().unwrap();
+    let n = robot.dof();
+    let cap = 0.05;
+    let mut zoned_paths = 0;
+    for path in &planned(&robot, 8) {
+        let goal = robot.ee_pose(&path[path.len() - n..], 0).position;
+        let near = Near {
+            point: goal,
+            radius: 0.1,
+        };
+        let speed = |near: Option<Near>| HandSpeed {
+            hand: 0,
+            linear: cap,
+            angular: f32::INFINITY,
+            near,
+        };
+        let free = Trajectory::try_new(&robot, path, 1.0).unwrap();
+        let whole = Trajectory::with_hand_speed(&robot, path, &[speed(None)]).unwrap();
+        let zoned = Trajectory::with_hand_speed(&robot, path, &[speed(Some(near))]).unwrap();
+        zoned.check(&robot).unwrap();
+        let speeds = hand_speeds(&robot, &zoned, &near);
+        let peak = |inside: bool| {
+            let of = speeds.iter().filter(|(i, _)| *i == inside);
+            of.map(|(_, v)| *v).fold(0.0, f32::max)
+        };
+        let (within, outside) = (peak(true), peak(false));
+        assert!(
+            within <= cap * (1.0 + 1e-3),
+            "{within} m/s near the goal under a cap of {cap}"
+        );
+        assert!(within > 0.9 * cap, "the cap does not bind: {within} m/s");
+        // The hand's travel inside the zone at the cap: what the cap must add, at least.
+        let dt = zoned.knot_interval / 64.0;
+        let inside: f32 = speeds.iter().filter(|(i, _)| *i).map(|(_, v)| v * dt).sum();
+        assert!(inside > 0.08, "{inside} m of the path within the zone");
+        if outside < 4.0 * cap {
+            // A motion too short to pick up speed before the zone shows nothing.
+            continue;
+        }
+        zoned_paths += 1;
+        let (free, whole, zoned) = (free.duration(), whole.duration(), zoned.duration());
+        assert!(
+            zoned > free && zoned < free + 1.25 * inside / cap && zoned < 0.7 * whole,
+            "{zoned} s with the cap near the goal, {free} s without, {whole} s under it throughout"
+        );
+    }
+    assert!(
+        zoned_paths >= 4,
+        "{zoned_paths} paths reach speed before the zone"
+    );
+}
+
+/// Several caps hold together: one at each end of a motion slows both ends, the tighter of two
+/// in one place binds, and a cap whose point the hand never comes near changes nothing.
+#[test]
+fn hand_speeds_hold_together_each_where_it_is() {
+    let robot = common::panda().unwrap();
+    let n = robot.dof();
+    let path = &planned(&robot, 8)[0];
+    let ends = [&path[..n], &path[path.len() - n..]].map(|q| robot.ee_pose(q, 0).position);
+    assert!(
+        ends[0].distance(ends[1]) > 0.3,
+        "the motion is short: {ends:?}"
+    );
+    let zone = |point: Vec3, linear: f32| HandSpeed {
+        hand: 0,
+        linear,
+        angular: f32::INFINITY,
+        near: Some(Near {
+            point,
+            radius: 0.08,
+        }),
+    };
+    let both = [zone(ends[0], 0.04), zone(ends[1], 0.08)];
+    let trajectory = Trajectory::with_hand_speed(&robot, path, &both).unwrap();
+    for speed in both {
+        let near = speed.near.unwrap();
+        let speeds = hand_speeds(&robot, &trajectory, &near);
+        let within = speeds.iter().filter(|(i, _)| *i).map(|(_, v)| *v);
+        let within = within.fold(0.0, f32::max);
+        assert!(
+            within <= speed.linear * (1.0 + 1e-3) && within > 0.9 * speed.linear,
+            "{within} m/s under a cap of {}",
+            speed.linear
+        );
+    }
+    let alone = |speed: HandSpeed| Trajectory::with_hand_speed(&robot, path, &[speed]).unwrap();
+    assert!(trajectory.duration() > alone(both[0]).duration().max(alone(both[1]).duration()));
+
+    // Two caps in one place, given either way round: the tighter one's timing.
+    let (tight, loose) = (zone(ends[1], 0.04), zone(ends[1], 0.08));
+    for pair in [[tight, loose], [loose, tight]] {
+        assert_eq!(
+            Trajectory::with_hand_speed(&robot, path, &pair).unwrap(),
+            alone(tight)
+        );
+    }
+    // A cap out of the hand's way, and no caps at all.
+    let free = Trajectory::try_new(&robot, path, 1.0).unwrap();
+    let away = zone(ends[1] + Vec3::new(0.0, 0.0, 2.0), 0.04);
+    assert_eq!(alone(away), free);
+    assert_eq!(
+        Trajectory::with_hand_speed(&robot, path, &[]).unwrap(),
+        free
+    );
+
+    let bad = [
+        (Vec3::ZERO, 0.0),
+        (Vec3::ZERO, -0.1),
+        (Vec3::NAN, 0.1),
+        (Vec3::ZERO, f32::INFINITY),
+    ];
+    for (point, radius) in bad {
+        let speed = HandSpeed {
+            near: Some(Near { point, radius }),
+            ..tight
+        };
+        assert!(
+            matches!(
+                Trajectory::with_hand_speed(&robot, path, &[speed]),
+                Err(Error::Input(_))
+            ),
+            "{point} within {radius}"
+        );
     }
 }
 

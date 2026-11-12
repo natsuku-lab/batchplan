@@ -56,7 +56,7 @@ fn a_one_thread_device_works_on_its_one_thread() {
     let planned = batchplan::plan(&device, &worlds, &problems, &PlanOptions::default()).unwrap();
     let planned: Vec<&[f32]> = planned.solved().map(|s| s.solution).collect();
     assert!(planned.len() >= 2, "{} paths planned", planned.len());
-    let timed = batchplan::time(&device, &planned, 1.0);
+    let timed = batchplan::time(&device, &planned, 1.0, &[]).unwrap();
     assert!(timed.iter().all(Result::is_ok));
     let searches: Vec<RrtProblem> = problems
         .iter()

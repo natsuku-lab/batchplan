@@ -1450,6 +1450,7 @@ fn choose(
             hand: c.hand,
             linear: o.tool_speed,
             angular: f32::INFINITY,
+            near: None,
         };
         let (held, placed) = leaves(c);
         Ok(TaskPlan {
@@ -1458,8 +1459,8 @@ fn choose(
                 true => Some(Trajectory::try_new(robot, &c.transit, 1.0)?),
                 false => None,
             },
-            approach: Trajectory::with_hand_speed(robot, &c.approach, &speed)?,
-            depart: Trajectory::with_hand_speed(robot, &c.depart, &speed)?,
+            approach: Trajectory::with_hand_speed(robot, &c.approach, &[speed])?,
+            depart: Trajectory::with_hand_speed(robot, &c.depart, &[speed])?,
             held,
             placed,
         })

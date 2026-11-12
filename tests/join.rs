@@ -9,9 +9,9 @@ mod common;
 
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionWeights, Device, Error, HandConstraint, Held, JoinOptions, JoinResult, Obstacle,
-    PlanOptions, PlanProblem, Pose, Robot, Sequence, ToolPath, ToolPathOptions, Trajectory, World,
-    Worlds,
+    CollisionWeights, Device, Error, HandConstraint, HandSpeed, Held, JoinOptions, JoinResult,
+    Near, Obstacle, PlanOptions, PlanProblem, Pose, Robot, Sequence, ToolPath, ToolPathOptions,
+    Trajectory, World, Worlds,
 };
 use glam::{Quat, Vec3};
 
@@ -133,6 +133,79 @@ fn joined_motions_turn_within_the_blend_and_finish_sooner() {
         assert!(
             nearest > 1e-3,
             "{name}: the hand passes {nearest} m from the corner"
+        );
+    }
+}
+
+/// A way joined into a short move to a grasp arrives slowly without crawling there: timed with
+/// the hand capped near the grasp, the hand keeps under the cap within that distance of it, runs
+/// several times faster before, and the whole takes less than the way and the capped move one
+/// after the other.
+#[test]
+fn a_joined_motion_arrives_under_a_cap_that_holds_near_its_end() {
+    let robot = panda();
+    let cap = 0.05;
+    for device in devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(&[World::default()]).unwrap();
+        // A way of 15 cm, then 6 cm more round a corner to the grasp.
+        let (paths, [_, _, grasp]) = corner(&device, &worlds, 0.15, 0.06);
+        let joined = join(&device, &worlds, paths.clone(), 0.03);
+        assert_eq!(joined.paths[0].len(), 1, "{name}: one motion");
+        let path = &joined.paths[0][0];
+        let speed = |near: Option<Near>| HandSpeed {
+            hand: 0,
+            linear: cap,
+            angular: f32::INFINITY,
+            near,
+        };
+        let near = Near {
+            point: grasp,
+            radius: 0.06,
+        };
+        let arriving = Trajectory::with_hand_speed(&robot, path, &[speed(Some(near))]).unwrap();
+        arriving.check(&robot).unwrap();
+
+        let dt = 0.002;
+        let at: Vec<Vec3> = arriving
+            .sample(1.0 / dt)
+            .unwrap()
+            .positions
+            .chunks(robot.dof())
+            .map(|q| robot.ee_pose(q, 0).position)
+            .collect();
+        let (mut within, mut before) = (0.0f32, 0.0f32);
+        for w in at.windows(3) {
+            let v = w[2].distance(w[0]) / (2.0 * dt);
+            if w.iter().all(|p| p.distance(grasp) <= near.radius) {
+                within = within.max(v);
+            } else {
+                before = before.max(v);
+            }
+        }
+        assert!(
+            within <= cap * (1.0 + 1e-3) && within > 0.9 * cap,
+            "{name}: {within} m/s near the grasp under a cap of {cap}"
+        );
+        assert!(before > 4.0 * cap, "{name}: {before} m/s on the way");
+
+        let apart = Trajectory::try_new(&robot, &paths[0], 1.0)
+            .unwrap()
+            .duration()
+            + Trajectory::with_hand_speed(&robot, &paths[1], &[speed(None)])
+                .unwrap()
+                .duration();
+        let free = Trajectory::try_new(&robot, path, 1.0).unwrap().duration();
+        let throughout = Trajectory::with_hand_speed(&robot, path, &[speed(None)]).unwrap();
+        let arriving = arriving.duration();
+        eprintln!(
+            "{name}: {arriving:.2} s arriving under the cap, {apart:.2} s apart, {free:.2} s \
+             uncapped, {:.2} s capped throughout",
+            throughout.duration()
+        );
+        assert!(
+            arriving < apart && arriving > free && arriving < 0.5 * throughout.duration(),
+            "{name}: {arriving} s arriving under the cap, {apart} s apart, {free} s uncapped"
         );
     }
 }

@@ -97,8 +97,9 @@ fn a_hand_speed_cap_moves_the_hand_at_that_speed() {
         hand: 0,
         linear: 0.05,
         angular: f32::INFINITY,
+        near: None,
     };
-    let trajectory = Trajectory::with_hand_speed(&robot, &result.paths[0], &speed).unwrap();
+    let trajectory = Trajectory::with_hand_speed(&robot, &result.paths[0], &[speed]).unwrap();
     // 2 s at the cap, and a little more to start and stop.
     let at_cap = 0.1 / speed.linear;
     assert!(

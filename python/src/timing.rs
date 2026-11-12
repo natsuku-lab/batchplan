@@ -5,6 +5,8 @@ use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
+use batchplan::glam::Vec3;
+
 use crate::device::Device;
 use crate::error::OrRaise;
 use crate::field::{self, Field, value_class};
@@ -46,8 +48,28 @@ value_class! {
 }
 
 value_class! {
+    /// The part of a path a `HandSpeed` holds on: where the hand's frame is within `radius` of
+    /// `point`.
+    Near(batchplan::Near) {
+        /// The point, in the robot's frame.
+        point: Vec3,
+        /// How far from it the caps reach, meters.
+        radius: f32,
+    }
+    methods {
+        #[new]
+        fn new(point: &Bound<'_, PyAny>, radius: f32) -> PyResult<Self> {
+            Ok(Self(batchplan::Near {
+                point: Vec3::from_py(point)?,
+                radius,
+            }))
+        }
+    }
+}
+
+value_class! {
     /// Caps on how fast a hand moves, on top of the joints' limits, for
-    /// `Trajectory.with_hand_speed`. `math.inf` leaves one uncapped.
+    /// `Trajectory.with_hand_speed` and `time`. `math.inf` leaves one uncapped.
     HandSpeed(batchplan::HandSpeed) {
         /// The hand, as `Robot.ee_pose` numbers them.
         hand: usize,
@@ -55,18 +77,34 @@ value_class! {
         linear: f32,
         /// The largest rate at which it turns, radians per second.
         angular: f32,
+        /// Where the caps hold: while the hand's frame is this near a point, as on the last
+        /// centimeters to a grasp, with the rest of the path as fast as the joints allow.
+        /// `None` caps the whole path.
+        near: Option<batchplan::Near>,
     }
     methods {
         #[new]
-        #[pyo3(signature = (hand, linear = f32::INFINITY, angular = f32::INFINITY))]
-        fn new(hand: usize, linear: f32, angular: f32) -> Self {
+        #[pyo3(signature = (hand, linear = f32::INFINITY, angular = f32::INFINITY, near = None))]
+        fn new(hand: usize, linear: f32, angular: f32, near: Option<&Near>) -> Self {
             Self(batchplan::HandSpeed {
                 hand,
                 linear,
                 angular,
+                near: near.map(|near| near.0),
             })
         }
     }
+}
+
+/// Hand speeds given as one `HandSpeed` or several.
+fn hand_speeds(speeds: &Bound<'_, PyAny>) -> PyResult<Vec<batchplan::HandSpeed>> {
+    if let Ok(one) = speeds.cast::<HandSpeed>() {
+        return Ok(vec![one.get().0]);
+    }
+    let each = speeds
+        .try_iter()?
+        .map(|speed| Ok(speed?.cast::<HandSpeed>()?.get().0));
+    each.collect()
 }
 
 /// One trajectory sampled every `dt` seconds: arrays are `(samples, dof)`.
@@ -156,18 +194,21 @@ impl Trajectory {
             .map(Self)
     }
 
-    /// Times a planned path as fast as `Trajectory(...)` does while hand `speed.hand` keeps under
-    /// `speed`'s caps too, as a tool moved along a path may need. `check` checks the joints'
-    /// limits only.
+    /// Times a planned path as fast as `Trajectory(...)` does while each of `speeds` (one
+    /// `HandSpeed` or several) keeps its hand under its caps too: along the whole path, as a
+    /// tool moved along one may need, or only near a point (`HandSpeed.near`), as a motion
+    /// joined into the move to a grasp needs to arrive slowly. `check` checks the joints' limits
+    /// only.
     #[staticmethod]
     fn with_hand_speed(
         py: Python<'_>,
         robot: &Robot,
         control_points: &Bound<'_, PyAny>,
-        speed: &HandSpeed,
+        speeds: &Bound<'_, PyAny>,
     ) -> PyResult<Self> {
         let cp = field::floats(control_points)?;
-        py.detach(|| batchplan::Trajectory::with_hand_speed(&robot.0, &cp, &speed.0))
+        let speeds = hand_speeds(speeds)?;
+        py.detach(|| batchplan::Trajectory::with_hand_speed(&robot.0, &cp, &speeds))
             .or_raise()
             .map(Self)
     }
@@ -277,20 +318,33 @@ impl Trajectory {
 }
 
 /// Times each of `paths` (control points, `(points, dof)` each) as `Trajectory` times one, on
-/// the device's threads: the paths a call planned, timed in one call. A tuple holding each path's
+/// the device's threads: the paths a call planned, timed in one call. With `hand_speeds`, one
+/// list of `HandSpeed` per path, each path keeps its hands under its list's caps as
+/// `Trajectory.with_hand_speed` does, before `speed_scale` slows it. A tuple holding each path's
 /// trajectory, or the error it would raise alone, in the paths' order.
 #[pyfunction]
-#[pyo3(signature = (device, paths, speed_scale = 1.0))]
+#[pyo3(signature = (device, paths, speed_scale = 1.0, hand_speeds = None))]
 pub(crate) fn time<'py>(
     py: Python<'py>,
     device: &Device,
     paths: &Bound<'py, PyAny>,
     speed_scale: f32,
+    hand_speeds: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyTuple>> {
     let paths = paths.try_iter()?.map(|path| field::floats(&path?));
     let paths: Vec<Vec<f32>> = paths.collect::<PyResult<_>>()?;
     let slices: Vec<&[f32]> = paths.iter().map(Vec::as_slice).collect();
-    let timed = py.detach(|| batchplan::time(&device.device, &slices, speed_scale));
+    let speeds = match hand_speeds {
+        Some(lists) => lists
+            .try_iter()?
+            .map(|list| self::hand_speeds(&list?))
+            .collect::<PyResult<Vec<_>>>()?,
+        None => vec![],
+    };
+    let lists: Vec<&[batchplan::HandSpeed]> = speeds.iter().map(Vec::as_slice).collect();
+    let timed = py
+        .detach(|| batchplan::time(&device.device, &slices, speed_scale, &lists))
+        .or_raise()?;
     let each = timed.into_iter().map(|timed| match timed.or_raise() {
         Ok(trajectory) => Trajectory(trajectory).into_bound_py_any(py),
         Err(error) => Ok(error.into_value(py).into_any().into_bound(py)),
@@ -300,6 +354,7 @@ pub(crate) fn time<'py>(
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<JointState>()?;
+    m.add_class::<Near>()?;
     m.add_class::<HandSpeed>()?;
     m.add_class::<JointTrajectory>()?;
     m.add_class::<Trajectory>()?;

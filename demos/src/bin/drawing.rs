@@ -130,6 +130,7 @@ fn main() -> Result<()> {
         hand: 0,
         linear: 0.15,
         angular: 1.0,
+        near: None,
     };
     let mut drawings = vec![];
     for (k, path) in result.paths.iter().enumerate() {
@@ -140,7 +141,7 @@ fn main() -> Result<()> {
             );
             continue;
         }
-        let samples = Trajectory::with_hand_speed(&robot, path, &speed)?.sample(HZ)?;
+        let samples = Trajectory::with_hand_speed(&robot, path, &[speed])?.sample(HZ)?;
         let positions: Vec<&[f32]> = samples.positions.chunks(robot.dof()).collect();
         let tip: Vec<[f32; 3]> = positions
             .iter()

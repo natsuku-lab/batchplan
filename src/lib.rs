@@ -88,7 +88,7 @@ pub use task::{
     CandidateStop, GraspOptions, Pick, Place, TaskFailure, TaskOptions, TaskPlan, TaskResult,
     TaskStep, grasps, pick, place, place_poses,
 };
-pub use timing::{HandSpeed, JointState, Trajectory, time};
+pub use timing::{HandSpeed, JointState, Near, Trajectory, time};
 pub use tool_path::{ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, follow};
 pub use trajopt::{Goal, PlanFailure, PlanOptions, PlanProblem, PlanResult, plan};
 pub use types::{JointTrajectory, Pose, Solved, StartMotion};

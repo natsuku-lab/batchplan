@@ -34,9 +34,19 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   problems with `holding` then rest their objects on what they are set down on in one call
   against one upload, as a device holding the object does with the world uploaded to it;
   problems that hold nothing are checked as without it. In Python, `Touch.held`.
-- `time(&device, &paths, speed_scale)` times many planned paths in one call on the device's
-  threads, each as `Trajectory::try_new` times one, and gives each path's trajectory or error in
-  order. In Python, `time(device, paths, speed_scale=1.0)`.
+- `time(&device, &paths, speed_scale, &hand_speeds)` times many planned paths in one call on the
+  device's threads, each as `Trajectory::try_new` times one, or under its own list of hand speed
+  caps (`&[]` caps none), and gives each path's trajectory or error in order. In Python,
+  `time(device, paths, speed_scale=1.0, hand_speeds=None)`.
+- A hand speed cap can hold on part of a path: `HandSpeed::near` (`Near { point, radius }`)
+  caps the hand only while its frame is within `radius` of `point`, so a way joined into the
+  move to a grasp comes as fast as the joints allow and arrives slowly, and
+  `Trajectory::with_hand_speed` takes several caps, each holding where it is. A 15 cm way joined
+  into a 6 cm move capped at 5 cm/s takes 2.19 s where the two take 2.26 s one after the other
+  and the joined path 4.41 s capped throughout (a Panda, `tests/join.rs`). **Breaking:** a
+  `HandSpeed` literal needs `near: None`, and `with_hand_speed` takes a slice (`&[speed]`). In
+  Python, `HandSpeed(hand, linear, angular, near=Near(point, radius))`, and `with_hand_speed`
+  takes one cap or a list.
 
 - Publish the Python bindings as `batches` on PyPI (`import batchplan`). Version tags publish
   the Rust crate and Python wheels and source together, using trusted publishing.
