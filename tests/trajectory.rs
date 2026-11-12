@@ -1057,22 +1057,149 @@ fn hand_speed_caps_hold_and_bind() {
     }
 }
 
-/// Where the hand is and how fast it moves along `trajectory`, from central differences of its
-/// position sampled 64 times per knot interval; a speed is that of the stretch between the
-/// samples either side, and `near` whether all three are within `radius` of `point`.
-fn hand_speeds(robot: &Robot, trajectory: &Trajectory, near: &Near) -> Vec<(bool, f32)> {
-    let dt = trajectory.knot_interval / 64.0;
-    let samples = trajectory.sample(1.0 / dt).unwrap();
-    let at: Vec<Vec3> = samples
+/// How fast hand `hand` moves along `trajectory`, 256 times per knot interval, and whether it is
+/// within `near` there, so the ball's very edge is measured. A sample's speed is read from its
+/// joint velocities: the hand's positions 5 ms of that motion either side of the sample, far
+/// enough apart for single precision.
+fn hand_speeds(
+    robot: &Robot,
+    trajectory: &Trajectory,
+    hand: usize,
+    near: &Near,
+) -> Vec<(bool, f32)> {
+    let n = robot.dof();
+    let samples = trajectory.sample(256.0 / trajectory.knot_interval).unwrap();
+    let states = samples
         .positions
-        .chunks(robot.dof())
-        .map(|q| robot.ee_pose(q, 0).position)
-        .collect();
-    let windows = at.windows(3).map(|w| {
-        let inside = w.iter().all(|p| p.distance(near.point) <= near.radius);
-        (inside, w[2].distance(w[0]) / (2.0 * dt))
+        .chunks(n)
+        .zip(samples.velocities.chunks(n));
+    let h = 0.005;
+    let each = states.map(|(q, dq)| {
+        let moved = |by: f32| -> Vec3 {
+            let q: Vec<f32> = q.iter().zip(dq).map(|(q, dq)| q + by * dq).collect();
+            robot.ee_pose(&q, hand).position
+        };
+        let inside = moved(0.0).distance(near.point) <= near.radius;
+        (inside, moved(h).distance(moved(-h)) / (2.0 * h))
     });
-    windows.collect()
+    each.collect()
+}
+
+/// The fastest the hand moves within the ball (`true`) or outside it.
+fn peak(speeds: &[(bool, f32)], inside: bool) -> f32 {
+    let of = speeds.iter().filter(|(i, _)| *i == inside);
+    of.map(|(_, v)| *v).fold(0.0, f32::max)
+}
+
+/// A ball the hand only clips, or one a few millimeters across, slows the hand while it is
+/// inside and the motion by little: the cap is neither missed where the hand crosses between two
+/// of the timing's samples nor answered by slowing the whole motion.
+#[test]
+fn a_ball_the_hand_only_clips_slows_it_there_alone() {
+    let robot = common::panda().unwrap();
+    let cap = 0.05;
+    let (mut clipped, mut fast) = (0, 0);
+    for path in &planned(&robot, 8)[..4] {
+        let free = Trajectory::try_new(&robot, path, 1.0).unwrap();
+        let whole = HandSpeed {
+            hand: 0,
+            linear: cap,
+            angular: f32::INFINITY,
+            near: None,
+        };
+        let throughout = Trajectory::with_hand_speed(&robot, path, &[whole]).unwrap();
+        let dt = free.knot_interval / 64.0;
+        let at: Vec<Vec3> = free
+            .sample(1.0 / dt)
+            .unwrap()
+            .positions
+            .chunks(robot.dof())
+            .map(|q| robot.ee_pose(q, 0).position)
+            .collect();
+        for tenth in 2..9 {
+            // A ball beside the path where the hand is after this share of the motion, reaching
+            // across it by a hundredth or a thousandth of its radius.
+            let k = at.len() * tenth / 10;
+            let along = (at[k + 1] - at[k - 1]).normalize();
+            let aside = along.any_orthonormal_vector();
+            for (radius, depth) in [(0.005, 0.999), (0.01, 0.99), (0.05, 0.99)] {
+                let near = Near {
+                    point: at[k] + aside * depth * radius,
+                    radius,
+                };
+                let speed = HandSpeed {
+                    near: Some(near),
+                    ..whole
+                };
+                let zoned = Trajectory::with_hand_speed(&robot, path, &[speed]).unwrap();
+                zoned.check(&robot).unwrap();
+                let speeds = hand_speeds(&robot, &zoned, 0, &near);
+                if !speeds.iter().any(|(inside, _)| *inside) {
+                    continue;
+                }
+                clipped += 1;
+                fast += usize::from(peak(&speeds, false) > 4.0 * cap);
+                let within = peak(&speeds, true);
+                assert!(
+                    within <= cap * (1.0 + 1e-3),
+                    "{within} m/s inside a ball of {radius} m clipped by {depth}"
+                );
+                let (zoned, free, throughout) =
+                    (zoned.duration(), free.duration(), throughout.duration());
+                assert!(
+                    zoned > free && zoned < free + 2.0 && zoned < 0.5 * throughout,
+                    "{zoned} s past a ball of {radius} m, {free} s without, {throughout} s capped throughout"
+                );
+            }
+        }
+    }
+    assert!(
+        clipped >= 60 && fast >= 40,
+        "{clipped} balls clipped, {fast} at speed"
+    );
+}
+
+/// A cap near a point holds for the hand it names: on two arms, the second hand arrives slowly
+/// at its goal while the first stands still elsewhere.
+#[test]
+fn a_hand_speed_near_a_point_follows_its_own_hand() {
+    let robot = common::two_pandas().unwrap();
+    let n = robot.dof();
+    let cpu = Device::cpu(&robot).unwrap();
+    let worlds = cpu.upload(&[World::default()]).unwrap();
+    let start = robot.default_q().to_vec();
+    let mut goal = start.clone();
+    let joints = robot.hand_joints(1);
+    goal[joints[0]] += 0.8;
+    goal[joints[3]] += 0.5;
+    let problem = PlanProblem::new(0, &start[..], &goal[..]);
+    let planned = batchplan::plan(&cpu, &worlds, &[problem], &PlanOptions::default()).unwrap();
+    let path = planned
+        .solved()
+        .next()
+        .expect("a free motion plans")
+        .solution;
+    let still = [&start, &goal].map(|q| robot.ee_pose(q, 0).position);
+    assert!(still[0].distance(still[1]) < 1e-6, "the first hand moves");
+    let near = Near {
+        point: robot.ee_pose(&path[path.len() - n..], 1).position,
+        radius: 0.08,
+    };
+    let speed = HandSpeed {
+        hand: 1,
+        linear: 0.03,
+        angular: f32::INFINITY,
+        near: Some(near),
+    };
+    let trajectory = Trajectory::with_hand_speed(&robot, path, &[speed]).unwrap();
+    let speeds = hand_speeds(&robot, &trajectory, 1, &near);
+    let (within, outside) = (peak(&speeds, true), peak(&speeds, false));
+    assert!(
+        within <= speed.linear * (1.0 + 1e-3) && within > 0.9 * speed.linear,
+        "the second hand arrives at {within} m/s under a cap of {}",
+        speed.linear
+    );
+    assert!(outside > 4.0 * speed.linear, "{outside} m/s on the way");
 }
 
 /// A cap that holds near a point slows the hand there and nowhere else: a planned motion arrives
@@ -1100,19 +1227,15 @@ fn a_hand_speed_near_a_point_holds_there_alone() {
         let whole = Trajectory::with_hand_speed(&robot, path, &[speed(None)]).unwrap();
         let zoned = Trajectory::with_hand_speed(&robot, path, &[speed(Some(near))]).unwrap();
         zoned.check(&robot).unwrap();
-        let speeds = hand_speeds(&robot, &zoned, &near);
-        let peak = |inside: bool| {
-            let of = speeds.iter().filter(|(i, _)| *i == inside);
-            of.map(|(_, v)| *v).fold(0.0, f32::max)
-        };
-        let (within, outside) = (peak(true), peak(false));
+        let speeds = hand_speeds(&robot, &zoned, 0, &near);
+        let (within, outside) = (peak(&speeds, true), peak(&speeds, false));
         assert!(
             within <= cap * (1.0 + 1e-3),
             "{within} m/s near the goal under a cap of {cap}"
         );
         assert!(within > 0.9 * cap, "the cap does not bind: {within} m/s");
         // The hand's travel inside the zone at the cap: what the cap must add, at least.
-        let dt = zoned.knot_interval / 64.0;
+        let dt = zoned.knot_interval / 256.0;
         let inside: f32 = speeds.iter().filter(|(i, _)| *i).map(|(_, v)| v * dt).sum();
         assert!(inside > 0.08, "{inside} m of the path within the zone");
         if outside < 4.0 * cap {
@@ -1133,7 +1256,7 @@ fn a_hand_speed_near_a_point_holds_there_alone() {
 }
 
 /// Several caps hold together: one at each end of a motion slows both ends, the tighter of two
-/// in one place binds, and a cap whose point the hand never comes near changes nothing.
+/// in one place binds, and a cap whose point the hand never comes near, alone, changes nothing.
 #[test]
 fn hand_speeds_hold_together_each_where_it_is() {
     let robot = common::panda().unwrap();
@@ -1157,7 +1280,7 @@ fn hand_speeds_hold_together_each_where_it_is() {
     let trajectory = Trajectory::with_hand_speed(&robot, path, &both).unwrap();
     for speed in both {
         let near = speed.near.unwrap();
-        let speeds = hand_speeds(&robot, &trajectory, &near);
+        let speeds = hand_speeds(&robot, &trajectory, 0, &near);
         let within = speeds.iter().filter(|(i, _)| *i).map(|(_, v)| *v);
         let within = within.fold(0.0, f32::max);
         assert!(
@@ -1192,7 +1315,7 @@ fn hand_speeds_hold_together_each_where_it_is() {
         "the hand turns at {turned} rad/s under a cap of {}",
         turning.angular
     );
-    let speeds = hand_speeds(&robot, &mixed, &tight.near.unwrap());
+    let speeds = hand_speeds(&robot, &mixed, 0, &tight.near.unwrap());
     let within = speeds.iter().filter(|(i, _)| *i).map(|(_, v)| *v);
     let within = within.fold(0.0, f32::max);
     assert!(

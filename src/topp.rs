@@ -59,6 +59,9 @@ const STEERED_AFTER: f32 = 1.3;
 /// the caps that hold there ([`HandSpeed::near`]), zero where none does.
 pub(crate) struct HandRates {
     rates: Vec<[f32; 2]>,
+    /// Per stage of the timing, the largest rate of the caps that hold near a point at any
+    /// sample up to the stages either side; empty without such caps.
+    stages: Vec<[f32; 2]>,
     limits: [f32; 2],
 }
 
@@ -74,6 +77,9 @@ impl HandRates {
             |of: fn(&HandSpeed) -> f32| caps.iter().map(of).fold(f32::INFINITY, f32::min);
         let limits = [tightest(|cap| cap.linear), tightest(|cap| cap.angular)];
         let mut rates = Vec::with_capacity(spans * HAND_SAMPLES_PER_SPAN + 1);
+        // The rates of the caps that hold near a point, apart: zero where the hand is away.
+        let zones = caps.iter().any(|cap| cap.near.is_some());
+        let mut near = Vec::with_capacity(if zones { rates.capacity() } else { 0 });
         for k in 0..=spans * HAND_SAMPLES_PER_SPAN {
             let s = k as f32 / HAND_SAMPLES_PER_SPAN as f32;
             let span = (s as usize).min(spans - 1);
@@ -81,14 +87,21 @@ impl HandRates {
             spline::blend(cp, n, span, spline::basis(u), &mut q);
             spline::blend(cp, n, span, spline::basis_d1(u), &mut dq);
             robot.fk_into(&q, &mut fk);
-            let mut most = [0.0f32; 2];
+            let (mut throughout, mut within) = ([0.0f32; 2], [0.0f32; 2]);
             for cap in caps {
-                let at = fk.pos[robot.ee_links[cap.hand]];
-                let away = |near: Near| at.distance(near.point) > near.radius;
-                if cap.near.is_some_and(away) {
-                    continue;
-                }
                 let rate = robot.hand_velocity(&fk, cap.hand, &dq).map(Vec3::length);
+                let most = match cap.near {
+                    None => &mut throughout,
+                    // The hand may enter the ball before the next sample: within its travel
+                    // between two of them counts as within.
+                    Some(Near { point, radius }) => {
+                        let reach = radius + rate[0] / HAND_SAMPLES_PER_SPAN as f32;
+                        if fk.pos[robot.ee_links[cap.hand]].distance(point) > reach {
+                            continue;
+                        }
+                        &mut within
+                    }
+                };
                 for (i, limit) in [cap.linear, cap.angular].into_iter().enumerate() {
                     // A kind left uncapped counts for nothing.
                     let counts = if limit.is_finite() {
@@ -99,9 +112,31 @@ impl HandRates {
                     most[i] = most[i].max(rate[i] * counts);
                 }
             }
-            rates.push(most);
+            rates.push(throughout);
+            if zones {
+                near.push(within);
+            }
         }
-        Self { rates, limits }
+        // A sample between two stages is checked against what holds either side of it, and the
+        // timing's speed runs straight from one stage to the next: so that it can keep under a
+        // cap that begins or ends between two stages, a stage slows for what holds anywhere up
+        // to the stages either side of it.
+        const PER_STAGE: usize = HAND_SAMPLES_PER_SPAN / STAGES_PER_SPAN;
+        let stages = near.chunks(PER_STAGE).enumerate().map(|(stage, _)| {
+            let at = stage * PER_STAGE;
+            let around = &near[at.saturating_sub(PER_STAGE)..(at + PER_STAGE + 1).min(near.len())];
+            let most = |i: usize| around.iter().map(|within| within[i]).fold(0.0, f32::max);
+            [most(0), most(1)]
+        });
+        let stages = stages.collect();
+        for (rate, within) in rates.iter_mut().zip(&near) {
+            *rate = [rate[0].max(within[0]), rate[1].max(within[1])];
+        }
+        Self {
+            rates,
+            stages,
+            limits,
+        }
     }
 
     /// The larger of the rates sampled either side of `s`, for position and for rotation.
@@ -113,6 +148,16 @@ impl HandRates {
             (k.ceil() as usize).min(last),
         );
         std::array::from_fn(|i| self.rates[below][i].max(self.rates[above][i]))
+    }
+
+    /// The rates stage `stage` of the timing, at `s`, slows for: those at `s`, and those of caps
+    /// that hold near a point anywhere up to the stages either side.
+    fn at_stage(&self, stage: usize, s: f32) -> [f32; 2] {
+        let here = self.at(s);
+        match self.stages.get(stage) {
+            Some(around) => [here[0].max(around[0]), here[1].max(around[1])],
+            None => here,
+        }
     }
 
     /// The smallest knot interval at which uniform timing keeps the hand under its caps.
@@ -243,7 +288,7 @@ fn timed_map(
                 }
             }
             if let Some(hand) = hand {
-                let rates = hand.at((i as f64 * step) as f32);
+                let rates = hand.at_stage(i, (i as f64 * step) as f32);
                 for (rate, limit) in rates.into_iter().zip(hand.limits) {
                     if rate > 1e-9 {
                         b.cap = b.cap.min((f64::from(limit) / f64::from(rate)).powi(2));

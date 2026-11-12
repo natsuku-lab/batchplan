@@ -177,7 +177,7 @@ fn a_joined_motion_arrives_under_a_cap_that_holds_near_its_end() {
         let (mut within, mut before) = (0.0f32, 0.0f32);
         for w in at.windows(3) {
             let v = w[2].distance(w[0]) / (2.0 * dt);
-            if w.iter().all(|p| p.distance(grasp) <= near.radius) {
+            if w[1].distance(grasp) <= near.radius {
                 within = within.max(v);
             } else {
                 before = before.max(v);
@@ -204,7 +204,7 @@ fn a_joined_motion_arrives_under_a_cap_that_holds_near_its_end() {
             throughout.duration()
         );
         assert!(
-            arriving < apart && arriving > free && arriving < 0.5 * throughout.duration(),
+            arriving < apart && arriving > free && arriving < 0.6 * throughout.duration(),
             "{name}: {arriving} s arriving under the cap, {apart} s apart, {free} s uncapped"
         );
     }
