@@ -24,7 +24,7 @@ use crate::device::Device;
 use crate::error::{Error, Result, ensure_input, input};
 use crate::robot::Robot;
 use crate::types::Pose;
-use crate::world::{self, Distance};
+use crate::world::Distance;
 
 /// Grids with more points are refused; 2^26 half floats take 128 MiB.
 const MAX_POINTS: u64 = 1 << 26;
@@ -109,14 +109,19 @@ impl DepthImage<'_> {
             "invalid intrinsics {:?}",
             self.intrinsics
         );
+        ensure_input!(
+            self.camera.is_unit(),
+            "the camera's pose must be finite with a unit rotation, got {:?}",
+            self.camera
+        );
         Ok(())
     }
 
-    /// The image with its camera's rotation made unit ([`world::unit`]): one a little off unit
+    /// The image with its camera's rotation made unit ([`Pose::rigid`]): one a little off unit
     /// would scale every depth the grid points are compared at.
     fn rigid(&self) -> Self {
         Self {
-            camera: Pose::new(self.camera.position, world::unit(self.camera.rotation)),
+            camera: self.camera.rigid(),
             ..*self
         }
     }

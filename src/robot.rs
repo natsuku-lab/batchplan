@@ -533,8 +533,14 @@ impl Robot {
         for part in parts {
             let description = description::load_robot(&part.path, &o.package_dirs, &o.variants)
                 .map_err(|e| load_error(&part.path, e))?;
+            ensure_input!(
+                part.base.is_unit(),
+                "part '{}': its base must be finite with a unit rotation, got {:?}",
+                part.prefix,
+                part.base
+            );
             let base = Transform {
-                rot: Mat3::from_quat(part.base.rotation),
+                rot: world::frame(part.base.rotation),
                 trans: part.base.position,
             };
             descriptions.push((description, part.prefix.clone(), base));

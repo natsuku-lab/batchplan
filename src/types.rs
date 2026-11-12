@@ -4,6 +4,8 @@
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
+use crate::world;
+
 /// A rigid placement: a position, then a rotation about it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pose {
@@ -40,6 +42,11 @@ impl Pose {
         self.position.is_finite()
             && self.rotation.is_finite()
             && (self.rotation.length() - 1.0).abs() < 1e-3
+    }
+
+    /// The pose with its rotation made unit ([`world::unit`]), for where it places geometry.
+    pub(crate) fn rigid(self) -> Pose {
+        Pose::new(self.position, world::unit(self.rotation))
     }
 
     /// The frame this pose is given in, in this pose's frame.

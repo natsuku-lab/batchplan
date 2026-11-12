@@ -243,10 +243,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   and a problem's `holding`), whose spheres sat up to 0.2% nearer or farther along the object,
   for the obstacles `MeshModel::clearance` checks, and for a depth image's camera, whose
   readings were placed 0.2% nearer or farther (5 mm at 3 m) in `SdfGrid::from_depth`,
-  `OccupancyMap::integrate` and `DepthImage::robot_mask`. The allowance the grids' box rule
-  made for stretched frames (0.5% of a link's bounding radius) is gone with them, so a link in
-  that band is ruled out without a lookup and its clearance past the margin is the rule's bound:
-  among grids, a result chosen between equally valid ones can differ in its last places.
+  `OccupancyMap::integrate` and `DepthImage::robot_mask`. A hold's grasp places its object by
+  the grasp made unit, and `Robot::assemble` a part by its base made unit. A camera's pose and
+  a part's base are now checked as other poses are: one that is not finite, or whose rotation
+  is more than a thousandth off unit, is an `Error::Input`, where it built a wrong grid or
+  robot without a word.
 
 - GPU devices on Windows using the FXC DX12 shader compiler can build the hand-frame kernels.
 

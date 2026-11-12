@@ -1069,7 +1069,7 @@ mod tests {
     use crate::robot::{AttachedObject, CollisionModel, RobotOptions};
     use crate::sdf::SdfGrid;
     use crate::spheres::SphereOptions;
-    use crate::world::{Obstacle, Touch, World};
+    use crate::world::{self, Obstacle, Touch, World};
 
     fn panda() -> Robot {
         let fingers = [
@@ -1296,6 +1296,36 @@ mod tests {
             hi - lo > 1e-3,
             "{name}: world clearances should follow the configuration"
         );
+    }
+
+    /// The box test the searches run before a grid's lookups reaches as far as those lookups
+    /// would, under a unit rotation and ones a thousandth off, which are made unit
+    /// (`cpu::grid_gap` is held to the same by the devices' tests).
+    #[test]
+    fn a_grids_box_is_reached_as_far_as_its_lookups_read() {
+        let origin = Vec3::new(-0.15, -0.15, -0.05);
+        let grid = SdfGrid::try_new([4, 4, 2], 0.1, origin, &[0.0; 32]).expect("a grid");
+        let center = Vec3::new(0.3, -0.2, 0.4);
+        for norm in [1.0f32, 0.9991, 1.0009] {
+            let rot = world::frame(Quat::from_xyzw(0.0, 0.0, norm, 0.0));
+            let grid_box = GridBox::of(&grid, rot, center);
+            for (away, radius) in [(0.5f32, 0.3f32), (0.25, 0.2), (1.0, 0.9)] {
+                // A bounding sphere beside the slab, its nearest point just inside a margin.
+                let p = center + Vec3::X * (0.15 + away);
+                let read = world::sdf_distance(rot, center, &grid, p - Vec3::X * radius).0;
+                let margin = read + 1e-4;
+                for level in [Level::new(), Level::baseline()] {
+                    let reached = fearless_simd::dispatch!(level, simd => {
+                        let reach = F::splat(simd, margin + radius);
+                        grid_reached(&grid_box, V3::splat(simd, p), reach).any_true()
+                    });
+                    assert!(
+                        reached,
+                        "norm {norm}: {read} from the slab, within {margin}"
+                    );
+                }
+            }
+        }
     }
 
     /// `keeps` with constraints agrees with `Region::contains` on states free of self-collision, at

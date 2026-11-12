@@ -619,7 +619,7 @@ fn environment_state(
                 let (lo, hi) = (grid.lower_corner(), grid.upper_corner());
                 (
                     4.0,
-                    center + rotation * (0.5 * (lo + hi)),
+                    center + world::unit(rotation) * (0.5 * (lo + hi)),
                     0.5 * (hi - lo),
                     rotation,
                 )
