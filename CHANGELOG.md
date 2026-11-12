@@ -90,6 +90,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Changed
 
+- A world with a distance grid uploads without checking the grid's every value again: a grid is
+  checked when it is made, and nothing changes one after. `pick` and `place` upload their worlds
+  by the dozen, so a grid in the world cost each call that many passes over its values. The
+  searches' and tool paths' collision checks and the CPU device's `clearance` also look a grid
+  up without its gradient, which they never read.
 - **Breaking:** IK screens its seeds. Every seed takes `IkOptions::screening` steps (8 by
   default), then only `IkOptions::kept` of each problem's (4) take the rest of `iterations`: those
   not yet at their targets, the nearest first, then seeds that have arrived. Where the steps push

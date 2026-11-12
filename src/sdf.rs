@@ -849,6 +849,28 @@ pub(crate) fn grid_distance(g: &SdfGrid, p: Vec3) -> (f32, Vec3) {
     (lerp(y0, y1, f.z) + away, grad)
 }
 
+/// `grid_distance`'s distance alone, the same to the bit: what a check that takes no gradient
+/// looks up, for less work.
+#[inline]
+pub(crate) fn grid_value(g: &SdfGrid, p: Vec3) -> f32 {
+    let top = (UVec3::from(g.dims) - 1).as_vec3();
+    let x = (p - g.origin) / g.voxel;
+    let c = x.clamp(Vec3::ZERO, top);
+    let i = c.floor().min(top - 1.0);
+    let f = c - i;
+    let (sy, sz) = (g.dims[0], g.dims[0] * g.dims[1]);
+    let n = i.x as u32 + sy * i.y as u32 + sz * i.z as u32;
+    let v = |offset: u32| g.value(n + offset);
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let (x00, x10) = (lerp(v(0), v(1), f.x), lerp(v(sy), v(sy + 1), f.x));
+    let (x01, x11) = (
+        lerp(v(sz), v(sz + 1), f.x),
+        lerp(v(sz + sy), v(sz + sy + 1), f.x),
+    );
+    let (y0, y1) = (lerp(x00, x10, f.y), lerp(x01, x11, f.y));
+    lerp(y0, y1, f.z) + ((x - c) * g.voxel).length()
+}
+
 fn bounds(points: &[Vec3]) -> (Vec3, Vec3) {
     points
         .iter()
@@ -1192,6 +1214,37 @@ mod tests {
         }
         let even = SdfGrid::try_new(dims, 0.1, Vec3::ZERO, &[0.5; 60]).unwrap();
         assert_eq!(even.least_on_faces, 0.5);
+    }
+
+    /// The lookup that takes no gradient reads what the one that takes it reads, to the bit:
+    /// inside the box, on its faces, edges and corners, and outside it.
+    #[test]
+    fn a_lookup_without_its_gradient_reads_the_same_distance() {
+        let dims = [4u32, 3, 5];
+        let mut rng = crate::rng::Rng::new(11);
+        let distances: Vec<f32> = (0..60).map(|_| rng.range(-0.2, 0.4)).collect();
+        let grid = SdfGrid::try_new(dims, 0.07, Vec3::new(0.1, -0.2, 0.3), &distances).unwrap();
+        let (lo, hi) = (grid.origin, grid.origin + 2.0 * grid.half_extent());
+        let mut outside = 0;
+        for k in 0..4000 {
+            let mut p = Vec3::new(
+                rng.range(lo.x - 0.05, hi.x + 0.05),
+                rng.range(lo.y - 0.05, hi.y + 0.05),
+                rng.range(lo.z - 0.05, hi.z + 0.05),
+            );
+            // Every eighth point on a face, an edge or a corner of the box, at either end.
+            if k % 8 == 0 {
+                let end = if k & 32 != 0 { hi } else { lo };
+                p = Vec3::select(glam::BVec3::new(k & 8 != 0, k & 16 != 0, true), end, p);
+            }
+            outside += usize::from(p.cmplt(lo).any() || p.cmpgt(hi).any());
+            let (with, without) = (grid_distance(&grid, p).0, grid_value(&grid, p));
+            assert_eq!(with.to_bits(), without.to_bits(), "at {p}");
+        }
+        assert!(
+            outside > 1500 && outside < 3500,
+            "{outside} of 4000 outside"
+        );
     }
 
     /// Classification projects points in floating point, so a point within rounding of a pixel's

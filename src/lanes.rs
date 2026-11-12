@@ -12,7 +12,8 @@ use glam::{Mat3, Vec3};
 use crate::constraint::Region;
 use crate::cpu::{CpuWorld, GridBox, Prepared, STRETCH};
 use crate::robot::{JointKind, Robot};
-use crate::world::{self, FAR};
+use crate::sdf;
+use crate::world::FAR;
 
 /// Configurations per call.
 pub(crate) const LANES: usize = 8;
@@ -1043,10 +1044,12 @@ fn distance<S: Simd>(o: &Prepared, p: V3<S>) -> F<S> {
         } => {
             let (x, y, z): ([f32; LANES], [f32; LANES], [f32; LANES]) =
                 (p.x.into(), p.y.into(), p.z.into());
+            // The lookup `world::sdf_distance` makes, without its gradient.
+            let into = rot.transpose();
             F::simd_from(
                 simd,
                 std::array::from_fn::<f32, LANES, _>(|l| {
-                    world::sdf_distance(rot, center, grid, Vec3::new(x[l], y[l], z[l])).0
+                    sdf::grid_value(grid, into * (Vec3::new(x[l], y[l], z[l]) - center))
                 }),
             )
         }
@@ -1066,7 +1069,7 @@ mod tests {
     use crate::robot::{AttachedObject, CollisionModel, RobotOptions};
     use crate::sdf::SdfGrid;
     use crate::spheres::SphereOptions;
-    use crate::world::{Obstacle, Touch, World};
+    use crate::world::{self, Obstacle, Touch, World};
 
     fn panda() -> Robot {
         let fingers = [

@@ -257,7 +257,7 @@ impl Device {
     /// differ by name from this one's where both have links: attaching an object, detaching the
     /// last one attached, or holding another of the same name keeps the worlds valid; an object of
     /// another name at the same link does not. Errors if an obstacle has non-finite or negative
-    /// sizes, a rotation that is not a unit quaternion, or a malformed distance grid, or if a
+    /// sizes or a rotation that is not a unit quaternion, or if a
     /// touch names an obstacle the world lacks or a link the robot lacks. What a hand comes to
     /// hold ([`Touch::held`](crate::Touch::held)) is a link the robot gains with it: the worlds
     /// of one upload name one hand's, and serve problems holding in that hand or holding nothing.

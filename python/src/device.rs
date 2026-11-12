@@ -162,8 +162,8 @@ impl Device {
     }
 
     /// Prepares `worlds` for this device: every batched call takes the result. Errors if an
-    /// obstacle has non-finite or negative sizes, a rotation that is not a unit quaternion, or a
-    /// malformed distance grid, or if a touch names an obstacle the world lacks or a link the
+    /// obstacle has non-finite or negative sizes or a rotation that is not a unit quaternion,
+    /// or if a touch names an obstacle the world lacks or a link the
     /// robot lacks.
     fn upload(&self, py: Python<'_>, worlds: &Bound<'_, PyAny>) -> PyResult<Worlds> {
         let worlds = Vec::<batchplan::World>::from_py(worlds)?;
