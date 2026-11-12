@@ -92,6 +92,12 @@ def test_a_picked_box_is_carried_and_set_down(tasks_robot):
         assert len(result.problems) == 1 and result.problems[0].object == BOX
         crawl = result.outcomes[0][0]
         assert crawl.approach.duration > 3 * plan.approach.duration, "2 cm/s against 10 cm/s"
+        # The same cap within 2 cm of the grasp alone: sooner than all along, the same path.
+        near = bp.TaskOptions(tool_speed=0.02, tool_speed_near=0.02)
+        assert near.tool_speed_near == pytest.approx(0.02)
+        brief = bp.pick(device, worlds, [task], near).outcomes[0][0]
+        np.testing.assert_array_equal(brief.approach.control_points, crawl.approach.control_points)
+        assert brief.approach.duration < 0.6 * crawl.approach.duration, "capped near the grasp"
 
 
 def test_a_task_no_grasp_gets_through_says_where_each_stopped(tasks_robot):

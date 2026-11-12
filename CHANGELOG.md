@@ -10,6 +10,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- **Breaking:** the straight moves of `pick` and `place` can be capped near the grasp or release
+  alone: `TaskOptions::tool_speed_near` (meters) holds `tool_speed` within that distance of where
+  the hand grasps or lets go, which the move in ends at and the move away starts from, and the
+  rest of each move runs as fast as the joints allow. The handovers of `datagen::handover` take
+  it too. `None`, the default, caps both moves all along, as before, to the bit. A `TaskOptions`
+  literal needs the new field (`tool_speed_near: None`). In Python,
+  `TaskOptions(tool_speed_near=0.02)`.
+
 - `CollisionModel::to_json` and `CollisionModel::from_json` give and take the JSON text `save`
   and `load` write and read, for a model sent where no file goes. In Python, `model.to_json()`
   and `CollisionModel.from_json(text)`.

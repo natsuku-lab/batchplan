@@ -30,7 +30,7 @@ use crate::error::{Result, ensure_input, input};
 use crate::held::{self, Fitted, Held};
 use crate::ik::{self, IkFailure, IkOptions, IkProblem, IkResult};
 use crate::robot::Robot;
-use crate::timing::{HandSpeed, Trajectory};
+use crate::timing::{HandSpeed, Near, Trajectory};
 use crate::tool_path::{self, ToolPath, ToolPathOptions, ToolPathStop};
 use crate::trajopt::{self, PlanOptions, PlanProblem};
 use crate::types::Pose;
@@ -169,6 +169,10 @@ pub struct TaskOptions {
     /// The hand's speed cap on the straight moves (m/s): 10 cm/s. `f32::INFINITY` leaves it
     /// uncapped, the moves as fast as the joints' limits allow.
     pub tool_speed: f32,
+    /// Where the cap holds (m): within this distance of the hand's position at the grasp or
+    /// release, which the move in ends at and the move away starts from, the rest of each move
+    /// as fast as the joints' limits allow ([`HandSpeed::near`]). `None`: along all of both.
+    pub tool_speed_near: Option<f32>,
     /// How much of each straight move a candidate must make, in (0, 1]: 1, all of it. Less lets
     /// an obstacle shorten the move in or away rather than stop the candidate; a move stopped
     /// short for any other reason (out of reach, a jump) still stops it.
@@ -182,6 +186,7 @@ impl Default for TaskOptions {
             plan: PlanOptions::default(),
             tool_path: ToolPathOptions::default(),
             tool_speed: 0.1,
+            tool_speed_near: None,
             min_fraction: 1.0,
         }
     }
@@ -1446,12 +1451,20 @@ fn choose(
     // A robot holding an object keeps its joints and their limits, so the bare robot times every
     // motion. Timing is most of what is left to do, so the device's threads share it.
     let time = |c: &&Candidate| -> Result<TaskPlan> {
-        let speed = HandSpeed {
+        // The cap on the straight moves; with `tool_speed_near`, it holds near the hand's
+        // position at `q`.
+        let speed = |q: &[f32]| HandSpeed {
             hand: c.hand,
             linear: o.tool_speed,
             angular: f32::INFINITY,
-            near: None,
+            near: o.tool_speed_near.map(|radius| Near {
+                point: robot.ee_pose(q, c.hand).position,
+                radius,
+            }),
         };
+        let n = robot.dof();
+        // The move in ends at the grasp or release, and the move away starts there.
+        let (in_end, away_start) = (&c.approach[c.approach.len() - n..], &c.depart[..n]);
         let (held, placed) = leaves(c);
         Ok(TaskPlan {
             candidate: c.index,
@@ -1459,8 +1472,8 @@ fn choose(
                 true => Some(Trajectory::try_new(robot, &c.transit, 1.0)?),
                 false => None,
             },
-            approach: Trajectory::with_hand_speed(robot, &c.approach, &[speed])?,
-            depart: Trajectory::with_hand_speed(robot, &c.depart, &[speed])?,
+            approach: Trajectory::with_hand_speed(robot, &c.approach, &[speed(in_end)])?,
+            depart: Trajectory::with_hand_speed(robot, &c.depart, &[speed(away_start)])?,
             held,
             placed,
         })
@@ -1544,6 +1557,12 @@ fn check_options(o: &TaskOptions) -> Result<()> {
         "the tool speed must be positive, got {}",
         o.tool_speed
     );
+    if let Some(radius) = o.tool_speed_near {
+        ensure_input!(
+            radius.is_finite() && radius > 0.0,
+            "tool_speed_near must be a positive distance, got {radius} m"
+        );
+    }
     ensure_input!(
         o.min_fraction > 0.0 && o.min_fraction <= 1.0,
         "min_fraction must be in (0, 1], got {}",
