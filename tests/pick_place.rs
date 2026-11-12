@@ -816,6 +816,85 @@ fn corner_clearance(block: &Obstacle, obstacles: &[Obstacle]) -> f32 {
         .fold(f32::INFINITY, f32::min)
 }
 
+/// With `tool_speed_near`, a handover's taker slows only as its hand comes within that distance of
+/// the block it takes, and the giver only until its hand is that far from the block it lets go:
+/// both keep under the cap there, move faster on the rest of those moves, and the episodes take
+/// less time than capped all along.
+#[test]
+fn a_handover_is_capped_near_the_block_alone() {
+    let robot = common::two_pandas().unwrap();
+    let n = robot.dof();
+    let (worlds, tasks) = handovers(4);
+    let cpu = Device::cpu(&robot).unwrap();
+    let (cap, radius) = (0.05, 0.02);
+    let o = |near: Option<f32>| PickPlaceOptions {
+        task: TaskOptions {
+            tool_speed: cap,
+            tool_speed_near: near,
+            ..PickPlaceOptions::default().task
+        },
+        speed_scale: (1.0, 1.0),
+        ..PickPlaceOptions::default()
+    };
+    // How far the moves in and away go.
+    let reach = PickPlaceOptions::default().approach + 1e-3;
+    let along = datagen::handover(&cpu, &worlds, &tasks, &o(None)).unwrap();
+    let near = datagen::handover(&cpu, &worlds, &tasks, &o(Some(radius))).unwrap();
+    assert!(
+        near.len() >= 3 && near.len() == along.len(),
+        "{} handovers",
+        near.len()
+    );
+    for (demo, capped) in near.iter().zip(&along) {
+        let frames = demo.trajectory.len();
+        let dt = demo.trajectory.dt;
+        assert!(
+            frames < capped.trajectory.len(),
+            "{frames} frames, capped all along {}",
+            capped.trajectory.len()
+        );
+        let q = |f: usize| &demo.trajectory.positions[f * n..(f + 1) * n];
+        let at = |f: usize, h: usize| robot.ee_pose(q(f), h).position;
+        let speed = |f: usize, h: usize| at(f + 1, h).distance(at(f - 1, h)) / (2.0 * dt);
+        let g = |f: usize, h: usize| demo.gripper[f * 2 + h];
+        let first = |h: usize, value: f32, after: usize| {
+            (after..frames).find(|&f| g(f, h) == value).unwrap()
+        };
+        // The taker's gripper closes at the end of its move in, and the giver's opens at the start
+        // of its move away: the frames of those moves, run back and forth from there.
+        let taker_closed = first(1, 0.0, first(0, 0.0, 0));
+        let giver_open = first(0, 1.0, taker_closed);
+        let (taken, let_go) = (at(taker_closed, 1), at(giver_open, 0));
+        let coming = (1..taker_closed)
+            .rev()
+            .take_while(|&f| at(f, 1).distance(taken) <= reach);
+        let going =
+            (giver_open + 1..frames - 1).take_while(|&f| at(f, 0).distance(let_go) <= reach);
+        let (coming, going): (Vec<usize>, Vec<usize>) = (coming.collect(), going.collect());
+        for (hand, moves, block) in [(1, &coming, taken), (0, &going, let_go)] {
+            // The fastest the hand moves near the block, or farther from it.
+            let fastest = |near: bool| {
+                let there = moves
+                    .iter()
+                    .filter(|&&f| (at(f, hand).distance(block) <= radius) == near);
+                let (count, fastest) =
+                    there.fold((0, 0.0f32), |(c, v), &f| (c + 1, v.max(speed(f, hand))));
+                assert!(count > 2, "hand {hand}: {count} frames (near: {near})");
+                fastest
+            };
+            let (within, beyond) = (fastest(true), fastest(false));
+            assert!(
+                within <= cap * 1.02,
+                "hand {hand} at {within} m/s near the block under a cap of {cap}"
+            );
+            assert!(
+                beyond > 2.0 * cap,
+                "hand {hand} at {beyond} m/s farther from the block"
+            );
+        }
+    }
+}
+
 /// Reset states are a handover's samples with joint noise, at rest: a block in one closed hand
 /// keeps its grip in that hand, a block no hand holds stays where the episode has it, no state has
 /// both hands on the block, and neither the arms nor a block in a hand touch the scene.

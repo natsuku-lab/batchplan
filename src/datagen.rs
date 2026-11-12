@@ -14,7 +14,7 @@ use crate::rng::Rng;
 use crate::robot::{AttachedObject, Robot};
 use crate::spline;
 use crate::task::{self, Pick, Place, TaskOptions, TaskPlan, TaskResult};
-use crate::timing::{HandSpeed, Trajectory};
+use crate::timing::{HandSpeed, Near, Trajectory};
 use crate::tool_path::{self, ToolPath};
 use crate::trajopt::{self, PlanOptions, PlanProblem, PlanResult};
 use crate::types::{JointTrajectory, Pose, Solved};
@@ -1059,20 +1059,31 @@ pub fn handover(
 
     // The exchange's motions are timed as the tasks' are, then every motion is slowed by a speed
     // scale drawn in order and sampled on the device's threads.
-    let speed = |hand: usize| HandSpeed {
+    // Near where the hand is at configuration `q` where the cap holds near a point.
+    let speed = |hand: usize, q: &[f32]| HandSpeed {
         hand,
         linear: o.task.tool_speed,
         angular: f32::INFINITY,
-        near: None,
+        near: o.task.tool_speed_near.map(|radius| Near {
+            point: robot.ee_pose(q, hand).position,
+            radius,
+        }),
     };
+    let n = robot.dof();
     let exchanges: Vec<[Trajectory; 3]> = device.install(|| {
         done.par_iter()
             .map(|(e, _, _)| {
                 let t = &tasks[e.task];
                 Ok([
                     Trajectory::try_new(robot, &e.meet, 1.0)?,
-                    Trajectory::with_hand_speed(robot, &e.take, &[speed(t.to)])?,
-                    Trajectory::with_hand_speed(robot, &e.leave, &[speed(t.from)])?,
+                    // The taker ends its move in, and the giver starts its move away, at the
+                    // object they hand over.
+                    Trajectory::with_hand_speed(
+                        robot,
+                        &e.take,
+                        &[speed(t.to, &e.take[e.take.len() - n..])],
+                    )?,
+                    Trajectory::with_hand_speed(robot, &e.leave, &[speed(t.from, &e.leave[..n])])?,
                 ])
             })
             .collect::<Result<_>>()

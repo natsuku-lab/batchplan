@@ -57,6 +57,10 @@ value_class! {
         /// The hand's speed cap on the straight moves (m/s): 10 cm/s. `math.inf` leaves it
         /// uncapped, the moves as fast as the joints' limits allow.
         tool_speed: f32,
+        /// Where the cap holds (m): within this distance of the hand's position at the grasp or
+        /// release, which the move in ends at and the move away starts from, the rest of each
+        /// move as fast as the joints' limits allow (`HandSpeed.near`). `None`: along all of both.
+        tool_speed_near: Option<f32>,
         /// How much of each straight move a candidate must make, in (0, 1]: 1, all of it. Less
         /// lets an obstacle shorten the move in or away rather than stop the candidate; a move
         /// stopped short for any other reason still stops it.

@@ -104,6 +104,26 @@ fn check_pick(robot: &Robot, start: &[f32], plan: &TaskPlan, at: Pose, lift: Vec
     assert!(lifted.position.distance(at.position + lift) < 2e-3);
 }
 
+/// Where hand 0 is along `t`, 256 times per knot interval, and how fast it moves there: from the
+/// joint velocities, the hand's positions 5 ms of that motion either side.
+fn hand_speeds(robot: &Robot, t: &Trajectory) -> Vec<(Vec3, f32)> {
+    let n = robot.dof();
+    let samples = t.sample(256.0 / t.knot_interval).unwrap();
+    let states = samples
+        .positions
+        .chunks(n)
+        .zip(samples.velocities.chunks(n));
+    let h = 0.005;
+    let each = states.map(|(q, dq)| {
+        let moved = |by: f32| -> Vec3 {
+            let q: Vec<f32> = q.iter().zip(dq).map(|(q, dq)| q + by * dq).collect();
+            robot.ee_pose(&q, 0).position
+        };
+        (moved(0.0), moved(h).distance(moved(-h)) / (2.0 * h))
+    });
+    each.collect()
+}
+
 /// The transit of a task that plans it.
 fn transit(plan: &TaskPlan) -> &Trajectory {
     plan.transit.as_ref().expect("the task plans its transit")
@@ -176,6 +196,63 @@ fn the_quickest_grasp_that_gets_through_wins() {
                 motions(plan),
                 "{name}: grasp {}",
                 plan.candidate
+            );
+        }
+    }
+}
+
+/// With `tool_speed_near`, the straight moves are capped near the grasp alone: the hand keeps
+/// under the cap within that distance of where it grasps, on the way in and on the way out, moves
+/// faster farther off, and the moves, the same paths, take less time than capped all along.
+#[test]
+fn the_straight_moves_can_be_capped_near_the_grasp_alone() {
+    let robot = panda();
+    let n = robot.dof();
+    let (cap, radius) = (0.05, 0.02);
+    let o = |near: Option<f32>| TaskOptions {
+        tool_speed: cap,
+        tool_speed_near: near,
+        ..TaskOptions::default()
+    };
+    let task = pick_from(&robot, vec![top_across()]);
+    for device in devices(&robot) {
+        let name = device.name();
+        let pick = |near| {
+            let plans = pick_in(&device, scene(vec![]), task.clone(), &o(near)).unwrap();
+            plans.into_iter().next().expect("the grasp gets through")
+        };
+        let (along, near) = (pick(None), pick(Some(radius)));
+        let cp = &near.approach.control_points;
+        let grasp = robot.ee_pose(&cp[cp.len() - n..], 0).position;
+        for (kind, moved, capped) in [
+            ("in", &near.approach, &along.approach),
+            ("away", &near.depart, &along.depart),
+        ] {
+            assert_eq!(
+                moved.control_points, capped.control_points,
+                "{name}: {kind}"
+            );
+            let speeds = hand_speeds(&robot, moved);
+            let fastest = |inside: bool| {
+                let of = speeds
+                    .iter()
+                    .filter(|(p, _)| (p.distance(grasp) <= radius) == inside);
+                of.map(|(_, v)| *v).fold(0.0, f32::max)
+            };
+            let (within, beyond) = (fastest(true), fastest(false));
+            assert!(
+                within <= cap * (1.0 + 1e-3) && within > 0.9 * cap,
+                "{name}: {within} m/s moving {kind} near the grasp under a cap of {cap}"
+            );
+            assert!(
+                beyond > 2.0 * cap,
+                "{name}: {beyond} m/s moving {kind} farther off"
+            );
+            assert!(
+                moved.duration() < 0.7 * capped.duration(),
+                "{name}: {} s moving {kind}, {} s capped all along",
+                moved.duration(),
+                capped.duration()
             );
         }
     }
@@ -1761,12 +1838,30 @@ fn malformed_tasks_are_input_errors() {
             ..TaskOptions::default()
         },
         TaskOptions {
+            tool_speed_near: Some(0.0),
+            ..TaskOptions::default()
+        },
+        TaskOptions {
+            tool_speed_near: Some(-0.02),
+            ..TaskOptions::default()
+        },
+        TaskOptions {
+            tool_speed_near: Some(f32::NAN),
+            ..TaskOptions::default()
+        },
+        TaskOptions {
+            tool_speed_near: Some(f32::INFINITY),
+            ..TaskOptions::default()
+        },
+        TaskOptions {
             min_fraction: 1.5,
             ..TaskOptions::default()
         },
     ] {
         // Refused as options, by name, not later as the motions are timed.
-        let named = if options.min_fraction == 1.0 {
+        let named = if options.tool_speed_near.is_some() {
+            "tool_speed_near"
+        } else if options.min_fraction == 1.0 {
             "tool speed"
         } else {
             "min_fraction"
