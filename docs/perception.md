@@ -69,20 +69,22 @@ An `SdfGrid` holds signed distances on a regular grid, stored as half floats and
 
 A `DepthImage` is one frame: z distances in meters row by row (zero, negative or non-finite where a pixel has no reading), its width, pinhole `Intrinsics`, and the camera's pose (OpenCV axes: x right, y down, z forward). `from_depth` classifies each voxel by projecting its centre into the image, so an 8×8 time-of-flight array gives solid surfaces rather than 64 points. Dense images also mark the voxel of every pixel. Unobserved space is:
 - free outside the image and along pixels without a reading;
-- free or solid behind observed surfaces, as `Occlusion` says (`Occlusion::Occupied` is the safe choice for a single view that does not see the robot).
+- free or solid behind observed surfaces, as `Occlusion` says (`Occlusion::Occupied` is the safe choice for a single view that does not see the robot). `Occlusion::Band(distance)` makes solid only what lies within `distance` behind an observed surface in depth (along the camera's z axis), and space past it free: a drawer pulled out over a table walls in `distance` below what the camera sees of it, not the space under it down to the table. The band grows toward collision as surfaces do, and a band of 0 is `Occlusion::Free`.
 
 ### Masking the robot
 
 A camera that sees the arm would make it an obstacle to itself. `image.robot_mask(&robot, &q, padding)` says where the robot is in the image at configuration `q`, its collision spheres grown by `padding`. With the mask passed to `from_depth` or `OccupancyMap::integrate`:
 - readings on the robot are not obstacles, and anything between the camera and the arm stays one;
 - the space in front of the arm and the space it fills are free, even with `Occlusion::Occupied`: nothing else can be where the robot is;
-- the space only the arm hides (its shadow) is solid under `Occlusion::Occupied` and free under `Occlusion::OccupiedExceptRobotShadow`, which keeps what other surfaces hide solid. No camera sees behind the arm, so under `Occupied` its shadow walls in the space the arm reaches through next: in the perception demo (`demos/`), with three cameras fused into a map, IK found none of 24 targets. What the shadow holds is unknown either way; `OccupiedExceptRobotShadow` accepts that so the arm can move. In maps, a voxel only the robot has hidden stays shadow until an image observes it.
+- the space only the arm hides (its shadow) is solid under `Occlusion::Occupied` and free under `Occlusion::OccupiedExceptRobotShadow`, which keeps what other surfaces hide solid. No camera sees behind the arm, so under `Occupied` its shadow walls in the space the arm reaches through next: in the perception demo (`demos/`), with three cameras fused into a map, IK found none of 24 targets. What the shadow holds is unknown either way; `OccupiedExceptRobotShadow` accepts that so the arm can move, and so does `Occlusion::Band`. In maps, a voxel is shadow while only the robot has hidden it: once an image observes it, or hides it behind another surface, it is not shadow again, whatever the order of the images.
 
 Grids from depth images grow toward collision by about three voxels, so set the mask's `padding` above that (4 cm for 1 cm voxels); otherwise the robot's surface touches the space it hides.
 
 ## Fused maps
 
 `OccupancyMap::try_new(lo, hi, voxel)` is a fixed grid in the world frame that fuses frames as OctoMap does. Each voxel holds the log-odds that it is occupied: a hit adds 0.85 and a miss subtracts 0.4, clamped to [−2, 3.5]. Something seen once and then seen through three times is free again. Voxels behind readings, outside the image or beyond the map are not updated.
+
+`map.grid(&device, unknown)` makes voxels more likely occupied than not solid, and voxels never observed as `unknown` says. A map keeps no rays, so under `Occlusion::Band(distance)` the band is every unobserved voxel within `distance` of an occupied one, in any direction: in front of a surface too where its pixels had no reading, and beside the view. The robot's shadow stays free. The band builds the grid twice.
 
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};

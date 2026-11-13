@@ -66,7 +66,7 @@ pub struct Intrinsics {
 
 /// What [`SdfGrid::from_depth`] assumes about space hidden behind observed surfaces, and
 /// [`OccupancyMap::grid`] about space no image has observed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Occlusion {
     /// Only observed surfaces are obstacles.
@@ -75,9 +75,36 @@ pub enum Occlusion {
     /// shadow included.
     Occupied,
     /// As `Occupied`, except the space only the robot hides (with a [`RobotMask`]), which is
-    /// free. No camera sees past the arm, so its shadow, solid, walls in the space it reaches
-    /// through next. What the shadow holds is unknown: this trades that for being able to move.
+    /// free; in a map, space no image has hidden behind another surface either. No camera sees
+    /// past the arm, so its shadow, solid, walls in the space it reaches through next. What the
+    /// shadow holds is unknown: this trades that for being able to move.
     OccupiedExceptRobotShadow,
+    /// Within this distance (meters) behind an observed surface, in depth as seen from the camera,
+    /// is solid; past it, the robot's shadow and pixels without a reading are free. In a map, space
+    /// no image has observed is solid within this distance of an occupied voxel, in any direction
+    /// (in front of a surface too, where its pixels had no reading), and the robot's shadow is
+    /// free.
+    Band(f32),
+}
+
+impl Occlusion {
+    /// How far behind a surface is solid by the band (`Band`), or 0.
+    pub(crate) fn band(self) -> f32 {
+        match self {
+            Occlusion::Band(distance) => distance,
+            _ => 0.0,
+        }
+    }
+
+    /// That a band, if this is one, is finite and not negative.
+    fn check(self) -> Result<()> {
+        let band = self.band();
+        ensure_input!(
+            band.is_finite() && band >= 0.0,
+            "an occlusion band must be finite and not negative, got {band} m"
+        );
+        Ok(())
+    }
 }
 
 /// One depth image: z distances in meters, row by row, `width` pixels per row, with zero, negative
@@ -164,10 +191,19 @@ impl DepthImage<'_> {
     }
 
     /// What the image says about the point `p` of a grid with `voxel` spacing, with the space the
-    /// robot fills free. `classify` in grids.wgsl mirrors it.
-    fn classify(&self, robot: Option<&RobotMask>, p: Vec3, voxel: f32) -> Seen {
-        match self.sees(robot, p, voxel) {
-            Seen::Hidden | Seen::Shadow | Seen::Unseen if robot.is_some_and(|r| r.contains(p)) => {
+    /// robot fills free. `classify` in grids.wgsl mirrors it. `BAND` compiles in the test for
+    /// points within `band` behind a reading (`Seen::Near`).
+    fn classify<const BAND: bool>(
+        &self,
+        robot: Option<&RobotMask>,
+        p: Vec3,
+        voxel: f32,
+        band: f32,
+    ) -> Seen {
+        match self.sees::<BAND>(robot, p, voxel, band) {
+            Seen::Near | Seen::Hidden | Seen::Shadow | Seen::Unseen
+                if robot.is_some_and(|r| r.contains(p)) =>
+            {
                 Seen::Free
             }
             seen => seen,
@@ -175,7 +211,13 @@ impl DepthImage<'_> {
     }
 
     /// What the image shows of the point `p`. `sees` in grids.wgsl mirrors it.
-    fn sees(&self, robot: Option<&RobotMask>, p: Vec3, voxel: f32) -> Seen {
+    fn sees<const BAND: bool>(
+        &self,
+        robot: Option<&RobotMask>,
+        p: Vec3,
+        voxel: f32,
+        band: f32,
+    ) -> Seen {
         let half = 0.5 * voxel;
         let Some((i, z_voxel)) = self.project(p) else {
             return Seen::Unseen;
@@ -195,6 +237,8 @@ impl DepthImage<'_> {
             Seen::Free
         } else if z_voxel <= z + half {
             Seen::Surface
+        } else if BAND && z_voxel <= z + half + band {
+            Seen::Near
         } else {
             Seen::Hidden
         }
@@ -335,7 +379,9 @@ enum Seen {
     Free,
     /// At a reading, within half a voxel.
     Surface,
-    /// Behind a reading.
+    /// Behind a reading, within the band ([`Occlusion::Band`]) past the half voxel.
+    Near,
+    /// Behind a reading, past the band.
     Hidden,
     /// At or behind the robot, along a pixel that sees it.
     Shadow,
@@ -435,20 +481,37 @@ pub(crate) fn depth_occupancy(
     robot: Option<&RobotMask>,
     behind: Occlusion,
 ) -> Vec<bool> {
-    let mut occupied: Vec<bool> = (0..grid.points())
-        .into_par_iter()
-        .map(|n| match image.classify(robot, grid.point(n), grid.voxel) {
-            Seen::Surface => true,
-            Seen::Hidden => behind != Occlusion::Free,
-            Seen::Shadow => behind == Occlusion::Occupied,
-            Seen::Free | Seen::Unseen => false,
-        })
-        .collect();
+    // The other rules run a copy without the band's test.
+    let mut occupied = match behind {
+        Occlusion::Band(band) => classified::<true>(grid, image, robot, behind, band),
+        _ => classified::<false>(grid, image, robot, behind, 0.0),
+    };
     // Dense images resolve surfaces finer than voxels project; their points are solid too.
     for n in hits(grid, image, robot, |_| true) {
         occupied[n] = true;
     }
     occupied
+}
+
+/// Each point's occupancy by how the image classifies it.
+fn classified<const BAND: bool>(
+    grid: &Layout,
+    image: &DepthImage,
+    robot: Option<&RobotMask>,
+    behind: Occlusion,
+    band: f32,
+) -> Vec<bool> {
+    (0..grid.points())
+        .into_par_iter()
+        .map(
+            |n| match image.classify::<BAND>(robot, grid.point(n), grid.voxel, band) {
+                Seen::Surface | Seen::Near => true,
+                Seen::Hidden => !BAND && behind != Occlusion::Free,
+                Seen::Shadow => behind == Occlusion::Occupied,
+                Seen::Free | Seen::Unseen => false,
+            },
+        )
+        .collect()
 }
 
 /// The grid point holding each reading off the robot that `keep` accepts.
@@ -486,20 +549,27 @@ pub(crate) fn integrate(
         .zip(hit)
         .enumerate()
         .for_each(|(n, (l, hit))| {
-            let step = match image.classify(robot, grid.point(n), grid.voxel) {
+            let step = match image.classify::<false>(robot, grid.point(n), grid.voxel, 0.0) {
                 _ if hit => HIT,
                 Seen::Surface => HIT,
                 Seen::Free => MISS,
-                // Only the robot hides it: noted, until an image observes it.
+                // Only the robot hides it: noted, until an image observes it or another surface
+                // hides it.
                 Seen::Shadow => {
                     if *l == UNOBSERVED {
                         *l = SHADOWED;
                     }
                     return;
                 }
-                Seen::Hidden | Seen::Unseen => return,
+                Seen::Hidden => {
+                    if *l == UNOBSERVED || *l == SHADOWED {
+                        *l = OCCLUDED;
+                    }
+                    return;
+                }
+                Seen::Near | Seen::Unseen => return,
             };
-            *l = (if *l == UNOBSERVED || *l == SHADOWED {
+            *l = (if *l == UNOBSERVED || *l == SHADOWED || *l == OCCLUDED {
                 0
             } else {
                 *l
@@ -720,6 +790,7 @@ impl SdfGrid {
         o: &SdfOptions,
     ) -> Result<Self> {
         image.check_with(robot)?;
+        behind.check()?;
         let image = &image.rigid();
         let (lo, hi) = (0..image.depth.len())
             .into_par_iter()
@@ -1061,8 +1132,11 @@ pub(crate) const MISS: i8 = -8;
 pub(crate) const CLAMP: (i8, i8) = (-40, 70);
 /// The log-odds of a voxel no image has updated.
 pub(crate) const UNOBSERVED: i8 = i8::MIN;
-/// The log-odds of a voxel no image has observed, which a robot mask has hidden.
+/// The log-odds of a voxel no image has observed, which only a robot mask has hidden.
 pub(crate) const SHADOWED: i8 = i8::MIN + 1;
+/// The log-odds of a voxel no image has observed, which a surface other than the robot has hidden:
+/// never shadow again.
+pub(crate) const OCCLUDED: i8 = i8::MIN + 2;
 
 /// Occupancy fused from depth images over time, on a fixed grid in the world frame: per voxel, the
 /// log-odds that it is occupied, updated as OctoMap updates them (a hit adds 0.85, a miss -0.4,
@@ -1115,18 +1189,22 @@ impl OccupancyMap {
     #[must_use]
     pub fn occupancy(&self, p: Vec3) -> Option<f32> {
         let l = self.log_odds[self.grid.nearest(p)];
-        (self.grid.contains(p) && l != UNOBSERVED && l != SHADOWED)
+        (self.grid.contains(p) && l != UNOBSERVED && l != SHADOWED && l != OCCLUDED)
             .then(|| 1.0 / (1.0 + (-f32::from(l) / 20.0).exp()))
     }
 
     /// The distance grid of the map: voxels more likely occupied than not are solid, and voxels
     /// never observed are solid or free as `unknown` says. Errors if nothing is solid.
     pub fn grid(&self, device: &Device, unknown: Occlusion) -> Result<SdfGrid> {
+        unknown.check()?;
         let occupied: Vec<bool> = self
             .log_odds
             .par_iter()
             .map(|&l| match l {
-                UNOBSERVED => unknown != Occlusion::Free,
+                UNOBSERVED | OCCLUDED => matches!(
+                    unknown,
+                    Occlusion::Occupied | Occlusion::OccupiedExceptRobotShadow
+                ),
                 SHADOWED => unknown == Occlusion::Occupied,
                 _ => l > 0,
             })
@@ -1135,7 +1213,25 @@ impl OccupancyMap {
             occupied.iter().any(|&o| o),
             "the map holds nothing occupied"
         );
-        SdfGrid::from_occupancy(device, &self.grid, &occupied)
+        let solid = SdfGrid::from_occupancy(device, &self.grid, &occupied)?;
+        let Occlusion::Band(band) = unknown else {
+            return Ok(solid);
+        };
+        // A free point stores at most its distance to the nearest occupied cube lowered by half a
+        // voxel diagonal, so one within the band of a cube stores at most `reach`: the band comes
+        // out no narrower.
+        let reach = band - 0.5 * 3f32.sqrt() * self.grid.voxel;
+        let banded: Vec<bool> = device.install(|| {
+            self.log_odds
+                .par_iter()
+                .zip(&occupied)
+                .zip(&solid.values)
+                .map(|((&l, &o), &v)| {
+                    o || (l == UNOBSERVED || l == OCCLUDED) && f16::from_bits(v).to_f32() <= reach
+                })
+                .collect()
+        });
+        SdfGrid::from_occupancy(device, &self.grid, &banded)
     }
 }
 
@@ -1297,36 +1393,52 @@ mod tests {
             },
         )
         .unwrap();
+        // The image with the arm masked out, then without the mask: the log-odds after each.
         let fused = |device: &Device| {
             let mut log_odds = vec![UNOBSERVED; grid.points()];
             device
-                .integrate(&grid, &mut log_odds, &image, None)
-                .unwrap();
-            device
                 .integrate(&grid, &mut log_odds, &image, Some(&mask))
                 .unwrap();
-            log_odds
+            let masked = log_odds.clone();
+            device
+                .integrate(&grid, &mut log_odds, &image, None)
+                .unwrap();
+            [masked, log_odds]
         };
-        let (a, b) = (fused(&cpu), fused(&gpu));
-        let count = |l: i8| a.iter().filter(|&&x| x == l).count();
-        assert!(count(HIT + HIT) > 2_000, "the table should be hit twice");
+        let (cpu_fused, gpu_fused) = (fused(&cpu), fused(&gpu));
+        let [masked, both] = &cpu_fused;
+        let count = |log_odds: &[i8], l: i8| log_odds.iter().filter(|&&x| x == l).count();
         assert!(
-            count(HIT) > 2_000,
-            "the arm should hide part of the table the second time"
+            count(masked, SHADOWED) > 1_000,
+            "the arm should hide space no image has seen"
         );
         assert!(
-            count(MISS + MISS) > 100_000,
+            count(masked, OCCLUDED) > 1_000,
+            "the table should hide space below it"
+        );
+        assert!(
+            count(both, HIT + HIT) > 2_000,
+            "the table should be hit twice"
+        );
+        assert!(
+            count(both, HIT) > 2_000,
+            "the arm should hide part of the table the first time"
+        );
+        assert!(
+            count(both, MISS + MISS) > 100_000,
             "the space in front of the table should be cleared twice"
         );
         assert!(
-            count(SHADOWED) > 1_000,
-            "the arm should hide space no image has seen"
+            count(both, OCCLUDED) > count(masked, OCCLUDED),
+            "the table should hide space below it that the arm hid"
         );
-        let differ = a.iter().zip(&b).filter(|(a, b)| a != b).count();
-        assert!(
-            differ * 2000 <= a.len(),
-            "{differ} of {} log-odds differ",
-            a.len()
-        );
+        for (a, b) in cpu_fused.iter().zip(&gpu_fused) {
+            let differ = a.iter().zip(b).filter(|(a, b)| a != b).count();
+            assert!(
+                differ * 2000 <= a.len(),
+                "{differ} of {} log-odds differ",
+                a.len()
+            );
+        }
     }
 }

@@ -45,7 +45,7 @@ Guide: [perception.md](perception.md).
 | `SdfOptions` | A grid's voxel size and padding. |
 | `DepthImage`, `Intrinsics` | A depth image with its pinhole intrinsics and camera pose. |
 | `DepthImage::robot_mask(&robot, q, padding)` | Where the robot is in the image (`RobotMask`), so grids leave it out. |
-| `Occlusion` | What a grid assumes behind observed surfaces: free, solid, or solid except the robot's shadow. |
+| `Occlusion` | What a grid assumes behind observed surfaces: free, solid, solid except the robot's shadow, or solid in a band behind surfaces. |
 | `OccupancyMap::try_new`, `integrate`, `occupancy`, `grid` | Depth images fused over time into occupancy, then into a distance grid. |
 
 ## Devices

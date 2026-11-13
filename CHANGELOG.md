@@ -16,6 +16,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   a hold checked where they closed. One call takes tasks and holds at many openings, a relocked
   robot for each group; empty, the default, is as loaded, to the bit. A `Pick` or `Held` literal
   needs `locked: HashMap::new()`. In Python, `Pick(..., locked={...})`, `Held(..., locked={...})`.
+- **Breaking:** `Occlusion::Band(distance)`, for `SdfGrid::from_depth` and `OccupancyMap::grid`:
+  solid within `distance` behind an observed surface, as seen from the camera, and free past it,
+  in the robot's shadow and along pixels without a reading. In a map, unobserved space within
+  `distance` of an occupied voxel is solid, in any direction, and the robot's shadow is free. A
+  band that is not finite or is negative is an input error. `Occlusion` is no longer `Eq` (the
+  band is an `f32`); from depth images, the other rules build the same grids as before.
 - One hand can pass what it holds to another: `handover(&device, &worlds, &[Handover], &TaskOptions)`,
   with `Handover::new(&robot, world, start, held, to)`. Candidates are each meeting with each of the
   taker's grasps; both hands' IK solves at the meeting with the object standing there, each hand's
@@ -281,6 +287,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Fixed
 
+- A map no longer frees what another surface hides because the arm once hid it too: a voxel no
+  image has observed is the robot's shadow only while nothing else has hidden it, whichever image
+  came first. Under `Occlusion::OccupiedExceptRobotShadow` such a voxel is solid, where it read
+  free.
 - An obstacle whose rotation is a little off a unit quaternion (up to a thousandth is accepted)
   is turned, not stretched. Its frame was built from the quaternion as given, which scaled it
   by up to 0.4%: a 1.2 m box reached 2 mm past its ends, and a search, which first rules
