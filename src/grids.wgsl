@@ -7,7 +7,7 @@
 // classified differently.
 //
 // Generated before this file: `GridParams`, `WORKGROUP`, and sdf.rs's `HIT`, `MISS`, `CLAMP_LO`,
-// `CLAMP_HI`, `UNOBSERVED` and `SHADOWED`.
+// `CLAMP_HI`, `UNOBSERVED`, `SHADOWED` and `OCCLUDED`.
 
 @group(0) @binding(0) var<uniform> G: GridParams;
 // Per pixel, row by row: the depth reading (0 without one). The robot mask: the depth to the robot
@@ -40,11 +40,13 @@ const FREE: u32 = 1u;
 const SURFACE: u32 = 2u;
 const HIDDEN: u32 = 3u;
 const SHADOW: u32 = 4u;
+const NEAR: u32 = 5u;
 
 // `G.behind`, as `Occlusion` in sdf.rs.
 const BEHIND_FREE: u32 = 0u;
 const BEHIND_OCCUPIED: u32 = 1u;
 const BEHIND_OCCUPIED_EXCEPT_SHADOW: u32 = 2u;
+const BEHIND_BAND: u32 = 3u;
 
 fn invocation(gid: vec3<u32>, groups: vec3<u32>) -> u32 {
     return gid.x + gid.y * groups.x * WORKGROUP;
@@ -82,7 +84,7 @@ fn inside_robot(p: vec3<f32>) -> bool {
 // (`DepthImage::classify`).
 fn classify(p: vec3<f32>) -> u32 {
     let seen = sees(p);
-    if (seen == HIDDEN || seen == SHADOW || seen == UNSEEN) && inside_robot(p) {
+    if (seen == NEAR || seen == HIDDEN || seen == SHADOW || seen == UNSEEN) && inside_robot(p) {
         return FREE;
     }
     return seen;
@@ -119,6 +121,9 @@ fn sees(p: vec3<f32>) -> u32 {
     if c.z <= z + half {
         return SURFACE;
     }
+    if c.z <= z + half + G.band {
+        return NEAR;
+    }
     return HIDDEN;
 }
 
@@ -136,9 +141,9 @@ fn depth_occupancy(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_w
             break;
         }
         let seen = classify(grid_point(n));
-        let hidden_solid = seen == HIDDEN && G.behind != BEHIND_FREE;
+        let hidden_solid = seen == HIDDEN && G.behind != BEHIND_FREE && G.behind != BEHIND_BAND;
         let shadow_solid = seen == SHADOW && G.behind == BEHIND_OCCUPIED;
-        if seen == SURFACE || hidden_solid || shadow_solid {
+        if seen == SURFACE || seen == NEAR || hidden_solid || shadow_solid {
             word |= 1u << b;
         }
     }
@@ -195,13 +200,17 @@ fn map_update(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
         } else if seen == FREE {
             step = MISS;
         } else if seen == SHADOW && l == UNOBSERVED {
-            // Only the robot hides it: noted, until an image observes it.
+            // Only the robot hides it: noted, until an image observes it or another surface hides
+            // it.
             word = (word & ~(0xffu << shift)) | ((u32(SHADOWED) & 0xffu) << shift);
+            continue;
+        } else if seen == HIDDEN && (l == UNOBSERVED || l == SHADOWED) {
+            word = (word & ~(0xffu << shift)) | ((u32(OCCLUDED) & 0xffu) << shift);
             continue;
         } else {
             continue;
         }
-        if l == UNOBSERVED || l == SHADOWED {
+        if l == UNOBSERVED || l == SHADOWED || l == OCCLUDED {
             l = 0;
         }
         l = clamp(l + step, CLAMP_LO, CLAMP_HI);

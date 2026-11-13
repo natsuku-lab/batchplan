@@ -143,8 +143,9 @@ shader_struct! {
     /// One step of building a grid (`G` in grids.wgsl). The grid: `origin` (w: the voxel size) and
     /// `nx * ny * nz = points` points. A depth image: the camera's position, the rows of its
     /// rotation's inverse (`to_camera*`) and its columns (`from_camera*`), the intrinsics (fx, fy,
-    /// cx, cy), its size, whether robot depths are given and whether hidden space is occupied.
-    /// `map` marks a map update. A transform pass runs along the `lines` of `axis`.
+    /// cx, cy), its size, whether robot depths are given, what hidden space is (`behind`) and how
+    /// far behind a surface the band reaches (`band`). `map` marks a map update. A transform pass
+    /// runs along the `lines` of `axis`.
     GpuGridParams => GridParams {
         origin: Vec4, camera: Vec4, intrinsics: Vec4,
         to_camera0: Vec4, to_camera1: Vec4, to_camera2: Vec4,
@@ -152,6 +153,7 @@ shader_struct! {
         nx: u32, ny: u32, nz: u32, points: u32,
         axis: u32, lines: u32, width: u32, height: u32,
         has_robot: u32, behind: u32, map: u32, spheres: u32,
+        band: f32, pad0: u32, pad1: u32, pad2: u32,
     }
 }
 
@@ -865,12 +867,12 @@ struct GridKernels {
 
 impl GridKernels {
     fn new(device: &wgpu::Device, info: &wgpu::AdapterInfo) -> Result<Self> {
-        use crate::sdf::{CLAMP, HIT, MISS, SHADOWED, UNOBSERVED};
+        use crate::sdf::{CLAMP, HIT, MISS, OCCLUDED, SHADOWED, UNOBSERVED};
         let source = [
             "alias Vec4 = vec4<f32>;\n",
             &format!("const WORKGROUP: u32 = {WORKGROUP}u;\n"),
             &format!(
-                "const HIT: i32 = {HIT};\nconst MISS: i32 = {MISS};\nconst UNOBSERVED: i32 = {UNOBSERVED};\nconst SHADOWED: i32 = {SHADOWED};\n"
+                "const HIT: i32 = {HIT};\nconst MISS: i32 = {MISS};\nconst UNOBSERVED: i32 = {UNOBSERVED};\nconst SHADOWED: i32 = {SHADOWED};\nconst OCCLUDED: i32 = {OCCLUDED};\n"
             ),
             &format!("const CLAMP_LO: i32 = {};\nconst CLAMP_HI: i32 = {};\n", CLAMP.0, CLAMP.1),
             GpuGridParams::WGSL,
@@ -2213,7 +2215,9 @@ fn grid_params(
             Occlusion::Free => 0,
             Occlusion::Occupied => 1,
             Occlusion::OccupiedExceptRobotShadow => 2,
+            Occlusion::Band(_) => 3,
         },
+        band: behind.band(),
         ..Default::default()
     };
     if let Some(image) = image {

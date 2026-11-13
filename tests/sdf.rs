@@ -695,6 +695,13 @@ fn check_table(grid: &SdfGrid, behind: Occlusion, o: &SdfOptions, rng: &mut Rng)
                 assert!(below < 0.0, "{below} below the table at {p}")
             }
             Occlusion::Free => assert!(below > 0.02, "{below} below the table at {p}"),
+            // Solid just behind the top, as seen from the camera above, and free past the band.
+            Occlusion::Band(band) => {
+                let near = grid.distance(Vec3::new(p.x, p.y, -band)).value;
+                let past = grid.distance(Vec3::new(p.x, p.y, -band - 0.06)).value;
+                assert!(near < 0.0, "{near} within the band below the table at {p}");
+                assert!(past > 0.02, "{past} past the band below the table at {p}");
+            }
             other => panic!("no expectation below the table under {other:?}"),
         }
     }
@@ -744,6 +751,7 @@ fn depth_images_become_grids_on(device: &Device) {
             Occlusion::Occupied,
             Occlusion::OccupiedExceptRobotShadow,
             Occlusion::Free,
+            Occlusion::Band(0.04),
         ] {
             let grid =
                 SdfGrid::from_depth(device, &scene.image(&depth, width, k), None, behind, &o)
@@ -824,6 +832,16 @@ fn depth_images_become_grids_on(device: &Device) {
         .is_err(),
         "rows of 7"
     );
+    for bad in [-0.01, f32::NAN] {
+        let image = scene.image(&depth, 640, vga);
+        assert!(
+            matches!(
+                SdfGrid::from_depth(device, &image, None, Occlusion::Band(bad), &o),
+                Err(Error::Input(_))
+            ),
+            "a band of {bad} m"
+        );
+    }
     // A camera's pose is checked as other poses are.
     let robot = common::panda().unwrap();
     let poses = [
@@ -1180,6 +1198,80 @@ fn fused_maps_on(device: &Device) {
             > 0.0,
         "unobserved space is free under Occlusion::Free"
     );
+    // Solid to the band's distance under the table, and free three voxels past it.
+    let banded = map.grid(device, Occlusion::Band(0.04)).unwrap();
+    let (at, past) = (Vec3::new(0.1, 0.1, -0.04), Vec3::new(0.1, 0.1, -0.07));
+    assert!(
+        banded.distance(at).value < 0.0,
+        "{} at the band under the table",
+        banded.distance(at).value
+    );
+    assert!(
+        banded.distance(past).value > 0.0,
+        "{} past the band under the table",
+        banded.distance(past).value
+    );
+    assert!(
+        map.grid(device, Occlusion::Band(0.0)).unwrap()
+            == map.grid(device, Occlusion::Free).unwrap(),
+        "a band of nothing walls in more than the free rule"
+    );
+    for bad in [-0.01, f32::NAN] {
+        assert!(matches!(
+            map.grid(device, Occlusion::Band(bad)),
+            Err(batchplan::Error::Input(_))
+        ));
+    }
+    // Where the arm hides the table, the band leaves what only the robot hides free, as images
+    // do, and with it the space just above the table, observed or not.
+    let robot = common::panda().unwrap();
+    let image = scene.image(&without, 640, vga);
+    let mask = image.robot_mask(&robot, robot.default_q(), 0.02).unwrap();
+    let mut masked =
+        OccupancyMap::try_new(Vec3::new(-0.3, -0.3, -0.1), Vec3::new(0.3, 0.3, 0.3), 0.01).unwrap();
+    masked.integrate(device, &image, Some(&mask)).unwrap();
+    let banded = masked.grid(device, Occlusion::Band(0.04)).unwrap();
+    let above: Vec<Vec3> = (-25..=25)
+        .flat_map(|i| (-25..=25).map(move |j| Vec3::new(i as f32, j as f32, 2.0) * 0.01))
+        .collect();
+    let hidden = above
+        .iter()
+        .filter(|&&p| masked.occupancy(p).is_none())
+        .count();
+    assert!(
+        hidden > 100,
+        "the arm should hide space above the table: {hidden} points"
+    );
+    for &p in &above {
+        let d = banded.distance(p).value;
+        assert!(d > 0.0, "{d} at {p}, 2 cm above the table");
+    }
+    // Below the table where the arm hid it, the table hides it too, whichever image comes first:
+    // solid as the rules say of what other surfaces hide.
+    let under: Vec<Vec3> = above
+        .iter()
+        .filter(|&&p| masked.occupancy(p).is_none())
+        .map(|&p| p - Vec3::new(0.0, 0.0, 0.04))
+        .collect();
+    let images = [(image, Some(&mask)), (image, None)];
+    for order in [[0, 1], [1, 0]] {
+        let mut map =
+            OccupancyMap::try_new(Vec3::new(-0.3, -0.3, -0.1), Vec3::new(0.3, 0.3, 0.3), 0.01)
+                .unwrap();
+        for i in order {
+            map.integrate(device, &images[i].0, images[i].1).unwrap();
+        }
+        for unknown in [Occlusion::OccupiedExceptRobotShadow, Occlusion::Band(0.04)] {
+            let grid = map.grid(device, unknown).unwrap();
+            for &p in &under {
+                let d = grid.distance(p).value;
+                assert!(
+                    d < 0.0,
+                    "{d} at {p} under {unknown:?}, images in order {order:?}"
+                );
+            }
+        }
+    }
     // A map ending inside the ball (its last voxels at x = 0) takes no hits from the readings
     // beyond its edge.
     let mut part = OccupancyMap::try_new(
@@ -1403,6 +1495,31 @@ fn robot_masking_on(device: &Device) {
             );
         }
     }
+    // A surface 1.5 cm in front of the grown arm: its band reaches into the arm, which still reads
+    // free.
+    let front: Vec<f32> = depth
+        .iter()
+        .zip(&mask.depth)
+        .map(|(&d, &m)| if m.is_finite() { d.min(m - 0.015) } else { d })
+        .collect();
+    let image = DepthImage {
+        depth: &front,
+        ..image
+    };
+    let band = Occlusion::Band(0.04);
+    let unmasked = SdfGrid::from_depth(device, &image, None, band, &o).unwrap();
+    assert!(
+        spheres.iter().any(|&(c, r)| unmasked.distance(c).value < r),
+        "the band should reach into the arm"
+    );
+    let grid = SdfGrid::from_depth(device, &image, Some(&mask), band, &o).unwrap();
+    for &(c, r) in &spheres {
+        assert!(
+            grid.distance(c).value > r,
+            "under a band, an obstacle at the arm: {} at {c}",
+            grid.distance(c).value
+        );
+    }
 }
 
 /// The distance transform is exact on every device. (Classifying a depth image's points is
@@ -1448,6 +1565,10 @@ fn every_device_builds_the_same_grids_from_occupancy() {
             (
                 "map, unknown occupied but the robot's shadow",
                 map.grid(d, Occlusion::OccupiedExceptRobotShadow).unwrap(),
+            ),
+            (
+                "map, unknown solid in a band",
+                map.grid(d, Occlusion::Band(0.04)).unwrap(),
             ),
         ]
     };
