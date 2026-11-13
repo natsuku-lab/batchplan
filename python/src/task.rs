@@ -1,5 +1,7 @@
 //! Picking objects up and setting them down, each a whole task in one call.
 
+use std::collections::HashMap;
+
 use batchplan::glam::Vec3;
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
@@ -117,6 +119,10 @@ value_class! {
         /// move in begins where they break stops at the transit. A task without its transit has
         /// no use for them.
         constraints: Vec<batchplan::HandConstraint>,
+        /// Joints the robot was loaded with locked, at the values they keep through the task, as
+        /// `Robot.relock` takes them: the fingers opened only as far as a rim between walls lets
+        /// them. Tasks are grouped by these in one call; each plan's `held` starts with them.
+        locked: HashMap<String, f32>,
     }
     methods {
         /// Hand 0 picks up `object` of world `world` from `start` by any of `grasps`, moving in

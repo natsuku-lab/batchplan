@@ -49,7 +49,8 @@ pub struct Sequence {
     /// problem's.
     pub constraints: Vec<HandConstraint>,
     /// An object a hand holds through the sequence, as a pick leaves it: every blend is checked
-    /// with it, as attaching it ([`Held::attachment`]) would check it. `None` holds nothing.
+    /// with it, as attaching it ([`Held::attachment`]) to the robot relocked at its
+    /// [`Held::locked`] would check it. `None` holds nothing.
     pub holding: Option<Held>,
 }
 
