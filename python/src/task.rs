@@ -9,6 +9,7 @@ use crate::device::{Device, Worlds};
 use crate::error::OrRaise;
 use crate::field::{self, Field, tuple_field, value_class};
 use crate::held::Held;
+use crate::robot::Robot;
 use crate::timing::Trajectory;
 use crate::world::{Obstacle, Pose};
 
@@ -35,6 +36,11 @@ value_class! {
         /// over a `floor` (meters): 1 cm. An object whose top is less than this over the floor has
         /// no grasp from above.
         overlap: f32,
+        /// How far toward the ends a grasp holds the object, along the side the fingers close on
+        /// rather than across, as a fraction of half that side, in [0, 1): 0, the middle. Above
+        /// 0, each grasp comes once toward each end; a hand that will pass the object to another
+        /// (`handover`) holds it toward one end, as 0.75.
+        along: f32,
     }
     methods {
         #[new]
@@ -198,7 +204,57 @@ value_class! {
     }
 }
 
-tuple_field!(batchplan::Pick, batchplan::Place);
+value_class! {
+    /// One hand passing the object it holds to another hand of the same robot.
+    Handover(batchplan::Handover) {
+        /// The world's index in the batch. The held object is not one of its obstacles.
+        world: u32,
+        /// Where the robot starts, at rest, the giving hand holding the object.
+        start: Vec<f32>,
+        /// What the giving hand holds, and how: a pick's `TaskPlan.held`.
+        held: batchplan::Held,
+        /// The hand that takes it.
+        to: usize,
+        /// Poses of the object's frame where it changes hands, in the robot's frame; any one will
+        /// do. `handover_poses` proposes some where both arms reach.
+        meetings: Vec<batchplan::Pose>,
+        /// Poses of the taking hand's IK frame that grasp the object, in the object's frame.
+        /// `handover_grasps` turns the giver's grasp to the object's other end.
+        grasps: Vec<batchplan::Pose>,
+        /// How far back along its own z axis the taking hand begins to move in (meters).
+        approach: f32,
+        /// How far back along its own z axis the giving hand moves once it lets go (meters).
+        retreat: f32,
+        /// Where the hands must stay on the way to the meeting (`HandConstraint`).
+        constraints: Vec<batchplan::HandConstraint>,
+    }
+    methods {
+        /// `held` passed from its hand to hand `to` from `start` in world `world`: at the meetings
+        /// `handover_poses` proposes, by the grasps `handover_grasps` gives, the taker moving in
+        /// 10 cm and the giver backing off 10 cm, each along its z axis.
+        #[new]
+        #[pyo3(signature = (robot, world, start, held, to, **changes))]
+        fn new(
+            robot: &Robot,
+            world: u32,
+            start: &Bound<'_, PyAny>,
+            held: &Held,
+            to: usize,
+            changes: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<Self> {
+            let handover = batchplan::Handover::new(
+                &robot.0,
+                world,
+                Vec::<f32>::from_py(start)?,
+                held.0.clone(),
+                to,
+            );
+            Ok(Self(Self::changed(handover, changes)?))
+        }
+    }
+}
+
+tuple_field!(batchplan::Pick, batchplan::Place, batchplan::Handover);
 
 /// A task's steps, in order.
 #[pyclass(module = "batchplan", frozen, eq, eq_int, ord, hash)]
@@ -277,19 +333,20 @@ impl TaskPlan {
         self.0.begin().to_vec().to_py(py)
     }
 
-    /// The straight move in. The gripper closes (pick) or opens (place) at its end.
+    /// The straight move in. The gripper closes (pick) or opens (place) at its end; in a
+    /// handover the taker's closes, then the giver's opens.
     #[getter]
     fn approach(&self) -> Trajectory {
         Trajectory(self.0.approach.clone())
     }
 
-    /// The straight move away: holding the object after a pick.
+    /// The straight move away: holding the object after a pick; the giver's after a handover.
     #[getter]
     fn depart(&self) -> Trajectory {
         Trajectory(self.0.depart.clone())
     }
 
-    /// After a pick, what the hand holds.
+    /// After a pick, what the hand holds; after a handover, what the taker holds.
     #[getter]
     fn held(&self) -> Option<Held> {
         self.0.held.clone().map(Held)
@@ -299,6 +356,12 @@ impl TaskPlan {
     #[getter]
     fn placed(&self) -> Option<Obstacle> {
         self.0.placed.clone().map(Obstacle)
+    }
+
+    /// After a handover, the object's pose where it changed hands, in the robot's frame.
+    #[getter]
+    fn meeting(&self) -> Option<Pose> {
+        self.0.meeting.map(Pose)
     }
 
     /// Seconds its motions take, one after another.
@@ -343,7 +406,7 @@ impl CandidateStop {
 
     /// For a collision, what collides, nearest first. Empty for the rest. Obstacles are
     /// numbered as in the task's world; in a place, `len(world.obstacles)` is the object where it
-    /// is set down.
+    /// is set down, and in a handover, the object where it changes hands.
     #[getter]
     fn contacts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.0.contacts.to_py(py)
@@ -498,6 +561,56 @@ pub(crate) fn place(
     TaskResult::new(py, result)
 }
 
+/// Passes each task's held object to the hand that takes it, trying each meeting with each of the
+/// taker's grasps: candidate `meeting * len(grasps) + grasp`. The object stands where it changes
+/// hands, the giver's hand and the taker's fingers free to touch it; each hand's straight move
+/// holds the other's joints still. Run the transit and the approach, close the taker's gripper,
+/// open the giver's, then run the departure. `device` is the robot's without the object.
+#[pyfunction]
+#[pyo3(signature = (device, worlds, handovers, options = None))]
+pub(crate) fn handover(
+    py: Python<'_>,
+    device: &Device,
+    worlds: &Worlds,
+    handovers: &Bound<'_, PyAny>,
+    options: Option<&TaskOptions>,
+) -> PyResult<TaskResult> {
+    let handovers = Vec::<batchplan::Handover>::from_py(handovers)?;
+    let options = options.map(|o| o.0.clone()).unwrap_or_default();
+    let result = py
+        .detach(|| batchplan::handover(&device.device, &worlds.0, &handovers, &options))
+        .or_raise()?;
+    TaskResult::new(py, result)
+}
+
+/// Grasps for the hand that takes `held`'s object, for `Handover.grasps`, at the object's other
+/// end: the giver's grasp turned half about the axis nearest its approach other than the one
+/// toward the end it holds (from the same side), and about the axis across both (from the other
+/// side).
+#[pyfunction]
+pub(crate) fn handover_grasps<'py>(py: Python<'py>, held: &Held) -> PyResult<Bound<'py, PyTuple>> {
+    PyTuple::new(
+        py,
+        batchplan::handover_grasps(&held.0).into_iter().map(Pose),
+    )
+}
+
+/// Poses of `held`'s object where hand `to` may take it, for `Handover.meetings`: where both arms
+/// reach, in front of and halfway between their shoulders as `start` has them, the object at its
+/// tilt in the giver's hand, its held end facing the giver.
+#[pyfunction]
+pub(crate) fn handover_poses<'py>(
+    py: Python<'py>,
+    robot: &Robot,
+    start: &Bound<'_, PyAny>,
+    held: &Held,
+    to: usize,
+) -> PyResult<Bound<'py, PyTuple>> {
+    let start = Vec::<f32>::from_py(start)?;
+    let poses = batchplan::handover_poses(&robot.0, &start, &held.0, to);
+    PyTuple::new(py, poses.into_iter().map(Pose))
+}
+
 /// Grasps of a box, ball, cylinder or capsule in its frame, for `Pick.grasps`: the hand facing
 /// each side and closing across what fits between its fingers. With a `floor`, the object's pose
 /// places it: pass a world's obstacle as it stands. Raises `InputError` saying why where no grasp
@@ -533,6 +646,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TaskOptions>()?;
     m.add_class::<Pick>()?;
     m.add_class::<Place>()?;
+    m.add_class::<Handover>()?;
     m.add_class::<TaskStep>()?;
     m.add_class::<TaskPlan>()?;
     m.add_class::<CandidateStop>()?;
@@ -540,6 +654,9 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TaskResult>()?;
     m.add_function(wrap_pyfunction!(pick, m)?)?;
     m.add_function(wrap_pyfunction!(place, m)?)?;
+    m.add_function(wrap_pyfunction!(handover, m)?)?;
+    m.add_function(wrap_pyfunction!(handover_grasps, m)?)?;
+    m.add_function(wrap_pyfunction!(handover_poses, m)?)?;
     m.add_function(wrap_pyfunction!(grasps, m)?)?;
     m.add_function(wrap_pyfunction!(place_poses, m)?)?;
     Ok(())

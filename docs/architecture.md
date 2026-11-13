@@ -42,6 +42,7 @@ src/
 ├── tool_path.rs     # follow: the hand in straight lines through poses
 ├── join.rs          # join: consecutive motions without stopping between them
 ├── task.rs          # pick and place: a whole task in one call
+├── handover.rs      # one hand passing what it holds to another, on the task layer's steps
 ├── held.rs          # Held: a held object's spheres, its devices, problems grouped by hold
 ├── timing.rs        # Trajectory: a path timed within the limits; stops; moving starts
 ├── topp.rs          # time-optimal timing (TOPP-RA), smoothed for jerk
@@ -64,7 +65,7 @@ Modules are grouped by what they do, in the order a call meets them. `demos/` is
 
 - **`Device` is the only way to run a batch.** It holds the robot and a CPU or GPU backend behind the crate-private `Backend` trait, and checks every batch (array shapes, world indices, worlds uploaded to it) before either backend sees it. Worlds go onto it once (`Device::upload`) and every algorithm takes them as `&Worlds`.
 - **Both backends compute the same numbers.** The GPU kernels and `cpu.rs` implement the same math function by function, held together by parity tests. Searches run on CPU threads on either device, so results depend on neither the batch nor the device.
-- **Algorithms are plain functions.** `solve_ik`, `plan`, `follow`, `join`, `pick`, `place` and `datagen` take a device, its worlds and problems, and exchange the shared types. Each owns its seeding, validation and choice of answer. There are no planner plugins and no runtime configuration.
+- **Algorithms are plain functions.** `solve_ik`, `plan`, `follow`, `join`, `pick`, `place`, `handover` and `datagen` take a device, its worlds and problems, and exchange the shared types. Each owns its seeding, validation and choice of answer. There are no planner plugins and no runtime configuration.
 - **Batch-first.** Every call covers many problems, and each problem names its world by index, so one call spans many scenes. Results carry their problems (`solved()`).
 - **Seeds come from the problem.** Each problem's generator mixes the options' seed with the problem's own numbers, so a problem draws alike in any batch and on either device.
 

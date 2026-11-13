@@ -157,7 +157,8 @@ impl Place {
     }
 }
 
-/// How [`pick`] and [`place`] solve, follow, plan and time their steps.
+/// How [`pick`], [`place`] and [`handover`](crate::handover()) solve, follow, plan and time
+/// their steps.
 #[derive(Clone, Debug)]
 pub struct TaskOptions {
     /// IK at each grasp or release.
@@ -226,14 +227,17 @@ pub struct TaskPlan {
     /// The planned path from the start to where the move in begins; none for a task that leaves
     /// its transit out.
     pub transit: Option<Trajectory>,
-    /// The straight move in. The gripper closes (pick) or opens (place) at its end.
+    /// The straight move in. The gripper closes (pick) or opens (place) at its end; in a
+    /// handover the taker's closes, then the giver's opens.
     pub approach: Trajectory,
-    /// The straight move away: holding the object after a pick.
+    /// The straight move away: holding the object after a pick; the giver's after a handover.
     pub depart: Trajectory,
-    /// After a pick, what the hand holds.
+    /// After a pick, what the hand holds; after a handover, what the taker holds.
     pub held: Option<Held>,
     /// After a place, the object where it was set down, to add to the world.
     pub placed: Option<Obstacle>,
+    /// After a handover, the object's pose where it changed hands, in the robot's frame.
+    pub meeting: Option<Pose>,
 }
 
 impl TaskPlan {
@@ -276,7 +280,8 @@ pub struct CandidateStop {
     /// IK solution with the most clearance that reaches the grasp or release, holding the object
     /// at the solution nearest the rest where every one collides holding it (a place), or at the
     /// straight move's next step. Empty for the rest. Obstacles are numbered as in the task's
-    /// world; in a place, `world.obstacles.len()` is the object where it is set down.
+    /// world; in a place, `world.obstacles.len()` is the object where it is set down, and in a
+    /// handover, the object where it changes hands.
     pub contacts: Vec<Contact>,
 }
 
@@ -357,7 +362,7 @@ impl fmt::Display for TaskFailure {
     }
 }
 
-/// What [`pick`] or [`place`] did with each task.
+/// What [`pick`], [`place`] or [`handover`](crate::handover()) did with each task.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct TaskResult<T> {
@@ -456,6 +461,7 @@ pub fn pick(
             device,
             &touching,
             &mut live(&mut candidates, TaskStep::Reach),
+            &by_task,
             &o.ik,
         )?;
         let mut moving = live(&mut candidates, TaskStep::Approach);
@@ -870,6 +876,13 @@ pub struct GraspOptions {
     /// `floor` (meters): 1 cm, as MoveIt Grasps' minimum depth for the Panda. An object whose top
     /// is less than this over the floor has no grasp from above.
     pub overlap: f32,
+    /// How far toward the ends a grasp holds the object, along the side the fingers close on
+    /// rather than across, as a fraction of half that side, in [0, 1): 0, the middle. Above 0,
+    /// each grasp comes once toward each end; a hand that will pass the object to another
+    /// ([`handover`](crate::handover())) holds it toward one end, as 0.75, leaving the other to
+    /// the hand that takes it. A ball's grasps, and a round object's from its ends or closing along
+    /// its axis, stay in the middle; those closing around its side slide along the axis.
+    pub along: f32,
 }
 
 impl Default for GraspOptions {
@@ -881,6 +894,7 @@ impl Default for GraspOptions {
             tip: 0.0,
             floor: None,
             overlap: 0.01,
+            along: 0.0,
         }
     }
 }
@@ -913,6 +927,11 @@ pub fn grasps(object: &Obstacle, o: &GraspOptions) -> Result<Vec<Pose>> {
         ensure_input!(floor.is_finite(), "the floor must be finite, got {floor}");
     }
     ensure_input!(
+        (0.0..1.0).contains(&o.along),
+        "grasps hold the object toward its ends by a fraction in [0, 1), got {}",
+        o.along
+    );
+    ensure_input!(
         !matches!(object, Obstacle::Sdf { .. }),
         "a distance grid has no grasps"
     );
@@ -922,11 +941,11 @@ pub fn grasps(object: &Obstacle, o: &GraspOptions) -> Result<Vec<Pose>> {
     let fits = |width: f32| width <= o.opening;
     let placed = object.pose();
     // The hand's z axis along `toward`, its fingers closing along `closing`, `depth` in from a
-    // surface `surface` from the frame's origin, or less where that takes the frame or an open
-    // finger below the floor; none where that leaves less than `overlap` of the fingers in the
-    // object.
+    // surface `surface` from the frame's origin and `shift` along it, or less deep where that takes
+    // the frame or an open finger below the floor; none where that leaves less than `overlap` of
+    // the fingers in the object.
     let mut fitting = 0;
-    let mut grasp = |toward: Vec3, closing: Vec3, surface: f32| {
+    let mut grasp = |toward: Vec3, closing: Vec3, surface: f32, shift: Vec3| {
         fitting += 1;
         let rotation = Quat::from_mat3(&Mat3::from_cols(closing.cross(toward), closing, toward));
         let mut depth = o.depth.min(surface);
@@ -938,13 +957,13 @@ pub fn grasps(object: &Obstacle, o: &GraspOptions) -> Result<Vec<Pose>> {
             let down = (placed.rotation * toward).z;
             let spread = (placed.rotation * closing).z.abs() * o.opening / 2.0;
             let points = [(0.0, 0.0), (o.tip, spread)];
-            let height = |d: f32, (reach, below): (f32, f32)| {
-                placed.position.z + down * (d - surface + reach) - below
-            };
+            let base = placed.position.z + (placed.rotation * shift).z;
+            let height =
+                |d: f32, (reach, below): (f32, f32)| base + down * (d - surface + reach) - below;
             if down < -1e-6 {
                 for (reach, below) in points {
                     if height(depth, (reach, below)) < floor {
-                        depth = surface - reach + (floor + below - placed.position.z) / down;
+                        depth = surface - reach + (floor + below - base) / down;
                     }
                 }
             }
@@ -955,7 +974,16 @@ pub fn grasps(object: &Obstacle, o: &GraspOptions) -> Result<Vec<Pose>> {
                 return None;
             }
         }
-        Some(Pose::new(-toward * (surface - depth), rotation))
+        Some(Pose::new(shift - toward * (surface - depth), rotation))
+    };
+    // Where along a side of half length `half`, running along `side`, the grasps hold: the middle,
+    // or toward each end.
+    let shifts = |side: Vec3, half: f32| -> Vec<Vec3> {
+        if o.along == 0.0 {
+            vec![Vec3::ZERO]
+        } else {
+            [1.0, -1.0].map(|end| side * end * o.along * half).to_vec()
+        }
     };
     let mut out = vec![];
     let around = |turn: usize| {
@@ -964,11 +992,12 @@ pub fn grasps(object: &Obstacle, o: &GraspOptions) -> Result<Vec<Pose>> {
     };
     let narrowest = match *object {
         Obstacle::Cuboid { half_extents, .. } => {
-            sides(half_extents, &fits, &mut grasp, &mut out);
+            sides(half_extents, &fits, &shifts, &mut grasp, &mut out);
             2.0 * half_extents.min_element()
         }
         Obstacle::Sphere { radius, .. } => {
-            sides(Vec3::splat(radius), &fits, &mut grasp, &mut out);
+            let middle = |_: Vec3, _: f32| vec![Vec3::ZERO];
+            sides(Vec3::splat(radius), &fits, &middle, &mut grasp, &mut out);
             2.0 * radius
         }
         Obstacle::Cylinder {
@@ -989,17 +1018,20 @@ pub fn grasps(object: &Obstacle, o: &GraspOptions) -> Result<Vec<Pose>> {
                 let outward = around(turn);
                 for sign in [1.0, -1.0] {
                     if fits(2.0 * radius) {
-                        out.extend(grasp(-outward, sign * Vec3::Z.cross(outward), radius));
+                        for shift in shifts(Vec3::Z, length) {
+                            let closing = sign * Vec3::Z.cross(outward);
+                            out.extend(grasp(-outward, closing, radius, shift));
+                        }
                     }
                     if fits(2.0 * end) {
-                        out.extend(grasp(-outward, sign * Vec3::Z, radius));
+                        out.extend(grasp(-outward, sign * Vec3::Z, radius, Vec3::ZERO));
                     }
                 }
             }
             if fits(2.0 * radius) {
                 for sign in [1.0, -1.0] {
                     for turn in 0..o.turns {
-                        out.extend(grasp(-sign * Vec3::Z, around(turn), end));
+                        out.extend(grasp(-sign * Vec3::Z, around(turn), end, Vec3::ZERO));
                     }
                 }
             }
@@ -1027,19 +1059,25 @@ pub fn grasps(object: &Obstacle, o: &GraspOptions) -> Result<Vec<Pose>> {
     Ok(out)
 }
 
-/// A box's grasps: from each face, closing along each axis of the face it fits across, both ways.
+/// A box's grasps: from each face, closing along each axis of the face it fits across, both ways,
+/// at each of `shifts` along the face's other axis.
 fn sides(
     half: Vec3,
     fits: &impl Fn(f32) -> bool,
-    grasp: &mut impl FnMut(Vec3, Vec3, f32) -> Option<Pose>,
+    shifts: &impl Fn(Vec3, f32) -> Vec<Vec3>,
+    grasp: &mut impl FnMut(Vec3, Vec3, f32, Vec3) -> Option<Pose>,
     out: &mut Vec<Pose>,
 ) {
     for face in 0..3 {
         for sign in [1.0, -1.0] {
             let outward = Vec3::AXES[face] * sign;
             for across in (0..3).filter(|&a| a != face && fits(2.0 * half[a])) {
+                let along = 3 - face - across;
                 for turn in [1.0, -1.0] {
-                    out.extend(grasp(-outward, Vec3::AXES[across] * turn, half[face]));
+                    for shift in shifts(Vec3::AXES[along], half[along]) {
+                        let closing = Vec3::AXES[across] * turn;
+                        out.extend(grasp(-outward, closing, half[face], shift));
+                    }
                 }
             }
         }
@@ -1047,10 +1085,10 @@ fn sides(
 }
 
 /// One candidate of a task on its way through the steps.
-struct Candidate {
-    task: usize,
+pub(crate) struct Candidate {
+    pub(crate) task: usize,
     /// Its index among the task's grasps or poses.
-    index: usize,
+    pub(crate) index: usize,
     /// Its task's world in the batch given.
     world: u32,
     /// The world its start is checked and its transit planned in.
@@ -1076,10 +1114,29 @@ struct Candidate {
     approach: Vec<f32>,
     depart: Vec<f32>,
     transit: Vec<f32>,
+    /// In a handover: the giver, which holds the object at the grasp too, and its IK frame's pose
+    /// there; it moves away, the joints the other hand moves held on each straight move, and the
+    /// object's pose where it changes hands.
+    pub(crate) giver: Option<Giver>,
+}
+
+/// What a handover's candidate asks of the hand that gives the object.
+pub(crate) struct Giver {
+    pub(crate) hand: usize,
+    /// Its IK frame's pose at the meeting.
+    pub(crate) at: Pose,
+    /// The joints held still on the taker's move in (the giver's) and on the giver's move away
+    /// (the taker's).
+    pub(crate) hold_in: Vec<usize>,
+    pub(crate) hold_away: Vec<usize>,
+    /// The joints neither hand moves, which wait where the start has them through the transit.
+    pub(crate) idle: Vec<usize>,
+    /// The object's pose where it changes hands.
+    pub(crate) meeting: Pose,
 }
 
 impl Candidate {
-    fn new(
+    pub(crate) fn new(
         task: usize,
         index: usize,
         steps: &Steps<'_>,
@@ -1104,12 +1161,18 @@ impl Candidate {
             approach: vec![],
             depart: vec![],
             transit: vec![],
+            giver: None,
         }
+    }
+
+    /// The hand that moves away: its own, or a handover's giver.
+    fn away_hand(&self) -> usize {
+        self.giver.as_ref().map_or(self.hand, |g| g.hand)
     }
 }
 
 /// The candidates that have got to `step`.
-fn live(candidates: &mut [Candidate], step: TaskStep) -> Vec<&mut Candidate> {
+pub(crate) fn live(candidates: &mut [Candidate], step: TaskStep) -> Vec<&mut Candidate> {
     let passed = STEPS
         .iter()
         .position(|&s| s == step)
@@ -1121,7 +1184,7 @@ fn live(candidates: &mut [Candidate], step: TaskStep) -> Vec<&mut Candidate> {
 }
 
 /// `live` in groups by the holder of their task (`holder_of`), a group per holder.
-fn by_holder<'a>(
+pub(crate) fn by_holder<'a>(
     live: Vec<&'a mut Candidate>,
     holder_of: &[usize],
     holders: &[Device],
@@ -1135,7 +1198,7 @@ fn by_holder<'a>(
 
 /// Whether each of `starting` starts clear of its task's transit world (`worlds_of`). One whose
 /// task plans no transit passes unchecked.
-fn start(
+pub(crate) fn start(
     device: &Device,
     worlds: &Worlds,
     starting: &mut [&mut Candidate],
@@ -1179,17 +1242,19 @@ fn start(
     Ok(())
 }
 
-/// IK at each candidate's grasp or release in its task's world of `worlds`, nearest its rest.
-fn reach(
+/// IK at each candidate's grasp or release in the world of `worlds` that `worlds_of` gives it,
+/// nearest its rest.
+pub(crate) fn reach(
     device: &Device,
     worlds: &Worlds,
     live: &mut [&mut Candidate],
+    worlds_of: &dyn Fn(usize, &Candidate) -> u32,
     o: &IkOptions,
 ) -> Result<()> {
     if live.is_empty() {
         return Ok(());
     }
-    let solved = solve(device, worlds, live, &by_task, o)?;
+    let solved = solve(device, worlds, live, worlds_of, o)?;
     for (i, c) in live.iter_mut().enumerate() {
         if let Some(q) = solved.nearest(i, &c.rest) {
             c.grasped = q.to_vec();
@@ -1215,7 +1280,10 @@ fn solve(
         .map(|(k, c)| IkProblem {
             world: worlds_of(k, c),
             targets: (0..hands)
-                .map(|h| (h == c.hand).then_some(c.poses[1]))
+                .map(|h| match &c.giver {
+                    Some(giver) if giver.hand == h => Some(giver.at),
+                    _ => (h == c.hand).then_some(c.poses[1]),
+                })
                 .collect(),
             seed: Some(c.rest.clone()),
             hold: vec![],
@@ -1330,7 +1398,7 @@ fn first_free(
 
 /// The straight moves.
 #[derive(Clone, Copy)]
-enum Leg {
+pub(crate) enum Leg {
     /// In to the grasp or release, followed backward from there and reversed.
     In,
     /// Away from it.
@@ -1340,7 +1408,7 @@ enum Leg {
 /// Each candidate's straight move from its grasp or release, in the world of `worlds` that
 /// `worlds_of` gives it: kept if it covers all of it, or at least `o.min_fraction` where an obstacle
 /// stops it.
-fn straight(
+pub(crate) fn straight(
     device: &Device,
     worlds: &Worlds,
     live: &mut [&mut Candidate],
@@ -1358,12 +1426,19 @@ fn straight(
         .map(|(k, c)| ToolPath {
             world: worlds_of(k, c),
             start: c.grasped.clone(),
-            hand: c.hand,
+            hand: match leg {
+                Leg::In => c.hand,
+                Leg::Away => c.away_hand(),
+            },
             waypoints: vec![match leg {
                 Leg::In => c.poses[0],
                 Leg::Away => c.poses[2],
             }],
-            hold: vec![],
+            hold: match (&c.giver, leg) {
+                (None, _) => vec![],
+                (Some(giver), Leg::In) => giver.hold_in.clone(),
+                (Some(giver), Leg::Away) => giver.hold_away.clone(),
+            },
             holding: None,
         })
         .collect();
@@ -1390,7 +1465,7 @@ fn straight(
 /// hands move held where they rest there already, keeping its task's `constraints`. A candidate
 /// whose move in begins where they break gets none. One whose task plans no transit passes
 /// without one.
-fn transit(
+pub(crate) fn transit(
     device: &Device,
     worlds: &Worlds,
     live: &mut [&mut Candidate],
@@ -1415,9 +1490,12 @@ fn transit(
         .iter()
         .map(|&k| {
             let c = &live[k];
+            let idle = match &c.giver {
+                Some(giver) => giver.idle.clone(),
+                None => robot.idle_joints(c.hand),
+            };
             PlanProblem {
-                hold: robot
-                    .idle_joints(c.hand)
+                hold: idle
                     .into_iter()
                     .filter(|&j| c.rest[j] == c.start[j])
                     .collect(),
@@ -1437,7 +1515,7 @@ fn transit(
 
 /// Each task's candidates that passed every step, timed, quickest first, with what they leave
 /// held and placed; or where each candidate stopped.
-fn choose(
+pub(crate) fn choose(
     device: &Device,
     tasks: usize,
     candidates: &[Candidate],
@@ -1454,12 +1532,12 @@ fn choose(
     let time = |c: &&Candidate| -> Result<TaskPlan> {
         // The cap on the straight moves; with `tool_speed_near`, it holds near the hand's
         // position at `q`.
-        let speed = |q: &[f32]| HandSpeed {
-            hand: c.hand,
+        let speed = |hand: usize, q: &[f32]| HandSpeed {
+            hand,
             linear: o.tool_speed,
             angular: f32::INFINITY,
             near: o.tool_speed_near.map(|radius| Near {
-                point: robot.ee_pose(q, c.hand).position,
+                point: robot.ee_pose(q, hand).position,
                 radius,
             }),
         };
@@ -1473,10 +1551,15 @@ fn choose(
                 true => Some(Trajectory::try_new(robot, &c.transit, 1.0)?),
                 false => None,
             },
-            approach: Trajectory::with_hand_speed(robot, &c.approach, &[speed(in_end)])?,
-            depart: Trajectory::with_hand_speed(robot, &c.depart, &[speed(away_start)])?,
+            approach: Trajectory::with_hand_speed(robot, &c.approach, &[speed(c.hand, in_end)])?,
+            depart: Trajectory::with_hand_speed(
+                robot,
+                &c.depart,
+                &[speed(c.away_hand(), away_start)],
+            )?,
             held,
             placed,
+            meeting: c.giver.as_ref().map(|g| g.meeting),
         })
     };
     let timed: Vec<TaskPlan> =
@@ -1542,7 +1625,7 @@ pub(crate) fn behind(pose: Pose, distance: f32) -> Pose {
 
 /// That task `i` has `poses` (its grasps or poses, called `what`), each finite with a unit
 /// rotation.
-fn check_poses(i: usize, what: &str, poses: &[Pose]) -> Result<()> {
+pub(crate) fn check_poses(i: usize, what: &str, poses: &[Pose]) -> Result<()> {
     ensure_input!(!poses.is_empty(), "task {i} has no {what}s");
     if let Some((k, p)) = poses.iter().enumerate().find(|(_, p)| !p.is_unit()) {
         return Err(input!(
@@ -1552,7 +1635,7 @@ fn check_poses(i: usize, what: &str, poses: &[Pose]) -> Result<()> {
     Ok(())
 }
 
-fn check_options(o: &TaskOptions) -> Result<()> {
+pub(crate) fn check_options(o: &TaskOptions) -> Result<()> {
     ensure_input!(
         o.tool_speed > 0.0,
         "the tool speed must be positive, got {}",
@@ -1573,12 +1656,12 @@ fn check_options(o: &TaskOptions) -> Result<()> {
 }
 
 /// The world each step of a task runs in, and whether it plans its transit.
-struct Steps<'a> {
-    world: u32,
-    transit_world: u32,
-    depart_world: u32,
-    transit: bool,
-    constraints: &'a [HandConstraint],
+pub(crate) struct Steps<'a> {
+    pub(crate) world: u32,
+    pub(crate) transit_world: u32,
+    pub(crate) depart_world: u32,
+    pub(crate) transit: bool,
+    pub(crate) constraints: &'a [HandConstraint],
 }
 
 impl<'a> Steps<'a> {
@@ -1604,7 +1687,7 @@ impl<'a> Steps<'a> {
 }
 
 /// Task `i`'s world, after checking its steps' worlds, its start and its hand.
-fn check_task<'a>(
+pub(crate) fn check_task<'a>(
     robot: &Robot,
     worlds: &'a Worlds,
     i: usize,
