@@ -427,9 +427,9 @@ fn obstacle_distance(o: &Prepared, p: Vec3) -> (f32, Vec3) {
     }
 }
 
-/// `obstacle_distance` with a grid's lookup out of line, for every obstacle but a grid: inlined, the
-/// lookup gave every check of a box or a sphere its stack frame and saved registers. Itself out of
-/// line, as `obstacle_distance` is, so the closures that inline the checks keep their size.
+/// `obstacle_distance` with a grid's lookup out of line, for every obstacle but a grid: inlined,
+/// the lookup gave every check of a box or a sphere its stack frame and saved registers. Itself
+/// out of line, as `obstacle_distance` is, so the closures that inline the checks keep their size.
 #[inline(never)]
 fn primitive_distance(o: &Prepared, p: Vec3) -> (f32, Vec3) {
     match *o {
@@ -449,14 +449,8 @@ fn primitive_distance(o: &Prepared, p: Vec3) -> (f32, Vec3) {
             radius,
             half_length,
         } => world::capsule_distance(rot, center, radius, half_length, p),
-        Prepared::Sdf { .. } => grid_distance_apart(o, p),
+        Prepared::Sdf { .. } => obstacle_distance(o, p),
     }
-}
-
-/// `obstacle_distance` of a distance grid, out of line, for `primitive_distance`.
-#[inline(never)]
-fn grid_distance_apart(o: &Prepared, p: Vec3) -> (f32, Vec3) {
-    obstacle_distance(o, p)
 }
 
 /// At least how far a distance grid is from every point within `radius` of `p`, where that is
@@ -510,9 +504,9 @@ fn collision_among_grids<const GRADIENT: bool, const CLEARANCE: bool>(
     collision_with::<GRADIENT, true, CLEARANCE>(robot, world, fk, w, grad, buffers)
 }
 
-/// `collision`, ruling distance grids out by their boxes with `GRIDS`. Without it the code is
-/// what worlds without grids ran before grids could be ruled out, instruction for instruction: a
-/// branch more in these loops slows them by percents, so the rule is compiled into a copy.
+/// `collision`, ruling distance grids out by their boxes with `GRIDS`. Without it the code has no
+/// such branch: a branch more in these loops slows them by percents, so the rule is compiled into a
+/// copy.
 #[inline(always)]
 fn collision_with<const GRADIENT: bool, const GRIDS: bool, const CLEARANCE: bool>(
     robot: &Robot,

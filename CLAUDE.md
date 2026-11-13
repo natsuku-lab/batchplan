@@ -131,7 +131,7 @@ The code follows [Google's Rust style guide](https://google.github.io/styleguide
   - A single run proves nothing.
   - Cover every class the change touches (CPU and GPU, each robot, batch sizes); none may regress.
 - **Decide inlining in the code, not by how the crate is split.** This workspace builds batchplan as one codegen unit (`Cargo.toml`), so its A/B runs don't redraw when unrelated code changes; a crate that depends on batchplan builds it with its own profile, usually sixteen units, and gets whatever the code decides.
-  - Keep `#[inline]` on hot functions the CPU backend calls across modules (`Robot::fk_into`, `Fk::dpoint`, `box_distance`, `sphere_distance`).
+  - Keep `#[inline]` on hot functions the CPU backend calls across modules (`Robot::fk_into`, `Fk::dpoint`).
   - Pin with `#[inline(always)]` a hot callee that a profile shows out of line in either build (`cpu::collision`, `topp::derivatives`, `sdf::grid_distance`, the world's distance functions).
   - Keep out of a hot function what most of its calls never run: the collision checks measure every obstacle but a grid through `primitive_distance`, which leaves the grid lookup out of line, since inlined it gave every check of a box or sphere its stack frame. Or compile it into a copy of its own (`PathOptimizer::rounds::<REGION>`).
   - Compare both builds (the default with `--config 'profile.release.package.batchplan.codegen-units=16'`), on the Ryzen as well as the M4 Pro: x86 and ARM inline differently.
