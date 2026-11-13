@@ -837,6 +837,7 @@ fn line(robot: &Robot, device: &Device) -> (Trajectory, Vec3, Vec3) {
         start: robot.default_q().to_vec(),
         hand: 0,
         waypoints: vec![to],
+        hold: vec![],
         holding: None,
     };
     let result = batchplan::follow(device, &worlds, &[path], &ToolPathOptions::default()).unwrap();
@@ -1217,6 +1218,7 @@ fn joined_into_a_move_in(
         start: robot.default_q().to_vec(),
         hand: 0,
         waypoints: vec![Pose::new(bottom, ready.rotation)],
+        hold: vec![],
         holding: None,
     };
     let moved = batchplan::follow(device, &worlds, &[path], &ToolPathOptions::default()).unwrap();

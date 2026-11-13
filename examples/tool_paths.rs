@@ -40,6 +40,7 @@ fn main() -> Result<()> {
         start: start.clone(),
         hand: 0,
         waypoints: vec![to],
+        hold: vec![],
         holding: None,
     };
     let moves: Vec<ToolPath> = (0..64)

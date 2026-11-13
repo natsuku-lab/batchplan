@@ -984,6 +984,7 @@ pub fn handover(
         start: start.to_vec(),
         hand,
         waypoints: vec![to],
+        hold: vec![],
         holding: None,
     };
     let taking = going.iter().map(|e| {

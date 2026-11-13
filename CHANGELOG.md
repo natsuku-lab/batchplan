@@ -10,6 +10,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- **Breaking:** a tool path can hold joints still: `ToolPath::hold` lists joints that stay where
+  `start` has them along the whole path, as `PlanProblem::hold` and `IkProblem::hold` do, for a
+  hand whose arm shares joints (a torso) with one that holds what it reaches for. The hand follows
+  with the joints left, and stops where they cannot keep it on the path. A `ToolPath` literal
+  needs the new field (`hold: vec![]`). In Python, `ToolPath(..., hold=[0, 1])`.
 - **Breaking:** the straight moves of `pick` and `place` can be capped near the grasp or release
   alone: `TaskOptions::tool_speed_near` (meters) holds `tool_speed` within that distance of where
   the hand grasps or lets go, which the move in ends at and the move away starts from, and the

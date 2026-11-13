@@ -1077,8 +1077,8 @@ impl Reach {
     }
 
     /// Steps `q` toward hand `hand`'s `target` until it is within `o`'s tolerances or
-    /// `o.iterations` steps have run, as `ik_step` does without its collision push. Returns
-    /// whether it got there.
+    /// `o.iterations` steps have run, as `ik_step` does without its collision push, moving only
+    /// the joints `moving` marks where it is given. Returns whether it got there.
     pub(crate) fn reach(
         &mut self,
         robot: &Robot,
@@ -1086,6 +1086,7 @@ impl Reach {
         target: &(Vec3, Mat3),
         q: &mut [f32],
         o: &IkOptions,
+        moving: Option<&[bool]>,
     ) -> bool {
         let mut a = [0.0f32; 36];
         for step in 0..=o.iterations {
@@ -1098,7 +1099,7 @@ impl Reach {
             if step == o.iterations {
                 break;
             }
-            hand_system(robot, &self.fk, hand, o, None, &mut self.jac, &mut a);
+            hand_system(robot, &self.fk, hand, o, moving, &mut self.jac, &mut a);
             self.dq.fill(0.0);
             add_jt(&self.jac, &chol6_solve(&a, e), &mut self.dq);
             let largest = self.dq.iter().fold(0.0f32, |m, v| m.max(v.abs()));

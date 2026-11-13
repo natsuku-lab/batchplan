@@ -168,7 +168,7 @@ fn main() -> Result<(), Error> {
 
 ## Moving the hand along a path
 
-`follow(&device, &worlds, &[ToolPath], &ToolPathOptions)` moves a hand through poses: in a straight line from each to the next, turning by the shortest rotation, as MoveIt's Cartesian paths do. Each `ToolPath` names its world, its start configuration, the hand, and the `waypoints` after the start; only the joints that move that hand move. It is what an approach, a lift or a pour asks for, where a planned path would take any route.
+`follow(&device, &worlds, &[ToolPath], &ToolPathOptions)` moves a hand through poses: in a straight line from each to the next, turning by the shortest rotation, as MoveIt's Cartesian paths do. Each `ToolPath` names its world, its start configuration, the hand, and the `waypoints` after the start; only the joints that move that hand move, and of those, `hold` keeps where the start has them: on a robot whose arms share joints (a torso), the other arm's, as it holds what this hand reaches for. The hand follows with the joints left, and stops where they cannot keep it on the path. It is what an approach, a lift or a pour asks for, where a planned path would take any route.
 
 ```rust,no_run
 use batchplan::glam::Vec3;
@@ -190,6 +190,7 @@ fn main() -> Result<(), Error> {
         start,
         hand: 0,
         waypoints: vec![down],
+        hold: vec![],
         holding: None,
     };
     let result = batchplan::follow(&device, &worlds, &[path], &ToolPathOptions::default())?;
@@ -213,7 +214,7 @@ fn main() -> Result<(), Error> {
 
 - **Steps.** The hand moves at most `step` (5 mm) or `rotation_step` (0.05 rad) between configurations, each solved by damped least squares from the one before, in at most `iterations` (30) and to a tenth of the precision. Where the joints' straight motion between two configurations would take the hand more than `precision` (1 mm) or `rotation_precision` (0.01 rad) off the path at its middle, the step is halved, up to 8 times.
 - **The motion.** A cubic B-spline passes through every configuration and rests at both ends. Where it would stray from the path by more than the precision, as at a sharp turn, or pass a joint limit, as where a joint arrives at its limit and stays, it stops at the configuration there instead. It is checked for collision at the planner's resolution, honouring [allowed contacts](perception.md#allowed-contacts), so an approach can end with the fingers around what they grasp.
-- **How far it got.** A motion that cannot finish goes as far as it can. `fraction` says how much of the path it covers, by its steps, and `stopped` why it ended there: `Unreachable` (beyond reach or joint limits, or at a singularity IK cannot step through), `Collision`, or `Jump` (configurations either side, but no motion between them keeps the hand on the path, as when IK leaps to another branch). Near a singularity, IK given more `iterations` may instead carry the arm through, swinging the wrist on the way while the hand keeps to the path. Each names the pose it stopped before. `paths` holds the motion that does run, ready for timing.
+- **How far it got.** A motion that cannot finish goes as far as it can. `fraction` says how much of the path it covers, by its steps, and `stopped` why it ended there: `Unreachable` (beyond reach or joint limits, at a singularity IK cannot step through, or where the joints left by `hold` cannot keep the hand on the path), `Collision`, or `Jump` (configurations either side, but no motion between them keeps the hand on the path, as when IK leaps to another branch). Near a singularity, IK given more `iterations` may instead carry the arm through, swinging the wrist on the way while the hand keeps to the path. Each names the pose it stopped before. `paths` holds the motion that does run, ready for timing.
 - **Timing.** `Trajectory::with_hand_speed` times the motion as fast as the joints' limits allow with the hand under caps on its speed and on how fast it turns ([below](#executable-trajectories)); `Trajectory::try_new` times it by the joints alone.
 - **Speed.** Paths are searches, run in parallel on the device's threads like plans. One 10 cm move takes 0.042 ms on one of the Ryzen's threads and 0.035 ms on the M4 Pro's; 64 take 0.27 ms on 32 threads and 0.37 ms on 14 ([Benchmarks](benchmarks.md#tool-paths)).
 

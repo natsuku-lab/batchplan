@@ -114,6 +114,7 @@ fn main() -> Result<()> {
                     .chain(around)
                     .chain([above, ready])
                     .collect(),
+                hold: vec![],
                 holding: None,
             }
         })
