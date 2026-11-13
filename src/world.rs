@@ -694,8 +694,10 @@ pub(crate) fn frame(rotation: Quat) -> Mat3 {
     Mat3::from_quat(unit(rotation))
 }
 
-/// Must stay in sync with `obstacle_distance` in kernels.wgsl.
-#[inline]
+/// Must stay in sync with `obstacle_distance` in kernels.wgsl. Out of line: inlined into the CPU's
+/// `obstacle_distance`, its lookup gave every check of a box or sphere its stack frame and saved
+/// registers, 38% of IK's time among boxes on a Ryzen.
+#[inline(never)]
 pub(crate) fn sdf_distance(r: Mat3, center: Vec3, grid: &SdfGrid, p: Vec3) -> (f32, Vec3) {
     let (d, g) = sdf::grid_distance(grid, r.transpose() * (p - center));
     (d, r * g)

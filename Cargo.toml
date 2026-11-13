@@ -71,6 +71,12 @@ disallowed_methods = "allow"
 [profile.release]
 debug = 1
 
+# batchplan as one codegen unit: its hot code then compiles the same whatever else in the crate
+# changes, so an A/B measures the change rather than a new split of the crate. A crate that depends
+# on batchplan builds it with its own profile (docs/benchmarks.md#reproducing).
+[profile.release.package.batchplan]
+codegen-units = 1
+
 [profile.test]
 opt-level = 3
 

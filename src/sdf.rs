@@ -906,7 +906,7 @@ fn at_most(d: f32) -> f16 {
 }
 
 /// Must stay in sync with `grid_distance` in kernels.wgsl.
-#[inline]
+#[inline(always)]
 pub(crate) fn grid_distance(g: &SdfGrid, p: Vec3) -> (f32, Vec3) {
     let top = (UVec3::from(g.dims) - 1).as_vec3();
     let x = (p - g.origin) / g.voxel;
@@ -1028,18 +1028,7 @@ pub(crate) fn squared_edt(occupied: &[bool], [nx, ny, nz]: [usize; 3]) -> Vec<u3
             .map(|&o| if o == site { 0 } else { FAR })
             .collect();
         d.par_chunks_mut(slab)
-            .for_each_init(Line::default, |line, s| {
-                for row in s.chunks_mut(nx) {
-                    line.transform(row.iter().copied());
-                    row.copy_from_slice(&line.out);
-                }
-                for x in 0..nx {
-                    line.transform((0..ny).map(|y| s[x + nx * y]));
-                    for y in 0..ny {
-                        s[x + nx * y] = line.out[y];
-                    }
-                }
-            });
+            .for_each_init(Line::default, |line, s| slab_passes(line, s, nx, ny));
         d
     });
     // The z pass, column by column, keeping each voxel's distance to the other kind.
@@ -1048,13 +1037,7 @@ pub(crate) fn squared_edt(occupied: &[bool], [nx, ny, nz]: [usize; 3]) -> Vec<u3
         .par_chunks_mut(nz)
         .enumerate()
         .for_each_init(Line::default, |line, (c, column)| {
-            for (site, plane) in [true, false].into_iter().zip(&planes) {
-                line.transform((0..nz).map(|z| plane[c + slab * z]));
-                let other_kind = (0..nz).filter(|&z| occupied[c + slab * z] != site);
-                for z in other_kind {
-                    column[z] = line.out[z];
-                }
-            }
+            column_pass(line, column, c, slab, occupied, &planes);
         });
     let [mut out, _] = planes;
     out.par_chunks_mut(slab).enumerate().for_each(|(z, s)| {
@@ -1063,6 +1046,42 @@ pub(crate) fn squared_edt(occupied: &[bool], [nx, ny, nz]: [usize; 3]) -> Vec<u3
         }
     });
     out
+}
+
+/// `squared_edt`'s x and y passes over the z slab `s`. Out of line, as is `column_pass`: inlined
+/// into rayon's splitting of the slabs, the passes ran 2% slower.
+#[inline(never)]
+fn slab_passes(line: &mut Line, s: &mut [u32], nx: usize, ny: usize) {
+    for row in s.chunks_mut(nx) {
+        line.transform(row.iter().copied());
+        row.copy_from_slice(&line.out);
+    }
+    for x in 0..nx {
+        line.transform((0..ny).map(|y| s[x + nx * y]));
+        for y in 0..ny {
+            s[x + nx * y] = line.out[y];
+        }
+    }
+}
+
+/// `squared_edt`'s z pass over column `c`, keeping each voxel's distance to the other kind.
+#[inline(never)]
+fn column_pass(
+    line: &mut Line,
+    column: &mut [u32],
+    c: usize,
+    slab: usize,
+    occupied: &[bool],
+    planes: &[Vec<u32>; 2],
+) {
+    let nz = column.len();
+    for (site, plane) in [true, false].into_iter().zip(planes) {
+        line.transform((0..nz).map(|z| plane[c + slab * z]));
+        let other_kind = (0..nz).filter(|&z| occupied[c + slab * z] != site);
+        for z in other_kind {
+            column[z] = line.out[z];
+        }
+    }
 }
 
 /// No site along the line.

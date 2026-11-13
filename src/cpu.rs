@@ -328,7 +328,7 @@ struct CollisionOut {
 }
 
 /// A configuration's sphere centres and per-link collision wrenches (force, and moment about the
-/// world origin).
+/// world origin). The wrenches are zero between calls: `collision` zeroes each as it reads it.
 struct CollisionBuffers {
     centers: Vec<Vec3>,
     force: Vec<Vec3>,
@@ -497,10 +497,6 @@ fn collision_with<const GRADIENT: bool, const GRIDS: bool, const CLEARANCE: bool
         *c = rot[sp.link] * sp.center + pos[sp.link];
     }
     let sc = &sc[..];
-    if GRADIENT {
-        force.fill(Vec3::ZERO);
-        moment.fill(Vec3::ZERO);
-    }
     let mut touched = false;
     let (mut cost, mut wmin, mut smin) = (0.0f32, FAR, FAR);
     // An obstacle farther from a link's bounding sphere than the margin cannot add cost through the
@@ -625,21 +621,22 @@ fn collision_with<const GRADIENT: bool, const GRIDS: bool, const CLEARANCE: bool
             self_clearance: smin,
         };
     }
-    // Each link's wrench reaches the joints at and above it, leaves first.
+    // Each link's wrench reaches the joints at and above it, leaves first, and is left zero for
+    // the next call.
     for i in (0..robot.links.len()).rev() {
         let link = &robot.links[i];
+        let (f, m) = (force[i], moment[i]);
+        (force[i], moment[i]) = (Vec3::ZERO, Vec3::ZERO);
         match link.joint {
             JointKind::Revolute { dof, curve, .. } => {
-                grad[dof] +=
-                    fk.rate(i, &curve) * fk.axis[i].dot(moment[i] - pos[i].cross(force[i]));
+                grad[dof] += fk.rate(i, &curve) * fk.axis[i].dot(m - pos[i].cross(f));
             }
             JointKind::Prismatic { dof, curve, .. } => {
-                grad[dof] += fk.rate(i, &curve) * fk.axis[i].dot(force[i])
+                grad[dof] += fk.rate(i, &curve) * fk.axis[i].dot(f)
             }
             JointKind::Fixed => {}
         }
         if let Some(p) = link.parent {
-            let (f, m) = (force[i], moment[i]);
             force[p] += f;
             moment[p] += m;
         }
@@ -827,11 +824,14 @@ fn hand_system(
 ) {
     let n = robot.dof();
     hand_jacobian(robot, fk, h, o, moving, jac);
+    // Rows as slices of `n`, so the inner loop needs no bounds checks whatever else is inlined.
     for r in 0..6 {
+        let row = &jac[r * n..(r + 1) * n];
         for c in 0..=r {
+            let other = &jac[c * n..(c + 1) * n];
             let mut s = 0.0;
             for j in 0..n {
-                s += jac[r * n + j] * jac[c * n + j];
+                s += row[j] * other[j];
             }
             if r == c {
                 s += o.damping * o.damping;
@@ -866,10 +866,12 @@ fn stack_system(
         }
     }
     for r in 0..m {
+        let row = &stack[r * n..(r + 1) * n];
         for c in 0..=r {
+            let other = &stack[c * n..(c + 1) * n];
             let mut s = 0.0;
             for j in 0..n {
-                s += stack[r * n + j] * stack[c * n + j];
+                s += row[j] * other[j];
             }
             if r == c {
                 s += o.damping * o.damping;
@@ -1161,13 +1163,13 @@ impl Reach {
 }
 
 /// Collision gradient of the trajectory cost at sample `s` of span `span`, with respect to the
-/// configuration there, and the gradient of `region`'s cost if any. Must match `traj_samples` in
-/// kernels.wgsl.
+/// configuration there, and with `REGION` the gradient of `region`'s cost if any. Must match
+/// `traj_samples` in kernels.wgsl.
 #[expect(
     clippy::too_many_arguments,
     reason = "the scalar twin of a kernel, which takes the same inputs"
 )]
-fn traj_sample_grad(
+fn traj_sample_grad<const REGION: bool>(
     robot: &Robot,
     world: &CpuWorld,
     region: Option<&Region>,
@@ -1196,7 +1198,7 @@ fn traj_sample_grad(
         out,
         &mut scratch.collision,
     );
-    if let Some(region) = region {
+    if REGION && let Some(region) = region {
         region.cost(robot, &scratch.fk, Some(out), &mut scratch.constraint);
     }
 }
@@ -1256,13 +1258,13 @@ fn candidate(robot: &Robot, x: &[f32], d: &[f32], alpha: f32, t: usize, j: usize
     (x[i] + alpha * d[i]).clamp(lo, hi)
 }
 
-/// Collision cost at sample `s` of span `span` of the candidate path `x + alpha d`, and `region`'s
-/// if any. Must match `traj_costs` in kernels.wgsl.
+/// Collision cost at sample `s` of span `span` of the candidate path `x + alpha d`, and with
+/// `REGION` `region`'s if any. Must match `traj_costs` in kernels.wgsl.
 #[expect(
     clippy::too_many_arguments,
     reason = "the scalar twin of a kernel, which takes the same inputs"
 )]
-fn traj_cost(
+fn traj_cost<const REGION: bool>(
     robot: &Robot,
     world: &CpuWorld,
     region: Option<&Region>,
@@ -1290,9 +1292,10 @@ fn traj_cost(
         &mut scratch.collision,
     )
     .cost;
-    cost + region.map_or(0.0, |r| {
-        r.cost(robot, &scratch.fk, None, &mut scratch.constraint)
-    })
+    match region {
+        Some(r) if REGION => cost + r.cost(robot, &scratch.fk, None, &mut scratch.constraint),
+        _ => cost,
+    }
 }
 
 /// One path's L-BFGS state, as kernels.wgsl keeps it in `aux`.
@@ -1553,6 +1556,24 @@ impl PathOptimizer {
         deadline: Option<Instant>,
         parallel: bool,
     ) {
+        if self.region.is_some() {
+            self.rounds::<true>(robot, world, tr, through, deadline, parallel);
+        } else {
+            self.rounds::<false>(robot, world, tr, through, deadline, parallel);
+        }
+    }
+
+    /// `run`, with the constraints' costs compiled in only with `REGION`: inlined beside the
+    /// collision checks, they grow the sample loops of plans that keep none.
+    fn rounds<const REGION: bool>(
+        &mut self,
+        robot: &Robot,
+        world: &CpuWorld,
+        tr: &mut [f32],
+        through: u32,
+        deadline: Option<Instant>,
+        parallel: bool,
+    ) {
         let Self {
             o,
             region,
@@ -1568,7 +1589,7 @@ impl PathOptimizer {
             if self.direction_due {
                 let tr_ref = &*tr;
                 each_chunk(parallel, robot, scratch, sample_grad, n, |s, i, g| {
-                    traj_sample_grad(robot, world, region, tr_ref, i / k, i % k, o, g, s);
+                    traj_sample_grad::<REGION>(robot, world, region, tr_ref, i / k, i % k, o, g, s);
                 });
                 for t in 3..t_count - 3 {
                     traj_grad(tr, sample_grad, n, t, o, &mut st.grad[t * n..(t + 1) * n]);
@@ -1584,7 +1605,7 @@ impl PathOptimizer {
             let dir = &st.dir;
             each_chunk(parallel, robot, scratch, &mut st.costs, 1, |s, i, cost| {
                 let (c, i) = (i / samples, i % samples);
-                cost[0] = traj_cost(
+                cost[0] = traj_cost::<REGION>(
                     robot,
                     world,
                     region,

@@ -232,8 +232,15 @@ fn timed_map(
     let n = robot.dof();
     let spans = cp.len() / n - 3;
     let (stages, step) = (spans * STAGES_PER_SPAN, 1.0 / STAGES_PER_SPAN as f64);
-    // The path's first and second derivatives at each stage, `[stages + 1, n]`.
-    let derivatives = |weights: fn(f32) -> [f32; 4]| -> Vec<f64> {
+    // The path's first and second derivatives at each stage, `[stages + 1, n]`. Generic over the
+    // basis, so each table evaluates it inline rather than through a pointer per stage.
+    fn derivatives(
+        cp: &[f32],
+        n: usize,
+        stages: usize,
+        weights: impl Fn(f32) -> [f32; 4],
+    ) -> Vec<f64> {
+        let (spans, step) = (cp.len() / n - 3, 1.0 / STAGES_PER_SPAN as f64);
         let mut table = Vec::with_capacity((stages + 1) * n);
         let mut out = vec![0.0f32; n];
         for i in 0..=stages {
@@ -243,9 +250,9 @@ fn timed_map(
             table.extend(out.iter().map(|&v| f64::from(v)));
         }
         table
-    };
-    let first = derivatives(spline::basis_d1);
-    let second = derivatives(spline::basis_d2);
+    }
+    let first = derivatives(cp, n, stages, spline::basis_d1);
+    let second = derivatives(cp, n, stages, spline::basis_d2);
     // The path's third derivative is constant along each span; the stage takes the larger of the
     // spans it touches.
     let mut third = Vec::with_capacity((stages + 1) * n);
@@ -664,7 +671,7 @@ fn narrow(lower: (f64, f64), upper: (f64, f64), x: &mut (f64, f64)) -> bool {
 
 /// The path's joint velocities, accelerations and jerks where the time map is at `u` of span `m`,
 /// written to `out` in that order (`[3, n]`), and the path position there.
-#[inline]
+#[inline(always)]
 pub(crate) fn derivatives(
     cp: &[f32],
     n: usize,
