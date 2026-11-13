@@ -10,6 +10,18 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- One hand can pass what it holds to another: `handover(&device, &worlds, &[Handover], &TaskOptions)`,
+  with `Handover::new(&robot, world, start, held, to)`. Candidates are each meeting with each of the
+  taker's grasps; both hands' IK solves at the meeting with the object standing there, each hand's
+  straight move holds the other arm still, and the way to the meeting holds the object in the
+  giver's hand. Every candidate that gets through comes back quickest first, naming its `meeting`
+  (`TaskPlan::meeting`) and the taker's `held`. `handover_poses` proposes meetings where both arms
+  reach and `handover_grasps` the taker's grasps at the object's other end. In Python, the same
+  names.
+- **Breaking:** `grasps` can hold an object toward its ends: `GraspOptions::along`, a fraction of
+  half the side the fingers close on (0, the middle, as before), for a pick whose object one hand
+  passes to another. A `GraspOptions` literal needs the new field (`along: 0.0`); literals with
+  `..GraspOptions::default()` are unaffected. In Python, `GraspOptions(along=0.75)`.
 - **Breaking:** a tool path can hold joints still: `ToolPath::hold` lists joints that stay where
   `start` has them along the whole path, as `PlanProblem::hold` and `IkProblem::hold` do, for a
   hand whose arm shares joints (a torso) with one that holds what it reaches for. The hand follows

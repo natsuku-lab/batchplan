@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 import batchplan as bp
-from conftest import devices
+from conftest import ASSETS, devices
 
 TABLE, BOX = 0, 1
 HALF = (0.02, 0.03, 0.03)
@@ -228,3 +228,61 @@ def test_a_transit_that_breaks_its_constraints_stops_there(tasks_robot):
     assert failure.step == bp.TaskStep.Transit, failure
     assert isinstance(failure.candidates, tuple)
     assert bp.TaskStep.Transit in {c.step for c in failure.candidates}, failure.candidates
+
+
+def test_a_handover_is_bound_with_its_defaults(tasks_robot):
+    bar = bp.Obstacle.cuboid((0.0, 0.0, 0.0), (0.12, 0.02, 0.02))
+    middle = bp.grasps(bar)
+    ends = bp.grasps(bar, bp.GraspOptions(along=0.75))
+    assert bp.GraspOptions(along=0.75).along == 0.75 and len(ends) == 2 * len(middle)
+    # From a side, toward the +x end; the taker holds the -x end.
+    toward_end = max(ends, key=lambda g: g.position[0])
+    held = bp.Held(0, bar, toward_end)
+    taken = bp.handover_grasps(held)
+    assert len(taken) == 2 and toward_end.position[0] > 0.08
+    for g in taken:
+        assert abs(g.position[0] + toward_end.position[0]) < 1e-6, g
+    q = tasks_robot.default_q
+    task = bp.Handover(tasks_robot, 0, q, held, 1, approach=0.05)
+    assert task.to == 1 and task.approach == 0.05 and task.grasps == taken
+    assert task.meetings == (), "a robot of one hand has nowhere to meet"
+    device = bp.Device.cpu(tasks_robot)
+    worlds = device.upload([bp.World()])
+    with pytest.raises(bp.InputError, match="hand 1"):
+        bp.handover(device, worlds, [task])
+
+
+def test_a_bar_is_handed_from_one_arm_to_the_other():
+    panda = ASSETS / "franka/franka_panda.urdf"
+    model = bp.CollisionModel.load(ASSETS / "franka/panda_collision.json")
+    parts = [
+        bp.Part(panda, "left_", bp.Pose((0.0, 0.35, 0.0))),
+        bp.Part(panda, "right_", bp.Pose((0.0, -0.35, 0.0))),
+    ]
+    both = bp.CollisionModel.assemble([("left_", model), ("right_", model)])
+    fingers = {f"{p}panda_finger_joint{j}": 0.04 for p in ("left_", "right_") for j in (1, 2)}
+    ready = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]
+    start = {f"{p}panda_joint{j + 1}": v for p in ("left_", "right_") for j, v in enumerate(ready)}
+    options = bp.RobotOptions(
+        ee_links=["left_ee_link", "right_ee_link"], lock_joints=fingers, collision_model=both
+    )
+    robot = bp.Robot.assemble(parts, options)
+    q = [start[name] for name in robot.joint_names]
+    device = bp.Device.cpu(robot)
+    hand = robot.ee_pose(q, 0).position
+    table = bp.Obstacle.cuboid((0.3, 0.0, -0.02), (0.6, 0.9, 0.02))
+    bar = bp.Obstacle.cuboid((hand[0] + 0.2, hand[1], 0.02), (0.02, 0.12, 0.02))
+    worlds = device.upload([bp.World([table, bar]), bp.World([table])])
+    grasps = bp.grasps(bar, bp.GraspOptions(along=0.75))
+    picked = bp.pick(device, worlds, [bp.Pick(0, q, 1, grasps, support=[0])])
+    plan = picked.outcomes[0][0]
+    task = bp.Handover(robot, 1, plan.end, plan.held, 1)
+    meetings = bp.handover_poses(robot, plan.end, plan.held, 1)
+    assert task.meetings == meetings and len(meetings) > 10
+    handed = bp.handover(device, worlds, [task])
+    plans = handed.outcomes[0]
+    assert len(plans) > 1, plans
+    first = plans[0]
+    assert first.meeting == task.meetings[first.candidate // len(task.grasps)]
+    grasp = task.grasps[first.candidate % len(task.grasps)]
+    assert first.held.hand == 1 and first.held.grasp == grasp

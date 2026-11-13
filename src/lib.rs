@@ -40,6 +40,7 @@ mod edges;
 pub mod error;
 #[cfg(feature = "gpu")]
 mod gpu;
+mod handover;
 mod held;
 pub mod ik;
 pub mod join;
@@ -72,6 +73,7 @@ pub mod world;
 pub use constraint::HandConstraint;
 pub use device::{CollisionWeights, Contact, Device, Evaluation, Worlds};
 pub use error::Error;
+pub use handover::{Handover, handover, handover_grasps, handover_poses};
 pub use held::Held;
 pub use ik::{IkFailure, IkOptions, IkProblem, IkResult, solve_ik};
 pub use join::{JoinOptions, JoinResult, Sequence, join};
