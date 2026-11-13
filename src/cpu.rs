@@ -397,7 +397,10 @@ struct Stack {
 }
 
 /// Signed distance from `o` to `p` and its gradient. Mirrors `obstacle_distance` in kernels.wgsl.
-#[inline]
+/// The collision checks call it for a distance grid, out of line: inlined into their loop over the
+/// spheres, it slowed plans among grids. They check every other obstacle with
+/// `primitive_distance`.
+#[inline(never)]
 fn obstacle_distance(o: &Prepared, p: Vec3) -> (f32, Vec3) {
     match *o {
         Prepared::Cuboid {
@@ -422,6 +425,38 @@ fn obstacle_distance(o: &Prepared, p: Vec3) -> (f32, Vec3) {
             ref grid,
         } => world::sdf_distance(rot, center, grid, p),
     }
+}
+
+/// `obstacle_distance` with a grid's lookup out of line, for every obstacle but a grid: inlined, the
+/// lookup gave every check of a box or a sphere its stack frame and saved registers. Itself out of
+/// line, as `obstacle_distance` is, so the closures that inline the checks keep their size.
+#[inline(never)]
+fn primitive_distance(o: &Prepared, p: Vec3) -> (f32, Vec3) {
+    match *o {
+        Prepared::Cuboid {
+            rot, center, half, ..
+        } => world::box_distance(rot, center, half, p),
+        Prepared::Sphere { center, radius } => world::sphere_distance(center, radius, p),
+        Prepared::Cylinder {
+            rot,
+            center,
+            radius,
+            half_height,
+        } => world::cylinder_distance(rot, center, radius, half_height, p),
+        Prepared::Capsule {
+            rot,
+            center,
+            radius,
+            half_length,
+        } => world::capsule_distance(rot, center, radius, half_length, p),
+        Prepared::Sdf { .. } => grid_distance_apart(o, p),
+    }
+}
+
+/// `obstacle_distance` of a distance grid, out of line, for `primitive_distance`.
+#[inline(never)]
+fn grid_distance_apart(o: &Prepared, p: Vec3) -> (f32, Vec3) {
+    obstacle_distance(o, p)
 }
 
 /// At least how far a distance grid is from every point within `radius` of `p`, where that is
@@ -523,14 +558,21 @@ fn collision_with<const GRADIENT: bool, const GRIDS: bool, const CLEARANCE: bool
                 }
             }
             if !matches!(o, Prepared::Sdf { .. }) {
-                let gap = obstacle_distance(o, bc).0 - b[3];
+                let gap = primitive_distance(o, bc).0 - b[3];
                 if gap > world_gate {
                     wmin = wmin.min(gap);
                     continue;
                 }
             }
+            // A grid's spheres go through `obstacle_distance`, every other obstacle's through
+            // `primitive_distance`, which leaves the grid's lookup out.
+            let grid = GRIDS && matches!(o, Prepared::Sdf { .. });
             for s in first as usize..(first + count) as usize {
-                let (dist, g) = obstacle_distance(o, sc[s]);
+                let (dist, g) = if grid {
+                    obstacle_distance(o, sc[s])
+                } else {
+                    primitive_distance(o, sc[s])
+                };
                 let d = dist - robot.spheres[s].radius;
                 wmin = wmin.min(d);
                 let pen = w.margin - d;

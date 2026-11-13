@@ -1049,7 +1049,7 @@ pub(crate) fn squared_edt(occupied: &[bool], [nx, ny, nz]: [usize; 3]) -> Vec<u3
 }
 
 /// `squared_edt`'s x and y passes over the z slab `s`. Out of line, as is `column_pass`: inlined
-/// into rayon's splitting of the slabs, the passes ran 2% slower.
+/// into rayon's splitting of the slabs, the passes compiled into a slower shape.
 #[inline(never)]
 fn slab_passes(line: &mut Line, s: &mut [u32], nx: usize, ny: usize) {
     for row in s.chunks_mut(nx) {
