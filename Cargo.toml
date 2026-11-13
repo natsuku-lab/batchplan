@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/natsuku-lab/batchplan"
 keywords = ["robotics", "motion-planning", "inverse-kinematics", "gpu", "lerobot"]
 categories = ["science::robotics", "algorithms"]
-exclude = [".github/", "CLAUDE.md", "rust-toolchain.toml", "docs/*.gif"]
+exclude = [".agents/", ".claude/", ".github/", "AGENTS.override.md", "CLAUDE.md", "rust-toolchain.toml", "docs/*.gif"]
 
 [package.metadata.docs.rs]
 features = ["lerobot", "usd"]
