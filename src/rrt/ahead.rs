@@ -636,6 +636,7 @@ fn query(base: &Base, edges: Vec<f32>) -> EdgeQuery {
 mod tests {
     use std::collections::HashMap;
     use std::sync::{Barrier, Mutex};
+    use std::time::{Duration, Instant};
 
     use glam::{Quat, Vec3};
     use rayon::ThreadPoolBuilder;
@@ -871,6 +872,7 @@ mod tests {
         world: &World,
         problem: &RrtProblem,
         helpers: usize,
+        minimum_answers: usize,
     ) -> (Vec<u32>, usize, usize) {
         let worlds =
             cpu::prepare(robot, std::slice::from_ref(world)).expect("the world is well formed");
@@ -881,11 +883,15 @@ mod tests {
             ..RrtOptions::default()
         };
         let ahead = Arc::new(Ahead::default());
-        let mut connect = Connect::new(robot, problem, &keeping, Sampling::NearLine, ahead.clone());
+        let mut search = HelpedSearch {
+            connect: Connect::new(robot, problem, &keeping, Sampling::NearLine, ahead.clone()),
+            alone: false,
+            minimum_answers,
+        };
         beside_helpers(helpers, &ahead, robot, &lanes, &worlds, || {
             let mut scratch = EdgeScratch::new(&lanes);
             edges::run(
-                &mut connect,
+                &mut search,
                 robot,
                 &lanes,
                 &worlds,
@@ -894,9 +900,9 @@ mod tests {
                 None,
                 &mut scratch,
             );
-            connect.relax(6000);
+            search.connect.relax(6000);
             edges::run(
-                &mut connect,
+                &mut search,
                 robot,
                 &lanes,
                 &worlds,
@@ -906,8 +912,9 @@ mod tests {
                 &mut scratch,
             );
         });
+        let connect = &search.connect;
         (
-            fingerprint(&connect),
+            fingerprint(connect),
             connect.tube_samples + connect.iterations,
             connect.sharing.answered,
         )
@@ -969,6 +976,65 @@ mod tests {
         bits
     }
 
+    /// Keeps an eligible search from outrunning the helper answers its test needs.
+    struct HelpedSearch<'a> {
+        connect: Connect<'a>,
+        alone: bool,
+        minimum_answers: usize,
+    }
+
+    impl HelpedSearch<'_> {
+        fn wait_for(&self, ready: impl Fn() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !ready() {
+                if Instant::now() >= deadline {
+                    // Let the pool's helpers exit before unwinding its scope.
+                    self.connect.sharing.ahead.finish();
+                    panic!("the scheduler did not deliver a helper's forecast");
+                }
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    impl Search for HelpedSearch<'_> {
+        fn request(&mut self, buffer: &mut Vec<f32>) -> Option<EdgeQuery> {
+            let query = self.connect.request(buffer)?;
+            let ahead = &self.connect.sharing.ahead;
+            let eligible = if self.alone {
+                // The driver's pause must run before the search can wait for its helpers.
+                ahead.summoned.load(Ordering::Relaxed)
+            } else {
+                ahead.reached.load(Ordering::Relaxed) > 0
+            };
+            if eligible && self.connect.sharing.answered < self.minimum_answers {
+                self.wait_for(|| ahead.shared.get().is_some());
+                let shared = ahead.shared.get().expect("a helper joined above");
+                let epoch = shared.epoch.load(Ordering::Acquire);
+                if epoch > 0 {
+                    let sample = (shared.at.load(Ordering::Acquire) >> 1) + 1;
+                    self.wait_for(|| {
+                        let slot = shared.slots[sample % SLOTS]
+                            .lock()
+                            .expect("a helper panicked");
+                        slot.sample == sample
+                            && slot.epoch == epoch
+                            && slot.forecasts.iter().any(|f| f.made)
+                    });
+                }
+            }
+            Some(query)
+        }
+
+        fn answer(&mut self, answer: usize) {
+            self.connect.answer(answer);
+        }
+
+        fn help(&self) -> Option<Arc<Ahead>> {
+            self.connect.help()
+        }
+    }
+
     /// The tests that keep threads busy run one at a time, so each has the machine's cores.
     static ALONE: Mutex<()> = Mutex::new(());
 
@@ -983,8 +1049,8 @@ mod tests {
             .expect("another test that keeps threads busy panicked");
         let robot = panda();
         let (world, problem) = dresser();
-        let (alone, samples, _) = search(&robot, &world, &problem, 0);
-        let (helped, _, answered) = search(&robot, &world, &problem, 3);
+        let (alone, samples, _) = search(&robot, &world, &problem, 0, 0);
+        let (helped, _, answered) = search(&robot, &world, &problem, 3, samples / 100 + 1);
         assert!(samples > 3000, "the search drew only {samples} samples");
         assert!(alone == helped, "helpers changed the search");
         assert!(
@@ -1013,10 +1079,17 @@ mod tests {
         };
         let ahead = Arc::new(Ahead::default());
         let [first, again] = [Sampling::NearLine, Sampling::JointRanges].map(|sampling| {
-            let mut connect = Connect::new(robot, &problem, &o, sampling, ahead.clone());
+            let mut search = HelpedSearch {
+                connect: Connect::new(robot, &problem, &o, sampling, ahead.clone()),
+                alone: false,
+                minimum_answers: match sampling {
+                    Sampling::NearLine => 1,
+                    Sampling::JointRanges => o.max_iterations / 100 + 1,
+                },
+            };
             beside_helpers(3, &ahead, robot, lanes, worlds, || {
                 edges::run(
-                    &mut connect,
+                    &mut search,
                     robot,
                     lanes,
                     worlds,
@@ -1026,6 +1099,7 @@ mod tests {
                     &mut EdgeScratch::new(lanes),
                 );
             });
+            let connect = &search.connect;
             assert!(connect.path.is_none(), "the search ends too soon");
             (
                 connect.tube_samples + connect.iterations,
@@ -1045,7 +1119,8 @@ mod tests {
     /// The scheduler's helpers change nothing either. A long search grows the trees it grows
     /// unhelped when the scheduler runs it in a batch, whose threads help it once the other
     /// searches end (shorter, so it has drawn `JOIN_AFTER` samples by then), and when it runs
-    /// alone, summoning helpers after `ALONE_AFTER` samples; helpers answer queries both times.
+    /// alone, summoning helpers after `ALONE_AFTER` samples. Once eligible, each search waits for
+    /// forecasts until one answers it, so a delayed helper cannot lose the race to its last sample.
     #[test]
     fn the_scheduler_helps_long_searches_in_batches_and_alone() {
         let _alone = ALONE
@@ -1086,25 +1161,28 @@ mod tests {
             "the search ends too soon"
         );
 
-        let mut batch = [
-            connect(&long),
-            connect(&short),
-            connect(&short),
-            connect(&short),
-        ];
+        let mut batch = [&long, &short, &short, &short].map(|options| HelpedSearch {
+            connect: connect(options),
+            alone: false,
+            minimum_answers: 1,
+        });
         let mut searches: Vec<&mut dyn Search> =
             batch.iter_mut().map(|c| c as &mut dyn Search).collect();
         cpu::run_searches(&pool, &mut searches, &robot, &lanes, &worlds, None);
         assert!(
-            fingerprint(&batch[0]) == unhelped,
+            fingerprint(&batch[0].connect) == unhelped,
             "helpers in a batch changed the search"
         );
         assert!(
-            batch[0].sharing.answered > 0,
+            batch[0].connect.sharing.answered > 0,
             "no helper answered in the batch"
         );
 
-        let mut one = connect(&long);
+        let mut one = HelpedSearch {
+            connect: connect(&long),
+            alone: true,
+            minimum_answers: 1,
+        };
         cpu::run_searches(
             &pool,
             &mut [&mut one as &mut dyn Search],
@@ -1114,11 +1192,11 @@ mod tests {
             None,
         );
         assert!(
-            fingerprint(&one) == unhelped,
+            fingerprint(&one.connect) == unhelped,
             "helpers of a search alone changed it"
         );
         assert!(
-            one.sharing.answered > 0,
+            one.connect.sharing.answered > 0,
             "no helper answered the search alone"
         );
     }
