@@ -429,6 +429,7 @@ fn a_held_object_sits_in_the_hand_as_its_grasp_holds_it() {
     // From above, and from two sides: grasps that are not their own inverse.
     for grasp in [top(), grasp(Vec3::X, Vec3::Y), grasp(-Vec3::Y, Vec3::Z)] {
         let held = Held {
+            locked: Default::default(),
             hand: 0,
             object: Obstacle::cuboid(Vec3::ZERO, HALF),
             grasp,
@@ -943,6 +944,7 @@ fn a_place_names_the_object_it_sets_down_after_its_worlds_obstacles() {
     let world = World::new(vec![scene(vec![]).obstacles[TABLE].clone()]);
     let tall = Vec3::new(HALF.x, HALF.y, 0.06);
     let held = Held {
+        locked: Default::default(),
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, tall),
         grasp: Pose::new(Vec3::Z * 0.01, top_across().rotation),
@@ -1938,6 +1940,7 @@ fn malformed_tasks_are_input_errors() {
     }
     // A place on a device that already holds the object.
     let held = Held {
+        locked: Default::default(),
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, HALF),
         grasp: top(),
@@ -1956,4 +1959,77 @@ fn malformed_tasks_are_input_errors() {
     let place = Place::new(0, robot.default_q(), not_finite, vec![Pose::IDENTITY]);
     let result = batchplan::place(&device, &worlds, &[place.clone(), place], &o);
     assert!(matches!(result, Err(Error::Input(_))), "{result:?}");
+}
+
+/// A pick may keep the fingers narrower than loaded (`Pick::locked`): beside a post 2 cm off the
+/// box, the open fingers closing along x come down on it and the pick fails, while fingers opened
+/// 1 cm each, where they close on the box, pass between them. In one call with an open pick between
+/// two narrow ones, each narrow pick plans as it does alone on a device for the robot relocked so,
+/// what it leaves held says where the fingers are, and a bad task is named by its place in the call.
+#[test]
+fn a_pick_keeps_the_fingers_as_narrow_as_it_says() {
+    let robot = panda();
+    let narrow: std::collections::HashMap<String, f32> = [
+        ("panda_finger_joint1".to_string(), 0.01),
+        ("panda_finger_joint2".to_string(), 0.01),
+    ]
+    .into();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[scene(vec![post()])]).unwrap();
+    let o = TaskOptions::default();
+    let open = pick_from(&robot, vec![top()]);
+    let narrowed = Pick {
+        locked: narrow.clone(),
+        ..open.clone()
+    };
+    let calls = [narrowed.clone(), open.clone(), narrowed.clone()];
+    let both = batchplan::pick(&device, &worlds, &calls, &o).unwrap();
+    assert_eq!(
+        format!("{:?}", both.outcomes[0]),
+        format!("{:?}", both.outcomes[2]),
+        "the narrow picks alike, around the open one"
+    );
+    let failure = both.outcomes[1]
+        .as_ref()
+        .expect_err("the open fingers come down on the post");
+    assert!(
+        failure
+            .candidates
+            .iter()
+            .flat_map(|c| &c.contacts)
+            .any(|c| matches!(c, Contact::World { obstacle: 2, .. })),
+        "{failure}"
+    );
+    let plans = both.outcomes[0]
+        .as_ref()
+        .unwrap_or_else(|f| panic!("narrow: {f}: {:?}", f.candidates[0].contacts));
+    let relocked = device.with_robot(&robot.relock(&narrow).unwrap()).unwrap();
+    let alone = batchplan::pick(&relocked, &worlds, std::slice::from_ref(&open), &o).unwrap();
+    let alone = alone.outcomes[0].as_ref().unwrap();
+    assert_eq!(plans.len(), alone.len());
+    for (a, b) in plans.iter().zip(alone) {
+        assert_eq!(a.approach.control_points, b.approach.control_points);
+        assert_eq!(a.depart.control_points, b.depart.control_points);
+        assert_eq!(
+            a.held.as_ref().unwrap().locked,
+            narrow,
+            "held says where the fingers are"
+        );
+    }
+    let bad = Pick {
+        locked: [("panda_joint1".to_string(), 0.0)].into(),
+        ..narrowed.clone()
+    };
+    match batchplan::pick(&device, &worlds, &[narrowed.clone(), open, bad], &o) {
+        Err(Error::Input(message)) => assert!(message.contains("task 2"), "{message}"),
+        other => panic!("a joint not locked is refused by the task's place in the call: {other:?}"),
+    }
+    let far = Pick {
+        object: 9,
+        ..narrowed.clone()
+    };
+    match batchplan::pick(&device, &worlds, &[narrowed.clone(), narrowed, far], &o) {
+        Err(Error::Input(message)) => assert!(message.contains("task 2"), "{message}"),
+        other => panic!("{other:?}"),
+    }
 }

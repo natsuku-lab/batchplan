@@ -914,6 +914,27 @@ impl Robot {
         Ok(robot)
     }
 
+    /// The hand whose IK frame `joint`, locked when the robot was loaded, carries, if it carries
+    /// one: as a torso or a turntable does, and fingers do not.
+    pub(crate) fn hand_carried_by(&self, joint: &str) -> Option<usize> {
+        let links: Vec<usize> = self
+            .locked
+            .iter()
+            .filter(|l| l.joint == joint)
+            .map(|l| l.link)
+            .collect();
+        (0..self.hands()).find(|&h| {
+            let mut at = Some(self.ee_links[h]);
+            while let Some(i) = at {
+                if links.contains(&i) {
+                    return true;
+                }
+                at = self.links[i].parent;
+            }
+            false
+        })
+    }
+
     /// The robot name from its description.
     #[must_use]
     pub fn name(&self) -> &str {

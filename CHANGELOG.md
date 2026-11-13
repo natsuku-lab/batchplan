@@ -10,6 +10,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- **Breaking:** picks and holds say where the fingers are: `Pick::locked` and `Held::locked` hold
+  the robot's locked joints (as `Robot::relock` takes them) at those values for that task, or
+  while the object is held, so a rim between walls can be picked with the fingers part open and
+  a hold checked where they closed. One call takes tasks and holds at many openings, a relocked
+  robot for each group; empty, the default, is as loaded, to the bit. A `Pick` or `Held` literal
+  needs `locked: HashMap::new()`. In Python, `Pick(..., locked={...})`, `Held(..., locked={...})`.
 - One hand can pass what it holds to another: `handover(&device, &worlds, &[Handover], &TaskOptions)`,
   with `Handover::new(&robot, world, start, held, to)`. Candidates are each meeting with each of the
   taker's grasps; both hands' IK solves at the meeting with the object standing there, each hand's

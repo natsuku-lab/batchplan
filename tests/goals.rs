@@ -247,6 +247,7 @@ fn pose_goals_keep_what_the_hand_holds() {
     let worlds = device.upload(&[World::default()]).unwrap();
     let start = robot.default_q().to_vec();
     let rod = Held {
+        locked: Default::default(),
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.3, 0.02)),
         grasp: Pose::IDENTITY,

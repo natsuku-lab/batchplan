@@ -17,6 +17,7 @@
 //! its own (`transit_world`, `depart_world`), so that what the hand may touch at the grasp is not
 //! what it may touch on the way there.
 
+use std::collections::HashMap;
 use std::f32::consts::TAU;
 use std::fmt;
 
@@ -71,6 +72,12 @@ pub struct Pick {
     /// takes path constraints. The start must keep them; a grasp whose move in begins where they
     /// break stops at the transit. A task without its transit has no use for them.
     pub constraints: Vec<HandConstraint>,
+    /// Joints the robot was loaded with locked, at the values they keep through the task, as
+    /// [`Robot::relock`] takes them: the fingers opened only as far as a rim between walls lets
+    /// them. A joint that carries a hand (a torso) is refused. Tasks are grouped by these, a relocked robot for each group in one call, and each
+    /// plan's [`TaskPlan::held`] starts with them (overwrite them with where the fingers closed).
+    /// Empty: as loaded.
+    pub locked: HashMap<String, f32>,
 }
 
 impl Pick {
@@ -91,6 +98,7 @@ impl Pick {
             lift: Vec3::Z * 0.1,
             support: vec![],
             constraints: vec![],
+            locked: HashMap::new(),
         }
     }
 }
@@ -377,14 +385,55 @@ pub struct TaskResult<T> {
 /// fingers ([`Robot::finger_links`], or the hand's links if it has none) may touch the object, and
 /// the move in runs backward from there. The move away holds the object, which may touch what it
 /// rests on. Run the transit and the approach, close the gripper, then run the departure holding
-/// the object ([`Held::attachment`]).
+/// the object ([`Held::attachment`], on the robot relocked at [`Held::locked`]).
 pub fn pick(
     device: &Device,
     worlds: &Worlds,
     tasks: &[Pick],
     o: &TaskOptions,
 ) -> Result<TaskResult<Pick>> {
-    let robot = device.robot();
+    check_picks(device.robot(), worlds, tasks, o)?;
+    if tasks.iter().all(|t| t.locked.is_empty()) {
+        return picked(device, worlds, tasks, o);
+    }
+    // A relocked robot for each set of locked joints' values, its tasks a batch of their own, the
+    // groups in parallel; a device for it builds nothing, and the worlds stay valid.
+    let mut groups: Vec<(&HashMap<String, f32>, Vec<usize>)> = vec![];
+    for (i, t) in tasks.iter().enumerate() {
+        match groups.iter_mut().find(|(locked, _)| **locked == t.locked) {
+            Some((_, items)) => items.push(i),
+            None => groups.push((&t.locked, vec![i])),
+        }
+    }
+    let results: Vec<TaskResult<Pick>> = device.install(|| {
+        let each = groups.par_iter().map(|(locked, items)| {
+            let mine = held::subset(tasks, items);
+            if locked.is_empty() {
+                picked(device, worlds, &mine, o)
+            } else {
+                let relocked = device.with_robot(&device.robot().relock(locked)?)?;
+                picked(&relocked, worlds, &mine, o)
+            }
+        });
+        each.collect::<Result<_>>()
+    })?;
+    let mut outcomes: Vec<_> = tasks.iter().map(|_| None).collect();
+    for ((_, items), result) in groups.iter().zip(results) {
+        for (&i, outcome) in items.iter().zip(result.outcomes) {
+            outcomes[i] = Some(outcome);
+        }
+    }
+    let outcomes = outcomes.into_iter();
+    Ok(TaskResult {
+        problems: tasks.to_vec(),
+        outcomes: outcomes
+            .map(|outcome| outcome.expect("every task is in a group"))
+            .collect(),
+    })
+}
+
+/// That `tasks` and `o` can be picked by `robot` in `worlds`, each task named by its index.
+fn check_picks(robot: &Robot, worlds: &Worlds, tasks: &[Pick], o: &TaskOptions) -> Result<()> {
     check_options(o)?;
     for (i, t) in tasks.iter().enumerate() {
         let world = check_task(robot, worlds, i, &Steps::of_pick(t), &t.start, t.hand)?;
@@ -411,7 +460,19 @@ pub fn pick(
             t.lift
         );
         check_support(i, world, &t.support, Some(t.object))?;
+        held::check_locked(robot, &t.locked, &format!("task {i}"))?;
     }
+    Ok(())
+}
+
+/// [`pick`] for checked tasks that keep the robot's locked joints as `device`'s robot has them.
+fn picked(
+    device: &Device,
+    worlds: &Worlds,
+    tasks: &[Pick],
+    o: &TaskOptions,
+) -> Result<TaskResult<Pick>> {
+    let robot = device.robot();
     let mut candidates = vec![];
     for (t, task) in tasks.iter().enumerate() {
         let object = worlds[task.world as usize].obstacles[task.object].pose();
@@ -1609,6 +1670,7 @@ pub(crate) fn fingers(robot: &Robot, hand: usize) -> Vec<&str> {
 /// What `task`'s grasp `index` leaves the hand holding.
 fn held(task: &Pick, worlds: &Worlds, index: usize) -> Held {
     Held {
+        locked: task.locked.clone(),
         hand: task.hand,
         object: worlds[task.world as usize].obstacles[task.object].placed(Pose::IDENTITY),
         grasp: task.grasps[index],

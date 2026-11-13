@@ -30,6 +30,7 @@ const HELD: &str = "held by hand 0";
 /// A 10 cm cube held with the IK frame `inset` from its middle toward the hand.
 fn cube(inset: f32) -> Held {
     Held {
+        locked: Default::default(),
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.05)),
         grasp: Pose::new(Vec3::new(0.0, 0.0, -inset), Quat::IDENTITY),
@@ -39,6 +40,7 @@ fn cube(inset: f32) -> Held {
 /// A 24 cm bar held across the hand, level, by its middle.
 fn bar() -> Held {
     Held {
+        locked: Default::default(),
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.12)),
         grasp: Pose::new(Vec3::ZERO, Quat::from_rotation_y(FRAC_PI_2)),
@@ -566,4 +568,140 @@ fn a_hold_the_device_cannot_take_is_an_input_error_naming_its_problem() {
     ];
     let e = batchplan::plan(&both, &touching, &problems, &PlanOptions::default()).unwrap_err();
     input(e, "let 'held by hand 0' touch obstacles");
+}
+
+/// A hold says where the fingers closed (`Held::locked`), and every call that holds the object
+/// checks the robot so: a ball where the open left finger is, and the closed one is not, stops a
+/// path that holds nothing narrower, lets one held closed through, and the closed hold gives what a
+/// device for the robot relocked there gives.
+#[test]
+fn a_hold_checks_the_fingers_where_they_closed() {
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    let closed: std::collections::HashMap<String, f32> = [
+        ("panda_finger_joint1".to_string(), 0.005),
+        ("panda_finger_joint2".to_string(), 0.005),
+    ]
+    .into();
+    let narrow = robot.relock(&closed).unwrap();
+    // Balls on a grid around the open left finger; the first the open robot touches and the
+    // closed one does not.
+    let finger = robot.link_pose(&q, "panda_leftfinger").unwrap().position;
+    let grid = (0..343).map(|i| {
+        let at = |k: usize| (k as f32 - 3.0) * 0.01;
+        finger + Vec3::new(at(i % 7), at(i / 7 % 7), at(i / 49))
+    });
+    let balls: Vec<Vec3> = grid.collect();
+    let worlds_of: Vec<World> = balls
+        .iter()
+        .map(|&b| World::new(vec![Obstacle::sphere(b, 0.006)]))
+        .collect();
+    let free = |robot: &Robot| {
+        let device = Device::cpu(robot).unwrap();
+        let worlds = device.upload(&worlds_of).unwrap();
+        let items: Vec<u32> = (0..balls.len() as u32).collect();
+        let configurations: Vec<f32> = items.iter().flat_map(|_| q.iter().copied()).collect();
+        let e = device
+            .evaluate(
+                &worlds,
+                &items,
+                &configurations,
+                &batchplan::CollisionWeights::NONE,
+            )
+            .unwrap();
+        (0..balls.len())
+            .map(|i| e.collision_free(i))
+            .collect::<Vec<bool>>()
+    };
+    let (open, shut) = (free(&robot), free(&narrow));
+    let ball = (0..balls.len())
+        .find(|&i| !open[i] && shut[i])
+        .map(|i| balls[i])
+        .expect("a ball only the open finger touches");
+    let small = Held {
+        locked: Default::default(),
+        hand: 0,
+        object: Obstacle::sphere(Vec3::ZERO, 0.004),
+        grasp: Pose::IDENTITY,
+    };
+    let held_closed = Held {
+        locked: closed,
+        ..small.clone()
+    };
+    let hand = robot.ee_pose(&q, 0);
+    let up = Pose::new(hand.position + Vec3::Z * 0.02, hand.rotation);
+    let path = |holding: Held| ToolPath {
+        world: 0,
+        start: q.clone(),
+        hand: 0,
+        waypoints: vec![up],
+        hold: vec![],
+        holding: Some(holding),
+    };
+    let o = ToolPathOptions::default();
+    for device in devices(&robot) {
+        let name = device.name();
+        let worlds = device
+            .upload(&[World::new(vec![Obstacle::sphere(ball, 0.006)])])
+            .unwrap();
+        let both = [path(small.clone()), path(held_closed.clone())];
+        let result = batchplan::follow(&device, &worlds, &both, &o).unwrap();
+        assert!(
+            matches!(result.stopped[0], Some(ToolPathStop::Collision { .. })),
+            "{name}: open, {:?}",
+            result.stopped[0]
+        );
+        assert_eq!(
+            result.fraction[1], 1.0,
+            "{name}: closed, {:?}",
+            result.stopped[1]
+        );
+        let relocked = device.with_robot(&narrow).unwrap();
+        let alone = batchplan::follow(&relocked, &worlds, &[path(small.clone())], &o).unwrap();
+        assert_eq!(
+            result.paths[1], alone.paths[0],
+            "{name}: as the relocked robot"
+        );
+        let wrong = Held {
+            locked: [("panda_joint1".to_string(), 0.0)].into(),
+            ..small.clone()
+        };
+        match batchplan::follow(&device, &worlds, &[path(wrong)], &o) {
+            Err(Error::Input(message)) => {
+                assert!(
+                    message.contains("path 0") && message.contains("locked"),
+                    "{name}: {message}"
+                );
+            }
+            other => panic!("{name}: a joint not locked is refused, got {other:?}"),
+        }
+    }
+}
+
+/// A joint that carries a hand (a torso, a turntable) is refused in a hold: the calls that hold an
+/// object solve some steps on the robot as loaded.
+#[test]
+fn a_hold_cannot_move_a_joint_that_carries_the_hand() {
+    let mut options = common::panda_options();
+    options.lock_joints.insert("panda_joint1".to_string(), 0.0);
+    options.default_q = options.default_q.map(|q| q[1..].to_vec());
+    let robot = Robot::load(common::asset("franka/franka_panda.urdf"), &options).unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[World::default()]).unwrap();
+    let held = Held {
+        locked: [("panda_joint1".to_string(), 0.8)].into(),
+        ..cube(0.0)
+    };
+    let q = robot.default_q().to_vec();
+    let problem = PlanProblem {
+        holding: Some(held),
+        ..PlanProblem::new(0, q.clone(), q)
+    };
+    match batchplan::plan(&device, &worlds, &[problem], &PlanOptions::default()) {
+        Err(Error::Input(message)) => assert!(
+            message.contains("panda_joint1") && message.contains("carries hand 0"),
+            "{message}"
+        ),
+        other => panic!("a torso is refused: {other:?}"),
+    }
 }

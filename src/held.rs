@@ -3,7 +3,7 @@
 //! grouped by what they hold, a batch for each.
 
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use rayon::prelude::*;
@@ -24,6 +24,13 @@ pub struct Held {
     pub object: Obstacle,
     /// The hand's IK frame in the object's frame: the grasp that holds it.
     pub grasp: Pose,
+    /// Joints the robot was loaded with locked (`RobotOptions::lock_joints`), at the values they
+    /// keep while it holds the object, as [`Robot::relock`] takes them: the fingers where they
+    /// closed on it. Every call that holds it checks the robot so; joints not named keep their
+    /// values. A joint that carries a hand (a torso) is refused: some steps solve on the robot as
+    /// loaded. To attach the object yourself, relock first, then attach [`Held::attachment`].
+    /// Empty: as loaded.
+    pub locked: HashMap<String, f32>,
 }
 
 impl Held {
@@ -74,6 +81,7 @@ impl Held {
                 self.hand
             ));
         }
+        check_locked(robot, &self.locked, what)?;
         ensure_input!(
             !matches!(self.object, Obstacle::Sdf { .. }),
             "{what}: the held object is a distance grid, which cannot be held"
@@ -95,8 +103,34 @@ impl Held {
     /// the object in its own frame and placed by the grasp, as attaching it would place them.
     fn holding(&self, robot: &Robot, spheres: &[[f32; 4]]) -> Result<Robot> {
         let placed = robot::placed_spheres(spheres, self.grasp.rigid().inverse());
-        robot.attach_with(&self.attachment(robot)?, || Ok(placed))
+        if self.locked.is_empty() {
+            return robot.attach_with(&self.attachment(robot)?, || Ok(placed));
+        }
+        let relocked = robot.relock(&self.locked)?;
+        relocked.attach_with(&self.attachment(&relocked)?, || Ok(placed))
     }
+}
+
+/// That `locked` (a task's or a hold's `locked`) names joints `robot` was loaded with locked and can
+/// take per task, at values it can: none carries a hand, whose IK, plans and constraints the call
+/// solves on the robot as loaded. An `Error::Input` naming `what` holds them where not.
+pub(crate) fn check_locked(robot: &Robot, locked: &HashMap<String, f32>, what: &str) -> Result<()> {
+    if locked.is_empty() {
+        return Ok(());
+    }
+    if let Some((joint, hand)) = locked
+        .keys()
+        .find_map(|j| robot.hand_carried_by(j).map(|h| (j, h)))
+    {
+        return Err(input!(
+            "{what}: locked joint '{joint}' carries hand {hand}; only joints off the hands' \
+             chains, as fingers, take other values per task or hold"
+        ));
+    }
+    robot
+        .relock(locked)
+        .map(|_| ())
+        .map_err(|e| input!("{what}: its locked joints: {e}"))
 }
 
 /// The name of the link an object held by `hand` is attached as.
@@ -341,6 +375,7 @@ mod tests {
         let robot = panda();
         let device = Device::cpu(&robot).unwrap();
         let can = Held {
+            locked: Default::default(),
             hand: 0,
             object: Obstacle::cylinder(Vec3::ZERO, 0.03, 0.06),
             grasp: Pose::IDENTITY,
@@ -401,6 +436,7 @@ mod tests {
             .iter()
             .flat_map(|object| {
                 grasps.map(|grasp| Held {
+                    locked: Default::default(),
                     hand: 0,
                     object: object.clone(),
                     grasp,
@@ -427,6 +463,7 @@ mod tests {
         let own = [[0.0, 0.0, 0.03, 0.03], [0.0, 0.0, -0.03, 0.03]];
         let spheres = |rotation: Quat| {
             let held = Held {
+                locked: Default::default(),
                 hand: 0,
                 object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.05)),
                 grasp: Pose::new(Vec3::new(0.0, 0.0, 0.28), rotation),

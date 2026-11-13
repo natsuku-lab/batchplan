@@ -1,5 +1,7 @@
 //! Objects a hand holds, objects attached to a robot, and where hands must stay along a path.
 
+use std::collections::HashMap;
+
 use batchplan::glam::Vec3;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -19,15 +21,27 @@ value_class! {
         object: batchplan::Obstacle,
         /// The hand's IK frame in the object's frame: the grasp that holds it.
         grasp: batchplan::Pose,
+        /// Joints the robot was loaded with locked, at the values they keep while it holds the
+        /// object, as `Robot.relock` takes them: the fingers where they closed on it. Empty: as
+        /// loaded.
+        locked: HashMap<String, f32>,
     }
     methods {
         #[new]
-        fn new(hand: usize, object: &Obstacle, grasp: &Pose) -> Self {
-            Self(batchplan::Held {
+        #[pyo3(signature = (hand, object, grasp, **changes))]
+        fn new(
+            hand: usize,
+            object: &Obstacle,
+            grasp: &Pose,
+            changes: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<Self> {
+            let held = batchplan::Held {
+                locked: Default::default(),
                 hand,
                 object: object.0.clone(),
                 grasp: grasp.0,
-            })
+            };
+            Ok(Self(Self::changed(held, changes)?))
         }
 
         /// The object as `robot` holds it, for `Robot.attach`: fixed to the hand's IK frame as

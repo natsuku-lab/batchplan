@@ -4,6 +4,7 @@
 //! one batch, and every one that gets through comes back quickest first. [`handover_poses`] and
 //! [`handover_grasps`] propose the meetings and the grasps.
 
+use std::collections::HashMap;
 use std::f32::consts::PI;
 
 use glam::{Quat, Vec2, Vec3};
@@ -192,24 +193,42 @@ pub fn handover(
         let at_its_meeting = |_: usize, c: &Candidate| {
             first_meeting[c.task] + (c.index / tasks[c.task].grasps.len()) as u32
         };
-        task::reach(
-            device,
-            &meetings,
-            &mut task::live(&mut candidates, TaskStep::Reach),
-            &at_its_meeting,
-            &o.ik,
-        )?;
-        let mut taking = task::live(&mut candidates, TaskStep::Approach);
-        task::straight(device, &meetings, &mut taking, &at_its_meeting, Leg::In, o)?;
-        let mut leaving = task::live(&mut candidates, TaskStep::Depart);
-        task::straight(
-            device,
-            &meetings,
-            &mut leaving,
-            &at_its_meeting,
-            Leg::Away,
-            o,
-        )?;
+        // The fingers where each hold says they closed: a device relocked so for each set of
+        // values, which builds nothing, its tasks' candidates a batch of their own at each step.
+        let mut locks: Vec<&HashMap<String, f32>> = vec![];
+        let mut lock_of = vec![];
+        for t in tasks {
+            let k = locks.iter().position(|l| **l == t.held.locked);
+            lock_of.push(k.unwrap_or_else(|| {
+                locks.push(&t.held.locked);
+                locks.len() - 1
+            }));
+        }
+        let relocked: Vec<Device> = locks
+            .iter()
+            .map(|locked| device.with_robot(&robot.relock(locked)?))
+            .collect::<Result<_>>()?;
+        let mut each =
+            |step: TaskStep,
+             run: &(dyn Fn(&Device, &mut [&mut Candidate]) -> Result<()> + Sync)| {
+                let mut groups =
+                    task::by_holder(task::live(&mut candidates, step), &lock_of, &relocked);
+                device.install(|| {
+                    groups
+                        .par_iter_mut()
+                        .zip(&relocked)
+                        .try_for_each(|(group, on)| run(on, group))
+                })
+            };
+        each(TaskStep::Reach, &|on, group| {
+            task::reach(on, &meetings, group, &at_its_meeting, &o.ik)
+        })?;
+        each(TaskStep::Approach, &|on, group| {
+            task::straight(on, &meetings, group, &at_its_meeting, Leg::In, o)
+        })?;
+        each(TaskStep::Depart, &|on, group| {
+            task::straight(on, &meetings, group, &at_its_meeting, Leg::Away, o)
+        })?;
     }
 
     // From the start to the meeting, the object in the giver's hand.
@@ -231,6 +250,7 @@ pub fn handover(
     let outcomes = task::choose(device, tasks.len(), &candidates, o, |c| {
         let t = &tasks[c.task];
         let held = Held {
+            locked: Default::default(),
             hand: t.to,
             object: t.held.object.clone(),
             grasp: t.grasps[c.index % t.grasps.len()],

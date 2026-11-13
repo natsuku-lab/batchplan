@@ -286,3 +286,20 @@ def test_a_bar_is_handed_from_one_arm_to_the_other():
     assert first.meeting == task.meetings[first.candidate // len(task.grasps)]
     grasp = task.grasps[first.candidate % len(task.grasps)]
     assert first.held.hand == 1 and first.held.grasp == grasp
+
+
+def test_holds_and_picks_say_where_the_fingers_are(tasks_robot):
+    box = bp.Obstacle.cuboid((0.0, 0.0, 0.0), (0.02, 0.03, 0.03))
+    narrow = {"panda_finger_joint1": 0.01, "panda_finger_joint2": 0.01}
+    held = bp.Held(0, box, bp.Pose((0.0, 0.0, 0.0)), locked=narrow)
+    assert held.locked == narrow and bp.Held(0, box, bp.Pose((0.0, 0.0, 0.0))).locked == {}
+    pick = bp.Pick(0, tasks_robot.default_q, 1, bp.grasps(box), locked=narrow)
+    assert pick.locked == narrow
+    device = bp.Device.cpu(tasks_robot)
+    worlds = device.upload([bp.World([box])])
+    with pytest.raises(bp.InputError, match="locked"):
+        bp.pick(
+            device,
+            worlds,
+            [bp.Pick(0, tasks_robot.default_q, 0, bp.grasps(box), locked={"x": 0.0})],
+        )

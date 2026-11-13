@@ -430,3 +430,38 @@ fn round_objects_are_grasped_toward_their_ends_above_the_floor() {
         assert!(frame.z >= 0.005 - 1e-5, "above the floor: {frame}");
     }
 }
+
+/// The giver's fingers where the hold says they closed (`Held::locked`): a handover plans as it does
+/// on a device for the robot relocked so, the meeting's steps included.
+#[test]
+fn a_giver_holding_closed_plans_as_the_robot_relocked_so() {
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let (worlds, start, held) = picked(&device, Vec3::new(0.12, 0.02, 0.02));
+    let closed: std::collections::HashMap<String, f32> = [
+        ("left_panda_finger_joint1".to_string(), 0.02),
+        ("left_panda_finger_joint2".to_string(), 0.02),
+    ]
+    .into();
+    let task = Handover::new(&robot, 1, start, held, 1);
+    let closing = Handover {
+        held: Held {
+            locked: closed.clone(),
+            ..task.held.clone()
+        },
+        ..task.clone()
+    };
+    let o = TaskOptions::default();
+    let mine = batchplan::handover(&device, &worlds, &[closing], &o).unwrap();
+    let relocked = device.with_robot(&robot.relock(&closed).unwrap()).unwrap();
+    let alone = batchplan::handover(&relocked, &worlds, &[task], &o).unwrap();
+    assert_eq!(
+        format!("{:?}", mine.outcomes[0]),
+        format!("{:?}", alone.outcomes[0])
+    );
+    assert!(
+        mine.outcomes[0].is_ok(),
+        "{:?}",
+        mine.outcomes[0].as_ref().err()
+    );
+}
