@@ -37,12 +37,13 @@ Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-la
 
 ```bash
 cargo add batchplan                        # --features lerobot,usd for the optional features below
-pip install --pre batches                 # Python bindings, imported as batchplan
+pip install batches                       # Python bindings, imported as batchplan
 ```
 
 From Python, [batches on PyPI](https://pypi.org/project/batches/) binds the same calls as
-`import batchplan`, with NumPy arrays in and out ([Python](docs/python.md)). The initial
-`0.11.0b1` release is a source distribution and needs a Rust toolchain to install.
+`import batchplan`, with NumPy arrays in and out ([Python](docs/python.md)). Wheels are available for Linux
+(x86-64 and ARM64), macOS (Intel and Apple Silicon), and Windows (x86-64), for Python 3.10
+or newer. Source installations require a Rust toolchain.
 
 | Cargo feature | Default | Adds |
 |---|---|---|

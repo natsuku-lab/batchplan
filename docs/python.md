@@ -7,13 +7,13 @@ The `batchplan` package binds the library for Python: the same calls, batches an
 Install [batches from PyPI](https://pypi.org/project/batches/):
 
 ```bash
-pip install --pre batches
+pip install batches
 ```
 
 The distribution is named `batches`; the import is `batchplan`. Python 3.10 or newer is required.
-The initial `0.11.0b1` release contains source only, so installing it needs a Rust toolchain
-([rustup](https://rustup.rs)). `--pre` includes beta releases; omit it when you want only stable
-releases once those are available.
+Wheels are available for Linux (x86-64 and ARM64), macOS (Intel and Apple Silicon), and Windows
+(x86-64). Installing a matching wheel needs no Rust toolchain. Building from source requires
+[Rust](https://rustup.rs/).
 
 For changes on `main` that have not reached PyPI, build from the repository:
 
@@ -109,4 +109,4 @@ Every call lets go of the interpreter while it works, so other Python threads ru
 
 ## What it binds
 
-Robots (`Robot.load`, `from_urdf`, `assemble` from `Part`s, `attach`, `detach`, `relock`, forward kinematics and spheres; `CollisionModel` with `load`, `save`, `to_json`, `from_json` and `assemble`), obstacles and worlds (`World.without`, `always_touching`), devices, IK, planning with hand constraints, timing, tool paths (`follow`), whole tasks (`pick`, `place`, `grasps`, `place_poses`) and held objects (`Held`, per problem as `holding`). Not yet: training data (`datagen`, the NumPy and LeRobot exports), live motion (`Follower`, `servo`), joining motions (`join`), distance grids and perception, `World.load`, `MeshModel`, `Robot.qualify`, `Robot.breach`, `Device.evaluate` and `Device.contacts`. OpenUSD files need the library's `usd` feature, which these builds leave out.
+Robots (`Robot.load`, `from_urdf`, `assemble` from `Part`s, `attach`, `detach`, `relock`, forward kinematics and spheres; `CollisionModel` with `load`, `save`, `to_json`, `from_json` and `assemble`), obstacles and worlds (`World.without`, `always_touching`), devices, IK, planning with hand constraints, timing, tool paths (`follow`), whole tasks (`pick`, `place`, `handover`, `grasps`, `place_poses`, `handover_poses`, `handover_grasps`) and held objects (`Held`, per problem as `holding`). Not yet: training data (`datagen`, the NumPy and LeRobot exports), live motion (`Follower`, `servo`), joining motions (`join`), distance grids and perception, `World.load`, `MeshModel`, `Robot.qualify`, `Robot.breach`, `Device.evaluate` and `Device.contacts`. OpenUSD files need the library's `usd` feature, which these builds leave out.
