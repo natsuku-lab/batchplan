@@ -1052,13 +1052,13 @@ impl Robot {
         start: impl Fn(&T) -> &[f32],
         start_mut: impl Fn(&mut T) -> &mut [f32],
     ) -> error::Result<Cow<'a, [T]>> {
+        if tolerance == 0.0 {
+            return Ok(Cow::Borrowed(items));
+        }
         ensure_input!(
             tolerance.is_finite() && tolerance >= 0.0,
             "start_tolerance must be finite and nonnegative, got {tolerance}"
         );
-        if tolerance == 0.0 {
-            return Ok(Cow::Borrowed(items));
-        }
         let mut changed = false;
         for (i, item) in items.iter().enumerate() {
             let q = start(item);

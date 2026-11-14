@@ -163,7 +163,8 @@ pub fn follow(
     paths: &[ToolPath],
     o: &ToolPathOptions,
 ) -> Result<ToolPathResult> {
-    let corrected = device.robot().correct_starts(
+    let robot = device.robot();
+    let corrected = robot.correct_starts(
         paths,
         o.start_tolerance,
         "path",
@@ -171,7 +172,7 @@ pub fn follow(
         |p| &mut p.start,
     )?;
     let paths = corrected.as_ref();
-    check(device.robot(), worlds, paths, o)?;
+    check(robot, worlds, paths, o)?;
     let holds: Vec<Option<&Held>> = paths.iter().map(|p| p.holding.as_ref()).collect();
     let parts = held::by_hold(device, &holds, |on, items| {
         followed(on, worlds, &held::subset(paths, items), o)

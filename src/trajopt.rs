@@ -379,7 +379,8 @@ pub fn plan(
     o: &PlanOptions,
 ) -> Result<PlanResult> {
     let deadline = o.time_budget.map(|budget| Instant::now() + budget);
-    let corrected = device.robot().correct_starts(
+    let robot = device.robot();
+    let corrected = robot.correct_starts(
         problems,
         o.start_tolerance,
         "problem",
@@ -387,7 +388,7 @@ pub fn plan(
         |p| &mut p.start,
     )?;
     let problems = corrected.as_ref();
-    check(device.robot(), worlds, problems, o)?;
+    check(robot, worlds, problems, o)?;
     let goals = resolve(device, worlds, problems, o, deadline)?;
     // Problems whose pose goals IK found no way to reach fail before planning.
     let planning: Vec<usize> = (0..problems.len())

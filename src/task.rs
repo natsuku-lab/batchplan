@@ -393,7 +393,8 @@ pub fn pick(
     tasks: &[Pick],
     o: &TaskOptions,
 ) -> Result<TaskResult<Pick>> {
-    let corrected = device.robot().correct_starts(
+    let robot = device.robot();
+    let corrected = robot.correct_starts(
         tasks,
         o.plan.start_tolerance,
         "task",
@@ -401,7 +402,7 @@ pub fn pick(
         |t| &mut t.start,
     )?;
     let tasks = corrected.as_ref();
-    check_picks(device.robot(), worlds, tasks, o)?;
+    check_picks(robot, worlds, tasks, o)?;
     if tasks.iter().all(|t| t.locked.is_empty()) {
         return picked(device, worlds, tasks, o);
     }
