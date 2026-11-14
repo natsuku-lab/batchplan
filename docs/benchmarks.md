@@ -743,6 +743,41 @@ batchplan's paths were 12% longer than cuRobo's at the median where both solved 
 
 - **One codegen unit for batchplan's own builds.** How rustc splits a crate into its sixteen codegen units decides what is inlined into what, and any new code redraws the split. After the hand-over (#52), pick and place ran 0.4–1.1% slower; built as one unit, it retired the instructions main did within 0.006% on one thread. After the occlusion band (#54), GPU grid building on the Radeon ran 3–10% slower, as slowly with the previous kernels; built as one unit, its times matched main's within ±3% (best and lower quartile of twelve rotated runs). Each PR gives its runs. This workspace's release profile builds batchplan as one unit (`Cargo.toml`), so an A/B here measures the change and not the redraw. Clean test builds take 52 s rather than 43 (M4 Pro). Adding ThinLTO across crates took them to 217 s, every test binary linked with LTO. ThinLTO is not used because of that build cost.
 
+### Fitting collision spheres
+
+Dense surface samples check the selected spheres four at a time, using SIMD with the scalar
+test's addition order and inclusive boundary. The fitted models are unchanged: the sampling,
+greedy selection, refinement order and final inflation are the same. This speeds up fitting
+without loosening its coverage or overhang bounds.
+
+Four alternating rounds against `30ca805` on 2026-11-14, with one caller thread and one codegen
+unit, using the fixtures in `examples/fitting.rs`. Each invocation warms up with one load,
+qualifies that model outside timing, and times three more loads. The table gives the best and
+lower quartile of the rounds' best times, in milliseconds. Both machines had other work running;
+the comparison uses builds run beside each other, not earlier idle measurements.
+
+| Model / sphere budget | M4 Pro before | M4 Pro after | Ryzen AI Max+ 395 before | Ryzen after |
+|---|---:|---:|---:|---:|
+| Stand / 512 | 430.33 / 440.53 | 346.96 / 349.90 | 481.38 / 484.20 | 338.90 / 339.00 |
+| Panda / 1,200 | 338.16 / 341.92 | 325.08 / 332.63 | 378.39 / 379.23 | 338.14 / 341.19 |
+| SO-101 / 700 | 141.43 / 142.48 | 131.43 / 132.78 | 152.17 / 153.99 | 127.74 / 127.80 |
+| UR5e / 1,200 | 254.71 / 258.37 | 225.78 / 233.74 | 272.70 / 273.48 | 221.81 / 221.81 |
+
+These runs set `self_collision_samples` to zero to isolate fitting from self-collision pair
+analysis. Runs with its default 10,000 samples, with smaller and larger sphere budgets, with
+fourteen or thirty-two caller threads, and with sixteen codegen units also compare the complete
+collision-model checksums before and after. The example prints those checksums, sphere counts
+and measured overhangs alongside times.
+
+```bash
+cargo run --release --example fitting -- 1 stand 512 0 3
+cargo run --release --example fitting -- 1 panda 1200 0 3
+# Default self-collision analysis, on fourteen threads:
+cargo run --release --example fitting -- 14 panda 1200 10000 3
+# A dependent crate's default codegen-unit count:
+cargo run --release --config 'profile.release.package.batchplan.codegen-units=16' --example fitting -- 1 so101 700 0 3
+```
+
 ## Reproducing
 
 This workspace builds batchplan as one codegen unit (`Cargo.toml`), since the change of that name [above](#how-the-speed-came); numbers measured before it were built with sixteen. A crate that depends on batchplan builds it with its own profile; to build it as here, add `[profile.release.package.batchplan]` with `codegen-units = 1` to that crate's `Cargo.toml`.

@@ -1,0 +1,9 @@
+<robot name="stand">
+  <link name="base"/>
+  <link name="feet"><collision><geometry><box size="0.77 0.7 0.31"/></geometry></collision></link>
+  <link name="box"><collision><origin xyz="0 0 0.5"/><geometry><box size="0.22 0.4 0.53"/></geometry></collision></link>
+  <joint name="turn" type="revolute"><parent link="base"/><child link="feet"/><axis xyz="0 0 1"/>
+    <limit lower="-1" upper="1" velocity="1" effort="1"/></joint>
+  <joint name="tilt" type="revolute"><parent link="feet"/><child link="box"/><axis xyz="1 0 0"/>
+    <limit lower="-1" upper="1" velocity="1" effort="1"/></joint>
+</robot>

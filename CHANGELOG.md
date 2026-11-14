@@ -150,6 +150,13 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Changed
 
+- Faster sphere fitting, with the same fitted collision models. Dense surface checks test four
+  spheres at once: on one thread, fitting the stand with a 512-sphere budget takes 19% less time
+  on an M4 Pro and 30% less on a Ryzen AI Max+ 395; the Panda with a 1,200-sphere budget takes
+  4% and 11% less, respectively.
+  These isolate fitting from self-collision analysis. The
+  [benchmark guide](docs/benchmarks.md#fitting-collision-spheres) gives the runs and
+  `examples/fitting.rs` reproduces the fixtures.
 - Faster CPU collision checks, contact queries, IK, planning, tasks, depth-grid construction and
   occupancy updates, with results the same to the bit. In six alternating runs, the best CPU
   times for 1,000 IK targets among clutter fell 9% on a Ryzen AI Max+ 395 and 4% on an M4 Pro;
