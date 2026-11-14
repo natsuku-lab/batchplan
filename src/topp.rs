@@ -234,6 +234,7 @@ fn timed_map(
     let (stages, step) = (spans * STAGES_PER_SPAN, 1.0 / STAGES_PER_SPAN as f64);
     // The path's first and second derivatives at each stage, `[stages + 1, n]`. Generic over the
     // basis, so each table evaluates it inline rather than through a pointer per stage.
+    #[inline(never)]
     fn derivatives(
         cp: &[f32],
         n: usize,

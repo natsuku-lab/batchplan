@@ -144,11 +144,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Changed
 
-- Faster CPU collision checks, IK, planning and tasks, in every build, with results the same to the
-  bit: on a Ryzen AI Max+ 395 (all threads), IK among clutter 25% faster, `evaluate` 26%, plans
-  20–32% and 64 picks 20%; on an M4 Pro, 2–12%. This workspace builds batchplan as one codegen unit
-  (`[profile.release.package.batchplan] codegen-units = 1`), so a change measured here no longer
-  moves with how rustc splits the crate; a crate that depends on batchplan can do the same.
+- Faster CPU collision checks, contact queries, IK, planning, tasks, depth-grid construction and
+  occupancy updates, with results the same to the bit. In six alternating runs, the best CPU
+  times for 1,000 IK targets among clutter fell 9% on a Ryzen AI Max+ 395 and 4% on an M4 Pro;
+  256 plans with four optimized seeds took 22% and 6% less time, respectively. The
+  [benchmark guide](docs/benchmarks.md#how-the-speed-came) gives the times, lower quartiles and
+  build configurations. This workspace builds batchplan as one
+  codegen unit (`[profile.release.package.batchplan] codegen-units = 1`), so a change measured here
+  no longer moves with how rustc splits the crate; a crate that depends on batchplan can do the same.
 - A world with a distance grid uploads without checking the grid's every value again: a grid is
   checked when it is made, and nothing changes one after. `pick` and `place` upload their worlds
   by the dozen, so a grid in the world cost each call that many passes over its values. The

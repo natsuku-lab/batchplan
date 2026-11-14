@@ -453,6 +453,20 @@ fn primitive_distance(o: &Prepared, p: Vec3) -> (f32, Vec3) {
     }
 }
 
+/// Distance without a gradient, with the grid lookup kept out of primitive contact loops.
+#[inline(never)]
+fn obstacle_value(o: &Prepared, p: Vec3) -> f32 {
+    match *o {
+        Prepared::Sdf {
+            rot,
+            center,
+            ref grid,
+            ..
+        } => sdf::grid_value(grid, rot.transpose() * (p - center)),
+        _ => primitive_distance(o, p).0,
+    }
+}
+
 /// At least how far a distance grid is from every point within `radius` of `p`, where that is
 /// positive: the distance of `p` from the grid's box less `radius`, and less what the grid's
 /// values outside the box may lie below the distance to it. A grid's values are interpolated, so
@@ -702,10 +716,15 @@ pub(crate) fn contacts(robot: &Robot, world: &CpuWorld, fk: &Fk, within: f32) ->
             if world.touch.contains(k, link) {
                 continue;
             }
+            let grid = matches!(o, Prepared::Sdf { .. });
             let mut distance = FAR;
             for s in first as usize..(first + count) as usize {
-                distance =
-                    distance.min(obstacle_distance(o, center(s)).0 - robot.spheres[s].radius);
+                let d = if grid {
+                    obstacle_value(o, center(s))
+                } else {
+                    primitive_distance(o, center(s)).0
+                };
+                distance = distance.min(d - robot.spheres[s].radius);
             }
             if distance < within {
                 out.push(Contact::World {

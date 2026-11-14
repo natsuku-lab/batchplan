@@ -330,6 +330,83 @@ fn clearances_are_exact_up_to_the_margins() {
 }
 
 #[test]
+fn contacts_measure_a_rotated_grid_as_clearance_does() {
+    let robot = panda();
+    let mut rng = Rng::new(17);
+    let q: Vec<f32> = (0..128 * robot.dof())
+        .map(|i| {
+            rng.range(
+                robot.lower()[i % robot.dof()],
+                robot.upper()[i % robot.dof()],
+            )
+        })
+        .collect();
+    let distances: Vec<f32> = (0..11 * 9 * 7)
+        .map(|i| {
+            let p = Vec3::new((i % 11) as f32, (i / 11 % 9) as f32, (i / 99) as f32);
+            (p * 0.05 - Vec3::new(0.25, 0.2, 0.15)).dot(Vec3::new(0.2, 0.3, -0.1)) - 0.05
+        })
+        .collect();
+    let grid =
+        SdfGrid::try_new([11, 9, 7], 0.05, Vec3::new(-0.25, -0.2, -0.15), &distances).unwrap();
+    let scenes = [
+        Quat::IDENTITY,
+        Quat::from_rotation_y(0.37) * Quat::from_rotation_z(-0.51),
+    ]
+    .map(|rotation| {
+        World::new(vec![
+            Obstacle::from_grid(grid.clone())
+                .placed(Pose::new(Vec3::new(0.35, 0.0, 0.35), rotation)),
+        ])
+    });
+    let everything = CollisionWeights {
+        margin: 10.0,
+        ..CollisionWeights::NONE
+    };
+    let cpu = Device::cpu(&robot).unwrap();
+    let worlds = cpu.upload(&scenes).unwrap();
+    let expected: Vec<Vec<f32>> = (0..2)
+        .map(|world| {
+            cpu.evaluate(&worlds, &vec![world; 128], &q, &everything)
+                .unwrap()
+                .world_clearance
+        })
+        .collect();
+    assert!(
+        expected[0]
+            .iter()
+            .zip(&expected[1])
+            .filter(|(a, b)| a != b)
+            .count()
+            > 100,
+        "the grid's rotation must change the distances being checked"
+    );
+    for device in devices(&robot) {
+        let worlds = device.upload(&scenes).unwrap();
+        for (world, expected) in expected.iter().enumerate() {
+            let found = device
+                .contacts(&worlds, &vec![world as u32; 128], &q, 2.0)
+                .unwrap();
+            for (contacts, &distance) in found.iter().zip(expected) {
+                let nearest = contacts.iter().find_map(|contact| match contact {
+                    batchplan::Contact::World {
+                        obstacle: 0,
+                        distance,
+                        ..
+                    } => Some(*distance),
+                    _ => None,
+                });
+                assert!(
+                    distance < 2.0,
+                    "every configuration must exercise the grid contact"
+                );
+                assert_eq!(nearest, Some(distance), "{}: world {world}", device.name());
+            }
+        }
+    }
+}
+
+#[test]
 fn contacts_name_what_each_clearance_measures() {
     let robot = panda();
     let (n, items) = (robot.dof(), 2000);
