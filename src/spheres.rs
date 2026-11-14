@@ -17,7 +17,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::sync::Arc;
 
-use glam::{Quat, UVec3, Vec3};
+use glam::{Quat, UVec3, Vec3, Vec4};
 use parry3d::math::Pose;
 use parry3d::query;
 use parry3d::shape::{TriMesh as ParryMesh, TriMeshFlags};
@@ -159,12 +159,44 @@ fn vertex_normals(meshes: &[TriMesh]) -> Vec<(Vec3, Vec3)> {
     out
 }
 
-/// Whether the sphere `(c, r)` reaches `p` within `overhang` beyond its radius: the one test the
-/// cover, its refinement and the samples' own candidates share, so a candidate made to reach a
-/// sample is one the cover counts as reaching it.
+/// Whether the sphere `(c, r)` reaches `p` within `overhang` beyond its radius: the scalar reference
+/// for the cover, its refinement and the samples' own candidates.
 #[inline]
 fn reaches(p: Vec3, (c, r): (Vec3, f32), overhang: f32) -> bool {
     (p - c).length_squared() <= (r + overhang) * (r + overhang)
+}
+
+/// Four spheres checked together, with the same rounding and boundary as [`reaches`].
+struct SphereCover {
+    groups: Vec<[Vec4; 4]>,
+}
+
+impl SphereCover {
+    fn new(candidates: &[(Vec3, f32)], picks: &[usize], overhang: f32) -> Self {
+        let groups = picks
+            .chunks(4)
+            .map(|chunk| {
+                // Repeat a real sphere in the tail so unused lanes cannot create a hit.
+                let spheres: [_; 4] =
+                    std::array::from_fn(|i| candidates[chunk[i.min(chunk.len() - 1)]]);
+                let x = Vec4::from_array(spheres.map(|s| s.0.x));
+                let y = Vec4::from_array(spheres.map(|s| s.0.y));
+                let z = Vec4::from_array(spheres.map(|s| s.0.z));
+                let radius = Vec4::from_array(spheres.map(|s| s.1 + overhang));
+                [x, y, z, radius * radius]
+            })
+            .collect();
+        Self { groups }
+    }
+
+    fn contains(&self, p: Vec3) -> bool {
+        self.groups.iter().any(|&[x, y, z, radius_squared]| {
+            let dx = Vec4::splat(p.x) - x;
+            let dy = Vec4::splat(p.y) - y;
+            let dz = Vec4::splat(p.z) - z;
+            (dx * dx + dy * dy + dz * dz).cmple(radius_squared).any()
+        })
+    }
 }
 
 /// The largest sphere centered at `p` inside any of `solids`, if `p` is inside one.
@@ -407,10 +439,10 @@ impl LinkFit {
                 continue;
             }
             // Dense samples that joined and are still missed are those no candidate reaches.
-            let picked: Vec<(Vec3, f32)> = picks.iter().map(|&i| self.candidates[i]).collect();
+            let cover = SphereCover::new(&self.candidates, &picks, growth * overhang);
             let missed = |&i: &usize| {
                 let p = self.dense[i].0;
-                !self.joined[i] && !picked.iter().any(|&s| reaches(p, s, growth * overhang))
+                !self.joined[i] && !cover.contains(p)
             };
             let dense = 0..self.dense.len();
             let missed: Vec<usize> = if self.parallel {
@@ -905,6 +937,57 @@ mod tests {
     use super::*;
     use crate::description::Geometry;
 
+    #[test]
+    fn packed_cover_matches_scalar_reaches() {
+        let candidates: Vec<_> = (0..11)
+            .map(|i| (Vec3::new(4.0 * i as f32, i as f32, -2.0 * i as f32), 0.25))
+            .collect();
+        for count in 0..=9 {
+            let picks: Vec<usize> = (1..=count).rev().collect();
+            for overhang in [0.0, 0.125] {
+                let cover = SphereCover::new(&candidates, &picks, overhang);
+                assert!(
+                    !cover.contains(candidates[0].0),
+                    "an empty cover or unused lane cannot cover an unpicked sphere"
+                );
+                for &i in &picks {
+                    let (center, radius) = candidates[i];
+                    let edge = center + Vec3::X * (radius + overhang);
+                    assert_eq!(
+                        picks
+                            .iter()
+                            .filter(|&&j| reaches(edge, candidates[j], overhang))
+                            .count(),
+                        1,
+                        "each picked sphere must be the only hit at its boundary"
+                    );
+                    for x in [edge.x.next_down(), edge.x, edge.x.next_up()] {
+                        let p = Vec3::new(x, edge.y, edge.z);
+                        let expected = picks.iter().any(|&j| reaches(p, candidates[j], overhang));
+                        assert_eq!(
+                            cover.contains(p),
+                            expected,
+                            "count {count}, sphere {i}, {p:?}"
+                        );
+                    }
+                }
+            }
+        }
+        let p = Vec3::new(1.0, 2.0f32.powi(-12), 2.0f32.powi(-12));
+        assert!(
+            reaches(p, (Vec3::ZERO, 1.0), 0.0),
+            "the scalar sum rounds to one"
+        );
+        assert!(
+            p.x * p.x + (p.y * p.y + p.z * p.z) > 1.0,
+            "regrouping the sum must change the result for this point"
+        );
+        let cover = SphereCover::new(&[(Vec3::ZERO, 1.0)], &[0], 0.0);
+        assert!(
+            cover.contains(p),
+            "packing must preserve the scalar addition order"
+        );
+    }
     #[test]
     fn the_cover_counts_a_sample_its_own_candidate_reaches_at_the_edge_of_its_window() {
         // A box from x = -0.05 to just past 0.002, and a sample on that face whose own candidate
