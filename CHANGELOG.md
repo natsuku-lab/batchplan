@@ -10,6 +10,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- **Breaking:** `PlanOptions::start_tolerance` and `ToolPathOptions::start_tolerance` optionally
+  clamp measured starts just past a joint limit before the normal collision and constraint checks.
+  Both default to zero, preserving strict validation. Larger or nonfinite violations are input
+  errors; continuous joints, goals and start velocities are unchanged. `pick`, `place` and
+  `handover` use `TaskOptions::plan.start_tolerance` for their initial states. Results retain the
+  corrected starts. Exact options literals need the new field; Python options expose it too.
 - **Breaking:** picks and holds say where the fingers are: `Pick::locked` and `Held::locked` hold
   the robot's locked joints (as `Robot::relock` takes them) at those values for that task, or
   while the object is held, so a rim between walls can be picked with the fingers part open and

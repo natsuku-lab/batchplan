@@ -1,5 +1,6 @@
 //! Robot model: a kinematic tree with collision spheres, built from a robot description file.
 
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -1039,6 +1040,57 @@ impl Robot {
         flips.sort_by(|a, b| distance(a).total_cmp(&distance(b)));
         variants.extend(flips);
         variants
+    }
+
+    /// Corrects a batch's starts within `tolerance`, keeping the original batch when none change.
+    /// Zero leaves validation to the caller's strict path, without another pass over the starts.
+    pub(crate) fn correct_starts<'a, T: Clone>(
+        &self,
+        items: &'a [T],
+        tolerance: f32,
+        what: &str,
+        start: impl Fn(&T) -> &[f32],
+        start_mut: impl Fn(&mut T) -> &mut [f32],
+    ) -> error::Result<Cow<'a, [T]>> {
+        ensure_input!(
+            tolerance.is_finite() && tolerance >= 0.0,
+            "start_tolerance must be finite and nonnegative, got {tolerance}"
+        );
+        if tolerance == 0.0 {
+            return Ok(Cow::Borrowed(items));
+        }
+        let mut changed = false;
+        for (i, item) in items.iter().enumerate() {
+            let q = start(item);
+            ensure_input!(
+                q.len() == self.dof(),
+                "{what} {i}: the start has {} joints, expected {}",
+                q.len(),
+                self.dof()
+            );
+            for (j, &value) in q.iter().enumerate() {
+                let (lower, upper) = self.bounds(j);
+                let excess = (lower - value).max(value - upper).max(0.0);
+                ensure_input!(
+                    value.is_finite() && excess <= tolerance,
+                    "{what} {i}: start joint {j} ({}) at {value} must be finite and within \
+                     {tolerance} of its limits [{lower}, {upper}]",
+                    self.dof_names[j]
+                );
+                changed |= excess > 0.0;
+            }
+        }
+        if !changed {
+            return Ok(Cow::Borrowed(items));
+        }
+        let mut corrected = items.to_vec();
+        for item in &mut corrected {
+            for (j, value) in start_mut(item).iter_mut().enumerate() {
+                let (lower, upper) = self.bounds(j);
+                *value = value.clamp(lower, upper);
+            }
+        }
+        Ok(Cow::Owned(corrected))
     }
 
     /// Whether `q` is within every joint's limits.

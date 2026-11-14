@@ -33,6 +33,11 @@ use crate::types::{JointPaths, Pose, Solved, StartMotion};
 /// How [`plan`] searches, shortens, fits and optimizes paths.
 #[derive(Clone, Copy, Debug)]
 pub struct PlanOptions {
+    /// Largest start-position violation to clamp to a joint's limit, in radians (meters for
+    /// prismatic joints): 0, strict. Must be finite and nonnegative. Larger violations are input
+    /// errors; continuous joints are unchanged. Collision and constraint checks use the corrected
+    /// start, which the result's problem retains. Goals and start velocities are unchanged.
+    pub start_tolerance: f32,
     /// Seeds trajectory optimization runs per problem, besides the searched path: its spline, the
     /// straight lines to the goal and its equivalents, then bends through random via points.
     /// Problems searched to within 2% of the straight line are not optimized (their seeds stay
@@ -92,6 +97,7 @@ pub const MAX_HISTORY: usize = 8;
 impl Default for PlanOptions {
     fn default() -> Self {
         Self {
+            start_tolerance: 0.0,
             seeds: 0,
             control_points: 24,
             samples_per_span: 3,
@@ -373,6 +379,14 @@ pub fn plan(
     o: &PlanOptions,
 ) -> Result<PlanResult> {
     let deadline = o.time_budget.map(|budget| Instant::now() + budget);
+    let corrected = device.robot().correct_starts(
+        problems,
+        o.start_tolerance,
+        "problem",
+        |p| &p.start,
+        |p| &mut p.start,
+    )?;
+    let problems = corrected.as_ref();
     check(device.robot(), worlds, problems, o)?;
     let goals = resolve(device, worlds, problems, o, deadline)?;
     // Problems whose pose goals IK found no way to reach fail before planning.
@@ -389,7 +403,7 @@ pub fn plan(
         (items, part)
     });
     let mut result = PlanResult::gather(problems, 1 + o.seeds, parts.collect());
-    // The problems as given, pose goals and all.
+    // Keep the pose goals, alongside any corrected starts.
     result.problems = problems.to_vec();
     for (pi, failure) in goals.failures.into_iter().enumerate() {
         if failure.is_some() {

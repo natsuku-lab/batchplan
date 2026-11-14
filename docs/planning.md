@@ -89,6 +89,24 @@ Optimized seeds are validated as the searched path's spline is checked: at the s
 
 Continuous joints are unbounded, and joints whose range spans more than a turn (the UR5e's ±2π) reach the same pose at angles a turn apart. Goals are reached at whichever equivalent is nearest or free: the search takes them all as its goal set, and continuous joints step and measure the short way round. On the UR5e, a goal whose shoulder has turned past the table below is reached the long way round when the short way is blocked.
 
+### Measured starts at joint limits
+
+Starts outside the joint limits are input errors by default. A measured state just past a stop can
+opt into correction with `PlanOptions { start_tolerance: 0.001, ..Default::default() }`: each bounded
+joint at most that far outside its limits is clamped to the nearest limit, in radians or meters for
+prismatic joints. A larger violation is an `Error::Input` naming the joint and value. The tolerance
+must be finite and nonnegative; zero keeps strict validation. Continuous joints keep their values,
+including whole turns, and a nonfinite start is always refused.
+
+Correction happens before IK, collision and constraint checks. Goals, held-joint rules and start
+velocities and accelerations remain unchanged: a joint goal still needs to be within its limits and
+to agree with the corrected start on held joints, and a moving start still needs a feasible path.
+The caller's inputs stay intact; `PlanResult::problems` holds the starts actually planned.
+`ToolPathOptions::start_tolerance` does the same for `follow`, whose hand path starts at the corrected
+configuration. `pick`, `place` and `handover` use `TaskOptions::plan.start_tolerance` for their initial
+states, even when a task omits its transit, and retain the corrected starts in their results. Python
+uses the same options, for example `bp.PlanOptions(start_tolerance=0.001)`.
+
 ### Time budgets and determinism
 
 `PlanOptions::time_budget` stops every search and the optimization once it passes, and returns the valid paths found so far. Without a budget nothing checks the clock, and two runs give bit-identical results, on either device. A plan to a pose ends where IK solves it, and a GPU rounds IK unlike the CPU, and by the batch's size, so its plan there can end slightly away from the CPU's and from the same problem's in another batch.

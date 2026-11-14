@@ -13,6 +13,10 @@ use crate::solved::Cached;
 value_class! {
     /// How `follow` tracks a path.
     ToolPathOptions(batchplan::ToolPathOptions) {
+        /// Largest start-position violation to clamp, in radians (meters for prismatic joints).
+        /// Default 0 is strict. Larger violations are errors; continuous joints stay unchanged.
+        /// The path begins at the corrected configuration.
+        start_tolerance: f32,
         /// Largest step of the hand between configurations (meters): 5 mm, at least 10 µm.
         step: f32,
         /// Largest turn of the hand between configurations (radians): 0.05, at least 1e-5.

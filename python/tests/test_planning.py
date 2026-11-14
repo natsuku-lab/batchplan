@@ -602,3 +602,24 @@ def test_calls_let_other_threads_run(tasks_robot, call):
     assert took[0] > 0.1, f"{call} is long enough to tell: {took[0]:.3f} s"
     assert first - began[0] < took[0] / 4, "the main thread resumed while the call ran"
     assert last - first > took[0] / 2, "and kept running through it"
+
+
+def test_measured_start_correction_is_opt_in_and_retained(tasks_robot):
+    corrected = tasks_robot.default_q.copy()
+    corrected[0] = tasks_robot.upper[0]
+    measured = corrected.copy()
+    measured[0] = np.nextafter(corrected[0], np.float32(math.inf))
+    assert measured[0] > corrected[0], "the input must be outside its limit"
+    goal = corrected.copy()
+    goal[0] -= 0.1
+    problem = bp.PlanProblem(0, measured, goal)
+    for device in devices(tasks_robot):
+        worlds = device.upload([bp.World()])
+        with pytest.raises(bp.InputError, match="start"):
+            bp.plan(device, worlds, [problem])
+        result = bp.plan(device, worlds, [problem], bp.PlanOptions(start_tolerance=0.001))
+        manual = bp.plan(device, worlds, [bp.PlanProblem(0, corrected, goal)])
+        assert result.best(0) is not None, result.failures
+        np.testing.assert_array_equal(result.best(0), manual.best(0))
+        np.testing.assert_array_equal(result.problems[0].start, corrected)
+        np.testing.assert_array_equal(problem.start, measured)
