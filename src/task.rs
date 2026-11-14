@@ -171,7 +171,8 @@ impl Place {
 pub struct TaskOptions {
     /// IK at each grasp or release.
     pub ik: IkOptions,
-    /// The planned paths from the start.
+    /// The planned paths from the start. `start_tolerance` applies to the task's initial
+    /// configuration too, even when its transit is disabled; the result retains a corrected start.
     pub plan: PlanOptions,
     /// The straight moves.
     pub tool_path: ToolPathOptions,
@@ -392,7 +393,16 @@ pub fn pick(
     tasks: &[Pick],
     o: &TaskOptions,
 ) -> Result<TaskResult<Pick>> {
-    check_picks(device.robot(), worlds, tasks, o)?;
+    let robot = device.robot();
+    let corrected = robot.correct_starts(
+        tasks,
+        o.plan.start_tolerance,
+        "task",
+        |t| &t.start,
+        |t| &mut t.start,
+    )?;
+    let tasks = corrected.as_ref();
+    check_picks(robot, worlds, tasks, o)?;
     if tasks.iter().all(|t| t.locked.is_empty()) {
         return picked(device, worlds, tasks, o);
     }
@@ -636,6 +646,14 @@ pub fn place(
     o: &TaskOptions,
 ) -> Result<TaskResult<Place>> {
     let robot = device.robot();
+    let corrected = robot.correct_starts(
+        tasks,
+        o.plan.start_tolerance,
+        "task",
+        |t| &t.start,
+        |t| &mut t.start,
+    )?;
+    let tasks = corrected.as_ref();
     check_options(o)?;
     for (i, t) in tasks.iter().enumerate() {
         let world = check_task(robot, worlds, i, &Steps::of_place(t), &t.start, t.held.hand)?;

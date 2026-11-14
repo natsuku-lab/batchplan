@@ -41,6 +41,11 @@ pub struct ToolPath {
 /// How [`follow`] tracks a path.
 #[derive(Clone, Debug)]
 pub struct ToolPathOptions {
+    /// Largest start-position violation to clamp to a joint's limit, in radians (meters for
+    /// prismatic joints): 0, strict. Must be finite and nonnegative. Larger violations are input
+    /// errors; continuous joints are unchanged. The hand's path and collision checks start from
+    /// the corrected configuration, which the result's problem retains.
+    pub start_tolerance: f32,
     /// Largest step of the hand between configurations (meters): 5 mm, at least 10 µm.
     pub step: f32,
     /// Largest turn of the hand between configurations (radians): 0.05, at least 1e-5.
@@ -59,6 +64,7 @@ pub struct ToolPathOptions {
 impl Default for ToolPathOptions {
     fn default() -> Self {
         Self {
+            start_tolerance: 0.0,
             step: 0.005,
             rotation_step: 0.05,
             precision: 0.001,
@@ -157,7 +163,16 @@ pub fn follow(
     paths: &[ToolPath],
     o: &ToolPathOptions,
 ) -> Result<ToolPathResult> {
-    check(device.robot(), worlds, paths, o)?;
+    let robot = device.robot();
+    let corrected = robot.correct_starts(
+        paths,
+        o.start_tolerance,
+        "path",
+        |p| &p.start,
+        |p| &mut p.start,
+    )?;
+    let paths = corrected.as_ref();
+    check(robot, worlds, paths, o)?;
     let holds: Vec<Option<&Held>> = paths.iter().map(|p| p.holding.as_ref()).collect();
     let parts = held::by_hold(device, &holds, |on, items| {
         followed(on, worlds, &held::subset(paths, items), o)

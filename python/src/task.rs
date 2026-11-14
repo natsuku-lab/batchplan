@@ -58,7 +58,8 @@ value_class! {
     TaskOptions(batchplan::TaskOptions) {
         /// IK at each grasp or release.
         ik: batchplan::IkOptions,
-        /// The planned paths from the start.
+        /// The planned paths from the start; start_tolerance also corrects the task's initial
+        /// configuration, even when its transit is disabled.
         plan: batchplan::PlanOptions,
         /// The straight moves.
         tool_path: batchplan::ToolPathOptions,

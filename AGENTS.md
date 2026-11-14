@@ -109,13 +109,14 @@ A robot that loads may still have spheres unfit to plan with. Before planning wi
 
 - `ik.best(i)`, `plans.best(i)` and `solved()` return only valid answers; `IkResult::success` and `PlanResult::valid` are per seed, problem-major (`problem * seeds + seed`).
 - A plan is B-spline control points, not a trajectory: time a call's paths together with `time`, or one with `Trajectory::try_new` (`Trajectory::moving` from a moving start), sample it with `at` or `sample`, and `check` it before it runs on hardware. Never send control points to a controller.
+- With `start_tolerance`, use the corrected start retained in the result’s problem; goals and start motion remain as given ([measured starts](docs/planning.md#measured-starts-at-joint-limits)).
 - Plans do not depend on the batch or the device; with a `time_budget`, they depend on the machine's speed. IK starts every problem from the same seeds in any batch, but a GPU rounds differently from the CPU, and differently on either side of where it switches how many invocations share a configuration (4,096 configurations, more for robots with many spheres), so solutions there can differ slightly, and so can plans to poses, which end where IK solves them.
 
 ### Diagnose a failed request, in order
 
 Check these before raising budgets:
 
-1. **The input.** An `Error::Input` names what was refused and the value given: shapes, joint order, unit quaternions, joint limits (starts and goals must be within them), frames.
+1. **The input.** An `Error::Input` names what was refused and the value given: shapes, joint order, unit quaternions, joint limits (strict by default; [measured starts can opt into correction](docs/planning.md#measured-starts-at-joint-limits)), frames.
 2. **The start.** `PlanFailure::StartCollides { contacts }` names each link and obstacle, or pair of links. A link touching the table in every configuration needs a touch (`always_touching`); a start inside a held object's spheres needs the object attached.
 3. **The goal.** `PlanFailure::GoalCollides`, and for a pose goal `GoalUnreachable`, which more `PlanOptions::goal_ik` iterations may fix, or more seeds `kept` past its screening (`screening: 0` gives every seed every iteration); for IK, `ik::failures` tells `Unreachable` from `Collides { contacts }`.
 4. **The search.** `NoPath`: more `rrt.max_iterations`, or the way is blocked. `NoSpline`: more `control_points`, or a slower start motion. `OutOfTime`: a longer `time_budget`.

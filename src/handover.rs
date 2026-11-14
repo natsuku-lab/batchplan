@@ -92,6 +92,14 @@ pub fn handover(
     o: &TaskOptions,
 ) -> Result<TaskResult<Handover>> {
     let robot = device.robot();
+    let corrected = robot.correct_starts(
+        tasks,
+        o.plan.start_tolerance,
+        "task",
+        |t| &t.start,
+        |t| &mut t.start,
+    )?;
+    let tasks = corrected.as_ref();
     task::check_options(o)?;
     for (i, t) in tasks.iter().enumerate() {
         task::check_task(robot, worlds, i, &steps(t), &t.start, t.to)?;

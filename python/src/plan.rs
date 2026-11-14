@@ -74,6 +74,10 @@ value_class! {
 value_class! {
     /// How `plan` searches, shortens, fits and optimizes paths.
     PlanOptions(batchplan::PlanOptions) {
+        /// Largest start-position violation to clamp, in radians (meters for prismatic joints).
+        /// Default 0 is strict. Larger violations are errors; continuous joints stay unchanged.
+        /// Goals and start velocities stay unchanged.
+        start_tolerance: f32,
         /// Seeds trajectory optimization runs per problem, besides the searched path: its spline,
         /// the straight lines to the goal and its equivalents, then bends through random via
         /// points. 0 keeps the searched path as it is.
