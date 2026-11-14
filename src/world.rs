@@ -617,7 +617,7 @@ impl Obstacle {
     }
 }
 
-#[inline]
+#[inline(always)]
 pub(crate) fn sphere_distance(center: Vec3, radius: f32, p: Vec3) -> (f32, Vec3) {
     let v = p - center;
     let len = v.length();
@@ -625,7 +625,7 @@ pub(crate) fn sphere_distance(center: Vec3, radius: f32, p: Vec3) -> (f32, Vec3)
 }
 
 /// Must stay in sync with `obstacle_distance` in kernels.wgsl.
-#[inline]
+#[inline(always)]
 pub(crate) fn box_distance(r: Mat3, center: Vec3, half: Vec3, p: Vec3) -> (f32, Vec3) {
     let lp = r.transpose() * (p - center);
     let sgn = Vec3::select(lp.cmpge(Vec3::ZERO), Vec3::ONE, Vec3::NEG_ONE);
@@ -645,7 +645,7 @@ pub(crate) fn box_distance(r: Mat3, center: Vec3, half: Vec3, p: Vec3) -> (f32, 
 }
 
 /// Must stay in sync with `obstacle_distance` in kernels.wgsl.
-#[inline]
+#[inline(always)]
 pub(crate) fn cylinder_distance(
     r: Mat3,
     center: Vec3,
@@ -695,14 +695,14 @@ pub(crate) fn frame(rotation: Quat) -> Mat3 {
 }
 
 /// Must stay in sync with `obstacle_distance` in kernels.wgsl.
-#[inline]
+#[inline(always)]
 pub(crate) fn sdf_distance(r: Mat3, center: Vec3, grid: &SdfGrid, p: Vec3) -> (f32, Vec3) {
     let (d, g) = sdf::grid_distance(grid, r.transpose() * (p - center));
     (d, r * g)
 }
 
 /// Must stay in sync with `obstacle_distance` in kernels.wgsl.
-#[inline]
+#[inline(always)]
 pub(crate) fn capsule_distance(
     r: Mat3,
     center: Vec3,

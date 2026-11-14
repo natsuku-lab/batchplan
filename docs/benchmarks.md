@@ -706,7 +706,46 @@ batchplan's paths were 12% longer than cuRobo's at the median where both solved 
 - **Paths that are done.** The CPU's trajectory optimization stops a path at a steepest-descent search that finds nothing better: no later round can change it. A GPU ran every round for every path. Its kernels now leave such a path out, which changes no path: of the 180 optimizations the CPU runs to their end for `examples/latency.rs`'s two batches of plans, 151 end before the last round, at round 60 of 100 on average. The plans' times are with the table above; the Radeon is not measured yet.
 - **Not adopted.** Shader modules without naga's checks, which wgpu builds only through `unsafe`: what the loop counters cost is above; without bounds checks as well, nothing more on the M4 Pro and under a tenth on an RTX 4090, with every index to prove in range. Taking a workgroup's strided loops several rounds at a time, or their first rounds out of the loop; one loop over a world's obstacles with every link inside it (4% slower without the counters). Reusing every call's buffers: creating, filling and binding them takes 0.36 ms of 53 ms for 16,384 seeds on the M4 Pro, and large ones are made around their data, which saves a copy. Small IK calls do reuse theirs (up to 64 KiB each), which saves them 0.04–0.07 ms of about a millisecond. Grid buffers, which are megabytes, are reused.
 
+**The CPU's hot call boundaries.**
+
+- **What most calls never run, out of their way.** The CPU's `obstacle_distance` measures a sphere against an obstacle, and it carried the distance-grid lookup inline: the trilinear interpolation, its gradient, and on x86 the conversion of half floats through F16C. Every check of a box or a sphere paid that code's stack frame and saved registers. The checks now measure every obstacle but a grid with `primitive_distance`, which calls the lookup out of line, and a grid with `obstacle_distance` as before. The world's five distance functions are `#[inline(always)]`, to keep those calls inline in both build profiles: left to their hints, one build kept the box and the capsule out of `obstacle_distance` and another the grid lookup, and either cost plans among grids 2–3% on the M4 Pro. With it came further changes, found by comparing profiles of two builds of the same code:
+  - the constraint cost is compiled only into constrained plans' sample loops (`PathOptimizer::rounds::<REGION>`);
+  - the normal matrix of IK's step reads the Jacobian by row slices, so its inner loop carries no bounds checks;
+  - the collision gradient's per-link buffers are left zero as they are read, rather than cleared before every call;
+  - the distance transform's passes and timing's derivative tables keep a shape that builds alike;
+  - depth-grid construction and occupancy updates select masking once per image, so unmasked
+    images never check for robot masks in their voxel loops;
+  - contact queries use the distance-only grid lookup, with its interpolation kept inline inside
+    the grid helper and SIMD checks.
+
+  Results are the same to the bit. The CPU runs of `examples/latency.rs` and
+  `examples/tasks.rs` compare 5d1fffb with this change, in six alternating rounds. The table
+  gives the best and lower-quartile time across rounds, in milliseconds, on the Ryzen AI Max+
+  395's 32 threads. The changed build uses one codegen unit; the baseline uses its default
+  sixteen. Background load varied, so one-thread controls also checked the smaller calls.
+
+  | | Before, best / lower quartile | After, best / lower quartile |
+  |---|---|---|
+  | IK, 1,000 targets among clutter | 69.83 / 77.54 | 63.44 / 63.51 |
+  | A UR5e, 1,000 targets among clutter | 97.34 / 111.63 | 88.43 / 88.84 |
+  | 1,000 targets, a grid among the clutter | 81.68 / 92.29 | 77.81 / 78.36 |
+  | `evaluate`, 16,384 configurations | 2.007 / 2.579 | 1.865 / 1.935 |
+  | 256 plans, 4 optimized seeds | 389.17 / 469.62 | 303.38 / 307.77 |
+  | 256 plans past a ball | 557.03 / 625.79 | 522.55 / 527.50 |
+  | 64 picks | 160.3 / 183.5 | 156.9 / 162.2 |
+
+  The M4 Pro's corresponding best/lower-quartile reductions were 4.1/4.0% for IK among
+  clutter, 5.2/6.1% for the UR5e, 5.7/6.5% for `evaluate`, 6.1/6.3% for optimized plans,
+  and 3.1/3.3% for 64 picks. Plans past a ball took 0.9/2.0% longer on all 14 threads;
+  the one-thread controls were faster. A dependent crate's default sixteen-codegen-unit
+  build was measured too: on the Ryzen, its best/lower-quartile times were 52.59/58.72 ms
+  for IK among clutter, 76.21/86.73 ms for the UR5e and 253.86/313.21 ms for optimized plans.
+
+- **One codegen unit for batchplan's own builds.** How rustc splits a crate into its sixteen codegen units decides what is inlined into what, and any new code redraws the split. After the hand-over (#52), pick and place ran 0.4–1.1% slower; built as one unit, it retired the instructions main did within 0.006% on one thread. After the occlusion band (#54), GPU grid building on the Radeon ran 3–10% slower, as slowly with the previous kernels; built as one unit, its times matched main's within ±3% (best and lower quartile of twelve rotated runs). Each PR gives its runs. This workspace's release profile builds batchplan as one unit (`Cargo.toml`), so an A/B here measures the change and not the redraw. Clean test builds take 52 s rather than 43 (M4 Pro). Adding ThinLTO across crates took them to 217 s, every test binary linked with LTO. ThinLTO is not used because of that build cost.
+
 ## Reproducing
+
+This workspace builds batchplan as one codegen unit (`Cargo.toml`), since the change of that name [above](#how-the-speed-came); numbers measured before it were built with sixteen. A crate that depends on batchplan builds it with its own profile; to build it as here, add `[profile.release.package.batchplan]` with `codegen-units = 1` to that crate's `Cargo.toml`.
 
 ```bash
 # GPU against CPU

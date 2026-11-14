@@ -192,15 +192,22 @@ impl DepthImage<'_> {
 
     /// What the image says about the point `p` of a grid with `voxel` spacing, with the space the
     /// robot fills free. `classify` in grids.wgsl mirrors it. `BAND` compiles in the test for
-    /// points within `band` behind a reading (`Seen::Near`).
-    fn classify<const BAND: bool>(
+    /// points within `band` behind a reading (`Seen::Near`); `MASK` keeps the robot's checks out
+    /// of images without a mask.
+    fn classify<const BAND: bool, const MASK: bool>(
         &self,
         robot: Option<&RobotMask>,
         p: Vec3,
         voxel: f32,
         band: f32,
     ) -> Seen {
-        match self.sees::<BAND>(robot, p, voxel, band) {
+        let robot = if MASK { robot } else { None };
+        let seen = if BAND || !MASK {
+            self.sees::<BAND, MASK>(robot, p, voxel, band)
+        } else {
+            self.sees_without_band(robot, p, voxel)
+        };
+        match seen {
             Seen::Near | Seen::Hidden | Seen::Shadow | Seen::Unseen
                 if robot.is_some_and(|r| r.contains(p)) =>
             {
@@ -210,8 +217,15 @@ impl DepthImage<'_> {
         }
     }
 
+    /// Masked, non-band projection stays out of line; other classifiers keep their own copies.
+    #[inline(never)]
+    fn sees_without_band(&self, robot: Option<&RobotMask>, p: Vec3, voxel: f32) -> Seen {
+        self.sees::<false, true>(robot, p, voxel, 0.0)
+    }
+
     /// What the image shows of the point `p`. `sees` in grids.wgsl mirrors it.
-    fn sees<const BAND: bool>(
+    #[inline(always)]
+    fn sees<const BAND: bool, const MASK: bool>(
         &self,
         robot: Option<&RobotMask>,
         p: Vec3,
@@ -226,7 +240,7 @@ impl DepthImage<'_> {
             return Seen::Unseen;
         };
         let robot_at = robot.map_or(f32::INFINITY, |r| r.depth[i]);
-        if z >= robot_at - voxel {
+        if MASK && z >= robot_at - voxel {
             // The pixel sees the robot.
             if z_voxel < robot_at - half {
                 Seen::Free
@@ -481,10 +495,14 @@ pub(crate) fn depth_occupancy(
     robot: Option<&RobotMask>,
     behind: Occlusion,
 ) -> Vec<bool> {
-    // The other rules run a copy without the band's test.
-    let mut occupied = match behind {
-        Occlusion::Band(band) => classified::<true>(grid, image, robot, behind, band),
-        _ => classified::<false>(grid, image, robot, behind, 0.0),
+    // Select the band's and robot mask's checks once, outside the loop over grid points.
+    let mut occupied = match (behind, robot.is_some()) {
+        (Occlusion::Band(band), true) => classified::<true, true>(grid, image, robot, behind, band),
+        (Occlusion::Band(band), false) => {
+            classified::<true, false>(grid, image, robot, behind, band)
+        }
+        (_, true) => classified::<false, true>(grid, image, robot, behind, 0.0),
+        (_, false) => classified::<false, false>(grid, image, robot, behind, 0.0),
     };
     // Dense images resolve surfaces finer than voxels project; their points are solid too.
     for n in hits(grid, image, robot, |_| true) {
@@ -494,7 +512,7 @@ pub(crate) fn depth_occupancy(
 }
 
 /// Each point's occupancy by how the image classifies it.
-fn classified<const BAND: bool>(
+fn classified<const BAND: bool, const MASK: bool>(
     grid: &Layout,
     image: &DepthImage,
     robot: Option<&RobotMask>,
@@ -504,7 +522,7 @@ fn classified<const BAND: bool>(
     (0..grid.points())
         .into_par_iter()
         .map(
-            |n| match image.classify::<BAND>(robot, grid.point(n), grid.voxel, band) {
+            |n| match image.classify::<BAND, MASK>(robot, grid.point(n), grid.voxel, band) {
                 Seen::Surface | Seen::Near => true,
                 Seen::Hidden => !BAND && behind != Occlusion::Free,
                 Seen::Shadow => behind == Occlusion::Occupied,
@@ -544,12 +562,32 @@ pub(crate) fn integrate(
     for n in hits(grid, image, robot, |p| grid.contains(p)) {
         hit[n] = true;
     }
+    if robot.is_some() {
+        integrated::<true>(grid, log_odds, image, robot, hit);
+    } else {
+        integrated::<false>(grid, log_odds, image, robot, hit);
+    }
+}
+
+/// Updates the map with one image's classification, with masking selected before the voxel loop.
+fn integrated<const MASK: bool>(
+    grid: &Layout,
+    log_odds: &mut [i8],
+    image: &DepthImage,
+    robot: Option<&RobotMask>,
+    hit: Vec<bool>,
+) {
     log_odds
         .par_iter_mut()
         .zip(hit)
         .enumerate()
         .for_each(|(n, (l, hit))| {
-            let step = match image.classify::<false>(robot, grid.point(n), grid.voxel, 0.0) {
+            let seen = if MASK {
+                image.classify::<false, true>(robot, grid.point(n), grid.voxel, 0.0)
+            } else {
+                image.sees::<false, false>(None, grid.point(n), grid.voxel, 0.0)
+            };
+            let step = match seen {
                 _ if hit => HIT,
                 Seen::Surface => HIT,
                 Seen::Free => MISS,
@@ -906,7 +944,7 @@ fn at_most(d: f32) -> f16 {
 }
 
 /// Must stay in sync with `grid_distance` in kernels.wgsl.
-#[inline]
+#[inline(always)]
 pub(crate) fn grid_distance(g: &SdfGrid, p: Vec3) -> (f32, Vec3) {
     let top = (UVec3::from(g.dims) - 1).as_vec3();
     let x = (p - g.origin) / g.voxel;
@@ -937,7 +975,7 @@ pub(crate) fn grid_distance(g: &SdfGrid, p: Vec3) -> (f32, Vec3) {
 
 /// `grid_distance`'s distance alone, the same to the bit: what a check that takes no gradient
 /// looks up, for less work.
-#[inline]
+#[inline(always)]
 pub(crate) fn grid_value(g: &SdfGrid, p: Vec3) -> f32 {
     let top = (UVec3::from(g.dims) - 1).as_vec3();
     let x = (p - g.origin) / g.voxel;
@@ -1028,18 +1066,7 @@ pub(crate) fn squared_edt(occupied: &[bool], [nx, ny, nz]: [usize; 3]) -> Vec<u3
             .map(|&o| if o == site { 0 } else { FAR })
             .collect();
         d.par_chunks_mut(slab)
-            .for_each_init(Line::default, |line, s| {
-                for row in s.chunks_mut(nx) {
-                    line.transform(row.iter().copied());
-                    row.copy_from_slice(&line.out);
-                }
-                for x in 0..nx {
-                    line.transform((0..ny).map(|y| s[x + nx * y]));
-                    for y in 0..ny {
-                        s[x + nx * y] = line.out[y];
-                    }
-                }
-            });
+            .for_each_init(Line::default, |line, s| slab_passes(line, s, nx, ny));
         d
     });
     // The z pass, column by column, keeping each voxel's distance to the other kind.
@@ -1048,13 +1075,7 @@ pub(crate) fn squared_edt(occupied: &[bool], [nx, ny, nz]: [usize; 3]) -> Vec<u3
         .par_chunks_mut(nz)
         .enumerate()
         .for_each_init(Line::default, |line, (c, column)| {
-            for (site, plane) in [true, false].into_iter().zip(&planes) {
-                line.transform((0..nz).map(|z| plane[c + slab * z]));
-                let other_kind = (0..nz).filter(|&z| occupied[c + slab * z] != site);
-                for z in other_kind {
-                    column[z] = line.out[z];
-                }
-            }
+            column_pass(line, column, c, slab, occupied, &planes);
         });
     let [mut out, _] = planes;
     out.par_chunks_mut(slab).enumerate().for_each(|(z, s)| {
@@ -1063,6 +1084,42 @@ pub(crate) fn squared_edt(occupied: &[bool], [nx, ny, nz]: [usize; 3]) -> Vec<u3
         }
     });
     out
+}
+
+/// `squared_edt`'s x and y passes over the z slab `s`. Out of line, as is `column_pass`: inlined
+/// into rayon's splitting of the slabs, the passes compiled into a slower shape.
+#[inline(never)]
+fn slab_passes(line: &mut Line, s: &mut [u32], nx: usize, ny: usize) {
+    for row in s.chunks_mut(nx) {
+        line.transform(row.iter().copied());
+        row.copy_from_slice(&line.out);
+    }
+    for x in 0..nx {
+        line.transform((0..ny).map(|y| s[x + nx * y]));
+        for y in 0..ny {
+            s[x + nx * y] = line.out[y];
+        }
+    }
+}
+
+/// `squared_edt`'s z pass over column `c`, keeping each voxel's distance to the other kind.
+#[inline(never)]
+fn column_pass(
+    line: &mut Line,
+    column: &mut [u32],
+    c: usize,
+    slab: usize,
+    occupied: &[bool],
+    planes: &[Vec<u32>; 2],
+) {
+    let nz = column.len();
+    for (site, plane) in [true, false].into_iter().zip(planes) {
+        line.transform((0..nz).map(|z| plane[c + slab * z]));
+        let other_kind = (0..nz).filter(|&z| occupied[c + slab * z] != site);
+        for z in other_kind {
+            column[z] = line.out[z];
+        }
+    }
 }
 
 /// No site along the line.

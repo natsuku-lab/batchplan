@@ -44,3 +44,7 @@ disallowed_methods = "allow"
 
 [profile.release]
 debug = 1
+
+# As the library's own builds (Cargo.toml).
+[profile.release.package.batchplan]
+codegen-units = 1

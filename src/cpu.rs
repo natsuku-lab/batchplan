@@ -328,7 +328,7 @@ struct CollisionOut {
 }
 
 /// A configuration's sphere centres and per-link collision wrenches (force, and moment about the
-/// world origin).
+/// world origin). The wrenches are zero between calls: `collision` zeroes each as it reads it.
 struct CollisionBuffers {
     centers: Vec<Vec3>,
     force: Vec<Vec3>,
@@ -397,7 +397,10 @@ struct Stack {
 }
 
 /// Signed distance from `o` to `p` and its gradient. Mirrors `obstacle_distance` in kernels.wgsl.
-#[inline]
+/// The collision checks call it for a distance grid, out of line: inlined into their loop over the
+/// spheres, it slowed plans among grids. They check every other obstacle with
+/// `primitive_distance`.
+#[inline(never)]
 fn obstacle_distance(o: &Prepared, p: Vec3) -> (f32, Vec3) {
     match *o {
         Prepared::Cuboid {
@@ -421,6 +424,46 @@ fn obstacle_distance(o: &Prepared, p: Vec3) -> (f32, Vec3) {
             center,
             ref grid,
         } => world::sdf_distance(rot, center, grid, p),
+    }
+}
+
+/// `obstacle_distance` with a grid's lookup out of line, for every obstacle but a grid: inlined,
+/// the lookup gave every check of a box or a sphere its stack frame and saved registers. Itself
+/// out of line, as `obstacle_distance` is, so the closures that inline the checks keep their size.
+#[inline(never)]
+fn primitive_distance(o: &Prepared, p: Vec3) -> (f32, Vec3) {
+    match *o {
+        Prepared::Cuboid {
+            rot, center, half, ..
+        } => world::box_distance(rot, center, half, p),
+        Prepared::Sphere { center, radius } => world::sphere_distance(center, radius, p),
+        Prepared::Cylinder {
+            rot,
+            center,
+            radius,
+            half_height,
+        } => world::cylinder_distance(rot, center, radius, half_height, p),
+        Prepared::Capsule {
+            rot,
+            center,
+            radius,
+            half_length,
+        } => world::capsule_distance(rot, center, radius, half_length, p),
+        Prepared::Sdf { .. } => obstacle_distance(o, p),
+    }
+}
+
+/// Distance without a gradient, with the grid lookup kept out of primitive contact loops.
+#[inline(never)]
+fn obstacle_value(o: &Prepared, p: Vec3) -> f32 {
+    match *o {
+        Prepared::Sdf {
+            rot,
+            center,
+            ref grid,
+            ..
+        } => sdf::grid_value(grid, rot.transpose() * (p - center)),
+        _ => primitive_distance(o, p).0,
     }
 }
 
@@ -475,9 +518,9 @@ fn collision_among_grids<const GRADIENT: bool, const CLEARANCE: bool>(
     collision_with::<GRADIENT, true, CLEARANCE>(robot, world, fk, w, grad, buffers)
 }
 
-/// `collision`, ruling distance grids out by their boxes with `GRIDS`. Without it the code is
-/// what worlds without grids ran before grids could be ruled out, instruction for instruction: a
-/// branch more in these loops slows them by percents, so the rule is compiled into a copy.
+/// `collision`, ruling distance grids out by their boxes with `GRIDS`. Without it the code has no
+/// such branch: a branch more in these loops slows them by percents, so the rule is compiled into a
+/// copy.
 #[inline(always)]
 fn collision_with<const GRADIENT: bool, const GRIDS: bool, const CLEARANCE: bool>(
     robot: &Robot,
@@ -497,10 +540,6 @@ fn collision_with<const GRADIENT: bool, const GRIDS: bool, const CLEARANCE: bool
         *c = rot[sp.link] * sp.center + pos[sp.link];
     }
     let sc = &sc[..];
-    if GRADIENT {
-        force.fill(Vec3::ZERO);
-        moment.fill(Vec3::ZERO);
-    }
     let mut touched = false;
     let (mut cost, mut wmin, mut smin) = (0.0f32, FAR, FAR);
     // An obstacle farther from a link's bounding sphere than the margin cannot add cost through the
@@ -527,14 +566,21 @@ fn collision_with<const GRADIENT: bool, const GRIDS: bool, const CLEARANCE: bool
                 }
             }
             if !matches!(o, Prepared::Sdf { .. }) {
-                let gap = obstacle_distance(o, bc).0 - b[3];
+                let gap = primitive_distance(o, bc).0 - b[3];
                 if gap > world_gate {
                     wmin = wmin.min(gap);
                     continue;
                 }
             }
+            // A grid's spheres go through `obstacle_distance`, every other obstacle's through
+            // `primitive_distance`, which leaves the grid's lookup out.
+            let grid = GRIDS && matches!(o, Prepared::Sdf { .. });
             for s in first as usize..(first + count) as usize {
-                let (dist, g) = obstacle_distance(o, sc[s]);
+                let (dist, g) = if grid {
+                    obstacle_distance(o, sc[s])
+                } else {
+                    primitive_distance(o, sc[s])
+                };
                 let d = dist - robot.spheres[s].radius;
                 wmin = wmin.min(d);
                 let pen = w.margin - d;
@@ -625,21 +671,22 @@ fn collision_with<const GRADIENT: bool, const GRIDS: bool, const CLEARANCE: bool
             self_clearance: smin,
         };
     }
-    // Each link's wrench reaches the joints at and above it, leaves first.
+    // Each link's wrench reaches the joints at and above it, leaves first, and is left zero for
+    // the next call.
     for i in (0..robot.links.len()).rev() {
         let link = &robot.links[i];
+        let (f, m) = (force[i], moment[i]);
+        (force[i], moment[i]) = (Vec3::ZERO, Vec3::ZERO);
         match link.joint {
             JointKind::Revolute { dof, curve, .. } => {
-                grad[dof] +=
-                    fk.rate(i, &curve) * fk.axis[i].dot(moment[i] - pos[i].cross(force[i]));
+                grad[dof] += fk.rate(i, &curve) * fk.axis[i].dot(m - pos[i].cross(f));
             }
             JointKind::Prismatic { dof, curve, .. } => {
-                grad[dof] += fk.rate(i, &curve) * fk.axis[i].dot(force[i])
+                grad[dof] += fk.rate(i, &curve) * fk.axis[i].dot(f)
             }
             JointKind::Fixed => {}
         }
         if let Some(p) = link.parent {
-            let (f, m) = (force[i], moment[i]);
             force[p] += f;
             moment[p] += m;
         }
@@ -669,10 +716,15 @@ pub(crate) fn contacts(robot: &Robot, world: &CpuWorld, fk: &Fk, within: f32) ->
             if world.touch.contains(k, link) {
                 continue;
             }
+            let grid = matches!(o, Prepared::Sdf { .. });
             let mut distance = FAR;
             for s in first as usize..(first + count) as usize {
-                distance =
-                    distance.min(obstacle_distance(o, center(s)).0 - robot.spheres[s].radius);
+                let d = if grid {
+                    obstacle_value(o, center(s))
+                } else {
+                    primitive_distance(o, center(s)).0
+                };
+                distance = distance.min(d - robot.spheres[s].radius);
             }
             if distance < within {
                 out.push(Contact::World {
@@ -827,11 +879,14 @@ fn hand_system(
 ) {
     let n = robot.dof();
     hand_jacobian(robot, fk, h, o, moving, jac);
+    // Rows as slices of `n`, so the inner loop needs no bounds checks whatever else is inlined.
     for r in 0..6 {
+        let row = &jac[r * n..(r + 1) * n];
         for c in 0..=r {
+            let other = &jac[c * n..(c + 1) * n];
             let mut s = 0.0;
             for j in 0..n {
-                s += jac[r * n + j] * jac[c * n + j];
+                s += row[j] * other[j];
             }
             if r == c {
                 s += o.damping * o.damping;
@@ -866,10 +921,12 @@ fn stack_system(
         }
     }
     for r in 0..m {
+        let row = &stack[r * n..(r + 1) * n];
         for c in 0..=r {
+            let other = &stack[c * n..(c + 1) * n];
             let mut s = 0.0;
             for j in 0..n {
-                s += stack[r * n + j] * stack[c * n + j];
+                s += row[j] * other[j];
             }
             if r == c {
                 s += o.damping * o.damping;
@@ -1161,13 +1218,13 @@ impl Reach {
 }
 
 /// Collision gradient of the trajectory cost at sample `s` of span `span`, with respect to the
-/// configuration there, and the gradient of `region`'s cost if any. Must match `traj_samples` in
-/// kernels.wgsl.
+/// configuration there, and with `REGION` the gradient of `region`'s cost if any. Must match
+/// `traj_samples` in kernels.wgsl.
 #[expect(
     clippy::too_many_arguments,
     reason = "the scalar twin of a kernel, which takes the same inputs"
 )]
-fn traj_sample_grad(
+fn traj_sample_grad<const REGION: bool>(
     robot: &Robot,
     world: &CpuWorld,
     region: Option<&Region>,
@@ -1196,7 +1253,7 @@ fn traj_sample_grad(
         out,
         &mut scratch.collision,
     );
-    if let Some(region) = region {
+    if REGION && let Some(region) = region {
         region.cost(robot, &scratch.fk, Some(out), &mut scratch.constraint);
     }
 }
@@ -1256,13 +1313,13 @@ fn candidate(robot: &Robot, x: &[f32], d: &[f32], alpha: f32, t: usize, j: usize
     (x[i] + alpha * d[i]).clamp(lo, hi)
 }
 
-/// Collision cost at sample `s` of span `span` of the candidate path `x + alpha d`, and `region`'s
-/// if any. Must match `traj_costs` in kernels.wgsl.
+/// Collision cost at sample `s` of span `span` of the candidate path `x + alpha d`, and with
+/// `REGION` `region`'s if any. Must match `traj_costs` in kernels.wgsl.
 #[expect(
     clippy::too_many_arguments,
     reason = "the scalar twin of a kernel, which takes the same inputs"
 )]
-fn traj_cost(
+fn traj_cost<const REGION: bool>(
     robot: &Robot,
     world: &CpuWorld,
     region: Option<&Region>,
@@ -1290,9 +1347,10 @@ fn traj_cost(
         &mut scratch.collision,
     )
     .cost;
-    cost + region.map_or(0.0, |r| {
-        r.cost(robot, &scratch.fk, None, &mut scratch.constraint)
-    })
+    match region {
+        Some(r) if REGION => cost + r.cost(robot, &scratch.fk, None, &mut scratch.constraint),
+        _ => cost,
+    }
 }
 
 /// One path's L-BFGS state, as kernels.wgsl keeps it in `aux`.
@@ -1553,6 +1611,24 @@ impl PathOptimizer {
         deadline: Option<Instant>,
         parallel: bool,
     ) {
+        if self.region.is_some() {
+            self.rounds::<true>(robot, world, tr, through, deadline, parallel);
+        } else {
+            self.rounds::<false>(robot, world, tr, through, deadline, parallel);
+        }
+    }
+
+    /// `run`, with the constraints' costs compiled in only with `REGION`: inlined beside the
+    /// collision checks, they grow the sample loops of plans that keep none.
+    fn rounds<const REGION: bool>(
+        &mut self,
+        robot: &Robot,
+        world: &CpuWorld,
+        tr: &mut [f32],
+        through: u32,
+        deadline: Option<Instant>,
+        parallel: bool,
+    ) {
         let Self {
             o,
             region,
@@ -1568,7 +1644,7 @@ impl PathOptimizer {
             if self.direction_due {
                 let tr_ref = &*tr;
                 each_chunk(parallel, robot, scratch, sample_grad, n, |s, i, g| {
-                    traj_sample_grad(robot, world, region, tr_ref, i / k, i % k, o, g, s);
+                    traj_sample_grad::<REGION>(robot, world, region, tr_ref, i / k, i % k, o, g, s);
                 });
                 for t in 3..t_count - 3 {
                     traj_grad(tr, sample_grad, n, t, o, &mut st.grad[t * n..(t + 1) * n]);
@@ -1584,7 +1660,7 @@ impl PathOptimizer {
             let dir = &st.dir;
             each_chunk(parallel, robot, scratch, &mut st.costs, 1, |s, i, cost| {
                 let (c, i) = (i / samples, i % samples);
-                cost[0] = traj_cost(
+                cost[0] = traj_cost::<REGION>(
                     robot,
                     world,
                     region,
