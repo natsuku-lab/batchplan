@@ -192,7 +192,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   or without. In RoboKit's IK benchmark on an RTX 4090 (a Panda without spheres), 1,000 targets
   take 3.1–3.3 ms where they took 3.6–3.7 and 2,000 take 6.1–6.3 ms where 7.2; 10 took
   0.77–0.80 ms where 0.71 before the changes for small calls, which are not measured there
-  ([Benchmarks](docs/benchmarks.md#against-robokit)). The 2,600 pose-goal problems solve as
+  ([Historical benchmark][historical-robokit]). The 2,600 pose-goal problems solve as
   before (98.3%). In Python, `IkOptions.screening` and `IkOptions.kept`.
 - Batched IK spends less time around the solve: a problem's seeds share its targets instead
   of each carrying a copy, large batches are seeded on the device's threads, buffers go to the
@@ -200,7 +200,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   which is zero for it. The same results, bit for bit. In RoboKit's IK benchmark on an RTX 4090
   (a Panda, collision off, 64 seeds of 30 steps), 1,000 targets take 4.5 ms where they took
   10.8, 2,000 take 9.1 ms where 23.2, and one takes 0.9 ms where 1.26
-  ([Benchmarks](docs/benchmarks.md#against-robokit)).
+  ([Historical benchmark][historical-robokit]).
 - **Breaking:** `IkOptions::collision_step` must be finite: an infinite or NaN one is an input
   error. NaN and negative infinity used to mean no push, and positive infinity solved nothing
   (the CPU left every seed where it started).
@@ -240,7 +240,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   23.7 (`examples/latency.rs`). On a Radeon 8060S, before the last two of these changes, one
   target took 0.18 ms where 1.12, and 1.10 ms where 2.70. In RoboKit's IK benchmark on an RTX
   4090 one target takes 0.33–0.42 ms and ten 0.35–0.43, where RoboKit takes 0.57–0.59 and
-  0.55–0.56 ([Benchmarks](docs/benchmarks.md#against-robokit)). The crate has no `unsafe`: the
+  0.55–0.56 ([Historical benchmark][historical-robokit]). The crate has no `unsafe`: the
   kernels are built with every check naga makes, the loop counters among them, which on an M4
   Pro make optimized plans 4–7% slower and IK for hands that share joints 13–20%. Three kinds of
   call are slower than before: IK with the push for a robot of several hundred spheres (4–5%),
@@ -445,3 +445,5 @@ Earlier releases have no notes beyond their commits.
 [0.10.0]: https://github.com/natsuku-lab/batchplan/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/natsuku-lab/batchplan/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/natsuku-lab/batchplan/compare/v0.7.0...v0.8.0
+
+[historical-robokit]: https://github.com/natsuku-lab/batchplan/blob/9d7823a53148a3f571fd5615d0ebbd5818d8f1d4/docs/benchmarks.md#against-robokit

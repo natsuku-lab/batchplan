@@ -216,12 +216,12 @@ From here, the [guides](#where-to-find-things) go further: planning around [what
 | [Worlds and perception](docs/perception.md) | Obstacles, allowed contacts, scenes, distance grids, depth images, masking the robot, and fused occupancy maps. |
 | [Training data](docs/training-data.md) | Reaches with recoveries, pick-and-place, handovers between two arms, reset states, and exporting to NumPy or LeRobot. |
 | [Devices](docs/devices.md) | GPU or CPU, which GPUs work, and running inside a robot's control process. |
-| [Benchmarks](docs/benchmarks.md) | Against VAMP, OMPL, RoboPlan and MoveIt 2 on one robot model, RoboKit in its own benchmark, GPU against CPU, spheres against meshes, and how to reproduce them. |
+| [Benchmarks](docs/benchmarks.md) | Against VAMP, OMPL, RoboPlan and MoveIt 2 on one robot model, GPU against CPU, spheres against meshes, and how to reproduce them. |
 | [Demos](demos/) | Handovers, pick-and-place, depth cameras and replanning, live in Rerun, and GIFs of tasks and tool paths. |
 
 ## How it compares
 
-Every planner below plans on one robot model, VAMP's spherized Panda, and one independent checker judges every output. The problems are the 262 final ones of MotionBenchMaker and MπNets, run with 5 seeds × 3 rounds on one AMD Ryzen AI Max+ 395, with 16 cores per planner. [Setup, matched settings, one core and per set](docs/benchmarks.md#against-other-planners) · [Run it yourself](docs/benchmarks.md#reproducing)
+Every planner below plans on one robot model, VAMP's spherized Panda, and one independent checker judges every output. The problems are the 262 final ones of MotionBenchMaker and MπNets, run with 5 seeds × 3 rounds on one AMD Ryzen AI Max+ 395, with 16 cores per planner. [Setup, matched settings and one core](docs/benchmarks.md#against-other-planners) · [Run it yourself](docs/benchmarks.md#reproducing)
 
 **Paths:**
 
@@ -254,7 +254,6 @@ Lengths and durations are relative to batchplan's, on the problems both solve va
 
 - 23 of the 262 problems start or end in collision, so no planner can pass 91.2%. batchplan solves all 3,585 of the other queries, and every path and trajectory it returns is valid.
 - Per query, batchplan takes 17% less time than VAMP on 16 cores, and the two tie on one core. With matched settings (edges checked as finely, batchplan without its clearance, VAMP stopped at 10,000 samples), VAMP's 16 workers return more valid paths per second (61,501 against 51,759), and RoboPlan solves 89.1% against batchplan's 88.4%. [All of it](docs/benchmarks.md#reading-the-results).
-- On cuRobo's own spheres, batchplan solved 98.9% of the box-only problems against cuRobo's 85.2% ([the earlier comparison](docs/benchmarks.md#the-earlier-comparison), with cuRobo on a T4 and batchplan on an M4 Pro).
 
 </details>
 
