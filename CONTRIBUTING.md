@@ -104,10 +104,11 @@ batch of changes rather than for each one.
      `scripts/check.sh` builds all three.
   2. For a release, not a beta, move the lines under `## [Unreleased]` to a new
      `## [0.10.0] - date`, and point the compare links at the end of the file at it.
-  3. Commit it as `batchplan 0.10.0`, to `main` or by pull request to a release's branch, and
-     wait for CI.
+  3. Open a pull request with the version changes, commit message `batchplan 0.10.0`, and merge
+     it into `main` after the required checks pass. Wait for core CI on the merged commit too.
   4. `git tag -a v0.10.0 -m "batchplan 0.10.0" && git push origin v0.10.0`. The release workflow
-     checks that the tag names both crates' versions and that `cargo semver-checks` passes. It
+     requires the tagged commit to be on `main` with a successful core CI push run on that exact
+     commit, checks that the tag names both crates' versions and that `cargo semver-checks` passes. It
      builds and tests Python wheels for Linux (x86-64 and ARM64), macOS (Intel and Apple Silicon)
      and Windows (x86-64), and builds and tests the source distribution. Once these pass, it
      publishes the Rust crate to crates.io, then the Python package to PyPI as `batches`.
@@ -117,7 +118,9 @@ batch of changes rather than for each one.
      Pull requests that change Python packaging run the builds without publishing; a manual
      run also only builds. If PyPI fails after crates.io succeeds, rerun the failed job, not
      the completed crates.io job. Published versions cannot be replaced: fix a bad release
-     with a new version and tag.
+     with a new version and tag. If the tag is pushed before core CI finishes, wait for CI to pass
+     and rerun the failed release jobs. Release tags cannot be moved or deleted. Publishing from a
+     maintenance branch requires extending the release gate and CI to protect that branch first.
   5. After a release, move batchplan-ros to it.
 - **1.0** waits for an interface we mean to keep. Two-digit minor versions until then are usual
   for Rust crates: nalgebra, glam and rapier are past 0.30. One decision comes first: how options
