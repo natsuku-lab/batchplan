@@ -91,6 +91,23 @@ Planning checks the robot as a few dozen spheres against obstacles, which are ex
 
 How tight the spheres are is a trade-off you can measure: see [Spheres and meshes](benchmarks.md#spheres-and-meshes).
 
+### Bounding sphere overhang
+
+Set `RobotOptions::spheres.enforce_mesh_bounds` to `true` to cap each sphere's radius
+at its center's clearance from the original mesh plus `max_mesh_penetration` in meters.
+The limit must be finite and nonnegative: zero keeps spheres inside the mesh, while
+`0.002` permits 2 mm of overhang. The default is disabled, with a zero limit.
+Python exposes the same fields on `SphereOptions`.
+
+The fitter keeps its greedy selection and total sphere budget. Capping radii can leave
+surface gaps; inspect `robot.qualify()` before using that approximation. Bounds require
+closed, consistently wound, finite geometry and interior sphere centers. Supplied
+collision models are checked against both the geometry and the budget.
+
+`robot.sphere_fit_options()` returns the loading policy. Per-problem held objects
+inherit its mesh bounds and retain their own fitting budget. Direct attachments use
+`AttachedObject::spheres`, including when their spheres were fitted beforehand.
+
 ### Qualifying a robot
 
 A robot that loads may still have spheres unfit to plan with. `robot.qualify()?` measures them against the geometry they cover. Per link with geometry and spheres (`LinkQualification`):

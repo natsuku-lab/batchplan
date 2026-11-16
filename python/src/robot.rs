@@ -79,6 +79,10 @@ value_class! {
         self_collision_samples: usize,
         /// Seed of the fit's random choices and those configurations.
         rng_seed: u64,
+        /// Bound sphere overhang, allowing surface gaps to retain the sphere budget.
+        enforce_mesh_bounds: bool,
+        /// Maximum sphere overhang in meters when mesh bounds are enforced.
+        max_mesh_penetration: f32,
     }
     methods {
         #[new]
@@ -302,6 +306,11 @@ impl Robot {
     #[getter]
     fn name(&self) -> &str {
         self.0.name()
+    }
+
+    /// The sphere-fitting options used to load this robot.
+    fn sphere_fit_options(&self) -> SphereOptions {
+        SphereOptions(self.0.sphere_fit_options())
     }
 
     /// The number of actuated joints: the length of every configuration.

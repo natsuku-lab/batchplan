@@ -46,6 +46,12 @@ pub struct SphereOptions {
     /// How far spheres may reach beyond the geometry (meters) before the fit spends more of the
     /// budget. When the budget cannot reach it, the fit uses the smallest overhang it can.
     pub tolerance: f32,
+    /// Keep centers inside the geometry and cap radii at the nearest surface distance plus
+    /// `max_mesh_penetration`. The budget stays a hard maximum; uncovered geometry is allowed.
+    pub enforce_mesh_bounds: bool,
+    /// Hard maximum distance spheres may extend past the original mesh (meters) when
+    /// `enforce_mesh_bounds` is enabled. Zero keeps spheres entirely inside closed geometry.
+    pub max_mesh_penetration: f32,
     /// Largest spacing of the interior grid that proposes sphere centers (meters). Small links
     /// use a finer grid.
     pub voxel_size: f32,
@@ -66,6 +72,12 @@ impl SphereOptions {
                 "sphere fitting needs a budget of at least one sphere and positive tolerance and voxel size, got {self:?}"
             ));
         }
+        if !self.max_mesh_penetration.is_finite() || self.max_mesh_penetration < 0.0 {
+            return Err(format!(
+                "max_mesh_penetration must be finite and nonnegative, got {}",
+                self.max_mesh_penetration
+            ));
+        }
         Ok(())
     }
 }
@@ -75,6 +87,8 @@ impl Default for SphereOptions {
         Self {
             budget: 64,
             tolerance: 0.005,
+            enforce_mesh_bounds: false,
+            max_mesh_penetration: 0.0,
             voxel_size: 0.01,
             geometry: SphereGeometry::Collision,
             self_collision_samples: 10_000,
@@ -277,6 +291,81 @@ fn inscribed(solids: &[ParryMesh], p: Vec3) -> Option<(Vec3, f32)> {
         .map(|r| (p, r))
 }
 
+/// A conservative bound against every original triangle, including component interfaces.
+fn bounded_radius(solids: &[ParryMesh], point: Vec3, penetration: f32) -> Option<f32> {
+    use parry3d::query::PointQuery;
+
+    let (_, interior) = inscribed(solids, point)?;
+    let nearest = solids
+        .iter()
+        .map(|solid| point.distance(solid.project_local_point(point, false).point))
+        .fold(f32::INFINITY, f32::min);
+    let limit = interior.min(nearest) + penetration;
+    // Round inward, so serializing the f32 center/radius cannot increase the bound.
+    let radius = limit.next_down();
+    (radius.is_finite() && radius > 0.0).then_some(radius)
+}
+
+/// Validate bounded fits and supplied models against the original closed triangle surfaces.
+pub(crate) fn validate_mesh_bounds(
+    meshes: &[TriMesh],
+    fitted: &[[f32; 4]],
+    penetration: f32,
+) -> Result<(), String> {
+    if meshes.is_empty() {
+        return if fitted.is_empty() {
+            Ok(())
+        } else {
+            Err("bounded spheres need original collision geometry".into())
+        };
+    }
+    let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
+        | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
+        | TriMeshFlags::ORIENTED;
+    let mut solids = vec![];
+    for mesh in meshes {
+        if mesh.vertices.iter().any(|point| !point.is_finite()) {
+            return Err("bounded sphere fitting needs finite mesh vertices".into());
+        }
+        let solid = ParryMesh::with_flags(mesh.vertices.clone(), mesh.triangles.clone(), flags)
+            .map_err(|e| format!("invalid collision mesh for bounded spheres: {e}"))?;
+        // Closed component cycles may touch and share edges. Each edge must still have
+        // equally many forward/backward incidences; open or inconsistent winding is refused.
+        let mut edges: BTreeMap<(u32, u32), (usize, i64)> = BTreeMap::new();
+        for &[a, b, c] in solid.indices() {
+            for (a, b) in [(a, b), (b, c), (c, a)] {
+                let edge = edges.entry((a.min(b), a.max(b))).or_default();
+                edge.0 += 1;
+                edge.1 += if a < b { 1 } else { -1 };
+            }
+        }
+        if edges.is_empty()
+            || edges
+                .values()
+                .any(|&(count, balance)| count < 2 || balance != 0)
+        {
+            return Err("bounded sphere fitting requires closed, consistently wound meshes".into());
+        }
+        solids.push(solid);
+    }
+    if fitted.is_empty() {
+        return Err(
+            "bounded sphere fitting found no interior sphere for collision geometry".into(),
+        );
+    }
+    for (index, &[x, y, z, radius]) in fitted.iter().enumerate() {
+        let point = Vec3::new(x, y, z);
+        let allowed = bounded_radius(&solids, point, penetration)
+            .ok_or_else(|| format!("sphere {index} has no valid interior center"))?;
+        if !radius.is_finite() || radius <= 0.0 || radius > allowed {
+            return Err(format!(
+                "sphere {index} radius {radius} exceeds the mesh penetration limit {penetration} (maximum radius {allowed})"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// One link's surface samples and candidate spheres (center, largest radius inside the geometry).
 #[derive(Clone)]
 struct LinkFit {
@@ -352,7 +441,26 @@ impl LinkFit {
         } else {
             cells.filter_map(cell).collect()
         };
-        if candidates.is_empty() {
+        if candidates.is_empty() && o.enforce_mesh_bounds {
+            // A thin closed part may fall between grid points. Search inward from its
+            // surface instead; bounded mode never seeds growing spheres on the surface.
+            let stride = samples.len().div_ceil(MAX_CANDIDATES).max(1);
+            for (&point, &normal) in samples.iter().zip(&normals).step_by(stride) {
+                if normal == Vec3::ZERO {
+                    continue;
+                }
+                let mut depth = extent.max_element();
+                while depth >= 1e-8 {
+                    if let Some(candidate) = inscribed(&solids, point - normal * depth)
+                        && candidate.1 > 0.0
+                    {
+                        candidates.push(candidate);
+                        break;
+                    }
+                    depth *= 0.5;
+                }
+            }
+        } else if candidates.is_empty() {
             // Open or degenerate geometry has no interior; grow spheres from the surface instead.
             candidates = samples.iter().map(|&p| (p, 0.0)).collect();
         }
@@ -552,7 +660,7 @@ impl LinkFit {
     /// The picked spheres, grown until every sample is inside one, and the largest growth. Each
     /// sample outside them grows the pick that reaches it with the least overhang, judged by the
     /// picks' original radii so growth cannot snowball onto one sphere.
-    fn spheres(&self, picks: &[usize]) -> (Vec<[f32; 4]>, f32) {
+    fn spheres(&self, picks: &[usize], penetration: Option<f32>) -> (Vec<[f32; 4]>, f32) {
         // A cover that picked nothing still needs one sphere to grow: the largest candidate.
         let largest = (0..self.candidates.len())
             .max_by(|&a, &b| self.candidates[a].1.total_cmp(&self.candidates[b].1));
@@ -562,6 +670,9 @@ impl LinkFit {
             picks.to_vec()
         };
         let mut spheres: Vec<(Vec3, f32)> = picks.iter().map(|&i| self.candidates[i]).collect();
+        if spheres.is_empty() {
+            return (vec![], 0.0);
+        }
         let dense = self.dense.iter().map(|(p, _)| p);
         for &s in self.samples.iter().chain(dense) {
             if spheres.iter().any(|&(c, r)| (s - c).length() <= r) {
@@ -573,6 +684,15 @@ impl LinkFit {
                 .expect("a sphere");
             spheres[j].1 = (s - spheres[j].0).length();
         }
+        // Cover/scaling chooses where to spend the budget. In bounded mode its scoring
+        // slack never authorizes growth past the mesh: preserve the centers and cap each
+        // selected radius independently, leaving coverage gaps instead of exceeding the cap.
+        if let Some(penetration) = penetration {
+            for (center, radius) in &mut spheres {
+                *radius = bounded_radius(&self.solids, *center, penetration)
+                    .map_or(0.0, |limit| radius.min(limit));
+            }
+        }
         let growth = picks
             .iter()
             .zip(&spheres)
@@ -581,6 +701,7 @@ impl LinkFit {
         (
             spheres
                 .into_iter()
+                .filter(|(_, r)| *r > 0.0)
                 .map(|(c, r)| [c.x, c.y, c.z, r])
                 .collect(),
             growth,
@@ -763,7 +884,14 @@ pub(crate) fn fit(
     let grown = |fits: &[Option<LinkFit>], picks: &[Vec<usize>]| -> Vec<(Vec<[f32; 4]>, f32)> {
         fits.iter()
             .zip(picks)
-            .map(|(f, picks)| f.as_ref().map_or((vec![], 0.0), |f| f.spheres(picks)))
+            .map(|(f, picks)| {
+                f.as_ref().map_or((vec![], 0.0), |f| {
+                    f.spheres(
+                        picks,
+                        o.enforce_mesh_bounds.then_some(o.max_mesh_penetration),
+                    )
+                })
+            })
             .collect()
     };
     // The largest of each link's growth over its tolerance.
@@ -819,6 +947,10 @@ pub(crate) fn fit(
 /// where the budget cannot reach it, the least overhang the budget can. Boxes share the budget the
 /// spheres leave. Microseconds, where fitting a box takes milliseconds.
 pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option<Vec<[f32; 4]>> {
+    if o.enforce_mesh_bounds {
+        // The usual box shortcut circumscribes cells and cannot honor an arbitrary hard cap.
+        return None;
+    }
     if shapes
         .iter()
         .any(|s| !matches!(s, Obstacle::Cuboid { .. } | Obstacle::Sphere { .. }))
@@ -1000,6 +1132,106 @@ pub(crate) fn ignore_pairs(
 mod tests {
     use super::*;
     use crate::description::Geometry;
+
+    #[test]
+    fn bounded_fits_keep_the_penetration_and_whole_robot_budget_hard() {
+        let half = Vec3::new(0.08, 0.02, 0.01);
+        let mesh = Geometry::Box { half }.mesh().expect("closed box");
+        for penetration in [0.0, 0.002] {
+            let options = SphereOptions {
+                budget: 4,
+                enforce_mesh_bounds: true,
+                max_mesh_penetration: penetration,
+                ..Default::default()
+            };
+            let links = vec![vec![mesh.clone()], vec![mesh.clone()]];
+            let fitted = fit(&links, &[options.tolerance; 2], &options, false);
+            assert!(fitted.spheres.iter().all(|spheres| !spheres.is_empty()));
+            assert!(fitted.spheres.iter().map(Vec::len).sum::<usize>() <= options.budget);
+            for spheres in &fitted.spheres {
+                validate_mesh_bounds(std::slice::from_ref(&mesh), spheres, penetration)
+                    .expect("every fitted sphere respects the original mesh");
+                for &[x, y, z, radius] in spheres {
+                    // Independent analytic distance to the six original box faces.
+                    let depth = (half - Vec3::new(x, y, z).abs()).min_element();
+                    assert!(depth >= 0.0, "center must stay inside the box");
+                    assert!(
+                        radius <= depth + penetration,
+                        "radius {radius}, depth {depth}"
+                    );
+                }
+            }
+            let measured = measure(
+                "box",
+                std::slice::from_ref(&mesh),
+                &fitted.spheres[0],
+                &options,
+            )
+            .expect("qualification reports the remaining surface gaps");
+            assert!(measured.uncovered > 0.0);
+            assert!(measured.overhang <= penetration);
+        }
+        // The default remains the covering fitter: this tiny budget needs substantial growth.
+        let legacy = SphereOptions {
+            budget: 2,
+            ..Default::default()
+        };
+        let fitted = fit(&[vec![mesh]], &[legacy.tolerance], &legacy, false);
+        assert!(fitted.spheres[0].iter().any(|&[x, y, z, radius]| {
+            radius > (half - Vec3::new(x, y, z).abs()).min_element() + 0.002
+        }));
+    }
+
+    #[test]
+    fn bounds_use_every_original_surface_and_refuse_open_meshes() {
+        let half = Vec3::splat(0.02);
+        let first = Geometry::Box { half }.mesh().expect("box");
+        let mut second = first.clone();
+        for point in &mut second.vertices {
+            point.x += 0.01;
+        }
+        let meshes = [first.clone(), second];
+        // This fits the first box but crosses an original face of the overlapping second box.
+        assert!(validate_mesh_bounds(&meshes, &[[0.0, 0.0, 0.0, 0.015]], 0.0).is_err());
+        validate_mesh_bounds(&meshes, &[[0.0, 0.0, 0.0, 0.009]], 0.0)
+            .expect("sphere stays on the interior side of all original surfaces");
+        let mut open = first;
+        open.triangles.pop();
+        let error = validate_mesh_bounds(&[open], &[[0.0, 0.0, 0.0, 0.001]], 0.0)
+            .expect_err("open geometry cannot certify a bounded sphere");
+        assert!(error.contains("closed"), "{error}");
+    }
+
+    #[test]
+    fn bounded_thin_fits_find_inward_centers_and_invalid_limits_are_rejected() {
+        let mesh = thin_tetrahedron();
+        let options = SphereOptions {
+            budget: 8,
+            enforce_mesh_bounds: true,
+            ..Default::default()
+        };
+        let fitted = fit(&[vec![mesh.clone()]], &[options.tolerance], &options, false);
+        assert!(
+            !fitted.spheres[0].is_empty(),
+            "thin closed geometry needs interior seeds"
+        );
+        assert!(fitted.spheres[0].len() <= options.budget);
+        validate_mesh_bounds(&[mesh], &fitted.spheres[0], 0.0).expect("thin fit stays inside");
+        for invalid in [-0.001, f32::NAN, f32::INFINITY] {
+            assert!(
+                SphereOptions {
+                    max_mesh_penetration: invalid,
+                    ..options
+                }
+                .check()
+                .is_err()
+            );
+        }
+        assert!(
+            cover_primitives(&[Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.1))], &options).is_none(),
+            "bounded boxes must bypass circumscribed cell spheres"
+        );
+    }
 
     #[test]
     fn packed_cover_matches_scalar_reaches() {

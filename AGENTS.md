@@ -98,6 +98,11 @@ IK finds configurations; a plan finds the path to one, or to a pose, solving IK 
 
 ### Qualify the robot
 
+`SphereOptions::enforce_mesh_bounds` caps overhang at `max_mesh_penetration` meters
+without exceeding the sphere budget. This can leave gaps, so inspect qualification
+before using the bounded approximation. Supplied models are revalidated too; see
+[bounding sphere overhang](docs/robots.md#bounding-sphere-overhang).
+
 A robot that loads may still have spheres unfit to plan with. Before planning with a new robot or a hand-tuned collision model ([qualifying a robot](docs/robots.md#qualifying-a-robot)):
 
 1. `robot.qualify()`: each link's `overhang` past its geometry, the `uncovered` share of its surface and its `thickness`, and each hand's `tips`. Fingers whose overhang or tip is a large part of the smallest object you will grasp will collide with what it stands on; give them a tighter tolerance (`RobotOptions::sphere_tolerances`) or a finer `SphereOptions::voxel_size`.

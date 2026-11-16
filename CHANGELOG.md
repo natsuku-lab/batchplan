@@ -8,6 +8,17 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+### Added
+
+- **Breaking:** `SphereOptions::enforce_mesh_bounds` and `max_mesh_penetration`
+  optionally cap sphere overhang while retaining the total budget. Capping radii
+  can leave surface gaps, reported by `qualify`. Bounded models require closed,
+  consistently wound finite geometry and interior centers; supplied models are
+  revalidated. Held objects inherit the robot's bounds, while direct attachments
+  use their own `AttachedObject::spheres` policy. Rust literals listing every field
+  need the two new fields; defaults keep bounds disabled. Python exposes the same
+  options and `Robot.sphere_fit_options()` returns the loading policy.
+
 ### Fixed
 
 - Sphere fitting rejects nonfinite and exterior candidate centers using mesh bounds

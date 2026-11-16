@@ -52,7 +52,11 @@ impl Held {
                 .into_iter()
                 .map(String::from)
                 .collect(),
-            spheres: Default::default(),
+            spheres: SphereOptions {
+                enforce_mesh_bounds: robot.sphere_fit_options().enforce_mesh_bounds,
+                max_mesh_penetration: robot.sphere_fit_options().max_mesh_penetration,
+                ..Default::default()
+            },
         })
     }
 
@@ -99,10 +103,14 @@ impl Held {
         Ok(())
     }
 
-    /// `robot` holding the object as [`Held::attachment`] attaches it, with `spheres` fitted to
-    /// the object in its own frame and placed by the grasp, as attaching it would place them.
+    /// `robot` holding the object as [`Held::attachment`] attaches it. Bounded spheres are
+    /// fitted in the final link frame; default fits are in the object's frame and placed here.
     fn holding(&self, robot: &Robot, spheres: &[[f32; 4]]) -> Result<Robot> {
-        let placed = robot::placed_spheres(spheres, self.grasp.rigid().inverse());
+        let placed = if robot.sphere_fit_options().enforce_mesh_bounds {
+            spheres.to_vec()
+        } else {
+            robot::placed_spheres(spheres, self.grasp.rigid().inverse())
+        };
         if self.locked.is_empty() {
             return robot.attach_with(&self.attachment(robot)?, || Ok(placed));
         }
@@ -217,8 +225,9 @@ pub(crate) fn holders(device: &Device, robot: &Robot, helds: &[&Held]) -> Result
 /// How many objects' spheres [`Fits`] keeps: those of the latest held.
 const KEPT: usize = 64;
 
-/// Spheres fitted to held objects, in their own frames, kept by the devices that share hardware:
-/// fitting a cylinder or a capsule takes milliseconds, and every call holding it would fit it again.
+/// Spheres fitted to held objects, kept by devices that share hardware: default fits use the
+/// object's frame; bounded fits use the final link frame so placement cannot change their bound.
+/// Fitting a cylinder or a capsule takes milliseconds; repeated holds reuse the cached fit.
 /// The least recently used goes first past [`KEPT`].
 #[derive(Default)]
 pub(crate) struct Fits(Mutex<VecDeque<Fit>>);
@@ -252,8 +261,8 @@ impl Fits {
     }
 }
 
-/// Held objects' spheres: each object fitted once, in its own frame, to be placed by each grasp of
-/// it where attaching each would fit them again.
+/// Held-object spheres fitted once per cache key: default fits use the object frame and are
+/// placed by each grasp; bounded fits use the final link frame and include the grasp in the key.
 pub(crate) struct Fitted {
     /// Per object, its spheres.
     spheres: Vec<Arc<[[f32; 4]]>>,
@@ -269,8 +278,15 @@ impl Fitted {
         let mut objects: Vec<(Obstacle, SphereOptions)> = vec![];
         let mut object_of = Vec::with_capacity(helds.len());
         for held in helds {
-            let object = held.object.placed(Pose::IDENTITY);
             let options = held.attachment(robot)?.spheres;
+            // Reprojecting a transformed f32 center can change its strict radius bound.
+            // Cache bounded fits in their final frame, including the grasp in the key.
+            let frame = if options.enforce_mesh_bounds {
+                held.grasp.rigid().inverse()
+            } else {
+                Pose::IDENTITY
+            };
+            let object = held.object.placed(frame);
             object_of.push(match objects.iter().position(|(o, _)| *o == object) {
                 Some(k) => k,
                 None => {
@@ -318,6 +334,98 @@ mod tests {
     use super::*;
     use crate::robot::{CollisionModel, RobotOptions};
 
+    #[test]
+    fn held_objects_inherit_mesh_bounds_without_changing_their_default_fit_budget() {
+        let urdf = r#"
+          <robot name="bounded-held-parent">
+            <link name="base"/>
+            <link name="hand">
+              <collision><geometry><box size="0.1 0.1 0.1"/></geometry></collision>
+            </link>
+            <joint name="joint" type="revolute">
+              <parent link="base"/><child link="hand"/><axis xyz="0 0 1"/>
+              <limit lower="-1" upper="1" effort="1" velocity="1"/>
+            </joint>
+          </robot>"#;
+        let policy = SphereOptions {
+            budget: 7,
+            tolerance: 0.0009,
+            voxel_size: 0.004,
+            enforce_mesh_bounds: true,
+            max_mesh_penetration: 0.002,
+            self_collision_samples: 0,
+            ..Default::default()
+        };
+        let robot = Robot::from_urdf(
+            urdf,
+            &RobotOptions {
+                ee_links: vec!["hand".into()],
+                spheres: policy,
+                collision_model: Some(CollisionModel {
+                    spheres: [("hand".into(), vec![[0.0, 0.0, 0.0, 0.04]])].into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("bounded parent model");
+        let held = Held {
+            hand: 0,
+            object: Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.02)),
+            grasp: Pose::new(Vec3::new(0.013, -0.027, 0.041), Quat::from_rotation_y(0.6)),
+            locked: HashMap::new(),
+        };
+        let attachment = held.attachment(&robot).expect("held attachment");
+        assert_eq!(
+            attachment.spheres,
+            SphereOptions {
+                enforce_mesh_bounds: true,
+                max_mesh_penetration: policy.max_mesh_penetration,
+                ..Default::default()
+            }
+        );
+        let device = Device::cpu(&robot).expect("bounded parent device");
+        let fitted = Fitted::new(&device, &robot, &[&held]).expect("bounded held fit");
+        let holder = fitted
+            .holder(&device, &robot, 0, &held)
+            .expect("cached bounded spheres stay in their fitted frame");
+        let direct = robot
+            .attach(&attachment)
+            .expect("direct bounded attachment");
+        assert_eq!(holder.robot().collision_model(), direct.collision_model());
+        let again = Fitted::new(&device, &robot, &[&held]).expect("cached bounded held fit");
+        assert!(Arc::ptr_eq(&fitted.spheres[0], &again.spheres[0]));
+    }
+
+    #[test]
+    fn held_fit_cache_separates_mesh_bound_policies_and_penetration_limits() {
+        let fits = Fits::default();
+        let object = Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.02));
+        let legacy = SphereOptions::default();
+        let bounded = SphereOptions {
+            enforce_mesh_bounds: true,
+            max_mesh_penetration: 0.0,
+            ..legacy
+        };
+        let penetrating = SphereOptions {
+            max_mesh_penetration: 0.001,
+            ..bounded
+        };
+        fits.keep(
+            object.clone(),
+            legacy,
+            Arc::from(vec![[0.0, 0.0, 0.0, 0.03]]),
+        );
+        assert!(fits.get(&object, &legacy).is_some());
+        assert!(fits.get(&object, &bounded).is_none());
+        fits.keep(
+            object.clone(),
+            bounded,
+            Arc::from(vec![[0.0, 0.0, 0.0, 0.019]]),
+        );
+        assert!(fits.get(&object, &bounded).is_some());
+        assert!(fits.get(&object, &penetrating).is_none());
+    }
     fn panda() -> Robot {
         let fingers = [
             ("panda_finger_joint1".to_string(), 0.04),

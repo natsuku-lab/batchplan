@@ -44,6 +44,31 @@ def test_replace_changes_only_what_it_names():
         options.replace(seed=4)
 
 
+def test_sphere_mesh_bounds_reach_robot_fitting_and_reject_invalid_models():
+    urdf = """<robot name="box"><link name="base"/><link name="shape"><collision><geometry>
+      <box size="0.1 0.1 0.1"/>
+    </geometry></collision></link><joint name="joint" type="revolute">
+      <parent link="base"/><child link="shape"/><axis xyz="0 0 1"/>
+      <limit lower="-1" upper="1" effort="1" velocity="1"/>
+    </joint></robot>"""
+    spheres = bp.SphereOptions(
+        budget=8, enforce_mesh_bounds=True, max_mesh_penetration=0.002, self_collision_samples=0
+    )
+    options = bp.RobotOptions(spheres=spheres)
+    robot = bp.Robot.from_urdf(urdf, options)
+    assert robot.sphere_fit_options() == spheres
+    fitted = np.asarray(robot.collision_model.spheres["shape"])
+    assert 0 < len(fitted) <= spheres.budget
+    assert np.all(np.abs(fitted[:, :3]) + fitted[:, 3, None] <= 0.052001)
+    invalid = bp.CollisionModel(spheres={"shape": [[0.0, 0.0, 0.0, 0.1]]})
+    with pytest.raises(bp.InputError):
+        bp.Robot.from_urdf(urdf, options.replace(collision_model=invalid))
+    with pytest.raises(bp.InputError):
+        bp.Robot.from_urdf(
+            urdf, options.replace(spheres=spheres.replace(max_mesh_penetration=-0.001))
+        )
+
+
 def test_values_cannot_change_in_place():
     problem = bp.PlanProblem(0, [0.0, 0.0], [1.0, 1.0])
     with pytest.raises(AttributeError):
