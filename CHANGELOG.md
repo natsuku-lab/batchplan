@@ -8,6 +8,16 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+### Added
+
+- **Breaking:** a `Follower` can hold an object: `FollowerOptions::holding` takes the `Held` the
+  trajectory was planned holding. The rest of the motion, and any stop, is checked with the object
+  in the hand, contacts naming it (`"held by hand 0"`), and replans and re-anchors carry it. The
+  follower's robot and the devices its ticks are given are those that do not hold it, as for a
+  problem's `holding`, so one device plans and follows a carry; the first tick on a device builds
+  the one that holds it, and later ticks on that device reuse it. `None`, the default, is as before. A `FollowerOptions` literal needs
+  the new field (`holding: None`).
+
 ## [0.11.0] - 2026-11-14
 
 ### Added

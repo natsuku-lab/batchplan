@@ -59,6 +59,25 @@ impl Held {
     /// Whether `robot`, which must not hold one in that hand already, can hold it in `worlds`: an
     /// `Error::Input` naming `what` holds it where not.
     pub(crate) fn check(&self, robot: &Robot, worlds: &Worlds, what: &str) -> Result<()> {
+        self.check_on(robot, what)?;
+        // Worlds name the link after the robot's own where they let what a hand comes to hold
+        // touch something (`Touch::held`), or were uploaded for a robot holding something.
+        let link = held_link(self.hand);
+        if let Some(was) = worlds.link_name(robot.links.len())
+            && was != link
+        {
+            return Err(input!(
+                "{what}: holds an object in hand {}, but these worlds let '{was}' touch obstacles, the link after the robot's own: name what hand {} holds in them (`Touch::held`), or upload them without that touch",
+                self.hand,
+                self.hand
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether `robot`, which must not hold one in that hand already, can hold it, whatever the
+    /// worlds: an `Error::Input` naming `what` holds it where not.
+    pub(crate) fn check_on(&self, robot: &Robot, what: &str) -> Result<()> {
         ensure_input!(
             self.hand < robot.hands(),
             "{what}: holds an object in hand {} of {}",
@@ -70,17 +89,6 @@ impl Held {
             robot.links.iter().all(|l| l.name != link),
             "{what}: the robot already has '{link}': pass the device that does not hold it"
         );
-        // Worlds name the link after the robot's own where they let what a hand comes to hold
-        // touch something (`Touch::held`), or were uploaded for a robot holding something.
-        if let Some(was) = worlds.link_name(robot.links.len())
-            && was != link
-        {
-            return Err(input!(
-                "{what}: holds an object in hand {}, but these worlds let '{was}' touch obstacles, the link after the robot's own: name what hand {} holds in them (`Touch::held`), or upload them without that touch",
-                self.hand,
-                self.hand
-            ));
-        }
         check_locked(robot, &self.locked, what)?;
         ensure_input!(
             !matches!(self.object, Obstacle::Sdf { .. }),
