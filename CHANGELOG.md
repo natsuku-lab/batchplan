@@ -8,6 +8,13 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+### Fixed
+
+- Sphere fitting rejects nonfinite and exterior candidate centers using mesh bounds
+  and oriented ray winding. Inscribed radii are bounded by the mesh's local box,
+  and qualification measures overhang with unsigned surface distance so thin or
+  concave geometry cannot hide exterior spheres behind a false inside result.
+
 ## [0.11.0] - 2026-11-14
 
 ### Added

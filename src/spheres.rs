@@ -199,6 +199,55 @@ impl SphereCover {
     }
 }
 
+/// Occupancy from oriented crossings, independent of the nearest-face inside heuristic.
+/// Nonzero winding preserves overlapping outward shells (odd/even parity would not).
+fn winding_inside(solid: &ParryMesh, point: Vec3) -> bool {
+    use parry3d::partitioning::TraversalAction;
+    use parry3d::query::{Ray, RayCast};
+
+    let bounds = solid.local_aabb();
+    let limit = 2.0 * (bounds.maxs - bounds.mins).length();
+    let directions = [
+        Vec3::new(1.0, 0.231, 0.177),
+        Vec3::new(-0.371, 1.0, 0.529),
+        Vec3::new(0.419, -0.217, 1.0),
+    ];
+    let mut inside = 0;
+    for (index, direction) in directions.into_iter().enumerate() {
+        let direction = direction.normalize();
+        let ray = Ray::new(point, direction);
+        let mut winding = 0i32;
+        // Visit every intersected triangle once. Unlike repeated nearest-hit casts,
+        // this needs no epsilon advance that could skip a very thin entry/exit pair.
+        solid.bvh().traverse(|node| {
+            if node.aabb().cast_local_ray(&ray, limit, true).is_none() {
+                return TraversalAction::Prune;
+            }
+            if let Some(triangle) = node.leaf_data() {
+                let triangle = solid.triangle(triangle);
+                if triangle.cast_local_ray(&ray, limit, false).is_some() {
+                    // RayIntersection.normal is ray-facing, not the original winding.
+                    let facing = triangle.scaled_normal().dot(direction);
+                    if facing > 0.0 {
+                        winding += 1;
+                    } else if facing < 0.0 {
+                        winding -= 1;
+                    }
+                }
+            }
+            TraversalAction::Continue
+        });
+        inside += usize::from(winding != 0);
+        if inside >= 2 {
+            return true;
+        }
+        if index + 1 - inside >= 2 {
+            return false;
+        }
+    }
+    false
+}
+
 /// The largest sphere centered at `p` inside any of `solids`, if `p` is inside one.
 fn inscribed(solids: &[ParryMesh], p: Vec3) -> Option<(Vec3, f32)> {
     use parry3d::query::PointQuery;
@@ -206,8 +255,23 @@ fn inscribed(solids: &[ParryMesh], p: Vec3) -> Option<(Vec3, f32)> {
     solids
         .iter()
         .filter_map(|s| {
+            // Oriented point queries can misclassify points far outside very thin solids.
+            // Every interior point, and every sphere inside this solid, must also lie in
+            // its AABB. Enforce both necessary conditions independently of that query.
+            let bounds = s.local_aabb();
+            let box_depth = (p - bounds.mins).min(bounds.maxs - p).min_element();
+            if !box_depth.is_finite() || box_depth < 0.0 {
+                return None;
+            }
             let proj = s.project_local_point(p, false);
-            proj.is_inside.then(|| (p - proj.point).length())
+            if !proj.point.is_finite() {
+                return None;
+            }
+            let radius = (p - proj.point).length();
+            if !radius.is_finite() || !winding_inside(s, p) {
+                return None;
+            }
+            Some(radius.min(box_depth))
         })
         .reduce(f32::max)
         .map(|r| (p, r))
@@ -318,7 +382,7 @@ impl LinkFit {
                     -self
                         .solids
                         .iter()
-                        .map(|s| s.distance_to_local_point(p, false))
+                        .map(|s| (p - s.project_local_point(p, false).point).length())
                         .fold(f32::INFINITY, f32::min)
                 },
                 |(_, r)| r,
@@ -988,6 +1052,210 @@ mod tests {
             "packing must preserve the scalar addition order"
         );
     }
+    fn thin_tetrahedron() -> TriMesh {
+        TriMesh {
+            vertices: vec![
+                Vec3::new(-0.05, -0.02, 0.0),
+                Vec3::new(0.05, -0.02, 0.0),
+                Vec3::new(0.0, 0.02, 0.0),
+                Vec3::new(0.0, 0.0, 1e-5),
+            ],
+            triangles: vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
+        }
+    }
+
+    #[test]
+    fn an_oriented_sliver_cannot_claim_a_distant_point_or_hide_its_overhang() {
+        // A closed 0.1 mm prism reproducing Parry's false interior classification.
+        let mesh = TriMesh {
+            vertices: vec![
+                Vec3::new(0.04805384, 0.12926735, 0.09413833),
+                Vec3::new(0.048095737, 0.12927745, 0.0951274),
+                Vec3::new(0.048110154, 0.12929678, 0.095489144),
+                Vec3::new(0.048209894, 0.12930256, 0.09548485),
+                Vec3::new(0.048195478, 0.12928323, 0.095123105),
+                Vec3::new(0.04815358, 0.12927313, 0.09413404),
+            ],
+            triangles: vec![
+                [0, 1, 2],
+                [3, 4, 5],
+                [0, 5, 4],
+                [0, 4, 1],
+                [1, 4, 3],
+                [1, 3, 2],
+                [2, 3, 5],
+                [2, 5, 0],
+            ],
+        };
+        let point = Vec3::new(-0.13717227, -0.13240308, -0.080591865);
+        let solid = ParryMesh::with_flags(
+            mesh.vertices.clone(),
+            mesh.triangles.clone(),
+            TriMeshFlags::MERGE_DUPLICATE_VERTICES
+                | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
+                | TriMeshFlags::ORIENTED,
+        )
+        .expect("closed sliver prism");
+        assert!(inscribed(std::slice::from_ref(&solid), point).is_none());
+        let qualification = measure(
+            "sliver",
+            &[mesh],
+            &[[point.x, point.y, point.z, 1e-9]],
+            &SphereOptions::default(),
+        )
+        .expect("sliver surface");
+        assert!(
+            qualification.overhang > 0.3,
+            "distant sphere's actual overhang was hidden: {qualification:?}"
+        );
+    }
+
+    #[test]
+    fn the_retention_sliver_rejects_a_false_interior_point_within_its_aabb() {
+        let mesh = TriMesh {
+            vertices: vec![
+                Vec3::new(-0.09312411, 0.10867787, 0.09173776),
+                Vec3::new(-0.09360698, 0.107881434, 0.09120643),
+                Vec3::new(-0.09330204, 0.10837083, 0.09153486),
+                Vec3::new(-0.09328164, 0.1084163, 0.091448165),
+                Vec3::new(-0.09358658, 0.1079269, 0.09111974),
+                Vec3::new(-0.09310371, 0.108723335, 0.09165107),
+            ],
+            triangles: vec![
+                [0, 1, 2],
+                [3, 4, 5],
+                [0, 5, 4],
+                [0, 4, 1],
+                [1, 4, 3],
+                [1, 3, 2],
+                [2, 3, 5],
+                [2, 5, 0],
+            ],
+        };
+        let solid = ParryMesh::with_flags(mesh.vertices, mesh.triangles, TriMeshFlags::ORIENTED)
+            .expect("actual closed retention sliver");
+        let point = Vec3::new(-0.09329422, 0.10790725, 0.09129702);
+        let bounds = solid.local_aabb();
+        assert!(point.cmpge(bounds.mins).all() && point.cmple(bounds.maxs).all());
+        assert!(!winding_inside(&solid, point));
+        assert!(inscribed(std::slice::from_ref(&solid), point).is_none());
+    }
+
+    #[test]
+    fn a_point_inside_a_thin_mesh_bounds_but_outside_its_footprint_is_rejected() {
+        let mesh = thin_tetrahedron();
+        let solid = ParryMesh::with_flags(mesh.vertices, mesh.triangles, TriMeshFlags::ORIENTED)
+            .expect("closed thin tetrahedron");
+        assert!(inscribed(std::slice::from_ref(&solid), Vec3::new(0.04, 0.015, 1e-6)).is_none());
+        assert!(inscribed(std::slice::from_ref(&solid), Vec3::new(0.0, 0.0, 1e-6)).is_some());
+    }
+
+    #[test]
+    fn oriented_winding_rejects_concave_gaps_and_accepts_overlapping_solids() {
+        use crate::description::Geometry;
+        let cuboid = |center: Vec3, half: Vec3| {
+            let mut mesh = Geometry::Box { half }.mesh().expect("box surface");
+            for point in &mut mesh.vertices {
+                *point += center;
+            }
+            mesh
+        };
+        let mut u = cuboid(Vec3::new(-0.04, 0.0, 0.0), Vec3::new(0.01, 0.05, 0.01));
+        u.append(cuboid(
+            Vec3::new(0.04, 0.0, 0.0),
+            Vec3::new(0.01, 0.05, 0.01),
+        ));
+        u.append(cuboid(
+            Vec3::new(0.0, -0.04, 0.0),
+            Vec3::new(0.04, 0.01, 0.01),
+        ));
+        let solid = ParryMesh::with_flags(u.vertices, u.triangles, TriMeshFlags::ORIENTED)
+            .expect("U-shaped component union");
+        assert!(inscribed(std::slice::from_ref(&solid), Vec3::ZERO).is_none());
+        assert!(inscribed(std::slice::from_ref(&solid), Vec3::new(-0.04, 0.0, 0.0)).is_some());
+        let mut overlap = cuboid(Vec3::new(-0.005, 0.0, 0.0), Vec3::splat(0.02));
+        overlap.append(cuboid(Vec3::new(0.005, 0.0, 0.0), Vec3::splat(0.02)));
+        let solid =
+            ParryMesh::with_flags(overlap.vertices, overlap.triangles, TriMeshFlags::ORIENTED)
+                .expect("overlapping outward shells");
+        assert!(
+            winding_inside(&solid, Vec3::ZERO),
+            "winding two is occupied"
+        );
+        let inside_one = Vec3::new(-0.016, 0.0, 0.0);
+        assert!(
+            winding_inside(&solid, inside_one),
+            "a point inside one shell stays occupied near another shell's exterior face"
+        );
+        assert!(inscribed(std::slice::from_ref(&solid), inside_one).is_some());
+    }
+
+    #[test]
+    fn touching_component_shells_do_not_fill_their_concave_gap() {
+        use crate::description::Geometry;
+        let mut joined = Geometry::Box {
+            half: Vec3::new(0.02, 0.02, 0.01),
+        }
+        .mesh()
+        .expect("first box");
+        for point in &mut joined.vertices {
+            *point += Vec3::new(-0.02, -0.02, 0.0);
+        }
+        let mut second = Geometry::Box {
+            half: Vec3::new(0.02, 0.02, 0.01),
+        }
+        .mesh()
+        .expect("touching box");
+        for point in &mut second.vertices {
+            *point += Vec3::new(0.02, 0.02, 0.0);
+        }
+        joined.append(second);
+        let solid =
+            ParryMesh::with_flags(joined.vertices, joined.triangles, TriMeshFlags::ORIENTED)
+                .expect("touching closed components");
+        assert!(!winding_inside(&solid, Vec3::new(-0.02, 0.02, 0.0)));
+        assert!(winding_inside(&solid, Vec3::new(0.02, 0.02, 0.0)));
+    }
+
+    #[test]
+    fn thin_solids_never_propose_spheres_outside_their_own_bounds() {
+        let mesh = thin_tetrahedron();
+        let solid = ParryMesh::with_flags(mesh.vertices, mesh.triangles, TriMeshFlags::ORIENTED)
+            .expect("closed thin tetrahedron");
+        for point in [
+            Vec3::new(0.0, 0.0, 0.4),
+            Vec3::new(0.3, 0.0, 1e-6),
+            Vec3::new(0.0, -0.2, 1e-6),
+        ] {
+            assert!(inscribed(std::slice::from_ref(&solid), point).is_none());
+        }
+        let point = Vec3::new(0.0, 0.0, 1e-6);
+        if let Some((center, radius)) = inscribed(std::slice::from_ref(&solid), point) {
+            let bounds = solid.local_aabb();
+            assert!((center - Vec3::splat(radius)).cmpge(bounds.mins).all());
+            assert!((center + Vec3::splat(radius)).cmple(bounds.maxs).all());
+        }
+    }
+
+    #[test]
+    fn a_thin_solid_fit_does_not_turn_into_a_large_distant_sphere() {
+        let mesh = thin_tetrahedron();
+        let options = SphereOptions {
+            budget: 64,
+            tolerance: 0.005,
+            ..SphereOptions::default()
+        };
+        let fitted = fit(&[vec![mesh]], &[options.tolerance], &options, false);
+        assert!(!fitted.spheres[0].is_empty());
+        assert!(fitted.spheres[0].len() <= options.budget);
+        // Surface fallback and tangent growth may overhang a thin solid; they must not
+        // inherit a hundreds-of-millimetres radius from a false interior point query.
+        for sphere in &fitted.spheres[0] {
+            assert!(sphere[3] < 0.05, "unbounded thin-solid sphere: {sphere:?}");
+            assert!(sphere[..3].iter().all(|coordinate| coordinate.is_finite()));
+        }
+    }
+
     #[test]
     fn the_cover_counts_a_sample_its_own_candidate_reaches_at_the_edge_of_its_window() {
         // A box from x = -0.05 to just past 0.002, and a sample on that face whose own candidate
