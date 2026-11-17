@@ -962,6 +962,15 @@ pub struct GraspOptions {
     /// the hand that takes it. A ball's grasps, and a round object's from its ends or closing along
     /// its axis, stay in the middle; those closing around its side slide along the axis.
     pub along: f32,
+    /// The friction between a fingertip and what it presses on, for grasps of a surface
+    /// ([`grasps_on`](crate::grasps_on)): 0.5, as Dex-Net samples grasps with. The line a grasp
+    /// closes along lies within the friction cone of each patch it presses on, `atan(friction)`
+    /// from the patch's normal; less asks for patches that face each other more squarely.
+    pub friction: f32,
+    /// The radius of the patch a fingertip presses on, for grasps of a surface (meters): 5 mm.
+    /// A patch is the mean of the points within it, and surfaces nearer each other than this
+    /// along a closing line count as one.
+    pub contact: f32,
 }
 
 impl Default for GraspOptions {
@@ -974,6 +983,8 @@ impl Default for GraspOptions {
             floor: None,
             overlap: 0.01,
             along: 0.0,
+            friction: 0.5,
+            contact: 0.005,
         }
     }
 }

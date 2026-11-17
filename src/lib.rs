@@ -59,6 +59,7 @@ pub mod sdf;
 pub mod shortcut;
 pub mod spheres;
 mod spline;
+mod surface;
 pub mod task;
 pub mod timing;
 pub mod tool_path;
@@ -87,6 +88,7 @@ pub use rrt::{RrtOptions, RrtProblem, RrtResult};
 pub use sdf::{DepthImage, Intrinsics, Occlusion, OccupancyMap, RobotMask, SdfGrid, SdfOptions};
 pub use shortcut::ShortcutOptions;
 pub use spheres::{LinkQualification, Qualification, SphereGeometry, SphereOptions};
+pub use surface::{Grasp, Surface, grasps_on};
 pub use task::{
     CandidateStop, GraspOptions, Pick, Place, TaskFailure, TaskOptions, TaskPlan, TaskResult,
     TaskStep, grasps, pick, place, place_poses,
