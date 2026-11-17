@@ -124,7 +124,7 @@ uses the same options, for example `bp.PlanOptions(start_tolerance=0.001)`.
 | `NoSpline` | a path was found, but no spline along it checked valid or followed the start's motion | more `control_points`, or a start moving slower |
 | `OutOfTime` | the `time_budget` ran out first | a longer budget |
 
-Each contact (`Contact`) names a link and an obstacle, or two links, with the signed distance between them. `device.contacts(&worlds, &item_world, &q, within)` lists them for any batch of configurations, nearest first, as the checks see them: touches, links no joint moves and ignored pairs are left out. Both devices compute them exactly on the CPU, so they list the same. `pick` and `place` report a candidate's contacts too (below), and `follow` the contacts of a straight move's step that collides (`ToolPathResult::contacts`).
+Each contact (`Contact`) names a link and an obstacle, or two links, with the signed distance between them. `device.contacts(&worlds, &item_world, &q, within)` lists them for any batch of configurations, nearest first, as the checks see them: touches, links no joint moves and ignored pairs are left out. Both devices compute them exactly on the CPU, so they list the same. `pick` and `place` report a candidate's contacts too (below), and `follow` the contacts of a straight move's step that collides (`ToolPathResult::contacts`). `device.contacts_holding(.., &holding)` lists them for configurations that hold objects (a `Held` or `None` per item), on the device that holds nothing: what a held object comes near is under its link, `"held by hand 0"`.
 
 ## Constraints along the path
 

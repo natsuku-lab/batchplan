@@ -19,7 +19,7 @@ use rayon::prelude::*;
 
 use crate::constraint::Region;
 use crate::error::{Result, ensure_input, input};
-use crate::held::{self, Fits};
+use crate::held::{self, Fits, Held};
 
 use crate::cpu::{CpuBackend, CpuWorlds};
 use crate::edges::Search;
@@ -412,6 +412,49 @@ impl Device {
     /// The spheres fitted to held objects on this device's hardware.
     pub(crate) fn fits(&self) -> &Fits {
         &self.fits
+    }
+
+    /// [`Device::contacts`] for configurations that hold objects: `holding[item]` is what item
+    /// `item` holds, or `None`. The device is the one that does not hold them, as for a problem's
+    /// `holding`: what a held object comes near is listed under its link, `"held by hand N"`,
+    /// and what it may touch is the worlds' [`Touch::held`](crate::Touch::held). Items that hold
+    /// alike are measured together, each lot on a device holding its object, as [`crate::plan`]
+    /// groups its problems. Errors as [`Device::contacts`] does, for as many holds as there are
+    /// not items, and for a hold the robot cannot take, naming its item.
+    pub fn contacts_holding(
+        &self,
+        worlds: &Worlds,
+        item_world: &[u32],
+        q: &[f32],
+        within: f32,
+        holding: &[Option<&Held>],
+    ) -> Result<Vec<Vec<Contact>>> {
+        let dof = self.robot().dof();
+        self.check_batch(worlds, item_world, q.len(), dof)?;
+        ensure_input!(
+            holding.len() == item_world.len(),
+            "{} holds for {} items",
+            holding.len(),
+            item_world.len()
+        );
+        for (item, held) in holding.iter().enumerate() {
+            if let Some(held) = held {
+                held.check(self.robot(), worlds, &format!("item {item}"))?;
+            }
+        }
+        let parts = held::by_hold(self, holding, |on, items| {
+            let item_world: Vec<u32> = items.iter().map(|&i| item_world[i]).collect();
+            let rows = items.iter().flat_map(|&i| &q[i * dof..(i + 1) * dof]);
+            let q: Vec<f32> = rows.copied().collect();
+            on.contacts(worlds, &item_world, &q, within)
+        })?;
+        let mut contacts = vec![vec![]; item_world.len()];
+        for (items, part) in parts {
+            for (item, found) in items.into_iter().zip(part) {
+                contacts[item] = found;
+            }
+        }
+        Ok(contacts)
     }
 
     /// A number no other device has, those made from this one with [`Device::with_robot`]

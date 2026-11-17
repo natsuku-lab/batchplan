@@ -59,7 +59,7 @@ Guide: [devices.md](devices.md).
 | `Device::upload(&[World])` | The `Worlds` every batched call takes, prepared for this device. `Worlds` derefs to `[World]`. |
 | `Device::with_robot(&robot)` | A device for a changed robot, such as one holding an object, on the same GPU or threads; uploaded worlds work on both. |
 | `Device::evaluate` | Collision cost, gradient and clearances for a batch of configurations (`Evaluation`), weighted by `CollisionWeights`. |
-| `Device::contacts` | What each configuration of a batch comes within a distance of, nearest first (`Contact`): a link and an obstacle, or two links, with the distance between them. |
+| `Device::contacts`, `Device::contacts_holding` | What each configuration of a batch comes within a distance of, nearest first (`Contact`): a link and an obstacle, or two links, with the distance between them. `contacts_holding` takes what each configuration holds (a `Held` or `None` per item) on the device that holds nothing, and lists what the held object comes near under its link, `"held by hand N"`. |
 | `Device::warmup` | Builds the kernels a GPU builds on first use and runs one small call of each kind, before anything is timed. |
 
 ## Inverse kinematics

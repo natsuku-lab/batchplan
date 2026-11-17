@@ -792,3 +792,94 @@ fn a_held_plate_passes_a_neighbor_a_few_millimeters_away_with_finer_spheres() {
         );
     }
 }
+
+/// What a configuration touches holding an object, asked of the device that holds nothing: what
+/// a device built by attaching the object lists, each item with its own hold, in the items'
+/// order; and what the world lets the held object touch is not a contact.
+#[test]
+fn contacts_are_listed_for_what_each_configuration_holds() {
+    let s = Scene::new();
+    let (cube, bar) = (cube(0.0), bar());
+    let resting = World {
+        touch: vec![Touch::held(SLAB, 0)],
+        ..s.world.clone()
+    };
+    for device in devices(&s.robot) {
+        let name = device.name();
+        let worlds = device.upload(&[s.world.clone(), resting.clone()]).unwrap();
+        // At the ready pose the hand is clear of the slab and a cube held there is in it.
+        let holds = [
+            None,
+            Some(&cube),
+            Some(&bar),
+            Some(&cube),
+            None,
+            Some(&cube),
+        ];
+        let q: Vec<f32> = [&s.ready, &s.ready, &s.ready, &s.up, &s.up, &s.ready]
+            .iter()
+            .flat_map(|q| q.iter().copied())
+            .collect();
+        let item_world = [0, 0, 0, 0, 0, 1];
+        let found = device
+            .contacts_holding(&worlds, &item_world, &q, 0.0, &holds)
+            .unwrap();
+        assert_eq!(found.len(), holds.len(), "{name}");
+        let held_on_the_slab = |contacts: &[Contact]| {
+            contacts.iter().any(|c| {
+                matches!(c, Contact::World { link, obstacle: SLAB, distance } if link == HELD && *distance < 0.0)
+            })
+        };
+        assert!(found[0].is_empty(), "{name}: {:?}", found[0]);
+        assert!(held_on_the_slab(&found[1]), "{name}: {:?}", found[1]);
+        assert!(
+            found[3].is_empty() && found[4].is_empty(),
+            "{name}: lifted clear"
+        );
+        assert!(
+            !held_on_the_slab(&found[5]),
+            "{name}: the world lets it rest there"
+        );
+        // Each as a device holding its object alone lists it.
+        let n = s.robot.dof();
+        for (i, hold) in holds.iter().enumerate() {
+            let holder = s.holder(&device, *hold);
+            let alone = holder
+                .contacts(&worlds, &item_world[i..=i], &q[i * n..(i + 1) * n], 0.0)
+                .unwrap();
+            assert_eq!(found[i], alone[0], "{name}: item {i}");
+        }
+        assert_ne!(found[1], found[2], "{name}: the cube and the bar differ");
+        // As many holds as items, and holds the robot can take, named by their item.
+        let input = |e: Error, says: &str| {
+            assert!(
+                matches!(e, Error::Input(_)) && e.to_string().contains(says),
+                "{name}: {e}"
+            );
+        };
+        let short = device.contacts_holding(&worlds, &item_world, &q, 0.0, &holds[..2]);
+        input(short.unwrap_err(), "2 holds for 6 items");
+        let other_hand = Held {
+            hand: 1,
+            ..bar.clone()
+        };
+        let wrong = [None, Some(&other_hand)];
+        let refused = device.contacts_holding(&worlds, &[0, 0], &q[..2 * n], 0.0, &wrong);
+        input(refused.unwrap_err(), "item 1");
+        // Holding nothing anywhere, it is `contacts`.
+        let nothing = [None; 6];
+        assert_eq!(
+            device
+                .contacts_holding(&worlds, &item_world, &q, 0.01, &nothing)
+                .unwrap(),
+            device.contacts(&worlds, &item_world, &q, 0.01).unwrap(),
+            "{name}"
+        );
+        assert!(
+            device
+                .contacts_holding(&worlds, &[], &[], 0.0, &[])
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
