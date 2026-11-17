@@ -26,9 +26,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   robot's own hand, with its fingers as locked, and its straight way in (`GraspOptions::approach`,
   10 cm) are kept clear of every point, the object's and the rest; `floor` holds the frame and
   the open fingertips over a height, and a hand that is not clear is drawn back while `overlap`
-  of the fingers stays on the patches. A wall that leans no more than the friction cone, as a
-  bowl's that flares, is closed on level as well as square to it. Each `Grasp` gives the hand's
-  `pose` and its two `contacts`, those that come straight down first, spread over the object. `Surface::from_depth` reads a depth image (the object's
+  of the fingers stays on the patches. Each `Grasp` gives the hand's `pose` and its two `contacts`, the first few from
+  above and spread over the object. `Surface::from_depth` reads a depth image (the object's
   pixels marked, the robot masked out, normals toward the camera), `Surface::from_points` a
   cloud seen from one place, and `Surface::join` adds a view. Surfaces of one call run in parallel
   on the device's threads. A `GraspOptions` literal needs the new fields (`friction: 0.5`,
