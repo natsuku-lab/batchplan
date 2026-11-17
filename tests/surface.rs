@@ -418,7 +418,7 @@ fn something_else_between_the_fingers_leaves_a_grasp_out() {
     let o = GraspOptions::default();
     let free = grasps(&alone, &o);
     assert!(!free.is_empty());
-    let mut blocked = alone.clone();
+    let mut blocked = alone;
     blocked.object = vec![true; blocked.points.len()];
     // A sheet of something else between the plates, 1 cm over their middles.
     let before = blocked.points.len();
@@ -749,7 +749,7 @@ fn what_two_cameras_see_between_them_is_grasped_and_what_one_sees_alone_is_not()
     assert!(grasps(&one, &o).is_empty());
     // With the other's view of the far side, the box is grasped across the 4 cm between them,
     // clear of the table.
-    let mut both = one.clone();
+    let mut both = one;
     both.join(box_on_a_table(far));
     assert_eq!(both.object.len(), both.points.len());
     let found = grasps(&both, &o);
