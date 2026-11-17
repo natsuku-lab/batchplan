@@ -259,6 +259,7 @@ pub fn handover(
         let t = &tasks[c.task];
         let held = Held {
             locked: Default::default(),
+            spheres: Default::default(),
             hand: t.to,
             object: t.held.object.clone(),
             grasp: t.grasps[c.index % t.grasps.len()],

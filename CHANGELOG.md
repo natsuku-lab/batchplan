@@ -10,6 +10,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- **Breaking:** how spheres cover what a hand holds is the caller's to set: `Held::spheres`, a
+  `SphereOptions` (64 spheres within 5 mm by default, as before). A thin wide object, as a plate
+  14 cm across, is fitted to 8.6 mm past its side at the default, so that a neighbor a few
+  millimeters away reads as touching it; with `budget: 256` it is covered within 4.7 mm. One
+  call takes one object held with different options, each fitted on its own. A `Held` literal
+  needs the new field (`spheres: SphereOptions::default()`); a pick's `TaskPlan::held` carries the
+  default. In Python, `Held(..., spheres=SphereOptions(budget=256))`.
+
 - **Breaking:** grasps of what cameras see, whatever its shape:
   `grasps_on(&device, hand, &[Surface], &GraspOptions)`. A grasp closes on two patches of the
   object's surface that were both seen, face away from each other within the opening, and have
@@ -32,6 +40,16 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   problem's `holding`, so one device plans and follows a carry; the first tick on a device builds
   the one that holds it, and later ticks on that device reuse it. `None`, the default, is as before. A `FollowerOptions` literal needs
   the new field (`holding: None`).
+
+### Changed
+
+- A held capsule is covered by spheres along its axis, and a held cylinder that is thin or
+  slender (a disc, a rod) by one layer of rings of spheres or one line of them, where that reaches
+  the tolerance within the budget: without fitting, in microseconds where a fit took 7 to 22 ms,
+  and with fewer spheres (a 14 cm plate: 145 within 4.7 mm of it, where the fit took 225 for
+  5.0 mm). Their spheres, and so clearances and contacts measured to them, differ from the fit's.
+  Stout cylinders, and discs the budget cannot bring within the tolerance (a plate at the default
+  64), are fitted as before.
 
 ## [0.11.0] - 2026-11-14
 

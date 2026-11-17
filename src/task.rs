@@ -1707,6 +1707,7 @@ fn held(task: &Pick, worlds: &Worlds, index: usize) -> Held {
         hand: task.hand,
         object: worlds[task.world as usize].obstacles[task.object].placed(Pose::IDENTITY),
         grasp: task.grasps[index],
+        spheres: Default::default(),
     }
 }
 

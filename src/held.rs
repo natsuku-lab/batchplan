@@ -31,6 +31,11 @@ pub struct Held {
     /// loaded. To attach the object yourself, relock first, then attach [`Held::attachment`].
     /// Empty: as loaded.
     pub locked: HashMap<String, f32>,
+    /// How spheres cover it: within `tolerance` of its surface where `budget` spheres can, the
+    /// defaults being 5 mm and 64. A thin wide object, as a plate, takes more to stay within a
+    /// few millimeters of its sides: a gap narrower than what its spheres reach past it reads as
+    /// a contact.
+    pub spheres: SphereOptions,
 }
 
 impl Held {
@@ -52,7 +57,7 @@ impl Held {
                 .into_iter()
                 .map(String::from)
                 .collect(),
-            spheres: Default::default(),
+            spheres: self.spheres,
         })
     }
 
@@ -273,13 +278,14 @@ impl Fitted {
     /// Each object among `helds` as the device keeps it ([`Fits`]), or fitted once, in parallel.
     pub(crate) fn new(device: &Device, robot: &Robot, helds: &[&Held]) -> Result<Self> {
         // Each object at its own origin, as `Held::attachment` places it, with the options it fits
-        // by.
+        // by: one object held with two sets of options is fitted twice.
         let mut objects: Vec<(Obstacle, SphereOptions)> = vec![];
         let mut object_of = Vec::with_capacity(helds.len());
         for held in helds {
             let object = held.object.placed(Pose::IDENTITY);
             let options = held.attachment(robot)?.spheres;
-            object_of.push(match objects.iter().position(|(o, _)| *o == object) {
+            let fitted_so = |(o, f): &(Obstacle, SphereOptions)| *o == object && *f == options;
+            object_of.push(match objects.iter().position(fitted_so) {
                 Some(k) => k,
                 None => {
                     objects.push((object, options));
@@ -384,6 +390,7 @@ mod tests {
         let device = Device::cpu(&robot).unwrap();
         let can = Held {
             locked: Default::default(),
+            spheres: Default::default(),
             hand: 0,
             object: Obstacle::cylinder(Vec3::ZERO, 0.03, 0.06),
             grasp: Pose::IDENTITY,
@@ -445,6 +452,7 @@ mod tests {
             .flat_map(|object| {
                 grasps.map(|grasp| Held {
                     locked: Default::default(),
+                    spheres: Default::default(),
                     hand: 0,
                     object: object.clone(),
                     grasp,
@@ -472,6 +480,7 @@ mod tests {
         let spheres = |rotation: Quat| {
             let held = Held {
                 locked: Default::default(),
+                spheres: Default::default(),
                 hand: 0,
                 object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.05)),
                 grasp: Pose::new(Vec3::new(0.0, 0.0, 0.28), rotation),

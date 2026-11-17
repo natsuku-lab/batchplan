@@ -1029,6 +1029,7 @@ pub fn handover(
             let t = &tasks[e.task];
             let held = Held {
                 locked: Default::default(),
+                spheres: Default::default(),
                 hand: t.to,
                 object: worlds[t.world as usize].obstacles[t.object].placed(Pose::IDENTITY),
                 grasp: takes[e.task],

@@ -458,13 +458,13 @@ fn a_finger_is_kept_out_of_what_stands_beside_the_object() {
     let alone = plates_of(0.04, 0.005);
     let free = grasps(&alone, &o).len();
     assert!(free > 0);
-    // A wall facing the object, `at` from its middle along the closing line.
+    // A wall facing the object, `at` from its middle along the closing line, on either side.
     let beside = |at: f32| {
         let mut s = alone.clone();
         the_object(&mut s);
         face(
             Vec3::X * at,
-            Vec3::NEG_X,
+            Vec3::X * -at.signum(),
             [Vec3::Y, Vec3::Z],
             [0.05, 0.05],
             &mut s,
@@ -474,7 +474,9 @@ fn a_finger_is_kept_out_of_what_stands_beside_the_object() {
     };
     // Open 8 cm, a finger stands 4 cm out: in a wall 4.5 cm out, and clear of one 12 cm out.
     assert_eq!(beside(0.045), 0);
+    assert_eq!(beside(-0.045), 0);
     assert_eq!(beside(0.12), free);
+    assert_eq!(beside(-0.12), free);
 }
 
 #[test]

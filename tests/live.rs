@@ -833,6 +833,7 @@ fn rod() -> Held {
         object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.12)),
         grasp: Pose::new(Vec3::new(0.0, 0.0, -0.12), Quat::IDENTITY),
         locked: Default::default(),
+        spheres: Default::default(),
     }
 }
 

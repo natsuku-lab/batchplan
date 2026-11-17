@@ -129,6 +129,7 @@ Check these before raising budgets:
 - `PlanOptions::seeds` is 0: no trajectory optimization unless asked for.
 - A world's touches name links; what a problem's `holding` may touch is named with `Touch::held(obstacle, hand)`, one hand's per upload, on the device that holds nothing.
 - `holding` takes the device without the object: one already holding a `Held` in that hand is an `Error::Input`.
+- A held object's spheres reach past it by up to 5 mm, and past a thin wide one (a plate) by about 9 mm at the default 64 spheres: a neighbor nearer than that reads as a contact. Ask for more with `Held::spheres` (`SphereOptions { budget: 256, .. }` brings a 14 cm plate within 4.7 mm), and leave room for where IK puts the hand (1 mm and 0.01 rad by default).
 - `grasps` returns poses in the object's frame; with a `floor`, pass the obstacle as it stands in the world.
 - A task's world holds for all its steps unless `transit_world` or `depart_world` name others: what the hand may touch at the grasp, it may touch all the way from the start.
 - `TaskPlan::transit` is `None` for a task with `transit: false`, whose start is a seed and is not checked.
