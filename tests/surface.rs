@@ -1053,6 +1053,55 @@ fn nothing_is_assumed_behind_a_solid_or_a_wall_thicker_than_the_shell() {
 }
 
 #[test]
+fn looks_joined_from_one_place_are_one_view_however_many() {
+    // A box past which the camera sees, its look cropped to around the box, and that look
+    // joined with itself 100 and 400 times, as a harness that keeps looking from one place
+    // would join them.
+    let whole = box_on_a_table(Vec3::new(0.35, 0.0, 0.35));
+    let near = |i: &usize| whole.points[*i].truncate().abs().max_element() < 0.12;
+    let kept: Vec<usize> = (0..whole.points.len()).filter(near).collect();
+    let look = Surface {
+        points: kept.iter().map(|&i| whole.points[i]).collect(),
+        normals: kept.iter().map(|&i| whole.normals[i]).collect(),
+        object: kept.iter().map(|&i| whole.object[i]).collect(),
+        seen_from: kept.iter().map(|&i| whole.seen_from[i]).collect(),
+    };
+    let o = with_shell(0.08);
+    let one_sided = |s: &Surface| -> Vec<f32> {
+        let found = grasps(s, &o);
+        let mut widths: Vec<f32> = found
+            .iter()
+            .filter(|g| g.one_sided)
+            .map(Grasp::width)
+            .collect();
+        widths.sort_by(f32::total_cmp);
+        widths
+    };
+    let once = one_sided(&look);
+    assert!(
+        once.len() > 100,
+        "{} of {} points",
+        once.len(),
+        look.points.len()
+    );
+    for k in [100, 400] {
+        let mut looks = Surface::default();
+        for _ in 0..k {
+            looks.join(look.clone());
+        }
+        // As many, as wide but for how a patch's mean over k copies of its points rounds.
+        let found = one_sided(&looks);
+        assert_eq!(found.len(), once.len(), "{k} looks");
+        let apart = found
+            .iter()
+            .zip(&once)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
+        assert!(apart < 1e-6, "{k} looks: widths {apart} m apart");
+    }
+}
+
+#[test]
 fn two_looks_from_one_place_show_what_one_look_does() {
     // The bowl seen from in front and over it, and a box past which the camera sees: once, and
     // joined with a second look from the same place whose readings are a little farther, as a

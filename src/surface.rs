@@ -288,8 +288,8 @@ const WIDER: f32 = 1.5;
 /// How many of a view's readings its spacing is measured at.
 const SAMPLES: usize = 4096;
 
-/// The most rings of cells around a reading its nearest is sought over: as far as readings lie
-/// apart that are as dense as eight looks from one place over the spacing of one.
+/// The most rings of cells around a ray its nearest is sought over, cells as wide as the rays
+/// would be apart spread evenly: past it, a ray lies too far from the rest to tell their spacing.
 const RINGS: usize = 8;
 
 /// Grasps on each of `surfaces` for hand `hand` of `device`'s robot, as its locked joints hold
@@ -985,7 +985,7 @@ impl View {
             .filter_map(|p| Some((direction(p).filter(over)?, p.distance(origin))))
             .collect();
         let span = high - low;
-        let mut cell = WIDER * spacing(&readings, low, span)?;
+        let mut cell = WIDER * spacing(&rays(&readings, low, span), low, span)?;
         let cells = loop {
             let cells = (span / cell).ceil().max(Vec2::ONE);
             if cells.x * cells.y <= MOST_CELLS as f32 {
@@ -1034,11 +1034,37 @@ impl View {
     }
 }
 
-/// How far apart the directions `readings` (x and y over z, from `low` over `span`) lie from their
+/// The directions of `readings` (x and y over z, from `low` over `span`), one per ray, in the
+/// order they first come: what several looks from one place read along a ray is one direction,
+/// to within a cell a 65,536th of the span wide, far finer than any camera's pixels over it and
+/// far coarser than rounding.
+fn rays(readings: &[(Vec2, f32)], low: Vec2, span: Vec2) -> Vec<Vec2> {
+    let fine = span.max_element() / 65536.0;
+    if fine.is_nan() || fine <= 0.0 {
+        return readings.iter().map(|&(d, _)| d).collect();
+    }
+    let keys: Vec<u64> = readings
+        .iter()
+        .map(|&(d, _)| {
+            let at = ((d - low) / fine).floor().max(Vec2::ZERO).as_uvec2();
+            (u64::from(at.y) << 32) | u64::from(at.x)
+        })
+        .collect();
+    let mut by_key: Vec<u32> = (0..readings.len() as u32).collect();
+    by_key.sort_unstable_by_key(|&k| (keys[k as usize], k));
+    let mut first = vec![false; readings.len()];
+    for (at, &k) in by_key.iter().enumerate() {
+        first[k as usize] = at == 0 || keys[by_key[at - 1] as usize] != keys[k as usize];
+    }
+    let firsts = readings.iter().zip(first).filter(|&(_, first)| first);
+    firsts.map(|(&(d, _), _)| d).collect()
+}
+
+/// How far apart the directions `rays` (x and y over z, from `low` over `span`) lie from their
 /// nearest other than one along the same ray: the median over a sample, sought among cells as
 /// wide as they would be apart spread evenly over the span. `None` for fewer than nine.
-fn spacing(readings: &[(Vec2, f32)], low: Vec2, span: Vec2) -> Option<f32> {
-    let count = readings.len();
+fn spacing(rays: &[Vec2], low: Vec2, span: Vec2) -> Option<f32> {
+    let count = rays.len();
     let even = (span.x * span.y / count as f32).sqrt();
     if count < 9 || even.is_nan() || even <= 0.0 {
         return None;
@@ -1056,10 +1082,10 @@ fn spacing(readings: &[(Vec2, f32)], low: Vec2, span: Vec2) -> Option<f32> {
             (at.y as usize).min(height - 1),
         ]
     };
-    // Counted per cell, then placed: each cell's readings together.
+    // Counted per cell, then placed: each cell's rays together.
     let mut starts = vec![0u32; width * height + 1];
-    for (d, _) in readings {
-        let [x, y] = cell(*d);
+    for &d in rays {
+        let [x, y] = cell(d);
         starts[y * width + x + 1] += 1;
     }
     for k in 1..starts.len() {
@@ -1067,22 +1093,22 @@ fn spacing(readings: &[(Vec2, f32)], low: Vec2, span: Vec2) -> Option<f32> {
     }
     let mut next = starts.clone();
     let mut order = vec![0u32; count];
-    for (k, (d, _)) in readings.iter().enumerate() {
-        let [x, y] = cell(*d);
+    for (k, &d) in rays.iter().enumerate() {
+        let [x, y] = cell(d);
         order[next[y * width + x] as usize] = k as u32;
         next[y * width + x] += 1;
     }
-    // Readings in one direction from several looks from one place lie along one ray: nearer
-    // than a hundredth of the even spacing, a reading is the same pixel's, and the nearest is
-    // sought past those, ring by ring of cells, out to where none nearer can lie.
+    // A ray's own rays from several looks that fell across the edge of a cell of `rays`
+    // remain: nearer than a hundredth of the even spacing, a direction is the same ray's, and
+    // the nearest is sought past those, ring by ring of cells, out to where none nearer can lie.
     let twin = (even * 1e-2).powi(2);
     let nearest = |k: usize| {
-        let (d, [x, y]) = (readings[k].0, cell(readings[k].0));
+        let (d, [x, y]) = (rays[k], cell(rays[k]));
         let along = |row: usize, from: usize, to: usize| {
             let cells = starts[row * width + from] as usize..starts[row * width + to + 1] as usize;
             let apart = order[cells]
                 .iter()
-                .map(|&j| readings[j as usize].0.distance_squared(d));
+                .map(|&j| rays[j as usize].distance_squared(d));
             apart
                 .filter(|&apart| apart > twin)
                 .fold(f32::INFINITY, f32::min)
