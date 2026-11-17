@@ -164,16 +164,11 @@ fn on(s: &Surface, o: &GraspOptions) -> Vec<Grasp> {
         };
         let inward = -out;
         for (second, facing) in crossed(first, inward, apart) {
-            // Two patches hold along the line that splits the angle between their normals:
-            // where that is outside the first's cone, no line is inside both. Where it is not
-            // the line searched along, as between a wedge's faces, the patch it crosses is the
-            // one to close on.
-            let Some(split) = (inward + facing).try_normalize() else {
-                continue;
-            };
-            if split.dot(inward) < cone {
-                continue;
-            }
+            // Two patches hold along the line that splits the angle between their normals,
+            // which is inside the first's cone, the two being no more than two cones apart.
+            // Where it is not the line searched along, as between a wedge's faces, the patch it
+            // crosses is the one to close on.
+            let split = (inward + facing).normalize();
             let (second, facing) = if split.dot(inward) < 1.0 - 1e-4 {
                 let nearest = |a: &(Vec3, Vec3), b: &(Vec3, Vec3)| {
                     let to = |x: &(Vec3, Vec3)| (x.0 - second).length_squared();
@@ -190,11 +185,10 @@ fn on(s: &Surface, o: &GraspOptions) -> Vec<Grasp> {
             if !(THINNEST..=o.opening).contains(&width) {
                 continue;
             }
+            // Inside both cones: the line splits the normals, and every point of the patch it
+            // crosses faces within a cone of it.
             let line = (second - first) / width;
             let square = inward.dot(line).min(facing.dot(line));
-            if square < cone {
-                continue;
-            }
             // Anything else between the two patches would be between the fingers.
             cells.within(&s.points, first, second, o.contact, &mut around);
             let between =

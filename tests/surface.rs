@@ -123,8 +123,19 @@ fn a_box_is_grasped_across_each_side_that_fits_and_no_other() {
     }
     assert!(across[0] > 0 && across[1] > 0, "{across:?}");
     assert_eq!(across[2], 0, "the box is too long to grasp along z");
-    // Each pair of patches from `turns` directions, both ways round, the first from above.
+    // Each pair of patches from `turns` directions, each both ways round, the first from above.
     assert_eq!(found.len() % (2 * o.turns), 0);
+    for both in found.chunks(2) {
+        let [a, b] = [both[0].pose, both[1].pose];
+        assert_eq!(a.position, b.position);
+        assert!((a.rotation * Vec3::Y).dot(b.rotation * Vec3::Y) < -0.9999);
+        assert!((a.rotation * Vec3::Z).dot(b.rotation * Vec3::Z) > 0.9999);
+    }
+    let turned = (found[0].pose.rotation * Vec3::Z).dot(found[2].pose.rotation * Vec3::Z);
+    assert!(
+        (turned - (TAU / o.turns as f32).cos()).abs() < 1e-4,
+        "{turned}"
+    );
     let first = found[0].pose.rotation * Vec3::Z;
     assert!(first.dot(Vec3::NEG_Z) > 0.9999, "{first}");
 }
@@ -202,6 +213,80 @@ fn a_surface_with_nothing_seen_behind_it_gives_no_grasp() {
             .count()
     };
     assert!(along(0) > 0 && along(1) > 0, "seen whole, it has them");
+}
+
+/// Two plates `apart`, facing away from each other.
+fn plates(apart: f32) -> Surface {
+    let mut s = Surface::default();
+    for side in [1.0, -1.0] {
+        let normal = Vec3::X * side;
+        face(
+            normal * apart / 2.0,
+            normal,
+            [Vec3::Y, Vec3::Z],
+            [0.02, 0.02],
+            &mut s,
+        );
+    }
+    s
+}
+
+#[test]
+fn sides_farther_apart_than_the_fingers_open_or_too_near_to_be_two_are_left_out() {
+    let o = GraspOptions::default();
+    assert!(!grasps(&plates(o.opening - 0.002), &o).is_empty());
+    // A little past the opening: still within a fingertip of where the search ends.
+    assert!(grasps(&plates(o.opening + 0.002), &o).is_empty());
+    // A sheet 1 mm thick is one surface seen with noise, not two sides to close on.
+    assert!(!grasps(&plates(0.004), &o).is_empty());
+    assert!(grasps(&plates(0.001), &o).is_empty());
+}
+
+/// An upright tube whose section is an ellipse of half axes `a` along x and `b` along y: its
+/// outside alone.
+fn oval(a: f32, b: f32, half_height: f32) -> Surface {
+    let mut s = Surface::default();
+    let around = (TAU * a / SPACING).round() as usize * 2;
+    let up = (2.0 * half_height / SPACING).round() as usize;
+    for k in 0..around {
+        let angle = TAU * k as f32 / around as f32;
+        let at = Vec3::new(a * angle.cos(), b * angle.sin(), 0.0);
+        let normal = Vec3::new(at.x / (a * a), at.y / (b * b), 0.0).normalize();
+        for j in 0..=up {
+            s.points
+                .push(at + Vec3::Z * (j as f32 * SPACING - half_height));
+            s.normals.push(normal);
+        }
+    }
+    s
+}
+
+#[test]
+fn every_grasp_of_a_curved_side_holds_by_friction_on_the_shape_itself() {
+    // Around an oval, a line in along one side's normal meets the other side askew nearly
+    // everywhere: only lines inside both cones hold.
+    let (a, b) = (0.035, 0.02);
+    let o = GraspOptions {
+        friction: 0.3,
+        ..Default::default()
+    };
+    let found = grasps(&oval(a, b, 0.02), &o);
+    assert!(!found.is_empty());
+    let cone = o.friction.atan();
+    let mut askew: f32 = 0.0;
+    for g in &found {
+        let (line, ends) = closes_on(g);
+        for (end, out) in ends.into_iter().zip([-line, line]) {
+            // On the oval, and within the cone of its normal there.
+            let on = (end.x / a).powi(2) + (end.y / b).powi(2);
+            assert!((on - 1.0).abs() < 0.05, "{g:?}");
+            let normal = Vec3::new(end.x / (a * a), end.y / (b * b), 0.0).normalize();
+            let off = normal.dot(out).clamp(-1.0, 1.0).acos();
+            assert!(off < cone + 0.03, "{off} rad off a cone of {cone}: {g:?}");
+            askew = askew.max(off);
+        }
+    }
+    assert!(askew > 0.1, "some hold askew, within the cone: {askew}");
 }
 
 /// Two faces leaning toward each other by `lean` each, 4 cm apart at their middles.
