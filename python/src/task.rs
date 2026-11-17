@@ -53,8 +53,8 @@ value_class! {
         /// that must be clear of what was seen (meters): 10 cm.
         approach: f32,
         /// The thickest wall seen from one side only that a grasp of a surface may close across,
-        /// where the cameras saw past it (meters): `None`, every grasp closes on two patches
-        /// seen.
+        /// where the cameras saw past it (meters), and never more than `opening`: `None`, every
+        /// grasp closes on two patches seen.
         shell: Option<f32>,
     }
     methods {

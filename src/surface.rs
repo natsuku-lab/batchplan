@@ -56,7 +56,11 @@ pub struct Surface {
     pub object: Vec<bool>,
     /// Per point, where it was seen from (the camera's position): the ray from there to the point
     /// crossed empty space, which tells [`GraspOptions::shell`] where a wall seen from one side
-    /// has ended. Not finite (NaN) where it is not known; empty: not known for any point.
+    /// has ended. The points seen from exactly one place make one view, of the nearest reading in
+    /// each direction; a view needs at least nine readings over the object and what lies around
+    /// it, so a cloud from a moving sensor, each point with a place of its own, shows nothing and
+    /// gives no grasp of one side. Not finite where it is not known (as `join` leaves it,
+    /// infinite); empty: not known for any point.
     pub seen_from: Vec<Vec3>,
 }
 
@@ -123,7 +127,10 @@ impl Surface {
 
     /// The surface `points` lie on, all of them the object's, as seen from `seen_from`: each
     /// with the normal of the plane through the points within `radius` of it (meters), toward
-    /// `seen_from`, or none where they are too few or lie on one line.
+    /// `seen_from`, or none where they are too few or lie on one line. `seen_from` is taken as
+    /// where one camera saw every point from, the space between it and each point empty, which
+    /// [`GraspOptions::shell`] closes on: a cloud fused from several views and given one place
+    /// would read as one camera's view, and must not be grasped with a shell.
     pub fn from_points(points: &[Vec3], seen_from: Vec3, radius: f32) -> Result<Self> {
         if let Some(k) = points.iter().position(|p| !p.is_finite()) {
             return Err(input!("point {k} is not finite, got {}", points[k]));
@@ -157,7 +164,7 @@ impl Surface {
     /// Adds `other`'s points after this surface's: two views of one scene as one surface. Where
     /// one of the two says which of its points are the object's and the other does not, every
     /// point of the other is; where one says where its points were seen from and the other does
-    /// not, the other's are not known (NaN).
+    /// not, the other's are not known (infinite).
     pub fn join(&mut self, other: Surface) {
         if !(self.object.is_empty() && other.object.is_empty()) {
             if self.object.is_empty() {
@@ -172,11 +179,11 @@ impl Surface {
         }
         if !(self.seen_from.is_empty() && other.seen_from.is_empty()) {
             if self.seen_from.is_empty() {
-                self.seen_from = vec![Vec3::NAN; self.points.len()];
+                self.seen_from = vec![Vec3::INFINITY; self.points.len()];
             }
             if other.seen_from.is_empty() {
                 self.seen_from
-                    .extend(std::iter::repeat_n(Vec3::NAN, other.points.len()));
+                    .extend(std::iter::repeat_n(Vec3::INFINITY, other.points.len()));
             } else {
                 self.seen_from.extend(&other.seen_from);
             }
@@ -280,6 +287,10 @@ const WIDER: f32 = 1.5;
 
 /// How many of a view's readings its spacing is measured at.
 const SAMPLES: usize = 4096;
+
+/// The most rings of cells around a reading its nearest is sought over: as far as readings lie
+/// apart that are as dense as eight looks from one place over the spacing of one.
+const RINGS: usize = 8;
 
 /// Grasps on each of `surfaces` for hand `hand` of `device`'s robot, as its locked joints hold
 /// its fingers: each pair of patches the hand can close on is grasped from `turns` directions
@@ -1024,8 +1035,8 @@ impl View {
 }
 
 /// How far apart the directions `readings` (x and y over z, from `low` over `span`) lie from their
-/// nearest: the median over a sample, sought among cells as wide as they would be apart spread
-/// evenly over the span, which is no nearer. `None` for fewer than nine.
+/// nearest other than one along the same ray: the median over a sample, sought among cells as
+/// wide as they would be apart spread evenly over the span. `None` for fewer than nine.
 fn spacing(readings: &[(Vec2, f32)], low: Vec2, span: Vec2) -> Option<f32> {
     let count = readings.len();
     let even = (span.x * span.y / count as f32).sqrt();
@@ -1061,17 +1072,39 @@ fn spacing(readings: &[(Vec2, f32)], low: Vec2, span: Vec2) -> Option<f32> {
         order[next[y * width + x] as usize] = k as u32;
         next[y * width + x] += 1;
     }
+    // Readings in one direction from several looks from one place lie along one ray: nearer
+    // than a hundredth of the even spacing, a reading is the same pixel's, and the nearest is
+    // sought past those, ring by ring of cells, out to where none nearer can lie.
+    let twin = (even * 1e-2).powi(2);
     let nearest = |k: usize| {
         let (d, [x, y]) = (readings[k].0, cell(readings[k].0));
+        let along = |row: usize, from: usize, to: usize| {
+            let cells = starts[row * width + from] as usize..starts[row * width + to + 1] as usize;
+            let apart = order[cells]
+                .iter()
+                .map(|&j| readings[j as usize].0.distance_squared(d));
+            apart
+                .filter(|&apart| apart > twin)
+                .fold(f32::INFINITY, f32::min)
+        };
         let mut best = f32::INFINITY;
-        for row in y.saturating_sub(1)..=(y + 1).min(height - 1) {
-            let from = row * width + x.saturating_sub(1);
-            let to = row * width + (x + 1).min(width - 1) + 1;
-            for &j in &order[starts[from] as usize..starts[to] as usize] {
-                let apart = readings[j as usize].0.distance_squared(d);
-                if apart > 0.0 {
-                    best = best.min(apart);
+        for ring in 0..=RINGS {
+            let (left, right) = (x.saturating_sub(ring), (x + ring).min(width - 1));
+            for row in y.saturating_sub(ring)..=(y + ring).min(height - 1) {
+                if row.abs_diff(y) == ring {
+                    best = best.min(along(row, left, right));
+                } else {
+                    if x >= ring {
+                        best = best.min(along(row, x - ring, x - ring));
+                    }
+                    if x + ring < width {
+                        best = best.min(along(row, x + ring, x + ring));
+                    }
                 }
+            }
+            // Past this ring every reading lies at least `ring` cells away.
+            if best <= (ring as f32 * even).powi(2) {
+                break;
             }
         }
         best.is_finite().then(|| best.sqrt())

@@ -988,8 +988,9 @@ pub struct GraspOptions {
     /// farther ([`Surface::seen_from`](crate::Surface::seen_from)), within this thickness, with
     /// nothing of the object seen facing along the line before it. The wall has ended there:
     /// the second contact is put there, the other side taken parallel to the side seen, so the
-    /// width is the most the wall can be. A bowl's rim seen from above is grasped so, its outer
-    /// wall hidden under it. Inside a solid no ray goes, so none of these grasps ends in one: a
+    /// width is the most the wall can be, and a wall is never taken thicker than the fingers
+    /// open: a shell past the `opening` is one at it. A bowl's rim seen from above is grasped so,
+    /// its outer wall hidden under it. Inside a solid no ray goes, so none of these grasps ends in one: a
     /// box seen from one side is closed on only across all of it, where the cameras saw past its
     /// far side. The space found lies past where the wall ends by what the rays leave unseen: under
     /// a bowl's flared wall seen from above, 5.5 to 11.5 mm behind the inner side of a 3 mm wall

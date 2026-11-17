@@ -693,10 +693,18 @@ fn render_with(distance: impl Fn(Vec3) -> f32, camera: Pose) -> Vec<f32> {
 /// A box 4 by 6 by 5 cm on a table, and what a camera at `eye` sees of them: the surface, the
 /// box's pixels marked as the object's.
 fn box_on_a_table(eye: Vec3) -> Surface {
+    box_read_farther(eye, 0.0)
+}
+
+/// As `box_on_a_table`, each reading `farther` (meters) than the scene is.
+fn box_read_farther(eye: Vec3, farther: f32) -> Surface {
     let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.01), Vec3::new(0.5, 0.5, 0.01));
     let block = Obstacle::cuboid(Vec3::new(0.0, 0.0, 0.025), Vec3::new(0.02, 0.03, 0.025));
     let camera = looking(eye, Vec3::new(0.0, 0.0, 0.025));
-    let depth = render(&[table, block.clone()], camera);
+    let mut depth = render(&[table, block.clone()], camera);
+    for reading in depth.iter_mut().filter(|z| **z > 0.0) {
+        *reading += farther;
+    }
     let image = DepthImage {
         depth: &depth,
         width: WIDTH,
@@ -709,7 +717,7 @@ fn box_on_a_table(eye: Vec3) -> Surface {
             let z = depth[i];
             let p = camera.rotation * Vec3::new((u - K.cx) / K.fx * z, (v - K.cy) / K.fy * z, z)
                 + camera.position;
-            z > 0.0 && block.distance(p).value < 5e-4 && p.z > 1e-3
+            z > 0.0 && block.distance(p).value < 5e-4 + farther && p.z > 1e-3
         })
         .collect();
     assert!(
@@ -844,14 +852,22 @@ fn outside_the_wall(p: Vec3, wall: f32) -> f32 {
 /// What cameras at `eyes` see of the bowl of `wall` on a table, the bowl's readings marked as the
 /// object's.
 fn bowl_seen(wall: f32, eyes: &[Vec3]) -> Surface {
+    bowl_read_farther(wall, eyes, 0.0)
+}
+
+/// As `bowl_seen`, each reading `farther` (meters) than the scene is.
+fn bowl_read_farther(wall: f32, eyes: &[Vec3], farther: f32) -> Surface {
     let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.01), Vec3::new(0.5, 0.5, 0.01));
     let mut seen = Surface::default();
     for &eye in eyes {
         let camera = looking(eye, Vec3::new(0.0, 0.0, 0.025));
-        let depth = render_with(
+        let mut depth = render_with(
             |p| bowl_distance(p, wall).min(table.distance(p).value),
             camera,
         );
+        for reading in depth.iter_mut().filter(|z| **z > 0.0) {
+            *reading += farther;
+        }
         let image = DepthImage {
             depth: &depth,
             width: WIDTH,
@@ -865,7 +881,7 @@ fn bowl_seen(wall: f32, eyes: &[Vec3]) -> Surface {
                 let p = camera.rotation
                     * Vec3::new((u - K.cx) / K.fx * z, (v - K.cy) / K.fy * z, z)
                     + camera.position;
-                z > 0.0 && bowl_distance(p, wall) < 5e-4 && p.z > 1e-3
+                z > 0.0 && bowl_distance(p, wall) < 5e-4 + farther && p.z > 1e-3
             })
             .collect();
         seen.join(Surface::from_depth(&image, &object, None, 0.005).unwrap());
@@ -894,7 +910,9 @@ fn hand() -> Vec<(Vec3, f32)> {
         let at = frame.rotation * Vec3::new(s[0], s[1], s[2]) + frame.position;
         (at.length() < 0.12).then_some((at, s[3]))
     });
-    near.collect()
+    let near: Vec<(Vec3, f32)> = near.collect();
+    assert!(near.len() > 10, "{} spheres", near.len());
+    near
 }
 
 /// `hand`'s spheres at grasp `g`.
@@ -979,19 +997,50 @@ fn a_rim_seen_from_above_is_grasped_across_its_wall_with_a_shell() {
 
 #[test]
 fn nothing_is_assumed_behind_a_solid_or_a_wall_thicker_than_the_shell() {
-    // A box seen from above alone: no ray goes into it, so no grasp puts a finger there. Seen
-    // past its far side within the shell, it is grasped across the whole of it.
+    // A box seen from above alone: no ray goes into it, and none past its sides within the
+    // opening, so nothing is assumed behind any of it.
     let box_seen = box_on_a_table(ABOVE);
     let block = Obstacle::cuboid(Vec3::new(0.0, 0.0, 0.025), Vec3::new(0.02, 0.03, 0.025));
     assert!(grasps(&box_seen, &with_shell(0.015)).is_empty());
-    let whole = grasps(&box_seen, &with_shell(0.08));
+    assert!(grasps(&box_seen, &with_shell(0.08)).is_empty());
+    // Seen from in front and over it, past its far side within the opening: closed on across
+    // the whole of it, its far contact out of it, and the hand past that contact, where the far
+    // finger stands in space the camera saw past, clear of it. (A finger may be in what it closes
+    // on, and of the faces no camera saw the hand knows nothing.)
+    let front = box_on_a_table(Vec3::new(0.35, 0.0, 0.35));
+    let o = with_shell(0.08);
+    let found = grasps(&front, &o);
+    let whole: Vec<&Grasp> = found.iter().filter(|g| g.one_sided).collect();
+    assert!(whole.len() > 100, "{}", whole.len());
     let hand = hand();
+    let mut far_side = 0;
     for g in &whole {
-        assert!(g.width() > 0.04 - 1e-3, "across all of it: {g:?}");
-        for (center, radius) in hand_at(&hand, g) {
+        assert!(
+            g.width() > 0.04 && g.width() <= o.opening,
+            "across all of it: {g:?}"
+        );
+        let [a, b] = g.contacts.map(|c| block.distance(c).value);
+        let (seen, unseen) = if a < b {
+            (g.contacts[0], g.contacts[1])
+        } else {
+            (g.contacts[1], g.contacts[0])
+        };
+        assert!(a.min(b).abs() < 1e-3 && a.max(b) > 0.0, "{g:?}");
+        let line = (unseen - seen).normalize();
+        let beyond = |&(center, _): &(Vec3, f32)| (center - unseen).dot(line) > 0.0;
+        for (center, radius) in hand_at(&hand, g).filter(beyond) {
             assert!(block.distance(center).value > radius - 1e-3, "{g:?}");
+            far_side += 1;
         }
     }
+    assert!(far_side > whole.len(), "{far_side}");
+    // A wall is never taken thicker than the fingers open: a shell past it is one at it.
+    let past = grasps(&front, &with_shell(0.2));
+    assert_eq!(past, grasps(&front, &with_shell(o.opening)));
+    assert!(
+        found.iter().any(|g| g.width() > o.opening - 1e-3),
+        "some reach the opening"
+    );
     // A wall 2 cm thick seen from above: thicker than a shell of 1.5 cm, not than one of 3.
     let thick = bowl_seen(0.02, &[ABOVE]);
     assert!(grasps(&thick, &with_shell(0.015)).is_empty());
@@ -1001,6 +1050,60 @@ fn nothing_is_assumed_behind_a_solid_or_a_wall_thicker_than_the_shell() {
     // And the thin wall's other side shows only past where the rim hides it: no grasp within
     // 4 mm.
     assert!(grasps(&bowl_seen(THIN, &[ABOVE]), &with_shell(0.004)).is_empty());
+}
+
+#[test]
+fn two_looks_from_one_place_show_what_one_look_does() {
+    // The bowl seen from in front and over it, and a box past which the camera sees: once, and
+    // joined with a second look from the same place whose readings are a little farther, as a
+    // harness that looks twice gives them. The two looks' readings of a pixel lie along one ray.
+    let one_sided = |s: &Surface, o: &GraspOptions| -> Vec<f32> {
+        let found = grasps(s, o);
+        let mut widths: Vec<f32> = found
+            .iter()
+            .filter(|g| g.one_sided)
+            .map(Grasp::width)
+            .collect();
+        widths.sort_by(f32::total_cmp);
+        widths
+    };
+    let o = with_shell(0.015);
+    let once = one_sided(&bowl_seen(THIN, &[FRONT]), &o);
+    assert!(once.len() > 100, "{}", once.len());
+    let median = |widths: &[f32]| widths[widths.len() / 2];
+    for farther in [0.0, 1e-4, 1e-3] {
+        let mut twice = bowl_seen(THIN, &[FRONT]);
+        twice.join(bowl_read_farther(THIN, &[FRONT], farther));
+        let found = one_sided(&twice, &o);
+        // None fewer: within a surface's noise of the first look, as many; a millimeter
+        // farther, the second look's points are a layer of their own and seed more.
+        let (n, m) = (once.len(), found.len());
+        assert!(m * 20 >= n * 19, "{m} against {n}, {farther} m farther");
+        if farther < 1e-3 {
+            assert!(m * 20 <= n * 21, "{m} against {n}, {farther} m farther");
+        }
+        // As wide, but for how much farther the second look reads and a step of the search for
+        // where the wall ends (half a millimeter).
+        let apart = (median(&found) - median(&once)).abs();
+        assert!(
+            apart <= farther + 5e-4 + 1e-6,
+            "{apart} m, {farther} m farther"
+        );
+    }
+    // The box's faces lie on the edges of the cells seeds are drawn from, so a second look's
+    // seeds fall in cells of their own: none fewer, each across the whole box.
+    let eye = Vec3::new(0.35, 0.0, 0.35);
+    let o = with_shell(0.08);
+    let once = one_sided(&box_on_a_table(eye), &o);
+    assert!(once.len() > 100, "{}", once.len());
+    for farther in [0.0, 1e-4, 1e-3] {
+        let mut twice = box_on_a_table(eye);
+        twice.join(box_read_farther(eye, farther));
+        let found = one_sided(&twice, &o);
+        let (n, m) = (once.len(), found.len());
+        assert!(m * 20 >= n * 19, "{m} against {n}, {farther} m farther");
+        assert!(found[0] > 0.04, "{} m", found[0]);
+    }
 }
 
 #[test]
@@ -1221,6 +1324,9 @@ fn joined_surfaces_keep_which_points_are_the_objects() {
         }
     }
     assert!(seen.seen_from[0] == eye && unseen.seen_from[count] == -eye);
+    // What a side did not say is not known, and a joined surface is still equal to itself.
+    assert_eq!(seen, seen.clone());
+    assert_eq!(unseen, unseen.clone());
 }
 
 #[test]
