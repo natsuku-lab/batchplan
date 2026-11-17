@@ -21,6 +21,7 @@ use glam::{Mat3, Quat, Vec3};
 
 use crate::device::Device;
 use crate::error::{Result, ensure_input};
+use crate::robot::HandSphere;
 use crate::task::GraspOptions;
 use crate::types::Pose;
 
@@ -44,8 +45,18 @@ pub struct Grasp {
     /// The hand's IK frame in the surface's frame, as [`GraspOptions`] has it: between the
     /// fingertips, its z axis out of the hand and its y axis along the closing direction.
     pub pose: Pose,
-    /// How far apart the two patches it closes on are (meters): what the fingers close to.
-    pub width: f32,
+    /// Where the fingers press, in the surface's frame: the first on the side the frame's y axis
+    /// points from. On the frame's y axis, or ahead of it along its z axis where the hand is
+    /// drawn back to stay clear.
+    pub contacts: [Vec3; 2],
+}
+
+impl Grasp {
+    /// How far apart the two points it closes on are (meters): what the fingers close to.
+    #[must_use]
+    pub fn width(&self) -> f32 {
+        (self.contacts[1] - self.contacts[0]).length()
+    }
 }
 
 /// The fewest points a patch a fingertip presses on holds: fewer say too little of where the
@@ -54,6 +65,13 @@ const SUPPORT: usize = 3;
 
 /// The nearest two patches may be (meters): closer, they are one surface's noise, not two sides.
 const THINNEST: f32 = 0.0025;
+
+/// How far a hand that is not clear is drawn back at a time (meters).
+const BACK: f32 = 0.002;
+
+/// The cells the hand's spheres are looked up in (meters): about a sphere's size, where a patch's
+/// would be hundreds to a sphere.
+const HAND_CELLS: f32 = 0.02;
 
 /// Grasps on each of `surfaces` for hand `hand` of `device`'s robot, the best first: those whose
 /// patches face each other most squarely. Each pair of patches is grasped from `turns` directions
@@ -74,12 +92,15 @@ pub fn grasps_on(
             && o.friction > 0.0
             && o.friction.is_finite()
             && o.contact > 0.0
-            && o.contact.is_finite(),
-        "grasps need a finite positive opening, a turn, and a finite positive friction and contact, got {} m, {}, {} and {} m",
+            && o.contact.is_finite()
+            && o.approach >= 0.0
+            && o.approach.is_finite(),
+        "grasps need a finite positive opening, a turn, a finite positive friction and contact, and a finite approach of at least 0, got {} m, {}, {}, {} m and {} m",
         o.opening,
         o.turns,
         o.friction,
-        o.contact
+        o.contact,
+        o.approach
     );
     for (i, s) in surfaces.iter().enumerate() {
         ensure_input!(
@@ -96,7 +117,8 @@ pub fn grasps_on(
             "surface {i}: points must be finite and normals unit"
         );
     }
-    Ok(surfaces.iter().map(|s| on(s, o)).collect())
+    let hand = device.robot().hand_spheres(hand);
+    Ok(surfaces.iter().map(|s| on(s, &hand, o)).collect())
 }
 
 /// Two patches a hand can close on.
@@ -110,8 +132,8 @@ struct Pair {
     square: f32,
 }
 
-/// One surface's grasps.
-fn on(s: &Surface, o: &GraspOptions) -> Vec<Grasp> {
+/// One surface's grasps for a hand of spheres `hand`.
+fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
     let cells = Cells::new(&s.points, o.contact);
     let object = |i: usize| s.object.is_empty() || s.object[i];
     // The cosine of the friction cone's half angle.
@@ -209,6 +231,36 @@ fn on(s: &Surface, o: &GraspOptions) -> Vec<Grasp> {
         }
     }
     pairs.sort_by(|a, b| b.square.total_cmp(&a.square));
+    let coarse = Cells::new(&s.points, HAND_CELLS);
+    // How far the hand reaches past its frame.
+    let reach = hand
+        .iter()
+        .map(|sphere| sphere.center.z + sphere.radius)
+        .fold(0.0, f32::max);
+    // Whether the hand at `pose`, open, and the straight way in to it along its z axis, are
+    // clear of what was seen and over the floor: each sphere swept back the approach, as GPD
+    // takes a hand's fingers to reach back without end, so that a sheet of points between two
+    // of a finger's spheres is in the way of the one that passed through it. Its fingers may
+    // be in what they close on: the object's points between the two patches, `width` apart
+    // along the frame's y axis.
+    let mut clear = |pose: &Pose, width: f32| {
+        let (closing, toward) = (pose.rotation * Vec3::Y, pose.rotation * Vec3::Z);
+        if let Some(floor) = o.floor {
+            let tips = (pose.position + toward * reach).z - closing.z.abs() * o.opening / 2.0;
+            if pose.position.z.min(tips) < floor {
+                return false;
+            }
+        }
+        hand.iter().all(|sphere| {
+            let center = pose.position + pose.rotation * sphere.center;
+            let from = center - toward * o.approach;
+            coarse.within(&s.points, from, center, sphere.radius, &mut around);
+            around.iter().all(|&(_, i)| {
+                let across = (s.points[i] - pose.position).dot(closing).abs();
+                sphere.finger && object(i) && across <= width / 2.0 + THINNEST
+            })
+        })
+    };
     let mut grasps = Vec::with_capacity(pairs.len() * 2 * o.turns);
     for pair in &pairs {
         // From above first, where the line is not upright.
@@ -221,10 +273,22 @@ fn on(s: &Surface, o: &GraspOptions) -> Vec<Grasp> {
             let toward = Quat::from_axis_angle(pair.line, angle) * first;
             for closing in [pair.line, -pair.line] {
                 let axes = Mat3::from_cols(closing.cross(toward), closing, toward);
-                grasps.push(Grasp {
-                    pose: Pose::new(pair.middle, Quat::from_mat3(&axes)),
-                    width: pair.width,
-                });
+                let rotation = Quat::from_mat3(&axes);
+                // As deep as the hand is clear: its frame on the line between the patches, or
+                // drawn back while its fingers still overlap them by `overlap`.
+                let mut back = 0.0;
+                while back == 0.0 || reach - back >= o.overlap {
+                    let pose = Pose::new(pair.middle - toward * back, rotation);
+                    if clear(&pose, pair.width) {
+                        let half = closing * pair.width / 2.0;
+                        grasps.push(Grasp {
+                            pose,
+                            contacts: [pair.middle - half, pair.middle + half],
+                        });
+                        break;
+                    }
+                    back += BACK;
+                }
             }
         }
     }

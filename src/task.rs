@@ -971,6 +971,9 @@ pub struct GraspOptions {
     /// A patch is the mean of the points within it, and surfaces nearer each other than this
     /// along a closing line count as one.
     pub contact: f32,
+    /// How far the hand comes in straight along its z axis to a grasp of a surface, a way that
+    /// must be clear of what was seen (meters): 10 cm, a pick's `approach`.
+    pub approach: f32,
 }
 
 impl Default for GraspOptions {
@@ -985,6 +988,7 @@ impl Default for GraspOptions {
             along: 0.0,
             friction: 0.5,
             contact: 0.005,
+            approach: 0.1,
         }
     }
 }

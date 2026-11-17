@@ -442,6 +442,15 @@ pub struct AttachedObject {
     pub spheres: SphereOptions,
 }
 
+/// One of a hand's collision spheres, in the hand's IK frame ([`Robot::hand_spheres`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HandSphere {
+    pub(crate) center: Vec3,
+    pub(crate) radius: f32,
+    /// Whether it is a finger's, not the palm's.
+    pub(crate) finger: bool,
+}
+
 /// World-frame kinematic state for one configuration, per link. Hot loops reuse one per thread
 /// through [`Robot::fk_into`].
 #[derive(Clone)]
@@ -1299,6 +1308,32 @@ impl Robot {
             links,
             tips: (0..self.hands()).map(|h| self.tip(h)).collect(),
         })
+    }
+
+    /// Hand `hand`'s collision spheres at the default configuration, in its IK frame: its palm's
+    /// and its fingers', as the locked joints hold them.
+    pub(crate) fn hand_spheres(&self, hand: usize) -> Vec<HandSphere> {
+        let fk = self.fk(&self.default_q);
+        let frame = self.ee_links[hand];
+        let (rot, pos) = (fk.rot[frame], fk.pos[frame]);
+        let links = self.hand_links(hand);
+        let fingers = self.finger_links(hand);
+        let of = |link: usize| self.links[link].name.as_str();
+        let hand_spheres = self.spheres.iter().filter(|s| links.contains(&of(s.link)));
+        hand_spheres
+            .map(|s| {
+                let center = fk.rot[s.link] * s.center + fk.pos[s.link] - pos;
+                HandSphere {
+                    center: Vec3::new(
+                        rot.x_axis.dot(center),
+                        rot.y_axis.dot(center),
+                        rot.z_axis.dot(center),
+                    ),
+                    radius: s.radius,
+                    finger: fingers.contains(&of(s.link)),
+                }
+            })
+            .collect()
     }
 
     /// Every collision sphere at configuration `q`, in the robot's frame, as `[x, y, z, radius]`,

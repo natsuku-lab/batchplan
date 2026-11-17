@@ -6,6 +6,7 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
+use std::collections::HashMap;
 use std::f32::consts::TAU;
 
 use batchplan::glam::Vec3;
@@ -95,8 +96,16 @@ fn grasps(surface: &Surface, o: &GraspOptions) -> Vec<Grasp> {
 /// The grasp's closing line and the two points it closes on.
 fn closes_on(g: &Grasp) -> (Vec3, [Vec3; 2]) {
     let line = g.pose.rotation * Vec3::Y;
-    let half = line * g.width / 2.0;
-    (line, [g.pose.position - half, g.pose.position + half])
+    // The frame's y axis runs from the first to the second, through the frame or ahead of it.
+    let between = g.contacts[1] - g.contacts[0];
+    assert!(between.normalize().dot(line) > 0.9999, "{g:?}");
+    let ahead = (g.contacts[0] + g.contacts[1]) / 2.0 - g.pose.position;
+    let toward = g.pose.rotation * Vec3::Z;
+    assert!(
+        ahead.cross(toward).length() < 1e-5 && ahead.dot(toward) > -1e-5,
+        "{g:?}"
+    );
+    (line, g.contacts)
 }
 
 #[test]
@@ -112,7 +121,7 @@ fn a_box_is_grasped_across_each_side_that_fits_and_no_other() {
         across[axis] += 1;
         // Along one axis, on the two faces it crosses, as wide as the box is there.
         assert!(line.abs()[axis] > 0.9999, "{g:?}");
-        assert!((g.width - 2.0 * half[axis]).abs() < 1e-4, "{g:?}");
+        assert!((g.width() - 2.0 * half[axis]).abs() < 1e-4, "{g:?}");
         for end in ends {
             assert!((end[axis].abs() - half[axis]).abs() < 1e-4, "{g:?}");
             assert!(end.abs().cmple(half + 1e-4).all(), "{g:?}");
@@ -123,21 +132,33 @@ fn a_box_is_grasped_across_each_side_that_fits_and_no_other() {
     }
     assert!(across[0] > 0 && across[1] > 0, "{across:?}");
     assert_eq!(across[2], 0, "the box is too long to grasp along z");
-    // Each pair of patches from `turns` directions, each both ways round, the first from above.
+    // From above among them.
+    let above = |g: &&Grasp| (g.pose.rotation * Vec3::Z).dot(Vec3::NEG_Z) > 0.9999;
+    assert!(found.iter().any(|g| above(&g)));
+}
+
+#[test]
+fn patches_the_hand_is_clear_around_are_grasped_from_every_turn_both_ways_round() {
+    // Two plates 1 cm square with nothing around them: the hand is clear from every side.
+    let o = GraspOptions::default();
+    let found = grasps(&plates_of(0.04, 0.005), &o);
+    assert!(!found.is_empty());
     assert_eq!(found.len() % (2 * o.turns), 0);
     for both in found.chunks(2) {
         let [a, b] = [both[0].pose, both[1].pose];
         assert_eq!(a.position, b.position);
         assert!((a.rotation * Vec3::Y).dot(b.rotation * Vec3::Y) < -0.9999);
         assert!((a.rotation * Vec3::Z).dot(b.rotation * Vec3::Z) > 0.9999);
+        assert_eq!(both[0].contacts, [both[1].contacts[1], both[1].contacts[0]]);
     }
-    let turned = (found[0].pose.rotation * Vec3::Z).dot(found[2].pose.rotation * Vec3::Z);
+    // The first from above, the next a turn on.
+    let toward = |k: usize| found[k].pose.rotation * Vec3::Z;
+    assert!(toward(0).dot(Vec3::NEG_Z) > 0.9999, "{}", toward(0));
+    let turned = toward(0).dot(toward(2));
     assert!(
         (turned - (TAU / o.turns as f32).cos()).abs() < 1e-4,
         "{turned}"
     );
-    let first = found[0].pose.rotation * Vec3::Z;
-    assert!(first.dot(Vec3::NEG_Z) > 0.9999, "{first}");
 }
 
 #[test]
@@ -153,14 +174,14 @@ fn a_wall_is_grasped_across_its_thickness() {
         let (line, ends) = closes_on(g);
         if line.z.abs() > 0.9999 {
             // Rim to rim through the wall.
-            assert!((g.width - 2.0 * half_height).abs() < 1e-3, "{g:?}");
+            assert!((g.width() - 2.0 * half_height).abs() < 1e-3, "{g:?}");
             through += 1;
             continue;
         }
         // Across the wall: along the radius where it stands, one end on each side of it.
         let radial = g.pose.position.with_z(0.0).normalize();
         assert!(line.dot(radial).abs() > 0.995, "{g:?}");
-        assert!((g.width - (outer - inner)).abs() < 1e-3, "{g:?}");
+        assert!((g.width() - (outer - inner)).abs() < 1e-3, "{g:?}");
         let mut radii = ends.map(|e| e.with_z(0.0).length());
         radii.sort_by(f32::total_cmp);
         assert!(
@@ -176,21 +197,36 @@ fn a_wall_is_grasped_across_its_thickness() {
     );
     assert!(through > 0, "and from rim to rim, which fits too");
     // None spans the bowl.
-    assert!(found.iter().all(|g| g.width < 0.06));
+    assert!(found.iter().all(|g| g.width() < 0.06));
 }
 
 #[test]
-fn a_cup_the_hand_spans_is_grasped_around_it_too() {
+fn a_cup_is_grasped_around_it_and_across_its_wall_by_a_hand_that_fits_inside() {
     let (outer, inner, half_height) = (0.03, 0.026, 0.06);
-    let found = grasps(
-        &tube_surface(outer, inner, half_height),
-        &GraspOptions::default(),
-    );
-    let width = |w: f32| found.iter().any(|g| (g.width - w).abs() < 1e-3);
-    assert!(width(outer - inner), "across its wall");
-    assert!(width(2.0 * outer), "around it");
+    let cup = tube_surface(outer, inner, half_height);
+    let o = GraspOptions::default();
+    let found = grasps(&cup, &o);
+    let width = |found: &[Grasp], w: f32| found.iter().any(|g| (g.width() - w).abs() < 1e-3);
+    assert!(width(&found, 2.0 * outer), "around it");
     // The far wall's inside faces the line's start: no finger presses on it from there.
-    assert!(!width(outer + inner), "not onto the inside of its far wall");
+    assert!(
+        !width(&found, outer + inner),
+        "not onto the inside of its far wall"
+    );
+    // Open 8 cm, the finger inside would stand in the far wall, 5.2 cm away.
+    assert!(
+        !width(&found, outer - inner),
+        "not across its wall, open wide"
+    );
+    // Open 3 cm, it fits inside.
+    let robot = common::panda().unwrap();
+    let fingers = ["panda_finger_joint1", "panda_finger_joint2"].map(|j| (j.to_string(), 0.015));
+    let narrow = robot.relock(&HashMap::from(fingers)).unwrap();
+    let device = Device::cpu(&narrow).unwrap();
+    let o = GraspOptions { opening: 0.03, ..o };
+    let found = grasps_on(&device, 0, &[cup], &o).unwrap().remove(0);
+    assert!(width(&found, outer - inner), "across its wall, open 3 cm");
+    assert!(!width(&found, 2.0 * outer));
 }
 
 #[test]
@@ -215,8 +251,13 @@ fn a_surface_with_nothing_seen_behind_it_gives_no_grasp() {
     assert!(along(0) > 0 && along(1) > 0, "seen whole, it has them");
 }
 
-/// Two plates `apart`, facing away from each other.
+/// Two plates 4 cm square, `apart`, facing away from each other.
 fn plates(apart: f32) -> Surface {
+    plates_of(apart, 0.02)
+}
+
+/// Two square plates of half size `half`, `apart`, facing away from each other.
+fn plates_of(apart: f32, half: f32) -> Surface {
     let mut s = Surface::default();
     for side in [1.0, -1.0] {
         let normal = Vec3::X * side;
@@ -224,7 +265,7 @@ fn plates(apart: f32) -> Surface {
             normal * apart / 2.0,
             normal,
             [Vec3::Y, Vec3::Z],
-            [0.02, 0.02],
+            [half, half],
             &mut s,
         );
     }
@@ -380,6 +421,118 @@ fn something_else_between_the_fingers_leaves_a_grasp_out() {
     // The same points as the object's are squeezed with it.
     blocked.object = vec![];
     assert_eq!(grasps(&blocked, &o).len(), free.len());
+}
+
+/// Marks every point of `s` so far as the object's, for points added after that are not.
+fn the_object(s: &mut Surface) {
+    s.object = vec![true; s.points.len()];
+}
+
+#[test]
+fn a_finger_is_kept_out_of_what_stands_beside_the_object() {
+    let o = GraspOptions::default();
+    let alone = plates_of(0.04, 0.005);
+    let free = grasps(&alone, &o).len();
+    assert!(free > 0);
+    // A wall facing the object, `at` from its middle along the closing line.
+    let beside = |at: f32| {
+        let mut s = alone.clone();
+        the_object(&mut s);
+        face(
+            Vec3::X * at,
+            Vec3::NEG_X,
+            [Vec3::Y, Vec3::Z],
+            [0.05, 0.05],
+            &mut s,
+        );
+        s.object.resize(s.points.len(), false);
+        grasps(&s, &o).len()
+    };
+    // Open 8 cm, a finger stands 4 cm out: in a wall 4.5 cm out, and clear of one 12 cm out.
+    assert_eq!(beside(0.045), 0);
+    assert_eq!(beside(0.12), free);
+}
+
+#[test]
+fn fingers_may_be_in_what_they_close_on_and_nothing_else_of_the_object() {
+    // Plates nearly as far apart as the fingers open: the open fingers' spheres reach them.
+    let o = GraspOptions::default();
+    assert!(!grasps(&plates_of(o.opening - 0.005, 0.005), &o).is_empty());
+    // A ledge of the object out past one plate, where that finger stands: no grasp.
+    let mut ledged = plates_of(0.04, 0.005);
+    face(
+        Vec3::X * 0.045,
+        Vec3::NEG_X,
+        [Vec3::Y, Vec3::Z],
+        [0.05, 0.05],
+        &mut ledged,
+    );
+    assert!(grasps(&ledged, &o).is_empty());
+}
+
+#[test]
+fn the_hand_stays_over_the_floor() {
+    let robot = common::panda().unwrap();
+    let tip = robot.tip(0);
+    let surface = plates_of(0.04, 0.005);
+    let anywhere = grasps(&surface, &GraspOptions::default());
+    let floor = -0.01;
+    let o = GraspOptions {
+        floor: Some(floor),
+        ..Default::default()
+    };
+    let found = grasps(&surface, &o);
+    assert!(!found.is_empty() && found.len() < anywhere.len());
+    let low = |g: &Grasp| {
+        let (closing, toward) = (g.pose.rotation * Vec3::Y, g.pose.rotation * Vec3::Z);
+        let tips = (g.pose.position + toward * tip).z - closing.z.abs() * o.opening / 2.0;
+        g.pose.position.z.min(tips)
+    };
+    for g in &found {
+        assert!(low(g) >= floor - 1e-5, "{g:?}");
+    }
+    assert!(anywhere.iter().any(|g| low(g) < floor - 1e-3));
+}
+
+#[test]
+fn fingertips_stay_off_the_bottom_of_a_bowl() {
+    // The bowl of the wall test with a bottom 2 cm under its rim.
+    let (outer, inner, half_height) = (0.055, 0.047, 0.025);
+    let bottom = half_height - 0.02;
+    let mut bowl = tube_surface(outer, inner, half_height);
+    let rings = (inner / SPACING) as usize;
+    for i in 0..rings {
+        let r = i as f32 * SPACING;
+        let around = ((TAU * r / SPACING) as usize).max(1);
+        for k in 0..around {
+            let angle = TAU * k as f32 / around as f32;
+            bowl.points
+                .push(Vec3::new(r * angle.cos(), r * angle.sin(), bottom));
+            bowl.normals.push(Vec3::Z);
+        }
+    }
+    let tip = common::panda().unwrap().tip(0);
+    let found = grasps(&bowl, &GraspOptions::default());
+    let across = |g: &&Grasp| (g.width() - (outer - inner)).abs() < 1e-3;
+    let from_above = |g: &&Grasp| (g.pose.rotation * Vec3::Z).dot(Vec3::NEG_Z) > 0.9999;
+    let rim: Vec<&Grasp> = found.iter().filter(across).filter(from_above).collect();
+    assert!(!rim.is_empty(), "the rim is grasped from above");
+    for g in &rim {
+        let fingertips = g.pose.position.z - tip;
+        assert!(fingertips > bottom - 1e-4, "in the bottom: {g:?}");
+    }
+    // Lower on the wall there are patches too, where the fingertips would be in the bottom.
+    let lowest = rim
+        .iter()
+        .map(|g| g.contacts[0].z)
+        .fold(f32::INFINITY, f32::min);
+    assert!(lowest > bottom && lowest < half_height - 0.002, "{lowest}");
+    // And none comes up through the bottom to the wall over it. (Under it the wall hangs free
+    // here, and is grasped from below.)
+    let through = |g: &Grasp| (g.pose.rotation * Vec3::Z).z > 0.5 && g.contacts[0].z > bottom;
+    assert!(!found.iter().filter(across).any(through));
+    let under = |g: &Grasp| (g.pose.rotation * Vec3::Z).z > 0.5 && g.contacts[0].z < bottom;
+    assert!(found.iter().filter(across).any(under));
 }
 
 #[test]
