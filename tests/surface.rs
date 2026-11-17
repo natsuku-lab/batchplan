@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::f32::consts::TAU;
 
 use batchplan::glam::{Mat3, Quat, Vec3};
+use batchplan::rng::Rng;
 use batchplan::{
     DepthImage, Device, Error, Grasp, GraspOptions, Intrinsics, Obstacle, Pose, Surface, grasps_on,
 };
@@ -826,6 +827,95 @@ fn points_get_the_normals_of_the_planes_they_lie_on_toward_where_they_were_seen_
         Surface::from_points(&line, eye, 0.0),
         Err(Error::Input(_))
     ));
+}
+
+#[test]
+fn readings_of_the_robot_are_not_surfaces() {
+    // The hand's spheres as the scene, seen from in front of the robot: with its mask, the image
+    // shows nothing of them, and the table behind is still seen.
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    let hand = robot.ee_pose(&q, 0).position;
+    let spheres: Vec<[f32; 4]> = robot
+        .spheres(&q)
+        .into_iter()
+        .filter(|s| Vec3::new(s[0], s[1], s[2]).distance(hand) < 0.12)
+        .collect();
+    assert!(spheres.len() > 10);
+    let mut scene: Vec<Obstacle> = spheres
+        .iter()
+        .map(|s| Obstacle::Sphere {
+            center: Vec3::new(s[0], s[1], s[2]),
+            radius: s[3],
+        })
+        .collect();
+    scene.push(Obstacle::cuboid(
+        hand - Vec3::Z * 0.3,
+        Vec3::new(0.5, 0.5, 0.01),
+    ));
+    let camera = looking(hand + Vec3::new(0.4, 0.0, 0.3), hand);
+    let depth = render(&scene, camera);
+    let image = DepthImage {
+        depth: &depth,
+        width: WIDTH,
+        intrinsics: K,
+        camera,
+    };
+    let on_the_robot = |surface: &Surface| {
+        let near = |p: &&Vec3| {
+            spheres
+                .iter()
+                .any(|s| p.distance(Vec3::new(s[0], s[1], s[2])) < s[3] + 1e-3)
+        };
+        surface.points.iter().filter(near).count()
+    };
+    let unmasked = Surface::from_depth(&image, &[], None, 0.005).unwrap();
+    assert!(on_the_robot(&unmasked) > 500, "the camera sees the hand");
+    let mask = image.robot_mask(&robot, &q, 0.005).unwrap();
+    let masked = Surface::from_depth(&image, &[], Some(&mask), 0.005).unwrap();
+    assert_eq!(on_the_robot(&masked), 0);
+    assert!(masked.points.len() > 1000, "the table is still seen");
+    assert!(masked.object.is_empty() && masked.normals.iter().any(|&n| n != Vec3::ZERO));
+    // Object flags for some pixels only, and a radius that is not a length, are refused.
+    for (object, radius) in [(&[true][..], 0.005), (&[][..], 0.0), (&[][..], f32::NAN)] {
+        assert!(matches!(
+            Surface::from_depth(&image, object, None, radius),
+            Err(Error::Input(_))
+        ));
+    }
+}
+
+#[test]
+fn a_normal_is_the_plane_through_every_reading_within_the_radius() {
+    // A wall half a meter ahead, read with a millimeter of noise: over the 5 mm around a
+    // reading, six pixels here, the noise averages out; over its nearest pixels alone it
+    // would not.
+    let camera = Pose::new(Vec3::ZERO, Quat::IDENTITY);
+    let mut rng = Rng::new(7);
+    let depth: Vec<f32> = (0..WIDTH * HEIGHT)
+        .map(|_| 0.5 + rng.range(-0.001, 0.001))
+        .collect();
+    let image = DepthImage {
+        depth: &depth,
+        width: WIDTH,
+        intrinsics: K,
+        camera,
+    };
+    let seen = Surface::from_depth(&image, &[], None, 0.005).unwrap();
+    assert_eq!(seen.points.len(), WIDTH * HEIGHT);
+    let known: Vec<f32> = seen
+        .normals
+        .iter()
+        .filter(|&&n| n != Vec3::ZERO)
+        .map(|n| n.dot(Vec3::NEG_Z).clamp(-1.0, 1.0).acos())
+        .collect();
+    assert!(
+        known.len() * 10 > 9 * WIDTH * HEIGHT,
+        "{} with a normal",
+        known.len()
+    );
+    let off = known.iter().sum::<f32>() / known.len() as f32;
+    assert!(off < 0.12, "{off} rad off the wall's normal on average");
 }
 
 #[test]
