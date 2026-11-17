@@ -369,17 +369,23 @@ fn held_boxes_and_balls_are_covered_without_fitting() {
     );
 }
 
-/// A round shape held with `options`, and its spheres in its own frame (its axis along z).
+/// A round shape held with `options`, alone or with a small ball beside it, and the shape's
+/// spheres in its own frame (its axis along z).
 fn held_round(
     robot: &Robot,
     shape: fn(Vec3, Quat) -> Obstacle,
     options: SphereOptions,
+    with_a_ball: bool,
 ) -> Vec<[f32; 4]> {
     let rotation = Quat::from_rotation_z(0.4) * Quat::from_rotation_x(0.3);
     let center = Vec3::new(0.0, 0.01, 0.12);
+    let mut shapes = vec![shape(center, rotation)];
+    if with_a_ball {
+        shapes.push(Obstacle::sphere(center + Vec3::X * 0.2, 0.01));
+    }
     let held = robot
         .attach(&AttachedObject {
-            shapes: vec![shape(center, rotation)],
+            shapes,
             spheres: options,
             ..held_box(&FINGERS)
         })
@@ -388,10 +394,9 @@ fn held_round(
         let p = rotation.inverse() * (Vec3::new(s[0], s[1], s[2]) - center);
         [p.x, p.y, p.z, s[3]]
     };
-    held.collision_model().spheres["box"]
-        .iter()
-        .map(own)
-        .collect()
+    let spheres = &held.collision_model().spheres["box"];
+    let its = spheres.len() - usize::from(with_a_ball);
+    spheres[..its].iter().map(own).collect()
 }
 
 /// That `spheres` hold every point of a cylinder of `radius` and `half_height` about z, and how
@@ -433,13 +438,29 @@ fn held_discs_rods_and_capsules_are_covered_without_fitting() {
         budget: 256,
         ..Default::default()
     };
-    let spheres = held_round(&robot, plate, fine);
+    let spheres = held_round(&robot, plate, fine, /* with_a_ball */ false);
     assert!(spheres.len() <= 160, "{} spheres", spheres.len());
     assert!(spheres.iter().all(|s| s[2].abs() < 1e-6), "one layer");
     let past = cylinder_overhang(&spheres, 0.0695, 0.009);
     assert!(past <= fine.tolerance + 1e-5, "{past} m past the plate");
+    // Covered with a ball beside it, as the two are placed, its spheres are where they were:
+    // turned as the plate is.
+    let beside = held_round(&robot, plate, fine, /* with_a_ball */ true);
+    assert_eq!(beside.len(), spheres.len());
+    for (a, b) in beside.iter().zip(&spheres) {
+        let apart = Vec3::new(a[0], a[1], a[2]).distance(Vec3::new(b[0], b[1], b[2]));
+        assert!(
+            apart < 1e-5 && (a[3] - b[3]).abs() < 1e-7,
+            "{a:?} against {b:?}"
+        );
+    }
     // With the default 64 the tolerance is out of reach, and the plate is fitted as before.
-    let coarse = held_round(&robot, plate, SphereOptions::default());
+    let coarse = held_round(
+        &robot,
+        plate,
+        SphereOptions::default(),
+        /* with_a_ball */ false,
+    );
     assert!(
         coarse.iter().any(|s| s[2].abs() > 1e-4),
         "fitted, not one layer"
@@ -452,7 +473,12 @@ fn held_discs_rods_and_capsules_are_covered_without_fitting() {
         radius: 0.004,
         half_height: 0.07,
     };
-    let spheres = held_round(&robot, rod, SphereOptions::default());
+    let spheres = held_round(
+        &robot,
+        rod,
+        SphereOptions::default(),
+        /* with_a_ball */ false,
+    );
     assert!(
         spheres.iter().all(|s| s[0].hypot(s[1]) < 1e-6),
         "on its axis"
@@ -470,7 +496,12 @@ fn held_discs_rods_and_capsules_are_covered_without_fitting() {
         radius: 0.033,
         half_height: 0.06,
     };
-    let spheres = held_round(&robot, can, SphereOptions::default());
+    let spheres = held_round(
+        &robot,
+        can,
+        SphereOptions::default(),
+        /* with_a_ball */ false,
+    );
     let off_axis = spheres.iter().any(|s| s[0].hypot(s[1]) > 1e-3);
     assert!(
         off_axis && spheres.iter().any(|s| s[2].abs() > 1e-3),
@@ -483,7 +514,12 @@ fn held_discs_rods_and_capsules_are_covered_without_fitting() {
         radius: 0.02,
         half_length: 0.05,
     };
-    let spheres = held_round(&robot, capsule, SphereOptions::default());
+    let spheres = held_round(
+        &robot,
+        capsule,
+        SphereOptions::default(),
+        /* with_a_ball */ false,
+    );
     assert!(
         spheres.iter().all(|s| s[0].hypot(s[1]) < 1e-6),
         "on its axis"
