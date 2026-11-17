@@ -7,12 +7,14 @@
 //! trajectory then; when no plan arrives in time, or the collision comes sooner than that, it stops
 //! on the path it is on ([`Trajectory::stop`]), naming what it stops for, checks the stop too, and
 //! reports itself blocked at rest. One that keeps its path, as along a tool path, stops without
-//! planning. `servo` takes one control step toward a hand pose: damped least squares on the hand's
-//! Jacobian, within the joints' velocity, acceleration and jerk limits, slowed and then braked to
-//! rest where braking from the state it commands would bring the robot too close to an obstacle,
-//! and braking each joint in time to rest within its range.
+//! planning; one that holds an object checks and plans with it in the hand. `servo` takes one
+//! control step toward a hand pose: damped least squares on the hand's Jacobian, within the
+//! joints' velocity, acceleration and jerk limits, slowed and then braked to rest where braking
+//! from the state it commands would bring the robot too close to an obstacle, and braking each
+//! joint in time to rest within its range.
 
 use std::f32::consts::{PI, TAU};
+use std::sync::Arc;
 use std::time::Duration;
 
 use glam::Vec3;
@@ -21,6 +23,7 @@ use crate::constraint::{self, HandConstraint};
 use crate::cpu::Reach;
 use crate::device::{CollisionWeights, Contact, Device, Worlds};
 use crate::error::{Result, ensure_input};
+use crate::held::{self, Held};
 use crate::robot::Robot;
 use crate::timing::{JointState, Trajectory};
 use crate::trajopt::{Goal, PlanOptions, PlanProblem};
@@ -48,6 +51,15 @@ pub struct FollowerOptions {
     /// Where the hands must stay along replans ([`HandConstraint`]), as the trajectory was planned
     /// to keep them. A replan that would start where they break stops instead.
     pub constraints: Vec<HandConstraint>,
+    /// An object a hand holds along the motion ([`Held`]), as the trajectory was planned holding
+    /// it: `None`, nothing. The rest of the motion is checked with the object in the hand, and
+    /// replans carry it. As for a problem's `holding`, the robot and the devices its ticks are
+    /// given are those that do not hold it, and what it may touch is named with
+    /// [`Touch::held`](crate::Touch::held). The first tick on a device builds the device that
+    /// holds it, which later ticks on that device reuse; a tick on another device builds one for
+    /// it. On a GPU that builds kernels too where no call there has held an object in that hand
+    /// yet, as the plan the trajectory came from has.
+    pub holding: Option<Held>,
     /// How far a joint of the measured state a tick is given may be from where the trajectory has
     /// it at that tick (radians, or meters for a prismatic joint) before the follower plans again
     /// from the measured state, or holds the robot there without `replan`: 0.2. Set it above how
@@ -97,6 +109,7 @@ impl Default for FollowerOptions {
             check_every: 0.02,
             plan: PlanOptions::default(),
             constraints: vec![],
+            holding: None,
             tolerance: 0.2,
             replan: true,
             detour: None,
@@ -191,6 +204,9 @@ pub struct Follower {
     /// where a stop on its path comes to rest, or where a hold began. The detour's window is read
     /// there from then on.
     left: Option<f32>,
+    /// A device holding what the follower holds, and the device it was made from
+    /// (`Device::instance`): that of the last tick that checked the rest of the motion.
+    holder: Option<(u64, Arc<Device>)>,
     o: FollowerOptions,
 }
 
@@ -261,6 +277,9 @@ impl Follower {
         );
         o.plan.check()?;
         constraint::check(robot, &o.constraints, "the follower")?;
+        if let Some(held) = &o.holding {
+            held.check_on(robot, "the follower")?;
+        }
         let n = robot.dof();
         let points = &trajectory.control_points;
         let mut goal = points[points.len() - trajectory.dof..].to_vec();
@@ -302,6 +321,7 @@ impl Follower {
             stopped_for: vec![],
             leg: Leg::Joined,
             left: None,
+            holder: None,
             o,
         })
     }
@@ -392,6 +412,8 @@ impl Follower {
             };
             return Ok(Tick { state, status });
         }
+        let holder = self.holder(device, worlds)?;
+        let checked = holder.as_deref().unwrap_or(device);
         // The rest of the motion: this trajectory up to a pending replan's takeover, then the
         // replan.
         let mut rest = vec![Stretch {
@@ -409,7 +431,7 @@ impl Follower {
                 to: next.duration(),
             });
         }
-        let hit = self.first_collision(device, worlds, &rest)?;
+        let hit = self.first_collision(checked, worlds, &rest)?;
         let Some(hit) = hit else {
             let status = if self.stopping {
                 FollowStatus::Stopping {
@@ -460,7 +482,7 @@ impl Follower {
                 start_motion: Some(motion.clone()),
                 hold: vec![],
                 constraints: self.o.constraints.clone(),
-                holding: None,
+                holding: self.o.holding.clone(),
             };
             let options = PlanOptions {
                 time_budget: Some(Duration::from_secs_f32(self.o.budget.max(1e-3))),
@@ -504,7 +526,7 @@ impl Follower {
             from: 0.0,
             to: self.trajectory.duration(),
         }];
-        let status = match self.first_collision(device, worlds, &rest)? {
+        let status = match self.first_collision(checked, worlds, &rest)? {
             Some(hit) => hit.collides(),
             None => FollowStatus::Stopping {
                 contacts: self.stopped_for.clone(),
@@ -562,7 +584,7 @@ impl Follower {
                 start_motion: moving.then(|| motion.clone()),
                 hold: vec![],
                 constraints: self.o.constraints.clone(),
-                holding: None,
+                holding: self.o.holding.clone(),
             };
             let options = PlanOptions {
                 time_budget: Some(Duration::from_secs_f32(self.o.budget.max(1e-3))),
@@ -607,8 +629,27 @@ impl Follower {
         })
     }
 
-    /// Where the robot first collides along `stretches`, each sampled `check_every` apart and at
-    /// its end, in one batch.
+    /// The device the rest of the motion is checked on where the follower holds an object: one
+    /// for `device`'s robot holding it, built at the first tick on `device` and kept until a tick
+    /// is given another. `None` where it holds nothing, and `device` checks.
+    fn holder(&mut self, device: &Device, worlds: &Worlds) -> Result<Option<Arc<Device>>> {
+        let Some(held) = &self.o.holding else {
+            return Ok(None);
+        };
+        if let Some((of, holder)) = &self.holder
+            && *of == device.instance()
+        {
+            return Ok(Some(holder.clone()));
+        }
+        held.check(device.robot(), worlds, "the follower")?;
+        let mut built = held::holders(device, device.robot(), &[held])?;
+        let holder = Arc::new(built.remove(0));
+        self.holder = Some((device.instance(), holder.clone()));
+        Ok(Some(holder))
+    }
+
+    /// Where the robot first collides along `stretches` on `device`, each sampled `check_every`
+    /// apart and at its end, in one batch.
     fn first_collision(
         &self,
         device: &Device,

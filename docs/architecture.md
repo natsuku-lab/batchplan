@@ -137,7 +137,7 @@ A `Trajectory` is the path plus a time map `s = σ(t)`, itself a uniform cubic B
 
 ## Live motion
 
-- **`Follower`** is built from the pieces above: `evaluate` on the rest of its motion every tick (up to a pending takeover, then the replan, and any stop), `plan` with a `start_motion` and a time budget, `Trajectory::moving`, and `Trajectory::stop`. It replans from where the robot will be once the budget has passed (with a `Detour`, no sooner than its window opens); with `replan` off, it only stops and holds.
+- **`Follower`** is built from the pieces above: `evaluate` on the rest of its motion every tick (up to a pending takeover, then the replan, and any stop), `plan` with a `start_motion` and a time budget, `Trajectory::moving`, and `Trajectory::stop`. It replans from where the robot will be once the budget has passed (with a `Detour`, no sooner than its window opens); with `replan` off, it only stops and holds. One that holds an object (`FollowerOptions::holding`) checks on a device holding it, built from the tick's device (`held::holders`) and kept until a tick is given another device, and passes the hold to `plan`.
 - **`servo`** solves the hand's velocity with the same damped least squares and analytic Jacobian as `follow` (`cpu::Reach`). It checks, in one `evaluate` batch, the braking paths from the state it would command at full speed and from braking now, with the margin at `slow_within` so the clearances it acts on are exact.
 
 ## Perception and training data
