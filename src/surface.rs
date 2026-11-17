@@ -237,10 +237,14 @@ pub struct Grasp {
     /// points from. On the frame's y axis, or ahead of it along its z axis where the hand is
     /// drawn back to stay clear.
     pub contacts: [Vec3; 2],
+    /// Whether one of the two contacts was not seen ([`GraspOptions::shell`]): it is where the
+    /// cameras saw past the wall, so the wall ends at or before it.
+    pub one_sided: bool,
 }
 
 impl Grasp {
-    /// How far apart the two points it closes on are (meters): what the fingers close to.
+    /// How far apart the two points it closes on are (meters): what the fingers close to, or
+    /// for a [`one_sided`](Self::one_sided) grasp the most they may, the wall being no thicker.
     #[must_use]
     pub fn width(&self) -> f32 {
         (self.contacts[1] - self.contacts[0]).length()
@@ -420,7 +424,7 @@ fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
     };
     // A pair's grasps, by turn: from above first, where the line is not upright, then a turn to
     // either side of that, and so on round to from below.
-    let of = |pair: &Pair| {
+    let of = |pair: &Pair, one_sided: bool| {
         let down = Vec3::NEG_Z.reject_from_normalized(pair.line);
         let first = down
             .try_normalize()
@@ -443,6 +447,7 @@ fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
                         grasps.push(Grasp {
                             pose,
                             contacts: [pair.middle - half, pair.middle + half],
+                            one_sided,
                         });
                         break;
                     }
@@ -456,7 +461,8 @@ fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
     // Every pair from above, then every pair a turn on: the pairs being spread over the object,
     // so are the first few grasps. Those of walls seen from one side after the rest, alike.
     let mut grasps = vec![];
-    for lot in [&pairs, &one_sided] {
+    for (lot, one_sided) in [(&pairs, false), (&one_sided, true)] {
+        let of = |pair: &Pair| of(pair, one_sided);
         let each: Vec<Vec<Vec<Grasp>>> = lot.par_iter().map(of).collect();
         for turn in 0..o.turns {
             let at_turn = each

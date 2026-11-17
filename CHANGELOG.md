@@ -44,7 +44,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   wall hidden under the rim: `GraspOptions::shell`, the thickest such wall a grasp may close across
   (`None` by default, which changes nothing). From a patch whose other side no camera saw, the line
   in along its normal meets, within that thickness, space every ray around it went past on its way
-  to something farther: the second contact goes there, so `width()` is the most the wall can be.
+  to something farther: the second contact goes there, so `width()` is the most the wall can be,
+  and the `Grasp` says so (`one_sided`).
   Inside a solid no ray goes, so a box seen from one side is closed on only across all of it, and a
   patch whose other side was seen keeps to the seen pair. These grasps follow every grasp of two
   patches seen (1.5 cm suits a bowl's rim: LIBERO's, its wall 3 mm thick, seen from 40 cm above, is

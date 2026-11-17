@@ -1012,6 +1012,9 @@ fn walls_seen_from_one_side_come_after_those_seen_from_both_and_change_nothing_e
     let with = grasps(&both, &with_shell(0.015));
     assert!(!without.is_empty() && with.len() > without.len());
     assert_eq!(with[..without.len()], without[..]);
+    // Each says whether one of its contacts was not seen.
+    assert!(without.iter().all(|g| !g.one_sided));
+    assert!(with[without.len()..].iter().all(|g| g.one_sided));
     // From four sides, where each camera sees both sides of the wall in front of it the shell
     // adds nothing: only between them, where too little of the outside was seen to press on.
     let turned = |k: usize| Quat::from_rotation_z(k as f32 * TAU / 4.0) * FRONT;
