@@ -825,21 +825,13 @@ fn contacts_are_listed_for_what_each_configuration_holds() {
             .contacts_holding(&worlds, &item_world, &q, 0.0, &holds)
             .unwrap();
         assert_eq!(found.len(), holds.len(), "{name}");
-        let held_on_the_slab = |contacts: &[Contact]| {
-            contacts.iter().any(|c| {
-                matches!(c, Contact::World { link, obstacle: SLAB, distance } if link == HELD && *distance < 0.0)
-            })
-        };
         assert!(found[0].is_empty(), "{name}: {:?}", found[0]);
-        assert!(held_on_the_slab(&found[1]), "{name}: {:?}", found[1]);
+        assert!(held_at_slab(&found[1]), "{name}: {:?}", found[1]);
         assert!(
             found[3].is_empty() && found[4].is_empty(),
             "{name}: lifted clear"
         );
-        assert!(
-            !held_on_the_slab(&found[5]),
-            "{name}: the world lets it rest there"
-        );
+        assert!(found[5].is_empty(), "{name}: the world lets it rest there");
         // Each as a device holding its object alone lists it.
         let n = s.robot.dof();
         for (i, hold) in holds.iter().enumerate() {
@@ -866,6 +858,13 @@ fn contacts_are_listed_for_what_each_configuration_holds() {
         let wrong = [None, Some(&other_hand)];
         let refused = device.contacts_holding(&worlds, &[0, 0], &q[..2 * n], 0.0, &wrong);
         input(refused.unwrap_err(), "item 1");
+        // A configuration that is not finite is named by its item, whichever lot it is in.
+        let mut broken = q.clone();
+        broken[5 * n] = f32::NAN;
+        let refused = device.contacts_holding(&worlds, &item_world, &broken, 0.0, &holds);
+        input(refused.unwrap_err(), "item 5");
+        let refused = device.contacts_holding(&worlds, &item_world, &q, f32::NAN, &holds);
+        input(refused.unwrap_err(), "finite distance");
         // Holding nothing anywhere, it is `contacts`.
         let nothing = [None; 6];
         assert_eq!(
