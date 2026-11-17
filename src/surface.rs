@@ -219,13 +219,23 @@ const BACK: f32 = 0.002;
 /// The cells the points near the hand are kept in (meters): a few to a sphere.
 const HAND_CELLS: f32 = 0.01;
 
+/// The most pairs of patches that are put in an order that spreads them over the object.
+const SPREAD: usize = 1024;
+
 /// The most cells they are kept in: past it the cells are larger.
 const MOST_CELLS: usize = 1 << 22;
 
-/// Grasps on each of `surfaces` for hand `hand` of `device`'s robot, the best first: those whose
-/// patches face each other most squarely. Each pair of patches is grasped from `turns` directions
-/// around its closing line, the first from above where the line is not upright, each both ways
-/// round.
+/// Grasps on each of `surfaces` for hand `hand` of `device`'s robot, as its locked joints hold
+/// its fingers: each pair of patches the hand can close on is grasped from `turns` directions
+/// around its closing line, each both ways round, wherever the hand and its straight way in
+/// (`approach`) are clear of every point and over the `floor`, drawn back by up to what leaves
+/// `overlap` of the fingers on the patches.
+///
+/// They come in an order whose first few are worth trying first: every pair from above (where
+/// its line is not upright), then every pair a turn to either side, and so on round; and within
+/// a turn, the pairs that face each other within half a friction cone of square before the rest,
+/// spread over the object, each the farthest from those before it. The surfaces run in parallel
+/// on the device's threads, and a surface's grasps are the same alone and among others.
 pub fn grasps_on(
     device: &Device,
     hand: usize,
@@ -282,6 +292,8 @@ struct Pair {
     width: f32,
     /// The cosine of the larger angle between the line and a patch's normal.
     square: f32,
+    /// Where it comes among the pairs found, the squarest first.
+    order: usize,
 }
 
 /// One surface's grasps for a hand of spheres `hand`.
@@ -329,15 +341,17 @@ fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
             })
         })
     };
+    // A pair's grasps, by turn: from above first, where the line is not upright, then a turn to
+    // either side of that, and so on round to from below.
     let of = |pair: &Pair| {
-        let mut grasps = Vec::with_capacity(2 * o.turns);
-        // From above first, where the line is not upright.
         let down = Vec3::NEG_Z.reject_from_normalized(pair.line);
         let first = down
             .try_normalize()
             .unwrap_or_else(|| pair.line.any_orthonormal_vector());
-        for turn in 0..o.turns {
-            let angle = TAU * turn as f32 / o.turns as f32;
+        let by_turn = (0..o.turns).map(|turn| {
+            let mut grasps = Vec::with_capacity(2);
+            let side = if turn % 2 == 1 { 1.0 } else { -1.0 };
+            let angle = side * turn.div_ceil(2) as f32 * TAU / o.turns as f32;
             let toward = Quat::from_axis_angle(pair.line, angle) * first;
             for closing in [pair.line, -pair.line] {
                 let axes = Mat3::from_cols(closing.cross(toward), closing, toward);
@@ -358,11 +372,56 @@ fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
                     back += BACK;
                 }
             }
-        }
-        grasps
+            grasps
+        });
+        by_turn.collect::<Vec<_>>()
     };
-    let each: Vec<Vec<Grasp>> = pairs.par_iter().map(of).collect();
-    each.into_iter().flatten().collect()
+    let each: Vec<Vec<Vec<Grasp>>> = pairs.par_iter().map(of).collect();
+    // Every pair from above, then every pair a turn on: the pairs being spread over the object,
+    // so are the first few grasps.
+    let turns = 0..o.turns;
+    turns
+        .flat_map(|turn| {
+            each.iter()
+                .flat_map(move |by_turn| by_turn[turn].iter().copied())
+        })
+        .collect()
+}
+
+/// `pairs`, those that face each other most squarely first, in an order that spreads them:
+/// first those within half a friction cone of square, then the rest, each lot starting with its
+/// squarest pair and going on with the pair farthest from every one before it. Past
+/// [`SPREAD`] pairs of a lot, the rest follow as they came.
+fn spread(pairs: Vec<Pair>, cone: f32) -> Vec<Pair> {
+    let well = ((1.0 + cone) / 2.0).sqrt();
+    let (square, askew): (Vec<Pair>, Vec<Pair>) = pairs.into_iter().partition(|p| p.square >= well);
+    let mut out = Vec::with_capacity(square.len() + askew.len());
+    for mut lot in [square, askew] {
+        // How far each pair left is from the nearest one taken, squared.
+        let mut from: Vec<f32> = vec![f32::INFINITY; lot.len()];
+        let mut next = 0;
+        for _ in 0..lot.len().min(SPREAD) {
+            let taken = lot.swap_remove(next);
+            from.swap_remove(next);
+            next = 0;
+            for (k, pair) in lot.iter().enumerate() {
+                from[k] = from[k].min(pair.middle.distance_squared(taken.middle));
+                // The farthest, and of those as far, the squarest and then the first found.
+                let better = (from[k], pair.square, lot[next].order).partial_cmp(&(
+                    from[next],
+                    lot[next].square,
+                    pair.order,
+                ));
+                if better == Some(std::cmp::Ordering::Greater) {
+                    next = k;
+                }
+            }
+            out.push(taken);
+        }
+        lot.sort_by_key(|pair| pair.order);
+        out.extend(lot);
+    }
+    out
 }
 
 /// The pairs of patches of the object's surfaces a hand can close on, those that face each other
@@ -459,6 +518,7 @@ fn pairs(s: &Surface, o: &GraspOptions) -> Vec<Pair> {
                 line,
                 width,
                 square,
+                order: 0,
             };
             pairs.push((pair, cells.key(first), cells.key(second)));
         }
@@ -479,7 +539,10 @@ fn pairs(s: &Surface, o: &GraspOptions) -> Vec<Pair> {
         }
     }
     pairs.sort_by(|a, b| b.square.total_cmp(&a.square));
-    pairs
+    for (order, pair) in pairs.iter_mut().enumerate() {
+        pair.order = order;
+    }
+    spread(pairs, cone)
 }
 
 /// The patch `near` makes (each a point's index, after how far along a line it lies): its middle

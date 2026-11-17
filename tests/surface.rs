@@ -166,13 +166,22 @@ fn patches_the_hand_is_clear_around_are_grasped_from_every_turn_both_ways_round(
         assert!((a.rotation * Vec3::Z).dot(b.rotation * Vec3::Z) > 0.9999);
         assert_eq!(both[0].contacts, [both[1].contacts[1], both[1].contacts[0]]);
     }
-    // The first from above, the next a turn on.
+    // Every pair from above first, then every pair a turn to one side, a turn to the other, and
+    // so on round to from below.
+    let pairs = found.len() / (2 * o.turns);
     let toward = |k: usize| found[k].pose.rotation * Vec3::Z;
-    assert!(toward(0).dot(Vec3::NEG_Z) > 0.9999, "{}", toward(0));
-    let turned = toward(0).dot(toward(2));
+    for turn in 0..o.turns {
+        let around = turn.div_ceil(2) as f32 * TAU / o.turns as f32;
+        for k in 0..2 * pairs {
+            let down = toward(turn * 2 * pairs + k).dot(Vec3::NEG_Z);
+            assert!((down - around.cos()).abs() < 1e-4, "turn {turn}: {down}");
+        }
+    }
+    // The two sides of a turn are opposite ways round the line.
+    let sides = toward(2 * pairs).dot(toward(4 * pairs));
     assert!(
-        (turned - (TAU / o.turns as f32).cos()).abs() < 1e-4,
-        "{turned}"
+        (sides - (2.0 * TAU / o.turns as f32).cos()).abs() < 1e-4,
+        "{sides}"
     );
 }
 
@@ -972,6 +981,42 @@ fn grasps_do_not_depend_on_the_threads_the_batch_or_the_device() {
     for device in &devices {
         let together = grasps_on(device, 0, &surfaces, &o).unwrap();
         assert_eq!(together, alone, "{}", device.name());
+    }
+}
+
+#[test]
+fn the_first_grasps_are_spread_over_the_object() {
+    // Around a bowl's rim, the first eight grasps of its wall are from above, each well away
+    // from the others, in most of its eight eighths.
+    let (outer, inner, half_height) = (0.055, 0.047, 0.025);
+    let found = grasps(
+        &tube_surface(outer, inner, half_height),
+        &GraspOptions::default(),
+    );
+    let across: Vec<&Grasp> = found
+        .iter()
+        .filter(|g| (g.width() - (outer - inner)).abs() < 1e-3)
+        .step_by(2)
+        .collect();
+    let eighth = |g: &&Grasp| {
+        let angle = g.pose.position.y.atan2(g.pose.position.x).rem_euclid(TAU);
+        (angle / TAU * 8.0) as usize % 8
+    };
+    let mut first: Vec<usize> = across[..8].iter().map(eighth).collect();
+    first.sort_unstable();
+    first.dedup();
+    assert!(first.len() >= 6, "the first eight stand in {first:?}");
+    for (k, a) in across[..8].iter().enumerate() {
+        assert!(
+            (a.pose.rotation * Vec3::Z).dot(Vec3::NEG_Z) > 0.9999,
+            "{a:?}"
+        );
+        for b in &across[..k] {
+            assert!(
+                a.pose.position.distance(b.pose.position) > 0.02,
+                "{a:?} {b:?}"
+            );
+        }
     }
 }
 
