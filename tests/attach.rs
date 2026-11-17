@@ -399,7 +399,10 @@ fn held_round(
 fn cylinder_overhang(spheres: &[[f32; 4]], radius: f32, half_height: f32) -> f32 {
     let mut rng = Rng::new(11);
     for _ in 0..6000 {
-        let (angle, from_axis) = (rng.range(0.0, 6.2832), radius * rng.uniform().sqrt());
+        let (angle, from_axis) = (
+            rng.range(0.0, std::f32::consts::TAU),
+            radius * rng.uniform().sqrt(),
+        );
         let p = Vec3::new(
             from_axis * angle.cos(),
             from_axis * angle.sin(),
