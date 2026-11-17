@@ -1251,19 +1251,9 @@ impl Robot {
     /// the frame.
     #[must_use]
     pub fn tip(&self, hand: usize) -> f32 {
-        let fk = self.fk(&self.default_q);
-        let frame = self.ee_links[hand];
-        let (rot, pos) = (fk.rot[frame], fk.pos[frame]);
-        let links = self.hand_links(hand);
-        let hand_spheres = self
-            .spheres
+        self.hand_spheres(hand)
             .iter()
-            .filter(|s| links.contains(&self.links[s.link].name.as_str()));
-        hand_spheres
-            .map(|s| {
-                let center = fk.rot[s.link] * s.center + fk.pos[s.link];
-                rot.z_axis.dot(center - pos) + s.radius
-            })
+            .map(|sphere| sphere.center.z + sphere.radius)
             .fold(f32::NEG_INFINITY, f32::max)
     }
 

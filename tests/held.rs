@@ -532,6 +532,14 @@ fn a_hold_the_device_cannot_take_is_an_input_error_naming_its_problem() {
         ..bar()
     };
     input(plan(&device, &worlds, skewed), "grasp");
+    let no_spheres = Held {
+        spheres: SphereOptions {
+            budget: 0,
+            ..Default::default()
+        },
+        ..bar()
+    };
+    input(plan(&device, &worlds, no_spheres), "spheres");
     // A world out of range is named by its problem, however the batch is grouped.
     let ik = [
         IkProblem {

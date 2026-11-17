@@ -395,6 +395,19 @@ fn faces_hold_where_the_line_between_them_is_inside_both_friction_cones() {
         }
     }
     assert!(holds(0.3).is_empty());
+    // Faces that lean less than half a degree, with next to no friction: along the line that
+    // splits their normals, 0.007 rad off each, inside a cone of 0.01.
+    let slight = 0.4f32.to_radians();
+    let o = GraspOptions {
+        friction: 0.01,
+        ..Default::default()
+    };
+    let found = grasps(&wedge(slight), &o);
+    assert!(!found.is_empty());
+    for g in &found {
+        let line = closes_on(g).0;
+        assert!(line.x.abs() > (0.0105f32 - slight).cos(), "{g:?}");
+    }
     // Faces that lean past the cone hold at no friction a fingertip has here.
     assert!(grasps(&wedge(35f32.to_radians()), &GraspOptions::default()).is_empty());
 }
@@ -947,6 +960,17 @@ fn joined_surfaces_keep_which_points_are_the_objects() {
     assert!(
         joined.object[..count].iter().all(|&o| o) && joined.object[count..].iter().all(|&o| !o)
     );
+    // Flags for some of a surface's points only are not made up for by joining it: refused
+    // alone, it is refused joined.
+    let mut partly = plates(0.04);
+    partly.object = vec![false];
+    let mut joined = Surface::default();
+    joined.join(partly);
+    assert_eq!(joined.object.len(), 1);
+    assert!(matches!(
+        grasps_on(&device(), 0, &[joined], &GraspOptions::default()),
+        Err(Error::Input(_))
+    ));
     marked.join(plates(0.03));
     assert!(
         marked.object[..count].iter().all(|&o| !o) && marked.object[count..].iter().all(|&o| o)
@@ -1050,6 +1074,19 @@ fn malformed_surfaces_and_options_are_input_errors() {
     for bad in [
         GraspOptions { friction: 0.0, ..o },
         GraspOptions { contact: 0.0, ..o },
+        GraspOptions { overlap: 0.0, ..o },
+        GraspOptions {
+            overlap: f32::NEG_INFINITY,
+            ..o
+        },
+        GraspOptions {
+            floor: Some(f32::NAN),
+            ..o
+        },
+        GraspOptions {
+            approach: -0.1,
+            ..o
+        },
         GraspOptions {
             opening: f32::INFINITY,
             ..o

@@ -29,7 +29,7 @@ use parry3d::utils::SymmetricEigen3;
 use rayon::prelude::*;
 
 use crate::device::Device;
-use crate::error::{Result, ensure_input};
+use crate::error::{Result, ensure_input, input};
 use crate::robot::HandSphere;
 use crate::sdf::{DepthImage, RobotMask};
 use crate::task::GraspOptions;
@@ -43,7 +43,8 @@ pub struct Surface {
     pub points: Vec<Vec3>,
     /// Per point, the unit normal out of its surface, toward where it was seen from, or zero
     /// where how the surface faces is not known: no finger presses there, and the point is kept
-    /// clear of or closed on like the rest. Only the object's are read.
+    /// clear of or closed on like the rest. Each must be unit or zero; only the object's are
+    /// read.
     pub normals: Vec<Vec3>,
     /// Per point, whether it lies on the object to grasp: grasps close on the object's points
     /// alone, and nothing else may lie between the fingers. Empty: every point does.
@@ -114,9 +115,12 @@ impl Surface {
     /// with the normal of the plane through the points within `radius` of it (meters), toward
     /// `seen_from`, or none where they are too few or lie on one line.
     pub fn from_points(points: &[Vec3], seen_from: Vec3, radius: f32) -> Result<Self> {
+        if let Some(k) = points.iter().position(|p| !p.is_finite()) {
+            return Err(input!("point {k} is not finite, got {}", points[k]));
+        }
         ensure_input!(
-            points.iter().all(|p| p.is_finite()) && seen_from.is_finite(),
-            "points and where they were seen from must be finite"
+            seen_from.is_finite(),
+            "where the points were seen from must be finite, got {seen_from}"
         );
         ensure_input!(
             radius > 0.0 && radius.is_finite(),
@@ -139,22 +143,29 @@ impl Surface {
         })
     }
 
-    /// Adds `other`'s points after this surface's: two views of one scene as one surface.
+    /// Adds `other`'s points after this surface's: two views of one scene as one surface. Where
+    /// one of the two says which of its points are the object's and the other does not, every
+    /// point of the other is.
     pub fn join(&mut self, other: Surface) {
         if !(self.object.is_empty() && other.object.is_empty()) {
-            self.object.resize(self.points.len(), true);
-            self.object.extend(&other.object);
+            if self.object.is_empty() {
+                self.object = vec![true; self.points.len()];
+            }
+            if other.object.is_empty() {
+                self.object
+                    .extend(std::iter::repeat_n(true, other.points.len()));
+            } else {
+                self.object.extend(&other.object);
+            }
         }
         self.points.extend(other.points);
         self.normals.extend(other.normals);
-        if !self.object.is_empty() {
-            self.object.resize(self.points.len(), true);
-        }
     }
 }
 
-/// The most pixels to either side of a reading its plane is sought among.
-const WINDOW: usize = 6;
+/// The most pixels to either side of a reading its plane is sought among: enough for the
+/// readings within 5 mm of one 10 cm from a camera of 600 pixels' focal length.
+const WINDOW: usize = 32;
 
 /// The unit normal of the plane nearest the points `near`, toward `toward` from `at`: the
 /// direction they spread least along. `None` for fewer than three, for points on one line, whose
@@ -260,14 +271,20 @@ pub fn grasps_on(
             && o.contact > 0.0
             && o.contact.is_finite()
             && o.approach >= 0.0
-            && o.approach.is_finite(),
-        "grasps need a finite positive opening, a turn, a finite positive friction and contact, and a finite approach of at least 0, got {} m, {}, {}, {} m and {} m",
+            && o.approach.is_finite()
+            && o.overlap > 0.0
+            && o.overlap.is_finite(),
+        "grasps need a finite positive opening, a turn, a finite positive friction, contact and overlap, and a finite approach of at least 0, got {} m, {}, {}, {} m, {} m and {} m",
         o.opening,
         o.turns,
         o.friction,
         o.contact,
+        o.overlap,
         o.approach
     );
+    if let Some(floor) = o.floor {
+        ensure_input!(floor.is_finite(), "the floor must be finite, got {floor}");
+    }
     for (i, s) in surfaces.iter().enumerate() {
         ensure_input!(
             s.normals.len() == s.points.len()
@@ -277,11 +294,19 @@ pub fn grasps_on(
             s.normals.len(),
             s.object.len()
         );
+        if let Some(k) = s.points.iter().position(|p| !p.is_finite()) {
+            return Err(input!(
+                "surface {i}: point {k} is not finite, got {}",
+                s.points[k]
+            ));
+        }
         let unit = |n: &Vec3| *n == Vec3::ZERO || (n.length_squared() - 1.0).abs() < 1e-3;
-        ensure_input!(
-            s.points.iter().all(|p| p.is_finite()) && s.normals.iter().all(unit),
-            "surface {i}: points must be finite and normals unit or zero"
-        );
+        if let Some(k) = s.normals.iter().position(|n| !unit(n)) {
+            return Err(input!(
+                "surface {i}: normal {k} must be unit or zero, got {}",
+                s.normals[k]
+            ));
+        }
     }
     // The fingers first: they are the likeliest to be in the way.
     let mut hand = device.robot().hand_spheres(hand);
@@ -487,10 +512,11 @@ fn pairs(s: &Surface, o: &GraspOptions) -> Vec<Pair> {
         for (second, facing) in crossed(first, inward, apart, near) {
             // Two patches hold along the line that splits the angle between their normals,
             // which is inside the first's cone, the two being no more than two cones apart.
-            // Where it is not the line searched along, as between a wedge's faces, the patch it
-            // crosses is the one to close on.
+            // Where it is not the line searched along, as between a wedge's faces, or the line
+            // searched along is outside the second's cone, the patch it crosses is the one to
+            // close on.
             let split = (inward + facing).normalize();
-            let (second, facing) = if split.dot(inward) < 1.0 - 1e-4 {
+            let (second, facing) = if split.dot(inward) < 1.0 - 1e-4 || facing.dot(inward) < cone {
                 let nearest = |a: &(Vec3, Vec3), b: &(Vec3, Vec3)| {
                     let to = |x: &(Vec3, Vec3)| (x.0 - second).length_squared();
                     to(a).total_cmp(&to(b))

@@ -213,7 +213,7 @@ The failed pick has every grasp blocked or out of reach. Grasp IK dominates pick
 
 ## Grasps of a surface
 
-`examples/surface_grasps.rs` finds the grasps of what cameras see (`grasps_on`) for the Panda's hand of 22 spheres, open 8 cm, on the M4 Pro's 14 threads, the quickest of five calls:
+`examples/surface_grasps.rs` finds the grasps of what cameras see (`grasps_on`) for the Panda's hand of 22 spheres, open 8 cm, on the M4 Pro's 14 threads, the quickest of five calls (of three for the 64 bowls):
 
 | | Points | Grasps | Time |
 |---|---|---|---|
@@ -222,6 +222,20 @@ The failed pick has every grasp blocked or out of reach. Grasp IK dominates pick
 | 64 such bowls in one call | 588,864 | 126,720 | 232 ms, 3.6 ms a bowl |
 
 Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from 16 directions, 22 spheres swept 10 cm against the points near them. Checked against every point of the scene through one coarse grid, before the points near the object were kept in cells of their own and a check stopped at its first point in the way, the bowl took 211 ms and the box 314 ms on one thread, with the same grasps to the last bit.
+
+## Spheres for what a hand holds
+
+`examples/held_spheres.rs` holds three round shapes with the default 64 spheres to spend and with 256 (`Held::spheres`), within the default 5 mm, on the M4 Pro: how many spheres each takes, how far they reach past it, and how long covering or fitting it took.
+
+| | To spend | Spheres | Past its side | Past its ends | Time |
+|---|---|---|---|---|---|
+| A plate 13.9 cm across, 18 mm thick | 64 | 64, fitted | 8.6 mm | 10.6 mm | 27 ms |
+| | 256 | 145, covered | 4.7 mm | 4.7 mm | 0.14 ms |
+| A can 6.6 cm across, 12 cm tall | 64 | 64, fitted | 7.1 mm | 6.7 mm | 8.4 ms |
+| | 256 | 90, fitted | 4.7 mm | 5.0 mm | 7.2 ms |
+| A capsule 4 cm across, 14 cm long | 64 or 256 | 5, covered | 3.6 mm | 3.6 mm | 0.02 ms |
+
+Fitted, as stout shapes are, a thin wide one keeps reaching past its tolerance until it has a few hundred spheres; covered in one layer, the plate is within it at 145.
 
 ## Joining motions
 

@@ -95,6 +95,9 @@ impl Held {
             "{what}: the robot already has '{link}': pass the device that does not hold it"
         );
         check_locked(robot, &self.locked, what)?;
+        self.spheres
+            .check()
+            .map_err(|e| input!("{what}: the held object's spheres: {e}"))?;
         ensure_input!(
             !matches!(self.object, Obstacle::Sdf { .. }),
             "{what}: the held object is a distance grid, which cannot be held"

@@ -24,8 +24,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   the line between them inside both friction cones (`GraspOptions::friction`, 0.5, and `contact`,
   the patch's radius, 5 mm), so a bowl's wall, a handle and a box's sides are found alike. The
   robot's own hand, with its fingers as locked, and its straight way in (`GraspOptions::approach`,
-  10 cm) are kept clear of every point, the object's and the rest; `floor` and `overlap` hold as
-  for `grasps`. Each `Grasp` gives the hand's `pose` and its two `contacts`, the first few from
+  10 cm) are kept clear of every point, the object's and the rest; `floor` holds the frame and
+  the open fingertips over a height, and a hand that is not clear is drawn back while `overlap`
+  of the fingers stays on the patches. Each `Grasp` gives the hand's `pose` and its two `contacts`, the first few from
   above and spread over the object. `Surface::from_depth` reads a depth image (the object's
   pixels marked, the robot masked out, normals toward the camera), `Surface::from_points` a
   cloud seen from one place, and `Surface::join` adds a view. Surfaces of one call run in parallel
@@ -43,11 +44,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Changed
 
-- A held capsule is covered by spheres along its axis, and a held cylinder that is thin or
+- **Breaking:** a held capsule is covered by spheres along its axis, and a held cylinder that is thin or
   slender (a disc, a rod) by one layer of rings of spheres or one line of them, where that reaches
-  the tolerance within the budget: without fitting, in microseconds where a fit took 7 to 22 ms,
-  and with fewer spheres (a 14 cm plate: 145 within 4.7 mm of it, where the fit took 225 for
-  5.0 mm). Their spheres, and so clearances and contacts measured to them, differ from the fit's.
+  the tolerance within the budget: without fitting, in microseconds where a fit took 4 to 25 ms,
+  and with fewer spheres than their fit took (a 14 cm plate: 145 within 4.7 mm of it). Their spheres, and so clearances and contacts measured to them, differ from the fit's.
   Stout cylinders, and discs the budget cannot bring within the tolerance (a plate at the default
   64), are fitted as before.
 
