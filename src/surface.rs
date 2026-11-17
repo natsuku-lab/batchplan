@@ -12,7 +12,14 @@
 //! other way within the opening: a cup seen from outside gives its wall, grasped with one finger
 //! inside, and its whole width, grasped around it. Patches are a fingertip's size
 //! ([`GraspOptions::contact`]), each the mean of the points in it, so noise in single points and
-//! their normals averages out.
+//! their normals averages out. Where two patches lean toward each other, as a wedge's faces, the
+//! line is the one that splits the angle between their normals.
+//!
+//! The hand is the robot's own: its collision spheres at each grasp and along the straight way
+//! in to it lie clear of every point, the object's and the rest, except that its fingers may be
+//! in what they close on. Seeds run in parallel on the device's threads, then pairs; the points
+//! the hand is checked against are those near the object, kept cell by cell ([`Near`]), and a
+//! check stops at the first point in the way.
 
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::TAU;

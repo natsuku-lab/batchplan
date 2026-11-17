@@ -211,6 +211,18 @@ These are end-to-end `follow` measurements, including path construction and chec
 
 The failed pick has every grasp blocked or out of reach. Grasp IK dominates picking; the GPU gains from batching tasks. Place candidates are checked with their held objects, grouped by hold.
 
+## Grasps of a surface
+
+`examples/surface_grasps.rs` finds the grasps of what cameras see (`grasps_on`) for the Panda's hand of 22 spheres, open 8 cm, on the M4 Pro's 14 threads, the quickest of five calls:
+
+| | Points | Grasps | Time |
+|---|---|---|---|
+| A bowl 11 cm across with a wall 8 mm thick, as points 2 mm apart with their normals | 9,201 | 1,980, all across its wall | 5.5 ms |
+| A box on a table in two 640×480 depth images | 593,920, 12,492 of them the box's | 686 | 9.7 ms to read both images, 10.1 ms to grasp |
+| 64 such bowls in one call | 588,864 | 126,720 | 232 ms, 3.6 ms a bowl |
+
+Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from 16 directions, 22 spheres swept 10 cm against the points near them. Checked against every point of the scene through one coarse grid, before the points near the object were kept in cells of their own and a check stopped at its first point in the way, the bowl took 211 ms and the box 314 ms on one thread, with the same grasps to the last bit.
+
 ## Joining motions
 
 `examples/join.rs` [joins](planning.md#joining-motions) pick-like motions on one arm in free space: a transit planned from home or the last pre-grasp to a random pre-grasp configuration, then the hand's straight move in along its z (5 cm on the reBot, 3 cm on the SO-101); or the straight move back out, then the transit to the next pre-grasp. Each sequence is timed with its motions one after another, and joined; the Ryzen AI Max+ 395, 32 threads, three runs each started with the machine's load under 6.

@@ -31,6 +31,7 @@ cargo run --release --example datagen -- data/demo 512 20       # .npy dataset: 
 cargo run --release --example tool_paths                        # straight moves and pours: one at a time on one thread, and 64 at once
 cargo run --release --example constraints [-- 64 5 --zone]      # the gripper kept upright past a pillar (solved, time, largest tilt, optimized, against unconstrained), and two arms carrying a tray level
 cargo run --release --example tasks -- 64                       # picks and places on random tabletops: how many get through, where the rest stop, per batch size
+cargo run --release --example surface_grasps                   # grasps of what cameras see: a bowl as points, a box in two depth images, 64 bowls in one call, and what each costs
 cargo run --release --example join [-- so101]                  # pick-like motions joined without stopping (one reBot, or the SO-101): how much sooner, per blend radius
 cargo run --release --example latency [-- --cpu]                # one call's time by kind: IK by batch size without spheres, without the push, with it and for two hands that share joints, evaluate, optimized plans, then IK for a Panda of 399 spheres and a UR5e among clutter, plans past a ball, and the Panda's IK among clutter without a grid, with one apart and with one in reach
 cargo run --release --example timing                            # timing's cost and the trajectories' durations, by kind of path, on one thread

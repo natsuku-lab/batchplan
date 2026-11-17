@@ -10,6 +10,21 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- **Breaking:** grasps of what cameras see, whatever its shape:
+  `grasps_on(&device, hand, &[Surface], &GraspOptions)`. A grasp closes on two patches of the
+  object's surface that were both seen, face away from each other within the opening, and have
+  the line between them inside both friction cones (`GraspOptions::friction`, 0.5, and `contact`,
+  the patch's radius, 5 mm), so a bowl's wall, a handle and a box's sides are found alike. The
+  robot's own hand, with its fingers as locked, and its straight way in (`GraspOptions::approach`,
+  10 cm) are kept clear of every point, the object's and the rest; `floor` and `overlap` hold as
+  for `grasps`. Each `Grasp` gives the hand's `pose` and its two `contacts`, the first few from
+  above and spread over the object. `Surface::from_depth` reads a depth image (the object's
+  pixels marked, the robot masked out, normals toward the camera), `Surface::from_points` a
+  cloud seen from one place, and `Surface::join` adds a view. Surfaces of one call run in parallel
+  on the device's threads. A `GraspOptions` literal needs the new fields (`friction: 0.5`,
+  `contact: 0.005`, `approach: 0.1`); in Python, `GraspOptions(friction=..., contact=...,
+  approach=...)` (the surfaces and `grasps_on` are not bound there yet).
+
 - **Breaking:** a `Follower` can hold an object: `FollowerOptions::holding` takes the `Held` the
   trajectory was planned holding. The rest of the motion, and any stop, is checked with the object
   in the hand, contacts naming it (`"held by hand 0"`), and replans and re-anchors carry it. The
