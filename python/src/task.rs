@@ -52,6 +52,10 @@ value_class! {
         /// How far the hand comes in straight along its z axis to a grasp of a surface, a way
         /// that must be clear of what was seen (meters): 10 cm.
         approach: f32,
+        /// The thickest wall seen from one side only that a grasp of a surface may close across,
+        /// where the cameras saw past it (meters): `None`, every grasp closes on two patches
+        /// seen.
+        shell: Option<f32>,
     }
     methods {
         #[new]

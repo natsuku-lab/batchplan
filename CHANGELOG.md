@@ -40,6 +40,19 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   `contact: 0.005`, `approach: 0.1`); in Python, `GraspOptions(friction=..., contact=...,
   approach=...)` (the surfaces and `grasps_on` are not bound there yet).
 
+- **Breaking:** grasps of a wall seen from one side only, as a bowl's rim seen from above, its outer
+  wall hidden under the rim: `GraspOptions::shell`, the thickest such wall a grasp may close across
+  (`None` by default, which changes nothing). From a patch whose other side no camera saw, the line
+  in along its normal meets, within that thickness, space every ray around it went past on its way
+  to something farther: the second contact goes there, so `width()` is the most the wall can be.
+  Inside a solid no ray goes, so a box seen from one side is closed on only across all of it, and a
+  patch whose other side was seen keeps to the seen pair. These grasps follow every grasp of two
+  patches seen (1.5 cm suits a bowl's rim: LIBERO's, its wall 3 mm thick, seen from 40 cm above, is
+  grasped 5.5 to 11.5 mm wide at its rim). The evidence is where each point was seen from,
+  `Surface::seen_from`, which `from_depth` and `from_points` record and `join` carries (NaN where a
+  joined surface did not say). A `GraspOptions` literal needs `shell: None`, and a `Surface` literal
+  `seen_from: vec![]` (or `..Default::default()`); in Python, `GraspOptions(shell=0.015)`.
+
 - **Breaking:** a `Follower` can hold an object: `FollowerOptions::holding` takes the `Held` the
   trajectory was planned holding. The rest of the motion, and any stop, is checked with the object
   in the hand, contacts naming it (`"held by hand 0"`), and replans and re-anchors carry it. The

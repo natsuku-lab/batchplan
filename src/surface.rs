@@ -8,6 +8,11 @@
 //! seen behind it gives no grasp, since where its other side lies is a guess. A thin wall, a
 //! handle and a box's faces are found alike, with no shape assumed.
 //!
+//! A wall seen from one side only is closed on where the cameras saw past it
+//! ([`GraspOptions::shell`]): a ray that reached something farther crossed empty space, so where
+//! the line in from a patch meets space every ray around it went past ([`Free`]), the wall has
+//! ended, and its other side lies between. Inside a solid no ray goes, so none is assumed there.
+//!
 //! From each seed point the search goes in along the normal, through every surface that faces the
 //! other way within the opening: a cup seen from outside gives its wall, grasped with one finger
 //! inside, and its whole width, grasped around it. Patches are a fingertip's size
@@ -24,7 +29,7 @@
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::TAU;
 
-use glam::{Mat3, Quat, Vec3};
+use glam::{Mat3, Quat, Vec2, Vec3};
 use parry3d::utils::SymmetricEigen3;
 use rayon::prelude::*;
 
@@ -49,15 +54,19 @@ pub struct Surface {
     /// Per point, whether it lies on the object to grasp: grasps close on the object's points
     /// alone, and nothing else may lie between the fingers. Empty: every point does.
     pub object: Vec<bool>,
+    /// Per point, where it was seen from (the camera's position): the ray from there to the point
+    /// crossed empty space, which tells [`GraspOptions::shell`] where a wall seen from one side
+    /// has ended. Not finite (NaN) where it is not known; empty: not known for any point.
+    pub seen_from: Vec<Vec3>,
 }
 
 impl Surface {
-    /// What one depth image sees: a point for each reading off the robot, and for each that
-    /// shows the object (`object`, a flag per pixel; empty: every pixel does), the normal of
-    /// the plane through the readings within `radius` of it (meters; about a fingertip's patch,
-    /// 5 mm), toward the camera. A reading whose neighbors within `radius` are too few or lie on
-    /// one line, as along an edge seen end on, has no normal. Two views of one scene make one
-    /// surface with [`Surface::join`].
+    /// What one depth image sees: a point for each reading off the robot, seen from the camera,
+    /// and for each that shows the object (`object`, a flag per pixel; empty: every pixel does),
+    /// the normal of the plane through the readings within `radius` of it (meters; about a
+    /// fingertip's patch, 5 mm), toward the camera. A reading whose neighbors within `radius` are
+    /// too few or lie on one line, as along an edge seen end on, has no normal. Two views of one
+    /// scene make one surface with [`Surface::join`].
     pub fn from_depth(
         image: &DepthImage<'_>,
         object: &[bool],
@@ -108,6 +117,7 @@ impl Surface {
                 surface.object.push(shows);
             }
         }
+        surface.seen_from = vec![image.camera.position; surface.points.len()];
         Ok(surface)
     }
 
@@ -140,12 +150,14 @@ impl Surface {
             points: points.to_vec(),
             normals,
             object: vec![],
+            seen_from: vec![seen_from; points.len()],
         })
     }
 
     /// Adds `other`'s points after this surface's: two views of one scene as one surface. Where
     /// one of the two says which of its points are the object's and the other does not, every
-    /// point of the other is.
+    /// point of the other is; where one says where its points were seen from and the other does
+    /// not, the other's are not known (NaN).
     pub fn join(&mut self, other: Surface) {
         if !(self.object.is_empty() && other.object.is_empty()) {
             if self.object.is_empty() {
@@ -156,6 +168,17 @@ impl Surface {
                     .extend(std::iter::repeat_n(true, other.points.len()));
             } else {
                 self.object.extend(&other.object);
+            }
+        }
+        if !(self.seen_from.is_empty() && other.seen_from.is_empty()) {
+            if self.seen_from.is_empty() {
+                self.seen_from = vec![Vec3::NAN; self.points.len()];
+            }
+            if other.seen_from.is_empty() {
+                self.seen_from
+                    .extend(std::iter::repeat_n(Vec3::NAN, other.points.len()));
+            } else {
+                self.seen_from.extend(&other.seen_from);
             }
         }
         self.points.extend(other.points);
@@ -243,6 +266,17 @@ const SPREAD: usize = 1024;
 /// The most cells they are kept in: past it the cells are larger.
 const MOST_CELLS: usize = 1 << 22;
 
+/// How finely the line behind a patch seen from one side is searched for where the cameras saw
+/// past the wall (meters).
+const BEHIND: f32 = 0.0005;
+
+/// How much wider than the spacing of a view's readings its cells are: wide enough that every
+/// cell over a surface seen whole holds one.
+const WIDER: f32 = 1.5;
+
+/// How many of a view's readings its spacing is measured at.
+const SAMPLES: usize = 4096;
+
 /// Grasps on each of `surfaces` for hand `hand` of `device`'s robot, as its locked joints hold
 /// its fingers: each pair of patches the hand can close on is grasped from `turns` directions
 /// around its closing line, each both ways round, wherever the hand and its straight way in
@@ -252,8 +286,11 @@ const MOST_CELLS: usize = 1 << 22;
 /// They come in an order whose first few are worth trying first: every pair from above (where
 /// its line is not upright), then every pair a turn to either side, and so on round; and within
 /// a turn, the pairs that face each other within half a friction cone of square before the rest,
-/// spread over the object, each the farthest from those before it. The surfaces run in parallel
-/// on the device's threads, and a surface's grasps are the same alone and among others.
+/// spread over the object, each the farthest from those before it. With a
+/// [`shell`](GraspOptions::shell), grasps of walls seen from one side follow all of these, in the
+/// same order among themselves: they rest on the cameras having seen past the wall, not on its
+/// other side, so the grasps without the option come first and unchanged. The surfaces run in
+/// parallel on the device's threads, and a surface's grasps are the same alone and among others.
 pub fn grasps_on(
     device: &Device,
     hand: usize,
@@ -285,14 +322,22 @@ pub fn grasps_on(
     if let Some(floor) = o.floor {
         ensure_input!(floor.is_finite(), "the floor must be finite, got {floor}");
     }
+    if let Some(shell) = o.shell {
+        ensure_input!(
+            shell > 0.0 && shell.is_finite(),
+            "a shell must be a finite positive thickness, got {shell} m"
+        );
+    }
     for (i, s) in surfaces.iter().enumerate() {
         ensure_input!(
             s.normals.len() == s.points.len()
-                && (s.object.is_empty() || s.object.len() == s.points.len()),
-            "surface {i}: {} points with {} normals and {} object flags",
+                && (s.object.is_empty() || s.object.len() == s.points.len())
+                && (s.seen_from.is_empty() || s.seen_from.len() == s.points.len()),
+            "surface {i}: {} points with {} normals, {} object flags and {} places seen from",
             s.points.len(),
             s.normals.len(),
-            s.object.len()
+            s.object.len(),
+            s.seen_from.len()
         );
         if let Some(k) = s.points.iter().position(|p| !p.is_finite()) {
             return Err(input!(
@@ -330,8 +375,8 @@ struct Pair {
 
 /// One surface's grasps for a hand of spheres `hand`.
 fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
-    let pairs = pairs(s, o);
-    if pairs.is_empty() {
+    let (pairs, one_sided) = pairs(s, o);
+    if pairs.is_empty() && one_sided.is_empty() {
         return vec![];
     }
     // How far the hand reaches past its frame, and how far from it any of it comes, its way in
@@ -346,7 +391,7 @@ fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
         .fold(0.0, f32::max)
         + o.approach
         + reach;
-    let middles = pairs.iter().map(|pair| pair.middle);
+    let middles = pairs.iter().chain(&one_sided).map(|pair| pair.middle);
     let lower = middles.clone().fold(Vec3::INFINITY, Vec3::min) - extent;
     let upper = middles.fold(Vec3::NEG_INFINITY, Vec3::max) + extent;
     let near = Near::new(s, lower, upper);
@@ -408,16 +453,19 @@ fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
         });
         by_turn.collect::<Vec<_>>()
     };
-    let each: Vec<Vec<Vec<Grasp>>> = pairs.par_iter().map(of).collect();
     // Every pair from above, then every pair a turn on: the pairs being spread over the object,
-    // so are the first few grasps.
-    let turns = 0..o.turns;
-    turns
-        .flat_map(|turn| {
-            each.iter()
-                .flat_map(move |by_turn| by_turn[turn].iter().copied())
-        })
-        .collect()
+    // so are the first few grasps. Those of walls seen from one side after the rest, alike.
+    let mut grasps = vec![];
+    for lot in [&pairs, &one_sided] {
+        let each: Vec<Vec<Vec<Grasp>>> = lot.par_iter().map(of).collect();
+        for turn in 0..o.turns {
+            let at_turn = each
+                .iter()
+                .flat_map(|by_turn| by_turn[turn].iter().copied());
+            grasps.extend(at_turn);
+        }
+    }
+    grasps
 }
 
 /// `pairs`, those that face each other most squarely first, in an order that spreads them:
@@ -457,8 +505,9 @@ fn spread(pairs: Vec<Pair>, cone: f32) -> Vec<Pair> {
 }
 
 /// The pairs of patches of the object's surfaces a hand can close on, those that face each other
-/// most squarely first.
-fn pairs(s: &Surface, o: &GraspOptions) -> Vec<Pair> {
+/// most squarely first; and with a [`shell`](GraspOptions::shell), those of walls seen from one
+/// side, apart.
+fn pairs(s: &Surface, o: &GraspOptions) -> (Vec<Pair>, Vec<Pair>) {
     let object = |i: usize| s.object.is_empty() || s.object[i];
     // The object's points, and what else lies among them: only that can be between two of its
     // patches.
@@ -469,6 +518,12 @@ fn pairs(s: &Surface, o: &GraspOptions) -> Vec<Pair> {
     let upper = its.fold(Vec3::NEG_INFINITY, Vec3::max) + o.contact;
     let among = |i: usize| s.points[i].cmpge(lower).all() && s.points[i].cmple(upper).all();
     let cells = Cells::new(&s.points, o.contact, among);
+    // What the cameras saw past, where a wall seen from one side may end within the shell.
+    let thickest = o.shell.map_or(0.0, |shell| shell.min(o.opening));
+    let free = o.shell.and_then(|_| {
+        let behind = Vec3::splat(thickest);
+        Some(Free::new(s, lower - behind, upper + behind)).filter(|free| !free.views.is_empty())
+    });
     // The cosine of the friction cone's half angle.
     let cone = 1.0 / (1.0 + o.friction * o.friction).sqrt();
     // Where a line from `from` along `toward` crosses the object's surfaces going out of it
@@ -497,8 +552,37 @@ fn pairs(s: &Surface, o: &GraspOptions) -> Vec<Pair> {
     // sixth of a turn apart they are not sought: nearer a quarter, a surface a line runs along
     // would count as one it crosses.
     let apart = (2.0 * cone * cone - 1.0).max(0.5);
+    // Whether anything else lies between patches `width` apart along the line from `first`: it
+    // would be between the fingers.
+    let between = |first: Vec3, second: Vec3, width: f32, near: &mut Vec<(f32, usize)>| {
+        cells.within(&s.points, first, second, o.contact, near);
+        let other = |&(t, i): &(f32, usize)| !object(i) && t > o.contact && t < width - o.contact;
+        near.iter().any(other)
+    };
+    // The pair a patch seen from one side makes where the line in along its normal meets space
+    // the cameras saw past, within the shell's thickness, with nothing of the object seen facing
+    // along it on the way: the wall has ended there, its other side taken parallel to this one.
+    let unseen_side = |free: &Free, first: Vec3, inward: Vec3, near: &mut Vec<(f32, usize)>| {
+        let steps = ((thickest - THINNEST) / BEHIND).floor().max(-1.0) as i32;
+        let width = (0..=steps)
+            .map(|k| THINNEST + k as f32 * BEHIND)
+            .find(|&behind| free.seen_past(first + inward * behind))?;
+        let second = first + inward * width;
+        let seen = crossed(first, inward, f32::MIN_POSITIVE, near);
+        let before = |&(at, _): &(Vec3, Vec3)| (at - first).dot(inward) <= width;
+        if seen.iter().any(before) || between(first, second, width, near) {
+            return None;
+        }
+        Some(Pair {
+            middle: (first + second) / 2.0,
+            line: inward,
+            width,
+            square: 1.0,
+            order: 0,
+        })
+    };
     // The pairs a seed's patch makes with those across from it, each with the cells its two
-    // patches fall in.
+    // patches fall in, and the pair it makes as a wall seen from one side.
     let across = |near: &mut Vec<(f32, usize)>, seed: usize| {
         let mut pairs = vec![];
         let (p, n) = (s.points[seed], s.normals[seed]);
@@ -506,7 +590,7 @@ fn pairs(s: &Surface, o: &GraspOptions) -> Vec<Pair> {
         cells.within(&s.points, p, p, o.contact, near);
         near.retain(|&(_, i)| object(i) && s.normals[i].dot(n) >= cone);
         let Some((first, out)) = patch(s, near) else {
-            return pairs;
+            return (pairs, None);
         };
         let inward = -out;
         for (second, facing) in crossed(first, inward, apart, near) {
@@ -539,11 +623,7 @@ fn pairs(s: &Surface, o: &GraspOptions) -> Vec<Pair> {
             // crosses faces within a cone of it.
             let line = (second - first) / width;
             let square = inward.dot(line).min(facing.dot(line));
-            // Anything else between the two patches would be between the fingers.
-            cells.within(&s.points, first, second, o.contact, near);
-            let between =
-                |&(t, i): &(f32, usize)| !object(i) && t > o.contact && t < width - o.contact;
-            if near.iter().any(between) {
+            if between(first, second, width, near) {
                 continue;
             }
             let pair = Pair {
@@ -555,7 +635,10 @@ fn pairs(s: &Surface, o: &GraspOptions) -> Vec<Pair> {
             };
             pairs.push((pair, cells.key(first), cells.key(second)));
         }
-        pairs
+        let alone = free
+            .as_ref()
+            .and_then(|free| unseen_side(free, first, inward, near));
+        (pairs, alone)
     };
     // One seed per cell: its first point of the object.
     let seeds: Vec<usize> = cells.firsts().filter(|&i| object(i)).collect();
@@ -566,16 +649,23 @@ fn pairs(s: &Surface, o: &GraspOptions) -> Vec<Pair> {
     // The same two patches come from seeds on either side: the first to find them keeps them.
     let mut found = HashSet::new();
     let mut pairs = vec![];
-    for (pair, a, b) in each.into_iter().flatten() {
-        if found.insert((a.min(b), a.max(b))) {
-            pairs.push(pair);
+    let mut one_sided = vec![];
+    for (seen, alone) in each {
+        for (pair, a, b) in seen {
+            if found.insert((a.min(b), a.max(b))) {
+                pairs.push(pair);
+            }
         }
+        one_sided.extend(alone);
     }
-    pairs.sort_by(|a, b| b.square.total_cmp(&a.square));
-    for (order, pair) in pairs.iter_mut().enumerate() {
-        pair.order = order;
-    }
-    spread(pairs, cone)
+    let in_order = |mut pairs: Vec<Pair>| {
+        pairs.sort_by(|a, b| b.square.total_cmp(&a.square));
+        for (order, pair) in pairs.iter_mut().enumerate() {
+            pair.order = order;
+        }
+        spread(pairs, cone)
+    };
+    (in_order(pairs), in_order(one_sided))
 }
 
 /// The patch `near` makes (each a point's index, after how far along a line it lies): its middle
@@ -784,5 +874,273 @@ impl Near {
             }
         }
         false
+    }
+}
+
+/// The space the cameras saw past near an object: for each place points were seen from, an image
+/// of the nearest reading in each direction. A ray that reached a reading crossed empty space on
+/// its way, and no ray goes into a solid, so a point in front of every reading around it lies
+/// outside whatever was seen: as GPD's shadow of what no camera saw, the other way round.
+struct Free {
+    views: Vec<View>,
+}
+
+/// One place's image: cells over the directions to a box, each holding its nearest reading.
+struct View {
+    origin: Vec3,
+    /// From the surface's frame into the image's: x and y across, z toward the box.
+    to_view: Mat3,
+    /// The directions the cells start at, as x and y over z.
+    lower: Vec2,
+    /// A cell's width, as x and y over z.
+    cell: f32,
+    cells: [usize; 2],
+    /// Per cell, the distance from the origin of its nearest reading; infinite without one.
+    nearest: Vec<f32>,
+}
+
+impl Free {
+    /// What the points of `s` with a place they were seen from show of the box from `lower` to
+    /// `upper`.
+    fn new(s: &Surface, lower: Vec3, upper: Vec3) -> Self {
+        let mut free = Self { views: vec![] };
+        // No place known, or no object.
+        if s.seen_from.len() != s.points.len() || !(lower.is_finite() && upper.is_finite()) {
+            return free;
+        }
+        // The points by where they were seen from, in the order those places first come.
+        let mut index = HashMap::new();
+        let mut places: Vec<(Vec3, Vec<usize>)> = vec![];
+        for (i, &from) in s.seen_from.iter().enumerate() {
+            if !from.is_finite() {
+                continue;
+            }
+            let place = *index
+                .entry(from.to_array().map(f32::to_bits))
+                .or_insert_with(|| {
+                    places.push((from, vec![]));
+                    places.len() - 1
+                });
+            places[place].1.push(i);
+        }
+        let views = places.into_iter().filter_map(|(origin, seen)| {
+            View::new(origin, seen.iter().map(|&i| s.points[i]), lower, upper)
+        });
+        free.views.extend(views);
+        free
+    }
+
+    /// Whether some view shows `p` in front of every reading around it.
+    fn seen_past(&self, p: Vec3) -> bool {
+        self.views.iter().any(|view| view.seen_past(p))
+    }
+}
+
+impl View {
+    /// The image `seen` gives of the box from `lower` to `upper`, seen from `origin`; `None` where
+    /// the box is not all ahead of it or too few readings fall over it.
+    fn new(
+        origin: Vec3,
+        seen: impl Iterator<Item = Vec3>,
+        lower: Vec3,
+        upper: Vec3,
+    ) -> Option<Self> {
+        let toward = ((lower + upper) / 2.0 - origin).try_normalize()?;
+        let (across, down) = toward.any_orthonormal_pair();
+        let to_view = Mat3::from_cols(across, down, toward).transpose();
+        let direction = |p: Vec3| {
+            let c = to_view * (p - origin);
+            (c.z > 0.0).then(|| c.truncate() / c.z)
+        };
+        let (mut low, mut high) = (Vec2::INFINITY, Vec2::NEG_INFINITY);
+        for corner in 0..8 {
+            let pick = |bit: usize, a: f32, b: f32| if corner & bit == 0 { a } else { b };
+            let at = Vec3::new(
+                pick(1, lower.x, upper.x),
+                pick(2, lower.y, upper.y),
+                pick(4, lower.z, upper.z),
+            );
+            let at = direction(at)?;
+            (low, high) = (low.min(at), high.max(at));
+        }
+        let over = |d: &Vec2| d.cmpge(low).all() && d.cmple(high).all();
+        let readings: Vec<(Vec2, f32)> = seen
+            .filter_map(|p| Some((direction(p).filter(over)?, p.distance(origin))))
+            .collect();
+        let span = high - low;
+        let mut cell = WIDER * spacing(&readings, low, span)?;
+        let cells = loop {
+            let cells = (span / cell).ceil().max(Vec2::ONE);
+            if cells.x * cells.y <= MOST_CELLS as f32 {
+                break [cells.x as usize, cells.y as usize];
+            }
+            cell *= 2.0;
+        };
+        let mut view = Self {
+            origin,
+            to_view,
+            lower: low,
+            cell,
+            cells,
+            nearest: vec![f32::INFINITY; cells[0] * cells[1]],
+        };
+        for (d, range) in readings {
+            let at = ((d - low) / cell).floor();
+            let x = (at.x as usize).min(cells[0] - 1);
+            let y = (at.y as usize).min(cells[1] - 1);
+            let nearest = &mut view.nearest[y * cells[0] + x];
+            *nearest = nearest.min(range);
+        }
+        Some(view)
+    }
+
+    /// Whether every cell around the one `p` falls in has a reading, each farther than `p` by
+    /// more than one surface's noise: the rays around it went on past it.
+    fn seen_past(&self, p: Vec3) -> bool {
+        let c = self.to_view * (p - self.origin);
+        if c.z <= 0.0 {
+            return false;
+        }
+        let at = ((c.truncate() / c.z - self.lower) / self.cell).floor();
+        let [width, height] = self.cells.map(|n| n as f32);
+        if !(at.x >= 1.0 && at.y >= 1.0 && at.x + 2.0 <= width && at.y + 2.0 <= height) {
+            return false;
+        }
+        let (x, y) = (at.x as usize, at.y as usize);
+        let beyond = c.length() + THINNEST;
+        (y - 1..=y + 1).all(|row| {
+            let cells = &self.nearest[row * self.cells[0] + x - 1..=row * self.cells[0] + x + 1];
+            cells
+                .iter()
+                .all(|&nearest| nearest.is_finite() && nearest > beyond)
+        })
+    }
+}
+
+/// How far apart the directions `readings` (x and y over z, from `low` over `span`) lie from their
+/// nearest: the median over a sample, sought among cells as wide as they would be apart spread
+/// evenly over the span, which is no nearer. `None` for fewer than nine.
+fn spacing(readings: &[(Vec2, f32)], low: Vec2, span: Vec2) -> Option<f32> {
+    let count = readings.len();
+    let even = (span.x * span.y / count as f32).sqrt();
+    if count < 9 || even.is_nan() || even <= 0.0 {
+        return None;
+    }
+    let [width, height] = (span / even)
+        .ceil()
+        .max(Vec2::ONE)
+        .as_uvec2()
+        .to_array()
+        .map(|n| n as usize);
+    let cell = |d: Vec2| {
+        let at = ((d - low) / even).floor().max(Vec2::ZERO).as_uvec2();
+        [
+            (at.x as usize).min(width - 1),
+            (at.y as usize).min(height - 1),
+        ]
+    };
+    // Counted per cell, then placed: each cell's readings together.
+    let mut starts = vec![0u32; width * height + 1];
+    for (d, _) in readings {
+        let [x, y] = cell(*d);
+        starts[y * width + x + 1] += 1;
+    }
+    for k in 1..starts.len() {
+        starts[k] += starts[k - 1];
+    }
+    let mut next = starts.clone();
+    let mut order = vec![0u32; count];
+    for (k, (d, _)) in readings.iter().enumerate() {
+        let [x, y] = cell(*d);
+        order[next[y * width + x] as usize] = k as u32;
+        next[y * width + x] += 1;
+    }
+    let nearest = |k: usize| {
+        let (d, [x, y]) = (readings[k].0, cell(readings[k].0));
+        let mut best = f32::INFINITY;
+        for row in y.saturating_sub(1)..=(y + 1).min(height - 1) {
+            let from = row * width + x.saturating_sub(1);
+            let to = row * width + (x + 1).min(width - 1) + 1;
+            for &j in &order[starts[from] as usize..starts[to] as usize] {
+                let apart = readings[j as usize].0.distance_squared(d);
+                if apart > 0.0 {
+                    best = best.min(apart);
+                }
+            }
+        }
+        best.is_finite().then(|| best.sqrt())
+    };
+    let sample = (0..count).step_by((count / SAMPLES).max(1));
+    let mut apart: Vec<f32> = sample.filter_map(nearest).collect();
+    if apart.is_empty() {
+        return Some(even);
+    }
+    let middle = apart.len() / 2;
+    Some(*apart.select_nth_unstable_by(middle, f32::total_cmp).1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sdf::Intrinsics;
+
+    #[test]
+    fn a_view_shows_nothing_inside_a_solid_as_seen_past() {
+        // A slab 10 cm thick over x < edge seen from 50 cm straight above, the floor past its
+        // edge: across the edge, at a twentieth of a pixel's steps and edges set across a pixel.
+        let k = Intrinsics {
+            fx: 300.0,
+            fy: 300.0,
+            cx: 160.0,
+            cy: 120.0,
+        };
+        let down = Mat3::from_cols(Vec3::X, Vec3::NEG_Y, Vec3::NEG_Z);
+        let camera = Pose::new(Vec3::Z * 0.5, Quat::from_mat3(&down));
+        let (mut inside, mut past) = (0, 0);
+        for shift in 0..12 {
+            let edge = 0.0007 + shift as f32 * 0.0001;
+            let depth: Vec<f32> = (0..320 * 240)
+                .map(|i| {
+                    let x = 0.4 * ((i % 320) as f32 - k.cx) / k.fx;
+                    if x < edge { 0.4 } else { 0.5 }
+                })
+                .collect();
+            let image = DepthImage {
+                depth: &depth,
+                width: 320,
+                intrinsics: k,
+                camera,
+            };
+            let seen = Surface::from_depth(&image, &[], None, 0.005).unwrap();
+            let free = Free::new(
+                &seen,
+                Vec3::new(-0.03, -0.03, 0.0),
+                Vec3::new(0.03, 0.03, 0.12),
+            );
+            assert_eq!(free.views.len(), 1);
+            for step in 0..120 {
+                let x = edge - 0.006 + step as f32 * 0.00005;
+                for y in [-0.0101, 0.0, 0.0037] {
+                    // Inside the slab, under its top, nothing is seen past.
+                    if x < edge {
+                        inside += 1;
+                        let under = Vec3::new(x, y, 0.099);
+                        assert!(!free.seen_past(under), "{under} in the slab, edge {edge}");
+                    }
+                    // Nor within one surface's noise in front of its top.
+                    let over = Vec3::new(x.min(edge - 0.004), y, 0.101);
+                    assert!(!free.seen_past(over), "{over} on the slab");
+                }
+            }
+            // In front of it and past its edge, the rays went on.
+            for p in [
+                Vec3::new(-0.01, 0.0, 0.11),
+                Vec3::new(edge + 0.006, 0.0, 0.05),
+            ] {
+                assert!(free.seen_past(p), "{p}");
+                past += 1;
+            }
+        }
+        assert!(inside > 1000 && past == 24);
     }
 }
