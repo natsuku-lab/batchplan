@@ -334,19 +334,15 @@ pub fn failures(
         .iter()
         .map(|&(p, _, _)| result.problems[p].holding.as_ref())
         .collect();
-    let parts = held::by_hold(device, &holds, |on, mine| {
-        let item_world: Vec<u32> = mine.iter().map(|&k| colliding[k].1).collect();
-        let q: Vec<f32> = mine.iter().flat_map(|&k| colliding[k].2).copied().collect();
-        on.contacts(worlds, &item_world, &q, 0.0)
-    })?;
+    let item_world: Vec<u32> = colliding.iter().map(|&(_, world, _)| world).collect();
+    let q: Vec<f32> = colliding.iter().flat_map(|&(_, _, q)| q).copied().collect();
+    let contacts = device.contacts_holding(worlds, &item_world, &q, 0.0, &holds)?;
     let mut out: Vec<Option<IkFailure>> = vec![None; result.problems.len()];
     for &p in &failed {
         out[p] = Some(IkFailure::Unreachable);
     }
-    for (mine, contacts) in parts {
-        for (&k, contacts) in mine.iter().zip(contacts) {
-            out[colliding[k].0] = Some(IkFailure::Collides { contacts });
-        }
+    for (&(p, _, _), contacts) in colliding.iter().zip(contacts) {
+        out[p] = Some(IkFailure::Collides { contacts });
     }
     Ok(out)
 }

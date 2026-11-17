@@ -10,6 +10,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- What a configuration touches while it holds an object:
+  `device.contacts_holding(&worlds, &item_world, &q, within, &holding)`, with a `Held` or `None`
+  per item, on the device that holds nothing, as a problem's `holding` takes it. What the held
+  object comes near is listed under its link (`"held by hand 0"`), what the worlds let it touch
+  (`Touch::held`) is not a contact, and one call takes items holding different objects.
+
 - **Breaking:** how spheres cover what a hand holds is the caller's to set: `Held::spheres`, a
   `SphereOptions` (64 spheres within 5 mm by default, as before). A thin wide object, as a plate
   14 cm across, is fitted to 8.6 mm past its side at the default, so that a neighbor a few
