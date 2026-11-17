@@ -19,6 +19,7 @@ use std::f32::consts::TAU;
 
 use glam::{Mat3, Quat, Vec3};
 use parry3d::utils::SymmetricEigen3;
+use rayon::prelude::*;
 
 use crate::device::Device;
 use crate::error::{Result, ensure_input};
@@ -114,7 +115,7 @@ impl Surface {
             radius > 0.0 && radius.is_finite(),
             "a finite positive radius, got {radius} m"
         );
-        let cells = Cells::new(points, radius);
+        let cells = Cells::new(points, radius, |_| true);
         let mut near = vec![];
         let normals = points
             .iter()
@@ -215,9 +216,11 @@ const THINNEST: f32 = 0.0025;
 /// How far a hand that is not clear is drawn back at a time (meters).
 const BACK: f32 = 0.002;
 
-/// The cells the hand's spheres are looked up in (meters): about a sphere's size, where a patch's
-/// would be hundreds to a sphere.
-const HAND_CELLS: f32 = 0.02;
+/// The cells the points near the hand are kept in (meters): a few to a sphere.
+const HAND_CELLS: f32 = 0.01;
+
+/// The most cells they are kept in: past it the cells are larger.
+const MOST_CELLS: usize = 1 << 22;
 
 /// Grasps on each of `surfaces` for hand `hand` of `device`'s robot, the best first: those whose
 /// patches face each other most squarely. Each pair of patches is grasped from `turns` directions
@@ -263,8 +266,11 @@ pub fn grasps_on(
             "surface {i}: points must be finite and normals unit or zero"
         );
     }
-    let hand = device.robot().hand_spheres(hand);
-    Ok(surfaces.iter().map(|s| on(s, &hand, o)).collect())
+    // The fingers first: they are the likeliest to be in the way.
+    let mut hand = device.robot().hand_spheres(hand);
+    hand.sort_by_key(|sphere| !sphere.finger);
+    let each = || surfaces.par_iter().map(|s| on(s, &hand, o)).collect();
+    Ok(device.install(each))
 }
 
 /// Two patches a hand can close on.
@@ -280,116 +286,33 @@ struct Pair {
 
 /// One surface's grasps for a hand of spheres `hand`.
 fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
-    let cells = Cells::new(&s.points, o.contact);
-    let object = |i: usize| s.object.is_empty() || s.object[i];
-    // The cosine of the friction cone's half angle.
-    let cone = 1.0 / (1.0 + o.friction * o.friction).sqrt();
-    let mut near = vec![];
-    // Where a line from `from` along `toward` crosses the object's surfaces going out of it
-    // within the opening, nearest first, and the normal out of each: each run of points that
-    // face along the line (`facing`, the least cosine between their normals and it), within a
-    // patch's size of it and of each other, is one patch, crossed where the line meets its plane.
-    // A surface the line runs along, as a box's side, faces across it and is not crossed.
-    let mut crossed = |from: Vec3, toward: Vec3, facing: f32| {
-        cells.within(
-            &s.points,
-            from,
-            from + toward * o.opening,
-            o.contact,
-            &mut near,
-        );
-        near.retain(|&(t, i)| object(i) && t > 0.0 && s.normals[i].dot(toward) >= facing);
-        near.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-        let mut crossings = vec![];
-        let mut start = 0;
-        for end in 1..=near.len() {
-            if end == near.len() || near[end].0 - near[end - 1].0 > o.contact {
-                if let Some((middle, normal)) = patch(s, &near[start..end]) {
-                    let along = (middle - from).dot(normal) / toward.dot(normal);
-                    crossings.push((from + toward * along, normal));
-                }
-                start = end;
-            }
-        }
-        crossings
-    };
-    // Two patches whose normals are more than two cones apart share no line inside both. Past a
-    // sixth of a turn apart they are not sought: nearer a quarter, a surface a line runs along
-    // would count as one it crosses.
-    let apart = (2.0 * cone * cone - 1.0).max(0.5);
-    let mut pairs = vec![];
-    let mut found = HashSet::new();
-    let mut around = vec![];
-    // One seed per cell: its first point of the object.
-    let seeds = cells.firsts().filter(|&i| object(i));
-    for seed in seeds {
-        let (p, n) = (s.points[seed], s.normals[seed]);
-        // The patch around the seed: the object's points there that face as it does.
-        cells.within(&s.points, p, p, o.contact, &mut around);
-        around.retain(|&(_, i)| object(i) && s.normals[i].dot(n) >= cone);
-        let Some((first, out)) = patch(s, &around) else {
-            continue;
-        };
-        let inward = -out;
-        for (second, facing) in crossed(first, inward, apart) {
-            // Two patches hold along the line that splits the angle between their normals,
-            // which is inside the first's cone, the two being no more than two cones apart.
-            // Where it is not the line searched along, as between a wedge's faces, the patch it
-            // crosses is the one to close on.
-            let split = (inward + facing).normalize();
-            let (second, facing) = if split.dot(inward) < 1.0 - 1e-4 {
-                let nearest = |a: &(Vec3, Vec3), b: &(Vec3, Vec3)| {
-                    let to = |x: &(Vec3, Vec3)| (x.0 - second).length_squared();
-                    to(a).total_cmp(&to(b))
-                };
-                match crossed(first, split, cone).into_iter().min_by(nearest) {
-                    Some(there) => there,
-                    None => continue,
-                }
-            } else {
-                (second, facing)
-            };
-            let width = (second - first).length();
-            if !(THINNEST..=o.opening).contains(&width) {
-                continue;
-            }
-            // Inside both cones: the line splits the normals, and every point of the patch it
-            // crosses faces within a cone of it.
-            let line = (second - first) / width;
-            let square = inward.dot(line).min(facing.dot(line));
-            // Anything else between the two patches would be between the fingers.
-            cells.within(&s.points, first, second, o.contact, &mut around);
-            let between =
-                |&(t, i): &(f32, usize)| !object(i) && t > o.contact && t < width - o.contact;
-            if around.iter().any(between) {
-                continue;
-            }
-            // The same two patches come from seeds on either side.
-            let (a, b) = (cells.key(first), cells.key(second));
-            if found.insert((a.min(b), a.max(b))) {
-                pairs.push(Pair {
-                    middle: (first + second) / 2.0,
-                    line,
-                    width,
-                    square,
-                });
-            }
-        }
+    let pairs = pairs(s, o);
+    if pairs.is_empty() {
+        return vec![];
     }
-    pairs.sort_by(|a, b| b.square.total_cmp(&a.square));
-    let coarse = Cells::new(&s.points, HAND_CELLS);
-    // How far the hand reaches past its frame.
+    // How far the hand reaches past its frame, and how far from it any of it comes, its way in
+    // included.
     let reach = hand
         .iter()
         .map(|sphere| sphere.center.z + sphere.radius)
         .fold(0.0, f32::max);
+    let extent = hand
+        .iter()
+        .map(|sphere| sphere.center.length() + sphere.radius)
+        .fold(0.0, f32::max)
+        + o.approach
+        + reach;
+    let middles = pairs.iter().map(|pair| pair.middle);
+    let lower = middles.clone().fold(Vec3::INFINITY, Vec3::min) - extent;
+    let upper = middles.fold(Vec3::NEG_INFINITY, Vec3::max) + extent;
+    let near = Near::new(s, lower, upper);
     // Whether the hand at `pose`, open, and the straight way in to it along its z axis, are
     // clear of what was seen and over the floor: each sphere swept back the approach, as GPD
     // takes a hand's fingers to reach back without end, so that a sheet of points between two
     // of a finger's spheres is in the way of the one that passed through it. Its fingers may
     // be in what they close on: the object's points between the two patches, `width` apart
     // along the frame's y axis.
-    let mut clear = |pose: &Pose, width: f32| {
+    let clear = |pose: &Pose, width: f32| {
         let (closing, toward) = (pose.rotation * Vec3::Y, pose.rotation * Vec3::Z);
         if let Some(floor) = o.floor {
             let tips = (pose.position + toward * reach).z - closing.z.abs() * o.opening / 2.0;
@@ -400,15 +323,14 @@ fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
         hand.iter().all(|sphere| {
             let center = pose.position + pose.rotation * sphere.center;
             let from = center - toward * o.approach;
-            coarse.within(&s.points, from, center, sphere.radius, &mut around);
-            around.iter().all(|&(_, i)| {
-                let across = (s.points[i] - pose.position).dot(closing).abs();
-                sphere.finger && object(i) && across <= width / 2.0 + THINNEST
+            !near.any(from, center, sphere.radius, |point, object| {
+                let across = (point - pose.position).dot(closing).abs();
+                !(sphere.finger && object && across <= width / 2.0 + THINNEST)
             })
         })
     };
-    let mut grasps = Vec::with_capacity(pairs.len() * 2 * o.turns);
-    for pair in &pairs {
+    let of = |pair: &Pair| {
+        let mut grasps = Vec::with_capacity(2 * o.turns);
         // From above first, where the line is not upright.
         let down = Vec3::NEG_Z.reject_from_normalized(pair.line);
         let first = down
@@ -437,8 +359,127 @@ fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
                 }
             }
         }
+        grasps
+    };
+    let each: Vec<Vec<Grasp>> = pairs.par_iter().map(of).collect();
+    each.into_iter().flatten().collect()
+}
+
+/// The pairs of patches of the object's surfaces a hand can close on, those that face each other
+/// most squarely first.
+fn pairs(s: &Surface, o: &GraspOptions) -> Vec<Pair> {
+    let object = |i: usize| s.object.is_empty() || s.object[i];
+    // The object's points, and what else lies among them: only that can be between two of its
+    // patches.
+    let its = (0..s.points.len())
+        .filter(|&i| object(i))
+        .map(|i| s.points[i]);
+    let lower = its.clone().fold(Vec3::INFINITY, Vec3::min) - o.contact;
+    let upper = its.fold(Vec3::NEG_INFINITY, Vec3::max) + o.contact;
+    let among = |i: usize| s.points[i].cmpge(lower).all() && s.points[i].cmple(upper).all();
+    let cells = Cells::new(&s.points, o.contact, among);
+    // The cosine of the friction cone's half angle.
+    let cone = 1.0 / (1.0 + o.friction * o.friction).sqrt();
+    // Where a line from `from` along `toward` crosses the object's surfaces going out of it
+    // within the opening, nearest first, and the normal out of each: each run of points that
+    // face along the line (`facing`, the least cosine between their normals and it), within a
+    // patch's size of it and of each other, is one patch, crossed where the line meets its plane.
+    // A surface the line runs along, as a box's side, faces across it and is not crossed.
+    let crossed = |from: Vec3, toward: Vec3, facing: f32, near: &mut Vec<(f32, usize)>| {
+        cells.within(&s.points, from, from + toward * o.opening, o.contact, near);
+        near.retain(|&(t, i)| object(i) && t > 0.0 && s.normals[i].dot(toward) >= facing);
+        near.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let mut crossings = vec![];
+        let mut start = 0;
+        for end in 1..=near.len() {
+            if end == near.len() || near[end].0 - near[end - 1].0 > o.contact {
+                if let Some((middle, normal)) = patch(s, &near[start..end]) {
+                    let along = (middle - from).dot(normal) / toward.dot(normal);
+                    crossings.push((from + toward * along, normal));
+                }
+                start = end;
+            }
+        }
+        crossings
+    };
+    // Two patches whose normals are more than two cones apart share no line inside both. Past a
+    // sixth of a turn apart they are not sought: nearer a quarter, a surface a line runs along
+    // would count as one it crosses.
+    let apart = (2.0 * cone * cone - 1.0).max(0.5);
+    // The pairs a seed's patch makes with those across from it, each with the cells its two
+    // patches fall in.
+    let across = |near: &mut Vec<(f32, usize)>, seed: usize| {
+        let mut pairs = vec![];
+        let (p, n) = (s.points[seed], s.normals[seed]);
+        // The patch around the seed: the object's points there that face as it does.
+        cells.within(&s.points, p, p, o.contact, near);
+        near.retain(|&(_, i)| object(i) && s.normals[i].dot(n) >= cone);
+        let Some((first, out)) = patch(s, near) else {
+            return pairs;
+        };
+        let inward = -out;
+        for (second, facing) in crossed(first, inward, apart, near) {
+            // Two patches hold along the line that splits the angle between their normals,
+            // which is inside the first's cone, the two being no more than two cones apart.
+            // Where it is not the line searched along, as between a wedge's faces, the patch it
+            // crosses is the one to close on.
+            let split = (inward + facing).normalize();
+            let (second, facing) = if split.dot(inward) < 1.0 - 1e-4 {
+                let nearest = |a: &(Vec3, Vec3), b: &(Vec3, Vec3)| {
+                    let to = |x: &(Vec3, Vec3)| (x.0 - second).length_squared();
+                    to(a).total_cmp(&to(b))
+                };
+                match crossed(first, split, cone, near)
+                    .into_iter()
+                    .min_by(nearest)
+                {
+                    Some(there) => there,
+                    None => continue,
+                }
+            } else {
+                (second, facing)
+            };
+            let width = (second - first).length();
+            if !(THINNEST..=o.opening).contains(&width) {
+                continue;
+            }
+            // Inside both cones: the line splits the normals, and every point of the patch it
+            // crosses faces within a cone of it.
+            let line = (second - first) / width;
+            let square = inward.dot(line).min(facing.dot(line));
+            // Anything else between the two patches would be between the fingers.
+            cells.within(&s.points, first, second, o.contact, near);
+            let between =
+                |&(t, i): &(f32, usize)| !object(i) && t > o.contact && t < width - o.contact;
+            if near.iter().any(between) {
+                continue;
+            }
+            let pair = Pair {
+                middle: (first + second) / 2.0,
+                line,
+                width,
+                square,
+            };
+            pairs.push((pair, cells.key(first), cells.key(second)));
+        }
+        pairs
+    };
+    // One seed per cell: its first point of the object.
+    let seeds: Vec<usize> = cells.firsts().filter(|&i| object(i)).collect();
+    let each: Vec<_> = seeds
+        .par_iter()
+        .map_init(Vec::new, |near, &seed| across(near, seed))
+        .collect();
+    // The same two patches come from seeds on either side: the first to find them keeps them.
+    let mut found = HashSet::new();
+    let mut pairs = vec![];
+    for (pair, a, b) in each.into_iter().flatten() {
+        if found.insert((a.min(b), a.max(b))) {
+            pairs.push(pair);
+        }
     }
-    grasps
+    pairs.sort_by(|a, b| b.square.total_cmp(&a.square));
+    pairs
 }
 
 /// The patch `near` makes (each a point's index, after how far along a line it lies): its middle
@@ -465,13 +506,17 @@ struct Cells {
 }
 
 impl Cells {
-    fn new(points: &[Vec3], size: f32) -> Self {
+    /// Those of `points` that `keep` accepts, by index.
+    fn new(points: &[Vec3], size: f32, keep: impl Fn(usize) -> bool) -> Self {
         let mut cells = Self {
             size,
             of: HashMap::new(),
             order: vec![],
         };
         for (i, &p) in points.iter().enumerate() {
+            if !keep(i) {
+                continue;
+            }
             let key = cells.key(p);
             let cell = cells.of.entry(key).or_default();
             if cell.is_empty() {
@@ -526,5 +571,122 @@ impl Cells {
                 }
             }
         }
+    }
+}
+
+/// The points near an object, each cell's of a grid together: to ask whether any lies near a
+/// segment, as in the way of a sphere swept along it.
+struct Near {
+    lower: Vec3,
+    size: f32,
+    cells: [usize; 3],
+    /// Where each cell's points start among `points`, and after the last, where they end.
+    starts: Vec<u32>,
+    points: Vec<Vec3>,
+    /// Per point, whether it is the object's.
+    object: Vec<bool>,
+}
+
+impl Near {
+    /// The points of `s` from `lower` to `upper`.
+    fn new(s: &Surface, lower: Vec3, upper: Vec3) -> Self {
+        let mut size = HAND_CELLS;
+        let cells = loop {
+            let cells = ((upper - lower) / size).ceil().max(Vec3::ONE);
+            if cells.x * cells.y * cells.z <= MOST_CELLS as f32 {
+                break cells.as_usizevec3().to_array();
+            }
+            size *= 2.0;
+        };
+        let mut near = Self {
+            lower,
+            size,
+            cells,
+            starts: vec![0; cells[0] * cells[1] * cells[2] + 1],
+            points: vec![],
+            object: vec![],
+        };
+        // Counted per cell, then placed: each cell's points end up together.
+        let within = |p: Vec3| p.cmpge(lower).all() && p.cmplt(upper).all();
+        let inside: Vec<usize> = (0..s.points.len())
+            .filter(|&i| within(s.points[i]))
+            .collect();
+        for &i in &inside {
+            let cell = near.cell(s.points[i]);
+            near.starts[cell + 1] += 1;
+        }
+        for cell in 1..near.starts.len() {
+            near.starts[cell] += near.starts[cell - 1];
+        }
+        let mut next = near.starts.clone();
+        near.points = vec![Vec3::ZERO; inside.len()];
+        near.object = vec![true; inside.len()];
+        for &i in &inside {
+            let cell = near.cell(s.points[i]);
+            let at = next[cell] as usize;
+            next[cell] += 1;
+            near.points[at] = s.points[i];
+            near.object[at] = s.object.is_empty() || s.object[i];
+        }
+        near
+    }
+
+    /// The cell `p` falls in along each axis, at the nearest where it lies outside them.
+    fn along(&self, p: Vec3) -> [usize; 3] {
+        let cell = ((p - self.lower) / self.size).floor().max(Vec3::ZERO);
+        let last = Vec3::new(
+            (self.cells[0] - 1) as f32,
+            (self.cells[1] - 1) as f32,
+            (self.cells[2] - 1) as f32,
+        );
+        cell.min(last).as_usizevec3().to_array()
+    }
+
+    fn cell(&self, p: Vec3) -> usize {
+        let [x, y, z] = self.along(p);
+        (z * self.cells[1] + y) * self.cells[0] + x
+    }
+
+    /// Whether `hit` holds for a point within `radius` of the segment from `a` to `b`, given the
+    /// point and whether it is the object's.
+    fn any(&self, a: Vec3, b: Vec3, radius: f32, hit: impl Fn(Vec3, bool) -> bool) -> bool {
+        let length = (b - a).length();
+        let along = if length > 0.0 {
+            (b - a) / length
+        } else {
+            Vec3::ZERO
+        };
+        let off = |p: Vec3| {
+            let t = (p - a).dot(along).clamp(0.0, length);
+            (p - (a + along * t)).length_squared()
+        };
+        let lower = self.along(a.min(b) - Vec3::splat(radius));
+        let upper = self.along(a.max(b) + Vec3::splat(radius));
+        // A cell whose middle lies farther from the segment than the radius and its own half
+        // diagonal holds none of them.
+        let reach = radius + self.size * 3f32.sqrt() / 2.0;
+        for z in lower[2]..=upper[2] {
+            for y in lower[1]..=upper[1] {
+                for x in lower[0]..=upper[0] {
+                    let cell = (z * self.cells[1] + y) * self.cells[0] + x;
+                    let (start, end) = (self.starts[cell] as usize, self.starts[cell + 1] as usize);
+                    if start == end {
+                        continue;
+                    }
+                    let middle =
+                        self.lower + (Vec3::new(x as f32, y as f32, z as f32) + 0.5) * self.size;
+                    if off(middle) > reach * reach {
+                        continue;
+                    }
+                    for at in start..end {
+                        let point = self.points[at];
+                        if off(point) <= radius * radius && hit(point, self.object[at]) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 }

@@ -944,6 +944,38 @@ fn joined_surfaces_keep_which_points_are_the_objects() {
 }
 
 #[test]
+fn grasps_do_not_depend_on_the_threads_the_batch_or_the_device() {
+    let robot = common::panda().unwrap();
+    let o = GraspOptions::default();
+    let surfaces = [
+        tube_surface(0.055, 0.047, 0.025),
+        box_surface(Vec3::new(0.02, 0.03, 0.06), &[]),
+        Surface::default(),
+        plates(0.04),
+    ];
+    let one = Device::cpu_threads(&robot, 1).unwrap();
+    let alone: Vec<Vec<Grasp>> = surfaces
+        .iter()
+        .map(|s| {
+            grasps_on(&one, 0, std::slice::from_ref(s), &o)
+                .unwrap()
+                .remove(0)
+        })
+        .collect();
+    assert!(alone[0].len() > 100 && alone[1].len() > 100 && alone[2].is_empty());
+    let mut devices = vec![one, Device::cpu(&robot).unwrap()];
+    match Device::gpu(&robot) {
+        Ok(gpu) => devices.push(gpu),
+        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
+        Err(e) => panic!("no GPU: {e}"),
+    }
+    for device in &devices {
+        let together = grasps_on(device, 0, &surfaces, &o).unwrap();
+        assert_eq!(together, alone, "{}", device.name());
+    }
+}
+
+#[test]
 fn malformed_surfaces_and_options_are_input_errors() {
     let device = device();
     let good = box_surface(Vec3::splat(0.02), &[]);

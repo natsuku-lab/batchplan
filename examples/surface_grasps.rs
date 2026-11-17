@@ -11,7 +11,9 @@ use std::f32::consts::TAU;
 use std::time::Instant;
 
 use anyhow::Result;
-use batchplan::{DepthImage, Device, GraspOptions, Intrinsics, Obstacle, Pose, Surface, grasps_on};
+use batchplan::{
+    DepthImage, Device, Grasp, GraspOptions, Intrinsics, Obstacle, Pose, Surface, grasps_on,
+};
 use glam::{Mat3, Quat, Vec3};
 use rayon::prelude::*;
 
@@ -83,6 +85,17 @@ fn render(scene: &[Obstacle], camera: Pose, k: Intrinsics) -> Vec<f32> {
         .collect()
 }
 
+/// A sum over every number of `grasps`, to tell whether two builds find the same.
+fn sum(grasps: &[Grasp]) -> f64 {
+    let of = |v: Vec3| f64::from(v.x) + 2.0 * f64::from(v.y) + 3.0 * f64::from(v.z);
+    let each = grasps.iter().enumerate().map(|(k, g)| {
+        let turn = g.pose.rotation * Vec3::new(1.0, 2.0, 3.0);
+        (k % 7 + 1) as f64
+            * (of(g.pose.position) + of(turn) + of(g.contacts[0]) + of(g.contacts[1]))
+    });
+    each.sum()
+}
+
 /// The quickest of `rounds` runs of `run`, in milliseconds, and its last result.
 fn quickest<T>(rounds: usize, mut run: impl FnMut() -> T) -> (f64, T) {
     let mut best = f64::INFINITY;
@@ -105,9 +118,10 @@ fn main() -> Result<()> {
     let found = found?.remove(0);
     let wall = found.iter().filter(|g| g.width() < 0.01).count();
     println!(
-        "a bowl of {} points: {} grasps, {wall} across its wall, in {ms:.1} ms",
+        "a bowl of {} points: {} grasps, {wall} across its wall, in {ms:.1} ms (sum {:.6})",
         bowl.points.len(),
-        found.len()
+        found.len(),
+        sum(&found)
     );
 
     // A box 4 by 6 by 5 cm on a table, seen from either side.
@@ -150,9 +164,10 @@ fn main() -> Result<()> {
     let found = found?.remove(0);
     let object = seen.object.iter().filter(|&&o| o).count();
     println!(
-        "a box in two depth images: {} points, {object} of them the box's, read in {reading:.1} ms: {} grasps in {ms:.1} ms",
+        "a box in two depth images: {} points, {object} of them the box's, read in {reading:.1} ms: {} grasps in {ms:.1} ms (sum {:.6})",
         seen.points.len(),
-        found.len()
+        found.len(),
+        sum(&found)
     );
 
     let bowls = vec![bowl; 64];
