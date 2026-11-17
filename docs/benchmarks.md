@@ -211,6 +211,32 @@ These are end-to-end `follow` measurements, including path construction and chec
 
 The failed pick has every grasp blocked or out of reach. Grasp IK dominates picking; the GPU gains from batching tasks. Place candidates are checked with their held objects, grouped by hold.
 
+## Grasps of a surface
+
+`examples/surface_grasps.rs` finds the grasps of what cameras see (`grasps_on`) for the Panda's hand of 22 spheres, open 8 cm, on the M4 Pro's 14 threads, the quickest of five calls (of three for the 64 bowls):
+
+| | Points | Grasps | Time |
+|---|---|---|---|
+| A bowl 11 cm across with a wall 8 mm thick, as points 2 mm apart with their normals | 9,201 | 1,980, all across its wall | 5.5 ms |
+| A box on a table in two 640×480 depth images | 593,920, 12,492 of them the box's | 686 | 9.7 ms to read both images, 10.1 ms to grasp |
+| 64 such bowls in one call | 588,864 | 126,720 | 232 ms, 3.6 ms a bowl |
+
+Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from 16 directions, 22 spheres swept 10 cm against the points near them. Checked against every point of the scene through one coarse grid, before the points near the object were kept in cells of their own and a check stopped at its first point in the way, the bowl took 211 ms and the box 314 ms on one thread, with the same grasps to the last bit.
+
+## Spheres for what a hand holds
+
+`examples/held_spheres.rs` holds three round shapes with the default 64 spheres to spend and with 256 (`Held::spheres`), within the default 5 mm, on the M4 Pro: how many spheres each takes, how far they reach past it, and how long covering or fitting it took.
+
+| | To spend | Spheres | Past its side | Past its ends | Time |
+|---|---|---|---|---|---|
+| A plate 13.9 cm across, 18 mm thick | 64 | 64, fitted | 8.6 mm | 10.6 mm | 27 ms |
+| | 256 | 145, covered | 4.7 mm | 4.7 mm | 0.14 ms |
+| A can 6.6 cm across, 12 cm tall | 64 | 64, fitted | 7.1 mm | 6.7 mm | 8.4 ms |
+| | 256 | 90, fitted | 4.7 mm | 5.0 mm | 7.2 ms |
+| A capsule 4 cm across, 14 cm long | 64 or 256 | 5, covered | 3.6 mm | 3.6 mm | 0.02 ms |
+
+Fitted, as stout shapes are, a thin wide one keeps reaching past its tolerance until it has a few hundred spheres; covered in one layer, the plate is within it at 145.
+
 ## Joining motions
 
 `examples/join.rs` [joins](planning.md#joining-motions) pick-like motions on one arm in free space: a transit planned from home or the last pre-grasp to a random pre-grasp configuration, then the hand's straight move in along its z (5 cm on the reBot, 3 cm on the SO-101); or the straight move back out, then the transit to the next pre-grasp. Each sequence is timed with its motions one after another, and joined; the Ryzen AI Max+ 395, 32 threads, three runs each started with the machine's load under 6.

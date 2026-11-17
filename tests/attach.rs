@@ -369,6 +369,185 @@ fn held_boxes_and_balls_are_covered_without_fitting() {
     );
 }
 
+/// A round shape held with `options`, alone or with a small ball beside it, and the shape's
+/// spheres in its own frame (its axis along z).
+fn held_round(
+    robot: &Robot,
+    shape: fn(Vec3, Quat) -> Obstacle,
+    options: SphereOptions,
+    with_a_ball: bool,
+) -> Vec<[f32; 4]> {
+    let rotation = Quat::from_rotation_z(0.4) * Quat::from_rotation_x(0.3);
+    let center = Vec3::new(0.0, 0.01, 0.12);
+    let mut shapes = vec![shape(center, rotation)];
+    if with_a_ball {
+        shapes.push(Obstacle::sphere(center + Vec3::X * 0.2, 0.01));
+    }
+    let held = robot
+        .attach(&AttachedObject {
+            shapes,
+            spheres: options,
+            ..held_box(&FINGERS)
+        })
+        .unwrap();
+    let own = |s: &[f32; 4]| {
+        let p = rotation.inverse() * (Vec3::new(s[0], s[1], s[2]) - center);
+        [p.x, p.y, p.z, s[3]]
+    };
+    let spheres = &held.collision_model().spheres["box"];
+    let its = spheres.len() - usize::from(with_a_ball);
+    spheres[..its].iter().map(own).collect()
+}
+
+/// That `spheres` hold every point of a cylinder of `radius` and `half_height` about z, and how
+/// far the farthest reaches past its side and its faces.
+fn cylinder_overhang(spheres: &[[f32; 4]], radius: f32, half_height: f32) -> f32 {
+    let mut rng = Rng::new(11);
+    for _ in 0..6000 {
+        let (angle, from_axis) = (
+            rng.range(0.0, std::f32::consts::TAU),
+            radius * rng.uniform().sqrt(),
+        );
+        let p = Vec3::new(
+            from_axis * angle.cos(),
+            from_axis * angle.sin(),
+            rng.range(-half_height, half_height),
+        );
+        let inside = |s: &&[f32; 4]| p.distance(Vec3::new(s[0], s[1], s[2])) <= s[3];
+        assert!(spheres.iter().any(|s| inside(&s)), "{p} is uncovered");
+    }
+    let past = |s: &[f32; 4]| {
+        let side = Vec3::new(s[0], s[1], 0.0).length() + s[3] - radius;
+        side.max(s[2].abs() + s[3] - half_height)
+    };
+    spheres.iter().map(past).fold(0.0, f32::max)
+}
+
+#[test]
+fn held_discs_rods_and_capsules_are_covered_without_fitting() {
+    let robot = common::panda().unwrap();
+    // A plate 14 cm across and 18 mm thick: one layer of spheres at its middle height, within
+    // the tolerance where the budget reaches it. A fit of as many spheres is not.
+    let plate = |center, rotation| Obstacle::Cylinder {
+        center,
+        rotation,
+        radius: 0.0695,
+        half_height: 0.009,
+    };
+    let fine = SphereOptions {
+        budget: 256,
+        ..Default::default()
+    };
+    let spheres = held_round(&robot, plate, fine, /* with_a_ball */ false);
+    assert!(spheres.len() <= 160, "{} spheres", spheres.len());
+    assert!(spheres.iter().all(|s| s[2].abs() < 1e-6), "one layer");
+    let past = cylinder_overhang(&spheres, 0.0695, 0.009);
+    assert!(past <= fine.tolerance + 1e-5, "{past} m past the plate");
+    // Covered with a ball beside it, as the two are placed, its spheres are where they were:
+    // turned as the plate is.
+    let beside = held_round(&robot, plate, fine, /* with_a_ball */ true);
+    assert_eq!(beside.len(), spheres.len());
+    for (a, b) in beside.iter().zip(&spheres) {
+        let apart = Vec3::new(a[0], a[1], a[2]).distance(Vec3::new(b[0], b[1], b[2]));
+        assert!(
+            apart < 1e-5 && (a[3] - b[3]).abs() < 1e-7,
+            "{a:?} against {b:?}"
+        );
+    }
+    // With the default 64 the tolerance is out of reach, and the plate is fitted as before.
+    let coarse = held_round(
+        &robot,
+        plate,
+        SphereOptions::default(),
+        /* with_a_ball */ false,
+    );
+    assert!(
+        coarse.iter().any(|s| s[2].abs() > 1e-4),
+        "fitted, not one layer"
+    );
+    assert!(cylinder_overhang(&coarse, 0.0695, 0.009) > fine.tolerance);
+    // A rod 8 mm across and 14 cm long: a line of spheres along its axis.
+    let rod = |center, rotation| Obstacle::Cylinder {
+        center,
+        rotation,
+        radius: 0.004,
+        half_height: 0.07,
+    };
+    let spheres = held_round(
+        &robot,
+        rod,
+        SphereOptions::default(),
+        /* with_a_ball */ false,
+    );
+    assert!(
+        spheres.iter().all(|s| s[0].hypot(s[1]) < 1e-6),
+        "on its axis"
+    );
+    let past = cylinder_overhang(&spheres, 0.004, 0.07);
+    assert!(
+        past <= 0.005 + 1e-5 && spheres.len() < 20,
+        "{past} m, {} spheres",
+        spheres.len()
+    );
+    // A can 6.6 cm across and 12 cm tall is neither: its fit spends fewer spheres on its inside.
+    let can = |center, rotation| Obstacle::Cylinder {
+        center,
+        rotation,
+        radius: 0.033,
+        half_height: 0.06,
+    };
+    let spheres = held_round(
+        &robot,
+        can,
+        SphereOptions::default(),
+        /* with_a_ball */ false,
+    );
+    let off_axis = spheres.iter().any(|s| s[0].hypot(s[1]) > 1e-3);
+    assert!(
+        off_axis && spheres.iter().any(|s| s[2].abs() > 1e-3),
+        "fitted"
+    );
+    // A capsule: spheres along its axis from end to end, the fewest within the tolerance.
+    let capsule = |center, rotation| Obstacle::Capsule {
+        center,
+        rotation,
+        radius: 0.02,
+        half_length: 0.05,
+    };
+    let spheres = held_round(
+        &robot,
+        capsule,
+        SphereOptions::default(),
+        /* with_a_ball */ false,
+    );
+    assert!(
+        spheres.iter().all(|s| s[0].hypot(s[1]) < 1e-6),
+        "on its axis"
+    );
+    let ends = spheres
+        .iter()
+        .map(|s| s[2])
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!((ends - 0.05).abs() < 1e-6, "to its ends: {ends}");
+    let mut rng = Rng::new(5);
+    for _ in 0..4000 {
+        // A point of the capsule: within its radius of a point of its axis.
+        let on_axis = Vec3::Z * rng.range(-0.05, 0.05);
+        let dir = Vec3::new(rng.normal(), rng.normal(), rng.normal()).normalize();
+        let p = on_axis + dir * 0.02 * rng.uniform().cbrt();
+        let inside = |s: &&[f32; 4]| p.distance(Vec3::new(s[0], s[1], s[2])) <= s[3];
+        assert!(spheres.iter().any(|s| inside(&s)), "{p} is uncovered");
+    }
+    let past = spheres.iter().map(|s| s[3] - 0.02).fold(0.0, f32::max);
+    assert!(past <= 0.005 + 1e-6, "{past} m past the capsule");
+    let fewer = spheres.len() - 1;
+    let gap = 0.05 / (fewer - 1) as f32;
+    assert!(
+        0.02f32.hypot(gap) - 0.02 > 0.005,
+        "one sphere fewer would reach past it"
+    );
+}
+
 /// A held shape's rotation a thousandth off a unit quaternion, which is accepted, turns it as the
 /// unit one does: a long board, covered directly, and a long rod, fitted, keep their spheres
 /// where they were, alone, together, and the board with a ball (covered as they are placed).

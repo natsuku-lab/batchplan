@@ -25,6 +25,10 @@ value_class! {
         /// object, as `Robot.relock` takes them: the fingers where they closed on it. Empty: as
         /// loaded.
         locked: HashMap<String, f32>,
+        /// How spheres cover it: within `tolerance` of its surface where `budget` spheres can
+        /// (5 mm and 64). A thin wide object, as a plate, takes more to stay within a few
+        /// millimeters of its sides.
+        spheres: batchplan::SphereOptions,
     }
     methods {
         #[new]
@@ -37,6 +41,7 @@ value_class! {
         ) -> PyResult<Self> {
             let held = batchplan::Held {
                 locked: Default::default(),
+                spheres: Default::default(),
                 hand,
                 object: object.0.clone(),
                 grasp: grasp.0,

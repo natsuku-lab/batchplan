@@ -15,6 +15,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::f32::consts::{PI, TAU};
 use std::sync::Arc;
 
 use glam::{Quat, UVec3, Vec3, Vec4};
@@ -748,62 +749,218 @@ pub(crate) fn fit(
     }
 }
 
-/// Spheres for an attached object's `shapes` (in its link's frame) without fitting, if every shape
-/// is a box or a sphere: a sphere is itself, and a box splits into a grid of cells, each covered by
-/// the sphere through its corners. That sphere reaches past the box's faces by its radius less the
-/// cell's smallest half size, so the grid with the fewest spheres within `o.tolerance` is taken, or
-/// where the budget cannot reach it, the least overhang the budget can. Boxes share the budget the
-/// spheres leave. Microseconds, where fitting a box takes milliseconds.
+/// Spheres for an attached object's `shapes` (in its link's frame) without fitting, where every
+/// shape can be covered directly: a sphere is itself; a box splits into a grid of cells, each
+/// covered by the sphere through its corners; a capsule is spheres along its axis; and a
+/// cylinder that is thin or slender, a disc or a rod, is one layer of rings of cells or one line
+/// of spheres where that reaches `o.tolerance` within the budget ([`cylinder_cover`]). A stout
+/// cylinder, or a thin one the budget cannot bring within the tolerance, is left to the fit,
+/// which spends fewer spheres on its inside; so is a distance grid. A box's sphere reaches past
+/// its faces by its radius less the cell's smallest half size, so of the covers within the
+/// tolerance the one of fewest spheres is taken, or where the budget cannot reach it, the least
+/// overhang the budget can; so for a capsule. The shapes but the spheres share the budget the
+/// spheres leave. Microseconds, where fitting takes milliseconds, and within the tolerance on a
+/// thin wide shape, where a fit of as many spheres is not.
 pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option<Vec<[f32; 4]>> {
-    if shapes
-        .iter()
-        .any(|s| !matches!(s, Obstacle::Cuboid { .. } | Obstacle::Sphere { .. }))
-    {
+    if shapes.iter().any(|s| matches!(s, Obstacle::Sdf { .. })) {
         return None;
     }
-    let boxes = shapes
+    let balls = shapes
         .iter()
-        .filter(|s| matches!(s, Obstacle::Cuboid { .. }))
+        .filter(|s| matches!(s, Obstacle::Sphere { .. }))
         .count();
-    let per_box = o
-        .budget
-        .checked_sub(shapes.len() - boxes)?
-        .checked_div(boxes)
-        .unwrap_or(0);
-    if boxes > 0 && per_box == 0 {
+    let rest = shapes.len() - balls;
+    let each = o.budget.checked_sub(balls)?.checked_div(rest).unwrap_or(0);
+    if rest > 0 && each == 0 {
         return None;
     }
     let mut spheres = vec![];
+    // A shape's spheres, given about its own axes, as it is placed.
+    let placed = |spheres: &mut Vec<[f32; 4]>, center: Vec3, rotation: Quat, own: Vec<[f32; 4]>| {
+        let rotation = world::unit(rotation);
+        for [x, y, z, radius] in own {
+            let p = center + rotation * Vec3::new(x, y, z);
+            spheres.push([p.x, p.y, p.z, radius]);
+        }
+    };
     for shape in shapes {
         match *shape {
             Obstacle::Sphere { center, radius } => {
-                spheres.push([center.x, center.y, center.z, radius])
+                spheres.push([center.x, center.y, center.z, radius]);
             }
             Obstacle::Cuboid {
                 center,
                 half_extents,
                 rotation,
             } => {
-                let rotation = world::unit(rotation);
-                let cells = box_cells(half_extents, o.tolerance, per_box);
+                let cells = box_cells(half_extents, o.tolerance, each);
                 let cell = half_extents / cells.as_vec3();
                 // A hair wide, so rounding never leaves a corner uncovered.
-                let radius = cell.length() * (1.0 + 1e-6);
+                let radius = cell.length() * HAIR;
+                let mut own = vec![];
                 for i in 0..cells.x {
                     for j in 0..cells.y {
                         for k in 0..cells.z {
                             let at = (UVec3::new(2 * i + 1, 2 * j + 1, 2 * k + 1).as_vec3() * cell)
                                 - half_extents;
-                            let p = center + rotation * at;
-                            spheres.push([p.x, p.y, p.z, radius]);
+                            own.push([at.x, at.y, at.z, radius]);
                         }
                     }
                 }
+                placed(&mut spheres, center, rotation, own);
             }
-            _ => unreachable!("only boxes and spheres reach here"),
+            Obstacle::Cylinder {
+                center,
+                rotation,
+                radius,
+                half_height,
+            } => {
+                let own = cylinder_cover(radius, half_height, o.tolerance, each)?;
+                placed(&mut spheres, center, rotation, own);
+            }
+            Obstacle::Capsule {
+                center,
+                rotation,
+                radius,
+                half_length,
+            } => {
+                let own = capsule_cover(radius, half_length, o.tolerance, each);
+                placed(&mut spheres, center, rotation, own);
+            }
+            Obstacle::Sdf { .. } => unreachable!("a distance grid returns above"),
         }
     }
     Some(spheres)
+}
+
+/// What a covering sphere's radius is widened by, so rounding never leaves a corner uncovered.
+const HAIR: f32 = 1.0 + 1e-6;
+
+/// Spheres along a capsule's axis (z) that cover it: the fewest that reach no more than
+/// `tolerance` past it, else `budget` of them. Evenly spaced from end to end, each wide enough
+/// to reach the capsule's side halfway to the next.
+fn capsule_cover(radius: f32, half_length: f32, tolerance: f32, budget: usize) -> Vec<[f32; 4]> {
+    if half_length <= 0.0 {
+        return vec![[0.0, 0.0, 0.0, radius]];
+    }
+    // With `count` spheres: half the spacing between two, and how far each reaches past the side.
+    let half_gap = |count: usize| half_length / (count - 1).max(1) as f32;
+    let covering = |count: usize| match count {
+        1 => half_length + radius,
+        _ => radius.hypot(half_gap(count)) * HAIR,
+    };
+    let within = (1..=budget).find(|&count| covering(count) - radius <= tolerance);
+    let count = within.unwrap_or(budget);
+    if count == 1 {
+        return vec![[0.0, 0.0, 0.0, covering(1)]];
+    }
+    (0..count)
+        .map(|k| {
+            let z = -half_length + 2.0 * half_gap(count) * k as f32;
+            [0.0, 0.0, z, covering(count)]
+        })
+        .collect()
+}
+
+/// How wide a cylinder's cover makes its middle disc, in ring widths: a disc of that radius
+/// needs a sphere about as large as a ring's cells do.
+const MIDDLE: f32 = 0.75;
+
+/// Spheres that cover a thin or a slender cylinder about its z axis and reach no more than
+/// `tolerance` past it, the fewest of up to `budget`: one layer of a middle disc and rings of
+/// equal width around it, each ring cut into equal cells, or one line of spheres along the axis.
+/// A cell is covered by a sphere at the cylinder's middle height, on the cell's middle line,
+/// through whichever of its corners are farthest; where along that line, toward the axis or the
+/// rim, is what leaves the sphere reaching least past the cylinder's faces and side. Rings, and
+/// how many cells a ring is cut into (one to three times what makes them square), are tried
+/// over. `None` where neither reaches the tolerance within the budget: a stout cylinder needs
+/// spheres of several sizes, which the fit finds.
+fn cylinder_cover(
+    radius: f32,
+    half_height: f32,
+    tolerance: f32,
+    budget: usize,
+) -> Option<Vec<[f32; 4]>> {
+    // A line of `count` spheres along the axis, each through the rim of its slice.
+    let line = |count: usize| {
+        let half = half_height / count as f32;
+        let sphere = radius.hypot(half) * HAIR;
+        let past = (sphere - half).max(sphere - radius);
+        let spheres = (0..count)
+            .map(|k| [0.0, 0.0, -half_height + (2 * k + 1) as f32 * half, sphere])
+            .collect::<Vec<_>>();
+        (past, spheres)
+    };
+    // One layer's spheres as (distance from the axis, cells around it, radius), and how far
+    // they reach past the cylinder, for `rings` rings (the middle disc one of them) whose cells
+    // are `fine` times as many as would make them square.
+    let layer = |rings: usize, fine: f32| {
+        let half = half_height;
+        // Past the faces, and past the side.
+        let past = |from_axis: f32, sphere: f32| (sphere - half).max(from_axis + sphere - radius);
+        let width = radius / (rings as f32 - 1.0 + MIDDLE);
+        let middle = MIDDLE * width;
+        let sphere = middle.hypot(half) * HAIR;
+        let mut layer = vec![(0.0, 1, sphere)];
+        let mut overhang = past(0.0, sphere);
+        for ring in 1..rings {
+            let inner = middle + (ring - 1) as f32 * width;
+            let outer = if ring + 1 == rings {
+                radius
+            } else {
+                inner + width
+            };
+            let around = (fine * TAU * (inner + outer) / 2.0 / width).ceil().max(3.0);
+            let half_angle = PI / around;
+            // The sphere through the cell's farthest corners, from `at` along its middle line.
+            let through = |at: f32| {
+                let to =
+                    |corner: f32| at * at + corner * corner - 2.0 * at * corner * half_angle.cos();
+                (to(inner).max(to(outer)) + half * half).sqrt() * HAIR
+            };
+            let steps = 32;
+            let best = (0..=steps)
+                .map(|k| inner + (outer - inner) * k as f32 / steps as f32)
+                .map(|at| (at, through(at)))
+                .min_by(|a, b| past(a.0, a.1).total_cmp(&past(b.0, b.1)))
+                .expect("at least one place along the line");
+            overhang = overhang.max(past(best.0, best.1));
+            layer.push((best.0, around as usize, best.1));
+        }
+        (overhang, layer)
+    };
+    // The fewest spheres within the tolerance, of the lines and the layers.
+    let lines = (1..=budget).map(line).find(|(past, _)| *past <= tolerance);
+    let mut best = lines.map(|(_, spheres)| spheres);
+    for rings in 2.. {
+        let mut any = false;
+        for fine in [1.0, 1.5, 2.0, 3.0] {
+            let (overhang, layer) = layer(rings, fine);
+            let count: usize = layer.iter().map(|ring| ring.1).sum();
+            if count > budget {
+                continue;
+            }
+            any = true;
+            if overhang <= tolerance && best.as_ref().is_none_or(|b| count < b.len()) {
+                let cells = layer.iter().flat_map(|&(from_axis, around, sphere)| {
+                    (0..around).map(move |cell| {
+                        let angle = TAU * cell as f32 / around as f32;
+                        [
+                            from_axis * angle.cos(),
+                            from_axis * angle.sin(),
+                            0.0,
+                            sphere,
+                        ]
+                    })
+                });
+                best = Some(cells.collect());
+            }
+        }
+        if !any {
+            break;
+        }
+    }
+    best
 }
 
 /// The cells per axis splitting a box of `half` extents for `cover_primitives`: the fewest within

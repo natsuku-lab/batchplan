@@ -10,7 +10,7 @@ use std::f32::consts::FRAC_PI_2;
 
 use batchplan::{
     CollisionWeights, Contact, Device, Error, GraspOptions, Handover, Held, Obstacle, Pick, Pose,
-    Robot, TaskOptions, TaskPlan, TaskStep, Trajectory, World, Worlds,
+    Robot, SphereOptions, TaskOptions, TaskPlan, TaskStep, Trajectory, World, Worlds,
 };
 use glam::{Quat, Vec2, Vec3};
 
@@ -87,6 +87,12 @@ fn a_held_bar_is_passed_to_the_other_arm_each_hand_holding_the_other_still() {
     for device in devices(&robot) {
         let name = device.name();
         let (worlds, start, held) = picked(&device, half);
+        // Held with spheres of the caller's choosing, which the taker's hold keeps.
+        let spheres = SphereOptions {
+            budget: 48,
+            ..Default::default()
+        };
+        let held = Held { spheres, ..held };
         let task = Handover::new(&robot, 1, start.clone(), held.clone(), 1);
         assert!(task.meetings.len() > 10 && task.grasps.len() == 2, "{name}");
         let result = batchplan::handover(
@@ -112,6 +118,7 @@ fn a_held_bar_is_passed_to_the_other_arm_each_hand_holding_the_other_still() {
             let taken = plan.held.as_ref().unwrap();
             assert_eq!((taken.hand, taken.grasp), (1, grasp), "{name}");
             assert_eq!(taken.object, held.object, "{name}");
+            assert_eq!(taken.spheres, spheres, "{name}");
             // The way there from the start, holding the bar, clear of everything.
             let meet = plan.transit.as_ref().unwrap();
             assert_eq!(configurations(meet).next().unwrap(), &start[..], "{name}");
