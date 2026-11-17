@@ -18,10 +18,12 @@ use std::collections::{HashMap, HashSet};
 use std::f32::consts::TAU;
 
 use glam::{Mat3, Quat, Vec3};
+use parry3d::utils::SymmetricEigen3;
 
 use crate::device::Device;
 use crate::error::{Result, ensure_input};
 use crate::robot::HandSphere;
+use crate::sdf::{DepthImage, RobotMask};
 use crate::task::GraspOptions;
 use crate::types::Pose;
 
@@ -31,11 +33,155 @@ use crate::types::Pose;
 pub struct Surface {
     /// Points on surfaces (meters).
     pub points: Vec<Vec3>,
-    /// Per point, the unit normal out of its surface, toward where it was seen from.
+    /// Per point, the unit normal out of its surface, toward where it was seen from, or zero
+    /// where how the surface faces is not known: no finger presses there, and the point is kept
+    /// clear of or closed on like the rest. Only the object's are read.
     pub normals: Vec<Vec3>,
     /// Per point, whether it lies on the object to grasp: grasps close on the object's points
     /// alone, and nothing else may lie between the fingers. Empty: every point does.
     pub object: Vec<bool>,
+}
+
+impl Surface {
+    /// What one depth image sees: a point for each reading off the robot, and for each that
+    /// shows the object (`object`, a flag per pixel; empty: every pixel does), the normal of
+    /// the plane through the readings within `radius` of it (meters; about a fingertip's patch,
+    /// 5 mm), toward the camera. A reading whose neighbors within `radius` are too few or lie on
+    /// one line, as along an edge seen end on, has no normal. Two views of one scene make one
+    /// surface with [`Surface::join`].
+    pub fn from_depth(
+        image: &DepthImage<'_>,
+        object: &[bool],
+        robot: Option<&RobotMask>,
+        radius: f32,
+    ) -> Result<Self> {
+        image.check_with(robot)?;
+        ensure_input!(
+            object.is_empty() || object.len() == image.depth.len(),
+            "{} object flags for {} pixels",
+            object.len(),
+            image.depth.len()
+        );
+        ensure_input!(
+            radius > 0.0 && radius.is_finite(),
+            "a finite positive radius, got {radius} m"
+        );
+        let image = &image.rigid();
+        let (width, height) = (image.width, image.depth.len() / image.width);
+        let seen: Vec<Option<Vec3>> = (0..image.depth.len())
+            .map(|i| image.point(i, robot, 0.0))
+            .collect();
+        let seen = &seen;
+        let mut surface = Surface::default();
+        for (i, &at) in seen.iter().enumerate() {
+            let Some(at) = at else {
+                continue;
+            };
+            let shows = object.is_empty() || object[i];
+            let mut normal = Vec3::ZERO;
+            if shows {
+                // The pixels a patch of `radius` covers at this depth, seen square on.
+                let depth = image.depth[i];
+                let reach = (radius * image.intrinsics.fx.max(image.intrinsics.fy) / depth).ceil();
+                let reach = (reach as usize).clamp(1, WINDOW);
+                let (u, v) = (i % width, i / width);
+                let rows = v.saturating_sub(reach)..=(v + reach).min(height - 1);
+                let near = rows.flat_map(|row| {
+                    let columns = u.saturating_sub(reach)..=(u + reach).min(width - 1);
+                    columns.filter_map(move |column| seen[row * width + column])
+                });
+                let near = near.filter(|p| p.distance_squared(at) <= radius * radius);
+                normal = plane(near, at, image.camera.position).unwrap_or(Vec3::ZERO);
+            }
+            surface.points.push(at);
+            surface.normals.push(normal);
+            if !object.is_empty() {
+                surface.object.push(shows);
+            }
+        }
+        Ok(surface)
+    }
+
+    /// The surface `points` lie on, all of them the object's, as seen from `seen_from`: each
+    /// with the normal of the plane through the points within `radius` of it (meters), toward
+    /// `seen_from`, or none where they are too few or lie on one line.
+    pub fn from_points(points: &[Vec3], seen_from: Vec3, radius: f32) -> Result<Self> {
+        ensure_input!(
+            points.iter().all(|p| p.is_finite()) && seen_from.is_finite(),
+            "points and where they were seen from must be finite"
+        );
+        ensure_input!(
+            radius > 0.0 && radius.is_finite(),
+            "a finite positive radius, got {radius} m"
+        );
+        let cells = Cells::new(points, radius);
+        let mut near = vec![];
+        let normals = points
+            .iter()
+            .map(|&at| {
+                cells.within(points, at, at, radius, &mut near);
+                let near = near.iter().map(|&(_, i)| points[i]);
+                plane(near, at, seen_from).unwrap_or(Vec3::ZERO)
+            })
+            .collect();
+        Ok(Surface {
+            points: points.to_vec(),
+            normals,
+            object: vec![],
+        })
+    }
+
+    /// Adds `other`'s points after this surface's: two views of one scene as one surface.
+    pub fn join(&mut self, other: Surface) {
+        if !(self.object.is_empty() && other.object.is_empty()) {
+            self.object.resize(self.points.len(), true);
+            self.object.extend(&other.object);
+        }
+        self.points.extend(other.points);
+        self.normals.extend(other.normals);
+        if !self.object.is_empty() {
+            self.object.resize(self.points.len(), true);
+        }
+    }
+}
+
+/// The most pixels to either side of a reading its plane is sought among.
+const WINDOW: usize = 6;
+
+/// The unit normal of the plane nearest the points `near`, toward `toward` from `at`: the
+/// direction they spread least along. `None` for fewer than three, for points on one line, whose
+/// plane is anyone's guess, and for points that lie near no plane.
+fn plane(near: impl Iterator<Item = Vec3>, at: Vec3, toward: Vec3) -> Option<Vec3> {
+    let (mut count, mut sum, mut squares) = (0, Vec3::ZERO, Mat3::ZERO);
+    for p in near {
+        let d = p - at;
+        count += 1;
+        sum += d;
+        squares += Mat3::from_cols(d * d.x, d * d.y, d * d.z);
+    }
+    if count < 3 {
+        return None;
+    }
+    let mean = sum / count as f32;
+    let spread = squares * (1.0 / count as f32)
+        - Mat3::from_cols(mean * mean.x, mean * mean.y, mean * mean.z);
+    let size = spread.x_axis.x + spread.y_axis.y + spread.z_axis.z;
+    if size <= 0.0 {
+        return None;
+    }
+    // Ascending, the plane's normal first, of the spread scaled to a sum of one.
+    let eigen = SymmetricEigen3::new(spread * (1.0 / size));
+    let [least, middle, _] = eigen.eigenvalues.to_array();
+    // On one line, with no spread across it to speak of, or as far off a plane as across it.
+    if middle <= 1e-2 || least > 0.5 * middle {
+        return None;
+    }
+    let normal = eigen.eigenvectors.x_axis.try_normalize()?;
+    Some(if normal.dot(toward - at) < 0.0 {
+        -normal
+    } else {
+        normal
+    })
 }
 
 /// A grasp [`grasps_on`] found.
@@ -111,10 +257,10 @@ pub fn grasps_on(
             s.normals.len(),
             s.object.len()
         );
-        let unit = |n: &Vec3| (n.length_squared() - 1.0).abs() < 1e-3;
+        let unit = |n: &Vec3| *n == Vec3::ZERO || (n.length_squared() - 1.0).abs() < 1e-3;
         ensure_input!(
             s.points.iter().all(|p| p.is_finite()) && s.normals.iter().all(unit),
-            "surface {i}: points must be finite and normals unit"
+            "surface {i}: points must be finite and normals unit or zero"
         );
     }
     let hand = device.robot().hand_spheres(hand);

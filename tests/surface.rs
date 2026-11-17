@@ -9,8 +9,10 @@ mod common;
 use std::collections::HashMap;
 use std::f32::consts::TAU;
 
-use batchplan::glam::Vec3;
-use batchplan::{Device, Error, Grasp, GraspOptions, Surface, grasps_on};
+use batchplan::glam::{Mat3, Quat, Vec3};
+use batchplan::{
+    DepthImage, Device, Error, Grasp, GraspOptions, Intrinsics, Obstacle, Pose, Surface, grasps_on,
+};
 
 /// Points 2 mm apart: a fingertip's patch of 5 mm holds a few dozen.
 const SPACING: f32 = 0.002;
@@ -611,6 +613,244 @@ fn fingertips_stay_off_the_bottom_of_a_bowl() {
     for g in rim {
         assert!(drawn(g) <= tip - 0.01 + 1e-5, "{g:?}");
     }
+}
+
+const WIDTH: usize = 320;
+const HEIGHT: usize = 240;
+const K: Intrinsics = Intrinsics {
+    fx: 300.0,
+    fy: 300.0,
+    cx: 160.0,
+    cy: 120.0,
+};
+
+/// A camera at `eye` looking at `target`, its image's x axis level.
+fn looking(eye: Vec3, target: Vec3) -> Pose {
+    let forward = (target - eye).normalize();
+    let right = forward.cross(Vec3::Z).normalize();
+    let down = forward.cross(right);
+    Pose::new(eye, Quat::from_mat3(&Mat3::from_cols(right, down, forward)))
+}
+
+/// z depth per pixel by sphere tracing the scene's distance functions; 0 where a ray hits nothing.
+fn render(scene: &[Obstacle], camera: Pose) -> Vec<f32> {
+    (0..WIDTH * HEIGHT)
+        .map(|i| {
+            let (u, v) = ((i % WIDTH) as f32, (i / WIDTH) as f32);
+            let ray = Vec3::new((u - K.cx) / K.fx, (v - K.cy) / K.fy, 1.0);
+            let dir = camera.rotation * ray.normalize();
+            let mut t = 0.0;
+            while t < 2.0 {
+                let p = camera.position + dir * t;
+                let d = scene
+                    .iter()
+                    .map(|o| o.distance(p).value)
+                    .fold(f32::INFINITY, f32::min);
+                if d < 1e-5 {
+                    return t * ray.normalize().z;
+                }
+                t += d;
+            }
+            0.0
+        })
+        .collect()
+}
+
+/// A box 4 by 6 by 5 cm on a table, and what a camera at `eye` sees of them: the surface, the
+/// box's pixels marked as the object's.
+fn box_on_a_table(eye: Vec3) -> Surface {
+    let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.01), Vec3::new(0.5, 0.5, 0.01));
+    let block = Obstacle::cuboid(Vec3::new(0.0, 0.0, 0.025), Vec3::new(0.02, 0.03, 0.025));
+    let camera = looking(eye, Vec3::new(0.0, 0.0, 0.025));
+    let depth = render(&[table, block.clone()], camera);
+    let image = DepthImage {
+        depth: &depth,
+        width: WIDTH,
+        intrinsics: K,
+        camera,
+    };
+    let object: Vec<bool> = (0..depth.len())
+        .map(|i| {
+            let (u, v) = ((i % WIDTH) as f32, (i / WIDTH) as f32);
+            let z = depth[i];
+            let p = camera.rotation * Vec3::new((u - K.cx) / K.fx * z, (v - K.cy) / K.fy * z, z)
+                + camera.position;
+            z > 0.0 && block.distance(p).value < 5e-4 && p.z > 1e-3
+        })
+        .collect();
+    assert!(
+        object.iter().filter(|&&o| o).count() > 500,
+        "the camera sees the box"
+    );
+    Surface::from_depth(&image, &object, None, 0.005).unwrap()
+}
+
+#[test]
+fn a_depth_image_gives_the_surfaces_it_sees_with_normals_toward_the_camera() {
+    let eye = Vec3::new(0.35, 0.0, 0.35);
+    let seen = box_on_a_table(eye);
+    assert_eq!(seen.points.len(), seen.normals.len());
+    assert_eq!(seen.points.len(), seen.object.len());
+    let (mut side, mut top, mut unknown, mut object) = (0, 0, 0, 0);
+    for i in 0..seen.points.len() {
+        let (p, n) = (seen.points[i], seen.normals[i]);
+        if !seen.object[i] {
+            assert_eq!(n, Vec3::ZERO, "only the object's normals are found");
+            continue;
+        }
+        object += 1;
+        if n == Vec3::ZERO {
+            unknown += 1;
+            continue;
+        }
+        assert!(
+            (n.length() - 1.0).abs() < 1e-4 && n.dot(eye - p) > 0.0,
+            "{n} at {p}"
+        );
+        // Away from the box's edges, where a patch lies on one face, the face's own normal.
+        let inside = p.y.abs() < 0.024 && p.x.abs() < 0.014;
+        if (p.x - 0.02).abs() < 1e-3 && (0.006..0.044).contains(&p.z) && p.y.abs() < 0.024 {
+            assert!(n.dot(Vec3::X) > 0.999, "{n} at {p}");
+            side += 1;
+        } else if (p.z - 0.05).abs() < 1e-3 && inside {
+            assert!(n.dot(Vec3::Z) > 0.999, "{n} at {p}");
+            top += 1;
+        }
+    }
+    assert!(side > 100 && top > 100, "{side} on the side, {top} on top");
+    assert!(
+        unknown * 20 < object,
+        "{unknown} of {object} without a normal"
+    );
+    // The far side was not seen: nothing there.
+    assert!(
+        seen.points
+            .iter()
+            .all(|p| p.x > -0.019 || p.z < 1e-3 || p.z > 0.049)
+    );
+}
+
+#[test]
+fn what_two_cameras_see_between_them_is_grasped_and_what_one_sees_alone_is_not() {
+    let o = GraspOptions::default();
+    let (near, far) = (Vec3::new(0.35, 0.0, 0.35), Vec3::new(-0.35, 0.0, 0.35));
+    // One camera sees one side and the top: nothing to close on.
+    let one = box_on_a_table(near);
+    assert!(grasps(&one, &o).is_empty());
+    // With the other's view of the far side, the box is grasped across the 4 cm between them,
+    // clear of the table.
+    let mut both = one.clone();
+    both.join(box_on_a_table(far));
+    assert_eq!(both.object.len(), both.points.len());
+    let found = grasps(&both, &o);
+    assert!(!found.is_empty());
+    let tip = common::panda().unwrap().tip(0);
+    // Within the friction cone of the faces' own normals, and a little for the normals found
+    // near the box's edges, which lean toward the next face.
+    let cone = (o.friction.atan() + 0.05).cos();
+    let mut square = 0;
+    for g in &found {
+        let (line, ends) = closes_on(g);
+        assert!(line.x.abs() > cone, "{g:?}");
+        square += usize::from(line.x.abs() > 0.999);
+        for end in ends {
+            assert!((end.x.abs() - 0.02).abs() < 0.002, "{g:?}");
+            assert!(
+                end.y.abs() < 0.031 && (-0.001..0.051).contains(&end.z),
+                "{g:?}"
+            );
+        }
+        assert!((g.width() * line.x.abs() - 0.04).abs() < 0.002, "{g:?}");
+        let toward = g.pose.rotation * Vec3::Z;
+        let lowest = (g.pose.position + toward * tip).z.min(g.pose.position.z);
+        assert!(lowest > -1e-3, "in the table: {g:?}");
+    }
+    assert!(
+        square * 2 > found.len(),
+        "most of them square across it: {square} of {}",
+        found.len()
+    );
+    assert!(
+        found.iter().any(|g| (g.pose.rotation * Vec3::Z).z < -0.99),
+        "from above"
+    );
+}
+
+#[test]
+fn points_get_the_normals_of_the_planes_they_lie_on_toward_where_they_were_seen_from() {
+    // Two faces of a box, seen from over its corner.
+    let half = Vec3::new(0.02, 0.03, 0.02);
+    let mut faces = Surface::default();
+    face(
+        Vec3::X * half.x,
+        Vec3::X,
+        [Vec3::Y, Vec3::Z],
+        [half.y, half.z],
+        &mut faces,
+    );
+    face(
+        Vec3::Z * half.z,
+        Vec3::Z,
+        [Vec3::X, Vec3::Y],
+        [half.x, half.y],
+        &mut faces,
+    );
+    let eye = Vec3::new(0.3, 0.0, 0.3);
+    let found = Surface::from_points(&faces.points, eye, 0.005).unwrap();
+    assert_eq!(found.points, faces.points);
+    assert!(found.object.is_empty());
+    let mut known = 0;
+    for i in 0..found.points.len() {
+        let (p, n) = (found.points[i], found.normals[i]);
+        // Within the radius of the edge the two faces share, the plane is neither's.
+        let edge = (p.x - half.x).abs() < 0.006 && (p.z - half.z).abs() < 0.006;
+        if !edge {
+            assert!(n.dot(faces.normals[i]) > 0.999, "{n} at {p}");
+            known += 1;
+        }
+        assert!(n == Vec3::ZERO || n.dot(eye - p) > 0.0, "{n} at {p}");
+    }
+    assert!(known > 500);
+    // Seen from the other side, the same planes face the other way.
+    let behind = Surface::from_points(&faces.points, -eye, 0.005).unwrap();
+    assert!(behind.normals[0].dot(faces.normals[0]) < -0.999);
+    // Points on one line, and too few, lie on no plane one could name.
+    let line: Vec<Vec3> = (0..10).map(|k| Vec3::X * k as f32 * 0.001).collect();
+    let on_a_line = Surface::from_points(&line, eye, 0.005).unwrap();
+    assert!(on_a_line.normals.iter().all(|&n| n == Vec3::ZERO));
+    let two = Surface::from_points(&line[..2], eye, 0.005).unwrap();
+    assert_eq!(two.normals, [Vec3::ZERO; 2]);
+    // And a surface without normals gives no grasp, its points kept all the same.
+    assert!(grasps(&on_a_line, &GraspOptions::default()).is_empty());
+    assert!(matches!(
+        Surface::from_points(&line, eye, 0.0),
+        Err(Error::Input(_))
+    ));
+}
+
+#[test]
+fn joined_surfaces_keep_which_points_are_the_objects() {
+    let mut plain = plates(0.04);
+    let count = plain.points.len();
+    plain.join(plates(0.03));
+    assert_eq!(plain.points.len(), 2 * count);
+    assert!(
+        plain.object.is_empty(),
+        "every point the object's, as before"
+    );
+    let mut marked = plates(0.04);
+    marked.object = vec![false; count];
+    let mut joined = plates(0.03);
+    joined.join(marked.clone());
+    assert_eq!(joined.object.len(), 2 * count);
+    assert!(
+        joined.object[..count].iter().all(|&o| o) && joined.object[count..].iter().all(|&o| !o)
+    );
+    marked.join(plates(0.03));
+    assert!(
+        marked.object[..count].iter().all(|&o| !o) && marked.object[count..].iter().all(|&o| o)
+    );
+    assert_eq!(marked.normals.len(), 2 * count);
 }
 
 #[test]
