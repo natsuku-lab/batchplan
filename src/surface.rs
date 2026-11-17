@@ -13,7 +13,9 @@
 //! inside, and its whole width, grasped around it. Patches are a fingertip's size
 //! ([`GraspOptions::contact`]), each the mean of the points in it, so noise in single points and
 //! their normals averages out. Where two patches lean toward each other, as a wedge's faces, the
-//! line is the one that splits the angle between their normals.
+//! line is the one that splits the angle between their normals; and a patch that leans from
+//! upright by less than the friction cone is also closed on along the level line through it, so
+//! that the hand can come straight down on a wall that flares.
 //!
 //! The hand is the robot's own: its collision spheres at each grasp and along the straight way
 //! in to it lie clear of every point, the object's and the rest, except that its fingers may be
@@ -21,7 +23,7 @@
 //! the hand is checked against are those near the object, kept cell by cell ([`Near`]), and a
 //! check stops at the first point in the way.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::f32::consts::TAU;
 
 use glam::{Mat3, Quat, Vec3};
@@ -231,6 +233,14 @@ const SUPPORT: usize = 3;
 /// The nearest two patches may be (meters): closer, they are one surface's noise, not two sides.
 const THINNEST: f32 = 0.0025;
 
+/// The cosine of the least angle between two lines through one pair of patches that makes them two
+/// grasps, and between a patch's normal and the level line that makes the level line another: 5
+/// degrees.
+const LEVEL: f32 = 0.9962;
+
+/// The steps a hand's tilt from straight down is ranked in (radians): 15 degrees.
+const TILT: f32 = TAU / 24.0;
+
 /// How far a hand that is not clear is drawn back at a time (meters).
 const BACK: f32 = 0.002;
 
@@ -249,11 +259,17 @@ const MOST_CELLS: usize = 1 << 22;
 /// (`approach`) are clear of every point and over the `floor`, drawn back by up to what leaves
 /// `overlap` of the fingers on the patches.
 ///
-/// They come in an order whose first few are worth trying first: every pair from above (where
-/// its line is not upright), then every pair a turn to either side, and so on round; and within
-/// a turn, the pairs that face each other within half a friction cone of square before the rest,
-/// spread over the object, each the farthest from those before it. The surfaces run in parallel
-/// on the device's threads, and a surface's grasps are the same alone and among others.
+/// A pair of patches is closed on along the line square to them, and where the patches lean no
+/// more than the friction cone from upright, along the level line through them too: a hand
+/// closing level comes straight down, and pushes what stands free on a support along it until
+/// both fingers have it, where a slanted close tips it away.
+///
+/// They come in an order whose first few are worth trying first: the hands nearest straight
+/// down, in steps of 15 degrees; and among those, every pair from above (where its line is not
+/// upright), then every pair a turn to either side, and so on round; and within a turn, the
+/// pairs that face each other within half a friction cone of square before the rest, spread
+/// over the object, each the farthest from those before it. The surfaces run in parallel on the
+/// device's threads, and a surface's grasps are the same alone and among others.
 pub fn grasps_on(
     device: &Device,
     hand: usize,
@@ -410,14 +426,20 @@ fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
     };
     let each: Vec<Vec<Vec<Grasp>>> = pairs.par_iter().map(of).collect();
     // Every pair from above, then every pair a turn on: the pairs being spread over the object,
-    // so are the first few grasps.
+    // so are the first few grasps. Then the nearest straight down first, in steps, whichever
+    // pair and turn they are: what stands on a support is best come down on.
     let turns = 0..o.turns;
-    turns
-        .flat_map(|turn| {
-            each.iter()
-                .flat_map(move |by_turn| by_turn[turn].iter().copied())
-        })
-        .collect()
+    let by_turn = turns.flat_map(|turn| {
+        each.iter()
+            .flat_map(move |by_turn| by_turn[turn].iter().copied())
+    });
+    let mut grasps: Vec<Grasp> = by_turn.collect();
+    let tilt = |g: &Grasp| {
+        let down = (g.pose.rotation * Vec3::Z).dot(Vec3::NEG_Z);
+        (down.clamp(-1.0, 1.0).acos() / TILT) as u32
+    };
+    grasps.sort_by_key(tilt);
+    grasps
 }
 
 /// `pairs`, those that face each other most squarely first, in an order that spreads them:
@@ -555,6 +577,32 @@ fn pairs(s: &Surface, o: &GraspOptions) -> Vec<Pair> {
             };
             pairs.push((pair, cells.key(first), cells.key(second)));
         }
+        // And along the level line through the patch, where that is inside its cone: a hand
+        // closing level comes straight down, and pushes what stands free on a support along it
+        // until both fingers have it, where a slanted close tips it away.
+        let level = inward.with_z(0.0).try_normalize();
+        if let Some(level) = level.filter(|l| (cone..LEVEL).contains(&l.dot(inward))) {
+            for (second, facing) in crossed(first, level, cone, near) {
+                let width = (second - first).length();
+                if !(THINNEST..=o.opening).contains(&width) {
+                    continue;
+                }
+                cells.within(&s.points, first, second, o.contact, near);
+                let between =
+                    |&(t, i): &(f32, usize)| !object(i) && t > o.contact && t < width - o.contact;
+                if near.iter().any(between) {
+                    continue;
+                }
+                let pair = Pair {
+                    middle: (first + second) / 2.0,
+                    line: level,
+                    width,
+                    square: inward.dot(level).min(facing.dot(level)),
+                    order: 0,
+                };
+                pairs.push((pair, cells.key(first), cells.key(second)));
+            }
+        }
         pairs
     };
     // One seed per cell: its first point of the object.
@@ -563,11 +611,15 @@ fn pairs(s: &Surface, o: &GraspOptions) -> Vec<Pair> {
         .par_iter()
         .map_init(Vec::new, |near, &seed| across(near, seed))
         .collect();
-    // The same two patches come from seeds on either side: the first to find them keeps them.
-    let mut found = HashSet::new();
+    // The same two patches come from seeds on either side: the first to find them along a
+    // line keeps them. Along another line, as level where the first was square to them, they
+    // are another pair.
+    let mut found: HashMap<_, Vec<Vec3>> = HashMap::new();
     let mut pairs = vec![];
     for (pair, a, b) in each.into_iter().flatten() {
-        if found.insert((a.min(b), a.max(b))) {
+        let lines = found.entry((a.min(b), a.max(b))).or_default();
+        if lines.iter().all(|line| line.dot(pair.line).abs() < LEVEL) {
+            lines.push(pair.line);
             pairs.push(pair);
         }
     }
