@@ -132,9 +132,21 @@ fn a_box_is_grasped_across_each_side_that_fits_and_no_other() {
     }
     assert!(across[0] > 0 && across[1] > 0, "{across:?}");
     assert_eq!(across[2], 0, "the box is too long to grasp along z");
-    // From above among them.
+    // From above among them, near its top alone: lower, the palm would be in the box, between
+    // the fingers though it is.
     let above = |g: &&Grasp| (g.pose.rotation * Vec3::Z).dot(Vec3::NEG_Z) > 0.9999;
-    assert!(found.iter().any(|g| above(&g)));
+    let from_above: Vec<&Grasp> = found.iter().filter(above).collect();
+    assert!(!from_above.is_empty());
+    for g in &from_above {
+        assert!(
+            g.pose.position.z > half.z - 0.05,
+            "the palm is in the box: {g:?}"
+        );
+    }
+    assert!(
+        found.iter().any(|g| g.pose.position.z < 0.0),
+        "from its sides, lower too"
+    );
 }
 
 #[test]
@@ -455,9 +467,26 @@ fn a_finger_is_kept_out_of_what_stands_beside_the_object() {
 
 #[test]
 fn fingers_may_be_in_what_they_close_on_and_nothing_else_of_the_object() {
-    // Plates nearly as far apart as the fingers open: the open fingers' spheres reach them.
+    // Plates a millimeter nearer than the fingers open: the open fingers' spheres reach them.
     let o = GraspOptions::default();
-    assert!(!grasps(&plates_of(o.opening - 0.005, 0.005), &o).is_empty());
+    let wide = plates(o.opening - 0.001);
+    assert!(!grasps(&wide, &o).is_empty());
+    // Something else nearly flush with one small plate, just over it and under the palm: a
+    // finger coming down past it would be in it, between the plates' planes though it is.
+    let small = plates_of(o.opening - 0.001, 0.005);
+    let mut flush = small.clone();
+    the_object(&mut flush);
+    face(
+        Vec3::new(o.opening / 2.0 + 0.001, 0.0, 0.0145),
+        Vec3::NEG_X,
+        [Vec3::Y, Vec3::Z],
+        [0.02, 0.0055],
+        &mut flush,
+    );
+    flush.object.resize(flush.points.len(), false);
+    let down = |g: &Grasp| (g.pose.rotation * Vec3::Z).dot(Vec3::NEG_Z);
+    assert!(grasps(&small, &o).iter().any(|g| down(g) > 0.9));
+    assert!(!grasps(&flush, &o).iter().any(|g| down(g) > 0.9));
     // A ledge of the object out past one plate, where that finger stands: no grasp.
     let mut ledged = plates_of(0.04, 0.005);
     face(
@@ -492,6 +521,34 @@ fn the_hand_stays_over_the_floor() {
         assert!(low(g) >= floor - 1e-5, "{g:?}");
     }
     assert!(anywhere.iter().any(|g| low(g) < floor - 1e-3));
+    // The frame too, where the fingertips are higher: coming up from below.
+    let above_them = GraspOptions {
+        floor: Some(0.006),
+        ..Default::default()
+    };
+    assert!(
+        anywhere
+            .iter()
+            .any(|g| low(g) < 0.006 && g.pose.position.z + tip > 0.006)
+    );
+    assert!(grasps(&surface, &above_them).is_empty());
+    // And the lower open finger, where the hand closes upright: 4 cm under the frame.
+    let mut upright = Surface::default();
+    for side in [1.0, -1.0] {
+        face(
+            Vec3::Z * side * 0.02,
+            Vec3::Z * side,
+            [Vec3::X, Vec3::Y],
+            [0.005, 0.005],
+            &mut upright,
+        );
+    }
+    let over = |floor: f32| GraspOptions {
+        floor: Some(floor),
+        ..Default::default()
+    };
+    assert!(!grasps(&upright, &over(-0.05)).is_empty());
+    assert!(grasps(&upright, &over(-0.03)).is_empty());
 }
 
 #[test]
@@ -533,6 +590,27 @@ fn fingertips_stay_off_the_bottom_of_a_bowl() {
     assert!(!found.iter().filter(across).any(through));
     let under = |g: &Grasp| (g.pose.rotation * Vec3::Z).z > 0.5 && g.contacts[0].z < bottom;
     assert!(found.iter().filter(across).any(under));
+    // With less of the fingers asked to overlap the wall, the hand is drawn back up from where
+    // its fingertips would be in the bottom: its frame over the line it closes on.
+    let shallow = GraspOptions {
+        overlap: 0.002,
+        ..Default::default()
+    };
+    let drawn = |g: &Grasp| g.pose.position.z - g.contacts[0].z;
+    let found = grasps(&bowl, &shallow);
+    let back = found
+        .iter()
+        .filter(across)
+        .filter(from_above)
+        .map(drawn)
+        .fold(0.0, f32::max);
+    assert!(
+        back > 0.001 && back <= tip - shallow.overlap + 1e-5,
+        "{back}"
+    );
+    for g in rim {
+        assert!(drawn(g) <= tip - 0.01 + 1e-5, "{g:?}");
+    }
 }
 
 #[test]
