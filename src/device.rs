@@ -132,11 +132,17 @@ pub(crate) fn collision_free(c: [f32; 2]) -> bool {
 /// Runs batched IK, planning, optimization and grid building on a GPU or on CPU threads: the
 /// only way to run batched work. Each device owns its threads.
 pub struct Device {
+    /// The hardware it runs on, which the devices made from it share and its worlds name.
     id: u64,
+    /// This device alone, among those that share its hardware.
+    instance: u64,
     backend: Box<dyn Backend>,
     /// Held objects' spheres, shared with the devices made from this one.
     fits: Arc<Fits>,
 }
+
+/// Numbers the devices: the hardware each one starts, and every device.
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
 impl fmt::Debug for Device {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -230,9 +236,10 @@ impl Device {
     }
 
     fn new(backend: Box<dyn Backend>) -> Self {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         Self {
-            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            id,
+            instance: id,
             backend,
             fits: Arc::default(),
         }
@@ -247,6 +254,7 @@ impl Device {
     pub fn with_robot(&self, robot: &Robot) -> Result<Self> {
         Ok(Self {
             id: self.id,
+            instance: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             backend: self.backend.with_robot(robot)?,
             fits: self.fits.clone(),
         })
@@ -404,6 +412,12 @@ impl Device {
     /// The spheres fitted to held objects on this device's hardware.
     pub(crate) fn fits(&self) -> &Fits {
         &self.fits
+    }
+
+    /// A number no other device has, those made from this one with [`Device::with_robot`]
+    /// included: what is built for one device and its robot is kept by it.
+    pub(crate) fn instance(&self) -> u64 {
+        self.instance
     }
 
     /// Runs `op` on this device's threads, so that its parallel loops run there too.

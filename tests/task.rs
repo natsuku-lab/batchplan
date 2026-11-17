@@ -430,6 +430,7 @@ fn a_held_object_sits_in_the_hand_as_its_grasp_holds_it() {
     for grasp in [top(), grasp(Vec3::X, Vec3::Y), grasp(-Vec3::Y, Vec3::Z)] {
         let held = Held {
             locked: Default::default(),
+            spheres: Default::default(),
             hand: 0,
             object: Obstacle::cuboid(Vec3::ZERO, HALF),
             grasp,
@@ -945,6 +946,7 @@ fn a_place_names_the_object_it_sets_down_after_its_worlds_obstacles() {
     let tall = Vec3::new(HALF.x, HALF.y, 0.06);
     let held = Held {
         locked: Default::default(),
+        spheres: Default::default(),
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, tall),
         grasp: Pose::new(Vec3::Z * 0.01, top_across().rotation),
@@ -1941,6 +1943,7 @@ fn malformed_tasks_are_input_errors() {
     // A place on a device that already holds the object.
     let held = Held {
         locked: Default::default(),
+        spheres: Default::default(),
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, HALF),
         grasp: top(),

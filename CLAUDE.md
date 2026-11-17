@@ -31,6 +31,8 @@ cargo run --release --example datagen -- data/demo 512 20       # .npy dataset: 
 cargo run --release --example tool_paths                        # straight moves and pours: one at a time on one thread, and 64 at once
 cargo run --release --example constraints [-- 64 5 --zone]      # the gripper kept upright past a pillar (solved, time, largest tilt, optimized, against unconstrained), and two arms carrying a tray level
 cargo run --release --example tasks -- 64                       # picks and places on random tabletops: how many get through, where the rest stop, per batch size
+cargo run --release --example surface_grasps                   # grasps of what cameras see: a bowl as points, a box in two depth images, 64 bowls in one call, and what each costs
+cargo run --release --example held_spheres                     # how spheres cover a held plate, can and capsule with 64 and 256 to spend: how many, how far past, how long
 cargo run --release --example join [-- so101]                  # pick-like motions joined without stopping (one reBot, or the SO-101): how much sooner, per blend radius
 cargo run --release --example latency [-- --cpu]                # one call's time by kind: IK by batch size without spheres, without the push, with it and for two hands that share joints, evaluate, optimized plans, then IK for a Panda of 399 spheres and a UR5e among clutter, plans past a ball, and the Panda's IK among clutter without a grid, with one apart and with one in reach
 cargo run --release --example timing                            # timing's cost and the trajectories' durations, by kind of path, on one thread
@@ -75,7 +77,7 @@ These decisions are settled. Keep to them unless the user decides otherwise.
 - **Embeddable.** Each device owns its rayon pool (`Device::cpu_threads`; the GPU device's has one thread per core).
   - Every parallel loop in `cpu.rs` and `gpu.rs` runs inside `self.pool.install` or on `cpu::run_searches`' broadcast, never on the global pool. `tests/threads.rs` counts OS threads; `tests/budget.rs` checks that a busy global pool does not hold up GPU plans.
   - Batches too small to be worth handing over (`SMALL_BATCH` clearances, a single search) run on the calling thread.
-  - `Robot::attach` covers boxes and spheres directly (`spheres::cover_primitives`, microseconds) and fits other shapes on the caller's pool, or on the calling thread with plain loops (`spheres::fit(.., parallel: false)`), not on a local pool: one built with `use_current_thread()` leaves the thread registered with rayon for good, and every parallel loop it starts afterwards runs on that one thread.
+  - `Robot::attach` covers boxes, spheres, capsules and thin or slender cylinders directly (`spheres::cover_primitives`, microseconds) and fits other shapes on the caller's pool, or on the calling thread with plain loops (`spheres::fit(.., parallel: false)`), not on a local pool: one built with `use_current_thread()` leaves the thread registered with rayon for good, and every parallel loop it starts afterwards runs on that one thread.
   - `PlanOptions::time_budget` becomes a deadline passed to `Backend::search` (checked before every edge check) and `Backend::trajopt`. Without one, nothing waits or checks the clock, and results are deterministic.
 - **USD stays optional.** The `openusd` crates are pinned exactly (`=0.7.0`, pre-1.0) and only built with feature `usd`.
 - **Standalone, with optional bridges.**

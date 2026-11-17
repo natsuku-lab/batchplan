@@ -146,7 +146,7 @@ impl DepthImage<'_> {
 
     /// The image with its camera's rotation made unit ([`Pose::rigid`]): one a little off unit
     /// would scale every depth the grid points are compared at.
-    fn rigid(&self) -> Self {
+    pub(crate) fn rigid(&self) -> Self {
         Self {
             camera: self.camera.rigid(),
             ..*self
@@ -178,7 +178,7 @@ impl DepthImage<'_> {
 
     /// Pixel `i`'s reading as a world point, unless it reads the robot: at or beyond the robot's
     /// depth there, within `voxel`.
-    fn point(&self, i: usize, robot: Option<&RobotMask>, voxel: f32) -> Option<Vec3> {
+    pub(crate) fn point(&self, i: usize, robot: Option<&RobotMask>, voxel: f32) -> Option<Vec3> {
         let Intrinsics { fx, fy, cx, cy } = self.intrinsics;
         let z = self
             .reading(i)
@@ -259,7 +259,7 @@ impl DepthImage<'_> {
     }
 
     /// Why the image, with this robot mask, cannot be used, if it cannot.
-    fn check_with(&self, robot: Option<&RobotMask>) -> Result<()> {
+    pub(crate) fn check_with(&self, robot: Option<&RobotMask>) -> Result<()> {
         self.check()?;
         if let Some(r) = robot {
             let n = r.depth.len();

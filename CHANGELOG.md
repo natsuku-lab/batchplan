@@ -19,6 +19,47 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   need the two new fields; defaults keep bounds disabled. Python exposes the same
   options and `Robot.sphere_fit_options()` returns the loading policy.
 
+- **Breaking:** how spheres cover what a hand holds is the caller's to set: `Held::spheres`, a
+  `SphereOptions` (64 spheres within 5 mm by default, as before). A thin wide object, as a plate
+  14 cm across, is fitted to 8.6 mm past its side at the default, so that a neighbor a few
+  millimeters away reads as touching it; with `budget: 256` it is covered within 4.7 mm. One
+  call takes one object held with different options, each fitted on its own. A `Held` literal
+  needs the new field (`spheres: SphereOptions::default()`); a pick's `TaskPlan::held` carries the
+  default. In Python, `Held(..., spheres=SphereOptions(budget=256))`.
+
+- **Breaking:** grasps of what cameras see, whatever its shape:
+  `grasps_on(&device, hand, &[Surface], &GraspOptions)`. A grasp closes on two patches of the
+  object's surface that were both seen, face away from each other within the opening, and have
+  the line between them inside both friction cones (`GraspOptions::friction`, 0.5, and `contact`,
+  the patch's radius, 5 mm), so a bowl's wall, a handle and a box's sides are found alike. The
+  robot's own hand, with its fingers as locked, and its straight way in (`GraspOptions::approach`,
+  10 cm) are kept clear of every point, the object's and the rest; `floor` holds the frame and
+  the open fingertips over a height, and a hand that is not clear is drawn back while `overlap`
+  of the fingers stays on the patches. Each `Grasp` gives the hand's `pose` and its two `contacts`, the first few from
+  above and spread over the object. `Surface::from_depth` reads a depth image (the object's
+  pixels marked, the robot masked out, normals toward the camera), `Surface::from_points` a
+  cloud seen from one place, and `Surface::join` adds a view. Surfaces of one call run in parallel
+  on the device's threads. A `GraspOptions` literal needs the new fields (`friction: 0.5`,
+  `contact: 0.005`, `approach: 0.1`); in Python, `GraspOptions(friction=..., contact=...,
+  approach=...)` (the surfaces and `grasps_on` are not bound there yet).
+
+- **Breaking:** a `Follower` can hold an object: `FollowerOptions::holding` takes the `Held` the
+  trajectory was planned holding. The rest of the motion, and any stop, is checked with the object
+  in the hand, contacts naming it (`"held by hand 0"`), and replans and re-anchors carry it. The
+  follower's robot and the devices its ticks are given are those that do not hold it, as for a
+  problem's `holding`, so one device plans and follows a carry; the first tick on a device builds
+  the one that holds it, and later ticks on that device reuse it. `None`, the default, is as before. A `FollowerOptions` literal needs
+  the new field (`holding: None`).
+
+### Changed
+
+- **Breaking:** a held capsule is covered by spheres along its axis, and a held cylinder that is thin or
+  slender (a disc, a rod) by one layer of rings of spheres or one line of them, where that reaches
+  the tolerance within the budget: without fitting, in microseconds where a fit took 4 to 25 ms,
+  and with fewer spheres than their fit took (a 14 cm plate: 145 within 4.7 mm of it). Their spheres, and so clearances and contacts measured to them, differ from the fit's.
+  Stout cylinders, and discs the budget cannot bring within the tolerance (a plate at the default
+  64), are fitted as before.
+
 ### Fixed
 
 - Sphere fitting rejects nonfinite and exterior candidate centers using mesh bounds

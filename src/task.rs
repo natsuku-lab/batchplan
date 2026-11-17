@@ -928,9 +928,13 @@ pub fn place_poses(object: &Obstacle, pose: Pose, turns: usize) -> Vec<Pose> {
         .collect()
 }
 
-/// How [`grasps`] proposes grasps for a parallel gripper whose IK frame lies between its
-/// fingertips, its z axis pointing out of the hand and its y axis along the fingers' closing
-/// direction (as the examples' Panda `ee_link`).
+/// How grasps are proposed for a parallel gripper whose IK frame lies between its fingertips, its
+/// z axis pointing out of the hand and its y axis along the fingers' closing direction (as the
+/// examples' Panda `ee_link`): by [`grasps`], for a box, ball, cylinder or capsule, and by
+/// [`grasps_on`](crate::grasps_on), for what cameras see of any shape. Both read `opening`,
+/// `turns`, `floor` and `overlap`; `depth`, `tip` and `along` are for `grasps` alone, whose
+/// hand is the options' own, and `friction`, `contact` and `approach` for `grasps_on` alone,
+/// whose hand is the robot's.
 #[derive(Clone, Copy, Debug)]
 pub struct GraspOptions {
     /// The widest the fingers open (meters): 8 cm.
@@ -938,7 +942,8 @@ pub struct GraspOptions {
     /// How far in from the object's surface the IK frame holds it (meters): 2 cm. Above a `floor`,
     /// a grasp from above may hold it less deep, its frame even outside the object.
     pub depth: f32,
-    /// Grasps spread around a round object's axis: 8.
+    /// Grasps spread around a round object's axis, and for `grasps_on`, the directions each pair
+    /// of patches is grasped from around the line between them: 8.
     pub turns: usize,
     /// How far the fingers reach past the IK frame along its z axis (meters), as
     /// [`Robot::tip`] measures it: 0.
@@ -953,7 +958,9 @@ pub struct GraspOptions {
     pub floor: Option<f32>,
     /// The least the fingers reach into the object, from their tips, in a grasp from above over a
     /// `floor` (meters): 1 cm, as MoveIt Grasps' minimum depth for the Panda. An object whose top
-    /// is less than this over the floor has no grasp from above.
+    /// is less than this over the floor has no grasp from above. For `grasps_on`, the least of
+    /// the fingers that stays on the patches they close on where the hand is drawn back to stay
+    /// clear.
     pub overlap: f32,
     /// How far toward the ends a grasp holds the object, along the side the fingers close on
     /// rather than across, as a fraction of half that side, in [0, 1): 0, the middle. Above 0,
@@ -962,6 +969,18 @@ pub struct GraspOptions {
     /// the hand that takes it. A ball's grasps, and a round object's from its ends or closing along
     /// its axis, stay in the middle; those closing around its side slide along the axis.
     pub along: f32,
+    /// The friction between a fingertip and what it presses on, for grasps of a surface
+    /// ([`grasps_on`](crate::grasps_on)): 0.5, as Dex-Net samples grasps with. The line a grasp
+    /// closes along lies within the friction cone of each patch it presses on, `atan(friction)`
+    /// from the patch's normal; less asks for patches that face each other more squarely.
+    pub friction: f32,
+    /// The radius of the patch a fingertip presses on, for grasps of a surface (meters): 5 mm.
+    /// A patch is the mean of the points within it, and surfaces nearer each other than this
+    /// along a closing line count as one.
+    pub contact: f32,
+    /// How far the hand comes in straight along its z axis to a grasp of a surface, a way that
+    /// must be clear of what was seen (meters): 10 cm, a pick's `approach`.
+    pub approach: f32,
 }
 
 impl Default for GraspOptions {
@@ -974,6 +993,9 @@ impl Default for GraspOptions {
             floor: None,
             overlap: 0.01,
             along: 0.0,
+            friction: 0.5,
+            contact: 0.005,
+            approach: 0.1,
         }
     }
 }
@@ -1692,6 +1714,7 @@ fn held(task: &Pick, worlds: &Worlds, index: usize) -> Held {
         hand: task.hand,
         object: worlds[task.world as usize].obstacles[task.object].placed(Pose::IDENTITY),
         grasp: task.grasps[index],
+        spheres: Default::default(),
     }
 }
 

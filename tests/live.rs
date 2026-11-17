@@ -2,9 +2,9 @@
 //! takes over from the state the robot is in then, stops on its path when there is no time or its
 //! replan collides, and says so when no stop is short enough; one that keeps its path, as along a
 //! tool path, stops on it and holds a robot held back where it is; replans keep the trajectory's
-//! constraints, and stop where they cannot start inside them; servo steps slow and halt before a
-//! wall without entering it, reach a free target and brake joints before their ends, within the
-//! limits.
+//! constraints, and stop where they cannot start inside them; one that holds an object checks,
+//! stops and replans with it in the hand; servo steps slow and halt before a wall without entering
+//! it, reach a free target and brake joints before their ends, within the limits.
 
 #[path = "../examples/common/mod.rs"]
 mod common;
@@ -12,10 +12,10 @@ mod common;
 use batchplan::glam::{Quat, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionWeights, Contact, Detour, Device, Error, FollowStatus, Follower, FollowerOptions,
-    HandConstraint, HandSpeed, JoinOptions, JointState, Obstacle, PlanOptions, PlanProblem, Pose,
-    Robot, RobotOptions, RrtOptions, Sequence, ServoOptions, ServoStatus, ToolPath,
-    ToolPathOptions, Trajectory, World, Worlds,
+    AttachedObject, CollisionWeights, Contact, Detour, Device, Error, FollowStatus, Follower,
+    FollowerOptions, HandConstraint, HandSpeed, Held, JoinOptions, JointState, Obstacle,
+    PlanOptions, PlanProblem, Pose, Robot, RobotOptions, RrtOptions, SdfGrid, Sequence,
+    ServoOptions, ServoStatus, SphereOptions, ToolPath, ToolPathOptions, Trajectory, World, Worlds,
 };
 
 const DT: f32 = 0.02;
@@ -824,6 +824,358 @@ fn a_robot_held_far_back_is_followed_from_where_it_is() {
         follower.tick(&device, &worlds, t, Some(&wrong)),
         Err(Error::Input(_))
     ));
+}
+
+/// A rod 24 cm long held by one end, pointing out of the hand.
+fn rod() -> Held {
+    Held {
+        hand: 0,
+        object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.12)),
+        grasp: Pose::new(Vec3::new(0.0, 0.0, -0.12), Quat::IDENTITY),
+        locked: Default::default(),
+        spheres: Default::default(),
+    }
+}
+
+/// The sweep carrying the rod, at `speed`.
+fn carry_at(robot: &Robot, device: &Device, speed: f32) -> Trajectory {
+    let worlds = device.upload(&[World::default()]).unwrap();
+    let problem = PlanProblem {
+        holding: Some(rod()),
+        ..PlanProblem::new(0, FROM.to_vec(), TO.to_vec())
+    };
+    let plans = batchplan::plan(device, &worlds, &[problem], &PlanOptions::default()).unwrap();
+    let path = plans.best(0).expect("a free sweep plans holding the rod");
+    Trajectory::try_new(robot, path, speed).unwrap()
+}
+
+/// A box of half size `half` at the rod's far end as `trajectory` has it at time `t`: 21 cm out
+/// of the hand, clear of the arm.
+fn box_at_the_rod(robot: &Robot, trajectory: &Trajectory, t: f32, half: f32) -> Obstacle {
+    let hand = robot.ee_pose(&state_at(trajectory, t).position, 0);
+    let tip = hand.position + hand.rotation * Vec3::Z * 0.21;
+    Obstacle::cuboid(tip, Vec3::splat(half))
+}
+
+/// The sweep carrying the rod, at half speed, and a world with a box at the rod's far end as the
+/// sweep has it at time `at` of its duration: in the rod's way, and clear of the arm all along.
+fn carry(robot: &Robot, device: &Device, at: f32) -> (Trajectory, World) {
+    let carry = carry_at(robot, device, 0.5);
+    let boxed = box_at_the_rod(robot, &carry, at * carry.duration(), 0.03);
+    (carry, World::new(vec![boxed]))
+}
+
+/// A device of `device`'s for the robot holding the rod, as attaching it gives one.
+fn holding_the_rod(robot: &Robot, device: &Device) -> Device {
+    let held = robot.attach(&rod().attachment(robot).unwrap()).unwrap();
+    device.with_robot(&held).unwrap()
+}
+
+/// Whether `contacts` name the rod against obstacle 0, and nothing else.
+fn name_the_rod(contacts: &[Contact]) -> bool {
+    let named = |c: &Contact| matches!(c, Contact::World { link, obstacle: 0, .. } if link == "held by hand 0");
+    !contacts.is_empty() && contacts.iter().all(named)
+}
+
+/// Whether every state of `trajectory`, a hundredth of a second apart, is clear on `device`.
+fn clear_along(device: &Device, worlds: &Worlds, trajectory: &Trajectory) -> bool {
+    let samples = (trajectory.duration() / 0.01).ceil() as usize;
+    (0..=samples).all(|k| {
+        let t = trajectory.duration() * k as f32 / samples as f32;
+        clear(device, worlds, &state_at(trajectory, t).position)
+    })
+}
+
+/// A follower that keeps its path, carrying a rod toward a box only the rod would hit: holding it,
+/// it stops short and names the rod; told of no rod, it carries on through.
+#[test]
+fn a_follower_stops_for_what_the_object_it_holds_would_hit() {
+    let robot = common::panda().unwrap();
+    for device in devices(&robot) {
+        let name = device.name();
+        let (carry, boxed) = carry(&robot, &device, 0.6);
+        let duration = carry.duration();
+        let free = device.upload(&[World::default()]).unwrap();
+        let blocked = device.upload(&[boxed]).unwrap();
+        let holder = holding_the_rod(&robot, &device);
+        assert!(
+            clear_along(&device, &blocked, &carry) && !clear_along(&holder, &blocked, &carry),
+            "{name}: the box is in the rod's way and not the arm's"
+        );
+        let run = |holding: Option<Held>| {
+            let o = FollowerOptions {
+                replan: false,
+                holding,
+                ..Default::default()
+            };
+            let mut follower = Follower::try_new(&robot, 0, carry.clone(), 0.0, o).unwrap();
+            let (mut t, mut statuses) = (0.0, vec![]);
+            while t < 4.0 * duration {
+                let worlds = if t < 0.1 * duration { &free } else { &blocked };
+                let tick = follower.tick(&device, worlds, t, None).unwrap();
+                let rod_clear = clear(&holder, worlds, &tick.state.position);
+                statuses.push((tick.status.clone(), rod_clear));
+                if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
+                    break;
+                }
+                t += DT;
+            }
+            statuses
+        };
+        let statuses = run(Some(rod()));
+        let stopping = |s: &FollowStatus| matches!(s, FollowStatus::Stopping { contacts } if name_the_rod(contacts));
+        assert!(
+            statuses.iter().any(|(s, _)| stopping(s))
+                && statuses.iter().all(|(s, clear)| {
+                    let kept = matches!(s, FollowStatus::Following | FollowStatus::Blocked);
+                    *clear && (kept || stopping(s))
+                }),
+            "{name}: {statuses:?}"
+        );
+        assert_eq!(
+            statuses.last().map(|(s, _)| s),
+            Some(&FollowStatus::Blocked),
+            "{name}"
+        );
+        // Told of no rod, the follower sees a clear path and carries the rod through the box.
+        let statuses = run(None);
+        assert!(
+            statuses.iter().any(|(_, clear)| !clear)
+                && statuses.last().map(|(s, _)| s) == Some(&FollowStatus::Arrived),
+            "{name}: {statuses:?}"
+        );
+    }
+}
+
+/// A follower carrying the rod replans around a box only the rod would hit, and arrives with the
+/// rod clear all the way.
+#[test]
+fn replans_carry_what_the_follower_holds() {
+    let robot = common::panda().unwrap();
+    for device in devices(&robot) {
+        let name = device.name();
+        let (carry, boxed) = carry(&robot, &device, 0.6);
+        let duration = carry.duration();
+        let free = device.upload(&[World::default()]).unwrap();
+        let blocked = device.upload(&[boxed]).unwrap();
+        let holder = holding_the_rod(&robot, &device);
+        assert!(
+            clear_along(&device, &blocked, &carry) && !clear_along(&holder, &blocked, &carry),
+            "{name}: the box is in the rod's way and not the arm's"
+        );
+        let o = FollowerOptions {
+            holding: Some(rod()),
+            ..Default::default()
+        };
+        let mut follower = Follower::try_new(&robot, 0, carry.clone(), 0.0, o).unwrap();
+        let (mut t, mut statuses) = (0.0, vec![]);
+        while t < 4.0 * duration {
+            let worlds = if t < 0.3 * duration { &free } else { &blocked };
+            let tick = follower.tick(&device, worlds, t, None).unwrap();
+            assert!(
+                clear(&holder, worlds, &tick.state.position),
+                "{name}: at {t:.2} s the rod collides ({:?})",
+                tick.status
+            );
+            if let FollowStatus::Replanned { trajectory, .. } = &tick.status {
+                assert!(
+                    clear_along(&holder, &blocked, trajectory),
+                    "{name}: the replan takes the rod through the box"
+                );
+            }
+            statuses.push(tick.status.clone());
+            if matches!(tick.status, FollowStatus::Arrived | FollowStatus::Blocked) {
+                break;
+            }
+            t += DT;
+        }
+        let replanned = |s: &FollowStatus| matches!(s, FollowStatus::Replanned { .. });
+        assert!(
+            statuses.iter().any(replanned) && statuses.last() == Some(&FollowStatus::Arrived),
+            "{name}: {statuses:?}"
+        );
+    }
+}
+
+/// Held back where the straight way to the goal takes the rod through a box, a follower holding
+/// the rod plans from there around it.
+#[test]
+fn a_robot_held_far_back_is_followed_from_where_it_is_with_what_it_holds() {
+    let robot = common::panda().unwrap();
+    for device in devices(&robot) {
+        let name = device.name();
+        let (carry, boxed) = carry(&robot, &device, 0.6);
+        let duration = carry.duration();
+        let blocked = device.upload(&[boxed]).unwrap();
+        let holder = holding_the_rod(&robot, &device);
+        assert!(
+            clear_along(&device, &blocked, &carry) && !clear_along(&holder, &blocked, &carry),
+            "{name}: the box is in the rod's way and not the arm's"
+        );
+        let o = FollowerOptions {
+            holding: Some(rod()),
+            // Room to find the way around from rest.
+            budget: 0.5,
+            ..Default::default()
+        };
+        let free = device.upload(&[World::default()]).unwrap();
+        let mut follower = Follower::try_new(&robot, 0, carry.clone(), 0.0, o).unwrap();
+        follower.tick(&device, &free, 0.0, None).unwrap();
+        // At rest where it started, a third of the way into the motion: the box is ahead.
+        let t = 0.3 * duration;
+        let back = JointState {
+            position: FROM.to_vec(),
+            ..JointState::new(robot.dof())
+        };
+        let tick = follower.tick(&device, &blocked, t, Some(&back)).unwrap();
+        assert!(
+            matches!(tick.status, FollowStatus::Reanchored { .. }),
+            "{name}: {:?}",
+            tick.status
+        );
+        assert!(
+            clear_along(&holder, &blocked, follower.trajectory()),
+            "{name}: the way from where it was held takes the rod through the box"
+        );
+        assert_eq!(follower.trajectory().end(), TO, "{name}");
+    }
+}
+
+/// At full speed with a box 0.2 s ahead of the rod alone, no stop ends short of it: the tick that
+/// begins the stop checks the stop with the rod too, and reports the collision.
+#[test]
+fn a_stop_that_takes_the_held_object_into_a_box_reports_the_collision() {
+    let robot = common::panda().unwrap();
+    for device in devices(&robot) {
+        let name = device.name();
+        let carry = carry_at(&robot, &device, 1.0);
+        let duration = carry.duration();
+        let holder = holding_the_rod(&robot, &device);
+        let o = FollowerOptions {
+            holding: Some(rod()),
+            ..Default::default()
+        };
+        let mut follower = Follower::try_new(&robot, 0, carry.clone(), 0.0, o).unwrap();
+        let free = device.upload(&[World::default()]).unwrap();
+        let t = 0.4 * duration;
+        assert_eq!(
+            follower.tick(&device, &free, t, None).unwrap().status,
+            FollowStatus::Following
+        );
+        let ahead = box_at_the_rod(&robot, &carry, t + 0.2, 0.01);
+        let blocked = device.upload(&[World::new(vec![ahead])]).unwrap();
+        assert!(
+            clear_along(&device, &blocked, &carry)
+                && clear(&holder, &blocked, &state_at(&carry, t).position)
+                && !clear(&holder, &blocked, &state_at(&carry, t + 0.2).position),
+            "{name}: the box is 0.2 s ahead of the rod, and clear of the arm"
+        );
+        let tick = follower.tick(&device, &blocked, t + 0.01, None).unwrap();
+        let FollowStatus::Collides { contacts, .. } = &tick.status else {
+            panic!("{name}: {:?}", tick.status);
+        };
+        assert!(name_the_rod(contacts), "{name}: {contacts:?}");
+    }
+}
+
+/// A follower holding the rod checks the robot of the device each tick is given: ticked on the
+/// device, then on one made from it for the robot with a camera on its hand, it stops for a box
+/// only the camera would hit.
+#[test]
+fn a_follower_holding_an_object_checks_the_robot_of_each_ticks_device() {
+    let robot = common::panda().unwrap();
+    for device in devices(&robot) {
+        let name = device.name();
+        let carry = carry_at(&robot, &device, 0.5);
+        let duration = carry.duration();
+        // A camera 20 cm to the side of the hand, and a box where it passes.
+        let beside = Vec3::new(0.0, 0.2, 0.0);
+        let camera = AttachedObject {
+            name: "camera".into(),
+            link: "ee_link".into(),
+            shapes: vec![Obstacle::cuboid(beside, Vec3::splat(0.015))],
+            touch_links: vec![],
+            spheres: SphereOptions::default(),
+        };
+        let with_camera = robot.attach(&camera).unwrap();
+        let filming = device.with_robot(&with_camera).unwrap();
+        let hand = robot.ee_pose(&state_at(&carry, 0.6 * duration).position, 0);
+        let boxed = Obstacle::cuboid(hand.position + hand.rotation * beside, Vec3::splat(0.03));
+        let blocked = device.upload(&[World::new(vec![boxed])]).unwrap();
+        let rod_and_camera = filming
+            .with_robot(
+                &with_camera
+                    .attach(&rod().attachment(&with_camera).unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(
+            clear_along(&holding_the_rod(&robot, &device), &blocked, &carry)
+                && !clear_along(&rod_and_camera, &blocked, &carry),
+            "{name}: the box is in the camera's way, and not the arm's or the rod's"
+        );
+        let o = FollowerOptions {
+            replan: false,
+            holding: Some(rod()),
+            ..Default::default()
+        };
+        let mut follower = Follower::try_new(&robot, 0, carry, 0.0, o).unwrap();
+        let tick = follower.tick(&device, &blocked, 0.0, None).unwrap();
+        assert_eq!(tick.status, FollowStatus::Following, "{name}");
+        let tick = follower.tick(&filming, &blocked, DT, None).unwrap();
+        let named = |c: &Contact| matches!(c, Contact::World { link, .. } if link == "camera");
+        assert!(
+            matches!(&tick.status, FollowStatus::Stopping { contacts } if contacts.iter().all(named)),
+            "{name}: {:?}",
+            tick.status
+        );
+    }
+}
+
+#[test]
+fn a_hold_the_robot_cannot_take_is_an_input_error() {
+    let robot = common::panda().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let (carry, _) = carry(&robot, &device, 0.6);
+    let refused = |robot: &Robot, holding: Held| {
+        let o = FollowerOptions {
+            holding: Some(holding),
+            ..Default::default()
+        };
+        matches!(
+            Follower::try_new(robot, 0, carry.clone(), 0.0, o),
+            Err(Error::Input(_))
+        )
+    };
+    assert!(
+        refused(&robot, Held { hand: 1, ..rod() }),
+        "a hand it lacks"
+    );
+    let grid = SdfGrid::try_new([2, 2, 2], 0.1, Vec3::ZERO, &[1.0; 8]).unwrap();
+    let grid = Obstacle::Sdf {
+        grid: grid.into(),
+        center: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+    };
+    assert!(
+        refused(
+            &robot,
+            Held {
+                object: grid,
+                ..rod()
+            }
+        ),
+        "a distance grid"
+    );
+    let mut turned = rod();
+    turned.grasp.rotation = Quat::from_xyzw(0.0, 0.0, 0.0, 2.0);
+    assert!(
+        refused(&robot, turned),
+        "a grasp whose rotation is not unit"
+    );
+    let holding = robot.attach(&rod().attachment(&robot).unwrap()).unwrap();
+    assert!(refused(&holding, rod()), "a robot that holds one already");
+    assert!(!refused(&robot, rod()));
 }
 
 /// The hand moved 30 cm forward from the Panda's default configuration at 10 cm/s, as `follow`

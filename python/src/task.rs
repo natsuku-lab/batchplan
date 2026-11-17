@@ -43,6 +43,15 @@ value_class! {
         /// 0, each grasp comes once toward each end; a hand that will pass the object to another
         /// (`handover`) holds it toward one end, as 0.75.
         along: f32,
+        /// The friction between a fingertip and what it presses on, for grasps of a surface:
+        /// 0.5. The line a grasp closes along lies within `atan(friction)` of the normal of each
+        /// patch it presses on.
+        friction: f32,
+        /// The radius of the patch a fingertip presses on, for grasps of a surface (meters): 5 mm.
+        contact: f32,
+        /// How far the hand comes in straight along its z axis to a grasp of a surface, a way
+        /// that must be clear of what was seen (meters): 10 cm.
+        approach: f32,
     }
     methods {
         #[new]

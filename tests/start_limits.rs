@@ -409,6 +409,7 @@ fn every_task_corrects_its_start_and_preserves_the_start_collision_failure() {
         object: object.clone(),
         grasp: Pose::IDENTITY,
         locked: HashMap::new(),
+        spheres: Default::default(),
     };
     let pick = Pick::new(0, measured.clone(), 1, vec![Pose::IDENTITY]);
     let place = Place::new(1, measured.clone(), held.clone(), vec![pose]);

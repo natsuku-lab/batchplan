@@ -31,6 +31,11 @@ pub struct Held {
     /// loaded. To attach the object yourself, relock first, then attach [`Held::attachment`].
     /// Empty: as loaded.
     pub locked: HashMap<String, f32>,
+    /// How spheres cover it: within `tolerance` of its surface where `budget` spheres can, the
+    /// defaults being 5 mm and 64. A thin wide object, as a plate, takes more to stay within a
+    /// few millimeters of its sides: a gap narrower than what its spheres reach past it reads as
+    /// a contact. Mesh bounds and their penetration limit are inherited from the robot.
+    pub spheres: SphereOptions,
 }
 
 impl Held {
@@ -55,7 +60,7 @@ impl Held {
             spheres: SphereOptions {
                 enforce_mesh_bounds: robot.sphere_fit_options().enforce_mesh_bounds,
                 max_mesh_penetration: robot.sphere_fit_options().max_mesh_penetration,
-                ..Default::default()
+                ..self.spheres
             },
         })
     }
@@ -63,6 +68,25 @@ impl Held {
     /// Whether `robot`, which must not hold one in that hand already, can hold it in `worlds`: an
     /// `Error::Input` naming `what` holds it where not.
     pub(crate) fn check(&self, robot: &Robot, worlds: &Worlds, what: &str) -> Result<()> {
+        self.check_on(robot, what)?;
+        // Worlds name the link after the robot's own where they let what a hand comes to hold
+        // touch something (`Touch::held`), or were uploaded for a robot holding something.
+        let link = held_link(self.hand);
+        if let Some(was) = worlds.link_name(robot.links.len())
+            && was != link
+        {
+            return Err(input!(
+                "{what}: holds an object in hand {}, but these worlds let '{was}' touch obstacles, the link after the robot's own: name what hand {} holds in them (`Touch::held`), or upload them without that touch",
+                self.hand,
+                self.hand
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether `robot`, which must not hold one in that hand already, can hold it, whatever the
+    /// worlds: an `Error::Input` naming `what` holds it where not.
+    pub(crate) fn check_on(&self, robot: &Robot, what: &str) -> Result<()> {
         ensure_input!(
             self.hand < robot.hands(),
             "{what}: holds an object in hand {} of {}",
@@ -74,18 +98,10 @@ impl Held {
             robot.links.iter().all(|l| l.name != link),
             "{what}: the robot already has '{link}': pass the device that does not hold it"
         );
-        // Worlds name the link after the robot's own where they let what a hand comes to hold
-        // touch something (`Touch::held`), or were uploaded for a robot holding something.
-        if let Some(was) = worlds.link_name(robot.links.len())
-            && was != link
-        {
-            return Err(input!(
-                "{what}: holds an object in hand {}, but these worlds let '{was}' touch obstacles, the link after the robot's own: name what hand {} holds in them (`Touch::held`), or upload them without that touch",
-                self.hand,
-                self.hand
-            ));
-        }
         check_locked(robot, &self.locked, what)?;
+        self.spheres
+            .check()
+            .map_err(|e| input!("{what}: the held object's spheres: {e}"))?;
         ensure_input!(
             !matches!(self.object, Obstacle::Sdf { .. }),
             "{what}: the held object is a distance grid, which cannot be held"
@@ -273,8 +289,7 @@ pub(crate) struct Fitted {
 impl Fitted {
     /// Each object among `helds` as the device keeps it ([`Fits`]), or fitted once, in parallel.
     pub(crate) fn new(device: &Device, robot: &Robot, helds: &[&Held]) -> Result<Self> {
-        // Each object at its own origin, as `Held::attachment` places it, with the options it fits
-        // by.
+        // One object held with two sets of options is fitted twice.
         let mut objects: Vec<(Obstacle, SphereOptions)> = vec![];
         let mut object_of = Vec::with_capacity(helds.len());
         for held in helds {
@@ -287,7 +302,8 @@ impl Fitted {
                 Pose::IDENTITY
             };
             let object = held.object.placed(frame);
-            object_of.push(match objects.iter().position(|(o, _)| *o == object) {
+            let fitted_so = |(o, f): &(Obstacle, SphereOptions)| *o == object && *f == options;
+            object_of.push(match objects.iter().position(fitted_so) {
                 Some(k) => k,
                 None => {
                     objects.push((object, options));
@@ -374,6 +390,7 @@ mod tests {
             object: Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.02)),
             grasp: Pose::new(Vec3::new(0.013, -0.027, 0.041), Quat::from_rotation_y(0.6)),
             locked: HashMap::new(),
+            spheres: SphereOptions::default(),
         };
         let attachment = held.attachment(&robot).expect("held attachment");
         assert_eq!(
@@ -484,6 +501,7 @@ mod tests {
         let device = Device::cpu(&robot).unwrap();
         let can = Held {
             locked: Default::default(),
+            spheres: Default::default(),
             hand: 0,
             object: Obstacle::cylinder(Vec3::ZERO, 0.03, 0.06),
             grasp: Pose::IDENTITY,
@@ -545,6 +563,7 @@ mod tests {
             .flat_map(|object| {
                 grasps.map(|grasp| Held {
                     locked: Default::default(),
+                    spheres: Default::default(),
                     hand: 0,
                     object: object.clone(),
                     grasp,
@@ -572,6 +591,7 @@ mod tests {
         let spheres = |rotation: Quat| {
             let held = Held {
                 locked: Default::default(),
+                spheres: Default::default(),
                 hand: 0,
                 object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.05)),
                 grasp: Pose::new(Vec3::new(0.0, 0.0, 0.28), rotation),
