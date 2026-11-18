@@ -163,7 +163,7 @@ macro_rules! tuple_field {
 
 pub(crate) use tuple_field;
 
-tuple_field!(usize, String, PathBuf);
+tuple_field!(usize, String, PathBuf, HashMap<String, f32>);
 
 /// A read-only array of `values` (`float32`, `bool`), shaped `shape`.
 pub(crate) fn array<'py, T: Element + Copy>(

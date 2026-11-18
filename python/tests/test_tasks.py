@@ -293,13 +293,16 @@ def test_holds_and_picks_say_where_the_fingers_are(tasks_robot):
     narrow = {"panda_finger_joint1": 0.01, "panda_finger_joint2": 0.01}
     held = bp.Held(0, box, bp.Pose((0.0, 0.0, 0.0)), locked=narrow)
     assert held.locked == narrow and bp.Held(0, box, bp.Pose((0.0, 0.0, 0.0))).locked == {}
-    pick = bp.Pick(0, tasks_robot.default_q, 1, bp.grasps(box), locked=narrow)
-    assert pick.locked == narrow
+    grasps = bp.grasps(box)
+    pick = bp.Pick(0, tasks_robot.default_q, 1, grasps, locked=[narrow] * len(grasps))
+    assert pick.locked == (narrow,) * len(grasps)
+    assert bp.Pick(0, tasks_robot.default_q, 1, grasps).locked == ()
+    assert bp.GraspOptions(narrow=True).narrow and not bp.GraspOptions().narrow
     device = bp.Device.cpu(tasks_robot)
     worlds = device.upload([bp.World([box])])
     with pytest.raises(bp.InputError, match="locked"):
         bp.pick(
             device,
             worlds,
-            [bp.Pick(0, tasks_robot.default_q, 0, bp.grasps(box), locked={"x": 0.0})],
+            [bp.Pick(0, tasks_robot.default_q, 0, grasps, locked=[{"x": 0.0}] * len(grasps))],
         )

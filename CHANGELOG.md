@@ -56,6 +56,21 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   `shell: None`, and a `Surface` literal `seen_from: vec![]` (or `..Default::default()`); in Python,
   `GraspOptions(shell=0.015)`.
 
+- **Breaking:** grasps whose fingers come in narrower than they open, where something stands
+  near: `GraspOptions::narrow` (false by default, which changes nothing). Open fingers beside a
+  wall or a neighbor are in it, though the grasp needs a fraction of the opening. With `narrow`,
+  `grasps_on` takes each finger to slide along the hand's y axis and checks every grasp at
+  sixteenths of `opening`; each `Grasp` comes back with the `opening` that keeps its fingers
+  farthest from what is not the object's, the floor included, which with something within the
+  fingers' travel is the narrowest the hand is clear at: a planner lets the fingers touch what
+  they grasp and nothing else. Of openings as far from all that it takes the one with the most
+  room from the object's other sides, then the widest, so a box with nothing near keeps
+  `GraspOptions::opening`. A hand that is clear narrower is not drawn back. LIBERO's bowl 4 cm
+  from a wall twice as tall is grasped all round so (698 grasps where the open fingers find
+  654), in the time the open hand's check takes. Without `narrow` every grasp's `opening` is
+  the options'. A `GraspOptions` literal needs `narrow: false`; in Python,
+  `GraspOptions(narrow=True)`.
+
 - **Breaking:** a `Follower` can hold an object: `FollowerOptions::holding` takes the `Held` the
   trajectory was planned holding. The rest of the motion, and any stop, is checked with the object
   in the hand, contacts naming it (`"held by hand 0"`), and replans and re-anchors carry it. The
@@ -65,6 +80,15 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   the new field (`holding: None`).
 
 ### Changed
+
+- **Breaking:** a pick's grasps each say where the fingers are: `Pick::locked` is a
+  `Vec<HashMap<String, f32>>`, the locked joints' values per grasp (empty: every grasp as loaded,
+  as before), where it was one map for the task. One pick then takes grasps that come in at
+  different openings, as `grasps_on` gives them with `GraspOptions::narrow`, and plans by any:
+  `pick` groups a call's grasps by those values, a relocked robot for each group, and each plan's
+  `candidate` numbers the pick's grasps and its `held` starts with its grasp's values. A pick
+  that set `locked: narrow` sets `locked: vec![narrow; grasps.len()]`; in Python,
+  `Pick(..., locked=[narrow] * len(grasps))`.
 
 - **Breaking:** a held capsule is covered by spheres along its axis, and a held cylinder that is thin or
   slender (a disc, a rod) by one layer of rings of spheres or one line of them, where that reaches

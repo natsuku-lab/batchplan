@@ -10,8 +10,8 @@ use std::f32::consts::PI;
 use batchplan::rng::Rng;
 use batchplan::{
     CandidateStop, Contact, Device, Error, GraspOptions, HandConstraint, Held, IkOptions,
-    IkProblem, Obstacle, Pick, Place, Pose, Robot, RobotOptions, SdfGrid, TaskFailure, TaskOptions,
-    TaskPlan, TaskStep, ToolPathStop, Touch, Trajectory, World,
+    IkProblem, Obstacle, Pick, Place, Pose, Robot, RobotOptions, SdfGrid, Surface, TaskFailure,
+    TaskOptions, TaskPlan, TaskStep, ToolPathStop, Touch, Trajectory, World,
 };
 use glam::{Mat3, Quat, Vec3};
 
@@ -1964,11 +1964,13 @@ fn malformed_tasks_are_input_errors() {
     assert!(matches!(result, Err(Error::Input(_))), "{result:?}");
 }
 
-/// A pick may keep the fingers narrower than loaded (`Pick::locked`): beside a post 2 cm off the
+/// A grasp may keep the fingers narrower than loaded (`Pick::locked`): beside a post 2 cm off the
 /// box, the open fingers closing along x come down on it and the pick fails, while fingers opened
 /// 1 cm each, where they close on the box, pass between them. In one call with an open pick between
 /// two narrow ones, each narrow pick plans as it does alone on a device for the robot relocked so,
 /// what it leaves held says where the fingers are, and a bad task is named by its place in the call.
+/// One pick whose grasps keep the fingers each their own way plans by each as a pick of that
+/// grasp alone does, its plans numbered as its grasps are.
 #[test]
 fn a_pick_keeps_the_fingers_as_narrow_as_it_says() {
     let robot = panda();
@@ -1982,7 +1984,7 @@ fn a_pick_keeps_the_fingers_as_narrow_as_it_says() {
     let o = TaskOptions::default();
     let open = pick_from(&robot, vec![top()]);
     let narrowed = Pick {
-        locked: narrow.clone(),
+        locked: vec![narrow.clone()],
         ..open.clone()
     };
     let calls = [narrowed.clone(), open.clone(), narrowed.clone()];
@@ -2019,8 +2021,53 @@ fn a_pick_keeps_the_fingers_as_narrow_as_it_says() {
             "held says where the fingers are"
         );
     }
+    // The same grasp three times, the fingers narrow for the second alone: the one plan is its.
+    let mixed = Pick {
+        grasps: vec![top(); 3],
+        locked: vec![Default::default(), narrow.clone(), Default::default()],
+        ..open.clone()
+    };
+    let each = batchplan::pick(&device, &worlds, &[open.clone(), mixed.clone()], &o).unwrap();
+    let by_one = each.outcomes[1].as_ref().expect("the narrow grasp plans");
+    assert_eq!(by_one.len(), plans.len());
+    for (a, b) in by_one.iter().zip(plans) {
+        assert_eq!(a.candidate, 1, "numbered as the pick's grasps are");
+        assert_eq!(a.approach.control_points, b.approach.control_points);
+        assert_eq!(a.depart.control_points, b.depart.control_points);
+        assert_eq!(a.held.as_ref().unwrap().locked, narrow);
+    }
+    // With every grasp's fingers open, each stops where the open pick's one does, in order.
+    let open_thrice = Pick {
+        locked: vec![Default::default(); 3],
+        ..mixed.clone()
+    };
+    let stopped = batchplan::pick(&device, &worlds, &[open_thrice], &o).unwrap();
+    let stopped = stopped.outcomes[0].as_ref().unwrap_err();
+    assert_eq!(stopped.candidates, vec![failure.candidates[0].clone(); 3]);
+    // And where the narrow one is stopped too, by a slab over the box, every grasp's stop comes
+    // in the pick's order: the narrow one's between the open ones'.
+    let covered = device.upload(&[scene(vec![post(), slab(0.1)])]).unwrap();
+    let all = batchplan::pick(&device, &covered, std::slice::from_ref(&mixed), &o).unwrap();
+    let all = all.outcomes[0].as_ref().unwrap_err();
+    let alone = |task: &Pick| {
+        let result = batchplan::pick(&device, &covered, std::slice::from_ref(task), &o).unwrap();
+        result.outcomes[0].as_ref().unwrap_err().candidates[0].clone()
+    };
+    assert_eq!(
+        all.candidates,
+        [alone(&open), alone(&narrowed), alone(&open)]
+    );
+    assert_ne!(all.candidates[0], all.candidates[1]);
+    let uneven = Pick {
+        locked: vec![narrow; 2],
+        ..mixed
+    };
+    match batchplan::pick(&device, &worlds, &[open.clone(), uneven], &o) {
+        Err(Error::Input(message)) => assert!(message.contains("task 1"), "{message}"),
+        other => panic!("locked joints for two grasps of three are refused: {other:?}"),
+    }
     let bad = Pick {
-        locked: [("panda_joint1".to_string(), 0.0)].into(),
+        locked: vec![[("panda_joint1".to_string(), 0.0)].into()],
         ..narrowed.clone()
     };
     match batchplan::pick(&device, &worlds, &[narrowed.clone(), open, bad], &o) {
@@ -2034,5 +2081,126 @@ fn a_pick_keeps_the_fingers_as_narrow_as_it_says() {
     match batchplan::pick(&device, &worlds, &[narrowed.clone(), narrowed, far], &o) {
         Err(Error::Input(message)) => assert!(message.contains("task 2"), "{message}"),
         other => panic!("{other:?}"),
+    }
+}
+
+/// Points 2 mm apart on the top and sides of a box at `at`, as cameras around it would see
+/// them, with the normals out of them: the object's, or what stands beside it.
+fn seen(at: Vec3, half: Vec3, object: bool, s: &mut Surface) {
+    let faces = [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z];
+    for normal in faces {
+        let axis = normal.abs().max_position();
+        let (a, b) = ((axis + 1) % 3, (axis + 2) % 3);
+        let steps = |h: f32| (2.0 * h / 0.002).round() as i32;
+        for i in 0..=steps(half[a]) {
+            for j in 0..=steps(half[b]) {
+                let across = Vec3::AXES[a] * (i as f32 * 0.002 - half[a])
+                    + Vec3::AXES[b] * (j as f32 * 0.002 - half[b]);
+                s.points.push(at + normal * half[axis] + across);
+                s.normals.push(normal);
+                s.object.push(object);
+            }
+        }
+    }
+}
+
+/// Grasps whose fingers come in narrower (`GraspOptions::narrow`) are picked by them: a box too
+/// long to close along stands 3 cm from a wall as tall as it, which the open fingers closing
+/// across it would be in, so seen as it is it has no grasp. With fingers that may come in
+/// narrower it has, each with its opening, the box's width, and one pick whose grasps lock the
+/// fingers there
+/// (`Pick::locked`) plans by them on every device; the same grasps with the fingers as loaded
+/// stop at the wall.
+#[test]
+fn grasps_whose_fingers_come_in_narrower_are_picked_beside_a_wall() {
+    let robot = panda();
+    let half = Vec3::new(0.02, 0.07, 0.03);
+    let at = Vec3::new(0.45, 0.2, half.z);
+    let wall_half = Vec3::new(0.005, 0.09, half.z);
+    let wall_at = at + Vec3::X * (half.x + 0.03 + wall_half.x);
+    const WALL: usize = 2;
+    let world = World::new(vec![
+        Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02)),
+        Obstacle::cuboid(at, half),
+        Obstacle::cuboid(wall_at, wall_half),
+    ]);
+    let mut surface = Surface::default();
+    seen(at, half, /* object */ true, &mut surface);
+    seen(wall_at, wall_half, /* object */ false, &mut surface);
+    let open = GraspOptions {
+        floor: Some(0.005),
+        ..Default::default()
+    };
+    let narrow = GraspOptions {
+        narrow: true,
+        ..open
+    };
+    for device in devices(&robot) {
+        let name = device.name();
+        let on = |o: &GraspOptions| {
+            let found = batchplan::grasps_on(&device, 0, std::slice::from_ref(&surface), o);
+            found.unwrap().remove(0)
+        };
+        assert!(
+            on(&open).is_empty(),
+            "{name}: the open fingers are in the wall"
+        );
+        let found = on(&narrow);
+        assert!(!found.is_empty(), "{name}");
+        // As far from the wall as they can stand: on the box.
+        for g in &found {
+            assert!((g.opening - 2.0 * half.x).abs() < 1e-6, "{name}: {g:?}");
+        }
+        let fingers = |opening: f32| -> std::collections::HashMap<String, f32> {
+            ["panda_finger_joint1", "panda_finger_joint2"]
+                .iter()
+                .map(|joint| (joint.to_string(), opening / 2.0))
+                .collect()
+        };
+        let in_box = Pose::new(at, Quat::IDENTITY).inverse();
+        let task = Pick {
+            support: vec![TABLE],
+            locked: found.iter().map(|g| fingers(g.opening)).collect(),
+            ..Pick::new(
+                0,
+                robot.default_q(),
+                BOX,
+                found.iter().map(|g| in_box.mul_pose(g.pose)).collect(),
+            )
+        };
+        let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
+        let o = TaskOptions::default();
+        let result = batchplan::pick(&device, &worlds, std::slice::from_ref(&task), &o).unwrap();
+        let plans = result.outcomes[0]
+            .as_ref()
+            .unwrap_or_else(|f| panic!("{name}: {f}"));
+        for plan in plans {
+            assert_eq!(
+                plan.held.as_ref().unwrap().locked,
+                task.locked[plan.candidate],
+                "{name}: held as its grasp came in"
+            );
+        }
+        let as_loaded = Pick {
+            locked: vec![],
+            ..task
+        };
+        let result = batchplan::pick(&device, &worlds, &[as_loaded], &o).unwrap();
+        let failure = result.outcomes[0]
+            .as_ref()
+            .expect_err("the open fingers come down on the wall");
+        // Every grasp the hand can reach, and so every one that planned, stops in the wall.
+        let at_wall = |c: &CandidateStop| {
+            let walls =
+                |contact: &Contact| matches!(contact, Contact::World { obstacle: WALL, .. });
+            c.contacts.iter().any(walls)
+        };
+        for (k, stop) in failure.candidates.iter().enumerate() {
+            let reached = !matches!(stop.why, Some(ToolPathStop::Unreachable { .. }));
+            assert!(at_wall(stop) || !reached, "{name}: grasp {k}: {stop:?}");
+        }
+        for plan in plans {
+            assert!(at_wall(&failure.candidates[plan.candidate]), "{name}");
+        }
     }
 }
