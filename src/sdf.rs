@@ -13,6 +13,7 @@
 //! Point clouds, depth images and occupancy maps become grids through an exact distance transform
 //! of their solid voxels, which runs on the [`Device`] the builder is given.
 
+use std::borrow::Cow;
 use std::num::FpCategory;
 
 use glam::{UVec3, Vec3, Vec4};
@@ -24,10 +25,11 @@ use serde::{Deserialize, Serialize};
 use crate::description::TriMesh;
 use crate::device::Device;
 use crate::error::{Error, Result, ensure_input, input};
+use crate::held::Held;
 use crate::robot::Robot;
 use crate::types::Pose;
 use crate::winding::Crossings;
-use crate::world::Distance;
+use crate::world::{Distance, Obstacle};
 
 /// Grids with more points are refused; 2^26 half floats take 128 MiB.
 const MAX_POINTS: u64 = 1 << 26;
@@ -160,8 +162,14 @@ impl DepthImage<'_> {
         self.depth.len() / self.width
     }
 
+    /// Pixel `i`'s depth where it has a reading: positive and finite, which a float is when its
+    /// bits lie between zero's and infinity's. One comparison, in every caller: asked as
+    /// `is_finite() && > 0.0`, the compiler tests the float's class, by a longer way in some
+    /// callers than in others.
+    #[inline(always)]
     fn reading(&self, i: usize) -> Option<f32> {
-        Some(self.depth[i]).filter(|z| z.is_finite() && *z > 0.0)
+        let z = self.depth[i];
+        (z.to_bits().wrapping_sub(1) < f32::INFINITY.to_bits() - 1).then_some(z)
     }
 
     /// The pixel `p` (world frame) projects to, and its depth; `None` behind or beside the camera.
@@ -179,13 +187,12 @@ impl DepthImage<'_> {
             .then(|| (v as usize * self.width + u as usize, c.z))
     }
 
-    /// Pixel `i`'s reading as a world point, unless it reads the robot: at or beyond the robot's
-    /// depth there, within `voxel`.
-    pub(crate) fn point(&self, i: usize, robot: Option<&RobotMask>, voxel: f32) -> Option<Vec3> {
+    /// Pixel `i`'s reading as a world point, unless it is the robot's.
+    pub(crate) fn point(&self, i: usize, robot: Option<&RobotMask>) -> Option<Vec3> {
         let Intrinsics { fx, fy, cx, cy } = self.intrinsics;
         let z = self
             .reading(i)
-            .filter(|&z| z < robot.map_or(f32::INFINITY, |r| r.depth[i]) - voxel)?;
+            .filter(|_| !robot.is_some_and(|r| r.on_robot[i]))?;
         let (u, v) = ((i % self.width) as f32, (i / self.width) as f32);
         Some(
             self.camera.rotation * Vec3::new((u - cx) / fx * z, (v - cy) / fy * z, z)
@@ -193,13 +200,24 @@ impl DepthImage<'_> {
         )
     }
 
+    /// Each pixel's reading as a point in the frame the camera is posed in, row by row: pixel `i`
+    /// is column `i % width` of row `i / width`, its centre at those whole coordinates. `None`
+    /// where the pixel has no reading, or its reading is the robot's (`robot`, this image's mask).
+    pub fn points(&self, robot: Option<&RobotMask>) -> Result<Vec<Option<Vec3>>> {
+        self.check_with(robot)?;
+        let image = self.rigid();
+        let pixels = 0..self.depth.len();
+        Ok(pixels.map(|i| image.point(i, robot)).collect())
+    }
+
     /// What the image says about the point `p` of a grid with `voxel` spacing, with the space the
-    /// robot fills free. `classify` in grids.wgsl mirrors it. `BAND` compiles in the test for
-    /// points within `band` behind a reading (`Seen::Near`); `MASK` keeps the robot's checks out
-    /// of images without a mask.
+    /// robot fills free: `inside` says whether `p` is in it ([`RobotMask::inside`]). `classify` in
+    /// grids.wgsl mirrors it. `BAND` compiles in the test for points within `band` behind a
+    /// reading (`Seen::Near`); `MASK` keeps the robot's checks out of images without a mask.
     fn classify<const BAND: bool, const MASK: bool>(
         &self,
         robot: Option<&RobotMask>,
+        inside: bool,
         p: Vec3,
         voxel: f32,
         band: f32,
@@ -211,11 +229,7 @@ impl DepthImage<'_> {
             self.sees_without_band(robot, p, voxel)
         };
         match seen {
-            Seen::Near | Seen::Hidden | Seen::Shadow | Seen::Unseen
-                if robot.is_some_and(|r| r.contains(p)) =>
-            {
-                Seen::Free
-            }
+            Seen::Near | Seen::Hidden | Seen::Shadow | Seen::Unseen if MASK && inside => Seen::Free,
             seen => seen,
         }
     }
@@ -242,10 +256,9 @@ impl DepthImage<'_> {
         let Some(z) = self.reading(i) else {
             return Seen::Unseen;
         };
-        let robot_at = robot.map_or(f32::INFINITY, |r| r.depth[i]);
-        if MASK && z >= robot_at - voxel {
+        if MASK && robot.is_some_and(|r| r.on_robot[i]) {
             // The pixel sees the robot.
-            if z_voxel < robot_at - half {
+            if z_voxel < z - half {
                 Seen::Free
             } else {
                 Seen::Shadow
@@ -265,7 +278,7 @@ impl DepthImage<'_> {
     pub(crate) fn check_with(&self, robot: Option<&RobotMask>) -> Result<()> {
         self.check()?;
         if let Some(r) = robot {
-            let n = r.depth.len();
+            let n = r.on_robot.len();
             ensure_input!(
                 n == self.depth.len(),
                 "a robot mask of {n} pixels for an image of {}",
@@ -275,15 +288,26 @@ impl DepthImage<'_> {
         Ok(())
     }
 
-    /// Where `robot` is in this image at configuration `q`, its collision spheres grown by
-    /// `padding`. Pass it to [`SdfGrid::from_depth`] or [`OccupancyMap::integrate`]: readings of
-    /// the robot are then not obstacles, and the space it fills is free, so it is not an obstacle
-    /// to itself even where it hides space that counts as solid. Grids from depth images grow
-    /// toward collision by about three voxels; pad by more, or the robot's surface reads as
-    /// touching the space it hides.
-    pub fn robot_mask(&self, robot: &Robot, q: &[f32], padding: f32) -> Result<RobotMask> {
+    /// Which of this image's readings are of `robot` at configuration `q`, or of what it holds:
+    /// those whose points lie inside its collision spheres grown by `padding`, or within `padding`
+    /// of an object of `holding` where its hand holds it (the fingers as each `Held` locks them).
+    /// Pass it to [`SdfGrid::from_depth`] or [`OccupancyMap::integrate`]: readings of the robot
+    /// are then not obstacles, and the space it fills is free, so it is not an obstacle to itself
+    /// even where it hides space that counts as solid. A reading past the robot is the world's,
+    /// however near the robot its ray went: a camera the hand carries stands inside or beside the
+    /// hand's grown spheres and keeps what it sees. Grids from depth images grow toward collision
+    /// by about three voxels; pad by more, or the robot's surface reads as touching the space it
+    /// hides.
+    pub fn robot_mask(
+        &self,
+        robot: &Robot,
+        q: &[f32],
+        padding: f32,
+        holding: &[Held],
+    ) -> Result<RobotMask> {
         self.check()?;
-        let to_camera = self.rigid().camera.rotation.inverse();
+        let camera = self.rigid().camera;
+        let to_camera = camera.rotation.inverse();
         ensure_input!(
             q.len() == robot.dof(),
             "q has {} values, the robot {} joints",
@@ -294,32 +318,59 @@ impl DepthImage<'_> {
             padding.is_finite() && padding >= 0.0,
             "the padding must not be negative, got {padding}"
         );
-        let Intrinsics { fx, fy, cx, cy } = self.intrinsics;
-        let (width, height) = (self.width, self.height());
+        let mut robot = Cow::Borrowed(robot);
+        for held in holding {
+            held.check_on(&robot, "a robot mask")?;
+            if !held.locked.is_empty() {
+                robot = Cow::Owned(robot.relock(&held.locked)?);
+            }
+        }
         let fk = robot.fk(q);
-        let grown: Vec<Vec4> = robot
+        let spheres: Vec<Vec4> = robot
             .spheres
             .iter()
             .map(|s| (fk.rot[s.link] * s.center + fk.pos[s.link]).extend(s.radius + padding))
             .collect();
-        // Each sphere in the camera's frame, and the pixels it can cover: the projections of its
-        // bounding box's sides at its near and far depths. The whole image when the camera is
-        // inside or next to it.
-        let spheres: Vec<_> = grown
-            .iter()
-            .filter_map(|sphere| {
-                let (center, r) = (
-                    to_camera * (sphere.truncate() - self.camera.position),
-                    sphere.w,
-                );
-                let (near, far) = (center.z - r, center.z + r);
-                if far <= 0.0 {
+        let held = holding.iter().map(|held| {
+            let pose = robot
+                .ee_pose(q, held.hand)
+                .mul_pose(held.grasp.rigid().inverse());
+            held.object.placed(pose)
+        });
+        let mask = RobotMask {
+            on_robot: vec![],
+            spheres,
+            held: held.collect(),
+            padding,
+        };
+        let Intrinsics { fx, fy, cx, cy } = self.intrinsics;
+        let (width, height) = (self.width, self.height());
+        // Each ball in the camera's frame.
+        let balls: Vec<(Vec3, f32)> = (mask.balls())
+            .map(|ball| (to_camera * (ball.truncate() - camera.position), ball.w))
+            .collect();
+        // The nearest reading bounds the pixels of a ball that reaches to the camera or behind
+        // it, as the hand's do for a camera it carries; a camera clear of every ball needs none.
+        let nearest = if balls.iter().any(|(center, r)| center.z - r <= 0.0) {
+            let rows = self.depth.par_chunks(width);
+            rows.map(|row| {
+                let readings = row.iter().filter(|z| z.is_finite() && **z > 0.0);
+                readings.fold(f32::INFINITY, |least, &z| least.min(z))
+            })
+            .reduce(|| f32::INFINITY, f32::min)
+        } else {
+            0.0
+        };
+        // The pixels whose readings can lie in each ball: the projections of its bounding box's
+        // sides at the least and the greatest depth a reading in it has. None where every
+        // reading is farther than the ball.
+        let balls: Vec<_> = (balls.into_iter().enumerate())
+            .filter_map(|(k, (center, r))| {
+                let (near, far) = ((center.z - r).max(nearest), center.z + r);
+                if far <= near {
                     return None;
                 }
                 let span = |c: f32, f: f32, k: f32, n: usize| {
-                    if near <= 1e-3 {
-                        return 0..n;
-                    }
                     let ends = [(c - r) / near, (c - r) / far, (c + r) / near, (c + r) / far]
                         .map(|x| f * x + k);
                     let lo = ends
@@ -330,60 +381,150 @@ impl DepthImage<'_> {
                     let hi = ends.iter().fold(f32::NEG_INFINITY, |m, &e| m.max(e)).ceil() + 1.0;
                     lo.min(n as f32) as usize..hi.clamp(0.0, n as f32) as usize
                 };
-                Some((
-                    center,
-                    r,
+                let (us, vs) = (
                     span(center.x, fx, cx, width),
                     span(center.y, fy, cy, height),
-                ))
+                );
+                Some((k, center, r, us, vs))
             })
             .collect();
-        let mut out = vec![f32::INFINITY; self.depth.len()];
-        out.par_chunks_mut(width).enumerate().for_each(|(v, row)| {
-            for (center, r, us, vs) in &spheres {
+        let mut on_robot = vec![false; self.depth.len()];
+        let rows = on_robot.par_chunks_mut(width).enumerate();
+        rows.for_each(|(v, row)| {
+            for (k, center, r, us, vs) in &balls {
                 if !vs.contains(&v) {
                     continue;
                 }
                 for u in us.clone() {
-                    // Points t * ray along the pixel; their depth is t.
-                    let ray = Vec3::new((u as f32 - cx) / fx, (v as f32 - cy) / fy, 1.0);
-                    let (a, b, c) = (
-                        ray.length_squared(),
-                        ray.dot(*center),
-                        center.length_squared() - r * r,
-                    );
-                    let disc = b * b - a * c;
-                    if disc < 0.0 {
+                    let Some(z) = self.reading(v * width + u).filter(|_| !row[u]) else {
                         continue;
-                    }
-                    let t = ((b - disc.sqrt()) / a).max(0.0);
-                    row[u] = row[u].min(t);
+                    };
+                    // The reading in the camera's frame.
+                    let p = Vec3::new((u as f32 - cx) / fx * z, (v as f32 - cy) / fy * z, z);
+                    row[u] = (p - *center).length_squared() < r * r
+                        && mask.holds(*k, camera.rotation * p + camera.position);
                 }
             }
         });
-        Ok(RobotMask {
-            depth: out,
-            spheres: grown,
-        })
+        Ok(RobotMask { on_robot, ..mask })
     }
 }
 
-/// Where a robot is in one depth image ([`DepthImage::robot_mask`]).
+/// Which of one depth image's readings are a robot's ([`DepthImage::robot_mask`]).
 #[derive(Clone, Debug)]
 pub struct RobotMask {
-    /// Each pixel's depth to the robot's grown spheres; infinite where the ray misses them.
-    pub depth: Vec<f32>,
+    /// Per pixel, whether its reading is of the robot or of what it holds: its point lies inside
+    /// one of the robot's grown spheres, or within the padding of a held object. False where the
+    /// pixel has no reading.
+    pub on_robot: Vec<bool>,
     /// The grown spheres in the image's frame: centre and radius.
-    pub(crate) spheres: Vec<Vec4>,
+    spheres: Vec<Vec4>,
+    /// What the robot holds, in the image's frame.
+    held: Vec<Obstacle>,
+    /// How far from a held object a point is its.
+    padding: f32,
 }
 
 impl RobotMask {
-    /// Whether `p` is inside the robot (`inside_robot` in grids.wgsl).
-    fn contains(&self, p: Vec3) -> bool {
-        self.spheres
-            .iter()
-            .any(|s| (p - s.truncate()).length_squared() < s.w * s.w)
+    /// A ball around each sphere and each held object, in that order: the sphere itself, and for
+    /// an object every point within the padding of it.
+    fn balls(&self) -> impl Iterator<Item = Vec4> + '_ {
+        let held = self.held.iter().map(|object| {
+            let reach = match *object {
+                Obstacle::Cuboid { half_extents, .. } => half_extents.length(),
+                Obstacle::Sphere { radius, .. } => radius,
+                Obstacle::Cylinder {
+                    radius,
+                    half_height,
+                    ..
+                } => radius.hypot(half_height),
+                Obstacle::Capsule {
+                    radius,
+                    half_length,
+                    ..
+                } => radius + half_length,
+                // No grid is held (`Held::check_on`).
+                Obstacle::Sdf { .. } => 0.0,
+            };
+            object.pose().position.extend(reach + self.padding)
+        });
+        self.spheres.iter().copied().chain(held)
     }
+
+    /// Whether `p`, a point of ball `k` of `balls`, is the robot's: every point of a sphere's is,
+    /// and of an object's those within the padding of the object.
+    fn holds(&self, k: usize, p: Vec3) -> bool {
+        (k.checked_sub(self.spheres.len()))
+            .is_none_or(|object| self.held[object].distance(p).value < self.padding)
+    }
+
+    /// Which points of `grid` are inside the robot, in one of the grown spheres or within the
+    /// padding of what it holds: a bit per point, x fastest, the first the lowest of the first
+    /// word ([`set`] reads one). Each ball marks the points it holds among those of its box, a
+    /// slab of the grid at a time, so the cost goes by the balls' volumes and not by the grid's
+    /// points times the spheres: a robot fitted with several hundred costs a map's update what
+    /// one of a few dozen does. Both devices read these bits (`inside_robot` in grids.wgsl).
+    pub(crate) fn inside(&self, grid: &Layout) -> Vec<u32> {
+        let [nx, ny, nz] = grid.dims.to_array().map(|d| d as usize);
+        let (origin, voxel) = (grid.origin, grid.voxel);
+        // The points along one axis within `reach` of `center`, and one more to either side: a
+        // point's coordinate is rounded, and so are these.
+        let span = |center: f32, reach: f32, origin: f32, n: usize| {
+            let lo = ((center - reach - origin) / voxel).floor() - 1.0;
+            let hi = ((center + reach - origin) / voxel).ceil() + 1.0;
+            lo.max(0.0) as usize..(hi + 1.0).clamp(0.0, n as f32) as usize
+        };
+        let balls: Vec<Vec4> = self.balls().collect();
+        // Each slab's bits from its own first point on; none for a slab no ball reaches.
+        let slabs: Vec<Vec<u32>> = (0..nz)
+            .into_par_iter()
+            .map(|z| {
+                let height = origin.z + z as f32 * voxel;
+                let mut bits = vec![];
+                for (k, &ball) in balls.iter().enumerate() {
+                    // The disc the slab cuts the ball in, and each row's chord of it.
+                    let across = ball.w * ball.w - (height - ball.z).powi(2);
+                    if across < 0.0 && (height - ball.z).abs() > ball.w + voxel {
+                        continue;
+                    }
+                    bits.resize((nx * ny).div_ceil(32), 0);
+                    let disc = across.max(0.0).sqrt();
+                    for y in span(ball.y, disc, origin.y, ny) {
+                        let along = across - (origin.y + y as f32 * voxel - ball.y).powi(2);
+                        for x in span(ball.x, along.max(0.0).sqrt(), origin.x, nx) {
+                            let n = x + nx * y;
+                            if set(&bits, n) {
+                                continue;
+                            }
+                            let p = grid.point(n + nx * ny * z);
+                            let holds = (p - ball.truncate()).length_squared() < ball.w * ball.w
+                                && self.holds(k, p);
+                            bits[n / 32] |= u32::from(holds) << (n % 32);
+                        }
+                    }
+                }
+                bits
+            })
+            .collect();
+        // Each slab's bits moved to where its points lie among the grid's.
+        let mut inside = vec![0; grid.points().div_ceil(32)];
+        for (z, bits) in slabs.iter().enumerate() {
+            let (word, shift) = (z * nx * ny / 32, z * nx * ny % 32);
+            for (k, &bits) in bits.iter().enumerate().filter(|(_, bits)| **bits != 0) {
+                inside[word + k] |= bits << shift;
+                if shift > 0 && bits >> (32 - shift) != 0 {
+                    inside[word + k + 1] |= bits >> (32 - shift);
+                }
+            }
+        }
+        inside
+    }
+}
+
+/// Whether bit `n` of `bits` is set, the first the lowest of the first word.
+#[inline(always)]
+pub(crate) fn set(bits: &[u32], n: usize) -> bool {
+    bits[n / 32] >> (n % 32) & 1 == 1
 }
 
 /// What a depth image says about a point.
@@ -522,16 +663,20 @@ fn classified<const BAND: bool, const MASK: bool>(
     behind: Occlusion,
     band: f32,
 ) -> Vec<bool> {
+    let inside = robot
+        .filter(|_| MASK)
+        .map_or_else(Vec::new, |r| r.inside(grid));
     (0..grid.points())
         .into_par_iter()
-        .map(
-            |n| match image.classify::<BAND, MASK>(robot, grid.point(n), grid.voxel, band) {
+        .map(|n| {
+            let inside = MASK && set(&inside, n);
+            match image.classify::<BAND, MASK>(robot, inside, grid.point(n), grid.voxel, band) {
                 Seen::Surface | Seen::Near => true,
                 Seen::Hidden => !BAND && behind != Occlusion::Free,
                 Seen::Shadow => behind == Occlusion::Occupied,
                 Seen::Free | Seen::Unseen => false,
-            },
-        )
+            }
+        })
         .collect()
 }
 
@@ -546,7 +691,7 @@ fn hits(
         .into_par_iter()
         .filter_map(|i| {
             image
-                .point(i, robot, grid.voxel)
+                .point(i, robot)
                 .filter(|&p| keep(p))
                 .map(|p| grid.nearest(p))
         })
@@ -580,13 +725,22 @@ fn integrated<const MASK: bool>(
     robot: Option<&RobotMask>,
     hit: Vec<bool>,
 ) {
+    let inside = robot
+        .filter(|_| MASK)
+        .map_or_else(Vec::new, |r| r.inside(grid));
     log_odds
         .par_iter_mut()
         .zip(hit)
         .enumerate()
         .for_each(|(n, (l, hit))| {
             let seen = if MASK {
-                image.classify::<false, true>(robot, grid.point(n), grid.voxel, 0.0)
+                image.classify::<false, true>(
+                    robot,
+                    set(&inside, n),
+                    grid.point(n),
+                    grid.voxel,
+                    0.0,
+                )
             } else {
                 image.sees::<false, false>(None, grid.point(n), grid.voxel, 0.0)
             };
@@ -844,8 +998,8 @@ impl SdfGrid {
     /// reading is free, and space behind observed surfaces is what `behind` says. Each voxel is
     /// classified by projecting its center into the image, so coarse sensors such as 8x8
     /// time-of-flight arrays give solid surfaces, not scattered points. With a [`RobotMask`],
-    /// readings on or behind the robot are not obstacles: space in front of it and the space it
-    /// fills are free, and space behind it is what `behind` says.
+    /// the readings it marks as the robot's are not obstacles: space in front of them and the
+    /// space the robot fills are free, and space behind them is what `behind` says.
     pub fn from_depth(
         device: &Device,
         image: &DepthImage,
@@ -858,7 +1012,7 @@ impl SdfGrid {
         let image = &image.rigid();
         let (lo, hi) = (0..image.depth.len())
             .into_par_iter()
-            .filter_map(|i| image.point(i, robot, o.voxel))
+            .filter_map(|i| image.point(i, robot))
             .fold(
                 || (Vec3::INFINITY, Vec3::NEG_INFINITY),
                 |(lo, hi), p| (lo.min(p), hi.max(p)),
@@ -1441,6 +1595,92 @@ mod tests {
         );
     }
 
+    /// The points a mask marks ball by ball are those of asking every ball about every point: of
+    /// spheres inside the grid, across its faces and outside it, and of a held shape of every
+    /// kind, on a grid whose points do not lie on whole centimeters.
+    #[test]
+    fn the_points_a_mask_marks_inside_are_every_balls() {
+        let mut rng = crate::rng::Rng::new(5);
+        let grid = Layout {
+            dims: UVec3::new(41, 33, 27),
+            origin: Vec3::new(-0.2013, 0.0507, 0.3001),
+            voxel: 0.0125,
+        };
+        let top = grid.point(grid.points() - 1);
+        let spheres: Vec<Vec4> = (0..60)
+            .map(|_| {
+                let mut at = |lo: f32, hi: f32| rng.range(lo - 0.08, hi + 0.08);
+                Vec3::new(
+                    at(grid.origin.x, top.x),
+                    at(grid.origin.y, top.y),
+                    at(grid.origin.z, top.z),
+                )
+                .extend(rng.range(0.004, 0.09))
+            })
+            .collect();
+        // One held shape of each kind, turned, each reaching its farthest from its middle
+        // inside the grid: a ball too small for one would leave such points unmarked.
+        let rotation = Quat::from_rotation_y(0.7) * Quat::from_rotation_z(0.4);
+        let held = vec![
+            Obstacle::Cuboid {
+                center: Vec3::new(-0.1, 0.15, 0.4),
+                half_extents: Vec3::new(0.02, 0.06, 0.03),
+                rotation,
+            },
+            Obstacle::sphere(Vec3::new(0.2, 0.15, 0.4), 0.03),
+            Obstacle::Cylinder {
+                center: Vec3::new(-0.1, 0.35, 0.5),
+                rotation,
+                radius: 0.04,
+                half_height: 0.05,
+            },
+            Obstacle::Capsule {
+                center: Vec3::new(0.2, 0.35, 0.5),
+                rotation,
+                radius: 0.025,
+                half_length: 0.06,
+            },
+        ];
+        let mask = RobotMask {
+            on_robot: vec![],
+            spheres,
+            held,
+            padding: 0.015,
+        };
+        let inside = mask.inside(&grid);
+        assert_eq!(inside.len(), grid.points().div_ceil(32));
+        let (mut in_spheres, mut in_held) = (0, [0; 4]);
+        for n in 0..grid.points() {
+            let (p, flag) = (grid.point(n), set(&inside, n));
+            let sphere =
+                (mask.spheres.iter()).any(|s| (p - s.truncate()).length_squared() < s.w * s.w);
+            let object = (mask.held.iter()).position(|o| o.distance(p).value < mask.padding);
+            assert_eq!(flag, sphere || object.is_some(), "point {n} at {p}");
+            in_spheres += usize::from(sphere);
+            if let Some(object) = object.filter(|_| !sphere) {
+                in_held[object] += 1;
+            }
+        }
+        assert!(
+            in_held.iter().all(|&points| points > 100),
+            "{in_held:?} points in each held shape alone"
+        );
+        let in_held: usize = in_held.iter().sum();
+        let outside = grid.points() - in_spheres - in_held;
+        assert!(
+            in_spheres > 2_000 && outside > 2_000,
+            "{in_spheres} points in spheres, {in_held} in held shapes alone, {outside} in neither"
+        );
+        // Spheres cross every face of the grid, and one lies wholly outside.
+        let crossing =
+            |axis: usize, end: f32| (mask.spheres.iter()).any(|s| (s[axis] - end).abs() < s.w);
+        for axis in 0..3 {
+            assert!(crossing(axis, grid.origin[axis]) && crossing(axis, top[axis]));
+        }
+        let apart = |s: &Vec4| (0..3).any(|a| s[a] + s.w < grid.origin[a] || s[a] - s.w > top[a]);
+        assert!(mask.spheres.iter().any(apart), "a sphere outside the grid");
+    }
+
     /// Classification projects points in floating point, so a point within rounding of a pixel's
     /// edge or of a depth may land either way on different devices; in a dense image, a handful.
     /// Maps show it directly: grids spread each such point over its neighbours' distances.
@@ -1455,18 +1695,44 @@ mod tests {
             Err(e) => panic!("no GPU: {e}"),
         };
         let cpu = Device::cpu(&robot).unwrap();
-        let (depth, intrinsics, camera) = table_image();
+        let (table, intrinsics, camera) = table_image();
+        // The arm's spheres before the table, as a camera that sees the arm reads them.
+        let spheres = robot.spheres(robot.default_q());
+        let depth: Vec<f32> = (0..table.len())
+            .map(|i| {
+                let (u, v) = ((i % 640) as f32, (i / 640) as f32);
+                let ray = camera.rotation
+                    * Vec3::new(
+                        (u - intrinsics.cx) / intrinsics.fx,
+                        (v - intrinsics.cy) / intrinsics.fy,
+                        1.0,
+                    );
+                let hits = spheres.iter().filter_map(|&[x, y, z, r]| {
+                    let from = camera.position - Vec3::new(x, y, z);
+                    let (b, c) = (ray.dot(from), from.length_squared() - r * r);
+                    let disc = b * b - ray.length_squared() * c;
+                    (disc >= 0.0).then(|| (-b - disc.sqrt()) / ray.length_squared())
+                });
+                hits.fold(table[i], f32::min)
+            })
+            .collect();
         let image = DepthImage {
             depth: &depth,
             width: 640,
             intrinsics,
             camera,
         };
-        let mask = image.robot_mask(&robot, robot.default_q(), 0.02).unwrap();
+        let mask = image
+            .robot_mask(&robot, robot.default_q(), 0.02, &[])
+            .unwrap();
         assert!(
-            mask.depth.iter().filter(|d| d.is_finite()).count() > 10_000,
+            mask.on_robot.iter().filter(|&&on| on).count() > 10_000,
             "the camera should see the arm"
         );
+        let table = DepthImage {
+            depth: &table,
+            ..image
+        };
         let grid = layout(
             Vec3::new(-0.6, -0.6, -0.1),
             Vec3::new(0.6, 0.6, 1.0),
@@ -1476,7 +1742,8 @@ mod tests {
             },
         )
         .unwrap();
-        // The image with the arm masked out, then without the mask: the log-odds after each.
+        // The image with the arm masked out, then the table without the arm before it: the
+        // log-odds after each.
         let fused = |device: &Device| {
             let mut log_odds = vec![UNOBSERVED; grid.points()];
             device
@@ -1484,7 +1751,7 @@ mod tests {
                 .unwrap();
             let masked = log_odds.clone();
             device
-                .integrate(&grid, &mut log_odds, &image, None)
+                .integrate(&grid, &mut log_odds, &table, None)
                 .unwrap();
             [masked, log_odds]
         };
@@ -1517,6 +1784,7 @@ mod tests {
         );
         for (a, b) in cpu_fused.iter().zip(&gpu_fused) {
             let differ = a.iter().zip(b).filter(|(a, b)| a != b).count();
+            eprintln!("{}: {differ} of {} log-odds differ", gpu.name(), a.len());
             assert!(
                 differ * 2000 <= a.len(),
                 "{differ} of {} log-odds differ",

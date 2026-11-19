@@ -5,6 +5,7 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
+use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -12,8 +13,8 @@ use std::sync::{Arc, OnceLock};
 use batchplan::datagen::{Demonstration, Origin};
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionWeights, DepthImage, Device, Distance, Error, Intrinsics, JointTrajectory, Obstacle,
-    Occlusion, OccupancyMap, Pose, Robot, SdfGrid, SdfOptions, World,
+    CollisionWeights, DepthImage, Device, Distance, Error, Held, Intrinsics, JointTrajectory,
+    Obstacle, Occlusion, OccupancyMap, Pose, Robot, SdfGrid, SdfOptions, SphereOptions, World,
 };
 use glam::{BVec3, EulerRot, Mat3, Quat, Vec3};
 
@@ -917,9 +918,42 @@ impl TableScene {
     }
 }
 
+/// Per pixel of `image`, the depth at which its ray meets `robot`'s collision spheres at `q`, each
+/// grown by `padding`; infinite where it meets none.
+fn arm_depth(image: &DepthImage, robot: &Robot, q: &[f32], padding: f32) -> Vec<f32> {
+    let k = image.intrinsics;
+    let origin = image.camera.position;
+    let spheres = robot.spheres(q);
+    (0..image.depth.len())
+        .map(|i| {
+            let (u, v) = ((i % image.width) as f32, (i / image.width) as f32);
+            let dir = image.camera.rotation * Vec3::new((u - k.cx) / k.fx, (v - k.cy) / k.fy, 1.0);
+            let hits = spheres.iter().filter_map(|&[x, y, z, r]| {
+                let (from, r) = (origin - Vec3::new(x, y, z), r + padding);
+                let (b, c) = (dir.dot(from), from.length_squared() - r * r);
+                let disc = b * b - dir.length_squared() * c;
+                Some((-b - disc.sqrt()) / dir.length_squared()).filter(|&t| disc >= 0.0 && t > 0.0)
+            });
+            hits.fold(f32::INFINITY, f32::min)
+        })
+        .collect()
+}
+
+/// `image`'s depths with the arm at `q` in front of what it hides: what a camera that sees the
+/// arm reads.
+fn with_arm(image: &DepthImage, robot: &Robot, q: &[f32]) -> Vec<f32> {
+    let arm = arm_depth(image, robot, q, 0.0);
+    image
+        .depth
+        .iter()
+        .zip(arm)
+        .map(|(&d, a)| d.min(a))
+        .collect()
+}
+
 /// A camera's rotation a thousandth off a unit quaternion turns the camera as the unit one does:
 /// the grid of what it sees from 3 m, where a depth 0.2% off is 5 mm, reads the same, and so do a
-/// map the image is fused into and the robot's depths in the image.
+/// map the image is fused into and which of the image's readings are the robot's.
 #[test]
 fn a_camera_turned_by_a_rotation_not_quite_unit_sees_the_same() {
     let o = SdfOptions {
@@ -957,22 +991,33 @@ fn a_camera_turned_by_a_rotation_not_quite_unit_sees_the_same() {
                 )
                 .unwrap();
                 map.integrate(device, &image, None).unwrap();
-                let mask = image.robot_mask(&robot, robot.default_q(), 0.02).unwrap();
-                (grid, map, mask.depth)
+                // The arm as the camera turned by the unit rotation sees it.
+                let unit = DepthImage {
+                    camera: Pose::new(scene.camera.position, turn),
+                    ..image
+                };
+                let arm = with_arm(&unit, &robot, robot.default_q());
+                let image = DepthImage {
+                    depth: &arm,
+                    ..image
+                };
+                let mask = image
+                    .robot_mask(&robot, robot.default_q(), 0.02, &[])
+                    .unwrap();
+                (grid, map, mask.on_robot)
             };
             let (unit, unit_map, unit_mask) = seen(turn);
             let (scaled, scaled_map, scaled_mask) = seen(turn * norm);
-            // The robot's depth in each pixel that sees it: the same but along its outline,
-            // where a ray grazes a sphere and its depth turns on the last place.
+            // Which readings are the robot's: the same but along the grown spheres' outline,
+            // where a reading lies in a sphere's last place.
             let (mut on_robot, mut moved) = (0, 0);
             for (u, s) in unit_mask.iter().zip(&scaled_mask) {
-                on_robot += usize::from(u.is_finite() || s.is_finite());
-                let same = u == s || (u - s).abs() < 2e-4;
-                moved += usize::from(!same);
+                on_robot += usize::from(*u || *s);
+                moved += usize::from(u != s);
             }
             assert!(
                 on_robot > 500 && moved <= on_robot / 100,
-                "norm {norm}: the robot's depth moved in {moved} of its {on_robot} pixels"
+                "norm {norm}: {moved} of the robot's {on_robot} readings changed sides"
             );
             // A grid point's pixel is the one its projection rounds to, so a camera turned in
             // its last place moves some to their neighbours (a GPU's rounding more than the
@@ -1192,7 +1237,7 @@ fn depth_images_become_grids_on(device: &Device) {
         refused(map.integrate(device, &image, None));
         refused(
             image
-                .robot_mask(&robot, robot.default_q(), 0.02)
+                .robot_mask(&robot, robot.default_q(), 0.02, &[])
                 .map(|_| ()),
         );
     }
@@ -1551,8 +1596,12 @@ fn fused_maps_on(device: &Device) {
     // Where the arm hides the table, the band leaves what only the robot hides free, as images
     // do, and with it the space just above the table, observed or not.
     let robot = common::panda().unwrap();
-    let image = scene.image(&without, 640, vga);
-    let mask = image.robot_mask(&robot, robot.default_q(), 0.02).unwrap();
+    let table = scene.image(&without, 640, vga);
+    let arm = with_arm(&table, &robot, robot.default_q());
+    let image = scene.image(&arm, 640, vga);
+    let mask = image
+        .robot_mask(&robot, robot.default_q(), 0.02, &[])
+        .unwrap();
     let mut masked =
         OccupancyMap::try_new(Vec3::new(-0.3, -0.3, -0.1), Vec3::new(0.3, 0.3, 0.3), 0.01).unwrap();
     masked.integrate(device, &image, Some(&mask)).unwrap();
@@ -1579,7 +1628,7 @@ fn fused_maps_on(device: &Device) {
         .filter(|&&p| masked.occupancy(p).is_none())
         .map(|&p| p - Vec3::new(0.0, 0.0, 0.04))
         .collect();
-    let images = [(image, Some(&mask)), (image, None)];
+    let images = [(image, Some(&mask)), (table, None)];
     for order in [[0, 1], [1, 0]] {
         let mut map =
             OccupancyMap::try_new(Vec3::new(-0.3, -0.3, -0.1), Vec3::new(0.3, 0.3, 0.3), 0.01)
@@ -1707,9 +1756,10 @@ fn robot_masking_on(device: &Device) {
         "the arm should read as an obstacle"
     );
     // Masked, its space is free while the box in front of it stays.
-    let mask = image.robot_mask(&robot, &q, 0.02).unwrap();
+    let mask = image.robot_mask(&robot, &q, 0.02, &[]).unwrap();
+    let arm = arm_depth(&image, &robot, &q, 0.0);
     let hidden = (0..depth.len())
-        .filter(|&i| depth[i] > 0.0 && depth[i] < mask.depth[i] - 0.1)
+        .filter(|&i| depth[i] > 0.0 && depth[i] < arm[i] - 0.1)
         .count();
     assert!(
         hidden > 1000,
@@ -1742,7 +1792,7 @@ fn robot_masking_on(device: &Device) {
 
     // Where hidden space is solid, the arm still reads free, since nothing else can be where it
     // is, while what it hides stays solid. The mask is padded past the grid's growth.
-    let mask = image.robot_mask(&robot, &q, 0.04).unwrap();
+    let mask = image.robot_mask(&robot, &q, 0.04, &[]).unwrap();
     let pixel = |p: Vec3| {
         let c = camera.rotation.inverse() * (p - camera.position);
         let (u, v) = (
@@ -1755,8 +1805,15 @@ fn robot_masking_on(device: &Device) {
         .iter()
         .map(|&(c, r)| c + (c - camera.position).normalize() * (r + 0.06))
         .filter(|&p| p.x > wall + 0.1 && spheres.iter().all(|&(c, r)| p.distance(c) > r + 0.06))
-        .find(|&p| depth[pixel(p)] >= mask.depth[pixel(p)] - 0.01)
+        .find(|&p| mask.on_robot[pixel(p)])
         .expect("a point only the arm hides");
+    // And a point as far before the arm, along a pixel that reads the arm: seen past, so free.
+    let before = spheres
+        .iter()
+        .map(|&(c, r)| c - (c - camera.position).normalize() * (r + 0.06))
+        .filter(|&p| spheres.iter().all(|&(c, r)| p.distance(c) > r + 0.06))
+        .find(|&p| mask.on_robot[pixel(p)])
+        .expect("a point before the arm");
     let mut map = OccupancyMap::try_new(
         Vec3::new(wall + 0.05, -0.6, 0.0),
         Vec3::new(1.2, 0.6, 1.2),
@@ -1783,7 +1840,15 @@ fn robot_masking_on(device: &Device) {
             grid.distance(shadow).value <= 0.0,
             "{name}: what the arm hides at {shadow} is free"
         );
+        assert!(
+            grid.distance(before).value > 0.0,
+            "{name}: the space before the arm at {before} is solid"
+        );
     }
+    assert!(
+        map.occupancy(before).is_some_and(|o| o < 0.5),
+        "the map has not seen past {before}, before the arm"
+    );
     // Except in the robot's shadow, which is free, while what the box hides stays solid.
     let behind_box = face - Vec3::new(2.0 * box_half.x, 0.0, 0.0);
     let grids = [
@@ -1821,17 +1886,23 @@ fn robot_masking_on(device: &Device) {
             );
         }
     }
-    // A surface 1.5 cm in front of the grown arm: its band reaches into the arm, which still reads
-    // free.
+    // A surface 1.5 cm in front of the grown arm, no reading of it the robot's: its band reaches
+    // into the arm, which still reads free.
+    let grown = arm_depth(&image, &robot, &q, 0.04);
     let front: Vec<f32> = depth
         .iter()
-        .zip(&mask.depth)
+        .zip(&grown)
         .map(|(&d, &m)| if m.is_finite() { d.min(m - 0.015) } else { d })
         .collect();
     let image = DepthImage {
         depth: &front,
         ..image
     };
+    let mask = image.robot_mask(&robot, &q, 0.04, &[]).unwrap();
+    assert!(
+        !mask.on_robot.iter().any(|&on| on),
+        "a surface before the grown arm is not the robot's"
+    );
     let band = Occlusion::Band(0.04);
     let unmasked = SdfGrid::from_depth(device, &image, None, band, &o).unwrap();
     assert!(
@@ -1848,6 +1919,358 @@ fn robot_masking_on(device: &Device) {
     }
 }
 
+/// A pixel has no reading where its depth is zero, negative or not finite: its point is none, and
+/// grids and maps are those of the image with zeros there, on every device.
+#[test]
+fn a_depth_that_is_zero_negative_or_not_finite_is_no_reading() {
+    let scene = TableScene::new();
+    let vga = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
+    let rendered = scene.render(640, 480, vga, true);
+    let none = [0.0, -0.0, -0.3, f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
+    // Every seventh pixel without a reading, each way in turn.
+    let (mut zeroed, mut odd) = (rendered.clone(), rendered.clone());
+    for (k, i) in (0..rendered.len()).step_by(7).enumerate() {
+        (zeroed[i], odd[i]) = (0.0, none[k % none.len()]);
+    }
+    let (zeroed, odd) = (scene.image(&zeroed, 640, vga), scene.image(&odd, 640, vga));
+    let points = odd.points(None).unwrap();
+    for (i, point) in points.iter().enumerate() {
+        assert_eq!(
+            point.is_none(),
+            i % 7 == 0,
+            "pixel {i} reads {}",
+            odd.depth[i]
+        );
+    }
+    assert!(points == zeroed.points(None).unwrap());
+    let robot = common::panda().unwrap();
+    let mask = |image: &DepthImage| image.robot_mask(&robot, robot.default_q(), 0.02, &[]);
+    assert_eq!(
+        mask(&odd).unwrap().on_robot,
+        mask(&zeroed).unwrap().on_robot
+    );
+    let o = SdfOptions {
+        voxel: 0.02,
+        padding: 0.15,
+    };
+    for device in devices() {
+        let seen = |image: &DepthImage| {
+            let grid = SdfGrid::from_depth(device, image, None, Occlusion::Occupied, &o).unwrap();
+            let mut map =
+                OccupancyMap::try_new(Vec3::new(-0.3, -0.3, -0.1), Vec3::new(0.3, 0.3, 0.3), 0.02)
+                    .unwrap();
+            map.integrate(device, image, None).unwrap();
+            (grid, map.grid(device, Occlusion::Free).unwrap())
+        };
+        assert!(seen(&odd) == seen(&zeroed), "{}", device.name());
+    }
+}
+
+/// Per pixel of `image`, the depth at which its ray meets `shape`, by sphere tracing; infinite
+/// where it meets none within 3 m.
+fn shape_depth(image: &DepthImage, shape: &Obstacle) -> Vec<f32> {
+    let k = image.intrinsics;
+    (0..image.depth.len())
+        .map(|i| {
+            let (u, v) = ((i % image.width) as f32, (i / image.width) as f32);
+            let ray = Vec3::new((u - k.cx) / k.fx, (v - k.cy) / k.fy, 1.0);
+            let dir = image.camera.rotation * ray.normalize();
+            let mut t = 0.0;
+            while t < 3.0 {
+                let d = shape.distance(image.camera.position + dir * t).value;
+                if d < 1e-4 {
+                    return t * ray.normalize().z;
+                }
+                t += d;
+            }
+            f32::INFINITY
+        })
+        .collect()
+}
+
+/// A camera on the Panda's palm, 6 cm aside of the fingers and looking along them, stands inside
+/// the hand's spheres once they are grown by the 4 cm a mask is padded with. A reading is the
+/// robot's where its point lies in a grown sphere, not where its ray enters one: the camera keeps
+/// the floor it sees past the hand, and maps and grids hold that floor.
+#[test]
+fn a_camera_the_hand_carries_keeps_what_it_sees_past_the_hand() {
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    let hand = robot.link_pose(&q, "panda_hand").unwrap();
+    let camera = hand.mul_pose(Pose::new(Vec3::new(0.06, 0.0, 0.03), Quat::IDENTITY));
+    let padding = 0.04;
+    let spheres = robot.spheres(&q);
+    let around = |p: Vec3, pad: f32| {
+        (spheres.iter()).any(|&[x, y, z, r]| p.distance(Vec3::new(x, y, z)) < r + pad)
+    };
+    assert!(
+        around(camera.position, padding),
+        "the camera should stand inside a grown sphere"
+    );
+    // A floor square on to the camera, 30 cm ahead, with the arm before it.
+    let k = Intrinsics {
+        fx: 320.0,
+        fy: 320.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
+    let floor = vec![0.3; 640 * 480];
+    let image = DepthImage {
+        depth: &floor,
+        width: 640,
+        intrinsics: k,
+        camera,
+    };
+    let arm = arm_depth(&image, &robot, &q, 0.0);
+    let depth = with_arm(&image, &robot, &q);
+    let image = DepthImage {
+        depth: &depth,
+        ..image
+    };
+    let mask = image.robot_mask(&robot, &q, padding, &[]).unwrap();
+    let points = image.points(None).unwrap();
+    let (mut of_arm, mut of_floor, mut lost) = (0, 0, 0);
+    for i in 0..depth.len() {
+        let p = points[i].expect("every pixel has a reading");
+        if arm[i] < 0.3 {
+            of_arm += 1;
+            assert!(mask.on_robot[i], "pixel {i} reads the arm at {p}");
+        } else {
+            of_floor += 1;
+            lost += usize::from(mask.on_robot[i]);
+            assert_eq!(mask.on_robot[i], around(p, padding), "pixel {i} at {p}");
+        }
+    }
+    assert!(
+        of_arm > 5_000,
+        "the camera sees its fingers: {of_arm} pixels"
+    );
+    assert!(
+        lost * 20 < of_floor,
+        "{lost} of the floor's {of_floor} readings taken for the robot"
+    );
+    // Floor points the camera sees, farther from the robot than a grid grows.
+    let seen: Vec<Vec3> = (0..depth.len())
+        .step_by(997)
+        .filter(|&i| arm[i] >= 0.3 && !around(points[i].unwrap(), 0.1))
+        .map(|i| points[i].unwrap())
+        .collect();
+    assert!(seen.len() > 100, "{} floor points", seen.len());
+    let o = SdfOptions {
+        voxel: 0.01,
+        padding: 0.15,
+    };
+    for device in devices() {
+        let (lo, hi) = (camera.position - 0.5, camera.position + 0.5);
+        let mut map = OccupancyMap::try_new(lo, hi, 0.01).unwrap();
+        map.integrate(device, &image, Some(&mask)).unwrap();
+        let grid = SdfGrid::from_depth(device, &image, Some(&mask), Occlusion::Free, &o).unwrap();
+        for &p in &seen {
+            assert!(
+                map.occupancy(p).is_some_and(|o| o > 0.5),
+                "{}: the map lost the floor at {p}",
+                device.name()
+            );
+            let d = grid.distance(p).value;
+            assert!(d <= 0.0, "{}: {d} on the floor at {p}", device.name());
+        }
+        for &[x, y, z, r] in &spheres {
+            let c = Vec3::new(x, y, z);
+            assert!(map.occupancy(c).is_none_or(|o| o < 0.5), "the hand at {c}");
+            let d = grid.distance(c).value;
+            assert!(d > r, "{}: {d} at the robot's sphere at {c}", device.name());
+        }
+    }
+}
+
+/// What a hand holds is left out as the robot is: its readings are no obstacle and the space it
+/// fills is free, where without it named the box is an obstacle in the hand.
+#[test]
+fn a_mask_leaves_out_what_a_hand_holds() {
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    // A box 6 by 6 by 16 cm, the hand's frame 4 cm over its middle.
+    let held = Held {
+        hand: 0,
+        object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.03, 0.03, 0.08)),
+        grasp: Pose::new(Vec3::new(0.0, 0.0, -0.04), Quat::IDENTITY),
+        locked: Default::default(),
+        spheres: SphereOptions::default(),
+    };
+    let pose = robot.ee_pose(&q, 0).mul_pose(held.grasp.inverse());
+    let object = held.object.placed(pose);
+    let camera = look_at(pose.position + Vec3::new(0.7, 0.5, 0.3), pose.position);
+    // An image whose pixels do not fill whole words of a mask's bits.
+    let k = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 314.5,
+        cy: 234.5,
+    };
+    let far = vec![0.0; 630 * 470];
+    let image = DepthImage {
+        depth: &far,
+        width: 630,
+        intrinsics: k,
+        camera,
+    };
+    let (arm, boxed) = (
+        arm_depth(&image, &robot, &q, 0.0),
+        shape_depth(&image, &object),
+    );
+    // A wall 2 m from the camera behind both.
+    let depth: Vec<f32> = (arm.iter().zip(&boxed))
+        .map(|(a, b)| a.min(*b).min(2.0))
+        .collect();
+    let image = DepthImage {
+        depth: &depth,
+        ..image
+    };
+    let padding = 0.02;
+    let bare = image.robot_mask(&robot, &q, padding, &[]).unwrap();
+    let holding = image
+        .robot_mask(&robot, &q, padding, std::slice::from_ref(&held))
+        .unwrap();
+    let points = image.points(Some(&holding)).unwrap();
+    let spheres = robot.spheres(&q);
+    let by_robot = |p: Vec3| {
+        (spheres.iter()).any(|&[x, y, z, r]| p.distance(Vec3::new(x, y, z)) < r + padding)
+    };
+    let all = image.points(None).unwrap();
+    let (mut of_box, mut apart) = (0, vec![]);
+    for i in 0..depth.len() {
+        let p = all[i].unwrap();
+        assert_eq!(points[i].is_none(), holding.on_robot[i], "pixel {i}");
+        if boxed[i] < arm[i] {
+            of_box += 1;
+            assert!(holding.on_robot[i], "pixel {i} reads the held box at {p}");
+            assert_eq!(bare.on_robot[i], by_robot(p), "pixel {i} at {p}");
+            // The box's readings well clear of the hand's spheres.
+            if !(spheres.iter()).any(|&[x, y, z, r]| p.distance(Vec3::new(x, y, z)) < r + 0.06) {
+                apart.push(p);
+            }
+        } else if arm[i] > 2.0 {
+            assert!(!holding.on_robot[i], "pixel {i} reads the wall at {p}");
+        }
+    }
+    assert!(of_box > 2_000, "the camera sees the box: {of_box} pixels");
+    assert!(apart.len() > 500, "{} readings of the box", apart.len());
+    let o = SdfOptions {
+        voxel: 0.01,
+        padding: 0.15,
+    };
+    for device in devices() {
+        let grids = [(&bare, true), (&holding, false)].map(|(mask, solid)| {
+            let mut map =
+                OccupancyMap::try_new(pose.position - 0.4, pose.position + 0.4, 0.01).unwrap();
+            map.integrate(device, &image, Some(mask)).unwrap();
+            let grid =
+                SdfGrid::from_depth(device, &image, Some(mask), Occlusion::Occupied, &o).unwrap();
+            (map, grid, solid)
+        });
+        for (map, grid, solid) in grids {
+            for &p in apart.iter().step_by(7) {
+                let (seen, d) = (map.occupancy(p), grid.distance(p).value);
+                assert_eq!(
+                    seen.is_some_and(|o| o > 0.5),
+                    solid,
+                    "{}: the map at {p} on the box, the box named: {}",
+                    device.name(),
+                    !solid
+                );
+                assert_eq!(d <= 0.0, solid, "{}: {d} at {p} on the box", device.name());
+            }
+            // Hidden space counts as solid, and the box's middle is hidden by its own faces.
+            let middle = grid.distance(pose.position - pose.rotation * Vec3::Z * 0.05);
+            assert_eq!(middle.value <= 0.0, solid, "{} in the box", middle.value);
+        }
+    }
+    // A robot that holds the object already, and a hand the robot lacks, are refused.
+    let attached = robot.attach(&held.attachment(&robot).unwrap()).unwrap();
+    assert!(matches!(
+        image.robot_mask(&attached, &q, padding, std::slice::from_ref(&held)),
+        Err(Error::Input(_))
+    ));
+    let other = Held { hand: 1, ..held };
+    assert!(matches!(
+        image.robot_mask(&robot, &q, padding, &[other]),
+        Err(Error::Input(_))
+    ));
+}
+
+/// A hold says where the fingers closed (`Held::locked`), and the mask takes the robot so: the
+/// readings of fingers shut on a small object are the robot's, where the fingers as the robot
+/// was loaded, open, leave most of them in as obstacles.
+#[test]
+fn a_mask_holds_the_fingers_where_a_hold_locks_them() {
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    let shut: HashMap<String, f32> = ["panda_finger_joint1", "panda_finger_joint2"]
+        .map(|joint| (joint.to_string(), 0.0))
+        .into();
+    let closed = robot.relock(&shut).unwrap();
+    let open = Held {
+        hand: 0,
+        object: Obstacle::sphere(Vec3::ZERO, 0.005),
+        grasp: Pose::IDENTITY,
+        locked: Default::default(),
+        spheres: SphereOptions::default(),
+    };
+    let held = Held {
+        locked: shut,
+        ..open.clone()
+    };
+    let hand = robot.ee_pose(&q, 0).position;
+    let k = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
+    let far = vec![2.0; 640 * 480];
+    let image = DepthImage {
+        depth: &far,
+        width: 640,
+        intrinsics: k,
+        camera: look_at(hand + Vec3::new(0.5, 0.4, 0.1), hand),
+    };
+    // The arm with its fingers shut, before a wall; and where it would read with them open.
+    let (seen, as_loaded) = (
+        arm_depth(&image, &closed, &q, 0.0),
+        arm_depth(&image, &robot, &q, 0.0),
+    );
+    let depth = with_arm(&image, &closed, &q);
+    let image = DepthImage {
+        depth: &depth,
+        ..image
+    };
+    // Padded by less than the fingers move, so that where they stand shows.
+    let padding = 0.002;
+    let locked = image.robot_mask(&robot, &q, padding, &[held]).unwrap();
+    let loaded = image.robot_mask(&robot, &q, padding, &[open]).unwrap();
+    let (mut moved, mut left_in) = (0, 0);
+    for i in 0..depth.len() {
+        if seen[i].is_finite() {
+            assert!(locked.on_robot[i], "pixel {i} reads the arm");
+        }
+        // A reading of a shut finger where an open one would read elsewhere, or nothing.
+        if seen[i].is_finite() && (seen[i] - as_loaded[i]).abs() > 0.01 {
+            moved += 1;
+            left_in += usize::from(!loaded.on_robot[i]);
+        }
+    }
+    assert!(moved > 300, "the camera sees the fingers: {moved} pixels");
+    assert!(
+        left_in * 2 > moved,
+        "{left_in} of {moved} readings of the shut fingers left in with the fingers open"
+    );
+}
+
 /// The distance transform is exact on every device. (Classifying a depth image's points is
 /// checked where it happens, in `sdf.rs`, and the tests above run every builder on every device.)
 #[test]
@@ -1862,7 +2285,9 @@ fn every_device_builds_the_same_grids_from_occupancy() {
     };
     let depth = scene.render(640, 480, vga, true);
     let image = scene.image(&depth, 640, vga);
-    let mask = image.robot_mask(&robot, robot.default_q(), 0.02).unwrap();
+    let mask = image
+        .robot_mask(&robot, robot.default_q(), 0.02, &[])
+        .unwrap();
     let mut map =
         OccupancyMap::try_new(Vec3::new(-0.3, -0.3, -0.1), Vec3::new(0.3, 0.3, 0.3), 0.01).unwrap();
     map.integrate(cpu(), &image, Some(&mask)).unwrap();

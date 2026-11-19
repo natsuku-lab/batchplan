@@ -143,7 +143,7 @@ shader_struct! {
     /// One step of building a grid (`G` in grids.wgsl). The grid: `origin` (w: the voxel size) and
     /// `nx * ny * nz = points` points. A depth image: the camera's position, the rows of its
     /// rotation's inverse (`to_camera*`) and its columns (`from_camera*`), the intrinsics (fx, fy,
-    /// cx, cy), its size, whether robot depths are given, what hidden space is (`behind`) and how
+    /// cx, cy), its size, whether a robot mask is given, what hidden space is (`behind`) and how
     /// far behind a surface the band reaches (`band`). `map` marks a map update. A transform pass
     /// runs along the `lines` of `axis`.
     GpuGridParams => GridParams {
@@ -152,8 +152,7 @@ shader_struct! {
         from_camera0: Vec4, from_camera1: Vec4, from_camera2: Vec4,
         nx: u32, ny: u32, nz: u32, points: u32,
         axis: u32, lines: u32, width: u32, height: u32,
-        has_robot: u32, behind: u32, map: u32, spheres: u32,
-        band: f32, pad0: u32, pad1: u32, pad2: u32,
+        has_robot: u32, behind: u32, map: u32, band: f32,
     }
 }
 
@@ -1982,7 +1981,7 @@ impl Backend for GpuBackend {
         let points = grid.points();
         let (pixels, robot) = match occupancy {
             Occupancy::Seen { image, robot, .. } => {
-                (image.depth.len(), robot.map_or(0, mask_words))
+                (image.depth.len(), robot.map_or(0, |r| mask_words(r, grid)))
             }
             Occupancy::Given(_) => (0, 0),
         };
@@ -1995,16 +1994,11 @@ impl Backend for GpuBackend {
         );
         let (params, mut steps) = match occupancy {
             Occupancy::Given(occupied) => {
-                let bits: Vec<u32> = occupied
-                    .par_chunks(32)
-                    .map(|word| {
-                        word.iter()
-                            .enumerate()
-                            .fold(0, |w, (b, &o)| w | u32::from(o) << b)
-                    })
-                    .collect();
+                let occupied: Vec<u32> = self
+                    .pool
+                    .install(|| occupied.par_chunks(32).map(bits).collect());
                 self.queue
-                    .write_buffer(bindings[2], 0, bytemuck::cast_slice(&bits));
+                    .write_buffer(bindings[2], 0, bytemuck::cast_slice(&occupied));
                 (grid_params(grid, None, None, Occlusion::Free), vec![])
             }
             Occupancy::Seen {
@@ -2012,7 +2006,7 @@ impl Backend for GpuBackend {
                 robot,
                 behind,
             } => {
-                self.upload_image(&bindings, image, robot);
+                self.upload_image(&bindings, grid, image, robot);
                 let params = grid_params(grid, Some(image), robot, behind);
                 (
                     params,
@@ -2084,10 +2078,10 @@ impl Backend for GpuBackend {
             &self.device,
             grid.points(),
             image.depth.len(),
-            robot.map_or(0, mask_words),
+            robot.map_or(0, |r| mask_words(r, grid)),
             0,
         );
-        self.upload_image(&bindings, image, robot);
+        self.upload_image(&bindings, grid, image, robot);
         let mut words = bytemuck::cast_slice::<i8, u8>(log_odds).to_vec();
         words.resize(log_odds.len().next_multiple_of(4), 0);
         self.queue.write_buffer(bindings[8], 0, &words);
@@ -2118,11 +2112,12 @@ impl GpuBackend {
         Ok(self.grids.get_or_init(|| kernels))
     }
 
-    /// Uploads an image's readings (0 for pixels without one) and its robot mask: depths (huge
-    /// where the robot is not seen), then the grown spheres.
+    /// Uploads an image's readings (0 for pixels without one) and its robot mask: which readings
+    /// are the robot's, then which of `grid`'s points are inside the robot, a bit each.
     fn upload_image(
         &self,
         bindings: &[&wgpu::Buffer; 10],
+        grid: &Layout,
         image: &DepthImage,
         robot: Option<&RobotMask>,
     ) {
@@ -2136,10 +2131,10 @@ impl GpuBackend {
         self.queue
             .write_buffer(bindings[0], 0, bytemuck::cast_slice(&readings));
         if let Some(robot) = robot {
-            let mut words: Vec<f32> = self
-                .pool
-                .install(|| robot.depth.par_iter().map(|&r| r.min(f32::MAX)).collect());
-            words.extend(robot.spheres.iter().flat_map(|s| s.to_array()));
+            // The pixels' flags are packed where they are: a few thousand words take less than
+            // handing them to the pool.
+            let mut words: Vec<u32> = robot.on_robot.chunks(32).map(bits).collect();
+            words.extend(self.pool.install(|| robot.inside(grid)));
             self.queue
                 .write_buffer(bindings[1], 0, bytemuck::cast_slice(&words));
         }
@@ -2190,9 +2185,17 @@ impl GpuBackend {
     }
 }
 
-/// The words of a robot mask in binding 2 of grids.wgsl.
-fn mask_words(robot: &RobotMask) -> usize {
-    robot.depth.len() + 4 * robot.spheres.len()
+/// The words of a robot mask in binding 2 of grids.wgsl, for `grid`.
+fn mask_words(robot: &RobotMask, grid: &Layout) -> usize {
+    robot.on_robot.len().div_ceil(32) + grid.points().div_ceil(32)
+}
+
+/// Up to 32 flags as a word's bits, the first lowest.
+fn bits(flags: &[bool]) -> u32 {
+    flags
+        .iter()
+        .enumerate()
+        .fold(0, |word, (b, &flag)| word | u32::from(flag) << b)
 }
 
 /// The grid kernels' parameters for `grid`, and for an image seen with `robot`'s mask.
@@ -2210,7 +2213,6 @@ fn grid_params(
         nz,
         points: grid.points() as u32,
         has_robot: u32::from(robot.is_some()),
-        spheres: robot.map_or(0, |r| r.spheres.len() as u32),
         behind: match behind {
             Occlusion::Free => 0,
             Occlusion::Occupied => 1,

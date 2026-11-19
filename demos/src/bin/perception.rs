@@ -83,7 +83,7 @@ fn main() -> Result<()> {
             intrinsics,
             camera: *pose,
         };
-        let arm = image.robot_mask(&robot, &q0, 0.04)?;
+        let arm = image.robot_mask(&robot, &q0, 0.04, &[])?;
         map.integrate(&device, &image, Some(&arm))?;
     }
     // Space no camera saw is solid, except where only the robot hid it: no camera sees under the

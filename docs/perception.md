@@ -67,18 +67,18 @@ An `SdfGrid` holds signed distances on a regular grid, stored as half floats and
 
 ## Depth images
 
-A `DepthImage` is one frame: z distances in meters row by row (zero, negative or non-finite where a pixel has no reading), its width, pinhole `Intrinsics`, and the camera's pose (OpenCV axes: x right, y down, z forward). `from_depth` classifies each voxel by projecting its centre into the image, so an 8×8 time-of-flight array gives solid surfaces rather than 64 points. Dense images also mark the voxel of every pixel. Unobserved space is:
+A `DepthImage` is one frame: z distances in meters row by row (zero, negative or non-finite where a pixel has no reading), its width, pinhole `Intrinsics`, and the camera's pose (OpenCV axes: x right, y down, z forward). `image.points(robot_mask)` gives each pixel's reading as a point in the frame the camera is posed in, pixel `i` being column `i % width` of row `i / width` with its centre at those whole coordinates, and `None` where the pixel has no reading or reads the robot (below). `from_depth` classifies each voxel by projecting its centre into the image, so an 8×8 time-of-flight array gives solid surfaces rather than 64 points. Dense images also mark the voxel of every pixel. Unobserved space is:
 - free outside the image and along pixels without a reading;
 - free or solid behind observed surfaces, as `Occlusion` says (`Occlusion::Occupied` is the safe choice for a single view that does not see the robot). `Occlusion::Band(distance)` makes solid only what lies within `distance` behind an observed surface in depth (along the camera's z axis), and space past it free: a drawer pulled out over a table walls in `distance` below what the camera sees of it, not the space under it down to the table. The band grows toward collision as surfaces do, and a band of 0 is `Occlusion::Free`.
 
 ### Masking the robot
 
-A camera that sees the arm would make it an obstacle to itself. `image.robot_mask(&robot, &q, padding)` says where the robot is in the image at configuration `q`, its collision spheres grown by `padding`. With the mask passed to `from_depth` or `OccupancyMap::integrate`:
-- readings on the robot are not obstacles, and anything between the camera and the arm stays one;
-- the space in front of the arm and the space it fills are free, even with `Occlusion::Occupied`: nothing else can be where the robot is;
+A camera that sees the arm would make it an obstacle to itself. `image.robot_mask(&robot, &q, padding, &holding)` says which of the image's readings are the robot's at configuration `q` (`RobotMask::on_robot`, a flag per pixel): those whose points lie inside its collision spheres grown by `padding`, or within `padding` of an object a hand holds. `holding` names those objects, a `Held` each as a problem's `holding` takes one, placed where its hand holds it and with the fingers where it locks them; `&[]` for a robot that holds nothing. With the mask passed to `from_depth`, `OccupancyMap::integrate` or `Surface::from_depth`:
+- readings of the robot and of what it holds are not obstacles, and every other reading stays one, between the camera and the arm or past it. A reading is judged by where its point lies, not by what its ray passed: a camera the hand carries stands inside or beside the hand's grown spheres, and keeps all it sees past the hand;
+- the space in front of the arm and the space it and what it holds fill are free, even with `Occlusion::Occupied`: nothing else can be where the robot is;
 - the space only the arm hides (its shadow) is solid under `Occlusion::Occupied` and free under `Occlusion::OccupiedExceptRobotShadow`, which keeps what other surfaces hide solid. No camera sees behind the arm, so under `Occupied` its shadow walls in the space the arm reaches through next: in the perception demo (`demos/`), with three cameras fused into a map, IK found none of 24 targets. What the shadow holds is unknown either way; `OccupiedExceptRobotShadow` accepts that so the arm can move, and so does `Occlusion::Band`. In maps, a voxel is shadow while only the robot has hidden it: once an image observes it, or hides it behind another surface, it is not shadow again, whatever the order of the images.
 
-Grids from depth images grow toward collision by about three voxels, so set the mask's `padding` above that (4 cm for 1 cm voxels); otherwise the robot's surface touches the space it hides.
+Grids from depth images grow toward collision by about three voxels, so set the mask's `padding` above that (4 cm for 1 cm voxels); otherwise the robot's surface touches the space it hides. The padding is also what covers a sensor's errors at the arm's outline: a pixel that mixes the arm with what lies behind it reads somewhere between the two, and such a reading farther than the padding behind the arm is the world's to the mask.
 
 ## Fused maps
 
@@ -117,7 +117,7 @@ fn main() -> Result<(), Error> {
             intrinsics,
             camera,
         };
-        let mask = image.robot_mask(&robot, &q, 0.04)?; // the arm is not an obstacle
+        let mask = image.robot_mask(&robot, &q, 0.04, &[])?; // the arm is not an obstacle
         map.integrate(&device, &image, Some(&mask))?;
     }
     let grid = map.grid(&device, Occlusion::Occupied)?; // never-seen space is solid
@@ -136,10 +136,10 @@ fn frames() -> Vec<Vec<f32>> {
 
 ## Building grids on the GPU
 
-Point clouds, depth images and maps become grids on the device they are given. On a GPU, everything after the host computes a depth image's bounds runs in compute kernels; the CPU device runs the same steps on its threads.
+Point clouds, depth images and maps become grids on the device they are given. On a GPU, everything after the host computes a depth image's bounds, and with a mask the grid points the robot fills, runs in compute kernels; the CPU device runs the same steps on its threads. Which points the robot fills is found sphere by sphere over the points near each, once for both devices, so a robot fitted with several hundred spheres costs a frame what one of a few dozen does.
 
 - **The distance transform is exact on both devices**: Felzenszwalb and Huttenlocher's separable transform in integers, so GPUs and CPUs build identical grids from the same occupancy.
-- **Classification projects voxel centres in floating point**, so a voxel within rounding of a pixel's edge may land either way: 2 of 600,000 voxels on Metal, 51 on Mesa's RADV, in a 640×480 image with the arm masked out.
+- **Classification projects voxel centres in floating point**, so a voxel within rounding of a pixel's edge may land either way: 70 of 1.67 million voxels on Metal, 51 on Mesa's RADV, for a 640×480 image of a table with the arm before it, masked out.
 
 Median build times for a 640×480 image of a table seen from 1 m:
 
@@ -150,4 +150,26 @@ Median build times for a 640×480 image of a table seen from 1 m:
 | M4 Pro (GPU) | 3.6 ms | 14.8 ms | 1.5 ms | 4.4 ms |
 | M4 Pro (CPU, 14 threads) | 6.4 ms | 36 ms | 2.2 ms | 6.9 ms |
 
-Masking the robot (`robot_mask`) takes 0.5 ms on the M4 Pro.
+`examples/perception.rs` times each call for a 640×480 image that shows the arm: a tabletop seen from across the table, and from a camera on the Panda's palm that looks along its fingers. The mask is padded 4 cm, for the Panda's 61 spheres and for a Panda fitted with 573. Each figure is the quickest median of several runs (twenty on the M4 Pro, eight on the Ryzen and its Radeon) on machines doing other work beside them (a load of 6 to 8 on the M4 Pro's 14 cores, 10 to 32 on the Ryzen's 32); each cell is the camera over the table, then the one on the hand.
+
+The mask, the points and a surface are read on the host:
+
+| | M4 Pro (14 threads) | Ryzen AI Max+ 395 (32 threads) |
+|---|---|---|
+| Which readings are the robot's (`robot_mask`), 61 spheres | 0.07 ms, 0.42 ms | 0.06 ms, 0.41 ms |
+| The same, 573 spheres | 0.20 ms, 1.05 ms | 0.21 ms, 1.12 ms |
+| The image's points (`points`) | 0.66 ms, 0.71 ms | 1.77 ms, 1.97 ms |
+| A surface with the table's normals (`Surface::from_depth`; 148,461 and 208,100 normals) | 3.0 ms, 3.8 ms | 3.4 ms, 3.4 ms |
+
+Fusing and grids run on the device:
+
+| | M4 Pro (CPU, 14 threads) | M4 Pro (GPU) | Ryzen AI Max+ 395 (CPU, 32 threads) | Radeon 8060S (GPU) |
+|---|---|---|---|---|
+| Fusing the image into a 1.8M-voxel map, no mask | 1.8 ms, 1.8 ms | 1.2 ms, 1.2 ms | 4.9 ms, 4.6 ms | 0.8 ms, 0.9 ms |
+| With a mask of 61 spheres | 2.1 ms, 2.1 ms | 1.6 ms, 1.6 ms | 5.4 ms, 5.0 ms | 1.1 ms, 1.4 ms |
+| With a mask of 573 spheres | 2.4 ms, 2.3 ms | 1.7 ms, 1.9 ms | 5.7 ms, 5.5 ms | 1.6 ms, 1.6 ms |
+| A 1 cm grid of the image, no mask (3.1M and 2.1M points) | 14.1 ms, 10.1 ms | 6.4 ms, 5.4 ms | 21 ms, 14.0 ms | 7.4 ms, 5.7 ms |
+| With a mask of 61 spheres (2.3M and 1.6M points) | 11.7 ms, 8.7 ms | 6.0 ms, 5.1 ms | 16.6 ms, 12.6 ms | 6.1 ms, 5.6 ms |
+| With a mask of 573 spheres | 11.5 ms, 8.8 ms | 6.0 ms, 5.4 ms | 16.4 ms, 12.7 ms | 6.4 ms, 5.1 ms |
+
+A mask's cost goes by the pixels the robot covers and, where it is used, by the volume it fills, not by how many spheres cover it.
