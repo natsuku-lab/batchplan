@@ -110,6 +110,16 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   Stout cylinders, and discs the budget cannot bring within the tolerance (a plate at the default
   64), are fitted as before.
 
+### Fixed
+
+- A call that held objects in several hundred ways at once, as a `place` after each of a pick's
+  plans, with more than one candidate for each, overflowed the stack of one of the device's
+  threads and aborted the process: 609 holds of a box with two poses each did so every time. What
+  runs for each hold waits for work it hands the device's threads, and a thread that waits took
+  up another hold's on top of its own, as deep as there were holds. `place`, `pick`'s lift,
+  `handover` and problems with a `holding` now keep as many holds in hand as the device has
+  threads, and a `place` of 64 or 609 holds is 7 to 9% quicker for it.
+
 ## [0.11.0] - 2026-11-14
 
 ### Added

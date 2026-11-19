@@ -2292,3 +2292,57 @@ fn grasps_whose_fingers_come_in_narrower_are_picked_beside_a_wall() {
         }
     }
 }
+
+/// A call that holds objects in many ways has a device for each, and what runs on one waits for
+/// work it hands the device's threads, where a thread that waits takes up another's on top of
+/// its own: all at once, seven hundred ways to hold a box, each set down at either of two
+/// turns, stack a thread's calls deeper than its stack. They are set down in one place of them
+/// all, each as it is alone.
+#[test]
+fn as_many_holds_as_fill_a_stack_at_once_are_placed_in_one_call() {
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let mut after = scene(vec![]);
+    let object = after.remove(BOX).unwrap().placed(Pose::IDENTITY);
+    let worlds = device.upload(&[after]).unwrap();
+    let o = TaskOptions::default();
+    // The box held from above a hair deeper each time: no two ways alike.
+    const WAYS: usize = 700;
+    let to = Pose::new(Vec3::new(0.45, -0.2, HALF.z), Quat::IDENTITY);
+    let places: Vec<Place> = (0..WAYS)
+        .map(|k| {
+            let held = Held {
+                locked: Default::default(),
+                spheres: Default::default(),
+                hand: 0,
+                object: object.clone(),
+                grasp: Pose::new(top().position - Vec3::Z * k as f32 * 8e-6, top().rotation),
+            };
+            Place {
+                support: vec![TABLE],
+                ..Place::new(
+                    0,
+                    robot.default_q(),
+                    held,
+                    batchplan::place_poses(&object, to, 2),
+                )
+            }
+        })
+        .collect();
+    let placed = batchplan::place(&device, &worlds, &places, &o).unwrap();
+    for (k, outcome) in placed.outcomes.iter().enumerate() {
+        let plans = outcome.as_ref().unwrap_or_else(|f| panic!("way {k}: {f}"));
+        assert_eq!(plans.len(), 2, "way {k}: either turn");
+    }
+    let last = &places[WAYS - 1..];
+    let alone = batchplan::place(&device, &worlds, last, &o).unwrap();
+    let (among, alone) = (&placed.outcomes[WAYS - 1], &alone.outcomes[0]);
+    for (a, b) in among.as_ref().unwrap().iter().zip(alone.as_ref().unwrap()) {
+        assert_eq!(a.candidate, b.candidate);
+        assert_eq!(a.approach.control_points, b.approach.control_points);
+        assert_eq!(
+            a.transit.as_ref().unwrap().control_points,
+            b.transit.as_ref().unwrap().control_points
+        );
+    }
+}

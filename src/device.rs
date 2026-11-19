@@ -10,8 +10,8 @@
 use std::any::Any;
 use std::fmt;
 use std::ops::Deref;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rayon::ThreadPool;
@@ -476,6 +476,37 @@ impl Device {
     /// Runs `op` on this device's threads, so that its parallel loops run there too.
     pub(crate) fn install<R: Send>(&self, op: impl FnOnce() -> R + Send) -> R {
         self.backend.pool().install(op)
+    }
+
+    /// Runs `each` on every one of `items` (with its index) on this device's threads, as many
+    /// at a time as it has threads, each thread taking the next as it finishes one, and gives
+    /// what they return, in order. For items that each wait for work they hand these threads,
+    /// as the candidates of each held object do: a thread that waits takes up another item on
+    /// top of its own, so all at once they stack its calls as deep as there are items, and a
+    /// few hundred overflow its stack.
+    pub(crate) fn in_turns<T: Send, R: Send>(
+        &self,
+        items: &mut [T],
+        each: impl Fn(usize, &mut T) -> Result<R> + Sync,
+    ) -> Result<Vec<R>> {
+        let abreast = self.backend.pool().current_num_threads().min(items.len());
+        let rest = Mutex::new(items.iter_mut().enumerate());
+        let next = || {
+            let mut rest = rest.lock().expect("taking the next item cannot panic");
+            rest.next()
+        };
+        let taken = |_| {
+            let mut done = vec![];
+            while let Some((i, item)) = next() {
+                done.push((i, each(i, item)));
+            }
+            done
+        };
+        let done: Vec<Vec<(usize, Result<R>)>> =
+            self.install(|| (0..abreast).into_par_iter().map(taken).collect());
+        let mut done: Vec<(usize, Result<R>)> = done.into_iter().flatten().collect();
+        done.sort_by_key(|(i, _)| *i);
+        done.into_iter().map(|(_, result)| result).collect()
     }
 
     /// Runs every search to its end, or to `deadline` (see `edges`).
