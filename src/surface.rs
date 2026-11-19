@@ -641,11 +641,17 @@ fn narrowed(
         }
     }
     // Marks the openings from `first` to `last` at which a finger's sphere is in something,
-    // until none is left, and says whether none is.
+    // until none is left to mark, and says whether the hand is in something at every one. Of
+    // the openings it has, none is left once it is in something at each; of those past open,
+    // which only place the nearest thing that is not the object's, once that is at each.
     let fingers = |taken: &mut u64, others: &mut u64, first: i32, last: i32| {
         let all = span(first, last);
+        let marked = |taken: u64, others: u64| match first < 0 {
+            true => others & all == all,
+            false => taken & all == all,
+        };
         for sphere in hand.iter().filter(|sphere| sphere.side != 0.0) {
-            if *taken & all == all {
+            if marked(*taken, *others) {
                 break;
             }
             let (from, center) = swept(sphere);
@@ -686,7 +692,7 @@ fn narrowed(
                 if !object {
                     *others |= at;
                 }
-                *taken & all == all
+                marked(*taken, *others)
             });
         }
         *taken & all == all
