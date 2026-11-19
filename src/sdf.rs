@@ -796,7 +796,13 @@ impl SdfGrid {
             let points = 0..dims[axis];
             points.map(|i| origin[axis] + i as f32 * o.voxel).collect()
         };
-        let crossings = Crossings::new(vertices, triangles, &along(1), &along(2));
+        let crossings = Crossings::new(
+            vertices,
+            triangles,
+            &along(1),
+            &along(2),
+            /* parallel */ true,
+        );
         let xs = along(0);
         let mut distances = vec![0.0; dims.element_product() as usize];
         let rows = distances.par_chunks_mut(dims.x as usize).enumerate();

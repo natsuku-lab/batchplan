@@ -2174,10 +2174,6 @@ fn covered(shapes: &[Obstacle], o: &SphereOptions) -> error::Result<Vec<[f32; 4]
         .iter()
         .map(|shape| attached_shape(shape)?.mesh().map_err(|e| input!("{e:#}")))
         .collect::<error::Result<Vec<TriMesh>>>()?;
-    if o.max_overhang.is_some() {
-        spheres::closed(&meshes)
-            .map_err(|e| input!("{shapes:?} cannot hold spheres within `max_overhang`: {e}"))?;
-    }
     let fitted = spheres::fit(
         &[meshes],
         &[o.tolerance],
