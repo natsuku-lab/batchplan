@@ -34,6 +34,13 @@ pub struct RestProblem {
     /// `Quat::from_rotation_x(FRAC_PI_2)`; a place that keeps how the hand holds the object now
     /// passes the object's rotation as it is.
     pub rotation: Quat,
+    /// Where the caller would have it set down, if it rests near there: a point in the surface's
+    /// frame, as the middle of a plate or where an agent pointed; its height is not read. Within
+    /// [`RestOptions::spacing`] of it, seen from above, the object is also set down a cell of
+    /// the support apart, [`RestOptions::touching`] wide, for a rest that the spots lie too far
+    /// apart to find: a flat bottom wider than a dished plate's floor stands evenly on its
+    /// raised ring only within millimeters of the middle. None looks no closer anywhere.
+    pub near: Option<Vec3>,
 }
 
 impl RestProblem {
@@ -44,6 +51,7 @@ impl RestProblem {
             object,
             surface,
             rotation: Quat::IDENTITY,
+            near: None,
         }
     }
 }
@@ -136,7 +144,9 @@ const SPREAD: usize = 1024;
 /// come to rest, so on a slope it needs the `rotation` that lies flat on it. A can or a capsule
 /// laid on its side is the one thing that moves: where it is not held it rolls, up to half the
 /// spots' spacing and `touching` more, to where it lies lowest, as into the cradle between two
-/// bars or down to a lip, and rests there if that holds it. Only the object's rest is checked:
+/// bars or down to a lip, and rests there if that holds it. A rest narrower than the spots are
+/// apart is found where the problem says to look closer ([`RestProblem::near`]). Only the
+/// object's rest is checked:
 /// the hand that sets it down and its way there are [`place`](crate::place)'s to check, with
 /// what the object may touch as its `support`.
 ///
@@ -218,6 +228,12 @@ pub fn rests_on(
             "problem {i}: the rotation must be a finite unit quaternion, got {}",
             p.rotation
         );
+        if let Some(near) = p.near {
+            ensure_input!(
+                near.is_finite(),
+                "problem {i}: the point to rest near must be finite, got {near}"
+            );
+        }
     }
     let each = || {
         // Each surface a problem names, read once, with what lies as far from its support as
@@ -433,39 +449,66 @@ fn on(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Rest> {
         first.push((0..k).find(same).unwrap_or(k));
     }
     let spots = seen.spots;
+    // The spots a cell apart within a spacing of where the caller would have it, after the
+    // rest.
+    let mut closer: Vec<Vec2> = vec![];
+    if let Some(near) = p.near {
+        let cell = seen.field.cell;
+        let reach = (o.spacing / cell).ceil() as i32;
+        for j in -reach..=reach {
+            for i in -reach..=reach {
+                let aside = Vec2::new(i as f32, j as f32) * cell;
+                if aside.length() <= o.spacing {
+                    closer.push(near.truncate() + aside);
+                }
+            }
+        }
+    }
+    let closer = &closer;
     // Each turn's rests in their order, the turns side by side.
     let each = (0..turns.len()).into_par_iter().map(|k| {
         if first[k] != k {
             return vec![];
         }
         let turned = turns[k];
-        let found: Vec<Option<(Rest, bool)>> = (0..spots.count())
+        let found: Vec<Option<(Rest, bool)>> = (0..spots.count() + closer.len())
             .into_par_iter()
             .map_init(Scratch::default, |scratch, k| {
-                setting.rest(turned, spots.at(k, o.spacing), scratch)
+                let over = match k.checked_sub(spots.count()) {
+                    None => spots.at(k, o.spacing),
+                    Some(k) => closer[k],
+                };
+                setting.rest(turned, over, scratch)
             })
             .collect();
-        let any_rolled = found.iter().flatten().any(|f| f.1);
+        let any_alike = !closer.is_empty() || found.iter().flatten().any(|f| f.1);
         let mut kept: Vec<Rest> = Vec::with_capacity(found.len());
-        // Spots to either side of a cradle roll to one place, which comes once: the first, of
-        // two of which either rolled that are within `touching` of each other, or half the
-        // spots' spacing where that is less. Those kept, by the cell that wide they are in, each
-        // with whether it rolled.
+        // Spots to either side of a cradle roll to one place, and a spot set closer may be one
+        // of the others' places: a place comes once, the first of two within `touching` of
+        // each other, or half the spots' spacing where that is less, of which either rolled or
+        // one alone is of the closer spots. Those kept, by the cell that wide they are in, each
+        // with whether it rolled and whether it is of the closer spots.
         let one = o.touching.min(0.5 * o.spacing);
-        let mut cells: HashMap<[i32; 3], Vec<(Vec3, bool)>> = HashMap::new();
-        for (rest, rolled) in found.into_iter().flatten() {
-            if any_rolled {
+        let mut cells: HashMap<[i32; 3], Vec<(Vec3, bool, bool)>> = HashMap::new();
+        for (k, found) in found.into_iter().enumerate() {
+            let Some((rest, rolled)) = found else {
+                continue;
+            };
+            let closer = k >= spots.count();
+            if any_alike {
                 let at = rest.pose.position;
                 let cell = (at / one).floor().as_ivec3();
                 let around =
                     (0..27).map(|n| cell + IVec3::new(n % 3 - 1, n / 3 % 3 - 1, n / 9 - 1));
-                let near =
-                    |&(there, other): &(Vec3, bool)| (rolled || other) && there.distance(at) < one;
+                let same = |&(there, other_rolled, other_closer): &(Vec3, bool, bool)| {
+                    (rolled || other_rolled || closer != other_closer) && there.distance(at) < one
+                };
                 let mut beside = around.filter_map(|c| cells.get(&c.to_array()));
-                if beside.any(|there| there.iter().any(near)) {
+                if beside.any(|there| there.iter().any(same)) {
                     continue;
                 }
-                cells.entry(cell.to_array()).or_default().push((at, rolled));
+                let here = cells.entry(cell.to_array()).or_default();
+                here.push((at, rolled, closer));
             }
             kept.push(rest);
         }

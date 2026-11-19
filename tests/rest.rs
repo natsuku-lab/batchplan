@@ -577,6 +577,87 @@ fn a_ball_rests_on_a_rim_or_three_posts_under_it_and_rolls_off_a_table() {
 }
 
 #[test]
+fn near_where_the_caller_would_have_it_the_spots_are_a_cell_apart() {
+    // A plate 14 cm across, its floor flat out to 5 cm and its rim rising 7 mm from there to
+    // its edge, and a bowl given as a flat cylinder 11 cm across, wider than the floor: it
+    // stands on the rim, evenly all round only within 3 mm of the middle, where the far side
+    // of the ring lies within `touching` under it. The plate's middle is as far from the spots
+    // as a place can be, 7 mm from the four around it: they miss it.
+    let mut plate = Surface::default();
+    for i in -35..=35 {
+        for j in -35..=35 {
+            let at = Vec2::new(i as f32, j as f32) * SPACING;
+            let out = at.length();
+            if out <= 0.07 {
+                let rise = (out - 0.05).max(0.0) * 0.35;
+                plate.points.push(at.extend(rise));
+                plate.normals.push(Vec3::Z);
+                plate.object.push(true);
+            }
+        }
+    }
+    let bowl = Obstacle::cylinder(Vec3::ZERO, 0.055, 0.025);
+    let o = RestOptions::default();
+    let problem = RestProblem::new(bowl, 0);
+    let rests = |p: &RestProblem, s: &Surface| {
+        rests_on(
+            &device(),
+            std::slice::from_ref(p),
+            std::slice::from_ref(s),
+            &o,
+        )
+        .unwrap()
+        .remove(0)
+    };
+    let from_the_middle = |r: &Rest| r.pose.position.truncate().length();
+    let plain = rests(&problem, &plate);
+    assert!(plain.iter().all(|r| from_the_middle(r) > 0.01));
+    // Told to look near the middle, it finds the bowl there, at every turn, standing on the
+    // ring all round; and every rest it had without.
+    let near = RestProblem {
+        near: Some(Vec3::new(0.0, 0.0, 0.3)),
+        ..problem.clone()
+    };
+    let found = rests(&near, &plate);
+    let middle: Vec<&Rest> = found
+        .iter()
+        .filter(|r| from_the_middle(r) < 0.003)
+        .collect();
+    assert!(middle.len() >= 8, "{}", middle.len());
+    for r in &middle {
+        assert!(r.tipping > 20f32.to_radians(), "{r:?}");
+        let around = |c: &Vec3| c.y.atan2(c.x);
+        let mut angles: Vec<f32> = r.support.iter().map(around).collect();
+        angles.sort_by(f32::total_cmp);
+        let gaps = (0..angles.len()).map(|k| {
+            let next = angles[(k + 1) % angles.len()];
+            (next - angles[k]).rem_euclid(TAU)
+        });
+        assert!(gaps.fold(0.0, f32::max) < FRAC_PI_2, "{r:?}");
+    }
+    for r in &plain {
+        assert!(found.contains(r), "lost: {r:?}");
+    }
+    // Near a point off the plate nothing more is tried, and on a table, where the spots find
+    // every place already, a place a spot and a closer spot both give comes once.
+    let off = RestProblem {
+        near: Some(Vec3::new(0.5, 0.5, 0.0)),
+        ..problem
+    };
+    assert_eq!(rests(&off, &plate), plain);
+    let on_a_spot = RestProblem {
+        near: Some(Vec3::new(0.005, 0.005, 0.0)),
+        ..RestProblem::new(a_box(), 0)
+    };
+    let closer = rests(&on_a_spot, &table());
+    let there = |r: &&Rest| r.pose.position.truncate().distance(Vec2::splat(0.005)) < 1e-4;
+    assert_eq!(closer.iter().filter(there).count(), 8);
+    // A cell apart around it: the 2 mm either side of the spot, between it and the next.
+    let beside = |r: &&Rest| r.pose.position.truncate().distance(Vec2::new(0.007, 0.005)) < 1e-4;
+    assert_eq!(closer.iter().filter(beside).count(), 8);
+}
+
+#[test]
 fn an_object_hangs_past_an_edge_only_as_far_as_it_stands() {
     // Tipping 5 degrees about the edge before falling, the box's middle stays 2.2 mm in from it;
     // asked to tip 20 degrees, 9.1 mm. The table's side is seen too, and nothing that rests is
@@ -1037,6 +1118,10 @@ fn rests_do_not_depend_on_the_threads_the_batch_or_the_device() {
         turned(&can, 4, Quat::IDENTITY),
         turned(&can, 1, Quat::from_rotation_x(FRAC_PI_2)),
         turned(&tile, 0, Quat::from_rotation_z(0.3)),
+        RestProblem {
+            near: Some(Vec3::new(-0.081, 0.062, 0.5)),
+            ..RestProblem::new(a_box(), 0)
+        },
     ];
     let one = Device::cpu_threads(&robot, 1).unwrap();
     let alone: Vec<Vec<Rest>> = problems
@@ -1053,6 +1138,7 @@ fn rests_do_not_depend_on_the_threads_the_batch_or_the_device() {
     assert!(alone[0].len() > 100 && !alone[1].is_empty() && alone[2].is_empty());
     assert!(!alone[3].is_empty() && !alone[4].is_empty());
     assert!(!alone[5].is_empty() && !alone[6].is_empty());
+    assert!(alone[7].len() > alone[0].len());
     let mut devices = vec![one, Device::cpu(&robot).unwrap()];
     match Device::gpu(&robot) {
         Ok(gpu) => devices.push(gpu),
@@ -1120,6 +1206,11 @@ fn malformed_input_is_an_input_error() {
         ..a.clone()
     };
     assert!(refused(&turned, &good, &o).is_some());
+    let nowhere_near = RestProblem {
+        near: Some(Vec3::new(0.0, f32::NAN, 0.0)),
+        ..a.clone()
+    };
+    assert!(refused(&nowhere_near, &good, &o).is_some_and(|why| why.starts_with("problem 0")));
     // Malformed surfaces.
     let mut short = good.clone();
     short.normals.pop();
