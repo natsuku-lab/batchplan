@@ -548,7 +548,7 @@ fn held_shapes_keep_within_a_limit_on_overhang() {
             };
             let refused = robot.attach(&held).map(|_| ());
             assert!(
-                matches!(&refused, Err(Error::Input(m)) if m.contains("both ways") && m.contains("no inside")),
+                matches!(&refused, Err(Error::Input(m)) if m.starts_with("'box': [C") && m.contains("both ways")),
                 "{shape:?}: {refused:?}"
             );
             // Without a limit they are covered, as before.

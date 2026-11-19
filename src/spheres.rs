@@ -55,7 +55,7 @@ pub struct SphereOptions {
     /// reports how deep as each link's `gap`. The geometry must be closed, and a collision model
     /// given with the options is held to it as a fitted one is. Depths are measured in the
     /// geometry as the fit sees it, a round shape as its mesh of 24 sides, which lies inside it by
-    /// up to 0.9% of a cylinder's or a capsule's radius and 1.7% of a ball's; a held shape covered
+    /// up to 0.9% of a cylinder's radius and 1.7% of a ball's or a capsule's; a held shape covered
     /// without fitting is held to the shape itself, so `qualify` reads that much more for it.
     /// `None`: spheres cover the surface and reach as far past it as the budget makes them.
     pub max_overhang: Option<f32>,
@@ -234,7 +234,8 @@ fn inscribed(solids: &[ParryMesh], p: Vec3) -> Option<(Vec3, f32)> {
         .map(|r| (p, r))
 }
 
-/// `meshes` as parry tests points against them, without those it cannot build.
+/// `meshes` as parry tests points against them, without those it cannot build, as
+/// [`LinkFit::new`] builds its own.
 fn solids(meshes: &[TriMesh]) -> Arc<[ParryMesh]> {
     let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
         | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
@@ -246,12 +247,13 @@ fn solids(meshes: &[TriMesh]) -> Arc<[ParryMesh]> {
 }
 
 /// Why spheres cannot be held within a distance of `meshes` ([`SphereOptions::max_overhang`]), if
-/// they cannot: a mesh that is not closed has no inside for a sphere's depth to be measured in.
-/// Closed: every edge borders as many triangles facing one way along it as the other, and no
-/// face is given both ways, once vertices at one place are merged, triangles that name a vertex
-/// twice are dropped and a triangle given twice the same way is read once. A face given both
-/// ways, as where two shells share one or a sheet has two sides, leaves the nearest face without
-/// a side to tell.
+/// they cannot: a sphere's depth is measured by the side of the nearest face, which tells inside
+/// from outside only for closed shells that face outward and give each face once. So, once
+/// vertices at one place are merged and triangles that name a vertex twice are dropped, a mesh
+/// is refused that gives a face again, the same way or the other (as where two shells share one,
+/// or a sheet has two sides); that has an edge bordering unlike counts of triangles each way; or
+/// that has a shell facing inward, a cavity's among them, which the meshes' own orientation
+/// (`TriMesh::orient_outward`, by their whole volume) leaves as it is.
 pub(crate) fn closed(meshes: &[TriMesh]) -> Result<(), String> {
     let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES;
     for (k, mesh) in meshes.iter().enumerate() {
@@ -268,35 +270,59 @@ pub(crate) fn closed(meshes: &[TriMesh]) -> Result<(), String> {
                 [c, a, b]
             }
         };
-        let faces: BTreeSet<[u32; 3]> = solid.indices().iter().map(from_lowest).collect();
+        let mut faces: Vec<[u32; 3]> = solid.indices().iter().map(from_lowest).collect();
         if faces.is_empty() {
             return Err(format!("{of} has no surface"));
         }
-        let both_ways = faces
-            .iter()
-            .filter(|&&[a, b, c]| faces.contains(&[a, c, b]));
-        let both_ways = both_ways.count() / 2;
-        if both_ways > 0 {
+        faces.sort_unstable();
+        let again = faces.windows(2).filter(|pair| pair[0] == pair[1]).count();
+        let reversed = |&&[a, b, c]: &&[u32; 3]| faces.binary_search(&[a, c, b]).is_ok();
+        let both_ways = faces.iter().filter(reversed).count() / 2;
+        if again + both_ways > 0 {
             return Err(format!(
-                "{of} gives {both_ways} of its {} faces both ways, so neither side of them is \
-                 inside",
-                faces.len() - both_ways
+                "{of} gives faces more than once, {again} the same way again and {both_ways} both \
+                 ways, so the side of the nearest face cannot tell inside from outside"
             ));
         }
-        // Per edge, the triangles that run along it from its lower vertex less those that run back.
-        let mut edges: BTreeMap<(u32, u32), i32> = BTreeMap::new();
-        for [a, b, c] in faces {
+        // Per edge, the triangles that run along it from its lower vertex less those that run
+        // back, and one of its triangles, to join shells by.
+        let mut edges: BTreeMap<(u32, u32), (i32, usize)> = BTreeMap::new();
+        // Each triangle's shell, as the lowest triangle joined to it across edges so far.
+        let mut shell: Vec<usize> = (0..faces.len()).collect();
+        let first = |shell: &[usize], mut t: usize| {
+            while shell[t] != t {
+                t = shell[t];
+            }
+            t
+        };
+        for (t, &[a, b, c]) in faces.iter().enumerate() {
             for (from, to) in [(a, b), (b, c), (c, a)] {
-                *edges.entry((from.min(to), from.max(to))).or_default() +=
-                    if from < to { 1 } else { -1 };
+                let edge = edges.entry((from.min(to), from.max(to))).or_insert((0, t));
+                edge.0 += if from < to { 1 } else { -1 };
+                let (ours, theirs) = (first(&shell, t), first(&shell, edge.1));
+                shell[ours.max(theirs)] = ours.min(theirs);
             }
         }
-        let open = edges.values().filter(|&&balance| balance != 0).count();
+        let open = edges.values().filter(|edge| edge.0 != 0).count();
         if open > 0 {
             return Err(format!(
                 "{of} is not closed: {open} of its {} edges border a triangle on one side alone, \
                  or triangles that face opposite ways",
                 edges.len()
+            ));
+        }
+        // Six times each shell's volume, negative where it faces inward.
+        let mut volumes: BTreeMap<usize, f64> = BTreeMap::new();
+        for (t, face) in faces.iter().enumerate() {
+            let [a, b, c] = face.map(|i| solid.vertices()[i as usize].as_dvec3());
+            *volumes.entry(first(&shell, t)).or_default() += a.dot(b.cross(c));
+        }
+        let inward = volumes.values().filter(|&&volume| volume <= 0.0).count();
+        if inward > 0 {
+            return Err(format!(
+                "{of} has {inward} of its {} shells facing inward, whose outside the side of the \
+                 nearest face takes for inside",
+                volumes.len()
             ));
         }
     }
@@ -399,7 +425,17 @@ impl LinkFit {
             .sum();
         let count = ((area / DENSE_AREA) as usize).clamp(DENSE_SAMPLES, MAX_DENSE_SAMPLES);
         let dense = surface_samples(meshes, count, rng);
-        let solids = solids(meshes);
+        // As `solids` builds them, written out: calling it here took fits without a limit 2 to 7%
+        // longer in a one-unit build on x86.
+        let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
+            | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
+            | TriMeshFlags::ORIENTED;
+        let solids: Arc<[ParryMesh]> = meshes
+            .iter()
+            .filter_map(|m| {
+                ParryMesh::with_flags(m.vertices.clone(), m.triangles.clone(), flags).ok()
+            })
+            .collect();
         let (lo, hi) = samples
             .iter()
             .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), &p| {

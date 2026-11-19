@@ -2184,12 +2184,16 @@ fn a_limit_on_overhang_holds_supplied_models_and_names_what_it_refuses() {
     let doubled = meshed(&boxes_obj(&dir, "doubled.obj", &whole, &[], &[1]));
     let inside = options(vec![[0.0, 0.0, 0.0, 0.03]], "body");
     Robot::from_urdf(&closed, &inside).unwrap();
-    Robot::from_urdf(&doubled, &inside).unwrap();
-    Robot::from_urdf(&doubled, &fit).unwrap();
     for o in [&inside, &fit] {
         let message = refused(&open, o);
         assert!(
             message.contains("link 'body': mesh 0 of 1 is not closed: 4 of its 17 edges"),
+            "{message}"
+        );
+        // A face given again skews which side the faces around it tell.
+        let message = refused(&doubled, o);
+        assert!(
+            message.contains("gives faces more than once, 2 the same way again and 0 both ways"),
             "{message}"
         );
     }
@@ -2214,7 +2218,7 @@ fn a_limit_on_overhang_holds_supplied_models_and_names_what_it_refuses() {
         for o in [&inside, &fit] {
             let message = refused(&meshed(&path), o);
             assert!(
-                message.contains("link 'body': mesh 0 of 1 gives 12 of its 12 faces both ways"),
+                message.contains("link 'body': mesh 0 of 1 gives faces more than once, 0 the same way again and 12 both ways"),
                 "{name}: {message}"
             );
         }
@@ -2224,7 +2228,43 @@ fn a_limit_on_overhang_holds_supplied_models_and_names_what_it_refuses() {
     for o in [&inside, &fit] {
         let message = refused(&stacked, o);
         assert!(
-            message.contains("gives 2 of its 22 faces both ways"),
+            message.contains("0 the same way again and 2 both ways"),
+            "{message}"
+        );
+    }
+    // A cube that faces inward beside the box, each closed: the nearest face would take the
+    // space around the cube for inside.
+    let apart = [(Vec3::ZERO, half), (Vec3::X * 0.2, Vec3::splat(0.02))];
+    let text = std::fs::read_to_string(boxes_obj(&dir, "apart.obj", &apart, &[], &[])).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let faces = lines.iter().filter(|line| line.starts_with('f')).count();
+    let mut seen = 0;
+    let inverted: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            seen += usize::from(line.starts_with('f'));
+            // The cube's faces are the second half.
+            if line.starts_with('f') && seen > faces / 2 {
+                reversed(line)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    let path = dir.join("inverted.obj");
+    std::fs::write(&path, inverted.join("\n")).unwrap();
+    Robot::from_urdf(&meshed(&dir.join("apart.obj")), &fit).unwrap();
+    let beside = RobotOptions {
+        collision_model: Some(CollisionModel {
+            spheres: BTreeMap::from([("body".to_string(), vec![[0.225, 0.0, 0.0, 0.005]])]),
+            ..Default::default()
+        }),
+        ..fit.clone()
+    };
+    for o in [&beside, &fit] {
+        let message = refused(&meshed(&path), o);
+        assert!(
+            message.contains("link 'body': mesh 0 of 1 has 1 of its 2 shells facing inward"),
             "{message}"
         );
     }

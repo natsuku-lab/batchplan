@@ -900,7 +900,10 @@ impl Robot {
                 .map_err(|e| input!("'{}' shape {k}: {e}, got {shape:?}", object.name))?;
         }
         ensure_input!(!shapes.is_empty(), "'{}' has no shapes", object.name);
-        let fitted = spheres()?;
+        let fitted = spheres().map_err(|e| match e {
+            Error::Input(message) => input!("'{}': {message}", object.name),
+            other => other,
+        })?;
         if let Some(limit) = object.spheres.max_overhang {
             ensure_input!(
                 !fitted.is_empty(),
@@ -2166,9 +2169,8 @@ fn covered(shapes: &[Obstacle], o: &SphereOptions) -> error::Result<Vec<[f32; 4]
         .map(|shape| attached_shape(shape)?.mesh().map_err(|e| input!("{e:#}")))
         .collect::<error::Result<Vec<TriMesh>>>()?;
     if o.max_overhang.is_some() {
-        spheres::closed(&meshes).map_err(|e| {
-            input!("{e}, so the shapes have no inside to hold spheres within `max_overhang` of")
-        })?;
+        spheres::closed(&meshes)
+            .map_err(|e| input!("{shapes:?} cannot hold spheres within `max_overhang`: {e}"))?;
     }
     let fitted = spheres::fit(
         &[meshes],
