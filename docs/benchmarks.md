@@ -234,10 +234,11 @@ Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from
 | A box 4 by 6 by 5 cm on a table 60 cm square among three blocks, in two 640×480 depth images | 392,708, 359,217 of them the table's | 11,808 | 55 ms | 542 ms |
 | A can in a basket 20 cm square, seen from above | 99,225 | 244, on its floor | 2.3 ms | 13 ms |
 | A tray 12 by 6 cm across two bars 2 cm thick, 8 cm apart | 9,362 | 411 | 18 ms | 170 ms |
+| A can 6.6 cm across laid along those bars, rolling in between them | 9,362 | 30, one for each centimeter along them | 7.1 ms | 56 ms |
 | A bottle 16 cm long laid flat on a rack sloping 30° against the lip at its foot, spots 2 mm apart at the one turn that lies flat | 10,117 | 150, all against the lip | 47 ms | 482 ms |
 | 64 boxes of as many heights on that table in one call | 392,708 | 755,622 | 3.2 s, 51 ms a box | 36 s |
 
-The table is read once for the 64 boxes. A flat bottom on a flat top is judged in closed form; the tray and the bottle touch two stretches of support that push different ways, which takes a balance of forces per pose and most of their time. `scripts/validate_rests.py` lets go of up to 250 rests of each scene in MuJoCo, on the support as a height field: all stay on the table and in the basket, 248 of 250 across the bars and 148 of 150 on the rack, the others at the very end of the support.
+The table is read once for the 64 boxes. A flat bottom on a flat top is judged in closed form; the tray and the bottle touch two stretches of support that push different ways, which takes a balance of forces per pose and most of their time. `scripts/validate_rests.py` lets go of up to 250 rests of each scene in MuJoCo, on the support as a height field: all stay on the table, in the basket and between the bars, 248 of 250 trays across the bars and 148 of 150 on the rack, the others at the very end of the support. A can or capsule on its side that is not held where it is set down is rolled to where it lies lowest, eleven more set-downs for that spot, so one laid where it has no rest anywhere, as on a flat top, costs the most.
 
 ## Spheres for what a hand holds
 

@@ -1,7 +1,8 @@
 //! Where a held object rests on what cameras see, and what finding it costs. A box on a table
 //! among other things, seen in two 640x480 depth images; a can in a basket seen from above; a
-//! tray laid across two bars; a bottle laid flat on a sloping rack against the lip at its foot;
-//! then 64 boxes of as many heights on the one table in one call, which reads the table once.
+//! tray laid across two bars, and a can laid along them, which rolls in between; a bottle laid
+//! flat on a sloping rack against the lip at its foot; then 64 boxes of as many heights on the
+//! one table in one call, which reads the table once.
 //!
 //! cargo run --release --example surface_rests [-- threads] [--dump dir]
 //!
@@ -269,7 +270,13 @@ fn main() -> Result<()> {
     }
     let inside = seen(&basket, &[0, 1, 2, 3, 4], Vec3::new(0.5, 0.0, 0.5), middle)?;
     let can = Obstacle::cylinder(Vec3::ZERO, 0.033, 0.04);
-    report("a basket seen from above", &inside, can, Quat::IDENTITY, &o)?;
+    report(
+        "a basket seen from above",
+        &inside,
+        can.clone(),
+        Quat::IDENTITY,
+        &o,
+    )?;
 
     // A tray 12 by 6 cm laid across two bars 2 cm thick, 8 cm apart.
     let mut bars = Surface::default();
@@ -283,6 +290,11 @@ fn main() -> Result<()> {
         Quat::IDENTITY,
         &o,
     )?;
+
+    // A can laid along those bars: set down beside the middle between them it lies on one of
+    // them, and rolls in to lie on both.
+    let lying = Quat::from_rotation_x(FRAC_PI_2);
+    report("a can laid along two bars", &bars, can, lying, &o)?;
 
     // A bottle 16 cm long laid across a rack sloping 30 degrees, a lip 1 cm high at its foot:
     // turned to lie flat on the slope, which is steeper than the friction holds, it rests only

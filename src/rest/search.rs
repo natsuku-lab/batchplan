@@ -131,9 +131,11 @@ const SPREAD: usize = 1024;
 /// tried at each turn `o` gives, the object set straight down until it touches. It rests where
 /// what it then touches holds it: its contacts, as stiff springs that push and do not pull, carry
 /// its weight, with friction only where the weight presses, and still do with the weight tipped
-/// by `tipping` any way. It rests only as it is set down: it is not tipped, rolled or slid to
-/// where it would come to rest, so on a slope it needs the `rotation` that lies flat on it, and
-/// in a cradle, as a can between two bars, a spot over the middle. Only the object's rest is
+/// by `tipping` any way. It rests as it is set down: it is not tipped or slid to where it would
+/// come to rest, so on a slope it needs the `rotation` that lies flat on it. A can or a capsule
+/// laid on its side is the one thing that moves: where it is not held it rolls, up to half the
+/// spots' spacing, to where it lies lowest, as into the cradle between two bars or down to a
+/// lip, and rests there if that holds it. Only the object's rest is
 /// checked: the hand that sets it down and its way there are [`place`](crate::place)'s to check,
 /// with what the object may touch as its `support`.
 ///
@@ -317,29 +319,86 @@ struct Setting<'a> {
 
 impl Setting<'_> {
     /// The rest of the object set down turned by `rotation` over `middle`, if what it touches
-    /// there holds it and it is clear.
-    fn rest(&self, rotation: Quat, middle: Vec2, s: &mut Scratch) -> Option<Rest> {
-        let o = self.o;
+    /// there holds it and it is clear, and whether it rolled there: one lying on its round side
+    /// that is not held where it is set down is tried again where it rolls to.
+    fn rest(&self, rotation: Quat, middle: Vec2, s: &mut Scratch) -> Option<(Rest, bool)> {
         let object = Turned::new(self.shape, rotation);
-        let height = self.field.set_down(&object, middle);
+        let (held, rolled) = match self.held(&object, middle, s) {
+            Some(held) => (held, false),
+            None => {
+                let to = self.rolled(&object, middle, &s.contacts)?;
+                (self.held(&object, to, s)?, true)
+            }
+        };
+        let (center, tipping) = held;
+        if !self.field.clear(&Turned::new(self.grown, rotation), center) {
+            return None;
+        }
+        let rest = Rest {
+            pose: Pose::new(center, rotation),
+            support: s.statics.support(&s.contacts),
+            tipping,
+        };
+        Some((rest, rolled))
+    }
+
+    /// Where the middle of `object` comes set down over `middle`, and how far its weight can be
+    /// tipped there, if what it touches holds it; its contacts are left in `s`.
+    fn held(&self, object: &Turned, middle: Vec2, s: &mut Scratch) -> Option<(Vec3, f32)> {
+        let o = self.o;
+        s.contacts.clear();
+        let height = self.field.set_down(object, middle);
         if height == f32::NEG_INFINITY {
             return None;
         }
         let center = middle.extend(height);
         s.touch
-            .contacts(self.field, &object, center, o.touching, &mut s.contacts);
+            .contacts(self.field, object, center, o.touching, &mut s.contacts);
         let size = self.shape.radius();
         let tipping = s
             .statics
             .holds(&s.contacts, center, size, o.tipping, o.friction)?;
-        if !self.field.clear(&Turned::new(self.grown, rotation), center) {
+        Some((center, tipping))
+    }
+
+    /// Where a can or a capsule that lies on its side over `middle`, pushed sideways by
+    /// `contacts`, rolls to: across its axis, the way they push it, to where it lies lowest, as
+    /// between the two sides of a cradle. A round side is the same turned about its axis, so
+    /// rolling is moving across. None where it has no such side, is not pushed across, or is
+    /// still going down half the spots' spacing on, in the next spot's reach.
+    fn rolled(&self, object: &Turned, middle: Vec2, contacts: &[Contact]) -> Option<Vec2> {
+        if !matches!(self.shape, Shape::Cylinder(..) | Shape::Capsule(..)) {
             return None;
         }
-        Some(Rest {
-            pose: Pose::new(center, rotation),
-            support: s.statics.support(&s.contacts),
-            tipping,
-        })
+        let axis = object.frame.z_axis.truncate();
+        let across = Vec2::new(-axis.y, axis.x).try_normalize()?;
+        let pushed: f32 = contacts.iter().map(|c| c.push.truncate().dot(across)).sum();
+        if pushed == 0.0 {
+            return None;
+        }
+        let across = across * pushed.signum();
+        let o = self.o;
+        let height = |by: f32| self.field.set_down(object, middle + across * by);
+        // The lowest, by golden section, to a sixteenth of `touching`: so near it both sides of
+        // a cradle lie within `touching` under it unless they stand steeper than 83 degrees.
+        let (far, fine) = (0.5 * o.spacing + o.touching, o.touching / 16.0);
+        let ratio = 0.618_034;
+        let (mut from, mut to) = (0.0, far);
+        let (mut a, mut b) = (to - ratio * (to - from), from + ratio * (to - from));
+        let (mut at_a, mut at_b) = (height(a), height(b));
+        while to - from > fine {
+            if at_a < at_b {
+                (to, b, at_b) = (b, a, at_a);
+                a = to - ratio * (to - from);
+                at_a = height(a);
+            } else {
+                (from, a, at_a) = (a, b, at_b);
+                b = from + ratio * (to - from);
+                at_b = height(b);
+            }
+        }
+        let by = 0.5 * (from + to);
+        (by > fine && by < far - fine).then(|| middle + across * by)
     }
 }
 
@@ -367,13 +426,23 @@ fn on(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Rest> {
     let spots = seen.spots;
     // Each turn's rests in their order, the turns side by side.
     let each = turns.par_iter().map(|&turned| {
-        let found: Vec<Option<Rest>> = (0..spots.count())
+        let found: Vec<Option<(Rest, bool)>> = (0..spots.count())
             .into_par_iter()
             .map_init(Scratch::default, |scratch, k| {
                 setting.rest(turned, spots.at(k, o.spacing), scratch)
             })
             .collect();
-        spread_out(found.into_iter().flatten().collect())
+        // Spots to either side of a cradle roll to one place, which comes once: the first, of
+        // those within `touching` of each other.
+        let mut kept: Vec<Rest> = Vec::with_capacity(found.len());
+        for (rest, rolled) in found.into_iter().flatten() {
+            let at = rest.pose.position;
+            let near = |r: &Rest| r.pose.position.distance(at) < o.touching;
+            if !(rolled && kept.iter().any(near)) {
+                kept.push(rest);
+            }
+        }
+        spread_out(kept)
     });
     let each: Vec<Vec<Rest>> = each.collect();
     each.into_iter().flatten().collect()

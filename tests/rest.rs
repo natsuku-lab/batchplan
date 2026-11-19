@@ -397,36 +397,30 @@ fn bars_hold_what_spans_them_and_cradle_what_is_laid_between_them() {
     // Of the ten spots across the bars, those between them hold it; over one bar it tips.
     let across = |x: f32| found.iter().any(|r| (r.pose.position.x - x).abs() < 1e-3);
     assert!(across(-0.005) && across(0.005) && !across(0.035) && !across(-0.045));
-    // A can 6.6 cm across laid down along the bars rests between them, touching both, where a
-    // spot is over the middle between them: its axis 4.3 cm from each bar's. The bars meet it
-    // 66 degrees from its lowest line, where half a millimeter aside lifts it off one by more
-    // than `touching` under it.
+    // A can 6.6 cm across laid down at each of its turns comes to rest between the bars,
+    // touching both, its axis 4.3 cm from each bar's and along them: set down half a centimeter
+    // to either side of the middle it lies on one bar, and rolls in. The spots to both sides
+    // come to the one place, which comes once; across the bars it would roll along them.
     let can = Obstacle::cylinder(Vec3::ZERO, 0.033, 0.08);
     let lying = Quat::from_rotation_x(FRAC_PI_2);
-    let fine = RestOptions {
-        spacing: 0.0005,
-        turns: 1,
-        ..Default::default()
-    };
-    let cradled = rests_turned(&can, lying, &bars(), &fine);
+    let cradled = rests_turned(&can, lying, &bars(), &RestOptions::default());
     assert!(cradled.len() >= 10, "{}", cradled.len());
-    // A centimeter apart, no spot comes that near the middle, and across the bars it would roll
-    // along them.
-    assert!(rests_turned(&can, lying, &bars(), &RestOptions::default()).is_empty());
     let z = 0.1 + (0.043f32 * 0.043 - 0.04 * 0.04).sqrt();
-    for r in &cradled {
-        // Within `touching` of both bars, where the second meets it 66 degrees from the top,
-        // its middle over the gap between them.
+    for (k, r) in cradled.iter().enumerate() {
         for side in [1.0, -1.0] {
             let bar = Vec3::new(side * 0.04, r.pose.position.y, 0.1);
             let gap = bar.distance(r.pose.position) - 0.043;
-            assert!((-1e-4..0.002).contains(&gap), "{gap} m from a bar: {r:?}");
+            assert!((-1e-4..5e-4).contains(&gap), "{gap} m from a bar: {r:?}");
         }
         assert!(
-            r.pose.position.x.abs() < 0.01 && (r.pose.position.z - z).abs() < 2e-3,
+            r.pose.position.x.abs() < 2.5e-4 && (r.pose.position.z - z).abs() < 5e-4,
             "{r:?}"
         );
         assert!((r.pose.rotation * Vec3::Z).y.abs() > 0.9999, "{r:?}");
+        for other in &cradled[..k] {
+            let apart = other.pose.position.distance(r.pose.position);
+            assert!(apart > 5e-3, "{apart} m apart: {r:?} and {other:?}");
+        }
     }
     // On a table it rolls, and has no rest.
     assert!(rests_turned(&can, lying, &table(), &RestOptions::default()).is_empty());
@@ -707,6 +701,35 @@ fn a_slope_holds_what_lies_on_it_by_friction_or_against_a_stop() {
     // set on the steep slope too.
     let rough = RestOptions { friction: 1.0, ..o };
     assert!(rests_turned(&tile, lying_on(35.0), &slope(35.0, false), &rough).len() > 50);
+}
+
+#[test]
+fn a_can_laid_across_a_slope_rolls_down_to_a_lip_and_off_without_one() {
+    // A can laid level across a slope of 20 degrees rolls down it: with a lip at the foot it
+    // comes to rest against the lip, from the spots within half their spacing up the slope of
+    // there, and with none it has no rest. Upright on its end it would stand anywhere.
+    let can = Obstacle::cylinder(Vec3::ZERO, 0.02, 0.05);
+    let across = Quat::from_rotation_y(FRAC_PI_2);
+    let o = RestOptions {
+        turns: 1,
+        ..Default::default()
+    };
+    assert!(rests_turned(&can, across, &slope(20.0, false), &o).is_empty());
+    let against = rests_turned(&can, across, &slope(20.0, true), &o);
+    assert!(against.len() >= 5, "{}", against.len());
+    let tilt = 20f32.to_radians();
+    let lip = Vec3::new(0.0, 0.1 * tilt.cos(), 0.01 - 0.1 * tilt.sin());
+    for r in &against {
+        // On the slope and at the lip's top edge.
+        let normal = Vec3::new(0.0, tilt.sin(), tilt.cos());
+        let off = r.pose.position.dot(normal) - 0.02;
+        assert!(off.abs() < 5e-4, "{off} m off the slope: {r:?}");
+        let gap = can
+            .placed(r.pose)
+            .distance(lip.with_x(r.pose.position.x))
+            .value;
+        assert!(gap.abs() < 5e-4, "{gap} m from the lip: {r:?}");
+    }
 }
 
 #[test]

@@ -17,10 +17,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   `spacing` (1 cm) apart at `turns` (8) turns about the vertical, and a `Rest` comes back where
   what it then touches holds it, with `friction` (0.5) at the contacts and its weight tipped
   `tipping` (5°) any way, clear of every other point by `clearance` (1 cm): the object's `pose`,
-  for `Place::poses`, the `support` it touches and how far it can be `tipping`. It rests only as
-  it is set down, not tipped, rolled or slid into place: a slope needs the rotation that lies
-  flat on it, and a cradle a spot over its middle. Many problems run in one call, each surface
-  read once. `examples/surface_rests.rs` times it, and `scripts/validate_rests.py` lets go of
+  for `Place::poses`, the `support` it touches and how far it can be `tipping`. It rests as it
+  is set down, not tipped or slid into place: a slope needs the rotation that lies flat on it.
+  A can or a capsule laid on its side rolls, within half the spacing, into the cradle between
+  two bars or a rack's groove or down to a lip, and has no rest on a flat support. Many
+  problems run in one call, each surface read once. `examples/surface_rests.rs` times it, and `scripts/validate_rests.py` lets go of
   each rest in MuJoCo.
 
 - What a configuration touches while it holds an object:

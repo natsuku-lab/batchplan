@@ -179,7 +179,8 @@ impl Touch {
         }
         // A round side that lies on one plane of the support touches it once, however the
         // points near under it fall into patches: on a table read with noise those at the
-        // fringe stand apart from the rest.
+        // fringe stand apart from the rest. They are of one plane where none lies farther than
+        // `touching` off it: a lip at the foot of a slope is not of the slope's.
         let near = &self.near;
         self.rounds.clear();
         let rounds = self
@@ -191,7 +192,7 @@ impl Touch {
         let fitted = &mut self.fitted;
         let lies = apart
             && above(near, &self.rounds, object, field.cell, fitted)
-                .is_some_and(|by| by >= object.shape.round() - touching);
+                .is_some_and(|(by, off)| off <= touching && by >= object.shape.round() - touching);
         if lies {
             let cell = field.cell;
             round(near, &self.rounds, object, cell, touching, fitted, contacts);
@@ -478,7 +479,7 @@ fn round(
     };
     let Some((radius, half)) = object.straight(tight.local) else {
         let through = above(near, members, object, cell, fitted)
-            .is_some_and(|by| by < object.shape.round() - touching);
+            .is_some_and(|(by, _)| by < object.shape.round() - touching);
         if !through {
             return contacts.push(contact(nearest, tight.local));
         }
@@ -508,15 +509,16 @@ fn round(
 }
 
 /// How far over the plane through the support points `members` of `near` the middle of the round
-/// side of `object` above them lies: its radius where it lies on the plane, less where it
-/// reaches through it. None where the points tell no plane.
+/// side of `object` above them lies, its radius where it lies on the plane and less where it
+/// reaches through it, and how far off the plane the farthest of the points is. None where
+/// the points tell no plane.
 fn above(
     near: &[Near],
     members: &[(u32, u32)],
     object: &Turned,
     cell: f32,
     fitted: &mut Vec<Vec3>,
-) -> Option<f32> {
+) -> Option<(f32, f32)> {
     let of = |m: &(u32, u32)| &near[m.1 as usize];
     let tight = members
         .iter()
@@ -527,7 +529,8 @@ fn above(
     let normal = fit(fitted, cell)?;
     let on = fitted.iter().sum::<Vec3>() / fitted.len() as f32;
     let middle = tight.over - tight.out * object.shape.round();
-    Some((middle - on).dot(normal))
+    let off = fitted.iter().map(|p| (*p - on).dot(normal).abs());
+    Some(((middle - on).dot(normal), off.fold(0.0, f32::max)))
 }
 
 /// The unit normal, upward, of the plane through the support points `of`, by least squares over
