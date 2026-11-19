@@ -203,6 +203,16 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   with a `holding` now keep no more in hand than the device has threads. On the M4 Pro's CPU a
   `place` of up to 4 holds takes what it did, and one of 16, 64 or 609 is 5 to 11% quicker.
 
+- Distance grids of meshes with more than one closed shell (`SdfGrid::from_mesh`, and scene
+  meshes `World::load` reads). The side of the nearest face decided inside from outside, which is
+  right for one shell only: where a table's leg ran up into its top, the top read free above the
+  leg's end; a shell facing the other way than the rest read hollow, with solid around it. A
+  point is now inside where the surface winds around it: shells that face the same way are their
+  union where they overlap, a shell apart from the others is solid whichever way it faces, a
+  shell facing in inside one facing out is a cavity as before, and a shell that crosses itself is
+  solid wherever it encloses space. Where two shells that face opposite ways overlap, the overlap
+  reads free. Grids of a single shell that does not cross itself are bit for bit what they were.
+
 ## [0.11.0] - 2026-11-14
 
 ### Added

@@ -56,7 +56,7 @@ Link names are resolved when the worlds are uploaded, against the device's robot
 
 An `SdfGrid` holds signed distances on a regular grid, stored as half floats and interpolated trilinearly on both devices. Worlds can share a grid through its `Arc`, and devices and exporters then store it once. `SdfOptions` lays grids out (1 cm voxels and 15 cm padding by default).
 
-- **`SdfGrid::from_mesh(&vertices, &triangles, &options)`**: exact signed distances of a closed triangle mesh, inside and outside decided by parry3d's pseudo-normals. Open or non-manifold meshes have no inside and are refused with the reason.
+- **`SdfGrid::from_mesh(&vertices, &triangles, &options)`**: signed distances of a closed triangle mesh: to its nearest face, negative where the surface winds around the point. A mesh may hold several closed shells, as a CAD table's top and legs: where they overlap it is their union, a shell facing in is solid as one facing out is, and a shell facing in inside one facing out is a cavity. A shell that crosses itself is solid wherever it encloses space. Two limits: where two shells that face opposite ways overlap, the overlap reads free; and inside a solid, a face buried in another shell still counts as the nearest, so the depth read near it is less than the true one. Open or non-manifold meshes have no inside and are refused with the reason.
 - **`SdfGrid::from_points(&device, &points, &options)`**: voxels holding a point are solid. A closed surface's inside reads as free beyond its shell.
 - **`SdfGrid::from_depth(&device, &image, robot_mask, behind, &options)`**: one depth image (below).
 - **`OccupancyMap`**: depth images fused over time (below).

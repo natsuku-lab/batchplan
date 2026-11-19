@@ -462,6 +462,332 @@ fn open_and_non_manifold_meshes_are_refused() {
     );
 }
 
+/// A mesh of several closed shells is the solid they wind around. Where shells overlap it is
+/// their union, as a table's leg that runs up into its top; a shell facing in is still solid
+/// beside one facing out, and a cavity inside one; a shell with a corner pushed through its
+/// opposite face is solid where it encloses space. The nearest face's normal got each but the
+/// cavity wrong: free space in the top above the leg's end, a hollow leg with solid around it,
+/// and a free pocket past the crossed face.
+#[test]
+fn mesh_grids_of_several_shells_are_the_solid_they_wind_around() {
+    type Mesh = (Vec<Vec3>, Vec<[u32; 3]>);
+    let o = SdfOptions {
+        voxel: 0.01,
+        padding: 0.06,
+    };
+    let inward = |mesh: &mut Mesh, from: usize| {
+        for t in &mut mesh.1[from..] {
+            t.swap(1, 2);
+        }
+    };
+    // Each mesh with the boxes it is the union of, and the box that is a cavity in them.
+    let top = (Vec3::new(-0.3, -0.3, 0.45), Vec3::new(0.3, 0.3, 0.55));
+    let leg = (Vec3::new(-0.05, -0.05, 0.0), Vec3::new(0.05, 0.05, 0.5));
+    let short = (leg.0, Vec3::new(0.05, 0.05, 0.4));
+    let outer = (Vec3::splat(-0.2), Vec3::splat(0.2));
+    let hole = (Vec3::splat(-0.1), Vec3::splat(0.1));
+    let mut overlapping = Mesh::default();
+    add_box(&mut overlapping, top.0, top.1);
+    add_box(&mut overlapping, leg.0, leg.1);
+    let mut disagreeing = Mesh::default();
+    add_box(&mut disagreeing, top.0, top.1);
+    add_box(&mut disagreeing, short.0, short.1);
+    inward(&mut disagreeing, 12);
+    let mut hollow = Mesh::default();
+    add_box(&mut hollow, outer.0, outer.1);
+    add_box(&mut hollow, hole.0, hole.1);
+    inward(&mut hollow, 12);
+    let mut inside_out_hollow = hollow.clone();
+    inward(&mut inside_out_hollow, 0);
+    type Case<'a> = (&'a str, &'a Mesh, Vec<(Vec3, Vec3)>, Option<(Vec3, Vec3)>);
+    let cases: [Case; 4] = [
+        ("a leg into its top", &overlapping, vec![top, leg], None),
+        (
+            "an inward leg under a top",
+            &disagreeing,
+            vec![top, short],
+            None,
+        ),
+        ("a box with a cavity", &hollow, vec![outer], Some(hole)),
+        (
+            "an inward box with a cavity",
+            &inside_out_hollow,
+            vec![outer],
+            Some(hole),
+        ),
+    ];
+    let mut rng = Rng::new(31);
+    for (name, mesh, solids, cavity) in cases {
+        let grid = SdfGrid::from_mesh(&mesh.0, &mesh.1, &o).unwrap();
+        let (lo, hi) = (grid.lower_corner(), grid.upper_corner());
+        // Points buried in one box nearer another's face than their own: what a face's normal
+        // got wrong.
+        let mut buried = 0;
+        for _ in 0..4000 {
+            let p = Vec3::new(
+                rng.range(lo.x, hi.x),
+                rng.range(lo.y, hi.y),
+                rng.range(lo.z, hi.z),
+            );
+            let each: Vec<f32> = solids.iter().map(|b| box_distance(b.0, b.1, p)).collect();
+            let union = each.iter().copied().fold(f32::INFINITY, f32::min);
+            let in_cavity = cavity.map_or(f32::INFINITY, |b| box_distance(b.0, b.1, p));
+            let d = grid.distance(p).value;
+            if in_cavity < 0.0 {
+                // Free, as far from the cavity's walls as it is deep in its box.
+                let truth = -in_cavity;
+                assert!(
+                    d <= truth + 1e-4 && d >= truth - 2.0 * shift(o.voxel) - 1e-4,
+                    "{name}: {d} in the cavity at {p}, truth {truth}"
+                );
+            } else if union < 0.0 {
+                assert!(d < 0.0, "{name}: {d} inside at {p}");
+                let nearest = each.iter().map(|d| d.abs()).fold(f32::INFINITY, f32::min);
+                buried +=
+                    usize::from(solids.len() > 1 && nearest > shift(o.voxel) && nearest < -union);
+            } else {
+                let truth = union.min(in_cavity);
+                assert!(
+                    d <= truth + 1e-4 && d >= truth - 2.0 * shift(o.voxel) - 1e-4,
+                    "{name}: {d} outside at {p}, truth {truth}"
+                );
+            }
+        }
+        if name == "a leg into its top" {
+            assert!(
+                buried > 0,
+                "no point sampled in the top beside the leg's end"
+            );
+        }
+    }
+
+    // A box with its far corner pushed down through the opposite face. The faces at the corner
+    // follow it: they dent the box from above and enclose a pocket below it, facing inward.
+    let mut crossed = Mesh::default();
+    add_box(
+        &mut crossed,
+        Vec3::new(-0.1, -0.1, -0.05),
+        Vec3::new(0.1, 0.1, 0.05),
+    );
+    crossed.0[7] = Vec3::new(0.02, 0.02, -0.15);
+    let grid = SdfGrid::from_mesh(&crossed.0, &crossed.1, &o).unwrap();
+    let value = |p: Vec3| grid.distance(p).value;
+    for body in [
+        Vec3::new(-0.09, -0.09, -0.02),
+        Vec3::new(0.09, -0.09, -0.04),
+    ] {
+        assert!(value(body) < 0.0, "{} in the body at {body}", value(body));
+    }
+    let pocket = Vec3::new(0.02, 0.02, -0.1);
+    assert!(
+        value(pocket) < 0.0,
+        "{} in the pocket the pushed corner encloses past the face",
+        value(pocket)
+    );
+    for free in [Vec3::new(0.0, 0.0, 0.03), Vec3::new(0.0, 0.0, 0.2)] {
+        assert!(
+            value(free) > 0.0,
+            "{} in and above the dent at {free}",
+            value(free)
+        );
+    }
+}
+
+/// Rays that run exactly through the edges and corners of a mesh count each crossing once. A
+/// cube with an off-centre cubic cavity, every coordinate a multiple of the voxel: the grid's
+/// rows run through the cube's edges and corners and along the diagonals that split its faces,
+/// and the cavity's diagonals lie on other rows than the cube's, so that a crossing counted for
+/// both triangles of an edge, or for neither, changes a row's winding.
+#[test]
+fn mesh_grids_count_a_ray_through_an_edge_once() {
+    let step = 1.0 / 64.0;
+    let o = SdfOptions {
+        voxel: step,
+        padding: 4.0 * step,
+    };
+    let outer = (Vec3::splat(-12.0 * step), Vec3::splat(12.0 * step));
+    let hole = (
+        Vec3::new(-6.0, -2.0, -6.0) * step,
+        Vec3::new(6.0, 10.0, 6.0) * step,
+    );
+    let mut mesh = (vec![], vec![]);
+    add_box(&mut mesh, outer.0, outer.1);
+    add_box(&mut mesh, hole.0, hole.1);
+    for t in &mut mesh.1[12..] {
+        t.swap(1, 2);
+    }
+    let grid = SdfGrid::from_mesh(&mesh.0, &mesh.1, &o).unwrap();
+    assert_eq!(
+        (grid.lower_corner(), grid.voxel(), grid.dims()),
+        (Vec3::splat(-16.0 * step), step, [33; 3]),
+        "the grid's points are the multiples of its voxel the mesh's corners are"
+    );
+    for n in 0..33u32.pow(3) {
+        let at = Vec3::new((n % 33) as f32, (n / 33 % 33) as f32, (n / 1089) as f32);
+        let p = grid.lower_corner() + at * step;
+        let truth = box_distance(outer.0, outer.1, p).max(-box_distance(hole.0, hole.1, p));
+        let d = grid.distance(p).value;
+        assert!(
+            (d - (truth - shift(step))).abs() < 1e-3,
+            "{d} at {p}, {truth} from the surface"
+        );
+    }
+
+    // A box turned about every axis, so that each row crosses slanted faces: where along the row
+    // decides every point's side.
+    let turned = Obstacle::Cuboid {
+        center: Vec3::new(0.013, -0.021, 0.007),
+        half_extents: Vec3::new(0.12, 0.07, 0.05),
+        rotation: Quat::from_euler(EulerRot::XYZ, 0.4, -0.7, 1.1),
+    };
+    let Obstacle::Cuboid {
+        center,
+        half_extents,
+        rotation,
+    } = turned
+    else {
+        unreachable!("a cuboid");
+    };
+    let mut slanted = (vec![], vec![]);
+    add_box(&mut slanted, -half_extents, half_extents);
+    for v in &mut slanted.0 {
+        *v = center + rotation * *v;
+    }
+    let centimeter = SdfOptions {
+        voxel: 0.01,
+        padding: 0.06,
+    };
+    let grid = SdfGrid::from_mesh(&slanted.0, &slanted.1, &centimeter).unwrap();
+    let (lo, dims) = (grid.lower_corner(), grid.dims());
+    let mut inside = 0;
+    for n in 0..dims.iter().product::<u32>() {
+        let at = [n % dims[0], n / dims[0] % dims[1], n / (dims[0] * dims[1])];
+        let p = lo + Vec3::from(at.map(|i| i as f32)) * centimeter.voxel;
+        let truth = turned.distance(p).value;
+        let d = grid.distance(p).value;
+        assert!(
+            (d - (truth - shift(centimeter.voxel))).abs() < 1e-3,
+            "{d} at {p}, {truth} from the turned box"
+        );
+        inside += usize::from(truth < -centimeter.voxel);
+    }
+    assert!(inside > 100, "{inside} points deep in the turned box");
+
+    // A hexagonal prism along x whose caps are fans about their centres: two of each fan's edges
+    // run along y on the row through the centre, where no hair along y tells their sides apart.
+    let half = 6.0 * step;
+    let hexagon = [
+        [8.0, 0.0],
+        [4.0, 6.0],
+        [-4.0, 6.0],
+        [-8.0, 0.0],
+        [-4.0, -6.0],
+        [4.0, -6.0],
+    ];
+    let corner = |k: u32| {
+        let [y, z] = hexagon[k as usize];
+        Vec3::new(0.0, y, z) * step
+    };
+    let mut prism = (vec![], vec![]);
+    for x in [-half, half] {
+        prism.0.push(Vec3::new(x, 0.0, 0.0));
+        prism.0.extend((0..6).map(|k| corner(k) + Vec3::X * x));
+    }
+    for k in 0..6u32 {
+        let (a, b) = (1 + k, 1 + (k + 1) % 6);
+        prism.1.extend([
+            [0, b, a],
+            [7, 7 + a, 7 + b],
+            [a, b, 7 + b],
+            [a, 7 + b, 7 + a],
+        ]);
+    }
+    let grid = SdfGrid::from_mesh(&prism.0, &prism.1, &o).unwrap();
+    let (lo, dims) = (grid.lower_corner(), grid.dims());
+    let mut on_the_edges = 0;
+    for n in 0..dims.iter().product::<u32>() {
+        let at = [n % dims[0], n / dims[0] % dims[1], n / (dims[0] * dims[1])];
+        let p = lo + Vec3::from(at.map(|i| i as f32)) * step;
+        // How deep in the prism: under its caps, its flat sides and its slanted ones.
+        let depth = (half - p.x.abs())
+            .min(6.0 * step - p.z.abs())
+            .min((6.0 * (8.0 * step - p.y.abs()) - 4.0 * p.z.abs()) / 52f32.sqrt());
+        if depth > 2.0 * step {
+            let d = grid.distance(p).value;
+            assert!(d < -step, "{d} at {p}, {depth} deep in the prism");
+            on_the_edges += usize::from(p.z == 0.0 && p.y != 0.0);
+        }
+    }
+    assert!(
+        on_the_edges > 0,
+        "no row of the grid runs along the fans' edges"
+    );
+}
+
+/// A mesh of thousands of triangles, which are crossed on several threads, reads as its solid:
+/// a ball of 9,000 facets, off the grid's lattice, at every grid point.
+#[test]
+fn a_mesh_of_thousands_of_triangles_reads_as_its_solid() {
+    let (center, radius) = (Vec3::new(0.0031, -0.0017, 0.0023), 0.1);
+    let (around, down) = (96u32, 48u32);
+    let mut ball = (
+        vec![center + Vec3::Z * radius, center - Vec3::Z * radius],
+        vec![],
+    );
+    for ring in 1..down {
+        let polar = std::f32::consts::PI * ring as f32 / down as f32;
+        for k in 0..around {
+            let turn = std::f32::consts::TAU * k as f32 / around as f32;
+            let unit = Vec3::new(
+                polar.sin() * turn.cos(),
+                polar.sin() * turn.sin(),
+                polar.cos(),
+            );
+            ball.0.push(center + radius * unit);
+        }
+    }
+    let at = |ring: u32, k: u32| 2 + (ring - 1) * around + k % around;
+    for k in 0..around {
+        ball.1.push([0, at(1, k), at(1, k + 1)]);
+        ball.1.push([1, at(down - 1, k + 1), at(down - 1, k)]);
+        for ring in 1..down - 1 {
+            ball.1
+                .push([at(ring, k), at(ring + 1, k), at(ring + 1, k + 1)]);
+            ball.1
+                .push([at(ring, k), at(ring + 1, k + 1), at(ring, k + 1)]);
+        }
+    }
+    assert!(ball.1.len() > 8192, "{} triangles", ball.1.len());
+    let o = SdfOptions {
+        voxel: 0.01,
+        padding: 0.05,
+    };
+    let grid = SdfGrid::from_mesh(&ball.0, &ball.1, &o).unwrap();
+    let (lo, dims) = (grid.lower_corner(), grid.dims());
+    for n in 0..dims.iter().product::<u32>() {
+        let at = [n % dims[0], n / dims[0] % dims[1], n / (dims[0] * dims[1])];
+        let p = lo + Vec3::from(at.map(|i| i as f32)) * o.voxel;
+        // The facets lie within a sixth of a millimetre inside the ball.
+        let truth = (p - center).length() - radius;
+        let d = grid.distance(p).value;
+        assert!(
+            (d - (truth - shift(o.voxel))).abs() < 1e-3,
+            "{d} at {p}, {truth} from the ball"
+        );
+    }
+    // Facing in, it is the same grid to the bit: the nearest point of a face depends on the order
+    // of its corners in its last bit, so the mesh is measured facing out either way.
+    let fine = SdfOptions {
+        voxel: 0.005,
+        padding: 0.05,
+    };
+    let inward: Vec<[u32; 3]> = ball.1.iter().map(|t| [t[0], t[2], t[1]]).collect();
+    assert_eq!(
+        SdfGrid::from_mesh(&ball.0, &ball.1, &fine).unwrap(),
+        SdfGrid::from_mesh(&ball.0, &inward, &fine).unwrap()
+    );
+}
+
 #[test]
 fn point_clouds_become_solid_shells() {
     // Points on a 10 cm sphere.
