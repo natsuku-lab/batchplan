@@ -52,6 +52,14 @@ value_class! {
         /// How far the hand comes in straight along its z axis to a grasp of a surface, a way
         /// that must be clear of what was seen (meters): 10 cm.
         approach: f32,
+        /// The thickest wall seen from one side only that a grasp of a surface may close across,
+        /// where the cameras saw past it (meters), and never more than `opening`: `None`, every
+        /// grasp closes on two patches seen.
+        shell: Option<f32>,
+        /// Whether the fingers may come in to a grasp of a surface less open than `opening`,
+        /// each grasp at the opening that keeps them farthest from what is not the object's:
+        /// false.
+        narrow: bool,
     }
     methods {
         #[new]
@@ -129,10 +137,15 @@ value_class! {
         /// move in begins where they break stops at the transit. A task without its transit has
         /// no use for them.
         constraints: Vec<batchplan::HandConstraint>,
-        /// Joints the robot was loaded with locked, at the values they keep through the task, as
-        /// `Robot.relock` takes them: the fingers opened only as far as a rim between walls lets
-        /// them. Tasks are grouped by these in one call; each plan's `held` starts with them.
-        locked: HashMap<String, f32>,
+        /// Per grasp, joints the robot was loaded with locked, at the values they keep through
+        /// the task by that grasp, as `Robot.relock` takes them: the fingers opened only as far
+        /// as the grasp has room for. A call's grasps are grouped by these; each plan's `held`
+        /// starts with its grasp's. Empty: every grasp as loaded.
+        locked: Vec<HashMap<String, f32>>,
+        /// How many plans will do: `None`, every grasp is tried. With a count, the grasps are
+        /// tried in their order, a few at a time, until that many have got through, and the
+        /// plans are the first that many in the grasps' order, quickest first.
+        enough: Option<usize>,
     }
     methods {
         /// Hand 0 picks up `object` of world `world` from `start` by any of `grasps`, moving in

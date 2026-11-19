@@ -1,6 +1,8 @@
 //! Grasps of what cameras see, and what finding them costs. A bowl too wide to span, as points on
 //! its surfaces, is grasped across its wall; a box on a table, as two 640x480 depth images, is
-//! grasped across the sides the two cameras see between them; then 64 bowls in one call.
+//! grasped across the sides the two cameras see between them; a flared bowl seen from above alone
+//! across its rim, where the camera saw past it (`GraspOptions::shell`), and beside a wall the
+//! open fingers would be in (`GraspOptions::narrow`); then 64 bowls in one call.
 //!
 //! cargo run --release --example surface_grasps
 
@@ -14,7 +16,7 @@ use anyhow::Result;
 use batchplan::{
     DepthImage, Device, Grasp, GraspOptions, Intrinsics, Obstacle, Pose, Surface, grasps_on,
 };
-use glam::{Mat3, Quat, Vec3};
+use glam::{Mat3, Quat, Vec2, Vec3};
 use rayon::prelude::*;
 
 const WIDTH: usize = 640;
@@ -52,6 +54,19 @@ fn bowl() -> Surface {
     s
 }
 
+/// How far `p` is from a bowl as LIBERO's, standing on z = 0: 11 cm across its rim and 5 cm tall,
+/// its wall 3 mm thick, flared 26 degrees from upright and rounded at the rim.
+fn flared_bowl(p: Vec3) -> f32 {
+    let (half, at) = (0.0015, Vec2::new(p.truncate().length(), p.z));
+    let from = |a: Vec2, b: Vec2| {
+        let t = ((at - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+        at.distance(a + (b - a) * t)
+    };
+    let edge = Vec2::new(0.03, half);
+    let wall = from(edge, Vec2::new(0.055 - half, 0.05 - half));
+    wall.min(from(Vec2::new(0.0, half), edge)) - half
+}
+
 /// A camera at `eye` looking at `target`, in OpenCV axes (x right, y down, z forward).
 fn look_at(eye: Vec3, target: Vec3) -> Pose {
     let forward = (target - eye).normalize();
@@ -60,8 +75,8 @@ fn look_at(eye: Vec3, target: Vec3) -> Pose {
     Pose::new(eye, Quat::from_mat3(&Mat3::from_cols(right, down, forward)))
 }
 
-/// z depth per pixel by sphere tracing the scene's distance functions; 0 where a ray hits nothing.
-fn render(scene: &[Obstacle], camera: Pose, k: Intrinsics) -> Vec<f32> {
+/// z depth per pixel by sphere tracing the scene's distance function; 0 where a ray hits nothing.
+fn render(distance: impl Fn(Vec3) -> f32 + Sync, camera: Pose, k: Intrinsics) -> Vec<f32> {
     (0..WIDTH * HEIGHT)
         .into_par_iter()
         .map(|i| {
@@ -71,10 +86,7 @@ fn render(scene: &[Obstacle], camera: Pose, k: Intrinsics) -> Vec<f32> {
             let mut t = 0.0;
             while t < 2.0 {
                 let p = camera.position + dir * t;
-                let d = scene
-                    .iter()
-                    .map(|o| o.distance(p).value)
-                    .fold(f32::INFINITY, f32::min);
+                let d = distance(p);
                 if d < 1e-5 {
                     return t * ray.normalize().z;
                 }
@@ -138,7 +150,16 @@ fn main() -> Result<()> {
     let mut reading = 0.0;
     for eye in [Vec3::new(0.35, 0.0, 0.35), Vec3::new(-0.35, 0.0, 0.35)] {
         let camera = look_at(eye, Vec3::new(0.0, 0.0, 0.025));
-        let depth = render(&scene, camera, k);
+        let depth = render(
+            |p| {
+                scene
+                    .iter()
+                    .map(|o| o.distance(p).value)
+                    .fold(f32::INFINITY, f32::min)
+            },
+            camera,
+            k,
+        );
         let image = DepthImage {
             depth: &depth,
             width: WIDTH,
@@ -168,6 +189,97 @@ fn main() -> Result<()> {
         seen.points.len(),
         found.len(),
         sum(&found)
+    );
+
+    // LIBERO's bowl on the table, seen from 40 cm above by a wrist camera alone: its rim and its
+    // inner wall, not its outer wall, which flares out of sight under the rim.
+    let table = scene[0].clone();
+    let wrist = Intrinsics {
+        fx: 313.0,
+        fy: 313.0,
+        ..k
+    };
+    let camera = look_at(Vec3::new(0.02, 0.0, 0.42), Vec3::new(0.0, 0.0, 0.025));
+    // The bowl among what else `around` holds, as the camera sees them.
+    let from_above = |around: &(dyn Fn(Vec3) -> f32 + Sync)| {
+        let depth = render(|p| flared_bowl(p).min(around(p)), camera, wrist);
+        let image = DepthImage {
+            depth: &depth,
+            width: WIDTH,
+            intrinsics: wrist,
+            camera,
+        };
+        let object: Vec<bool> = (0..depth.len())
+            .map(|i| {
+                let (u, v) = ((i % WIDTH) as f32, (i / WIDTH) as f32);
+                let z = depth[i];
+                let p = camera.rotation
+                    * Vec3::new(
+                        (u - wrist.cx) / wrist.fx * z,
+                        (v - wrist.cy) / wrist.fy * z,
+                        z,
+                    )
+                    + camera.position;
+                z > 0.0 && flared_bowl(p) < 5e-4 && p.z > 1e-3
+            })
+            .collect();
+        Surface::from_depth(&image, &object, None, 0.005)
+    };
+    let seen = from_above(&|p| table.distance(p).value)?;
+    let without = grasps_on(&device, 0, std::slice::from_ref(&seen), &o)?.remove(0);
+    let shell = GraspOptions {
+        shell: Some(0.015),
+        ..o
+    };
+    let (ms, found) = quickest(5, || {
+        grasps_on(&device, 0, std::slice::from_ref(&seen), &shell)
+    });
+    let found = found?.remove(0);
+    // How wide they are, and those that press on the inner wall within 5 mm of the rim.
+    let range = |widths: &mut dyn Iterator<Item = f32>| {
+        widths.fold((f32::INFINITY, 0f32), |(a, b), w| {
+            (a.min(w * 1e3), b.max(w * 1e3))
+        })
+    };
+    let (narrowest, widest) = range(&mut found.iter().map(Grasp::width));
+    let at_the_rim = |g: &&Grasp| g.contacts[0].z.max(g.contacts[1].z) > 0.045;
+    let (low, high) = range(&mut found.iter().filter(at_the_rim).map(Grasp::width));
+    println!(
+        "a flared bowl seen from above: {} points, {} of them the bowl's: {} grasps, {} with a shell of 1.5 cm in {ms:.1} ms, {narrowest:.1} to {widest:.1} mm wide, {low:.1} to {high:.1} at its rim (sum {:.6})",
+        seen.points.len(),
+        seen.object.iter().filter(|&&o| o).count(),
+        without.len(),
+        found.len(),
+        sum(&found)
+    );
+
+    // The bowl beside a cabinet: a wall twice as tall, 4 cm from its rim, which the open fingers
+    // of a grasp on that side would be in. Fingers that may come in narrower pass between them.
+    let cabinet = Obstacle::cuboid(Vec3::new(0.105, 0.0, 0.05), Vec3::new(0.01, 0.15, 0.05));
+    let seen = from_above(&|p| table.distance(p).value.min(cabinet.distance(p).value))?;
+    let (open_ms, open) = quickest(5, || {
+        grasps_on(&device, 0, std::slice::from_ref(&seen), &shell)
+    });
+    let open = open?.remove(0);
+    let narrow = GraspOptions {
+        narrow: true,
+        ..shell
+    };
+    let (ms, found) = quickest(5, || {
+        grasps_on(&device, 0, std::slice::from_ref(&seen), &narrow)
+    });
+    let found = found?.remove(0);
+    let narrower = found.iter().filter(|g| g.opening < o.opening).count();
+    let least = found
+        .iter()
+        .map(|g| g.opening)
+        .fold(f32::INFINITY, f32::min);
+    println!(
+        "the bowl 4 cm from a wall: {} grasps with the fingers open in {open_ms:.1} ms, {} where they may come in narrower in {ms:.1} ms, {narrower} of them narrower, down to {:.1} cm (sum {:.6})",
+        open.len(),
+        found.len(),
+        least * 100.0,
+        sum(&found) + found.iter().map(|g| f64::from(g.opening)).sum::<f64>()
     );
 
     let bowls = vec![bowl; 64];

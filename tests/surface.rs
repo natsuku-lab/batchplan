@@ -1,7 +1,8 @@
 //! Grasps of a surface through `grasps_on`: surfaces sampled from shapes whose grasps are known
 //! give those grasps and no others, each holding by friction on the shape itself; a wall is
 //! grasped across its thickness; what was not seen from both sides, what does not face within the
-//! friction cone and what has something else between the fingers is left out.
+//! friction cone and what has something else between the fingers is left out; with a shell, a
+//! wall seen from one side is grasped where the cameras saw past it, and nothing behind a solid.
 
 #[path = "../examples/common/mod.rs"]
 mod common;
@@ -9,7 +10,7 @@ mod common;
 use std::collections::HashMap;
 use std::f32::consts::TAU;
 
-use batchplan::glam::{Mat3, Quat, Vec3};
+use batchplan::glam::{Mat3, Quat, Vec2, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{
     DepthImage, Device, Error, Grasp, GraspOptions, Intrinsics, Obstacle, Pose, Surface, grasps_on,
@@ -526,6 +527,243 @@ fn fingers_may_be_in_what_they_close_on_and_nothing_else_of_the_object() {
     assert!(grasps(&ledged, &o).is_empty());
 }
 
+/// The Panda's spheres in its IK frame with its fingers `opening` apart, as the robot relocked
+/// there has them: those within 12 cm of the frame.
+fn hand_open(opening: f32) -> Vec<(Vec3, f32)> {
+    let fingers = ["panda_finger_joint1", "panda_finger_joint2"];
+    let locked: HashMap<String, f32> = fingers
+        .iter()
+        .map(|joint| (joint.to_string(), opening / 2.0))
+        .collect();
+    let robot = common::panda().unwrap().relock(&locked).unwrap();
+    let q = robot.default_q().to_vec();
+    let frame = robot.ee_pose(&q, 0).inverse();
+    let near = robot.spheres(&q).into_iter().filter_map(|s| {
+        let at = frame.rotation * Vec3::new(s[0], s[1], s[2]) + frame.position;
+        (at.length() < 0.12).then_some((at, s[3]))
+    });
+    near.collect()
+}
+
+/// Whether `hand` at `g`, and its way in, lie clear of every point of `s` but the object's
+/// between the two contacts; with `others`, of every point that is not the object's.
+fn clear_at(hand: &[(Vec3, f32)], g: &Grasp, s: &Surface, approach: f32, others: bool) -> bool {
+    let (closing, toward) = (g.pose.rotation * Vec3::Y, g.pose.rotation * Vec3::Z);
+    hand_at(hand, g).all(|(center, radius)| {
+        s.points.iter().enumerate().all(|(i, &point)| {
+            let object = s.object.is_empty() || s.object[i];
+            let across = (point - g.pose.position).dot(closing).abs();
+            if object && (others || across <= g.width() / 2.0 + 0.0025) {
+                return true;
+            }
+            let back = (center - point).dot(toward).clamp(0.0, approach);
+            (point - (center - toward * back)).length() > radius
+        })
+    })
+}
+
+/// Fingers that may come in narrower (`GraspOptions::narrow`) take, of sixteenths of the opening
+/// the Panda relocked there is clear at, way in included, the one farthest from any at which it
+/// would be in what is not the object's, as far past open as the fingers close; of those as far,
+/// the one with the most room, as many steps from the first it would be in anything at farther
+/// apart as from the first nearer, the patches at the last; and of those the widest. So between
+/// walls in the open fingers' way, or just past them, the fingers come in on the plates; beside
+/// a ledge of the object itself they stand midway between it and the plate; what is not the
+/// object's past one open finger is found though the object's own walls fill every opening past
+/// the other; and with nothing within their travel they come in open, every grasp as without
+/// the option.
+#[test]
+fn fingers_that_may_come_in_narrower_keep_farthest_from_what_stands_around() {
+    let o = GraspOptions::default();
+    let narrow = GraspOptions { narrow: true, ..o };
+    let alone = plates_of(0.02, 0.005);
+    let open = grasps(&alone, &o);
+    assert!(!open.is_empty() && open.iter().all(|g| g.opening == o.opening));
+    assert_eq!(grasps(&alone, &narrow), open);
+    // Walls facing the plates, low enough that a hand from above has only its fingertips
+    // between them: something else's, or the object's own.
+    let between = |walls: &[f32], own: &[f32]| {
+        let mut s = alone.clone();
+        the_object(&mut s);
+        for (walls, theirs) in [(own, true), (walls, false)] {
+            for &at in walls {
+                face(
+                    Vec3::X * at,
+                    Vec3::X * -at.signum(),
+                    [Vec3::Y, Vec3::Z],
+                    [0.05, 0.01],
+                    &mut s,
+                );
+            }
+            s.object.resize(s.points.len(), theirs);
+        }
+        s
+    };
+    let step = o.opening / 16.0;
+    let most = ((o.opening - 0.02) / step).round() as i32;
+    let hands: Vec<Vec<(Vec3, f32)>> = (-most..=most)
+        .map(|k| hand_open(o.opening - k as f32 * step))
+        .collect();
+    // The grasps of the plates among `walls`, each at the opening the rule gives the Panda, and
+    // the opening of one from above.
+    let from_above = |walls: &[f32], own: &[f32]| {
+        let s = between(walls, own);
+        let found = grasps(&s, &narrow);
+        assert!(found.len() >= grasps(&s, &o).len() && !found.is_empty());
+        for g in &found {
+            let clear = |others: bool| -> Vec<bool> {
+                let at = |hand: &Vec<_>| clear_at(hand, g, &s, o.approach, others);
+                hands.iter().map(at).collect()
+            };
+            let (free, apart) = (clear(false), clear(true));
+            let free = |k: i32| free[(k + most) as usize];
+            let from_others = |k: i32| {
+                let theirs = (-most..=most).filter(|&j| !apart[(j + most) as usize]);
+                theirs.map(|j| (j - k).abs()).min().unwrap_or(i32::MAX)
+            };
+            let room = |k: i32| {
+                let wider = (-most..k).rev().find(|&j| !free(j));
+                let nearer = (k + 1..=most).find(|&j| !free(j)).unwrap_or(most + 1);
+                wider.map_or(i32::MAX, |j| k - j).min(nearer - k)
+            };
+            let best = (0..=most)
+                .filter(|&k| free(k))
+                .max_by_key(|&k| (from_others(k), room(k), -k))
+                .unwrap_or_else(|| panic!("the Panda is clear at no opening for {g:?}"));
+            let expected = o.opening - best as f32 * step;
+            assert!(
+                (g.opening - expected).abs() < 1e-6,
+                "{g:?} for {expected}, clear at {:?}",
+                (0..=most).filter(|&k| free(k)).collect::<Vec<_>>()
+            );
+        }
+        let down = found.iter().find(|g| (g.pose.rotation * Vec3::Z).z < -0.99);
+        let opening = down.expect("a grasp from above").opening;
+        (found, opening)
+    };
+    // In the open fingers' way, and 4 mm past them: on the plates, 2 cm apart.
+    for walls in [[0.045, -0.045], [0.04, -0.06], [0.065, -0.065]] {
+        let in_the_way = grasps(&between(&walls, &[]), &o).is_empty();
+        assert_eq!(in_the_way, walls[0] < 0.06);
+        let (_, opening) = from_above(&walls, &[]);
+        assert!((opening - 0.02).abs() < 1e-6, "{walls:?}: {opening}");
+    }
+    // Farther than the fingers could reach: as without the option.
+    let far = [0.11, -0.11];
+    let (found, opening) = from_above(&far, &[]);
+    assert_eq!(found, grasps(&between(&far, &[]), &o));
+    assert_eq!(opening, o.opening);
+    // The object's own ledge where one open finger stands: midway between it and the plate.
+    let (_, opening) = from_above(&[], &[0.045]);
+    assert!((opening - 0.035).abs() < 1e-6, "{opening}");
+    // The object's own walls all the way past one open finger, and a wall of something else
+    // 4 mm past the other: what is not the object's is found though the object's fill every
+    // opening past open, and the fingers come in on the plates, whichever finger is on which
+    // side.
+    let (found, _) = from_above(&[-0.065], &[0.062, 0.075, 0.088]);
+    let down = found
+        .iter()
+        .filter(|g| (g.pose.rotation * Vec3::Z).z < -0.99);
+    let openings: Vec<f32> = down.map(|g| g.opening).collect();
+    assert!(openings.len() >= 2 && openings.iter().all(|w| (w - 0.02).abs() < 1e-6));
+}
+
+/// A grasp the open hand has stays where it is with fingers that may come in narrower: a stud
+/// under one open fingertip draws the open hand back from the plates, and narrower fingers,
+/// which clear it at full depth, come in to that grasp where the open hand does. Where the open
+/// hand is clear at no depth, with the stud too tall to draw back from, the hand comes in
+/// narrower at full depth.
+#[test]
+fn fingers_that_may_come_in_narrower_leave_the_open_hands_grasps_where_they_are() {
+    // A hand may be drawn back until 4 mm of its fingers are left on the plates.
+    let o = GraspOptions {
+        overlap: 0.004,
+        ..Default::default()
+    };
+    let narrow = GraspOptions { narrow: true, ..o };
+    // A stud where the +x open fingertip of a hand from above comes down, its top `under` the
+    // plates' middle.
+    let with_stud = |under: f32| {
+        let mut s = plates_of(0.02, 0.005);
+        the_object(&mut s);
+        face(
+            Vec3::new(0.05, 0.0, -under),
+            Vec3::Z,
+            [Vec3::X, Vec3::Y],
+            [0.01, 0.01],
+            &mut s,
+        );
+        s.object.resize(s.points.len(), false);
+        s
+    };
+    let from_above = |g: &&Grasp| (g.pose.rotation * Vec3::Z).z < -0.99;
+    let back = |g: &Grasp| {
+        let middle = (g.contacts[0] + g.contacts[1]) / 2.0;
+        (middle - g.pose.position).length()
+    };
+    let low = with_stud(0.008);
+    let open = grasps(&low, &o);
+    let drawn_back = open.iter().filter(from_above).filter(|g| back(g) > 1e-3);
+    assert!(drawn_back.count() > 0, "the stud draws the open hand back");
+    let found = grasps(&low, &narrow);
+    for g in &open {
+        assert!(
+            found.iter().any(|n| n.pose == g.pose),
+            "the open hand's grasp stays where it is: {g:?}"
+        );
+    }
+    // Too tall to draw back from: the open hand has no grasp from above, and narrower fingers
+    // come in at full depth.
+    let tall = with_stud(-0.004);
+    assert_eq!(grasps(&tall, &o).iter().filter(from_above).count(), 0);
+    let found = grasps(&tall, &narrow);
+    let deep = found.iter().filter(from_above).filter(|g| back(g) < 1e-6);
+    assert!(deep.clone().count() > 0);
+    assert!(deep.into_iter().all(|g| g.opening < o.opening - 0.02));
+}
+
+/// Narrower fingers stand higher where the hand closes upright: over a floor the open fingers
+/// would be under, a grasp comes in with its fingers as far over it as they can be, on the plates.
+#[test]
+fn fingers_that_come_in_narrower_stay_over_the_floor() {
+    let tip = common::panda().unwrap().tip(0);
+    let mut upright = Surface::default();
+    for side in [1.0, -1.0] {
+        face(
+            Vec3::Z * side * 0.02,
+            Vec3::Z * side,
+            [Vec3::X, Vec3::Y],
+            [0.005, 0.005],
+            &mut upright,
+        );
+    }
+    let over = GraspOptions {
+        floor: Some(-0.03),
+        ..Default::default()
+    };
+    assert!(grasps(&upright, &over).is_empty());
+    let narrow = GraspOptions {
+        narrow: true,
+        ..over
+    };
+    let found = grasps(&upright, &narrow);
+    assert!(!found.is_empty());
+    for g in &found {
+        let (closing, toward) = (g.pose.rotation * Vec3::Y, g.pose.rotation * Vec3::Z);
+        let tips = (g.pose.position + toward * tip).z - closing.z.abs() * g.opening / 2.0;
+        assert!(tips >= -0.03 - 1e-6, "{g:?}");
+        assert!((g.opening - 0.04).abs() < 1e-6, "{g:?}");
+    }
+    // A floor only fingers no wider than the plates clear leaves those grasps, and one under
+    // the plates none.
+    let just = |floor: f32| GraspOptions {
+        floor: Some(floor),
+        ..narrow
+    };
+    assert_eq!(grasps(&upright, &just(-0.021)).len(), found.len());
+    assert!(grasps(&upright, &just(-0.019)).is_empty());
+}
+
 #[test]
 fn the_hand_stays_over_the_floor() {
     let robot = common::panda().unwrap();
@@ -659,6 +897,17 @@ fn looking(eye: Vec3, target: Vec3) -> Pose {
 
 /// z depth per pixel by sphere tracing the scene's distance functions; 0 where a ray hits nothing.
 fn render(scene: &[Obstacle], camera: Pose) -> Vec<f32> {
+    let distance = |p: Vec3| {
+        scene
+            .iter()
+            .map(|o| o.distance(p).value)
+            .fold(f32::INFINITY, f32::min)
+    };
+    render_with(distance, camera)
+}
+
+/// z depth per pixel by sphere tracing `distance`; 0 where a ray hits nothing.
+fn render_with(distance: impl Fn(Vec3) -> f32, camera: Pose) -> Vec<f32> {
     (0..WIDTH * HEIGHT)
         .map(|i| {
             let (u, v) = ((i % WIDTH) as f32, (i / WIDTH) as f32);
@@ -667,10 +916,7 @@ fn render(scene: &[Obstacle], camera: Pose) -> Vec<f32> {
             let mut t = 0.0;
             while t < 2.0 {
                 let p = camera.position + dir * t;
-                let d = scene
-                    .iter()
-                    .map(|o| o.distance(p).value)
-                    .fold(f32::INFINITY, f32::min);
+                let d = distance(p);
                 if d < 1e-5 {
                     return t * ray.normalize().z;
                 }
@@ -684,10 +930,18 @@ fn render(scene: &[Obstacle], camera: Pose) -> Vec<f32> {
 /// A box 4 by 6 by 5 cm on a table, and what a camera at `eye` sees of them: the surface, the
 /// box's pixels marked as the object's.
 fn box_on_a_table(eye: Vec3) -> Surface {
+    box_read_farther(eye, 0.0)
+}
+
+/// As `box_on_a_table`, each reading `farther` (meters) than the scene is.
+fn box_read_farther(eye: Vec3, farther: f32) -> Surface {
     let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.01), Vec3::new(0.5, 0.5, 0.01));
     let block = Obstacle::cuboid(Vec3::new(0.0, 0.0, 0.025), Vec3::new(0.02, 0.03, 0.025));
     let camera = looking(eye, Vec3::new(0.0, 0.0, 0.025));
-    let depth = render(&[table, block.clone()], camera);
+    let mut depth = render(&[table, block.clone()], camera);
+    for reading in depth.iter_mut().filter(|z| **z > 0.0) {
+        *reading += farther;
+    }
     let image = DepthImage {
         depth: &depth,
         width: WIDTH,
@@ -700,7 +954,7 @@ fn box_on_a_table(eye: Vec3) -> Surface {
             let z = depth[i];
             let p = camera.rotation * Vec3::new((u - K.cx) / K.fx * z, (v - K.cy) / K.fy * z, z)
                 + camera.position;
-            z > 0.0 && block.distance(p).value < 5e-4 && p.z > 1e-3
+            z > 0.0 && block.distance(p).value < 5e-4 + farther && p.z > 1e-3
         })
         .collect();
     assert!(
@@ -716,6 +970,7 @@ fn a_depth_image_gives_the_surfaces_it_sees_with_normals_toward_the_camera() {
     let seen = box_on_a_table(eye);
     assert_eq!(seen.points.len(), seen.normals.len());
     assert_eq!(seen.points.len(), seen.object.len());
+    assert_eq!(seen.seen_from, vec![eye; seen.points.len()]);
     let (mut side, mut top, mut unknown, mut object) = (0, 0, 0, 0);
     for i in 0..seen.points.len() {
         let (p, n) = (seen.points[i], seen.normals[i]);
@@ -769,6 +1024,8 @@ fn what_two_cameras_see_between_them_is_grasped_and_what_one_sees_alone_is_not()
     assert_eq!(both.object.len(), both.points.len());
     let found = grasps(&both, &o);
     assert!(!found.is_empty());
+    // Every side the box is grasped across seen, a shell adds nothing.
+    assert_eq!(grasps(&both, &with_shell(0.015)), found);
     let tip = common::panda().unwrap().tip(0);
     // Within the friction cone of the faces' own normals, and a little for the normals found
     // near the box's edges, which lean toward the next face.
@@ -799,6 +1056,427 @@ fn what_two_cameras_see_between_them_is_grasped_and_what_one_sees_alone_is_not()
         found.iter().any(|g| (g.pose.rotation * Vec3::Z).z < -0.99),
         "from above"
     );
+}
+
+/// A bowl as LIBERO's, standing on z = 0: 11 cm across its rim and 5 cm tall, its wall `wall`
+/// thick, flared 26 degrees from upright and rounded at the rim. In its profile (radius, height),
+/// its wall's middle and its bottom's, which it lies within half the wall of.
+fn bowl_profile(wall: f32) -> [(Vec2, Vec2); 2] {
+    let half = wall / 2.0;
+    let edge = Vec2::new(0.03, half);
+    let rim = Vec2::new(0.055 - half, 0.05 - half);
+    [(edge, rim), (Vec2::new(0.0, half), edge)]
+}
+
+/// How far `p` lies from the bowl of `wall`, negative inside it.
+fn bowl_distance(p: Vec3, wall: f32) -> f32 {
+    let at = Vec2::new(p.truncate().length(), p.z);
+    let from = |(a, b): (Vec2, Vec2)| {
+        let t = ((at - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+        at.distance(a + (b - a) * t)
+    };
+    let [side, bottom] = bowl_profile(wall);
+    from(side).min(from(bottom)) - wall / 2.0
+}
+
+/// Which side of the middle of the bowl's wall `p` lies on, and how far: positive outside.
+fn outside_the_wall(p: Vec3, wall: f32) -> f32 {
+    let [(edge, rim), _] = bowl_profile(wall);
+    let up = (rim - edge).normalize();
+    (Vec2::new(p.truncate().length(), p.z) - edge).perp_dot(up)
+}
+
+/// What cameras at `eyes` see of the bowl of `wall` on a table, the bowl's readings marked as the
+/// object's.
+fn bowl_seen(wall: f32, eyes: &[Vec3]) -> Surface {
+    bowl_read_farther(wall, eyes, 0.0)
+}
+
+/// As `bowl_seen`, each reading `farther` (meters) than the scene is.
+fn bowl_read_farther(wall: f32, eyes: &[Vec3], farther: f32) -> Surface {
+    let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.01), Vec3::new(0.5, 0.5, 0.01));
+    let mut seen = Surface::default();
+    for &eye in eyes {
+        let camera = looking(eye, Vec3::new(0.0, 0.0, 0.025));
+        let mut depth = render_with(
+            |p| bowl_distance(p, wall).min(table.distance(p).value),
+            camera,
+        );
+        for reading in depth.iter_mut().filter(|z| **z > 0.0) {
+            *reading += farther;
+        }
+        let image = DepthImage {
+            depth: &depth,
+            width: WIDTH,
+            intrinsics: K,
+            camera,
+        };
+        let object: Vec<bool> = (0..depth.len())
+            .map(|i| {
+                let (u, v) = ((i % WIDTH) as f32, (i / WIDTH) as f32);
+                let z = depth[i];
+                let p = camera.rotation
+                    * Vec3::new((u - K.cx) / K.fx * z, (v - K.cy) / K.fy * z, z)
+                    + camera.position;
+                z > 0.0 && bowl_distance(p, wall) < 5e-4 + farther && p.z > 1e-3
+            })
+            .collect();
+        seen.join(Surface::from_depth(&image, &object, None, 0.005).unwrap());
+    }
+    seen
+}
+
+/// Over the bowl, as a wrist camera 40 cm above it: its rim and inner wall, not its outer wall,
+/// which flares out of sight under the rim.
+const ABOVE: Vec3 = Vec3::new(0.02, 0.0, 0.42);
+
+/// In front of the bowl and over it, as a camera on the robot's base: its near wall's outside and
+/// its far wall's inside.
+const FRONT: Vec3 = Vec3::new(0.45, 0.0, 0.4);
+
+/// A thin wall's: a LIBERO bowl's.
+const THIN: f32 = 0.003;
+
+/// The Panda's hand's spheres in its IK frame, open as the Panda is loaded: the spheres within
+/// 12 cm of the frame at its default configuration.
+fn hand() -> Vec<(Vec3, f32)> {
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    let frame = robot.ee_pose(&q, 0).inverse();
+    let near = robot.spheres(&q).into_iter().filter_map(|s| {
+        let at = frame.rotation * Vec3::new(s[0], s[1], s[2]) + frame.position;
+        (at.length() < 0.12).then_some((at, s[3]))
+    });
+    let near: Vec<(Vec3, f32)> = near.collect();
+    assert!(near.len() > 10, "{} spheres", near.len());
+    near
+}
+
+/// `hand`'s spheres at grasp `g`.
+fn hand_at(hand: &[(Vec3, f32)], g: &Grasp) -> impl Iterator<Item = (Vec3, f32)> {
+    let pose = g.pose;
+    hand.iter()
+        .map(move |&(at, r)| (pose.rotation * at + pose.position, r))
+}
+
+fn with_shell(shell: f32) -> GraspOptions {
+    GraspOptions {
+        shell: Some(shell),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_rim_seen_from_above_is_grasped_across_its_wall_with_a_shell() {
+    let seen = bowl_seen(THIN, &[ABOVE]);
+    // The camera sees the rim and the inner wall, and nothing of the outer wall under the rim.
+    let ours = |i: &usize| seen.object[*i];
+    let inner = (0..seen.points.len())
+        .filter(ours)
+        .filter(|&i| outside_the_wall(seen.points[i], THIN) < 0.0)
+        .count();
+    let outer = (0..seen.points.len())
+        .filter(ours)
+        .filter(|&i| outside_the_wall(seen.points[i], THIN) > 0.0 && seen.points[i].z < 0.045)
+        .count();
+    assert!(
+        inner > 1000 && outer == 0,
+        "{inner} inside, {outer} outside"
+    );
+    assert!(seen.seen_from.iter().all(|&from| from == ABOVE));
+    assert!(grasps(&seen, &GraspOptions::default()).is_empty());
+    let o = with_shell(0.015);
+    let found = grasps(&seen, &o);
+    let hand = hand();
+    let mut sectors = [false; 8];
+    for g in &found {
+        let (line, [first, second]) = closes_on(g);
+        // From the inner wall seen out through the wall, to where the camera saw past it.
+        let side = [first, second].map(|p| outside_the_wall(p, THIN));
+        let (seen_end, beyond) = if side[0] < side[1] {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        assert!(
+            outside_the_wall(seen_end, THIN) < 0.0 && outside_the_wall(beyond, THIN) > 0.0,
+            "{g:?}"
+        );
+        assert!(bowl_distance(seen_end, THIN).abs() < 1.5e-3, "{g:?}");
+        assert!(bowl_distance(beyond, THIN) > 0.0, "{g:?}");
+        assert!(g.width() <= o.shell.unwrap() + 1e-6, "{g:?}");
+        let through = (0..=20).map(|k| first + (second - first) * k as f32 / 20.0);
+        assert!(
+            through.map(|p| bowl_distance(p, THIN)).any(|d| d < 0.0),
+            "{g:?}"
+        );
+        // Along the wall's normal there, near the rim.
+        let radial = seen_end.with_z(0.0).normalize();
+        assert!(
+            line.with_z(0.0).normalize().dot(radial).abs() > 0.99,
+            "{g:?}"
+        );
+        assert!(seen_end.z > 0.035, "{g:?}");
+        // The open hand is out of the bowl, outer wall and all, which no camera saw.
+        for (center, radius) in hand_at(&hand, g) {
+            assert!(bowl_distance(center, THIN) > radius - 1e-3, "{g:?}");
+        }
+        let angle = seen_end.y.atan2(seen_end.x).rem_euclid(TAU);
+        sectors[(angle / TAU * 8.0) as usize % 8] = true;
+    }
+    assert!(
+        sectors.iter().all(|&s| s),
+        "all around the rim: {sectors:?}"
+    );
+    let down = |g: &&Grasp| (g.pose.rotation * Vec3::Z).dot(Vec3::NEG_Z) > 0.8;
+    assert!(found.iter().filter(down).count() > 16, "many from above");
+}
+
+/// A wall seen from one side that leans is closed on level too, where that is inside its
+/// friction cone: the flared bowl's inner wall leans 27 degrees, so fingers that hold with a
+/// friction of 2 close level across its rim all around, the hand coming straight down, each
+/// grasp from the inner wall seen to a point outside the wall at its height, the open hand out
+/// of the bowl; these follow none of the grasps along the wall's normal out of place, and
+/// fingers with a friction of 0.3, whose cone the level line is outside, get none.
+#[test]
+fn a_leaning_wall_seen_from_one_side_is_closed_on_level_within_its_friction_cone() {
+    let seen = bowl_seen(THIN, &[ABOVE]);
+    let with_friction = |friction: f32| GraspOptions {
+        friction,
+        ..with_shell(0.015)
+    };
+    let level = |g: &&Grasp| (g.pose.rotation * Vec3::Y).z.abs() < 1e-4;
+    let found = grasps(&seen, &with_friction(2.0));
+    let hand = hand();
+    let mut sectors = [false; 8];
+    let mut from_above = 0;
+    for g in found.iter().filter(level) {
+        assert!(g.one_sided, "{g:?}");
+        let (_, [first, second]) = closes_on(g);
+        let side = [first, second].map(|p| outside_the_wall(p, THIN));
+        let (seen_end, beyond) = if side[0] < side[1] {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        // From the inner wall seen, level and out through the wall, to where the camera saw
+        // past it.
+        assert!(bowl_distance(seen_end, THIN).abs() < 1.5e-3, "{g:?}");
+        assert!(outside_the_wall(beyond, THIN) > 0.0, "{g:?}");
+        assert!(bowl_distance(beyond, THIN) > 0.0, "{g:?}");
+        assert!((seen_end.z - beyond.z).abs() < 1e-4, "{g:?}");
+        let radial = seen_end.with_z(0.0).normalize();
+        assert!((beyond - seen_end).normalize().dot(radial) > 0.99, "{g:?}");
+        for (center, radius) in hand_at(&hand, g) {
+            assert!(bowl_distance(center, THIN) > radius - 1e-3, "{g:?}");
+        }
+        if (g.pose.rotation * Vec3::Z).z < -0.9999 {
+            from_above += 1;
+            let angle = seen_end.y.atan2(seen_end.x).rem_euclid(TAU);
+            sectors[(angle / TAU * 8.0) as usize % 8] = true;
+        }
+    }
+    assert!(
+        from_above > 16 && sectors.iter().all(|&s| s),
+        "{from_above} straight down, around the rim: {sectors:?}"
+    );
+    // Along the wall's normal no hand comes straight down: it leans as the wall does.
+    let leaning = found.iter().filter(|g| !level(g));
+    let steepest = leaning
+        .map(|g| (g.pose.rotation * Vec3::Z).z)
+        .fold(0.0, f32::min);
+    assert!(steepest > -0.95, "{steepest}");
+    // The grasps along the normal are those found without the level ones, in their order.
+    let slippery = grasps(&seen, &with_friction(0.3));
+    assert!(!slippery.is_empty() && !slippery.iter().any(|g| level(&g)));
+}
+
+#[test]
+fn nothing_is_assumed_behind_a_solid_or_a_wall_thicker_than_the_shell() {
+    // A box seen from above alone: no ray goes into it, and none past its sides within the
+    // opening, so nothing is assumed behind any of it.
+    let box_seen = box_on_a_table(ABOVE);
+    let block = Obstacle::cuboid(Vec3::new(0.0, 0.0, 0.025), Vec3::new(0.02, 0.03, 0.025));
+    assert!(grasps(&box_seen, &with_shell(0.015)).is_empty());
+    assert!(grasps(&box_seen, &with_shell(0.08)).is_empty());
+    // Seen from in front and over it, past its far side within the opening: closed on across
+    // the whole of it, its far contact out of it, and the hand past that contact, where the far
+    // finger stands in space the camera saw past, clear of it. (A finger may be in what it closes
+    // on, and of the faces no camera saw the hand knows nothing.)
+    let front = box_on_a_table(Vec3::new(0.35, 0.0, 0.35));
+    let o = with_shell(0.08);
+    let found = grasps(&front, &o);
+    let whole: Vec<&Grasp> = found.iter().filter(|g| g.one_sided).collect();
+    assert!(whole.len() > 100, "{}", whole.len());
+    let hand = hand();
+    let mut far_side = 0;
+    for g in &whole {
+        assert!(
+            g.width() > 0.04 && g.width() <= o.opening,
+            "across all of it: {g:?}"
+        );
+        let [a, b] = g.contacts.map(|c| block.distance(c).value);
+        let (seen, unseen) = if a < b {
+            (g.contacts[0], g.contacts[1])
+        } else {
+            (g.contacts[1], g.contacts[0])
+        };
+        assert!(a.min(b).abs() < 1e-3 && a.max(b) > 0.0, "{g:?}");
+        let line = (unseen - seen).normalize();
+        let beyond = |&(center, _): &(Vec3, f32)| (center - unseen).dot(line) > 0.0;
+        for (center, radius) in hand_at(&hand, g).filter(beyond) {
+            assert!(block.distance(center).value > radius - 1e-3, "{g:?}");
+            far_side += 1;
+        }
+    }
+    assert!(far_side > whole.len(), "{far_side}");
+    // A wall is never taken thicker than the fingers open: a shell past it is one at it.
+    let past = grasps(&front, &with_shell(0.2));
+    assert_eq!(past, grasps(&front, &with_shell(o.opening)));
+    assert!(
+        found.iter().any(|g| g.width() > o.opening - 1e-3),
+        "some reach the opening"
+    );
+    // A wall 2 cm thick seen from above: thicker than a shell of 1.5 cm, not than one of 3.
+    let thick = bowl_seen(0.02, &[ABOVE]);
+    assert!(grasps(&thick, &with_shell(0.015)).is_empty());
+    let across = grasps(&thick, &with_shell(0.03));
+    assert!(!across.is_empty());
+    assert!(across.iter().all(|g| g.width() > 0.02), "across the wall");
+    // And the thin wall's other side shows only past where the rim hides it: no grasp within
+    // 4 mm.
+    assert!(grasps(&bowl_seen(THIN, &[ABOVE]), &with_shell(0.004)).is_empty());
+}
+
+#[test]
+fn looks_joined_from_one_place_are_one_view_however_many() {
+    // A box past which the camera sees, its look cropped to around the box, and that look
+    // joined with itself 100 and 400 times, as a harness that keeps looking from one place
+    // would join them.
+    let whole = box_on_a_table(Vec3::new(0.35, 0.0, 0.35));
+    let near = |i: &usize| whole.points[*i].truncate().abs().max_element() < 0.12;
+    let kept: Vec<usize> = (0..whole.points.len()).filter(near).collect();
+    let look = Surface {
+        points: kept.iter().map(|&i| whole.points[i]).collect(),
+        normals: kept.iter().map(|&i| whole.normals[i]).collect(),
+        object: kept.iter().map(|&i| whole.object[i]).collect(),
+        seen_from: kept.iter().map(|&i| whole.seen_from[i]).collect(),
+    };
+    let o = with_shell(0.08);
+    let one_sided = |s: &Surface| -> Vec<f32> {
+        let found = grasps(s, &o);
+        let mut widths: Vec<f32> = found
+            .iter()
+            .filter(|g| g.one_sided)
+            .map(Grasp::width)
+            .collect();
+        widths.sort_by(f32::total_cmp);
+        widths
+    };
+    let once = one_sided(&look);
+    assert!(
+        once.len() > 100,
+        "{} of {} points",
+        once.len(),
+        look.points.len()
+    );
+    for k in [100, 400] {
+        let mut looks = Surface::default();
+        for _ in 0..k {
+            looks.join(look.clone());
+        }
+        // As many, as wide but for how a patch's mean over k copies of its points rounds.
+        let found = one_sided(&looks);
+        assert_eq!(found.len(), once.len(), "{k} looks");
+        let apart = found
+            .iter()
+            .zip(&once)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
+        assert!(apart < 1e-6, "{k} looks: widths {apart} m apart");
+    }
+}
+
+#[test]
+fn two_looks_from_one_place_show_what_one_look_does() {
+    // The bowl seen from in front and over it, and a box past which the camera sees: once, and
+    // joined with a second look from the same place whose readings are a little farther, as a
+    // harness that looks twice gives them. The two looks' readings of a pixel lie along one ray.
+    let one_sided = |s: &Surface, o: &GraspOptions| -> Vec<f32> {
+        let found = grasps(s, o);
+        let mut widths: Vec<f32> = found
+            .iter()
+            .filter(|g| g.one_sided)
+            .map(Grasp::width)
+            .collect();
+        widths.sort_by(f32::total_cmp);
+        widths
+    };
+    let o = with_shell(0.015);
+    let once = one_sided(&bowl_seen(THIN, &[FRONT]), &o);
+    assert!(once.len() > 100, "{}", once.len());
+    let median = |widths: &[f32]| widths[widths.len() / 2];
+    for farther in [0.0, 1e-4, 1e-3] {
+        let mut twice = bowl_seen(THIN, &[FRONT]);
+        twice.join(bowl_read_farther(THIN, &[FRONT], farther));
+        let found = one_sided(&twice, &o);
+        // None fewer: within a surface's noise of the first look, as many; a millimeter
+        // farther, the second look's points are a layer of their own and seed more.
+        let (n, m) = (once.len(), found.len());
+        assert!(m * 20 >= n * 19, "{m} against {n}, {farther} m farther");
+        if farther < 1e-3 {
+            assert!(m * 20 <= n * 21, "{m} against {n}, {farther} m farther");
+        }
+        // As wide, but for how much farther the second look reads and a step of the search for
+        // where the wall ends (half a millimeter).
+        let apart = (median(&found) - median(&once)).abs();
+        assert!(
+            apart <= farther + 5e-4 + 1e-6,
+            "{apart} m, {farther} m farther"
+        );
+    }
+    // The box's faces lie on the edges of the cells seeds are drawn from, so a second look's
+    // seeds fall in cells of their own: none fewer, each across the whole box.
+    let eye = Vec3::new(0.35, 0.0, 0.35);
+    let o = with_shell(0.08);
+    let once = one_sided(&box_on_a_table(eye), &o);
+    assert!(once.len() > 100, "{}", once.len());
+    for farther in [0.0, 1e-4, 1e-3] {
+        let mut twice = box_on_a_table(eye);
+        twice.join(box_read_farther(eye, farther));
+        let found = one_sided(&twice, &o);
+        let (n, m) = (once.len(), found.len());
+        assert!(m * 20 >= n * 19, "{m} against {n}, {farther} m farther");
+        assert!(found[0] > 0.04, "{} m", found[0]);
+    }
+}
+
+#[test]
+fn walls_seen_from_one_side_come_after_those_seen_from_both_and_change_nothing_else() {
+    // From in front and over it, the near wall is seen from both sides, the far wall's outside
+    // not at all.
+    let both = bowl_seen(THIN, &[FRONT, ABOVE]);
+    let without = grasps(&both, &GraspOptions::default());
+    let with = grasps(&both, &with_shell(0.015));
+    assert!(!without.is_empty() && with.len() > without.len());
+    assert_eq!(with[..without.len()], without[..]);
+    // Each says whether one of its contacts was not seen.
+    assert!(without.iter().all(|g| !g.one_sided));
+    assert!(with[without.len()..].iter().all(|g| g.one_sided));
+    // From four sides, where each camera sees both sides of the wall in front of it the shell
+    // adds nothing: only between them, where too little of the outside was seen to press on.
+    let turned = |k: usize| Quat::from_rotation_z(k as f32 * TAU / 4.0) * FRONT;
+    let around = bowl_seen(THIN, &[turned(0), turned(1), turned(2), turned(3)]);
+    let without = grasps(&around, &GraspOptions::default());
+    let with = grasps(&around, &with_shell(0.015));
+    assert!(!without.is_empty() && with.len() > without.len());
+    assert_eq!(with[..without.len()], without[..]);
+    for g in &with[without.len()..] {
+        let middle = (g.contacts[0] + g.contacts[1]) / 2.0;
+        let from_a_camera = middle.y.atan2(middle.x).rem_euclid(TAU / 4.0);
+        let from_a_camera = from_a_camera.min(TAU / 4.0 - from_a_camera);
+        assert!(from_a_camera > 30f32.to_radians(), "{g:?}");
+    }
 }
 
 #[test]
@@ -976,6 +1654,24 @@ fn joined_surfaces_keep_which_points_are_the_objects() {
         marked.object[..count].iter().all(|&o| !o) && marked.object[count..].iter().all(|&o| o)
     );
     assert_eq!(marked.normals.len(), 2 * count);
+    assert!(marked.seen_from.is_empty(), "nowhere known, as before");
+    // Where the points were seen from, kept where known and not known (NaN) where not.
+    let eye = Vec3::new(0.3, 0.0, 0.3);
+    let mut seen = Surface::from_points(&plates(0.04).points, eye, 0.005).unwrap();
+    assert_eq!(seen.seen_from, vec![eye; count]);
+    seen.join(plates(0.03));
+    let mut unseen = plates(0.03);
+    unseen.join(Surface::from_points(&plates(0.04).points, -eye, 0.005).unwrap());
+    for (joined, known) in [(&seen, 0..count), (&unseen, count..2 * count)] {
+        assert_eq!(joined.seen_from.len(), 2 * count);
+        for (k, from) in joined.seen_from.iter().enumerate() {
+            assert_eq!(known.contains(&k), from.is_finite(), "{k}: {from}");
+        }
+    }
+    assert!(seen.seen_from[0] == eye && unseen.seen_from[count] == -eye);
+    // What a side did not say is not known, and a joined surface is still equal to itself.
+    assert_eq!(seen, seen.clone());
+    assert_eq!(unseen, unseen.clone());
 }
 
 #[test]
@@ -1004,6 +1700,42 @@ fn grasps_do_not_depend_on_the_threads_the_batch_or_the_device() {
         Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
         Err(e) => panic!("no GPU: {e}"),
     }
+    for device in &devices {
+        let together = grasps_on(device, 0, &surfaces, &o).unwrap();
+        assert_eq!(together, alone, "{}", device.name());
+    }
+    // Walls seen from one side too.
+    let o = with_shell(0.015);
+    let surfaces = [
+        bowl_seen(THIN, &[ABOVE]),
+        surfaces[1].clone(),
+        bowl_seen(THIN, &[FRONT]),
+        box_on_a_table(ABOVE),
+    ];
+    let alone: Vec<Vec<Grasp>> = surfaces
+        .iter()
+        .map(|s| {
+            grasps_on(&devices[0], 0, std::slice::from_ref(s), &o)
+                .unwrap()
+                .remove(0)
+        })
+        .collect();
+    assert!(alone[0].len() > 100 && alone[2].len() > 100);
+    for device in &devices {
+        let together = grasps_on(device, 0, &surfaces, &o).unwrap();
+        assert_eq!(together, alone, "{}", device.name());
+    }
+    // And fingers that come in narrower, as some of these do.
+    let o = GraspOptions { narrow: true, ..o };
+    let alone: Vec<Vec<Grasp>> = surfaces
+        .iter()
+        .map(|s| {
+            grasps_on(&devices[0], 0, std::slice::from_ref(s), &o)
+                .unwrap()
+                .remove(0)
+        })
+        .collect();
+    assert!(alone.iter().flatten().any(|g| g.opening < o.opening));
     for device in &devices {
         let together = grasps_on(device, 0, &surfaces, &o).unwrap();
         assert_eq!(together, alone, "{}", device.name());
@@ -1071,6 +1803,16 @@ fn malformed_surfaces_and_options_are_input_errors() {
     let mut flags = good.clone();
     flags.object = vec![true];
     assert!(refused(&flags, 0, &o), "object flags for some points only");
+    let mut places = good.clone();
+    places.seen_from = vec![Vec3::Z];
+    assert!(
+        refused(&places, 0, &o),
+        "where some points only were seen from"
+    );
+    // Where a point was seen from may be unknown.
+    let mut unknown = good.clone();
+    unknown.seen_from = vec![Vec3::NAN; good.points.len()];
+    assert!(!refused(&unknown, 0, &with_shell(0.01)));
     for bad in [
         GraspOptions { friction: 0.0, ..o },
         GraspOptions { contact: 0.0, ..o },
@@ -1092,6 +1834,10 @@ fn malformed_surfaces_and_options_are_input_errors() {
             ..o
         },
         GraspOptions { turns: 0, ..o },
+        with_shell(0.0),
+        with_shell(-0.01),
+        with_shell(f32::NAN),
+        with_shell(f32::INFINITY),
     ] {
         assert!(refused(&good, 0, &bad), "{bad:?}");
     }

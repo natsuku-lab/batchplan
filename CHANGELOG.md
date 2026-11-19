@@ -10,14 +10,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
-- **Breaking:** `SphereOptions::enforce_mesh_bounds` and `max_mesh_penetration`
-  optionally cap sphere overhang while retaining the total budget. Capping radii
-  can leave surface gaps, reported by `qualify`. Bounded models require closed,
-  consistently wound finite geometry and interior centers; supplied models are
-  revalidated. Held objects inherit the robot's bounds, while direct attachments
-  use their own `AttachedObject::spheres` policy. Rust literals listing every field
-  need the two new fields; defaults keep bounds disabled. Python exposes the same
-  options and `Robot.sphere_fit_options()` returns the loading policy.
+- What a configuration touches while it holds an object:
+  `device.contacts_holding(&worlds, &item_world, &q, within, &holding)`, with a `Held` or `None`
+  per item, on the device that holds nothing, as a problem's `holding` takes it. What the held
+  object comes near is listed under its link (`"held by hand 0"`), what the worlds let it touch
+  (`Touch::held`) is not a contact, and one call takes items holding different objects.
 
 - **Breaking:** how spheres cover what a hand holds is the caller's to set: `Held::spheres`, a
   `SphereOptions` (64 spheres within 5 mm by default, as before). A thin wide object, as a plate
@@ -43,6 +40,50 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   `contact: 0.005`, `approach: 0.1`); in Python, `GraspOptions(friction=..., contact=...,
   approach=...)` (the surfaces and `grasps_on` are not bound there yet).
 
+- **Breaking:** grasps of a wall seen from one side only, as a bowl's rim seen from above, its outer
+  wall hidden under the rim: `GraspOptions::shell`, the thickest such wall a grasp may close across
+  (`None` by default, which changes nothing). From a patch whose other side no camera saw, the line
+  in along its normal meets, within that thickness, space every ray around it went past on its way
+  to something farther: the second contact goes there, so `width()` is the most the wall can be,
+  never past the `opening`, and the `Grasp` says so (`one_sided`). Inside a solid no ray goes, so a
+  box seen from one side is closed on only across all of it, and a patch whose other side was seen
+  keeps to the seen pair. A wall that leans is closed on level too, where the level line through the
+  patch is inside its friction cone, so a hand comes straight down across a flared rim where one
+  closing along the wall's normal leans with it. These grasps follow every grasp of two patches
+  seen (1.5 cm suits a bowl's
+  rim: LIBERO's, its wall 3 mm thick, seen from 40 cm above, is grasped 5.5 to 11.5 mm wide at its
+  rim). The evidence is where each point was seen from, `Surface::seen_from`, which `from_depth` and
+  `from_points` record and `join` carries (infinite where a joined surface did not say). The points
+  seen from exactly one place make one view, so looks joined from one place are one view, and a
+  cloud fused from several views must not be given one place. A `GraspOptions` literal needs
+  `shell: None`, and a `Surface` literal `seen_from: vec![]` (or `..Default::default()`); in Python,
+  `GraspOptions(shell=0.015)`.
+
+- **Breaking:** a pick says how many plans will do: `Pick::enough` (`None` by default: every
+  grasp is tried, as before). With a count, the grasps are tried in their order, 32 and then
+  twice as many each time, until that many have got through, and the plans are the first that
+  many in the grasps' order, as trying every grasp gives them. A pick's time is the IK of its
+  grasps, so one given the hundreds `grasps_on` finds and asked for the first that gets through
+  stops after the first few. A pick none gets through has tried every one and says where each
+  stopped. A `Pick` literal needs `enough: None`; in Python, `Pick(..., enough=1)`.
+
+- **Breaking:** grasps whose fingers come in narrower than they open, where something stands
+  near: `GraspOptions::narrow` (false by default, which changes nothing). Open fingers beside a
+  wall or a neighbor are in it, though the grasp needs a fraction of the opening. With `narrow`,
+  `grasps_on` takes each finger to slide along the hand's y axis and checks every grasp at
+  sixteenths of `opening`; each `Grasp` comes back with the `opening` that keeps its fingers
+  farthest from what is not the object's, the floor included, which with something within the
+  fingers' travel is the narrowest the hand is clear at: a planner lets the fingers touch what
+  they grasp and nothing else. Of openings as far from all that it takes the one with the most
+  room from the object's other sides, then the widest, so a box with nothing near keeps
+  `GraspOptions::opening`. A grasp the open hand has stays where it is; where the open hand is clear at no
+  depth, the hand comes in as deep as it is clear narrower. LIBERO's bowl 4 cm
+  from a wall twice as tall is grasped all round so (698 grasps where the open fingers find
+  654), in 10.7 ms where the open hand's check takes 8.9: a grasp that is found is checked
+  across each finger's whole slide, so a hand of many spheres pays more. Without `narrow` every grasp's `opening` is
+  the options'. A `GraspOptions` literal needs `narrow: false`; in Python,
+  `GraspOptions(narrow=True)`.
+
 - **Breaking:** a `Follower` can hold an object: `FollowerOptions::holding` takes the `Held` the
   trajectory was planned holding. The rest of the motion, and any stop, is checked with the object
   in the hand, contacts naming it (`"held by hand 0"`), and replans and re-anchors carry it. The
@@ -53,19 +94,21 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Changed
 
+- **Breaking:** a pick's grasps each say where the fingers are: `Pick::locked` is a
+  `Vec<HashMap<String, f32>>`, the locked joints' values per grasp (empty: every grasp as loaded,
+  as before), where it was one map for the task. One pick then takes grasps that come in at
+  different openings, as `grasps_on` gives them with `GraspOptions::narrow`, and plans by any:
+  `pick` groups a call's grasps by those values, a relocked robot for each group, and each plan's
+  `candidate` numbers the pick's grasps and its `held` starts with its grasp's values. A pick
+  that set `locked: narrow` sets `locked: vec![narrow; grasps.len()]`; in Python,
+  `Pick(..., locked=[narrow] * len(grasps))`.
+
 - **Breaking:** a held capsule is covered by spheres along its axis, and a held cylinder that is thin or
   slender (a disc, a rod) by one layer of rings of spheres or one line of them, where that reaches
   the tolerance within the budget: without fitting, in microseconds where a fit took 4 to 25 ms,
   and with fewer spheres than their fit took (a 14 cm plate: 145 within 4.7 mm of it). Their spheres, and so clearances and contacts measured to them, differ from the fit's.
   Stout cylinders, and discs the budget cannot bring within the tolerance (a plate at the default
   64), are fitted as before.
-
-### Fixed
-
-- Sphere fitting rejects nonfinite and exterior candidate centers using mesh bounds
-  and oriented ray winding. Inscribed radii are bounded by the mesh's local box,
-  and qualification measures overhang with unsigned surface distance so thin or
-  concave geometry cannot hide exterior spheres behind a false inside result.
 
 ## [0.11.0] - 2026-11-14
 
