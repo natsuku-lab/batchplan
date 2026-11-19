@@ -1128,6 +1128,15 @@ impl Robot {
         variants
     }
 
+    /// An `Error::Input` for a `start_tolerance` no start can be corrected within.
+    pub(crate) fn check_start_tolerance(tolerance: f32) -> error::Result<()> {
+        ensure_input!(
+            tolerance.is_finite() && tolerance >= 0.0,
+            "start_tolerance must be finite and nonnegative, got {tolerance}"
+        );
+        Ok(())
+    }
+
     /// Corrects a batch's starts within `tolerance`, keeping the original batch when none change.
     /// Zero leaves validation to the caller's strict path, without another pass over the starts.
     pub(crate) fn correct_starts<'a, T: Clone>(
@@ -1141,10 +1150,7 @@ impl Robot {
         if tolerance == 0.0 {
             return Ok(Cow::Borrowed(items));
         }
-        ensure_input!(
-            tolerance.is_finite() && tolerance >= 0.0,
-            "start_tolerance must be finite and nonnegative, got {tolerance}"
-        );
+        Self::check_start_tolerance(tolerance)?;
         let mut changed = false;
         for (i, item) in items.iter().enumerate() {
             let q = start(item);

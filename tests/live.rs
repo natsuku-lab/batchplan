@@ -1433,6 +1433,18 @@ fn non_finite_and_degenerate_inputs_are_errors() {
     assert!(input(servo(&state, hand, &forever)));
     let backward = ServoOptions { linear: -0.1, ..o };
     assert!(input(servo(&state, hand, &backward)));
+    // A distance to slow within that is not a number never slows; any distance, always.
+    let unsure = ServoOptions {
+        slow_within: f32::NAN,
+        ..o
+    };
+    let err = servo(&state, hand, &unsure).unwrap_err().to_string();
+    assert!(err.contains("servo needs slow_within"), "{err}");
+    let wary = ServoOptions {
+        slow_within: f32::INFINITY,
+        ..o
+    };
+    servo(&state, hand, &wary).expect("slowing for obstacles at any distance");
 }
 
 /// The gripper's tilt from straight down at `q`.

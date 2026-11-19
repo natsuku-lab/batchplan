@@ -287,6 +287,7 @@ pub fn failures(
     result: &IkResult,
     o: &IkOptions,
 ) -> Result<Vec<Option<IkFailure>>> {
+    o.check()?;
     ensure_input!(
         result.seeds == o.seeds,
         "a result of {} seeds per problem, from options with {}",
@@ -383,10 +384,21 @@ pub fn solve_ik(
 }
 
 impl IkOptions {
-    /// An `Error::Input` naming the first option IK cannot run with; `what` names the options in
-    /// it (`IK`, or `plan`'s `goal_ik`).
-    pub(crate) fn check(&self, what: &str) -> Result<()> {
+    /// An `Error::Input` naming the first option [`solve_ik`] cannot run with, as the call itself
+    /// returns it: for a host to refuse options when they are set.
+    pub fn check(&self) -> Result<()> {
+        self.check_as("IK")
+    }
+
+    /// [`IkOptions::check`], where `what` names the options (`IK`, or `plan`'s `goal_ik`).
+    pub(crate) fn check_as(&self, what: &str) -> Result<()> {
         ensure_input!(self.seeds > 0, "{what} needs at least one seed");
+        ensure_input!(
+            device::fits_batch(1, self.seeds),
+            "{what} needs at most {} seeds, got {}",
+            u32::MAX,
+            self.seeds
+        );
         ensure_input!(
             self.kept > 0,
             "{what} needs at least one seed kept past the screening"
@@ -404,14 +416,28 @@ impl IkOptions {
             "{what} needs a finite collision_step, got {}",
             self.collision_step
         );
-        Ok(())
+        ensure_input!(
+            self.position_tolerance > 0.0 && self.rotation_tolerance > 0.0,
+            "{what} needs positive tolerances, which no seed meets otherwise, got {} m and {} rad",
+            self.position_tolerance,
+            self.rotation_tolerance
+        );
+        self.collision.check(what)
     }
 }
 
 /// Whether `problems` and `o` can be solved for `robot` in `worlds`.
 fn check(robot: &Robot, worlds: &Worlds, problems: &[IkProblem], o: &IkOptions) -> Result<()> {
     let n = robot.dof();
-    o.check("IK")?;
+    o.check()?;
+    ensure_input!(
+        device::fits_batch(problems.len(), o.seeds),
+        "{} IK problems of {} seeds each are more items than a batch holds ({}); solve them in \
+         several calls",
+        problems.len(),
+        o.seeds,
+        u32::MAX
+    );
     let hands = robot.hands();
     for (i, p) in problems.iter().enumerate() {
         ensure_input!(

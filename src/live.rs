@@ -825,6 +825,12 @@ pub fn servo(
         o.angular,
         o.damping
     );
+    ensure_input!(
+        !o.slow_within.is_nan() && !o.halt_within.is_nan(),
+        "servo needs slow_within and halt_within that are numbers, got {} m and {} m",
+        o.slow_within,
+        o.halt_within
+    );
     let q = &state.position;
     let pose = robot.ee_pose(q, o.hand);
     let dp = target.position - pose.position;

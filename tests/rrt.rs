@@ -381,6 +381,53 @@ fn travel(path: &[f32], n: usize) -> Vec<f32> {
         .collect()
 }
 
+/// A plan's search with no limit on its samples searches again without its clearance, as one
+/// with a limit does, once the clearance proves too much. The Panda reaches around a wall keeping
+/// a metre from it, which no path can: the first search fails, and the second goes on from the
+/// samples the first drew. Counted from them without care, a limit of `usize::MAX` wrapped to
+/// fewer than were drawn, and the second search found nothing.
+#[test]
+fn a_search_without_a_limit_relaxes_its_clearance_as_one_with() {
+    let robot = common::panda().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let wall = Obstacle::Cuboid {
+        center: Vec3::new(0.45, 0.0, 0.45),
+        half_extents: Vec3::new(0.05, 0.3, 0.3),
+        rotation: Quat::IDENTITY,
+    };
+    let worlds = device.upload(&[World::new(vec![wall])]).unwrap();
+    let start = vec![-1.2, 0.3, 0.0, -1.8, 0.0, 2.0, 0.8];
+    let mut goal = start.clone();
+    goal[0] = 1.2;
+    let problem = PlanProblem::new(0, start, goal);
+    let keeping = RrtOptions {
+        clearance: 1.0,
+        ..PlanOptions::default().rrt
+    };
+    let kept = rrt::connect(
+        &device,
+        &worlds,
+        &searches(std::slice::from_ref(&problem)),
+        &keeping,
+    );
+    assert!(
+        kept.unwrap().paths[0].is_none(),
+        "a path keeps a metre from the wall"
+    );
+    for max_iterations in [10_000, usize::MAX] {
+        let mut o = PlanOptions::default();
+        o.rrt.clearance = 1.0;
+        o.rrt.max_iterations = max_iterations;
+        let result = batchplan::plan(&device, &worlds, std::slice::from_ref(&problem), &o).unwrap();
+        assert_eq!(
+            result.solved().count(),
+            1,
+            "{max_iterations} samples at most: {:?}",
+            result.failures[0]
+        );
+    }
+}
+
 #[test]
 fn a_continuous_joint_at_infinity_is_an_input_error() {
     // A continuous joint's range has no limits, so only finiteness rules infinity out.

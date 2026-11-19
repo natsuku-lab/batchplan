@@ -145,6 +145,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   the one that holds it, and later ticks on that device reuse it. `None`, the default, is as before. A `FollowerOptions` literal needs
   the new field (`holding: None`).
 
+- Options a host can check where they are set, before a request uses them: `IkOptions::check()`,
+  `PlanOptions::check()` (its search, shortcuts and goal IK included), `RrtOptions::check()`,
+  `ShortcutOptions::check()`, `ToolPathOptions::check()` and `JoinOptions::check()` return the
+  `Error::Input` their call returns for those options. In Python, `options.check()` raises it.
+
 ### Changed
 
 - **Breaking:** a robot's `SphereOptions` are checked whether its spheres are fitted or given
@@ -152,6 +157,19 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   voxel size that is not positive, is an `Error::Input` from `Robot::load`, `from_urdf` and
   `assemble`. With a collision model they were not read and the robot loaded; without one, `load`
   and `assemble` returned an `Error::Load`.
+
+- **Breaking:** options a call cannot use are input errors where the call ran before: IK
+  tolerances that are zero, negative or not a number, which no seed meets, so every problem came
+  back unsolved; collision weights that are not finite, margins that are not numbers, and
+  infinite margins with a weight on them, each of which makes the cost not a number (an infinite
+  margin without a weight still asks for exact clearances at any distance); a plan's acceleration
+  and velocity weights that are not finite; an infinite `initial_step`; and seeds, control points
+  or samples per span past what 32 bits count, alone or as a batch's problems times their seeds
+  (a plan's pose goals at the sixteen times their `goal_ik` seeds its IK may come to try): a
+  trillion IK seeds ended the process when it allocated for them. `Device::evaluate` refuses
+  such weights and margins too, where it returned costs that were not numbers, `ik::failures`
+  the options `solve_ik` refuses, and `servo` a `slow_within` or `halt_within` that is not a
+  number, with which it never slowed.
 
 - **Breaking:** a pick's grasps each say where the fingers are: `Pick::locked` is a
   `Vec<HashMap<String, f32>>`, the locked joints' values per grasp (empty: every grasp as loaded,
@@ -170,6 +188,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   64), are fitted as before.
 
 ### Fixed
+
+- A plan with a `time_budget` longer than the clock counts (`Duration::MAX`) panicked on adding
+  it to the time; it now has no deadline. A plan whose search had `RrtOptions::max_iterations`
+  of `usize::MAX` found nothing where it had to search again without its clearance: the samples
+  its first search drew, added to the limit, wrapped.
 
 - A call that held objects in several hundred ways at once, as a `place` after each of a pick's
   plans, with more than one candidate for each, could overflow the stack of one of the device's

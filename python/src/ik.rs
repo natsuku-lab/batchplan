@@ -52,6 +52,12 @@ value_class! {
         fn new(changes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
             Ok(Self(Self::changed(Default::default(), changes)?))
         }
+
+        /// Raises the `InputError` the call raises for these options, naming the first one it
+        /// cannot run with: for a host to refuse options when they are set.
+        fn check(&self) -> PyResult<()> {
+            self.0.check().or_raise()
+        }
     }
 }
 

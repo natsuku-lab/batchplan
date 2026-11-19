@@ -70,7 +70,7 @@ Guide: [planning.md](planning.md#inverse-kinematics).
 |---|---|
 | `solve_ik(&device, &worlds, &[IkProblem], &IkOptions)` | Collision-free IK from many seeds per target (`IkResult`). |
 | `IkProblem::new(world, target)` | A one-handed robot's hand at `target`. The fields `targets` (a pose or `None` per hand), `seed` (where seed 0 starts), `hold` (joints that stay where the seed has them) and `holding` (an object a hand holds, a `Held`) cover the rest. |
-| `IkOptions` | Seeds per problem, iterations, tolerances and collision weights. |
+| `IkOptions` | Seeds per problem, iterations, tolerances and collision weights. `options.check()` returns the input error `solve_ik` would, for a host to refuse options when they are set; `PlanOptions`, `RrtOptions`, `ShortcutOptions`, `ToolPathOptions` and `JoinOptions` have the same. |
 | `IkResult::best(problem)`, `nearest(problem, q)`, `solved()` | The seed with the most clearance, the seed nearest `q`, and every solved problem. |
 | `ik::failures(&device, &worlds, &result, &IkOptions)` | Why each unsolved problem has no solution (`IkFailure`): out of reach, or reached only in collision, with its contacts. |
 

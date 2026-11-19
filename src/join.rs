@@ -69,6 +69,14 @@ impl Default for JoinOptions {
     }
 }
 
+impl JoinOptions {
+    /// An `Error::Input` naming the first option [`join`] cannot run with, as the call itself
+    /// returns it: for a host to refuse options when they are set.
+    pub fn check(&self) -> Result<()> {
+        edges::check_resolution("the resolution", self.resolution)
+    }
+}
+
 /// What [`join`] did with each sequence.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -108,7 +116,7 @@ pub fn join(
 ) -> Result<JoinResult> {
     let robot = device.robot();
     let n = robot.dof();
-    edges::check_resolution("the resolution", o.resolution)?;
+    o.check()?;
     for (i, sequence) in sequences.iter().enumerate() {
         ensure_input!(
             (sequence.world as usize) < worlds.len(),

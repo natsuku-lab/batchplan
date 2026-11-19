@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionWeights, Device, Error, IkOptions, IkProblem, JointState, Obstacle, PlanOptions,
-    PlanProblem, Pose, Robot, RobotOptions, RrtOptions, SdfGrid, ShortcutOptions, StartMotion,
-    Trajectory, World,
+    CollisionWeights, Device, Error, Goal, IkOptions, IkProblem, JoinOptions, JointState, Obstacle,
+    PlanOptions, PlanProblem, Pose, Robot, RobotOptions, RrtOptions, SdfGrid, ShortcutOptions,
+    StartMotion, ToolPathOptions, Trajectory, World,
 };
 use glam::{Quat, Vec3};
 
@@ -271,6 +271,223 @@ fn malformed_batches_are_errors_on_every_device() {
             let err = d.upload(&[World::new(vec![bad.clone()])]).map(|_| ());
             assert!(input(err), "{name}: {bad:?} uploaded");
         }
+    }
+}
+
+/// A host can check options when they are set: each `check()` returns the error its call
+/// returns for those options, on every device, and passes what the calls run with.
+#[test]
+fn options_are_checked_as_their_calls_check_them() {
+    let robot = panda();
+    let q = robot.default_q().to_vec();
+    let (ik, plans) = (IkOptions::default(), PlanOptions::default());
+    let (paths, joins) = (ToolPathOptions::default(), JoinOptions::default());
+    let nan = f32::NAN;
+    let none = CollisionWeights::NONE;
+    let bad_ik = [
+        IkOptions { seeds: 0, ..ik },
+        IkOptions {
+            seeds: usize::MAX,
+            ..ik
+        },
+        IkOptions { kept: 0, ..ik },
+        IkOptions {
+            max_step: nan,
+            ..ik
+        },
+        IkOptions {
+            collision_step: f32::INFINITY,
+            ..ik
+        },
+        IkOptions {
+            position_tolerance: 0.0,
+            ..ik
+        },
+        IkOptions {
+            position_tolerance: nan,
+            ..ik
+        },
+        IkOptions {
+            rotation_tolerance: -1.0,
+            ..ik
+        },
+        IkOptions {
+            collision: CollisionWeights { world: nan, ..none },
+            ..ik
+        },
+        IkOptions {
+            collision: CollisionWeights {
+                self_collision: 1.0,
+                self_margin: f32::INFINITY,
+                ..none
+            },
+            ..ik
+        },
+    ];
+    let plan_with = |change: &dyn Fn(&mut PlanOptions)| {
+        let mut o = plans;
+        change(&mut o);
+        o
+    };
+    let bad_plans = [
+        plan_with(&|o| o.start_tolerance = -1.0),
+        plan_with(&|o| o.seeds = usize::MAX),
+        plan_with(&|o| o.control_points = 6),
+        plan_with(&|o| o.control_points = usize::MAX),
+        plan_with(&|o| o.samples_per_span = 0),
+        plan_with(&|o| o.samples_per_span = usize::MAX),
+        plan_with(&|o| o.history = 0),
+        plan_with(&|o| o.initial_step = f32::INFINITY),
+        plan_with(&|o| o.acceleration_weight = nan),
+        plan_with(&|o| o.velocity_weight = f32::NEG_INFINITY),
+        plan_with(&|o| o.collision.margin = nan),
+        plan_with(&|o| o.goal_ik.seeds = 0),
+        plan_with(&|o| o.goal_ik.seeds = u32::MAX as usize),
+        plan_with(&|o| o.goal_ik.position_tolerance = nan),
+        plan_with(&|o| o.rrt.range = 0.0),
+        plan_with(&|o| o.shortcut.resolution = 0.0),
+    ];
+    let path_with = |change: &dyn Fn(&mut ToolPathOptions)| {
+        let mut o = paths.clone();
+        change(&mut o);
+        o
+    };
+    let bad_paths = [
+        path_with(&|o| o.start_tolerance = nan),
+        path_with(&|o| o.step = 0.0),
+        path_with(&|o| o.rotation_precision = 0.0),
+        path_with(&|o| o.resolution = 0.0),
+        path_with(&|o| o.iterations = 0),
+    ];
+    let bad_join = JoinOptions { resolution: nan };
+    let same = |name: &str, checked: Result<(), Error>, called: Result<(), Error>| {
+        let (Err(Error::Input(checked)), Err(Error::Input(called))) = (checked, called) else {
+            panic!("{name}: options a call cannot run with were not an input error twice");
+        };
+        assert_eq!(checked, called, "{name}: the check and the call disagree");
+    };
+    for d in devices(&robot) {
+        let name = d.name();
+        let worlds = d.upload(&[World::default()]).unwrap();
+        for o in &bad_ik {
+            let called = batchplan::solve_ik(&d, &worlds, &[], o).map(|_| ());
+            same(&format!("{name}: {o:?}"), o.check(), called);
+        }
+        for o in &bad_plans {
+            let called = batchplan::plan(&d, &worlds, &[], o).map(|_| ());
+            same(&format!("{name}: {o:?}"), o.check(), called);
+        }
+        for o in &bad_paths {
+            let called = batchplan::follow(&d, &worlds, &[], o).map(|_| ());
+            same(&format!("{name}: {o:?}"), o.check(), called);
+        }
+        let called = batchplan::join(&d, &worlds, &[], &bad_join).map(|_| ());
+        same(&name, bad_join.check(), called);
+        // The search's and the shortcuts' own checks are what the plan's check reports.
+        let narrow = RrtOptions {
+            resolution: 0.0,
+            ..plans.rrt
+        };
+        let o = plan_with(&|o| o.rrt = narrow);
+        same(&name, narrow.check(), o.check());
+        let coarse = ShortcutOptions {
+            min_change: 0.0,
+            ..plans.shortcut
+        };
+        let o = plan_with(&|o| o.shortcut = coarse);
+        same(&name, coarse.check(), o.check());
+
+        // `failures` takes the options its solve took, and `evaluate` the weights.
+        let problem = IkProblem::new(0, robot.ee_pose(&q, 0));
+        let solved = batchplan::solve_ik(&d, &worlds, &[problem], &ik).unwrap();
+        let err = batchplan::ik::failures(&d, &worlds, &solved, &bad_ik[5]).map(|_| ());
+        same(&name, bad_ik[5].check(), err);
+        let unweighed = CollisionWeights { world: nan, ..none };
+        let err = d.evaluate(&worlds, &[0], &q, &unweighed).unwrap_err();
+        assert!(
+            matches!(&err, Error::Input(m) if m.contains("finite collision weights")),
+            "{name}: {err}"
+        );
+        // A margin without a weight may be infinite: exact clearances at any distance.
+        let exact = CollisionWeights {
+            margin: f32::INFINITY,
+            self_margin: f32::INFINITY,
+            ..none
+        };
+        d.evaluate(&worlds, &[0], &q, &exact)
+            .expect("exact clearances at any distance");
+    }
+    // What the calls run with passes: the defaults, and values that only look odd.
+    ik.check().expect("the default IK options");
+    plans.check().expect("the default plan options");
+    paths.check().expect("the default tool path options");
+    joins.check().expect("the default join options");
+    let odd_ik = IkOptions {
+        iterations: 0,
+        rotation_tolerance: f32::INFINITY,
+        ..ik
+    };
+    odd_ik.check().expect("no steps, and any rotation");
+    let odd = plan_with(&|o| {
+        o.validate_substeps = 0;
+        o.seeds = 0;
+        o.shortcut.min_change = f32::INFINITY;
+    });
+    odd.check().expect("no smoothing and no optimized seeds");
+}
+
+/// A batch of more items than the kernels' 32-bit indices count is refused before anything is
+/// allocated for it: IK's problems times their seeds, a plan's problems times their optimization
+/// seeds, and its pose goals times the seeds their IK may come to try, sixteen times
+/// `goal_ik`'s. Each is a batch with one problem and not with two.
+#[test]
+fn a_batch_past_what_32_bits_count_is_refused_before_it_is_allocated() {
+    let robot = panda();
+    let q = robot.default_q().to_vec();
+    let refused = |name: &str, what: &str, err: Error| {
+        assert!(
+            matches!(&err, Error::Input(m) if m.contains(what)),
+            "{name}: {err}"
+        );
+    };
+    for d in devices(&robot) {
+        let name = d.name();
+        let worlds = d.upload(&[World::default()]).unwrap();
+        let half = IkOptions {
+            seeds: 1 << 31,
+            ..IkOptions::default()
+        };
+        half.check().expect("2^31 seeds of one problem are a batch");
+        let problem = IkProblem::new(0, robot.ee_pose(&q, 0));
+        let two = [problem.clone(), problem];
+        let err = batchplan::solve_ik(&d, &worlds, &two, &half).unwrap_err();
+        refused(&name, "more items than a batch holds", err);
+
+        let half = PlanOptions {
+            seeds: 1 << 31,
+            ..PlanOptions::default()
+        };
+        half.check()
+            .expect("2^31 optimization seeds of one problem are a batch");
+        let problem = PlanProblem::new(0, q.clone(), q.clone());
+        let two = [problem.clone(), problem];
+        let err = batchplan::plan(&d, &worlds, &two, &half).unwrap_err();
+        refused(&name, "more items than a batch holds", err);
+
+        let base = PlanOptions::default();
+        let posed = PlanOptions {
+            goal_ik: IkOptions {
+                seeds: (1 << 28) - 1,
+                ..base.goal_ik
+            },
+            ..base
+        };
+        posed
+            .check()
+            .expect("sixteen times 2^28 - 1 seeds of one pose goal are a batch");
+        let reach = PlanProblem::new(0, q.clone(), Goal::Poses(vec![Some(robot.ee_pose(&q, 0))]));
+        let err = batchplan::plan(&d, &worlds, &[reach.clone(), reach], &posed).unwrap_err();
+        refused(&name, "2 pose goals", err);
     }
 }
 

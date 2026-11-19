@@ -17,7 +17,7 @@ use rayon::prelude::*;
 
 use crate::constraint::{self, HandConstraint, Projector, Region};
 use crate::cpu::PathOptimizer;
-use crate::device::{CollisionWeights, Contact, Device, Worlds};
+use crate::device::{self, CollisionWeights, Contact, Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Keep, Optimize, Search};
 use crate::error::{Result, ensure_input};
 use crate::held::{self, Held};
@@ -85,7 +85,7 @@ pub struct PlanOptions {
     /// several rounds), and validation still runs after it; optimization does not start once it
     /// has passed. Pose goals' first round of IK counts toward it and always runs; their later
     /// rounds do not start once it has passed. Results then depend on machine speed; without a
-    /// budget they are the same on every run.
+    /// budget they are the same on every run. A budget longer than the clock can count is none.
     pub time_budget: Option<Duration>,
 }
 
@@ -126,8 +126,19 @@ impl Default for PlanOptions {
 }
 
 impl PlanOptions {
-    /// An `Error::Input` naming the first option [`plan`] cannot run with.
-    pub(crate) fn check(&self) -> Result<()> {
+    /// An `Error::Input` naming the first option [`plan`] cannot run with, as the call itself
+    /// returns it, those of its search, shortcuts and goal IK included: for a host to refuse
+    /// options when they are set.
+    pub fn check(&self) -> Result<()> {
+        Robot::check_start_tolerance(self.start_tolerance)?;
+        ensure_input!(
+            self.seeds
+                .checked_add(1)
+                .is_some_and(|each| device::fits_batch(1, each)),
+            "need at most {} optimization seeds, got {}",
+            u32::MAX - 1,
+            self.seeds
+        );
         ensure_input!(
             self.control_points >= 7,
             "need at least 7 control points, got {}",
@@ -138,16 +149,38 @@ impl PlanOptions {
             "need at least one collision sample per span"
         );
         ensure_input!(
+            u32::try_from(self.control_points).is_ok()
+                && u32::try_from(self.samples_per_span).is_ok(),
+            "{} control points of {} samples per span are more than a path holds ({})",
+            self.control_points,
+            self.samples_per_span,
+            u32::MAX
+        );
+        ensure_input!(
             (1..=MAX_HISTORY).contains(&self.history),
             "L-BFGS history must be 1 to {MAX_HISTORY} steps, got {}",
             self.history
         );
         ensure_input!(
-            self.initial_step > 0.0,
-            "the initial step must be positive, got {}",
+            self.initial_step.is_finite() && self.initial_step > 0.0,
+            "the initial step must be finite and positive, got {}",
             self.initial_step
         );
-        self.goal_ik.check("goal_ik")?;
+        ensure_input!(
+            self.acceleration_weight.is_finite() && self.velocity_weight.is_finite(),
+            "the acceleration and velocity weights must be finite, got {} and {}",
+            self.acceleration_weight,
+            self.velocity_weight
+        );
+        self.collision.check("plan")?;
+        self.goal_ik.check_as("goal_ik")?;
+        ensure_input!(
+            device::fits_batch(GOAL_SEED_LIMIT, self.goal_ik.seeds),
+            "goal_ik's {} seeds, tried with up to {GOAL_SEED_LIMIT} times as many, are more than \
+             a batch holds ({})",
+            self.goal_ik.seeds,
+            u32::MAX
+        );
         self.rrt.check()?;
         self.shortcut.check()
     }
@@ -378,7 +411,10 @@ pub fn plan(
     problems: &[PlanProblem],
     o: &PlanOptions,
 ) -> Result<PlanResult> {
-    let deadline = o.time_budget.map(|budget| Instant::now() + budget);
+    // A budget past what the clock counts is no deadline.
+    let deadline = o
+        .time_budget
+        .and_then(|budget| Instant::now().checked_add(budget));
     let robot = device.robot();
     let corrected = robot.correct_starts(
         problems,
@@ -519,6 +555,24 @@ fn resolve(
 fn check(robot: &Robot, worlds: &Worlds, problems: &[PlanProblem], o: &PlanOptions) -> Result<()> {
     let n = robot.dof();
     o.check()?;
+    // `o.check` has passed: neither product of the options alone overflows.
+    ensure_input!(
+        device::fits_batch(problems.len(), o.seeds + 1),
+        "{} problems of {} optimization seeds each are more items than a batch holds ({}); plan \
+         them in several calls",
+        problems.len(),
+        o.seeds,
+        u32::MAX
+    );
+    let posed = problems.iter().filter(|p| matches!(p.goal, Goal::Poses(_)));
+    let posed = posed.count();
+    ensure_input!(
+        device::fits_batch(posed, GOAL_SEED_LIMIT * o.goal_ik.seeds),
+        "{posed} pose goals of {} goal_ik seeds each, tried with up to {GOAL_SEED_LIMIT} times as \
+         many, are more items than a batch holds ({}); plan them in several calls",
+        o.goal_ik.seeds,
+        u32::MAX
+    );
     for (pi, p) in problems.iter().enumerate() {
         ensure_input!(
             (p.world as usize) < worlds.len(),

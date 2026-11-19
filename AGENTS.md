@@ -119,7 +119,7 @@ A robot that loads may still have spheres unfit to plan with. Before planning wi
 
 Check these before raising budgets:
 
-1. **The input.** An `Error::Input` names what was refused and the value given: shapes, joint order, unit quaternions, joint limits (strict by default; [measured starts can opt into correction](docs/planning.md#measured-starts-at-joint-limits)), frames.
+1. **The input.** An `Error::Input` names what was refused and the value given: shapes, joint order, unit quaternions, joint limits (strict by default; [measured starts can opt into correction](docs/planning.md#measured-starts-at-joint-limits)), frames. Options can be checked where they are set, before any request uses them: `IkOptions::check()`, and the same on `PlanOptions`, `RrtOptions`, `ShortcutOptions`, `ToolPathOptions` and `JoinOptions`, return the error their call would. They refuse what a call cannot run with, not what would take it long: how many seeds or iterations are too many for a cell is the host's to decide.
 2. **The start.** `PlanFailure::StartCollides { contacts }` names each link and obstacle, or pair of links. A link touching the table in every configuration needs a touch (`always_touching`); a start inside a held object's spheres needs the object attached.
 3. **The goal.** `PlanFailure::GoalCollides`, and for a pose goal `GoalUnreachable`, which more `PlanOptions::goal_ik` iterations may fix, or more seeds `kept` past its screening (`screening: 0` gives every seed every iteration); for IK, `ik::failures` tells `Unreachable` from `Collides { contacts }`.
 4. **The search.** `NoPath`: more `rrt.max_iterations`, or the way is blocked. `NoSpline`: more `control_points`, or a slower start motion. `OutOfTime`: a longer `time_budget`.
