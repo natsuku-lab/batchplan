@@ -18,13 +18,13 @@ Guide: [robots.md](robots.md).
 | `RobotOptions` | The base link, the hands (`ee_links`) and their fingers where they are part of the palm (`finger_links`), the default configuration, locked joints, joint limits and their scales, `package://` directories, an SRDF, OpenUSD variants, and the collision spheres, with tighter tolerances for some links (`sphere_tolerances`). |
 | `JointLimits` | One joint's position, velocity, acceleration and jerk limits, replacing its description's. |
 | `CollisionModel` | Collision spheres and self-collision settings by link: `load` and `save` a file, `to_json` and `from_json` the same text, `assemble` the model of an assembled robot. |
-| `SphereOptions`, `SphereGeometry` | How spheres are fitted when no collision model is given: the budget, the tolerance, and collision or visual geometry. |
+| `SphereOptions`, `SphereGeometry` | How spheres are fitted when no collision model is given: the budget, the tolerance, and collision or visual geometry; and `max_overhang`, a limit on how far any sphere reaches past the geometry, which holds a given model too. |
 | `Robot::attach(&AttachedObject)`, `Robot::detach(name)` | The robot holding an object fixed to one of its links, or without it. |
 | `Robot::relock(&joints)` | The robot with joints it locked at load held at new values, as a torso that moved ([guide](robots.md#kinematics)). |
 | `dof`, `joint_names`, `lower`, `upper`, `continuous`, `default_q`, `max_velocity`, `max_acceleration`, `max_jerk` | The robot's joints and their limits. |
 | `hands`, `hand_joints(hand)`, `hand_links(hand)`, `finger_links(hand)`, `tip(hand)`, `ee_pose(q, hand)`, `link_pose(q, link)` | Hands and forward kinematics; `hand_links` names a hand and its fingers, for allowed contacts, `finger_links` its fingers alone, and `tip` how far its spheres reach past its frame. |
 | `spheres(q)`, `reach()` | Every collision sphere at a configuration, and a bound on how far they reach from the base in any. |
-| `qualify()` | How well the spheres fit the geometry (`Qualification`): per link (`LinkQualification`) the `overhang`, the `uncovered` share of the surface and the `thickness`, and each hand's tip ([guide](robots.md#qualifying-a-robot)). |
+| `qualify()` | How well the spheres fit the geometry (`Qualification`): per link (`LinkQualification`) the `overhang`, the `uncovered` share of the surface, how deep the `gap` and the `thickness`, and each hand's tip ([guide](robots.md#qualifying-a-robot)). |
 | `breach(constraints, q)` | Why a configuration breaks `HandConstraint`s, if it does, tested as `plan` tests its start and goals: to keep only goals that keep them before planning. |
 | `MeshModel::try_new(&robot)`, `MeshModel::clearance` | Clearances on the links' meshes instead of the spheres, to check plans against the real geometry: a `Clearance` (`world`, `self_collision`) per configuration. |
 

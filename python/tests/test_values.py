@@ -44,6 +44,31 @@ def test_replace_changes_only_what_it_names():
         options.replace(seed=4)
 
 
+def test_a_limit_on_overhang_holds_fitted_and_given_spheres():
+    urdf = """<robot name="box"><link name="base"/><link name="shape"><collision><geometry>
+      <box size="0.1 0.1 0.1"/>
+    </geometry></collision></link><joint name="joint" type="revolute">
+      <parent link="base"/><child link="shape"/><axis xyz="0 0 1"/>
+      <limit lower="-1" upper="1" effort="1" velocity="1"/>
+    </joint></robot>"""
+    assert bp.SphereOptions().max_overhang is None
+    spheres = bp.SphereOptions(budget=8, max_overhang=0.002, self_collision_samples=0)
+    assert spheres.max_overhang == 0.002
+    options = bp.RobotOptions(spheres=spheres)
+    fitted = np.asarray(bp.Robot.from_urdf(urdf, options).collision_model.spheres["shape"])
+    assert 0 < len(fitted) <= spheres.budget
+    # No sphere reaches more than the limit past a face of the box.
+    assert np.all(np.abs(fitted[:, :3]).max(axis=1) + fitted[:, 3] <= 0.052001)
+    free = bp.Robot.from_urdf(urdf, options.replace(spheres=spheres.replace(max_overhang=None)))
+    loose = np.asarray(free.collision_model.spheres["shape"])
+    assert np.any(np.abs(loose[:, :3]).max(axis=1) + loose[:, 3] > 0.06), "the limit was needed"
+    past = bp.CollisionModel(spheres={"shape": [[0.0, 0.0, 0.0, 0.06]]})
+    with pytest.raises(bp.InputError, match="link 'shape': sphere 0,"):
+        bp.Robot.from_urdf(urdf, options.replace(collision_model=past))
+    with pytest.raises(bp.InputError, match="max_overhang must be finite"):
+        bp.Robot.from_urdf(urdf, options.replace(spheres=spheres.replace(max_overhang=-0.001)))
+
+
 def test_values_cannot_change_in_place():
     problem = bp.PlanProblem(0, [0.0, 0.0], [1.0, 1.0])
     with pytest.raises(AttributeError):

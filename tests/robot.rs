@@ -1848,3 +1848,517 @@ fn a_parts_base_turns_its_part_and_is_checked() {
         );
     }
 }
+
+/// How deep `p` lies inside a box of `half` extents about `center`: negative outside.
+fn depth_in_box(p: Vec3, center: Vec3, half: Vec3) -> f32 {
+    let q = (p - center).abs() - half;
+    -(q.max(Vec3::ZERO).length() + q.max_element().min(0.0))
+}
+
+#[test]
+fn spheres_held_to_an_overhang_reach_no_farther_and_the_gap_says_what_they_leave() {
+    // The stand's two boxes, as the URDF places them.
+    let boxes = [
+        ("feet", Vec3::ZERO, Vec3::new(0.385, 0.35, 0.155)),
+        ("box", Vec3::new(0.0, 0.0, 0.5), Vec3::new(0.11, 0.2, 0.265)),
+    ];
+    let fit = |max_overhang: Option<f32>| {
+        let options = RobotOptions {
+            spheres: SphereOptions {
+                budget: 48,
+                max_overhang,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        Robot::from_urdf(STAND, &options).unwrap()
+    };
+    let free = fit(None).qualify().unwrap().links;
+    for limit in [0.0, 0.002, 0.02] {
+        let robot = fit(Some(limit));
+        let model = robot.collision_model();
+        let count: usize = model.spheres.values().map(Vec::len).sum();
+        assert!(count > 0 && count <= 48, "{count} spheres");
+        let source = model.source.as_deref().unwrap();
+        let held = format!("each held to {:.1} mm", limit * 1e3);
+        assert!(source.contains(&held), "{source}");
+        let links = robot.qualify().unwrap().links;
+        // The fit's own account of how far its spheres reach is what they reach, held: the limit.
+        let reported: f32 = source
+            .split("up to ")
+            .nth(1)
+            .and_then(|s| s.split(' ').next())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("no reach in {source:?}"));
+        let largest = links.iter().map(|l| l.overhang).fold(0.0, f32::max);
+        assert!(
+            (largest - limit).abs() < 1e-5 && (reported - limit * 1e3).abs() < 0.06,
+            "{largest} m against {source}"
+        );
+        for ((&(name, center, half), l), free) in boxes.iter().zip(&links).zip(&free) {
+            assert_eq!((l.link.as_str(), free.link.as_str()), (name, name));
+            // The limit is one the budget does not reach by itself.
+            assert!(free.overhang > limit + 0.005, "{free:?}");
+            let spheres = &model.spheres[name];
+            assert!(!spheres.is_empty());
+            for &[x, y, z, radius] in spheres {
+                let reach = radius - depth_in_box(Vec3::new(x, y, z), center, half);
+                assert!(
+                    radius > 0.0 && reach <= limit + 1e-6,
+                    "{name}: a sphere reaches {reach} past the box, limit {limit}"
+                );
+            }
+            assert!(l.overhang <= limit + 1e-6, "{l:?}");
+            // How far the box's corners and its faces' centers lie outside the spheres, at most:
+            // the gap is measured on finer samples, so it is at least as deep, and not far off.
+            let outside = |p: Vec3| {
+                spheres
+                    .iter()
+                    .map(|s| p.distance(Vec3::new(s[0], s[1], s[2])) - s[3])
+                    .fold(f32::INFINITY, f32::min)
+            };
+            let marks = (0..27).map(|k| {
+                let at = Vec3::new((k % 3) as f32, (k / 3 % 3) as f32, (k / 9) as f32) - 1.0;
+                center + at * half
+            });
+            let deepest = marks
+                .filter(|&p| depth_in_box(p, center, half).abs() < 1e-6)
+                .map(outside)
+                .fold(0.0, f32::max);
+            assert!(
+                deepest > 0.01 && l.gap >= deepest - 1e-6 && l.gap < deepest + 0.01,
+                "{name}: gap {} against {deepest} at the corners",
+                l.gap
+            );
+            assert!(l.gap > free.gap + 0.01 && l.uncovered > 0.5, "{l:?}");
+        }
+    }
+    // Real meshes, each link held: the SO-101.
+    let limit = 0.002;
+    let options = RobotOptions {
+        spheres: SphereOptions {
+            budget: 256,
+            max_overhang: Some(limit),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let free = load(SO101).qualify().unwrap().links;
+    let robot = Robot::load(common::asset(SO101), &options).unwrap();
+    let links = robot.qualify().unwrap().links;
+    assert_eq!(links.len(), free.len());
+    assert!(free.iter().all(|l| l.overhang > 2.0 * limit), "{free:?}");
+    for l in &links {
+        assert!(l.overhang <= limit + 1e-6 && l.gap > 0.0, "{l:?}");
+    }
+}
+
+/// Boxes (center, half extents) written as one OBJ in `dir`, the first without its faces in
+/// `dropped` (of -x, +x, -y, +y, -z, +z) and with those in `twice` given twice. Returns its path.
+fn boxes_obj(
+    dir: &Path,
+    name: &str,
+    boxes: &[(Vec3, Vec3)],
+    dropped: &[usize],
+    twice: &[usize],
+) -> PathBuf {
+    // Each face's corners, counterclockwise seen from outside.
+    let faces = [
+        [1, 5, 7, 3],
+        [2, 4, 8, 6],
+        [1, 2, 6, 5],
+        [3, 7, 8, 4],
+        [1, 3, 4, 2],
+        [5, 6, 8, 7],
+    ];
+    let mut lines = vec![];
+    for (n, &(center, half)) in boxes.iter().enumerate() {
+        for k in 0..8 {
+            let sign = |bit: usize| if k >> bit & 1 == 1 { 1.0 } else { -1.0 };
+            let v = center + Vec3::new(sign(0), sign(1), sign(2)) * half;
+            lines.push(format!("v {} {} {}", v.x, v.y, v.z));
+        }
+        for (k, face) in faces.into_iter().enumerate() {
+            let [a, b, c, d] = face.map(|corner| corner + 8 * n);
+            let times = match n {
+                0 if dropped.contains(&k) => 0,
+                0 if twice.contains(&k) => 2,
+                _ => 1,
+            };
+            for _ in 0..times {
+                lines.push(format!("f {a} {b} {c}\nf {a} {c} {d}"));
+            }
+        }
+    }
+    let path = dir.join(name);
+    std::fs::write(&path, lines.join("\n")).unwrap();
+    path
+}
+
+/// A robot of one link, `body`, with `collision` inside its `<collision>` element.
+fn one_link(collision: &str) -> String {
+    format!(
+        r#"<robot name="held"><link name="base"/>
+          <link name="body"><collision>{collision}</collision></link>
+          <joint name="turn" type="revolute"><parent link="base"/><child link="body"/>
+            <axis xyz="0 0 1"/><limit lower="-1" upper="1" velocity="1" effort="1"/></joint>
+        </robot>"#
+    )
+}
+
+/// [`one_link`] with the mesh file at `path` as its geometry.
+fn meshed(path: &Path) -> String {
+    one_link(&format!(
+        r#"<geometry><mesh filename="file://{}"/></geometry>"#,
+        path.display()
+    ))
+}
+
+/// A link of two closed shells in one mesh, a plate 20.9 × 6.1 cm over another with 4 cm between
+/// them: the space between is outside the link, at its middle and under the plates' edges and
+/// the diagonals their faces are split along.
+#[test]
+fn the_space_between_two_shells_of_a_link_is_outside_it() {
+    let half = Vec3::new(0.1045, 0.0305, 0.01);
+    let plates = [(Vec3::Z * 0.03, half), (Vec3::Z * -0.03, half)];
+    let depth = |p: Vec3| {
+        let of = |&(center, half): &(Vec3, Vec3)| depth_in_box(p, center, half);
+        plates.iter().map(of).fold(f32::NEG_INFINITY, f32::max)
+    };
+    let dir = scratch("two-shells");
+    let urdf = meshed(&boxes_obj(&dir, "plates.obj", &plates, &[], &[]));
+    let given = |sphere: [f32; 4], max_overhang: Option<f32>| RobotOptions {
+        collision_model: Some(CollisionModel {
+            spheres: BTreeMap::from([("body".to_string(), vec![sphere])]),
+            ..Default::default()
+        }),
+        spheres: SphereOptions {
+            max_overhang,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    for (x, y) in [
+        (0.0, 0.0),
+        (1.0, 0.0),
+        (0.0, 1.0),
+        (1.0, 1.0),
+        (0.5, 0.5),
+        (-0.25, 0.25),
+    ] {
+        let center = Vec3::new(x * half.x, y * half.y, 0.0);
+        let sphere = [center.x, center.y, 0.0, 0.0196];
+        let refused = Robot::from_urdf(&urdf, &given(sphere, Some(0.0))).map(|_| ());
+        assert!(
+            matches!(&refused, Err(Error::Input(m)) if m.contains("its center 20.000 mm outside")),
+            "{center}: {refused:?}"
+        );
+        let robot = Robot::from_urdf(&urdf, &given(sphere, None)).unwrap();
+        let overhang = robot.qualify().unwrap().links[0].overhang;
+        assert!((overhang - 0.0396).abs() < 1e-5, "{center}: {overhang}");
+    }
+    // Fitted, every sphere's center is in a plate, and held to nothing past them, all of it.
+    for max_overhang in [None, Some(0.0)] {
+        let options = RobotOptions {
+            collision_model: None,
+            ..given([0.0; 4], max_overhang)
+        };
+        let robot = Robot::from_urdf(&urdf, &options).unwrap();
+        let spheres = &robot.collision_model().spheres["body"];
+        assert!(spheres.len() > 8, "{} spheres", spheres.len());
+        for &[x, y, z, radius] in spheres {
+            let deep = depth(Vec3::new(x, y, z));
+            assert!(deep > 0.0, "a center {} mm outside the plates", -deep * 1e3);
+            if max_overhang.is_some() {
+                assert!(radius <= deep + 1e-6, "{radius} at a depth of {deep}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_limit_on_overhang_holds_supplied_models_and_names_what_it_refuses() {
+    let half = Vec3::new(0.05, 0.04, 0.03);
+    let boxed = one_link(r#"<geometry><box size="0.1 0.08 0.06"/></geometry>"#);
+    let limit = 0.002;
+    let options = |spheres: Vec<[f32; 4]>, link: &str| RobotOptions {
+        collision_model: Some(CollisionModel {
+            spheres: BTreeMap::from([(link.to_string(), spheres)]),
+            ..Default::default()
+        }),
+        spheres: SphereOptions {
+            max_overhang: Some(limit),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let refused = |urdf: &str, o: &RobotOptions| match Robot::from_urdf(urdf, o) {
+        Err(Error::Input(message)) => message,
+        other => panic!("expected an input error, got {other:?}"),
+    };
+    // Inside, and past a face by the limit: held. A hair more, or a center outside: refused,
+    // the sphere named with how far it reaches.
+    Robot::from_urdf(&boxed, &options(vec![[0.0, 0.0, 0.0, 0.03]], "body")).unwrap();
+    Robot::from_urdf(&boxed, &options(vec![[0.0, 0.0, 0.0, 0.032]], "body")).unwrap();
+    let message = refused(
+        &boxed,
+        &options(
+            vec![[0.0, 0.0, 0.0, 0.03], [0.0, 0.0, 0.01, 0.0225]],
+            "body",
+        ),
+    );
+    assert!(
+        message.contains("link 'body': sphere 1,")
+            && message.contains("reaches 2.500 mm past the geometry")
+            && message.contains("20.000 mm deep")
+            && message.contains("`max_overhang` allows 2.000 mm"),
+        "{message}"
+    );
+    let message = refused(&boxed, &options(vec![[0.06, 0.0, 0.0, 0.001]], "body"));
+    assert!(
+        message.contains("sphere 0,") && message.contains("its center 10.000 mm outside"),
+        "{message}"
+    );
+    let message = refused(&boxed, &options(vec![[0.0, 0.0, 0.0, f32::NAN]], "body"));
+    assert!(message.contains("sphere 0,"), "{message}");
+    // Without a limit the same model loads, as it always has.
+    let mut free = options(vec![[0.0, 0.0, 0.01, 0.0225]], "body");
+    free.spheres.max_overhang = None;
+    Robot::from_urdf(&boxed, &free).unwrap();
+    // Spheres on a link without geometry have nothing to be held to.
+    let message = refused(&boxed, &options(vec![[0.0, 0.0, 0.0, 0.01]], "base"));
+    assert!(
+        message.contains("link 'base' has spheres") && message.contains("no geometry"),
+        "{message}"
+    );
+
+    // A fit under the limit is a model the limit holds, here and with the link's geometry and
+    // the spheres both moved by one pose, which rounds each center anew.
+    let fit = RobotOptions {
+        collision_model: None,
+        ..options(vec![], "body")
+    };
+    let fitted = Robot::from_urdf(&boxed, &fit).unwrap();
+    let spheres = fitted.collision_model().spheres["body"].clone();
+    let at_the_limit = spheres.iter().filter(|&&[x, y, z, radius]| {
+        (radius - depth_in_box(Vec3::new(x, y, z), Vec3::ZERO, half) - limit).abs() < 1e-6
+    });
+    assert!(at_the_limit.count() > 8, "few spheres reach the limit");
+    Robot::from_urdf(&boxed, &options(spheres.clone(), "body")).unwrap();
+    let mut rng = Rng::new(5);
+    for _ in 0..20 {
+        let rpy = Vec3::new(
+            rng.range(-3.0, 3.0),
+            rng.range(-1.5, 1.5),
+            rng.range(-3.0, 3.0),
+        );
+        let xyz = Vec3::new(
+            rng.range(-0.5, 0.5),
+            rng.range(-0.5, 0.5),
+            rng.range(-0.5, 0.5),
+        );
+        // A URDF's rpy turns about fixed x, then y, then z.
+        let turn = Quat::from_rotation_z(rpy.z)
+            * Quat::from_rotation_y(rpy.y)
+            * Quat::from_rotation_x(rpy.x);
+        let moved = one_link(&format!(
+            r#"<origin xyz="{} {} {}" rpy="{} {} {}"/><geometry><box size="0.1 0.08 0.06"/></geometry>"#,
+            xyz.x, xyz.y, xyz.z, rpy.x, rpy.y, rpy.z
+        ));
+        let placed = spheres
+            .iter()
+            .map(|&[x, y, z, radius]| {
+                let c = xyz + turn * Vec3::new(x, y, z);
+                [c.x, c.y, c.z, radius]
+            })
+            .collect();
+        Robot::from_urdf(&moved, &options(placed, "body")).unwrap();
+    }
+
+    // Geometry that is not closed has no inside to hold spheres in: refused with the link and
+    // its open edges, whether the model is given or fitted. A face given twice is closed.
+    let dir = scratch("overhang");
+    let whole = [(Vec3::ZERO, half)];
+    let closed = meshed(&boxes_obj(&dir, "closed.obj", &whole, &[], &[]));
+    let open = meshed(&boxes_obj(&dir, "open.obj", &whole, &[5], &[]));
+    let doubled = meshed(&boxes_obj(&dir, "doubled.obj", &whole, &[], &[1]));
+    let inside = options(vec![[0.0, 0.0, 0.0, 0.03]], "body");
+    Robot::from_urdf(&closed, &inside).unwrap();
+    for o in [&inside, &fit] {
+        let message = refused(&open, o);
+        assert!(
+            message.contains("link 'body': mesh 0 of 1 is not closed: 4 of its 17 edges"),
+            "{message}"
+        );
+        // A face given again skews which side the faces around it tell.
+        let message = refused(&doubled, o);
+        assert!(
+            message.contains("gives faces more than once, 2 the same way again and 0 both ways"),
+            "{message}"
+        );
+    }
+    // A box whose every face is given both ways, as a mesh drawn from both sides is, has no
+    // side that is inside, whichever copy comes first; nor do two boxes that share a face.
+    let text = std::fs::read_to_string(dir.join("closed.obj")).unwrap();
+    // Backward from its last corner, so the copies start at different ones.
+    let reversed = |line: &str| {
+        let corners: Vec<&str> = line.split(' ').collect();
+        format!("f {} {} {}", corners[3], corners[2], corners[1])
+    };
+    let faces = text.lines().filter(|line| line.starts_with('f'));
+    let (forward, backward): (Vec<String>, Vec<String>) =
+        faces.map(|line| (line.to_string(), reversed(line))).unzip();
+    let corners: Vec<&str> = text.lines().filter(|line| line.starts_with('v')).collect();
+    for (name, faces) in [
+        ("both.obj", [forward.clone(), backward.clone()].concat()),
+        ("both-reversed-first.obj", [backward, forward].concat()),
+    ] {
+        let path = dir.join(name);
+        std::fs::write(&path, [corners.join("\n"), faces.join("\n")].join("\n")).unwrap();
+        for o in [&inside, &fit] {
+            let message = refused(&meshed(&path), o);
+            assert!(
+                message.contains("link 'body': mesh 0 of 1 gives faces more than once, 0 the same way again and 12 both ways"),
+                "{name}: {message}"
+            );
+        }
+    }
+    let stacked = [(Vec3::ZERO, half), (Vec3::Z * 2.0 * half.z, half)];
+    let stacked = meshed(&boxes_obj(&dir, "stacked.obj", &stacked, &[], &[]));
+    for o in [&inside, &fit] {
+        let message = refused(&stacked, o);
+        assert!(
+            message.contains("0 the same way again and 2 both ways"),
+            "{message}"
+        );
+    }
+    // A cube that faces inward beside the box, each closed: the nearest face would take the
+    // space around the cube for inside.
+    let apart = [(Vec3::ZERO, half), (Vec3::X * 0.2, Vec3::splat(0.02))];
+    let text = std::fs::read_to_string(boxes_obj(&dir, "apart.obj", &apart, &[], &[])).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let faces = lines.iter().filter(|line| line.starts_with('f')).count();
+    let mut seen = 0;
+    let inverted: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            seen += usize::from(line.starts_with('f'));
+            // The cube's faces are the second half.
+            if line.starts_with('f') && seen > faces / 2 {
+                reversed(line)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    let path = dir.join("inverted.obj");
+    std::fs::write(&path, inverted.join("\n")).unwrap();
+    Robot::from_urdf(&meshed(&dir.join("apart.obj")), &fit).unwrap();
+    let beside = RobotOptions {
+        collision_model: Some(CollisionModel {
+            spheres: BTreeMap::from([("body".to_string(), vec![[0.225, 0.0, 0.0, 0.005]])]),
+            ..Default::default()
+        }),
+        ..fit.clone()
+    };
+    for o in [&beside, &fit] {
+        let message = refused(&meshed(&path), o);
+        assert!(
+            message.contains("link 'body': mesh 0 of 1 has 1 of its 2 shells facing inward"),
+            "{message}"
+        );
+    }
+    let mut free = fit;
+    free.spheres.max_overhang = None;
+    Robot::from_urdf(&open, &free).unwrap();
+    Robot::from_urdf(&stacked, &free).unwrap();
+
+    // The options are checked whether spheres are fitted or given, as input, by every loader.
+    let path = dir.join("stand.urdf");
+    std::fs::write(&path, STAND).unwrap();
+    let bad = [
+        SphereOptions {
+            max_overhang: Some(-0.001),
+            ..Default::default()
+        },
+        SphereOptions {
+            max_overhang: Some(f32::NAN),
+            ..Default::default()
+        },
+        SphereOptions {
+            max_overhang: Some(f32::INFINITY),
+            ..Default::default()
+        },
+        SphereOptions {
+            budget: 0,
+            ..Default::default()
+        },
+    ];
+    for spheres in bad {
+        for collision_model in [None, Some(CollisionModel::default())] {
+            let o = RobotOptions {
+                collision_model,
+                spheres,
+                ..Default::default()
+            };
+            let part = Part {
+                path: path.clone(),
+                prefix: String::new(),
+                base: Pose::IDENTITY,
+            };
+            for result in [
+                Robot::load(&path, &o),
+                Robot::from_urdf(STAND, &o),
+                Robot::assemble(&[part], &o),
+            ] {
+                assert!(
+                    matches!(&result, Err(Error::Input(m)) if m.contains("max_overhang") || m.contains("budget")),
+                    "{spheres:?}: {result:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_link_too_thin_for_a_sphere_inside_it_is_refused_by_name() {
+    // A plate 0.05 mm thick: no center the fit can place lies inside it.
+    let urdf = r#"<robot name="plate"><link name="base"/>
+      <link name="plate"><collision><geometry><box size="0.1 0.1 0.00005"/></geometry></collision></link>
+      <joint name="turn" type="revolute"><parent link="base"/><child link="plate"/>
+        <axis xyz="0 0 1"/><limit lower="-1" upper="1" velocity="1" effort="1"/></joint>
+    </robot>"#;
+    let options = |max_overhang: Option<f32>| RobotOptions {
+        spheres: SphereOptions {
+            max_overhang,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let refused =
+        Robot::from_urdf(urdf, &options(Some(0.0))).map(|robot| robot.collision_model().clone());
+    assert!(
+        matches!(&refused, Err(Error::Input(m)) if m.contains("link 'plate': no sphere fits within `max_overhang` (0 m)")),
+        "{refused:?}"
+    );
+    // A ball of no radius has no surface at all, and no limit would help it.
+    let point = urdf.replace(
+        r#"<box size="0.1 0.1 0.00005"/>"#,
+        r#"<sphere radius="0"/>"#,
+    );
+    assert_ne!(point, urdf);
+    let refused = Robot::from_urdf(&point, &options(Some(0.002))).map(|_| ());
+    assert!(
+        matches!(&refused, Err(Error::Input(m)) if m.contains("link 'plate': mesh 0 of 1 has no surface")),
+        "{refused:?}"
+    );
+    // With room past it, or without a limit, it is covered.
+    for max_overhang in [Some(0.002), None] {
+        let robot = Robot::from_urdf(urdf, &options(max_overhang)).unwrap();
+        let l = &robot.qualify().unwrap().links[0];
+        assert!(
+            l.spheres > 0 && l.overhang <= max_overhang.unwrap_or(1.0) + 1e-6,
+            "{l:?}"
+        );
+    }
+}

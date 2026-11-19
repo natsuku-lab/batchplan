@@ -5,7 +5,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, anyhow, bail, ensure};
 use glam::{Mat3, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
@@ -320,7 +320,8 @@ pub struct RobotOptions {
     pub package_dirs: Vec<PathBuf>,
     /// Collision spheres; fitted to the description's geometry with `spheres` when `None`.
     pub collision_model: Option<CollisionModel>,
-    /// How spheres are fitted when there is no `collision_model`.
+    /// How spheres are fitted when there is no `collision_model`, and the `max_overhang` one
+    /// given is held to; checked either way.
     pub spheres: SphereOptions,
     /// Per link, by name: how far its spheres may reach beyond its geometry (meters), in place of
     /// `spheres.tolerance`, as fingers fitted tighter than the arm so they can grasp small objects.
@@ -511,6 +512,7 @@ impl Fk {
 impl Robot {
     /// Loads a robot from URDF, MJCF (`.xml`, `.mjcf`) or OpenUSD (`.usd*`, feature `usd`).
     pub fn load(path: impl AsRef<Path>, o: &RobotOptions) -> error::Result<Self> {
+        o.spheres.check().map_err(Error::Input)?;
         let path = path.as_ref();
         let part = Part {
             path: path.to_path_buf(),
@@ -533,6 +535,7 @@ impl Robot {
     /// paths must be `package://` (found through [`RobotOptions::package_dirs`]), `file://` or
     /// absolute.
     pub fn from_urdf(urdf: &str, o: &RobotOptions) -> error::Result<Self> {
+        o.spheres.check().map_err(Error::Input)?;
         crate::urdf::from_text(urdf, None, &o.package_dirs)
             .and_then(|description| Self::from_description(&description, o))
             .map_err(|e| Error::Input(format!("URDF: {e:#}")))
@@ -543,6 +546,7 @@ impl Robot {
     /// root link, `world`. The options name links and joints with their prefixes; give each arm's
     /// hand in `ee_links`.
     pub fn assemble(parts: &[Part], o: &RobotOptions) -> error::Result<Self> {
+        o.spheres.check().map_err(Error::Input)?;
         let load_error = |path: &Path, e: anyhow::Error| Error::Load {
             path: path.to_path_buf(),
             message: format!("{e:#}"),
@@ -616,6 +620,9 @@ impl Robot {
                          model with it free"
                     );
                 }
+                if let Some(limit) = o.spheres.max_overhang {
+                    robot.held_within(model, limit)?;
+                }
                 model.clone()
             }
             None => {
@@ -631,6 +638,29 @@ impl Robot {
         }
         robot.set_collision_model(model)?;
         Ok(robot)
+    }
+
+    /// That every sphere `model` gives a link reaches no more than `limit` past the link's
+    /// geometry ([`SphereOptions::max_overhang`]), naming the first that does, or the link whose
+    /// geometry has no inside to measure it in.
+    fn held_within(&self, model: &CollisionModel, limit: f32) -> Result<()> {
+        for link in &self.links {
+            let Some(spheres) = model.spheres.get(&link.name).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            ensure!(
+                !link.shapes.is_empty(),
+                "link '{}' has spheres in the collision model and no geometry to hold them within \
+                 `max_overhang` of",
+                link.name
+            );
+            let meshes: Vec<TriMesh> =
+                link.shapes.iter().map(Shape::mesh).collect::<Result<_>>()?;
+            spheres::closed(&meshes)
+                .and_then(|()| spheres::within(&meshes, spheres, limit))
+                .map_err(|e| anyhow!("link '{}': {e}", link.name))?;
+        }
+        Ok(())
     }
 
     /// Fits spheres to every link's geometry, then finds the link pairs not worth checking.
@@ -656,7 +686,6 @@ impl Robot {
             .iter()
             .map(|link| link.shapes.iter().map(|s| s.mesh()).collect())
             .collect::<Result<_>>()?;
-        o.check().map_err(anyhow::Error::msg)?;
         let with_geometry = meshes.iter().filter(|m| !m.is_empty()).count();
         ensure!(
             o.budget >= with_geometry,
@@ -668,10 +697,39 @@ impl Robot {
             .iter()
             .map(|link| tolerances.get(&link.name).copied().unwrap_or(o.tolerance))
             .collect();
+        if o.max_overhang.is_some() {
+            for (link, meshes) in self.links.iter().zip(&meshes) {
+                spheres::closed(meshes).map_err(|e| {
+                    anyhow!(
+                        "link '{}': {e}, so it has no inside to hold spheres within \
+                         `max_overhang` of",
+                        link.name
+                    )
+                })?;
+            }
+        }
         let fitted = spheres::fit(&meshes, &tolerances, o, /* parallel */ true);
+        if let Some(limit) = o.max_overhang {
+            let bare = self
+                .links
+                .iter()
+                .zip(&meshes)
+                .zip(&fitted.spheres)
+                .find(|((_, meshes), spheres)| !meshes.is_empty() && spheres.is_empty());
+            if let Some(((link, _), _)) = bare {
+                bail!(
+                    "link '{}': no sphere fits within `max_overhang` ({limit} m) of its \
+                     geometry, which is too thin for a center inside it: allow more",
+                    link.name
+                );
+            }
+        }
+        let held = o.max_overhang.map_or_else(String::new, |limit| {
+            format!(", each held to {:.1} mm beyond it", limit * 1e3)
+        });
         let source = format!(
             "fitted by batchplan: spheres reach up to {:.1} mm beyond the geometry and up to {:.2} \
-             times their link's tolerance, with every tolerance scaled by {:.2} for the budget",
+             times their link's tolerance, with every tolerance scaled by {:.2} for the budget{held}",
             fitted.overhang * 1e3,
             fitted.relative_overhang,
             fitted.scale
@@ -842,7 +900,18 @@ impl Robot {
                 .map_err(|e| input!("'{}' shape {k}: {e}, got {shape:?}", object.name))?;
         }
         ensure_input!(!shapes.is_empty(), "'{}' has no shapes", object.name);
-        let fitted = spheres()?;
+        let fitted = spheres().map_err(|e| match e {
+            Error::Input(message) => input!("'{}': {message}", object.name),
+            other => other,
+        })?;
+        if let Some(limit) = object.spheres.max_overhang {
+            ensure_input!(
+                !fitted.is_empty(),
+                "'{}': no sphere fits within `max_overhang` ({limit} m) of its shapes, which are \
+                 too thin for a center inside them: allow more",
+                object.name
+            );
+        }
         let mut robot = self.clone();
         let chain = robot.links[parent].chain.clone();
         robot.links.push(Link {
@@ -2099,6 +2168,10 @@ fn covered(shapes: &[Obstacle], o: &SphereOptions) -> error::Result<Vec<[f32; 4]
         .iter()
         .map(|shape| attached_shape(shape)?.mesh().map_err(|e| input!("{e:#}")))
         .collect::<error::Result<Vec<TriMesh>>>()?;
+    if o.max_overhang.is_some() {
+        spheres::closed(&meshes)
+            .map_err(|e| input!("{shapes:?} cannot hold spheres within `max_overhang`: {e}"))?;
+    }
     let fitted = spheres::fit(
         &[meshes],
         &[o.tolerance],

@@ -32,7 +32,7 @@ pub struct Held {
     /// How spheres cover it: within `tolerance` of its surface where `budget` spheres can, the
     /// defaults being 5 mm and 64. A thin wide object, as a plate, takes more to stay within a
     /// few millimeters of its sides: a gap narrower than what its spheres reach past it reads as
-    /// a contact.
+    /// a contact. Its own `max_overhang` holds them, whatever the robot was loaded with.
     pub spheres: SphereOptions,
 }
 

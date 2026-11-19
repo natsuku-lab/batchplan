@@ -47,6 +47,18 @@ pub struct SphereOptions {
     /// How far spheres may reach beyond the geometry (meters) before the fit spends more of the
     /// budget. When the budget cannot reach it, the fit uses the smallest overhang it can.
     pub tolerance: f32,
+    /// The farthest any sphere may reach beyond the geometry (meters), whatever the budget: each
+    /// sphere's radius is at most how deep its center lies inside plus this
+    /// ([`LinkQualification::overhang`]), so `Some(0.0)` keeps every sphere inside. Spheres are
+    /// chosen as without it and then held to it, which leaves surface outside them wherever
+    /// `tolerance`, as the budget scales it, is the larger: [`Robot::qualify`](crate::Robot::qualify)
+    /// reports how deep as each link's `gap`. The geometry must be closed, and a collision model
+    /// given with the options is held to it as a fitted one is. Depths are measured in the
+    /// geometry as the fit sees it, a round shape as its mesh of 24 sides, which lies inside it by
+    /// up to 0.9% of a cylinder's radius and 1.7% of a ball's or a capsule's; a held shape covered
+    /// without fitting is held to the shape itself, so `qualify` reads that much more for it.
+    /// `None`: spheres cover the surface and reach as far past it as the budget makes them.
+    pub max_overhang: Option<f32>,
     /// Largest spacing of the interior grid that proposes sphere centers (meters). Small links
     /// use a finer grid.
     pub voxel_size: f32,
@@ -67,6 +79,13 @@ impl SphereOptions {
                 "sphere fitting needs a budget of at least one sphere and positive tolerance and voxel size, got {self:?}"
             ));
         }
+        if let Some(limit) = self.max_overhang
+            && !(limit.is_finite() && limit >= 0.0)
+        {
+            return Err(format!(
+                "max_overhang must be finite and not negative, got {limit}"
+            ));
+        }
         Ok(())
     }
 }
@@ -76,6 +95,7 @@ impl Default for SphereOptions {
         Self {
             budget: 64,
             tolerance: 0.005,
+            max_overhang: None,
             voxel_size: 0.01,
             geometry: SphereGeometry::Collision,
             self_collision_samples: 10_000,
@@ -214,6 +234,34 @@ fn inscribed(solids: &[ParryMesh], p: Vec3) -> Option<(Vec3, f32)> {
         .map(|r| (p, r))
 }
 
+/// `meshes` as parry tests points against them, without those it cannot build, as
+/// [`LinkFit::new`] builds its own.
+fn solids(meshes: &[TriMesh]) -> Arc<[ParryMesh]> {
+    let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
+        | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
+        | TriMeshFlags::ORIENTED;
+    meshes
+        .iter()
+        .filter_map(|m| ParryMesh::with_flags(m.vertices.clone(), m.triangles.clone(), flags).ok())
+        .collect()
+}
+
+/// How deep `p` lies inside `solids` (meters): the radius of the largest sphere centered there
+/// inside one of them, or where it is outside them all, its distance to the nearest, negative.
+fn depth(solids: &[ParryMesh], p: Vec3) -> f32 {
+    use parry3d::query::PointQuery;
+
+    inscribed(solids, p).map_or_else(
+        || {
+            -solids
+                .iter()
+                .map(|s| s.distance_to_local_point(p, false))
+                .fold(f32::INFINITY, f32::min)
+        },
+        |(_, r)| r,
+    )
+}
+
 /// One link's surface samples and candidate spheres (center, largest radius inside the geometry).
 #[derive(Clone)]
 struct LinkFit {
@@ -255,6 +303,8 @@ impl LinkFit {
             .sum();
         let count = ((area / DENSE_AREA) as usize).clamp(DENSE_SAMPLES, MAX_DENSE_SAMPLES);
         let dense = surface_samples(meshes, count, rng);
+        // As `solids` builds them, written out: calling it here took fits without a limit 2 to 7%
+        // longer in a one-unit build on x86.
         let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
             | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
             | TriMeshFlags::ORIENTED;
@@ -308,38 +358,35 @@ impl LinkFit {
     }
 
     /// How `spheres` (`[x, y, z, radius]`, in the meshes' frame) fit this geometry: their largest
-    /// overhang, the share of the dense samples outside every one, and the geometry's thickness.
+    /// overhang, the share of the dense samples outside every one and how far outside the
+    /// farthest lies, and the geometry's thickness.
     fn measure(&self, link: &str, spheres: &[[f32; 4]]) -> LinkQualification {
-        use parry3d::query::PointQuery;
-
-        // How deep `p` lies inside the geometry: negative outside.
-        let depth = |p: Vec3| {
-            inscribed(&self.solids, p).map_or_else(
-                || {
-                    -self
-                        .solids
-                        .iter()
-                        .map(|s| s.distance_to_local_point(p, false))
-                        .fold(f32::INFINITY, f32::min)
-                },
-                |(_, r)| r,
-            )
-        };
         let overhang = spheres
             .iter()
-            .map(|s| s[3] - depth(Vec3::new(s[0], s[1], s[2])))
+            .map(|s| s[3] - depth(&self.solids, Vec3::new(s[0], s[1], s[2])))
             .fold(0.0, f32::max);
-        let inside = |p: &&Vec3| {
+        let inside = |p: Vec3| {
             spheres
                 .iter()
                 .any(|s| p.distance(Vec3::new(s[0], s[1], s[2])) <= s[3] * (1.0 + 1e-5))
         };
-        let outside = self.dense.iter().filter(|(p, _)| !inside(&p)).count();
+        // How far `p` lies from the nearest sphere's surface.
+        let beyond = |p: Vec3| {
+            spheres
+                .iter()
+                .map(|s| p.distance(Vec3::new(s[0], s[1], s[2])) - s[3])
+                .fold(f32::INFINITY, f32::min)
+        };
+        let outside = self.dense.iter().filter(|(p, _)| !inside(*p));
+        let (count, gap) = outside.fold((0, 0.0f32), |(count, gap), &(p, _)| {
+            (count + 1, gap.max(beyond(p)))
+        });
         LinkQualification {
             link: link.to_string(),
             spheres: spheres.len(),
             overhang,
-            uncovered: outside as f32 / self.dense.len().max(1) as f32,
+            uncovered: count as f32 / self.dense.len().max(1) as f32,
+            gap,
             thickness: 2.0 * self.largest,
         }
     }
@@ -523,6 +570,32 @@ impl LinkFit {
             growth,
         )
     }
+
+    /// Holds fitted `spheres` to `limit` past the geometry ([`SphereOptions::max_overhang`]): each
+    /// radius is cut back to its center's depth plus the limit, and a sphere left with no more
+    /// than rounding gives a center on the surface is dropped, so the samples they reached past
+    /// that stay outside. Returns how far past the geometry the farthest still reaches. Out of
+    /// line: inlined, it grew `fit` by two fifths, and fits without a limit that search for the
+    /// least growth took 7 to 12% longer on x86.
+    #[inline(never)]
+    fn hold(&self, spheres: &mut Vec<[f32; 4]>, limit: f32) -> f32 {
+        let corner = |far: f32, solid: &ParryMesh| {
+            let bounds = solid.local_aabb();
+            far.max(bounds.mins.abs().max(bounds.maxs.abs()).max_element())
+        };
+        let least = ROUNDING * self.solids.iter().fold(0.0, corner);
+        let mut reach = 0.0f32;
+        spheres.retain_mut(|sphere| {
+            let depth = depth(&self.solids, Vec3::new(sphere[0], sphere[1], sphere[2]));
+            sphere[3] = sphere[3].min(depth + limit);
+            let kept = sphere[3] > least;
+            if kept {
+                reach = reach.max(sphere[3] - depth);
+            }
+            kept
+        });
+        reach
+    }
 }
 
 /// How well a robot's collision spheres fit its geometry ([`Robot::qualify`](crate::Robot::qualify)):
@@ -553,6 +626,12 @@ pub struct LinkQualification {
     /// samples and leave slivers about a millimeter deep between them where held tight, and more
     /// where a hand-tuned model leaves gaps.
     pub uncovered: f32,
+    /// How far the farthest of those samples lies outside the spheres (meters), zero where none
+    /// does: how deep an obstacle can reach into the link unseen. Up to about a millimeter for
+    /// spheres fitted to an arm's links, and two or three on a stand's wide boxes; more where a
+    /// hand-tuned model leaves gaps, or where [`SphereOptions::max_overhang`] holds spheres
+    /// short of the surface, which leaves all of it outside them at zero.
+    pub gap: f32,
     /// How thick its geometry is where thickest (meters): the largest sphere inside it, across. A
     /// link thinner than its spheres' overhang is mostly sphere.
     pub thickness: f32,
@@ -740,7 +819,15 @@ pub(crate) fn fit(
             fitted = Some(grown(&trial, &covers));
         }
     }
-    let fitted = fitted.unwrap_or_else(|| grown(&fits, &picks));
+    let mut fitted = fitted.unwrap_or_else(|| grown(&fits, &picks));
+    if let Some(limit) = o.max_overhang {
+        // The tries above share each link's geometry with `fits`.
+        for (f, (spheres, reach)) in fits.iter().zip(&mut fitted) {
+            if let Some(f) = f {
+                *reach = f.hold(spheres, limit);
+            }
+        }
+    }
     Fitted {
         overhang: fitted.iter().map(|f| f.1).fold(0.0, f32::max),
         relative_overhang: relative(&fitted),
@@ -760,11 +847,16 @@ pub(crate) fn fit(
 /// tolerance the one of fewest spheres is taken, or where the budget cannot reach it, the least
 /// overhang the budget can; so for a capsule. The shapes but the spheres share the budget the
 /// spheres leave. Microseconds, where fitting takes milliseconds, and within the tolerance on a
-/// thin wide shape, where a fit of as many spheres is not.
+/// thin wide shape, where a fit of as many spheres is not. Under `o.max_overhang` the covers are
+/// those within the smaller of it and the tolerance, and where the budget has none within it,
+/// the shapes are left to the fit, which holds its spheres to it.
 pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option<Vec<[f32; 4]>> {
     if shapes.iter().any(|s| matches!(s, Obstacle::Sdf { .. })) {
         return None;
     }
+    // Under a limit, a cover reaches no farther than it, or the shapes are left to the fit.
+    let limit = o.max_overhang.unwrap_or(f32::INFINITY);
+    let tolerance = o.tolerance.min(limit);
     let balls = shapes
         .iter()
         .filter(|s| matches!(s, Obstacle::Sphere { .. }))
@@ -793,10 +885,13 @@ pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option
                 half_extents,
                 rotation,
             } => {
-                let cells = box_cells(half_extents, o.tolerance, each);
+                let cells = box_cells(half_extents, tolerance, each);
                 let cell = half_extents / cells.as_vec3();
                 // A hair wide, so rounding never leaves a corner uncovered.
                 let radius = cell.length() * HAIR;
+                if radius - cell.min_element() > limit {
+                    return None;
+                }
                 let mut own = vec![];
                 for i in 0..cells.x {
                     for j in 0..cells.y {
@@ -815,7 +910,7 @@ pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option
                 radius,
                 half_height,
             } => {
-                let own = cylinder_cover(radius, half_height, o.tolerance, each)?;
+                let own = cylinder_cover(radius, half_height, tolerance, each)?;
                 placed(&mut spheres, center, rotation, own);
             }
             Obstacle::Capsule {
@@ -824,7 +919,10 @@ pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option
                 radius,
                 half_length,
             } => {
-                let own = capsule_cover(radius, half_length, o.tolerance, each);
+                let own = capsule_cover(radius, half_length, tolerance, each);
+                if own[0][3] - radius > limit {
+                    return None;
+                }
                 placed(&mut spheres, center, rotation, own);
             }
             Obstacle::Sdf { .. } => unreachable!("a distance grid returns above"),
@@ -1087,6 +1185,131 @@ pub(crate) fn ignore_pairs(
             .push(robot.links[b].name.clone());
     }
     out
+}
+
+// What only a limit on overhang runs is kept here, after the fit's functions: set among them, it
+// took fits without a limit 2 to 8% longer in a one-unit build on x86.
+
+/// Why spheres cannot be held within a distance of `meshes` ([`SphereOptions::max_overhang`]), if
+/// they cannot: a sphere's depth is measured by the side of the nearest face, which tells inside
+/// from outside only for closed shells that face outward and give each face once. So, once
+/// vertices at one place are merged and triangles that name a vertex twice are dropped, a mesh
+/// is refused that gives a face again, the same way or the other (as where two shells share one,
+/// or a sheet has two sides); that has an edge bordering unlike counts of triangles each way; or
+/// that has a shell facing inward, a cavity's among them, which the meshes' own orientation
+/// (`TriMesh::orient_outward`, by their whole volume) leaves as it is.
+pub(crate) fn closed(meshes: &[TriMesh]) -> Result<(), String> {
+    let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES;
+    for (k, mesh) in meshes.iter().enumerate() {
+        let of = format!("mesh {k} of {}", meshes.len());
+        let solid = ParryMesh::with_flags(mesh.vertices.clone(), mesh.triangles.clone(), flags)
+            .map_err(|e| format!("{of} has no surface: {e}"))?;
+        // Each triangle from its lowest vertex, so that one given again is the same three.
+        let from_lowest = |&[a, b, c]: &[u32; 3]| {
+            if a <= b && a <= c {
+                [a, b, c]
+            } else if b <= c {
+                [b, c, a]
+            } else {
+                [c, a, b]
+            }
+        };
+        let mut faces: Vec<[u32; 3]> = solid.indices().iter().map(from_lowest).collect();
+        if faces.is_empty() {
+            return Err(format!("{of} has no surface"));
+        }
+        faces.sort_unstable();
+        let again = faces.windows(2).filter(|pair| pair[0] == pair[1]).count();
+        let reversed = |&&[a, b, c]: &&[u32; 3]| faces.binary_search(&[a, c, b]).is_ok();
+        let both_ways = faces.iter().filter(reversed).count() / 2;
+        if again + both_ways > 0 {
+            return Err(format!(
+                "{of} gives faces more than once, {again} the same way again and {both_ways} both \
+                 ways, so the side of the nearest face cannot tell inside from outside"
+            ));
+        }
+        // Per edge, the triangles that run along it from its lower vertex less those that run
+        // back, and one of its triangles, to join shells by.
+        let mut edges: BTreeMap<(u32, u32), (i32, usize)> = BTreeMap::new();
+        // Each triangle's shell, as the lowest triangle joined to it across edges so far.
+        let mut shell: Vec<usize> = (0..faces.len()).collect();
+        let first = |shell: &[usize], mut t: usize| {
+            while shell[t] != t {
+                t = shell[t];
+            }
+            t
+        };
+        for (t, &[a, b, c]) in faces.iter().enumerate() {
+            for (from, to) in [(a, b), (b, c), (c, a)] {
+                let edge = edges.entry((from.min(to), from.max(to))).or_insert((0, t));
+                edge.0 += if from < to { 1 } else { -1 };
+                let (ours, theirs) = (first(&shell, t), first(&shell, edge.1));
+                shell[ours.max(theirs)] = ours.min(theirs);
+            }
+        }
+        let open = edges.values().filter(|edge| edge.0 != 0).count();
+        if open > 0 {
+            return Err(format!(
+                "{of} is not closed: {open} of its {} edges border a triangle on one side alone, \
+                 or triangles that face opposite ways",
+                edges.len()
+            ));
+        }
+        // Six times each shell's volume, negative where it faces inward.
+        let mut volumes: BTreeMap<usize, f64> = BTreeMap::new();
+        for (t, face) in faces.iter().enumerate() {
+            let [a, b, c] = face.map(|i| solid.vertices()[i as usize].as_dvec3());
+            *volumes.entry(first(&shell, t)).or_default() += a.dot(b.cross(c));
+        }
+        let inward = volumes.values().filter(|&&volume| volume <= 0.0).count();
+        if inward > 0 {
+            return Err(format!(
+                "{of} has {inward} of its {} shells facing inward, whose outside the side of the \
+                 nearest face takes for inside",
+                volumes.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What rounding moves a depth measured in `f32` by, in units of the largest coordinate it is
+/// measured from: a point's difference from the surface loses a unit in the last place per axis,
+/// and a sphere placed by a pose a few more, so eight in all.
+const ROUNDING: f32 = 8.0 * f32::EPSILON;
+
+/// Why `spheres` (`[x, y, z, radius]`, in the frame of `meshes`, which are [`closed`]) do not all
+/// keep within `max_overhang` of them, if one does not: the first that reaches farther.
+pub(crate) fn within(
+    meshes: &[TriMesh],
+    spheres: &[[f32; 4]],
+    max_overhang: f32,
+) -> Result<(), String> {
+    let solids = solids(meshes);
+    let largest = meshes
+        .iter()
+        .flat_map(|m| &m.vertices)
+        .fold(0.0, |largest: f32, v| largest.max(v.abs().max_element()));
+    for (k, &[x, y, z, radius]) in spheres.iter().enumerate() {
+        let center = Vec3::new(x, y, z);
+        let depth = depth(&solids, center);
+        let slack = ROUNDING * largest.max(center.abs().max_element() + radius);
+        let reach = radius - depth;
+        if reach.is_nan() || reach > max_overhang + slack {
+            let lies = if depth < 0.0 {
+                format!("its center {:.3} mm outside", -depth * 1e3)
+            } else {
+                format!("its center {:.3} mm deep", depth * 1e3)
+            };
+            return Err(format!(
+                "sphere {k}, at {center} with radius {radius}, reaches {:.3} mm past the \
+                 geometry, {lies}: `max_overhang` allows {:.3} mm",
+                reach * 1e3,
+                max_overhang * 1e3
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

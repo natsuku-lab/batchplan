@@ -70,6 +70,10 @@ value_class! {
         /// How far spheres may reach beyond the geometry (meters) before the fit spends more of
         /// the budget. When the budget cannot reach it, the fit uses the smallest overhang it can.
         tolerance: f32,
+        /// The farthest any sphere may reach beyond the geometry (meters), whatever the budget;
+        /// 0 keeps every sphere inside. It leaves surface outside the spheres where the budget
+        /// cannot cover it within that, and needs closed geometry. `None`: no limit.
+        max_overhang: Option<f32>,
         /// Largest spacing of the interior grid that proposes sphere centers (meters). Small links
         /// use a finer grid.
         voxel_size: f32,
@@ -213,7 +217,8 @@ value_class! {
         package_dirs: Vec<PathBuf>,
         /// Collision spheres; fitted to the description's geometry with `spheres` when `None`.
         collision_model: Option<batchplan::CollisionModel>,
-        /// How spheres are fitted when there is no `collision_model`.
+        /// How spheres are fitted when there is no `collision_model`, and the `max_overhang` one
+        /// given is held to; checked either way.
         spheres: batchplan::SphereOptions,
         /// Per link, by name: how far its spheres may reach beyond its geometry (meters), in place
         /// of `spheres.tolerance`, as fingers fitted tighter than the arm so they can grasp small

@@ -369,6 +369,207 @@ fn held_boxes_and_balls_are_covered_without_fitting() {
     );
 }
 
+/// Held shapes under a limit on how far their spheres reach (`SphereOptions::max_overhang`):
+/// covered whole where the budget has a cover within it, else fitted and held to it.
+#[test]
+fn held_shapes_keep_within_a_limit_on_overhang() {
+    let robot = common::panda().unwrap();
+    let rotation = Quat::from_rotation_z(0.4) * Quat::from_rotation_x(0.3);
+    let (center, half) = (Vec3::new(0.0, 0.01, 0.08), Vec3::new(0.02, 0.035, 0.028));
+    // The box's spheres in its own frame, held with `options`.
+    let boxed = |options: SphereOptions| -> Vec<[f32; 4]> {
+        let held = robot
+            .attach(&AttachedObject {
+                shapes: vec![Obstacle::Cuboid {
+                    center,
+                    half_extents: half,
+                    rotation,
+                }],
+                spheres: options,
+                ..held_box(&FINGERS)
+            })
+            .unwrap();
+        let own = |s: &[f32; 4]| {
+            let p = rotation.inverse() * (Vec3::new(s[0], s[1], s[2]) - center);
+            [p.x, p.y, p.z, s[3]]
+        };
+        let spheres = &held.collision_model().spheres["box"];
+        assert!(!spheres.is_empty() && spheres.len() <= options.budget);
+        spheres.iter().map(own).collect()
+    };
+    // How far the farthest reaches past the box, and whether they hold all of it.
+    let past = |spheres: &[[f32; 4]]| {
+        let reach = |s: &[f32; 4]| {
+            let q = Vec3::new(s[0], s[1], s[2]).abs() - half;
+            s[3] + q.max(Vec3::ZERO).length() + q.max_element().min(0.0)
+        };
+        spheres.iter().map(reach).fold(f32::NEG_INFINITY, f32::max)
+    };
+    let whole = |spheres: &[[f32; 4]]| {
+        let mut rng = Rng::new(9);
+        (0..4000).all(|_| {
+            let p = Vec3::new(
+                rng.range(-half.x, half.x),
+                rng.range(-half.y, half.y),
+                rng.range(-half.z, half.z),
+            );
+            spheres
+                .iter()
+                .any(|s| p.distance(Vec3::new(s[0], s[1], s[2])) <= s[3])
+        })
+    };
+    let limit = 0.003;
+    let with = |budget: usize, max_overhang: Option<f32>| SphereOptions {
+        budget,
+        max_overhang,
+        ..Default::default()
+    };
+    // 512 spheres have a cover within the limit, tighter than the tolerance asks for: the whole
+    // box, each sphere within it.
+    let free = boxed(with(512, None));
+    assert!(
+        whole(&free) && past(&free) > limit + 5e-4,
+        "{}",
+        past(&free)
+    );
+    let covered = boxed(with(512, Some(limit)));
+    assert!(whole(&covered), "a cover within the limit leaves none out");
+    assert!(past(&covered) <= limit + 1e-6, "{}", past(&covered));
+    // 64 have none: fitted, held to the limit, and some of the box left out.
+    let free = boxed(with(64, None));
+    assert!(
+        whole(&free) && past(&free) > limit + 5e-4,
+        "{}",
+        past(&free)
+    );
+    let fitted = boxed(with(64, Some(limit)));
+    assert!(past(&fitted) <= limit + 1e-6, "{}", past(&fitted));
+    assert!(!whole(&fitted), "the limit costs coverage");
+    // Held to nothing past it, every sphere is inside the box.
+    let inside = boxed(with(64, Some(0.0)));
+    assert!(past(&inside) <= 1e-6, "{}", past(&inside));
+
+    // A capsule's spheres lie along its axis, a rod's too, and a plate's in a layer: each within
+    // the limit of its shape, as its cover's own account gives it, and all of it covered.
+    let (radius, half_length) = (0.02, 0.06);
+    let capsule = |center, rotation| Obstacle::Capsule {
+        center,
+        rotation,
+        radius: 0.02,
+        half_length: 0.06,
+    };
+    let limit = 0.001;
+    let free = held_round(
+        &robot,
+        capsule,
+        with(64, None),
+        /* with_a_ball */ false,
+    );
+    let held = held_round(
+        &robot,
+        capsule,
+        with(64, Some(limit)),
+        /* with_a_ball */ false,
+    );
+    let reach = |spheres: &[[f32; 4]]| spheres.iter().map(|s| s[3] - radius).fold(0.0, f32::max);
+    assert!(reach(&free) > limit + 5e-4, "{}", reach(&free));
+    assert!(reach(&held) <= limit + 1e-6 && held.len() > free.len());
+    assert!(
+        held.iter()
+            .all(|s| s[0].hypot(s[1]) < 1e-6 && s[2].abs() <= half_length + 1e-6)
+    );
+    // Two spheres along the axis cannot keep it: fitted, the two are held to it off the axis too.
+    let few = held_round(
+        &robot,
+        capsule,
+        with(2, Some(limit)),
+        /* with_a_ball */ false,
+    );
+    let past = |s: &[f32; 4]| {
+        let along = s[2].clamp(-half_length, half_length);
+        Vec3::new(s[0], s[1], s[2] - along).length() + s[3] - radius
+    };
+    let farthest = few.iter().map(past).fold(f32::NEG_INFINITY, f32::max);
+    assert!(!few.is_empty() && farthest <= limit + 1e-6, "{farthest}");
+    let plate = |center, rotation| Obstacle::Cylinder {
+        center,
+        rotation,
+        radius: 0.0695,
+        half_height: 0.009,
+    };
+    let limit = 0.004;
+    let held = held_round(
+        &robot,
+        plate,
+        with(512, Some(limit)),
+        /* with_a_ball */ false,
+    );
+    let past = cylinder_overhang(&held, 0.0695, 0.009);
+    assert!(past <= limit + 1e-5, "{past} m past the plate");
+    // A ball is its own sphere at any limit.
+    let ball = robot
+        .attach(&AttachedObject {
+            shapes: vec![Obstacle::sphere(center, 0.03)],
+            spheres: with(64, Some(0.0)),
+            ..held_box(&FINGERS)
+        })
+        .unwrap();
+    assert_eq!(
+        ball.collision_model().spheres["box"],
+        vec![[center.x, center.y, center.z, 0.03]]
+    );
+    // A sheet too thin for a center inside it has no sphere within it, and says so.
+    let sheet = AttachedObject {
+        shapes: vec![Obstacle::cuboid(center, Vec3::new(0.03, 0.03, 2e-5))],
+        spheres: with(64, Some(0.0)),
+        ..held_box(&FINGERS)
+    };
+    let refused = robot.attach(&sheet).map(|_| ());
+    assert!(
+        matches!(&refused, Err(Error::Input(m)) if m.contains("'box': no sphere fits within `max_overhang`")),
+        "{refused:?}"
+    );
+    // Shapes of no thickness have no inside for a sphere to be held in: a sheet and a disc.
+    let flat = [
+        Obstacle::cuboid(center, Vec3::new(0.03, 0.03, 0.0)),
+        Obstacle::Cylinder {
+            center,
+            rotation,
+            radius: 0.05,
+            half_height: 0.0,
+        },
+    ];
+    for shape in flat {
+        for budget in [16, 64] {
+            let held = AttachedObject {
+                shapes: vec![shape.clone()],
+                spheres: with(budget, Some(0.0)),
+                ..held_box(&FINGERS)
+            };
+            let refused = robot.attach(&held).map(|_| ());
+            assert!(
+                matches!(&refused, Err(Error::Input(m)) if m.starts_with("'box': [C") && m.contains("both ways")),
+                "{shape:?}: {refused:?}"
+            );
+            // Without a limit they are covered, as before.
+            let free = AttachedObject {
+                spheres: with(budget, None),
+                ..held
+            };
+            robot.attach(&free).unwrap();
+        }
+    }
+    let bad = AttachedObject {
+        spheres: with(64, Some(-1.0)),
+        ..held_box(&FINGERS)
+    };
+    let refused = robot.attach(&bad).map(|_| ());
+    assert!(
+        matches!(&refused, Err(Error::Input(m)) if m.contains("max_overhang must be finite")),
+        "{refused:?}"
+    );
+}
+
 /// A round shape held with `options`, alone or with a small ball beside it, and the shape's
 /// spheres in its own frame (its axis along z).
 fn held_round(
