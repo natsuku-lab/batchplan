@@ -10,6 +10,20 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- **Breaking:** a limit on how far collision spheres reach past the geometry:
+  `SphereOptions::max_overhang`, `Some(0.002)` for 2 mm and `Some(0.0)` for spheres inside it,
+  whatever the budget. Spheres are chosen as before and each radius cut back to its center's depth
+  plus the limit, so the budget is kept and the surface it cannot cover within the limit is left
+  outside the spheres: `LinkQualification::gap`, new in `Robot::qualify`, is how far outside the
+  farthest of it lies, which is how deep an obstacle reaches into the link unseen. The geometry
+  must be closed: a link whose mesh has open edges is refused with their count, and one too thin
+  for a center inside it under a limit of zero by name. A collision model given with the options
+  is held to the limit too, a sphere past it refused by link and index with how far it reaches.
+  Held objects take their own (`AttachedObject::spheres`, `Held::spheres`): a box, capsule, disc
+  or rod is covered whole where the budget has a cover within the limit, and fitted and held to
+  it where not. `None`, the default, fits as before. A `SphereOptions` literal that lists every
+  field needs the new one (`max_overhang: None`); in Python, `SphereOptions(max_overhang=0.002)`.
+
 - What a configuration touches while it holds an object:
   `device.contacts_holding(&worlds, &item_world, &q, within, &holding)`, with a `Held` or `None`
   per item, on the device that holds nothing, as a problem's `holding` takes it. What the held
@@ -93,6 +107,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   the new field (`holding: None`).
 
 ### Changed
+
+- **Breaking:** a robot's `SphereOptions` are checked whether its spheres are fitted or given
+  (`RobotOptions::collision_model`), before anything is read: a budget of zero, or a tolerance or
+  voxel size that is not positive, is an `Error::Input` from `Robot::load`, `from_urdf` and
+  `assemble`. With a collision model they were not read and the robot loaded; without one, `load`
+  and `assemble` returned an `Error::Load`.
 
 - **Breaking:** a pick's grasps each say where the fingers are: `Pick::locked` is a
   `Vec<HashMap<String, f32>>`, the locked joints' values per grasp (empty: every grasp as loaded,

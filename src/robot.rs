@@ -5,7 +5,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, anyhow, bail, ensure};
 use glam::{Mat3, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
@@ -511,6 +511,7 @@ impl Fk {
 impl Robot {
     /// Loads a robot from URDF, MJCF (`.xml`, `.mjcf`) or OpenUSD (`.usd*`, feature `usd`).
     pub fn load(path: impl AsRef<Path>, o: &RobotOptions) -> error::Result<Self> {
+        o.spheres.check().map_err(Error::Input)?;
         let path = path.as_ref();
         let part = Part {
             path: path.to_path_buf(),
@@ -533,6 +534,7 @@ impl Robot {
     /// paths must be `package://` (found through [`RobotOptions::package_dirs`]), `file://` or
     /// absolute.
     pub fn from_urdf(urdf: &str, o: &RobotOptions) -> error::Result<Self> {
+        o.spheres.check().map_err(Error::Input)?;
         crate::urdf::from_text(urdf, None, &o.package_dirs)
             .and_then(|description| Self::from_description(&description, o))
             .map_err(|e| Error::Input(format!("URDF: {e:#}")))
@@ -543,6 +545,7 @@ impl Robot {
     /// root link, `world`. The options name links and joints with their prefixes; give each arm's
     /// hand in `ee_links`.
     pub fn assemble(parts: &[Part], o: &RobotOptions) -> error::Result<Self> {
+        o.spheres.check().map_err(Error::Input)?;
         let load_error = |path: &Path, e: anyhow::Error| Error::Load {
             path: path.to_path_buf(),
             message: format!("{e:#}"),
@@ -581,7 +584,6 @@ impl Robot {
     }
 
     fn from_description(desc: &RobotDescription, o: &RobotOptions) -> Result<Self> {
-        o.spheres.check().map_err(anyhow::Error::msg)?;
         let closed;
         let desc = if desc.loops.is_empty() {
             desc
@@ -617,6 +619,9 @@ impl Robot {
                          model with it free"
                     );
                 }
+                if let Some(limit) = o.spheres.max_overhang {
+                    robot.held_within(model, limit)?;
+                }
                 model.clone()
             }
             None => {
@@ -630,29 +635,30 @@ impl Robot {
                 model.self_collision_ignore.entry(a).or_default().push(b);
             }
         }
-        if o.spheres.enforce_mesh_bounds {
-            let count: usize = model.spheres.values().map(Vec::len).sum();
-            ensure!(
-                count <= o.spheres.budget,
-                "bounded collision model has {count} spheres, exceeding budget {}",
-                o.spheres.budget
-            );
-            for link in &robot.links {
-                let fitted = model.spheres.get(&link.name).map_or(&[][..], Vec::as_slice);
-                if link.shapes.is_empty() && fitted.is_empty() {
-                    continue;
-                }
-                let meshes = link
-                    .shapes
-                    .iter()
-                    .map(Shape::mesh)
-                    .collect::<Result<Vec<_>>>()?;
-                spheres::validate_mesh_bounds(&meshes, fitted, o.spheres.max_mesh_penetration)
-                    .map_err(|message| anyhow::anyhow!("link '{}': {message}", link.name))?;
-            }
-        }
         robot.set_collision_model(model)?;
         Ok(robot)
+    }
+
+    /// That every sphere `model` gives a link reaches no more than `limit` past the link's
+    /// geometry ([`SphereOptions::max_overhang`]), naming the first that does, or the link whose
+    /// geometry has no inside to measure it in.
+    fn held_within(&self, model: &CollisionModel, limit: f32) -> Result<()> {
+        for link in &self.links {
+            let Some(spheres) = model.spheres.get(&link.name).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            ensure!(
+                !link.shapes.is_empty(),
+                "link '{}' has spheres in the collision model and no geometry to hold them within \
+                 `max_overhang` of",
+                link.name
+            );
+            let meshes: Vec<TriMesh> = link.shapes.iter().map(Shape::mesh).collect::<Result<_>>()?;
+            spheres::closed(&meshes)
+                .and_then(|()| spheres::within(&meshes, spheres, limit))
+                .map_err(|e| anyhow!("link '{}': {e}", link.name))?;
+        }
+        Ok(())
     }
 
     /// Fits spheres to every link's geometry, then finds the link pairs not worth checking.
@@ -678,7 +684,6 @@ impl Robot {
             .iter()
             .map(|link| link.shapes.iter().map(|s| s.mesh()).collect())
             .collect::<Result<_>>()?;
-        o.check().map_err(anyhow::Error::msg)?;
         let with_geometry = meshes.iter().filter(|m| !m.is_empty()).count();
         ensure!(
             o.budget >= with_geometry,
@@ -690,22 +695,46 @@ impl Robot {
             .iter()
             .map(|link| tolerances.get(&link.name).copied().unwrap_or(o.tolerance))
             .collect();
+        if o.max_overhang.is_some() {
+            for (link, meshes) in self.links.iter().zip(&meshes) {
+                spheres::closed(meshes).map_err(|e| {
+                    anyhow!(
+                        "link '{}': {e}, so it has no inside to hold spheres within \
+                         `max_overhang` of",
+                        link.name
+                    )
+                })?;
+            }
+        }
         let fitted = spheres::fit(&meshes, &tolerances, o, /* parallel */ true);
-        let source = if o.enforce_mesh_bounds {
-            format!(
-                "fitted by batchplan with mesh bounds: maximum mesh penetration {:.6} m; \
-                 surface gaps may remain; qualify() reports uncovered surface",
-                o.max_mesh_penetration
-            )
-        } else {
-            format!(
-                "fitted by batchplan: spheres reach up to {:.1} mm beyond the geometry and up to {:.2} \
-                 times their link's tolerance, with every tolerance scaled by {:.2} for the budget",
-                fitted.overhang * 1e3,
-                fitted.relative_overhang,
-                fitted.scale
-            )
-        };
+        if let Some(limit) = o.max_overhang {
+            let bare = self
+                .links
+                .iter()
+                .zip(&meshes)
+                .zip(&fitted.spheres)
+                .find(|((_, meshes), spheres)| !meshes.is_empty() && spheres.is_empty());
+            if let Some(((link, _), _)) = bare {
+                bail!(
+                    "link '{}': no sphere fits within `max_overhang` ({limit} m) of its \
+                     geometry, which is too thin for a center inside it: allow more",
+                    link.name
+                );
+            }
+        }
+        let mut source = format!(
+            "fitted by batchplan: spheres reach up to {:.1} mm beyond the geometry and up to {:.2} \
+             times their link's tolerance, with every tolerance scaled by {:.2} for the budget",
+            fitted.overhang * 1e3,
+            fitted.relative_overhang,
+            fitted.scale
+        );
+        if let Some(limit) = o.max_overhang {
+            source += &format!(
+                ", each held to {:.1} mm beyond it, which leaves surface outside them",
+                limit * 1e3
+            );
+        }
         let mut model = CollisionModel {
             source: Some(source),
             ..Default::default()
@@ -873,20 +902,13 @@ impl Robot {
         }
         ensure_input!(!shapes.is_empty(), "'{}' has no shapes", object.name);
         let fitted = spheres()?;
-        if object.spheres.enforce_mesh_bounds {
+        if let Some(limit) = object.spheres.max_overhang {
             ensure_input!(
-                fitted.len() <= object.spheres.budget,
-                "bounded attached object '{}' has {} spheres, exceeding budget {}",
-                object.name,
-                fitted.len(),
-                object.spheres.budget
+                !fitted.is_empty(),
+                "'{}': no sphere fits within `max_overhang` ({limit} m) of its shapes, which are \
+                 too thin for a center inside them: allow more",
+                object.name
             );
-            let meshes = shapes
-                .iter()
-                .map(|shape| shape.mesh().map_err(|e| input!("{e:#}")))
-                .collect::<error::Result<Vec<_>>>()?;
-            spheres::validate_mesh_bounds(&meshes, &fitted, object.spheres.max_mesh_penetration)
-                .map_err(|message| input!("attached object '{}': {message}", object.name))?;
         }
         let mut robot = self.clone();
         let chain = robot.links[parent].chain.clone();
@@ -1191,13 +1213,6 @@ impl Robot {
     #[must_use]
     pub fn collision_model(&self) -> &CollisionModel {
         &self.collision_model
-    }
-
-    /// The sphere fitting options this robot was loaded with. Per-problem held objects inherit
-    /// their mesh-bound policy while retaining their own default fitting budget and tolerances.
-    #[must_use]
-    pub fn sphere_fit_options(&self) -> SphereOptions {
-        self.sphere_options
     }
 
     /// The number of hands: IK target frames (`RobotOptions::ee_links`).
@@ -2122,9 +2137,6 @@ pub(crate) fn object_spheres(
     o: &SphereOptions,
 ) -> error::Result<Vec<[f32; 4]>> {
     o.check().map_err(Error::Input)?;
-    if o.enforce_mesh_bounds {
-        return covered(shapes, o);
-    }
     if let [shape] = shapes {
         let own = covered(std::slice::from_ref(&shape.placed(Pose::IDENTITY)), o)?;
         return Ok(placed_spheres(&own, shape.pose()));
@@ -2147,9 +2159,7 @@ pub(crate) fn placed_spheres(spheres: &[[f32; 4]], pose: Pose) -> Vec<[f32; 4]> 
 /// the global pool. (A one-thread pool on the calling thread would leave it registered with rayon
 /// for good, and every parallel loop it started afterwards would run on that one thread.)
 fn covered(shapes: &[Obstacle], o: &SphereOptions) -> error::Result<Vec<[f32; 4]>> {
-    if !o.enforce_mesh_bounds
-        && let Some(covered) = spheres::cover_primitives(shapes, o)
-    {
+    if let Some(covered) = spheres::cover_primitives(shapes, o) {
         return Ok(covered);
     }
     let meshes = shapes
@@ -2157,23 +2167,12 @@ fn covered(shapes: &[Obstacle], o: &SphereOptions) -> error::Result<Vec<[f32; 4]
         .map(|shape| attached_shape(shape)?.mesh().map_err(|e| input!("{e:#}")))
         .collect::<error::Result<Vec<TriMesh>>>()?;
     let fitted = spheres::fit(
-        std::slice::from_ref(&meshes),
+        &[meshes],
         &[o.tolerance],
         o,
         rayon::current_thread_index().is_some(),
     );
-    let fitted: Vec<_> = fitted.spheres.into_iter().flatten().collect();
-    if o.enforce_mesh_bounds {
-        ensure_input!(
-            fitted.len() <= o.budget,
-            "bounded attached object has {} spheres, exceeding budget {}",
-            fitted.len(),
-            o.budget
-        );
-        spheres::validate_mesh_bounds(&meshes, &fitted, o.max_mesh_penetration)
-            .map_err(Error::Input)?;
-    }
-    Ok(fitted)
+    Ok(fitted.spheres.into_iter().flatten().collect())
 }
 
 /// An attached object's shape, placed in its link's frame.
@@ -2229,158 +2228,6 @@ fn attached_shape(shape: &Obstacle) -> error::Result<Shape> {
 mod tests {
     use super::*;
 
-    const BOUNDED_BOX_URDF: &str = r#"
-      <robot name="bounded-box">
-        <link name="base"/>
-        <link name="shape">
-          <collision><geometry><box size="0.1 0.1 0.1"/></geometry></collision>
-        </link>
-        <joint name="joint" type="revolute">
-          <parent link="base"/><child link="shape"/><axis xyz="0 0 1"/>
-          <limit lower="-1" upper="1" effort="1" velocity="1"/>
-        </joint>
-      </robot>"#;
-
-    fn bounded_box_options(fitted: Vec<[f32; 4]>) -> RobotOptions {
-        RobotOptions {
-            collision_model: Some(CollisionModel {
-                spheres: BTreeMap::from([("shape".into(), fitted)]),
-                ..Default::default()
-            }),
-            spheres: SphereOptions {
-                budget: 8,
-                enforce_mesh_bounds: true,
-                max_mesh_penetration: 0.0,
-                self_collision_samples: 0,
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn bounded_supplied_models_cannot_bypass_geometric_or_budget_checks() {
-        let valid = [0.0, 0.0, 0.0, 0.04];
-        let options = bounded_box_options(vec![valid]);
-        Robot::from_urdf(BOUNDED_BOX_URDF, &options).expect("valid bounded supplied model");
-        for invalid in [[0.0, 0.0, 0.0, 0.06], [0.1, 0.0, 0.0, 0.001]] {
-            let options = bounded_box_options(vec![invalid]);
-            assert!(
-                Robot::from_urdf(BOUNDED_BOX_URDF, &options).is_err(),
-                "unsafe supplied sphere {invalid:?} was accepted"
-            );
-        }
-        let mut options = bounded_box_options(vec![valid, valid]);
-        options.spheres.budget = 1;
-        assert!(Robot::from_urdf(BOUNDED_BOX_URDF, &options).is_err());
-
-        let options = bounded_box_options(vec![]);
-        assert!(
-            Robot::from_urdf(BOUNDED_BOX_URDF, &options).is_err(),
-            "a supplied model omitted all collision coverage"
-        );
-        for name in ["base", "unknown"] {
-            let mut options = bounded_box_options(vec![valid]);
-            options
-                .collision_model
-                .as_mut()
-                .expect("supplied model")
-                .spheres
-                .insert(name.into(), vec![valid]);
-            assert!(
-                Robot::from_urdf(BOUNDED_BOX_URDF, &options).is_err(),
-                "sphere for {name} has no corresponding geometry"
-            );
-        }
-    }
-
-    #[test]
-    fn supplied_models_still_check_fit_options_and_preserve_legacy_override_behavior() {
-        let valid = [0.0, 0.0, 0.0, 0.04];
-        for limit in [-1.0, f32::NAN, f32::INFINITY] {
-            let mut options = bounded_box_options(vec![valid]);
-            options.spheres.max_mesh_penetration = limit;
-            assert!(Robot::from_urdf(BOUNDED_BOX_URDF, &options).is_err());
-        }
-        let mut options = bounded_box_options(vec![valid]);
-        options.spheres.tolerance = 0.0;
-        assert!(Robot::from_urdf(BOUNDED_BOX_URDF, &options).is_err());
-
-        let mut options = bounded_box_options(vec![[0.0, 0.0, 0.0, 1.0]]);
-        options.spheres.enforce_mesh_bounds = false;
-        Robot::from_urdf(BOUNDED_BOX_URDF, &options)
-            .expect("default mode retains explicitly supplied collision models");
-    }
-
-    #[test]
-    fn a_fresh_bounded_model_reports_its_limit_and_uncovered_surface() {
-        let mut options = bounded_box_options(vec![]);
-        options.collision_model = None;
-        let robot = Robot::from_urdf(BOUNDED_BOX_URDF, &options).expect("bounded box fit");
-        let model = robot.collision_model();
-        let count: usize = model.spheres.values().map(Vec::len).sum();
-        assert!(count > 0 && count <= options.spheres.budget);
-        let source = model.source.as_deref().expect("bounded fit provenance");
-        assert!(source.contains("maximum mesh penetration") && source.contains("gaps may remain"));
-        let qualification = robot.qualify().expect("bounded qualification");
-        let link = qualification
-            .links
-            .iter()
-            .find(|l| l.link == "shape")
-            .unwrap();
-        assert!(link.overhang <= 2e-6, "{link:?}");
-        assert!(link.uncovered > 0.05, "{link:?}");
-    }
-
-    #[test]
-    fn bounded_attachment_fits_and_cached_attachment_results_are_validated() {
-        let penetration = 0.001;
-        let options = SphereOptions {
-            budget: 8,
-            enforce_mesh_bounds: true,
-            max_mesh_penetration: penetration,
-            self_collision_samples: 0,
-            ..Default::default()
-        };
-        let half = Vec3::new(0.03, 0.04, 0.05);
-        let center = Vec3::new(0.13, -0.2, 0.35);
-        let rotation = Quat::from_rotation_y(0.4);
-        let shape = Obstacle::Cuboid {
-            center,
-            half_extents: half,
-            rotation,
-        };
-        let fitted =
-            object_spheres(std::slice::from_ref(&shape), &options).expect("bounded rotated box");
-        assert!(!fitted.is_empty() && fitted.len() <= options.budget);
-        for sphere in fitted {
-            let local =
-                rotation.conjugate() * (Vec3::new(sphere[0], sphere[1], sphere[2]) - center);
-            let depth = (half - local.abs()).min_element();
-            assert!(depth >= -2e-6 && sphere[3] <= depth + penetration + 2e-6);
-        }
-        let robot = Robot::from_urdf(
-            BOUNDED_BOX_URDF,
-            &bounded_box_options(vec![[0.0, 0.0, 0.0, 0.04]]),
-        )
-        .expect("bounded parent");
-        let attached = AttachedObject {
-            name: "bounded-object".into(),
-            link: "shape".into(),
-            shapes: vec![shape],
-            touch_links: vec![],
-            spheres: options,
-        };
-        robot
-            .attach(&attached)
-            .expect("valid transformed bounded attachment");
-        assert!(
-            robot
-                .attach_with(&attached, || Ok(vec![[0.0, 0.0, 0.0, 1.0]]))
-                .is_err(),
-            "cached fitted spheres bypassed the attachment bounds"
-        );
-    }
     fn panda() -> Robot {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/franka");
         let options = RobotOptions {

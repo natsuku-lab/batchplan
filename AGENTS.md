@@ -100,14 +100,9 @@ IK finds configurations; a plan finds the path to one, or to a pose, solving IK 
 
 ### Qualify the robot
 
-`SphereOptions::enforce_mesh_bounds` caps overhang at `max_mesh_penetration` meters
-without exceeding the sphere budget. This can leave gaps, so inspect qualification
-before using the bounded approximation. Supplied models are revalidated too; see
-[bounding sphere overhang](docs/robots.md#bounding-sphere-overhang).
-
 A robot that loads may still have spheres unfit to plan with. Before planning with a new robot or a hand-tuned collision model ([qualifying a robot](docs/robots.md#qualifying-a-robot)):
 
-1. `robot.qualify()`: each link's `overhang` past its geometry, the `uncovered` share of its surface and its `thickness`, and each hand's `tips`. Fingers whose overhang or tip is a large part of the smallest object you will grasp will collide with what it stands on; give them a tighter tolerance (`RobotOptions::sphere_tolerances`) or a finer `SphereOptions::voxel_size`.
+1. `robot.qualify()`: each link's `overhang` past its geometry, the `uncovered` share of its surface, how deep the `gap` it leaves and its `thickness`, and each hand's `tips`. Fingers whose overhang or tip is a large part of the smallest object you will grasp will collide with what it stands on; give them a tighter tolerance (`RobotOptions::sphere_tolerances`) or a finer `SphereOptions::voxel_size`. `SphereOptions::max_overhang` holds every sphere to a distance past the geometry instead, at the cost of coverage: read each link's `gap` after setting it, since an obstacle reaches that deep into the link unseen ([a limit on overhang](docs/robots.md#collision-spheres)).
 2. `world.always_touching(&robot)` with the table the robot stands on: links that touch it in every configuration need a touch, or every plan's start collides.
 3. Fingers that are part of the palm's link, as the SO-101's fixed jaw: name them in `RobotOptions::finger_links`, or grasps where they meet the object fail.
 4. `device.contacts(&worlds, &item_world, &q, 0.0)` at the default configuration, the SRDF's named states and a few others: each should collide with nothing.

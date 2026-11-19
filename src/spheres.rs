@@ -47,12 +47,15 @@ pub struct SphereOptions {
     /// How far spheres may reach beyond the geometry (meters) before the fit spends more of the
     /// budget. When the budget cannot reach it, the fit uses the smallest overhang it can.
     pub tolerance: f32,
-    /// Keep centers inside the geometry and cap radii at the nearest surface distance plus
-    /// `max_mesh_penetration`. The budget stays a hard maximum; uncovered geometry is allowed.
-    pub enforce_mesh_bounds: bool,
-    /// Hard maximum distance spheres may extend past the original mesh (meters) when
-    /// `enforce_mesh_bounds` is enabled. Zero keeps spheres entirely inside closed geometry.
-    pub max_mesh_penetration: f32,
+    /// The farthest any sphere may reach beyond the geometry (meters), whatever the budget: each
+    /// sphere's radius is at most how deep its center lies inside plus this
+    /// ([`LinkQualification::overhang`]), so `Some(0.0)` keeps every sphere inside. Spheres are
+    /// chosen as without it and then held to it, which leaves surface outside them wherever
+    /// `tolerance`, as the budget scales it, is the larger: [`Robot::qualify`](crate::Robot::qualify)
+    /// reports how deep as each link's `gap`. The geometry must be closed, and a collision model
+    /// given with the options is held to it as a fitted one is. `None`: spheres cover the surface
+    /// and reach as far past it as the budget makes them.
+    pub max_overhang: Option<f32>,
     /// Largest spacing of the interior grid that proposes sphere centers (meters). Small links
     /// use a finer grid.
     pub voxel_size: f32,
@@ -73,10 +76,11 @@ impl SphereOptions {
                 "sphere fitting needs a budget of at least one sphere and positive tolerance and voxel size, got {self:?}"
             ));
         }
-        if !self.max_mesh_penetration.is_finite() || self.max_mesh_penetration < 0.0 {
+        if let Some(limit) = self.max_overhang
+            && !(limit.is_finite() && limit >= 0.0)
+        {
             return Err(format!(
-                "max_mesh_penetration must be finite and nonnegative, got {}",
-                self.max_mesh_penetration
+                "max_overhang must be finite and not negative, got {limit}"
             ));
         }
         Ok(())
@@ -88,8 +92,7 @@ impl Default for SphereOptions {
         Self {
             budget: 64,
             tolerance: 0.005,
-            enforce_mesh_bounds: false,
-            max_mesh_penetration: 0.0,
+            max_overhang: None,
             voxel_size: 0.01,
             geometry: SphereGeometry::Collision,
             self_collision_samples: 10_000,
@@ -214,55 +217,6 @@ impl SphereCover {
     }
 }
 
-/// Occupancy from oriented crossings, independent of the nearest-face inside heuristic.
-/// Nonzero winding preserves overlapping outward shells (odd/even parity would not).
-fn winding_inside(solid: &ParryMesh, point: Vec3) -> bool {
-    use parry3d::partitioning::TraversalAction;
-    use parry3d::query::{Ray, RayCast};
-
-    let bounds = solid.local_aabb();
-    let limit = 2.0 * (bounds.maxs - bounds.mins).length();
-    let directions = [
-        Vec3::new(1.0, 0.231, 0.177),
-        Vec3::new(-0.371, 1.0, 0.529),
-        Vec3::new(0.419, -0.217, 1.0),
-    ];
-    let mut inside = 0;
-    for (index, direction) in directions.into_iter().enumerate() {
-        let direction = direction.normalize();
-        let ray = Ray::new(point, direction);
-        let mut winding = 0i32;
-        // Visit every intersected triangle once. Unlike repeated nearest-hit casts,
-        // this needs no epsilon advance that could skip a very thin entry/exit pair.
-        solid.bvh().traverse(|node| {
-            if node.aabb().cast_local_ray(&ray, limit, true).is_none() {
-                return TraversalAction::Prune;
-            }
-            if let Some(triangle) = node.leaf_data() {
-                let triangle = solid.triangle(triangle);
-                if triangle.cast_local_ray(&ray, limit, false).is_some() {
-                    // RayIntersection.normal is ray-facing, not the original winding.
-                    let facing = triangle.scaled_normal().dot(direction);
-                    if facing > 0.0 {
-                        winding += 1;
-                    } else if facing < 0.0 {
-                        winding -= 1;
-                    }
-                }
-            }
-            TraversalAction::Continue
-        });
-        inside += usize::from(winding != 0);
-        if inside >= 2 {
-            return true;
-        }
-        if index + 1 - inside >= 2 {
-            return false;
-        }
-    }
-    false
-}
-
 /// The largest sphere centered at `p` inside any of `solids`, if `p` is inside one.
 fn inscribed(solids: &[ParryMesh], p: Vec3) -> Option<(Vec3, f32)> {
     use parry3d::query::PointQuery;
@@ -270,101 +224,109 @@ fn inscribed(solids: &[ParryMesh], p: Vec3) -> Option<(Vec3, f32)> {
     solids
         .iter()
         .filter_map(|s| {
-            // Oriented point queries can misclassify points far outside very thin solids.
-            // Every interior point, and every sphere inside this solid, must also lie in
-            // its AABB. Enforce both necessary conditions independently of that query.
-            let bounds = s.local_aabb();
-            let box_depth = (p - bounds.mins).min(bounds.maxs - p).min_element();
-            if !box_depth.is_finite() || box_depth < 0.0 {
-                return None;
-            }
             let proj = s.project_local_point(p, false);
-            if !proj.point.is_finite() {
-                return None;
-            }
-            let radius = (p - proj.point).length();
-            if !radius.is_finite() || !winding_inside(s, p) {
-                return None;
-            }
-            Some(radius.min(box_depth))
+            proj.is_inside.then(|| (p - proj.point).length())
         })
         .reduce(f32::max)
         .map(|r| (p, r))
 }
 
-/// A conservative bound against every original triangle, including component interfaces.
-fn bounded_radius(solids: &[ParryMesh], point: Vec3, penetration: f32) -> Option<f32> {
-    use parry3d::query::PointQuery;
-
-    let (_, interior) = inscribed(solids, point)?;
-    let nearest = solids
-        .iter()
-        .map(|solid| point.distance(solid.project_local_point(point, false).point))
-        .fold(f32::INFINITY, f32::min);
-    let limit = interior.min(nearest) + penetration;
-    // Round inward, so serializing the f32 center/radius cannot increase the bound.
-    let radius = limit.next_down();
-    (radius.is_finite() && radius > 0.0).then_some(radius)
-}
-
-/// Validate bounded fits and supplied models against the original closed triangle surfaces.
-pub(crate) fn validate_mesh_bounds(
-    meshes: &[TriMesh],
-    fitted: &[[f32; 4]],
-    penetration: f32,
-) -> Result<(), String> {
-    if meshes.is_empty() {
-        return if fitted.is_empty() {
-            Ok(())
-        } else {
-            Err("bounded spheres need original collision geometry".into())
-        };
-    }
+/// `meshes` as parry tests points against them, without those it cannot build.
+fn solids(meshes: &[TriMesh]) -> Arc<[ParryMesh]> {
     let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
         | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
         | TriMeshFlags::ORIENTED;
-    let mut solids = vec![];
-    for mesh in meshes {
-        if mesh.vertices.iter().any(|point| !point.is_finite()) {
-            return Err("bounded sphere fitting needs finite mesh vertices".into());
-        }
+    meshes
+        .iter()
+        .filter_map(|m| ParryMesh::with_flags(m.vertices.clone(), m.triangles.clone(), flags).ok())
+        .collect()
+}
+
+/// Why spheres cannot be held within a distance of `meshes` ([`SphereOptions::max_overhang`]), if
+/// they cannot: a mesh that is not closed has no inside for a sphere's depth to be measured in.
+/// Closed: every edge borders as many triangles facing one way along it as the other, once
+/// vertices at one place are merged and triangles without area, or given twice, are dropped.
+pub(crate) fn closed(meshes: &[TriMesh]) -> Result<(), String> {
+    let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
+        | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
+        | TriMeshFlags::DELETE_DUPLICATE_TRIANGLES;
+    for (k, mesh) in meshes.iter().enumerate() {
+        let of = format!("mesh {k} of {}", meshes.len());
         let solid = ParryMesh::with_flags(mesh.vertices.clone(), mesh.triangles.clone(), flags)
-            .map_err(|e| format!("invalid collision mesh for bounded spheres: {e}"))?;
-        // Closed component cycles may touch and share edges. Each edge must still have
-        // equally many forward/backward incidences; open or inconsistent winding is refused.
-        let mut edges: BTreeMap<(u32, u32), (usize, i64)> = BTreeMap::new();
+            .map_err(|e| format!("{of} has no surface: {e}"))?;
+        // Per edge, the triangles that run along it from its lower vertex less those that run back.
+        let mut edges: BTreeMap<(u32, u32), i32> = BTreeMap::new();
         for &[a, b, c] in solid.indices() {
-            for (a, b) in [(a, b), (b, c), (c, a)] {
-                let edge = edges.entry((a.min(b), a.max(b))).or_default();
-                edge.0 += 1;
-                edge.1 += if a < b { 1 } else { -1 };
+            for (from, to) in [(a, b), (b, c), (c, a)] {
+                *edges.entry((from.min(to), from.max(to))).or_default() +=
+                    if from < to { 1 } else { -1 };
             }
         }
-        if edges.is_empty()
-            || edges
-                .values()
-                .any(|&(count, balance)| count < 2 || balance != 0)
-        {
-            return Err("bounded sphere fitting requires closed, consistently wound meshes".into());
-        }
-        solids.push(solid);
-    }
-    if fitted.is_empty() {
-        return Err(
-            "bounded sphere fitting found no interior sphere for collision geometry".into(),
-        );
-    }
-    for (index, &[x, y, z, radius]) in fitted.iter().enumerate() {
-        let point = Vec3::new(x, y, z);
-        let allowed = bounded_radius(&solids, point, penetration)
-            .ok_or_else(|| format!("sphere {index} has no valid interior center"))?;
-        if !radius.is_finite() || radius <= 0.0 || radius > allowed {
+        let open = edges.values().filter(|&&balance| balance != 0).count();
+        if open > 0 {
             return Err(format!(
-                "sphere {index} radius {radius} exceeds the mesh penetration limit {penetration} (maximum radius {allowed})"
+                "{of} is not closed: {open} of its {} edges border a triangle on one side alone, \
+                 or triangles that face opposite ways",
+                edges.len()
             ));
         }
     }
     Ok(())
+}
+
+/// What rounding moves a depth measured in `f32` by, in units of the largest coordinate it is
+/// measured from: a point's difference from the surface loses a unit in the last place per axis,
+/// and a sphere placed by a pose a few more, so eight in all.
+const ROUNDING: f32 = 8.0 * f32::EPSILON;
+
+/// Why `spheres` (`[x, y, z, radius]`, in the frame of `meshes`, which are [`closed`]) do not all
+/// keep within `max_overhang` of them, if one does not: the first that reaches farther.
+pub(crate) fn within(
+    meshes: &[TriMesh],
+    spheres: &[[f32; 4]],
+    max_overhang: f32,
+) -> Result<(), String> {
+    let solids = solids(meshes);
+    let largest = meshes
+        .iter()
+        .flat_map(|m| &m.vertices)
+        .fold(0.0, |largest: f32, v| largest.max(v.abs().max_element()));
+    for (k, &[x, y, z, radius]) in spheres.iter().enumerate() {
+        let center = Vec3::new(x, y, z);
+        let depth = depth(&solids, center);
+        let slack = ROUNDING * largest.max(center.abs().max_element() + radius);
+        // Written so that a radius or a center that is not a number fails it.
+        if !(radius - depth <= max_overhang + slack) {
+            let lies = if depth < 0.0 {
+                format!("its center {:.3} mm outside", -depth * 1e3)
+            } else {
+                format!("its center {:.3} mm deep", depth * 1e3)
+            };
+            return Err(format!(
+                "sphere {k}, at {center} with radius {radius}, reaches {:.3} mm past the \
+                 geometry, {lies}: `max_overhang` allows {:.3} mm",
+                (radius - depth) * 1e3,
+                max_overhang * 1e3
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// How deep `p` lies inside `solids` (meters): the radius of the largest sphere centered there
+/// inside one of them, or where it is outside them all, its distance to the nearest, negative.
+fn depth(solids: &[ParryMesh], p: Vec3) -> f32 {
+    use parry3d::query::PointQuery;
+
+    inscribed(solids, p).map_or_else(
+        || {
+            -solids
+                .iter()
+                .map(|s| s.distance_to_local_point(p, false))
+                .fold(f32::INFINITY, f32::min)
+        },
+        |(_, r)| r,
+    )
 }
 
 /// One link's surface samples and candidate spheres (center, largest radius inside the geometry).
@@ -408,15 +370,7 @@ impl LinkFit {
             .sum();
         let count = ((area / DENSE_AREA) as usize).clamp(DENSE_SAMPLES, MAX_DENSE_SAMPLES);
         let dense = surface_samples(meshes, count, rng);
-        let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
-            | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
-            | TriMeshFlags::ORIENTED;
-        let solids: Arc<[ParryMesh]> = meshes
-            .iter()
-            .filter_map(|m| {
-                ParryMesh::with_flags(m.vertices.clone(), m.triangles.clone(), flags).ok()
-            })
-            .collect();
+        let solids = solids(meshes);
         let (lo, hi) = samples
             .iter()
             .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), &p| {
@@ -442,26 +396,7 @@ impl LinkFit {
         } else {
             cells.filter_map(cell).collect()
         };
-        if candidates.is_empty() && o.enforce_mesh_bounds {
-            // A thin closed part may fall between grid points. Search inward from its
-            // surface instead; bounded mode never seeds growing spheres on the surface.
-            let stride = samples.len().div_ceil(MAX_CANDIDATES).max(1);
-            for (&point, &normal) in samples.iter().zip(&normals).step_by(stride) {
-                if normal == Vec3::ZERO {
-                    continue;
-                }
-                let mut depth = extent.max_element();
-                while depth >= 1e-8 {
-                    if let Some(candidate) = inscribed(&solids, point - normal * depth)
-                        && candidate.1 > 0.0
-                    {
-                        candidates.push(candidate);
-                        break;
-                    }
-                    depth *= 0.5;
-                }
-            }
-        } else if candidates.is_empty() {
+        if candidates.is_empty() {
             // Open or degenerate geometry has no interior; grow spheres from the surface instead.
             candidates = samples.iter().map(|&p| (p, 0.0)).collect();
         }
@@ -480,38 +415,35 @@ impl LinkFit {
     }
 
     /// How `spheres` (`[x, y, z, radius]`, in the meshes' frame) fit this geometry: their largest
-    /// overhang, the share of the dense samples outside every one, and the geometry's thickness.
+    /// overhang, the share of the dense samples outside every one and how far outside the
+    /// farthest lies, and the geometry's thickness.
     fn measure(&self, link: &str, spheres: &[[f32; 4]]) -> LinkQualification {
-        use parry3d::query::PointQuery;
-
-        // How deep `p` lies inside the geometry: negative outside.
-        let depth = |p: Vec3| {
-            inscribed(&self.solids, p).map_or_else(
-                || {
-                    -self
-                        .solids
-                        .iter()
-                        .map(|s| (p - s.project_local_point(p, false).point).length())
-                        .fold(f32::INFINITY, f32::min)
-                },
-                |(_, r)| r,
-            )
-        };
         let overhang = spheres
             .iter()
-            .map(|s| s[3] - depth(Vec3::new(s[0], s[1], s[2])))
+            .map(|s| s[3] - depth(&self.solids, Vec3::new(s[0], s[1], s[2])))
             .fold(0.0, f32::max);
-        let inside = |p: &&Vec3| {
+        let inside = |p: Vec3| {
             spheres
                 .iter()
                 .any(|s| p.distance(Vec3::new(s[0], s[1], s[2])) <= s[3] * (1.0 + 1e-5))
         };
-        let outside = self.dense.iter().filter(|(p, _)| !inside(&p)).count();
+        // How far `p` lies from the nearest sphere's surface.
+        let beyond = |p: Vec3| {
+            spheres
+                .iter()
+                .map(|s| p.distance(Vec3::new(s[0], s[1], s[2])) - s[3])
+                .fold(f32::INFINITY, f32::min)
+        };
+        let outside = self.dense.iter().filter(|(p, _)| !inside(*p));
+        let (count, gap) = outside.fold((0, 0.0f32), |(count, gap), &(p, _)| {
+            (count + 1, gap.max(beyond(p)))
+        });
         LinkQualification {
             link: link.to_string(),
             spheres: spheres.len(),
             overhang,
-            uncovered: outside as f32 / self.dense.len().max(1) as f32,
+            uncovered: count as f32 / self.dense.len().max(1) as f32,
+            gap,
             thickness: 2.0 * self.largest,
         }
     }
@@ -660,8 +592,10 @@ impl LinkFit {
 
     /// The picked spheres, grown until every sample is inside one, and the largest growth. Each
     /// sample outside them grows the pick that reaches it with the least overhang, judged by the
-    /// picks' original radii so growth cannot snowball onto one sphere.
-    fn spheres(&self, picks: &[usize], penetration: Option<f32>) -> (Vec<[f32; 4]>, f32) {
+    /// picks' original radii so growth cannot snowball onto one sphere. With `max_overhang`, each is
+    /// then held to that far past the geometry, as its depth measures it, and one left without a
+    /// radius is dropped: the samples it reached past that stay outside.
+    fn spheres(&self, picks: &[usize], max_overhang: Option<f32>) -> (Vec<[f32; 4]>, f32) {
         // A cover that picked nothing still needs one sphere to grow: the largest candidate.
         let largest = (0..self.candidates.len())
             .max_by(|&a, &b| self.candidates[a].1.total_cmp(&self.candidates[b].1));
@@ -671,9 +605,6 @@ impl LinkFit {
             picks.to_vec()
         };
         let mut spheres: Vec<(Vec3, f32)> = picks.iter().map(|&i| self.candidates[i]).collect();
-        if spheres.is_empty() {
-            return (vec![], 0.0);
-        }
         let dense = self.dense.iter().map(|(p, _)| p);
         for &s in self.samples.iter().chain(dense) {
             if spheres.iter().any(|&(c, r)| (s - c).length() <= r) {
@@ -685,13 +616,9 @@ impl LinkFit {
                 .expect("a sphere");
             spheres[j].1 = (s - spheres[j].0).length();
         }
-        // Cover/scaling chooses where to spend the budget. In bounded mode its scoring
-        // slack never authorizes growth past the mesh: preserve the centers and cap each
-        // selected radius independently, leaving coverage gaps instead of exceeding the cap.
-        if let Some(penetration) = penetration {
+        if let Some(limit) = max_overhang {
             for (center, radius) in &mut spheres {
-                *radius = bounded_radius(&self.solids, *center, penetration)
-                    .map_or(0.0, |limit| radius.min(limit));
+                *radius = radius.min(depth(&self.solids, *center) + limit);
             }
         }
         let growth = picks
@@ -699,10 +626,15 @@ impl LinkFit {
             .zip(&spheres)
             .map(|(&i, s)| s.1 - self.candidates[i].1)
             .fold(0.0, f32::max);
+        if max_overhang.is_some() {
+            // A radius that rounding alone gives a center on the surface is none.
+            let farthest = |far: f32, p: &Vec3| far.max(p.abs().max_element());
+            let least = ROUNDING * self.samples.iter().fold(0.0, farthest);
+            spheres.retain(|&(_, radius)| radius > least);
+        }
         (
             spheres
                 .into_iter()
-                .filter(|(_, r)| *r > 0.0)
                 .map(|(c, r)| [c.x, c.y, c.z, r])
                 .collect(),
             growth,
@@ -738,6 +670,12 @@ pub struct LinkQualification {
     /// samples and leave slivers about a millimeter deep between them where held tight, and more
     /// where a hand-tuned model leaves gaps.
     pub uncovered: f32,
+    /// How far the farthest of those samples lies outside the spheres (meters), zero where none
+    /// does: how deep an obstacle can reach into the link unseen. About a millimeter for fitted
+    /// spheres; more where a hand-tuned model leaves gaps, or where
+    /// [`SphereOptions::max_overhang`] holds spheres short of the surface, which leaves all of it
+    /// outside them at zero.
+    pub gap: f32,
     /// How thick its geometry is where thickest (meters): the largest sphere inside it, across. A
     /// link thinner than its spheres' overhang is mostly sphere.
     pub thickness: f32,
@@ -886,12 +824,8 @@ pub(crate) fn fit(
         fits.iter()
             .zip(picks)
             .map(|(f, picks)| {
-                f.as_ref().map_or((vec![], 0.0), |f| {
-                    f.spheres(
-                        picks,
-                        o.enforce_mesh_bounds.then_some(o.max_mesh_penetration),
-                    )
-                })
+                f.as_ref()
+                    .map_or((vec![], 0.0), |f| f.spheres(picks, o.max_overhang))
             })
             .collect()
     };
@@ -952,15 +886,16 @@ pub(crate) fn fit(
 /// tolerance the one of fewest spheres is taken, or where the budget cannot reach it, the least
 /// overhang the budget can; so for a capsule. The shapes but the spheres share the budget the
 /// spheres leave. Microseconds, where fitting takes milliseconds, and within the tolerance on a
-/// thin wide shape, where a fit of as many spheres is not.
+/// thin wide shape, where a fit of as many spheres is not. Under `o.max_overhang` the covers are
+/// those within the smaller of it and the tolerance, and where the budget has none within it,
+/// the shapes are left to the fit, which holds its spheres to it.
 pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option<Vec<[f32; 4]>> {
-    if o.enforce_mesh_bounds {
-        // Direct covers circumscribe cells and cannot honor an arbitrary hard cap.
-        return None;
-    }
     if shapes.iter().any(|s| matches!(s, Obstacle::Sdf { .. })) {
         return None;
     }
+    // Under a limit, a cover reaches no farther than it, or the shapes are left to the fit.
+    let limit = o.max_overhang.unwrap_or(f32::INFINITY);
+    let tolerance = o.tolerance.min(limit);
     let balls = shapes
         .iter()
         .filter(|s| matches!(s, Obstacle::Sphere { .. }))
@@ -989,10 +924,13 @@ pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option
                 half_extents,
                 rotation,
             } => {
-                let cells = box_cells(half_extents, o.tolerance, each);
+                let cells = box_cells(half_extents, tolerance, each);
                 let cell = half_extents / cells.as_vec3();
                 // A hair wide, so rounding never leaves a corner uncovered.
                 let radius = cell.length() * HAIR;
+                if radius - cell.min_element() > limit {
+                    return None;
+                }
                 let mut own = vec![];
                 for i in 0..cells.x {
                     for j in 0..cells.y {
@@ -1011,7 +949,7 @@ pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option
                 radius,
                 half_height,
             } => {
-                let own = cylinder_cover(radius, half_height, o.tolerance, each)?;
+                let own = cylinder_cover(radius, half_height, tolerance, each)?;
                 placed(&mut spheres, center, rotation, own);
             }
             Obstacle::Capsule {
@@ -1020,7 +958,10 @@ pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option
                 radius,
                 half_length,
             } => {
-                let own = capsule_cover(radius, half_length, o.tolerance, each);
+                let own = capsule_cover(radius, half_length, tolerance, each);
+                if own[0][3] - radius > limit {
+                    return None;
+                }
                 placed(&mut spheres, center, rotation, own);
             }
             Obstacle::Sdf { .. } => unreachable!("a distance grid returns above"),
@@ -1291,106 +1232,6 @@ mod tests {
     use crate::description::Geometry;
 
     #[test]
-    fn bounded_fits_keep_the_penetration_and_whole_robot_budget_hard() {
-        let half = Vec3::new(0.08, 0.02, 0.01);
-        let mesh = Geometry::Box { half }.mesh().expect("closed box");
-        for penetration in [0.0, 0.002] {
-            let options = SphereOptions {
-                budget: 4,
-                enforce_mesh_bounds: true,
-                max_mesh_penetration: penetration,
-                ..Default::default()
-            };
-            let links = vec![vec![mesh.clone()], vec![mesh.clone()]];
-            let fitted = fit(&links, &[options.tolerance; 2], &options, false);
-            assert!(fitted.spheres.iter().all(|spheres| !spheres.is_empty()));
-            assert!(fitted.spheres.iter().map(Vec::len).sum::<usize>() <= options.budget);
-            for spheres in &fitted.spheres {
-                validate_mesh_bounds(std::slice::from_ref(&mesh), spheres, penetration)
-                    .expect("every fitted sphere respects the original mesh");
-                for &[x, y, z, radius] in spheres {
-                    // Independent analytic distance to the six original box faces.
-                    let depth = (half - Vec3::new(x, y, z).abs()).min_element();
-                    assert!(depth >= 0.0, "center must stay inside the box");
-                    assert!(
-                        radius <= depth + penetration,
-                        "radius {radius}, depth {depth}"
-                    );
-                }
-            }
-            let measured = measure(
-                "box",
-                std::slice::from_ref(&mesh),
-                &fitted.spheres[0],
-                &options,
-            )
-            .expect("qualification reports the remaining surface gaps");
-            assert!(measured.uncovered > 0.0);
-            assert!(measured.overhang <= penetration);
-        }
-        // The default remains the covering fitter: this tiny budget needs substantial growth.
-        let legacy = SphereOptions {
-            budget: 2,
-            ..Default::default()
-        };
-        let fitted = fit(&[vec![mesh]], &[legacy.tolerance], &legacy, false);
-        assert!(fitted.spheres[0].iter().any(|&[x, y, z, radius]| {
-            radius > (half - Vec3::new(x, y, z).abs()).min_element() + 0.002
-        }));
-    }
-
-    #[test]
-    fn bounds_use_every_original_surface_and_refuse_open_meshes() {
-        let half = Vec3::splat(0.02);
-        let first = Geometry::Box { half }.mesh().expect("box");
-        let mut second = first.clone();
-        for point in &mut second.vertices {
-            point.x += 0.01;
-        }
-        let meshes = [first.clone(), second];
-        // This fits the first box but crosses an original face of the overlapping second box.
-        assert!(validate_mesh_bounds(&meshes, &[[0.0, 0.0, 0.0, 0.015]], 0.0).is_err());
-        validate_mesh_bounds(&meshes, &[[0.0, 0.0, 0.0, 0.009]], 0.0)
-            .expect("sphere stays on the interior side of all original surfaces");
-        let mut open = first;
-        open.triangles.pop();
-        let error = validate_mesh_bounds(&[open], &[[0.0, 0.0, 0.0, 0.001]], 0.0)
-            .expect_err("open geometry cannot certify a bounded sphere");
-        assert!(error.contains("closed"), "{error}");
-    }
-
-    #[test]
-    fn bounded_thin_fits_find_inward_centers_and_invalid_limits_are_rejected() {
-        let mesh = thin_tetrahedron();
-        let options = SphereOptions {
-            budget: 8,
-            enforce_mesh_bounds: true,
-            ..Default::default()
-        };
-        let fitted = fit(&[vec![mesh.clone()]], &[options.tolerance], &options, false);
-        assert!(
-            !fitted.spheres[0].is_empty(),
-            "thin closed geometry needs interior seeds"
-        );
-        assert!(fitted.spheres[0].len() <= options.budget);
-        validate_mesh_bounds(&[mesh], &fitted.spheres[0], 0.0).expect("thin fit stays inside");
-        for invalid in [-0.001, f32::NAN, f32::INFINITY] {
-            assert!(
-                SphereOptions {
-                    max_mesh_penetration: invalid,
-                    ..options
-                }
-                .check()
-                .is_err()
-            );
-        }
-        assert!(
-            cover_primitives(&[Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.1))], &options).is_none(),
-            "bounded boxes must bypass circumscribed cell spheres"
-        );
-    }
-
-    #[test]
     fn packed_cover_matches_scalar_reaches() {
         let candidates: Vec<_> = (0..11)
             .map(|i| (Vec3::new(4.0 * i as f32, i as f32, -2.0 * i as f32), 0.25))
@@ -1441,210 +1282,6 @@ mod tests {
             "packing must preserve the scalar addition order"
         );
     }
-    fn thin_tetrahedron() -> TriMesh {
-        TriMesh {
-            vertices: vec![
-                Vec3::new(-0.05, -0.02, 0.0),
-                Vec3::new(0.05, -0.02, 0.0),
-                Vec3::new(0.0, 0.02, 0.0),
-                Vec3::new(0.0, 0.0, 1e-5),
-            ],
-            triangles: vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
-        }
-    }
-
-    #[test]
-    fn an_oriented_sliver_cannot_claim_a_distant_point_or_hide_its_overhang() {
-        // A closed 0.1 mm prism reproducing Parry's false interior classification.
-        let mesh = TriMesh {
-            vertices: vec![
-                Vec3::new(0.04805384, 0.12926735, 0.09413833),
-                Vec3::new(0.048095737, 0.12927745, 0.0951274),
-                Vec3::new(0.048110154, 0.12929678, 0.095489144),
-                Vec3::new(0.048209894, 0.12930256, 0.09548485),
-                Vec3::new(0.048195478, 0.12928323, 0.095123105),
-                Vec3::new(0.04815358, 0.12927313, 0.09413404),
-            ],
-            triangles: vec![
-                [0, 1, 2],
-                [3, 4, 5],
-                [0, 5, 4],
-                [0, 4, 1],
-                [1, 4, 3],
-                [1, 3, 2],
-                [2, 3, 5],
-                [2, 5, 0],
-            ],
-        };
-        let point = Vec3::new(-0.13717227, -0.13240308, -0.080591865);
-        let solid = ParryMesh::with_flags(
-            mesh.vertices.clone(),
-            mesh.triangles.clone(),
-            TriMeshFlags::MERGE_DUPLICATE_VERTICES
-                | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
-                | TriMeshFlags::ORIENTED,
-        )
-        .expect("closed sliver prism");
-        assert!(inscribed(std::slice::from_ref(&solid), point).is_none());
-        let qualification = measure(
-            "sliver",
-            &[mesh],
-            &[[point.x, point.y, point.z, 1e-9]],
-            &SphereOptions::default(),
-        )
-        .expect("sliver surface");
-        assert!(
-            qualification.overhang > 0.3,
-            "distant sphere's actual overhang was hidden: {qualification:?}"
-        );
-    }
-
-    #[test]
-    fn the_retention_sliver_rejects_a_false_interior_point_within_its_aabb() {
-        let mesh = TriMesh {
-            vertices: vec![
-                Vec3::new(-0.09312411, 0.10867787, 0.09173776),
-                Vec3::new(-0.09360698, 0.107881434, 0.09120643),
-                Vec3::new(-0.09330204, 0.10837083, 0.09153486),
-                Vec3::new(-0.09328164, 0.1084163, 0.091448165),
-                Vec3::new(-0.09358658, 0.1079269, 0.09111974),
-                Vec3::new(-0.09310371, 0.108723335, 0.09165107),
-            ],
-            triangles: vec![
-                [0, 1, 2],
-                [3, 4, 5],
-                [0, 5, 4],
-                [0, 4, 1],
-                [1, 4, 3],
-                [1, 3, 2],
-                [2, 3, 5],
-                [2, 5, 0],
-            ],
-        };
-        let solid = ParryMesh::with_flags(mesh.vertices, mesh.triangles, TriMeshFlags::ORIENTED)
-            .expect("actual closed retention sliver");
-        let point = Vec3::new(-0.09329422, 0.10790725, 0.09129702);
-        let bounds = solid.local_aabb();
-        assert!(point.cmpge(bounds.mins).all() && point.cmple(bounds.maxs).all());
-        assert!(!winding_inside(&solid, point));
-        assert!(inscribed(std::slice::from_ref(&solid), point).is_none());
-    }
-
-    #[test]
-    fn a_point_inside_a_thin_mesh_bounds_but_outside_its_footprint_is_rejected() {
-        let mesh = thin_tetrahedron();
-        let solid = ParryMesh::with_flags(mesh.vertices, mesh.triangles, TriMeshFlags::ORIENTED)
-            .expect("closed thin tetrahedron");
-        assert!(inscribed(std::slice::from_ref(&solid), Vec3::new(0.04, 0.015, 1e-6)).is_none());
-        assert!(inscribed(std::slice::from_ref(&solid), Vec3::new(0.0, 0.0, 1e-6)).is_some());
-    }
-
-    #[test]
-    fn oriented_winding_rejects_concave_gaps_and_accepts_overlapping_solids() {
-        use crate::description::Geometry;
-        let cuboid = |center: Vec3, half: Vec3| {
-            let mut mesh = Geometry::Box { half }.mesh().expect("box surface");
-            for point in &mut mesh.vertices {
-                *point += center;
-            }
-            mesh
-        };
-        let mut u = cuboid(Vec3::new(-0.04, 0.0, 0.0), Vec3::new(0.01, 0.05, 0.01));
-        u.append(cuboid(
-            Vec3::new(0.04, 0.0, 0.0),
-            Vec3::new(0.01, 0.05, 0.01),
-        ));
-        u.append(cuboid(
-            Vec3::new(0.0, -0.04, 0.0),
-            Vec3::new(0.04, 0.01, 0.01),
-        ));
-        let solid = ParryMesh::with_flags(u.vertices, u.triangles, TriMeshFlags::ORIENTED)
-            .expect("U-shaped component union");
-        assert!(inscribed(std::slice::from_ref(&solid), Vec3::ZERO).is_none());
-        assert!(inscribed(std::slice::from_ref(&solid), Vec3::new(-0.04, 0.0, 0.0)).is_some());
-        let mut overlap = cuboid(Vec3::new(-0.005, 0.0, 0.0), Vec3::splat(0.02));
-        overlap.append(cuboid(Vec3::new(0.005, 0.0, 0.0), Vec3::splat(0.02)));
-        let solid =
-            ParryMesh::with_flags(overlap.vertices, overlap.triangles, TriMeshFlags::ORIENTED)
-                .expect("overlapping outward shells");
-        assert!(
-            winding_inside(&solid, Vec3::ZERO),
-            "winding two is occupied"
-        );
-        let inside_one = Vec3::new(-0.016, 0.0, 0.0);
-        assert!(
-            winding_inside(&solid, inside_one),
-            "a point inside one shell stays occupied near another shell's exterior face"
-        );
-        assert!(inscribed(std::slice::from_ref(&solid), inside_one).is_some());
-    }
-
-    #[test]
-    fn touching_component_shells_do_not_fill_their_concave_gap() {
-        use crate::description::Geometry;
-        let mut joined = Geometry::Box {
-            half: Vec3::new(0.02, 0.02, 0.01),
-        }
-        .mesh()
-        .expect("first box");
-        for point in &mut joined.vertices {
-            *point += Vec3::new(-0.02, -0.02, 0.0);
-        }
-        let mut second = Geometry::Box {
-            half: Vec3::new(0.02, 0.02, 0.01),
-        }
-        .mesh()
-        .expect("touching box");
-        for point in &mut second.vertices {
-            *point += Vec3::new(0.02, 0.02, 0.0);
-        }
-        joined.append(second);
-        let solid =
-            ParryMesh::with_flags(joined.vertices, joined.triangles, TriMeshFlags::ORIENTED)
-                .expect("touching closed components");
-        assert!(!winding_inside(&solid, Vec3::new(-0.02, 0.02, 0.0)));
-        assert!(winding_inside(&solid, Vec3::new(0.02, 0.02, 0.0)));
-    }
-
-    #[test]
-    fn thin_solids_never_propose_spheres_outside_their_own_bounds() {
-        let mesh = thin_tetrahedron();
-        let solid = ParryMesh::with_flags(mesh.vertices, mesh.triangles, TriMeshFlags::ORIENTED)
-            .expect("closed thin tetrahedron");
-        for point in [
-            Vec3::new(0.0, 0.0, 0.4),
-            Vec3::new(0.3, 0.0, 1e-6),
-            Vec3::new(0.0, -0.2, 1e-6),
-        ] {
-            assert!(inscribed(std::slice::from_ref(&solid), point).is_none());
-        }
-        let point = Vec3::new(0.0, 0.0, 1e-6);
-        if let Some((center, radius)) = inscribed(std::slice::from_ref(&solid), point) {
-            let bounds = solid.local_aabb();
-            assert!((center - Vec3::splat(radius)).cmpge(bounds.mins).all());
-            assert!((center + Vec3::splat(radius)).cmple(bounds.maxs).all());
-        }
-    }
-
-    #[test]
-    fn a_thin_solid_fit_does_not_turn_into_a_large_distant_sphere() {
-        let mesh = thin_tetrahedron();
-        let options = SphereOptions {
-            budget: 64,
-            tolerance: 0.005,
-            ..SphereOptions::default()
-        };
-        let fitted = fit(&[vec![mesh]], &[options.tolerance], &options, false);
-        assert!(!fitted.spheres[0].is_empty());
-        assert!(fitted.spheres[0].len() <= options.budget);
-        // Surface fallback and tangent growth may overhang a thin solid; they must not
-        // inherit a hundreds-of-millimetres radius from a false interior point query.
-        for sphere in &fitted.spheres[0] {
-            assert!(sphere[3] < 0.05, "unbounded thin-solid sphere: {sphere:?}");
-            assert!(sphere[..3].iter().all(|coordinate| coordinate.is_finite()));
-        }
-    }
-
     #[test]
     fn the_cover_counts_a_sample_its_own_candidate_reaches_at_the_edge_of_its_window() {
         // A box from x = -0.05 to just past 0.002, and a sample on that face whose own candidate

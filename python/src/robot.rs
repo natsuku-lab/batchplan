@@ -70,6 +70,10 @@ value_class! {
         /// How far spheres may reach beyond the geometry (meters) before the fit spends more of
         /// the budget. When the budget cannot reach it, the fit uses the smallest overhang it can.
         tolerance: f32,
+        /// The farthest any sphere may reach beyond the geometry (meters), whatever the budget;
+        /// 0 keeps every sphere inside. It leaves surface outside the spheres where the budget
+        /// cannot cover it within that, and needs closed geometry. `None`: no limit.
+        max_overhang: Option<f32>,
         /// Largest spacing of the interior grid that proposes sphere centers (meters). Small links
         /// use a finer grid.
         voxel_size: f32,
@@ -79,10 +83,6 @@ value_class! {
         self_collision_samples: usize,
         /// Seed of the fit's random choices and those configurations.
         rng_seed: u64,
-        /// Bound sphere overhang, allowing surface gaps to retain the sphere budget.
-        enforce_mesh_bounds: bool,
-        /// Maximum sphere overhang in meters when mesh bounds are enforced.
-        max_mesh_penetration: f32,
     }
     methods {
         #[new]
@@ -306,11 +306,6 @@ impl Robot {
     #[getter]
     fn name(&self) -> &str {
         self.0.name()
-    }
-
-    /// The sphere-fitting options used to load this robot.
-    fn sphere_fit_options(&self) -> SphereOptions {
-        SphereOptions(self.0.sphere_fit_options())
     }
 
     /// The number of actuated joints: the length of every configuration.
