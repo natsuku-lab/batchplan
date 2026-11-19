@@ -639,7 +639,10 @@ impl LinkFit {
     /// Holds fitted `spheres` to `limit` past the geometry ([`SphereOptions::max_overhang`]): each
     /// radius is cut back to its center's depth plus the limit, and a sphere left with no more
     /// than rounding gives a center on the surface is dropped, so the samples they reached past
-    /// that stay outside. Returns how far past the geometry the farthest still reaches.
+    /// that stay outside. Returns how far past the geometry the farthest still reaches. Out of
+    /// line: inlined, it grew `fit` by two fifths, and fits without a limit that search for the
+    /// least growth took 7 to 12% longer on x86.
+    #[inline(never)]
     fn hold(&self, spheres: &mut Vec<[f32; 4]>, limit: f32) -> f32 {
         let corner = |far: f32, solid: &ParryMesh| {
             let bounds = solid.local_aabb();
