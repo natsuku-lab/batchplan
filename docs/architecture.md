@@ -43,6 +43,7 @@ src/
 ├── join.rs          # join: consecutive motions without stopping between them
 ├── task.rs          # pick and place: a whole task in one call
 ├── surface.rs       # grasps of what cameras see: surfaces from depth and points, pairs of patches, the hand kept clear
+├── rest/            # rests_on: a measured support as heights, an object set down on it, what it touches, whether that holds it
 ├── handover.rs      # one hand passing what it holds to another, on the task layer's steps
 ├── held.rs          # Held: a held object's spheres, its devices, problems grouped by hold
 ├── timing.rs        # Trajectory: a path timed within the limits; stops; moving starts
