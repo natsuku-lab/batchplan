@@ -10,10 +10,11 @@
 // `CLAMP_HI`, `UNOBSERVED`, `SHADOWED` and `OCCLUDED`.
 
 @group(0) @binding(0) var<uniform> G: GridParams;
-// Per pixel, row by row: the depth reading (0 without one). The robot mask: the depth to the robot
-// per pixel, then `G.spheres` grown spheres (centre, radius).
+// Per pixel, row by row: the depth reading (0 without one). The robot mask: one bit per pixel,
+// whether its reading is the robot's (`RobotMask::on_robot`), then from the next word on one bit
+// per grid point, x fastest: whether the point is inside the robot (`RobotMask::inside`).
 @group(0) @binding(1) var<storage, read> depth: array<f32>;
-@group(0) @binding(2) var<storage, read> robot: array<f32>;
+@group(0) @binding(2) var<storage, read> robot: array<u32>;
 // One bit per grid point, x fastest: the occupancy the transform reads, or the points a map's
 // readings hit.
 @group(0) @binding(3) var<storage, read_write> bits: array<atomic<u32>>;
@@ -67,24 +68,25 @@ fn is_set(n: u32) -> bool {
     return ((atomicLoad(&bits[n >> 5u]) >> (n & 31u)) & 1u) == 1u;
 }
 
-// Whether `p` is inside the robot (`RobotMask::contains`).
-fn inside_robot(p: vec3<f32>) -> bool {
-    let first = G.width * G.height;
-    for (var s = 0u; s < G.spheres; s++) {
-        let k = first + 4u * s;
-        let d = p - vec3<f32>(robot[k], robot[k + 1u], robot[k + 2u]);
-        if dot(d, d) < robot[k + 3u] * robot[k + 3u] {
-            return true;
-        }
-    }
-    return false;
+// Whether pixel `i`'s reading is the robot's, for an image with a mask.
+fn on_robot(i: u32) -> bool {
+    return ((robot[i >> 5u] >> (i & 31u)) & 1u) == 1u;
 }
 
-// What the image says about the grid point `p`, with the space the robot fills free
-// (`DepthImage::classify`).
-fn classify(p: vec3<f32>) -> u32 {
+// Whether grid point `n` is inside the robot (`RobotMask::inside`).
+fn inside_robot(n: u32) -> bool {
+    if G.has_robot == 0u {
+        return false;
+    }
+    let first = (G.width * G.height + 31u) / 32u;
+    return ((robot[first + (n >> 5u)] >> (n & 31u)) & 1u) == 1u;
+}
+
+// What the image says about the grid point `p`, point `n` of the grid, with the space the robot
+// fills free (`DepthImage::classify`).
+fn classify(p: vec3<f32>, n: u32) -> u32 {
     let seen = sees(p);
-    if (seen == NEAR || seen == HIDDEN || seen == SHADOW || seen == UNSEEN) && inside_robot(p) {
+    if (seen == NEAR || seen == HIDDEN || seen == SHADOW || seen == UNSEEN) && inside_robot(n) {
         return FREE;
     }
     return seen;
@@ -110,9 +112,8 @@ fn sees(p: vec3<f32>) -> u32 {
         return UNSEEN;
     }
     if G.has_robot == 1u {
-        let r = robot[i];
-        if z >= r - voxel {
-            return select(SHADOW, FREE, c.z < r - half);
+        if on_robot(i) {
+            return select(SHADOW, FREE, c.z < z - half);
         }
     }
     if c.z < z - half {
@@ -140,7 +141,7 @@ fn depth_occupancy(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_w
         if n >= G.points {
             break;
         }
-        let seen = classify(grid_point(n));
+        let seen = classify(grid_point(n), n);
         let hidden_solid = seen == HIDDEN && G.behind != BEHIND_FREE && G.behind != BEHIND_BAND;
         let shadow_solid = seen == SHADOW && G.behind == BEHIND_OCCUPIED;
         if seen == SURFACE || seen == NEAR || hidden_solid || shadow_solid {
@@ -159,7 +160,7 @@ fn depth_hits(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
         return;
     }
     let z = depth[i];
-    if z <= 0.0 || (G.has_robot == 1u && z >= robot[i] - G.origin.w) {
+    if z <= 0.0 || (G.has_robot == 1u && on_robot(i)) {
         return;
     }
     let uv = vec2<f32>(f32(i % G.width), f32(i / G.width));
@@ -191,7 +192,7 @@ fn map_update(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
         if n >= G.points {
             break;
         }
-        let seen = classify(grid_point(n));
+        let seen = classify(grid_point(n), n);
         let shift = 8u * b;
         var l = i32(word << (24u - shift)) >> 24u;
         var step: i32;

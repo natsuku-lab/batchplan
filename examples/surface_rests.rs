@@ -37,7 +37,13 @@ fn look_at(eye: Vec3, target: Vec3) -> Pose {
 
 /// What a camera at `eye` looking at `target` sees of `scene`, the points of `support` (indices
 /// into `scene`) marked as the support, as a segmentation would mark them.
-fn seen(scene: &[Obstacle], support: &[usize], eye: Vec3, target: Vec3) -> Result<Surface> {
+fn seen(
+    device: &Device,
+    scene: &[Obstacle],
+    support: &[usize],
+    eye: Vec3,
+    target: Vec3,
+) -> Result<Surface> {
     let k = Intrinsics {
         fx: 600.0,
         fy: 600.0,
@@ -85,7 +91,7 @@ fn seen(scene: &[Obstacle], support: &[usize], eye: Vec3, target: Vec3) -> Resul
         intrinsics: k,
         camera,
     };
-    Ok(Surface::from_depth(&image, &flags, None, 0.005)?)
+    Ok(Surface::from_depth(device, &image, &flags, None, 0.005)?)
 }
 
 /// Points 2 mm apart around a bar of radius `r` along y at `(x, z)`, 30 cm long, with normals.
@@ -241,8 +247,14 @@ fn main() -> Result<()> {
         ));
     }
     let middle = Vec3::new(0.5, 0.0, 0.0);
-    let mut clutter = seen(&scene, &[0], Vec3::new(0.0, 0.0, 0.6), middle)?;
-    clutter.join(seen(&scene, &[0], Vec3::new(0.5, 0.0, 0.8), middle)?);
+    let mut clutter = seen(&device, &scene, &[0], Vec3::new(0.0, 0.0, 0.6), middle)?;
+    clutter.join(seen(
+        &device,
+        &scene,
+        &[0],
+        Vec3::new(0.5, 0.0, 0.8),
+        middle,
+    )?);
     let block = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.03, 0.025));
     report(
         "a table among three blocks in two depth images",
@@ -268,7 +280,13 @@ fn main() -> Result<()> {
             Vec3::new(hx, hy, 0.06),
         ));
     }
-    let inside = seen(&basket, &[0, 1, 2, 3, 4], Vec3::new(0.5, 0.0, 0.5), middle)?;
+    let inside = seen(
+        &device,
+        &basket,
+        &[0, 1, 2, 3, 4],
+        Vec3::new(0.5, 0.0, 0.5),
+        middle,
+    )?;
     let can = Obstacle::cylinder(Vec3::ZERO, 0.033, 0.04);
     report(
         "a basket seen from above",

@@ -1445,7 +1445,7 @@ fn measured(scene: &[Obstacle], support: &[usize], eye: Vec3, target: Vec3, nois
             z > 0.0 && nearest.is_some_and(|k| support.contains(&k))
         })
         .collect();
-    Surface::from_depth(&image, &flags, None, 0.005).unwrap()
+    Surface::from_depth(&device(), &image, &flags, None, 0.005).unwrap()
 }
 
 #[test]

@@ -218,7 +218,7 @@ The failed pick has every grasp blocked or out of reach. Grasp IK dominates pick
 | | Points | Grasps | Time |
 |---|---|---|---|
 | A bowl 11 cm across with a wall 8 mm thick, as points 2 mm apart with their normals | 9,201 | 1,980, all across its wall | 5.4 ms |
-| A box on a table in two 640×480 depth images | 593,920, 12,492 of them the box's | 686 | 10.7 ms to read both images, 10.1 ms to grasp |
+| A box on a table in two 640×480 depth images | 593,920, 12,492 of them the box's | 686 | 2.8 ms to read both images, 9.5 ms to grasp |
 | LIBERO's bowl, its wall 3 mm thick and flared, seen from 40 cm above in one 640×480 depth image (focal length 313 pixels), its outer wall nowhere | 307,200, 6,728 of them the bowl's | none; with a `shell` of 1.5 cm 1,132, 5.5 to 14.5 mm wide (5.5 to 11.5 mm at its rim) | 9.2 ms with the shell |
 | That bowl 4 cm from a wall twice as tall, seen the same way | 307,200 | 654 with the shell; 698 where the fingers may come in narrower (`narrow`), every one narrower, down to 1 cm beside the wall | 8.9 ms with the shell, 10.7 ms with both |
 | 64 such bowls in one call | 588,864 | 126,720 | 226 ms, 3.5 ms a bowl |

@@ -77,8 +77,10 @@ impl Surface {
     /// the normal of the plane through the readings within `radius` of it (meters; about a
     /// fingertip's patch, 5 mm), toward the camera. A reading whose neighbors within `radius` are
     /// too few or lie on one line, as along an edge seen end on, has no normal. Two views of one
-    /// scene make one surface with [`Surface::join`].
+    /// scene make one surface with [`Surface::join`]. The image's rows are read on the device's
+    /// threads, and the points come row by row whatever their number.
     pub fn from_depth(
+        device: &Device,
         image: &DepthImage<'_>,
         object: &[bool],
         robot: Option<&RobotMask>,
@@ -97,36 +99,49 @@ impl Surface {
         );
         let image = &image.rigid();
         let (width, height) = (image.width, image.depth.len() / image.width);
-        let seen: Vec<Option<Vec3>> = (0..image.depth.len())
-            .map(|i| image.point(i, robot, 0.0))
-            .collect();
-        let seen = &seen;
+        // One row's readings off the robot, those that show the object with their normals.
+        let read = |seen: &[Option<Vec3>], v: usize| {
+            let mut row = Surface::default();
+            for u in 0..width {
+                let i = v * width + u;
+                let Some(at) = seen[i] else {
+                    continue;
+                };
+                let shows = object.is_empty() || object[i];
+                let mut normal = Vec3::ZERO;
+                if shows {
+                    // The pixels a patch of `radius` covers at this depth, seen square on.
+                    let depth = image.depth[i];
+                    let reach =
+                        (radius * image.intrinsics.fx.max(image.intrinsics.fy) / depth).ceil();
+                    let reach = (reach as usize).clamp(1, WINDOW);
+                    let rows = v.saturating_sub(reach)..=(v + reach).min(height - 1);
+                    let near = rows.flat_map(|row| {
+                        let columns = u.saturating_sub(reach)..=(u + reach).min(width - 1);
+                        columns.filter_map(move |column| seen[row * width + column])
+                    });
+                    let near = near.filter(|p| p.distance_squared(at) <= radius * radius);
+                    normal = plane(near, at, image.camera.position).unwrap_or(Vec3::ZERO);
+                }
+                row.points.push(at);
+                row.normals.push(normal);
+                if !object.is_empty() {
+                    row.object.push(shows);
+                }
+            }
+            row
+        };
+        let rows: Vec<Surface> = device.install(|| {
+            let pixels = (0..image.depth.len()).into_par_iter();
+            let seen: Vec<Option<Vec3>> = pixels.map(|i| image.point(i, robot)).collect();
+            let rows = (0..height).into_par_iter();
+            rows.map(|v| read(&seen, v)).collect()
+        });
         let mut surface = Surface::default();
-        for (i, &at) in seen.iter().enumerate() {
-            let Some(at) = at else {
-                continue;
-            };
-            let shows = object.is_empty() || object[i];
-            let mut normal = Vec3::ZERO;
-            if shows {
-                // The pixels a patch of `radius` covers at this depth, seen square on.
-                let depth = image.depth[i];
-                let reach = (radius * image.intrinsics.fx.max(image.intrinsics.fy) / depth).ceil();
-                let reach = (reach as usize).clamp(1, WINDOW);
-                let (u, v) = (i % width, i / width);
-                let rows = v.saturating_sub(reach)..=(v + reach).min(height - 1);
-                let near = rows.flat_map(|row| {
-                    let columns = u.saturating_sub(reach)..=(u + reach).min(width - 1);
-                    columns.filter_map(move |column| seen[row * width + column])
-                });
-                let near = near.filter(|p| p.distance_squared(at) <= radius * radius);
-                normal = plane(near, at, image.camera.position).unwrap_or(Vec3::ZERO);
-            }
-            surface.points.push(at);
-            surface.normals.push(normal);
-            if !object.is_empty() {
-                surface.object.push(shows);
-            }
+        for row in rows {
+            surface.points.extend(row.points);
+            surface.normals.extend(row.normals);
+            surface.object.extend(row.object);
         }
         surface.seen_from = vec![image.camera.position; surface.points.len()];
         Ok(surface)
@@ -1466,10 +1481,13 @@ fn spacing(rays: &[Vec2], low: Vec2, span: Vec2) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::robot::{Robot, RobotOptions};
     use crate::sdf::Intrinsics;
 
     #[test]
     fn a_view_shows_nothing_inside_a_solid_as_seen_past() {
+        let robot = Robot::load("assets/franka/franka_panda.urdf", &RobotOptions::default());
+        let device = Device::cpu(&robot.unwrap()).unwrap();
         // A slab 10 cm thick over x < edge seen from 50 cm straight above, the floor past its
         // edge: across the edge, at a twentieth of a pixel's steps and edges set across a pixel.
         let k = Intrinsics {
@@ -1495,7 +1513,7 @@ mod tests {
                 intrinsics: k,
                 camera,
             };
-            let seen = Surface::from_depth(&image, &[], None, 0.005).unwrap();
+            let seen = Surface::from_depth(&device, &image, &[], None, 0.005).unwrap();
             let free = Free::new(
                 &seen,
                 Vec3::new(-0.03, -0.03, 0.0),

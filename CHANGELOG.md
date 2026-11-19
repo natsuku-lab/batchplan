@@ -10,6 +10,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- Each pixel's reading as a point: `DepthImage::points(robot_mask)`, row by row, `None` where a
+  pixel has no reading or reads the robot. Pixel `i` is column `i % width` of row `i / width`, its
+  centre at those whole coordinates, as grids, maps and surfaces read it.
+
+- `examples/perception.rs` times each depth call for a 640×480 image: the robot's mask, the
+  image's points, a surface, a grid, a frame fused into a map and the map's grid, for a camera
+  over a table and one the hand carries.
+
 - **Breaking:** a limit on how far collision spheres reach past the geometry:
   `SphereOptions::max_overhang`, `Some(0.002)` for 2 mm and `Some(0.0)` for spheres inside it,
   whatever the budget. Spheres are chosen as before and each radius cut back to its center's depth
@@ -162,6 +170,34 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   `Error::Input` their call returns for those options. In Python, `options.check()` raises it.
 
 ### Changed
+
+- **Breaking:** a robot mask judges each reading by where its point lies:
+  `image.robot_mask(&robot, &q, padding, &holding)` marks a reading the robot's where its point
+  is inside a collision sphere grown by the padding, and `RobotMask::on_robot`, a flag per pixel,
+  replaces `RobotMask::depth`. Before, every reading at or behind where its ray entered a grown
+  sphere was the robot's, so a camera the hand carries, which stands inside or beside the hand's
+  grown spheres, lost all it saw: a camera on the Panda's palm, inside a sphere grown by the 4 cm
+  a mask is padded with, lost its whole image. Now it keeps every reading past the hand, and a
+  camera across the table keeps the surfaces seen just past the arm's outline. A sensor's stray readings there, farther than the padding behind the arm, are obstacles
+  where they were dropped. `holding` names what the hands hold (`&[]` for nothing), a `Held` each
+  as a problem's `holding` takes one: its readings are left out and the space it fills is free, as
+  the robot's, without attaching it. In Python the mask was not bound.
+
+- **Breaking:** `Surface::from_depth(&device, &image, &object, robot_mask, radius)` takes the
+  device and reads the image's rows on its threads; the surface is the same to the bit. On the M4
+  Pro's 14 threads a 640×480 image of a tabletop with the table's 148,461 normals takes 2.7 ms
+  where 28, and on the Ryzen's 32 threads 3.4 ms where 34 (`examples/perception.rs`).
+
+- Fusing a frame or building a grid with a robot mask costs by the robot's volume, not by its
+  spheres times the grid's points: which points the robot fills is found once, sphere by sphere
+  over the points near each, for both devices, and which points those are is the same to the bit
+  on the CPU. A
+  640×480 frame fused into a map of 1.8M voxels with the mask of a Panda fitted with 573 spheres
+  (`examples/perception.rs`, runs alternated with the release before): 2.2 ms where 49 on the M4
+  Pro's CPU and 1.6 where 11.2 on its GPU, 5.4 ms where 41 on the Ryzen's 32 threads and 1.2 where
+  3.0 on the Radeon 8060S. With the Panda's 61 spheres: 1.9 ms where 6.3, 1.4 where 2.5, 5.2 where
+  8.8 and 0.9 where 1.4. Calls without a mask take what they took, with the same results to the
+  bit.
 
 - **Breaking:** a robot's `SphereOptions` are checked whether its spheres are fitted or given
   (`RobotOptions::collision_model`), before anything is read: a budget of zero, or a tolerance or

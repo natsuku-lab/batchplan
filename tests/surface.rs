@@ -971,7 +971,7 @@ fn box_read_farther(eye: Vec3, farther: f32) -> Surface {
         object.iter().filter(|&&o| o).count() > 500,
         "the camera sees the box"
     );
-    Surface::from_depth(&image, &object, None, 0.005).unwrap()
+    Surface::from_depth(&device(), &image, &object, None, 0.005).unwrap()
 }
 
 #[test]
@@ -1131,7 +1131,7 @@ fn bowl_read_farther(wall: f32, eyes: &[Vec3], farther: f32) -> Surface {
                 z > 0.0 && bowl_distance(p, wall) < 5e-4 + farther && p.z > 1e-3
             })
             .collect();
-        seen.join(Surface::from_depth(&image, &object, None, 0.005).unwrap());
+        seen.join(Surface::from_depth(&device(), &image, &object, None, 0.005).unwrap());
     }
     seen
 }
@@ -1581,19 +1581,64 @@ fn readings_of_the_robot_are_not_surfaces() {
         };
         surface.points.iter().filter(near).count()
     };
-    let unmasked = Surface::from_depth(&image, &[], None, 0.005).unwrap();
+    let unmasked = Surface::from_depth(&device(), &image, &[], None, 0.005).unwrap();
     assert!(on_the_robot(&unmasked) > 500, "the camera sees the hand");
-    let mask = image.robot_mask(&robot, &q, 0.005).unwrap();
-    let masked = Surface::from_depth(&image, &[], Some(&mask), 0.005).unwrap();
+    let mask = image.robot_mask(&robot, &q, 0.005, &[]).unwrap();
+    let masked = Surface::from_depth(&device(), &image, &[], Some(&mask), 0.005).unwrap();
     assert_eq!(on_the_robot(&masked), 0);
     assert!(masked.points.len() > 1000, "the table is still seen");
     assert!(masked.object.is_empty() && masked.normals.iter().any(|&n| n != Vec3::ZERO));
     // Object flags for some pixels only, and a radius that is not a length, are refused.
     for (object, radius) in [(&[true][..], 0.005), (&[][..], 0.0), (&[][..], f32::NAN)] {
         assert!(matches!(
-            Surface::from_depth(&image, object, None, radius),
+            Surface::from_depth(&device(), &image, object, None, radius),
             Err(Error::Input(_))
         ));
+    }
+}
+
+/// An image's rows are read on the device's threads: on one thread and on all of them the
+/// surface is the same, point for point in the image's order, with or without object flags.
+#[test]
+fn a_surface_reads_the_same_on_one_thread_and_on_many() {
+    let robot = common::panda().unwrap();
+    let (one, many) = (Device::cpu_threads(&robot, 1).unwrap(), device());
+    // A wall with a step across it and readings missing in a band, noise on every reading.
+    let mut rng = Rng::new(3);
+    let depth: Vec<f32> = (0..WIDTH * HEIGHT)
+        .map(|i| {
+            let (u, v) = (i % WIDTH, i / WIDTH);
+            let wall = if u < WIDTH / 2 { 0.4 } else { 0.5 };
+            let noise = rng.range(-0.0005, 0.0005);
+            if (HEIGHT / 3..HEIGHT / 3 + 9).contains(&v) {
+                0.0
+            } else {
+                wall + noise
+            }
+        })
+        .collect();
+    let image = DepthImage {
+        depth: &depth,
+        width: WIDTH,
+        intrinsics: K,
+        camera: Pose::new(Vec3::new(0.1, -0.2, 0.3), Quat::from_rotation_x(0.3)),
+    };
+    let object: Vec<bool> = (0..depth.len()).map(|i| i % 3 != 0).collect();
+    for flags in [&[][..], &object[..]] {
+        let alone = Surface::from_depth(&one, &image, flags, None, 0.005).unwrap();
+        let together = Surface::from_depth(&many, &image, flags, None, 0.005).unwrap();
+        assert!(alone == together, "the surfaces differ");
+        assert_eq!(alone.points.len(), WIDTH * (HEIGHT - 9));
+        assert_eq!(alone.object.len(), flags.len().min(alone.points.len()));
+        // In the image's order: each point is its pixel's reading.
+        let read = image.points(None).unwrap();
+        let read: Vec<Vec3> = read.into_iter().flatten().collect();
+        assert!(
+            alone.points == read,
+            "the points are not in the image's order"
+        );
+        let normals = alone.normals.iter().filter(|n| **n != Vec3::ZERO).count();
+        assert!(normals > WIDTH * HEIGHT / 2, "{normals} normals");
     }
 }
 
@@ -1613,7 +1658,7 @@ fn a_normal_is_the_plane_through_every_reading_within_the_radius() {
         intrinsics: K,
         camera,
     };
-    let seen = Surface::from_depth(&image, &[], None, 0.005).unwrap();
+    let seen = Surface::from_depth(&device(), &image, &[], None, 0.005).unwrap();
     assert_eq!(seen.points.len(), WIDTH * HEIGHT);
     let known: Vec<f32> = seen
         .normals
