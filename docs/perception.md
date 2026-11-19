@@ -82,7 +82,7 @@ Grids from depth images grow toward collision by about three voxels, so set the 
 
 ## Fused maps
 
-`OccupancyMap::try_new(lo, hi, voxel)` is a fixed grid in the world frame that fuses frames as OctoMap does. Each voxel holds the log-odds that it is occupied: a hit adds 0.85 and a miss subtracts 0.4, clamped to [−2, 3.5]. Something seen once and then seen through three times is free again. Voxels behind readings, outside the image or beyond the map are not updated.
+`OccupancyMap::try_new(lo, hi, voxel)` is a fixed grid in the world frame that fuses frames as OctoMap does. Each voxel holds the log-odds that it is occupied: a hit adds 0.85 and a miss subtracts 0.4, clamped to [−2, 3.5]. Something seen once and then seen through three times is free again; something seen in five images or more, nine times. Voxels behind readings, outside the image or beyond the map are not updated.
 
 `map.grid(&device, unknown)` makes voxels more likely occupied than not solid, and voxels never observed as `unknown` says. A map keeps no rays, so under `Occlusion::Band(distance)` the band is every unobserved voxel within `distance` of an occupied one, in any direction: in front of a surface too where its pixels had no reading, and beside the view. The robot's shadow stays free. The band builds the grid twice.
 
@@ -131,6 +131,17 @@ fn frames() -> Vec<Vec<f32>> {
     vec![vec![1.0; 640 * 480]]
 }
 ```
+
+### What a caller knows, and one object's part
+
+A map holds what the cameras saw. A caller knows more, and says so in the map's frame:
+
+- **`map.free(&shape, margin)`** marks the voxels within `margin` of a shape free, as seen through once, or as they were where cameras saw through them more: where an object stood before the robot carried it away, which no camera has looked at since. It is also how a shape the world already holds as an obstacle of its own is kept out of a grid, on a copy of the map (`map.clone()`; a map is a byte a voxel). One reading there afterwards makes a voxel the shape held occupied again.
+- **`map.clear(&shape, margin)`** marks them never observed: what was seen there no longer holds, as where a drawer stood before it was pulled and where it stands now. A grid takes them as it is told to take never-observed space.
+- **`map.part(&region, padding)`** is the map inside one region, as a map of its own that reaches `padding` past the region's bounds (as a grid must reach past the solid it holds, [above](#distance-grids)), every voxel that does not reach into the region left out: no solid in its grid whatever `unknown` says. A voxel reaches into it where its middle lies within half a voxel's diagonal of it, so that a reading on the region's own face is kept whichever side of the face its voxel's middle lies. `map.part(&object, padding)?.grid(&device, Occlusion::Occupied)` is one object as the cameras saw into it: solid where a reading landed or nothing saw past, free where a camera saw in, and nothing around it, where the whole map's grid under `Occupied` would wall in everything no camera has seen. Where the region reaches past the map it was never observed, and past a part it is taken from, it is left out. A part takes no images: fuse into the map and take the part again.
+- **`map.counts()`** says how many voxels are occupied, free and never observed, of a part those inside its region: a region with free voxels was seen into, and one that is all occupied and never observed was not.
+
+The shape is any `Obstacle`, turned as it is: a measured object's box, a ball about a grasp, a grid. These run on the calling thread: on the M4 Pro, doing other work beside (a load of 15 on its 14 cores), the part of a 1.8M-voxel map in a box of the scene takes 0.1 ms and its grid of 94,000 points 1.3 to 2.0 ms on either device, and a copy of the map with a shape marked free, then cleared, 1.7 ms (`examples/perception.rs`).
 
 `examples/depth.rs` renders a 640×480 depth image of a tabletop scene, builds a grid of 172×192×72 points from it, and plans Panda reaches with the grid as the only obstacle. IK reaches 48 of 64 grasp targets (the others lie in the camera's shadow, which `Occlusion::Occupied` treats as solid); all 48 plan, and their closest approach to the true scene is 27.0 mm.
 

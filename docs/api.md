@@ -47,6 +47,7 @@ Guide: [perception.md](perception.md).
 | `DepthImage::robot_mask(&robot, q, padding, &holding)` | Which of the image's readings are of the robot or of what it holds (`RobotMask::on_robot`, a flag per pixel), so grids, maps and surfaces leave them out. |
 | `Occlusion` | What a grid assumes behind observed surfaces: free, solid, solid except the robot's shadow, or solid in a band behind surfaces. |
 | `OccupancyMap::try_new`, `integrate`, `occupancy`, `grid` | Depth images fused over time into occupancy, then into a distance grid. |
+| `OccupancyMap::free(&shape, margin)`, `clear(&shape, margin)`, `part(&region, padding)`, `counts()` | What a caller knows of a map: space that is empty, space that is no longer known, the map inside one region (an object as the cameras saw into it), and how many voxels are occupied, free and never observed (`MapCounts`). |
 
 ## Devices
 

@@ -561,6 +561,53 @@ impl Obstacle {
         }
     }
 
+    /// The corners of the smallest box along the frame's axes that holds the obstacle; a
+    /// distance grid's is that of its points' box, grown by how far the grid reads solid past it.
+    pub(crate) fn bounds(&self) -> (Vec3, Vec3) {
+        let turned = |rotation: Quat, half: Vec3| {
+            let r = frame(rotation);
+            Mat3::from_cols(r.x_axis.abs(), r.y_axis.abs(), r.z_axis.abs()) * half
+        };
+        let (center, half) = match *self {
+            Obstacle::Cuboid {
+                center,
+                half_extents,
+                rotation,
+            } => (center, turned(rotation, half_extents)),
+            Obstacle::Sphere { center, radius } => (center, Vec3::splat(radius)),
+            Obstacle::Cylinder {
+                center,
+                rotation,
+                radius,
+                half_height,
+            } => {
+                // Along each axis, its caps reach their radius times the sine of the angle
+                // between that axis and the cylinder's.
+                let axis = frame(rotation).z_axis;
+                let across = (Vec3::ONE - axis * axis).max(Vec3::ZERO).map(f32::sqrt);
+                (center, axis.abs() * half_height + across * radius)
+            }
+            Obstacle::Capsule {
+                center,
+                rotation,
+                radius,
+                half_length,
+            } => (center, frame(rotation).z_axis.abs() * half_length + radius),
+            Obstacle::Sdf {
+                ref grid,
+                center,
+                rotation,
+            } => {
+                // Past its box a grid reads the value on its nearest face and the distance to
+                // it, so one solid on a face stays solid that far out.
+                let half = grid.half_extent();
+                let middle = center + frame(rotation) * (grid.lower_corner() + half);
+                (middle, turned(rotation, half) - grid.sunk())
+            }
+        };
+        (center - half, center + half)
+    }
+
     /// The obstacle's frame: its centre and rotation.
     #[must_use]
     pub fn pose(&self) -> Pose {

@@ -1663,6 +1663,449 @@ fn fused_maps_on(device: &Device) {
     );
 }
 
+/// The points of a map made with `try_new(lo, hi, voxel)`.
+fn lattice(lo: Vec3, hi: Vec3, voxel: f32) -> Vec<Vec3> {
+    let [nx, ny, nz] = ((hi - lo) / voxel).ceil().to_array().map(|n| n as u32 + 1);
+    let all = (0..nz).flat_map(|z| (0..ny).flat_map(move |y| (0..nx).map(move |x| (x, y, z))));
+    all.map(|(x, y, z)| lo + Vec3::new(x as f32, y as f32, z as f32) * voxel)
+        .collect()
+}
+
+/// A caller marks space it knows is empty, and space it no longer knows: the voxels within the
+/// margin of a shape of any kind, turned any way, and no other. Marked free, a voxel is free
+/// until a reading lands there; cleared, it was never observed.
+#[test]
+fn a_caller_marks_space_free_or_no_longer_known() {
+    let (lo, hi, voxel) = (Vec3::new(-0.2, -0.15, 0.0), Vec3::new(0.2, 0.15, 0.3), 0.01);
+    let points = lattice(lo, hi, voxel);
+    let turn = Quat::from_rotation_y(0.7) * Quat::from_rotation_z(0.4);
+    let cloud: Vec<Vec3> = (0..400)
+        .map(|i| Vec3::new((i % 20) as f32, (i / 20) as f32, 0.0) * 0.004)
+        .collect();
+    let o = SdfOptions {
+        voxel: 0.01,
+        padding: 0.03,
+    };
+    let plate = SdfGrid::from_points(cpu(), &cloud, &o).unwrap();
+    let shapes = [
+        Obstacle::Cuboid {
+            center: Vec3::new(-0.05, 0.0, 0.15),
+            half_extents: Vec3::new(0.02, 0.06, 0.03),
+            rotation: turn,
+        },
+        Obstacle::sphere(Vec3::new(0.1, 0.05, 0.1), 0.04),
+        Obstacle::Cylinder {
+            center: Vec3::new(0.0, 0.0, 0.2),
+            rotation: turn,
+            radius: 0.05,
+            half_height: 0.02,
+        },
+        // Half of it past the map's edge.
+        Obstacle::Capsule {
+            center: Vec3::new(0.2, 0.0, 0.15),
+            rotation: turn,
+            radius: 0.02,
+            half_length: 0.07,
+        },
+        Obstacle::Sdf {
+            grid: Arc::new(plate),
+            center: Vec3::new(-0.1, -0.05, 0.1),
+            rotation: turn,
+        },
+        // A grid solid on its faces, which reads solid past its box as deep as they are.
+        Obstacle::Sdf {
+            grid: Arc::new(
+                SdfGrid::try_new([6; 3], 0.02, Vec3::splat(-0.05), &[-0.03; 216]).unwrap(),
+            ),
+            center: Vec3::new(0.05, 0.0, 0.15),
+            rotation: turn,
+        },
+    ];
+    let margin = 0.015;
+    for shape in &shapes {
+        let mut map = OccupancyMap::try_new(lo, hi, voxel).unwrap();
+        assert_eq!(map.counts().unobserved, points.len());
+        map.free(shape, margin).unwrap();
+        let mut within = 0;
+        for &p in &points {
+            let marked = shape.distance(p).value <= margin;
+            let seen = map.occupancy(p);
+            assert_eq!(seen.is_some(), marked, "{shape:?} at {p}");
+            assert!(seen.is_none_or(|o| o < 0.5), "{shape:?} at {p}");
+            within += usize::from(marked);
+        }
+        assert!(
+            within > 100 && 2 * within < points.len(),
+            "{within} points within the margin of {shape:?}"
+        );
+        let counts = map.counts();
+        assert_eq!(
+            (counts.occupied, counts.free, counts.unobserved),
+            (0, within, points.len() - within)
+        );
+        map.clear(shape, margin).unwrap();
+        assert_eq!(map.counts().unobserved, points.len(), "{shape:?}");
+    }
+    // A box whose margin ends on the map's points, in lengths a float holds exactly: the points
+    // a voxel out from its faces are within the margin, and are the first and last looked at.
+    let (corner, eighth) = (Vec3::splat(2.0), 0.125);
+    let mut map = OccupancyMap::try_new(Vec3::ZERO, corner, eighth).unwrap();
+    let cube = Obstacle::cuboid(Vec3::ONE, Vec3::splat(0.5));
+    map.free(&cube, eighth).unwrap();
+    let exact = lattice(Vec3::ZERO, corner, eighth);
+    assert_eq!(cube.distance(Vec3::new(0.375, 1.0, 1.0)).value, eighth);
+    for &p in &exact {
+        let marked = cube.distance(p).value <= eighth;
+        assert_eq!(map.occupancy(p).is_some(), marked, "at {p}");
+    }
+    assert_eq!(
+        map.counts().free,
+        9 * 9 * 9 + 6 * 9 * 9,
+        "the cube and a voxel off each face"
+    );
+    // A margin that is no length and a shape that is no shape are refused.
+    let mut map = OccupancyMap::try_new(lo, hi, voxel).unwrap();
+    let broken = Obstacle::sphere(Vec3::ZERO, f32::NAN);
+    for (shape, margin) in [(&shapes[0], -0.01), (&shapes[0], f32::NAN), (&broken, 0.0)] {
+        assert!(matches!(map.free(shape, margin), Err(Error::Input(_))));
+        assert!(matches!(map.clear(shape, margin), Err(Error::Input(_))));
+        assert!(matches!(map.part(shape, margin), Err(Error::Input(_))));
+    }
+
+    // In a fused scene: a ball on a table, carried away with no camera looking.
+    let scene = TableScene::new();
+    let vga = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
+    let depth = scene.render(640, 480, vga, true);
+    let image = scene.image(&depth, 640, vga);
+    let (c, r) = scene.ball;
+    let ball = Obstacle::sphere(c, r);
+    let (top, table) = (c + Vec3::Z * r, Vec3::new(-0.2, -0.2, 0.0));
+    for device in devices() {
+        let mut map =
+            OccupancyMap::try_new(Vec3::new(-0.3, -0.3, -0.1), Vec3::new(0.3, 0.3, 0.3), 0.01)
+                .unwrap();
+        map.integrate(device, &image, None).unwrap();
+        let seen = map.counts();
+        assert!(seen.occupied > 1_000 && seen.free > 10_000 && seen.unobserved > 10_000);
+        let before = (map.occupancy(top).unwrap(), map.occupancy(table).unwrap());
+        assert!(
+            before.0 > 0.5 && before.1 > 0.5,
+            "the ball and the table are seen"
+        );
+        map.free(&ball, 0.02).unwrap();
+        assert!(
+            map.occupancy(top).unwrap() < 0.5,
+            "the ball's place is free"
+        );
+        assert!(
+            map.occupancy(c).unwrap() < 0.5,
+            "and its middle, never seen"
+        );
+        assert_eq!(map.occupancy(table).unwrap(), before.1, "the table stays");
+        assert!(map.counts().occupied < seen.occupied);
+        let gone = map.grid(device, Occlusion::Occupied).unwrap();
+        assert!(
+            gone.distance(c).value > 0.03,
+            "{}: {} where the ball was",
+            device.name(),
+            gone.distance(c).value
+        );
+        // One more look at the ball where it stands, and it is there again.
+        map.integrate(device, &image, None).unwrap();
+        assert!(map.occupancy(top).unwrap() > 0.5, "the ball is seen again");
+        // Space seen through three times is more surely free than marking it makes it: it
+        // stays as it was, and one reading there does not fill it.
+        let mut empty =
+            OccupancyMap::try_new(Vec3::new(-0.3, -0.3, -0.1), Vec3::new(0.3, 0.3, 0.3), 0.01)
+                .unwrap();
+        let bare = scene.render(640, 480, vga, false);
+        for _ in 0..3 {
+            empty
+                .integrate(device, &scene.image(&bare, 640, vga), None)
+                .unwrap();
+        }
+        let seen_through = empty.occupancy(top).unwrap();
+        empty.free(&ball, 0.02).unwrap();
+        assert_eq!(empty.occupancy(top).unwrap(), seen_through);
+        empty.integrate(device, &image, None).unwrap();
+        assert!(
+            empty.occupancy(top).unwrap() < 0.5,
+            "one reading against three"
+        );
+        // What was seen there no longer holds: never observed, and taken as the grid is told.
+        map.clear(&ball, 0.02).unwrap();
+        assert_eq!(map.occupancy(top), None);
+        assert!(map.occupancy(table).unwrap() > 0.5, "the table stays");
+        let (solid, free) = (
+            map.grid(device, Occlusion::Occupied).unwrap(),
+            map.grid(device, Occlusion::Free).unwrap(),
+        );
+        assert!(solid.distance(c).value <= 0.0 && free.distance(c).value > 0.03);
+    }
+}
+
+/// A part of a map is one object as the cameras saw into it: a tray with a block in it, seen
+/// from above. With never-observed space solid, its walls and the block's hidden inside are
+/// solid, the space seen into is free, and nothing outside the tray's box is in the grid, which
+/// reaches the padding past it and never reads farther from the tray than the tray is.
+#[test]
+fn a_part_of_a_map_is_an_object_as_seen_into() {
+    for device in devices() {
+        a_part_of_a_map_on(device);
+    }
+}
+
+fn a_part_of_a_map_on(device: &Device) {
+    // A tray 20 by 16 cm and 10 cm tall, its floor and walls 2 cm thick, turned on a table, and
+    // a block 4 cm on a side on its floor.
+    let pose = Pose::new(Vec3::new(0.02, -0.01, 0.05), Quat::from_rotation_z(0.4));
+    let piece = |at: Vec3, half: Vec3| {
+        Obstacle::cuboid(Vec3::ZERO, half).placed(pose.mul_pose(Pose::new(at, Quat::IDENTITY)))
+    };
+    let (half, wall) = (Vec3::new(0.10, 0.08, 0.05), 0.01);
+    let tray = [
+        piece(
+            Vec3::new(0.0, 0.0, wall - half.z),
+            Vec3::new(half.x, half.y, wall),
+        ),
+        piece(
+            Vec3::new(half.x - wall, 0.0, 0.0),
+            Vec3::new(wall, half.y, half.z),
+        ),
+        piece(
+            Vec3::new(wall - half.x, 0.0, 0.0),
+            Vec3::new(wall, half.y, half.z),
+        ),
+        piece(
+            Vec3::new(0.0, half.y - wall, 0.0),
+            Vec3::new(half.x, wall, half.z),
+        ),
+        piece(
+            Vec3::new(0.0, wall - half.y, 0.0),
+            Vec3::new(half.x, wall, half.z),
+        ),
+    ];
+    let block = piece(Vec3::new(0.03, 0.0, -0.01), Vec3::splat(0.02));
+    let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.05), Vec3::new(0.5, 0.5, 0.05));
+    let k = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
+    let far = vec![0.0; 640 * 480];
+    let image = DepthImage {
+        depth: &far,
+        width: 640,
+        intrinsics: k,
+        camera: Pose::new(Vec3::new(0.0, 0.0, 0.7), Quat::from_rotation_x(PI)),
+    };
+    let scene: Vec<&Obstacle> = tray.iter().chain([&block, &table]).collect();
+    let depths: Vec<Vec<f32>> = scene.iter().map(|o| shape_depth(&image, o)).collect();
+    let depth: Vec<f32> = (0..far.len())
+        .map(|i| depths.iter().map(|d| d[i]).fold(f32::INFINITY, f32::min))
+        .map(|z| if z.is_finite() { z } else { 0.0 })
+        .collect();
+    let image = DepthImage {
+        depth: &depth,
+        ..image
+    };
+    let (lo, hi) = (Vec3::new(-0.3, -0.3, -0.1), Vec3::new(0.3, 0.3, 0.3));
+    let mut map = OccupancyMap::try_new(lo, hi, 0.01).unwrap();
+    map.integrate(device, &image, None).unwrap();
+    let region = Obstacle::cuboid(Vec3::ZERO, half).placed(pose);
+    let padding = 0.1;
+    let part = map.part(&region, padding).unwrap();
+
+    // Where a voxel reaches into the tray's box the part is the map, and elsewhere nothing.
+    let points = lattice(lo, hi, 0.01);
+    let reach = 0.5 * 3f32.sqrt() * 0.01;
+    let mut inside = 0;
+    for &p in &points {
+        let within = region.distance(p).value <= reach;
+        inside += usize::from(within);
+        let expected = map.occupancy(p).filter(|_| within);
+        assert_eq!(part.occupancy(p), expected, "at {p}");
+    }
+    let counts = part.counts();
+    assert_eq!(counts.occupied + counts.free + counts.unobserved, inside);
+    assert!(
+        counts.occupied > 200 && counts.free > 500 && counts.unobserved > 200,
+        "{counts:?}: walls seen, space seen into, and space hidden"
+    );
+    assert!(matches!(
+        part.clone().integrate(device, &image, None),
+        Err(Error::Input(_))
+    ));
+    // What a caller marks in a part stays in its region: the voxels left out stay out.
+    let everything = Obstacle::cuboid(Vec3::ZERO, Vec3::splat(1.0));
+    let (mut freed, mut cleared) = (part.clone(), part.clone());
+    freed.free(&everything, 0.0).unwrap();
+    cleared.clear(&everything, 0.0).unwrap();
+    assert_eq!(freed.counts().free, inside);
+    assert_eq!(cleared.counts().unobserved, inside);
+    let beside = pose.position + pose.rotation * Vec3::new(half.x + 0.05, 0.0, 0.0);
+    assert_eq!(
+        (freed.occupancy(beside), cleared.occupancy(beside)),
+        (None, None)
+    );
+    // A part of a part is the part of the map in both regions: what the first left out stays
+    // out, also where the second region reaches past the first part's own points.
+    let ball = Obstacle::sphere(pose.position, 0.06);
+    let wider = Obstacle::sphere(pose.position, 0.3);
+    let small = map.part(&ball, 0.0).unwrap();
+    for padding in [0.0, 0.05] {
+        let nested = small.part(&wider, padding).unwrap();
+        assert_eq!(nested.counts(), small.counts(), "padded {padding}");
+    }
+    assert!(small.counts().free > 100 && small.counts().occupied > 100);
+
+    let (whole, grid) = (
+        map.grid(device, Occlusion::Occupied).unwrap(),
+        part.grid(device, Occlusion::Occupied).unwrap(),
+    );
+    let at = |local: Vec3| pose.position + pose.rotation * local;
+    // Over the tray's floor beside the block, seen into: free. In a wall, in the floor and in
+    // the block under its top, where nothing saw past: solid.
+    let seen_into = at(Vec3::new(-0.04, 0.0, 0.0));
+    assert!(grid.distance(seen_into).value > 0.0, "the tray's inside");
+    for hidden in [
+        at(Vec3::new(half.x - wall, 0.0, 0.0)),
+        at(Vec3::new(0.0, 0.0, wall - half.z)),
+        at(Vec3::new(0.03, 0.0, -0.015)),
+    ] {
+        let d = grid.distance(hidden).value;
+        assert!(d <= 0.0, "{}: {d} at {hidden}, hidden", device.name());
+    }
+    // Under the table, beside the tray: solid in the whole map's grid, and not in the part's.
+    let under = Vec3::new(-0.2, 0.2, -0.05);
+    assert!(whole.distance(under).value <= 0.0 && grid.distance(under).value > 0.05);
+    // The grid reaches the padding past the tray's box, to within a voxel.
+    let (corner, bounds) = (
+        half.x.hypot(half.y),
+        (grid.lower_corner(), grid.upper_corner()),
+    );
+    assert!(
+        bounds.0.x < pose.position.x - 0.9 * corner - padding + 0.02,
+        "{bounds:?}"
+    );
+    assert!(
+        bounds.1.x > pose.position.x + 0.9 * corner + padding - 0.02,
+        "{bounds:?}"
+    );
+    assert!(
+        (bounds.0.z - (-padding)).abs() < 0.011 && (bounds.1.z - (0.1 + padding)).abs() < 0.011
+    );
+    // Around the tray, in the grid's box, it never reads farther than the tray's walls are;
+    // past the box, where the tray is the padding away or more, it reads clear by most of that.
+    let mut rng = Rng::new(9);
+    let (mut near, mut past) = (0, 0);
+    for _ in 0..2000 {
+        let p = at(Vec3::new(
+            rng.range(-0.3, 0.3),
+            rng.range(-0.3, 0.3),
+            rng.range(-0.04, 0.2),
+        ));
+        let truly = tray
+            .iter()
+            .map(|o| o.distance(p).value)
+            .fold(f32::INFINITY, f32::min);
+        if region.distance(p).value <= 0.0 {
+            continue;
+        }
+        let d = grid.distance(p).value;
+        if p.cmpge(bounds.0).all() && p.cmple(bounds.1).all() {
+            near += usize::from(truly < 0.05);
+            assert!(
+                d <= truly + 1e-4,
+                "{}: {d} at {p}, {truly} from the tray",
+                device.name()
+            );
+        } else {
+            past += 1;
+            assert!(truly > padding - 0.01 && d > 0.5 * padding, "{d} at {p}");
+        }
+    }
+    assert!(
+        near > 100 && past > 100,
+        "{near} points near the tray, {past} past the grid"
+    );
+
+    // A region half off the map: what the map does not reach was never observed.
+    let edge = Obstacle::cuboid(Vec3::new(0.3, 0.0, 0.1), Vec3::splat(0.05));
+    let off = map.part(&edge, 0.05).unwrap();
+    let counts = off.counts();
+    assert!(
+        counts.unobserved > 300 && counts.free > 300 && counts.occupied == 0,
+        "{counts:?}: the half the map reaches was seen through, the other never observed"
+    );
+    assert_eq!(off.occupancy(Vec3::new(0.33, 0.0, 0.1)), None);
+    let solid = off.grid(device, Occlusion::Occupied).unwrap();
+    assert!(solid.distance(Vec3::new(0.33, 0.0, 0.1)).value <= 0.0);
+}
+
+/// A reading on a region's own face lies in a voxel whose middle may be just outside it: a block
+/// seen from above, its top between two layers of the map's points, and the block itself as the
+/// region. The part holds the top, so its grid has the block whatever never-observed space is.
+#[test]
+fn a_part_keeps_the_readings_on_its_regions_faces() {
+    let top = 0.1054;
+    let block = Obstacle::cuboid(
+        Vec3::new(0.0, 0.0, 0.5 * top),
+        Vec3::new(0.05, 0.05, 0.5 * top),
+    );
+    let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.05), Vec3::new(0.5, 0.5, 0.05));
+    let far = vec![0.0; 640 * 480];
+    let image = DepthImage {
+        depth: &far,
+        width: 640,
+        intrinsics: Intrinsics {
+            fx: 525.0,
+            fy: 525.0,
+            cx: 319.5,
+            cy: 239.5,
+        },
+        camera: Pose::new(Vec3::new(0.0, 0.0, 0.7), Quat::from_rotation_x(PI)),
+    };
+    let (on_block, on_table) = (shape_depth(&image, &block), shape_depth(&image, &table));
+    let depth: Vec<f32> = (on_block.iter().zip(&on_table))
+        .map(|(a, b)| a.min(*b))
+        .collect();
+    let image = DepthImage {
+        depth: &depth,
+        ..image
+    };
+    let above = Vec3::new(0.0, 0.0, top + 0.01);
+    for device in devices() {
+        let mut map =
+            OccupancyMap::try_new(Vec3::new(-0.2, -0.2, -0.05), Vec3::new(0.2, 0.2, 0.3), 0.01)
+                .unwrap();
+        map.integrate(device, &image, None).unwrap();
+        // The top's readings lie in the layer of points over the block: outside it.
+        let layer = Vec3::new(0.0, 0.0, 0.11);
+        assert!(map.occupancy(layer).unwrap() > 0.5 && block.distance(layer).value > 0.0);
+        let part = map.part(&block, 0.05).unwrap();
+        assert!(part.counts().occupied >= 100, "{:?}", part.counts());
+        for unknown in [Occlusion::Free, Occlusion::Band(0.03), Occlusion::Occupied] {
+            let (whole, grid) = (
+                map.grid(device, unknown).unwrap(),
+                part.grid(device, unknown).unwrap(),
+            );
+            let d = grid.distance(above).value;
+            assert!(
+                d <= whole.distance(above).value + 1e-6 && d < 0.01,
+                "{}, {unknown:?}: {d} a centimeter over the block",
+                device.name()
+            );
+        }
+    }
+}
+
 /// A camera at `eye` looking at `target`, in OpenCV axes (x right, y down, z forward).
 fn look_at(eye: Vec3, target: Vec3) -> Pose {
     let forward = (target - eye).normalize();

@@ -10,6 +10,17 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- What a caller knows of a fused map, said in the map's frame with any `Obstacle` as the shape:
+  `map.free(&shape, margin)` marks the voxels within the margin free, as seen through once (where
+  an object stood before the robot carried it away, or a shape the world holds as an obstacle
+  of its own, on a copy of the map), and `map.clear(&shape, margin)` marks them never observed
+  (where something was moved). `map.part(&region, padding)` is the map inside one region, as a
+  map of its own that reaches the padding past the region, every voxel outside left out:
+  `part(&object, padding)?.grid(&device, Occlusion::Occupied)` is one object as the cameras saw
+  into it, solid where a reading landed or nothing saw past, with nothing around it. A part
+  takes no images. `map.counts()` gives the voxels occupied, free and never observed
+  (`MapCounts`), of a part those inside its region.
+
 - Each pixel's reading as a point: `DepthImage::points(robot_mask)`, row by row, `None` where a
   pixel has no reading or reads the robot. Pixel `i` is column `i % width` of row `i / width`, its
   centre at those whole coordinates, as grids, maps and surfaces read it.
