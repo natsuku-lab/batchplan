@@ -2383,3 +2383,199 @@ fn as_many_finger_openings_as_fill_a_stack_at_once_are_picked_by_in_one_call() {
     assert_eq!(last.approach.control_points, alone.approach.control_points);
     assert_eq!(last.held.as_ref().unwrap().locked, fingers(WAYS - 1));
 }
+
+/// A place may say how far its hand opens where it lets go (`Place::open`): between two posts 3 cm
+/// off the box's sides, where the fingers as loaded come down on the posts, a place that names
+/// no opening stops at its release, and one that names some lets go at the first of them clear of
+/// the posts, says which, and backs off with the fingers there. Around a place that names none,
+/// in one call, two that do plan alike. With only the loaded opening to choose from it gets to
+/// where it lets go and stops there, at the posts; one that then finds no transit says nothing
+/// of the openings that stopped; an opening that names an arm's joint is refused by its task and
+/// place in the list.
+#[test]
+fn a_place_lets_go_as_wide_as_it_has_room_to() {
+    let robot = panda();
+    let fingers = |at: f32| -> std::collections::HashMap<String, f32> {
+        [
+            ("panda_finger_joint1".to_string(), at),
+            ("panda_finger_joint2".to_string(), at),
+        ]
+        .into()
+    };
+    let spot = Vec3::new(0.45, -0.2, HALF.z);
+    let post = |side: f32| {
+        Obstacle::cuboid(
+            spot + Vec3::X * side * (HALF.x + 0.03 + 0.005),
+            Vec3::new(0.005, 0.02, HALF.z),
+        )
+    };
+    let before = scene(vec![post(1.0), post(-1.0)]);
+    let mut after = before.clone();
+    let object = after.remove(BOX).unwrap().placed(Pose::IDENTITY);
+    // Without the box, as the places see it: the table, then the posts.
+    let posts = [1, 2];
+    // Something in the hand's way where it lets go: in place of a post, for a move away in a
+    // world of its own, and beside both, for a release that cannot be reached.
+    let block = Obstacle::cuboid(spot + Vec3::Z * 0.16, Vec3::splat(0.03));
+    let mut backing = after.clone();
+    backing.obstacles[posts[1]] = block.clone();
+    let mut taken = after.clone();
+    taken.obstacles.push(block);
+    let the_block = taken.obstacles.len() - 1;
+    let o = TaskOptions::default();
+    let open = vec![fingers(0.04), fingers(0.03), fingers(0.02), fingers(0.01)];
+    for device in devices(&robot) {
+        let scenes = [
+            before.clone(),
+            after.clone(),
+            backing.clone(),
+            taken.clone(),
+        ];
+        let worlds = device.upload(&scenes).unwrap();
+        let held = Pick {
+            locked: vec![fingers(0.01)],
+            ..pick_from(&robot, vec![top()])
+        };
+        let picked = batchplan::pick(&device, &worlds, &[held], &o).unwrap();
+        let picked = &picked.outcomes[0].as_ref().unwrap()[0];
+        let unnamed = Place {
+            support: vec![TABLE],
+            ..Place::new(
+                1,
+                picked.end(),
+                picked.held.clone().unwrap(),
+                vec![Pose::new(spot, Quat::IDENTITY)],
+            )
+        };
+        let named = Place {
+            open: open.clone(),
+            ..unnamed.clone()
+        };
+        let tasks = [named.clone(), unnamed.clone(), named.clone()];
+        let placed = batchplan::place(&device, &worlds, &tasks, &o).unwrap();
+        let of_posts =
+            |c: &Contact| matches!(c, Contact::World { obstacle, .. } if posts.contains(obstacle));
+        let stopped = placed.outcomes[1]
+            .as_ref()
+            .expect_err("the fingers as loaded come down on the posts");
+        assert_eq!(stopped.candidates[0].step, TaskStep::Reach, "{stopped}");
+        assert!(
+            stopped.candidates[0].contacts.iter().any(of_posts),
+            "{stopped}"
+        );
+        assert_eq!(
+            format!("{:?}", placed.outcomes[0]),
+            format!("{:?}", placed.outcomes[2]),
+            "those that name openings alike, around the one that names none"
+        );
+        let plan = &placed.outcomes[0]
+            .as_ref()
+            .unwrap_or_else(|f| panic!("{f}: {:?}", f.candidates[0].contacts))[0];
+        // The first opening clear of the posts where the hand lets go is the plan's, and not
+        // the first named.
+        let n = robot.dof();
+        let release = &plan.depart.control_points[..n];
+        let clear = |open: &std::collections::HashMap<String, f32>| {
+            let relocked = device.with_robot(&robot.relock(open).unwrap()).unwrap();
+            let contacts = relocked.contacts(&worlds, &[1], release, 0.0).unwrap();
+            !contacts[0].iter().any(of_posts)
+        };
+        let first = open.iter().position(clear).expect("an opening is clear");
+        assert!(
+            first > 0 && first + 1 < open.len(),
+            "opening {first} of {open:?}"
+        );
+        assert_eq!(plan.opening, Some(first));
+        for t in plan.motions() {
+            t.check(&robot).unwrap();
+        }
+        assert_eq!(
+            plan.approach.control_points[plan.approach.control_points.len() - n..],
+            *release
+        );
+        let at = robot.ee_pose(release, 0);
+        let backed = robot.ee_pose(plan.end(), 0);
+        let behind = at.position - at.rotation * Vec3::Z * named.retreat;
+        assert!(
+            backed.position.distance(behind) < 2e-3,
+            "{backed:?} from {at:?}"
+        );
+        assert_eq!(
+            plan.placed,
+            Some(object.placed(Pose::new(spot, Quat::IDENTITY)))
+        );
+
+        // Each place backs off in its own world: after one set down in the open, one whose
+        // hand is in a block where it backs off stops there, though the first's world is clear.
+        let aside = Place {
+            poses: vec![Pose::new(spot - Vec3::X * 0.15, Quat::IDENTITY)],
+            ..unnamed.clone()
+        };
+        let blocked = Place {
+            open: vec![open[first].clone()],
+            depart_world: Some(2),
+            ..unnamed.clone()
+        };
+        let placed = batchplan::place(&device, &worlds, &[aside, blocked], &o).unwrap();
+        assert!(placed.outcomes[0].is_ok(), "{:?}", placed.outcomes[0]);
+        let stopped = placed.outcomes[1]
+            .as_ref()
+            .expect_err("the hand backs off into the block");
+        assert!(
+            all_stop(stopped, TaskStep::Depart, Some(posts[1])),
+            "{stopped:?}"
+        );
+
+        // A release the arm cannot reach says what the arm meets, the fingers where they hold
+        // the box: the block, and neither post.
+        let unreached = Place {
+            world: 3,
+            ..named.clone()
+        };
+        let placed = batchplan::place(&device, &worlds, &[unreached], &o).unwrap();
+        let stopped = placed.outcomes[0].as_ref().unwrap_err();
+        assert!(
+            all_stop(stopped, TaskStep::Reach, Some(the_block)),
+            "{stopped:?}"
+        );
+        let contacts = &stopped.candidates[0].contacts;
+        assert!(!contacts.iter().any(of_posts), "{contacts:?}");
+
+        // With the loaded opening alone to choose from, the release is reached, the fingers
+        // where they hold the box, and the hand cannot open there.
+        let loaded = Place {
+            open: vec![Default::default()],
+            ..unnamed.clone()
+        };
+        let placed = batchplan::place(&device, &worlds, &[loaded], &o).unwrap();
+        let stopped = placed.outcomes[0].as_ref().unwrap_err();
+        assert_eq!(stopped.candidates[0].step, TaskStep::Depart, "{stopped}");
+        assert!(
+            stopped.candidates[0].contacts.iter().any(of_posts),
+            "{stopped}"
+        );
+
+        // Kept within 20 cm of where the pick ends, the hand cannot get to the posts: the place
+        // stops at its transit, and says nothing of the openings it could not let go at.
+        let near = HandConstraint {
+            position: Vec3::splat(0.2),
+            ..HandConstraint::new(0, robot.ee_pose(picked.end(), 0))
+        };
+        let confined = Place {
+            constraints: vec![near],
+            ..named.clone()
+        };
+        let placed = batchplan::place(&device, &worlds, &[confined], &o).unwrap();
+        let stopped = placed.outcomes[0].as_ref().unwrap_err();
+        assert!(all_stop(stopped, TaskStep::Transit, None), "{stopped:?}");
+
+        let arm = Place {
+            open: vec![fingers(0.02), [("panda_joint1".to_string(), 0.0)].into()],
+            ..unnamed.clone()
+        };
+        match batchplan::place(&device, &worlds, &[unnamed, arm], &o) {
+            Err(Error::Input(e)) => assert!(e.contains("task 1: opening 1"), "{e}"),
+            other => panic!("an opening that names an arm's joint is refused: {other:?}"),
+        }
+    }
+}
