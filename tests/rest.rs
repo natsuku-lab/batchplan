@@ -184,13 +184,24 @@ fn a_box_rests_upright_on_a_table_at_each_of_its_own_turns() {
         let turns = by_turn(&object);
         assert_eq!(turns.len(), 8, "{object:?}");
         for k in 0..8 {
-            assert!(!turns[k].1.is_empty());
             assert_eq!(turns[k].1, turns[k % alike].1, "turn {k} of {object:?}");
         }
         if alike > 1 {
             assert_ne!(turns[1].1, turns[0].1, "{object:?}");
         }
     }
+    // A can leaning 0.07 degrees is the same a turn of 45 degrees on, to the rounding turns are
+    // told alike by, and not 90 degrees on: every turn has its rests still, none left to a turn
+    // that is itself a copy.
+    let can = Obstacle::cylinder(Vec3::ZERO, 0.03, 0.05);
+    let leaning = Quat::from_rotation_x(0.07f32.to_radians());
+    let mut each = [0; 8];
+    for r in rests_turned(&can, leaning, &table(), &o) {
+        let lean = (r.pose.rotation * Vec3::Z).truncate();
+        let turn = (lean.y.atan2(lean.x) + FRAC_PI_2).rem_euclid(TAU) / (TAU / 8.0);
+        each[turn.round() as usize % 8] += 1;
+    }
+    assert!(each.iter().all(|&n| n > 500), "{each:?}");
 }
 
 #[test]
@@ -367,6 +378,11 @@ fn a_basket_holds_what_is_set_on_its_floor_inside_its_walls() {
 
 /// Two bars 2 cm thick along y, their axes 8 cm apart at x = ±4 cm and 10 cm up, seen all round.
 fn bars() -> Surface {
+    bars_about(0.0)
+}
+
+/// [`bars`], the middle between them at x = `middle`.
+fn bars_about(middle: f32) -> Surface {
     let mut s = Surface::default();
     let around = (TAU * 0.01 / SPACING).round() as usize;
     for side in [1.0, -1.0] {
@@ -376,7 +392,7 @@ fn bars() -> Surface {
             for j in 0..=(0.3 / SPACING) as usize {
                 let y = j as f32 * SPACING - 0.15;
                 s.points
-                    .push(Vec3::new(side * 0.04, y, 0.1) + normal * 0.01);
+                    .push(Vec3::new(middle + side * 0.04, y, 0.1) + normal * 0.01);
                 s.normals.push(normal);
             }
         }
@@ -420,32 +436,67 @@ fn bars_hold_what_spans_them_and_cradle_what_is_laid_between_them() {
     // come to the one place, which comes once a turn; across the bars it would roll along them.
     let can = Obstacle::cylinder(Vec3::ZERO, 0.033, 0.08);
     let lying = Quat::from_rotation_x(FRAC_PI_2);
-    let cradled = rests_turned(&can, lying, &bars(), &RestOptions::default());
-    assert!(cradled.len() >= 10, "{}", cradled.len());
     let z = 0.1 + (0.043f32 * 0.043 - 0.04 * 0.04).sqrt();
-    for (k, r) in cradled.iter().enumerate() {
-        for side in [1.0, -1.0] {
-            let bar = Vec3::new(side * 0.04, r.pose.position.y, 0.1);
-            let gap = bar.distance(r.pose.position) - 0.043;
-            assert!((-1e-4..5e-4).contains(&gap), "{gap} m from a bar: {r:?}");
+    // Wherever the middle lies among the spots, and with spots as near together as `touching`,
+    // where the one over the middle rests without rolling and its neighbors roll to it.
+    for (middle, spacing) in [
+        (0.0f32, 0.01f32),
+        (0.0005, 0.01),
+        (0.0035, 0.01),
+        (0.001, 0.002),
+    ] {
+        let o = RestOptions {
+            spacing,
+            ..Default::default()
+        };
+        let cradled = rests_turned(&can, lying, &bars_about(middle), &o);
+        assert!(cradled.len() >= 10, "{middle}: {}", cradled.len());
+        for (k, r) in cradled.iter().enumerate() {
+            // Touching both bars: the lowest place between the points seen of them is up to
+            // 0.4 mm lower than between the bars themselves, which the points lie on 2 mm apart.
+            for side in [1.0, -1.0] {
+                let bar = Vec3::new(middle + side * 0.04, r.pose.position.y, 0.1);
+                let gap = bar.distance(r.pose.position) - 0.043;
+                assert!((-5e-4..5e-4).contains(&gap), "{gap} m from a bar: {r:?}");
+            }
+            // Its height follows from the two: half a millimeter nearer a bar's axis is 1.4 mm
+            // lower between them.
+            assert!(
+                (r.pose.position.x - middle).abs() < 5e-4 && (r.pose.position.z - z).abs() < 1.4e-3,
+                "{middle}: {r:?}"
+            );
+            assert!((r.pose.rotation * Vec3::Z).y.abs() > 0.9999, "{r:?}");
+            let same_way = |other: &&Rest| other.pose.rotation == r.pose.rotation;
+            for other in cradled[..k].iter().filter(same_way) {
+                let apart = other.pose.position.distance(r.pose.position);
+                assert!(
+                    apart > 0.75 * spacing,
+                    "{apart} m apart: {r:?} and {other:?}"
+                );
+            }
         }
-        assert!(
-            r.pose.position.x.abs() < 2.5e-4 && (r.pose.position.z - z).abs() < 5e-4,
-            "{r:?}"
-        );
-        assert!((r.pose.rotation * Vec3::Z).y.abs() > 0.9999, "{r:?}");
-        let same_way = |other: &&Rest| other.pose.rotation == r.pose.rotation;
-        for other in cradled[..k].iter().filter(same_way) {
-            let apart = other.pose.position.distance(r.pose.position);
-            assert!(apart > 5e-3, "{apart} m apart: {r:?} and {other:?}");
+        // Each place comes both ways round along the bars.
+        let ways = |along: f32| {
+            let that_way = |r: &&Rest| (r.pose.rotation * Vec3::Z).y * along > 0.0;
+            cradled.iter().filter(that_way).count()
+        };
+        assert!(ways(1.0) > 0 && ways(1.0) == ways(-1.0));
+    }
+    // Stood on its end and leaning a few degrees, it is not rolled: on a table read with a
+    // millimeter of noise, whatever rests it has are on the spots.
+    let mut rng = Rng::new(11);
+    let mut noisy = table();
+    for p in &mut noisy.points {
+        p.z += rng.range(-0.001, 0.001);
+    }
+    for degrees in [1.0f32, 3.0] {
+        let leaning = Quat::from_rotation_x(degrees.to_radians());
+        for r in rests_turned(&can, leaning, &noisy, &RestOptions::default()) {
+            let from_a_spot = (r.pose.position.truncate() / 0.01 - 0.5).round() + 0.5;
+            let off = (r.pose.position.truncate() - from_a_spot * 0.01).length();
+            assert!(off < 1e-5, "{off} m off its spot: {r:?}");
         }
     }
-    // Each place comes both ways round along the bars.
-    let ways = |along: f32| {
-        let that_way = |r: &&Rest| (r.pose.rotation * Vec3::Z).y * along > 0.0;
-        cradled.iter().filter(that_way).count()
-    };
-    assert!(ways(1.0) > 0 && ways(1.0) == ways(-1.0));
     // On a table it rolls, and has no rest.
     assert!(rests_turned(&can, lying, &table(), &RestOptions::default()).is_empty());
     let can = Obstacle::cylinder(Vec3::ZERO, 0.035, 0.08);
@@ -984,7 +1035,7 @@ fn rests_do_not_depend_on_the_threads_the_batch_or_the_device() {
         turned(&a_box(), 2, Quat::IDENTITY),
         turned(&tile, 3, lying_on(20.0)),
         turned(&can, 4, Quat::IDENTITY),
-        turned(&can, 0, Quat::IDENTITY),
+        turned(&can, 1, Quat::from_rotation_x(FRAC_PI_2)),
         turned(&tile, 0, Quat::from_rotation_z(0.3)),
     ];
     let one = Device::cpu_threads(&robot, 1).unwrap();

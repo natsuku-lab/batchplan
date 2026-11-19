@@ -65,10 +65,11 @@ impl Shape {
         }
     }
 
-    /// Whether turning it by `turn`, in its own frame, leaves it where it was.
+    /// Whether turning it by `turn`, in its own frame, leaves it where it was, to the rounding
+    /// of a turn put together from others.
     pub(super) fn same_turned(self, turn: Quat) -> bool {
         let axes = Mat3::from_quat(turn);
-        let along = |a: Vec3, b: Vec3| a.dot(b).abs() > 1.0 - 1e-5;
+        let along = |a: Vec3, b: Vec3| a.dot(b).abs() > 1.0 - 1e-6;
         match self {
             Shape::Sphere(_) => true,
             Shape::Cylinder(..) | Shape::Capsule(..) => along(axes.z_axis, Vec3::Z),

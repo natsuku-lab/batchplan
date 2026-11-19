@@ -2,9 +2,10 @@
 //! turn, set down, judged, and put in an order worth trying.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, TAU};
 
-use glam::{Quat, Vec2, Vec3};
+use glam::{IVec3, Quat, Vec2, Vec3};
 use rayon::prelude::*;
 
 use super::contact::Touch;
@@ -134,16 +135,16 @@ const SPREAD: usize = 1024;
 /// by `tipping` any way. It rests as it is set down: it is not tipped or slid to where it would
 /// come to rest, so on a slope it needs the `rotation` that lies flat on it. A can or a capsule
 /// laid on its side is the one thing that moves: where it is not held it rolls, up to half the
-/// spots' spacing, to where it lies lowest, as into the cradle between two bars or down to a
-/// lip, and rests there if that holds it. Only the object's rest is
-/// checked: the hand that sets it down and its way there are [`place`](crate::place)'s to check,
-/// with what the object may touch as its `support`.
+/// spots' spacing and `touching` more, to where it lies lowest, as into the cradle between two
+/// bars or down to a lip, and rests there if that holds it. Only the object's rest is checked:
+/// the hand that sets it down and its way there are [`place`](crate::place)'s to check, with
+/// what the object may touch as its `support`.
 ///
 /// They come at every turn, in an order whose first few are worth trying first: every spot at
-/// the first turn, then every spot at the next, and within a turn, the steadiest first and then each the farthest
-/// from those before it, so the first few spread over the support; past the first 1,024 of a
-/// turn, as their spots come. The problems run in parallel
-/// on the device's threads, each surface read once however many problems name it, and a
+/// the first turn, then every spot at the next, and within a turn, the steadiest first and then
+/// each the farthest from those before it, so the first few spread over the support; past the
+/// first 1,024 of a turn, as their spots come. The problems run in parallel on the device's
+/// threads, each surface read once however many problems name it, and a
 /// problem's rests are the same alone and among others.
 pub fn rests_on(
     device: &Device,
@@ -370,8 +371,12 @@ impl Setting<'_> {
         if !matches!(self.shape, Shape::Cylinder(..) | Shape::Capsule(..)) {
             return None;
         }
-        let axis = object.frame.z_axis.truncate();
-        let across = Vec2::new(-axis.y, axis.x).try_normalize()?;
+        // Lying: its side faces down more than an end does.
+        let (level, upright) = (object.frame.z_axis.truncate(), object.frame.z_axis.z);
+        if level.length() < upright.abs() {
+            return None;
+        }
+        let across = Vec2::new(-level.y, level.x).try_normalize()?;
         let pushed: f32 = contacts.iter().map(|c| c.push.truncate().dot(across)).sum();
         if pushed == 0.0 {
             return None;
@@ -381,12 +386,15 @@ impl Setting<'_> {
         let height = |by: f32| self.field.set_down(object, middle + across * by);
         // The lowest, by golden section, to a sixteenth of `touching`: so near it both sides of
         // a cradle lie within `touching` under it unless they stand steeper than 83 degrees.
+        // Half the spacing on and `touching` more, so that a place midway between two spots is
+        // in reach of both.
         let (far, fine) = (0.5 * o.spacing + o.touching, o.touching / 16.0);
-        let ratio = 0.618_034;
+        let ratio = 0.618_034f32;
+        let rounds = ((far / fine).ln() / -ratio.ln()).ceil().max(0.0) as usize;
         let (mut from, mut to) = (0.0, far);
         let (mut a, mut b) = (to - ratio * (to - from), from + ratio * (to - from));
         let (mut at_a, mut at_b) = (height(a), height(b));
-        while to - from > fine {
+        for _ in 0..rounds {
             if at_a < at_b {
                 (to, b, at_b) = (b, a, at_a);
                 a = to - ratio * (to - from);
@@ -417,11 +425,13 @@ fn on(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Rest> {
     let turns: Vec<Quat> = (0..o.turns)
         .map(|k| Quat::from_rotation_z(TAU * k as f32 / o.turns as f32) * rotation)
         .collect();
-    let alike = |k: usize| {
-        let same = |t: &Quat| shape.same_turned(t.inverse() * turns[k]);
-        turns[..k].iter().position(same).unwrap_or(k)
-    };
-    let first: Vec<usize> = (0..turns.len()).map(alike).collect();
+    let mut first: Vec<usize> = Vec::with_capacity(turns.len());
+    for k in 0..turns.len() {
+        // Of the earlier turns that are the first of their kind: being alike to within a
+        // rounding does not carry from one turn through another to a third.
+        let same = |&j: &usize| first[j] == j && shape.same_turned(turns[j].inverse() * turns[k]);
+        first.push((0..k).find(same).unwrap_or(k));
+    }
     let spots = seen.spots;
     // Each turn's rests in their order, the turns side by side.
     let each = (0..turns.len()).into_par_iter().map(|k| {
@@ -435,15 +445,29 @@ fn on(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Rest> {
                 setting.rest(turned, spots.at(k, o.spacing), scratch)
             })
             .collect();
-        // Spots to either side of a cradle roll to one place, which comes once: the first, of
-        // those within `touching` of each other.
+        let any_rolled = found.iter().flatten().any(|f| f.1);
         let mut kept: Vec<Rest> = Vec::with_capacity(found.len());
+        // Spots to either side of a cradle roll to one place, which comes once: the first, of
+        // two of which either rolled that are within `touching` of each other, or half the
+        // spots' spacing where that is less. Those kept, by the cell that wide they are in, each
+        // with whether it rolled.
+        let one = o.touching.min(0.5 * o.spacing);
+        let mut cells: HashMap<[i32; 3], Vec<(Vec3, bool)>> = HashMap::new();
         for (rest, rolled) in found.into_iter().flatten() {
-            let at = rest.pose.position;
-            let near = |r: &Rest| r.pose.position.distance(at) < o.touching;
-            if !(rolled && kept.iter().any(near)) {
-                kept.push(rest);
+            if any_rolled {
+                let at = rest.pose.position;
+                let cell = (at / one).floor().as_ivec3();
+                let around =
+                    (0..27).map(|n| cell + IVec3::new(n % 3 - 1, n / 3 % 3 - 1, n / 9 - 1));
+                let near =
+                    |&(there, other): &(Vec3, bool)| (rolled || other) && there.distance(at) < one;
+                let mut beside = around.filter_map(|c| cells.get(&c.to_array()));
+                if beside.any(|there| there.iter().any(near)) {
+                    continue;
+                }
+                cells.entry(cell.to_array()).or_default().push((at, rolled));
             }
+            kept.push(rest);
         }
         spread_out(kept)
     });
