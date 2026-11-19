@@ -85,7 +85,7 @@ pub use live::{
     servo,
 };
 pub use meshes::{Clearance, MeshModel};
-pub use rest::{Rest, RestOptions, RestProblem, rests_on};
+pub use rest::{Fall, Rest, RestOptions, RestProblem, falls_into, rests_on};
 pub use robot::{AttachedObject, CollisionModel, JointLimits, Part, Robot, RobotOptions};
 pub use rrt::{RrtOptions, RrtProblem, RrtResult};
 pub use sdf::{DepthImage, Intrinsics, Occlusion, OccupancyMap, RobotMask, SdfGrid, SdfOptions};

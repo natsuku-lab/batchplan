@@ -1,8 +1,8 @@
 //! Where a held object rests on what cameras see, and what finding it costs. A box on a table
-//! among other things, seen in two 640x480 depth images; a can in a basket seen from above; a
-//! tray laid across two bars, and a can laid along them, which rolls in between; a bottle laid
-//! flat on a sloping rack against the lip at its foot; then 64 boxes of as many heights on the
-//! one table in one call, which reads the table once.
+//! among other things, seen in two 640x480 depth images; a can in a basket seen from above, and
+//! where to let it go to fall in; a tray laid across two bars, and a can laid along them, which
+//! rolls in between; a bottle laid flat on a sloping rack against the lip at its foot; then 64
+//! boxes of as many heights on the one table in one call, which reads the table once.
 //!
 //! cargo run --release --example surface_rests [-- threads] [--dump dir]
 //!
@@ -19,7 +19,7 @@ use std::time::Instant;
 use anyhow::Result;
 use batchplan::{
     DepthImage, Device, Intrinsics, Obstacle, Pose, Rest, RestOptions, RestProblem, Surface,
-    rests_on,
+    falls_into, rests_on,
 };
 use glam::{Mat3, Quat, Vec3};
 use rayon::prelude::*;
@@ -277,6 +277,16 @@ fn main() -> Result<()> {
         Quat::IDENTITY,
         &o,
     )?;
+    // Where to let that can go over the basket for it to fall in and stay.
+    let into = [RestProblem::new(can.clone(), 0)];
+    let basket_seen = std::slice::from_ref(&inside);
+    let (ms, falls) = quickest(5, || falls_into(&device, &into, basket_seen, &o));
+    let falls = falls?.remove(0);
+    let first = falls.first().map(|f| f.pose.position);
+    println!(
+        "the can let go over that basket to fall in: {} places in {ms:.1} ms, the first at {first:?}",
+        falls.len()
+    );
 
     // A tray 12 by 6 cm laid across two bars 2 cm thick, 8 cm apart.
     let mut bars = Surface::default();

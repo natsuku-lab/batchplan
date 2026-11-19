@@ -227,12 +227,13 @@ Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from
 
 ## Rests on a surface
 
-`examples/surface_rests.rs` finds where a held object rests on what cameras see (`rests_on`) with the default options (spots 1 cm apart, 8 turns, cells 2 mm wide) on the M4 Pro's 14 threads, the quickest of five calls (of three for the 64 boxes), and of several runs on a machine building beside them; on one thread, one run:
+`examples/surface_rests.rs` finds where a held object rests on what cameras see (`rests_on`), and where to let it go to fall into a basket (`falls_into`), with the default options (spots 1 cm apart, 8 turns, cells 2 mm wide) on the M4 Pro's 14 threads, the quickest of five calls (of three for the 64 boxes), and of several runs on a machine building beside them; on one thread, one run:
 
 | | Points | Rests | Time | On one thread |
 |---|---|---|---|---|
 | A box 4 by 6 by 5 cm on a table 60 cm square among three blocks, in two 640×480 depth images | 392,708, 359,217 of them the table's | 23,616 | 62 ms | 532 ms |
 | A can in a basket 20 cm square, seen from above | 99,225 | 1,952, on its floor | 2.6 ms | 12 ms |
+| That can let go over that basket to fall in (`falls_into`) | 99,225 | 800 places to let go at | 1.0 ms | 1.5 ms |
 | A tray 12 by 6 cm across two bars 2 cm thick, 8 cm apart | 9,362 | 822 | 18 ms | 166 ms |
 | A can 6.6 cm across laid along those bars, rolling in between them | 9,362 | 60, both ways round for each centimeter along them | 6.2 ms | 54 ms |
 | A bottle 16 cm long laid flat on a rack sloping 30° against the lip at its foot, spots 2 mm apart at the one turn that lies flat | 10,117 | 150, all against the lip | 50 ms | 456 ms |

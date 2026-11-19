@@ -55,6 +55,23 @@ impl Shape {
         }
     }
 
+    /// The shape shrunk by `by` all round, or by half its least size where that is less, so
+    /// that it stays a solid: a box and a cylinder to the box and the cylinder that it holds.
+    pub(super) fn shrunk(self, by: f32) -> Self {
+        let least = match self {
+            Shape::Cuboid(half) => half.min_element(),
+            Shape::Sphere(r) | Shape::Capsule(r, _) => r,
+            Shape::Cylinder(r, h) => r.min(h),
+        };
+        let by = by.min(0.5 * least);
+        match self {
+            Shape::Cuboid(half) => Shape::Cuboid(half - by),
+            Shape::Sphere(r) => Shape::Sphere(r - by),
+            Shape::Cylinder(r, h) => Shape::Cylinder(r - by, h - by),
+            Shape::Capsule(r, h) => Shape::Capsule(r - by, h),
+        }
+    }
+
     /// How far from its middle any of it lies.
     pub(super) fn radius(self) -> f32 {
         match self {

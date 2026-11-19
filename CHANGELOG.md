@@ -27,6 +27,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   that lists every field needs the new one (`max_overhang: None`); in Python,
   `SphereOptions(max_overhang=0.002)`.
 
+- Where to let a held object go for it to fall into a container and stay:
+  `falls_into(&device, &[RestProblem], &[Surface], &RestOptions)`, with the same problems,
+  surfaces and options as `rests_on`. Each `Fall` gives a `pose` to let go at, for
+  `Place::poses`, its bottom `clearance` over the rim of a hollow of the support that the object
+  could not leave without being lifted by more than its middle is over its bottom, and how far
+  it would have to be (`sunk`). A basket, a bin or an open drawer has falls; a tray, a plate or a
+  table, and a container whose floor and walls were not seen that far down, has none.
+
 - Where a held object rests on what cameras see: `rests_on(&device, &[RestProblem], &[Surface],
   &RestOptions)`. A problem names the object, how it is turned as it is set down (`rotation`:
   upright, on its side, flat on a slope) and a surface whose `object` points are the support. The
