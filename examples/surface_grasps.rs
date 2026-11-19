@@ -1,7 +1,8 @@
 //! Grasps of what cameras see, and what finding them costs. A bowl too wide to span, as points on
 //! its surfaces, is grasped across its wall; a box on a table, as two 640x480 depth images, is
 //! grasped across the sides the two cameras see between them; a flared bowl seen from above alone
-//! across its rim, where the camera saw past it (`GraspOptions::shell`); then 64 bowls in one call.
+//! across its rim, where the camera saw past it (`GraspOptions::shell`), and beside a wall the
+//! open fingers would be in (`GraspOptions::narrow`); then 64 bowls in one call.
 //!
 //! cargo run --release --example surface_grasps
 
@@ -199,32 +200,32 @@ fn main() -> Result<()> {
         ..k
     };
     let camera = look_at(Vec3::new(0.02, 0.0, 0.42), Vec3::new(0.0, 0.0, 0.025));
-    let depth = render(
-        |p| flared_bowl(p).min(table.distance(p).value),
-        camera,
-        wrist,
-    );
-    let image = DepthImage {
-        depth: &depth,
-        width: WIDTH,
-        intrinsics: wrist,
-        camera,
+    // The bowl among what else `around` holds, as the camera sees them.
+    let from_above = |around: &(dyn Fn(Vec3) -> f32 + Sync)| {
+        let depth = render(|p| flared_bowl(p).min(around(p)), camera, wrist);
+        let image = DepthImage {
+            depth: &depth,
+            width: WIDTH,
+            intrinsics: wrist,
+            camera,
+        };
+        let object: Vec<bool> = (0..depth.len())
+            .map(|i| {
+                let (u, v) = ((i % WIDTH) as f32, (i / WIDTH) as f32);
+                let z = depth[i];
+                let p = camera.rotation
+                    * Vec3::new(
+                        (u - wrist.cx) / wrist.fx * z,
+                        (v - wrist.cy) / wrist.fy * z,
+                        z,
+                    )
+                    + camera.position;
+                z > 0.0 && flared_bowl(p) < 5e-4 && p.z > 1e-3
+            })
+            .collect();
+        Surface::from_depth(&image, &object, None, 0.005)
     };
-    let object: Vec<bool> = (0..depth.len())
-        .map(|i| {
-            let (u, v) = ((i % WIDTH) as f32, (i / WIDTH) as f32);
-            let z = depth[i];
-            let p = camera.rotation
-                * Vec3::new(
-                    (u - wrist.cx) / wrist.fx * z,
-                    (v - wrist.cy) / wrist.fy * z,
-                    z,
-                )
-                + camera.position;
-            z > 0.0 && flared_bowl(p) < 5e-4 && p.z > 1e-3
-        })
-        .collect();
-    let seen = Surface::from_depth(&image, &object, None, 0.005)?;
+    let seen = from_above(&|p| table.distance(p).value)?;
     let without = grasps_on(&device, 0, std::slice::from_ref(&seen), &o)?.remove(0);
     let shell = GraspOptions {
         shell: Some(0.015),
@@ -250,6 +251,35 @@ fn main() -> Result<()> {
         without.len(),
         found.len(),
         sum(&found)
+    );
+
+    // The bowl beside a cabinet: a wall twice as tall, 4 cm from its rim, which the open fingers
+    // of a grasp on that side would be in. Fingers that may come in narrower pass between them.
+    let cabinet = Obstacle::cuboid(Vec3::new(0.105, 0.0, 0.05), Vec3::new(0.01, 0.15, 0.05));
+    let seen = from_above(&|p| table.distance(p).value.min(cabinet.distance(p).value))?;
+    let (open_ms, open) = quickest(5, || {
+        grasps_on(&device, 0, std::slice::from_ref(&seen), &shell)
+    });
+    let open = open?.remove(0);
+    let narrow = GraspOptions {
+        narrow: true,
+        ..shell
+    };
+    let (ms, found) = quickest(5, || {
+        grasps_on(&device, 0, std::slice::from_ref(&seen), &narrow)
+    });
+    let found = found?.remove(0);
+    let narrower = found.iter().filter(|g| g.opening < o.opening).count();
+    let least = found
+        .iter()
+        .map(|g| g.opening)
+        .fold(f32::INFINITY, f32::min);
+    println!(
+        "the bowl 4 cm from a wall: {} grasps with the fingers open in {open_ms:.1} ms, {} where they may come in narrower in {ms:.1} ms, {narrower} of them narrower, down to {:.1} cm (sum {:.6})",
+        open.len(),
+        found.len(),
+        least * 100.0,
+        sum(&found) + found.iter().map(|g| f64::from(g.opening)).sum::<f64>()
     );
 
     let bowls = vec![bowl; 64];

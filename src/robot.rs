@@ -442,6 +442,10 @@ pub struct AttachedObject {
     pub spheres: SphereOptions,
 }
 
+/// How far to one side of the hand's IK frame the middle of a finger's spheres lies, at least,
+/// for the finger to stand on that side (meters).
+const SIDED: f32 = 1e-3;
+
 /// One of a hand's collision spheres, in the hand's IK frame ([`Robot::hand_spheres`]).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct HandSphere {
@@ -449,6 +453,10 @@ pub(crate) struct HandSphere {
     pub(crate) radius: f32,
     /// Whether it is a finger's, not the palm's.
     pub(crate) finger: bool,
+    /// Which way along the frame's y axis its finger stands from the frame, 1 or -1: the way it
+    /// moves as the fingers open. 0 for the palm's, and for a finger's that stands to neither
+    /// side.
+    pub(crate) side: f32,
 }
 
 /// World-frame kinematic state for one configuration, per link. Hot loops reuse one per thread
@@ -1310,10 +1318,10 @@ impl Robot {
         let fingers = self.finger_links(hand);
         let of = |link: usize| self.links[link].name.as_str();
         let hand_spheres = self.spheres.iter().filter(|s| links.contains(&of(s.link)));
-        hand_spheres
+        let mut spheres: Vec<(usize, HandSphere)> = hand_spheres
             .map(|s| {
                 let center = fk.rot[s.link] * s.center + fk.pos[s.link] - pos;
-                HandSphere {
+                let sphere = HandSphere {
                     center: Vec3::new(
                         rot.x_axis.dot(center),
                         rot.y_axis.dot(center),
@@ -1321,9 +1329,28 @@ impl Robot {
                     ),
                     radius: s.radius,
                     finger: fingers.contains(&of(s.link)),
-                }
+                    side: 0.0,
+                };
+                (s.link, sphere)
             })
-            .collect()
+            .collect();
+        // A finger stands to the side its spheres' middle does.
+        let middles: Vec<f32> = spheres
+            .iter()
+            .map(|&(link, _)| {
+                let its = spheres.iter().filter(|(other, _)| *other == link);
+                let (sum, count) = its.fold((0.0, 0), |(sum, count), (_, sphere)| {
+                    (sum + sphere.center.y, count + 1)
+                });
+                sum / count as f32
+            })
+            .collect();
+        for ((_, sphere), middle) in spheres.iter_mut().zip(middles) {
+            if sphere.finger && middle.abs() > SIDED {
+                sphere.side = middle.signum();
+            }
+        }
+        spheres.into_iter().map(|(_, sphere)| sphere).collect()
     }
 
     /// Every collision sphere at configuration `q`, in the robot's frame, as `[x, y, z, radius]`,

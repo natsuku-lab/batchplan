@@ -527,6 +527,243 @@ fn fingers_may_be_in_what_they_close_on_and_nothing_else_of_the_object() {
     assert!(grasps(&ledged, &o).is_empty());
 }
 
+/// The Panda's spheres in its IK frame with its fingers `opening` apart, as the robot relocked
+/// there has them: those within 12 cm of the frame.
+fn hand_open(opening: f32) -> Vec<(Vec3, f32)> {
+    let fingers = ["panda_finger_joint1", "panda_finger_joint2"];
+    let locked: HashMap<String, f32> = fingers
+        .iter()
+        .map(|joint| (joint.to_string(), opening / 2.0))
+        .collect();
+    let robot = common::panda().unwrap().relock(&locked).unwrap();
+    let q = robot.default_q().to_vec();
+    let frame = robot.ee_pose(&q, 0).inverse();
+    let near = robot.spheres(&q).into_iter().filter_map(|s| {
+        let at = frame.rotation * Vec3::new(s[0], s[1], s[2]) + frame.position;
+        (at.length() < 0.12).then_some((at, s[3]))
+    });
+    near.collect()
+}
+
+/// Whether `hand` at `g`, and its way in, lie clear of every point of `s` but the object's
+/// between the two contacts; with `others`, of every point that is not the object's.
+fn clear_at(hand: &[(Vec3, f32)], g: &Grasp, s: &Surface, approach: f32, others: bool) -> bool {
+    let (closing, toward) = (g.pose.rotation * Vec3::Y, g.pose.rotation * Vec3::Z);
+    hand_at(hand, g).all(|(center, radius)| {
+        s.points.iter().enumerate().all(|(i, &point)| {
+            let object = s.object.is_empty() || s.object[i];
+            let across = (point - g.pose.position).dot(closing).abs();
+            if object && (others || across <= g.width() / 2.0 + 0.0025) {
+                return true;
+            }
+            let back = (center - point).dot(toward).clamp(0.0, approach);
+            (point - (center - toward * back)).length() > radius
+        })
+    })
+}
+
+/// Fingers that may come in narrower (`GraspOptions::narrow`) take, of sixteenths of the opening
+/// the Panda relocked there is clear at, way in included, the one farthest from any at which it
+/// would be in what is not the object's, as far past open as the fingers close; of those as far,
+/// the one with the most room, as many steps from the first it would be in anything at farther
+/// apart as from the first nearer, the patches at the last; and of those the widest. So between
+/// walls in the open fingers' way, or just past them, the fingers come in on the plates; beside
+/// a ledge of the object itself they stand midway between it and the plate; what is not the
+/// object's past one open finger is found though the object's own walls fill every opening past
+/// the other; and with nothing within their travel they come in open, every grasp as without
+/// the option.
+#[test]
+fn fingers_that_may_come_in_narrower_keep_farthest_from_what_stands_around() {
+    let o = GraspOptions::default();
+    let narrow = GraspOptions { narrow: true, ..o };
+    let alone = plates_of(0.02, 0.005);
+    let open = grasps(&alone, &o);
+    assert!(!open.is_empty() && open.iter().all(|g| g.opening == o.opening));
+    assert_eq!(grasps(&alone, &narrow), open);
+    // Walls facing the plates, low enough that a hand from above has only its fingertips
+    // between them: something else's, or the object's own.
+    let between = |walls: &[f32], own: &[f32]| {
+        let mut s = alone.clone();
+        the_object(&mut s);
+        for (walls, theirs) in [(own, true), (walls, false)] {
+            for &at in walls {
+                face(
+                    Vec3::X * at,
+                    Vec3::X * -at.signum(),
+                    [Vec3::Y, Vec3::Z],
+                    [0.05, 0.01],
+                    &mut s,
+                );
+            }
+            s.object.resize(s.points.len(), theirs);
+        }
+        s
+    };
+    let step = o.opening / 16.0;
+    let most = ((o.opening - 0.02) / step).round() as i32;
+    let hands: Vec<Vec<(Vec3, f32)>> = (-most..=most)
+        .map(|k| hand_open(o.opening - k as f32 * step))
+        .collect();
+    // The grasps of the plates among `walls`, each at the opening the rule gives the Panda, and
+    // the opening of one from above.
+    let from_above = |walls: &[f32], own: &[f32]| {
+        let s = between(walls, own);
+        let found = grasps(&s, &narrow);
+        assert!(found.len() >= grasps(&s, &o).len() && !found.is_empty());
+        for g in &found {
+            let clear = |others: bool| -> Vec<bool> {
+                let at = |hand: &Vec<_>| clear_at(hand, g, &s, o.approach, others);
+                hands.iter().map(at).collect()
+            };
+            let (free, apart) = (clear(false), clear(true));
+            let free = |k: i32| free[(k + most) as usize];
+            let from_others = |k: i32| {
+                let theirs = (-most..=most).filter(|&j| !apart[(j + most) as usize]);
+                theirs.map(|j| (j - k).abs()).min().unwrap_or(i32::MAX)
+            };
+            let room = |k: i32| {
+                let wider = (-most..k).rev().find(|&j| !free(j));
+                let nearer = (k + 1..=most).find(|&j| !free(j)).unwrap_or(most + 1);
+                wider.map_or(i32::MAX, |j| k - j).min(nearer - k)
+            };
+            let best = (0..=most)
+                .filter(|&k| free(k))
+                .max_by_key(|&k| (from_others(k), room(k), -k))
+                .unwrap_or_else(|| panic!("the Panda is clear at no opening for {g:?}"));
+            let expected = o.opening - best as f32 * step;
+            assert!(
+                (g.opening - expected).abs() < 1e-6,
+                "{g:?} for {expected}, clear at {:?}",
+                (0..=most).filter(|&k| free(k)).collect::<Vec<_>>()
+            );
+        }
+        let down = found.iter().find(|g| (g.pose.rotation * Vec3::Z).z < -0.99);
+        let opening = down.expect("a grasp from above").opening;
+        (found, opening)
+    };
+    // In the open fingers' way, and 4 mm past them: on the plates, 2 cm apart.
+    for walls in [[0.045, -0.045], [0.04, -0.06], [0.065, -0.065]] {
+        let in_the_way = grasps(&between(&walls, &[]), &o).is_empty();
+        assert_eq!(in_the_way, walls[0] < 0.06);
+        let (_, opening) = from_above(&walls, &[]);
+        assert!((opening - 0.02).abs() < 1e-6, "{walls:?}: {opening}");
+    }
+    // Farther than the fingers could reach: as without the option.
+    let far = [0.11, -0.11];
+    let (found, opening) = from_above(&far, &[]);
+    assert_eq!(found, grasps(&between(&far, &[]), &o));
+    assert_eq!(opening, o.opening);
+    // The object's own ledge where one open finger stands: midway between it and the plate.
+    let (_, opening) = from_above(&[], &[0.045]);
+    assert!((opening - 0.035).abs() < 1e-6, "{opening}");
+    // The object's own walls all the way past one open finger, and a wall of something else
+    // 4 mm past the other: what is not the object's is found though the object's fill every
+    // opening past open, and the fingers come in on the plates, whichever finger is on which
+    // side.
+    let (found, _) = from_above(&[-0.065], &[0.062, 0.075, 0.088]);
+    let down = found
+        .iter()
+        .filter(|g| (g.pose.rotation * Vec3::Z).z < -0.99);
+    let openings: Vec<f32> = down.map(|g| g.opening).collect();
+    assert!(openings.len() >= 2 && openings.iter().all(|w| (w - 0.02).abs() < 1e-6));
+}
+
+/// A grasp the open hand has stays where it is with fingers that may come in narrower: a stud
+/// under one open fingertip draws the open hand back from the plates, and narrower fingers,
+/// which clear it at full depth, come in to that grasp where the open hand does. Where the open
+/// hand is clear at no depth, with the stud too tall to draw back from, the hand comes in
+/// narrower at full depth.
+#[test]
+fn fingers_that_may_come_in_narrower_leave_the_open_hands_grasps_where_they_are() {
+    // A hand may be drawn back until 4 mm of its fingers are left on the plates.
+    let o = GraspOptions {
+        overlap: 0.004,
+        ..Default::default()
+    };
+    let narrow = GraspOptions { narrow: true, ..o };
+    // A stud where the +x open fingertip of a hand from above comes down, its top `under` the
+    // plates' middle.
+    let with_stud = |under: f32| {
+        let mut s = plates_of(0.02, 0.005);
+        the_object(&mut s);
+        face(
+            Vec3::new(0.05, 0.0, -under),
+            Vec3::Z,
+            [Vec3::X, Vec3::Y],
+            [0.01, 0.01],
+            &mut s,
+        );
+        s.object.resize(s.points.len(), false);
+        s
+    };
+    let from_above = |g: &&Grasp| (g.pose.rotation * Vec3::Z).z < -0.99;
+    let back = |g: &Grasp| {
+        let middle = (g.contacts[0] + g.contacts[1]) / 2.0;
+        (middle - g.pose.position).length()
+    };
+    let low = with_stud(0.008);
+    let open = grasps(&low, &o);
+    let drawn_back = open.iter().filter(from_above).filter(|g| back(g) > 1e-3);
+    assert!(drawn_back.count() > 0, "the stud draws the open hand back");
+    let found = grasps(&low, &narrow);
+    for g in &open {
+        assert!(
+            found.iter().any(|n| n.pose == g.pose),
+            "the open hand's grasp stays where it is: {g:?}"
+        );
+    }
+    // Too tall to draw back from: the open hand has no grasp from above, and narrower fingers
+    // come in at full depth.
+    let tall = with_stud(-0.004);
+    assert_eq!(grasps(&tall, &o).iter().filter(from_above).count(), 0);
+    let found = grasps(&tall, &narrow);
+    let deep = found.iter().filter(from_above).filter(|g| back(g) < 1e-6);
+    assert!(deep.clone().count() > 0);
+    assert!(deep.into_iter().all(|g| g.opening < o.opening - 0.02));
+}
+
+/// Narrower fingers stand higher where the hand closes upright: over a floor the open fingers
+/// would be under, a grasp comes in with its fingers as far over it as they can be, on the plates.
+#[test]
+fn fingers_that_come_in_narrower_stay_over_the_floor() {
+    let tip = common::panda().unwrap().tip(0);
+    let mut upright = Surface::default();
+    for side in [1.0, -1.0] {
+        face(
+            Vec3::Z * side * 0.02,
+            Vec3::Z * side,
+            [Vec3::X, Vec3::Y],
+            [0.005, 0.005],
+            &mut upright,
+        );
+    }
+    let over = GraspOptions {
+        floor: Some(-0.03),
+        ..Default::default()
+    };
+    assert!(grasps(&upright, &over).is_empty());
+    let narrow = GraspOptions {
+        narrow: true,
+        ..over
+    };
+    let found = grasps(&upright, &narrow);
+    assert!(!found.is_empty());
+    for g in &found {
+        let (closing, toward) = (g.pose.rotation * Vec3::Y, g.pose.rotation * Vec3::Z);
+        let tips = (g.pose.position + toward * tip).z - closing.z.abs() * g.opening / 2.0;
+        assert!(tips >= -0.03 - 1e-6, "{g:?}");
+        assert!((g.opening - 0.04).abs() < 1e-6, "{g:?}");
+    }
+    // A floor only fingers no wider than the plates clear leaves those grasps, and one under
+    // the plates none.
+    let just = |floor: f32| GraspOptions {
+        floor: Some(floor),
+        ..narrow
+    };
+    assert_eq!(grasps(&upright, &just(-0.021)).len(), found.len());
+    assert!(grasps(&upright, &just(-0.019)).is_empty());
+}
+
 #[test]
 fn the_hand_stays_over_the_floor() {
     let robot = common::panda().unwrap();
@@ -995,6 +1232,65 @@ fn a_rim_seen_from_above_is_grasped_across_its_wall_with_a_shell() {
     assert!(found.iter().filter(down).count() > 16, "many from above");
 }
 
+/// A wall seen from one side that leans is closed on level too, where that is inside its
+/// friction cone: the flared bowl's inner wall leans 27 degrees, so fingers that hold with a
+/// friction of 2 close level across its rim all around, the hand coming straight down, each
+/// grasp from the inner wall seen to a point outside the wall at its height, the open hand out
+/// of the bowl; these follow none of the grasps along the wall's normal out of place, and
+/// fingers with a friction of 0.3, whose cone the level line is outside, get none.
+#[test]
+fn a_leaning_wall_seen_from_one_side_is_closed_on_level_within_its_friction_cone() {
+    let seen = bowl_seen(THIN, &[ABOVE]);
+    let with_friction = |friction: f32| GraspOptions {
+        friction,
+        ..with_shell(0.015)
+    };
+    let level = |g: &&Grasp| (g.pose.rotation * Vec3::Y).z.abs() < 1e-4;
+    let found = grasps(&seen, &with_friction(2.0));
+    let hand = hand();
+    let mut sectors = [false; 8];
+    let mut from_above = 0;
+    for g in found.iter().filter(level) {
+        assert!(g.one_sided, "{g:?}");
+        let (_, [first, second]) = closes_on(g);
+        let side = [first, second].map(|p| outside_the_wall(p, THIN));
+        let (seen_end, beyond) = if side[0] < side[1] {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        // From the inner wall seen, level and out through the wall, to where the camera saw
+        // past it.
+        assert!(bowl_distance(seen_end, THIN).abs() < 1.5e-3, "{g:?}");
+        assert!(outside_the_wall(beyond, THIN) > 0.0, "{g:?}");
+        assert!(bowl_distance(beyond, THIN) > 0.0, "{g:?}");
+        assert!((seen_end.z - beyond.z).abs() < 1e-4, "{g:?}");
+        let radial = seen_end.with_z(0.0).normalize();
+        assert!((beyond - seen_end).normalize().dot(radial) > 0.99, "{g:?}");
+        for (center, radius) in hand_at(&hand, g) {
+            assert!(bowl_distance(center, THIN) > radius - 1e-3, "{g:?}");
+        }
+        if (g.pose.rotation * Vec3::Z).z < -0.9999 {
+            from_above += 1;
+            let angle = seen_end.y.atan2(seen_end.x).rem_euclid(TAU);
+            sectors[(angle / TAU * 8.0) as usize % 8] = true;
+        }
+    }
+    assert!(
+        from_above > 16 && sectors.iter().all(|&s| s),
+        "{from_above} straight down, around the rim: {sectors:?}"
+    );
+    // Along the wall's normal no hand comes straight down: it leans as the wall does.
+    let leaning = found.iter().filter(|g| !level(g));
+    let steepest = leaning
+        .map(|g| (g.pose.rotation * Vec3::Z).z)
+        .fold(0.0, f32::min);
+    assert!(steepest > -0.95, "{steepest}");
+    // The grasps along the normal are those found without the level ones, in their order.
+    let slippery = grasps(&seen, &with_friction(0.3));
+    assert!(!slippery.is_empty() && !slippery.iter().any(|g| level(&g)));
+}
+
 #[test]
 fn nothing_is_assumed_behind_a_solid_or_a_wall_thicker_than_the_shell() {
     // A box seen from above alone: no ray goes into it, and none past its sides within the
@@ -1425,6 +1721,21 @@ fn grasps_do_not_depend_on_the_threads_the_batch_or_the_device() {
         })
         .collect();
     assert!(alone[0].len() > 100 && alone[2].len() > 100);
+    for device in &devices {
+        let together = grasps_on(device, 0, &surfaces, &o).unwrap();
+        assert_eq!(together, alone, "{}", device.name());
+    }
+    // And fingers that come in narrower, as some of these do.
+    let o = GraspOptions { narrow: true, ..o };
+    let alone: Vec<Vec<Grasp>> = surfaces
+        .iter()
+        .map(|s| {
+            grasps_on(&devices[0], 0, std::slice::from_ref(s), &o)
+                .unwrap()
+                .remove(0)
+        })
+        .collect();
+    assert!(alone.iter().flatten().any(|g| g.opening < o.opening));
     for device in &devices {
         let together = grasps_on(device, 0, &surfaces, &o).unwrap();
         assert_eq!(together, alone, "{}", device.name());
