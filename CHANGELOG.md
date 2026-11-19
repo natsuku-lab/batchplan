@@ -18,12 +18,28 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   farthest of it lies, which is how deep an obstacle reaches into the link unseen. The geometry
   must be closed: a link whose mesh has open edges, or faces given both ways, is refused with
   their count, and one too thin for a center inside it under a limit of zero by name. Round
-  shapes are measured as the fit sees them, on their meshes of 24 sides. A collision model given with the options
-  is held to the limit too, a sphere past it refused by link and index with how far it reaches.
-  Held objects take their own (`AttachedObject::spheres`, `Held::spheres`): a box, capsule, disc
-  or rod is covered whole where the budget has a cover within the limit, and fitted and held to
-  it where not. `None`, the default, fits as before. A `SphereOptions` literal that lists every
-  field needs the new one (`max_overhang: None`); in Python, `SphereOptions(max_overhang=0.002)`.
+  shapes are measured as the fit sees them, on their meshes of 24 sides. A collision model given
+  with the options is held to the limit too, a sphere past it refused by link and index with how
+  far it reaches. Held objects take their own (`AttachedObject::spheres`, `Held::spheres`): a
+  box, capsule, disc or rod is covered whole where the budget has a cover within the limit, and
+  fitted and held to it where not. `None`, the default, fits as before. A `SphereOptions` literal
+  that lists every field needs the new one (`max_overhang: None`); in Python,
+  `SphereOptions(max_overhang=0.002)`.
+
+- Where a held object rests on what cameras see:
+  `rests_on(&device, &[RestProblem], &[Surface], &RestOptions)`. A problem names the object, how
+  it is turned as it is set down (`rotation`: upright, on its side, flat on a slope) and a
+  surface whose `object` points are the support. The object comes straight down over spots
+  `spacing` (1 cm) apart at `turns` (8) turns about the vertical, and a `Rest` comes back where
+  what it then touches holds it, with `friction` (0.5) at the contacts and its weight tipped
+  `tipping` (5°) any way, clear of every other point by `clearance` (1 cm): the object's `pose`,
+  for `Place::poses`, the `support` it touches and how far it can be `tipping`, at each of the
+  turns, so a box comes at its half turn and a bottle laid down comes end for end too. It rests as it
+  is set down, not tipped or slid into place: a slope needs the rotation that lies flat on it.
+  A can or a capsule laid on its side rolls, within half the spacing and `touching`, into the cradle between
+  two bars or a rack's groove or down to a lip, and has no rest on a flat support. Many
+  problems run in one call, each surface read once. `examples/surface_rests.rs` times it, and `scripts/validate_rests.py` lets go of
+  each rest in MuJoCo.
 
 - What a configuration touches while it holds an object:
   `device.contacts_holding(&worlds, &item_world, &q, within, &holding)`, with a `Held` or `None`

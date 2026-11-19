@@ -142,7 +142,8 @@ pub struct Place {
     /// What the hand holds, and how: a pick's [`TaskPlan::held`].
     pub held: Held,
     /// Poses of the object's frame to set it down at; any one will do. [`place_poses`] gives an
-    /// object's symmetric turns at one spot.
+    /// object's symmetric turns at one spot, and [`rests_on`](crate::rests_on) the poses it
+    /// rests at on a support cameras see.
     pub poses: Vec<Pose>,
     /// How the hand moves in to where it lets go, in the world's frame (meters).
     pub lower: Vec3,
