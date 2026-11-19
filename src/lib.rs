@@ -70,6 +70,7 @@ pub mod types;
 mod urdf;
 #[cfg(feature = "usd")]
 mod usd;
+mod winding;
 pub mod world;
 
 pub use constraint::HandConstraint;

@@ -23,6 +23,7 @@ src/
 │   worlds
 ├── world.rs         # obstacles, allowed contacts, scenes
 ├── sdf.rs           # distance grids from meshes, points and depth images; occupancy maps
+├── winding.rs       # which points of a grid a closed mesh winds around: the inside of a mesh grid
 │
 │   running a batch
 ├── device.rs        # Device: checks every batch, then hands it to a backend

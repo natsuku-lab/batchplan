@@ -7,6 +7,8 @@
 //! interpolation can overestimate by. A built grid therefore never reads farther from an obstacle
 //! than its geometry, and walls thinner than a voxel still block. The price is that obstacles grow,
 //! by up to a voxel diagonal for meshes and about three voxels for points and depth images.
+//! Inside a mesh of several shells the distance is to the nearest face, one buried in another
+//! shell too: there a grid reads solid, and less deep than the solid is.
 //!
 //! Point clouds, depth images and occupancy maps become grids through an exact distance transform
 //! of their solid voxels, which runs on the [`Device`] the builder is given.
@@ -24,6 +26,7 @@ use crate::device::Device;
 use crate::error::{Error, Result, ensure_input, input};
 use crate::robot::Robot;
 use crate::types::Pose;
+use crate::winding::Crossings;
 use crate::world::Distance;
 
 /// Grids with more points are refused; 2^26 half floats take 128 MiB.
@@ -737,8 +740,14 @@ impl SdfGrid {
         Ok(())
     }
 
-    /// The distance field of a closed triangle mesh, in the mesh's frame. Triangles may face in
-    /// or out, consistently; meshes that are open or not manifold have no inside and are refused.
+    /// The distance field of a closed triangle mesh, in the mesh's frame: of the solid its surface
+    /// winds around. A mesh of several closed shells that face the same way is their union where
+    /// they overlap, and a shell facing in, inside one facing out, is a cavity; a mesh is the
+    /// same solid whichever way it faces as a whole, and a shell that crosses itself is solid
+    /// wherever it encloses space. Where two shells that face opposite ways overlap, the overlap
+    /// reads free. Distances are to the nearest face, also inside a solid of several shells,
+    /// where a face buried in another shell makes the depth read less than it is. Meshes that
+    /// are open or not manifold have no inside and are refused.
     pub fn from_mesh(vertices: &[Vec3], triangles: &[[u32; 3]], o: &SdfOptions) -> Result<Self> {
         use parry3d::query::PointQuery;
 
@@ -755,18 +764,18 @@ impl SdfGrid {
             vertices.iter().all(|v| v.is_finite()),
             "mesh vertices must be finite"
         );
+        // The side does not depend on which way the mesh faces; the nearest face's point does, in
+        // its last bit, so the mesh is turned to face out as a whole.
         let mut mesh = TriMesh {
             vertices: vertices.to_vec(),
             triangles: triangles.to_vec(),
         };
         mesh.orient_outward();
         let flags = TriMeshFlags::HALF_EDGE_TOPOLOGY
-            | TriMeshFlags::ORIENTED
             | TriMeshFlags::MERGE_DUPLICATE_VERTICES
             | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES;
         // `with_flags` drops topology errors, so the flags are set separately.
-        let mut solid =
-            ParryMesh::new(mesh.vertices.clone(), mesh.triangles).map_err(|e| input!("{e}"))?;
+        let mut solid = ParryMesh::new(mesh.vertices, mesh.triangles).map_err(|e| input!("{e}"))?;
         solid
             .set_flags(flags)
             .map_err(|e| input!("the mesh is not a manifold surface: {e}"))?;
@@ -780,17 +789,28 @@ impl SdfGrid {
             open == 0,
             "the mesh is not closed ({open} edges border a single triangle), so it has no inside"
         );
-        let (lo, hi) = bounds(&mesh.vertices);
+        let (lo, hi) = bounds(vertices);
         let Layout { dims, origin, .. } = layout(lo, hi, o)?;
-        let distances = (0..dims.element_product())
-            .into_par_iter()
-            .map(|n| {
+        // The grid's coordinates along each axis, as `point` computes them.
+        let along = |axis: usize| -> Vec<f32> {
+            let points = 0..dims[axis];
+            points.map(|i| origin[axis] + i as f32 * o.voxel).collect()
+        };
+        let crossings = Crossings::new(vertices, triangles, &along(1), &along(2));
+        let xs = along(0);
+        let mut distances = vec![0.0; dims.element_product() as usize];
+        let rows = distances.par_chunks_mut(dims.x as usize).enumerate();
+        rows.for_each(|(row, distances)| {
+            // The nearest face gives the distance and the winding number the side: the face's
+            // own normal says which side only for one shell that does not cross itself.
+            let points = (row as u32 * dims.x..).zip(crossings.numbers(row, &xs));
+            for (d, (n, winding)) in distances.iter_mut().zip(points) {
                 let p = point(dims, origin, o.voxel, n);
                 let proj = solid.project_local_point(p, false);
-                let d = (p - proj.point).length();
-                if proj.is_inside { -d } else { d }
-            })
-            .collect();
+                let nearest = (p - proj.point).length();
+                *d = if winding == 0 { nearest } else { -nearest };
+            }
+        });
         Self::conservative(dims, o.voxel, origin, distances)
     }
 
