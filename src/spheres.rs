@@ -53,8 +53,11 @@ pub struct SphereOptions {
     /// chosen as without it and then held to it, which leaves surface outside them wherever
     /// `tolerance`, as the budget scales it, is the larger: [`Robot::qualify`](crate::Robot::qualify)
     /// reports how deep as each link's `gap`. The geometry must be closed, and a collision model
-    /// given with the options is held to it as a fitted one is. `None`: spheres cover the surface
-    /// and reach as far past it as the budget makes them.
+    /// given with the options is held to it as a fitted one is. Depths are measured in the
+    /// geometry as the fit sees it, a round shape as its mesh of 24 sides, which lies inside it by
+    /// up to 0.9% of a cylinder's or a capsule's radius and 1.7% of a ball's; a held shape covered
+    /// without fitting is held to the shape itself, so `qualify` reads that much more for it.
+    /// `None`: spheres cover the surface and reach as far past it as the budget makes them.
     pub max_overhang: Option<f32>,
     /// Largest spacing of the interior grid that proposes sphere centers (meters). Small links
     /// use a finer grid.
@@ -244,19 +247,45 @@ fn solids(meshes: &[TriMesh]) -> Arc<[ParryMesh]> {
 
 /// Why spheres cannot be held within a distance of `meshes` ([`SphereOptions::max_overhang`]), if
 /// they cannot: a mesh that is not closed has no inside for a sphere's depth to be measured in.
-/// Closed: every edge borders as many triangles facing one way along it as the other, once
-/// vertices at one place are merged and triangles without area, or given twice, are dropped.
+/// Closed: every edge borders as many triangles facing one way along it as the other, and no
+/// face is given both ways, once vertices at one place are merged, triangles that name a vertex
+/// twice are dropped and a triangle given twice the same way is read once. A face given both
+/// ways, as where two shells share one or a sheet has two sides, leaves the nearest face without
+/// a side to tell.
 pub(crate) fn closed(meshes: &[TriMesh]) -> Result<(), String> {
-    let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
-        | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
-        | TriMeshFlags::DELETE_DUPLICATE_TRIANGLES;
+    let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES;
     for (k, mesh) in meshes.iter().enumerate() {
         let of = format!("mesh {k} of {}", meshes.len());
         let solid = ParryMesh::with_flags(mesh.vertices.clone(), mesh.triangles.clone(), flags)
             .map_err(|e| format!("{of} has no surface: {e}"))?;
+        // Each triangle from its lowest vertex, so that one given again is the same three.
+        let from_lowest = |&[a, b, c]: &[u32; 3]| {
+            if a <= b && a <= c {
+                [a, b, c]
+            } else if b <= c {
+                [b, c, a]
+            } else {
+                [c, a, b]
+            }
+        };
+        let faces: BTreeSet<[u32; 3]> = solid.indices().iter().map(from_lowest).collect();
+        if faces.is_empty() {
+            return Err(format!("{of} has no surface"));
+        }
+        let both_ways = faces
+            .iter()
+            .filter(|&&[a, b, c]| faces.contains(&[a, c, b]));
+        let both_ways = both_ways.count() / 2;
+        if both_ways > 0 {
+            return Err(format!(
+                "{of} gives {both_ways} of its {} faces both ways, so neither side of them is \
+                 inside",
+                faces.len() - both_ways
+            ));
+        }
         // Per edge, the triangles that run along it from its lower vertex less those that run back.
         let mut edges: BTreeMap<(u32, u32), i32> = BTreeMap::new();
-        for &[a, b, c] in solid.indices() {
+        for [a, b, c] in faces {
             for (from, to) in [(a, b), (b, c), (c, a)] {
                 *edges.entry((from.min(to), from.max(to))).or_default() +=
                     if from < to { 1 } else { -1 };
@@ -370,15 +399,7 @@ impl LinkFit {
             .sum();
         let count = ((area / DENSE_AREA) as usize).clamp(DENSE_SAMPLES, MAX_DENSE_SAMPLES);
         let dense = surface_samples(meshes, count, rng);
-        let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
-            | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
-            | TriMeshFlags::ORIENTED;
-        let solids: Arc<[ParryMesh]> = meshes
-            .iter()
-            .filter_map(|m| {
-                ParryMesh::with_flags(m.vertices.clone(), m.triangles.clone(), flags).ok()
-            })
-            .collect();
+        let solids = solids(meshes);
         let (lo, hi) = samples
             .iter()
             .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), &p| {
@@ -692,10 +713,10 @@ pub struct LinkQualification {
     /// where a hand-tuned model leaves gaps.
     pub uncovered: f32,
     /// How far the farthest of those samples lies outside the spheres (meters), zero where none
-    /// does: how deep an obstacle can reach into the link unseen. About a millimeter for fitted
-    /// spheres; more where a hand-tuned model leaves gaps, or where
-    /// [`SphereOptions::max_overhang`] holds spheres short of the surface, which leaves all of it
-    /// outside them at zero.
+    /// does: how deep an obstacle can reach into the link unseen. Up to about a millimeter for
+    /// spheres fitted to an arm's links, and two or three on a stand's wide boxes; more where a
+    /// hand-tuned model leaves gaps, or where [`SphereOptions::max_overhang`] holds spheres
+    /// short of the surface, which leaves all of it outside them at zero.
     pub gap: f32,
     /// How thick its geometry is where thickest (meters): the largest sphere inside it, across. A
     /// link thinner than its spheres' overhang is mostly sphere.

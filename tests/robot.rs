@@ -2193,9 +2193,45 @@ fn a_limit_on_overhang_holds_supplied_models_and_names_what_it_refuses() {
             "{message}"
         );
     }
+    // A box whose every face is given both ways, as a mesh drawn from both sides is, has no
+    // side that is inside, whichever copy comes first; nor do two boxes that share a face.
+    let text = std::fs::read_to_string(dir.join("closed.obj")).unwrap();
+    // Backward from its last corner, so the copies start at different ones.
+    let reversed = |line: &str| {
+        let corners: Vec<&str> = line.split(' ').collect();
+        format!("f {} {} {}", corners[3], corners[2], corners[1])
+    };
+    let faces = text.lines().filter(|line| line.starts_with('f'));
+    let (forward, backward): (Vec<String>, Vec<String>) =
+        faces.map(|line| (line.to_string(), reversed(line))).unzip();
+    let corners: Vec<&str> = text.lines().filter(|line| line.starts_with('v')).collect();
+    for (name, faces) in [
+        ("both.obj", [forward.clone(), backward.clone()].concat()),
+        ("both-reversed-first.obj", [backward, forward].concat()),
+    ] {
+        let path = dir.join(name);
+        std::fs::write(&path, [corners.join("\n"), faces.join("\n")].join("\n")).unwrap();
+        for o in [&inside, &fit] {
+            let message = refused(&meshed(&path), o);
+            assert!(
+                message.contains("link 'body': mesh 0 of 1 gives 12 of its 12 faces both ways"),
+                "{name}: {message}"
+            );
+        }
+    }
+    let stacked = [(Vec3::ZERO, half), (Vec3::Z * 2.0 * half.z, half)];
+    let stacked = meshed(&boxes_obj(&dir, "stacked.obj", &stacked, &[], &[]));
+    for o in [&inside, &fit] {
+        let message = refused(&stacked, o);
+        assert!(
+            message.contains("gives 2 of its 22 faces both ways"),
+            "{message}"
+        );
+    }
     let mut free = fit;
     free.spheres.max_overhang = None;
     Robot::from_urdf(&open, &free).unwrap();
+    Robot::from_urdf(&stacked, &free).unwrap();
 
     // The options are checked whether spheres are fitted or given, as input, by every loader.
     let path = dir.join("stand.urdf");
@@ -2263,6 +2299,17 @@ fn a_link_too_thin_for_a_sphere_inside_it_is_refused_by_name() {
         Robot::from_urdf(urdf, &options(Some(0.0))).map(|robot| robot.collision_model().clone());
     assert!(
         matches!(&refused, Err(Error::Input(m)) if m.contains("link 'plate': no sphere fits within `max_overhang` (0 m)")),
+        "{refused:?}"
+    );
+    // A ball of no radius has no surface at all, and no limit would help it.
+    let point = urdf.replace(
+        r#"<box size="0.1 0.1 0.00005"/>"#,
+        r#"<sphere radius="0"/>"#,
+    );
+    assert_ne!(point, urdf);
+    let refused = Robot::from_urdf(&point, &options(Some(0.002))).map(|_| ());
+    assert!(
+        matches!(&refused, Err(Error::Input(m)) if m.contains("link 'plate': mesh 0 of 1 has no surface")),
         "{refused:?}"
     );
     // With room past it, or without a limit, it is covered.

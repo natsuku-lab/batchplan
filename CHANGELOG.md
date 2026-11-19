@@ -16,8 +16,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   plus the limit, so the budget is kept and the surface it cannot cover within the limit is left
   outside the spheres: `LinkQualification::gap`, new in `Robot::qualify`, is how far outside the
   farthest of it lies, which is how deep an obstacle reaches into the link unseen. The geometry
-  must be closed: a link whose mesh has open edges is refused with their count, and one too thin
-  for a center inside it under a limit of zero by name. A collision model given with the options
+  must be closed: a link whose mesh has open edges, or faces given both ways, is refused with
+  their count, and one too thin for a center inside it under a limit of zero by name. Round
+  shapes are measured as the fit sees them, on their meshes of 24 sides. A collision model given with the options
   is held to the limit too, a sphere past it refused by link and index with how far it reaches.
   Held objects take their own (`AttachedObject::spheres`, `Held::spheres`): a box, capsule, disc
   or rod is covered whole where the budget has a cover within the limit, and fitted and held to

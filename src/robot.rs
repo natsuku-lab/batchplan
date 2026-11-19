@@ -320,7 +320,8 @@ pub struct RobotOptions {
     pub package_dirs: Vec<PathBuf>,
     /// Collision spheres; fitted to the description's geometry with `spheres` when `None`.
     pub collision_model: Option<CollisionModel>,
-    /// How spheres are fitted when there is no `collision_model`.
+    /// How spheres are fitted when there is no `collision_model`, and the `max_overhang` one
+    /// given is held to; checked either way.
     pub spheres: SphereOptions,
     /// Per link, by name: how far its spheres may reach beyond its geometry (meters), in place of
     /// `spheres.tolerance`, as fingers fitted tighter than the arm so they can grasp small objects.
@@ -724,10 +725,7 @@ impl Robot {
             }
         }
         let held = o.max_overhang.map_or_else(String::new, |limit| {
-            format!(
-                ", each held to {:.1} mm beyond it, which leaves surface outside them",
-                limit * 1e3
-            )
+            format!(", each held to {:.1} mm beyond it", limit * 1e3)
         });
         let source = format!(
             "fitted by batchplan: spheres reach up to {:.1} mm beyond the geometry and up to {:.2} \
@@ -2167,6 +2165,11 @@ fn covered(shapes: &[Obstacle], o: &SphereOptions) -> error::Result<Vec<[f32; 4]
         .iter()
         .map(|shape| attached_shape(shape)?.mesh().map_err(|e| input!("{e:#}")))
         .collect::<error::Result<Vec<TriMesh>>>()?;
+    if o.max_overhang.is_some() {
+        spheres::closed(&meshes).map_err(|e| {
+            input!("{e}, so the shapes have no inside to hold spheres within `max_overhang` of")
+        })?;
+    }
     let fitted = spheres::fit(
         &[meshes],
         &[o.tolerance],

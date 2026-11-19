@@ -217,7 +217,8 @@ value_class! {
         package_dirs: Vec<PathBuf>,
         /// Collision spheres; fitted to the description's geometry with `spheres` when `None`.
         collision_model: Option<batchplan::CollisionModel>,
-        /// How spheres are fitted when there is no `collision_model`.
+        /// How spheres are fitted when there is no `collision_model`, and the `max_overhang` one
+        /// given is held to; checked either way.
         spheres: batchplan::SphereOptions,
         /// Per link, by name: how far its spheres may reach beyond its geometry (meters), in place
         /// of `spheres.tolerance`, as fingers fitted tighter than the arm so they can grasp small
