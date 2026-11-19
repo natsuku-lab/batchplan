@@ -88,7 +88,7 @@ fn main() -> Result<(), Error> {
 | A hand kept upright, in a box or relative to another hand | `HandConstraint` on the problem | [constraints](docs/planning.md#constraints-along-the-path) |
 | Picking up and setting down | `grasps`, `pick`, `place` | [tasks](docs/planning.md#picking-up-and-setting-down) |
 | Grasps of a measured object of any shape (a rim, a handle) | `Surface::from_depth` per camera, `join`, then `grasps_on` | [tasks](docs/planning.md#picking-up-and-setting-down) |
-| Where to set a held object down on a measured support (a plate, a cabinet's top, a rack's top) | `rests_on` with the support's points flagged, then `place` with the rests' `pose`s | [tasks](docs/planning.md#picking-up-and-setting-down) |
+| Where to set a held object down on a measured support (a plate, a cabinet's top, a rack's top) | `rests_on` with the support's points flagged, then `place` with the rests' `pose`s, every one, and `Place::enough` for how many plans will do | [tasks](docs/planning.md#picking-up-and-setting-down) |
 | Passing an object from one hand to another | `pick` with `GraspOptions::along` (toward an end), then `handover` | [tasks](docs/planning.md#picking-up-and-setting-down) |
 | A program of picks and places planned together | `pick` and `place` with `transit: false`, then one `plan` and `join` | [tasks](docs/planning.md#picking-up-and-setting-down) |
 | Motions run without stopping between them | `join` | [joins](docs/planning.md#joining-motions) |
