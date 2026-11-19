@@ -119,12 +119,27 @@ impl Field {
     /// How high the middle of `object` comes to rest set straight down over `at`: the least height
     /// at which none of the support is in it. Negative infinity where no support is under it.
     pub(super) fn set_down(&self, object: &Turned, at: Vec2) -> f32 {
+        self.down_onto(&self.tops, object, at, f32::NEG_INFINITY)
+    }
+
+    /// How high the middle of `object` lands let go straight down over `at`: on the support or on
+    /// anything else that is there, as another object already in a basket. Negative infinity
+    /// where nothing is under it.
+    pub(super) fn lands(&self, object: &Turned, at: Vec2) -> f32 {
+        let on_support = self.set_down(object, at);
+        self.down_onto(&self.blocks, object, at, on_support)
+    }
+
+    /// The least height over `from` at which the middle of `object` over `at` has none of
+    /// `cells`' points in it.
+    #[inline(always)]
+    fn down_onto(&self, cells: &[Vec3], object: &Turned, at: Vec2, from: f32) -> f32 {
         let [columns, rows] = self.window(at, object.reach);
         // No point lower than this under the height found so far can raise it.
         let deepest = object.depth;
-        let mut height = f32::NEG_INFINITY;
+        let mut height = from;
         for row in rows {
-            let cells = &self.tops[row * self.across..][columns.clone()];
+            let cells = &cells[row * self.across..][columns.clone()];
             for p in cells {
                 if p.z + deepest <= height {
                     continue;

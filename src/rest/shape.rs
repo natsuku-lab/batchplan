@@ -55,6 +55,29 @@ impl Shape {
         }
     }
 
+    /// The shape turned by `turn` worn down by a level disc of radius `by`: what of it is in it
+    /// wherever it moves that far level, as a box less by `by` along each of its axes as far as
+    /// that axis runs level. None where less than `least` would be left of it any way.
+    pub(super) fn worn(self, by: f32, turn: Quat, least: f32) -> Option<Self> {
+        let axes = Mat3::from_quat(turn);
+        let level = |axis: Vec3| by * axis.truncate().length();
+        let worn = match self {
+            Shape::Cuboid(half) => {
+                let less = Vec3::new(level(axes.x_axis), level(axes.y_axis), level(axes.z_axis));
+                Shape::Cuboid(half - less)
+            }
+            Shape::Sphere(r) => Shape::Sphere(r - by),
+            Shape::Cylinder(r, h) => Shape::Cylinder(r - by, h - level(axes.z_axis)),
+            Shape::Capsule(r, h) => Shape::Capsule(r - by, h),
+        };
+        let thick = match worn {
+            Shape::Cuboid(half) => half.min_element(),
+            Shape::Sphere(r) | Shape::Capsule(r, _) => r,
+            Shape::Cylinder(r, h) => r.min(h),
+        };
+        (thick >= least).then_some(worn)
+    }
+
     /// How far from its middle any of it lies.
     pub(super) fn radius(self) -> f32 {
         match self {

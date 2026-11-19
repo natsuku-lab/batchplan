@@ -164,117 +164,9 @@ pub fn rests_on(
     surfaces: &[Surface],
     o: &RestOptions,
 ) -> Result<Vec<Vec<Rest>>> {
-    ensure_input!(
-        o.turns > 0
-            && o.spacing > 0.0
-            && o.spacing.is_finite()
-            && o.touching > 0.0
-            && o.touching.is_finite()
-            && o.clearance >= 0.0
-            && o.clearance.is_finite()
-            && (0.0..FRAC_PI_2).contains(&o.tipping)
-            && o.friction >= 0.0
-            && o.friction.is_finite(),
-        "rests need a turn, a finite positive spacing and touching, a finite clearance and friction of at least 0 and a tipping angle in [0, pi/2), got {}, {} m, {} m, {} m, {} and {} rad",
-        o.turns,
-        o.spacing,
-        o.touching,
-        o.clearance,
-        o.friction,
-        o.tipping
-    );
-    let mut spots = Vec::with_capacity(surfaces.len());
-    for (i, s) in surfaces.iter().enumerate() {
-        ensure_input!(
-            s.normals.len() == s.points.len()
-                && (s.object.is_empty() || s.object.len() == s.points.len())
-                && (s.seen_from.is_empty() || s.seen_from.len() == s.points.len()),
-            "surface {i}: {} points with {} normals, {} object flags and {} places seen from",
-            s.points.len(),
-            s.normals.len(),
-            s.object.len(),
-            s.seen_from.len()
-        );
-        if let Some(k) = s.points.iter().position(|p| !p.is_finite()) {
-            return Err(input!(
-                "surface {i}: point {k} is not finite, got {}",
-                s.points[k]
-            ));
-        }
-        let unit = |n: &Vec3| *n == Vec3::ZERO || (n.length_squared() - 1.0).abs() < 1e-3;
-        if let Some(k) = s.normals.iter().position(|n| !unit(n)) {
-            return Err(input!(
-                "surface {i}: normal {k} must be unit or zero, got {}",
-                s.normals[k]
-            ));
-        }
-        spots.push(Spots::over(i, s, o.spacing)?);
-    }
-    for (i, p) in problems.iter().enumerate() {
-        ensure_input!(
-            p.surface < surfaces.len(),
-            "problem {i}: surface {} of {}",
-            p.surface,
-            surfaces.len()
-        );
-        ensure_input!(
-            !matches!(p.object, Obstacle::Sdf { .. }),
-            "problem {i}: the object is a distance grid, which has no rests"
-        );
-        p.object
-            .placed(Pose::IDENTITY)
-            .check()
-            .map_err(|e| input!("problem {i}: the object: {e}, got {:?}", p.object))?;
-        ensure_input!(
-            p.rotation.is_finite() && (p.rotation.length() - 1.0).abs() < 1e-3,
-            "problem {i}: the rotation must be a finite unit quaternion, got {}",
-            p.rotation
-        );
-        if let Some(near) = p.near {
-            ensure_input!(
-                near.is_finite(),
-                "problem {i}: the point to rest near must be finite, got {near}"
-            );
-            let count = spots[p.surface].map_or(0.0, |spots| {
-                let [across, rows] = Closer::about(near.truncate(), &spots, o);
-                across.count as f32 * rows.count as f32
-            });
-            ensure_input!(
-                count <= MOST_SPOTS as f32,
-                "problem {i}: {count} spots {} m apart within {} m of the point to rest near, more than {MOST_SPOTS}; space the spots nearer",
-                o.touching,
-                o.spacing
-            );
-        }
-    }
-    // What lies as far from each surface's support as the largest object set down on it
-    // reaches, grown by the clearance it keeps, is read with it.
-    let mut margins = Vec::with_capacity(surfaces.len());
-    for (i, spots) in spots.iter().enumerate() {
-        let on = problems.iter().filter(|p| p.surface == i);
-        let grown = on.map(|p| Shape::of(&p.object).grown(o.clearance).radius());
-        let margin = grown.reduce(f32::max).map(|reach| reach + o.touching);
-        if let (Some(spots), Some(margin)) = (spots, margin) {
-            let cells = Field::cells(spots.lower, spots.upper, o.touching, margin);
-            ensure_input!(
-                cells <= field::MOST_CELLS,
-                "surface {i}: {cells} cells {} m wide over its support and the {margin} m around it that its objects reach, more than {}; read it in wider cells",
-                o.touching,
-                field::MOST_CELLS
-            );
-        }
-        margins.push(margin);
-    }
+    let read = Read::checked(problems, surfaces, o)?;
     let each = || {
-        // Each surface a problem names, read once.
-        let seen: Vec<Option<Seen>> = (0..surfaces.len())
-            .into_par_iter()
-            .map(|i| {
-                let (spots, margin) = (spots[i]?, margins[i]?);
-                let field = Field::new(&surfaces[i], spots.lower, spots.upper, o.touching, margin);
-                Some(Seen { field, spots })
-            })
-            .collect();
+        let seen = read.seen(surfaces, o);
         let each = problems.par_iter().map(|p| match &seen[p.surface] {
             Some(seen) => on(p, seen, o),
             None => vec![],
@@ -284,16 +176,149 @@ pub fn rests_on(
     Ok(device.install(each))
 }
 
+/// What a call reads of its surfaces, once its problems, surfaces and options are checked.
+pub(super) struct Read {
+    /// Per surface, the spots over its support; none where it has no support.
+    spots: Vec<Option<Spots>>,
+    /// Per surface, how far around its support what else lies there is read with it; none
+    /// where no problem names it.
+    margins: Vec<Option<f32>>,
+}
+
+impl Read {
+    /// `problems`, `surfaces` and `o` checked: an `Error::Input` that names what is wrong.
+    pub(super) fn checked(
+        problems: &[RestProblem],
+        surfaces: &[Surface],
+        o: &RestOptions,
+    ) -> Result<Self> {
+        ensure_input!(
+            o.turns > 0
+                && o.spacing > 0.0
+                && o.spacing.is_finite()
+                && o.touching > 0.0
+                && o.touching.is_finite()
+                && o.clearance >= 0.0
+                && o.clearance.is_finite()
+                && (0.0..FRAC_PI_2).contains(&o.tipping)
+                && o.friction >= 0.0
+                && o.friction.is_finite(),
+            "rests need a turn, a finite positive spacing and touching, a finite clearance and friction of at least 0 and a tipping angle in [0, pi/2), got {}, {} m, {} m, {} m, {} and {} rad",
+            o.turns,
+            o.spacing,
+            o.touching,
+            o.clearance,
+            o.friction,
+            o.tipping
+        );
+        let mut spots = Vec::with_capacity(surfaces.len());
+        for (i, s) in surfaces.iter().enumerate() {
+            ensure_input!(
+                s.normals.len() == s.points.len()
+                    && (s.object.is_empty() || s.object.len() == s.points.len())
+                    && (s.seen_from.is_empty() || s.seen_from.len() == s.points.len()),
+                "surface {i}: {} points with {} normals, {} object flags and {} places seen from",
+                s.points.len(),
+                s.normals.len(),
+                s.object.len(),
+                s.seen_from.len()
+            );
+            if let Some(k) = s.points.iter().position(|p| !p.is_finite()) {
+                return Err(input!(
+                    "surface {i}: point {k} is not finite, got {}",
+                    s.points[k]
+                ));
+            }
+            let unit = |n: &Vec3| *n == Vec3::ZERO || (n.length_squared() - 1.0).abs() < 1e-3;
+            if let Some(k) = s.normals.iter().position(|n| !unit(n)) {
+                return Err(input!(
+                    "surface {i}: normal {k} must be unit or zero, got {}",
+                    s.normals[k]
+                ));
+            }
+            spots.push(Spots::over(i, s, o.spacing)?);
+        }
+        for (i, p) in problems.iter().enumerate() {
+            ensure_input!(
+                p.surface < surfaces.len(),
+                "problem {i}: surface {} of {}",
+                p.surface,
+                surfaces.len()
+            );
+            ensure_input!(
+                !matches!(p.object, Obstacle::Sdf { .. }),
+                "problem {i}: the object is a distance grid, which has no rests"
+            );
+            p.object
+                .placed(Pose::IDENTITY)
+                .check()
+                .map_err(|e| input!("problem {i}: the object: {e}, got {:?}", p.object))?;
+            ensure_input!(
+                p.rotation.is_finite() && (p.rotation.length() - 1.0).abs() < 1e-3,
+                "problem {i}: the rotation must be a finite unit quaternion, got {}",
+                p.rotation
+            );
+            if let Some(near) = p.near {
+                ensure_input!(
+                    near.is_finite(),
+                    "problem {i}: the point to rest near must be finite, got {near}"
+                );
+                let count = spots[p.surface].map_or(0.0, |spots| {
+                    let [across, rows] = Closer::about(near.truncate(), &spots, o);
+                    across.count as f32 * rows.count as f32
+                });
+                ensure_input!(
+                    count <= MOST_SPOTS as f32,
+                    "problem {i}: {count} spots {} m apart within {} m of the point to rest near, more than {MOST_SPOTS}; space the spots nearer",
+                    o.touching,
+                    o.spacing
+                );
+            }
+        }
+        // What lies as far from each surface's support as the largest object set down on it
+        // reaches, grown by the clearance it keeps, is read with it.
+        let mut margins = Vec::with_capacity(surfaces.len());
+        for (i, spots) in spots.iter().enumerate() {
+            let on = problems.iter().filter(|p| p.surface == i);
+            let grown = on.map(|p| Shape::of(&p.object).grown(o.clearance).radius());
+            let margin = grown.reduce(f32::max).map(|reach| reach + o.touching);
+            if let (Some(spots), Some(margin)) = (spots, margin) {
+                let cells = Field::cells(spots.lower, spots.upper, o.touching, margin);
+                ensure_input!(
+                    cells <= field::MOST_CELLS,
+                    "surface {i}: {cells} cells {} m wide over its support and the {margin} m around it that its objects reach, more than {}; read it in wider cells",
+                    o.touching,
+                    field::MOST_CELLS
+                );
+            }
+            margins.push(margin);
+        }
+        Ok(Self { spots, margins })
+    }
+
+    /// Each surface a problem names, read once, on the device's threads.
+    pub(super) fn seen(&self, surfaces: &[Surface], o: &RestOptions) -> Vec<Option<Seen>> {
+        (0..surfaces.len())
+            .into_par_iter()
+            .map(|i| {
+                let (spots, margin) = (self.spots[i]?, self.margins[i]?);
+                let field = Field::new(&surfaces[i], spots.lower, spots.upper, o.touching, margin);
+                Some(Seen { field, spots })
+            })
+            .collect()
+    }
+}
+
 /// The spots over one surface's support, seen from above.
 #[derive(Clone, Copy)]
-struct Spots {
+pub(super) struct Spots {
     /// The corners of the support, seen from above.
     lower: Vec2,
     upper: Vec2,
     /// The first spot's cell, in spacings.
     first: Vec2,
-    across: usize,
-    rows: usize,
+    pub(super) across: usize,
+    pub(super) rows: usize,
 }
 
 impl Spots {
@@ -325,12 +350,12 @@ impl Spots {
         }))
     }
 
-    fn count(&self) -> usize {
+    pub(super) fn count(&self) -> usize {
         self.across * self.rows
     }
 
     /// Spot `k`'s middle, seen from above.
-    fn at(&self, k: usize, spacing: f32) -> Vec2 {
+    pub(super) fn at(&self, k: usize, spacing: f32) -> Vec2 {
         let cell = self.first + Vec2::new((k % self.across) as f32, (k / self.across) as f32);
         (cell + 0.5) * spacing
     }
@@ -360,9 +385,9 @@ impl Closer {
 }
 
 /// One surface as every problem that names it reads it.
-struct Seen {
-    field: Field,
-    spots: Spots,
+pub(super) struct Seen {
+    pub(super) field: Field,
+    pub(super) spots: Spots,
 }
 
 /// What a thread keeps between the poses it tries.
@@ -483,19 +508,7 @@ fn on(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Rest> {
         grown: shape.grown(o.clearance),
         o,
     };
-    // The turns, and for each the first that sets the shape down as it does: its rests are
-    // found once.
-    let rotation = world::unit(p.rotation);
-    let turns: Vec<Quat> = (0..o.turns)
-        .map(|k| Quat::from_rotation_z(TAU * k as f32 / o.turns as f32) * rotation)
-        .collect();
-    let mut first: Vec<usize> = Vec::with_capacity(turns.len());
-    for k in 0..turns.len() {
-        // Of the earlier turns that are the first of their kind: being alike to within a
-        // rounding does not carry from one turn through another to a third.
-        let same = |&j: &usize| first[j] == j && shape.same_turned(turns[j].inverse() * turns[k]);
-        first.push((0..k).find(same).unwrap_or(k));
-    }
+    let (turns, first) = turns(shape, p.rotation, o);
     let spots = seen.spots;
     // The spots a cell apart within a spacing of where the caller would have it, after the
     // grid's.
@@ -564,20 +577,49 @@ fn on(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Rest> {
         }
         spread_out(kept)
     });
-    let mut found: Vec<Vec<Rest>> = each.collect();
-    // A turn that sets the shape down as an earlier one does rests where that one does, turned
-    // its own way: for a hand that holds the object by one end, another pose. From the last
-    // turn back, so that the first of each kind gives its own away after the others copied it.
-    let mut each: Vec<Vec<Rest>> = vec![vec![]; turns.len()];
+    let turned = |r: &Rest, turn: Quat| Rest {
+        pose: Pose::new(r.pose.position, turn),
+        ..r.clone()
+    };
+    at_every_turn(each.collect(), &turns, &first, turned)
+}
+
+/// The turns `o` gives of `rotation`, and for each the first that sets `shape` down as it does:
+/// what is found at a turn is found once for its kind.
+pub(super) fn turns(shape: Shape, rotation: Quat, o: &RestOptions) -> (Vec<Quat>, Vec<usize>) {
+    let rotation = world::unit(rotation);
+    let turns: Vec<Quat> = (0..o.turns)
+        .map(|k| Quat::from_rotation_z(TAU * k as f32 / o.turns as f32) * rotation)
+        .collect();
+    let mut first: Vec<usize> = Vec::with_capacity(turns.len());
+    for k in 0..turns.len() {
+        // Of the earlier turns that are the first of their kind: being alike to within a
+        // rounding does not carry from one turn through another to a third.
+        let same = |&j: &usize| first[j] == j && shape.same_turned(turns[j].inverse() * turns[k]);
+        first.push((0..k).find(same).unwrap_or(k));
+    }
+    (turns, first)
+}
+
+/// What was `found` at the first turn of each kind, at every turn: a turn that sets the shape
+/// down as an earlier one does has what that one has, each `turned` its own way, for a hand that
+/// holds the object by one end another pose. From the last turn back, so that the first of each
+/// kind gives its own away after the others copied it.
+pub(super) fn at_every_turn<T: Clone>(
+    mut found: Vec<Vec<T>>,
+    turns: &[Quat],
+    first: &[usize],
+    turned: impl Fn(&T, Quat) -> T,
+) -> Vec<T> {
+    let mut each: Vec<Vec<T>> = vec![vec![]; turns.len()];
     for k in (0..turns.len()).rev() {
         each[k] = if first[k] == k {
             std::mem::take(&mut found[k])
         } else {
-            let turned = |r: &Rest| Rest {
-                pose: Pose::new(r.pose.position, turns[k]),
-                ..r.clone()
-            };
-            found[first[k]].iter().map(turned).collect()
+            found[first[k]]
+                .iter()
+                .map(|t| turned(t, turns[k]))
+                .collect()
         };
     }
     each.into_iter().flatten().collect()

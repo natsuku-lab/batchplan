@@ -1,11 +1,14 @@
 //! Where what a hand holds can be set down on what was seen ([`rests_on`]), the mirror of
 //! [`grasps_on`](crate::grasps_on): rests of a box, ball, cylinder or capsule on the points seen of
-//! the place it goes ([`Surface`](crate::Surface)), whatever that place's shape.
+//! the place it goes ([`Surface`](crate::Surface)), whatever that place's shape. And where it
+//! can be let go to fall into a hollow of what was seen that holds it in ([`falls_into`]).
 
 mod contact;
+mod fall;
 mod field;
 mod search;
 mod shape;
 mod statics;
 
+pub use fall::{Fall, falls_into};
 pub use search::{Rest, RestOptions, RestProblem, rests_on};

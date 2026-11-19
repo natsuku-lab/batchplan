@@ -11,8 +11,8 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 use batchplan::glam::{Mat3, Quat, Vec2, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{
-    DepthImage, Device, Error, Held, Intrinsics, Obstacle, Place, Pose, Rest, RestOptions,
-    RestProblem, Surface, TaskOptions, World, rests_on,
+    DepthImage, Device, Error, Fall, Held, Intrinsics, Obstacle, Place, Pose, Rest, RestOptions,
+    RestProblem, Surface, TaskOptions, World, falls_into, rests_on,
 };
 
 /// Points 2 mm apart, as a depth camera reads a surface under a meter.
@@ -2058,4 +2058,209 @@ fn a_flat_bottom_on_a_level_support_tips_as_far_as_the_general_balance_finds() {
         let same = margins.iter().filter(|m| (*m - expected).abs() < 1e-3);
         assert!(same.count() > 20, "{expected} rad of {margins:?}");
     }
+}
+
+/// A pen 20 by 16 cm inside, its floor's top 1 cm up and its walls 1 cm thick and `height` over
+/// the floor, all the support, the wall at +x with a gap `gap` wide in its middle, and nothing
+/// outside it.
+fn pen(height: f32, gap: f32) -> Surface {
+    let mut s = Surface::default();
+    let inner = Vec2::new(0.1, 0.08);
+    level(-inner, inner, 0.01, true, &mut s);
+    let (z, half) = (0.01 + height / 2.0, height / 2.0);
+    let wall = |at: Vec2, half_across: Vec2, s: &mut Surface| {
+        block(at.extend(z), half_across.extend(half), true, s);
+    };
+    wall(Vec2::new(-0.105, 0.0), Vec2::new(0.005, 0.09), &mut s);
+    wall(Vec2::new(0.0, 0.085), Vec2::new(0.1, 0.005), &mut s);
+    wall(Vec2::new(0.0, -0.085), Vec2::new(0.1, 0.005), &mut s);
+    let piece = (0.09 - gap / 2.0) / 2.0;
+    for sign in [1.0, -1.0] {
+        let at = Vec2::new(0.105, sign * (0.09 - piece));
+        wall(at, Vec2::new(0.005, piece), &mut s);
+    }
+    s
+}
+
+fn falls(object: &Obstacle, surface: &Surface, o: &RestOptions) -> Vec<Fall> {
+    let problem = RestProblem::new(object.clone(), 0);
+    falls_into(&device(), &[problem], std::slice::from_ref(surface), o)
+        .unwrap()
+        .remove(0)
+}
+
+#[test]
+fn what_is_let_go_over_a_pen_falls_in_and_stays() {
+    // A can 6 cm across and 8 cm tall over a pen with walls 8 cm tall. Grown by the clearance it
+    // is 8 cm across: it is let go where that fits inside the walls, its bottom a centimeter
+    // over their tops, and lands on the floor 8 cm under where it would leave.
+    let can = Obstacle::cylinder(Vec3::ZERO, 0.03, 0.04);
+    let o = RestOptions::default();
+    let found = falls(&can, &pen(0.08, 0.0), &o);
+    for f in &found {
+        let at = f.pose.position;
+        assert!((at.z - 0.04 - (0.09 + o.clearance)).abs() < 1e-4, "{f:?}");
+        let room = Vec2::new(0.1, 0.08) - 0.03 - o.clearance + 1e-4;
+        assert!(at.truncate().abs().cmple(room).all(), "{f:?}");
+        assert!((f.sunk - 0.08).abs() < 1e-4, "{f:?}");
+    }
+    // Every spot where it fits, 12 by 8, at every turn; the middle first.
+    assert_eq!(found.len(), 12 * 8 * 8);
+    let first = found[0].pose.position.truncate();
+    assert!(first.abs().max_element() < 0.01, "{first}");
+    // Walls lower than its middle, a gap it fits through, a floor no camera saw and a table hold
+    // nothing in. A gap narrower than it does.
+    for (what, s) in [
+        ("low walls", pen(0.03, 0.0)),
+        ("a gap of 9 cm", pen(0.08, 0.09)),
+        (
+            "a gap of 6.5 cm, which it fits through and its clearance does not",
+            pen(0.08, 0.065),
+        ),
+        ("no floor", basket(false, Some(true))),
+        ("a table", table()),
+    ] {
+        let none = falls(&can, &s, &o);
+        assert!(none.is_empty(), "{what}: {}", none.len());
+    }
+    assert_eq!(falls(&can, &pen(0.08, 0.04), &o).len(), found.len());
+    // Its corner open, the walls to either side stopping 4 cm short of it, 5.7 cm apart across
+    // it: too narrow for the can, but not for it worn down by half the spots' diagonal, 4.6 cm
+    // across, which leaves that way between two spots that each touch a wall. It is taken as a
+    // way out.
+    let mut corner = Surface::default();
+    level(
+        Vec2::new(-0.1, -0.08),
+        Vec2::new(0.1, 0.08),
+        0.01,
+        true,
+        &mut corner,
+    );
+    let mut wall =
+        |at: Vec2, half: Vec2| block(at.extend(0.05), half.extend(0.04), true, &mut corner);
+    wall(Vec2::new(-0.105, 0.0), Vec2::new(0.005, 0.09));
+    wall(Vec2::new(0.0, -0.085), Vec2::new(0.1, 0.005));
+    wall(Vec2::new(0.105, -0.025), Vec2::new(0.005, 0.065));
+    wall(Vec2::new(-0.025, 0.085), Vec2::new(0.085, 0.005));
+    assert!(falls(&can, &corner, &o).is_empty());
+    // Over a floor seen but for a hole 12 cm square in its middle, it is let go over the hole
+    // too, as deep as it lands anywhere in the pen.
+    let mut holed = Surface::default();
+    for (lower, upper) in [
+        (Vec2::new(-0.1, -0.08), Vec2::new(0.1, -0.06)),
+        (Vec2::new(-0.1, 0.06), Vec2::new(0.1, 0.08)),
+        (Vec2::new(-0.1, -0.06), Vec2::new(-0.06, 0.06)),
+        (Vec2::new(0.06, -0.06), Vec2::new(0.1, 0.06)),
+    ] {
+        level(lower, upper, 0.01, true, &mut holed);
+    }
+    let mut walls = pen(0.08, 0.0);
+    walls.points.retain(|p| p.z > 0.0105);
+    let kept = walls.points.len();
+    walls.normals.truncate(kept);
+    walls.object.truncate(kept);
+    holed.join(walls);
+    let over_the_hole: Vec<Fall> = falls(&can, &holed, &o)
+        .into_iter()
+        .filter(|f| f.pose.position.truncate().abs().max_element() < 0.02)
+        .collect();
+    assert!(!over_the_hole.is_empty());
+    for f in &over_the_hole {
+        assert!((f.sunk - 0.08).abs() < 1e-4, "{f:?}");
+    }
+    // A plate 6 cm square and 6 mm thick lying flat, and a ball 2.4 cm across, slide out
+    // through a gap a little wider than they are; in the closed pen they are held in. Worn down
+    // by half the spots' diagonal, they keep their thickness.
+    let plate = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.03, 0.03, 0.003));
+    let ball = Obstacle::sphere(Vec3::ZERO, 0.012);
+    let once = RestOptions { turns: 1, ..o };
+    for (what, object, gap) in [("plate", &plate, 0.062), ("ball", &ball, 0.025)] {
+        assert!(!falls(object, &pen(0.08, 0.0), &once).is_empty(), "{what}");
+        let out = falls(object, &pen(0.08, gap), &once);
+        assert!(out.is_empty(), "{what}: {}", out.len());
+    }
+    // A ball 1.6 cm across and a pencil standing have none: worn down that far, less than a
+    // cell of the support is left of them, which could slip between the points seen of a wall.
+    let pencil = Obstacle::cylinder(Vec3::ZERO, 0.004, 0.08);
+    let small = Obstacle::sphere(Vec3::ZERO, 0.008);
+    for thin in [&pencil, &small] {
+        assert!(falls(thin, &pen(0.12, 0.0), &o).is_empty(), "{thin:?}");
+    }
+    // A box 4 by 6 cm comes at every turn, turned its own way.
+    let boxed = falls(&a_box(), &pen(0.08, 0.0), &o);
+    let mut turns: Vec<Quat> = boxed.iter().map(|f| f.pose.rotation).collect();
+    turns.dedup();
+    assert_eq!(turns.len(), 8);
+}
+
+#[test]
+fn what_falls_onto_something_already_in_a_pen_may_not_stay() {
+    // A block 6 by 6 cm and 7 cm tall stands in the pen, not the support. Over it the can lands
+    // on it, its middle a centimeter under the walls' tops: let go there, it does not stay in.
+    let can = Obstacle::cylinder(Vec3::ZERO, 0.03, 0.04);
+    let o = RestOptions::default();
+    let mut s = pen(0.08, 0.0);
+    block(
+        Vec3::new(-0.06, 0.0, 0.045),
+        Vec3::new(0.03, 0.03, 0.035),
+        false,
+        &mut s,
+    );
+    let found = falls(&can, &s, &o);
+    assert!(!found.is_empty());
+    for f in &found {
+        // Its footprint grown by the clearance off the block.
+        let off = f.pose.position.truncate() - Vec2::new(-0.06, 0.0);
+        let near = off.abs() - Vec2::splat(0.03);
+        let gap = near.max(Vec2::ZERO).length();
+        assert!(
+            gap >= 0.03 + o.clearance - 1e-4,
+            "{gap} m from the block: {f:?}"
+        );
+    }
+}
+
+#[test]
+fn falls_do_not_depend_on_the_threads_the_batch_or_the_device() {
+    let robot = common::panda().unwrap();
+    let o = RestOptions::default();
+    let can = Obstacle::cylinder(Vec3::ZERO, 0.03, 0.04);
+    let surfaces = [pen(0.08, 0.0), basket(true, Some(true)), table()];
+    let problems = [
+        RestProblem::new(can.clone(), 0),
+        RestProblem::new(a_box(), 1),
+        RestProblem::new(can, 2),
+        RestProblem {
+            rotation: Quat::from_rotation_z(0.3),
+            ..RestProblem::new(a_box(), 0)
+        },
+    ];
+    let one = Device::cpu_threads(&robot, 1).unwrap();
+    let alone: Vec<Vec<Fall>> = problems
+        .iter()
+        .map(|p| {
+            let problem = RestProblem {
+                surface: 0,
+                ..p.clone()
+            };
+            let s = std::slice::from_ref(&surfaces[p.surface]);
+            falls_into(&one, &[problem], s, &o).unwrap().remove(0)
+        })
+        .collect();
+    assert!(!alone[0].is_empty() && !alone[1].is_empty() && alone[2].is_empty());
+    assert!(!alone[3].is_empty());
+    let mut devices = vec![one, Device::cpu(&robot).unwrap()];
+    match Device::gpu(&robot) {
+        Ok(gpu) => devices.push(gpu),
+        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
+        Err(e) => panic!("no GPU: {e}"),
+    }
+    for device in &devices {
+        let together = falls_into(device, &problems, &surfaces, &o).unwrap();
+        assert_eq!(together, alone, "{}", device.name());
+    }
+    // Its input is checked as `rests_on` checks it.
+    let elsewhere = RestProblem::new(a_box(), 3);
+    let refused = falls_into(&devices[0], &[elsewhere], &surfaces, &o);
+    assert!(matches!(refused, Err(Error::Input(why)) if why.starts_with("problem 0: surface 3")));
 }
