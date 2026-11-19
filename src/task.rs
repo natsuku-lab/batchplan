@@ -446,31 +446,10 @@ pub fn pick(
     if tasks.iter().all(whole) {
         return picked(device, worlds, tasks, o);
     }
-    // Each task's plans, numbered as its grasps are, and where each grasp tried without one
-    // stopped.
-    let mut plans: Vec<Vec<TaskPlan>> = tasks.iter().map(|_| vec![]).collect();
-    let mut stops: Vec<Vec<Option<CandidateStop>>> =
-        tasks.iter().map(|t| vec![None; t.grasps.len()]).collect();
-    // How many of each task's grasps have been tried, and how many more a task that wants only
-    // some plans tries at a time.
-    let mut tried = vec![0; tasks.len()];
-    let mut few = FEW;
     let as_loaded = HashMap::new();
-    loop {
-        // The grasps each task tries next: all it has, or the next few in order while it has
-        // fewer plans than will do.
-        let next = tasks.iter().enumerate().map(|(i, t)| {
-            let more = match t.enough {
-                Some(enough) if plans[i].len() >= enough => 0,
-                Some(enough) => few.max(enough),
-                None => t.grasps.len(),
-            };
-            tried[i]..t.grasps.len().min(tried[i] + more)
-        });
-        let next: Vec<Range<usize>> = next.collect();
-        if next.iter().all(Range::is_empty) {
-            break;
-        }
+    let counts: Vec<usize> = tasks.iter().map(|t| t.grasps.len()).collect();
+    let enough: Vec<Option<usize>> = tasks.iter().map(|t| t.enough).collect();
+    let outcomes = in_waves(&counts, &enough, |next| {
         // A relocked robot for each set of locked joints' values, and for it each task with
         // the grasps that keep them, a batch of their own, the groups in parallel; a device
         // for it builds nothing, and the worlds stay valid.
@@ -509,47 +488,106 @@ pub fn pick(
                 picked(&relocked, worlds, &mine, o)
             }
         })?;
+        let mut wave: Vec<Wave> = tasks.iter().map(|_| Wave::default()).collect();
         for (group, result) in groups.iter().zip(results) {
             for ((i, grasps), outcome) in group.tasks.iter().zip(result.outcomes) {
-                match outcome {
-                    Ok(found) => plans[*i].extend(found.into_iter().map(|plan| TaskPlan {
-                        candidate: grasps[plan.candidate],
-                        ..plan
-                    })),
-                    Err(failure) => {
-                        for (&grasp, stop) in grasps.iter().zip(failure.candidates) {
-                            stops[*i][grasp] = Some(stop);
-                        }
-                    }
-                }
+                wave[*i].take(outcome, |k| grasps[k]);
             }
         }
-        for (tried, next) in tried.iter_mut().zip(next) {
-            *tried = next.end;
+        Ok(wave)
+    })?;
+    Ok(TaskResult {
+        problems: tasks.to_vec(),
+        outcomes,
+    })
+}
+
+/// What some of a task's candidates came to: the plans of those that got through, and where the
+/// others stopped where none did, each numbered as the task's candidates are.
+#[derive(Default)]
+struct Wave {
+    plans: Vec<TaskPlan>,
+    stops: Vec<(usize, CandidateStop)>,
+}
+
+impl Wave {
+    /// Adds the `outcome` of a call given some of the task's candidates, the call's `k`th being
+    /// the task's `numbered(k)`th.
+    fn take(
+        &mut self,
+        outcome: std::result::Result<Vec<TaskPlan>, TaskFailure>,
+        numbered: impl Fn(usize) -> usize,
+    ) {
+        match outcome {
+            Ok(found) => self.plans.extend(found.into_iter().map(|plan| TaskPlan {
+                candidate: numbered(plan.candidate),
+                ..plan
+            })),
+            Err(failure) => {
+                let stops = failure.candidates.into_iter().enumerate();
+                self.stops
+                    .extend(stops.map(|(k, stop)| (numbered(k), stop)));
+            }
+        }
+    }
+}
+
+/// Each task's plans by its candidates tried in their order: all of them (`counts`, per task),
+/// or, where only some plans will do (`enough`), [`FEW`] of them and then twice as many each
+/// time until that many have got through. `tried` plans the candidates it is given per task
+/// (none for a task that has enough) and says what they came to. A task's plans are the first
+/// that many in its candidates' order, quickest first; one without a plan has tried every
+/// candidate, and says where each stopped.
+fn in_waves(
+    counts: &[usize],
+    enough: &[Option<usize>],
+    mut tried: impl FnMut(&[Range<usize>]) -> Result<Vec<Wave>>,
+) -> Result<Vec<std::result::Result<Vec<TaskPlan>, TaskFailure>>> {
+    let mut plans: Vec<Vec<TaskPlan>> = counts.iter().map(|_| vec![]).collect();
+    let mut stops: Vec<Vec<Option<CandidateStop>>> =
+        counts.iter().map(|&count| vec![None; count]).collect();
+    // How many of each task's candidates have been tried, and how many more a task that wants
+    // only some plans tries at a time.
+    let mut from = vec![0; counts.len()];
+    let mut few = FEW;
+    loop {
+        let next = (0..counts.len()).map(|i| {
+            let more = match enough[i] {
+                Some(enough) if plans[i].len() >= enough => 0,
+                Some(enough) => few.max(enough),
+                None => counts[i],
+            };
+            from[i]..counts[i].min(from[i] + more)
+        });
+        let next: Vec<Range<usize>> = next.collect();
+        if next.iter().all(Range::is_empty) {
+            break;
+        }
+        for (i, wave) in tried(&next)?.into_iter().enumerate() {
+            plans[i].extend(wave.plans);
+            for (candidate, stop) in wave.stops {
+                stops[i][candidate] = Some(stop);
+            }
+            from[i] = next[i].end;
         }
         few *= 2;
     }
-    // The first plans in the grasps' order, as many as will do, quickest first; or where each
-    // grasp stopped, every one having been tried.
-    let outcomes = tasks.iter().zip(plans).zip(stops);
-    let outcomes = outcomes.map(|((t, mut plans), stops)| {
+    let outcomes = plans.into_iter().zip(stops).zip(enough);
+    let outcomes = outcomes.map(|((mut plans, stops), enough)| {
         if plans.is_empty() {
             let candidates = stops.into_iter();
             return Err(TaskFailure {
                 candidates: candidates
-                    .map(|stop| stop.expect("a task without a plan has tried every grasp"))
+                    .map(|stop| stop.expect("a task without a plan has tried every candidate"))
                     .collect(),
             });
         }
         plans.sort_by_key(|plan| plan.candidate);
-        plans.truncate(t.enough.unwrap_or(usize::MAX));
+        plans.truncate(enough.unwrap_or(usize::MAX));
         plans.sort_by(|a, b| a.duration().total_cmp(&b.duration()));
         Ok(plans)
     });
-    Ok(TaskResult {
-        problems: tasks.to_vec(),
-        outcomes: outcomes.collect(),
-    })
+    Ok(outcomes.collect())
 }
 
 /// How many grasps a pick that wants only some plans ([`Pick::enough`]) tries first, and how
@@ -856,63 +894,26 @@ pub fn place(
     if tasks.iter().all(|t| t.enough.is_none()) {
         return placed(device, worlds, tasks, o);
     }
-    // Each task's plans, numbered as its poses are, and where each pose tried without one
-    // stopped, in the poses' order.
-    let mut plans: Vec<Vec<TaskPlan>> = tasks.iter().map(|_| vec![]).collect();
-    let mut stops: Vec<Vec<CandidateStop>> = tasks.iter().map(|_| vec![]).collect();
-    // How many of each task's poses have been tried, and how many more a task that wants only
-    // some plans tries at a time.
-    let mut tried = vec![0; tasks.len()];
-    let mut few = FEW;
-    loop {
-        // The poses each task tries next: all it has, or the next few in order while it has
-        // fewer plans than will do.
-        let next = tasks.iter().enumerate().map(|(i, t)| {
-            let more = match t.enough {
-                Some(enough) if plans[i].len() >= enough => 0,
-                Some(enough) => few.max(enough),
-                None => t.poses.len(),
-            };
-            tried[i]..t.poses.len().min(tried[i] + more)
-        });
-        let next: Vec<Range<usize>> = next.collect();
+    let counts: Vec<usize> = tasks.iter().map(|t| t.poses.len()).collect();
+    let enough: Vec<Option<usize>> = tasks.iter().map(|t| t.enough).collect();
+    let outcomes = in_waves(&counts, &enough, |next| {
+        // The tasks with poses to try, each with those alone.
         let going: Vec<usize> = (0..tasks.len()).filter(|&i| !next[i].is_empty()).collect();
-        if going.is_empty() {
-            break;
-        }
         let some = going.iter().map(|&i| Place {
             poses: tasks[i].poses[next[i].clone()].to_vec(),
             ..tasks[i].clone()
         });
         let some: Vec<Place> = some.collect();
         let result = placed(device, worlds, &some, o)?;
+        let mut wave: Vec<Wave> = tasks.iter().map(|_| Wave::default()).collect();
         for (&i, outcome) in going.iter().zip(result.outcomes) {
-            match outcome {
-                Ok(found) => plans[i].extend(found.into_iter().map(|plan| TaskPlan {
-                    candidate: next[i].start + plan.candidate,
-                    ..plan
-                })),
-                Err(failure) => stops[i].extend(failure.candidates),
-            }
-            tried[i] = next[i].end;
+            wave[i].take(outcome, |k| next[i].start + k);
         }
-        few *= 2;
-    }
-    // The first plans in the poses' order, as many as will do, quickest first; or where each
-    // pose stopped, every one having been tried.
-    let outcomes = tasks.iter().zip(plans).zip(stops);
-    let outcomes = outcomes.map(|((t, mut plans), candidates)| {
-        if plans.is_empty() {
-            return Err(TaskFailure { candidates });
-        }
-        plans.sort_by_key(|plan| plan.candidate);
-        plans.truncate(t.enough.unwrap_or(usize::MAX));
-        plans.sort_by(|a, b| a.duration().total_cmp(&b.duration()));
-        Ok(plans)
-    });
+        Ok(wave)
+    })?;
     Ok(TaskResult {
         problems: tasks.to_vec(),
-        outcomes: outcomes.collect(),
+        outcomes,
     })
 }
 
