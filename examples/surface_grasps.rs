@@ -257,7 +257,10 @@ fn main() -> Result<()> {
     // of a grasp on that side would be in. Fingers that may come in narrower pass between them.
     let cabinet = Obstacle::cuboid(Vec3::new(0.105, 0.0, 0.05), Vec3::new(0.01, 0.15, 0.05));
     let seen = from_above(&|p| table.distance(p).value.min(cabinet.distance(p).value))?;
-    let open = grasps_on(&device, 0, std::slice::from_ref(&seen), &shell)?.remove(0);
+    let (open_ms, open) = quickest(5, || {
+        grasps_on(&device, 0, std::slice::from_ref(&seen), &shell)
+    });
+    let open = open?.remove(0);
     let narrow = GraspOptions {
         narrow: true,
         ..shell
@@ -272,7 +275,7 @@ fn main() -> Result<()> {
         .map(|g| g.opening)
         .fold(f32::INFINITY, f32::min);
     println!(
-        "the bowl 4 cm from a wall: {} grasps with the fingers open, {} where they may come in narrower in {ms:.1} ms, {narrower} of them narrower, down to {:.1} cm (sum {:.6})",
+        "the bowl 4 cm from a wall: {} grasps with the fingers open in {open_ms:.1} ms, {} where they may come in narrower in {ms:.1} ms, {narrower} of them narrower, down to {:.1} cm (sum {:.6})",
         open.len(),
         found.len(),
         least * 100.0,

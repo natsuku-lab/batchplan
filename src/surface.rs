@@ -29,9 +29,9 @@
 //! Fingers that may come in narrower ([`GraspOptions::narrow`]) are taken to slide along the
 //! closing line, as a parallel gripper's do. A finger's sphere is in a point over one stretch of
 //! that slide, so a pass over the points near the slide marks every opening the sphere is in
-//! something at, and stops once none is left: the openings a grasp is clear at cost about what
-//! one does. It comes in at the one farthest from what is not the object's, which a planner
-//! lets no finger touch.
+//! something at, and stops once none is left: a grasp that is refused costs about what the open
+//! hand's check does, and one that is found a pass over each finger's whole slide. It comes in
+//! at the one farthest from what is not the object's, which a planner lets no finger touch.
 
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::TAU;
@@ -514,7 +514,9 @@ fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
 }
 
 /// A pair's grasps by turn, as [`on`] takes them, where the fingers may come in narrower
-/// ([`GraspOptions::narrow`]): as deep as the hand is clear at some opening, with that opening.
+/// ([`GraspOptions::narrow`]): where the open hand is clear, as deep as it is, so that a grasp
+/// it has stays where it is; where it is clear at no depth, as deep as the hand is clear at some
+/// opening. Each with the opening it comes in with there.
 #[inline(never)]
 fn narrowly(
     pair: &Pair,
@@ -536,20 +538,36 @@ fn narrowly(
         for closing in [pair.line, -pair.line] {
             let axes = Mat3::from_cols(closing.cross(toward), closing, toward);
             let rotation = Quat::from_mat3(&axes);
+            // The deepest the hand is clear at narrower, kept for where the open hand is
+            // clear nowhere; past it only the open hand is looked for.
+            let mut narrower = None;
             let mut back = 0.0;
             while back == 0.0 || reach - back >= o.overlap {
                 let pose = Pose::new(pair.middle - toward * back, rotation);
-                if let Some(opening) = narrowed(near, hand, &pose, pair.width, reach, o) {
-                    let half = closing * pair.width / 2.0;
-                    grasps.push(Grasp {
-                        pose,
-                        contacts: [pair.middle - half, pair.middle + half],
-                        one_sided,
-                        opening,
-                    });
-                    break;
+                let whole = narrower.is_none();
+                match narrowed(near, hand, &pose, pair.width, reach, o, whole) {
+                    Some((opening, /* open */ true)) => {
+                        let opening = match whole {
+                            true => opening,
+                            false => narrowed(near, hand, &pose, pair.width, reach, o, true)
+                                .map_or(opening, |(opening, _)| opening),
+                        };
+                        narrower = Some((pose, opening));
+                        break;
+                    }
+                    Some(found) if whole => narrower = Some((pose, found.0)),
+                    _ => {}
                 }
                 back += BACK;
+            }
+            if let Some((pose, opening)) = narrower {
+                let half = closing * pair.width / 2.0;
+                grasps.push(Grasp {
+                    pose,
+                    contacts: [pair.middle - half, pair.middle + half],
+                    one_sided,
+                    opening,
+                });
             }
         }
         grasps
@@ -565,7 +583,8 @@ fn narrowly(
 /// stands around less finely than the points do. Of the openings as far, the one with the most
 /// room, as far from the nearest the hand is in anything at farther apart as from the nearest
 /// nearer, the patches at the last; and of those, the widest, so the whole opening with nothing
-/// near. `reach` is how far the hand reaches past its frame.
+/// near. With it, whether the open hand is clear there; and unless `whole`, only that is looked
+/// for, the opening the whole one. `reach` is how far the hand reaches past its frame.
 fn narrowed(
     near: &Near,
     hand: &[HandSphere],
@@ -573,12 +592,16 @@ fn narrowed(
     width: f32,
     reach: f32,
     o: &GraspOptions,
-) -> Option<f32> {
+    whole: bool,
+) -> Option<(f32, bool)> {
     let (closing, toward) = (pose.rotation * Vec3::Y, pose.rotation * Vec3::Z);
     // A finger's way from one opening to the next, and how many take it onto its patch: a
     // rounding short of one more is one more.
     let step = o.opening / (2 * OPENINGS) as f32;
-    let most = ((o.opening - width) / 2.0 / step + 1e-3) as i32;
+    let most = match whole {
+        true => ((o.opening - width) / 2.0 / step + 1e-3) as i32,
+        false => 0,
+    };
     // The openings from `first` to `last`, as bits: one for each count of steps the fingers
     // are moved toward each other, below zero for apart.
     let span = |first: i32, last: i32| {
@@ -687,7 +710,7 @@ fn narrowed(
     };
     let clear = (0..=most).filter(|&k| free(k));
     let best = clear.max_by_key(|&k| (from_others(k), room(k), -k))?;
-    Some(o.opening - 2.0 * best as f32 * step)
+    Some((o.opening - 2.0 * best as f32 * step, free(0)))
 }
 
 /// `pairs`, those that face each other most squarely first, in an order that spreads them:
@@ -781,25 +804,26 @@ fn pairs(s: &Surface, o: &GraspOptions) -> (Vec<Pair>, Vec<Pair>) {
         let other = |&(t, i): &(f32, usize)| !object(i) && t > o.contact && t < width - o.contact;
         near.iter().any(other)
     };
-    // The pair a patch seen from one side makes where the line in along its normal meets space
-    // the cameras saw past, within the shell's thickness, with nothing of the object seen facing
-    // along it on the way: the wall has ended there, its other side taken parallel to this one.
-    let unseen_side = |free: &Free, first: Vec3, inward: Vec3, near: &mut Vec<(f32, usize)>| {
+    // The pair a patch seen from one side makes where a line in from it (`line`, `square` the
+    // cosine between it and the patch's normal) meets space the cameras saw past, within the
+    // shell's thickness, with nothing of the object seen facing along it on the way: the wall
+    // has ended there, its other side taken parallel to this one.
+    let unseen_side = |free: &Free, first: Vec3, line: Vec3, square: f32, near: &mut Vec<_>| {
         let steps = ((thickest - THINNEST) / BEHIND).floor().max(-1.0) as i32;
         let width = (0..=steps)
             .map(|k| THINNEST + k as f32 * BEHIND)
-            .find(|&behind| free.seen_past(first + inward * behind))?;
-        let second = first + inward * width;
-        let seen = crossed(first, inward, f32::MIN_POSITIVE, near);
-        let before = |&(at, _): &(Vec3, Vec3)| (at - first).dot(inward) <= width;
+            .find(|&behind| free.seen_past(first + line * behind))?;
+        let second = first + line * width;
+        let seen = crossed(first, line, f32::MIN_POSITIVE, near);
+        let before = |&(at, _): &(Vec3, Vec3)| (at - first).dot(line) <= width;
         if seen.iter().any(before) || between(first, second, width, near) {
             return None;
         }
         Some(Pair {
             middle: (first + second) / 2.0,
-            line: inward,
+            line,
             width,
-            square: 1.0,
+            square,
             order: 0,
         })
     };
@@ -812,7 +836,7 @@ fn pairs(s: &Surface, o: &GraspOptions) -> (Vec<Pair>, Vec<Pair>) {
         cells.within(&s.points, p, p, o.contact, near);
         near.retain(|&(_, i)| object(i) && s.normals[i].dot(n) >= cone);
         let Some((first, out)) = patch(s, near) else {
-            return (pairs, None);
+            return (pairs, [None, None]);
         };
         let inward = -out;
         for (second, facing) in crossed(first, inward, apart, near) {
@@ -857,9 +881,17 @@ fn pairs(s: &Surface, o: &GraspOptions) -> (Vec<Pair>, Vec<Pair>) {
             };
             pairs.push((pair, cells.key(first), cells.key(second)));
         }
-        let alone = free
-            .as_ref()
-            .and_then(|free| unseen_side(free, first, inward, near));
+        // A wall seen from one side is closed on along its normal and, where it leans, level
+        // too if that is inside its friction cone: a hand closing level comes in from straight
+        // above, as across a flared rim, where one closing along the normal leans as the wall
+        // does and puts a finger down beside it.
+        let level = Vec3::new(inward.x, inward.y, 0.0).try_normalize();
+        let level = level.filter(|level| (cone..1.0 - 1e-4).contains(&level.dot(inward)));
+        let alone = free.as_ref().map_or([None, None], |free| {
+            let leveled =
+                level.and_then(|line| unseen_side(free, first, line, line.dot(inward), near));
+            [unseen_side(free, first, inward, 1.0, near), leveled]
+        });
         (pairs, alone)
     };
     // One seed per cell: its first point of the object.
@@ -878,7 +910,7 @@ fn pairs(s: &Surface, o: &GraspOptions) -> (Vec<Pair>, Vec<Pair>) {
                 pairs.push(pair);
             }
         }
-        one_sided.extend(alone);
+        one_sided.extend(alone.into_iter().flatten());
     }
     let in_order = |mut pairs: Vec<Pair>| {
         pairs.sort_by(|a, b| b.square.total_cmp(&a.square));

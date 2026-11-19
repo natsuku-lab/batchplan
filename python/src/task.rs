@@ -142,6 +142,10 @@ value_class! {
         /// as the grasp has room for. A call's grasps are grouped by these; each plan's `held`
         /// starts with its grasp's. Empty: every grasp as loaded.
         locked: Vec<HashMap<String, f32>>,
+        /// How many plans will do: `None`, every grasp is tried. With a count, the grasps are
+        /// tried in their order, a few at a time, until that many have got through, and the
+        /// plans are the first that many in the grasps' order, quickest first.
+        enough: Option<usize>,
     }
     methods {
         /// Hand 0 picks up `object` of world `world` from `start` by any of `grasps`, moving in

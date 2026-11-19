@@ -297,6 +297,8 @@ def test_holds_and_picks_say_where_the_fingers_are(tasks_robot):
     pick = bp.Pick(0, tasks_robot.default_q, 1, grasps, locked=[narrow] * len(grasps))
     assert pick.locked == (narrow,) * len(grasps)
     assert bp.Pick(0, tasks_robot.default_q, 1, grasps).locked == ()
+    assert bp.Pick(0, tasks_robot.default_q, 1, grasps).enough is None
+    assert bp.Pick(0, tasks_robot.default_q, 1, grasps, enough=2).enough == 2
     assert bp.GraspOptions(narrow=True).narrow and not bp.GraspOptions().narrow
     device = bp.Device.cpu(tasks_robot)
     worlds = device.upload([bp.World([box])])

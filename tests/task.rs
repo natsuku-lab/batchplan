@@ -2084,6 +2084,94 @@ fn a_pick_keeps_the_fingers_as_narrow_as_it_says() {
     }
 }
 
+/// A pick that wants only some plans (`Pick::enough`) gives the first that many of its grasps, in
+/// their order, that get through, quickest first, each as the pick that tries every grasp gives
+/// it: of a hundred grasps of which the sixth, the 41st, the 42nd and the 91st get through, one
+/// plan is the sixth's, two are the sixth's and the 41st's (the 42nd, tried with it, left out),
+/// and ten are all four. A pick none gets through says where each of the hundred stopped, as
+/// without a count; among grasps with fingers of their own the count takes the first that plans;
+/// and no plans is not enough.
+#[test]
+fn a_pick_stops_at_as_many_plans_as_will_do_in_its_grasps_order() {
+    let robot = panda();
+    let o = TaskOptions::default();
+    // Beside the post, the grasps closing along x stop and those closing along y get through.
+    let through = [5, 40, 41, 90];
+    let grasps = (0..100).map(|k| match through.contains(&k) {
+        true => top_across(),
+        false => top(),
+    });
+    let every = pick_from(&robot, grasps.collect());
+    for device in devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(&[scene(vec![post()])]).unwrap();
+        let plans_of = |task: &Pick| {
+            let result = batchplan::pick(&device, &worlds, std::slice::from_ref(task), &o);
+            result.unwrap().outcomes.remove(0)
+        };
+        let all = plans_of(&every).unwrap();
+        let mut by_grasp: Vec<usize> = all.iter().map(|plan| plan.candidate).collect();
+        by_grasp.sort_unstable();
+        assert_eq!(by_grasp, through, "{name}");
+        for (enough, first) in [(1, &through[..1]), (2, &through[..2]), (10, &through[..])] {
+            let some = Pick {
+                enough: Some(enough),
+                ..every.clone()
+            };
+            let found = plans_of(&some).unwrap();
+            // Those of them the whole pick gives, in its order: quickest first.
+            let wanted = all.iter().filter(|plan| first.contains(&plan.candidate));
+            let wanted: Vec<&TaskPlan> = wanted.collect();
+            assert_eq!(found.len(), wanted.len(), "{name}: {enough} will do");
+            for (a, b) in found.iter().zip(wanted) {
+                assert_eq!(a.candidate, b.candidate, "{name}: {enough} will do");
+                // Searches run alike on either device; a GPU's IK rounds by its batch.
+                if name.starts_with("cpu") {
+                    assert_eq!(a.approach.control_points, b.approach.control_points);
+                    assert_eq!(a.depart.control_points, b.depart.control_points);
+                }
+            }
+        }
+        let none = Pick {
+            grasps: vec![top(); 100],
+            ..every.clone()
+        };
+        let stopped = plans_of(&none).unwrap_err();
+        let one = Pick {
+            enough: Some(1),
+            ..none
+        };
+        let tried = plans_of(&one).unwrap_err();
+        assert_eq!(tried.candidates.len(), 100, "{name}");
+        if name.starts_with("cpu") {
+            assert_eq!(tried, stopped, "{name}");
+        }
+        // Fingers narrow for the second of three grasps alone: the first plan is its.
+        let narrow: std::collections::HashMap<String, f32> = [
+            ("panda_finger_joint1".to_string(), 0.01),
+            ("panda_finger_joint2".to_string(), 0.01),
+        ]
+        .into();
+        let mixed = Pick {
+            grasps: vec![top(); 3],
+            locked: vec![Default::default(), narrow, Default::default()],
+            enough: Some(1),
+            ..every.clone()
+        };
+        let found = plans_of(&mixed).unwrap();
+        assert_eq!(found.len(), 1, "{name}");
+        assert_eq!(found[0].candidate, 1, "{name}");
+        let nothing = Pick {
+            enough: Some(0),
+            ..every.clone()
+        };
+        match batchplan::pick(&device, &worlds, &[every.clone(), nothing], &o) {
+            Err(Error::Input(message)) => assert!(message.contains("task 1"), "{message}"),
+            other => panic!("{name}: no plans being enough is refused: {other:?}"),
+        }
+    }
+}
+
 /// Points 2 mm apart on the top and sides of a box at `at`, as cameras around it would see
 /// them, with the normals out of them: the object's, or what stands beside it.
 fn seen(at: Vec3, half: Vec3, object: bool, s: &mut Surface) {

@@ -47,7 +47,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   to something farther: the second contact goes there, so `width()` is the most the wall can be,
   never past the `opening`, and the `Grasp` says so (`one_sided`). Inside a solid no ray goes, so a
   box seen from one side is closed on only across all of it, and a patch whose other side was seen
-  keeps to the seen pair. These grasps follow every grasp of two patches seen (1.5 cm suits a bowl's
+  keeps to the seen pair. A wall that leans is closed on level too, where the level line through the
+  patch is inside its friction cone, so a hand comes straight down across a flared rim where one
+  closing along the wall's normal leans with it. These grasps follow every grasp of two patches
+  seen (1.5 cm suits a bowl's
   rim: LIBERO's, its wall 3 mm thick, seen from 40 cm above, is grasped 5.5 to 11.5 mm wide at its
   rim). The evidence is where each point was seen from, `Surface::seen_from`, which `from_depth` and
   `from_points` record and `join` carries (infinite where a joined surface did not say). The points
@@ -55,6 +58,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   cloud fused from several views must not be given one place. A `GraspOptions` literal needs
   `shell: None`, and a `Surface` literal `seen_from: vec![]` (or `..Default::default()`); in Python,
   `GraspOptions(shell=0.015)`.
+
+- **Breaking:** a pick says how many plans will do: `Pick::enough` (`None` by default: every
+  grasp is tried, as before). With a count, the grasps are tried in their order, 32 and then
+  twice as many each time, until that many have got through, and the plans are the first that
+  many in the grasps' order, as trying every grasp gives them. A pick's time is the IK of its
+  grasps, so one given the hundreds `grasps_on` finds and asked for the first that gets through
+  stops after the first few. A pick none gets through has tried every one and says where each
+  stopped. A `Pick` literal needs `enough: None`; in Python, `Pick(..., enough=1)`.
 
 - **Breaking:** grasps whose fingers come in narrower than they open, where something stands
   near: `GraspOptions::narrow` (false by default, which changes nothing). Open fingers beside a
@@ -65,9 +76,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   fingers' travel is the narrowest the hand is clear at: a planner lets the fingers touch what
   they grasp and nothing else. Of openings as far from all that it takes the one with the most
   room from the object's other sides, then the widest, so a box with nothing near keeps
-  `GraspOptions::opening`. A hand that is clear narrower is not drawn back. LIBERO's bowl 4 cm
+  `GraspOptions::opening`. A grasp the open hand has stays where it is; where the open hand is clear at no
+  depth, the hand comes in as deep as it is clear narrower. LIBERO's bowl 4 cm
   from a wall twice as tall is grasped all round so (698 grasps where the open fingers find
-  654), in the time the open hand's check takes. Without `narrow` every grasp's `opening` is
+  654), in 10.7 ms where the open hand's check takes 8.9: a grasp that is found is checked
+  across each finger's whole slide, so a hand of many spheres pays more. Without `narrow` every grasp's `opening` is
   the options'. A `GraspOptions` literal needs `narrow: false`; in Python,
   `GraspOptions(narrow=True)`.
 

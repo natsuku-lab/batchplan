@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use std::f32::consts::TAU;
 use std::fmt;
+use std::ops::Range;
 
 use glam::{Mat3, Quat, Vec3};
 use rayon::prelude::*;
@@ -80,6 +81,15 @@ pub struct Pick {
     /// plan's [`TaskPlan::held`] starts with its grasp's (overwrite them with where the fingers
     /// closed). Empty: every grasp as loaded, as is a grasp whose own are empty.
     pub locked: Vec<HashMap<String, f32>>,
+    /// How many plans will do: `None`, every grasp is tried. With a count, the grasps are tried
+    /// in their order, 32 of them and then twice as many each time, until that many have got
+    /// through, and the task's plans are the first that many in the grasps' order to get
+    /// through, quickest first: those that trying every grasp gives, without the IK and the
+    /// motions of the grasps after them (on a GPU, whose IK rounds by the size of its batch,
+    /// to that rounding). Put the grasps worth having first, as
+    /// [`grasps_on`](crate::grasps_on) gives them. A task none gets through has tried every
+    /// one, and says where each stopped.
+    pub enough: Option<usize>,
 }
 
 impl Pick {
@@ -101,6 +111,7 @@ impl Pick {
             support: vec![],
             constraints: vec![],
             locked: vec![],
+            enough: None,
         }
     }
 }
@@ -405,81 +416,110 @@ pub fn pick(
     )?;
     let tasks = corrected.as_ref();
     check_picks(robot, worlds, tasks, o)?;
-    if tasks.iter().all(|t| t.locked.iter().all(HashMap::is_empty)) {
+    let whole = |t: &Pick| t.enough.is_none() && t.locked.iter().all(HashMap::is_empty);
+    if tasks.iter().all(whole) {
         return picked(device, worlds, tasks, o);
     }
-    // A relocked robot for each set of locked joints' values, and for it each task with the
-    // grasps that keep them, a batch of their own, the groups in parallel; a device for it builds
-    // nothing, and the worlds stay valid.
-    let as_loaded = HashMap::new();
-    let mut groups: Vec<Group<'_>> = vec![];
-    for (i, t) in tasks.iter().enumerate() {
-        for grasp in 0..t.grasps.len() {
-            let locked = t.locked.get(grasp).unwrap_or(&as_loaded);
-            let k = groups.iter().position(|g| g.locked == locked);
-            let k = k.unwrap_or_else(|| {
-                groups.push(Group {
-                    locked,
-                    tasks: vec![],
-                });
-                groups.len() - 1
-            });
-            match groups[k].tasks.last_mut() {
-                Some((task, grasps)) if *task == i => grasps.push(grasp),
-                _ => groups[k].tasks.push((i, vec![grasp])),
-            }
-        }
-    }
-    let results: Vec<TaskResult<Pick>> = device.install(|| {
-        let each = groups.par_iter().map(|group| {
-            let mine: Vec<Pick> = group
-                .tasks
-                .iter()
-                .map(|(i, grasps)| Pick {
-                    grasps: grasps.iter().map(|&g| tasks[*i].grasps[g]).collect(),
-                    locked: vec![group.locked.clone(); grasps.len()],
-                    ..tasks[*i].clone()
-                })
-                .collect();
-            if group.locked.is_empty() {
-                picked(device, worlds, &mine, o)
-            } else {
-                let relocked = device.with_robot(&device.robot().relock(group.locked)?)?;
-                picked(&relocked, worlds, &mine, o)
-            }
-        });
-        each.collect::<Result<_>>()
-    })?;
-    // Each task's plans from every group, numbered as its grasps are and quickest first, or
-    // where each of its grasps stopped.
+    // Each task's plans, numbered as its grasps are, and where each grasp tried without one
+    // stopped.
     let mut plans: Vec<Vec<TaskPlan>> = tasks.iter().map(|_| vec![]).collect();
     let mut stops: Vec<Vec<Option<CandidateStop>>> =
         tasks.iter().map(|t| vec![None; t.grasps.len()]).collect();
-    for (group, result) in groups.iter().zip(results) {
-        for ((i, grasps), outcome) in group.tasks.iter().zip(result.outcomes) {
-            match outcome {
-                Ok(found) => plans[*i].extend(found.into_iter().map(|plan| TaskPlan {
-                    candidate: grasps[plan.candidate],
-                    ..plan
-                })),
-                Err(failure) => {
-                    for (&grasp, stop) in grasps.iter().zip(failure.candidates) {
-                        stops[*i][grasp] = Some(stop);
+    // How many of each task's grasps have been tried, and how many more a task that wants only
+    // some plans tries at a time.
+    let mut tried = vec![0; tasks.len()];
+    let mut few = FEW;
+    let as_loaded = HashMap::new();
+    loop {
+        // The grasps each task tries next: all it has, or the next few in order while it has
+        // fewer plans than will do.
+        let next = tasks.iter().enumerate().map(|(i, t)| {
+            let more = match t.enough {
+                Some(enough) if plans[i].len() >= enough => 0,
+                Some(enough) => few.max(enough),
+                None => t.grasps.len(),
+            };
+            tried[i]..t.grasps.len().min(tried[i] + more)
+        });
+        let next: Vec<Range<usize>> = next.collect();
+        if next.iter().all(Range::is_empty) {
+            break;
+        }
+        // A relocked robot for each set of locked joints' values, and for it each task with
+        // the grasps that keep them, a batch of their own, the groups in parallel; a device
+        // for it builds nothing, and the worlds stay valid.
+        let mut groups: Vec<Group<'_>> = vec![];
+        for (i, t) in tasks.iter().enumerate() {
+            for grasp in next[i].clone() {
+                let locked = t.locked.get(grasp).unwrap_or(&as_loaded);
+                let k = groups.iter().position(|g| g.locked == locked);
+                let k = k.unwrap_or_else(|| {
+                    groups.push(Group {
+                        locked,
+                        tasks: vec![],
+                    });
+                    groups.len() - 1
+                });
+                match groups[k].tasks.last_mut() {
+                    Some((task, grasps)) if *task == i => grasps.push(grasp),
+                    _ => groups[k].tasks.push((i, vec![grasp])),
+                }
+            }
+        }
+        let results: Vec<TaskResult<Pick>> = device.install(|| {
+            let each = groups.par_iter().map(|group| {
+                let mine: Vec<Pick> = group
+                    .tasks
+                    .iter()
+                    .map(|(i, grasps)| Pick {
+                        grasps: grasps.iter().map(|&g| tasks[*i].grasps[g]).collect(),
+                        locked: vec![group.locked.clone(); grasps.len()],
+                        ..tasks[*i].clone()
+                    })
+                    .collect();
+                if group.locked.is_empty() {
+                    picked(device, worlds, &mine, o)
+                } else {
+                    let relocked = device.with_robot(&device.robot().relock(group.locked)?)?;
+                    picked(&relocked, worlds, &mine, o)
+                }
+            });
+            each.collect::<Result<_>>()
+        })?;
+        for (group, result) in groups.iter().zip(results) {
+            for ((i, grasps), outcome) in group.tasks.iter().zip(result.outcomes) {
+                match outcome {
+                    Ok(found) => plans[*i].extend(found.into_iter().map(|plan| TaskPlan {
+                        candidate: grasps[plan.candidate],
+                        ..plan
+                    })),
+                    Err(failure) => {
+                        for (&grasp, stop) in grasps.iter().zip(failure.candidates) {
+                            stops[*i][grasp] = Some(stop);
+                        }
                     }
                 }
             }
         }
+        for (tried, next) in tried.iter_mut().zip(next) {
+            *tried = next.end;
+        }
+        few *= 2;
     }
-    let outcomes = plans.into_iter().zip(stops).map(|(mut plans, stops)| {
+    // The first plans in the grasps' order, as many as will do, quickest first; or where each
+    // grasp stopped, every one having been tried.
+    let outcomes = tasks.iter().zip(plans).zip(stops);
+    let outcomes = outcomes.map(|((t, mut plans), stops)| {
         if plans.is_empty() {
             let candidates = stops.into_iter();
             return Err(TaskFailure {
                 candidates: candidates
-                    .map(|stop| stop.expect("a task without a plan has every grasp's stop"))
+                    .map(|stop| stop.expect("a task without a plan has tried every grasp"))
                     .collect(),
             });
         }
         plans.sort_by_key(|plan| plan.candidate);
+        plans.truncate(t.enough.unwrap_or(usize::MAX));
         plans.sort_by(|a, b| a.duration().total_cmp(&b.duration()));
         Ok(plans)
     });
@@ -488,6 +528,10 @@ pub fn pick(
         outcomes: outcomes.collect(),
     })
 }
+
+/// How many grasps a pick that wants only some plans ([`Pick::enough`]) tries first: enough
+/// that their IK is one batch worth sending, and twice as many each time after.
+const FEW: usize = 32;
 
 /// The grasps of a call's picks that keep the robot's locked joints at one set of values.
 struct Group<'a> {
@@ -526,6 +570,10 @@ fn check_picks(robot: &Robot, worlds: &Worlds, tasks: &[Pick], o: &TaskOptions) 
             t.lift
         );
         check_support(i, world, &t.support, Some(t.object))?;
+        ensure_input!(
+            t.enough != Some(0),
+            "task {i}: at least one plan must be enough, got 0"
+        );
         ensure_input!(
             t.locked.is_empty() || t.locked.len() == t.grasps.len(),
             "task {i}: locked joints' values for {} grasps of {}",
@@ -1056,7 +1104,10 @@ pub struct GraspOptions {
     /// nothing of the object seen facing along the line before it. The wall has ended there: the
     /// second contact is put there, the other side taken parallel to the side seen, so the width is
     /// the most the wall can be, and a wall is never taken thicker than the fingers open: a shell
-    /// past the `opening` is one at it. A bowl's rim seen from above is grasped so, its outer wall
+    /// past the `opening` is one at it. A wall that leans is closed on level as well, where the
+    /// level line through the patch is inside its friction cone (`friction`): the hand then comes
+    /// straight down across a flared rim, where one closing along the wall's normal leans as the
+    /// wall does. A bowl's rim seen from above is grasped so, its outer wall
     /// hidden under it. Inside a solid no ray goes, so none of these grasps ends in one: a box seen
     /// from one side is closed on only across all of it, where the cameras saw past its far side.
     /// The space found lies past where the wall ends by what the rays leave unseen: under a bowl's
@@ -1074,7 +1125,9 @@ pub struct GraspOptions {
     /// takes the one with the most room from the object's other sides, then the widest: a
     /// finger inside a bowl stands midway between its walls, and a box with nothing near is
     /// grasped at the whole `opening`. A rim beside a wall the open fingers would be in is
-    /// grasped so, and a hand that is clear narrower is not drawn back. Lock the fingers there
+    /// grasped so. A grasp the open hand has stays where it is, drawn back as the open hand
+    /// is; where the open hand is clear at no depth, the hand comes in as deep as it is clear
+    /// narrower. Lock the fingers there
     /// for the pick ([`Pick::locked`]); a call's grasps share at most sixteen openings.
     pub narrow: bool,
 }
