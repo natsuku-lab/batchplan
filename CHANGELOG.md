@@ -10,6 +10,19 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- Where a held object rests on what cameras see:
+  `rests_on(&device, &[RestProblem], &[Surface], &RestOptions)`. A problem names the object, how
+  it is turned as it is set down (`rotation`: upright, on its side, flat on a slope) and a
+  surface whose `object` points are the support. The object comes straight down over spots
+  `spacing` (1 cm) apart at `turns` (8) turns about the vertical, and a `Rest` comes back where
+  what it then touches holds it, with `friction` (0.5) at the contacts and its weight tipped
+  `tipping` (5°) any way, clear of every other point by `clearance` (1 cm): the object's `pose`,
+  for `Place::poses`, the `support` it touches and how far it can be `tipping`. It rests only as
+  it is set down, not tipped, rolled or slid into place: a slope needs the rotation that lies
+  flat on it, and a cradle a spot over its middle. Many problems run in one call, each surface
+  read once. `examples/surface_rests.rs` times it, and `scripts/validate_rests.py` lets go of
+  each rest in MuJoCo.
+
 - What a configuration touches while it holds an object:
   `device.contacts_holding(&worlds, &item_world, &q, within, &holding)`, with a `Held` or `None`
   per item, on the device that holds nothing, as a problem's `holding` takes it. What the held

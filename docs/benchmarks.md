@@ -225,6 +225,20 @@ The failed pick has every grasp blocked or out of reach. Grasp IK dominates pick
 
 Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from 16 directions, 22 spheres swept 10 cm against the points near them. Checked against every point of the scene through one coarse grid, before the points near the object were kept in cells of their own and a check stopped at its first point in the way, the bowl took 211 ms and the box 314 ms on one thread, with the same grasps to the last bit.
 
+## Rests on a surface
+
+`examples/surface_rests.rs` finds where a held object rests on what cameras see (`rests_on`) with the default options (spots 1 cm apart, 8 turns, cells 2 mm wide) on the M4 Pro's 14 threads, the quickest of five calls (of three for the 64 boxes), and of several runs on a machine building beside them; on one thread, one run:
+
+| | Points | Rests | Time | On one thread |
+|---|---|---|---|---|
+| A box 4 by 6 by 5 cm on a table 60 cm square among three blocks, in two 640×480 depth images | 392,708, 359,217 of them the table's | 11,808 | 55 ms | 542 ms |
+| A can in a basket 20 cm square, seen from above | 99,225 | 244, on its floor | 2.3 ms | 13 ms |
+| A tray 12 by 6 cm across two bars 2 cm thick, 8 cm apart | 9,362 | 411 | 18 ms | 170 ms |
+| A bottle 16 cm long laid flat on a rack sloping 30° against the lip at its foot, spots 2 mm apart at the one turn that lies flat | 10,117 | 150, all against the lip | 47 ms | 482 ms |
+| 64 boxes of as many heights on that table in one call | 392,708 | 755,622 | 3.2 s, 51 ms a box | 36 s |
+
+The table is read once for the 64 boxes. A flat bottom on a flat top is judged in closed form; the tray and the bottle touch two stretches of support that push different ways, which takes a balance of forces per pose and most of their time. `scripts/validate_rests.py` lets go of up to 250 rests of each scene in MuJoCo, on the support as a height field: all stay on the table and in the basket, 248 of 250 across the bars and 148 of 150 on the rack, the others at the very end of the support.
+
 ## Spheres for what a hand holds
 
 `examples/held_spheres.rs` holds three round shapes with the default 64 spheres to spend and with 256 (`Held::spheres`), within the default 5 mm, on the M4 Pro: how many spheres each takes, how far they reach past it, and how long covering or fitting it took.

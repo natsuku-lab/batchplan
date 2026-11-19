@@ -52,6 +52,7 @@ mod loops;
 pub mod meshes;
 mod mjcf;
 pub mod npy;
+mod rest;
 pub mod rng;
 pub mod robot;
 pub mod rrt;
@@ -83,6 +84,7 @@ pub use live::{
     servo,
 };
 pub use meshes::{Clearance, MeshModel};
+pub use rest::{Rest, RestOptions, RestProblem, rests_on};
 pub use robot::{AttachedObject, CollisionModel, JointLimits, Part, Robot, RobotOptions};
 pub use rrt::{RrtOptions, RrtProblem, RrtResult};
 pub use sdf::{DepthImage, Intrinsics, Occlusion, OccupancyMap, RobotMask, SdfGrid, SdfOptions};
