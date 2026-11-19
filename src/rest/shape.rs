@@ -55,21 +55,27 @@ impl Shape {
         }
     }
 
-    /// The shape shrunk by `by` all round, or by half its least size where that is less, so
-    /// that it stays a solid: a box and a cylinder to the box and the cylinder that it holds.
-    pub(super) fn shrunk(self, by: f32) -> Self {
-        let least = match self {
+    /// The shape turned by `turn` worn down by a level disc of radius `by`: what of it is in it
+    /// wherever it moves that far level, as a box less by `by` along each of its axes as far as
+    /// that axis runs level. None where less than `least` would be left of it any way.
+    pub(super) fn worn(self, by: f32, turn: Quat, least: f32) -> Option<Self> {
+        let axes = Mat3::from_quat(turn);
+        let level = |axis: Vec3| by * axis.truncate().length();
+        let worn = match self {
+            Shape::Cuboid(half) => {
+                let less = Vec3::new(level(axes.x_axis), level(axes.y_axis), level(axes.z_axis));
+                Shape::Cuboid(half - less)
+            }
+            Shape::Sphere(r) => Shape::Sphere(r - by),
+            Shape::Cylinder(r, h) => Shape::Cylinder(r - by, h - level(axes.z_axis)),
+            Shape::Capsule(r, h) => Shape::Capsule(r - by, h),
+        };
+        let thick = match worn {
             Shape::Cuboid(half) => half.min_element(),
             Shape::Sphere(r) | Shape::Capsule(r, _) => r,
             Shape::Cylinder(r, h) => r.min(h),
         };
-        let by = by.min(0.5 * least);
-        match self {
-            Shape::Cuboid(half) => Shape::Cuboid(half - by),
-            Shape::Sphere(r) => Shape::Sphere(r - by),
-            Shape::Cylinder(r, h) => Shape::Cylinder(r - by, h - by),
-            Shape::Capsule(r, h) => Shape::Capsule(r - by, h),
-        }
+        (thick >= least).then_some(worn)
     }
 
     /// How far from its middle any of it lies.

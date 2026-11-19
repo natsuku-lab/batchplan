@@ -2109,13 +2109,12 @@ fn what_is_let_go_over_a_pen_falls_in_and_stays() {
     let first = found[0].pose.position.truncate();
     assert!(first.abs().max_element() < 0.01, "{first}");
     // Walls lower than its middle, a gap it fits through, a floor no camera saw and a table hold
-    // nothing in. A gap narrower than it does, and one narrower than it by less than the spots
-    // are apart is taken as one it may slip through.
+    // nothing in. A gap narrower than it does.
     for (what, s) in [
         ("low walls", pen(0.03, 0.0)),
         ("a gap of 9 cm", pen(0.08, 0.09)),
         (
-            "a gap of 6.5 cm, wider than it and narrower than its clearance",
+            "a gap of 6.5 cm, which it fits through and its clearance does not",
             pen(0.08, 0.065),
         ),
         ("no floor", basket(false, Some(true))),
@@ -2126,8 +2125,9 @@ fn what_is_let_go_over_a_pen_falls_in_and_stays() {
     }
     assert_eq!(falls(&can, &pen(0.08, 0.04), &o).len(), found.len());
     // Its corner open, the walls to either side stopping 4 cm short of it, 5.7 cm apart across
-    // it: the can shrunk by half the spots' diagonal, 4.6 cm across, leaves that way, between
-    // two spots that each touch a wall.
+    // it: too narrow for the can, but not for it worn down by half the spots' diagonal, 4.6 cm
+    // across, which leaves that way between two spots that each touch a wall. It is taken as a
+    // way out.
     let mut corner = Surface::default();
     level(
         Vec2::new(-0.1, -0.08),
@@ -2143,6 +2143,49 @@ fn what_is_let_go_over_a_pen_falls_in_and_stays() {
     wall(Vec2::new(0.105, -0.025), Vec2::new(0.005, 0.065));
     wall(Vec2::new(-0.025, 0.085), Vec2::new(0.085, 0.005));
     assert!(falls(&can, &corner, &o).is_empty());
+    // Over a floor seen but for a hole 12 cm square in its middle, it is let go over the hole
+    // too, as deep as it lands anywhere in the pen.
+    let mut holed = Surface::default();
+    for (lower, upper) in [
+        (Vec2::new(-0.1, -0.08), Vec2::new(0.1, -0.06)),
+        (Vec2::new(-0.1, 0.06), Vec2::new(0.1, 0.08)),
+        (Vec2::new(-0.1, -0.06), Vec2::new(-0.06, 0.06)),
+        (Vec2::new(0.06, -0.06), Vec2::new(0.1, 0.06)),
+    ] {
+        level(lower, upper, 0.01, true, &mut holed);
+    }
+    let mut walls = pen(0.08, 0.0);
+    walls.points.retain(|p| p.z > 0.0105);
+    let kept = walls.points.len();
+    walls.normals.truncate(kept);
+    walls.object.truncate(kept);
+    holed.join(walls);
+    let over_the_hole: Vec<Fall> = falls(&can, &holed, &o)
+        .into_iter()
+        .filter(|f| f.pose.position.truncate().abs().max_element() < 0.02)
+        .collect();
+    assert!(!over_the_hole.is_empty());
+    for f in &over_the_hole {
+        assert!((f.sunk - 0.08).abs() < 1e-4, "{f:?}");
+    }
+    // A plate 6 cm square and 6 mm thick lying flat, and a ball 2.4 cm across, slide out
+    // through a gap a little wider than they are; in the closed pen they are held in. Worn down
+    // by half the spots' diagonal, they keep their thickness.
+    let plate = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.03, 0.03, 0.003));
+    let ball = Obstacle::sphere(Vec3::ZERO, 0.012);
+    let once = RestOptions { turns: 1, ..o };
+    for (what, object, gap) in [("plate", &plate, 0.062), ("ball", &ball, 0.025)] {
+        assert!(!falls(object, &pen(0.08, 0.0), &once).is_empty(), "{what}");
+        let out = falls(object, &pen(0.08, gap), &once);
+        assert!(out.is_empty(), "{what}: {}", out.len());
+    }
+    // A ball 1.6 cm across and a pencil standing have none: worn down that far, less than a
+    // cell of the support is left of them, which could slip between the points seen of a wall.
+    let pencil = Obstacle::cylinder(Vec3::ZERO, 0.004, 0.08);
+    let small = Obstacle::sphere(Vec3::ZERO, 0.008);
+    for thin in [&pencil, &small] {
+        assert!(falls(thin, &pen(0.12, 0.0), &o).is_empty(), "{thin:?}");
+    }
     // A box 4 by 6 cm comes at every turn, turned its own way.
     let boxed = falls(&a_box(), &pen(0.08, 0.0), &o);
     let mut turns: Vec<Quat> = boxed.iter().map(|f| f.pose.rotation).collect();

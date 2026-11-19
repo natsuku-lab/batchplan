@@ -6,15 +6,15 @@
 //! inside: under gravity an object is caged where it would have to be lifted to get out, by
 //! more than it can be (Mahler et al., Energy-Bounded Caging, 2016). Here the object keeps the
 //! turn it is let go at and moves over what was seen as a height: at each spot, how high it
-//! lands let go straight down there, on the support or on anything else in the way. A hollow of those heights is found as the hollows of a
-//! terrain are, by flooding it from its edge inward, lowest first, which gives every spot the
-//! level it would have to rise to before it could leave (Barnes et al., Priority-Flood, 2014).
-//! The object is held in where that level is more than the height of its own middle above
-//! where it lands: its weight is then under the rim it would have to cross.
+//! lands let go straight down there, on the support or on anything else in the way. A hollow of
+//! those heights is found as the hollows of a terrain are, by flooding it from its edge inward,
+//! lowest first, which gives every spot the level it would have to rise to before it could
+//! leave (Barnes et al., Priority-Flood, 2014). The object is held in where that level is more
+//! than the height of its own middle above where it lands: its weight is then under the rim it
+//! would have to cross.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
-
 use std::f32::consts::FRAC_1_SQRT_2;
 
 use glam::{Quat, Vec2};
@@ -32,14 +32,15 @@ use crate::types::Pose;
 #[non_exhaustive]
 pub struct Fall {
     /// The object's frame where it is let go, in the surface's frame: one of [`Place::poses`].
-    /// Its lowest point is [`RestOptions::clearance`] over the lowest of the hollow's rim.
+    /// Its lowest point is at least [`RestOptions::clearance`] over the lowest of the hollow's
+    /// rim: that far for a shape that stands level, more for one turned askew.
     ///
     /// [`Place::poses`]: crate::Place::poses
     pub pose: Pose,
-    /// How far the object would have to be lifted from where it lands to leave the hollow
-    /// (meters), at least: the lowest of the rim over the support under it. Where no support was
-    /// seen under it there, as over a floor no camera saw, the most that was seen anywhere in
-    /// the hollow.
+    /// How far under the lowest of the hollow's rim the object's bottom lands (meters): what it
+    /// would have to be lifted by to leave, to within how it fits between what it lands on.
+    /// Where nothing was seen under it there, as over a floor no camera saw, the most that was
+    /// seen anywhere in the hollow.
     pub sunk: f32,
 }
 
@@ -52,14 +53,19 @@ pub struct Fall {
 /// support or on anything else there, as what is already in a basket; a hollow is
 /// where it would have to rise from that height to get out of the support any way, sliding
 /// over it as it is turned. It is held in where the hollow's rim is higher over where it lands
-/// than its own middle is, so that its weight lies under the rim, and where nothing that is
-/// not the support is in it or over it as it is let go. A hollow needs support seen that far
-/// down somewhere in it: what no camera saw is no floor, and no hollow either. Walls with a gap
-/// the object could pass through hold nothing in.
+/// than its own middle is, so that its weight lies under the rim. A hollow needs a floor, or a
+/// wall sloping in under the object, seen that far down somewhere in it: what no camera saw is
+/// no floor, and an upright wall is read as its top. Walls with a gap the object could pass
+/// through hold nothing in: whether it can leave is asked of it worn down by a level disc of
+/// half the diagonal between spots, which also takes a gap up to that much narrower than it
+/// for one it passes. An object that leaves less than [`RestOptions::touching`] of itself so
+/// worn, any way, has no falls: it could slip between the points seen of a solid wall. Space
+/// the spots nearer for it.
 ///
 /// A problem's `object`, `surface` and `rotation` are read as [`rests_on`](super::rests_on)
-/// reads them, its `near` not at all, and of the options `turns`, `spacing`, `touching` and
-/// `clearance`. The falls come at every turn, and within a turn those with the most room
+/// reads them, and of the options `turns`, `spacing`, `touching` and `clearance`; the problems
+/// and options are checked as `rests_on` checks them, `near`, `tipping` and `friction` too,
+/// though falls read none of them. The falls come at every turn, and within a turn those with the most room
 /// around them first, and of those as roomy the nearest the middle of where it is held in, as
 /// the middle of a basket before its sides. The problems run in parallel on the device's
 /// threads, each surface read once, and a problem's falls are the same alone and among others.
@@ -103,9 +109,13 @@ fn into(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Fall> {
 fn at_turn(shape: Shape, grown: Shape, turn: Quat, seen: &Seen, o: &RestOptions) -> Vec<Fall> {
     let (spots, field) = (seen.spots, &seen.field);
     let (across, rows) = (spots.across, spots.rows);
-    // Whether it can leave is asked of it shrunk by half the diagonal between spots: a way out
-    // it fits through lies within that of a spot, where so shrunk it fits too.
-    let leaves = Turned::new(shape.shrunk(FRAC_1_SQRT_2 * o.spacing), turn);
+    // Whether it can leave is asked of it worn down by half the diagonal between spots: a way
+    // out it fits through lies within that of a spot, where so worn it fits too. Worn thinner
+    // than a cell of the support, it could slip between the points seen of a solid wall.
+    let Some(worn) = shape.worn(FRAC_1_SQRT_2 * o.spacing, turn, o.touching) else {
+        return vec![];
+    };
+    let leaves = Turned::new(worn, turn);
     let lands = |object: &Turned| {
         (0..spots.count())
             .into_par_iter()
@@ -115,11 +125,9 @@ fn at_turn(shape: Shape, grown: Shape, turn: Quat, seen: &Seen, o: &RestOptions)
     // How high under its middle the shrunk object lands over each spot, and how high it would
     // have to rise to leave from there: the lowest of the rim around it, in its bottom's height.
     let low = lands(&leaves);
-    let rim: Vec<f32> = filled(&low, across, rows)
-        .into_iter()
-        .map(|level| level - leaves.depth)
-        .collect();
-    let hollow = |k: usize| rim[k].is_finite() && rim[k] + leaves.depth > low[k];
+    let level = filled(&low, across, rows);
+    let hollow = |k: usize| level[k].is_finite() && level[k] > low[k];
+    let rim: Vec<f32> = level.iter().map(|level| level - leaves.depth).collect();
     // Where the object grown by its clearance lands over each spot, in its bottom's height,
     // and how far that is under the rim; negative infinity where nothing was seen under it.
     let grown = Turned::new(grown, turn);
@@ -161,13 +169,9 @@ fn at_turn(shape: Shape, grown: Shape, turn: Quat, seen: &Seen, o: &RestOptions)
         }
     }
     // Held in: in a hollow it lands as deep in as its middle is over its bottom somewhere, where
-    // it lands that deep itself, or on nothing that was seen.
+    // it lands that deep itself, or on nothing that was seen (infinitely deep).
     let middle = Turned::new(shape, turn).depth;
-    let held = |k: usize| {
-        hollow(k)
-            && deepest[of[k] as usize] >= middle
-            && (sunk(k) >= middle || bottom[k] == f32::NEG_INFINITY)
-    };
+    let held = |k: usize| hollow(k) && deepest[of[k] as usize] >= middle && sunk(k) >= middle;
     // How many spots lie between each and the nearest that is not held in: its room.
     let mut room: Vec<u32> = (0..low.len())
         .map(|k| u32::from(held(k)) * u32::MAX)
@@ -219,8 +223,13 @@ fn at_turn(shape: Shape, grown: Shape, turn: Quat, seen: &Seen, o: &RestOptions)
 }
 
 /// A height with the spot it is at, ordered by the height and then the spot.
-#[derive(PartialEq)]
 struct At(f32, u32);
+
+impl PartialEq for At {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
 
 impl Eq for At {}
 
