@@ -110,6 +110,17 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   Stout cylinders, and discs the budget cannot bring within the tolerance (a plate at the default
   64), are fitted as before.
 
+### Fixed
+
+- A call that held objects in several hundred ways at once, as a `place` after each of a pick's
+  plans, with more than one candidate for each, could overflow the stack of one of the device's
+  threads and abort the process: on an M4 Pro, 609 holds of a box with two poses each did so in
+  most runs, and 1,500 in every one. What runs for each hold waits for work it hands the device's
+  threads, and a thread that waits took up another hold's on top of its own, as deep as there
+  were holds. `place`, `pick` (its lift, and its grasps' finger values), `handover` and problems
+  with a `holding` now keep no more in hand than the device has threads. On the M4 Pro's CPU a
+  `place` of up to 4 holds takes what it did, and one of 16, 64 or 609 is 5 to 11% quicker.
+
 ## [0.11.0] - 2026-11-14
 
 ### Added
