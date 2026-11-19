@@ -16,7 +16,7 @@
 use std::borrow::Cow;
 use std::num::FpCategory;
 
-use glam::{UVec3, Vec3, Vec4};
+use glam::{IVec3, UVec3, Vec3, Vec4};
 use half::f16;
 use parry3d::shape::{TriMesh as ParryMesh, TriMeshFlags};
 use rayon::prelude::*;
@@ -569,6 +569,21 @@ impl Layout {
 
     fn nearest(&self, p: Vec3) -> usize {
         nearest(self.dims, self.origin, self.voxel, p)
+    }
+
+    /// The points from the last before `lo` to the first after `hi` along each axis, as the
+    /// indices of the first and the last: those that can lie in a box with these corners. None
+    /// where the box lies off the grid.
+    fn among(&self, lo: Vec3, hi: Vec3) -> Option<(UVec3, UVec3)> {
+        let index = |p: Vec3| (p - self.origin) / self.voxel;
+        let from = index(lo).floor().max(Vec3::ZERO);
+        let to = index(hi).ceil().min((self.dims - 1).as_vec3());
+        (from.cmple(to).all()).then(|| (from.as_uvec3(), to.as_uvec3()))
+    }
+
+    /// The index of the point `x`, `y`, `z` points along the axes.
+    fn index(&self, at: UVec3) -> usize {
+        (at.x + self.dims.x * (at.y + self.dims.y * at.z)) as usize
     }
 
     /// Whether `p` lies within half a voxel of the points.
@@ -1374,15 +1389,52 @@ pub(crate) const SHADOWED: i8 = i8::MIN + 1;
 /// The log-odds of a voxel no image has observed, which a surface other than the robot has hidden:
 /// never shadow again.
 pub(crate) const OCCLUDED: i8 = i8::MIN + 2;
+/// The log-odds of a voxel a part of a map leaves out, outside its region
+/// ([`OccupancyMap::part`]): no solid in its grids, and not counted.
+const APART: i8 = i8::MIN + 3;
+
+/// Every point from `from` to `to` along each axis, both included.
+fn points((from, to): (UVec3, UVec3)) -> impl Iterator<Item = UVec3> {
+    (from.z..=to.z).flat_map(move |z| {
+        (from.y..=to.y).flat_map(move |y| (from.x..=to.x).map(move |x| UVec3::new(x, y, z)))
+    })
+}
+
+/// Whether log-odds are those of a voxel an image has observed.
+fn observed(l: i8) -> bool {
+    !matches!(l, UNOBSERVED | SHADOWED | OCCLUDED | APART)
+}
 
 /// Occupancy fused from depth images over time, on a fixed grid in the world frame: per voxel, the
 /// log-odds that it is occupied, updated as OctoMap updates them (a hit adds 0.85, a miss -0.4,
 /// clamped to [-2, 3.5]). Readings that come and go settle: something seen once and then seen
 /// through three times is free again. Build distance grids from it with [`OccupancyMap::grid`].
+///
+/// What a camera cannot tell, a caller can: [`free`](OccupancyMap::free) marks space known to
+/// be empty, as where an object was before it was carried away, and
+/// [`clear`](OccupancyMap::clear) space that is no longer known, as where something was moved.
+/// [`part`](OccupancyMap::part) is the map inside one region, for a grid of one object as the
+/// cameras saw into it.
 #[derive(Clone, Debug)]
 pub struct OccupancyMap {
     grid: Layout,
     log_odds: Vec<i8>,
+    /// Whether this is a part of a map, some of its voxels left out: it takes no images.
+    part: bool,
+}
+
+/// How many of a map's voxels are occupied, free and never observed
+/// ([`OccupancyMap::counts`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MapCounts {
+    /// Voxels more likely occupied than not.
+    pub occupied: usize,
+    /// Voxels observed and not more likely occupied than not.
+    pub free: usize,
+    /// Voxels no image has observed: outside every image, along pixels without a reading, or
+    /// hidden behind a surface or the robot.
+    pub unobserved: usize,
 }
 
 impl OccupancyMap {
@@ -1403,6 +1455,7 @@ impl OccupancyMap {
         Ok(Self {
             grid,
             log_odds: vec![UNOBSERVED; grid.points()],
+            part: false,
         })
     }
 
@@ -1418,16 +1471,128 @@ impl OccupancyMap {
         robot: Option<&RobotMask>,
     ) -> Result<()> {
         image.check_with(robot)?;
+        ensure_input!(
+            !self.part,
+            "a part of a map takes no images: fuse them into the map and take its part again"
+        );
         device.integrate(&self.grid, &mut self.log_odds, &image.rigid(), robot)
     }
 
     /// The probability that the voxel holding `p` is occupied; `None` if it was never observed or
-    /// lies outside the map.
+    /// lies outside the map, or outside the region of a part of one.
     #[must_use]
     pub fn occupancy(&self, p: Vec3) -> Option<f32> {
         let l = self.log_odds[self.grid.nearest(p)];
-        (self.grid.contains(p) && l != UNOBSERVED && l != SHADOWED && l != OCCLUDED)
-            .then(|| 1.0 / (1.0 + (-f32::from(l) / 20.0).exp()))
+        (self.grid.contains(p) && observed(l)).then(|| 1.0 / (1.0 + (-f32::from(l) / 20.0).exp()))
+    }
+
+    /// How many voxels are occupied, free and never observed. Of a part, those inside its
+    /// region: a region with free voxels was seen into, and one that is all occupied and never
+    /// observed was not.
+    #[must_use]
+    pub fn counts(&self) -> MapCounts {
+        let mut counts = MapCounts::default();
+        for &l in self.log_odds.iter().filter(|&&l| l != APART) {
+            match (observed(l), l > 0) {
+                (true, true) => counts.occupied += 1,
+                (true, false) => counts.free += 1,
+                (false, _) => counts.unobserved += 1,
+            }
+        }
+        counts
+    }
+
+    /// The part of the map inside `region`, a shape in the map's frame: a map of its own that
+    /// reaches `padding` past the region's bounds, as a grid must reach past the solid it holds
+    /// ([`SdfOptions::padding`]), with every voxel that does not reach into the region left out.
+    /// A voxel reaches into it where its middle is within half a voxel's diagonal of the region:
+    /// a reading on the region's own face lies in such a voxel, on either side of the face. A
+    /// left-out voxel is no solid in the part's grid whatever is asked of never-observed space,
+    /// and is not counted. So `map.part(&object, padding)?.grid(&device, Occlusion::Occupied)` is
+    /// the object as the cameras saw into it, solid where a reading landed or nothing saw past,
+    /// with nothing around it. Where the region reaches past the map, it was never observed; past
+    /// a part it is taken from, it is left out. A part takes no images.
+    pub fn part(&self, region: &Obstacle, padding: f32) -> Result<Self> {
+        region.check().map_err(|e| input!("the region {e}"))?;
+        ensure_input!(
+            padding.is_finite() && padding >= 0.0,
+            "the padding must not be negative, got {padding}"
+        );
+        let (lo, hi) = region.bounds();
+        let voxel = self.grid.voxel;
+        // The part's points among the map's, counted from the map's first: possibly before it.
+        let first = ((lo - padding - self.grid.origin) / voxel).floor();
+        let grid = layout(
+            self.grid.origin + first * voxel,
+            hi + padding,
+            &SdfOptions {
+                voxel,
+                padding: 0.0,
+            },
+        )?;
+        let (first, dims) = (first.as_ivec3(), self.grid.dims.as_ivec3());
+        // A voxel's cube reaches this far from its middle.
+        let reach = 0.5 * 3f32.sqrt() * voxel;
+        let mut log_odds = vec![APART; grid.points()];
+        for at in (grid.among(lo - reach, hi + reach).into_iter()).flat_map(points) {
+            // The same point of the map, at the map's own coordinates, whatever the padding.
+            let of_map = first + at.as_ivec3();
+            let off = region.distance(self.grid.origin + of_map.as_vec3() * voxel);
+            if off.value > reach {
+                continue;
+            }
+            let reached = of_map.cmpge(IVec3::ZERO).all() && of_map.cmplt(dims).all();
+            log_odds[grid.index(at)] = match reached {
+                true => self.log_odds[self.grid.index(of_map.as_uvec3())],
+                // Past a map nothing was observed; past a part of one, the voxel was left out.
+                false if self.part => APART,
+                false => UNOBSERVED,
+            };
+        }
+        Ok(Self {
+            grid,
+            log_odds,
+            part: true,
+        })
+    }
+
+    /// Marks the voxels within `margin` of `shape` (in the map's frame) free, as seen through
+    /// once, or as they were where cameras saw through them more: space the caller knows is
+    /// empty though no camera has looked, as where an object stood before the robot carried it
+    /// away, or where the world already holds the shape as an obstacle of its own and the map's
+    /// grid should not hold it again. One reading there afterwards makes a voxel the shape held
+    /// occupied again.
+    pub fn free(&mut self, shape: &Obstacle, margin: f32) -> Result<()> {
+        self.mark(shape, margin, |l| match observed(l) {
+            true => l.min(MISS),
+            false => MISS,
+        })
+    }
+
+    /// Marks the voxels within `margin` of `shape` (in the map's frame) never observed: what
+    /// was seen there no longer holds, as where a drawer stood before it was pulled and where it
+    /// stands now. A grid then takes them as it is told to take never-observed space.
+    pub fn clear(&mut self, shape: &Obstacle, margin: f32) -> Result<()> {
+        self.mark(shape, margin, |_| UNOBSERVED)
+    }
+
+    /// Sets the log-odds of each voxel within `margin` of `shape`, among those of the shape's
+    /// bounds, to what `to` makes of it. A part's left-out voxels stay left out.
+    fn mark(&mut self, shape: &Obstacle, margin: f32, to: impl Fn(i8) -> i8) -> Result<()> {
+        shape.check().map_err(|e| input!("the shape {e}"))?;
+        ensure_input!(
+            margin.is_finite() && margin >= 0.0,
+            "the margin must not be negative, got {margin}"
+        );
+        let (lo, hi) = shape.bounds();
+        for at in (self.grid.among(lo - margin, hi + margin).into_iter()).flat_map(points) {
+            let n = self.grid.index(at);
+            let l = self.log_odds[n];
+            if l != APART && shape.distance(self.grid.point(n)).value <= margin {
+                self.log_odds[n] = to(l);
+            }
+        }
+        Ok(())
     }
 
     /// The distance grid of the map: voxels more likely occupied than not are solid, and voxels
@@ -1443,6 +1608,7 @@ impl OccupancyMap {
                     Occlusion::Occupied | Occlusion::OccupiedExceptRobotShadow
                 ),
                 SHADOWED => unknown == Occlusion::Occupied,
+                APART => false,
                 _ => l > 0,
             })
             .collect();

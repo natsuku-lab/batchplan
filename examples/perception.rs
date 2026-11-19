@@ -1,7 +1,8 @@
 //! What the depth calls cost, a 640x480 image at a time: which readings are the robot's, the
-//! image's points, a surface with its normals, a grid of the image, the image fused into a map and
-//! that map's grid. For a camera over a table that sees the arm and for one the hand carries, with
-//! the Panda's 61 spheres and with it fitted to several hundred (a budget of 576).
+//! image's points, a surface with its normals, a grid of the image, the image fused into a map,
+//! that map's grid, one object's part of it, and what a caller marks in it. For a camera over a
+//! table that sees the arm and for one the hand carries, with the Panda's 61 spheres and with it
+//! fitted to several hundred (a budget of 576).
 //!
 //! cargo run --release --example perception [-- --cpu [threads]]
 
@@ -222,6 +223,32 @@ fn main() -> Result<()> {
                 sum(&grid?)
             );
         }
+        // One object's part of the map, as the cameras saw into its box, and what a caller marks.
+        let object = &scene.obstacles[1];
+        let (median, best, part) = timed(9, || map.part(object, 0.15));
+        let part = part?;
+        let counts = part.counts();
+        println!(
+            "  the map's part in a box of the scene: median {median:.2} ms, best {best:.2} ({} voxels occupied, {} free, {} never observed)",
+            counts.occupied, counts.free, counts.unobserved
+        );
+        let (median, best, grid) = timed(9, || part.grid(&device, Occlusion::Occupied));
+        let grid = grid?;
+        let [nx, ny, nz] = grid.dims();
+        println!(
+            "  that part's grid: median {median:.2} ms, best {best:.2} ({nx}x{ny}x{nz}, sum {:.6})",
+            sum(&grid)
+        );
+        let (median, best, marked) = timed(9, || {
+            let mut copy = map.clone();
+            copy.free(object, 0.01)?;
+            copy.clear(object, 0.01)?;
+            Ok::<_, batchplan::Error>(copy.counts())
+        });
+        println!(
+            "  a copy of the map with the box marked free, then cleared: median {median:.2} ms, best {best:.2} ({} never observed)",
+            marked?.unobserved
+        );
     }
     Ok(())
 }
