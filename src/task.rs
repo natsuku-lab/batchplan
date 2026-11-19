@@ -160,6 +160,14 @@ pub struct Place {
     /// before; a pose none clears stops at its departure, with what the last one tried met.
     /// Empty: the hand opens to where the robot was loaded with them.
     pub open: Vec<HashMap<String, f32>>,
+    /// How many plans will do: `None`, every pose is tried. With a count, the poses are tried in
+    /// their order, 32 of them and then twice as many each time, until that many have got
+    /// through, and the task's plans are the first that many in the poses' order to get through,
+    /// quickest first: those that trying every pose gives, without the IK and the motions of
+    /// the poses after them (on a GPU, whose IK rounds by the size of its batch, to that
+    /// rounding). Put the poses worth having first. A task none gets through has tried every
+    /// one, and says where each stopped.
+    pub enough: Option<usize>,
     /// Obstacles the object is set on, by index: it may touch them as it arrives.
     pub support: Vec<usize>,
     /// Where the hands must stay along the transit ([`HandConstraint`]), as a cup carried upright
@@ -185,6 +193,7 @@ impl Place {
             lower: Vec3::Z * -0.1,
             retreat: 0.1,
             open: vec![],
+            enough: None,
             support: vec![],
             constraints: vec![],
         }
@@ -542,8 +551,9 @@ pub fn pick(
     })
 }
 
-/// How many grasps a pick that wants only some plans ([`Pick::enough`]) tries first: enough
-/// that their IK is one batch worth sending, and twice as many each time after.
+/// How many grasps a pick that wants only some plans ([`Pick::enough`]) tries first, and how
+/// many poses a place that does ([`Place::enough`]): enough that their IK is one batch worth
+/// sending, and twice as many each time after.
 const FEW: usize = 32;
 
 /// The candidates of a call's places that open their fingers alike where they let go, each with
@@ -774,8 +784,9 @@ fn picked(
 /// that names how far its hand may open ([`Place::open`]) is solved where it lets go with the
 /// fingers where they hold the object, and backs off at the first opening it is clear with
 /// ([`TaskPlan::opening`]): open the gripper that far, and follow the departure on the robot
-/// relocked there. `device` is the robot's without the object; each task's `held` is attached to
-/// it here.
+/// relocked there. A task that says how many plans will do ([`Place::enough`]) tries its poses in
+/// their order until that many have got through. `device` is the robot's without the object; each
+/// task's `held` is attached to it here.
 pub fn place(
     device: &Device,
     worlds: &Worlds,
@@ -830,6 +841,10 @@ pub fn place(
             t.retreat
         );
         check_support(i, world, &t.support, None)?;
+        ensure_input!(
+            t.enough != Some(0),
+            "task {i}: at least one plan must be enough, got 0"
+        );
         for (k, open) in t.open.iter().enumerate() {
             if !opened.contains(&open) {
                 held::check_locked(robot, open, &format!("task {i}: opening {k}"))?;
@@ -837,6 +852,77 @@ pub fn place(
             }
         }
     }
+    if tasks.iter().all(|t| t.enough.is_none()) {
+        return placed(device, worlds, tasks, o);
+    }
+    // Each task's plans, numbered as its poses are, and where each pose tried without one
+    // stopped, in the poses' order.
+    let mut plans: Vec<Vec<TaskPlan>> = tasks.iter().map(|_| vec![]).collect();
+    let mut stops: Vec<Vec<CandidateStop>> = tasks.iter().map(|_| vec![]).collect();
+    // How many of each task's poses have been tried, and how many more a task that wants only
+    // some plans tries at a time.
+    let mut tried = vec![0; tasks.len()];
+    let mut few = FEW;
+    loop {
+        // The poses each task tries next: all it has, or the next few in order while it has
+        // fewer plans than will do.
+        let next = tasks.iter().enumerate().map(|(i, t)| {
+            let more = match t.enough {
+                Some(enough) if plans[i].len() >= enough => 0,
+                Some(enough) => few.max(enough),
+                None => t.poses.len(),
+            };
+            tried[i]..t.poses.len().min(tried[i] + more)
+        });
+        let next: Vec<Range<usize>> = next.collect();
+        let going: Vec<usize> = (0..tasks.len()).filter(|&i| !next[i].is_empty()).collect();
+        if going.is_empty() {
+            break;
+        }
+        let some = going.iter().map(|&i| Place {
+            poses: tasks[i].poses[next[i].clone()].to_vec(),
+            ..tasks[i].clone()
+        });
+        let some: Vec<Place> = some.collect();
+        let result = placed(device, worlds, &some, o)?;
+        for (&i, outcome) in going.iter().zip(result.outcomes) {
+            match outcome {
+                Ok(found) => plans[i].extend(found.into_iter().map(|plan| TaskPlan {
+                    candidate: next[i].start + plan.candidate,
+                    ..plan
+                })),
+                Err(failure) => stops[i].extend(failure.candidates),
+            }
+            tried[i] = next[i].end;
+        }
+        few *= 2;
+    }
+    // The first plans in the poses' order, as many as will do, quickest first; or where each
+    // pose stopped, every one having been tried.
+    let outcomes = tasks.iter().zip(plans).zip(stops);
+    let outcomes = outcomes.map(|((t, mut plans), candidates)| {
+        if plans.is_empty() {
+            return Err(TaskFailure { candidates });
+        }
+        plans.sort_by_key(|plan| plan.candidate);
+        plans.truncate(t.enough.unwrap_or(usize::MAX));
+        plans.sort_by(|a, b| a.duration().total_cmp(&b.duration()));
+        Ok(plans)
+    });
+    Ok(TaskResult {
+        problems: tasks.to_vec(),
+        outcomes: outcomes.collect(),
+    })
+}
+
+/// [`place`] for checked tasks, every pose of each.
+fn placed(
+    device: &Device,
+    worlds: &Worlds,
+    tasks: &[Place],
+    o: &TaskOptions,
+) -> Result<TaskResult<Place>> {
+    let robot = device.robot();
     // A device holding each task's object, built in parallel; tasks holding theirs alike share one.
     // Every step below runs each holder's candidates as a batch of their own, as many holders
     // at a time as the device has threads (`Device::in_turns`).

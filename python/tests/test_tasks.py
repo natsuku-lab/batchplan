@@ -303,7 +303,7 @@ def test_holds_and_picks_say_where_the_fingers_are(tasks_robot):
     assert bp.Pick(0, tasks_robot.default_q, 1, grasps).locked == ()
     assert bp.Pick(0, tasks_robot.default_q, 1, grasps).enough is None
     place = bp.Place(0, tasks_robot.default_q, held, [bp.Pose((0.4, 0.0, 0.03))])
-    assert place.open == ()
+    assert place.open == () and place.enough is None and place.replace(enough=1).enough == 1
     opening = bp.Place(0, tasks_robot.default_q, held, place.poses, open=[{}, narrow])
     assert opening.open == ({}, narrow)
     assert bp.Pick(0, tasks_robot.default_q, 1, grasps, enough=2).enough == 2

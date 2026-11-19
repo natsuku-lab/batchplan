@@ -2579,3 +2579,97 @@ fn a_place_lets_go_as_wide_as_it_has_room_to() {
         }
     }
 }
+
+/// A place that wants only some plans (`Place::enough`) gives the first that many of its poses, in
+/// their order, that get through, quickest first, each as the place that tries every pose gives
+/// it: of a hundred poses of which the sixth, the 41st, the 42nd and the 91st are clear of a block,
+/// one plan is the sixth's, two are the sixth's and the 41st's (the 42nd, tried with it, left out),
+/// and ten are all four. In one call a place that one plan will do for and one that wants ten
+/// each get theirs. A place none gets through says where each of the hundred stopped, as without
+/// a count; and no plans is not enough.
+#[test]
+fn a_place_stops_at_as_many_plans_as_will_do_in_its_poses_order() {
+    let robot = panda();
+    let o = TaskOptions::default();
+    let free = Pose::new(Vec3::new(0.45, -0.2, HALF.z), Quat::IDENTITY);
+    let taken = Pose::new(Vec3::new(0.3, -0.25, HALF.z), Quat::IDENTITY);
+    let before = scene(vec![Obstacle::cuboid(taken.position, Vec3::splat(0.03))]);
+    let mut after = before.clone();
+    after.remove(BOX).unwrap();
+    let through = [5, 40, 41, 90];
+    let poses = (0..100).map(|k| match through.contains(&k) {
+        true => free,
+        false => taken,
+    });
+    let poses: Vec<Pose> = poses.collect();
+    for device in devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(&[before.clone(), after.clone()]).unwrap();
+        let picked = batchplan::pick(&device, &worlds, &[pick_from(&robot, vec![top()])], &o);
+        let picked = picked.unwrap();
+        let picked = &picked.outcomes[0].as_ref().unwrap()[0];
+        let every = Place {
+            support: vec![TABLE],
+            ..Place::new(1, picked.end(), picked.held.clone().unwrap(), poses.clone())
+        };
+        let plans_of = |tasks: &[Place]| batchplan::place(&device, &worlds, tasks, &o).unwrap();
+        let all = plans_of(std::slice::from_ref(&every))
+            .outcomes
+            .remove(0)
+            .unwrap();
+        let mut by_pose: Vec<usize> = all.iter().map(|plan| plan.candidate).collect();
+        by_pose.sort_unstable();
+        assert_eq!(by_pose, through, "{name}");
+        let some = |enough: usize| Place {
+            enough: Some(enough),
+            ..every.clone()
+        };
+        let same = |found: &[TaskPlan], first: &[usize], what: &str| {
+            // Those of them the whole place gives, in its order: quickest first.
+            let wanted = all.iter().filter(|plan| first.contains(&plan.candidate));
+            let wanted: Vec<&TaskPlan> = wanted.collect();
+            assert_eq!(found.len(), wanted.len(), "{name}: {what}");
+            for (a, b) in found.iter().zip(wanted) {
+                assert_eq!(a.candidate, b.candidate, "{name}: {what}");
+                assert_eq!(a.placed, b.placed, "{name}: {what}");
+                // Searches run alike on either device; a GPU's IK rounds by its batch.
+                if name.starts_with("cpu") {
+                    assert_eq!(a.approach.control_points, b.approach.control_points);
+                    assert_eq!(a.depart.control_points, b.depart.control_points);
+                }
+            }
+        };
+        for (enough, first) in [(1, &through[..1]), (2, &through[..2]), (10, &through[..])] {
+            let found = plans_of(&[some(enough)]).outcomes.remove(0).unwrap();
+            same(&found, first, &format!("{enough} will do"));
+        }
+        // One that is done after its first poses beside one that goes on to its last.
+        let both = plans_of(&[some(1), some(10)]).outcomes;
+        same(both[0].as_ref().unwrap(), &through[..1], "one, beside ten");
+        same(both[1].as_ref().unwrap(), &through, "ten, beside one");
+
+        let none = Place {
+            poses: vec![taken; 100],
+            ..every.clone()
+        };
+        let stopped = plans_of(std::slice::from_ref(&none)).outcomes.remove(0);
+        let stopped = stopped.unwrap_err();
+        let one = Place {
+            enough: Some(1),
+            ..none
+        };
+        let tried = plans_of(&[one]).outcomes.remove(0).unwrap_err();
+        assert_eq!(tried.candidates.len(), 100, "{name}");
+        assert!(
+            all_stop(&tried, TaskStep::Reach, Some(1)),
+            "{name}: {tried}"
+        );
+        if name.starts_with("cpu") {
+            assert_eq!(tried, stopped, "{name}");
+        }
+        match batchplan::place(&device, &worlds, &[every.clone(), some(0)], &o) {
+            Err(Error::Input(message)) => assert!(message.contains("task 1"), "{message}"),
+            other => panic!("{name}: no plans being enough is refused: {other:?}"),
+        }
+    }
+}

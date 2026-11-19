@@ -219,6 +219,10 @@ value_class! {
         /// object, not where the robot was loaded with them. Joints an opening does not name are
         /// as loaded. Empty: the hand opens to where the robot was loaded with them.
         open: Vec<HashMap<String, f32>>,
+        /// How many plans will do: `None`, every pose is tried. With a count, the poses are tried
+        /// in their order, a few at a time, until that many have got through, and the plans are
+        /// the first that many in the poses' order, quickest first.
+        enough: Option<usize>,
         /// Obstacles the object is set on, by index: it may touch them as it arrives.
         support: Vec<usize>,
         /// Where the hands must stay along the transit, as a cup carried upright. The start must

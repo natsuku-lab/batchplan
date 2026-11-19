@@ -71,6 +71,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   first, to offer a place the same. A `Place` literal needs `open: vec![]`; in Python,
   `Place(..., open=[{...}, ...])`, `TaskPlan.opening` and `GraspOptions.openings`.
 
+- **Breaking:** a place says how many plans will do: `Place::enough` (`None` by default: every
+  pose is tried, as before). With a count, the poses are tried in their order, 32 and then twice
+  as many each time, until that many have got through, and the plans are the first that many in
+  the poses' order, as trying every pose gives them: a place given every spot of a table plans
+  the first that will do without the IK and the motions of the rest. A place none gets through
+  has tried every pose and says where each stopped. A `Place` literal needs `enough: None`; in
+  Python, `Place(..., enough=1)`.
+
 - **Breaking:** a pick says how many plans will do: `Pick::enough` (`None` by default: every
   grasp is tried, as before). With a count, the grasps are tried in their order, 32 and then
   twice as many each time, until that many have got through, and the plans are the first that
