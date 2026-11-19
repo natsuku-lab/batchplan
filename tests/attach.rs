@@ -530,6 +530,7 @@ fn held_shapes_keep_within_a_limit_on_overhang() {
         "{refused:?}"
     );
     // Shapes of no thickness have no inside for a sphere to be held in: a sheet and a disc.
+    // Their two sides are closed and wind around nothing.
     let flat = [
         Obstacle::cuboid(center, Vec3::new(0.03, 0.03, 0.0)),
         Obstacle::Cylinder {
@@ -548,7 +549,7 @@ fn held_shapes_keep_within_a_limit_on_overhang() {
             };
             let refused = robot.attach(&held).map(|_| ());
             assert!(
-                matches!(&refused, Err(Error::Input(m)) if m.starts_with("'box': [C") && m.contains("both ways")),
+                matches!(&refused, Err(Error::Input(m)) if m.starts_with("'box': no sphere fits within `max_overhang`")),
                 "{shape:?}: {refused:?}"
             );
             // Without a limit they are covered, as before.

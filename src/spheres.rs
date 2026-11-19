@@ -12,6 +12,12 @@
 //! tighter: the least growth past them it affords, down to none, every link within its own.
 //! Parts thinner than `MIN_TANGENT_DEPTH`, and vertices whose averaged normal leads out of the
 //! geometry, get no candidates of their own and may reach a little past those bounds.
+//!
+//! Inside a closed mesh is where its surface winds around the point (`winding`): shells that
+//! overlap are their union, a shell is solid whichever way it faces, and one facing inward inside
+//! one facing outward is a cavity. The grid's cells and the depth of a sphere's center are told so.
+//! A mesh with open edges has no inside, and the side of its nearest face stands in for it, as it
+//! does for a sample's own candidate, a little way in from its face.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -27,6 +33,7 @@ use rayon::prelude::*;
 use crate::description::{self, TriMesh};
 use crate::rng::Rng;
 use crate::robot::Robot;
+use crate::winding::{Crossings, Surface};
 use crate::world::{self, Obstacle};
 
 /// Which link geometry spheres are fitted to.
@@ -52,12 +59,15 @@ pub struct SphereOptions {
     /// ([`LinkQualification::overhang`]), so `Some(0.0)` keeps every sphere inside. Spheres are
     /// chosen as without it and then held to it, which leaves surface outside them wherever
     /// `tolerance`, as the budget scales it, is the larger: [`Robot::qualify`](crate::Robot::qualify)
-    /// reports how deep as each link's `gap`. The geometry must be closed, and a collision model
-    /// given with the options is held to it as a fitted one is. Depths are measured in the
-    /// geometry as the fit sees it, a round shape as its mesh of 24 sides, which lies inside it by
-    /// up to 0.9% of a cylinder's radius and 1.7% of a ball's or a capsule's; a held shape covered
-    /// without fitting is held to the shape itself, so `qualify` reads that much more for it.
-    /// `None`: spheres cover the surface and reach as far past it as the budget makes them.
+    /// reports how deep as each link's `gap`. The geometry must be closed, every edge shared by
+    /// as many triangles one way as the other, and a collision model given with the options is
+    /// held to it as a fitted one is. A center's depth is its distance to the nearest face of a
+    /// mesh that winds around it, a face buried in another shell among them, so it is never more
+    /// than the true depth. Depths are measured in the geometry as the fit sees it, a round shape
+    /// as its mesh of 24 sides, which lies inside it by up to 0.9% of a cylinder's radius and 1.7%
+    /// of a ball's or a capsule's; a held shape covered without fitting is held to the shape
+    /// itself, so `qualify` reads that much more for it. `None`: spheres cover the surface and
+    /// reach as far past it as the budget makes them.
     pub max_overhang: Option<f32>,
     /// Largest spacing of the interior grid that proposes sphere centers (meters). Small links
     /// use a finer grid.
@@ -220,46 +230,19 @@ impl SphereCover {
     }
 }
 
-/// The largest sphere centered at `p` inside any of `solids`, if `p` is inside one.
-fn inscribed(solids: &[ParryMesh], p: Vec3) -> Option<(Vec3, f32)> {
+/// The largest sphere centered at `p` inside any of `solids`, if `p` is inside one, as the side of
+/// the nearest face tells it: for points a little way in from a face ([`LinkFit::tangent`]).
+fn inscribed(solids: &[Solid], p: Vec3) -> Option<(Vec3, f32)> {
     use parry3d::query::PointQuery;
 
     solids
         .iter()
         .filter_map(|s| {
-            let proj = s.project_local_point(p, false);
+            let proj = s.mesh.project_local_point(p, false);
             proj.is_inside.then(|| (p - proj.point).length())
         })
         .reduce(f32::max)
         .map(|r| (p, r))
-}
-
-/// `meshes` as parry tests points against them, without those it cannot build, as
-/// [`LinkFit::new`] builds its own.
-fn solids(meshes: &[TriMesh]) -> Arc<[ParryMesh]> {
-    let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
-        | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
-        | TriMeshFlags::ORIENTED;
-    meshes
-        .iter()
-        .filter_map(|m| ParryMesh::with_flags(m.vertices.clone(), m.triangles.clone(), flags).ok())
-        .collect()
-}
-
-/// How deep `p` lies inside `solids` (meters): the radius of the largest sphere centered there
-/// inside one of them, or where it is outside them all, its distance to the nearest, negative.
-fn depth(solids: &[ParryMesh], p: Vec3) -> f32 {
-    use parry3d::query::PointQuery;
-
-    inscribed(solids, p).map_or_else(
-        || {
-            -solids
-                .iter()
-                .map(|s| s.distance_to_local_point(p, false))
-                .fold(f32::INFINITY, f32::min)
-        },
-        |(_, r)| r,
-    )
 }
 
 /// One link's surface samples and candidate spheres (center, largest radius inside the geometry).
@@ -275,8 +258,8 @@ struct LinkFit {
     /// Per dense sample, whether it has joined `samples`.
     joined: Vec<bool>,
     candidates: Vec<(Vec3, f32)>,
-    /// The geometry, as parry tests points against it, shared by a fit's copies.
-    solids: Arc<[ParryMesh]>,
+    /// The geometry, as points are tested against it, shared by a fit's copies.
+    solids: Arc<[Solid]>,
     /// The largest candidate's radius, before the candidates are thinned out.
     largest: f32,
     /// Whether its loops run on the current rayon pool, or on the calling thread alone.
@@ -285,6 +268,8 @@ struct LinkFit {
 
 impl LinkFit {
     fn new(meshes: &[TriMesh], o: &SphereOptions, rng: &mut Rng, parallel: bool) -> Option<Self> {
+        use parry3d::query::PointQuery;
+
         let vertices = vertex_normals(meshes);
         let stride = vertices.len().div_ceil(MAX_VERTEX_SAMPLES).max(1);
         let mut sampled: Vec<(Vec3, Vec3)> = vertices.into_iter().step_by(stride).collect();
@@ -303,17 +288,7 @@ impl LinkFit {
             .sum();
         let count = ((area / DENSE_AREA) as usize).clamp(DENSE_SAMPLES, MAX_DENSE_SAMPLES);
         let dense = surface_samples(meshes, count, rng);
-        // As `solids` builds them, written out: calling it here took fits without a limit 2 to 7%
-        // longer in a one-unit build on x86.
-        let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
-            | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
-            | TriMeshFlags::ORIENTED;
-        let solids: Arc<[ParryMesh]> = meshes
-            .iter()
-            .filter_map(|m| {
-                ParryMesh::with_flags(m.vertices.clone(), m.triangles.clone(), flags).ok()
-            })
-            .collect();
+        let solids = solids(meshes);
         let (lo, hi) = samples
             .iter()
             .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), &p| {
@@ -326,18 +301,53 @@ impl LinkFit {
             voxel *= 1.25;
         }
         let n = cells(voxel);
-        let cell = |i: u32| {
-            let (x, y, z) = (i % n.x, i / n.x % n.y, i / (n.x * n.y));
-            inscribed(
-                &solids,
-                lo + (Vec3::new(x as f32, y as f32, z as f32) + 0.5) * voxel,
-            )
+        // The cells' centers along each axis.
+        let along = |axis: usize| -> Vec<f32> {
+            let cells = 0..n[axis];
+            cells.map(|i| lo[axis] + (i as f32 + 0.5) * voxel).collect()
         };
-        let cells = 0..n.element_product();
+        let (xs, ys, zs) = (along(0), along(1), along(2));
+        // Where the rows of cells cross each closed solid, for what winds around each cell.
+        let crossed = |s: &Solid| {
+            s.closed
+                .then(|| Crossings::new(s.mesh.vertices(), s.mesh.indices(), &ys, &zs, parallel))
+        };
+        let crossings: Vec<Option<Crossings>> = solids.iter().map(crossed).collect();
+        // A row's cells that are inside a solid, each with the largest sphere inside one: only
+        // those are measured to the surface, which is most of what a cell costs.
+        let (xs, crossings) = (xs.as_slice(), crossings.as_slice());
+        let row = |row: u32| -> Vec<(Vec3, f32)> {
+            let (y, z) = (ys[(row % n.y) as usize], zs[(row / n.y) as usize]);
+            let numbers = crossings
+                .iter()
+                .map(|c| c.as_ref().map(|c| c.numbers(row as usize, xs)));
+            let mut wound: Vec<_> = numbers.collect();
+            let cell = |&x: &f32| {
+                let p = Vec3::new(x, y, z);
+                let radius = |(s, wound): (&Solid, &mut Option<_>)| {
+                    let inside = match wound {
+                        Some(numbers) => Iterator::next(numbers) != Some(0),
+                        None => true,
+                    };
+                    if !inside {
+                        return None;
+                    }
+                    let proj = s.mesh.project_local_point(p, false);
+                    (s.closed || proj.is_inside).then(|| (p - proj.point).length())
+                };
+                let radii = solids.iter().zip(&mut wound).filter_map(radius);
+                radii.reduce(f32::max).map(|r| (p, r))
+            };
+            // Room for the whole row at once: a box's cells are all inside it.
+            let mut inside = Vec::with_capacity(xs.len());
+            inside.extend(xs.iter().filter_map(cell));
+            inside
+        };
+        let rows = 0..n.y * n.z;
         let mut candidates: Vec<(Vec3, f32)> = if parallel {
-            cells.into_par_iter().filter_map(cell).collect()
+            rows.into_par_iter().flat_map_iter(row).collect()
         } else {
-            cells.filter_map(cell).collect()
+            rows.flat_map(row).collect()
         };
         if candidates.is_empty() {
             // Open or degenerate geometry has no interior; grow spheres from the surface instead.
@@ -361,9 +371,10 @@ impl LinkFit {
     /// overhang, the share of the dense samples outside every one and how far outside the
     /// farthest lies, and the geometry's thickness.
     fn measure(&self, link: &str, spheres: &[[f32; 4]]) -> LinkQualification {
+        let depths = Depths::new(&self.solids);
         let overhang = spheres
             .iter()
-            .map(|s| s[3] - depth(&self.solids, Vec3::new(s[0], s[1], s[2])))
+            .map(|s| s[3] - depths.at(Vec3::new(s[0], s[1], s[2])))
             .fold(0.0, f32::max);
         let inside = |p: Vec3| {
             spheres
@@ -579,14 +590,15 @@ impl LinkFit {
     /// least growth took 7 to 12% longer on x86.
     #[inline(never)]
     fn hold(&self, spheres: &mut Vec<[f32; 4]>, limit: f32) -> f32 {
-        let corner = |far: f32, solid: &ParryMesh| {
-            let bounds = solid.local_aabb();
+        let corner = |far: f32, solid: &Solid| {
+            let bounds = solid.mesh.local_aabb();
             far.max(bounds.mins.abs().max(bounds.maxs.abs()).max_element())
         };
         let least = ROUNDING * self.solids.iter().fold(0.0, corner);
+        let depths = Depths::new(&self.solids);
         let mut reach = 0.0f32;
         spheres.retain_mut(|sphere| {
-            let depth = depth(&self.solids, Vec3::new(sphere[0], sphere[1], sphere[2]));
+            let depth = depths.at(Vec3::new(sphere[0], sphere[1], sphere[2]));
             sphere[3] = sphere[3].min(depth + limit);
             let kept = sphere[3] > least;
             if kept {
@@ -1187,23 +1199,103 @@ pub(crate) fn ignore_pairs(
     out
 }
 
-// What only a limit on overhang runs is kept here, after the fit's functions: set among them, it
-// took fits without a limit 2 to 8% longer in a one-unit build on x86.
+// What a fit runs once for a link, or not at all without a limit, is kept here, after the
+// functions it spends its time in: set among them, it took fits 2 to 8% longer in a one-unit
+// build on x86.
+
+/// One mesh of a link's geometry.
+struct Solid {
+    /// For distances to its surface, and the side of its nearest face.
+    mesh: ParryMesh,
+    /// Whether its surface is closed: every edge borders as many triangles that run along it one
+    /// way as the other. What it winds around is then its inside (`winding`), shells that overlap
+    /// their union. A mesh with open edges has none, and the side of its nearest face stands in.
+    closed: bool,
+}
+
+/// `meshes` as points are tested against them, without those parry cannot build.
+fn solids(meshes: &[TriMesh]) -> Arc<[Solid]> {
+    let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
+        | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
+        | TriMeshFlags::ORIENTED;
+    let solid = |m: &TriMesh| {
+        let mesh = ParryMesh::with_flags(m.vertices.clone(), m.triangles.clone(), flags).ok()?;
+        // Each edge as its two vertices, lower first, by which way a triangle runs along it.
+        let (mut forward, mut backward) = (vec![], vec![]);
+        for &[a, b, c] in mesh.indices() {
+            for (from, to) in [(a, b), (b, c), (c, a)] {
+                let edge = u64::from(from.min(to)) << 32 | u64::from(from.max(to));
+                if from < to {
+                    forward.push(edge);
+                } else {
+                    backward.push(edge);
+                }
+            }
+        }
+        forward.sort_unstable();
+        backward.sort_unstable();
+        Some(Solid {
+            closed: forward == backward,
+            mesh,
+        })
+    };
+    meshes.iter().filter_map(solid).collect()
+}
+
+/// How deep points lie inside a link's solids, one at a time.
+struct Depths<'a> {
+    solids: &'a [Solid],
+    /// Per solid that is closed, its surface, for what winds around a point.
+    surfaces: Vec<Option<Surface<'a>>>,
+}
+
+impl<'a> Depths<'a> {
+    fn new(solids: &'a [Solid]) -> Self {
+        let surface = |s: &'a Solid| {
+            s.closed
+                .then(|| Surface::new(s.mesh.vertices(), s.mesh.indices()))
+        };
+        Self {
+            solids,
+            surfaces: solids.iter().map(surface).collect(),
+        }
+    }
+
+    /// How deep `p` lies inside the solids (meters): the radius of the largest sphere centered
+    /// there that crosses no face of a solid it is inside, or where it is outside them all, its
+    /// distance to the nearest, negative. Inside a closed solid is where its surface winds around
+    /// the point, and inside one with open edges the inner side of its nearest face.
+    fn at(&self, p: Vec3) -> f32 {
+        use parry3d::query::PointQuery;
+
+        let (mut deepest, mut nearest) = (None::<f32>, f32::INFINITY);
+        for (s, surface) in self.solids.iter().zip(&self.surfaces) {
+            let proj = s.mesh.project_local_point(p, false);
+            let to_surface = (p - proj.point).length();
+            let wound = |surface: &Surface| surface.number(p) != 0;
+            if surface.as_ref().map_or(proj.is_inside, wound) {
+                deepest = Some(deepest.map_or(to_surface, |d| d.max(to_surface)));
+            }
+            nearest = nearest.min(to_surface);
+        }
+        deepest.unwrap_or(-nearest)
+    }
+}
 
 /// Why spheres cannot be held within a distance of `meshes` ([`SphereOptions::max_overhang`]), if
-/// they cannot: a sphere's depth is measured by the side of the nearest face, which tells inside
-/// from outside only for closed shells that face outward and give each face once. So, once
-/// vertices at one place are merged and triangles that name a vertex twice are dropped, a mesh
-/// is refused that gives a face again, the same way or the other (as where two shells share one,
-/// or a sheet has two sides); that has an edge bordering unlike counts of triangles each way; or
-/// that has a shell facing inward, a cavity's among them, which the meshes' own orientation
-/// (`TriMesh::orient_outward`, by their whole volume) leaves as it is.
+/// they cannot: a mesh that is not closed has no inside for a sphere's depth to be measured in.
+/// Closed, as [`Solid::closed`]: every edge borders as many triangles that run along it one way
+/// as the other, once vertices at one place are merged and triangles that name a vertex twice
+/// are dropped. A triangle given twice the same way leaves its edges with one too many.
 pub(crate) fn closed(meshes: &[TriMesh]) -> Result<(), String> {
     let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES;
     for (k, mesh) in meshes.iter().enumerate() {
         let of = format!("mesh {k} of {}", meshes.len());
         let solid = ParryMesh::with_flags(mesh.vertices.clone(), mesh.triangles.clone(), flags)
             .map_err(|e| format!("{of} has no surface: {e}"))?;
+        if solid.indices().is_empty() {
+            return Err(format!("{of} has no surface"));
+        }
         // Each triangle from its lowest vertex, so that one given again is the same three.
         let from_lowest = |&[a, b, c]: &[u32; 3]| {
             if a <= b && a <= c {
@@ -1215,58 +1307,28 @@ pub(crate) fn closed(meshes: &[TriMesh]) -> Result<(), String> {
             }
         };
         let mut faces: Vec<[u32; 3]> = solid.indices().iter().map(from_lowest).collect();
-        if faces.is_empty() {
-            return Err(format!("{of} has no surface"));
-        }
         faces.sort_unstable();
         let again = faces.windows(2).filter(|pair| pair[0] == pair[1]).count();
-        let reversed = |&&[a, b, c]: &&[u32; 3]| faces.binary_search(&[a, c, b]).is_ok();
-        let both_ways = faces.iter().filter(reversed).count() / 2;
-        if again + both_ways > 0 {
+        if again > 0 {
             return Err(format!(
-                "{of} gives faces more than once, {again} the same way again and {both_ways} both \
-                 ways, so the side of the nearest face cannot tell inside from outside"
+                "{of} is not closed: it gives {again} of its {} faces again the same way",
+                faces.len() - again
             ));
         }
-        // Per edge, the triangles that run along it from its lower vertex less those that run
-        // back, and one of its triangles, to join shells by.
-        let mut edges: BTreeMap<(u32, u32), (i32, usize)> = BTreeMap::new();
-        // Each triangle's shell, as the lowest triangle joined to it across edges so far.
-        let mut shell: Vec<usize> = (0..faces.len()).collect();
-        let first = |shell: &[usize], mut t: usize| {
-            while shell[t] != t {
-                t = shell[t];
-            }
-            t
-        };
-        for (t, &[a, b, c]) in faces.iter().enumerate() {
+        // Per edge, the triangles that run along it from its lower vertex less those that run back.
+        let mut edges: BTreeMap<(u32, u32), i32> = BTreeMap::new();
+        for [a, b, c] in faces {
             for (from, to) in [(a, b), (b, c), (c, a)] {
-                let edge = edges.entry((from.min(to), from.max(to))).or_insert((0, t));
-                edge.0 += if from < to { 1 } else { -1 };
-                let (ours, theirs) = (first(&shell, t), first(&shell, edge.1));
-                shell[ours.max(theirs)] = ours.min(theirs);
+                *edges.entry((from.min(to), from.max(to))).or_default() +=
+                    if from < to { 1 } else { -1 };
             }
         }
-        let open = edges.values().filter(|edge| edge.0 != 0).count();
+        let open = edges.values().filter(|&&balance| balance != 0).count();
         if open > 0 {
             return Err(format!(
                 "{of} is not closed: {open} of its {} edges border a triangle on one side alone, \
                  or triangles that face opposite ways",
                 edges.len()
-            ));
-        }
-        // Six times each shell's volume, negative where it faces inward.
-        let mut volumes: BTreeMap<usize, f64> = BTreeMap::new();
-        for (t, face) in faces.iter().enumerate() {
-            let [a, b, c] = face.map(|i| solid.vertices()[i as usize].as_dvec3());
-            *volumes.entry(first(&shell, t)).or_default() += a.dot(b.cross(c));
-        }
-        let inward = volumes.values().filter(|&&volume| volume <= 0.0).count();
-        if inward > 0 {
-            return Err(format!(
-                "{of} has {inward} of its {} shells facing inward, whose outside the side of the \
-                 nearest face takes for inside",
-                volumes.len()
             ));
         }
     }
@@ -1286,13 +1348,14 @@ pub(crate) fn within(
     max_overhang: f32,
 ) -> Result<(), String> {
     let solids = solids(meshes);
+    let depths = Depths::new(&solids);
     let largest = meshes
         .iter()
         .flat_map(|m| &m.vertices)
         .fold(0.0, |largest: f32, v| largest.max(v.abs().max_element()));
     for (k, &[x, y, z, radius]) in spheres.iter().enumerate() {
         let center = Vec3::new(x, y, z);
-        let depth = depth(&solids, center);
+        let depth = depths.at(center);
         let slack = ROUNDING * largest.max(center.abs().max_element() + radius);
         let reach = radius - depth;
         if reach.is_nan() || reach > max_overhang + slack {

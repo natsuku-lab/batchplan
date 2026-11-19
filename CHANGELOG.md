@@ -16,10 +16,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   plus the limit, so the budget is kept and the surface it cannot cover within the limit is left
   outside the spheres: `LinkQualification::gap`, new in `Robot::qualify`, is how far outside the
   farthest of it lies, which is how deep an obstacle reaches into the link unseen. The geometry
-  must be closed, each face given once and every shell facing outward: a link whose mesh has open
-  edges, faces given again or both ways, or a shell facing inward (a cavity's among them) is
+  must be closed: a link whose mesh has open edges, or a face given again the same way, is
   refused with their count, and one too thin for a center inside it under a limit of zero by
-  name. Round shapes are measured as the fit sees them, on their meshes of 24 sides. A collision model given
+  name. Shells that overlap or share a face are their union, a shell is solid whichever way it
+  faces, and a cavity is outside. Round shapes are measured as the fit sees them, on their meshes
+  of 24 sides. A collision model given
   with the options is held to the limit too, a sphere past it refused by link and index with how
   far it reaches. Held objects take their own (`AttachedObject::spheres`, `Held::spheres`): a
   box, capsule, disc or rod is covered whole where the budget has a cover within the limit, and
@@ -202,6 +203,20 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   were holds. `place`, `pick` (its lift, and its grasps' finger values), `handover` and problems
   with a `holding` now keep no more in hand than the device has threads. On the M4 Pro's CPU a
   `place` of up to 4 holds takes what it did, and one of 16, 64 or 609 is 5 to 11% quicker.
+
+- **Breaking:** spheres fitted to a link mesh of more than one closed shell, and how
+  `Robot::qualify` measures spheres against one. The side of the nearest face decided inside
+  from outside: in a shell
+  beside a face of another that is buried in it, a center read as outside, so the fit had no
+  candidates there and `qualify` gave a sphere there its distance to that face as overhang; and
+  around a shell that faces inward, the fit put spheres outside the link, 12 cm past a box with
+  an inward cube beside it. Inside a closed mesh is now where its surface winds around the
+  point, as for distance grids: shells that overlap are their union, and a shell is solid
+  whichever way it faces. Meshes with open edges, and every robot in this repository, are fitted
+  as before, sphere for sphere. A robot with such a mesh is fitted differently, and clearances
+  and contacts measured to its spheres differ: the reBot's arm, where 41 of a link's grid points
+  read the other way, keeps its sphere count and how far they reach, and the handover and join
+  benchmarks on it give the results they did.
 
 - Distance grids of meshes with more than one closed shell (`SdfGrid::from_mesh`, and scene
   meshes `World::load` reads). The side of the nearest face decided inside from outside, which is
