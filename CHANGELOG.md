@@ -92,6 +92,26 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   `shell: None`, and a `Surface` literal `seen_from: vec![]` (or `..Default::default()`); in Python,
   `GraspOptions(shell=0.015)`.
 
+- **Breaking:** a place says how far its hand may open where it lets go: `Place::open`, finger
+  values as `Held::locked` names them, in the order preferred (empty by default, which changes
+  nothing: the hand opens to where the robot was loaded with them, and a spot the open fingers do
+  not fit is refused at its release). With openings named, where the hand lets go is solved with
+  the fingers where they hold the object, each pose lets go at the first opening with which the
+  hand is clear there and on its move away, and the plan says which (`TaskPlan::opening`): a hand
+  can set an object down where it has no room to open all the way. The openings share the
+  place's IK, move in and transit; each one tried costs a move away.
+  `GraspOptions::openings()` gives the openings a grasp with `narrow` may come in at, widest
+  first, to offer a place the same. A `Place` literal needs `open: vec![]`; in Python,
+  `Place(..., open=[{...}, ...])`, `TaskPlan.opening` and `GraspOptions.openings`.
+
+- **Breaking:** a place says how many plans will do: `Place::enough` (`None` by default: every
+  pose is tried, as before). With a count, the poses are tried in their order, 32 and then twice
+  as many each time, until that many have got through, and the plans are the first that many in
+  the poses' order, as trying every pose gives them: a place given every spot of a table plans
+  the first that will do without the IK and the motions of the rest. A place none gets through
+  has tried every pose and says where each stopped. A `Place` literal needs `enough: None`; in
+  Python, `Place(..., enough=1)`.
+
 - **Breaking:** a pick says how many plans will do: `Pick::enough` (`None` by default: every
   grasp is tried, as before). With a count, the grasps are tried in their order, 32 and then
   twice as many each time, until that many have got through, and the plans are the first that

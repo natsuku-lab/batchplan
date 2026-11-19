@@ -67,6 +67,15 @@ value_class! {
         fn new(changes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
             Ok(Self(Self::changed(Default::default(), changes)?))
         }
+
+        /// The openings a grasp may come in at where `narrow` lets it (meters), widest first:
+        /// `opening` and each sixteenth of it less. A place may let go at the same
+        /// (`Place.open`), each as the fingers' joint values.
+        #[getter]
+        fn openings<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+            let openings = self.0.openings().into_iter().map(field::shortest);
+            PyTuple::new(py, openings)
+        }
     }
 }
 
@@ -203,6 +212,17 @@ value_class! {
         lower: Vec3,
         /// How far back along its own z axis the hand moves once it lets go (meters).
         retreat: f32,
+        /// Values the fingers may open to where the hand lets go, each as `Held.locked` names
+        /// them, in the order preferred: a pose lets go at the first with which the hand, where
+        /// it lets go and on its move away, is clear, and its plan says which
+        /// (`TaskPlan.opening`). The release is then solved with the fingers where they hold the
+        /// object, not where the robot was loaded with them. Joints an opening does not name are
+        /// as loaded. Empty: the hand opens to where the robot was loaded with them.
+        open: Vec<HashMap<String, f32>>,
+        /// How many plans will do: `None`, every pose is tried. With a count, the poses are tried
+        /// in their order, a few at a time, until that many have got through, and the plans are
+        /// the first that many in the poses' order, quickest first.
+        enough: Option<usize>,
         /// Obstacles the object is set on, by index: it may touch them as it arrives.
         support: Vec<usize>,
         /// Where the hands must stay along the transit, as a cup carried upright. The start must
@@ -385,6 +405,13 @@ impl TaskPlan {
     #[getter]
     fn placed(&self) -> Option<Obstacle> {
         self.0.placed.clone().map(Obstacle)
+    }
+
+    /// After a place that says how far its hand may open (`Place.open`), which of those the
+    /// hand lets go at and moves away with, by index.
+    #[getter]
+    fn opening(&self) -> Option<usize> {
+        self.0.opening
     }
 
     /// After a handover, the object's pose where it changed hands, in the robot's frame.

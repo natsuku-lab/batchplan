@@ -84,6 +84,10 @@ def test_a_picked_box_is_carried_and_set_down(tasks_robot):
         placed = bp.place(device, without, [place]).outcomes[0]
         assert isinstance(placed, tuple) and placed, f"{placed} on {device}"
         np.testing.assert_allclose(placed[0].placed.pose.position, spot.position, atol=2e-3)
+        # It names no opening to let go at; with the loaded one named, its plan says so.
+        assert placed[0].opening is None
+        loaded = bp.place(device, without, [place.replace(open=[{}])]).outcomes[0]
+        assert loaded[0].opening == 0
 
         slow = bp.TaskOptions(tool_speed=0.02)
         lowered = bp.place(device, without, [place], slow).outcomes[0][0]
@@ -298,8 +302,15 @@ def test_holds_and_picks_say_where_the_fingers_are(tasks_robot):
     assert pick.locked == (narrow,) * len(grasps)
     assert bp.Pick(0, tasks_robot.default_q, 1, grasps).locked == ()
     assert bp.Pick(0, tasks_robot.default_q, 1, grasps).enough is None
+    place = bp.Place(0, tasks_robot.default_q, held, [bp.Pose((0.4, 0.0, 0.03))])
+    assert place.open == () and place.enough is None and place.replace(enough=1).enough == 1
+    opening = bp.Place(0, tasks_robot.default_q, held, place.poses, open=[{}, narrow])
+    assert opening.open == ({}, narrow)
     assert bp.Pick(0, tasks_robot.default_q, 1, grasps, enough=2).enough == 2
     assert bp.GraspOptions(narrow=True).narrow and not bp.GraspOptions().narrow
+    openings = bp.GraspOptions(opening=0.08).openings
+    assert len(openings) == 16 and openings[0] == 0.08
+    assert openings[1:] == pytest.approx([0.08 * (16 - k) / 16 for k in range(1, 16)])
     device = bp.Device.cpu(tasks_robot)
     worlds = device.upload([bp.World([box])])
     with pytest.raises(bp.InputError, match="locked"):

@@ -284,6 +284,18 @@ const BACK: f32 = 0.002;
 /// 5 mm apart for a hand that opens 8 cm, a quarter of a fingertip's patch to each finger.
 const OPENINGS: i32 = 16;
 
+impl GraspOptions {
+    /// The openings a grasp may come in at where [`narrow`](GraspOptions::narrow) lets it
+    /// (meters), widest first: `opening` and each sixteenth of it less. A place may let go at
+    /// the same ([`Place::open`](crate::Place::open)), each as the fingers' joint values.
+    #[must_use]
+    pub fn openings(&self) -> Vec<f32> {
+        let step = self.opening / (2 * OPENINGS) as f32;
+        let openings = (0..OPENINGS).map(|k| self.opening - 2.0 * k as f32 * step);
+        openings.collect()
+    }
+}
+
 /// The cells the points near the hand are kept in (meters): a few to a sphere.
 const HAND_CELLS: f32 = 0.01;
 
