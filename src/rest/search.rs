@@ -9,7 +9,7 @@ use glam::{IVec3, Quat, Vec2, Vec3};
 use rayon::prelude::*;
 
 use super::contact::Touch;
-use super::field::Field;
+use super::field::{self, Field};
 use super::shape::{Shape, Turned};
 use super::statics::{Contact, Statics};
 use crate::device::Device;
@@ -34,6 +34,15 @@ pub struct RestProblem {
     /// `Quat::from_rotation_x(FRAC_PI_2)`; a place that keeps how the hand holds the object now
     /// passes the object's rotation as it is.
     pub rotation: Quat,
+    /// Where the caller would have it set down, if it rests near there: a point in the surface's
+    /// frame, as the middle of a plate or where an agent pointed; its height is not read. Within
+    /// [`RestOptions::spacing`] of it, seen from above, and over the support, the object is also
+    /// set down a cell of the support apart, [`RestOptions::touching`] wide, for a rest that the
+    /// spots lie too far apart to find: a flat bottom wider than a dished plate's floor stands
+    /// evenly on its raised ring only within millimeters of the middle. That is as many more
+    /// spots as cells lie within the spacing of the point, 77 at the defaults. None looks no
+    /// closer anywhere.
+    pub near: Option<Vec3>,
 }
 
 impl RestProblem {
@@ -44,6 +53,7 @@ impl RestProblem {
             object,
             surface,
             rotation: Quat::IDENTITY,
+            near: None,
         }
     }
 }
@@ -62,7 +72,8 @@ pub struct RestOptions {
     pub spacing: f32,
     /// How near under the object a support point counts as touching it (meters): 2 mm, a depth
     /// camera's noise under a meter, so a flat bottom on a measured table touches it across. The
-    /// support is read in cells this wide, each with its highest point.
+    /// support is read in cells this wide, each with its highest point; a support of more than
+    /// four million of them is an input error that asks for a wider one.
     pub touching: f32,
     /// How far every point that is not the support's stays from the object (meters): 1 cm, twice
     /// the 5 mm a held object's spheres reach past it by default ([`Held::spheres`]), so that
@@ -136,9 +147,10 @@ const SPREAD: usize = 1024;
 /// come to rest, so on a slope it needs the `rotation` that lies flat on it. A can or a capsule
 /// laid on its side is the one thing that moves: where it is not held it rolls, up to half the
 /// spots' spacing and `touching` more, to where it lies lowest, as into the cradle between two
-/// bars or down to a lip, and rests there if that holds it. Only the object's rest is checked:
-/// the hand that sets it down and its way there are [`place`](crate::place)'s to check, with
-/// what the object may touch as its `support`.
+/// bars or down to a lip, and rests there if that holds it. A rest narrower than the spots are
+/// apart is found where the problem says to look closer ([`RestProblem::near`]). Only the
+/// object's rest is checked: the hand that sets it down and its way there are
+/// [`place`](crate::place)'s to check, with what the object may touch as its `support`.
 ///
 /// They come at every turn, in an order whose first few are worth trying first: every spot at
 /// the first turn, then every spot at the next, and within a turn, the steadiest first and then
@@ -218,18 +230,47 @@ pub fn rests_on(
             "problem {i}: the rotation must be a finite unit quaternion, got {}",
             p.rotation
         );
+        if let Some(near) = p.near {
+            ensure_input!(
+                near.is_finite(),
+                "problem {i}: the point to rest near must be finite, got {near}"
+            );
+            let count = spots[p.surface].map_or(0.0, |spots| {
+                let [across, rows] = Closer::about(near.truncate(), &spots, o);
+                across.count as f32 * rows.count as f32
+            });
+            ensure_input!(
+                count <= MOST_SPOTS as f32,
+                "problem {i}: {count} spots {} m apart within {} m of the point to rest near, more than {MOST_SPOTS}; space the spots nearer",
+                o.touching,
+                o.spacing
+            );
+        }
+    }
+    // What lies as far from each surface's support as the largest object set down on it
+    // reaches, grown by the clearance it keeps, is read with it.
+    let mut margins = Vec::with_capacity(surfaces.len());
+    for (i, spots) in spots.iter().enumerate() {
+        let on = problems.iter().filter(|p| p.surface == i);
+        let grown = on.map(|p| Shape::of(&p.object).grown(o.clearance).radius());
+        let margin = grown.reduce(f32::max).map(|reach| reach + o.touching);
+        if let (Some(spots), Some(margin)) = (spots, margin) {
+            let cells = Field::cells(spots.lower, spots.upper, o.touching, margin);
+            ensure_input!(
+                cells <= field::MOST_CELLS,
+                "surface {i}: {cells} cells {} m wide over its support and the {margin} m around it that its objects reach, more than {}; read it in wider cells",
+                o.touching,
+                field::MOST_CELLS
+            );
+        }
+        margins.push(margin);
     }
     let each = || {
-        // Each surface a problem names, read once, with what lies as far from its support as
-        // the largest object set down on it reaches, grown by the clearance it keeps.
+        // Each surface a problem names, read once.
         let seen: Vec<Option<Seen>> = (0..surfaces.len())
             .into_par_iter()
             .map(|i| {
-                let on = problems.iter().filter(|p| p.surface == i);
-                let grown = on.map(|p| Shape::of(&p.object).grown(o.clearance).radius());
-                let reach = grown.reduce(f32::max)?;
-                let spots = spots[i]?;
-                let margin = reach + o.touching;
+                let (spots, margin) = (spots[i]?, margins[i]?);
                 let field = Field::new(&surfaces[i], spots.lower, spots.upper, o.touching, margin);
                 Some(Seen { field, spots })
             })
@@ -292,6 +333,29 @@ impl Spots {
     fn at(&self, k: usize, spacing: f32) -> Vec2 {
         let cell = self.first + Vec2::new((k % self.across) as f32, (k / self.across) as f32);
         (cell + 0.5) * spacing
+    }
+}
+
+/// Along one axis, the spots a cell apart about the point a problem would rest near: the first,
+/// in cells from the point, and how many.
+#[derive(Clone, Copy)]
+struct Closer {
+    first: f32,
+    count: usize,
+}
+
+impl Closer {
+    /// Along x and along y, the spots about `near` that lie within the spacing of it and over
+    /// the support of `spots`, where alone a rest's middle can be.
+    fn about(near: Vec2, spots: &Spots, o: &RestOptions) -> [Self; 2] {
+        let cell = o.touching;
+        let first = ((spots.lower - near).max(Vec2::splat(-o.spacing)) / cell).ceil();
+        let last = ((spots.upper - near).min(Vec2::splat(o.spacing)) / cell).floor();
+        let along = |axis: usize| Self {
+            first: first[axis],
+            count: (last[axis] - first[axis] + 1.0).max(0.0) as usize,
+        };
+        [along(0), along(1)]
     }
 }
 
@@ -433,39 +497,68 @@ fn on(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Rest> {
         first.push((0..k).find(same).unwrap_or(k));
     }
     let spots = seen.spots;
+    // The spots a cell apart within a spacing of where the caller would have it, after the
+    // grid's.
+    let mut closer: Vec<Vec2> = vec![];
+    if let Some(near) = p.near {
+        let [across, rows] = Closer::about(near.truncate(), &spots, o);
+        for j in 0..rows.count {
+            for i in 0..across.count {
+                let cells = Vec2::new(across.first + i as f32, rows.first + j as f32);
+                let aside = cells * o.touching;
+                if aside.length() <= o.spacing {
+                    closer.push(near.truncate() + aside);
+                }
+            }
+        }
+    }
     // Each turn's rests in their order, the turns side by side.
     let each = (0..turns.len()).into_par_iter().map(|k| {
         if first[k] != k {
             return vec![];
         }
         let turned = turns[k];
-        let found: Vec<Option<(Rest, bool)>> = (0..spots.count())
+        let found: Vec<Option<(Rest, bool)>> = (0..spots.count() + closer.len())
             .into_par_iter()
             .map_init(Scratch::default, |scratch, k| {
-                setting.rest(turned, spots.at(k, o.spacing), scratch)
+                let over = match k.checked_sub(spots.count()) {
+                    None => spots.at(k, o.spacing),
+                    Some(k) => closer[k],
+                };
+                setting.rest(turned, over, scratch)
             })
             .collect();
-        let any_rolled = found.iter().flatten().any(|f| f.1);
+        let any_alike = !closer.is_empty() || found.iter().flatten().any(|f| f.1);
         let mut kept: Vec<Rest> = Vec::with_capacity(found.len());
-        // Spots to either side of a cradle roll to one place, which comes once: the first, of
-        // two of which either rolled that are within `touching` of each other, or half the
-        // spots' spacing where that is less. Those kept, by the cell that wide they are in, each
-        // with whether it rolled.
+        // Spots to either side of a cradle roll to one place, and a spot set closer may be one
+        // of the grid's: a place comes once, the first of two. Of two of which either rolled,
+        // within `touching` of each other, or half the spots' spacing where that is less; of a
+        // grid's spot and a closer one, within half of that, so that a closer spot a cell from
+        // a grid's is a place of its own. Those kept, by the cell that wide they are in, each
+        // with whether it rolled and whether it is of the closer spots.
         let one = o.touching.min(0.5 * o.spacing);
-        let mut cells: HashMap<[i32; 3], Vec<(Vec3, bool)>> = HashMap::new();
-        for (rest, rolled) in found.into_iter().flatten() {
-            if any_rolled {
+        let mut cells: HashMap<[i32; 3], Vec<(Vec3, bool, bool)>> = HashMap::new();
+        for (k, rest) in found.into_iter().enumerate() {
+            let Some((rest, rolled)) = rest else {
+                continue;
+            };
+            let set_closer = k >= spots.count();
+            if any_alike {
                 let at = rest.pose.position;
                 let cell = (at / one).floor().as_ivec3();
                 let around =
                     (0..27).map(|n| cell + IVec3::new(n % 3 - 1, n / 3 % 3 - 1, n / 9 - 1));
-                let near =
-                    |&(there, other): &(Vec3, bool)| (rolled || other) && there.distance(at) < one;
+                let same = |&(there, other_rolled, other_closer): &(Vec3, bool, bool)| {
+                    let apart = there.distance(at);
+                    ((rolled || other_rolled) && apart < one)
+                        || (set_closer != other_closer && apart < 0.5 * one)
+                };
                 let mut beside = around.filter_map(|c| cells.get(&c.to_array()));
-                if beside.any(|there| there.iter().any(near)) {
+                if beside.any(|there| there.iter().any(same)) {
                     continue;
                 }
-                cells.entry(cell.to_array()).or_default().push((at, rolled));
+                let here = cells.entry(cell.to_array()).or_default();
+                here.push((at, rolled, set_closer));
             }
             kept.push(rest);
         }

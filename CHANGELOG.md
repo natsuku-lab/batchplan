@@ -27,20 +27,22 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   that lists every field needs the new one (`max_overhang: None`); in Python,
   `SphereOptions(max_overhang=0.002)`.
 
-- Where a held object rests on what cameras see:
-  `rests_on(&device, &[RestProblem], &[Surface], &RestOptions)`. A problem names the object, how
-  it is turned as it is set down (`rotation`: upright, on its side, flat on a slope) and a
-  surface whose `object` points are the support. The object comes straight down over spots
-  `spacing` (1 cm) apart at `turns` (8) turns about the vertical, and a `Rest` comes back where
-  what it then touches holds it, with `friction` (0.5) at the contacts and its weight tipped
-  `tipping` (5°) any way, clear of every other point by `clearance` (1 cm): the object's `pose`,
-  for `Place::poses`, the `support` it touches and how far it can be `tipping`, at each of the
-  turns, so a box comes at its half turn and a bottle laid down comes end for end too. It rests as it
-  is set down, not tipped or slid into place: a slope needs the rotation that lies flat on it.
-  A can or a capsule laid on its side rolls, within half the spacing and `touching`, into the cradle between
-  two bars or a rack's groove or down to a lip, and has no rest on a flat support. Many
-  problems run in one call, each surface read once. `examples/surface_rests.rs` times it, and `scripts/validate_rests.py` lets go of
-  each rest in MuJoCo.
+- Where a held object rests on what cameras see: `rests_on(&device, &[RestProblem], &[Surface],
+  &RestOptions)`. A problem names the object, how it is turned as it is set down (`rotation`:
+  upright, on its side, flat on a slope) and a surface whose `object` points are the support. The
+  object comes straight down over spots `spacing` (1 cm) apart at `turns` (8) turns about the
+  vertical, and a `Rest` comes back where what it then touches holds it, with `friction` (0.5) at
+  the contacts and its weight tipped `tipping` (5°) any way, clear of every other point by
+  `clearance` (1 cm): the object's `pose`, for `Place::poses`, the `support` it touches and how far
+  it can be `tipping`, at each of the turns, so a box comes at its half turn and a bottle laid down
+  comes end for end too. It rests as it is set down, not tipped or slid into place: a slope needs
+  the rotation that lies flat on it. `RestProblem::near` names a point to look closer around, a cell
+  of the support apart, for a rest the spots are too far apart to find, as the middle of a dished
+  plate under a wide flat bottom. A can or a capsule laid on its side rolls, within half the spacing
+  and `touching`, into the cradle between two bars or a rack's groove or down to a lip, and has no
+  rest on a flat support. Many problems run in one call, each surface read once.
+  `examples/surface_rests.rs` times it, and `scripts/validate_rests.py` lets go of each rest in
+  MuJoCo.
 
 - What a configuration touches while it holds an object:
   `device.contacts_holding(&worlds, &item_world, &q, within, &holding)`, with a `Held` or `None`

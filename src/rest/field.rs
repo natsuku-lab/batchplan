@@ -6,8 +6,8 @@ use glam::{Vec2, Vec3};
 use super::shape::Turned;
 use crate::surface::Surface;
 
-/// The most cells a surface is kept in: past it the cells are larger.
-const MOST_CELLS: f32 = (1 << 22) as f32;
+/// The most cells a surface is kept in: past it, `rests_on` asks for wider ones.
+pub(super) const MOST_CELLS: f32 = (1 << 22) as f32;
 
 /// A support point whose normal's z is under this faces down: it holds nothing up, and blocks.
 /// 30 degrees under level, so that the noise of a wall's normals, which are level, does not
@@ -36,12 +36,15 @@ pub(super) struct Field {
 }
 
 impl Field {
+    /// How many cells `cell` wide a support between `lower` and `upper`, seen from above, is
+    /// kept in with the `margin` around it.
+    pub(super) fn cells(lower: Vec2, upper: Vec2, cell: f32, margin: f32) -> f32 {
+        ((upper - lower + 2.0 * margin) / cell + 3.0).element_product()
+    }
+
     /// `s` read once, its support between `lower` and `upper` seen from above, in cells
-    /// `touching` wide, with what else of it lies within `margin` of the support.
-    pub(super) fn new(s: &Surface, lower: Vec2, upper: Vec2, touching: f32, margin: f32) -> Self {
-        let count = |cell: f32| ((upper - lower + 2.0 * margin) / cell + 3.0).element_product();
-        let wider = (count(touching) / MOST_CELLS).sqrt().ceil().max(1.0);
-        let cell = touching * wider;
+    /// `cell` wide, with what else of it lies within `margin` of the support.
+    pub(super) fn new(s: &Surface, lower: Vec2, upper: Vec2, cell: f32, margin: f32) -> Self {
         let first = ((lower - margin) / cell).round().as_ivec2() - 1;
         let last = ((upper + margin) / cell).round().as_ivec2() + 1;
         let (across, rows) = (
