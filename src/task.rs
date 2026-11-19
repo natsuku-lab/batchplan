@@ -466,25 +466,22 @@ pub fn pick(
                 }
             }
         }
-        let results: Vec<TaskResult<Pick>> = device.install(|| {
-            let each = groups.par_iter().map(|group| {
-                let mine: Vec<Pick> = group
-                    .tasks
-                    .iter()
-                    .map(|(i, grasps)| Pick {
-                        grasps: grasps.iter().map(|&g| tasks[*i].grasps[g]).collect(),
-                        locked: vec![group.locked.clone(); grasps.len()],
-                        ..tasks[*i].clone()
-                    })
-                    .collect();
-                if group.locked.is_empty() {
-                    picked(device, worlds, &mine, o)
-                } else {
-                    let relocked = device.with_robot(&device.robot().relock(group.locked)?)?;
-                    picked(&relocked, worlds, &mine, o)
-                }
-            });
-            each.collect::<Result<_>>()
+        let results: Vec<TaskResult<Pick>> = device.in_turns(&mut groups, |_, group| {
+            let mine: Vec<Pick> = group
+                .tasks
+                .iter()
+                .map(|(i, grasps)| Pick {
+                    grasps: grasps.iter().map(|&g| tasks[*i].grasps[g]).collect(),
+                    locked: vec![group.locked.clone(); grasps.len()],
+                    ..tasks[*i].clone()
+                })
+                .collect();
+            if group.locked.is_empty() {
+                picked(device, worlds, &mine, o)
+            } else {
+                let relocked = device.with_robot(&device.robot().relock(group.locked)?)?;
+                picked(&relocked, worlds, &mine, o)
+            }
         })?;
         for (group, result) in groups.iter().zip(results) {
             for ((i, grasps), outcome) in group.tasks.iter().zip(result.outcomes) {
@@ -698,35 +695,32 @@ fn picked(
                 ));
             }
         }
-        device.install(|| {
-            let groups = alike.par_iter_mut().enumerate();
-            groups.try_for_each(|(k, (holding, group))| {
-                let (_, uploaded) = lifted
-                    .iter()
-                    .find(|(hand, _)| *hand == holding.hand)
-                    .expect("every hand that lifts has its worlds");
-                // Built where it is used, so that building one overlaps the other groups' moves.
-                straight(
-                    &holder(k, holding)?,
-                    uploaded,
-                    group,
-                    &by_task,
-                    Leg::Away,
-                    o,
-                )?;
-                // Contacts name obstacles as the task's world does, which still holds the object.
-                for c in group.iter_mut() {
-                    let object = tasks[c.task].object;
-                    for contact in &mut c.contacts {
-                        if let Contact::World { obstacle, .. } = contact
-                            && *obstacle >= object
-                        {
-                            *obstacle += 1;
-                        }
+        device.in_turns(&mut alike, |k, (holding, group)| {
+            let (_, uploaded) = lifted
+                .iter()
+                .find(|(hand, _)| *hand == holding.hand)
+                .expect("every hand that lifts has its worlds");
+            // Built where it is used, so that building one overlaps the other groups' moves.
+            straight(
+                &holder(k, holding)?,
+                uploaded,
+                group,
+                &by_task,
+                Leg::Away,
+                o,
+            )?;
+            // Contacts name obstacles as the task's world does, which still holds the object.
+            for c in group.iter_mut() {
+                let object = tasks[c.task].object;
+                for contact in &mut c.contacts {
+                    if let Contact::World { obstacle, .. } = contact
+                        && *obstacle >= object
+                    {
+                        *obstacle += 1;
                     }
                 }
-                Ok::<_, crate::Error>(())
-            })
+            }
+            Ok(())
         })?;
     }
 
@@ -808,7 +802,8 @@ pub fn place(
         check_support(i, world, &t.support, None)?;
     }
     // A device holding each task's object, built in parallel; tasks holding theirs alike share one.
-    // Every step below runs each holder's candidates as a batch of their own, all in parallel.
+    // Every step below runs each holder's candidates as a batch of their own, as many holders
+    // at a time as the device has threads (`Device::in_turns`).
     let mut helds: Vec<&Held> = vec![];
     let mut holder_of = vec![];
     for t in tasks {
@@ -849,11 +844,8 @@ pub fn place(
         .map(|t| Steps::of_place(t).transit_world)
         .collect();
     let mut starting = by_holder(live(&mut candidates, TaskStep::Start), &holder_of, &holders);
-    device.install(|| {
-        starting
-            .par_iter_mut()
-            .zip(&holders)
-            .try_for_each(|(group, holder)| start(holder, worlds, group, &worlds_of))
+    device.in_turns(&mut starting, |h, group| {
+        start(&holders[h], worlds, group, &worlds_of)
     })?;
 
     // Where the hand lets go, and the move in to there, the object touching what it is set on.
@@ -902,20 +894,15 @@ pub fn place(
                 .expect("every hand that lets go has its worlds");
             uploaded
         };
-        let found: Vec<Vec<Option<usize>>> = device.install(|| {
-            mine.par_iter()
-                .zip(&holders)
-                .map(|(mine, holder)| {
-                    let Some(&first) = mine.first() else {
-                        return Ok(vec![]);
-                    };
-                    let lists = mine
-                        .iter()
-                        .map(|&i| (reaching[i].task as u32, solutions[i].clone()))
-                        .collect();
-                    first_free(holder, uploaded_for(reaching[first].hand), lists)
-                })
-                .collect::<Result<_>>()
+        let found: Vec<Vec<Option<usize>>> = device.in_turns(&mut mine, |h, mine| {
+            let Some(&first) = mine.first() else {
+                return Ok(vec![]);
+            };
+            let lists = mine
+                .iter()
+                .map(|&i| (reaching[i].task as u32, solutions[i].clone()))
+                .collect();
+            first_free(&holders[h], uploaded_for(reaching[first].hand), lists)
         })?;
         let n = robot.dof();
         // Per holder, the candidates whose every solution collides holding the object.
@@ -957,20 +944,15 @@ pub fn place(
         &holder_of,
         &holders,
     );
-    device.install(|| {
-        moving
-            .par_iter_mut()
-            .zip(&holders)
-            .try_for_each(|(group, holder)| {
-                let Some(hand) = group.first().map(|c| c.hand) else {
-                    return Ok(());
-                };
-                let (_, uploaded) = arrived
-                    .iter()
-                    .find(|(h, _)| *h == hand)
-                    .expect("every hand that lets go has its worlds");
-                straight(holder, uploaded, group, &by_task, Leg::In, o)
-            })
+    device.in_turns(&mut moving, |h, group| {
+        let Some(hand) = group.first().map(|c| c.hand) else {
+            return Ok(());
+        };
+        let (_, uploaded) = arrived
+            .iter()
+            .find(|(h, _)| *h == hand)
+            .expect("every hand that lets go has its worlds");
+        straight(&holders[h], uploaded, group, &by_task, Leg::In, o)
     })?;
 
     // Back from the object where it stands, the fingers touching it: a world for each.
@@ -1000,11 +982,8 @@ pub fn place(
         &holders,
     );
     let constraints: Vec<&[HandConstraint]> = tasks.iter().map(|t| &t.constraints[..]).collect();
-    device.install(|| {
-        going
-            .par_iter_mut()
-            .zip(&holders)
-            .try_for_each(|(group, holder)| transit(holder, worlds, group, &constraints, &o.plan))
+    device.in_turns(&mut going, |h, group| {
+        transit(&holders[h], worlds, group, &constraints, &o.plan)
     })?;
 
     let outcomes = choose(device, tasks.len(), &candidates, o, |c| {

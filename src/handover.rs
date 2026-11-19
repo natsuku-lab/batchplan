@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::f32::consts::PI;
 
 use glam::{Quat, Vec2, Vec3};
-use rayon::prelude::*;
 
 use crate::constraint::HandConstraint;
 use crate::device::{Device, Worlds};
@@ -173,11 +172,8 @@ pub fn handover(
         &holder_of,
         &holders,
     );
-    device.install(|| {
-        starting
-            .par_iter_mut()
-            .zip(&holders)
-            .try_for_each(|(group, holder)| task::start(holder, worlds, group, &worlds_of))
+    device.in_turns(&mut starting, |h, group| {
+        task::start(&holders[h], worlds, group, &worlds_of)
     })?;
 
     // Both hands at the meeting and the straight moves there, the object standing where it changes
@@ -221,12 +217,9 @@ pub fn handover(
              run: &(dyn Fn(&Device, &mut [&mut Candidate]) -> Result<()> + Sync)| {
                 let mut groups =
                     task::by_holder(task::live(&mut candidates, step), &lock_of, &relocked);
-                device.install(|| {
-                    groups
-                        .par_iter_mut()
-                        .zip(&relocked)
-                        .try_for_each(|(group, on)| run(on, group))
-                })
+                device
+                    .in_turns(&mut groups, |k, group| run(&relocked[k], group))
+                    .map(|_| ())
             };
         each(TaskStep::Reach, &|on, group| {
             task::reach(on, &meetings, group, &at_its_meeting, &o.ik)
@@ -246,13 +239,8 @@ pub fn handover(
         &holders,
     );
     let constraints: Vec<&[HandConstraint]> = tasks.iter().map(|t| &t.constraints[..]).collect();
-    device.install(|| {
-        going
-            .par_iter_mut()
-            .zip(&holders)
-            .try_for_each(|(group, holder)| {
-                task::transit(holder, worlds, group, &constraints, &o.plan)
-            })
+    device.in_turns(&mut going, |h, group| {
+        task::transit(&holders[h], worlds, group, &constraints, &o.plan)
     })?;
 
     let outcomes = task::choose(device, tasks.len(), &candidates, o, |c| {

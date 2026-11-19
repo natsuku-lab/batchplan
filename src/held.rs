@@ -6,8 +6,6 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use rayon::prelude::*;
-
 use crate::device::{Device, Worlds};
 use crate::error::{Result, ensure_input, input};
 use crate::robot::{self, AttachedObject, Robot};
@@ -156,9 +154,9 @@ pub(crate) fn held_link(hand: usize) -> String {
 
 /// Runs `run` on each group of items that hold alike (`holds`: per item, what it holds), with the
 /// items' indices in order: on `device` for those holding nothing, and on a device holding the
-/// object for the rest, every object fitted once. Groups run in parallel on the device's threads;
-/// a call with one group runs it on the calling thread, and one with no items runs `run` once on
-/// `device` with none.
+/// object for the rest, every object fitted once. Groups run on the device's threads, as many at
+/// a time as it has (`Device::in_turns`); a call with one group runs it on the calling thread,
+/// and one with no items runs `run` once on `device` with none.
 pub(crate) fn by_hold<R: Send>(
     device: &Device,
     holds: &[Option<&Held>],
@@ -196,15 +194,9 @@ pub(crate) fn by_hold<R: Send>(
         let result = run(on(group), &items)?;
         return Ok(vec![(items, result)]);
     }
-    device.install(|| {
-        groups
-            .into_par_iter()
-            .map(|(group, items)| {
-                let result = run(on(group), &items)?;
-                Ok((items, result))
-            })
-            .collect()
-    })
+    let results = device.in_turns(&mut groups, |_, (group, items)| run(on(*group), items))?;
+    let groups = groups.into_iter().map(|(_, items)| items);
+    Ok(groups.zip(results).collect())
 }
 
 /// `items` of `all`, in order: `all` itself where they are every one.
@@ -223,11 +215,8 @@ pub(crate) fn holders(device: &Device, robot: &Robot, helds: &[&Held]) -> Result
         return Ok(vec![]);
     }
     let fitted = Fitted::new(device, robot, helds)?;
-    device.install(|| {
-        let each = helds.par_iter().enumerate();
-        each.map(|(k, held)| fitted.holder(device, robot, k, held))
-            .collect()
-    })
+    let mut helds = helds.to_vec();
+    device.in_turns(&mut helds, |k, held| fitted.holder(device, robot, k, held))
 }
 
 /// How many objects' spheres [`Fits`] keeps: those of the latest held.
@@ -297,19 +286,14 @@ impl Fitted {
             });
         }
         let fits = device.fits();
-        let spheres = device.install(|| {
-            objects
-                .par_iter()
-                .map(|(object, options)| {
-                    if let Some(spheres) = fits.get(object, options) {
-                        return Ok(spheres);
-                    }
-                    let fitted: Arc<[[f32; 4]]> =
-                        robot::object_spheres(std::slice::from_ref(object), options)?.into();
-                    fits.keep(object.clone(), *options, fitted.clone());
-                    Ok(fitted)
-                })
-                .collect::<Result<_>>()
+        let spheres = device.in_turns(&mut objects, |_, (object, options)| {
+            if let Some(spheres) = fits.get(object, options) {
+                return Ok(spheres);
+            }
+            let fitted: Arc<[[f32; 4]]> =
+                robot::object_spheres(std::slice::from_ref(object), options)?.into();
+            fits.keep(object.clone(), *options, fitted.clone());
+            Ok(fitted)
         })?;
         Ok(Self { spheres, object_of })
     }

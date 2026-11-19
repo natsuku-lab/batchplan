@@ -2292,3 +2292,94 @@ fn grasps_whose_fingers_come_in_narrower_are_picked_beside_a_wall() {
         }
     }
 }
+
+/// A call that holds objects in many ways has a device for each, and what runs on one waits for
+/// work it hands the device's threads, where a thread that waits takes up another's on top of
+/// its own: all at once, fifteen hundred ways to hold a box, each set down at either of two
+/// turns, stack a thread's calls deeper than its stack. They are set down in one place of them
+/// all, each as it is alone.
+#[test]
+fn as_many_holds_as_fill_a_stack_at_once_are_placed_in_one_call() {
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let mut after = scene(vec![]);
+    let object = after.remove(BOX).unwrap().placed(Pose::IDENTITY);
+    let worlds = device.upload(&[after]).unwrap();
+    let o = TaskOptions::default();
+    // The box held from above a hair deeper each time: no two ways alike.
+    const WAYS: usize = 1500;
+    let to = Pose::new(Vec3::new(0.45, -0.2, HALF.z), Quat::IDENTITY);
+    let places: Vec<Place> = (0..WAYS)
+        .map(|k| {
+            let held = Held {
+                locked: Default::default(),
+                spheres: Default::default(),
+                hand: 0,
+                object: object.clone(),
+                grasp: Pose::new(top().position - Vec3::Z * k as f32 * 4e-6, top().rotation),
+            };
+            Place {
+                support: vec![TABLE],
+                ..Place::new(
+                    0,
+                    robot.default_q(),
+                    held,
+                    batchplan::place_poses(&object, to, 2),
+                )
+            }
+        })
+        .collect();
+    let placed = batchplan::place(&device, &worlds, &places, &o).unwrap();
+    for (k, outcome) in placed.outcomes.iter().enumerate() {
+        let plans = outcome.as_ref().unwrap_or_else(|f| panic!("way {k}: {f}"));
+        assert_eq!(plans.len(), 2, "way {k}: either turn");
+    }
+    let last = &places[WAYS - 1..];
+    let alone = batchplan::place(&device, &worlds, last, &o).unwrap();
+    let (among, alone) = (&placed.outcomes[WAYS - 1], &alone.outcomes[0]);
+    for (a, b) in among.as_ref().unwrap().iter().zip(alone.as_ref().unwrap()) {
+        assert_eq!(a.candidate, b.candidate);
+        assert_eq!(a.approach.control_points, b.approach.control_points);
+        assert_eq!(
+            a.transit.as_ref().unwrap().control_points,
+            b.transit.as_ref().unwrap().control_points
+        );
+    }
+}
+
+/// A pick whose grasps lock the fingers each their own way has a relocked robot for each, and
+/// what runs on one waits for work it hands the device's threads as a held object's does: five
+/// thousand openings, two grasps at each, are picked by in one call, the last as it is alone.
+#[test]
+fn as_many_finger_openings_as_fill_a_stack_at_once_are_picked_by_in_one_call() {
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[scene(vec![])]).unwrap();
+    let o = TaskOptions::default();
+    const WAYS: usize = 5000;
+    // From as loaded, 8 cm, to 6 cm: every one wider than the box.
+    let fingers = |way: usize| -> std::collections::HashMap<String, f32> {
+        let at = 0.04 - way as f32 * 2e-6;
+        ["panda_finger_joint1", "panda_finger_joint2"]
+            .iter()
+            .map(|joint| (joint.to_string(), at))
+            .collect()
+    };
+    let every = Pick {
+        locked: (0..2 * WAYS).map(|grasp| fingers(grasp / 2)).collect(),
+        ..pick_from(&robot, vec![top(); 2 * WAYS])
+    };
+    let picked = batchplan::pick(&device, &worlds, std::slice::from_ref(&every), &o).unwrap();
+    let plans = picked.outcomes[0].as_ref().unwrap();
+    assert_eq!(plans.len(), 2 * WAYS);
+    let last = plans.iter().find(|plan| plan.candidate == 2 * WAYS - 1);
+    let alone = Pick {
+        locked: vec![fingers(WAYS - 1)],
+        ..pick_from(&robot, vec![top()])
+    };
+    let alone = batchplan::pick(&device, &worlds, &[alone], &o).unwrap();
+    let alone = &alone.outcomes[0].as_ref().unwrap()[0];
+    let last = last.expect("the last grasp's plan");
+    assert_eq!(last.approach.control_points, alone.approach.control_points);
+    assert_eq!(last.held.as_ref().unwrap().locked, fingers(WAYS - 1));
+}
