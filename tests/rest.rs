@@ -623,9 +623,12 @@ fn near_where_the_caller_would_have_it_the_spots_are_a_cell_apart() {
         .iter()
         .filter(|r| from_the_middle(r) < 0.003)
         .collect();
-    assert!(middle.len() >= 8, "{}", middle.len());
+    let mut turns: Vec<Quat> = middle.iter().map(|r| r.pose.rotation).collect();
+    turns.dedup();
+    assert_eq!(turns.len(), 8, "{} at {turns:?}", middle.len());
     for r in &middle {
-        assert!(r.tipping > 20f32.to_radians(), "{r:?}");
+        // As steady as the friction lets anything be, 26.6 degrees: on the ring all round.
+        assert!(r.tipping > 26f32.to_radians(), "{r:?}");
         let around = |c: &Vec3| c.y.atan2(c.x);
         let mut angles: Vec<f32> = r.support.iter().map(around).collect();
         angles.sort_by(f32::total_cmp);
@@ -638,23 +641,91 @@ fn near_where_the_caller_would_have_it_the_spots_are_a_cell_apart() {
     for r in &plain {
         assert!(found.contains(r), "lost: {r:?}");
     }
-    // Near a point off the plate nothing more is tried, and on a table, where the spots find
-    // every place already, a place a spot and a closer spot both give comes once.
-    let off = RestProblem {
-        near: Some(Vec3::new(0.5, 0.5, 0.0)),
-        ..problem
+    // Near a point off the plate, as far off as may be, nothing more is tried.
+    for far in [0.5f32, 1e7, f32::MAX] {
+        let off = RestProblem {
+            near: Some(Vec3::new(far, 0.5, 0.0)),
+            ..problem.clone()
+        };
+        assert_eq!(rests(&off, &plate), plain, "{far}");
+    }
+    // On a table, where a box rests at every spot, it rests at every closer spot too, at each
+    // turn: those a cell apart out to the spacing from the point, each a place of its own but
+    // one that lies within a millimeter of a grid's spot, which is that spot's place.
+    for point in [
+        Vec2::ZERO,
+        Vec2::new(0.005, 0.005),
+        Vec2::new(-0.0412, 0.0273),
+    ] {
+        let about = RestProblem {
+            near: Some(point.extend(0.0)),
+            ..RestProblem::new(a_box(), 0)
+        };
+        let closer = rests(&about, &table());
+        let at = |spot: Vec2| {
+            let there = |r: &&Rest| r.pose.position.truncate().distance(spot) < 1e-5;
+            closer.iter().filter(there).count()
+        };
+        let (mut own, mut farthest) = (0, 0.0f32);
+        for i in -5..=5 {
+            for j in -5..=5 {
+                let aside = Vec2::new(i as f32, j as f32) * o.touching;
+                let spot = point + aside;
+                let grid = ((spot / o.spacing).floor() + 0.5) * o.spacing;
+                // Just at the spacing, either way.
+                if (aside.length() - o.spacing).abs() < 1e-5 {
+                    continue;
+                }
+                if aside.length() > o.spacing {
+                    let rests = if spot.distance(grid) < 1e-5 { 8 } else { 0 };
+                    assert_eq!(at(spot), rests, "{spot} is past the spacing from {point}");
+                } else if spot.distance(grid) > 0.0011 {
+                    assert_eq!(at(spot), 8, "{spot} about {point}");
+                    own += 1;
+                    farthest = farthest.max(aside.length());
+                } else if spot.distance(grid) < 0.0009 {
+                    // Once a turn, at the grid's spot and not beside it.
+                    let beside = if spot.distance(grid) < 1e-5 { 8 } else { 0 };
+                    assert_eq!(
+                        at(spot),
+                        beside,
+                        "{spot} is the place of the spot at {grid}"
+                    );
+                    assert_eq!(at(grid), 8, "{grid}");
+                }
+            }
+        }
+        assert!(
+            own > 60 && farthest > 0.0085,
+            "{own} to {farthest} m about {point}"
+        );
+    }
+    // More closer spots than a call takes, and more cells than a surface is read in, are
+    // input errors that say which.
+    let mut wide = Surface::default();
+    level(Vec2::ZERO, Vec2::splat(0.002), 0.0, true, &mut wide);
+    level(Vec2::splat(3.0), Vec2::splat(3.002), 0.0, true, &mut wide);
+    let spaced = RestOptions {
+        spacing: 2.0,
+        ..Default::default()
     };
-    assert_eq!(rests(&off, &plate), plain);
-    let on_a_spot = RestProblem {
-        near: Some(Vec3::new(0.005, 0.005, 0.0)),
+    let about = RestProblem {
+        near: Some(Vec3::splat(1.5)),
         ..RestProblem::new(a_box(), 0)
     };
-    let closer = rests(&on_a_spot, &table());
-    let there = |r: &&Rest| r.pose.position.truncate().distance(Vec2::splat(0.005)) < 1e-4;
-    assert_eq!(closer.iter().filter(there).count(), 8);
-    // A cell apart around it: the 2 mm either side of the spot, between it and the next.
-    let beside = |r: &&Rest| r.pose.position.truncate().distance(Vec2::new(0.007, 0.005)) < 1e-4;
-    assert_eq!(closer.iter().filter(beside).count(), 8);
+    let refused = |p: &RestProblem, s: &Surface, o: &RestOptions| match rests_on(
+        &device(),
+        std::slice::from_ref(p),
+        std::slice::from_ref(s),
+        o,
+    ) {
+        Err(Error::Input(why)) => why,
+        other => panic!("not refused: {:?}", other.map(|r| r[0].len())),
+    };
+    assert!(refused(&about, &wide, &spaced).starts_with("problem 0: "));
+    level(Vec2::splat(5.0), Vec2::splat(5.002), 0.0, true, &mut wide);
+    let plain = RestProblem::new(a_box(), 0);
+    assert!(refused(&plain, &wide, &spaced).contains("wider cells"));
 }
 
 #[test]
