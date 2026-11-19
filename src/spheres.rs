@@ -246,128 +246,6 @@ fn solids(meshes: &[TriMesh]) -> Arc<[ParryMesh]> {
         .collect()
 }
 
-/// Why spheres cannot be held within a distance of `meshes` ([`SphereOptions::max_overhang`]), if
-/// they cannot: a sphere's depth is measured by the side of the nearest face, which tells inside
-/// from outside only for closed shells that face outward and give each face once. So, once
-/// vertices at one place are merged and triangles that name a vertex twice are dropped, a mesh
-/// is refused that gives a face again, the same way or the other (as where two shells share one,
-/// or a sheet has two sides); that has an edge bordering unlike counts of triangles each way; or
-/// that has a shell facing inward, a cavity's among them, which the meshes' own orientation
-/// (`TriMesh::orient_outward`, by their whole volume) leaves as it is.
-pub(crate) fn closed(meshes: &[TriMesh]) -> Result<(), String> {
-    let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES;
-    for (k, mesh) in meshes.iter().enumerate() {
-        let of = format!("mesh {k} of {}", meshes.len());
-        let solid = ParryMesh::with_flags(mesh.vertices.clone(), mesh.triangles.clone(), flags)
-            .map_err(|e| format!("{of} has no surface: {e}"))?;
-        // Each triangle from its lowest vertex, so that one given again is the same three.
-        let from_lowest = |&[a, b, c]: &[u32; 3]| {
-            if a <= b && a <= c {
-                [a, b, c]
-            } else if b <= c {
-                [b, c, a]
-            } else {
-                [c, a, b]
-            }
-        };
-        let mut faces: Vec<[u32; 3]> = solid.indices().iter().map(from_lowest).collect();
-        if faces.is_empty() {
-            return Err(format!("{of} has no surface"));
-        }
-        faces.sort_unstable();
-        let again = faces.windows(2).filter(|pair| pair[0] == pair[1]).count();
-        let reversed = |&&[a, b, c]: &&[u32; 3]| faces.binary_search(&[a, c, b]).is_ok();
-        let both_ways = faces.iter().filter(reversed).count() / 2;
-        if again + both_ways > 0 {
-            return Err(format!(
-                "{of} gives faces more than once, {again} the same way again and {both_ways} both \
-                 ways, so the side of the nearest face cannot tell inside from outside"
-            ));
-        }
-        // Per edge, the triangles that run along it from its lower vertex less those that run
-        // back, and one of its triangles, to join shells by.
-        let mut edges: BTreeMap<(u32, u32), (i32, usize)> = BTreeMap::new();
-        // Each triangle's shell, as the lowest triangle joined to it across edges so far.
-        let mut shell: Vec<usize> = (0..faces.len()).collect();
-        let first = |shell: &[usize], mut t: usize| {
-            while shell[t] != t {
-                t = shell[t];
-            }
-            t
-        };
-        for (t, &[a, b, c]) in faces.iter().enumerate() {
-            for (from, to) in [(a, b), (b, c), (c, a)] {
-                let edge = edges.entry((from.min(to), from.max(to))).or_insert((0, t));
-                edge.0 += if from < to { 1 } else { -1 };
-                let (ours, theirs) = (first(&shell, t), first(&shell, edge.1));
-                shell[ours.max(theirs)] = ours.min(theirs);
-            }
-        }
-        let open = edges.values().filter(|edge| edge.0 != 0).count();
-        if open > 0 {
-            return Err(format!(
-                "{of} is not closed: {open} of its {} edges border a triangle on one side alone, \
-                 or triangles that face opposite ways",
-                edges.len()
-            ));
-        }
-        // Six times each shell's volume, negative where it faces inward.
-        let mut volumes: BTreeMap<usize, f64> = BTreeMap::new();
-        for (t, face) in faces.iter().enumerate() {
-            let [a, b, c] = face.map(|i| solid.vertices()[i as usize].as_dvec3());
-            *volumes.entry(first(&shell, t)).or_default() += a.dot(b.cross(c));
-        }
-        let inward = volumes.values().filter(|&&volume| volume <= 0.0).count();
-        if inward > 0 {
-            return Err(format!(
-                "{of} has {inward} of its {} shells facing inward, whose outside the side of the \
-                 nearest face takes for inside",
-                volumes.len()
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// What rounding moves a depth measured in `f32` by, in units of the largest coordinate it is
-/// measured from: a point's difference from the surface loses a unit in the last place per axis,
-/// and a sphere placed by a pose a few more, so eight in all.
-const ROUNDING: f32 = 8.0 * f32::EPSILON;
-
-/// Why `spheres` (`[x, y, z, radius]`, in the frame of `meshes`, which are [`closed`]) do not all
-/// keep within `max_overhang` of them, if one does not: the first that reaches farther.
-pub(crate) fn within(
-    meshes: &[TriMesh],
-    spheres: &[[f32; 4]],
-    max_overhang: f32,
-) -> Result<(), String> {
-    let solids = solids(meshes);
-    let largest = meshes
-        .iter()
-        .flat_map(|m| &m.vertices)
-        .fold(0.0, |largest: f32, v| largest.max(v.abs().max_element()));
-    for (k, &[x, y, z, radius]) in spheres.iter().enumerate() {
-        let center = Vec3::new(x, y, z);
-        let depth = depth(&solids, center);
-        let slack = ROUNDING * largest.max(center.abs().max_element() + radius);
-        let reach = radius - depth;
-        if reach.is_nan() || reach > max_overhang + slack {
-            let lies = if depth < 0.0 {
-                format!("its center {:.3} mm outside", -depth * 1e3)
-            } else {
-                format!("its center {:.3} mm deep", depth * 1e3)
-            };
-            return Err(format!(
-                "sphere {k}, at {center} with radius {radius}, reaches {:.3} mm past the \
-                 geometry, {lies}: `max_overhang` allows {:.3} mm",
-                reach * 1e3,
-                max_overhang * 1e3
-            ));
-        }
-    }
-    Ok(())
-}
-
 /// How deep `p` lies inside `solids` (meters): the radius of the largest sphere centered there
 /// inside one of them, or where it is outside them all, its distance to the nearest, negative.
 fn depth(solids: &[ParryMesh], p: Vec3) -> f32 {
@@ -1307,6 +1185,131 @@ pub(crate) fn ignore_pairs(
             .push(robot.links[b].name.clone());
     }
     out
+}
+
+// What only a limit on overhang runs is kept here, after the fit's functions: set among them, it
+// took fits without a limit 2 to 8% longer in a one-unit build on x86.
+
+/// Why spheres cannot be held within a distance of `meshes` ([`SphereOptions::max_overhang`]), if
+/// they cannot: a sphere's depth is measured by the side of the nearest face, which tells inside
+/// from outside only for closed shells that face outward and give each face once. So, once
+/// vertices at one place are merged and triangles that name a vertex twice are dropped, a mesh
+/// is refused that gives a face again, the same way or the other (as where two shells share one,
+/// or a sheet has two sides); that has an edge bordering unlike counts of triangles each way; or
+/// that has a shell facing inward, a cavity's among them, which the meshes' own orientation
+/// (`TriMesh::orient_outward`, by their whole volume) leaves as it is.
+pub(crate) fn closed(meshes: &[TriMesh]) -> Result<(), String> {
+    let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES;
+    for (k, mesh) in meshes.iter().enumerate() {
+        let of = format!("mesh {k} of {}", meshes.len());
+        let solid = ParryMesh::with_flags(mesh.vertices.clone(), mesh.triangles.clone(), flags)
+            .map_err(|e| format!("{of} has no surface: {e}"))?;
+        // Each triangle from its lowest vertex, so that one given again is the same three.
+        let from_lowest = |&[a, b, c]: &[u32; 3]| {
+            if a <= b && a <= c {
+                [a, b, c]
+            } else if b <= c {
+                [b, c, a]
+            } else {
+                [c, a, b]
+            }
+        };
+        let mut faces: Vec<[u32; 3]> = solid.indices().iter().map(from_lowest).collect();
+        if faces.is_empty() {
+            return Err(format!("{of} has no surface"));
+        }
+        faces.sort_unstable();
+        let again = faces.windows(2).filter(|pair| pair[0] == pair[1]).count();
+        let reversed = |&&[a, b, c]: &&[u32; 3]| faces.binary_search(&[a, c, b]).is_ok();
+        let both_ways = faces.iter().filter(reversed).count() / 2;
+        if again + both_ways > 0 {
+            return Err(format!(
+                "{of} gives faces more than once, {again} the same way again and {both_ways} both \
+                 ways, so the side of the nearest face cannot tell inside from outside"
+            ));
+        }
+        // Per edge, the triangles that run along it from its lower vertex less those that run
+        // back, and one of its triangles, to join shells by.
+        let mut edges: BTreeMap<(u32, u32), (i32, usize)> = BTreeMap::new();
+        // Each triangle's shell, as the lowest triangle joined to it across edges so far.
+        let mut shell: Vec<usize> = (0..faces.len()).collect();
+        let first = |shell: &[usize], mut t: usize| {
+            while shell[t] != t {
+                t = shell[t];
+            }
+            t
+        };
+        for (t, &[a, b, c]) in faces.iter().enumerate() {
+            for (from, to) in [(a, b), (b, c), (c, a)] {
+                let edge = edges.entry((from.min(to), from.max(to))).or_insert((0, t));
+                edge.0 += if from < to { 1 } else { -1 };
+                let (ours, theirs) = (first(&shell, t), first(&shell, edge.1));
+                shell[ours.max(theirs)] = ours.min(theirs);
+            }
+        }
+        let open = edges.values().filter(|edge| edge.0 != 0).count();
+        if open > 0 {
+            return Err(format!(
+                "{of} is not closed: {open} of its {} edges border a triangle on one side alone, \
+                 or triangles that face opposite ways",
+                edges.len()
+            ));
+        }
+        // Six times each shell's volume, negative where it faces inward.
+        let mut volumes: BTreeMap<usize, f64> = BTreeMap::new();
+        for (t, face) in faces.iter().enumerate() {
+            let [a, b, c] = face.map(|i| solid.vertices()[i as usize].as_dvec3());
+            *volumes.entry(first(&shell, t)).or_default() += a.dot(b.cross(c));
+        }
+        let inward = volumes.values().filter(|&&volume| volume <= 0.0).count();
+        if inward > 0 {
+            return Err(format!(
+                "{of} has {inward} of its {} shells facing inward, whose outside the side of the \
+                 nearest face takes for inside",
+                volumes.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What rounding moves a depth measured in `f32` by, in units of the largest coordinate it is
+/// measured from: a point's difference from the surface loses a unit in the last place per axis,
+/// and a sphere placed by a pose a few more, so eight in all.
+const ROUNDING: f32 = 8.0 * f32::EPSILON;
+
+/// Why `spheres` (`[x, y, z, radius]`, in the frame of `meshes`, which are [`closed`]) do not all
+/// keep within `max_overhang` of them, if one does not: the first that reaches farther.
+pub(crate) fn within(
+    meshes: &[TriMesh],
+    spheres: &[[f32; 4]],
+    max_overhang: f32,
+) -> Result<(), String> {
+    let solids = solids(meshes);
+    let largest = meshes
+        .iter()
+        .flat_map(|m| &m.vertices)
+        .fold(0.0, |largest: f32, v| largest.max(v.abs().max_element()));
+    for (k, &[x, y, z, radius]) in spheres.iter().enumerate() {
+        let center = Vec3::new(x, y, z);
+        let depth = depth(&solids, center);
+        let slack = ROUNDING * largest.max(center.abs().max_element() + radius);
+        let reach = radius - depth;
+        if reach.is_nan() || reach > max_overhang + slack {
+            let lies = if depth < 0.0 {
+                format!("its center {:.3} mm outside", -depth * 1e3)
+            } else {
+                format!("its center {:.3} mm deep", depth * 1e3)
+            };
+            return Err(format!(
+                "sphere {k}, at {center} with radius {radius}, reaches {:.3} mm past the \
+                 geometry, {lies}: `max_overhang` allows {:.3} mm",
+                reach * 1e3,
+                max_overhang * 1e3
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
