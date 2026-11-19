@@ -472,3 +472,56 @@ fn a_giver_holding_closed_plans_as_the_robot_relocked_so() {
         mine.outcomes[0].as_ref().err()
     );
 }
+
+/// Bars held in many ways are passed on a device for each, and what runs on one waits for work
+/// it hands the device's threads, where a thread that waits takes up another's on top of its
+/// own: two thousand ways to hold a bar, taken by either of two grasps at one meeting, are
+/// passed in one call, each as it is alone.
+#[test]
+fn as_many_holds_as_fill_a_stack_at_once_are_passed_in_one_call() {
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let (worlds, start, held) = picked(&device, Vec3::new(0.12, 0.02, 0.02));
+    let o = TaskOptions::default();
+    // A meeting the bar can be passed at, by whichever grasp.
+    let whole = Handover::new(&robot, 1, start, held.clone(), 1);
+    let passed = batchplan::handover(&device, &worlds, std::slice::from_ref(&whole), &o).unwrap();
+    let plans = passed.outcomes[0].as_ref().expect("the bar is passed");
+    let by: Vec<usize> = plans.iter().map(|plan| plan.candidate).collect();
+    let both =
+        (0..whole.meetings.len()).find(|m| by.contains(&(2 * m)) && by.contains(&(2 * m + 1)));
+    let meeting = whole.meetings[both.expect("a meeting either grasp takes the bar at")];
+    const WAYS: usize = 2000;
+    let way = |k: usize| Handover {
+        meetings: vec![meeting],
+        held: Held {
+            grasp: Pose::new(
+                held.grasp.position + held.grasp.rotation * Vec3::Z * k as f32 * 2e-7,
+                held.grasp.rotation,
+            ),
+            ..held.clone()
+        },
+        ..whole.clone()
+    };
+    let tasks: Vec<Handover> = (0..WAYS).map(way).collect();
+    assert_eq!(tasks[0].grasps.len(), 2);
+    let passed = batchplan::handover(&device, &worlds, &tasks, &o).unwrap();
+    // Nearly every way passes (a few graze the giver's hand), and each does as it does alone.
+    let through = passed.outcomes.iter().filter(|p| p.is_ok()).count();
+    assert!(through > WAYS * 9 / 10, "{through} of {WAYS}");
+    let stopped = passed.outcomes.iter().position(|p| p.is_err());
+    for k in [0, WAYS / 2, WAYS - 1].into_iter().chain(stopped) {
+        let alone = batchplan::handover(&device, &worlds, &tasks[k..k + 1], &o).unwrap();
+        match (&passed.outcomes[k], &alone.outcomes[0]) {
+            (Ok(among), Ok(alone)) => {
+                assert_eq!(among.len(), alone.len(), "way {k}");
+                for (a, b) in among.iter().zip(alone) {
+                    assert_eq!(a.candidate, b.candidate, "way {k}");
+                    assert_eq!(a.approach.control_points, b.approach.control_points);
+                }
+            }
+            (Err(among), Err(alone)) => assert_eq!(among, alone, "way {k}"),
+            (among, alone) => panic!("way {k}: {among:?} among the rest, {alone:?} alone"),
+        }
+    }
+}

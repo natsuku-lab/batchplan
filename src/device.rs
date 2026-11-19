@@ -10,8 +10,8 @@
 use std::any::Any;
 use std::fmt;
 use std::ops::Deref;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rayon::ThreadPool;
@@ -478,33 +478,29 @@ impl Device {
         self.backend.pool().install(op)
     }
 
-    /// Runs `each` on every one of `items` (with its index) on this device's threads, as many
-    /// at a time as it has threads, each thread taking the next as it finishes one, and gives
-    /// what they return, in order. For items that each wait for work they hand these threads,
-    /// as the candidates of each held object do: a thread that waits takes up another item on
-    /// top of its own, so all at once they stack its calls as deep as there are items, and a
-    /// few hundred overflow its stack.
+    /// Runs `each` on every one of `items` (with its index) on this device's threads, no more
+    /// at a time than it has threads, and gives what they return, in order; of several errors,
+    /// the first item's. For items that each run calls of the device, as the candidates of each
+    /// held object do: such a call waits for work it hands these threads, and a thread that
+    /// waits takes up another item on top of its own, so all at once they stack its calls as
+    /// deep as there are items, and a few hundred overflow its stack. More items than threads
+    /// are taken one at a time by each thread as it finishes one (`par_bridge`).
     pub(crate) fn in_turns<T: Send, R: Send>(
         &self,
         items: &mut [T],
         each: impl Fn(usize, &mut T) -> Result<R> + Sync,
     ) -> Result<Vec<R>> {
-        let abreast = self.backend.pool().current_num_threads().min(items.len());
-        let rest = Mutex::new(items.iter_mut().enumerate());
-        let next = || {
-            let mut rest = rest.lock().expect("taking the next item cannot panic");
-            rest.next()
-        };
-        let taken = |_| {
-            let mut done = vec![];
-            while let Some((i, item)) = next() {
-                done.push((i, each(i, item)));
-            }
-            done
-        };
-        let done: Vec<Vec<(usize, Result<R>)>> =
-            self.install(|| (0..abreast).into_par_iter().map(taken).collect());
-        let mut done: Vec<(usize, Result<R>)> = done.into_iter().flatten().collect();
+        let threads = self.backend.pool().current_num_threads();
+        let each = |(i, item)| (i, each(i, item));
+        let mut done: Vec<(usize, Result<R>)> = self.install(|| match items.len() <= threads {
+            true => items.par_iter_mut().enumerate().map(each).collect(),
+            false => items
+                .iter_mut()
+                .enumerate()
+                .par_bridge()
+                .map(each)
+                .collect(),
+        });
         done.sort_by_key(|(i, _)| *i);
         done.into_iter().map(|(_, result)| result).collect()
     }

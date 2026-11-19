@@ -882,3 +882,36 @@ fn contacts_are_listed_for_what_each_configuration_holds() {
         );
     }
 }
+
+/// Problems that hold objects in many ways are planned on a device for each, and what runs on
+/// one waits for work it hands the device's threads, where a thread that waits takes up
+/// another's on top of its own: four thousand ways to hold a cube, two plans holding it each
+/// way, are planned in one call, the last as they are alone.
+#[test]
+fn as_many_holds_as_fill_a_stack_at_once_are_planned_in_one_call() {
+    let s = Scene::new();
+    let device = Device::cpu(&s.robot).unwrap();
+    let worlds = device.upload(std::slice::from_ref(&s.world)).unwrap();
+    let o = PlanOptions::default();
+    const WAYS: usize = 4000;
+    let holding = |way: usize| cube(0.05 + way as f32 * 1e-6);
+    let across = |way: usize| {
+        let there = PlanProblem {
+            holding: Some(holding(way)),
+            ..PlanProblem::new(0, s.up.clone(), s.aside.clone())
+        };
+        let back = PlanProblem {
+            holding: Some(holding(way)),
+            ..PlanProblem::new(0, s.aside.clone(), s.up.clone())
+        };
+        [there, back]
+    };
+    let problems: Vec<PlanProblem> = (0..WAYS).flat_map(across).collect();
+    let planned = batchplan::plan(&device, &worlds, &problems, &o).unwrap();
+    assert_eq!(planned.solved().count(), 2 * WAYS);
+    let alone = batchplan::plan(&device, &worlds, &across(WAYS - 1), &o).unwrap();
+    let among: Vec<_> = planned.solved().skip(2 * WAYS - 2).collect();
+    for (a, b) in among.iter().zip(alone.solved()) {
+        assert_eq!(a.solution, b.solution);
+    }
+}

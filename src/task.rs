@@ -466,25 +466,22 @@ pub fn pick(
                 }
             }
         }
-        let results: Vec<TaskResult<Pick>> = device.install(|| {
-            let each = groups.par_iter().map(|group| {
-                let mine: Vec<Pick> = group
-                    .tasks
-                    .iter()
-                    .map(|(i, grasps)| Pick {
-                        grasps: grasps.iter().map(|&g| tasks[*i].grasps[g]).collect(),
-                        locked: vec![group.locked.clone(); grasps.len()],
-                        ..tasks[*i].clone()
-                    })
-                    .collect();
-                if group.locked.is_empty() {
-                    picked(device, worlds, &mine, o)
-                } else {
-                    let relocked = device.with_robot(&device.robot().relock(group.locked)?)?;
-                    picked(&relocked, worlds, &mine, o)
-                }
-            });
-            each.collect::<Result<_>>()
+        let results: Vec<TaskResult<Pick>> = device.in_turns(&mut groups, |_, group| {
+            let mine: Vec<Pick> = group
+                .tasks
+                .iter()
+                .map(|(i, grasps)| Pick {
+                    grasps: grasps.iter().map(|&g| tasks[*i].grasps[g]).collect(),
+                    locked: vec![group.locked.clone(); grasps.len()],
+                    ..tasks[*i].clone()
+                })
+                .collect();
+            if group.locked.is_empty() {
+                picked(device, worlds, &mine, o)
+            } else {
+                let relocked = device.with_robot(&device.robot().relock(group.locked)?)?;
+                picked(&relocked, worlds, &mine, o)
+            }
         })?;
         for (group, result) in groups.iter().zip(results) {
             for ((i, grasps), outcome) in group.tasks.iter().zip(result.outcomes) {
