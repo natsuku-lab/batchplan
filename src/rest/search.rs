@@ -51,10 +51,10 @@ impl RestProblem {
 #[derive(Clone, Copy, Debug)]
 pub struct RestOptions {
     /// The turns about the vertical each spot is tried at, from a problem's `rotation` round a
-    /// whole turn: 8, as [`place_poses`](crate::place_poses) is commonly given. Turns the
-    /// object's shape maps onto an earlier one, as a box's half turn or any turn of an upright
-    /// can, are left out: `place_poses` gives a rest's copies about the object's own axis, and
-    /// one held by an end and laid down may be set down end for end too.
+    /// whole turn: 8, as [`place_poses`](crate::place_poses) is commonly given. A rest comes at
+    /// each of them: a turn that sets the shape down as an earlier one does, as a box's half turn
+    /// or any turn of an upright can, rests where that one does and is found with it, and is
+    /// another pose for the hand, as a bottle laid down end for end.
     pub turns: usize,
     /// How far apart the spots its middle is set down over lie, seen from above (meters): 1 cm,
     /// the step of Wang and Hauser's search.
@@ -139,8 +139,8 @@ const SPREAD: usize = 1024;
 /// checked: the hand that sets it down and its way there are [`place`](crate::place)'s to check,
 /// with what the object may touch as its `support`.
 ///
-/// They come in an order whose first few are worth trying first: every spot at the first turn,
-/// then every spot at the next, and within a turn, the steadiest first and then each the farthest
+/// They come at every turn, in an order whose first few are worth trying first: every spot at
+/// the first turn, then every spot at the next, and within a turn, the steadiest first and then each the farthest
 /// from those before it, so the first few spread over the support; past the first 1,024 of a
 /// turn, as their spots come. The problems run in parallel
 /// on the device's threads, each surface read once however many problems name it, and a
@@ -411,21 +411,24 @@ fn on(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Rest> {
         grown: shape.grown(o.clearance),
         o,
     };
-    // The turns, each once.
+    // The turns, and for each the first that sets the shape down as it does: its rests are
+    // found once.
     let rotation = world::unit(p.rotation);
-    let mut turns: Vec<Quat> = vec![];
-    for k in 0..o.turns {
-        let turned = Quat::from_rotation_z(TAU * k as f32 / o.turns as f32) * rotation;
-        if !turns
-            .iter()
-            .any(|&t| shape.same_turned(t.inverse() * turned))
-        {
-            turns.push(turned);
-        }
-    }
+    let turns: Vec<Quat> = (0..o.turns)
+        .map(|k| Quat::from_rotation_z(TAU * k as f32 / o.turns as f32) * rotation)
+        .collect();
+    let alike = |k: usize| {
+        let same = |t: &Quat| shape.same_turned(t.inverse() * turns[k]);
+        turns[..k].iter().position(same).unwrap_or(k)
+    };
+    let first: Vec<usize> = (0..turns.len()).map(alike).collect();
     let spots = seen.spots;
     // Each turn's rests in their order, the turns side by side.
-    let each = turns.par_iter().map(|&turned| {
+    let each = (0..turns.len()).into_par_iter().map(|k| {
+        if first[k] != k {
+            return vec![];
+        }
+        let turned = turns[k];
         let found: Vec<Option<(Rest, bool)>> = (0..spots.count())
             .into_par_iter()
             .map_init(Scratch::default, |scratch, k| {
@@ -444,7 +447,22 @@ fn on(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Rest> {
         }
         spread_out(kept)
     });
-    let each: Vec<Vec<Rest>> = each.collect();
+    let mut found: Vec<Vec<Rest>> = each.collect();
+    // A turn that sets the shape down as an earlier one does rests where that one does, turned
+    // its own way: for a hand that holds the object by one end, another pose. From the last
+    // turn back, so that the first of each kind gives its own away after the others copied it.
+    let mut each: Vec<Vec<Rest>> = vec![vec![]; turns.len()];
+    for k in (0..turns.len()).rev() {
+        each[k] = if first[k] == k {
+            std::mem::take(&mut found[k])
+        } else {
+            let turned = |r: &Rest| Rest {
+                pose: Pose::new(r.pose.position, turns[k]),
+                ..r.clone()
+            };
+            found[first[k]].iter().map(turned).collect()
+        };
+    }
     each.into_iter().flatten().collect()
 }
 

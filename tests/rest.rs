@@ -156,24 +156,41 @@ fn a_box_rests_upright_on_a_table_at_each_of_its_own_turns() {
         })
     };
     assert!(found.iter().any(past));
-    // Eight turns of a box are four: a half turn sets it down as it was. A square box's are two,
-    // an upright can's one.
-    let turns = |object: &Obstacle| {
-        let mut x: Vec<Vec3> = vec![];
-        for r in rests(object, &table(), &o) {
+    // Each of the eight turns comes. A box's half turn sets it down as it was, so it rests at a
+    // turn and at the one half way round in the same places, in the same order, turned each its
+    // own way; a square box at every quarter turn so, and an upright can at every turn. Beside
+    // a block that is in the way, where a box rests depends on how it is turned.
+    let mut beside = table();
+    block(
+        Vec3::new(0.03, 0.0, 0.04),
+        Vec3::new(0.03, 0.03, 0.04),
+        false,
+        &mut beside,
+    );
+    let by_turn = |object: &Obstacle| {
+        let mut turns: Vec<(Vec3, Vec<Vec3>)> = vec![];
+        for r in rests(object, &beside, &o) {
             let along = r.pose.rotation * Vec3::X;
-            if !x.iter().any(|a| a.dot(along) > 0.9999) {
-                x.push(along);
+            match turns.iter_mut().find(|t| t.0.dot(along) > 0.9999) {
+                Some(turn) => turn.1.push(r.pose.position),
+                None => turns.push((along, vec![r.pose.position])),
             }
         }
-        x.len()
+        turns
     };
-    assert_eq!(turns(&a_box()), 4);
-    assert_eq!(
-        turns(&Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.03, 0.03, 0.02))),
-        2
-    );
-    assert_eq!(turns(&Obstacle::cylinder(Vec3::ZERO, 0.03, 0.05)), 1);
+    let square = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.03, 0.03, 0.02));
+    let can = Obstacle::cylinder(Vec3::ZERO, 0.03, 0.05);
+    for (object, alike) in [(a_box(), 4), (square, 2), (can, 1)] {
+        let turns = by_turn(&object);
+        assert_eq!(turns.len(), 8, "{object:?}");
+        for k in 0..8 {
+            assert!(!turns[k].1.is_empty());
+            assert_eq!(turns[k].1, turns[k % alike].1, "turn {k} of {object:?}");
+        }
+        if alike > 1 {
+            assert_ne!(turns[1].1, turns[0].1, "{object:?}");
+        }
+    }
 }
 
 #[test]
@@ -400,7 +417,7 @@ fn bars_hold_what_spans_them_and_cradle_what_is_laid_between_them() {
     // A can 6.6 cm across laid down at each of its turns comes to rest between the bars,
     // touching both, its axis 4.3 cm from each bar's and along them: set down half a centimeter
     // to either side of the middle it lies on one bar, and rolls in. The spots to both sides
-    // come to the one place, which comes once; across the bars it would roll along them.
+    // come to the one place, which comes once a turn; across the bars it would roll along them.
     let can = Obstacle::cylinder(Vec3::ZERO, 0.033, 0.08);
     let lying = Quat::from_rotation_x(FRAC_PI_2);
     let cradled = rests_turned(&can, lying, &bars(), &RestOptions::default());
@@ -417,11 +434,18 @@ fn bars_hold_what_spans_them_and_cradle_what_is_laid_between_them() {
             "{r:?}"
         );
         assert!((r.pose.rotation * Vec3::Z).y.abs() > 0.9999, "{r:?}");
-        for other in &cradled[..k] {
+        let same_way = |other: &&Rest| other.pose.rotation == r.pose.rotation;
+        for other in cradled[..k].iter().filter(same_way) {
             let apart = other.pose.position.distance(r.pose.position);
             assert!(apart > 5e-3, "{apart} m apart: {r:?} and {other:?}");
         }
     }
+    // Each place comes both ways round along the bars.
+    let ways = |along: f32| {
+        let that_way = |r: &&Rest| (r.pose.rotation * Vec3::Z).y * along > 0.0;
+        cradled.iter().filter(that_way).count()
+    };
+    assert!(ways(1.0) > 0 && ways(1.0) == ways(-1.0));
     // On a table it rolls, and has no rest.
     assert!(rests_turned(&can, lying, &table(), &RestOptions::default()).is_empty());
     let can = Obstacle::cylinder(Vec3::ZERO, 0.035, 0.08);
