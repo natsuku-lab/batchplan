@@ -2,13 +2,15 @@
 //! ([`place`]). Each is three motions from rest to rest: a planned path from the start to where the
 //! hand begins to move in, a straight move in (to the grasp, or down to where the object goes), and
 //! a straight move away (lifting the object, or backing off from it). The gripper closes or opens
-//! between the second and the third; every motion is checked with the fingers where the start has
-//! them, so open them first.
+//! between the second and the third. Every motion is checked with the fingers where the robot was
+//! loaded with them, so open them first, unless the task says otherwise: a pick's grasps may keep
+//! them narrower ([`Pick::locked`]), a hold says where they closed ([`Held::locked`]), and a place
+//! may name how far they open where it lets go ([`Place::open`]).
 //!
 //! A task's candidates, its grasps or the poses it may set the object at, run with every other
-//! task's, step by step, each step one batch: IK at each grasp or release, the moves in (run
-//! backward from there, so they end exactly there), the moves away, then planned paths for those
-//! still going. Every candidate that passes every step comes back, quickest first. When none does,
+//! task's, step by step, each step a batch for those whose fingers and held object are alike: IK
+//! at each grasp or release, the moves in (run backward from there, so they end exactly there),
+//! the moves away, then planned paths for those still going. Every candidate that passes every step comes back, quickest first. When none does,
 //! each candidate's step and reason come back instead.
 //!
 //! A task may leave its transit out (`transit: false`) and give the two straight moves alone: a
@@ -149,6 +151,24 @@ pub struct Place {
     pub lower: Vec3,
     /// How far back along its own z axis the hand moves once it lets go (meters).
     pub retreat: f32,
+    /// Values the fingers may open to where the hand lets go, each as [`Held::locked`] names
+    /// them, in the order preferred: a pose lets go at the first with which the hand, where it
+    /// lets go and on its move away, is clear, and its plan says which ([`TaskPlan::opening`]).
+    /// The release is then solved with the fingers where they hold the object, not where the
+    /// robot was loaded with them, so a hand can set an object down where it has no room to open
+    /// all the way. Joints an opening does not name are where the robot was loaded with them,
+    /// whatever the hold has them at. An opening is tried only where the fingers stopped the one
+    /// before; a pose none clears stops at its departure, with what the last one tried met.
+    /// Empty: the hand opens to where the robot was loaded with them.
+    pub open: Vec<HashMap<String, f32>>,
+    /// How many plans will do: `None`, every pose is tried. With a count, the poses are tried in
+    /// their order, 32 of them and then twice as many each time, until that many have got
+    /// through, and the task's plans are the first that many in the poses' order to get through,
+    /// quickest first: those that trying every pose gives, without the IK and the motions of
+    /// the poses after them (on a GPU, whose IK rounds by the size of its batch, to that
+    /// rounding). Put the poses worth having first. A task none gets through has tried every
+    /// one, and says where each stopped.
+    pub enough: Option<usize>,
     /// Obstacles the object is set on, by index: it may touch them as it arrives.
     pub support: Vec<usize>,
     /// Where the hands must stay along the transit ([`HandConstraint`]), as a cup carried upright
@@ -173,6 +193,8 @@ impl Place {
             poses,
             lower: Vec3::Z * -0.1,
             retreat: 0.1,
+            open: vec![],
+            enough: None,
             support: vec![],
             constraints: vec![],
         }
@@ -259,6 +281,9 @@ pub struct TaskPlan {
     pub held: Option<Held>,
     /// After a place, the object where it was set down, to add to the world.
     pub placed: Option<Obstacle>,
+    /// After a place that says how far its hand may open ([`Place::open`]), which of those the
+    /// hand lets go at and moves away with, by index.
+    pub opening: Option<usize>,
     /// After a handover, the object's pose where it changed hands, in the robot's frame.
     pub meeting: Option<Pose>,
 }
@@ -527,9 +552,18 @@ pub fn pick(
     })
 }
 
-/// How many grasps a pick that wants only some plans ([`Pick::enough`]) tries first: enough
-/// that their IK is one batch worth sending, and twice as many each time after.
+/// How many grasps a pick that wants only some plans ([`Pick::enough`]) tries first, and how
+/// many poses a place that does ([`Place::enough`]): enough that their IK is one batch worth
+/// sending, and twice as many each time after.
 const FEW: usize = 32;
+
+/// The candidates of a call's places that open their fingers alike where they let go, each with
+/// its world among those the hands back off in.
+struct Opening<'a, 'c> {
+    open: &'a HashMap<String, f32>,
+    worlds: Vec<u32>,
+    candidates: Vec<&'c mut Candidate>,
+}
 
 /// The grasps of a call's picks that keep the robot's locked joints at one set of values.
 struct Group<'a> {
@@ -747,8 +781,13 @@ fn picked(
 /// Sets down each task's held object, trying each of its poses. IK solves where the hand lets go,
 /// holding the object, which may touch what it is set on there and on the move in, run backward
 /// from there. The move away lets the fingers touch the object where it now stands. Run the
-/// transit and the approach holding the object, open the gripper, then run the departure. `device`
-/// is the robot's without the object; each task's `held` is attached to it here.
+/// transit and the approach holding the object, open the gripper, then run the departure. A task
+/// that names how far its hand may open ([`Place::open`]) is solved where it lets go with the
+/// fingers where they hold the object, and backs off at the first opening it is clear with
+/// ([`TaskPlan::opening`]): open the gripper that far, and follow the departure on the robot
+/// relocked there. A task that says how many plans will do ([`Place::enough`]) tries its poses in
+/// their order until that many have got through. `device` is the robot's without the object; each
+/// task's `held` is attached to it here.
 pub fn place(
     device: &Device,
     worlds: &Worlds,
@@ -765,6 +804,8 @@ pub fn place(
     )?;
     let tasks = corrected.as_ref();
     check_options(o)?;
+    // The openings checked so far: tasks that offer the same ones check them once.
+    let mut opened: Vec<&HashMap<String, f32>> = vec![];
     for (i, t) in tasks.iter().enumerate() {
         let world = check_task(robot, worlds, i, &Steps::of_place(t), &t.start, t.held.hand)?;
         if let Some(idle) = &t.idle {
@@ -801,7 +842,88 @@ pub fn place(
             t.retreat
         );
         check_support(i, world, &t.support, None)?;
+        ensure_input!(
+            t.enough != Some(0),
+            "task {i}: at least one plan must be enough, got 0"
+        );
+        for (k, open) in t.open.iter().enumerate() {
+            if !opened.contains(&open) {
+                held::check_locked(robot, open, &format!("task {i}: opening {k}"))?;
+                opened.push(open);
+            }
+        }
     }
+    if tasks.iter().all(|t| t.enough.is_none()) {
+        return placed(device, worlds, tasks, o);
+    }
+    // Each task's plans, numbered as its poses are, and where each pose tried without one
+    // stopped, in the poses' order.
+    let mut plans: Vec<Vec<TaskPlan>> = tasks.iter().map(|_| vec![]).collect();
+    let mut stops: Vec<Vec<CandidateStop>> = tasks.iter().map(|_| vec![]).collect();
+    // How many of each task's poses have been tried, and how many more a task that wants only
+    // some plans tries at a time.
+    let mut tried = vec![0; tasks.len()];
+    let mut few = FEW;
+    loop {
+        // The poses each task tries next: all it has, or the next few in order while it has
+        // fewer plans than will do.
+        let next = tasks.iter().enumerate().map(|(i, t)| {
+            let more = match t.enough {
+                Some(enough) if plans[i].len() >= enough => 0,
+                Some(enough) => few.max(enough),
+                None => t.poses.len(),
+            };
+            tried[i]..t.poses.len().min(tried[i] + more)
+        });
+        let next: Vec<Range<usize>> = next.collect();
+        let going: Vec<usize> = (0..tasks.len()).filter(|&i| !next[i].is_empty()).collect();
+        if going.is_empty() {
+            break;
+        }
+        let some = going.iter().map(|&i| Place {
+            poses: tasks[i].poses[next[i].clone()].to_vec(),
+            ..tasks[i].clone()
+        });
+        let some: Vec<Place> = some.collect();
+        let result = placed(device, worlds, &some, o)?;
+        for (&i, outcome) in going.iter().zip(result.outcomes) {
+            match outcome {
+                Ok(found) => plans[i].extend(found.into_iter().map(|plan| TaskPlan {
+                    candidate: next[i].start + plan.candidate,
+                    ..plan
+                })),
+                Err(failure) => stops[i].extend(failure.candidates),
+            }
+            tried[i] = next[i].end;
+        }
+        few *= 2;
+    }
+    // The first plans in the poses' order, as many as will do, quickest first; or where each
+    // pose stopped, every one having been tried.
+    let outcomes = tasks.iter().zip(plans).zip(stops);
+    let outcomes = outcomes.map(|((t, mut plans), candidates)| {
+        if plans.is_empty() {
+            return Err(TaskFailure { candidates });
+        }
+        plans.sort_by_key(|plan| plan.candidate);
+        plans.truncate(t.enough.unwrap_or(usize::MAX));
+        plans.sort_by(|a, b| a.duration().total_cmp(&b.duration()));
+        Ok(plans)
+    });
+    Ok(TaskResult {
+        problems: tasks.to_vec(),
+        outcomes: outcomes.collect(),
+    })
+}
+
+/// [`place`] for checked tasks, every pose of each.
+fn placed(
+    device: &Device,
+    worlds: &Worlds,
+    tasks: &[Place],
+    o: &TaskOptions,
+) -> Result<TaskResult<Place>> {
+    let robot = device.robot();
     // A device holding each task's object, built in parallel; tasks holding theirs alike share one.
     // Every step below runs each holder's candidates as a batch of their own, as many holders
     // at a time as the device has threads (`Device::in_turns`).
@@ -869,6 +991,7 @@ pub fn place(
             .collect()
     };
     let mut arrived: Vec<(usize, Worlds)> = vec![];
+    let as_loaded = HashMap::new();
     let mut reaching = live(&mut candidates, TaskStep::Reach);
     if !reaching.is_empty() {
         for c in &reaching {
@@ -877,13 +1000,48 @@ pub fn place(
                 arrived.push((c.hand, holder.upload(&arriving(c.hand))?));
             }
         }
-        let given = |_: usize, c: &Candidate| c.world;
-        let solved = solve(device, worlds, &reaching, &given, &o.ik)?;
-        let solutions: Vec<Vec<f32>> = reaching
-            .iter()
-            .enumerate()
-            .map(|(i, c)| nearest_first(&solved, i, &c.rest))
-            .collect();
+        // The fingers each release is solved with: where the robot was loaded with them, to
+        // which the hand opens there; or, for a task that says how far its hand opens, where
+        // they hold the object. Those solved alike are side by side, a batch on a robot relocked
+        // so; where all are, the candidates keep their order.
+        let solved_with = |c: &Candidate| match &tasks[c.task] {
+            t if t.open.is_empty() => &as_loaded,
+            t => &t.held.locked,
+        };
+        let mut alike: Vec<&HashMap<String, f32>> = vec![];
+        for c in &reaching {
+            if !alike.contains(&solved_with(c)) {
+                alike.push(solved_with(c));
+            }
+        }
+        reaching.sort_by_key(|c| alike.iter().position(|with| *with == solved_with(c)));
+        let mut lots: Vec<(Range<usize>, Option<Device>)> = vec![];
+        for with in alike {
+            let from = lots.last().map_or(0, |(lot, _)| lot.end);
+            let count = reaching[from..]
+                .iter()
+                .take_while(|c| solved_with(c) == with)
+                .count();
+            let relocked = match with.is_empty() {
+                true => None,
+                false => Some(device.with_robot(&robot.relock(with)?)?),
+            };
+            lots.push((from..from + count, relocked));
+        }
+        let solve_lot = |(lot, relocked): &(Range<usize>, Option<Device>)| {
+            let given = |_: usize, c: &Candidate| c.world;
+            let on = relocked.as_ref().unwrap_or(device);
+            solve(on, worlds, &reaching[lot.clone()], &given, &o.ik)
+        };
+        let solved: Vec<IkResult> = match &mut lots[..] {
+            [one] => vec![solve_lot(one)?],
+            lots => device.in_turns(lots, |_, lot| solve_lot(lot))?,
+        };
+        let mut solutions: Vec<Vec<f32>> = vec![];
+        for ((lot, _), solved) in lots.iter().zip(&solved) {
+            let lot = reaching[lot.clone()].iter().enumerate();
+            solutions.extend(lot.map(|(k, c)| nearest_first(solved, k, &c.rest)));
+        }
         let mut mine: Vec<Vec<usize>> = holders.iter().map(|_| vec![]).collect();
         for (i, c) in reaching.iter().enumerate() {
             mine[holder_of[c.task]].push(i);
@@ -938,7 +1096,10 @@ pub fn place(
                 reaching[i].contacts = contacts;
             }
         }
-        classify(device, worlds, &mut reaching, &solved, &o.ik)?;
+        for ((lot, relocked), solved) in lots.iter().zip(&solved) {
+            let on = relocked.as_ref().unwrap_or(device);
+            classify(on, worlds, &mut reaching[lot.clone()], solved, &o.ik)?;
+        }
     }
     let mut moving = by_holder(
         live(&mut candidates, TaskStep::Approach),
@@ -957,7 +1118,7 @@ pub fn place(
     })?;
 
     // Back from the object where it stands, the fingers touching it: a world for each.
-    let mut leaving = live(&mut candidates, TaskStep::Depart);
+    let leaving = live(&mut candidates, TaskStep::Depart);
     if !leaving.is_empty() {
         let left: Vec<World> = leaving
             .iter()
@@ -972,8 +1133,72 @@ pub fn place(
             })
             .collect();
         let left = device.upload(&left)?;
-        let each = |k: usize, _: &Candidate| k as u32;
-        straight(device, &left, &mut leaving, &each, Leg::Away, o)?;
+        // The hand opens to the first of its task's openings with which it is clear there and
+        // on its way back: those that open alike are a batch on a robot relocked so, and those
+        // the fingers stop try their next. A task that names none opens to where the robot was
+        // loaded.
+        let unnamed = [as_loaded];
+        let openings = |c: &Candidate| match &tasks[c.task].open[..] {
+            [] => &unnamed[..],
+            open => open,
+        };
+        // Only a stop that is the fingers' own can end otherwise at another opening: out of
+        // reach, a jump and what the arm or the palm meets are the same at each.
+        let of_fingers = |c: &Candidate| {
+            let fingers = fingers(robot, c.hand);
+            let theirs = |link: &String| fingers.contains(&link.as_str());
+            let collided = matches!(c.stop, Some(ToolPathStop::Collision { .. }));
+            collided
+                && c.contacts.iter().all(|contact| match contact {
+                    Contact::World { link, .. } => theirs(link),
+                    Contact::SelfCollision { links, .. } => links.iter().any(theirs),
+                })
+        };
+        let departing = leaving.first().map_or(0, |c| c.passed);
+        let mut waiting: Vec<(u32, &mut Candidate)> = (0..).zip(leaving).collect();
+        let mut round = 0;
+        while !waiting.is_empty() {
+            let mut lots: Vec<Opening<'_, '_>> = vec![];
+            for (world, c) in waiting.drain(..) {
+                let open = &openings(c)[round];
+                let k = lots.iter().position(|lot| lot.open == open);
+                let k = k.unwrap_or_else(|| {
+                    lots.push(Opening {
+                        open,
+                        worlds: vec![],
+                        candidates: vec![],
+                    });
+                    lots.len() - 1
+                });
+                lots[k].worlds.push(world);
+                lots[k].candidates.push(c);
+            }
+            let away = |lot: &mut Opening<'_, '_>| {
+                let each = |k: usize, _: &Candidate| lot.worlds[k];
+                if lot.open.is_empty() {
+                    return straight(device, &left, &mut lot.candidates, &each, Leg::Away, o);
+                }
+                let relocked = device.with_robot(&robot.relock(lot.open)?)?;
+                straight(&relocked, &left, &mut lot.candidates, &each, Leg::Away, o)
+            };
+            match &mut lots[..] {
+                [one] => away(one)?,
+                lots => drop(device.in_turns(lots, |_, lot| away(lot))?),
+            }
+            for lot in lots {
+                for (world, c) in lot.worlds.into_iter().zip(lot.candidates) {
+                    let named = !tasks[c.task].open.is_empty();
+                    if c.passed > departing {
+                        c.opening = named.then_some(round);
+                    } else if round + 1 < openings(c).len() && of_fingers(c) {
+                        c.stop = None;
+                        c.contacts.clear();
+                        waiting.push((world, c));
+                    }
+                }
+            }
+            round += 1;
+        }
     }
 
     // From the start, holding the object.
@@ -1342,6 +1567,8 @@ pub(crate) struct Candidate {
     contacts: Vec<Contact>,
     /// The configuration at the grasp or release, where both straight moves start.
     grasped: Vec<f32>,
+    /// Which of its place's openings it lets go at, where the place names some.
+    opening: Option<usize>,
     /// Its motions: in, away and from the start, as control points.
     approach: Vec<f32>,
     depart: Vec<f32>,
@@ -1390,6 +1617,7 @@ impl Candidate {
             stop: None,
             contacts: vec![],
             grasped: vec![],
+            opening: None,
             approach: vec![],
             depart: vec![],
             transit: vec![],
@@ -1791,6 +2019,7 @@ pub(crate) fn choose(
             )?,
             held,
             placed,
+            opening: c.opening,
             meeting: c.giver.as_ref().map(|g| g.meeting),
         })
     };

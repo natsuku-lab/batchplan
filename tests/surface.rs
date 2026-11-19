@@ -580,6 +580,11 @@ fn fingers_that_may_come_in_narrower_keep_farthest_from_what_stands_around() {
     let open = grasps(&alone, &o);
     assert!(!open.is_empty() && open.iter().all(|g| g.opening == o.opening));
     assert_eq!(grasps(&alone, &narrow), open);
+    // The openings they may come in at, widest first: the whole one and each sixteenth less.
+    let openings = narrow.openings();
+    assert_eq!((openings.len(), openings[0]), (16, o.opening));
+    let sixteenth = |pair: &[f32]| (pair[0] - pair[1] - o.opening / 16.0).abs() < 1e-6;
+    assert!(openings.windows(2).all(sixteenth), "{openings:?}");
     // Walls facing the plates, low enough that a hand from above has only its fingertips
     // between them: something else's, or the object's own.
     let between = |walls: &[f32], own: &[f32]| {
@@ -635,6 +640,11 @@ fn fingers_that_may_come_in_narrower_keep_farthest_from_what_stands_around() {
                 (g.opening - expected).abs() < 1e-6,
                 "{g:?} for {expected}, clear at {:?}",
                 (0..=most).filter(|&k| free(k)).collect::<Vec<_>>()
+            );
+            assert!(
+                openings.contains(&g.opening),
+                "{} of {openings:?}",
+                g.opening
             );
         }
         let down = found.iter().find(|g| (g.pose.rotation * Vec3::Z).z < -0.99);
