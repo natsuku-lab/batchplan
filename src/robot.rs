@@ -653,7 +653,8 @@ impl Robot {
                  `max_overhang` of",
                 link.name
             );
-            let meshes: Vec<TriMesh> = link.shapes.iter().map(Shape::mesh).collect::<Result<_>>()?;
+            let meshes: Vec<TriMesh> =
+                link.shapes.iter().map(Shape::mesh).collect::<Result<_>>()?;
             spheres::closed(&meshes)
                 .and_then(|()| spheres::within(&meshes, spheres, limit))
                 .map_err(|e| anyhow!("link '{}': {e}", link.name))?;
@@ -722,19 +723,19 @@ impl Robot {
                 );
             }
         }
-        let mut source = format!(
+        let held = o.max_overhang.map_or_else(String::new, |limit| {
+            format!(
+                ", each held to {:.1} mm beyond it, which leaves surface outside them",
+                limit * 1e3
+            )
+        });
+        let source = format!(
             "fitted by batchplan: spheres reach up to {:.1} mm beyond the geometry and up to {:.2} \
-             times their link's tolerance, with every tolerance scaled by {:.2} for the budget",
+             times their link's tolerance, with every tolerance scaled by {:.2} for the budget{held}",
             fitted.overhang * 1e3,
             fitted.relative_overhang,
             fitted.scale
         );
-        if let Some(limit) = o.max_overhang {
-            source += &format!(
-                ", each held to {:.1} mm beyond it, which leaves surface outside them",
-                limit * 1e3
-            );
-        }
         let mut model = CollisionModel {
             source: Some(source),
             ..Default::default()

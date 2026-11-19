@@ -295,8 +295,8 @@ pub(crate) fn within(
         let center = Vec3::new(x, y, z);
         let depth = depth(&solids, center);
         let slack = ROUNDING * largest.max(center.abs().max_element() + radius);
-        // Written so that a radius or a center that is not a number fails it.
-        if !(radius - depth <= max_overhang + slack) {
+        let reach = radius - depth;
+        if reach.is_nan() || reach > max_overhang + slack {
             let lies = if depth < 0.0 {
                 format!("its center {:.3} mm outside", -depth * 1e3)
             } else {
@@ -305,7 +305,7 @@ pub(crate) fn within(
             return Err(format!(
                 "sphere {k}, at {center} with radius {radius}, reaches {:.3} mm past the \
                  geometry, {lies}: `max_overhang` allows {:.3} mm",
-                (radius - depth) * 1e3,
+                reach * 1e3,
                 max_overhang * 1e3
             ));
         }
@@ -370,7 +370,15 @@ impl LinkFit {
             .sum();
         let count = ((area / DENSE_AREA) as usize).clamp(DENSE_SAMPLES, MAX_DENSE_SAMPLES);
         let dense = surface_samples(meshes, count, rng);
-        let solids = solids(meshes);
+        let flags = TriMeshFlags::MERGE_DUPLICATE_VERTICES
+            | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
+            | TriMeshFlags::ORIENTED;
+        let solids: Arc<[ParryMesh]> = meshes
+            .iter()
+            .filter_map(|m| {
+                ParryMesh::with_flags(m.vertices.clone(), m.triangles.clone(), flags).ok()
+            })
+            .collect();
         let (lo, hi) = samples
             .iter()
             .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), &p| {
@@ -592,10 +600,8 @@ impl LinkFit {
 
     /// The picked spheres, grown until every sample is inside one, and the largest growth. Each
     /// sample outside them grows the pick that reaches it with the least overhang, judged by the
-    /// picks' original radii so growth cannot snowball onto one sphere. With `max_overhang`, each is
-    /// then held to that far past the geometry, as its depth measures it, and one left without a
-    /// radius is dropped: the samples it reached past that stay outside.
-    fn spheres(&self, picks: &[usize], max_overhang: Option<f32>) -> (Vec<[f32; 4]>, f32) {
+    /// picks' original radii so growth cannot snowball onto one sphere.
+    fn spheres(&self, picks: &[usize]) -> (Vec<[f32; 4]>, f32) {
         // A cover that picked nothing still needs one sphere to grow: the largest candidate.
         let largest = (0..self.candidates.len())
             .max_by(|&a, &b| self.candidates[a].1.total_cmp(&self.candidates[b].1));
@@ -616,22 +622,11 @@ impl LinkFit {
                 .expect("a sphere");
             spheres[j].1 = (s - spheres[j].0).length();
         }
-        if let Some(limit) = max_overhang {
-            for (center, radius) in &mut spheres {
-                *radius = radius.min(depth(&self.solids, *center) + limit);
-            }
-        }
         let growth = picks
             .iter()
             .zip(&spheres)
             .map(|(&i, s)| s.1 - self.candidates[i].1)
             .fold(0.0, f32::max);
-        if max_overhang.is_some() {
-            // A radius that rounding alone gives a center on the surface is none.
-            let farthest = |far: f32, p: &Vec3| far.max(p.abs().max_element());
-            let least = ROUNDING * self.samples.iter().fold(0.0, farthest);
-            spheres.retain(|&(_, radius)| radius > least);
-        }
         (
             spheres
                 .into_iter()
@@ -639,6 +634,29 @@ impl LinkFit {
                 .collect(),
             growth,
         )
+    }
+
+    /// Holds fitted `spheres` to `limit` past the geometry ([`SphereOptions::max_overhang`]): each
+    /// radius is cut back to its center's depth plus the limit, and a sphere left with no more
+    /// than rounding gives a center on the surface is dropped, so the samples they reached past
+    /// that stay outside. Returns how far past the geometry the farthest still reaches.
+    fn hold(&self, spheres: &mut Vec<[f32; 4]>, limit: f32) -> f32 {
+        let corner = |far: f32, solid: &ParryMesh| {
+            let bounds = solid.local_aabb();
+            far.max(bounds.mins.abs().max(bounds.maxs.abs()).max_element())
+        };
+        let least = ROUNDING * self.solids.iter().fold(0.0, corner);
+        let mut reach = 0.0f32;
+        spheres.retain_mut(|sphere| {
+            let depth = depth(&self.solids, Vec3::new(sphere[0], sphere[1], sphere[2]));
+            sphere[3] = sphere[3].min(depth + limit);
+            let kept = sphere[3] > least;
+            if kept {
+                reach = reach.max(sphere[3] - depth);
+            }
+            kept
+        });
+        reach
     }
 }
 
@@ -823,10 +841,7 @@ pub(crate) fn fit(
     let grown = |fits: &[Option<LinkFit>], picks: &[Vec<usize>]| -> Vec<(Vec<[f32; 4]>, f32)> {
         fits.iter()
             .zip(picks)
-            .map(|(f, picks)| {
-                f.as_ref()
-                    .map_or((vec![], 0.0), |f| f.spheres(picks, o.max_overhang))
-            })
+            .map(|(f, picks)| f.as_ref().map_or((vec![], 0.0), |f| f.spheres(picks)))
             .collect()
     };
     // The largest of each link's growth over its tolerance.
@@ -866,7 +881,15 @@ pub(crate) fn fit(
             fitted = Some(grown(&trial, &covers));
         }
     }
-    let fitted = fitted.unwrap_or_else(|| grown(&fits, &picks));
+    let mut fitted = fitted.unwrap_or_else(|| grown(&fits, &picks));
+    if let Some(limit) = o.max_overhang {
+        // The tries above share each link's geometry with `fits`.
+        for (f, (spheres, reach)) in fits.iter().zip(&mut fitted) {
+            if let Some(f) = f {
+                *reach = f.hold(spheres, limit);
+            }
+        }
+    }
     Fitted {
         overhang: fitted.iter().map(|f| f.1).fold(0.0, f32::max),
         relative_overhang: relative(&fitted),

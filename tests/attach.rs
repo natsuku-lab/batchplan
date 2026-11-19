@@ -427,13 +427,21 @@ fn held_shapes_keep_within_a_limit_on_overhang() {
     // 512 spheres have a cover within the limit, tighter than the tolerance asks for: the whole
     // box, each sphere within it.
     let free = boxed(with(512, None));
-    assert!(whole(&free) && past(&free) > limit + 5e-4, "{}", past(&free));
+    assert!(
+        whole(&free) && past(&free) > limit + 5e-4,
+        "{}",
+        past(&free)
+    );
     let covered = boxed(with(512, Some(limit)));
     assert!(whole(&covered), "a cover within the limit leaves none out");
     assert!(past(&covered) <= limit + 1e-6, "{}", past(&covered));
     // 64 have none: fitted, held to the limit, and some of the box left out.
     let free = boxed(with(64, None));
-    assert!(whole(&free) && past(&free) > limit + 5e-4, "{}", past(&free));
+    assert!(
+        whole(&free) && past(&free) > limit + 5e-4,
+        "{}",
+        past(&free)
+    );
     let fitted = boxed(with(64, Some(limit)));
     assert!(past(&fitted) <= limit + 1e-6, "{}", past(&fitted));
     assert!(!whole(&fitted), "the limit costs coverage");
@@ -451,14 +459,32 @@ fn held_shapes_keep_within_a_limit_on_overhang() {
         half_length: 0.06,
     };
     let limit = 0.001;
-    let free = held_round(&robot, capsule, with(64, None), /* with_a_ball */ false);
-    let held = held_round(&robot, capsule, with(64, Some(limit)), /* with_a_ball */ false);
+    let free = held_round(
+        &robot,
+        capsule,
+        with(64, None),
+        /* with_a_ball */ false,
+    );
+    let held = held_round(
+        &robot,
+        capsule,
+        with(64, Some(limit)),
+        /* with_a_ball */ false,
+    );
     let reach = |spheres: &[[f32; 4]]| spheres.iter().map(|s| s[3] - radius).fold(0.0, f32::max);
     assert!(reach(&free) > limit + 5e-4, "{}", reach(&free));
     assert!(reach(&held) <= limit + 1e-6 && held.len() > free.len());
-    assert!(held.iter().all(|s| s[0].hypot(s[1]) < 1e-6 && s[2].abs() <= half_length + 1e-6));
+    assert!(
+        held.iter()
+            .all(|s| s[0].hypot(s[1]) < 1e-6 && s[2].abs() <= half_length + 1e-6)
+    );
     // Two spheres along the axis cannot keep it: fitted, the two are held to it off the axis too.
-    let few = held_round(&robot, capsule, with(2, Some(limit)), /* with_a_ball */ false);
+    let few = held_round(
+        &robot,
+        capsule,
+        with(2, Some(limit)),
+        /* with_a_ball */ false,
+    );
     let past = |s: &[f32; 4]| {
         let along = s[2].clamp(-half_length, half_length);
         Vec3::new(s[0], s[1], s[2] - along).length() + s[3] - radius
@@ -472,7 +498,12 @@ fn held_shapes_keep_within_a_limit_on_overhang() {
         half_height: 0.009,
     };
     let limit = 0.004;
-    let held = held_round(&robot, plate, with(512, Some(limit)), /* with_a_ball */ false);
+    let held = held_round(
+        &robot,
+        plate,
+        with(512, Some(limit)),
+        /* with_a_ball */ false,
+    );
     let past = cylinder_overhang(&held, 0.0695, 0.009);
     assert!(past <= limit + 1e-5, "{past} m past the plate");
     // A ball is its own sphere at any limit.

@@ -1883,6 +1883,18 @@ fn spheres_held_to_an_overhang_reach_no_farther_and_the_gap_says_what_they_leave
         let held = format!("each held to {:.1} mm", limit * 1e3);
         assert!(source.contains(&held), "{source}");
         let links = robot.qualify().unwrap().links;
+        // The fit's own account of how far its spheres reach is what they reach, held: the limit.
+        let reported: f32 = source
+            .split("up to ")
+            .nth(1)
+            .and_then(|s| s.split(' ').next())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("no reach in {source:?}"));
+        let largest = links.iter().map(|l| l.overhang).fold(0.0, f32::max);
+        assert!(
+            (largest - limit).abs() < 1e-5 && (reported - limit * 1e3).abs() < 0.06,
+            "{largest} m against {source}"
+        );
         for ((&(name, center, half), l), free) in boxes.iter().zip(&links).zip(&free) {
             assert_eq!((l.link.as_str(), free.link.as_str()), (name, name));
             // The limit is one the budget does not reach by itself.
@@ -1959,12 +1971,12 @@ fn boxes_obj(
         [1, 3, 4, 2],
         [5, 6, 8, 7],
     ];
-    let mut text = String::new();
+    let mut lines = vec![];
     for (n, &(center, half)) in boxes.iter().enumerate() {
         for k in 0..8 {
             let sign = |bit: usize| if k >> bit & 1 == 1 { 1.0 } else { -1.0 };
             let v = center + Vec3::new(sign(0), sign(1), sign(2)) * half;
-            text += &format!("v {} {} {}\n", v.x, v.y, v.z);
+            lines.push(format!("v {} {} {}", v.x, v.y, v.z));
         }
         for (k, face) in faces.into_iter().enumerate() {
             let [a, b, c, d] = face.map(|corner| corner + 8 * n);
@@ -1974,12 +1986,12 @@ fn boxes_obj(
                 _ => 1,
             };
             for _ in 0..times {
-                text += &format!("f {a} {b} {c}\nf {a} {c} {d}\n");
+                lines.push(format!("f {a} {b} {c}\nf {a} {c} {d}"));
             }
         }
     }
     let path = dir.join(name);
-    std::fs::write(&path, text).unwrap();
+    std::fs::write(&path, lines.join("\n")).unwrap();
     path
 }
 
@@ -2013,7 +2025,7 @@ fn the_space_between_two_shells_of_a_link_is_outside_it() {
         let of = |&(center, half): &(Vec3, Vec3)| depth_in_box(p, center, half);
         plates.iter().map(of).fold(f32::NEG_INFINITY, f32::max)
     };
-    let dir = scratch("plates");
+    let dir = scratch("two-shells");
     let urdf = meshed(&boxes_obj(&dir, "plates.obj", &plates, &[], &[]));
     let given = |sphere: [f32; 4], max_overhang: Option<f32>| RobotOptions {
         collision_model: Some(CollisionModel {
@@ -2026,7 +2038,14 @@ fn the_space_between_two_shells_of_a_link_is_outside_it() {
         },
         ..Default::default()
     };
-    for (x, y) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.5, 0.5), (-0.25, 0.25)] {
+    for (x, y) in [
+        (0.0, 0.0),
+        (1.0, 0.0),
+        (0.0, 1.0),
+        (1.0, 1.0),
+        (0.5, 0.5),
+        (-0.25, 0.25),
+    ] {
         let center = Vec3::new(x * half.x, y * half.y, 0.0);
         let sphere = [center.x, center.y, 0.0, 0.0196];
         let refused = Robot::from_urdf(&urdf, &given(sphere, Some(0.0))).map(|_| ());
@@ -2083,7 +2102,10 @@ fn a_limit_on_overhang_holds_supplied_models_and_names_what_it_refuses() {
     Robot::from_urdf(&boxed, &options(vec![[0.0, 0.0, 0.0, 0.032]], "body")).unwrap();
     let message = refused(
         &boxed,
-        &options(vec![[0.0, 0.0, 0.0, 0.03], [0.0, 0.0, 0.01, 0.0225]], "body"),
+        &options(
+            vec![[0.0, 0.0, 0.0, 0.03], [0.0, 0.0, 0.01, 0.0225]],
+            "body",
+        ),
     );
     assert!(
         message.contains("link 'body': sphere 1,")
@@ -2125,10 +2147,20 @@ fn a_limit_on_overhang_holds_supplied_models_and_names_what_it_refuses() {
     Robot::from_urdf(&boxed, &options(spheres.clone(), "body")).unwrap();
     let mut rng = Rng::new(5);
     for _ in 0..20 {
-        let rpy = Vec3::new(rng.range(-3.0, 3.0), rng.range(-1.5, 1.5), rng.range(-3.0, 3.0));
-        let xyz = Vec3::new(rng.range(-0.5, 0.5), rng.range(-0.5, 0.5), rng.range(-0.5, 0.5));
+        let rpy = Vec3::new(
+            rng.range(-3.0, 3.0),
+            rng.range(-1.5, 1.5),
+            rng.range(-3.0, 3.0),
+        );
+        let xyz = Vec3::new(
+            rng.range(-0.5, 0.5),
+            rng.range(-0.5, 0.5),
+            rng.range(-0.5, 0.5),
+        );
         // A URDF's rpy turns about fixed x, then y, then z.
-        let turn = Quat::from_rotation_z(rpy.z) * Quat::from_rotation_y(rpy.y) * Quat::from_rotation_x(rpy.x);
+        let turn = Quat::from_rotation_z(rpy.z)
+            * Quat::from_rotation_y(rpy.y)
+            * Quat::from_rotation_x(rpy.x);
         let moved = one_link(&format!(
             r#"<origin xyz="{} {} {}" rpy="{} {} {}"/><geometry><box size="0.1 0.08 0.06"/></geometry>"#,
             xyz.x, xyz.y, xyz.z, rpy.x, rpy.y, rpy.z
@@ -2161,7 +2193,7 @@ fn a_limit_on_overhang_holds_supplied_models_and_names_what_it_refuses() {
             "{message}"
         );
     }
-    let mut free = fit.clone();
+    let mut free = fit;
     free.spheres.max_overhang = None;
     Robot::from_urdf(&open, &free).unwrap();
 
@@ -2227,7 +2259,8 @@ fn a_link_too_thin_for_a_sphere_inside_it_is_refused_by_name() {
         },
         ..Default::default()
     };
-    let refused = Robot::from_urdf(urdf, &options(Some(0.0))).map(|robot| robot.collision_model().clone());
+    let refused =
+        Robot::from_urdf(urdf, &options(Some(0.0))).map(|robot| robot.collision_model().clone());
     assert!(
         matches!(&refused, Err(Error::Input(m)) if m.contains("link 'plate': no sphere fits within `max_overhang` (0 m)")),
         "{refused:?}"
@@ -2236,6 +2269,9 @@ fn a_link_too_thin_for_a_sphere_inside_it_is_refused_by_name() {
     for max_overhang in [Some(0.002), None] {
         let robot = Robot::from_urdf(urdf, &options(max_overhang)).unwrap();
         let l = &robot.qualify().unwrap().links[0];
-        assert!(l.spheres > 0 && l.overhang <= max_overhang.unwrap_or(1.0) + 1e-6, "{l:?}");
+        assert!(
+            l.spheres > 0 && l.overhang <= max_overhang.unwrap_or(1.0) + 1e-6,
+            "{l:?}"
+        );
     }
 }
