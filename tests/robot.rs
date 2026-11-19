@@ -2252,12 +2252,20 @@ fn a_limit_on_overhang_holds_supplied_models_and_names_what_it_refuses() {
         );
         let message = refused(&doubled, o);
         assert!(
-            message.contains(
-                "link 'body': mesh 0 of 1 is not closed: it gives 2 of its 12 faces again"
-            ),
+            message.contains("link 'body': mesh 0 of 1 is not closed: 4 of its 18 edges"),
             "{message}"
         );
     }
+    // The whole box given twice is closed: it winds around its inside twice.
+    let twice = meshed(&boxes_obj(
+        &dir,
+        "twice.obj",
+        &[whole[0], whole[0]],
+        &[],
+        &[],
+    ));
+    Robot::from_urdf(&twice, &inside).unwrap();
+    Robot::from_urdf(&twice, &fit).unwrap();
     // The spheres a fit under the limit gives `urdf`'s link, as (center, radius).
     let fitted = |urdf: &str| -> Vec<(Vec3, f32)> {
         let robot = Robot::from_urdf(urdf, &fit).unwrap();
@@ -2315,8 +2323,10 @@ fn a_limit_on_overhang_holds_supplied_models_and_names_what_it_refuses() {
             "{radius} at {center} reaches {reach}"
         );
     }
-    // A cube that faces inward beside the box is as solid as one that faces outward: a sphere
-    // beside it is outside, one at its middle is in it, and fitted spheres keep to the two.
+    // A cube beside the box is its own shell: a sphere beside it is outside, one at its middle
+    // is in it, and fitted spheres keep to the two. Facing inward it is as solid, and without a
+    // limit is fitted so, every center in the box or the cube; under a limit it is refused, since
+    // a shell that faces inward gets its samples' candidates from the wrong side.
     let apart = [(Vec3::ZERO, half), (Vec3::X * 0.2, Vec3::splat(0.02))];
     let text = std::fs::read_to_string(boxes_obj(&dir, "apart.obj", &apart, &[], &[])).unwrap();
     let lines: Vec<&str> = text.lines().collect();
@@ -2336,36 +2346,62 @@ fn a_limit_on_overhang_holds_supplied_models_and_names_what_it_refuses() {
         .collect();
     let path = dir.join("inverted.obj");
     std::fs::write(&path, inverted.join("\n")).unwrap();
-    for urdf in [meshed(&dir.join("apart.obj")), meshed(&path)] {
-        let message = refused(&urdf, &options(vec![[0.225, 0.0, 0.0, 0.005]], "body"));
-        assert!(message.contains("its center 5.000 mm outside"), "{message}");
-        Robot::from_urdf(&urdf, &options(vec![[0.2, 0.0, 0.0, 0.02]], "body")).unwrap();
-        let spheres = fitted(&urdf);
-        let depth = |p: Vec3| {
-            let of = |&(center, half): &(Vec3, Vec3)| depth_in_box(p, center, half);
-            apart.iter().map(of).fold(f32::NEG_INFINITY, f32::max)
-        };
-        for &(center, radius) in &spheres {
-            let reach = radius - depth(center);
-            assert!(
-                reach <= limit + 1e-6,
-                "{radius} at {center} reaches {reach}"
-            );
-        }
-        let in_the_cube = |&&(center, _): &&(Vec3, f32)| center.x > 0.1;
+    let depth = |p: Vec3| {
+        let of = |&(center, half): &(Vec3, Vec3)| depth_in_box(p, center, half);
+        apart.iter().map(of).fold(f32::NEG_INFINITY, f32::max)
+    };
+    let beside = options(vec![[0.225, 0.0, 0.0, 0.005]], "body");
+    let within = options(vec![[0.2, 0.0, 0.0, 0.02]], "body");
+    let outward = meshed(&dir.join("apart.obj"));
+    let message = refused(&outward, &beside);
+    assert!(message.contains("its center 5.000 mm outside"), "{message}");
+    Robot::from_urdf(&outward, &within).unwrap();
+    let spheres = fitted(&outward);
+    for &(center, radius) in &spheres {
+        let reach = radius - depth(center);
         assert!(
-            spheres.iter().filter(in_the_cube).count() > 2,
-            "the cube has spheres"
+            reach <= limit + 1e-6,
+            "{radius} at {center} reaches {reach}"
         );
-        // Without a limit too, every sphere is centered in the box or the cube.
+    }
+    let in_the_cube = |&&(center, _): &&(Vec3, f32)| center.x > 0.1;
+    assert!(
+        spheres.iter().filter(in_the_cube).count() > 2,
+        "the cube has spheres"
+    );
+    for o in [&beside, &within, &fit] {
+        let message = refused(&meshed(&path), o);
+        assert!(
+            message.contains("link 'body': mesh 0 of 1 has 1 of its 2 shells facing inward"),
+            "{message}"
+        );
+    }
+    for urdf in [outward, meshed(&path)] {
         let mut free = fit.clone();
         free.spheres.max_overhang = None;
         let robot = Robot::from_urdf(&urdf, &free).unwrap();
-        for &[x, y, z, _] in &robot.collision_model().spheres["body"] {
+        let spheres = &robot.collision_model().spheres["body"];
+        assert!(spheres.iter().any(|s| s[0] > 0.1), "the cube has spheres");
+        for &[x, y, z, _] in spheres {
             let deep = depth(Vec3::new(x, y, z));
             assert!(deep > -1e-6, "a center {} mm outside", -deep * 1e3);
         }
+        // Measured without a limit, a sphere beside the cube reaches its radius and the 5 mm.
+        free.collision_model = beside.collision_model.clone();
+        let overhang = Robot::from_urdf(&urdf, &free)
+            .unwrap()
+            .qualify()
+            .unwrap()
+            .links[0]
+            .overhang;
+        assert!((overhang - 0.01).abs() < 1e-5, "{overhang}");
     }
+    // A sphere farther away than its distance can be told to a digit is outside all the same.
+    let message = refused(&closed, &options(vec![[1e20, 0.0, 0.0, 0.01]], "body"));
+    assert!(
+        message.contains("sphere 0,") && message.contains("outside"),
+        "{message}"
+    );
     let mut free = fit;
     free.spheres.max_overhang = None;
     Robot::from_urdf(&open, &free).unwrap();

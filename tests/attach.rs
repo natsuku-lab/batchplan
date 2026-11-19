@@ -552,12 +552,27 @@ fn held_shapes_keep_within_a_limit_on_overhang() {
                 matches!(&refused, Err(Error::Input(m)) if m.starts_with("'box': no sphere fits within `max_overhang`")),
                 "{shape:?}: {refused:?}"
             );
-            // Without a limit they are covered, as before.
+            // Without a limit they are covered, as before, and with one to reach past them
+            // within, by spheres centered on them and no larger than it.
             let free = AttachedObject {
                 spheres: with(budget, None),
-                ..held
+                ..held.clone()
             };
             robot.attach(&free).unwrap();
+            let limit = 0.002;
+            let thin = AttachedObject {
+                spheres: with(budget, Some(limit)),
+                ..held
+            };
+            let attached = robot.attach(&thin).unwrap();
+            let spheres = &attached.collision_model().spheres["box"];
+            assert!(!spheres.is_empty() && spheres.len() <= budget);
+            for s in spheres {
+                let off = (rotation.inverse() * (Vec3::new(s[0], s[1], s[2]) - center)).z;
+                let rotated = matches!(shape, Obstacle::Cylinder { .. });
+                let off = if rotated { off } else { s[2] - center.z };
+                assert!(off.abs() < 1e-5 && s[3] <= limit + 1e-6, "{s:?}");
+            }
         }
     }
     let bad = AttachedObject {
