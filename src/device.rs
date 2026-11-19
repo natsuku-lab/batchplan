@@ -54,6 +54,26 @@ impl CollisionWeights {
         margin: 0.0,
         self_margin: 0.0,
     };
+
+    /// An `Error::Input` for weights and margins that make a cost not a number: a weight that is
+    /// not finite, a margin that is not a number, or an infinite margin with a weight on it. An
+    /// infinite margin without one asks for exact clearances at any distance. `what` names the
+    /// call or the options they are in.
+    pub(crate) fn check(&self, what: &str) -> Result<()> {
+        let costs = [
+            (self.world, self.margin),
+            (self.self_collision, self.self_margin),
+        ];
+        let usable = |&(weight, margin): &(f32, f32)| {
+            weight.is_finite() && !margin.is_nan() && (weight == 0.0 || margin < f32::INFINITY)
+        };
+        ensure_input!(
+            costs.iter().all(usable),
+            "{what} needs finite collision weights, and margins that are numbers and finite \
+             where they are weighted, got {self:?}"
+        );
+        Ok(())
+    }
 }
 
 impl Default for CollisionWeights {
@@ -357,7 +377,9 @@ impl Device {
 
     /// Collision cost, its gradient and clearances for each configuration in `q` (`[items, dof]`)
     /// against `worlds[item_world[item]]`. Errors if `q` does not hold `dof` finite values per
-    /// item, an item names a world outside `worlds`, or `worlds` were uploaded to another device.
+    /// item, an item names a world outside `worlds`, `worlds` were uploaded to another device, or the
+    /// weights make the cost not a number (a weight not finite, a margin not a number, or an
+    /// infinite margin with a weight on it).
     pub fn evaluate(
         &self,
         worlds: &Worlds,
@@ -367,6 +389,7 @@ impl Device {
     ) -> Result<Evaluation> {
         self.check_batch(worlds, item_world, q.len(), self.robot().dof())?;
         finite(q, self.robot().dof())?;
+        w.check("evaluate")?;
         self.backend.evaluate(worlds, item_world, q, w)
     }
 
@@ -668,6 +691,13 @@ impl Device {
         }
         Ok(())
     }
+}
+
+/// Whether a batch of `problems` with `each` seeds or paths apiece is no more items than the
+/// kernels' 32-bit indices count.
+pub(crate) fn fits_batch(problems: usize, each: usize) -> bool {
+    let items = problems.checked_mul(each);
+    items.is_some_and(|items| u32::try_from(items).is_ok())
 }
 
 /// That every value of the configurations `q` (`[items, dof]`) is finite: a NaN compares as clear of

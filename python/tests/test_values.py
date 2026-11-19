@@ -69,6 +69,30 @@ def test_a_limit_on_overhang_holds_fitted_and_given_spheres():
         bp.Robot.from_urdf(urdf, options.replace(spheres=spheres.replace(max_overhang=-0.001)))
 
 
+def test_options_are_checked_as_their_calls_check_them():
+    defaults = (
+        bp.IkOptions(),
+        bp.PlanOptions(),
+        bp.RrtOptions(),
+        bp.ShortcutOptions(),
+        bp.ToolPathOptions(),
+    )
+    for options in defaults:
+        options.check()
+    with pytest.raises(bp.InputError, match="at least one seed"):
+        bp.IkOptions(seeds=0).check()
+    with pytest.raises(bp.InputError, match="IK needs at most 4294967295 seeds"):
+        bp.IkOptions(seeds=10**12).check()
+    with pytest.raises(bp.InputError, match="goal_ik needs positive tolerances"):
+        bp.PlanOptions(goal_ik=bp.IkOptions(position_tolerance=float("nan"))).check()
+    with pytest.raises(bp.InputError, match="range must be positive"):
+        bp.RrtOptions(range=0.0).check()
+    with pytest.raises(bp.InputError, match="smallest change must be positive"):
+        bp.ShortcutOptions(min_change=0.0).check()
+    with pytest.raises(bp.InputError, match="steps must be finite"):
+        bp.ToolPathOptions(step=0.0).check()
+
+
 def test_values_cannot_change_in_place():
     problem = bp.PlanProblem(0, [0.0, 0.0], [1.0, 1.0])
     with pytest.raises(AttributeError):

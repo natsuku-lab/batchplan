@@ -59,8 +59,9 @@ impl Default for ShortcutOptions {
 }
 
 impl ShortcutOptions {
-    /// An `Error::Input` naming the first option shortcutting cannot run with.
-    pub(crate) fn check(&self) -> Result<()> {
+    /// An `Error::Input` naming the first option shortcutting cannot run with, as the calls that
+    /// take them return it: for a host to refuse options when they are set.
+    pub fn check(&self) -> Result<()> {
         edges::check_resolution("the shortcuts' resolution", self.resolution)?;
         ensure_input!(
             self.min_change > 0.0,

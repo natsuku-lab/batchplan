@@ -26,6 +26,40 @@ fn devices(robot: &Robot) -> Vec<Device> {
     devices
 }
 
+/// A budget longer than the clock counts is no deadline: a plan to a pose, with an optimized
+/// seed, so that its goal IK, its search and its optimization all read the deadline, ends as it
+/// does without a budget. Added to the time unchecked, `Duration::MAX` panicked.
+#[test]
+fn a_budget_longer_than_the_clock_counts_is_no_deadline() {
+    let _alone = ALONE.lock().expect("another timed test panicked");
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    let mut goal = q.clone();
+    goal[0] += 0.5;
+    let reach = batchplan::PlanProblem::new(
+        0,
+        q,
+        batchplan::Goal::Poses(vec![Some(robot.ee_pose(&goal, 0))]),
+    );
+    let patient = PlanOptions {
+        seeds: 1,
+        time_budget: Some(Duration::MAX),
+        ..PlanOptions::default()
+    };
+    patient.check().expect("any budget");
+    for d in devices(&robot) {
+        let worlds = d.upload(&[batchplan::World::default()]).unwrap();
+        let planned = batchplan::plan(&d, &worlds, std::slice::from_ref(&reach), &patient).unwrap();
+        assert_eq!(
+            planned.solved().count(),
+            1,
+            "{}: {:?}",
+            d.name(),
+            planned.failures[0]
+        );
+    }
+}
+
 #[test]
 fn the_search_keeps_the_time_budget() {
     let _alone = ALONE.lock().expect("another timed test panicked");

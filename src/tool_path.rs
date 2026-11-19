@@ -180,24 +180,34 @@ pub fn follow(
     Ok(ToolPathResult::gather(paths, parts))
 }
 
+impl ToolPathOptions {
+    /// An `Error::Input` naming the first option [`follow`] cannot run with, as the call itself
+    /// returns it: for a host to refuse options when they are set.
+    pub fn check(&self) -> Result<()> {
+        Robot::check_start_tolerance(self.start_tolerance)?;
+        let steps = MIN_STEP..f32::INFINITY;
+        ensure_input!(
+            steps.contains(&self.step) && steps.contains(&self.rotation_step),
+            "steps must be finite and at least {MIN_STEP}, got {} m and {} rad",
+            self.step,
+            self.rotation_step
+        );
+        ensure_input!(
+            self.precision > 0.0 && self.rotation_precision > 0.0,
+            "precisions must be positive, got {} m and {} rad",
+            self.precision,
+            self.rotation_precision
+        );
+        edges::check_resolution("the resolution", self.resolution)?;
+        ensure_input!(self.iterations > 0, "the IK needs at least one iteration");
+        Ok(())
+    }
+}
+
 /// Whether `paths` and `o` can be followed by `robot` in `worlds`.
 fn check(robot: &Robot, worlds: &Worlds, paths: &[ToolPath], o: &ToolPathOptions) -> Result<()> {
     let n = robot.dof();
-    let steps = MIN_STEP..f32::INFINITY;
-    ensure_input!(
-        steps.contains(&o.step) && steps.contains(&o.rotation_step),
-        "steps must be finite and at least {MIN_STEP}, got {} m and {} rad",
-        o.step,
-        o.rotation_step
-    );
-    ensure_input!(
-        o.precision > 0.0 && o.rotation_precision > 0.0,
-        "precisions must be positive, got {} m and {} rad",
-        o.precision,
-        o.rotation_precision
-    );
-    edges::check_resolution("the resolution", o.resolution)?;
-    ensure_input!(o.iterations > 0, "the IK needs at least one iteration");
+    o.check()?;
     for (i, p) in paths.iter().enumerate() {
         ensure_input!(
             p.start.len() == n,

@@ -47,8 +47,9 @@ impl Default for RrtOptions {
 }
 
 impl RrtOptions {
-    /// An `Error::Input` naming the first option a search cannot run with.
-    pub(crate) fn check(&self) -> Result<()> {
+    /// An `Error::Input` naming the first option a search cannot run with, as the calls that take
+    /// them return it: for a host to refuse options when they are set.
+    pub fn check(&self) -> Result<()> {
         ensure_input!(
             self.range > 0.0,
             "the search's range must be positive, got {}",
@@ -759,7 +760,7 @@ impl<'call> Connect<'call> {
         for tree in &mut self.trees {
             tree.radius.fill(f32::INFINITY);
         }
-        self.max_iterations = self.iterations + samples;
+        self.max_iterations = self.iterations.saturating_add(samples);
         self.stage = Stage::Straight;
     }
 
