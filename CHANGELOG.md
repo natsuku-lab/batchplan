@@ -129,17 +129,17 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   the rotation that lies flat on it. `RestProblem::near` names a point to look closer around, a cell
   of the support apart, for a rest the spots are too far apart to find, as the middle of a dished
   plate under a wide flat bottom. Around a spot where the object held but tipped too easily,
-  pushed two ways, with nothing held among the eight spots around it, the spots a cell apart
-  within the spacing are tried too: an upright bottle against the lip at the foot of a sloping
-  rack, which stands only in a strip a few millimeters deep, is found along the lip where a spot
-  of the grid touches both the lip and the slope, and a flat top, one bar or a table's rim costs
-  nothing more. A support point whose normal faces down holds nothing up
-  unless the camera that saw it was above it (`Surface::seen_from`), so the noisy normals of a top
-  read at a slant do not block rests on it. A can or a capsule laid on its side rolls, within half
-  the spacing and `touching`, into the cradle between two bars or a rack's groove or down to a
-  lip, and has no rest on a flat support. Many problems run in one call, each surface read once.
-  `examples/surface_rests.rs` times it, and `scripts/validate_rests.py` lets go of each rest in
-  MuJoCo.
+  with nothing held among the eight spots around it and one of them where the place it touches
+  jumps farther than the spots are apart, as from one piece of support to another, the spots a
+  cell apart within the spacing are tried too: an upright bottle against the lip at the foot of a
+  sloping rack, which stands only in a strip a few millimeters deep, is found along the lip, and
+  a flat top, one bar or a table's rim costs nothing more. A support point whose normal faces
+  down holds nothing up unless the camera that saw it was above it (`Surface::seen_from`), so the
+  noisy normals of a top read at a slant do not block rests on it. A can or a capsule laid on its
+  side rolls, within half the spacing and `touching`, into the cradle between two bars or a rack's
+  groove or down to a lip, and has no rest on a flat support. Many problems run in one call, each
+  surface read once. `examples/surface_rests.rs` times it, and `scripts/validate_rests.py` lets
+  go of each rest in MuJoCo.
 
 - Why a held object has no rest: `rest_failures(&device, &problems, &surfaces, &rests, &o)`
   gives, per problem `rests_on` found no rest for, how near the search came (`RestFailure`):

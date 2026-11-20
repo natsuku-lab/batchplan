@@ -151,16 +151,17 @@ const SPREAD: usize = 1024;
 /// bars or down to a lip, and rests there if that holds it.
 ///
 /// A rest narrower than the spots are apart is looked for closer. Around each spot where the
-/// object held but tipped too easily (its contacts carry its weight upright and not with the
-/// weight tipped by `tipping`), pushed two ways, with nothing held at any of the eight spots
-/// around it at that turn, the spots a cell ([`RestOptions::touching`]) apart within `spacing` of
-/// it are tried too: a rest such as an upright bottle's against the lip at the foot of a sloping
-/// rack lies where the object passes from one piece of support to another and needs both, and is
-/// found where a spot of the grid touches both. Rests found there come in the order the others
-/// do. Where the problem says where it would have the object ([`RestProblem::near`]), the spots
-/// about that point are tried as well. Only the object's rest is checked: the hand that sets it
-/// down and its way there are [`place`](crate::place)'s to check, with what the object may touch
-/// as its `support`.
+/// object, as set down and not rolled, held but tipped too easily (its contacts carry its weight
+/// upright and not with the weight tipped by `tipping`), with nothing held at any of the eight
+/// spots around it at that turn and one of them where, as set down, it touches the support
+/// farther from where it touches it there than the two spots are apart, the spots a cell
+/// ([`RestOptions::touching`]) apart within `spacing` of it are tried too: a rest such as an
+/// upright bottle's against the lip at the foot of a sloping rack lies where the object passes
+/// from one piece of support to another and needs both, between two spots where the place it
+/// touches jumps. Rests found there come in the order the others do. Where the problem says
+/// where it would have the object ([`RestProblem::near`]), the spots about that point are tried
+/// as well. Only the object's rest is checked: the hand that sets it down and its way there are
+/// [`place`](crate::place)'s to check, with what the object may touch as its `support`.
 ///
 /// They come at every turn, in an order whose first few are worth trying first: every spot at
 /// the first turn, then every spot at the next, and within a turn, the steadiest first and then
@@ -443,7 +444,7 @@ impl Setting<'_> {
                 };
                 match self.held::<WHY>(&object, to, s) {
                     Ok(held) => (held, true),
-                    Err(missed) => return self.missed::<WHY>(missed, rotation, s),
+                    Err(missed) => return self.missed::<WHY>(missed.rolled(), rotation, s),
                 }
             }
         };
@@ -492,13 +493,13 @@ impl Setting<'_> {
                 }
                 Ok((center, tipping))
             }
-            Holding::Tips(two_ways) => {
+            Holding::Tips => {
                 if WHY {
                     s.tipping = s.statics.tips_by;
                 }
-                Err(Outcome::Tips(two_ways))
+                Err(Outcome::Tips(touched(&s.contacts), false))
             }
-            Holding::Not => Err(Outcome::Unheld),
+            Holding::Not => Err(Outcome::Unheld(touched(&s.contacts), false)),
         }
     }
 
@@ -701,13 +702,14 @@ fn spread_out(found: Vec<Rest>) -> Vec<Rest> {
 enum Outcome {
     /// It rests there, and whether it rolled there.
     Rests(Rest, bool),
-    /// What it touches there holds it upright, and not with its weight tipped by `tipping`; and
-    /// whether that pushes it two ways.
-    Tips(bool),
+    /// What it touches there holds it upright, and not with its weight tipped by `tipping`; where
+    /// it touches the support ([`touched`]), and whether it rolled there.
+    Tips(Option<Vec3>, bool),
     /// It would rest there but for something in its way.
     Blocked,
-    /// What it touches there does not hold it.
-    Unheld,
+    /// What it touches there does not hold it; where it touches the support, if anywhere, and
+    /// whether it rolled there.
+    Unheld(Option<Vec3>, bool),
     /// Nothing of the support lies under it.
     Unsupported,
 }
@@ -780,7 +782,7 @@ impl<'a> Problem<'a> {
                 setting.rest::<false>(turned, over, scratch)
             })
             .collect();
-        let seeds = seeds(&outcomes[..spots.count()], spots.across, spots.rows);
+        let seeds = seeds(&outcomes[..spots.count()], spots.across, o.spacing);
         let at = seeds.iter().map(|&k| spots.at(k, o.spacing));
         let nearer = nearer(at, spots, self.near, o);
         if !nearer.is_empty() {
@@ -795,28 +797,41 @@ impl<'a> Problem<'a> {
     }
 }
 
-/// The grid's spots, `across` by `rows` with `outcomes` row by row, that the spots set closer
-/// start from: those where the object was held but tipped too easily, pushed two ways, with no
-/// spot among the eight around where it is held (a rest, or one blocked). A narrow rest lies
-/// where the object passes from one piece of support to another and needs both, as a bottle's
-/// bottom on a lip and its rim on the slope behind: beside it the object touches both already.
-/// On one piece (a flat top, the top of one bar, a table's rim) how far it can tip changes
-/// smoothly from spot to spot and the grid's spots tell it; between two it can change within a
-/// millimeter. Where a spot beside holds, the edge of what holds is found already, and a measured
-/// flat top, whose patches' planes differ by its noise, costs nothing more at its rim.
-fn seeds(outcomes: &[Outcome], across: usize, rows: usize) -> Vec<usize> {
+/// The grid's spots, `across` a row with `outcomes` row by row and `spacing` apart, that the
+/// spots set closer start from: those where the object, as set down, was held but tipped too
+/// easily, with no spot among the eight around where it is held (a rest, or one blocked), and
+/// one among them where, as set down, it touches the support at a place farther from where it
+/// touches it here than the two spots are apart ([`touched`]). Moved from one spot to the next
+/// over one piece of support, the object touches it no farther off than it was moved; where the
+/// place it touches jumps farther, it has passed from one piece to another, and between the two
+/// spots it may lie on both, which neither spot shows, as a bottle's bottom on a lip and its rim
+/// on the slope behind. An object that rolled is already where it lies lowest and starts
+/// nothing. Where a spot around holds, the edge of what holds is found already.
+fn seeds(outcomes: &[Outcome], across: usize, spacing: f32) -> Vec<usize> {
+    let rows = outcomes.len() / across;
     let mut seeds = vec![];
-    let tipping = (0..outcomes.len()).filter(|&k| matches!(outcomes[k], Outcome::Tips(true)));
-    for k in tipping {
-        let (column, row) = ((k % across) as isize, (k / across) as isize);
-        let around = (-1..=1).flat_map(|dr| (-1..=1).map(move |dc| (column + dc, row + dr)));
-        let mut on_the_grid =
-            around.filter(|&(c, r)| c >= 0 && r >= 0 && c < across as isize && r < rows as isize);
-        let held = |(c, r): (isize, isize)| {
-            let outcome = &outcomes[r as usize * across + c as usize];
-            matches!(outcome, Outcome::Rests(..) | Outcome::Blocked)
+    for (k, outcome) in outcomes.iter().enumerate() {
+        let Outcome::Tips(Some(here), false) = *outcome else {
+            continue;
         };
-        if !on_the_grid.any(held) {
+        let (column, row) = ((k % across) as isize, (k / across) as isize);
+        let around = (-1..=1isize).flat_map(|dr| (-1..=1isize).map(move |dc| (dc, dr)));
+        let on_the_grid = around.filter(|&(dc, dr)| {
+            let (c, r) = (column + dc, row + dr);
+            (dc, dr) != (0, 0) && c >= 0 && r >= 0 && c < across as isize && r < rows as isize
+        });
+        let (mut held, mut jumps) = (false, false);
+        for (dc, dr) in on_the_grid {
+            match outcomes[(row + dr) as usize * across + (column + dc) as usize] {
+                Outcome::Rests(..) | Outcome::Blocked => held = true,
+                Outcome::Tips(Some(there), false) | Outcome::Unheld(Some(there), false) => {
+                    let apart = spacing * ((dc * dc + dr * dr) as f32).sqrt();
+                    jumps |= here.distance(there) > apart;
+                }
+                _ => {}
+            }
+        }
+        if jumps && !held {
             seeds.push(k);
         }
     }
@@ -1017,8 +1032,8 @@ fn failure(
     // How far each outcome came.
     let stage = |f: &Outcome| match f {
         Outcome::Unsupported => 0,
-        Outcome::Unheld => 1,
-        Outcome::Tips(_) => 2,
+        Outcome::Unheld(..) => 1,
+        Outcome::Tips(..) => 2,
         Outcome::Blocked => 3,
         Outcome::Rests(..) => 4,
     };
@@ -1085,7 +1100,7 @@ fn failure(
             },
             by: blocking.expect("a point in the way of what is blocked"),
         },
-        Outcome::Tips(_) => RestFailure::Tips {
+        Outcome::Tips(..) => RestFailure::Tips {
             pose,
             support,
             tipping: s.tipping,
@@ -1103,52 +1118,93 @@ fn failure(
     })
 }
 
+/// Where `contacts` touch the support: the middle of the box around the support's points they
+/// touch at; none where they touch nothing.
+fn touched(contacts: &[Contact]) -> Option<Vec3> {
+    let first = contacts.first()?.point;
+    let mut box_around = (first, first);
+    for c in contacts {
+        box_around = (box_around.0.min(c.point), box_around.1.max(c.point));
+    }
+    Some(0.5 * (box_around.0 + box_around.1))
+}
+
+impl Outcome {
+    /// What became of the object where it rolled to: as it is, marked rolled.
+    fn rolled(self) -> Self {
+        match self {
+            Self::Tips(at, _) => Self::Tips(at, true),
+            Self::Unheld(at, _) => Self::Unheld(at, true),
+            other => other,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A grid of outcomes from one letter a spot, the first row first: `r` rests, `t` tips pushed
-    /// one way, `w` tips pushed two ways, `b` is blocked, `u` is not held, `-` has nothing under
-    /// it.
-    fn grid(rows: &[&str]) -> (Vec<Outcome>, usize, usize) {
+    /// The spots' spacing in [`grid`].
+    const SPACING: f32 = 0.01;
+
+    /// A grid of outcomes from one letter a spot, the first row first, the spots `SPACING` apart:
+    /// `r` rests, `b` is blocked, `t` tips and `u` is not held touching a first piece of support,
+    /// where it touches moving nine tenths as far as the spot, so that across a corner it moves
+    /// farther than a spacing; `T` and `U` the same on a second piece, 1.5 spacings over the
+    /// first, farther from it than the spots around are apart and less than twice as far; `o`
+    /// tips on the first and `O` is not held on the second where it rolled; `n` is not held
+    /// touching nothing, `-` has nothing under it.
+    fn grid(rows: &[&str]) -> (Vec<Outcome>, usize) {
         let rest = Rest {
             pose: Pose::IDENTITY,
             support: vec![],
             tipping: 0.1,
         };
-        let each = rows.iter().flat_map(|row| row.chars());
+        let across = rows[0].len();
+        let each = rows.iter().flat_map(|row| row.chars()).enumerate();
         let outcomes = each
-            .map(|c| match c {
-                'r' => Outcome::Rests(rest.clone(), false),
-                't' => Outcome::Tips(false),
-                'w' => Outcome::Tips(true),
-                'b' => Outcome::Blocked,
-                'u' => Outcome::Unheld,
-                _ => Outcome::Unsupported,
+            .map(|(k, c)| {
+                let spot = Vec2::new((k % across) as f32, (k / across) as f32) * SPACING;
+                let first = Some(0.9 * spot.extend(0.0));
+                let second = Some(0.9 * spot.extend(0.0) + Vec3::Z * 1.5 * SPACING);
+                match c {
+                    'r' => Outcome::Rests(rest.clone(), false),
+                    'b' => Outcome::Blocked,
+                    't' => Outcome::Tips(first, false),
+                    'u' => Outcome::Unheld(first, false),
+                    'T' => Outcome::Tips(second, false),
+                    'U' => Outcome::Unheld(second, false),
+                    'o' => Outcome::Tips(first, true),
+                    'O' => Outcome::Unheld(second, true),
+                    'n' => Outcome::Unheld(None, false),
+                    _ => Outcome::Unsupported,
+                }
             })
             .collect();
-        (outcomes, rows[0].len(), rows.len())
+        (outcomes, across)
     }
 
-    /// A spot that tips pushed two ways is a seed where no spot around it holds; one pushed one
-    /// way never is, wherever it lies.
+    /// A spot that tips as set down is a seed where a spot around it touches the support farther
+    /// from where it touches here than the spots are apart, and none around holds.
     #[test]
-    fn looking_closer_starts_where_a_spot_tips_two_ways_with_nothing_held_around() {
-        // Pushed one way, as everywhere on a flat top or along the top of one bar: none.
-        let (one_way, across, rows) = grid(&["ttt", "ttt", "tt-", "uuu"]);
-        assert!(seeds(&one_way, across, rows).is_empty());
-        // Two ways among spots that hold nothing, or tip, or lie at the grid's edge: each.
-        let (alone, across, rows) = grid(&["uuu", "uwu", "-t-"]);
-        assert_eq!(seeds(&alone, across, rows), [4]);
-        let (all, across, rows) = grid(&["ww", "ww"]);
-        assert_eq!(seeds(&all, across, rows), [0, 1, 2, 3]);
+    fn looking_closer_starts_where_what_is_touched_jumps_beside_a_spot_that_tips() {
+        let seeds_of = |rows: &[&str]| {
+            let (outcomes, across) = grid(rows);
+            seeds(&outcomes, across, SPACING)
+        };
+        // On one piece what it touches moves no farther than it does, across a corner too: none.
+        assert!(seeds_of(&["ttu", "tuu", "uu-"]).is_empty());
+        assert!(seeds_of(&["tu", "ut"]).is_empty());
+        // Beside a spot on another piece, beside it or across a corner, either way round: each.
+        assert_eq!(seeds_of(&["utU", "uuu"]), [1]);
+        assert_eq!(seeds_of(&["uuu", "utu", "uuU"]), [4]);
+        assert_eq!(seeds_of(&["uTu"]), [1]);
         // Beside a rest or a spot held but blocked, the edge of what holds is found: none.
-        let (beside_a_rest, across, rows) = grid(&["uuu", "uwr", "uuu"]);
-        assert!(seeds(&beside_a_rest, across, rows).is_empty());
-        let (beside_blocked, across, rows) = grid(&["uuu", "uwu", "buu"]);
-        assert!(seeds(&beside_blocked, across, rows).is_empty());
-        // Together: those beside the blocked spot and the rest are not seeds, the others are.
-        let (mixed, across, rows) = grid(&["uuuuu", "uwwwr", "uwtwu", "uwwbu", "uuuuu"]);
-        assert_eq!(seeds(&mixed, across, rows), [6, 7, 11, 16]);
+        assert!(seeds_of(&["rtU"]).is_empty());
+        assert!(seeds_of(&["btU", "uuu"]).is_empty());
+        // What rolled starts nothing, nor ends a jump; nor does touching nothing.
+        assert!(seeds_of(&["uoU"]).is_empty());
+        assert!(seeds_of(&["utO"]).is_empty());
+        assert!(seeds_of(&["ntn", "-n-"]).is_empty());
     }
 }
