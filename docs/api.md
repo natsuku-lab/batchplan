@@ -4,7 +4,7 @@ Everything a program uses, by task. Names are in `batchplan::*` unless a module 
 
 Every batched call has the same shape: a `Device`, the `Worlds` uploaded to it, a slice of problems that each name their world by index, and an options struct whose `Default` is a good start. Results keep the problems they answer: `best(problem)` gives one problem's answer, and `solved()` yields each solved problem with its index and answer.
 
-Options and problems are built with struct update syntax (`..Default::default()`, `..PlanProblem::new(..)`). Results, `Trajectory` and the enums that may grow (`Obstacle`, `Occlusion`, `Origin`, `Error`) are `#[non_exhaustive]`: read their fields, and give a `match` on them a wildcard arm.
+Options and problems are built with struct update syntax (`..Default::default()`, `..PlanProblem::new(..)`). Results, `Trajectory` and the enums that may grow (`Obstacle`, `Occlusion`, `Weighing`, `Origin`, `Error`) are `#[non_exhaustive]`: read their fields, and give a `match` on them a wildcard arm.
 
 ## Robots
 
@@ -49,7 +49,8 @@ Guide: [perception.md](perception.md).
 | `DepthImage::robot_mask(&robot, q, padding, &holding)` | Which of the image's readings are of the robot or of what it holds (`RobotMask::on_robot`, a flag per pixel), so grids, maps and surfaces leave them out. |
 | `Occlusion` | What a grid assumes behind observed surfaces: free, solid, solid except the robot's shadow, or solid in a band behind surfaces. |
 | `OccupancyMap::try_new`, `integrate`, `occupancy`, `grid` | Depth images fused over time into occupancy, then into a distance grid. |
-| `OccupancyMap::free(&shape, margin)`, `clear(&shape, margin)`, `part(&region, padding)`, `counts()` | What a caller knows of a map: space that is empty, space that is no longer known, the map inside one region (an object as the cameras saw into it), and how many voxels are occupied, free and never observed (`MapCounts`). |
+| `OccupancyMap::with_weighing(Weighing)` | How much one image counts: as evidence (`Weighing::Evidence`, the default, for a stream of frames), or deciding what it sees (`Weighing::Latest`, for a caller that looks once every few seconds). |
+| `OccupancyMap::free(&shape, margin)`, `clear(&shape, margin)`, `part(&region, padding)`, `counts()`, `occupied()` | What a caller knows of a map: space that is empty, space that is no longer known, the map inside one region (an object as the cameras saw into it), how many voxels are occupied, free and never observed (`MapCounts`), and where the occupied ones are. |
 
 ## Devices
 

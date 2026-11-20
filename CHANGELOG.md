@@ -10,6 +10,23 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- How much one image counts in a fused map: `map.with_weighing(Weighing)`. `Weighing::Evidence`,
+  the default and the weighing until now, suits a stream of frames: a reading adds 0.85 to a
+  voxel's log-odds and a ray through it takes 0.4, so it takes three images to fill a voxel seen
+  empty often and nine to empty one seen full often. Under `Weighing::Latest` each image decides
+  what it sees: a voxel it reads a surface in, or that holds one of its readings, is as surely
+  occupied as a map holds anything, and one its rays pass through as surely free; what it does
+  not see keeps what earlier images said, but for the space a mask's robot and shapes fill,
+  which is as surely free wherever it is. For a caller that looks once every few seconds; one
+  stray reading is an obstacle until a look sees through it.
+
+- Where a fused map is occupied: `map.occupied()`, the middles of the voxels `counts` counts as
+  occupied, in the map's frame and in the order of its voxels, and of a part none it leaves out.
+  Where never-observed space is taken for free, none means there is no grid to make, and
+  otherwise a part around them is a grid of what is there.
+  `part`'s documentation now says that a part's points cover its region and padding whatever the
+  map covers, and that one past a grid's size limits is an input error.
+
 - `mask.with_shapes(&device, &image, &shapes, margin)`: the mask with shapes the caller holds left out
   as the robot is, as a cell's fixtures and objects measured as shapes, which the world holds
   as obstacles of their own. A reading within the margin of a shape is not fused and what only

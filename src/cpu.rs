@@ -24,7 +24,7 @@ use crate::ik::IkOptions;
 use crate::lanes::{LANES, LaneScratch, Lanes};
 use crate::robot::{Fk, JointKind, Robot};
 use crate::rrt::HELPERS;
-use crate::sdf::{self, DepthImage, Layout, Occupancy, RobotMask, SdfGrid};
+use crate::sdf::{self, DepthImage, Layout, Occupancy, RobotMask, SdfGrid, Weighing};
 use crate::spline;
 use crate::trajopt::{LINE_SEARCH, MAX_HISTORY, PlanOptions};
 use crate::types::{JointPaths, Pose};
@@ -2150,9 +2150,10 @@ impl Backend for CpuBackend {
         log_odds: &mut [i8],
         image: &DepthImage,
         robot: Option<&RobotMask>,
+        weighing: Weighing,
     ) -> Result<()> {
         self.pool
-            .install(|| sdf::integrate(grid, log_odds, image, robot));
+            .install(|| sdf::integrate(grid, log_odds, image, robot, weighing));
         Ok(())
     }
 }

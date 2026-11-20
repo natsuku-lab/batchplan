@@ -21,7 +21,9 @@ use crate::error::{Error, Result};
 use crate::ik::IkOptions;
 use crate::lanes::Lanes;
 use crate::robot::{JointKind, Robot};
-use crate::sdf::{self, DepthImage, FAR, Layout, Occlusion, Occupancy, RobotMask, SdfGrid};
+use crate::sdf::{
+    self, DepthImage, FAR, Layout, Occlusion, Occupancy, RobotMask, SdfGrid, Weighing,
+};
 use crate::trajopt::{LINE_SEARCH, MAX_HISTORY, PlanOptions};
 use crate::types::{JointPaths, Pose};
 use crate::world::{self, Obstacle, World};
@@ -860,31 +862,57 @@ struct GridKernels {
     depth_occupancy: wgpu::ComputePipeline,
     depth_hits: wgpu::ComputePipeline,
     map_update: wgpu::ComputePipeline,
+    /// `map_update` when one image decides ([`Weighing::Latest`]): compiled from a source whose
+    /// `HIT` and `MISS` differ, so the default's is as it was.
+    map_update_latest: wgpu::ComputePipeline,
     edt_pass: wgpu::ComputePipeline,
     finish: wgpu::ComputePipeline,
 }
 
 impl GridKernels {
     fn new(device: &wgpu::Device, info: &wgpu::AdapterInfo) -> Result<Self> {
-        use crate::sdf::{CLAMP, HIT, MISS, OCCLUDED, SHADOWED, UNOBSERVED};
-        let source = [
-            "alias Vec4 = vec4<f32>;\n",
-            &format!("const WORKGROUP: u32 = {WORKGROUP}u;\n"),
-            &format!(
-                "const HIT: i32 = {HIT};\nconst MISS: i32 = {MISS};\nconst UNOBSERVED: i32 = {UNOBSERVED};\nconst SHADOWED: i32 = {SHADOWED};\nconst OCCLUDED: i32 = {OCCLUDED};\n"
-            ),
-            &format!("const CLAMP_LO: i32 = {};\nconst CLAMP_HI: i32 = {};\n", CLAMP.0, CLAMP.1),
-            GpuGridParams::WGSL,
-            include_str!("grids.wgsl"),
-        ]
-        .concat();
-        // What the driver refuses is an error as what wgpu does is, as for `pipeline`.
-        let refused = device.push_error_scope(wgpu::ErrorFilter::Internal);
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("grids"),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
-        });
+        use crate::sdf::{
+            CLAMP, HIT, LATEST_HIT, LATEST_MISS, MISS, OCCLUDED, SHADOWED, UNOBSERVED,
+        };
+        let source = |hit: i8, miss: i8| {
+            [
+                "alias Vec4 = vec4<f32>;\n",
+                &format!("const WORKGROUP: u32 = {WORKGROUP}u;\n"),
+                &format!(
+                    "const HIT: i32 = {hit};\nconst MISS: i32 = {miss};\nconst UNOBSERVED: i32 = {UNOBSERVED};\nconst SHADOWED: i32 = {SHADOWED};\nconst OCCLUDED: i32 = {OCCLUDED};\n"
+                ),
+                &format!("const CLAMP_LO: i32 = {};\nconst CLAMP_HI: i32 = {};\n", CLAMP.0, CLAMP.1),
+                GpuGridParams::WGSL,
+                include_str!("grids.wgsl"),
+            ]
+            .concat()
+        };
+        let cannot = |e: wgpu::Error| {
+            Error::Gpu(format!(
+                "{} ({:?}) cannot build the grid kernels: {e}",
+                info.name, info.backend
+            ))
+        };
+        // Drivers compile each pipeline on the thread that asks for it: both modules, then every
+        // pipeline, are built on threads of their own.
+        let sources = [
+            ("grids", source(HIT, MISS)),
+            ("grids, latest", source(LATEST_HIT, LATEST_MISS)),
+        ];
+        let modules = together(sources.into_iter().map(|(label, source)| {
+            move || {
+                scoped(device, || {
+                    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some(label),
+                        source: wgpu::ShaderSource::Wgsl(source.into()),
+                    })
+                })
+            }
+        }));
+        // The modules' own failures first: every pipeline would repeat them.
+        let modules: std::result::Result<Vec<_>, _> = modules.into_iter().collect();
+        let modules = modules.map_err(cannot)?;
+        let (module, latest) = (&modules[0], &modules[1]);
         let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -906,42 +934,54 @@ impl GridKernels {
             10,
             wgpu::BufferBindingType::Storage { read_only: true },
         ));
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("grids"),
-            entries: &entries,
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = |entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(entry),
-                layout: Some(&pipeline_layout),
-                module: &module,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                cache: None,
-            })
-        };
-        let kernels = Self {
-            depth_occupancy: pipeline("depth_occupancy"),
-            depth_hits: pipeline("depth_hits"),
-            map_update: pipeline("map_update"),
-            edt_pass: pipeline("edt_pass"),
-            finish: pipeline("finish"),
+        let (layout, pipeline_layout) = scoped(device, || {
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("grids"),
+                entries: &entries,
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+            (layout, pipeline_layout)
+        })
+        .map_err(cannot)?;
+        let each = [
+            (module, "depth_occupancy"),
+            (module, "depth_hits"),
+            (module, "map_update"),
+            (latest, "map_update"),
+            (module, "edt_pass"),
+            (module, "finish"),
+        ];
+        let built = together(each.into_iter().map(|(module, entry)| {
+            let pipeline_layout = &pipeline_layout;
+            move || {
+                scoped(device, || {
+                    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some(entry),
+                        layout: Some(pipeline_layout),
+                        module,
+                        entry_point: Some(entry),
+                        compilation_options: Default::default(),
+                        cache: None,
+                    })
+                })
+            }
+        }));
+        let built: std::result::Result<Vec<_>, _> = built.into_iter().collect();
+        let mut built = built.map_err(cannot)?.into_iter();
+        let mut next = || built.next().expect("a pipeline for every entry");
+        Ok(Self {
+            depth_occupancy: next(),
+            depth_hits: next(),
+            map_update: next(),
+            map_update_latest: next(),
+            edt_pass: next(),
+            finish: next(),
             layout,
-        };
-        let invalid = pollster::block_on(scope.pop());
-        let refused = pollster::block_on(refused.pop());
-        if let Some(e) = invalid.or(refused) {
-            return Err(Error::Gpu(format!(
-                "{} ({:?}) cannot build the grid kernels: {e}",
-                info.name, info.backend
-            )));
-        }
-        Ok(kernels)
+        })
     }
 }
 
@@ -2068,8 +2108,13 @@ impl Backend for GpuBackend {
         log_odds: &mut [i8],
         image: &DepthImage,
         robot: Option<&RobotMask>,
+        weighing: Weighing,
     ) -> Result<()> {
         let kernels = self.grid_kernels()?;
+        let update = match weighing {
+            Weighing::Evidence => &kernels.map_update,
+            Weighing::Latest => &kernels.map_update_latest,
+        };
         let mut buffers = self
             .grid_buffers
             .lock()
@@ -2094,7 +2139,7 @@ impl Backend for GpuBackend {
         };
         let steps = [
             (&kernels.depth_hits, params, image.depth.len()),
-            (&kernels.map_update, params, grid.points().div_ceil(4)),
+            (update, params, grid.points().div_ceil(4)),
         ];
         self.run_grid(kernels, &bindings, &steps);
         let words: Vec<u32> = self.read(bindings[8], grid.points().div_ceil(4))?;
@@ -2689,6 +2734,23 @@ fn storage_zeroed(device: &wgpu::Device, label: &str, floats: usize) -> wgpu::Bu
             | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
+}
+
+/// What `build` makes on `device`, or what wgpu or the driver refuses in it, as an error rather
+/// than a panic: wgpu keeps error scopes by thread, so each thread that builds pushes its own.
+fn scoped<T>(
+    device: &wgpu::Device,
+    build: impl FnOnce() -> T,
+) -> std::result::Result<T, wgpu::Error> {
+    let refused = device.push_error_scope(wgpu::ErrorFilter::Internal);
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let built = build();
+    let invalid = pollster::block_on(scope.pop());
+    let refused = pollster::block_on(refused.pop());
+    match invalid.or(refused) {
+        Some(error) => Err(error),
+        None => Ok(built),
+    }
 }
 
 #[cfg(test)]
