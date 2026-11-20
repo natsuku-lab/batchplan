@@ -2643,8 +2643,8 @@ fn a_fuse_changes_only_what_the_image_sees_and_the_mask_frees() {
     };
     // Whether `p` lies outside one of the half-spaces a point projects into `image` in, by more
     // than `by` and, for a side slanted to the map's rows (x), `along` times the slant (meters),
-    // in doubles. A row's span reaches past the view by its margin and two voxels along the row
-    // at most (`sdf::span`): past `by` 1 mm and `along` two voxels, a voxel lies outside its span.
+    // in doubles. A row's span reaches past the view by its margin and a voxel along the row at
+    // most (`sdf::span`): past `by` 1 mm and `along` two voxels, a voxel lies outside its span.
     let outside = |image: &DepthImage, p: Vec3, by: f64, along: f64| {
         let rotation = image.camera.rotation.as_dquat();
         let c = rotation.inverse() * (p.as_dvec3() - image.camera.position.as_dvec3());
