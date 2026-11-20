@@ -4051,8 +4051,8 @@ fn a_band_flags_exactly_the_readings_behind_a_thing_of_a_flag() {
 /// lie nearer than the box's lower rows by more than the margin, but the table lies behind the
 /// box along each of the box's rays. A box 1 cm high and 16 cm long that no shape explains, seen
 /// from across the table as `examples/perception.rs` sees it, at bands of 1, 2, 5 and 8 pixels,
-/// and from 30 cm over the table 1.5 m out, at bands of 3 and 5: the band takes none of its
-/// readings, and the map holds the voxels it holds without the band.
+/// and from 30 cm and from 8.5 cm over the table 1.5 m out, at bands of 3 and 5: the band takes
+/// none of its readings, and the map holds the voxels it holds without the band.
 #[test]
 fn a_band_keeps_what_stands_on_a_held_table_at_any_band() {
     let robot = common::panda().unwrap();
@@ -4066,20 +4066,29 @@ fn a_band_keeps_what_stands_on_a_held_table_at_any_band() {
     let table = Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02));
     let block = Obstacle::cuboid(Vec3::new(0.55, -0.1, 0.005), Vec3::new(0.02, 0.08, 0.005));
     let margin = [0.004, 0.0, 0.0];
+    // The last view meets the table at 3 degrees: a ray carried on from the box comes down to
+    // the table too slowly to arrive in the steps a ray is given, and is taken to enter it.
     let views = [
         (
             look_at(Vec3::new(1.4, 0.3, 0.9), Vec3::new(0.4, 0.0, 0.1)),
             &[1, 2, 5, 8][..],
+            250,
         ),
         (
             look_at(Vec3::new(2.05, -0.1, 0.3), Vec3::new(0.55, -0.1, 0.005)),
             &[3, 5][..],
+            250,
+        ),
+        (
+            look_at(Vec3::new(2.05, -0.1, 0.085), Vec3::new(0.55, -0.1, 0.005)),
+            &[3, 5][..],
+            50,
         ),
     ];
     let reaches = |p: Vec3| block.distance(p).value <= 0.5 * 3f32.sqrt() * 0.01;
     for device in devices() {
         let on = device.name();
-        for (view, &(camera, bands)) in views.iter().enumerate() {
+        for (view, &(camera, bands, least)) in views.iter().enumerate() {
             let depth = look_at_shapes(&[&table, &block], camera, k);
             let image = DepthImage {
                 depth: &depth,
@@ -4097,7 +4106,7 @@ fn a_band_keeps_what_stands_on_a_held_table_at_any_band() {
                 .filter(|&i| its[i] == depth[i] && !mask.on_robot[i])
                 .collect();
             assert!(
-                readings.len() > 250,
+                readings.len() > least,
                 "{} readings of the box, which no shape explains, from view {view}",
                 readings.len()
             );

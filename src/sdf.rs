@@ -1050,6 +1050,13 @@ const ROUNDING: f32 = 4.0 * 3.452_669_8e-4;
 /// rounds away by at each step, so it leaves the thing's box.
 const STEP: f32 = 4.0 * f32::EPSILON;
 
+/// The most steps a ray is carried along a thing's box by the thing's distance
+/// ([`RobotMask::with_band`]). A ray that meets a face at an angle `a` comes nearer it by a
+/// factor of `1 - sin a` a step: from a meter to a [`STEP`] takes 20 steps at 30 degrees, 70 at
+/// 10 and 140 at 5, so one that has not arrived after this many meets the face at under about
+/// 5 degrees or runs beside it.
+const STEPS: usize = 128;
+
 /// The least depth `image` reads: infinity where it reads none.
 fn nearest_reading(image: &DepthImage) -> f32 {
     let rows = image.depth.par_chunks(image.width);
@@ -2714,7 +2721,9 @@ impl<'a> Band<'a> {
 
     /// Whether `ray`, carried on from `point`, enters `thing`, whose box and the size of its
     /// coordinates are `bounds`: stepped along by the thing's distance, from where the ray enters
-    /// the box, until it comes within a step ([`STEP`]) of the thing or leaves the box.
+    /// the box, until it comes within a step ([`STEP`]) of the thing or leaves the box. A ray
+    /// still in the box after [`STEPS`] steps runs along the thing's surface, into it at a few
+    /// degrees or beside it: it is taken to enter, which keeps the reading.
     fn enters(
         thing: &Obstacle,
         (lo, hi, scale): (Vec3, Vec3, f32),
@@ -2725,14 +2734,17 @@ impl<'a> Band<'a> {
         let (a, b) = ((lo - point) * inverse, (hi - point) * inverse);
         let (mut t, end) = (a.min(b).max_element().max(0.0), a.max(b).min_element());
         let step = STEP * (scale + point.abs().max_element());
-        while t <= end {
+        for _ in 0..STEPS {
+            if t > end {
+                return false;
+            }
             let d = thing.distance(point + ray * t).value;
             if d <= step {
                 return true;
             }
             t += d;
         }
-        false
+        true
     }
 }
 
