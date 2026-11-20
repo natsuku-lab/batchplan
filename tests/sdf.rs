@@ -2520,7 +2520,15 @@ fn a_mask_flags_the_readings_within_the_margin_of_a_shape() {
         .collect();
     let alone = all.iter().map(std::slice::from_ref);
     for held in alone.chain([&all[..]]) {
-        for margin in [[0.004, 0.0, 0.0], [0.001, 0.002, 0.003], [0.0, 0.0, 0.02]] {
+        // The last two reach farther the deeper a reading lies, past the box's own far end.
+        let margins = [
+            [0.004, 0.0, 0.0],
+            [0.001, 0.002, 0.003],
+            [0.0, 0.0, 0.02],
+            [0.0, 0.0, 0.05],
+            [0.05, 0.05, 0.05],
+        ];
+        for margin in margins {
             let mask = (robot_mask.clone())
                 .with_shapes(&devices()[0], &image, held, margin)
                 .unwrap();
@@ -2542,7 +2550,41 @@ fn a_mask_flags_the_readings_within_the_margin_of_a_shape() {
             );
         }
     }
-    // The second block's readings are no shape's, whatever the margin of those tried.
+    // A box off to one side and a wall behind it, at margins that reach much farther for a
+    // reading on the wall than for one at the box's far end: the pixels a box may be read in
+    // are those of its reach at the deepest such reading (30 cm past the box at the first
+    // margin), and every pixel where the reach outruns the depth (the second).
+    let aside = Pose::new(Vec3::splat(5.0), Quat::IDENTITY);
+    let boxed = [Obstacle::cuboid(
+        aside.position + Vec3::new(-0.5, 0.0, 1.0),
+        Vec3::splat(0.05),
+    )];
+    for (margin, wall) in [([0.0, 0.0, 0.2], 1.3), ([0.0, 0.0, 0.3], 3.0)] {
+        let depth = vec![wall; 640 * 480];
+        let image = DepthImage {
+            depth: &depth,
+            camera: aside,
+            ..image
+        };
+        let mask = image.robot_mask(&robot, &q, 0.04, &[]).unwrap();
+        let mask = mask
+            .with_shapes(&devices()[0], &image, &boxed, margin)
+            .unwrap();
+        let reach = margin[2] * wall * wall;
+        let within = |p: &Option<Vec3>| p.is_some_and(|p| boxed[0].distance(p).value <= reach);
+        let expected: Vec<bool> = image.points(None).unwrap().iter().map(within).collect();
+        let flags = expected.iter().filter(|&&f| f).count();
+        assert!(
+            flags > 10_000,
+            "{flags} readings of the wall within {reach} m of the box"
+        );
+        assert!(
+            mask.on_robot == expected,
+            "a wall {wall} m off at {margin:?}"
+        );
+    }
+    // The second block, held by none, is in view: what of it lies farther than the margin from
+    // every shape is unflagged, as the check above holds every pixel to.
     let second = shape_depth(&image, &shapes[2]);
     let its = (0..depth.len()).filter(|&i| second[i] == depth[i]).count();
     assert!(its > 1_000, "{its} readings of the second block");
@@ -2560,6 +2602,98 @@ fn a_mask_flags_the_readings_within_the_margin_of_a_shape() {
         mask().with_shapes(&devices()[0], &image, &[flat], [0.004, 0.0, 0.0]),
     ] {
         assert!(matches!(refused, Err(Error::Input(_))));
+    }
+}
+
+/// A mask given shapes keeps what it held: the robot's readings stay flagged and its space free
+/// in the slabs a shape reaches too, and a second call keeps the first call's shapes.
+#[test]
+fn a_mask_given_shapes_keeps_the_robot_and_earlier_shapes() {
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    // A table before the arm, as high as its base, and a block on it, seen from across the
+    // table with the arm.
+    let table = Obstacle::cuboid(Vec3::new(0.6, 0.0, 0.1), Vec3::new(0.3, 0.6, 0.05));
+    let block = Obstacle::cuboid(Vec3::new(0.6, 0.3, 0.18), Vec3::splat(0.03));
+    let k = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
+    let camera = look_at(Vec3::new(1.3, 0.2, 0.8), Vec3::new(0.45, 0.0, 0.0));
+    // Where a ray meets neither shape it may still meet the arm: no reading is as far as can be.
+    let shapes: Vec<f32> = look_at_shapes(&[&table, &block], camera, k)
+        .into_iter()
+        .map(|z| if z > 0.0 { z } else { f32::INFINITY })
+        .collect();
+    let image = DepthImage {
+        depth: &shapes,
+        width: 640,
+        intrinsics: k,
+        camera,
+    };
+    let depth = with_arm(&image, &robot, &q);
+    let image = DepthImage {
+        depth: &depth,
+        ..image
+    };
+    let margin = [0.004, 0.0, 0.0];
+    // A point of the map's lattice inside one of the arm's spheres as the mask grows them, on
+    // a layer of voxels the table reaches, and clear of the table itself: at the height of its
+    // middle, at the arm's base.
+    let spheres = robot.spheres(&q);
+    let lattice = (-20..=20).flat_map(|x| (-20..=20).map(move |y| (x as f32, y as f32)));
+    let behind = lattice
+        .map(|(x, y)| Vec3::new(x, y, 10.0) / 100.0)
+        .find(|&p| {
+            let in_arm = |&[x, y, z, r]: &[f32; 4]| (p - Vec3::new(x, y, z)).length() < r + 0.03;
+            table.distance(p).value > 0.02 && spheres.iter().any(in_arm)
+        });
+    let behind = behind.expect("a sphere of the arm's base reaches the table's height");
+    for device in devices() {
+        let arm = image.robot_mask(&robot, &q, 0.04, &[]).unwrap();
+        let its = arm.on_robot.iter().filter(|&&own| own).count();
+        assert!(its > 1_000, "{its} readings of the arm");
+        let held = (arm.clone())
+            .with_shapes(device, &image, std::slice::from_ref(&table), margin)
+            .unwrap()
+            .with_shapes(device, &image, std::slice::from_ref(&block), margin)
+            .unwrap();
+        let kept = arm.on_robot.iter().zip(&held.on_robot);
+        assert!(
+            kept.clone().all(|(arm, held)| !arm || *held),
+            "the arm's readings stay"
+        );
+        let read = depth.iter().filter(|z| z.is_finite()).count();
+        let flagged = held.on_robot.iter().filter(|&&own| own).count();
+        assert_eq!(
+            flagged, read,
+            "the arm, the table and the block are all that is read"
+        );
+        let mut map =
+            OccupancyMap::try_new(Vec3::new(-0.3, -0.8, -0.1), Vec3::new(1.1, 0.8, 0.9), 0.01)
+                .unwrap();
+        map.integrate(device, &image, Some(&held)).unwrap();
+        assert_eq!(map.counts().occupied, 0);
+        let free = [
+            ("in the arm, at the table's height", behind),
+            (
+                "in the table, which the first call gave",
+                Vec3::new(0.6, 0.0, 0.1),
+            ),
+            (
+                "in the block, which the second gave",
+                Vec3::new(0.6, 0.3, 0.18),
+            ),
+        ];
+        for (what, p) in free {
+            assert!(
+                map.occupancy(p).is_some_and(|o| o < 0.5),
+                "{p}, {what}, is free on {}",
+                device.name()
+            );
+        }
     }
 }
 
@@ -2663,8 +2797,8 @@ fn what_a_caller_holds_as_a_shape_is_left_out_of_a_map() {
             assert_eq!(filled, look == 3, "after {look} looks at the other block");
         }
 
-        // A shape measured a centimeter small on every side: the block's top, which it does
-        // not cover, is the map's.
+        // A shape measured small, a centimeter in on each side and two under the top: the
+        // block's top, which it does not cover, is the map's.
         let small = Obstacle::cuboid(Vec3::new(2.5, 0.0, 0.04), Vec3::splat(0.04));
         let mut map = new();
         fuse(&mut map, &[&table, &block], &[table.clone(), small], &no);
@@ -2682,7 +2816,8 @@ fn what_a_caller_holds_as_a_shape_is_left_out_of_a_map() {
         );
         assert_eq!(map.counts().occupied, 0);
         assert!(map.occupancy(top).is_some_and(|o| o < 0.5), "{top} is free");
-        // Unless the caller flags those readings itself, as of an object it is about to grasp.
+        // The block's readings flagged by the caller, as of an object it is about to grasp, and
+        // no shape given for it: they are left out too.
         let mut map = new();
         let its = |p: Vec3| block.distance(p).value < 0.004;
         fuse(&mut map, &[&table, &block], &both[..1], &its);
