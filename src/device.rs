@@ -27,7 +27,7 @@ use crate::edges::Search;
 use crate::gpu::GpuBackend;
 use crate::ik::IkOptions;
 use crate::robot::Robot;
-use crate::sdf::{DepthImage, Layout, Occupancy, RobotMask};
+use crate::sdf::{DepthImage, Layout, Occupancy, RobotMask, Weighing};
 use crate::trajopt::PlanOptions;
 use crate::types::{JointPaths, Pose};
 use crate::world::World;
@@ -566,13 +566,15 @@ impl Device {
         self.backend.grid_values(grid, occupancy)
     }
 
-    /// Fuses a checked `image` into a map's log-odds, one per point of `grid`.
+    /// Fuses a checked `image` into a map's log-odds, one per point of `grid`, weighed as
+    /// `weighing` says.
     pub(crate) fn integrate(
         &self,
         grid: &Layout,
         log_odds: &mut [i8],
         image: &DepthImage,
         robot: Option<&RobotMask>,
+        weighing: Weighing,
     ) -> Result<()> {
         ensure_input!(
             log_odds.len() == grid.points(),
@@ -580,7 +582,8 @@ impl Device {
             log_odds.len(),
             grid.points()
         );
-        self.backend.integrate(grid, log_odds, image, robot)
+        self.backend
+            .integrate(grid, log_odds, image, robot, weighing)
     }
 
     pub(crate) fn ik(
@@ -772,12 +775,13 @@ pub(crate) trait Backend: Send + Sync {
     /// The stored values of a distance grid over `grid` (`sdf::depth_occupancy` for images, then
     /// `sdf::squared_edt` and `sdf::finish`).
     fn grid_values(&self, grid: &Layout, occupancy: Occupancy) -> Result<Vec<u16>>;
-    /// Fuses `image` into a map's log-odds (`sdf::integrate`).
+    /// Fuses `image` into a map's log-odds, weighed as `weighing` says (`sdf::integrate`).
     fn integrate(
         &self,
         grid: &Layout,
         log_odds: &mut [i8],
         image: &DepthImage,
         robot: Option<&RobotMask>,
+        weighing: Weighing,
     ) -> Result<()>;
 }

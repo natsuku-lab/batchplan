@@ -15,7 +15,7 @@ use batchplan::rng::Rng;
 use batchplan::{
     CollisionWeights, DepthFilter, DepthImage, Device, Distance, Error, Held, Intrinsics,
     JointTrajectory, Obstacle, Occlusion, OccupancyMap, Pose, Robot, SdfGrid, SdfOptions,
-    SphereOptions, World,
+    SphereOptions, Weighing, World,
 };
 use glam::{BVec3, EulerRot, Mat3, Quat, Vec2, Vec3};
 
@@ -2233,6 +2233,359 @@ fn a_map_says_where_it_is_occupied() {
         assert!(
             (occupied.iter()).all(|&p| even.occupancy(p).unwrap() > 0.5),
             "{name}"
+        );
+    }
+}
+
+/// A 640x480 camera 70 cm over the middle of a table, looking straight down, reading `depth`.
+fn from_above(depth: &[f32]) -> DepthImage<'_> {
+    DepthImage {
+        depth,
+        width: 640,
+        intrinsics: Intrinsics {
+            fx: 525.0,
+            fy: 525.0,
+            cx: 319.5,
+            cy: 239.5,
+        },
+        camera: Pose::new(Vec3::new(0.0, 0.0, 0.7), Quat::from_rotation_x(PI)),
+    }
+}
+
+/// Per pixel of `image`, the depth of the nearest of `shapes`; 0 where its ray meets none.
+fn scene_depth(image: &DepthImage, shapes: &[&Obstacle]) -> Vec<f32> {
+    let depths: Vec<Vec<f32>> = shapes.iter().map(|s| shape_depth(image, s)).collect();
+    (0..image.depth.len())
+        .map(|i| depths.iter().map(|d| d[i]).fold(f32::INFINITY, f32::min))
+        .map(|z| if z.is_finite() { z } else { 0.0 })
+        .collect()
+}
+
+/// A table whose top is at `z`, a meter on a side.
+fn table_at(z: f32) -> Obstacle {
+    Obstacle::cuboid(Vec3::new(0.0, 0.0, z - 0.05), Vec3::new(0.5, 0.5, 0.05))
+}
+
+/// When one image decides (`Weighing::Latest`), a voxel five looks saw empty is occupied after one
+/// look that reads a surface in it, and one five looks filled is free after one look that sees
+/// through it, each as surely as five looks weighed as evidence make it. Weighed as evidence, the
+/// first takes three looks at the surface, and the second is still occupied after one look
+/// through.
+#[test]
+fn one_image_decides_what_it_sees() {
+    let block = Obstacle::cuboid(Vec3::new(0.06, -0.03, 0.031), Vec3::new(0.04, 0.025, 0.031));
+    let blank = vec![0.0; 640 * 480];
+    let (with, without) = (
+        scene_depth(&from_above(&blank), &[&block, &table_at(0.0)]),
+        scene_depth(&from_above(&blank), &[&table_at(0.0)]),
+    );
+    let (with, without) = (from_above(&with), from_above(&without));
+    // The middle of the block's top.
+    let top = Vec3::new(0.06, -0.03, 0.06);
+    for device in devices() {
+        let name = device.name();
+        let looked = |weighing: Weighing, images: &[&DepthImage]| {
+            let (lo, hi) = (Vec3::new(-0.2, -0.15, -0.05), Vec3::new(0.25, 0.15, 0.2));
+            let mut map = OccupancyMap::try_new(lo, hi, 0.01)
+                .unwrap()
+                .with_weighing(weighing);
+            for image in images {
+                map.integrate(device, image, None).unwrap();
+            }
+            map.occupancy(top).unwrap()
+        };
+        // Five looks weighed as evidence reach the clamps: as sure as a map holds anything.
+        let (full, empty) = (
+            looked(Weighing::Evidence, &[&with; 5]),
+            looked(Weighing::Evidence, &[&without; 5]),
+        );
+        assert!(full > 0.95 && empty < 0.15, "{name}: {full} and {empty}");
+        let mut images = vec![&without; 5];
+        for looks in 1..=3 {
+            images.push(&with);
+            let weighed = looked(Weighing::Evidence, &images);
+            assert_eq!(
+                weighed > 0.5,
+                looks == 3,
+                "{name}: {weighed} after {looks} looks at the block"
+            );
+        }
+        assert_eq!(
+            looked(Weighing::Latest, &images[..6]),
+            full,
+            "{name}: seen empty five times, then read"
+        );
+        let images = [&with, &with, &with, &with, &with, &without];
+        let weighed = looked(Weighing::Evidence, &images);
+        assert!(
+            weighed > 0.5,
+            "{name}: {weighed}, filled, then seen through"
+        );
+        assert_eq!(
+            looked(Weighing::Latest, &images),
+            empty,
+            "{name}: filled five times, then seen through"
+        );
+    }
+}
+
+/// What a deciding image does not see keeps what earlier images said: a block outside the image,
+/// and a block hidden behind a board held over it. What it sees, it decides: another block that
+/// is gone, and the board.
+#[test]
+fn what_one_image_does_not_see_keeps_what_it_was() {
+    let right = Obstacle::cuboid(Vec3::new(0.06, -0.03, 0.031), Vec3::new(0.04, 0.025, 0.031));
+    let left = Obstacle::cuboid(Vec3::new(-0.08, 0.04, 0.031), Vec3::new(0.03, 0.03, 0.031));
+    let board = Obstacle::cuboid(Vec3::new(0.06, -0.03, 0.203), Vec3::new(0.07, 0.05, 0.005));
+    let table = table_at(0.0);
+    let blank = vec![0.0; 640 * 480];
+    let seen = |shapes: &[&Obstacle]| scene_depth(&from_above(&blank), shapes);
+    let (both, bare, covered) = (
+        seen(&[&right, &left, &table]),
+        seen(&[&table]),
+        seen(&[&right, &left, &board, &table]),
+    );
+    // The left half of the image without the blocks, which shows no point past x = 0.
+    let half: Vec<f32> = bare
+        .chunks(640)
+        .flat_map(|row| &row[..320])
+        .copied()
+        .collect();
+    let half = DepthImage {
+        depth: &half,
+        width: 320,
+        ..from_above(&blank)
+    };
+    let (right_top, left_top) = (Vec3::new(0.06, -0.03, 0.06), Vec3::new(-0.08, 0.04, 0.06));
+    // The layer of points holding the board's top.
+    let on_board = Vec3::new(0.06, -0.03, 0.21);
+    for device in devices() {
+        let name = device.name();
+        let (lo, hi) = (Vec3::new(-0.2, -0.15, -0.05), Vec3::new(0.25, 0.15, 0.25));
+        let mut map = OccupancyMap::try_new(lo, hi, 0.01)
+            .unwrap()
+            .with_weighing(Weighing::Latest);
+        map.integrate(device, &from_above(&both), None).unwrap();
+        let before = map.occupancy(right_top);
+        assert!(
+            before.unwrap() > 0.5 && map.occupancy(left_top).unwrap() > 0.5,
+            "{name}: both blocks are seen"
+        );
+        map.integrate(device, &half, None).unwrap();
+        let gone = map.occupancy(left_top).unwrap();
+        assert!(gone < 0.5, "{name}: {gone} where the left block was");
+        assert_eq!(
+            map.occupancy(right_top),
+            before,
+            "{name}: the right block, outside the image"
+        );
+        map.integrate(device, &from_above(&covered), None).unwrap();
+        let board = map.occupancy(on_board).unwrap();
+        assert!(board > 0.5, "{name}: {board} on the board");
+        assert_eq!(
+            map.occupancy(right_top),
+            before,
+            "{name}: the right block, hidden behind the board"
+        );
+    }
+}
+
+/// A voxel that holds a reading is occupied whatever rays pass through it, also when one image
+/// decides: a table seen at a grazing angle, its top 4 mm under a layer of the map's points, so
+/// that the voxels holding its readings lie in front of the readings their middles project to.
+#[test]
+fn a_voxel_holding_a_reading_is_occupied_whatever_passes_through_it() {
+    let blank = vec![0.0; 640 * 480];
+    let image = DepthImage {
+        camera: look_at(Vec3::new(0.0, -0.6, 0.2), Vec3::ZERO),
+        ..from_above(&blank)
+    };
+    let depth = scene_depth(&image, &[&table_at(-0.004)]);
+    let image = DepthImage {
+        depth: &depth,
+        ..image
+    };
+    let (lo, hi, voxel) = (
+        Vec3::new(-0.15, -0.15, -0.05),
+        Vec3::new(0.15, 0.15, 0.1),
+        0.01,
+    );
+    // The voxels holding a reading, of readings not within rounding of a voxel's face.
+    let mut voxels: Vec<[i32; 3]> = vec![];
+    for p in image.points(None).unwrap().into_iter().flatten() {
+        let at = (p - lo) / voxel;
+        let inside = at.cmpge(Vec3::splat(-0.5)).all() && at.cmplt((hi - lo) / voxel + 0.5).all();
+        let off_faces = ((at - at.floor() - 0.5).abs()).min_element() > 1e-3;
+        if inside && off_faces {
+            voxels.push(at.round().to_array().map(|a| a as i32));
+        }
+    }
+    voxels.sort_unstable();
+    voxels.dedup();
+    let holding: Vec<Vec3> = (voxels.iter())
+        .map(|&[x, y, z]| lo + Vec3::new(x as f32, y as f32, z as f32) * voxel)
+        .collect();
+    // Those whose middle the ray of the pixel it projects to passes, in front of its reading by
+    // more than half a voxel.
+    let k = image.intrinsics;
+    let to_camera = image.camera.inverse();
+    let passed = |p: Vec3| {
+        let c = to_camera.position + to_camera.rotation * p;
+        let u = (k.fx * c.x / c.z + k.cx + 0.5).floor();
+        let v = (k.fy * c.y / c.z + k.cy + 0.5).floor();
+        let within = (0.0..640.0).contains(&u) && (0.0..480.0).contains(&v);
+        within && c.z < depth[v as usize * 640 + u as usize] - 0.5 * voxel - 1e-3
+    };
+    let passed_through = holding.iter().filter(|&&p| passed(p)).count();
+    assert!(
+        passed_through > 200,
+        "{passed_through} of {} voxels holding a reading are passed through",
+        holding.len()
+    );
+    for device in devices() {
+        for weighing in [Weighing::Evidence, Weighing::Latest] {
+            let mut map = OccupancyMap::try_new(lo, hi, voxel)
+                .unwrap()
+                .with_weighing(weighing);
+            map.integrate(device, &image, None).unwrap();
+            for &p in &holding {
+                let seen = map.occupancy(p).unwrap();
+                assert!(
+                    seen > 0.5,
+                    "{}, {weighing:?}: {seen} at {p}, passed through: {}",
+                    device.name(),
+                    passed(p)
+                );
+            }
+        }
+    }
+}
+
+/// What no image has observed is marked alike whatever the weighing: after one look at a table
+/// with the arm before it, masked out, the voxels with no occupancy are the same under either,
+/// and so are the grids that take never-observed space as solid, and solid but for the arm's
+/// shadow; after a second look, at the table alone, the voxels with no occupancy still are.
+#[test]
+fn either_weighing_marks_what_no_image_observed_alike() {
+    let scene = TableScene::new();
+    let vga = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
+    let robot = common::panda().unwrap();
+    let bare = scene.render(640, 480, vga, false);
+    let table = scene.image(&bare, 640, vga);
+    let arm = with_arm(&table, &robot, robot.default_q());
+    let image = scene.image(&arm, 640, vga);
+    let mask = image
+        .robot_mask(&robot, robot.default_q(), 0.02, &[])
+        .unwrap();
+    let (lo, hi) = (Vec3::new(-0.3, -0.3, -0.1), Vec3::new(0.3, 0.3, 0.3));
+    let points = lattice(lo, hi, 0.01);
+    let unobserved = |map: &OccupancyMap| -> Vec<bool> {
+        (points.iter())
+            .map(|&p| map.occupancy(p).is_none())
+            .collect()
+    };
+    for device in devices() {
+        let name = device.name();
+        let mut maps = [Weighing::Evidence, Weighing::Latest].map(|weighing| {
+            let mut map = OccupancyMap::try_new(lo, hi, 0.01)
+                .unwrap()
+                .with_weighing(weighing);
+            map.integrate(device, &image, Some(&mask)).unwrap();
+            map
+        });
+        let [evidence, latest] = &maps;
+        let never = unobserved(evidence);
+        let hidden = never.iter().filter(|&&n| n).count();
+        assert!(hidden > 10_000, "{name}: {hidden} voxels never observed");
+        assert!(never == unobserved(latest), "{name}");
+        let differ = (points.iter())
+            .filter(|&&p| evidence.occupancy(p) != latest.occupancy(p))
+            .count();
+        assert!(
+            differ > 10_000,
+            "{name}: the weighings agree on all but {differ}"
+        );
+        let grids = |map: &OccupancyMap| {
+            [Occlusion::Occupied, Occlusion::OccupiedExceptRobotShadow]
+                .map(|unknown| map.grid(device, unknown).unwrap())
+        };
+        let (weighed, decided) = (grids(evidence), grids(latest));
+        assert!(weighed[0] != weighed[1], "{name}: the arm hides space");
+        assert!(weighed == decided, "{name}");
+        for map in &mut maps {
+            map.integrate(device, &table, None).unwrap();
+        }
+        assert!(
+            unobserved(&maps[0]) == unobserved(&maps[1]),
+            "{name}: after a second look"
+        );
+    }
+}
+
+/// The GPU fuses images into a map that one image decides as the CPU does: after three looks (a
+/// ball on a table, the arm before the table, masked out, and the table alone), the maps differ at
+/// no more voxels than images are classified differently on the devices, one in 2,000 at most.
+#[test]
+fn every_device_fuses_alike_when_one_image_decides() {
+    let robot = common::panda().unwrap();
+    let scene = TableScene::new();
+    let vga = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
+    let (ball, bare) = (
+        scene.render(640, 480, vga, true),
+        scene.render(640, 480, vga, false),
+    );
+    let table = scene.image(&bare, 640, vga);
+    let arm = with_arm(&table, &robot, robot.default_q());
+    let arm = scene.image(&arm, 640, vga);
+    let mask = arm
+        .robot_mask(&robot, robot.default_q(), 0.02, &[])
+        .unwrap();
+    let looks = [
+        (scene.image(&ball, 640, vga), None),
+        (arm, Some(&mask)),
+        (table, None),
+    ];
+    let (lo, hi) = (Vec3::new(-0.3, -0.3, -0.1), Vec3::new(0.3, 0.3, 0.3));
+    let points = lattice(lo, hi, 0.01);
+    let fused = |device: &Device, weighing: Weighing| -> Vec<Option<f32>> {
+        let mut map = OccupancyMap::try_new(lo, hi, 0.01)
+            .unwrap()
+            .with_weighing(weighing);
+        for (image, mask) in &looks {
+            map.integrate(device, image, *mask).unwrap();
+        }
+        points.iter().map(|&p| map.occupancy(p)).collect()
+    };
+    let (decided, weighed) = (
+        fused(cpu(), Weighing::Latest),
+        fused(cpu(), Weighing::Evidence),
+    );
+    let differ =
+        |a: &[Option<f32>], b: &[Option<f32>]| a.iter().zip(b).filter(|(a, b)| a != b).count();
+    let between = differ(&decided, &weighed);
+    assert!(between > 10_000, "the weighings agree on all but {between}");
+    for device in &devices()[1..] {
+        let count = differ(&decided, &fused(device, Weighing::Latest));
+        eprintln!(
+            "{}: {count} of {} voxels differ",
+            device.name(),
+            points.len()
+        );
+        assert!(
+            count * 2000 <= points.len(),
+            "{}: {count} of {} voxels differ",
+            device.name(),
+            points.len()
         );
     }
 }

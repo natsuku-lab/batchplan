@@ -988,20 +988,25 @@ pub(crate) fn integrate(
     log_odds: &mut [i8],
     image: &DepthImage,
     robot: Option<&RobotMask>,
+    weighing: Weighing,
 ) {
     let mut hit = vec![false; grid.points()];
     for n in hits(grid, image, robot, |p| grid.contains(p)) {
         hit[n] = true;
     }
-    if robot.is_some() {
-        integrated::<true>(grid, log_odds, image, robot, hit);
-    } else {
-        integrated::<false>(grid, log_odds, image, robot, hit);
+    match (robot.is_some(), weighing) {
+        (true, Weighing::Evidence) => integrated::<true, false>(grid, log_odds, image, robot, hit),
+        (false, Weighing::Evidence) => {
+            integrated::<false, false>(grid, log_odds, image, robot, hit);
+        }
+        (true, Weighing::Latest) => integrated::<true, true>(grid, log_odds, image, robot, hit),
+        (false, Weighing::Latest) => integrated::<false, true>(grid, log_odds, image, robot, hit),
     }
 }
 
-/// Updates the map with one image's classification, with masking selected before the voxel loop.
-fn integrated<const MASK: bool>(
+/// Updates the map with one image's classification, with masking and the weighing
+/// ([`Weighing::Latest`] if `LATEST`) selected before the voxel loop.
+fn integrated<const MASK: bool, const LATEST: bool>(
     grid: &Layout,
     log_odds: &mut [i8],
     image: &DepthImage,
@@ -1027,10 +1032,12 @@ fn integrated<const MASK: bool>(
             } else {
                 image.sees::<false, false>(None, grid.point(n), grid.voxel, 0.0)
             };
+            // Constants in place: chosen into locals, they compiled the copy that weighs evidence
+            // to other instructions.
             let step = match seen {
-                _ if hit => HIT,
-                Seen::Surface => HIT,
-                Seen::Free => MISS,
+                _ if hit => const { if LATEST { LATEST_HIT } else { HIT } },
+                Seen::Surface => const { if LATEST { LATEST_HIT } else { HIT } },
+                Seen::Free => const { if LATEST { LATEST_MISS } else { MISS } },
                 // Only the robot hides it: noted, until an image observes it or another surface
                 // hides it.
                 Seen::Shadow => {
@@ -1047,12 +1054,17 @@ fn integrated<const MASK: bool>(
                 }
                 Seen::Near | Seen::Unseen => return,
             };
-            *l = (if *l == UNOBSERVED || *l == SHADOWED || *l == OCCLUDED {
+            let from = if *l == UNOBSERVED || *l == SHADOWED || *l == OCCLUDED {
                 0
             } else {
                 *l
-            } + step)
-                .clamp(CLAMP.0, CLAMP.1);
+            };
+            // One image's step from either clamp passes the other, past what a byte holds.
+            let to = match LATEST {
+                true => from.saturating_add(step),
+                false => from + step,
+            };
+            *l = to.clamp(CLAMP.0, CLAMP.1);
         });
 }
 
@@ -1650,6 +1662,9 @@ fn meet(p: usize, fp: u32, q: usize, fq: u32) -> i32 {
 pub(crate) const HIT: i8 = 17;
 pub(crate) const MISS: i8 = -8;
 pub(crate) const CLAMP: (i8, i8) = (-40, 70);
+/// A hit and a miss when one image decides ([`Weighing::Latest`]): from either clamp to the other.
+pub(crate) const LATEST_HIT: i8 = CLAMP.1 - CLAMP.0;
+pub(crate) const LATEST_MISS: i8 = CLAMP.0 - CLAMP.1;
 /// The log-odds of a voxel no image has updated.
 pub(crate) const UNOBSERVED: i8 = i8::MIN;
 /// The log-odds of a voxel no image has observed, which only a robot mask has hidden.
@@ -1676,7 +1691,9 @@ fn observed(l: i8) -> bool {
 /// Occupancy fused from depth images over time, on a fixed grid in the world frame: per voxel, the
 /// log-odds that it is occupied, updated as OctoMap updates them (a hit adds 0.85, a miss -0.4,
 /// clamped to [-2, 3.5]). Readings that come and go settle: something seen once and then seen
-/// through three times is free again. Build distance grids from it with [`OccupancyMap::grid`].
+/// through three times is free again. Under [`Weighing::Latest`]
+/// ([`with_weighing`](OccupancyMap::with_weighing)) each image decides what it sees instead.
+/// Build distance grids from it with [`OccupancyMap::grid`].
 ///
 /// What a camera cannot tell, a caller can: [`free`](OccupancyMap::free) marks space known to
 /// be empty, as where an object was before it was carried away, and
@@ -1689,6 +1706,26 @@ pub struct OccupancyMap {
     log_odds: Vec<i8>,
     /// Whether this is a part of a map, some of its voxels left out: it takes no images.
     part: bool,
+    /// How much each image counts.
+    weighing: Weighing,
+}
+
+/// How much one image counts in a map ([`OccupancyMap::with_weighing`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Weighing {
+    /// Each image is evidence, weighed as OctoMap weighs it: a reading adds 0.85 to a voxel's
+    /// log-odds and a ray through it takes 0.4, held within [-2, 3.5]. It takes three images to
+    /// fill a voxel seen empty often and nine to empty one seen full often: a stream of frames
+    /// settles what comes and goes, and one stray reading is outweighed by the looks through it.
+    #[default]
+    Evidence,
+    /// Each image decides what it sees: a voxel it reads a surface in, or that holds one of its
+    /// readings, is as surely occupied as a map holds anything, and a voxel its rays pass through
+    /// is as surely free. A voxel it does not see keeps what earlier images said, and space no
+    /// image has observed is marked as under `Evidence`. For a caller that looks once every few
+    /// seconds; one stray reading is an obstacle until a look sees through it.
+    Latest,
 }
 
 /// How many of a map's voxels are occupied, free and never observed
@@ -1706,7 +1743,8 @@ pub struct MapCounts {
 }
 
 impl OccupancyMap {
-    /// An unobserved map with `voxel` spacing whose points cover `lo..=hi`.
+    /// An unobserved map with `voxel` spacing whose points cover `lo..=hi`, weighing images as
+    /// evidence ([`Weighing::Evidence`]).
     pub fn try_new(lo: Vec3, hi: Vec3, voxel: f32) -> Result<Self> {
         ensure_input!(
             lo.is_finite() && hi.is_finite() && lo.cmplt(hi).all(),
@@ -1724,14 +1762,24 @@ impl OccupancyMap {
             grid,
             log_odds: vec![UNOBSERVED; grid.points()],
             part: false,
+            weighing: Weighing::Evidence,
         })
+    }
+
+    /// The map, weighing the images it takes from now on as `weighing` says. What earlier images
+    /// said stays as it is.
+    #[must_use]
+    pub fn with_weighing(self, weighing: Weighing) -> Self {
+        Self { weighing, ..self }
     }
 
     /// Fuses one depth image on `device`. Each voxel is projected into it: voxels in front of a
     /// reading are misses, voxels at it (within half a voxel) and those holding a reading's point
     /// are hits, and voxels behind readings, outside the image or along pixels without a reading
-    /// are not updated. With a [`RobotMask`], pixels that see the robot only clear the space in
-    /// front of it, and the space the robot fills is a miss wherever it is.
+    /// are not updated. A voxel holding a reading is a hit whatever rays pass through it. How much
+    /// a hit and a miss count is the map's [`Weighing`]. With a [`RobotMask`], pixels that see the
+    /// robot only clear the space in front of it, and the space the robot fills is a miss
+    /// wherever it is.
     pub fn integrate(
         &mut self,
         device: &Device,
@@ -1743,7 +1791,13 @@ impl OccupancyMap {
             !self.part,
             "a part of a map takes no images: fuse them into the map and take its part again"
         );
-        device.integrate(&self.grid, &mut self.log_odds, &image.rigid(), robot)
+        device.integrate(
+            &self.grid,
+            &mut self.log_odds,
+            &image.rigid(),
+            robot,
+            self.weighing,
+        )
     }
 
     /// The probability that the voxel holding `p` is occupied; `None` if it was never observed or
@@ -1838,6 +1892,7 @@ impl OccupancyMap {
             grid,
             log_odds,
             part: true,
+            weighing: self.weighing,
         })
     }
 
@@ -2212,11 +2267,17 @@ mod tests {
         let fused = |device: &Device| {
             let mut log_odds = vec![UNOBSERVED; grid.points()];
             device
-                .integrate(&grid, &mut log_odds, &image, Some(&mask))
+                .integrate(
+                    &grid,
+                    &mut log_odds,
+                    &image,
+                    Some(&mask),
+                    Weighing::Evidence,
+                )
                 .unwrap();
             let masked = log_odds.clone();
             device
-                .integrate(&grid, &mut log_odds, &table, None)
+                .integrate(&grid, &mut log_odds, &table, None, Weighing::Evidence)
                 .unwrap();
             [masked, log_odds]
         };
