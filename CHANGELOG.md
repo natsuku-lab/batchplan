@@ -10,6 +10,25 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- A band behind what a mask flags: `mask.with_band(&device, &image, margin, pixels)` flags a
+  reading that lies behind a thing the mask holds (a sphere of the robot, a held object, a
+  shape), beside a flagged reading of that thing within `pixels` pixels along rows, columns and
+  diagonals: the thing's surface where that reading reads it lies nearer the camera than the
+  reading by more than `margin` at its depth (`margin` as `with_shapes` takes it), and the
+  reading's ray, carried on past it, does not enter the thing. A depth camera reads the pixels
+  beside a depth jump toward the other surface, one for a sensor that samples each pixel's
+  disparity a fraction of a pixel off and up to half the window for a stereo block matcher;
+  behind the arm's or a shape's outline, those readings lie farther than the padding or the
+  margin from it and the filter keeps the ones near either surface, so they were obstacles in
+  mid-air where fingers go. `pixels` is that fact of the camera. A reading whose ray goes on
+  into a thing is in front of it and never that thing's: a table given as a shape takes nothing
+  of what stands on it, at any band and from any view, and a surface level with a flagged one
+  keeps its readings within the margin, whatever the noise of the flagged ones. Given up: an
+  outline read too near stays a reading, and the honest readings just behind each flagged
+  outline are taken with the rest. A band of one pixel behind the Panda's mask
+  (`examples/perception.rs`, the camera across the table) takes 0.17 ms for a 640×480 image on
+  the M4 Pro's 14 threads and 0.23 on the Ryzen's 32.
+
 - How much one image counts in a fused map: `map.with_weighing(Weighing)`. `Weighing::Evidence`,
   the default and the weighing until now, suits a stream of frames: a reading adds 0.85 to a
   voxel's log-odds and a ray through it takes 0.4, so it takes three images to fill a voxel seen

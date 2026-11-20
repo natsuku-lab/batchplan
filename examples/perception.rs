@@ -1,9 +1,9 @@
 //! What the depth calls cost, a 640x480 image at a time: the image without the readings between
-//! two surfaces, which readings are the robot's or a known shape's, the image's points, a
-//! surface with its normals, a grid of the image, the image fused into a map, that map's grid,
-//! where it is occupied, one object's part of it, and what a caller marks in it. For a camera
-//! over a table that sees the arm and for one the hand carries, with the Panda's 61 spheres and
-//! with it fitted to several hundred (a budget of 576).
+//! two surfaces, which readings are the robot's or a known shape's and which lie beside them, the
+//! image's points, a surface with its normals, a grid of the image, the image fused into a map,
+//! that map's grid, where it is occupied, one object's part of it, and what a caller marks in it.
+//! For a camera over a table that sees the arm and for one the hand carries, with the Panda's 61
+//! spheres and with it fitted to several hundred (a budget of 576).
 //!
 //! cargo run --release --example perception [-- --cpu [threads]]
 
@@ -246,6 +246,22 @@ fn main() -> Result<()> {
             "  the scene's {} shapes left out too: median {median:.2} ms, best {best:.2} ({on} pixels)",
             scene.obstacles.len()
         );
+        // The pixel beside each outline that a camera reads toward what lies behind, at the
+        // shapes' margin: behind the robot alone, where the table and the objects around the
+        // arm are left to the band, and behind the robot and the shapes, which flag every
+        // reading of this scene already.
+        for (label, mask) in [
+            ("the robot alone", &robot),
+            ("the robot and the shapes", &held),
+        ] {
+            let (median, best, banded) = timed(21, || {
+                (mask.clone()).with_band(&device, &image, [0.004, 0.0, 0.0], 1)
+            });
+            let on = banded?.on_robot.iter().filter(|&&on| on).count();
+            println!(
+                "  a band of a pixel behind {label}: median {median:.2} ms, best {best:.2} ({on} pixels)"
+            );
+        }
         let mut rest =
             OccupancyMap::try_new(Vec3::new(-0.3, -0.8, -0.1), Vec3::new(1.1, 0.8, 0.7), 0.01)?;
         let (median, best, fused) = timed(9, || rest.integrate(&device, &image, Some(&held)));

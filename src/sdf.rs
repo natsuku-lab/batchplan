@@ -705,6 +705,115 @@ impl RobotMask {
         Ok(self)
     }
 
+    /// The mask with the readings flagged that lie behind a thing it holds, beside that thing's
+    /// flagged readings. A reading at depth `z` the mask does not flag is taken where a flagged
+    /// reading within `pixels` pixels of it, along rows, columns and diagonals (the larger of the
+    /// two offsets at most `pixels`), is of a thing whose surface where it reads it is nearer the
+    /// camera than `z - (margin[0] + margin[1] * z + margin[2] * z * z)`, and the reading's own
+    /// ray, carried on past it, does not enter that thing. It is then that thing's, with all
+    /// that follows for a flagged reading. A flagged reading is of a sphere of the robot or of an
+    /// object it holds where its point lies within the padding of it, as
+    /// [`DepthImage::robot_mask`] tests, and of a shape where it lies within the margin at its
+    /// depth of it, as [`with_shapes`](Self::with_shapes) tests with the `margin` given here; a
+    /// flag a caller sets on a reading of none of them takes nothing. `image` is the image the
+    /// mask was made of. Its rows are read on the device's threads: first, in a pass along the
+    /// columns and one along each row, the least depth of a flagged reading within the band less
+    /// as much as its thing may lie nearer, which is all most readings need; then, for a reading
+    /// that the least leaves open, the flagged readings of the band and their things.
+    ///
+    /// `pixels` is a fact of the camera: how many pixels beside a depth jump it reads toward the
+    /// other surface. A sensor that samples each pixel's disparity a fraction of a pixel off
+    /// reads one; a stereo block matcher, half its window. Those readings lie behind the thing in
+    /// front, farther than the padding or the margin from it: its own outline read too deep, on
+    /// a ray that missed it or has passed through it, and the pixel behind it read toward it,
+    /// and they would be obstacles in mid-air beside it, where fingers go. A reading whose ray
+    /// goes on into a thing lies in front of it, and that thing never takes it: a table given as
+    /// a shape takes no reading of what stands on it, at any band and from any view, however far
+    /// its own readings a few rows below lie nearer. A reading level with a flagged surface is
+    /// measured against the thing's surface, not against the flagged readings and their noise,
+    /// and is kept within the margin of it. Given up: an outline read too near, in front of the
+    /// thing by more than the margin, stays a reading, and the honest readings just behind each
+    /// flagged outline, `pixels` wide, are taken with the rest, as of an object no shape
+    /// explains that stands within the band behind another's outline. Zero pixels changes
+    /// nothing.
+    ///
+    /// Called after [`with_shapes`](Self::with_shapes), it grows the shapes' flags as well as the
+    /// robot's; called before, the robot's alone. The space the mask frees in a grid or a map is
+    /// what it was.
+    pub fn with_band(
+        mut self,
+        device: &Device,
+        image: &DepthImage,
+        margin: [f32; 3],
+        pixels: usize,
+    ) -> Result<Self> {
+        image.check_with(Some(&self))?;
+        ensure_input!(
+            margin.iter().all(|m| m.is_finite() && *m >= 0.0),
+            "the margin's coefficients must not be negative, got {margin:?}"
+        );
+        let image = image.rigid();
+        let (width, height) = (image.width, image.height());
+        // A band as wide as the image reaches all of it.
+        let pixels = pixels.min(width.max(height));
+        let RobotMask {
+            on_robot,
+            spheres,
+            held,
+            padding,
+            shapes,
+        } = &mut self;
+        let band = Band::new(
+            &image,
+            on_robot.clone(),
+            spheres,
+            held,
+            *padding,
+            shapes,
+            margin,
+        );
+        device.install(|| {
+            let rows = on_robot.par_chunks_mut(width).enumerate();
+            let things = band.held.len() + band.shapes.len();
+            rows.for_each_init(
+                || (vec![f32::INFINITY; width], vec![None; things]),
+                |(nearest, ahead), (v, row)| {
+                    // The least depth, less as much as its thing may lie nearer, of a flagged
+                    // reading within the band along each pixel's column. A flagged pixel without
+                    // a reading counts for nothing: one at 0, below it or no number is passed
+                    // over, and one at infinity lowers no least.
+                    nearest.fill(f32::INFINITY);
+                    for w in v.saturating_sub(pixels)..(v + pixels + 1).min(height) {
+                        let flags = &band.flags[w * width..][..width];
+                        let depths = &image.depth[w * width..][..width];
+                        let column = nearest.iter_mut().zip(flags).zip(depths);
+                        for ((least, &flag), &z) in column {
+                            if flag && z > 0.0 {
+                                *least = least.min(z - band.slack(z));
+                            }
+                        }
+                    }
+                    // Then the least of those within the band along the row: a reading no thing
+                    // can lie nearer than by the margin is kept, and the rest are looked into.
+                    for (u, own) in row.iter_mut().enumerate() {
+                        if *own {
+                            continue;
+                        }
+                        let Some(z) = image.reading(v * width + u) else {
+                            continue;
+                        };
+                        let around =
+                            &nearest[u.saturating_sub(pixels)..(u + pixels + 1).min(width)];
+                        let least = around.iter().fold(f32::INFINITY, |least, &d| least.min(d));
+                        *own = least < z - band.reach(z)
+                            && band.takes(v * width + u, z, pixels, ahead);
+                    }
+                },
+            );
+        });
+        Ok(self)
+    }
+
     /// A ball around each sphere and each held object, in that order: the sphere itself, and for
     /// an object every point within the padding of it.
     fn balls(&self) -> impl Iterator<Item = Vec4> + '_ {
@@ -933,6 +1042,20 @@ fn shape_run(
 /// is good to a few times ε at its coordinates, and a box's sides ([`Obstacle::bounds`]) come from
 /// square roots of rounded values near zero, good to about √ε times its size.
 const ROUNDING: f32 = 4.0 * 3.452_669_8e-4;
+
+/// How near, relative to the size of the coordinates involved, a ray stepped along by a thing's
+/// distance must come to the thing to be taken as entering it ([`RobotMask::with_band`]): 4 ε,
+/// as a distance is good to a few times ε at its coordinates. A ray that enters comes that near
+/// before it would cross the surface, and one that does not gains more than its position
+/// rounds away by at each step, so it leaves the thing's box.
+const STEP: f32 = 4.0 * f32::EPSILON;
+
+/// The most steps a ray is carried along a thing's box by the thing's distance
+/// ([`RobotMask::with_band`]). A ray that meets a face at an angle `a` comes nearer it by a
+/// factor of `1 - sin a` a step: from a meter to a [`STEP`] takes 20 steps at 30 degrees, 70 at
+/// 10 and 140 at 5, so one that has not arrived after this many meets the face at under about
+/// 5 degrees or runs beside it.
+const STEPS: usize = 128;
 
 /// The least depth `image` reads: infinity where it reads none.
 fn nearest_reading(image: &DepthImage) -> f32 {
@@ -2437,6 +2560,191 @@ impl Default for DepthFilter {
             steepest: 80f32.to_radians(),
             deviations: 4.0,
         }
+    }
+}
+
+/// What a band behind a mask's flags reads ([`RobotMask::with_band`]): the image, made rigid,
+/// the flags as they were before the band, which each row reads while its own are set, and the
+/// things the mask holds.
+struct Band<'a> {
+    image: DepthImage<'a>,
+    flags: Vec<bool>,
+    /// The robot's spheres grown by the padding.
+    spheres: &'a [Vec4],
+    held: &'a [Obstacle],
+    shapes: &'a [Obstacle],
+    /// The box of each held object and then each shape, grown by what rounding may leave its
+    /// bounds short by ([`ROUNDING`]), and the size of its coordinates.
+    boxes: Vec<(Vec3, Vec3, f32)>,
+    padding: f32,
+    margin: [f32; 3],
+    /// The camera's axis, along which depths are measured.
+    forward: Vec3,
+}
+
+impl<'a> Band<'a> {
+    fn new(
+        image: &DepthImage<'a>,
+        flags: Vec<bool>,
+        spheres: &'a [Vec4],
+        held: &'a [Obstacle],
+        padding: f32,
+        shapes: &'a [Obstacle],
+        margin: [f32; 3],
+    ) -> Self {
+        let boxes = (held.iter().chain(shapes))
+            .map(|thing| {
+                let (lo, hi) = thing.bounds();
+                let scale = (hi - lo).max_element() + lo.abs().max(hi.abs()).max_element();
+                (lo - ROUNDING * scale, hi + ROUNDING * scale, scale)
+            })
+            .collect();
+        Self {
+            image: *image,
+            flags,
+            spheres,
+            held,
+            shapes,
+            boxes,
+            padding,
+            margin,
+            forward: image.camera.rotation * Vec3::Z,
+        }
+    }
+
+    /// How far from a shape a reading at depth `z` may lie and be its, and how much nearer than
+    /// the reading a thing must lie for the reading to be behind it.
+    fn reach(&self, z: f32) -> f32 {
+        self.margin[0] + (self.margin[1] + self.margin[2] * z) * z
+    }
+
+    /// How much nearer than a flagged reading at depth `z` the surface of its thing may lie: by
+    /// the padding for a sphere or a held object, by the reach for a shape.
+    fn slack(&self, z: f32) -> f32 {
+        self.reach(z).max(self.padding)
+    }
+
+    /// The depth of `p` along the camera's axis.
+    fn depth(&self, p: Vec3) -> f32 {
+        self.forward.dot(p - self.image.camera.position)
+    }
+
+    /// Whether the band takes the reading of pixel `i`, unflagged, at depth `z`: a flagged
+    /// reading within `pixels` of it is of a thing whose surface where it reads it is nearer than
+    /// `z` by more than the margin's reach at `z`, and the reading's ray, carried on past it, does
+    /// not enter the thing. The spheres are tried first, then what the robot holds and the
+    /// shapes; `ahead` keeps, for each of those, whether the ray enters it, once found.
+    fn takes(&self, i: usize, z: f32, pixels: usize, ahead: &mut [Option<bool>]) -> bool {
+        let width = self.image.width;
+        let point = self
+            .image
+            .point(i, None)
+            .expect("the band reads a pixel with a reading");
+        let ray = (point - self.image.camera.position).normalize();
+        let nearer = z - self.reach(z);
+        ahead.fill(None);
+        let (u, v) = (i % width, i / width);
+        let columns = u.saturating_sub(pixels)..(u + pixels + 1).min(width);
+        let rows = v.saturating_sub(pixels)..(v + pixels + 1).min(self.image.height());
+        let window = rows.flat_map(|w| columns.clone().map(move |x| w * width + x));
+        for j in window {
+            let Some(flagged) = self.image.reading(j).filter(|_| self.flags[j]) else {
+                continue;
+            };
+            if flagged - self.slack(flagged) >= nearer {
+                continue;
+            }
+            let f = self.image.point(j, None).expect("a reading has a point");
+            for ball in self.spheres {
+                let (center, grown) = (ball.truncate(), ball.w);
+                let off = f - center;
+                if off.length_squared() >= grown * grown {
+                    continue;
+                }
+                // The sphere's point nearest the reading's, or the reading's inside it.
+                let (radius, length) = (grown - self.padding, off.length());
+                let surface = if length > radius {
+                    center + off * (radius / length)
+                } else {
+                    f
+                };
+                if self.depth(surface) < nearer && !Self::enters_ball(point, ray, center, radius) {
+                    return true;
+                }
+            }
+            let things = (self.held.iter().chain(self.shapes)).zip(&self.boxes);
+            for (k, (thing, &bounds)) in things.enumerate() {
+                let shape = k >= self.held.len();
+                let reach = if shape {
+                    self.reach(flagged)
+                } else {
+                    self.padding
+                };
+                let past = reach + ROUNDING * reach;
+                if shape && (f.cmplt(bounds.0 - past).any() || f.cmpgt(bounds.1 + past).any()) {
+                    continue;
+                }
+                let d = thing.distance(f);
+                let of = if shape {
+                    d.value <= reach
+                } else {
+                    d.value < reach
+                };
+                if !of {
+                    continue;
+                }
+                // The thing's point nearest the reading's, or the reading's inside it.
+                let surface = if d.value > 0.0 {
+                    f - d.value * d.gradient.normalize_or_zero()
+                } else {
+                    f
+                };
+                if self.depth(surface) >= nearer {
+                    continue;
+                }
+                let enters =
+                    *ahead[k].get_or_insert_with(|| Self::enters(thing, bounds, point, ray));
+                if !enters {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Whether `ray`, carried on from `point`, enters the ball of `radius` about `center`.
+    fn enters_ball(point: Vec3, ray: Vec3, center: Vec3, radius: f32) -> bool {
+        let off = point - center;
+        let (b, c) = (off.dot(ray), off.length_squared() - radius * radius);
+        c <= 0.0 || (b < 0.0 && b * b >= c)
+    }
+
+    /// Whether `ray`, carried on from `point`, enters `thing`, whose box and the size of its
+    /// coordinates are `bounds`: stepped along by the thing's distance, from where the ray enters
+    /// the box, until it comes within a step ([`STEP`]) of the thing or leaves the box. A ray
+    /// still in the box after [`STEPS`] steps runs along the thing's surface, into it at a few
+    /// degrees or beside it: it is taken to enter, which keeps the reading.
+    fn enters(
+        thing: &Obstacle,
+        (lo, hi, scale): (Vec3, Vec3, f32),
+        point: Vec3,
+        ray: Vec3,
+    ) -> bool {
+        let inverse = ray.recip();
+        let (a, b) = ((lo - point) * inverse, (hi - point) * inverse);
+        let (mut t, end) = (a.min(b).max_element().max(0.0), a.max(b).min_element());
+        let step = STEP * (scale + point.abs().max_element());
+        for _ in 0..STEPS {
+            if t > end {
+                return false;
+            }
+            let d = thing.distance(point + ray * t).value;
+            if d <= step {
+                return true;
+            }
+            t += d;
+        }
+        true
     }
 }
 
