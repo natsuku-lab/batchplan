@@ -414,19 +414,11 @@ fn bars_hold_what_spans_them_and_cradle_what_is_laid_between_them() {
     };
     let found = rests(&tray, &bars(), &o);
     assert!(!found.is_empty());
-    // On one bar alone it stands only on that band, its middle within it by what it tips: the
-    // spots set closer about those that tip there find it. A tray taller than the bar is thick
-    // would rock off; the band is how the contacts are read, not how a round bar holds.
-    let lean = 0.02 * o.tipping.tan();
-    let (across_both, on_one): (Vec<&Rest>, Vec<&Rest>) = found
-        .iter()
-        .partition(|r| r.pose.position.x.abs() <= 0.06 - 0.04 + band);
-    for r in on_one {
-        let off = (r.pose.position.x.abs() - 0.04).abs();
-        assert!(off <= band - lean, "past the band: {r:?}");
-        assert!(!on_the_grid(r, &o), "on one bar at a spot: {r:?}");
-    }
-    for r in across_both {
+    for r in &found {
+        assert!(
+            r.pose.position.x.abs() <= 0.06 - 0.04 + band,
+            "on one bar: {r:?}"
+        );
         // Level on both tops.
         assert!((r.pose.position.z - 0.13).abs() < 2e-3, "{r:?}");
         let on = |side: f32| {
@@ -492,8 +484,10 @@ fn bars_hold_what_spans_them_and_cradle_what_is_laid_between_them() {
         assert!(ways(1.0) > 0 && ways(1.0) == ways(-1.0));
     }
     // Stood on its end and leaning a few degrees, it is not rolled: on a table read with a
-    // millimeter of noise, whatever rests it has are on the spots, the grid's or those set
-    // closer a cell apart.
+    // millimeter of noise, whatever rests it has are on the spots. Leaning 3 degrees, it tips
+    // where it overhangs the rim, at spots all around which it tips too and where the noise makes
+    // the table push two ways: the spots set closer about them, a cell apart, find rests within a
+    // spacing of there too.
     let mut rng = Rng::new(11);
     let mut noisy = table();
     for p in &mut noisy.points {
@@ -501,15 +495,15 @@ fn bars_hold_what_spans_them_and_cradle_what_is_laid_between_them() {
     }
     for degrees in [1.0f32, 3.0] {
         let leaning = Quat::from_rotation_x(degrees.to_radians());
-        let o = RestOptions::default();
-        for r in rests_turned(&can, leaning, &noisy, &o) {
+        for r in rests_turned(&can, leaning, &noisy, &RestOptions::default()) {
             let at = r.pose.position.truncate();
-            let off = |every: f32, from: f32| {
-                let spot = ((at / every - from).round() + from) * every;
-                (at - spot).length()
-            };
-            let off = off(o.spacing, 0.5).min(off(o.touching, 0.0));
-            assert!(off < 1e-5, "{off} m off its spot: {r:?}");
+            let from_a_spot = (at / 0.01 - 0.5).round() + 0.5;
+            let off = (at - from_a_spot * 0.01).length();
+            let cells = at / 0.002;
+            let closer = degrees > 1.0
+                && at.abs().max_element() + 0.033 + 0.01 > 0.15
+                && (cells - cells.round()).abs().max_element() < 1e-3;
+            assert!(off < 1e-5 || closer, "{off} m off its spot: {r:?}");
         }
     }
     // On a table it rolls, and has no rest.
@@ -2567,14 +2561,19 @@ fn a_problem_without_rests_says_how_near_the_search_came() {
     );
 
     // A box 20 cm tall on a post 1.5 cm across: held upright and tipping, as far as its middle
-    // is in from the post's edge allows, the steadiest of all, where the spots set closer find
-    // it; its support the post's top.
+    // is in from the post's edge allows, the steadiest of all, where the spots about the post's
+    // middle find it (a flat top pushes one way: none are set closer there); its support the
+    // post's top.
+    let on_the_post = RestProblem {
+        near: Some(Vec3::ZERO),
+        ..RestProblem::new(tall.clone(), 0)
+    };
     let Some(RestFailure::Tips {
         pose,
         support,
         tipping,
         blocked,
-    }) = failure(&RestProblem::new(tall.clone(), 0), &post(0.0075), &o)
+    }) = failure(&on_the_post, &post(0.0075), &o)
     else {
         panic!("not tipping");
     };

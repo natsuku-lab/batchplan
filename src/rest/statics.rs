@@ -296,7 +296,7 @@ impl Statics {
             if WHY {
                 self.tips_by = least;
             }
-            Holding::Tips
+            Holding::Tips(false)
         }
     }
 
@@ -371,7 +371,9 @@ impl Statics {
                 }
                 self.tips_by = holds;
             }
-            return Holding::Tips;
+            // Two ways as the one-face test tells one: some push differs from the first's.
+            let (first, near) = (contacts[0].push, FINE.cos());
+            return Holding::Tips(contacts.iter().any(|c| c.push.dot(first) < near));
         }
         // How much farther: doubled until it gives, then narrowed.
         let (mut holds, mut gives) = (tipping, FRAC_PI_2);
@@ -592,8 +594,10 @@ fn solve(mut a: [[f64; 6]; 6], mut b: Wrench) -> Option<Wrench> {
 pub(super) enum Holding {
     /// They hold it with its weight tipped this far any way (radians), at least as far as asked.
     By(f32),
-    /// They hold it upright, but not with its weight tipped as far as asked.
-    Tips,
+    /// They hold it upright, but not with its weight tipped as far as asked; and whether they
+    /// push it two ways, some push differing from the first's by more than `FINE`. Those on one
+    /// flat face push one way.
+    Tips(bool),
     /// They do not hold it.
     Not,
 }
