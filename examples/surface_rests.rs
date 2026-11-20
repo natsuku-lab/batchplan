@@ -1,8 +1,10 @@
 //! Where a held object rests on what cameras see, and what finding it costs. A box on a table
 //! among other things, seen in two 640x480 depth images; a can in a basket seen from above, and
 //! where to let it go to fall in; a tray laid across two bars, and a can laid along them, which
-//! rolls in between; a bottle laid flat on a sloping rack against the lip at its foot; then 64
-//! boxes of as many heights on the one table in one call, which reads the table once.
+//! rolls in between; a bottle laid flat on a sloping rack against the lip at its foot; a bottle
+//! stood upright on that rack, which the bare lip does not hold and a lip with a top does, found
+//! by looking closer, with why it has none where it has none; then 64 boxes of as many heights on
+//! the one table in one call, which reads the table once.
 //!
 //! cargo run --release --example surface_rests [-- threads] [--dump dir]
 //!
@@ -19,7 +21,7 @@ use std::time::Instant;
 use anyhow::Result;
 use batchplan::{
     DepthImage, Device, Intrinsics, Obstacle, Pose, Rest, RestOptions, RestProblem, Surface,
-    falls_into, rests_on,
+    falls_into, rest_failures, rests_on,
 };
 use glam::{Mat3, Quat, Vec3};
 use rayon::prelude::*;
@@ -144,7 +146,14 @@ fn write(
 ) -> Result<()> {
     let name = what.split([' ', ',']).nth(1).unwrap_or("scene");
     let support = (0..s.points.len()).filter(|&k| s.object.is_empty() || s.object[k]);
-    let facing = support.filter(|&k| s.normals[k].z >= -0.5);
+    // What holds the object up, as `rests_on` reads it: not a point that faces down and was not
+    // seen from above.
+    let from_above = |k: usize| {
+        s.seen_from
+            .get(k)
+            .is_some_and(|f| f.is_finite() && f.z > s.points[k].z)
+    };
+    let facing = support.filter(|&k| s.normals[k].z >= -0.5 || from_above(k));
     let points: Vec<u8> = facing
         .flat_map(|k| s.points[k].to_array())
         .flat_map(f32::to_le_bytes)
@@ -211,7 +220,7 @@ fn main() -> Result<()> {
                   object: Obstacle,
                   rotation: Quat,
                   o: &RestOptions|
-     -> Result<()> {
+     -> Result<Vec<Rest>> {
         let problems = [RestProblem {
             rotation,
             ..RestProblem::new(object, 0)
@@ -233,7 +242,7 @@ fn main() -> Result<()> {
             found.len(),
             sum(&found)
         );
-        Ok(())
+        Ok(found)
     };
 
     // A box 4 by 6 by 5 cm set down on a table 60 cm square among three others, seen from the
@@ -356,6 +365,41 @@ fn main() -> Result<()> {
         bottle,
         flat_across,
         &fine,
+    )?;
+
+    // A wine bottle stood upright on that rack, the default options. Against the bare lip it has
+    // no rest: for its rim behind to reach the slope its middle would stand past the lip. With
+    // the lip's top 1 cm wide, as a rack's lip has, it stands against the lip, its rim behind on
+    // the slope and its bottom on the lip's top, in a strip 2 mm deep between the spots' rows,
+    // which looking closer about the spots where it nearly holds finds along the lip.
+    let wine = Obstacle::cylinder(Vec3::ZERO, 0.0215, 0.079);
+    let bare = report(
+        "a bare lip of that rack, a bottle stood upright on it",
+        &rack,
+        wine.clone(),
+        Quat::IDENTITY,
+        &o,
+    )?;
+    let upright = [RestProblem::new(wine.clone(), 0)];
+    let racks = std::slice::from_ref(&rack);
+    let (ms, why) = quickest(5, || {
+        rest_failures(&device, &upright, racks, &[bare.clone()], &o)
+    });
+    println!("  why none, in {ms:.1} ms: {:?}", why?[0]);
+    let mut topped = rack.clone();
+    plane(
+        foot + Vec3::new(0.0, 0.005, 0.01),
+        Vec3::Z,
+        [Vec3::X, Vec3::Y],
+        [0.15, 0.005],
+        &mut topped,
+    );
+    report(
+        "an upright bottle against the lip of that rack, its top 1 cm wide",
+        &topped,
+        wine,
+        Quat::IDENTITY,
+        &o,
     )?;
 
     // 64 boxes 4 by 6 cm and 2 to 8.3 cm tall on the one table, as a call asks what of many held
