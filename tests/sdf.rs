@@ -13,10 +13,11 @@ use std::sync::{Arc, OnceLock};
 use batchplan::datagen::{Demonstration, Origin};
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionWeights, DepthImage, Device, Distance, Error, Held, Intrinsics, JointTrajectory,
-    Obstacle, Occlusion, OccupancyMap, Pose, Robot, SdfGrid, SdfOptions, SphereOptions, World,
+    CollisionWeights, DepthFilter, DepthImage, Device, Distance, Error, Held, Intrinsics,
+    JointTrajectory, Obstacle, Occlusion, OccupancyMap, Pose, Robot, SdfGrid, SdfOptions,
+    SphereOptions, World,
 };
-use glam::{BVec3, EulerRot, Mat3, Quat, Vec3};
+use glam::{BVec3, EulerRot, Mat3, Quat, Vec2, Vec3};
 
 /// A CPU device for the builders' distance transform, which needs no particular robot.
 fn cpu() -> &'static Device {
@@ -2101,6 +2102,334 @@ fn a_part_keeps_the_readings_on_its_regions_faces() {
                 d <= whole.distance(above).value + 1e-6 && d < 0.01,
                 "{}, {unknown:?}: {d} a centimeter over the block",
                 device.name()
+            );
+        }
+    }
+}
+
+/// A depth camera reads a pixel that mixes a near surface with what lies behind it somewhere
+/// between the two. Filtered, a reading between a nearer and a farther neighbour, or between one
+/// of them and a pixel without a reading, is left out; the surfaces on both sides keep every
+/// reading up to the edge, and pixels without a reading beside one surface take nothing from it.
+/// A reading of either surface with a step on one side and a pixel without a reading straight
+/// across goes too: the pixel without one may be the other surface.
+#[test]
+fn a_reading_between_two_surfaces_is_left_out() {
+    let (width, height) = (64, 48);
+    let k = Intrinsics {
+        fx: 60.0,
+        fy: 60.0,
+        cx: 31.5,
+        cy: 23.5,
+    };
+    // A near surface over the left, a far one over the right, and between them two columns
+    // that read in between, as mixed pixels do. A slit one pixel wide in the near surface shows
+    // the far one, and a wire one pixel wide hangs before the far one: neither lies between.
+    let (near, far) = (0.4, 0.7);
+    let column = |u: usize| match u {
+        15 => far,
+        0..=29 | 50 => near,
+        30 => 0.5,
+        31 => 0.6,
+        _ => far,
+    };
+    let mut depth: Vec<f32> = (0..width * height).map(|i| column(i % width)).collect();
+    let image = |depth: &[f32]| {
+        let image = DepthImage {
+            depth,
+            width,
+            intrinsics: k,
+            camera: Pose::IDENTITY,
+        };
+        image.filtered(&DepthFilter::default()).unwrap()
+    };
+    let kept = image(&depth);
+    for (i, (&was, &is)) in depth.iter().zip(&kept).enumerate() {
+        let between = (30..=31).contains(&(i % width));
+        assert_eq!(is, if between { 0.0 } else { was }, "pixel {i}");
+    }
+    // Where the far surface beside them has no reading, as in a stereo camera's shadow, where
+    // the near one has none in its top rows, at one pixel on its edge and in a ring around one
+    // reading in its middle: the two columns go all the same, and neither surface loses a
+    // reading to the pixels without one beside it, but for the one reading of the near surface
+    // that has such a pixel on one side and the step straight across from it.
+    for (i, depth) in depth.iter_mut().enumerate() {
+        let (u, v) = (i % width, i / width);
+        let shadow = (32..=34).contains(&u);
+        let unread = v < 8 && (27..=29).contains(&u);
+        let ring = (5..=7).contains(&u) && (20..=22).contains(&v) && (u, v) != (6, 21);
+        if shadow || unread || ring || (u, v) == (29, 30) {
+            *depth = 0.0;
+        }
+    }
+    let kept = image(&depth);
+    for (i, (&was, &is)) in depth.iter().zip(&kept).enumerate() {
+        let (u, v) = (i % width, i / width);
+        let between = (30..=31).contains(&u) || (u, v) == (29, 8);
+        assert_eq!(
+            is,
+            if between { 0.0 } else { was },
+            "pixel {u}, {v} beside a hole"
+        );
+    }
+    // A depth that is no reading comes out as none.
+    for none in [-0.3, f32::NAN, f32::INFINITY] {
+        depth[5] = none;
+        assert_eq!(image(&depth)[5], 0.0);
+    }
+    // Options that say nothing are refused.
+    let image = DepthImage {
+        depth: &depth,
+        width,
+        intrinsics: k,
+        camera: Pose::IDENTITY,
+    };
+    let bad = [
+        DepthFilter {
+            noise: [0.0, -0.001, 0.0],
+            ..Default::default()
+        },
+        DepthFilter {
+            noise: [f32::NAN, 0.0, 0.0],
+            ..Default::default()
+        },
+        DepthFilter {
+            steepest: 0.0,
+            ..Default::default()
+        },
+        DepthFilter {
+            steepest: PI / 2.0,
+            ..Default::default()
+        },
+        DepthFilter {
+            deviations: -1.0,
+            ..Default::default()
+        },
+        // Each of these would make every step one surface's, and the filter leave all in.
+        DepthFilter {
+            noise: [f32::INFINITY, 0.0, 0.0],
+            ..Default::default()
+        },
+        DepthFilter {
+            steepest: f32::NAN,
+            ..Default::default()
+        },
+        DepthFilter {
+            deviations: f32::INFINITY,
+            ..Default::default()
+        },
+    ];
+    for options in bad {
+        assert!(
+            matches!(image.filtered(&options), Err(Error::Input(_))),
+            "{options:?}"
+        );
+    }
+    // And an image whose depths do not form rows.
+    for (depth, width) in [(&depth[..10], 3), (&depth[..], 0)] {
+        let image = DepthImage {
+            depth,
+            width,
+            ..image
+        };
+        let ragged = image.filtered(&DepthFilter::default());
+        assert!(matches!(ragged, Err(Error::Input(_))), "rows of {width}");
+    }
+}
+
+/// What one surface can step between two pixels is the width they are apart times the tangent
+/// of the steepest turn, and so many deviations of the noise in two readings' difference. Along
+/// a row, a column and both diagonals, a wall turned 78 degrees keeps every reading and one
+/// turned 82 loses those with a neighbour on both sides; a step just inside what the noise
+/// reaches stays and one just past it goes, whichever coefficient the noise comes from.
+#[test]
+fn a_surface_is_one_as_far_as_it_is_turned_and_the_noise_reaches() {
+    let (width, height) = (64, 48);
+    // A long lens, so a wall stands to every ray as it is turned, and pixels taller than wide.
+    let k = Intrinsics {
+        fx: 6000.0,
+        fy: 4000.0,
+        cx: 31.5,
+        cy: 23.5,
+    };
+    let filtered = |depth: &[f32], options: &DepthFilter| {
+        let image = DepthImage {
+            depth,
+            width,
+            intrinsics: k,
+            camera: Pose::IDENTITY,
+        };
+        image.filtered(options).unwrap()
+    };
+    // A wall through a point 0.5 m ahead, turned so its depth grows along (du, dv) of the image.
+    let wall = |turn: f32, (du, dv): (isize, isize)| -> Vec<f32> {
+        let along = Vec2::new(du as f32, dv as f32).normalize();
+        (0..width * height)
+            .map(|i| {
+                let (u, v) = ((i % width) as f32, (i / width) as f32);
+                let ray = Vec2::new((u - k.cx) / k.fx, (v - k.cy) / k.fy);
+                0.5 / (1.0 - turn.to_radians().tan() * along.dot(ray))
+            })
+            .collect()
+    };
+    for (du, dv) in [(1, 0), (0, 1), (1, 1), (1, -1)] {
+        let (shallow, steep) = (wall(78.0, (du, dv)), wall(82.0, (du, dv)));
+        assert!(
+            filtered(&shallow, &DepthFilter::default()) == shallow,
+            "along {du}, {dv}"
+        );
+        let kept = filtered(&steep, &DepthFilter::default());
+        for (i, &z) in kept.iter().enumerate() {
+            let (u, v) = ((i % width) as isize, (i / width) as isize);
+            let inside = |u: isize, v: isize| {
+                (0..width as isize).contains(&u) && (0..height as isize).contains(&v)
+            };
+            let both = inside(u + du, v + dv) && inside(u - du, v - dv);
+            assert_eq!(
+                z == 0.0,
+                both,
+                "pixel {u}, {v} of a wall edge on along {du}, {dv}"
+            );
+        }
+        // Turned as far as the caller allows, it stays.
+        let allowed = DepthFilter {
+            steepest: 85f32.to_radians(),
+            ..Default::default()
+        };
+        assert!(filtered(&steep, &allowed) == steep, "along {du}, {dv}");
+    }
+
+    // Three levels 2 m off, a column of the middle one between the other two. A reading's
+    // noise there is 1 cm from each coefficient alone, so two deviations of the difference of
+    // two readings is 2.83 cm, and the slope's part 0.19 cm: a step of 2.9 cm is one surface
+    // and one of 3.15 cm is not.
+    let steps = |step: f32| -> Vec<f32> {
+        let level = |u: usize| 2.0 + step * (u.cmp(&32) as i8 as f32);
+        (0..width * height).map(|i| level(i % width)).collect()
+    };
+    for noise in [[0.01, 0.0, 0.0], [0.0, 0.005, 0.0], [0.0, 0.0, 0.0025]] {
+        let options = DepthFilter {
+            noise,
+            deviations: 2.0,
+            ..Default::default()
+        };
+        let (within, past) = (steps(0.029), steps(0.0315));
+        assert!(filtered(&within, &options) == within, "{noise:?}");
+        let kept = filtered(&past, &options);
+        for (i, (&was, &is)) in past.iter().zip(&kept).enumerate() {
+            let middle = i % width == 32;
+            assert_eq!(is, if middle { 0.0 } else { was }, "pixel {i}, {noise:?}");
+        }
+    }
+
+    // A wall square on at 1 m, each reading 2 cm off as a stereo camera's are across a room,
+    // many times what the wall's own slope could step between two pixels: two thirds of its
+    // readings go where the filter is not told the noise, and none where it is.
+    let mut rng = Rng::new(4);
+    let noisy: Vec<f32> = (0..width * height)
+        .map(|_| 1.0 + 0.02 * rng.normal())
+        .collect();
+    let lost = |options: &DepthFilter| {
+        let kept = filtered(&noisy, options);
+        kept.iter().filter(|&&z| z == 0.0).count()
+    };
+    let told = DepthFilter {
+        noise: [0.0, 0.0, 0.02],
+        ..Default::default()
+    };
+    let (unaware, aware) = (lost(&DepthFilter::default()), lost(&told));
+    assert!(
+        unaware * 2 > width * height && aware == 0,
+        "{unaware} readings lost without the noise, {aware} with it"
+    );
+}
+
+/// In a scene: a block on a table seen from above without noise loses no reading, its outline
+/// included. With the pixels around its outline reading between its top and the table, a map
+/// fused from the image holds points in mid-air beside the block; filtered first, it holds
+/// none, and the block and the table are there as before.
+#[test]
+fn a_filtered_image_puts_nothing_in_mid_air() {
+    let top = 0.1;
+    let block = Obstacle::cuboid(
+        Vec3::new(0.0, 0.0, 0.5 * top),
+        Vec3::new(0.05, 0.05, 0.5 * top),
+    );
+    let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.05), Vec3::new(0.5, 0.5, 0.05));
+    let k = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
+    let far = vec![0.0; 640 * 480];
+    let image = DepthImage {
+        depth: &far,
+        width: 640,
+        intrinsics: k,
+        camera: Pose::new(Vec3::new(0.0, 0.0, 0.7), Quat::from_rotation_x(PI)),
+    };
+    let (on_block, on_table) = (shape_depth(&image, &block), shape_depth(&image, &table));
+    let exact: Vec<f32> = (on_block.iter().zip(&on_table))
+        .map(|(a, b)| a.min(*b))
+        .collect();
+    let image = DepthImage {
+        depth: &exact,
+        ..image
+    };
+    assert!(image.filtered(&DepthFilter::default()).unwrap() == exact);
+    // The table's pixels that touch the block's read halfway up its side.
+    let mixed: Vec<f32> = (0..exact.len())
+        .map(|i| {
+            let (u, v) = (i % 640, i / 640);
+            // The block is in the image's middle: its pixels have every neighbour.
+            let inner = (1..639).contains(&u) && (1..479).contains(&v);
+            let beside = inner
+                && [i - 1, i + 1, i - 640, i + 640]
+                    .iter()
+                    .any(|&n| on_block[n].is_finite());
+            match on_block[i].is_infinite() && beside {
+                true => 0.7 - 0.5 * top,
+                false => exact[i],
+            }
+        })
+        .collect();
+    let flying = mixed.iter().zip(&exact).filter(|(a, b)| a != b).count();
+    assert!(flying > 200, "{flying} pixels around the block");
+    let image = DepthImage {
+        depth: &mixed,
+        ..image
+    };
+    let kept = image.filtered(&DepthFilter::default()).unwrap();
+    for (i, (&was, &is)) in exact.iter().zip(&kept).enumerate() {
+        let lost = mixed[i] != was;
+        assert_eq!(is, if lost { 0.0 } else { was }, "pixel {i}");
+    }
+    // Halfway up the block's side, a voxel out from it.
+    let beside = Vec3::new(0.06, 0.0, 0.5 * top);
+    for device in devices() {
+        let fused = |depth: &[f32]| {
+            let mut map =
+                OccupancyMap::try_new(Vec3::new(-0.2, -0.2, -0.05), Vec3::new(0.2, 0.2, 0.3), 0.01)
+                    .unwrap();
+            let image = DepthImage { depth, ..image };
+            map.integrate(device, &image, None).unwrap();
+            map
+        };
+        let (raw, clean) = (fused(&mixed), fused(&kept));
+        assert!(
+            raw.occupancy(beside).is_some_and(|o| o > 0.5),
+            "the mixed pixels' points"
+        );
+        assert!(
+            clean.occupancy(beside).is_none_or(|o| o < 0.5),
+            "{}",
+            device.name()
+        );
+        for seen in [Vec3::new(0.0, 0.0, top), Vec3::new(0.15, 0.1, 0.0)] {
+            assert!(
+                clean.occupancy(seen).is_some_and(|o| o > 0.5),
+                "{seen} is seen"
             );
         }
     }

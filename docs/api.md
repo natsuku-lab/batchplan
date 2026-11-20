@@ -44,6 +44,7 @@ Guide: [perception.md](perception.md).
 | `SdfGrid::from_mesh`, `from_points`, `from_depth`, `try_new` | Distance grids from a closed mesh, surface points, one depth image, or your own values. `lower_corner()`, `upper_corner()` and `distance(p)` read one. |
 | `SdfOptions` | A grid's voxel size and padding. |
 | `DepthImage`, `Intrinsics` | A depth image with its pinhole intrinsics and camera pose. `points(robot_mask)` gives each pixel's reading as a point, `None` without one or on the robot. |
+| `DepthImage::filtered(&DepthFilter)` | The image's depths without the readings that lie between two surfaces, which a depth camera gives along every edge: for an image everything else then reads. `DepthFilter` holds the camera's `noise`, the `steepest` a surface is turned to the rays and the `deviations` noise is taken to reach. |
 | `DepthImage::robot_mask(&robot, q, padding, &holding)` | Which of the image's readings are of the robot or of what it holds (`RobotMask::on_robot`, a flag per pixel), so grids, maps and surfaces leave them out. |
 | `Occlusion` | What a grid assumes behind observed surfaces: free, solid, solid except the robot's shadow, or solid in a band behind surfaces. |
 | `OccupancyMap::try_new`, `integrate`, `occupancy`, `grid` | Depth images fused over time into occupancy, then into a distance grid. |

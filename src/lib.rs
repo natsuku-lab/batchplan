@@ -89,7 +89,8 @@ pub use rest::{Fall, Rest, RestOptions, RestProblem, falls_into, rests_on};
 pub use robot::{AttachedObject, CollisionModel, JointLimits, Part, Robot, RobotOptions};
 pub use rrt::{RrtOptions, RrtProblem, RrtResult};
 pub use sdf::{
-    DepthImage, Intrinsics, MapCounts, Occlusion, OccupancyMap, RobotMask, SdfGrid, SdfOptions,
+    DepthFilter, DepthImage, Intrinsics, MapCounts, Occlusion, OccupancyMap, RobotMask, SdfGrid,
+    SdfOptions,
 };
 pub use shortcut::ShortcutOptions;
 pub use spheres::{LinkQualification, Qualification, SphereGeometry, SphereOptions};
