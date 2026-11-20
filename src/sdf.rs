@@ -705,27 +705,44 @@ impl RobotMask {
         Ok(self)
     }
 
-    /// The mask with every reading within `pixels` pixels of one it flags flagged too, along
-    /// rows, columns and diagonals (the larger of the two offsets at most `pixels`): the robot's,
-    /// a held object's or a shape's as the reading beside it is, with all that follows for a
-    /// flagged reading. `image` is the image the mask was made of; its rows are read on the
-    /// device's threads, each in a pass along the columns and one along the row, so the cost goes
-    /// by the image's pixels times `pixels`.
+    /// The mask with every reading flagged that lies behind a flagged reading near it: one within
+    /// `pixels` pixels along rows, columns and diagonals (the larger of the two offsets at most
+    /// `pixels`) whose depth is under `z - (margin[0] + margin[1] * z + margin[2] * z * z)`, `z`
+    /// the reading's own. It is then the robot's, a held object's or a shape's as that one is,
+    /// with all that follows for a flagged reading. `margin` is as
+    /// [`with_shapes`](Self::with_shapes) takes it, and `image` the image the mask was made of; its
+    /// rows are read on the device's threads, each in a pass along the columns and one along the
+    /// row, so the cost goes by the image's pixels times `pixels`.
     ///
     /// `pixels` is a fact of the camera: how many pixels beside a depth jump it reads toward the
     /// other surface. A sensor that samples each pixel's disparity a fraction of a pixel off
-    /// reads one; a stereo block matcher, half its window. Those readings lie between what the
-    /// mask flags and what is behind it, farther than the padding or the margin from either, and
-    /// would be obstacles in mid-air beside the robot and the shapes, where fingers go. The band
-    /// takes the ring of honest readings beside each flagged thing with them, as of a table
-    /// around an object on it. Zero changes nothing.
+    /// reads one; a stereo block matcher, half its window. Those readings lie between the thing in
+    /// front and what is behind it, farther than the padding or the margin from either: its own
+    /// outline read too deep, and the pixel behind it read toward it. Both lie behind the thing,
+    /// and would be obstacles in mid-air beside it, where fingers go. What stands in front of a
+    /// flagged thing, as a block on a table given as a shape, is nearer than the flagged readings
+    /// around it, or level with them where the two meet, and keeps its readings. Given up: an
+    /// outline read too near, in front of the thing by more than the margin, stays a reading,
+    /// and the honest readings behind each flagged outline, `pixels` wide, are taken with the
+    /// rest. Zero pixels changes nothing.
     ///
     /// Called after [`with_shapes`](Self::with_shapes), it grows the shapes' flags as well as the
     /// robot's; called before, the robot's alone. A second call grows what the first left. The
     /// space the mask frees in a grid or a map is what it was.
-    pub fn with_band(mut self, device: &Device, image: &DepthImage, pixels: usize) -> Result<Self> {
+    pub fn with_band(
+        mut self,
+        device: &Device,
+        image: &DepthImage,
+        margin: [f32; 3],
+        pixels: usize,
+    ) -> Result<Self> {
         image.check_with(Some(&self))?;
+        ensure_input!(
+            margin.iter().all(|m| m.is_finite() && *m >= 0.0),
+            "the margin's coefficients must not be negative, got {margin:?}"
+        );
         let (width, height) = (image.width, image.height());
+        let reach = |z: f32| margin[0] + (margin[1] + margin[2] * z) * z;
         // A band as wide as the image reaches all of it.
         let pixels = pixels.min(width.max(height));
         // The flags as they were, read while each row's grow.
@@ -733,25 +750,31 @@ impl RobotMask {
         device.install(|| {
             let rows = self.on_robot.par_chunks_mut(width).enumerate();
             rows.for_each_init(
-                || vec![false; width],
-                |near, (v, row)| {
-                    // Whether a flag lies within the band along the pixel's column.
-                    near.fill(false);
+                || vec![f32::INFINITY; width],
+                |nearest, (v, row)| {
+                    // The least depth of a flagged reading within the band along each pixel's
+                    // column. A flagged pixel without a reading counts for nothing: one at 0,
+                    // below it or no number is passed over, and one at infinity lowers no least.
+                    nearest.fill(f32::INFINITY);
                     for w in v.saturating_sub(pixels)..(v + pixels + 1).min(height) {
-                        for (close, &flag) in near.iter_mut().zip(&flags[w * width..][..width]) {
-                            *close |= flag;
+                        let flags = &flags[w * width..][..width];
+                        let depths = &image.depth[w * width..][..width];
+                        let column = nearest.iter_mut().zip(flags).zip(depths);
+                        for ((least, &flag), &z) in column {
+                            if flag && z > 0.0 {
+                                *least = least.min(z);
+                            }
                         }
                     }
-                    // Then whether one of those lies within it along the row: each marks the
-                    // band about it from where the one before left off.
-                    let mut end = 0;
-                    let flagged = near.iter().enumerate().filter(|(_, close)| **close);
-                    for (u, _) in flagged {
-                        let start = u.saturating_sub(pixels).max(end);
-                        end = (u + pixels + 1).min(width);
-                        for (x, own) in (start..end).zip(&mut row[start..end]) {
-                            *own |= image.reading(v * width + x).is_some();
-                        }
+                    // Then the least of those within the band along the row.
+                    for (u, own) in row.iter_mut().enumerate() {
+                        let Some(z) = image.reading(v * width + u) else {
+                            continue;
+                        };
+                        let around =
+                            &nearest[u.saturating_sub(pixels)..(u + pixels + 1).min(width)];
+                        let least = around.iter().fold(f32::INFINITY, |least, &d| least.min(d));
+                        *own |= least < z - reach(z);
                     }
                 },
             );
