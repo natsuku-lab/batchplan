@@ -1120,8 +1120,8 @@ fn view(image: &DepthImage, grid: &Layout) -> [Vec4; 5] {
 }
 
 /// The voxels of row `r` of `grid` (those with `x + dims.x * r` as index, x from 0) whose middles
-/// may lie in every half-space of `planes` ([`view`]), as the camera at `camera` sees them, with a
-/// voxel more at each end for the rounding of the ends: empty where the row misses the view.
+/// may lie in every half-space of `planes` ([`view`]), as the camera at `camera` sees them, its
+/// ends rounded outward: empty where the row misses the view.
 fn span(planes: &[Vec4; 5], camera: Vec3, grid: &Layout, r: usize) -> Range<usize> {
     let (nx, ny) = (grid.dims.x, grid.dims.y as usize);
     let (y, z) = ((r % ny) as u32, (r / ny) as u32);
@@ -1139,7 +1139,7 @@ fn span(planes: &[Vec4; 5], camera: Vec3, grid: &Layout, r: usize) -> Range<usiz
             return 0..0;
         }
     }
-    let (from, to) = ((from.floor() - 1.0).max(0.0), (to.ceil() + 1.0).min(last));
+    let (from, to) = (from.floor(), to.ceil());
     if from > to {
         return 0..0;
     }
@@ -2307,7 +2307,7 @@ mod tests {
 
     /// Checks each row of `grid` against `image`: its span holds every voxel whose middle
     /// projects into the image, and reaches past the view by no more than the margin `view` moves
-    /// each plane out by and two voxels. How many rows are empty, whole and partial, and how many
+    /// each plane out by and a voxel. How many rows are empty, whole and partial, and how many
     /// voxels project.
     fn spans_against(grid: &Layout, image: &DepthImage, case: &str) -> ([usize; 3], usize) {
         let planes = view(image, grid);
@@ -2329,7 +2329,7 @@ mod tests {
             .map(|p| p.abs().max_element())
             .into_iter()
             .fold(0.0, f32::max);
-        let reach = f64::from((1e-4 * largest).max(1e-4)) * 1.01 + 2.0 * f64::from(grid.voxel);
+        let reach = f64::from((1e-4 * largest).max(1e-4)) * 1.01 + f64::from(grid.voxel);
         let to_camera = image.camera.rotation.as_dquat().inverse();
         let position = image.camera.position.as_dvec3();
         let (mut kinds, mut projected) = ([0; 3], 0);
@@ -2364,13 +2364,15 @@ mod tests {
     }
 
     /// A row's span holds every voxel whose middle projects into the image, and reaches past the
-    /// view by no more than its margin and two voxels. Of cameras posed at random inside, beside
-    /// and outside a small map, looking in, out, along a face and away, with images from one
-    /// pixel to 640 by 480 and focal lengths from a fifth of their width to three times it; of
-    /// cameras on the map's points turned by quarter turns, whose sides run at 45 degrees through
-    /// the points along whole rows, where a point projects or not by rounding alone; and of a
-    /// camera whose focal length is far under a pixel, whose first column takes voxels a fraction
-    /// of a millimeter past it by rounding alone.
+    /// view by no more than its margin and a voxel. Of cameras posed at random inside, beside and
+    /// outside a small map, looking in, out, along a face and away, with images from one pixel to
+    /// 640 by 480 and focal lengths from a fifth of their width to three times it; of cameras on
+    /// the map's points turned by quarter turns, whose sides run at 45 degrees through the points
+    /// along whole rows, where a point projects or not by rounding alone; of each camera posed
+    /// alike about a map 10 km from the origin whose voxels, 0.05 to 0.2 mm, are finer than a
+    /// float's spacing there, where only a margin that grows with the coordinates holds what
+    /// rounding moves a point; and of a camera whose focal length is far under a pixel, whose
+    /// first column takes voxels a fraction of a millimeter past it by rounding alone.
     #[test]
     fn a_rows_span_holds_every_voxel_that_projects_into_the_image() {
         let grid = Layout {
@@ -2379,7 +2381,7 @@ mod tests {
             voxel: 0.05,
         };
         let top = grid.point(grid.points() - 1);
-        let mut rng = crate::rng::Rng::new(19);
+        let (mut rng, mut fine) = (crate::rng::Rng::new(19), crate::rng::Rng::new(23));
         let depth = vec![1.0; 640 * 640];
         // A camera at `eye` looking along `forward`, turned `roll` about it.
         let look = |eye: Vec3, forward: Vec3, roll: f32| {
@@ -2392,7 +2394,7 @@ mod tests {
             let mut at = |a: usize| rng.range(grid.origin[a] - grow, top[a] + grow);
             Vec3::new(at(0), at(1), at(2))
         };
-        let (mut kinds, mut projected, mut on_sides) = ([0; 3], 0, 0);
+        let (mut kinds, mut projected, mut on_sides, mut far_projected) = ([0; 3], 0, 0, 0);
         for k in 0..480 {
             let (image, sides) = if k % 3 == 0 {
                 // On a point of the map's lattice, or one past it, turned by quarter turns, its
@@ -2477,6 +2479,19 @@ mod tests {
             }
             projected += voxels;
             on_sides += if sides { voxels } else { 0 };
+            // The camera posed alike about a map 10 km off, its voxels finer than a float's
+            // spacing there.
+            let far = Layout {
+                origin: Vec3::new(9_000.0, -4_000.0, 1_500.0),
+                voxel: fine.range(5e-5, 2e-4),
+                ..grid
+            };
+            let eye = far.origin + (image.camera.position - grid.origin) * (far.voxel / grid.voxel);
+            let image = DepthImage {
+                camera: Pose::new(eye, image.camera.rotation),
+                ..image
+            };
+            far_projected += spans_against(&far, &image, &format!("camera {k}, 10 km off")).1;
         }
         // A focal length far under a pixel: in the rows at y = 0, the voxels from x = 0.2 m on
         // lie a fraction of a millimeter left of the image, and project into its first column by
@@ -2512,8 +2527,8 @@ mod tests {
             "{empty} rows empty, {whole} whole, {partial} partial"
         );
         assert!(
-            projected > 250_000 && on_sides > 60_000,
-            "{projected} voxels project, {on_sides} for cameras on the lattice"
+            projected > 250_000 && on_sides > 60_000 && far_projected > 250_000,
+            "{projected} voxels project, {on_sides} for cameras on the lattice, {far_projected} 10 km off"
         );
     }
 
