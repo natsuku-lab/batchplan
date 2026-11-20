@@ -1091,10 +1091,14 @@ fn integrated<const MASK: bool, const LATEST: bool>(
 /// is moved out (w), a point `p` lying in it where `normal · (p - camera) + w >= 0`. In the
 /// camera's frame, a point `c` projects where `c.z > 0` and its pixel `floor(fx c.x / c.z + cx +
 /// 0.5)` lies in `0..width`, likewise rows; multiplied through by `c.z`, each bound is linear in
-/// `c`. Each is moved out by its normal's length times a distance of a ten-thousandth of the
-/// largest coordinate among the grid's corners and the camera's position, at least 0.1 mm: a
-/// float carries a point to a part in ten million, so this is a thousand times what rounding
-/// moves a point, in `project` or here, and the voxels it takes in can only be unseen.
+/// `c`. Each is moved out by its normal's length, or 1 where that is less, times a distance of a
+/// ten-thousandth of the largest coordinate among the grid's corners and the camera's position,
+/// at least 0.1 mm. A float carries a number to a part in ten million, so the distance is a
+/// thousand times what rounding moves a point, in `project` or here, and the bound moves by that
+/// times the normal's length. `project` also rounds its pixel, `cx` and 0.5 added to it, by a
+/// part in ten million of the normal's length and a pixel, which moves the bound by that times
+/// `c.z`: hundreds of times less than the margin, which the floor of 1 keeps where a focal length
+/// far under a pixel makes the normal short. The voxels the margin takes in can only be unseen.
 fn view(image: &DepthImage, grid: &Layout) -> [Vec4; 5] {
     let Intrinsics { fx, fy, cx, cy } = image.intrinsics;
     let (width, height) = (image.width as f32, image.height() as f32);
@@ -1112,7 +1116,7 @@ fn view(image: &DepthImage, grid: &Layout) -> [Vec4; 5] {
         Vec3::new(0.0, fy, cy + 0.5),
         Vec3::new(0.0, -fy, height - cy - 0.5),
     ]
-    .map(|normal| (camera.rotation * normal).extend(normal.length() * distance))
+    .map(|normal| (camera.rotation * normal).extend(normal.length().max(1.0) * distance))
 }
 
 /// The voxels of row `r` of `grid` (those with `x + dims.x * r` as index, x from 0) whose middles
@@ -2301,12 +2305,72 @@ mod tests {
         assert!(mask.spheres.iter().any(apart), "a sphere outside the grid");
     }
 
+    /// Checks each row of `grid` against `image`: its span holds every voxel whose middle
+    /// projects into the image, and reaches past the view by no more than the margin `view` moves
+    /// each plane out by and two voxels. How many rows are empty, whole and partial, and how many
+    /// voxels project.
+    fn spans_against(grid: &Layout, image: &DepthImage, case: &str) -> ([usize; 3], usize) {
+        let planes = view(image, grid);
+        let top = grid.point(grid.points() - 1);
+        let (nx, rows) = (grid.dims.x as usize, grid.points() / grid.dims.x as usize);
+        // The planes in the camera's frame, and how far the span may reach past them, in
+        // doubles.
+        let Intrinsics { fx, fy, cx, cy } = image.intrinsics;
+        let (width, height) = (image.width as f32, image.height() as f32);
+        let sides_in_camera = [
+            Vec3::Z,
+            Vec3::new(fx, 0.0, cx + 0.5),
+            Vec3::new(-fx, 0.0, width - cx - 0.5),
+            Vec3::new(0.0, fy, cy + 0.5),
+            Vec3::new(0.0, -fy, height - cy - 0.5),
+        ]
+        .map(|n| n.as_dvec3());
+        let largest = [grid.origin, top, image.camera.position]
+            .map(|p| p.abs().max_element())
+            .into_iter()
+            .fold(0.0, f32::max);
+        let reach = f64::from((1e-4 * largest).max(1e-4)) * 1.01 + 2.0 * f64::from(grid.voxel);
+        let to_camera = image.camera.rotation.as_dquat().inverse();
+        let position = image.camera.position.as_dvec3();
+        let (mut kinds, mut projected) = ([0; 3], 0);
+        for r in 0..rows {
+            let seen = span(&planes, image.camera.position, grid, r);
+            for x in 0..nx {
+                let p = grid.point(r * nx + x);
+                if image.project(p).is_some() {
+                    assert!(
+                        seen.contains(&x),
+                        "{case}, row {r}: voxel {x} projects, outside {seen:?}"
+                    );
+                    projected += 1;
+                }
+                if seen.contains(&x) {
+                    let c = to_camera * (p.as_dvec3() - position);
+                    for (side, n) in sides_in_camera.iter().enumerate() {
+                        assert!(
+                            n.dot(c) >= -n.length().max(1.0) * reach,
+                            "{case}, row {r}: voxel {x} of {seen:?} past side {side}"
+                        );
+                    }
+                }
+            }
+            kinds[match seen.len() {
+                0 => 0,
+                n if n == nx => 1,
+                _ => 2,
+            }] += 1;
+        }
+        (kinds, projected)
+    }
+
     /// A row's span holds every voxel whose middle projects into the image, and reaches past the
     /// view by no more than its margin and two voxels. Of cameras posed at random inside, beside
     /// and outside a small map, looking in, out, along a face and away, with images from one
-    /// pixel to 640 by 480 and focal lengths from a fifth of their width to three times it; and
-    /// of cameras on the map's points turned by quarter turns, whose sides run at 45 degrees
-    /// through the points along whole rows, where a point projects or not by rounding alone.
+    /// pixel to 640 by 480 and focal lengths from a fifth of their width to three times it; of
+    /// cameras on the map's points turned by quarter turns, whose sides run at 45 degrees through
+    /// the points along whole rows, where a point projects or not by rounding alone; and of a
+    /// camera whose focal length is far under a pixel, whose first column takes voxels a fraction
+    /// of a millimeter past it by rounding alone.
     #[test]
     fn a_rows_span_holds_every_voxel_that_projects_into_the_image() {
         let grid = Layout {
@@ -2315,7 +2379,6 @@ mod tests {
             voxel: 0.05,
         };
         let top = grid.point(grid.points() - 1);
-        let (nx, rows) = (grid.dims.x as usize, grid.points() / grid.dims.x as usize);
         let mut rng = crate::rng::Rng::new(19);
         let depth = vec![1.0; 640 * 640];
         // A camera at `eye` looking along `forward`, turned `roll` about it.
@@ -2408,55 +2471,41 @@ mod tests {
                 (image, false)
             };
             let image = image.rigid();
-            let planes = view(&image, &grid);
-            // The planes in the camera's frame, and how far the span may reach past them, in
-            // doubles.
-            let Intrinsics { fx, fy, cx, cy } = image.intrinsics;
-            let (width, height) = (image.width as f32, image.height() as f32);
-            let sides_in_camera = [
-                Vec3::Z,
-                Vec3::new(fx, 0.0, cx + 0.5),
-                Vec3::new(-fx, 0.0, width - cx - 0.5),
-                Vec3::new(0.0, fy, cy + 0.5),
-                Vec3::new(0.0, -fy, height - cy - 0.5),
-            ]
-            .map(|n| n.as_dvec3());
-            let largest = [grid.origin, top, image.camera.position]
-                .map(|p| p.abs().max_element())
-                .into_iter()
-                .fold(0.0, f32::max);
-            let reach = f64::from((1e-4 * largest).max(1e-4)) * 1.01 + 2.0 * f64::from(grid.voxel);
-            let to_camera = image.camera.rotation.as_dquat().inverse();
-            let position = image.camera.position.as_dvec3();
-            for r in 0..rows {
-                let seen = span(&planes, image.camera.position, &grid, r);
-                for x in 0..nx {
-                    let p = grid.point(r * nx + x);
-                    if image.project(p).is_some() {
-                        assert!(
-                            seen.contains(&x),
-                            "camera {k}, row {r}: voxel {x} projects, outside {seen:?}"
-                        );
-                        projected += 1;
-                        on_sides += usize::from(sides);
-                    }
-                    if seen.contains(&x) {
-                        let c = to_camera * (p.as_dvec3() - position);
-                        for (side, n) in sides_in_camera.iter().enumerate() {
-                            assert!(
-                                n.dot(c) >= -n.length() * reach,
-                                "camera {k}, row {r}: voxel {x} of {seen:?} past side {side}"
-                            );
-                        }
-                    }
-                }
-                kinds[match seen.len() {
-                    0 => 0,
-                    n if n == nx => 1,
-                    _ => 2,
-                }] += 1;
+            let (seen, voxels) = spans_against(&grid, &image, &format!("camera {k}"));
+            for (all, one) in kinds.iter_mut().zip(seen) {
+                *all += one;
+            }
+            projected += voxels;
+            on_sides += if sides { voxels } else { 0 };
+        }
+        // A focal length far under a pixel: in the rows at y = 0, the voxels from x = 0.2 m on
+        // lie a fraction of a millimeter left of the image, and project into its first column by
+        // rounding alone.
+        let (lo, hi) = (Vec3::new(0.0, -0.05, -0.05), Vec3::new(1.95, 0.05, 0.05));
+        let line = OccupancyMap::try_new(lo, hi, 0.05).unwrap().grid;
+        let image = DepthImage {
+            depth: &depth[..640 * 480],
+            width: 640,
+            intrinsics: Intrinsics {
+                fx: 1e-4,
+                fy: 525.0,
+                cx: -0.5,
+                cy: 239.5,
+            },
+            camera: Pose::new(
+                Vec3::new(-0.5, -2e-4, 0.0),
+                Quat::from_mat3(&Mat3::from_cols(Vec3::NEG_Y, Vec3::NEG_Z, Vec3::X)),
+            ),
+        }
+        .rigid();
+        for z in 0..line.dims.z {
+            for x in 4..line.dims.x {
+                let p = line.point(line.index(UVec3::new(x, 1, z)));
+                let column = image.project(p).map(|(i, _)| i % 640);
+                assert_eq!(column, Some(0), "the voxel at {p}");
             }
         }
+        spans_against(&line, &image, "a focal length of 1e-4");
         let [empty, whole, partial] = kinds;
         assert!(
             empty > 30_000 && whole > 7_000 && partial > 15_000,
