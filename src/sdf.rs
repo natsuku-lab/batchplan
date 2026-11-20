@@ -788,7 +788,13 @@ impl RobotMask {
                     bits.resize((nx * ny).div_ceil(32), 0);
                     // Every shape but a grid is convex, and so is it grown: what reaches into it
                     // along a row is one run of voxels, found by a few tests.
-                    let convex = !matches!(shape, Obstacle::Sdf { .. });
+                    let convex = match shape {
+                        Obstacle::Cuboid { .. }
+                        | Obstacle::Sphere { .. }
+                        | Obstacle::Cylinder { .. }
+                        | Obstacle::Capsule { .. } => true,
+                        Obstacle::Sdf { .. } => false,
+                    };
                     let nearest = ((middle.x - origin.x) / voxel).round() as usize;
                     for y in rows {
                         let row = nx * y;
