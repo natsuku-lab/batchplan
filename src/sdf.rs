@@ -16,7 +16,7 @@
 use std::borrow::Cow;
 use std::num::FpCategory;
 
-use glam::{IVec3, UVec3, Vec3, Vec4};
+use glam::{BVec3, IVec3, UVec3, Vec2, Vec3, Vec4};
 use half::f16;
 use parry3d::shape::{TriMesh as ParryMesh, TriMeshFlags};
 use rayon::prelude::*;
@@ -116,13 +116,15 @@ pub enum Occlusion {
     /// Everything behind an observed surface, as seen from the camera, is solid, the robot's
     /// shadow included.
     Occupied,
-    /// As `Occupied`, except the space only the robot hides (with a [`RobotMask`]), which is
-    /// free; in a map, space no image has hidden behind another surface either. No camera sees
+    /// As `Occupied`, except the space only the robot hides, or a shape the mask was given (with
+    /// a [`RobotMask`]), which is free; in a map, space no image has hidden behind another
+    /// surface either. No camera sees
     /// past the arm, so its shadow, solid, walls in the space it reaches through next. What the
     /// shadow holds is unknown: this trades that for being able to move.
     OccupiedExceptRobotShadow,
     /// Within this distance (meters) behind an observed surface, in depth as seen from the camera,
-    /// is solid; past it, the robot's shadow and pixels without a reading are free. In a map, space
+    /// is solid; past it, the shadow of the robot and of the mask's shapes and pixels without a
+    /// reading are free. In a map, space
     /// no image has observed is solid within this distance of an occupied voxel, in any direction
     /// (in front of a surface too, where its pixels had no reading), and the robot's shadow is
     /// free.
@@ -461,6 +463,7 @@ impl DepthImage<'_> {
             spheres,
             held: held.collect(),
             padding,
+            shapes: vec![],
         };
         let Intrinsics { fx, fy, cx, cy } = self.intrinsics;
         let (width, height) = (self.width, self.height());
@@ -535,6 +538,11 @@ pub struct RobotMask {
     /// Per pixel, whether its reading is of the robot or of what it holds: its point lies inside
     /// one of the robot's grown spheres, or within the padding of a held object. False where the
     /// pixel has no reading.
+    ///
+    /// With [`with_shapes`](Self::with_shapes), also whether it is of a shape the caller holds.
+    /// A caller may set more still, as the readings of an object it is about to grasp, which a
+    /// fitted shape does not cover: a flagged reading is left out of a grid or a map as the
+    /// robot's is, the space before it free and what only it hides shadow.
     pub on_robot: Vec<bool>,
     /// The grown spheres in the image's frame: centre and radius.
     spheres: Vec<Vec4>,
@@ -542,9 +550,113 @@ pub struct RobotMask {
     held: Vec<Obstacle>,
     /// How far from a held object a point is its.
     padding: f32,
+    /// The shapes the caller holds, in the image's frame ([`with_shapes`](Self::with_shapes)).
+    shapes: Vec<Obstacle>,
 }
 
 impl RobotMask {
+    /// The mask with shapes that stand in the world left out as the robot is: the cell's
+    /// fixtures, and objects measured as shapes, which a [`World`](crate::World) holds as
+    /// obstacles of their own. `image` is the image the mask was made of; its rows are read on
+    /// the device's threads.
+    ///
+    /// A reading within the margin of a shape is that shape's: no obstacle in a grid or a map,
+    /// the space before it free, and what only it hides shadow. The space a shape fills is free
+    /// in a grid or a map of the image, and with it every voxel that reaches into the shape,
+    /// its middle within half a voxel's diagonal of it, as a part of a map keeps them
+    /// ([`OccupancyMap::part`]): in every image, seen or not, as the robot's space is. So what
+    /// stands within the margin of a shape, or in a voxel that reaches into one, is taken for
+    /// the shape, and anything farther from every shape stays a reading like any other: what a
+    /// shape does not cover, as a handle on a mug measured as a cylinder, is the map's.
+    ///
+    /// `margin` is how far from a shape a reading at depth `z` may lie and be the shape's,
+    /// `margin[0] + margin[1] * z + margin[2] * z * z` (meters): what the camera's noise reaches
+    /// there, as three times a [`DepthFilter::noise`], and what the shapes and the camera's
+    /// pose are off by, which no camera's noise covers: with a margin of zero only readings on
+    /// or in a shape are its.
+    pub fn with_shapes(
+        mut self,
+        device: &Device,
+        image: &DepthImage,
+        shapes: &[Obstacle],
+        margin: [f32; 3],
+    ) -> Result<Self> {
+        image.check_with(Some(&self))?;
+        ensure_input!(
+            margin.iter().all(|m| m.is_finite() && *m >= 0.0),
+            "the margin's coefficients must not be negative, got {margin:?}"
+        );
+        for (k, shape) in shapes.iter().enumerate() {
+            shape.check().map_err(|e| input!("shape {k} {e}"))?;
+        }
+        let image = image.rigid();
+        let Intrinsics { fx, fy, cx, cy } = image.intrinsics;
+        let (width, height) = (image.width, image.height());
+        let to_camera = image.camera.rotation.inverse();
+        let reach = |z: f32| margin[0] + (margin[1] + margin[2] * z) * z;
+        // The pixels that may read each shape, rows and columns: those its box covers, grown by
+        // the margin at its far end, or every pixel where the box reaches the plane the camera
+        // stands in.
+        let pixels = |shape: &Obstacle| {
+            let (lo, hi) = shape.bounds();
+            let corners = |lo: Vec3, hi: Vec3| {
+                (0..8).map(move |c| {
+                    let corner = Vec3::select(BVec3::new(c & 1 > 0, c & 2 > 0, c & 4 > 0), hi, lo);
+                    to_camera * (corner - image.camera.position)
+                })
+            };
+            // A reading of the shape lies no deeper than the box's far end and its own reach,
+            // which grows with its depth: the least depth `z` with `z = far + reach(z)`. Where
+            // there is none, the reach outruns the depth and every pixel may read the shape.
+            let far = corners(lo, hi).fold(0f32, |far, c| far.max(c.z));
+            let (a, b, c) = (margin[2], 1.0 - margin[1], far + margin[0]);
+            let grown = 2.0 * c / (b + (b * b - 4.0 * a * c).sqrt()) - far;
+            let mut pixels = (Vec2::ZERO, Vec2::new(width as f32, height as f32));
+            if grown >= 0.0
+                && grown.is_finite()
+                && corners(lo - grown, hi + grown).all(|c| c.z > 0.0)
+            {
+                let seen = corners(lo - grown, hi + grown)
+                    .map(|c| Vec2::new(fx * c.x / c.z + cx, fy * c.y / c.z + cy));
+                let (from, to) = seen.fold((Vec2::INFINITY, Vec2::NEG_INFINITY), |(a, b), p| {
+                    (a.min(p), b.max(p))
+                });
+                pixels = (
+                    (from.floor() - 1.0).max(pixels.0),
+                    (to.ceil() + 2.0).min(pixels.1),
+                );
+            }
+            let (from, to) = (
+                pixels.0.as_usizevec2(),
+                pixels.1.max(Vec2::ZERO).as_usizevec2(),
+            );
+            (from.y..to.y, from.x..to.x)
+        };
+        let seen: Vec<_> = shapes.iter().map(|shape| (shape, pixels(shape))).collect();
+        device.install(|| {
+            let rows = self.on_robot.par_chunks_mut(width).enumerate();
+            rows.for_each(|(v, row)| {
+                for (shape, (rows, columns)) in &seen {
+                    if !rows.contains(&v) {
+                        continue;
+                    }
+                    for u in columns.clone() {
+                        let i = v * width + u;
+                        if row[u] {
+                            continue;
+                        }
+                        let Some(p) = image.point(i, None) else {
+                            continue;
+                        };
+                        row[u] = shape.distance(p).value <= reach(image.depth[i]);
+                    }
+                }
+            });
+        });
+        self.shapes.extend_from_slice(shapes);
+        Ok(self)
+    }
+
     /// A ball around each sphere and each held object, in that order: the sphere itself, and for
     /// an object every point within the padding of it.
     fn balls(&self) -> impl Iterator<Item = Vec4> + '_ {
@@ -578,12 +690,23 @@ impl RobotMask {
     }
 
     /// Which points of `grid` are inside the robot, in one of the grown spheres or within the
-    /// padding of what it holds: a bit per point, x fastest, the first the lowest of the first
-    /// word ([`set`] reads one). Each ball marks the points it holds among those of its box, a
-    /// slab of the grid at a time, so the cost goes by the balls' volumes and not by the grid's
-    /// points times the spheres: a robot fitted with several hundred costs a map's update what
-    /// one of a few dozen does. Both devices read these bits (`inside_robot` in grids.wgsl).
+    /// padding of what it holds, or reach into a shape the caller holds: a bit per point, x
+    /// fastest, the first the lowest of the first word ([`set`] reads one). Each ball marks the
+    /// points it holds among those of its box, a slab of the grid at a time, so the cost goes
+    /// by the balls' volumes and not by the grid's points times the spheres: a robot fitted
+    /// with several hundred costs a map's update what one of a few dozen does. Both devices
+    /// read these bits (`inside_robot` in grids.wgsl).
     pub(crate) fn inside(&self, grid: &Layout) -> Vec<u32> {
+        if self.shapes.is_empty() {
+            self.inside_with::<false>(grid)
+        } else {
+            self.inside_with::<true>(grid)
+        }
+    }
+
+    /// [`inside`](Self::inside), with the shapes' part compiled in for `SHAPES` alone: a mask
+    /// of the robot only runs the code it ran before masks took shapes.
+    fn inside_with<const SHAPES: bool>(&self, grid: &Layout) -> Vec<u32> {
         let [nx, ny, nz] = grid.dims.to_array().map(|d| d as usize);
         let (origin, voxel) = (grid.origin, grid.voxel);
         // The points along one axis within `reach` of `center`, and one more to either side: a
@@ -594,6 +717,14 @@ impl RobotMask {
             lo.max(0.0) as usize..(hi + 1.0).clamp(0.0, n as f32) as usize
         };
         let balls: Vec<Vec4> = self.balls().collect();
+        // Each shape's box, and how far from a shape a point still reaches into it: half a
+        // voxel's diagonal.
+        let boxes: Vec<(Vec3, Vec3)> = if SHAPES {
+            self.shapes.iter().map(Obstacle::bounds).collect()
+        } else {
+            vec![]
+        };
+        let reach = 0.5 * 3f32.sqrt() * voxel;
         // Each slab's bits from its own first point on; none for a slab no ball reaches.
         let slabs: Vec<Vec<u32>> = (0..nz)
             .into_par_iter()
@@ -619,6 +750,24 @@ impl RobotMask {
                             let holds = (p - ball.truncate()).length_squared() < ball.w * ball.w
                                 && self.holds(k, p);
                             bits[n / 32] |= u32::from(holds) << (n % 32);
+                        }
+                    }
+                }
+                let shapes = self.shapes.iter().zip(&boxes).filter(|_| SHAPES);
+                for (shape, &(lo, hi)) in shapes {
+                    if height < lo.z - reach || height > hi.z + reach {
+                        continue;
+                    }
+                    bits.resize((nx * ny).div_ceil(32), 0);
+                    let (middle, half) = (0.5 * (lo + hi), 0.5 * (hi - lo) + reach);
+                    for y in span(middle.y, half.y, origin.y, ny) {
+                        for x in span(middle.x, half.x, origin.x, nx) {
+                            let n = x + nx * y;
+                            if set(&bits, n) {
+                                continue;
+                            }
+                            let inside = shape.distance(grid.point(n + nx * ny * z)).value <= reach;
+                            bits[n / 32] |= u32::from(inside) << (n % 32);
                         }
                     }
                 }
@@ -1157,7 +1306,7 @@ impl SdfGrid {
             );
         ensure_input!(
             lo.cmple(hi).all(),
-            "the depth image has no valid pixels off the robot"
+            "the depth image has no readings but those the mask leaves out"
         );
         let grid = layout(lo, hi, o)?;
         let values = device.grid_values(
@@ -1678,9 +1827,9 @@ impl OccupancyMap {
     /// Marks the voxels within `margin` of `shape` (in the map's frame) free, as seen through
     /// once, or as they were where cameras saw through them more: space the caller knows is
     /// empty though no camera has looked, as where an object stood before the robot carried it
-    /// away, or where the world already holds the shape as an obstacle of its own and the map's
-    /// grid should not hold it again. One reading there afterwards makes a voxel the shape held
-    /// occupied again.
+    /// away. One reading there afterwards makes a voxel the shape held occupied again. A shape
+    /// the world holds as an obstacle of its own is kept out of a map where images are fused
+    /// into it ([`RobotMask::with_shapes`]).
     pub fn free(&mut self, shape: &Obstacle, margin: f32) -> Result<()> {
         self.mark(shape, margin, |l| match observed(l) {
             true => l.min(MISS),
@@ -1944,6 +2093,7 @@ mod tests {
             spheres,
             held,
             padding: 0.015,
+            shapes: vec![],
         };
         let inside = mask.inside(&grid);
         assert_eq!(inside.len(), grid.points().div_ceil(32));

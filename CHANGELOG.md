@@ -10,6 +10,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- `mask.with_shapes(&device, &image, &shapes, margin)`: the mask with shapes the caller holds left out
+  as the robot is, as a cell's fixtures and objects measured as shapes, which the world holds
+  as obstacles of their own. A reading within the margin of a shape is not fused and what only
+  it hides is shadow; the space the shape fills is free in the map; what a shape does not
+  cover stays a reading. So each thing has one memory, a shape or the map's voxels, and a plan
+  is checked against both. The perception page says where a perception library meets
+  batchplan, with an example of one look through both.
+
 - `image.filtered(&DepthFilter)`: a depth image's depths without the readings that lie between
   two surfaces, which a depth camera gives where a pixel covers both a near surface and what is
   behind it, and which a grid or a map would hold as points in mid-air. A reading goes where,
