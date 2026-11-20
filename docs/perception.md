@@ -177,7 +177,7 @@ A map holds what the cameras saw. A caller knows more, and says so in the map's 
 - **`map.clear(&shape, margin)`** marks them never observed: what was seen there no longer holds, as where a drawer stood before it was pulled and where it stands now. A grid takes them as it is told to take never-observed space.
 - **`map.part(&region, padding)`** is the map inside one region, as a map of its own that reaches `padding` past the region's bounds (as a grid must reach past the solid it holds, [above](#distance-grids)), every voxel that does not reach into the region left out: no solid in its grid whatever `unknown` says. A voxel reaches into it where its middle lies within half a voxel's diagonal of it, so that a reading on the region's own face is kept whichever side of the face its voxel's middle lies. `map.part(&object, padding)?.grid(&device, Occlusion::Occupied)` is one object as the cameras saw into it: solid where a reading landed or nothing saw past, free where a camera saw in, and nothing around it, where the whole map's grid under `Occupied` would wall in everything no camera has seen. Where the region reaches past the map it was never observed, and past a part it is taken from, it is left out. A part takes no images: fuse into the map and take the part again. Its points cover the region and the padding whatever the map covers, so a region that reaches past the map costs by its own size, and one whose points would number more than 2^26 (67 million), or whose diagonal would reach 4,096 voxels, is an input error, as a grid that large is.
 - **`map.counts()`** says how many voxels are occupied, free and never observed, of a part those inside its region: a region with free voxels was seen into, and one that is all occupied and never observed was not.
-- **`map.occupied()`** says where: the middles of the voxels `counts` counts as occupied, in the map's frame, and of a part none it leaves out. A caller that keeps the shapes it knows out of a copy of the map asks it after each look: none means there is no grid to make, and otherwise `map.part(&bounds, padding)` around them is a grid of what is there and no more.
+- **`map.occupied()`** says where: the middles of the voxels `counts` counts as occupied, in the map's frame, and of a part none it leaves out. A caller that keeps the shapes it holds out of the map ([`with_shapes`](#shapes-the-caller-holds)) asks it after each look: none means there is no grid to make, and otherwise `map.part(&bounds, padding)` around them is a grid of what is there and no more.
 
 The shape is any `Obstacle`, turned as it is: a measured object's box, a ball about a grasp, a grid. These run on the calling thread: on the M4 Pro, doing other work beside (a load of 15 on its 14 cores), the part of a 1.8M-voxel map in a box of the scene takes 0.1 ms and its grid of 94,000 points 1.3 to 2.0 ms on either device, and a copy of the map with a shape marked free, then cleared, 1.7 ms. Where that map is occupied, 11,000 to 18,000 voxels, takes 0.5 ms, at a load of 24 (`examples/perception.rs`).
 
@@ -205,7 +205,7 @@ A scene remembered twice, as objects and as voxels, has to be kept in step by wh
 use batchplan::glam::{Quat, Vec3};
 use batchplan::{
     DepthFilter, DepthImage, Device, Error, Intrinsics, Obstacle, Occlusion, OccupancyMap, Pose,
-    Robot, RobotOptions, Surface, World,
+    Robot, RobotOptions, Surface, Weighing, World,
 };
 
 /// Stands in for a perception library: what it says one look shows.
@@ -246,8 +246,10 @@ fn main() -> Result<(), Error> {
         Vec3::new(0.5, 0.0, -0.05),
         Vec3::new(0.5, 0.6, 0.05),
     )];
+    // A caller that looks now and then lets each look decide what it sees.
     let mut map =
-        OccupancyMap::try_new(Vec3::new(-0.2, -0.8, -0.1), Vec3::new(1.2, 0.8, 0.9), 0.01)?;
+        OccupancyMap::try_new(Vec3::new(-0.2, -0.8, -0.1), Vec3::new(1.2, 0.8, 0.9), 0.01)?
+            .with_weighing(Weighing::Latest);
 
     // One look. The depths come from your camera driver.
     let depth = vec![1.0; 640 * 480];
@@ -319,10 +321,10 @@ Said once, each to the memory that holds the thing:
 - **an object kept unseen**, as one the arm hides: it stays a shape, and the map reads free where it stands because the shape explains that space. If someone took it meanwhile, plans stay clear of it until a camera sees through;
 - **a pull or a push of something the map holds**, as a drawer: to the map, `map.clear(&shape, margin)` where it stood and where it stands.
 
-A thing passes from one memory to the other as the map weighs images. One that becomes a shape is no longer read from that look on, but what earlier looks filled around it stays until seen through: `map.free(&shape, reach)` frees it at once, with a reach of the mask's margin and half a voxel's diagonal, so that it takes the voxels its readings fell in. One that stops being a shape is read from that look on, and solid once its readings outweigh the looks that saw its place empty, three at most; `map.clear(&shape, reach)` where it stood makes its first reading count.
+A thing passes from one memory to the other as the map weighs images ([`Weighing`](#fused-maps)). One that becomes a shape is no longer read from that look on, but what earlier looks filled around it stays until seen through: `map.free(&shape, reach)` frees it at once, with a reach of the mask's margin and half a voxel's diagonal, so that it takes the voxels its readings fell in. One that stops being a shape is read from that look on, and solid once its readings outweigh the looks that saw its place empty, three at most; `map.clear(&shape, reach)` where it stood makes its first reading count. In a map where one image decides, as a caller that looks now and then wants, a thing that stops being a shape is solid at its first reading, and one that becomes a shape is free in that look as far as its voxels reach into it; `free` is then only for readings that lay farther from the shape than that.
 
 Never-observed space is taken two ways, by where it lies:
-- Around the scene it is free, as it is for a world of shapes alone: `map.grid(&device, Occlusion::Free)`, or the grid of a `map.part` over where plans go, and none where `counts().occupied` is 0.
+- Around the scene it is free, as it is for a world of shapes alone: `map.grid(&device, Occlusion::Free)`, and none where `map.occupied()` gives no point. Where it gives a few, the grid of a `map.part` around them is all there is to make, however large the map.
 - Inside a region the map holds for one large object it is solid: `map.part(&region, padding)?.grid(&device, Occlusion::Occupied)`. The copy the first grid is made of has that region marked free as far as the part reaches, `free(&region, 0.5 * 3f32.sqrt() * voxel)`, so the object's matter is in one grid only.
 
 ## Building grids on the GPU
