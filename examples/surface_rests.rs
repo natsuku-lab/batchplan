@@ -146,12 +146,13 @@ fn write(
 ) -> Result<()> {
     let name = what.split([' ', ',']).nth(1).unwrap_or("scene");
     let support = (0..s.points.len()).filter(|&k| s.object.is_empty() || s.object[k]);
-    // What holds the object up, as `rests_on` reads it: not a point that faces down and was not
-    // seen from above.
+    // What holds the object up, as `rests_on` reads it: not a point that faces down, unless it
+    // was seen from above where that is asked for.
     let from_above = |k: usize| {
-        s.seen_from
-            .get(k)
-            .is_some_and(|f| f.is_finite() && f.z > s.points[k].z)
+        o.seen_from_above_holds
+            && s.seen_from
+                .get(k)
+                .is_some_and(|f| f.is_finite() && f.z > s.points[k].z)
     };
     let facing = support.filter(|&k| s.normals[k].z >= -0.5 || from_above(k));
     let points: Vec<u8> = facing

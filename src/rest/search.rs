@@ -40,10 +40,10 @@ pub struct RestProblem {
     /// set down a cell of the support apart, [`RestOptions::touching`] wide, for a rest that the
     /// spots lie too far apart to find: a flat bottom wider than a dished plate's floor stands
     /// evenly on its raised ring only within millimeters of the middle. That is as many more
-    /// spots as cells lie within the spacing of the point, 77 at the defaults. It also says which
-    /// place where the object nearly rests is looked at closer at every turn: the one nearest it
-    /// ([`rests_on`]). None looks closer only where no spot rests, about the middle of the
-    /// support.
+    /// spots as cells lie within the spacing of the point, 77 at the defaults. With
+    /// [`RestOptions::look_closer`] it also says which place where the object nearly rests is
+    /// looked at closer at every turn: the one nearest it. None looks closer only where no spot
+    /// rests, about the middle of the support.
     pub near: Option<Vec3>,
 }
 
@@ -92,6 +92,33 @@ pub struct RestOptions {
     /// [`GraspOptions::friction`](crate::GraspOptions::friction). A slope steeper than
     /// `atan(friction)` (27°) less `tipping` holds the object only against a stop below it.
     pub friction: f32,
+    /// Whether a rest narrower than the spots are apart is looked for closer about one place a
+    /// turn: off by default. Where the object nearly rests (as set down and not rolled, its
+    /// contacts carry its weight upright and not with the weight tipped by `tipping`), a rest may
+    /// lie within a spacing that the spots are too far apart to meet, as an upright bottle's
+    /// against the lip at the foot of a sloping rack, which stands in a strip a few millimeters
+    /// deep. With it, of the spots where the object nearly rests at a turn, the one nearest where
+    /// the problem would have it ([`RestProblem::near`]), or without that the middle of the
+    /// support, has the spots a cell (`touching`) apart within `spacing` of it tried too: with
+    /// `near` at every turn, and without it only where no spot rests at any turn. Ask for it where
+    /// such a rest is wanted near a point, or where the spots find nothing else.
+    ///
+    /// A search that finds rests and is given no `near` costs what it did; otherwise each turn
+    /// tries at most as many spots more as `near` adds. One place is looked at, not every place:
+    /// such a strip is found near that spot and not along its length, so a caller that wants it
+    /// elsewhere points there. Rests found there come in the order the others do.
+    pub look_closer: bool,
+    /// Whether a support point whose normal faces down holds the object up where it was seen
+    /// from above ([`Surface::seen_from`] higher than it): off by default, and such a point is an
+    /// underside, which holds nothing up and blocks, wherever it was seen from. The normals of a
+    /// top read with noise at a slant, fitted over a few millimeters, can face down in places,
+    /// whose points then block rests on that top; a camera above a point sees no underside
+    /// there, so with this a point seen from above is the top of what is there whatever its
+    /// normal says. Ask for it for a support measured by a camera above it whose noise tilts its
+    /// fitted normals past level. What it gives up is a face of the support that leans out over
+    /// empty space, seen from above with what is over it out of view: it is taken as a top at its
+    /// own height. [`falls_into`](crate::falls_into) reads the support so too.
+    pub seen_from_above_holds: bool,
 }
 
 impl Default for RestOptions {
@@ -103,6 +130,8 @@ impl Default for RestOptions {
             clearance: 0.01,
             tipping: 5f32.to_radians(),
             friction: 0.5,
+            look_closer: false,
+            seen_from_above_holds: false,
         }
     }
 }
@@ -139,9 +168,9 @@ const SPREAD: usize = 1024;
 /// high it is.
 ///
 /// The support is read from above, as a height in each cell [`RestOptions::touching`] wide: what
-/// is under a cell's highest point is taken as solid, so a support point whose normal faces down
-/// and that was not seen from above ([`Surface::seen_from`] no higher than it, or not known), as a
-/// shelf seen from below, holds nothing up, and a cell no point lies in is empty space: a floor no
+/// is under a cell's highest point is taken as solid, so a support point whose normal faces down,
+/// as a shelf seen from below, holds nothing up (with [`RestOptions::seen_from_above_holds`],
+/// only where it was not seen from above), and a cell no point lies in is empty space: a floor no
 /// camera saw holds nothing. Each spot [`RestOptions::spacing`] apart over the support is
 /// tried at each turn `o` gives, the object set straight down until it touches. It rests where
 /// what it then touches holds it: its contacts, as stiff springs that push and do not pull, carry
@@ -152,21 +181,11 @@ const SPREAD: usize = 1024;
 /// spots' spacing and `touching` more, to where it lies lowest, as into the cradle between two
 /// bars or down to a lip, and rests there if that holds it.
 ///
-/// A rest narrower than the spots are apart is looked for closer about one place a turn. Where
-/// the object nearly rests (as set down and not rolled, its contacts carry its weight upright
-/// and not with the weight tipped by `tipping`), a rest may lie within a spacing that the spots
-/// are too far apart to meet, as an upright bottle's against the lip at the foot of a sloping
-/// rack, which stands in a strip a few millimeters deep. Of the spots where it nearly rests at a
-/// turn, the one nearest where the problem would have the object ([`RestProblem::near`]), or
-/// without it the middle of the support, has the spots a cell ([`RestOptions::touching`]) apart
-/// within `spacing` of it tried too: with `near` at every turn, and without it only where no
-/// spot rests at any turn, so that a search that finds rests costs what it did. One place is
-/// looked at, not every place: such a strip is found near that spot and not along its length,
-/// so a caller that wants it elsewhere points there. Rests found there come in the order the
-/// others do. Where the problem says where it would have the object, the spots about that point
-/// are tried as well. Only the object's rest is checked: the hand that sets it down and its way
-/// there are [`place`](crate::place)'s to check, with what the object may touch as its
-/// `support`.
+/// A rest narrower than the spots are apart is found where the problem says where it would have
+/// the object ([`RestProblem::near`]), whose spots a cell apart are tried as well, and with
+/// [`RestOptions::look_closer`] about one place a turn where the object nearly rests. Only the
+/// object's rest is checked: the hand that sets it down and its way there are
+/// [`place`](crate::place)'s to check, with what the object may touch as its `support`.
 ///
 /// They come at every turn, in an order whose first few are worth trying first: every spot at
 /// the first turn, then every spot at the next, and within a turn, the steadiest first and then
@@ -318,7 +337,14 @@ impl Read {
             .into_par_iter()
             .map(|i| {
                 let (spots, margin) = (self.spots[i]?, self.margins[i]?);
-                let field = Field::new(&surfaces[i], spots.lower, spots.upper, o.touching, margin);
+                let (s, lower, upper) = (&surfaces[i], spots.lower, spots.upper);
+                // A copy each way: chosen inside the loop over every point, the option cost
+                // reading a surface without it a percent.
+                let field = if o.seen_from_above_holds {
+                    Field::new::<true>(s, lower, upper, o.touching, margin)
+                } else {
+                    Field::new::<false>(s, lower, upper, o.touching, margin)
+                };
                 Some(Seen { field, spots })
             })
             .collect()
@@ -792,10 +818,11 @@ impl<'a> Problem<'a> {
         }
     }
 
-    /// Each kind of turn tried ([`tried`](Self::tried)), and where the object nearly rests,
-    /// looked at closer about one place ([`look_closer`](Self::look_closer)): at every kind where
-    /// the caller says where it would have the object, and otherwise only where no spot of the
-    /// grid rests at any turn, so that a search that finds rests costs what it did.
+    /// Each kind of turn tried ([`tried`](Self::tried)), and with
+    /// [`RestOptions::look_closer`], where the object nearly rests, looked at closer about one
+    /// place ([`look_closer`](Self::look_closer)): at every kind where the caller says where it
+    /// would have the object, and otherwise only where no spot of the grid rests at any turn, so
+    /// that a search that finds rests costs what it did.
     fn search(&self) -> Vec<(usize, Tried)> {
         let kinds: Vec<usize> = (0..self.turns.len())
             .filter(|&k| self.first[k] == k)
@@ -806,7 +833,7 @@ impl<'a> Problem<'a> {
             let mut on_the_grid = t.outcomes[..grid].iter();
             on_the_grid.any(|f| matches!(f, Outcome::Rests(..)))
         };
-        if self.near.is_some() || !tried.iter().any(rests) {
+        if self.setting.o.look_closer && (self.near.is_some() || !tried.iter().any(rests)) {
             let each = kinds.par_iter().zip(tried.par_iter_mut());
             each.for_each(|(&k, tried)| self.look_closer(k, tried));
         }
@@ -946,20 +973,23 @@ pub enum RestFailure {
 pub struct Blocking {
     /// The point, the first the check meets.
     pub point: Vec3,
-    /// Whether it is the support's own, an underside of it that faces down and was not seen
-    /// from above, and not a reading left unflagged. Flags that leave out part of what the
-    /// object would lie against give points that are not; a support seen from below gives
-    /// points that are.
+    /// Whether it is the support's own, an underside of it that faces down (and, with
+    /// [`RestOptions::seen_from_above_holds`], was not seen from above), and not a reading left
+    /// unflagged. Flags that leave out part of what the object would lie against give points
+    /// that are not; a support seen from below gives points that are.
     pub support: bool,
 }
 
 /// Why each of `problems` has no rest, given `rests`, what [`rests_on`] found for them with `o`:
-/// `None` where it has one. The answer is how far the search came: in this order, a place where
-/// it rests but for a point in its way ([`RestFailure::Blocked`], the steadiest such place), one
-/// where it is held but tips too easily (`Tips`, the steadiest), one where it touches the
-/// support and is not held (`Unheld`, the one nearest the problem's `near`, or without one the
-/// middle of the support seen from above), and none where nothing of the support lies under it
-/// anywhere (`Unsupported`); of two alike, that at the lower turn, then at the lower spot.
+/// `None` where it has one. The search is run again as `rests_on` ran it with `o`, whether it
+/// looks closer ([`RestOptions::look_closer`]) and how it reads the support
+/// ([`RestOptions::seen_from_above_holds`]) included, so pass the options the rests were found
+/// with. The answer is how far the search came: in this order, a place where it rests but for a
+/// point in its way ([`RestFailure::Blocked`], the steadiest such place), one where it is held
+/// but tips too easily (`Tips`, the steadiest), one where it touches the support and is not held
+/// (`Unheld`, the one nearest the problem's `near`, or without one the middle of the support seen
+/// from above), and none where nothing of the support lies under it anywhere (`Unsupported`); of
+/// two alike, that at the lower turn, then at the lower spot.
 ///
 /// Where it is not held or tips, what would be in its way there even if it held comes with it:
 /// flags that leave out part of what the object must lie against both leave it unheld and put
@@ -1218,7 +1248,10 @@ mod tests {
     /// does.
     #[test]
     fn a_search_that_finds_rests_sets_nothing_closer() {
-        let o = RestOptions::default();
+        let o = RestOptions {
+            look_closer: true,
+            ..RestOptions::default()
+        };
         let tall = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.1));
         let kinds = searched(tall, &table(0.0), &o);
         assert!(kinds.iter().any(|(_, rests, _)| *rests));
@@ -1230,7 +1263,10 @@ mod tests {
     /// set closer for it is at most one spot's disc a kind of turn, whatever the noise.
     #[test]
     fn where_nothing_rests_one_disc_a_turn_is_set_closer() {
-        let o = RestOptions::default();
+        let o = RestOptions {
+            look_closer: true,
+            ..RestOptions::default()
+        };
         let slender = Obstacle::cylinder(Vec3::ZERO, 0.01, 0.12);
         let kinds = searched(slender, &table(0.001), &o);
         // The lattice points within a spacing of a grid's spot, which lies half a spacing from the
