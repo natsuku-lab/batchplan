@@ -128,18 +128,21 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   comes end for end too. It rests as it is set down, not tipped or slid into place: a slope needs
   the rotation that lies flat on it. `RestProblem::near` names a point to look closer around, a cell
   of the support apart, for a rest the spots are too far apart to find, as the middle of a dished
-  plate under a wide flat bottom. Of the spots where the object nearly rests (held, tipping too
-  easily) at a turn, the one nearest `near`, or without it the middle of the support, has the
-  spots a cell apart within the spacing tried too: with `near` at every turn, without it only
-  where no spot rests at any turn. So an upright bottle against the lip at the foot of a sloping
-  rack, which stands only in a strip a few millimeters deep, is found near that spot, and a
-  search that finds rests costs what it did. A support point whose normal faces
-  down holds nothing up unless the camera that saw it was above it (`Surface::seen_from`), so the
-  noisy normals of a top read at a slant do not block rests on it. A can or a capsule laid on its
-  side rolls, within half the spacing and `touching`, into the cradle between two bars or a rack's
-  groove or down to a lip, and has no rest on a flat support. Many problems run in one call, each
-  surface read once. `examples/surface_rests.rs` times it, and `scripts/validate_rests.py` lets
-  go of each rest in MuJoCo.
+  plate under a wide flat bottom. A support point whose normal faces down holds nothing up. A can
+  or a capsule laid on its side rolls, within half the spacing and `touching`, into the cradle
+  between two bars or a rack's groove or down to a lip, and has no rest on a flat support. Many
+  problems run in one call, each surface read once. `examples/surface_rests.rs` times it, and
+  `scripts/validate_rests.py` lets go of each rest in MuJoCo. Two options, both off by default,
+  find more. With `RestOptions::look_closer`, of the spots where the object nearly rests (held,
+  tipping too easily) at a turn, the one nearest `near`, or without it the middle of the support,
+  has the spots a cell apart within the spacing tried too, with `near` at every turn and without
+  it only where no spot rests at any turn: an upright bottle against the lip at the foot of a
+  sloping rack, which stands only in a strip a few millimeters deep, is found near that spot, and
+  a search that finds rests with no `near` costs what it does without. With
+  `RestOptions::seen_from_above_holds`, a support point whose normal faces down holds where the
+  camera that saw it was above it (`Surface::seen_from`), so the noisy normals of a top read at a
+  slant do not block rests on it; a face that leans out over empty space, seen from above, is then
+  taken as a top.
 
 - Why a held object has no rest: `rest_failures(&device, &problems, &surfaces, &rests, &o)`
   gives, per problem `rests_on` found no rest for, how near the search came (`RestFailure`):
@@ -148,8 +151,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   `Unsupported`, nothing of the support under it anywhere. Where it is not held or tips, what would
   be in its way there even if it held comes too (`Blocking`, the support's own underside or a
   reading left unflagged), as a rack's lip measured as another object than the rack's top. It
-  searches those problems again and judges each place of the furthest stage once more where that
-  is `Tips` or `Blocked`: one to two more searches of them.
+  searches those problems again as `rests_on` did with the same options and judges each place of
+  the furthest stage once more where that is `Tips` or `Blocked`: one to two more searches of
+  them.
 
 - What a configuration touches while it holds an object:
   `device.contacts_holding(&worlds, &item_world, &q, within, &holding)`, with a `Held` or `None`
