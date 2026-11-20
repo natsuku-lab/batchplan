@@ -159,10 +159,9 @@ pub(super) struct Statics {
 }
 
 impl Statics {
-    /// How far the weight of an object whose middle is `center`, held by `contacts`, can be
-    /// tipped any way before they no longer hold it (radians), where that is at least `tipping`;
-    /// none where they do not hold it that far. `size` is the object's, the unit its torques are
-    /// balanced in.
+    /// Whether `contacts` hold the weight of an object whose middle is `center`, and how far it can
+    /// be tipped any way before they no longer do (radians), where that is at least `tipping`.
+    /// `size` is the object's, the unit its torques are balanced in.
     pub(super) fn holds(
         &mut self,
         contacts: &[Contact],
@@ -170,9 +169,11 @@ impl Statics {
         size: f32,
         tipping: f32,
         friction: f32,
-    ) -> Option<f32> {
+    ) -> Holding {
         self.from_above = false;
-        let first = contacts.first()?;
+        let Some(first) = contacts.first() else {
+            return Holding::Not;
+        };
         // One flat piece flush with the support is one face, pushed one way: along the mean,
         // where the support is measured in patches whose planes differ by its noise, by less
         // than the angle is found to elsewhere.
@@ -227,11 +228,11 @@ impl Statics {
         center: Vec3,
         tipping: f32,
         friction: f32,
-    ) -> Option<f32> {
+    ) -> Holding {
         let origin = contacts[0].at;
         let above = (center - origin).dot(push);
         if push.z <= 1e-6 || above <= 0.0 {
-            return None;
+            return Holding::Not;
         }
         let (u, v) = push.any_orthonormal_pair();
         let axes = [u, v];
@@ -252,7 +253,7 @@ impl Statics {
             self.outline.reverse();
         }
         if self.outline.len() < 3 {
-            return None;
+            return Holding::Not;
         }
         let under = across(center - Vec3::Z * (above / push.z));
         let cone = friction.atan();
@@ -266,24 +267,30 @@ impl Statics {
             let (level, leaning) = (push.z, push.dot(toward));
             let most = level.hypot(leaning);
             if most < cone.cos() {
-                return None;
+                return Holding::Not;
             }
             let within = (cone.cos() / most).min(1.0).acos();
             let lean = leaning.atan2(level);
             if lean.abs() > within + 1e-6 {
-                return None;
+                return Holding::Not;
             }
             let by_friction = within - lean;
             // Where the weight's line meets the piece moves along the piece as it tips.
             let along = -push.cross(Vec3::Z.cross(toward));
             let along = Vec2::new(along.dot(axes[0]), along.dot(axes[1])).normalize_or_zero();
-            let reach = exit(&self.outline, under, along)?;
+            let Some(reach) = exit(&self.outline, under, along) else {
+                return Holding::Not;
+            };
             let edge = under + along * reach;
             let to = origin + axes[0] * edge.x + axes[1] * edge.y - center;
             let by_hull = (-to.z / to.length()).clamp(-1.0, 1.0).acos();
             least = least.min(by_friction).min(by_hull);
         }
-        (least >= tipping).then_some(least)
+        if least >= tipping {
+            Holding::By(least)
+        } else {
+            Holding::Tips
+        }
     }
 
     /// [`holds`](Self::holds) by the settle: the contacts of each flat piece first cut down to
@@ -295,7 +302,7 @@ impl Statics {
         size: f32,
         tipping: f32,
         friction: f32,
-    ) -> Option<f32> {
+    ) -> Holding {
         // The contacts that lie on one flat piece and push one way, together.
         self.kept.clear();
         self.pieces.clear();
@@ -333,7 +340,7 @@ impl Statics {
             && !(springs.settle(upright, Some(mu), None, &mut self.base)
                 && springs.within_cones(&self.base, mu))
         {
-            return None;
+            return Holding::Not;
         }
         // Tipped every way, from the forces it settled on upright.
         let mut tipped_by = |tilt: f32, tipped: &mut Vec<DVec3>| {
@@ -344,7 +351,7 @@ impl Statics {
             })
         };
         if tipping > 0.0 && !tipped_by(tipping, &mut self.tipped) {
-            return None;
+            return Holding::Tips;
         }
         // How much farther: doubled until it gives, then narrowed.
         let (mut holds, mut gives) = (tipping, FRAC_PI_2);
@@ -365,7 +372,7 @@ impl Statics {
                 gives = middle;
             }
         }
-        Some(holds)
+        Holding::By(holds)
     }
 }
 
@@ -558,4 +565,15 @@ fn solve(mut a: [[f64; 6]; 6], mut b: Wrench) -> Option<Wrench> {
         x[row] = (b[row] - known) / a[row][row];
     }
     x.iter().all(|v| v.is_finite()).then_some(x)
+}
+
+/// What an object's contacts do with its weight ([`Statics::holds`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Holding {
+    /// They hold it with its weight tipped this far any way (radians), at least as far as asked.
+    By(f32),
+    /// They hold it upright, but not with its weight tipped as far as asked.
+    Tips,
+    /// They do not hold it.
+    Not,
 }

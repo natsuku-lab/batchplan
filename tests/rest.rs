@@ -6,6 +6,7 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
+use std::collections::HashSet;
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 use batchplan::glam::{Mat3, Quat, Vec2, Vec3};
@@ -413,11 +414,19 @@ fn bars_hold_what_spans_them_and_cradle_what_is_laid_between_them() {
     };
     let found = rests(&tray, &bars(), &o);
     assert!(!found.is_empty());
-    for r in &found {
-        assert!(
-            r.pose.position.x.abs() <= 0.06 - 0.04 + band,
-            "on one bar: {r:?}"
-        );
+    // On one bar alone it stands only on that band, its middle within it by what it tips: the
+    // spots set closer about those that tip there find it. A tray taller than the bar is thick
+    // would rock off; the band is how the contacts are read, not how a round bar holds.
+    let lean = 0.02 * o.tipping.tan();
+    let (across_both, on_one): (Vec<&Rest>, Vec<&Rest>) = found
+        .iter()
+        .partition(|r| r.pose.position.x.abs() <= 0.06 - 0.04 + band);
+    for r in on_one {
+        let off = (r.pose.position.x.abs() - 0.04).abs();
+        assert!(off <= band - lean, "past the band: {r:?}");
+        assert!(!on_the_grid(r, &o), "on one bar at a spot: {r:?}");
+    }
+    for r in across_both {
         // Level on both tops.
         assert!((r.pose.position.z - 0.13).abs() < 2e-3, "{r:?}");
         let on = |side: f32| {
@@ -483,7 +492,8 @@ fn bars_hold_what_spans_them_and_cradle_what_is_laid_between_them() {
         assert!(ways(1.0) > 0 && ways(1.0) == ways(-1.0));
     }
     // Stood on its end and leaning a few degrees, it is not rolled: on a table read with a
-    // millimeter of noise, whatever rests it has are on the spots.
+    // millimeter of noise, whatever rests it has are on the spots, the grid's or those set
+    // closer a cell apart.
     let mut rng = Rng::new(11);
     let mut noisy = table();
     for p in &mut noisy.points {
@@ -491,9 +501,14 @@ fn bars_hold_what_spans_them_and_cradle_what_is_laid_between_them() {
     }
     for degrees in [1.0f32, 3.0] {
         let leaning = Quat::from_rotation_x(degrees.to_radians());
-        for r in rests_turned(&can, leaning, &noisy, &RestOptions::default()) {
-            let from_a_spot = (r.pose.position.truncate() / 0.01 - 0.5).round() + 0.5;
-            let off = (r.pose.position.truncate() - from_a_spot * 0.01).length();
+        let o = RestOptions::default();
+        for r in rests_turned(&can, leaning, &noisy, &o) {
+            let at = r.pose.position.truncate();
+            let off = |every: f32, from: f32| {
+                let spot = ((at / every - from).round() + from) * every;
+                (at - spot).length()
+            };
+            let off = off(o.spacing, 0.5).min(off(o.touching, 0.0));
             assert!(off < 1e-5, "{off} m off its spot: {r:?}");
         }
     }
@@ -1697,18 +1712,40 @@ fn unbalanced(columns: &[[f64; 6]], b: [f64; 6]) -> f64 {
     dot(&rest, &rest).sqrt()
 }
 
-/// Whether forces at the support points within `touching` of the box `object` resting at `r`,
-/// each inside its friction cone (sixteen rays of it), can carry its weight with no torque about
-/// its middle: a check that shares nothing with `rests_on`. A point pushes along the box's own
-/// normal where it lies against the inside of a face, half a millimeter from its edges, and
-/// along its own elsewhere, as hard as it takes. Every point that near counts, more than touch
-/// it, so a rest that fails this cannot hold.
+/// Whether forces at the support points within `touching` of the box or cylinder `object`
+/// resting at `r`, each inside its friction cone (sixteen rays of it), can carry its weight with
+/// no torque about its middle: a check that shares nothing with `rests_on`. A point pushes along
+/// the object's own normal where it lies against the inside of a face, half a millimeter from
+/// its edges, and along its own elsewhere, as hard as it takes. Every point that near counts,
+/// more than touch it, so a rest that fails this cannot hold.
 fn holds(object: &Obstacle, r: &Rest, s: &Surface, o: &RestOptions) -> bool {
-    let Obstacle::Cuboid {
-        half_extents: half, ..
-    } = *object
-    else {
-        panic!("the check is written for boxes, got {object:?}");
+    // The face nearest a point in the object's frame: the way out of it, and whether the point
+    // lies inside its edges.
+    let face = |local: Vec3| match *object {
+        Obstacle::Cuboid {
+            half_extents: half, ..
+        } => {
+            let past = (local.abs() - half).to_array();
+            let axis = (0..3)
+                .max_by(|&a, &b| past[a].total_cmp(&past[b]))
+                .expect("three axes");
+            let inside = (0..3).all(|i| i == axis || local[i].abs() <= half[i] - 0.0005);
+            (Vec3::AXES[axis] * local[axis].signum(), inside)
+        }
+        Obstacle::Cylinder {
+            radius,
+            half_height,
+            ..
+        } => {
+            let across = local.truncate().length();
+            if local.z.abs() - half_height >= across - radius {
+                (Vec3::Z * local.z.signum(), across <= radius - 0.0005)
+            } else {
+                let out = (local.truncate() / across).extend(0.0);
+                (out, local.z.abs() <= half_height - 0.0005)
+            }
+        }
+        _ => panic!("the check is written for boxes and cylinders, got {object:?}"),
     };
     let placed = object.placed(r.pose);
     let cone = o.friction.atan();
@@ -1719,15 +1756,10 @@ fn holds(object: &Obstacle, r: &Rest, s: &Surface, o: &RestOptions) -> bool {
         if !support || distance > o.touching || distance < -1e-3 {
             continue;
         }
-        // The face it is nearest, and whether it lies inside that face's edges.
         let local = r.pose.rotation.inverse() * (p - r.pose.position);
-        let past = (local.abs() - half).to_array();
-        let axis = (0..3)
-            .max_by(|&a, &b| past[a].total_cmp(&past[b]))
-            .expect("three axes");
-        let inside = (0..3).all(|i| i == axis || local[i].abs() <= half[i] - 0.0005);
+        let (out, inside) = face(local);
         let push = if inside || s.normals[k] == Vec3::ZERO {
-            -(r.pose.rotation * (Vec3::AXES[axis] * local[axis].signum()))
+            -(r.pose.rotation * out)
         } else {
             s.normals[k]
         };
@@ -2297,4 +2329,131 @@ fn falls_do_not_depend_on_the_threads_the_batch_or_the_device() {
     let elsewhere = RestProblem::new(a_box(), 3);
     let refused = falls_into(&devices[0], &[elsewhere], &surfaces, &o);
     assert!(matches!(refused, Err(Error::Input(why)) if why.starts_with("problem 0: surface 3")));
+}
+
+/// A wine bottle stood upright, 4.3 cm across and 15.8 cm tall.
+fn bottle() -> Obstacle {
+    Obstacle::cylinder(Vec3::ZERO, 0.0215, 0.079)
+}
+
+/// Whether `r`'s middle stands over a spot of the grid `o` spaces, seen from above.
+fn on_the_grid(r: &Rest, o: &RestOptions) -> bool {
+    let cells = r.pose.position.truncate() / o.spacing - 0.5;
+    (cells - cells.round()).abs().max_element() < 1e-3
+}
+
+/// The centimeters along x, from the rack's own frame turned by `turn`, in which a rest's middle
+/// stands.
+fn centimeters(found: &[Rest], turn: Quat) -> HashSet<i32> {
+    let along = |r: &Rest| (turn.inverse() * r.pose.position).x;
+    found
+        .iter()
+        .map(|r| (along(r) * 100.0).floor() as i32)
+        .collect()
+}
+
+#[test]
+fn an_upright_bottle_rests_against_the_lip_of_a_sloping_rack() {
+    // Stood upright on a slope of 30 degrees with a lip 1 cm high and 1 cm wide at its foot, the
+    // bottle rests where its rim behind lies on the slope and its bottom on the lip's top, its
+    // middle far enough in from the lip's edge to tip 5 degrees: a strip 2 mm deep, between the
+    // rows of the grid a centimeter apart. The spots set closer about the grid's near misses
+    // find it along the lip's length, and only there.
+    let o = RestOptions::default();
+    let rack = slope(30.0, true);
+    let found = rests(&bottle(), &rack, &o);
+    let foot = 0.1 * 30f32.to_radians().cos();
+    let mut places = HashSet::new();
+    for r in &found {
+        assert!(holds(&bottle(), r, &rack, &o), "{r:?}");
+        assert!(r.tipping >= o.tipping, "{r:?}");
+        assert!(up(r).z > 0.9999, "{r:?}");
+        assert!(!on_the_grid(r, &o), "{r:?}");
+        // On the lattice the support's cells are centred on, each place once a turn.
+        let cells = r.pose.position.truncate() / o.touching;
+        assert!((cells - cells.round()).abs().max_element() < 1e-3, "{r:?}");
+        let place = (
+            cells.round().as_ivec2().to_array(),
+            r.pose.rotation.to_array().map(f32::to_bits),
+        );
+        assert!(places.insert(place), "twice: {r:?}");
+        let over = r.pose.position.y - foot;
+        assert!((0.0..0.004).contains(&over), "over the lip's top: {r:?}");
+    }
+    let along = centimeters(&found, Quat::IDENTITY);
+    assert!(
+        along.len() >= 18,
+        "{} of the lip's 20: {along:?}",
+        along.len()
+    );
+    assert!(rests(&bottle(), &slope(30.0, false), &o).is_empty());
+}
+
+#[test]
+fn a_lip_the_grid_meets_at_a_spot_is_found_along_its_length() {
+    // The rack turned half a degree about the vertical: the grid's spots meet the strip where it
+    // can stand in two places, and the spots set closer find the rest of it.
+    let o = RestOptions::default();
+    let turn = Quat::from_rotation_z(0.5f32.to_radians());
+    let mut rack = slope(30.0, true);
+    for p in &mut rack.points {
+        *p = turn * *p;
+    }
+    for n in &mut rack.normals {
+        *n = turn * *n;
+    }
+    let found = rests(&bottle(), &rack, &o);
+    let on_grid = found.iter().filter(|r| on_the_grid(r, &o)).count();
+    assert!(
+        on_grid > 0 && on_grid < found.len() / 10,
+        "{on_grid} of {}",
+        found.len()
+    );
+    for r in &found {
+        assert!(holds(&bottle(), r, &rack, &o), "{r:?}");
+    }
+    let along = centimeters(&found, turn);
+    assert!(
+        along.len() >= 18,
+        "{} of the lip's 20: {along:?}",
+        along.len()
+    );
+}
+
+/// [`table`] with two blocks on it, the support's where `flagged`.
+fn cluttered(flagged: bool) -> Surface {
+    let mut s = table();
+    let blocks = [
+        (Vec3::new(0.03, 0.0, 0.04), Vec3::new(0.03, 0.03, 0.04)),
+        (Vec3::new(-0.08, -0.07, 0.02), Vec3::new(0.02, 0.04, 0.02)),
+    ];
+    for (center, half) in blocks {
+        block(center, half, flagged, &mut s);
+    }
+    s
+}
+
+#[test]
+fn on_a_table_every_rest_stands_on_a_spot_of_the_grid() {
+    // Where a box or a can rests at a spot, or tips at the table's rim beside one that does, as a
+    // box 20 cm tall, nothing is set closer: as many rests as the grid alone found, each on a spot
+    // of it.
+    let o = RestOptions::default();
+    let can = Obstacle::cylinder(Vec3::ZERO, 0.03, 0.05);
+    let tall = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.1));
+    let scenes = [
+        (
+            table(),
+            vec![(a_box(), 7200), (can.clone(), 7200), (tall, 6272)],
+        ),
+        (cluttered(false), vec![(a_box(), 4348), (can.clone(), 4368)]),
+        (cluttered(true), vec![(a_box(), 5596), (can, 5536)]),
+    ];
+    for (k, (s, objects)) in scenes.iter().enumerate() {
+        for (object, count) in objects {
+            let found = rests(object, s, &o);
+            assert_eq!(found.len(), *count, "scene {k}: {object:?}");
+            assert!(found.iter().all(|r| on_the_grid(r, &o)), "scene {k}");
+        }
+    }
 }
