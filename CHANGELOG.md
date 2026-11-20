@@ -16,12 +16,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   empty often and nine to empty one seen full often. Under `Weighing::Latest` each image decides
   what it sees: a voxel it reads a surface in, or that holds one of its readings, is as surely
   occupied as a map holds anything, and one its rays pass through as surely free; what it does
-  not see keeps what earlier images said. For a caller that looks once every few seconds; one
+  not see keeps what earlier images said, but for the space a mask's robot and shapes fill,
+  which is as surely free wherever it is. For a caller that looks once every few seconds; one
   stray reading is an obstacle until a look sees through it.
 
 - Where a fused map is occupied: `map.occupied()`, the middles of the voxels `counts` counts as
   occupied, in the map's frame and in the order of its voxels, and of a part none it leaves out.
-  None means there is no grid to make; otherwise a part around them is a grid of what is there.
+  Where never-observed space is taken for free, none means there is no grid to make, and
+  otherwise a part around them is a grid of what is there.
   `part`'s documentation now says that a part's points cover its region and padding whatever the
   map covers, and that one past a grid's size limits is an input error.
 

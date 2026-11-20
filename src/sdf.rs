@@ -1723,8 +1723,10 @@ pub enum Weighing {
     /// Each image decides what it sees: a voxel it reads a surface in, or that holds one of its
     /// readings, is as surely occupied as a map holds anything, and a voxel its rays pass through
     /// is as surely free. A voxel it does not see keeps what earlier images said, and space no
-    /// image has observed is marked as under `Evidence`. For a caller that looks once every few
-    /// seconds; one stray reading is an obstacle until a look sees through it.
+    /// image has observed is marked as under `Evidence`. With a mask, the space the robot, what
+    /// it holds and the mask's shapes fill is as surely free wherever it is, seen or not, as it
+    /// is a ray through under `Evidence`. For a caller that looks once every few seconds; one
+    /// stray reading is an obstacle until a look sees through it.
     Latest,
 }
 
@@ -1826,8 +1828,9 @@ impl OccupancyMap {
 
     /// The middles of the voxels more likely occupied than not, those [`counts`](Self::counts)
     /// counts as occupied, in the map's frame and in the order of the voxels, x fastest. Of a
-    /// part, none it leaves out. None means there is nothing to make a grid of; otherwise a part
-    /// around them is a grid of what is there and no more.
+    /// part, none it leaves out. Where never-observed space is taken for free
+    /// ([`Occlusion::Free`]), none means there is nothing to make a grid of, and otherwise a
+    /// part around them is a grid of what is there and no more.
     #[must_use]
     pub fn occupied(&self) -> Vec<Vec3> {
         (self.log_odds.iter().enumerate())
@@ -1896,8 +1899,9 @@ impl OccupancyMap {
         })
     }
 
-    /// Marks the voxels within `margin` of `shape` (in the map's frame) free, as seen through
-    /// once, or as they were where cameras saw through them more: space the caller knows is
+    /// Marks the voxels within `margin` of `shape` (in the map's frame) free, as one image
+    /// weighed as evidence sees through them, or as they were where cameras saw through them
+    /// more: space the caller knows is
     /// empty though no camera has looked, as where an object stood before the robot carried it
     /// away. One reading there afterwards makes a voxel the shape held occupied again. A shape
     /// the world holds as an obstacle of its own is kept out of a map where images are fused
