@@ -246,15 +246,22 @@ fn main() -> Result<()> {
             "  the scene's {} shapes left out too: median {median:.2} ms, best {best:.2} ({on} pixels)",
             scene.obstacles.len()
         );
-        // The pixel behind each of their outlines that a camera reads toward what lies behind,
-        // at the shapes' margin. Here they already flag every reading the camera has.
-        let (median, best, banded) = timed(21, || {
-            (held.clone()).with_band(&device, &image, [0.004, 0.0, 0.0], 1)
-        });
-        let on = banded?.on_robot.iter().filter(|&&on| on).count();
-        println!(
-            "  a band of a pixel behind the robot and the shapes: median {median:.2} ms, best {best:.2} ({on} pixels)"
-        );
+        // The pixel beside each outline that a camera reads toward what lies behind, at the
+        // shapes' margin: behind the robot alone, where the table and the objects around the
+        // arm are left to the band, and behind the robot and the shapes, which flag every
+        // reading of this scene already.
+        for (label, mask) in [
+            ("the robot alone", &robot),
+            ("the robot and the shapes", &held),
+        ] {
+            let (median, best, banded) = timed(21, || {
+                (mask.clone()).with_band(&device, &image, [0.004, 0.0, 0.0], 1)
+            });
+            let on = banded?.on_robot.iter().filter(|&&on| on).count();
+            println!(
+                "  a band of a pixel behind {label}: median {median:.2} ms, best {best:.2} ({on} pixels)"
+            );
+        }
         let mut rest =
             OccupancyMap::try_new(Vec3::new(-0.3, -0.8, -0.1), Vec3::new(1.1, 0.8, 0.7), 0.01)?;
         let (median, best, fused) = timed(9, || rest.integrate(&device, &image, Some(&held)));

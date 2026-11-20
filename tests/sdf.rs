@@ -14,8 +14,8 @@ use batchplan::datagen::{Demonstration, Origin};
 use batchplan::rng::Rng;
 use batchplan::{
     CollisionWeights, DepthFilter, DepthImage, Device, Distance, Error, Held, Intrinsics,
-    JointTrajectory, Obstacle, Occlusion, OccupancyMap, Pose, Robot, SdfGrid, SdfOptions,
-    SphereOptions, Weighing, World,
+    JointTrajectory, Obstacle, Occlusion, OccupancyMap, Pose, Robot, RobotMask, SdfGrid,
+    SdfOptions, SphereOptions, Weighing, World,
 };
 use glam::{BVec3, EulerRot, Mat3, Quat, Vec2, Vec3};
 
@@ -3747,153 +3747,486 @@ fn pixels_apart(i: usize, j: usize, width: usize) -> usize {
         .max((i / width).abs_diff(j / width))
 }
 
-/// A band about what a mask flags flags exactly the readings that lie behind a flagged reading
-/// within so many pixels along rows, columns and diagonals by more than the margin at their own
-/// depth, as a check of every pair of pixels says. Depths vary so that beside a flagged reading
-/// lie nearer, level and deeper ones, and enough that the margin at the reading's depth and at
-/// the flagged one's tell some pairs apart; at margins of each coefficient alone and all three;
-/// for flags at an image's corners and edges, a single one, a diagonal line of them, flags on
-/// pixels without a reading and none; at bands of 0, 1, 2 and 5 pixels and one wider than the
-/// image. A margin below zero or no number, and a mask of another image, are input errors.
+/// The point of the box `shape` nearest `p`, found in the box's frame: `p` itself inside it.
+fn box_nearest(shape: &Obstacle, p: Vec3) -> Vec3 {
+    let Obstacle::Cuboid {
+        center,
+        half_extents,
+        rotation,
+    } = *shape
+    else {
+        unreachable!("the band's tests hold boxes")
+    };
+    let local = rotation.inverse() * (p - center);
+    rotation * local.clamp(-half_extents, half_extents) + center
+}
+
+/// Whether the ray from `p` along `dir`, from `p` on, meets the box `shape`: its slabs crossed in
+/// the box's frame.
+fn box_ahead(shape: &Obstacle, p: Vec3, dir: Vec3) -> bool {
+    let Obstacle::Cuboid {
+        center,
+        half_extents,
+        rotation,
+    } = *shape
+    else {
+        unreachable!("the band's tests hold boxes")
+    };
+    let (from, along) = (rotation.inverse() * (p - center), rotation.inverse() * dir);
+    let (mut first, mut last) = (0.0f32, f32::INFINITY);
+    for axis in 0..3 {
+        let (from, along, half) = (from[axis], along[axis], half_extents[axis]);
+        if along == 0.0 {
+            if from.abs() > half {
+                return false;
+            }
+            continue;
+        }
+        let (a, b) = ((-half - from) / along, (half - from) / along);
+        first = first.max(a.min(b));
+        last = last.min(a.max(b));
+    }
+    first <= last
+}
+
+/// Whether the ray from `p` along `dir`, from `p` on, meets the ball of `radius` about `center`:
+/// the ray's point nearest the centre lies in it.
+fn ball_ahead(center: Vec3, radius: f32, p: Vec3, dir: Vec3) -> bool {
+    let t = (center - p).dot(dir).max(0.0);
+    (p + dir * t - center).length() <= radius
+}
+
+/// A band behind a mask's flags flags exactly the readings it should, as a check of every
+/// unflagged reading against every flagged reading within the band and every thing the mask
+/// holds says. A reading at depth z is taken where a flagged reading within the band is of a
+/// thing (within the padding of one of the robot's spheres or of a held object, within the margin
+/// at its depth of a shape) whose point nearest it lies nearer than z less the margin's reach at
+/// z, and the reading's ray, carried on past it, does not meet that thing. A view of the Panda's
+/// hand holding a box over a table with a turned block on it, two thirds of its readings moved
+/// nearer or deeper at random: among them readings behind a sphere, the held box and a shape on
+/// rays that pass through it first, taken, and readings in front of each, kept. At margins of
+/// each coefficient alone and all three, and paddings of 1 and 3 cm; at bands of 0, 1, 2 and 5
+/// pixels, one wider than the image and the widest there is; with flags a caller sets on pixels
+/// without a reading (at 0, below it, no number and infinity) and on readings; on every device,
+/// and on one thread, which runs its rows one after another with the same buffers. A margin
+/// below zero or no number, and a mask of another image, are input errors.
 #[test]
-fn a_band_flags_the_readings_behind_a_flag_within_so_many_pixels() {
+fn a_band_flags_exactly_the_readings_behind_a_thing_of_a_flag() {
     let robot = common::panda().unwrap();
     let q = robot.default_q().to_vec();
-    let (width, height) = (13, 9);
-    let pixel = |u: usize, v: usize| v * width + u;
-    // One pixel in seven has no reading, at 0 or no number; the others lie from 0.5 to 3 m.
-    let mut rng = Rng::new(5);
-    let depth: Vec<f32> = (0..width * height)
-        .map(|i| match ((3 * (i % width) + i / width) % 7, i % 2) {
-            (3, 0) => 0.0,
-            (3, _) => f32::NAN,
-            _ => rng.range(0.5, 3.0),
+    let hand = robot.ee_pose(&q, 0).position;
+    let padding = 0.01;
+    // A box 6 by 6 by 16 cm in the hand, a table 30 cm under the hand and a block on it.
+    let held = Held {
+        hand: 0,
+        object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.03, 0.03, 0.08)),
+        grasp: Pose::new(Vec3::new(0.0, 0.0, -0.04), Quat::IDENTITY),
+        locked: Default::default(),
+        spheres: SphereOptions::default(),
+    };
+    let object = held
+        .object
+        .placed(robot.ee_pose(&q, 0).mul_pose(held.grasp.inverse()));
+    let shapes = [
+        Obstacle::cuboid(hand + Vec3::new(0.0, 0.0, -0.32), Vec3::new(0.4, 0.4, 0.02)),
+        Obstacle::Cuboid {
+            center: hand + Vec3::new(0.1, -0.12, -0.25),
+            half_extents: Vec3::new(0.04, 0.03, 0.05),
+            rotation: Quat::from_rotation_z(0.5),
+        },
+    ];
+    let (width, height) = (48, 36);
+    let k = Intrinsics {
+        fx: 36.0,
+        fy: 36.0,
+        cx: 23.5,
+        cy: 17.5,
+    };
+    let camera = look_at(
+        hand + Vec3::new(0.55, 0.3, 0.2),
+        hand + Vec3::new(0.0, 0.0, -0.15),
+    );
+    let none = vec![0.0; width * height];
+    let blank = DepthImage {
+        depth: &none,
+        width,
+        intrinsics: k,
+        camera,
+    };
+    let seen: Vec<Vec<f32>> = (shapes.iter().chain([&object]))
+        .map(|shape| shape_depth(&blank, shape))
+        .collect();
+    let scene: Vec<f32> = (0..none.len())
+        .map(|i| seen.iter().map(|d| d[i]).fold(f32::INFINITY, f32::min))
+        .collect();
+    let rendered = with_arm(
+        &DepthImage {
+            depth: &scene,
+            ..blank
+        },
+        &robot,
+        &q,
+    );
+    // Of the readings, one in five moved 1 to 10 cm nearer, one in six 1 to 15 cm deeper and
+    // three in ten up to 2.5 cm either way, which sets many near a thing's margin; and one pixel
+    // in 25 without a reading.
+    let mut rng = Rng::new(6);
+    let unread = [0.0, -1.0, f32::NAN, f32::INFINITY];
+    let depth: Vec<f32> = (rendered.iter().enumerate())
+        .map(|(i, &z)| match rng.uniform() {
+            _ if !z.is_finite() => 0.0,
+            x if x < 0.04 => unread[i % 4],
+            x if x < 0.24 => z - rng.range(0.01, 0.1),
+            x if x < 0.4 => z + rng.range(0.01, 0.15),
+            x if x < 0.7 => z + rng.range(-0.025, 0.025),
+            _ => z,
         })
         .collect();
     let image = DepthImage {
         depth: &depth,
-        width,
-        intrinsics: Intrinsics {
-            fx: 10.0,
-            fy: 10.0,
-            cx: 6.0,
-            cy: 4.0,
-        },
-        camera: look_at(Vec3::new(5.0, 5.0, 2.0), Vec3::new(6.0, 6.0, 2.0)),
+        ..blank
     };
-    let read = |i: usize| depth[i] > 0.0;
-    let edges = [
-        pixel(0, 0),
-        pixel(width - 1, 0),
-        pixel(0, height - 1),
-        pixel(width - 1, height - 1),
-        pixel(width / 2, 0),
-        pixel(width / 2, height - 1),
-        pixel(0, height / 2),
-        pixel(width - 1, height / 2),
-    ];
-    let line: Vec<usize> = (0..6).map(|k| pixel(2 + k, 1 + k)).collect();
-    let unread = [pixel(1, 0), pixel(6, 6), pixel(4, 5), pixel(2, 4)];
-    assert!(unread.iter().all(|&i| !read(i)));
-    assert!(unread.iter().any(|&i| depth[i] == 0.0) && unread.iter().any(|&i| depth[i].is_nan()));
-    let flagged: [&[usize]; 5] = [&edges, &[pixel(width / 2, height / 2)], &line, &unread, &[]];
+    let points = image.points(None).unwrap();
+    let read = |i: usize| points[i].is_some();
+    for value in unread {
+        let pixels = (0..depth.len()).filter(|&i| depth[i].to_bits() == value.to_bits());
+        assert!(pixels.count() > 2, "pixels at {value}");
+    }
+    let forward = camera.rotation * Vec3::Z;
+    let depth_of = |p: Vec3| forward.dot(p - camera.position);
+    let spheres: Vec<(Vec3, f32)> = (robot.spheres(&q).iter())
+        .map(|&[x, y, z, r]| (Vec3::new(x, y, z), r))
+        .collect();
+    // The things, by kind: the spheres, the held box, the shapes.
+    let kind =
+        |thing: usize| usize::from(thing >= spheres.len()) + usize::from(thing > spheres.len());
+    let rays: Vec<Vec3> = (points.iter())
+        .map(|p| p.map_or(Vec3::Z, |p| (p - camera.position).normalize()))
+        .collect();
+    // Whether the ray through reading `i`, carried on from `from`, meets thing `thing`.
+    let meets = |thing: usize, from: Vec3, i: usize| match thing.checked_sub(spheres.len()) {
+        None => ball_ahead(spheres[thing].0, spheres[thing].1, from, rays[i]),
+        Some(0) => box_ahead(&object, from, rays[i]),
+        Some(s) => box_ahead(&shapes[s - 1], from, rays[i]),
+    };
+    let things = spheres.len() + 1 + shapes.len();
+    let ahead: Vec<Vec<bool>> = (0..depth.len())
+        .map(|i| match points[i] {
+            Some(p) => (0..things).map(|thing| meets(thing, p, i)).collect(),
+            None => vec![],
+        })
+        .collect();
+    let one = Device::cpu_threads(&robot, 1).unwrap();
+    let every: Vec<&Device> = devices().iter().chain([&one]).collect();
+    // Margins of each coefficient alone and all three, two reaching farther than the padding
+    // and two less far, and one that grows so steeply with depth that it reaches a centimeter
+    // farther at a reading 5 cm deeper; and two paddings, the second a shell in which a flagged
+    // reading lies farther from its sphere than most margins reach.
     let margins = [
-        [0.3, 0.0, 0.0],
-        [0.0, 0.3, 0.0],
-        [0.0, 0.0, 0.1],
-        [0.1, 0.1, 0.05],
+        [0.02, 0.0, 0.0],
+        [0.0, 0.03, 0.0],
+        [0.0, 0.0, 0.005],
+        [0.001, 0.002, 0.003],
+        [0.0, 0.0, 0.15],
     ];
-    for device in devices() {
-        let unflagged = image.robot_mask(&robot, &q, 0.04, &[]).unwrap();
-        assert!(!unflagged.on_robot.contains(&true), "the arm is elsewhere");
-        for margin in margins {
-            let reach = |z: f32| margin[0] + (margin[1] + margin[2] * z) * z;
-            let behind = |i: usize, j: usize| depth[j] < depth[i] - reach(depth[i]);
-            // Beside a flagged reading, a pixel apart: readings deeper by more than the margin,
-            // nearer by more, and level; and those the margin at the flagged reading's depth
-            // would judge otherwise. The readings taken in the image's first and last rows and
-            // columns, at every band but the first.
-            let (mut deeper, mut nearer, mut level, mut otherwise) = (0, 0, 0, 0);
-            let mut sides = [0; 4];
-            for flags in flagged {
-                let mut mask = unflagged.clone();
-                for &i in flags {
-                    mask.on_robot[i] = true;
-                }
-                let readings = flags.iter().copied().filter(|&j| read(j));
-                for j in readings {
-                    let beside = (0..depth.len())
-                        .filter(|&i| read(i) && i != j && pixels_apart(i, j, width) == 1);
-                    for i in beside.filter(|i| !flags.contains(i)) {
-                        if behind(i, j) {
-                            deeper += 1;
-                        } else if depth[i] < depth[j] - reach(depth[i]) {
-                            nearer += 1;
-                        } else {
-                            level += 1;
-                        }
-                        otherwise +=
-                            usize::from(behind(i, j) != (depth[j] < depth[i] - reach(depth[j])));
-                    }
-                }
-                for pixels in [0, 1, 2, 5, 2 * width] {
-                    let taken = |i: usize| {
-                        let near = |j: usize| read(j) && pixels_apart(i, j, width) <= pixels;
-                        read(i) && flags.iter().any(|&j| near(j) && behind(i, j))
-                    };
-                    let expected: Vec<bool> = (0..depth.len())
-                        .map(|i| flags.contains(&i) || taken(i))
-                        .collect();
-                    let (before, after) = (flags.len(), expected.iter().filter(|&&f| f).count());
-                    if pixels > 0 {
-                        let new = (0..depth.len()).filter(|&i| expected[i] && !flags.contains(&i));
-                        for i in new {
-                            let (u, v) = (i % width, i / width);
-                            sides[0] += usize::from(v == 0);
-                            sides[1] += usize::from(v == height - 1);
-                            sides[2] += usize::from(u == 0);
-                            sides[3] += usize::from(u == width - 1);
-                        }
-                    }
-                    let none_read = flags.iter().all(|&j| !read(j));
-                    if pixels == 0 || none_read {
-                        assert_eq!(after, before, "{before} flags, a band of {pixels}");
+    let cases = [padding, 0.03]
+        .into_iter()
+        .flat_map(|p| margins.map(|m| (p, m)));
+    // Readings taken through a thing of each kind that their rays passed through first, and
+    // readings in front of one, kept, at a band of five pixels.
+    let (mut through, mut before) = ([0; 3], [0; 3]);
+    for (padding, margin) in cases {
+        let reach = |z: f32| margin[0] + (margin[1] + margin[2] * z) * z;
+        let mut mask = image
+            .robot_mask(&robot, &q, padding, std::slice::from_ref(&held))
+            .unwrap()
+            .with_shapes(cpu(), &image, &shapes, margin)
+            .unwrap();
+        // A caller's flags on every pixel without a reading, and on one reading in fifty.
+        for i in 0..depth.len() {
+            mask.on_robot[i] |= !read(i) || rng.uniform() < 0.02;
+        }
+        let flags = mask.on_robot.clone();
+        // What each flagged reading is of, and the depth of that thing's point nearest it.
+        let owners: Vec<Vec<(usize, f32)>> = (0..depth.len())
+            .map(|j| {
+                let Some(p) = points[j].filter(|_| flags[j]) else {
+                    return vec![];
+                };
+                let balls = spheres.iter().enumerate().filter_map(|(s, &(c, r))| {
+                    let off = p - c;
+                    let near = if off.length() > r {
+                        c + off * (r / off.length())
                     } else {
-                        assert!(after > before, "{before} flags, a band of {pixels}");
+                        p
+                    };
+                    let grown = r + padding;
+                    (off.length_squared() < grown * grown).then(|| (s, depth_of(near)))
+                });
+                let box_of = (object.distance(p).value < padding)
+                    .then(|| (spheres.len(), depth_of(box_nearest(&object, p))));
+                let shapes_of = (shapes.iter().enumerate())
+                    .filter(|(_, shape)| shape.distance(p).value <= reach(depth[j]))
+                    .map(|(s, shape)| (spheres.len() + 1 + s, depth_of(box_nearest(shape, p))));
+                balls.chain(box_of).chain(shapes_of).collect()
+            })
+            .collect();
+        let kinds = (0..3).map(|n| owners.iter().flatten().filter(|o| kind(o.0) == n).count());
+        assert!(
+            kinds.clone().all(|n| n > 0),
+            "flags of each kind: {:?}",
+            kinds.collect::<Vec<_>>()
+        );
+        for pixels in [0, 1, 2, 5, 2 * width, usize::MAX] {
+            let window = |i: usize| {
+                let (u, v) = (i % width, i / width);
+                let end = |at: usize, n: usize| at.saturating_add(pixels).saturating_add(1).min(n);
+                let columns = u.saturating_sub(pixels)..end(u, width);
+                let rows = v.saturating_sub(pixels)..end(v, height);
+                rows.flat_map(move |w| columns.clone().map(move |x| w * width + x))
+            };
+            let taken = |i: usize| {
+                let nearer = depth[i] - reach(depth[i]);
+                let by = |j: usize| owners[j].iter().any(|&(t, d)| d < nearer && !ahead[i][t]);
+                read(i) && !flags[i] && window(i).any(by)
+            };
+            let expected: Vec<bool> = (0..depth.len()).map(|i| flags[i] || taken(i)).collect();
+            let (count, after) = (
+                flags.iter().filter(|&&f| f).count(),
+                expected.iter().filter(|&&f| f).count(),
+            );
+            if pixels == 0 {
+                assert_eq!(after, count, "a band of 0 at {margin:?}");
+            } else {
+                assert!(after > count, "a band of {pixels} at {margin:?}");
+            }
+            if pixels == 5 {
+                for i in (0..depth.len()).filter(|&i| read(i) && !flags[i]) {
+                    let nearer = depth[i] - reach(depth[i]);
+                    let pairs = window(i).flat_map(|j| owners[j].iter().copied());
+                    for (thing, _) in pairs.filter(|&(_, d)| d < nearer) {
+                        let passed = meets(thing, camera.position, i);
+                        if ahead[i][thing] {
+                            before[kind(thing)] += 1;
+                        } else if passed {
+                            through[kind(thing)] += 1;
+                        }
                     }
-                    let banded = (mask.clone())
-                        .with_band(device, &image, margin, pixels)
-                        .unwrap();
-                    assert!(
-                        banded.on_robot == expected,
-                        "{before} flags, a band of {pixels} at {margin:?}: {} flagged where {after}",
-                        banded.on_robot.iter().filter(|&&f| f).count()
-                    );
                 }
             }
-            assert!(
-                deeper > 5 && nearer > 5 && level > 5,
-                "{deeper} deeper, {nearer} nearer, {level} level at {margin:?}"
-            );
-            let by_depth = margin[1] > 0.0 || margin[2] > 0.0;
-            assert!(
-                !by_depth || otherwise > 0,
-                "{otherwise} told apart at {margin:?}"
-            );
-            assert!(sides.iter().all(|&n| n > 0), "{sides:?} taken at the sides");
+            for device in &every {
+                let banded = (mask.clone())
+                    .with_band(device, &image, margin, pixels)
+                    .unwrap();
+                assert!(
+                    banded.on_robot == expected,
+                    "a band of {pixels} at {margin:?} on {}: {} flagged where {after}, of {count}",
+                    device.name(),
+                    banded.on_robot.iter().filter(|&&f| f).count()
+                );
+            }
         }
-        // A margin below zero or no number, and a mask of another image.
-        let other = DepthImage {
-            depth: &depth[..width * (height - 1)],
-            ..image
+    }
+    assert!(
+        through.iter().chain(&before).all(|&n| n > 0),
+        "taken through a sphere, the held box and a shape: {through:?}; kept before: {before:?}"
+    );
+    // A margin below zero or no number, and a mask of another image.
+    let other = DepthImage {
+        depth: &depth[..width * (height - 1)],
+        ..image
+    };
+    let mask = || image.robot_mask(&robot, &q, padding, &[]).unwrap();
+    for refused in [
+        mask().with_band(cpu(), &image, [0.004, -0.1, 0.0], 1),
+        mask().with_band(cpu(), &image, [0.004, 0.0, f32::NAN], 1),
+        mask().with_band(cpu(), &other, [0.004, 0.0, 0.0], 1),
+    ] {
+        assert!(matches!(refused, Err(Error::Input(_))));
+    }
+}
+
+/// What stands on a table given as a shape keeps every reading whose ray goes on into the table,
+/// whatever the band and the view. The table's own flagged readings a few rows below a box on it
+/// lie nearer than the box's lower rows by more than the margin, but the table lies behind the
+/// box along each of the box's rays. A box 1 cm high and 16 cm long that no shape explains, seen
+/// from across the table as `examples/perception.rs` sees it, at bands of 1, 2, 5 and 8 pixels,
+/// and from 30 cm over the table 1.5 m out, at bands of 3 and 5: the band takes none of its
+/// readings, and the map holds the voxels it holds without the band.
+#[test]
+fn a_band_keeps_what_stands_on_a_held_table_at_any_band() {
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    let k = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
+    let table = Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02));
+    let block = Obstacle::cuboid(Vec3::new(0.55, -0.1, 0.005), Vec3::new(0.02, 0.08, 0.005));
+    let margin = [0.004, 0.0, 0.0];
+    let views = [
+        (
+            look_at(Vec3::new(1.4, 0.3, 0.9), Vec3::new(0.4, 0.0, 0.1)),
+            &[1, 2, 5, 8][..],
+        ),
+        (
+            look_at(Vec3::new(2.05, -0.1, 0.3), Vec3::new(0.55, -0.1, 0.005)),
+            &[3, 5][..],
+        ),
+    ];
+    let reaches = |p: Vec3| block.distance(p).value <= 0.5 * 3f32.sqrt() * 0.01;
+    for device in devices() {
+        let on = device.name();
+        for (view, &(camera, bands)) in views.iter().enumerate() {
+            let depth = look_at_shapes(&[&table, &block], camera, k);
+            let image = DepthImage {
+                depth: &depth,
+                width: 640,
+                intrinsics: k,
+                camera,
+            };
+            let its = shape_depth(&image, &block);
+            let mask = image.robot_mask(&robot, &q, 0.04, &[]).unwrap();
+            let mask = mask
+                .with_shapes(device, &image, std::slice::from_ref(&table), margin)
+                .unwrap();
+            // The box's readings but those within the margin of the table, which are its.
+            let readings: Vec<usize> = (0..depth.len())
+                .filter(|&i| its[i] == depth[i] && !mask.on_robot[i])
+                .collect();
+            assert!(
+                readings.len() > 250,
+                "{} readings of the box, which no shape explains, from view {view}",
+                readings.len()
+            );
+            let voxels = |mask: &RobotMask| {
+                let mut map = OccupancyMap::try_new(
+                    Vec3::new(-0.3, -0.8, -0.1),
+                    Vec3::new(1.1, 0.8, 0.3),
+                    0.01,
+                )
+                .unwrap();
+                map.integrate(device, &image, Some(mask)).unwrap();
+                map.occupied().into_iter().filter(|&p| reaches(p)).count()
+            };
+            let without = voxels(&mask);
+            for &pixels in bands {
+                // The box's readings with a flagged reading within the band nearer by more than
+                // the margin: those a comparison of depths alone would take.
+                let nearer = (readings.iter())
+                    .filter(|&&i| {
+                        let (u, v) = (i % 640, i / 640);
+                        let rows = v.saturating_sub(pixels)..(v + pixels + 1).min(480);
+                        let mut window = rows.flat_map(|w| {
+                            (u.saturating_sub(pixels)..(u + pixels + 1).min(640))
+                                .map(move |x| w * 640 + x)
+                        });
+                        window.any(|j| mask.on_robot[j] && depth[j] < depth[i] - margin[0])
+                    })
+                    .count();
+                let banded = (mask.clone())
+                    .with_band(device, &image, margin, pixels)
+                    .unwrap();
+                let taken = readings.iter().filter(|&&i| banded.on_robot[i]).count();
+                let with = voxels(&banded);
+                assert!(
+                    (pixels < 3 || nearer > 0) && taken == 0 && with == without && without > 10,
+                    "view {view}, a band of {pixels} on {on}: {nearer} of the box's {} readings \
+                     have a flagged one nearer within the band; {taken} taken; its voxels \
+                     {without} without the band and {with} with it",
+                    readings.len()
+                );
+            }
+        }
+    }
+}
+
+/// A surface level with a flagged one keeps its readings: they are measured against the thing's
+/// surface, not against the flagged readings beside them and their noise. A wall square on to
+/// the camera, the half of it on one side a shape and the other half not. Read exactly at one
+/// depth, at a margin of zero and a band of one pixel, the level half keeps every reading. Read
+/// with noise of a third of the margin a deviation, at bands of 1, 2 and 5, it keeps every
+/// reading within the margin of the wall's plane, though for many of them a flagged reading
+/// within the band lies nearer by more than the margin.
+#[test]
+fn a_band_keeps_a_surface_level_with_a_flagged_one() {
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    let (width, height) = (64, 48);
+    let k = Intrinsics {
+        fx: 64.0,
+        fy: 64.0,
+        cx: 31.5,
+        cy: 23.5,
+    };
+    // A camera with the world's axes, away from the robot, and a wall a meter before it whose
+    // half to the left of the image's middle is a shape.
+    let camera = Pose::new(Vec3::new(5.0, 5.0, 0.0), Quat::IDENTITY);
+    let half = Obstacle::cuboid(Vec3::new(4.5, 5.0, 1.25), Vec3::new(0.5, 1.0, 0.25));
+    let mut rng = Rng::new(9);
+    // Exact depths with a margin of zero and the mask padded, so that the depths alone pass
+    // every level reading to the band's second look; then noise, with the mask unpadded.
+    let cases = [
+        (0.0, [0.0; 3], 0.04, &[1][..]),
+        (0.004 / 3.0, [0.004, 0.0, 0.0], 0.0, &[1, 2, 5][..]),
+    ];
+    for (deviation, margin, padding, bands) in cases {
+        let depth: Vec<f32> = (0..width * height)
+            .map(|_| 1.0 + deviation * rng.normal())
+            .collect();
+        let image = DepthImage {
+            depth: &depth,
+            width,
+            intrinsics: k,
+            camera,
         };
-        let mask = || unflagged.clone();
-        for refused in [
-            mask().with_band(device, &image, [0.004, -0.1, 0.0], 1),
-            mask().with_band(device, &image, [0.004, 0.0, f32::NAN], 1),
-            mask().with_band(device, &other, [0.004, 0.0, 0.0], 1),
-        ] {
-            assert!(matches!(refused, Err(Error::Input(_))));
+        let points = image.points(None).unwrap();
+        assert!(
+            deviation > 0.0 || points.iter().flatten().all(|p| p.z == 1.0),
+            "the wall is read exactly"
+        );
+        for device in devices() {
+            let on = device.name();
+            let mask = image.robot_mask(&robot, &q, padding, &[]).unwrap();
+            let mask = mask
+                .with_shapes(device, &image, std::slice::from_ref(&half), margin)
+                .unwrap();
+            let flagged = mask.on_robot.iter().filter(|&&f| f).count();
+            assert!(
+                flagged > 1_000 && flagged < 2_000,
+                "{flagged} flagged on {on}"
+            );
+            // The unflagged half's readings within the margin of the wall's plane.
+            let level: Vec<usize> = (0..depth.len())
+                .filter(|&i| !mask.on_robot[i])
+                .filter(|&i| points[i].is_some_and(|p| (p.z - 1.0).abs() <= margin[0]))
+                .collect();
+            for &pixels in bands {
+                let nearer = (level.iter())
+                    .filter(|&&i| {
+                        let (u, v) = (i % width, i / width);
+                        let rows = v.saturating_sub(pixels)..(v + pixels + 1).min(height);
+                        let mut window = rows.flat_map(|w| {
+                            (u.saturating_sub(pixels)..(u + pixels + 1).min(width))
+                                .map(move |x| w * width + x)
+                        });
+                        let slack = margin[0].max(padding);
+                        window.any(|j| mask.on_robot[j] && depth[j] - slack < depth[i] - margin[0])
+                    })
+                    .count();
+                let banded = (mask.clone())
+                    .with_band(device, &image, margin, pixels)
+                    .unwrap();
+                let taken = level.iter().filter(|&&i| banded.on_robot[i]).count();
+                assert!(
+                    nearer > 10 && taken == 0,
+                    "a band of {pixels} at {margin:?} on {on}: of {} level readings, {nearer} \
+                     pass the depths, {taken} taken",
+                    level.len()
+                );
+            }
         }
     }
 }
@@ -3902,8 +4235,8 @@ fn a_band_flags_the_readings_behind_a_flag_within_so_many_pixels() {
 /// and keeps what stands in front of one. A block on a table, both given as shapes, its outline
 /// read away from its true depth by more than the margin: on one side halfway to what lies behind
 /// it, on the other 2 cm nearer. Fused without a band, the readings behind fill voxels in mid-air
-/// beside the block; with a band of one pixel none do, and the readings in front stay, which is
-/// what the band gives up. A second block and a slat one pixel wide, which no shape explains and
+/// beside the block; with a band of one pixel or five none do, and the readings in front stay,
+/// which is what the band gives up. A second block and a slat one pixel wide, which no shape explains and
 /// which stand on the table, keep every reading and every voxel: they are in front of the table.
 #[test]
 fn a_band_leaves_out_what_is_read_behind_a_held_shape() {
@@ -4007,10 +4340,9 @@ fn a_band_leaves_out_what_is_read_behind_a_held_shape() {
             moved.clone().all(|&i| !mask.on_robot[i]),
             "unflagged before the band"
         );
-        let banded = (mask.clone()).with_band(device, &image, margin, 1).unwrap();
-        // Each mask's map: its voxels in mid-air, the second block's and the slat's, and whether
+        // A mask's map: its voxels in mid-air, the second block's and the slat's, and whether
         // every reading moved nearer fills its voxel.
-        let fused = [&mask, &banded].map(|mask| {
+        let fused = |mask: &RobotMask| {
             let mut map =
                 OccupancyMap::try_new(Vec3::new(2.0, -0.5, -0.1), Vec3::new(3.0, 0.5, 0.4), 0.01)
                     .unwrap();
@@ -4034,44 +4366,60 @@ fn a_band_leaves_out_what_is_read_behind_a_held_shape() {
                 count(&slat),
                 nearer.iter().all(filled),
             )
-        });
-        let taken = |pixels: &[usize]| {
-            let by_band = |&&i: &&usize| banded.on_robot[i] && !mask.on_robot[i];
-            pixels.iter().filter(by_band).count()
         };
+        let (mid_air, second_without, slat_without, filled) = fused(&mask);
         assert!(
-            deeper.iter().all(|&i| banded.on_robot[i]),
-            "the readings behind the block are taken on {on}"
+            mid_air > 8 && second_without > 80 && slat_without > 5 && filled,
+            "without a band on {on}: {mid_air} voxels in mid-air, {second_without} of the \
+             second block's, {slat_without} of the slat's"
         );
-        assert!(
-            fused[0].0 > 8 && fused[1].0 == 0,
-            "voxels in mid-air without a band and with it on {on}: {} and {}",
-            fused[0].0,
-            fused[1].0
-        );
-        // The second block and the slat stand in front of the table, which is a shape: nearer
-        // than its flagged readings around them, or level with them where they meet it.
-        let (second_taken, slat_taken) = (taken(&second_pixels), taken(&slat_pixels));
-        let [
-            (_, second_without, slat_without, _),
-            (_, second_with, slat_with, _),
-        ] = fused;
-        assert!(
-            second_taken == 0
-                && slat_taken == 0
-                && second_with == second_without
-                && slat_with == slat_without
-                && second_without > 80
-                && slat_without > 5,
-            "on {on}, the band takes {second_taken} of the second block's readings and \
-             {slat_taken} of the slat's; their voxels without and with it: {second_without} and \
-             {second_with}, {slat_without} and {slat_with}"
-        );
-        // What the band gives up: an outline read in front of the block stays a reading.
-        assert!(
-            !nearer.iter().any(|&i| banded.on_robot[i]) && fused.iter().all(|f| f.3),
-            "the readings before the block stay and fill their voxels on {on}"
-        );
+        for pixels in [1, 5] {
+            let banded = (mask.clone())
+                .with_band(device, &image, margin, pixels)
+                .unwrap();
+            let taken = |pixels: &[usize]| {
+                let by_band = |&&i: &&usize| banded.on_robot[i] && !mask.on_robot[i];
+                pixels.iter().filter(by_band).count()
+            };
+            let (mid_air, second_with, slat_with, filled) = fused(&banded);
+            assert!(
+                deeper.iter().all(|&i| banded.on_robot[i]) && mid_air == 0,
+                "a band of {pixels} on {on} takes the readings behind the block and leaves \
+                 {mid_air} voxels in mid-air"
+            );
+            // The second block and the slat stand in front of the table, which is a shape: the
+            // ray through each of their readings goes on into it, and the table takes none of
+            // them. The second block stands three pixels from the first's outline and behind
+            // its near face, on rays that miss it: within a band wider than that, its readings
+            // are the ring behind that outline the band gives up, and no others.
+            let ring = |i: &&usize| {
+                let mut first = block_pixels.iter().filter(|&&j| mask.on_robot[j]);
+                first.any(|&j| pixels_apart(**i, j, width) <= pixels)
+            };
+            let in_ring = second_pixels.iter().filter(ring).count();
+            let (second_taken, slat_taken) = (taken(&second_pixels), taken(&slat_pixels));
+            let outside = (second_pixels.iter())
+                .filter(|&&i| banded.on_robot[i] && !mask.on_robot[i])
+                .filter(|i| !ring(i))
+                .count();
+            let kept = second_taken == 0 && second_with == second_without;
+            assert!(
+                outside == 0
+                    && (pixels > 3 || (in_ring == 0 && kept))
+                    && slat_taken == 0
+                    && slat_with == slat_without,
+                "a band of {pixels} on {on} takes {second_taken} of the second block's readings, \
+                 {outside} of them outside the {in_ring} behind the first's outline, and \
+                 {slat_taken} of the slat's; their voxels without and with it: \
+                 {second_without} and {second_with}, {slat_without} and {slat_with}"
+            );
+            // What the band gives up: an outline read in front of the block stays a reading.
+            assert!(
+                !nearer.iter().any(|&i| banded.on_robot[i]) && filled,
+                "the readings before the block stay and fill their voxels, a band of {pixels} on \
+                 {on}"
+            );
+        }
     }
 }
 
