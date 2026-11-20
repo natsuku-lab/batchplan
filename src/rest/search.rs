@@ -40,8 +40,10 @@ pub struct RestProblem {
     /// set down a cell of the support apart, [`RestOptions::touching`] wide, for a rest that the
     /// spots lie too far apart to find: a flat bottom wider than a dished plate's floor stands
     /// evenly on its raised ring only within millimeters of the middle. That is as many more
-    /// spots as cells lie within the spacing of the point, 77 at the defaults. None looks no
-    /// closer anywhere.
+    /// spots as cells lie within the spacing of the point, 77 at the defaults. It also says which
+    /// place where the object nearly rests is looked at closer at every turn: the one nearest it
+    /// ([`rests_on`]). None looks closer only where no spot rests, about the middle of the
+    /// support.
     pub near: Option<Vec3>,
 }
 
@@ -158,10 +160,13 @@ const SPREAD: usize = 1024;
 /// turn, the one nearest where the problem would have the object ([`RestProblem::near`]), or
 /// without it the middle of the support, has the spots a cell ([`RestOptions::touching`]) apart
 /// within `spacing` of it tried too: with `near` at every turn, and without it only where no
-/// spot rests at any turn, so that a search that finds rests costs what it did. Rests found
-/// there come in the order the others do. Where the problem says where it would have the
-/// object, the spots about that point are tried as well. Only the object's rest is checked: the hand that sets it down and its way there are
-/// [`place`](crate::place)'s to check, with what the object may touch as its `support`.
+/// spot rests at any turn, so that a search that finds rests costs what it did. One place is
+/// looked at, not every place: such a strip is found near that spot and not along its length,
+/// so a caller that wants it elsewhere points there. Rests found there come in the order the
+/// others do. Where the problem says where it would have the object, the spots about that point
+/// are tried as well. Only the object's rest is checked: the hand that sets it down and its way
+/// there are [`place`](crate::place)'s to check, with what the object may touch as its
+/// `support`.
 ///
 /// They come at every turn, in an order whose first few are worth trying first: every spot at
 /// the first turn, then every spot at the next, and within a turn, the steadiest first and then
@@ -959,8 +964,10 @@ pub struct Blocking {
 /// Where it is not held or tips, what would be in its way there even if it held comes with it:
 /// flags that leave out part of what the object must lie against both leave it unheld and put
 /// that part in its way. The problems with no rest are searched again, every spot's outcome
-/// kept, and the places of the furthest stage judged once more for their details, so this costs
-/// about one more search of those problems; it runs only when asked for, here.
+/// kept, and where the furthest stage is `Tips` or `Blocked` each of its places is judged once
+/// more for the steadiest, so this costs one to two more searches of those problems: on a table
+/// where a box asked to tip 40 degrees tips everywhere, 63 ms to search and 126 ms to say why. It
+/// runs only when asked for, here.
 pub fn rest_failures(
     device: &Device,
     problems: &[RestProblem],
@@ -1182,8 +1189,12 @@ mod tests {
     }
 
     /// `object` on `surface` searched as `rests_on` searches it: per kind of turn, the spots set
-    /// closer, and whether any spot rests.
-    fn searched(object: Obstacle, surface: &Surface, o: &RestOptions) -> Vec<(Vec<Vec2>, bool)> {
+    /// closer, whether any spot rests, and whether any of the grid's tips as set down.
+    fn searched(
+        object: Obstacle,
+        surface: &Surface,
+        o: &RestOptions,
+    ) -> Vec<(Vec<Vec2>, bool, bool)> {
         let p = RestProblem::new(object, 0);
         let surfaces = std::slice::from_ref(surface);
         let read =
@@ -1195,20 +1206,24 @@ mod tests {
                 .outcomes
                 .iter()
                 .any(|f| matches!(f, Outcome::Rests(..)));
-            (tried.nearer, rests)
+            let grid = &tried.outcomes[..problem.spots.count()];
+            let tips = grid.iter().any(|f| matches!(f, Outcome::Tips(false)));
+            (tried.nearer, rests, tips)
         });
         each.collect()
     }
 
-    /// Where the grid finds rests and no place is pointed at, nothing is set closer: a box on a
-    /// table costs what the grid does.
+    /// Where the grid finds rests and no place is pointed at, nothing is set closer: a box 20 cm
+    /// tall on a table, which tips at the table's rim and rests inside it, costs what the grid
+    /// does.
     #[test]
     fn a_search_that_finds_rests_sets_nothing_closer() {
         let o = RestOptions::default();
-        let a_box = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.03, 0.025));
-        let kinds = searched(a_box, &table(0.0), &o);
-        assert!(kinds.iter().any(|(_, rests)| *rests));
-        assert!(kinds.iter().all(|(nearer, _)| nearer.is_empty()));
+        let tall = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.1));
+        let kinds = searched(tall, &table(0.0), &o);
+        assert!(kinds.iter().any(|(_, rests, _)| *rests));
+        assert!(kinds.iter().any(|(_, _, tips)| *tips));
+        assert!(kinds.iter().all(|(nearer, _, _)| nearer.is_empty()));
     }
 
     /// A slender bottle that tips everywhere on a table read with noise has no rest, and what is
@@ -1227,9 +1242,9 @@ mod tests {
             .map(|(i, j)| Vec2::new(i as f32, j as f32) + spot.round())
             .filter(|at| at.distance(spot) * o.touching <= o.spacing)
             .count();
-        assert!(kinds.iter().all(|(_, rests)| !rests));
-        assert!(kinds.iter().any(|(nearer, _)| !nearer.is_empty()));
-        for (nearer, _) in &kinds {
+        assert!(kinds.iter().all(|(_, rests, _)| !rests));
+        assert!(kinds.iter().any(|(nearer, _, _)| !nearer.is_empty()));
+        for (nearer, _, _) in &kinds {
             assert!(nearer.len() <= disc, "{} past {disc}", nearer.len());
         }
     }
