@@ -878,58 +878,6 @@ fn nearer(
     nearer
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A grid of outcomes from one letter a spot, the first row first: `r` rests, `t` tips, `b`
-    /// is blocked, `u` is not held, `-` has nothing under it.
-    fn grid(rows: &[&str]) -> (Vec<Outcome>, usize, usize) {
-        let rest = Rest {
-            pose: Pose::IDENTITY,
-            support: vec![],
-            tipping: 0.1,
-        };
-        let each = rows.iter().flat_map(|row| row.chars());
-        let outcomes = each
-            .map(|c| match c {
-                'r' => Outcome::Rests(rest.clone(), false),
-                't' => Outcome::Tips,
-                'b' => Outcome::Blocked,
-                'u' => Outcome::Unheld,
-                _ => Outcome::Unsupported,
-            })
-            .collect();
-        (outcomes, rows[0].len(), rows.len())
-    }
-
-    /// Where every spot tips, the seeds are its edge, whose neighbors off the grid hold nothing;
-    /// a spot that tips beside a rest is none, and one beside a spot that holds nothing is one.
-    #[test]
-    fn looking_closer_starts_where_a_spot_tips_between_none_and_nothing() {
-        let (all, across, rows) = grid(&["tttt", "tttt", "tttt", "tttt"]);
-        let edge: Vec<usize> = (0..16)
-            .filter(|&k| k % 4 == 0 || k % 4 == 3 || k / 4 == 0 || k / 4 == 3)
-            .collect();
-        assert_eq!(seeds(&all, across, rows), edge);
-        let (beside_a_rest, across, rows) = grid(&["uuu", "utr", "uuu"]);
-        assert!(seeds(&beside_a_rest, across, rows).is_empty());
-        let (beside_nothing, across, rows) = grid(&["ttt", "tt-", "ttt"]);
-        assert_eq!(
-            seeds(&beside_nothing, across, rows),
-            [0, 1, 2, 3, 4, 6, 7, 8]
-        );
-        // Inside, among spots that tip or are blocked, none is; beside one not held, those
-        // around it are, and those beside a rest are not.
-        let (inside, across, rows) = grid(&["bbbbb", "btttb", "btttb", "btttb", "bbbbb"]);
-        assert!(seeds(&inside, across, rows).is_empty());
-        let (unheld, across, rows) = grid(&["bbbbb", "btttb", "bttub", "btttb", "bbbbb"]);
-        assert_eq!(seeds(&unheld, across, rows), [7, 8, 12, 17, 18]);
-        let (rested, across, rows) = grid(&["bbbbb", "btttb", "bttub", "bttrb", "bbbbb"]);
-        assert_eq!(seeds(&rested, across, rows), [7, 8]);
-    }
-}
-
 impl Setting<'_> {
     /// `missed`, what became of the object set down turned by `rotation`; with `WHY`, where it
     /// touched the support, what would be in its way where it was set down left in `s`.
@@ -1157,4 +1105,56 @@ fn failure(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A grid of outcomes from one letter a spot, the first row first: `r` rests, `t` tips, `b`
+    /// is blocked, `u` is not held, `-` has nothing under it.
+    fn grid(rows: &[&str]) -> (Vec<Outcome>, usize, usize) {
+        let rest = Rest {
+            pose: Pose::IDENTITY,
+            support: vec![],
+            tipping: 0.1,
+        };
+        let each = rows.iter().flat_map(|row| row.chars());
+        let outcomes = each
+            .map(|c| match c {
+                'r' => Outcome::Rests(rest.clone(), false),
+                't' => Outcome::Tips,
+                'b' => Outcome::Blocked,
+                'u' => Outcome::Unheld,
+                _ => Outcome::Unsupported,
+            })
+            .collect();
+        (outcomes, rows[0].len(), rows.len())
+    }
+
+    /// Where every spot tips, the seeds are its edge, whose neighbors off the grid hold nothing;
+    /// a spot that tips beside a rest is none, and one beside a spot that holds nothing is one.
+    #[test]
+    fn looking_closer_starts_where_a_spot_tips_between_none_and_nothing() {
+        let (all, across, rows) = grid(&["tttt", "tttt", "tttt", "tttt"]);
+        let edge: Vec<usize> = (0..16)
+            .filter(|&k| k % 4 == 0 || k % 4 == 3 || k / 4 == 0 || k / 4 == 3)
+            .collect();
+        assert_eq!(seeds(&all, across, rows), edge);
+        let (beside_a_rest, across, rows) = grid(&["uuu", "utr", "uuu"]);
+        assert!(seeds(&beside_a_rest, across, rows).is_empty());
+        let (beside_nothing, across, rows) = grid(&["ttt", "tt-", "ttt"]);
+        assert_eq!(
+            seeds(&beside_nothing, across, rows),
+            [0, 1, 2, 3, 4, 6, 7, 8]
+        );
+        // Inside, among spots that tip or are blocked, none is; beside one not held, those
+        // around it are, and those beside a rest are not.
+        let (inside, across, rows) = grid(&["bbbbb", "btttb", "btttb", "btttb", "bbbbb"]);
+        assert!(seeds(&inside, across, rows).is_empty());
+        let (unheld, across, rows) = grid(&["bbbbb", "btttb", "bttub", "btttb", "bbbbb"]);
+        assert_eq!(seeds(&unheld, across, rows), [7, 8, 12, 17, 18]);
+        let (rested, across, rows) = grid(&["bbbbb", "btttb", "bttub", "bttrb", "bbbbb"]);
+        assert_eq!(seeds(&rested, across, rows), [7, 8]);
+    }
 }
