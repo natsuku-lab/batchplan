@@ -272,6 +272,19 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   the camera across the table; 0.9 where 1.4, 1.6 where 2.2, 1.4 where 1.7 and 1.2 where 1.5 from
   the one on the hand. A mask without shapes runs the instructions it ran.
 
+- `with_shapes` tests a shape only in the pixels its box, grown by the margin, projects to once
+  cut to the camera's view, where a box that reached the plane the camera stands in was tested at
+  every pixel; each pixel's point is taken once for every shape, a point outside a shape's box
+  grown by the margin is no test of its distance, and each shape's rotation is made a matrix once
+  a call. A floor or a wall around the cell costs by what of it the camera may see, and one
+  behind the camera or beside its view nothing. The flags are those the margin gives, and a
+  reading past the depth at which a margin that grows with the square of the depth outruns the
+  depth a second time, which no pixel bound held, is now flagged where it lies within the margin.
+  A 640×480 image with the scene's three shapes (`examples/perception.rs`, the quickest median of
+  eight runs alternated with the code before) takes 0.26 ms where 0.37 on the M4 Pro's 14 threads
+  and 0.23 where 0.34 on the Ryzen's 32 from the camera across the table, and 0.31 where 0.44
+  and 0.27 where 0.41 from the one on the hand.
+
 - **Breaking:** a robot's `SphereOptions` are checked whether its spheres are fitted or given
   (`RobotOptions::collision_model`), before anything is read: a budget of zero, or a tolerance or
   voxel size that is not positive, is an `Error::Input` from `Robot::load`, `from_urdf` and
