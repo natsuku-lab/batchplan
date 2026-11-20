@@ -484,10 +484,7 @@ fn bars_hold_what_spans_them_and_cradle_what_is_laid_between_them() {
         assert!(ways(1.0) > 0 && ways(1.0) == ways(-1.0));
     }
     // Stood on its end and leaning a few degrees, it is not rolled: on a table read with a
-    // millimeter of noise, whatever rests it has are on the spots. Leaning 3 degrees, it tips
-    // where it overhangs the rim, at spots all around which it tips too and where the noise makes
-    // the table push two ways: the spots set closer about them, a cell apart, find rests within a
-    // spacing of there too.
+    // millimeter of noise, whatever rests it has are on the spots.
     let mut rng = Rng::new(11);
     let mut noisy = table();
     for p in &mut noisy.points {
@@ -496,14 +493,9 @@ fn bars_hold_what_spans_them_and_cradle_what_is_laid_between_them() {
     for degrees in [1.0f32, 3.0] {
         let leaning = Quat::from_rotation_x(degrees.to_radians());
         for r in rests_turned(&can, leaning, &noisy, &RestOptions::default()) {
-            let at = r.pose.position.truncate();
-            let from_a_spot = (at / 0.01 - 0.5).round() + 0.5;
-            let off = (at - from_a_spot * 0.01).length();
-            let cells = at / 0.002;
-            let closer = degrees > 1.0
-                && at.abs().max_element() + 0.033 + 0.01 > 0.15
-                && (cells - cells.round()).abs().max_element() < 1e-3;
-            assert!(off < 1e-5 || closer, "{off} m off its spot: {r:?}");
+            let from_a_spot = (r.pose.position.truncate() / 0.01 - 0.5).round() + 0.5;
+            let off = (r.pose.position.truncate() - from_a_spot * 0.01).length();
+            assert!(off < 1e-5, "{off} m off its spot: {r:?}");
         }
     }
     // On a table it rolls, and has no rest.
@@ -650,13 +642,26 @@ fn near_where_the_caller_would_have_it_the_spots_are_a_cell_apart() {
     for r in &plain {
         assert!(found.contains(r), "lost: {r:?}");
     }
-    // Near a point off the plate, as far off as may be, nothing more is tried.
+    // Near a point off the plate, as far off as may be, none of the point's own spots is over
+    // it, and what is looked at closer is about the one spot where the bowl nearly rests nearest
+    // the point: every rest it had without, and those more within a spacing of one spot.
     for far in [0.5f32, 1e7, f32::MAX] {
         let off = RestProblem {
             near: Some(Vec3::new(far, 0.5, 0.0)),
             ..problem.clone()
         };
-        assert_eq!(rests(&off, &plate), plain, "{far}");
+        let found = rests(&off, &plate);
+        for r in &plain {
+            assert!(found.contains(r), "lost near {far}: {r:?}");
+        }
+        let more: Vec<Vec2> = found
+            .iter()
+            .filter(|r| !plain.contains(r))
+            .map(|r| r.pose.position.truncate())
+            .collect();
+        for at in &more {
+            assert!(at.distance(more[0]) <= 2.0 * o.spacing, "{at} near {far}");
+        }
     }
     // On a table, where a box rests at every spot, it rests at every closer spot too, at each
     // turn: those a cell apart out to the spacing from the point, each a place of its own but
@@ -2336,37 +2341,46 @@ fn on_the_grid(r: &Rest, o: &RestOptions) -> bool {
     (cells - cells.round()).abs().max_element() < 1e-3
 }
 
-/// The centimeters along x, from the rack's own frame turned by `turn`, in which a rest's middle
-/// stands.
-fn centimeters(found: &[Rest], turn: Quat) -> HashSet<i32> {
-    let along = |r: &Rest| (turn.inverse() * r.pose.position).x;
-    found
-        .iter()
-        .map(|r| (along(r) * 100.0).floor() as i32)
-        .collect()
+/// The spot of the grid over the lip's top of [`slope`] moved `along` x, nearest `x` along the
+/// lip, the first of two as near: where the bottle stood upright nearly rests.
+fn over_the_lip(x: f32, along: f32, o: &RestOptions) -> Vec2 {
+    let foot = 0.1 * 30f32.to_radians().cos();
+    let row = ((foot / o.spacing - 0.5).ceil() + 0.5) * o.spacing;
+    let below = ((x / o.spacing - 0.5).floor() + 0.5) * o.spacing;
+    let column = if x - below <= below + o.spacing - x {
+        below
+    } else {
+        below + o.spacing
+    };
+    let first = ((-0.1 + along) / o.spacing).floor() * o.spacing + 0.5 * o.spacing;
+    Vec2::new(column.max(first), row)
 }
 
-#[test]
-fn an_upright_bottle_rests_against_the_lip_of_a_sloping_rack() {
-    // Stood upright on a slope of 30 degrees with a lip 1 cm high and 1 cm wide at its foot, the
-    // bottle rests where its rim behind lies on the slope and its bottom on the lip's top, its
-    // middle far enough in from the lip's edge to tip 5 degrees: a strip 2 mm deep, between the
-    // rows of the grid a centimeter apart. The spots set closer about the grid's near misses
-    // find it along the lip's length, and only there.
-    let o = RestOptions::default();
-    let rack = slope(30.0, true);
-    let found = rests(&bottle(), &rack, &o);
+/// What every rest of the bottle against the lip of [`slope`] keeps: held by force and torque,
+/// tipping as far as asked, upright, over the lip's top and on the lattice of the support's
+/// cells or of the spots about `near`, each place once a turn, none on a spot of the grid.
+fn against_the_lip(found: &[Rest], rack: &Surface, near: Option<Vec2>, o: &RestOptions) {
     let foot = 0.1 * 30f32.to_radians().cos();
     let mut places = HashSet::new();
-    for r in &found {
-        assert!(holds(&bottle(), r, &rack, &o), "{r:?}");
+    for r in found {
+        assert!(holds(&bottle(), r, rack, o), "{r:?}");
         assert!(r.tipping >= o.tipping, "{r:?}");
         assert!(up(r).z > 0.9999, "{r:?}");
-        assert!(!on_the_grid(r, &o), "{r:?}");
-        // On the lattice the support's cells are centred on, each place once a turn.
-        let cells = r.pose.position.truncate() / o.touching;
-        assert!((cells - cells.round()).abs().max_element() < 1e-3, "{r:?}");
+        assert!(!on_the_grid(r, o), "{r:?}");
+        let on = |origin: Vec2| {
+            let cells = (r.pose.position.truncate() - origin) / o.touching;
+            (cells - cells.round()).abs().max_element() < 1e-3
+        };
+        assert!(on(Vec2::ZERO) || near.is_some_and(on), "{r:?}");
+        // A place on its lattice: the support's cells', or the point's.
+        let origin = if on(Vec2::ZERO) {
+            Vec2::ZERO
+        } else {
+            near.unwrap_or_default()
+        };
+        let cells = (r.pose.position.truncate() - origin) / o.touching;
         let place = (
+            origin.to_array().map(f32::to_bits),
             cells.round().as_ivec2().to_array(),
             r.pose.rotation.to_array().map(f32::to_bits),
         );
@@ -2374,44 +2388,158 @@ fn an_upright_bottle_rests_against_the_lip_of_a_sloping_rack() {
         let over = r.pose.position.y - foot;
         assert!((0.0..0.004).contains(&over), "over the lip's top: {r:?}");
     }
-    let along = centimeters(&found, Quat::IDENTITY);
-    assert!(
-        along.len() >= 18,
-        "{} of the lip's 20: {along:?}",
-        along.len()
-    );
+}
+
+#[test]
+fn an_upright_bottle_is_found_against_the_lip_about_where_it_nearly_rests() {
+    // Stood upright on a slope of 30 degrees with a lip 1 cm high and 1 cm wide at its foot, the
+    // bottle rests where its rim behind lies on the slope and its bottom on the lip's top, its
+    // middle far enough in from the lip's edge to tip 5 degrees: a strip 2 mm deep between the
+    // rows of the grid a centimeter apart, which find no rest. On the lip's top it nearly rests,
+    // and about the spot there nearest the middle of the support the spots set closer find the
+    // strip, as far along the lip as the spacing each way. The rack lies 3.3 cm along x, so that
+    // the middle of the support is not the frame's origin.
+    let o = RestOptions::default();
+    let along = 0.033;
+    let mut rack = slope(30.0, true);
+    for p in &mut rack.points {
+        p.x += along;
+    }
+    let found = rests(&bottle(), &rack, &o);
+    assert!(!found.is_empty());
+    against_the_lip(&found, &rack, None, &o);
+    let spot = over_the_lip(along, along, &o);
+    let xs = found.iter().map(|r| r.pose.position.x);
+    let (least, most) = xs.fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), x| {
+        (a.min(x), b.max(x))
+    });
+    for r in &found {
+        let at = r.pose.position.truncate();
+        assert!(
+            at.distance(spot) <= o.spacing + 1e-6,
+            "{r:?} is not about {spot}"
+        );
+    }
+    assert!(most - least > o.spacing, "{least}..{most} along the lip");
     assert!(rests(&bottle(), &slope(30.0, false), &o).is_empty());
 }
 
 #[test]
-fn a_lip_the_grid_meets_at_a_spot_is_found_along_its_length() {
-    // The rack turned half a degree about the vertical: the grid's spots meet the strip where it
-    // can stand in two places, and the spots set closer find the rest of it.
+fn near_where_the_caller_points_the_bottle_is_found_against_the_lip() {
+    // Told where it would have the bottle, the search looks closer about the spot where it nearly
+    // rests nearest that point: along the lip where the caller points, and below a point far up
+    // the slope, as a harness gives the middle of the rack's top.
     let o = RestOptions::default();
+    let rack = slope(30.0, true);
+    let foot = 0.1 * 30f32.to_radians().cos();
+    let points = [
+        Vec2::new(-0.062, foot + 0.002),
+        Vec2::new(0.0, foot + 0.002),
+        Vec2::new(0.071, foot + 0.002),
+        Vec2::new(0.0, 0.005),
+    ];
+    for point in points {
+        let near = RestProblem {
+            near: Some(point.extend(0.1)),
+            ..RestProblem::new(bottle(), 0)
+        };
+        let found = rests_on(&device(), &[near], std::slice::from_ref(&rack), &o)
+            .unwrap()
+            .remove(0);
+        assert!(!found.is_empty(), "near {point}");
+        against_the_lip(&found, &rack, Some(point), &o);
+        let spot = over_the_lip(point.x, 0.0, &o);
+        for r in &found {
+            let at = r.pose.position.truncate();
+            let about = at.distance(spot).min(at.distance(point));
+            assert!(
+                about <= o.spacing + 1e-6,
+                "{r:?} near {point}, about {spot}"
+            );
+        }
+    }
+    // The rack turned half a degree, where a spot of the grid meets the strip: the grid finds
+    // that place, and with nothing pointed at nothing more is looked for; pointed far up the
+    // slope at the other end of the lip, the place below the point is found too.
     let turn = Quat::from_rotation_z(0.5f32.to_radians());
-    let mut rack = slope(30.0, true);
-    for p in &mut rack.points {
+    let mut turned = slope(30.0, true);
+    for p in &mut turned.points {
         *p = turn * *p;
     }
-    for n in &mut rack.normals {
+    for n in &mut turned.normals {
         *n = turn * *n;
     }
-    let found = rests(&bottle(), &rack, &o);
-    let on_grid = found.iter().filter(|r| on_the_grid(r, &o)).count();
-    assert!(
-        on_grid > 0 && on_grid < found.len() / 10,
-        "{on_grid} of {}",
-        found.len()
-    );
-    for r in &found {
-        assert!(holds(&bottle(), r, &rack, &o), "{r:?}");
+    let plain = rests(&bottle(), &turned, &o);
+    assert!(!plain.is_empty());
+    assert!(plain.iter().all(|r| on_the_grid(r, &o)), "{plain:?}");
+    let ends = [-0.08f32, 0.08];
+    let gap = |x: f32| {
+        let off = plain.iter().map(|r| (r.pose.position.x - x).abs());
+        off.fold(f32::INFINITY, f32::min)
+    };
+    let x = if gap(ends[0]) > gap(ends[1]) {
+        ends[0]
+    } else {
+        ends[1]
+    };
+    assert!(gap(x) > 3.0 * o.spacing, "the grid's place lies at {x}");
+    let up_there = RestProblem {
+        near: Some(Vec3::new(x, -0.05, 0.1)),
+        ..RestProblem::new(bottle(), 0)
+    };
+    let found = rests_on(&device(), &[up_there], std::slice::from_ref(&turned), &o)
+        .unwrap()
+        .remove(0);
+    let below = found
+        .iter()
+        .filter(|r| (r.pose.position.x - x).abs() <= o.spacing + o.touching && !on_the_grid(r, &o));
+    assert!(below.count() > 0, "nothing near {x}: {found:?}");
+    for r in &plain {
+        assert!(found.contains(r), "lost: {r:?}");
     }
-    let along = centimeters(&found, turn);
-    assert!(
-        along.len() >= 18,
-        "{} of the lip's 20: {along:?}",
-        along.len()
-    );
+}
+
+#[test]
+fn a_place_near_the_point_comes_once_on_the_lattice_or_off_it() {
+    // Pointed at the lip, on the lattice of the support's cells and a tenth of a millimeter off
+    // it: the point's own spots and those set closer about the spot where the bottle nearly
+    // rests overlap, and a place both meet comes once.
+    let o = RestOptions::default();
+    let rack = slope(30.0, true);
+    let foot = 0.1 * 30f32.to_radians().cos();
+    let on = Vec2::new(0.0, ((foot + 0.002) / o.touching).round() * o.touching);
+    for point in [on, on + Vec2::splat(1e-4)] {
+        let near = RestProblem {
+            near: Some(point.extend(0.1)),
+            ..RestProblem::new(bottle(), 0)
+        };
+        let found = rests_on(&device(), &[near], std::slice::from_ref(&rack), &o)
+            .unwrap()
+            .remove(0);
+        assert!(!found.is_empty(), "near {point}");
+        for (k, r) in found.iter().enumerate() {
+            let at = r.pose.position.truncate();
+            let again = found[..k].iter().find(|q| {
+                q.pose.rotation == r.pose.rotation
+                    && q.pose.position.truncate().distance(at) < 0.5 * o.touching
+            });
+            assert!(again.is_none(), "near {point}, twice: {r:?} and {again:?}");
+        }
+    }
+}
+
+#[test]
+fn a_slender_bottle_that_tips_everywhere_on_a_noisy_table_has_no_rest() {
+    // 2 cm across and 24 cm tall, it tips past 5 degrees on any flat top; on a table read with
+    // a millimeter of noise the spots set closer about where it nearly rests find none either.
+    let o = RestOptions::default();
+    let slender = Obstacle::cylinder(Vec3::ZERO, 0.01, 0.12);
+    let mut rng = Rng::new(17);
+    let mut noisy = table();
+    for p in &mut noisy.points {
+        p.z += rng.range(-0.001, 0.001);
+    }
+    assert!(rests(&slender, &noisy, &o).is_empty());
 }
 
 /// [`table`] with two blocks on it, the support's where `flagged`.
@@ -2429,9 +2557,8 @@ fn cluttered(flagged: bool) -> Surface {
 
 #[test]
 fn on_a_table_every_rest_stands_on_a_spot_of_the_grid() {
-    // Where a box or a can rests at a spot, or tips at the table's rim beside one that does, as a
-    // box 20 cm tall, nothing is set closer: as many rests as the grid alone found, each on a spot
-    // of it.
+    // Where a box or a can rests at a spot, and no place is pointed at, nothing is set closer: as
+    // many rests as the grid alone found, each on a spot of it.
     let o = RestOptions::default();
     let can = Obstacle::cylinder(Vec3::ZERO, 0.03, 0.05);
     let tall = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.1));
@@ -2561,19 +2688,14 @@ fn a_problem_without_rests_says_how_near_the_search_came() {
     );
 
     // A box 20 cm tall on a post 1.5 cm across: held upright and tipping, as far as its middle
-    // is in from the post's edge allows, the steadiest of all, where the spots about the post's
-    // middle find it (a flat top pushes one way: none are set closer there); its support the
-    // post's top.
-    let on_the_post = RestProblem {
-        near: Some(Vec3::ZERO),
-        ..RestProblem::new(tall.clone(), 0)
-    };
+    // is in from the post's edge allows, the steadiest of all, where the spots set closer about
+    // the spot nearest the post's middle find it; its support the post's top.
     let Some(RestFailure::Tips {
         pose,
         support,
         tipping,
         blocked,
-    }) = failure(&on_the_post, &post(0.0075), &o)
+    }) = failure(&RestProblem::new(tall.clone(), 0), &post(0.0075), &o)
     else {
         panic!("not tipping");
     };
