@@ -221,6 +221,19 @@ fn main() -> Result<()> {
                 sum(&grid)
             );
         }
+        // A map of the room around the robot, 2.9 m by 2.9 m by 1.55 m: on a CPU device a fuse
+        // costs by what the camera sees of it, on a GPU by its size.
+        let (lo, hi) = (Vec3::new(-1.45, -1.45, -0.1), Vec3::new(1.45, 1.45, 1.45));
+        let mut room = OccupancyMap::try_new(lo, hi, 0.01)?;
+        for (label, mask) in &masks[..2] {
+            let (median, best, fused) = timed(9, || room.integrate(&device, &image, mask.as_ref()));
+            fused?;
+            let counts = room.counts();
+            println!(
+                "  the image fused into a map of 13.4M voxels, {label}: median {median:.2} ms, best {best:.2} ({} voxels occupied, {} free)",
+                counts.occupied, counts.free
+            );
+        }
         // The scene's shapes left out with the robot, as a world that holds them as obstacles
         // of its own would have them: what is then fused is what no shape explains.
         let robot = masks[1].1.clone().expect("the Panda's mask");

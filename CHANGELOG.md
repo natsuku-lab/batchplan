@@ -249,15 +249,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   size: a row of the map at a time, the fuse visits the voxels the image may see, and past them
   only those holding one of its readings and those a mask frees, with the same map to the byte.
   A 640×480 frame of a tabletop fused into a map of 13.4M voxels (2.9 m by 2.9 m by 1.55 m at
-  1 cm) takes 2.5 ms where 6.4 on the M4 Pro's 14 threads from a camera across the table, and
-  1.6 where 5.5 from one on the Panda's hand; into a 2.9 m cube of 24.9M voxels, which the views
-  reach farther down, 6.6 ms where 11.8 and 4.7 where 10.9 (best of eight runs alternated with
-  the code before, at a load of 7 to 13). A map of 1.8M voxels that the camera across the table
-  sees nearly all of takes what it took, and from the hand 1.5 ms where 1.7. On the Ryzen AI Max+
-  395's 32 threads the 13.4M map takes 6.0 ms where 12.5 and 3.7 where 9.5 (ten rounds
-  alternated, at a load of 7 to 19). The GPU's fuse is as it was: it sends the map to the
-  device and back, so a map that large now fuses quicker on a CPU device, and any device
-  fuses a map.
+  1 cm) takes 2.4 ms on the M4 Pro's 14 threads from a camera across the table, 1.4 times what a
+  map of 1.8M voxels it sees nearly all of takes, and 1.6 ms from one on the Panda's hand, which
+  sees less of it; with the Panda's mask, 3.1 and 1.9 ms. On the Ryzen AI Max+ 395's 32 threads
+  it takes 5.2 and 3.1 ms, and 6.5 and 3.5 with the mask (`examples/perception.rs`, the quickest
+  median of eight runs, at a load of 3.5 to 7.5 on the M4 Pro and 2 to 10 on the Ryzen). The
+  GPU's fuse is as it was: it sends the map to the device and back, so a frame fused into that
+  map takes 8.3 to 9.7 ms on the Radeon 8060S and 4.7 to 6.5 on the M4 Pro's GPU, and a map that
+  large now fuses quicker on a CPU device; any device fuses a map.
 
 - **Breaking:** a robot's `SphereOptions` are checked whether its spheres are fitted or given
   (`RobotOptions::collision_model`), before anything is read: a budget of zero, or a tolerance or
