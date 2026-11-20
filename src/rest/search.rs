@@ -137,9 +137,10 @@ const SPREAD: usize = 1024;
 /// high it is.
 ///
 /// The support is read from above, as a height in each cell [`RestOptions::touching`] wide: what
-/// is under a cell's highest point is taken as solid, so a support point whose normal faces down,
-/// as a shelf seen from below, holds nothing up, and a cell no point lies in is empty space: a
-/// floor no camera saw holds nothing. Each spot [`RestOptions::spacing`] apart over the support is
+/// is under a cell's highest point is taken as solid, so a support point whose normal faces down
+/// and that was not seen from above ([`Surface::seen_from`] no higher than it, or not known), as a
+/// shelf seen from below, holds nothing up, and a cell no point lies in is empty space: a floor no
+/// camera saw holds nothing. Each spot [`RestOptions::spacing`] apart over the support is
 /// tried at each turn `o` gives, the object set straight down until it touches. It rests where
 /// what it then touches holds it: its contacts, as stiff springs that push and do not pull, carry
 /// its weight, with friction only where the weight presses, and still do with the weight tipped

@@ -1133,6 +1133,40 @@ fn a_support_seen_only_from_below_holds_nothing_up() {
 }
 
 #[test]
+fn a_support_seen_from_above_holds_whatever_its_normals_say() {
+    // A board with a lip along it, read by a camera above it at a slant with enough noise that
+    // some normals fitted over 5 mm face down: where the camera's place is known they are the
+    // board's top, and the box rests where it does not when that place is not known.
+    let board = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.01), Vec3::new(0.15, 0.12, 0.01));
+    let lip = Obstacle::cuboid(Vec3::new(0.0, 0.08, 0.005), Vec3::new(0.15, 0.005, 0.005));
+    let eye = Vec3::new(0.5, 0.0, 0.3);
+    let s = measured(&[board, lip], &[0, 1], eye, Vec3::ZERO, 0.003);
+    let down = (0..s.points.len()).filter(|&k| s.object[k] && s.normals[k].z < -0.5);
+    assert!(down.count() > 20);
+    let o = RestOptions::default();
+    let known = rests(&a_box(), &s, &o);
+    let mut unknown = s.clone();
+    unknown.seen_from.clear();
+    let without = rests(&a_box(), &unknown, &o);
+    assert!(
+        known.len() > without.len() + 100,
+        "{} with where it was seen from, {} without",
+        known.len(),
+        without.len()
+    );
+    // A shelf seen from below holds nothing up, its place known or not: seen from a meter off,
+    // its points lie about one to a cell, each the highest of its own.
+    let shelf = Obstacle::cuboid(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.1, 0.1, 0.01));
+    let from_below = Vec3::new(0.1, 0.0, 0.05);
+    let mut under = seen(&[shelf], &[0], from_below, Vec3::new(0.0, 0.0, 1.0));
+    assert!(under.points.len() > 1000);
+    assert!(under.normals.iter().all(|n| n.z < -0.5));
+    assert!(rests(&a_box(), &under, &o).is_empty());
+    under.seen_from.fill(Vec3::INFINITY);
+    assert!(rests(&a_box(), &under, &o).is_empty());
+}
+
+#[test]
 fn the_first_rests_are_spread_over_the_support_the_steadiest_first() {
     let found = rests(&a_box(), &table(), &RestOptions::default());
     let first = &found[..8];
