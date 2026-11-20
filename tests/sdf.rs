@@ -2435,6 +2435,261 @@ fn a_filtered_image_puts_nothing_in_mid_air() {
     }
 }
 
+/// The table, two blocks and the camera of the tests of shapes a caller holds: a table two meters
+/// from the arm, a block on it, and a smaller block beside the first.
+fn held_shapes() -> ([Obstacle; 3], Pose, Intrinsics) {
+    let k = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
+    let shapes = [
+        Obstacle::cuboid(Vec3::new(2.5, 0.0, -0.05), Vec3::new(0.4, 0.4, 0.05)),
+        Obstacle::cuboid(Vec3::new(2.5, 0.0, 0.05), Vec3::splat(0.05)),
+        Obstacle::cuboid(Vec3::new(2.3, 0.2, 0.03), Vec3::splat(0.03)),
+    ];
+    let camera = look_at(Vec3::new(3.3, 0.0, 0.7), Vec3::new(2.5, 0.0, 0.0));
+    (shapes, camera, k)
+}
+
+/// The depths of a 640 by 480 look at `shapes` from `camera`, 0 where a ray meets none.
+fn look_at_shapes(shapes: &[&Obstacle], camera: Pose, k: Intrinsics) -> Vec<f32> {
+    let none = vec![0.0; 640 * 480];
+    let image = DepthImage {
+        depth: &none,
+        width: 640,
+        intrinsics: k,
+        camera,
+    };
+    let depths: Vec<Vec<f32>> = shapes.iter().map(|s| shape_depth(&image, s)).collect();
+    let nearest = |i: usize| depths.iter().map(|d| d[i]).fold(f32::INFINITY, f32::min);
+    let depth = (0..none.len()).map(nearest);
+    depth.map(|z| if z.is_finite() { z } else { 0.0 }).collect()
+}
+
+/// A mask given shapes flags exactly the readings within the margin of one, the margin growing
+/// with the reading's depth as its three coefficients say: for a box, a ball, a cylinder and a
+/// capsule, turned, and for a floor that reaches behind the camera.
+#[test]
+fn a_mask_flags_the_readings_within_the_margin_of_a_shape() {
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    let (shapes, camera, k) = held_shapes();
+    let turn = Quat::from_euler(EulerRot::XYZ, 0.3, -0.4, 0.9);
+    let more = [
+        Obstacle::Cuboid {
+            center: Vec3::new(2.6, -0.25, 0.08),
+            half_extents: Vec3::new(0.06, 0.02, 0.04),
+            rotation: turn,
+        },
+        Obstacle::Sphere {
+            center: Vec3::new(2.3, -0.2, 0.05),
+            radius: 0.05,
+        },
+        Obstacle::Cylinder {
+            center: Vec3::new(2.7, 0.25, 0.06),
+            rotation: turn,
+            radius: 0.03,
+            half_height: 0.05,
+        },
+        Obstacle::Capsule {
+            center: Vec3::new(2.45, 0.3, 0.05),
+            rotation: turn,
+            radius: 0.02,
+            half_length: 0.04,
+        },
+    ];
+    // A floor under it all, out past the camera's own place.
+    let floor = Obstacle::cuboid(Vec3::new(2.5, 0.0, -0.3), Vec3::new(3.0, 3.0, 0.1));
+    let scene: Vec<&Obstacle> = shapes.iter().chain(&more).chain([&floor]).collect();
+    let depth = look_at_shapes(&scene, camera, k);
+    let image = DepthImage {
+        depth: &depth,
+        width: 640,
+        intrinsics: k,
+        camera,
+    };
+    let robot_mask = image.robot_mask(&robot, &q, 0.04, &[]).unwrap();
+    assert!(!robot_mask.on_robot.contains(&true), "the arm is elsewhere");
+    let points = image.points(None).unwrap();
+    // Held: every shape but the second block, each alone and all at once.
+    let all: Vec<Obstacle> = (scene.iter().enumerate())
+        .filter(|&(i, _)| i != 2)
+        .map(|(_, s)| (*s).clone())
+        .collect();
+    let alone = all.iter().map(std::slice::from_ref);
+    for held in alone.chain([&all[..]]) {
+        for margin in [[0.004, 0.0, 0.0], [0.001, 0.002, 0.003], [0.0, 0.0, 0.02]] {
+            let mask = (robot_mask.clone())
+                .with_shapes(&devices()[0], &image, held, margin)
+                .unwrap();
+            let within = |(i, p): (usize, &Option<Vec3>)| {
+                let reach = margin[0] + (margin[1] + margin[2] * depth[i]) * depth[i];
+                p.is_some_and(|p| held.iter().any(|s| s.distance(p).value <= reach))
+            };
+            let expected: Vec<bool> = points.iter().enumerate().map(within).collect();
+            let flags = expected.iter().filter(|&&f| f).count();
+            assert!(flags > 500, "{flags} readings of {} shapes", held.len());
+            let wrong = (mask.on_robot.iter().zip(&expected))
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(
+                wrong,
+                0,
+                "of {flags} readings, {} shapes, {margin:?}",
+                held.len()
+            );
+        }
+    }
+    // The second block's readings are no shape's, whatever the margin of those tried.
+    let second = shape_depth(&image, &shapes[2]);
+    let its = (0..depth.len()).filter(|&i| second[i] == depth[i]).count();
+    assert!(its > 1_000, "{its} readings of the second block");
+    // A mask of another image, a margin below zero or no number, and a shape that is none.
+    let small = DepthImage {
+        depth: &depth[..640 * 400],
+        ..image
+    };
+    let flat = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.1, -0.1, 0.1));
+    let mask = || robot_mask.clone();
+    for refused in [
+        mask().with_shapes(&devices()[0], &small, &all, [0.004, 0.0, 0.0]),
+        mask().with_shapes(&devices()[0], &image, &all, [0.004, -0.1, 0.0]),
+        mask().with_shapes(&devices()[0], &image, &all, [f32::NAN, 0.0, 0.0]),
+        mask().with_shapes(&devices()[0], &image, &[flat], [0.004, 0.0, 0.0]),
+    ] {
+        assert!(matches!(refused, Err(Error::Input(_))));
+    }
+}
+
+/// What a caller holds as a shape is left out of a map. With a table and a block on it given to
+/// the mask, one look fuses neither: the space each fills is free, with the voxels that reach
+/// into it, and what only the block hides is shadow. So nothing is said to the map when the
+/// block is carried away. What a shape does not cover stays the map's, as does a block no shape
+/// explains, and a reading the caller flags itself is left out too.
+#[test]
+fn what_a_caller_holds_as_a_shape_is_left_out_of_a_map() {
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    let ([table, block, other], camera, k) = held_shapes();
+    let margin = [0.004, 0.0, 0.0];
+    // Inside the block, at its middle and a centimeter in from a corner, and at the middle of
+    // its top; before it toward the camera; on the table behind it, which the camera sees only
+    // once the block is gone; and inside the table, at its middle and near an edge.
+    let inside = Vec3::new(2.5, 0.0, 0.05);
+    let corner = Vec3::new(2.54, 0.04, 0.05);
+    let top = Vec3::new(2.5, 0.0, 0.1);
+    let before = Vec3::new(2.62, 0.0, 0.2);
+    let hidden = Vec3::new(2.4, 0.0, 0.02);
+    let under = Vec3::new(2.5, 0.0, -0.05);
+    let edge = Vec3::new(2.88, 0.38, -0.03);
+    for device in devices() {
+        let new = || {
+            OccupancyMap::try_new(Vec3::new(2.0, -0.5, -0.1), Vec3::new(3.0, 0.5, 0.4), 0.01)
+                .unwrap()
+        };
+        // A look at `shapes` fused into `map`, with `held` given to the mask and the readings
+        // `flag` picks flagged by the caller.
+        let fuse = |map: &mut OccupancyMap,
+                    shapes: &[&Obstacle],
+                    held: &[Obstacle],
+                    flag: &dyn Fn(Vec3) -> bool| {
+            let depth = look_at_shapes(shapes, camera, k);
+            let image = DepthImage {
+                depth: &depth,
+                width: 640,
+                intrinsics: k,
+                camera,
+            };
+            let mask = image.robot_mask(&robot, &q, 0.04, &[]).unwrap();
+            let mut mask = mask
+                .with_shapes(&devices()[0], &image, held, margin)
+                .unwrap();
+            let points = image.points(None).unwrap();
+            for (own, p) in mask.on_robot.iter_mut().zip(&points) {
+                *own |= p.is_some_and(flag);
+            }
+            map.integrate(device, &image, Some(&mask)).unwrap();
+            let left = image.points(Some(&mask)).unwrap();
+            let flags = mask.on_robot.iter().filter(|&&f| f).count();
+            assert_eq!(
+                left.iter().flatten().count() + flags,
+                points.iter().flatten().count(),
+                "a flagged reading is no point either"
+            );
+        };
+        let both = [table.clone(), block.clone()];
+        let no = |_: Vec3| false;
+
+        // One look, and nothing said to the map besides.
+        let mut map = new();
+        fuse(&mut map, &[&table, &block], &both, &no);
+        assert_eq!(map.counts().occupied, 0, "nothing of a held shape is fused");
+        for free in [inside, corner, top, before, under, edge] {
+            assert!(
+                map.occupancy(free).is_some_and(|o| o < 0.5),
+                "{free} is free on {}",
+                device.name()
+            );
+        }
+        // What only the block hides is shadow: solid where never-observed space is, and free
+        // where the caller takes shadow for free.
+        assert!(map.occupancy(hidden).is_none(), "nothing saw {hidden}");
+        let solid = map.grid(device, Occlusion::Occupied).unwrap();
+        let shadow = map
+            .grid(device, Occlusion::OccupiedExceptRobotShadow)
+            .unwrap();
+        assert!(solid.distance(hidden).value <= 0.0 && shadow.distance(hidden).value > 0.0);
+
+        // The block is carried away: the looks after say so, and nobody else has to. Five of
+        // them, so that the space over the table is as surely free as a map holds it.
+        for _ in 0..5 {
+            fuse(&mut map, &[&table], &both[..1], &no);
+        }
+        assert_eq!(map.counts().occupied, 0);
+        for free in [inside, before, hidden] {
+            assert!(
+                map.occupancy(free).is_some_and(|o| o < 0.5),
+                "{free} is free once the block is gone"
+            );
+        }
+        // A block no shape explains is the map's: filled by its third look, as a voxel seen
+        // through that often is, and not before.
+        let read = Vec3::new(2.3, 0.2, 0.06);
+        for look in 1..=3 {
+            fuse(&mut map, &[&table, &other], &both[..1], &no);
+            let filled = map.occupancy(read).is_some_and(|o| o > 0.5);
+            assert_eq!(filled, look == 3, "after {look} looks at the other block");
+        }
+
+        // A shape measured a centimeter small on every side: the block's top, which it does
+        // not cover, is the map's.
+        let small = Obstacle::cuboid(Vec3::new(2.5, 0.0, 0.04), Vec3::splat(0.04));
+        let mut map = new();
+        fuse(&mut map, &[&table, &block], &[table.clone(), small], &no);
+        assert!(map.occupancy(top).is_some_and(|o| o > 0.5), "{top} is read");
+        // A block whose top lies 2 mm under a layer of voxels, nearer than the camera tells a
+        // voxel before a surface from one on it: the layer reaches into the block, and is free
+        // with it.
+        let low = Obstacle::cuboid(Vec3::new(2.5, 0.0, 0.049), Vec3::new(0.05, 0.05, 0.049));
+        let mut map = new();
+        fuse(
+            &mut map,
+            &[&table, &low],
+            &[table.clone(), low.clone()],
+            &no,
+        );
+        assert_eq!(map.counts().occupied, 0);
+        assert!(map.occupancy(top).is_some_and(|o| o < 0.5), "{top} is free");
+        // Unless the caller flags those readings itself, as of an object it is about to grasp.
+        let mut map = new();
+        let its = |p: Vec3| block.distance(p).value < 0.004;
+        fuse(&mut map, &[&table, &block], &both[..1], &its);
+        assert_eq!(map.counts().occupied, 0, "a caller's flags are honoured");
+    }
+}
+
 /// A camera at `eye` looking at `target`, in OpenCV axes (x right, y down, z forward).
 fn look_at(eye: Vec3, target: Vec3) -> Pose {
     let forward = (target - eye).normalize();

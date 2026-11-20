@@ -96,7 +96,7 @@ fn main() -> Result<(), Error> {
 | A motion that comes fast and arrives slowly | `Trajectory::with_hand_speed` with a cap near the grasp (`HandSpeed::near`); many paths: `time`; in `pick`/`place`: `TaskOptions::tool_speed_near` | [timing](docs/planning.md#executable-trajectories) |
 | Running a motion while the world changes | `Follower`, `servo` | [live motion](docs/planning.md#live-motion) |
 | Obstacles from depth images or point clouds | `SdfGrid`, `OccupancyMap`, `DepthImage::filtered`, `DepthImage::robot_mask` | [perception](docs/perception.md) |
-| A perception library's labels and shapes, and what it needs back | The calls the two meet at | [perception](docs/perception.md#with-a-perception-library) |
+| A perception library's labels and shapes, and what it needs back; keeping one memory of each thing between its objects and a fused map | `RobotMask::with_shapes` for what is held as a shape, `Surface::from_depth` with the labels as flags | [perception](docs/perception.md#with-a-perception-library) |
 | One object as the cameras saw into it (an open drawer, a basket), and space known empty or stale | `OccupancyMap::part`, `free`, `clear`, `counts` | [perception](docs/perception.md#what-a-caller-knows-and-one-objects-part) |
 | Training data | `datagen`, `npy::export`, `lerobot::export` | [training data](docs/training-data.md) |
 

@@ -92,6 +92,17 @@ A camera that sees the arm would make it an obstacle to itself. `image.robot_mas
 
 Grids from depth images grow toward collision by about three voxels, so set the mask's `padding` above that (4 cm for 1 cm voxels); otherwise the robot's surface touches the space it hides. The padding is also what covers a sensor's errors at the arm's outline: a pixel that mixes the arm with what lies behind it reads somewhere between the two, and such a reading farther than the padding behind the arm is the world's to the mask.
 
+### Shapes the caller holds
+
+A cell's fixtures and the objects a caller has measured as shapes are obstacles of their own in the `World`. Fused into a map as well, each would be held twice, and what reads of it would grow toward collision around the shape itself. `mask.with_shapes(&device, &image, &shapes, margin)` leaves them out as the robot is, for the image the mask was made of:
+- a reading within the margin of a shape is the shape's: no obstacle, the space before it free, and what only it hides shadow;
+- the space a shape fills is free in a map the image is fused into, with the voxels that reach into it (those `map.part` keeps for it): nothing else can be where the shape is;
+- a reading farther than the margin from every shape stays a reading like any other. What a shape does not cover, as the handle of a mug measured as a cylinder, is the map's.
+
+`margin` is how far from a shape a reading at depth z may lie and be the shape's, `margin[0] + margin[1] z + margin[2] z²`: what the camera's noise reaches there, as three times a `DepthFilter`'s `noise`, and what the shapes and the camera's pose are off by. What only a shape hides is shadow as what only the robot hides is: solid under `Occlusion::Occupied`, and free under `OccupiedExceptRobotShadow` and `Band`, where a caller that gives shapes takes the space behind them for free.
+
+`RobotMask::on_robot` holds the flags, one per pixel, and a caller may set more of them: the readings of an object it is about to grasp, as whatever told them apart says, where a fitted shape does not cover the object and its readings would stand in the fingers' way.
+
 ## Fused maps
 
 `OccupancyMap::try_new(lo, hi, voxel)` is a fixed grid in the world frame that fuses frames as OctoMap does. Each voxel holds the log-odds that it is occupied: a hit adds 0.85 and a miss subtracts 0.4, clamped to [−2, 3.5]. Something seen once and then seen through three times is free again; something seen in five images or more, nine times. Voxels behind readings, outside the image or beyond the map are not updated.
@@ -169,20 +180,142 @@ The shape is any `Obstacle`, turned as it is: a measured object's box, a ball ab
 
 ## With a perception library
 
-batchplan reads depth; it does not say what things are. A library that finds objects in images (their pixels, their shapes, their poses) meets it at the calls below. Each takes or gives plain data (flags per pixel, points, shapes), so neither library depends on the other.
+batchplan reads depth; it does not say what things are. Its part is the one a motion-planning library's perception takes: cuRobo's perception module, for one, holds a depth filter, a robot segmenter and a mapper with its distance field, and nothing that tells objects apart. A library that does (which pixels are one thing, its shape, what it stands on, what is still there while hidden) meets batchplan at plain data, so neither depends on the other:
 
-| The perception side has | It meets batchplan at |
-|---|---|
-| A camera's depths | `image.filtered(&filter)` first, and an image of the result for every call below |
-| No use for the arm in its images | `image.robot_mask(..)?.on_robot`, a flag per pixel to leave out of what it segments |
-| A need for points in the world's frame | `image.points(mask)`, a point per pixel in the frame the camera is posed in |
-| The pixels of one object | `Surface::from_depth(&device, &image, &object, mask, radius)` with its labels as the flags; `grasps_on`, `rests_on` and `falls_into` read the surface |
-| A shape fitted to an object | An `Obstacle` in the `World`, and a problem's `holding` once the object is picked; `map.free(&shape, margin)` on a copy of the map keeps what the cameras read of it from being an obstacle a second time |
-| An object it can only bound, as a cabinet with a drawer open | `map.part(&bounds, padding)?.grid(&device, Occlusion::Occupied)`, the object as the cameras saw into it |
-| Something that moved | `map.clear(&shape, margin)` where it was and where it is |
-| A question about what is known | `obstacle.distance(point)`, `grid.distance(point)`, `map.occupancy(point)`, `map.counts()` |
+| | batchplan | The perception library |
+|---|---|---|
+| A camera's depths | Leaves out the readings between two surfaces (`filtered`) and says which are the robot's (`robot_mask`), for both to read | Reads them, with the robot's flags (`RobotMask::on_robot`) |
+| Things | Takes each as a shape (an `Obstacle` in the `World`, a problem's `holding` once picked, and left out of the map by `with_shapes`) and as flags per pixel (`Surface::from_depth`, for `grasps_on`, `rests_on` and `falls_into`); gives the distance to a shape known beforehand (`obstacle.distance(point)`) | Tells them apart, measures each as a shape, says what each stands on, and keeps the ones no camera can see |
+| Space | Holds what the cameras saw free, filled or never (`OccupancyMap`), and gives its distance field (`grid`, `part`) | Nothing |
 
-Which pixels are which object's, and what shape and pose fit them, stay on the perception side. What the cameras saw of space, where the robot is in each image, and everything a plan is checked against stay here.
+### One memory for each thing
+
+A scene remembered twice, as objects and as voxels, has to be kept in step by whoever uses both, and a fact said to one and not the other leaves a ghost. So each thing has one memory:
+
+- **What the caller holds as a shape is left out of the map** ([above](#shapes-the-caller-holds)): the robot, what a hand holds, the cell's fixtures, and the objects the perception library measured, seen or kept unseen. The shape itself is the obstacle.
+- **Everything else the cameras read is the map's**: what no object was made of, what a shape does not cover, and a thing whose shape is a poor solid, as a cabinet with a drawer open, for which the perception library's box only names a region (`map.part`).
+- **A plan is checked against both together**, the shapes and the map's grid. Nothing is taken out of that but what lies within the margin of a shape, so where the two differ the plan is the more careful one.
+
+```rust,no_run
+use batchplan::glam::{Quat, Vec3};
+use batchplan::{
+    DepthFilter, DepthImage, Device, Error, Intrinsics, Obstacle, Occlusion, OccupancyMap, Pose,
+    Robot, RobotOptions, Surface, World,
+};
+
+/// Stands in for a perception library: what it says one look shows.
+mod perception {
+    use batchplan::Obstacle;
+    use batchplan::glam::Vec3;
+
+    /// The objects a look found, each measured as a shape, and per pixel which object its
+    /// reading is of.
+    #[derive(Default)]
+    pub struct Scene {
+        pub shapes: Vec<Obstacle>,
+        pub object: Vec<Option<usize>>,
+    }
+
+    /// One camera's depths, which of them are the robot's and the distance to each shape known
+    /// beforehand, after the scene before.
+    pub fn look(
+        depth: &[f32],
+        robot: &[bool],
+        known: &[&(dyn Fn(Vec3) -> f32 + Sync)],
+        previous: Scene,
+    ) -> Scene {
+        let _ = (robot, known);
+        Scene {
+            shapes: previous.shapes,
+            object: vec![None; depth.len()],
+        }
+    }
+}
+
+fn main() -> Result<(), Error> {
+    let arm = Robot::load("assets/franka/franka_panda.urdf", &RobotOptions::default())?;
+    let device = Device::gpu(&arm).or_else(|_| Device::cpu(&arm))?;
+    let q = arm.default_q().to_vec();
+    // The cell, known without looking: a table.
+    let fixtures = [Obstacle::cuboid(
+        Vec3::new(0.5, 0.0, -0.05),
+        Vec3::new(0.5, 0.6, 0.05),
+    )];
+    let mut map =
+        OccupancyMap::try_new(Vec3::new(-0.2, -0.8, -0.1), Vec3::new(1.2, 0.8, 0.9), 0.01)?;
+
+    // One look. The depths come from your camera driver.
+    let depth = vec![1.0; 640 * 480];
+    let intrinsics = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
+    let image = DepthImage {
+        depth: &depth,
+        width: 640,
+        intrinsics,
+        camera: Pose::new(
+            Vec3::new(0.5, 0.0, 1.5),
+            Quat::from_rotation_x(std::f32::consts::PI),
+        ),
+    };
+    // batchplan: the depths without readings between two surfaces, and the robot's readings.
+    let filter = DepthFilter {
+        noise: [0.0, 0.0, 0.08 / (intrinsics.fx * 0.05)],
+        ..Default::default()
+    };
+    let depth = image.filtered(&filter)?;
+    let image = DepthImage {
+        depth: &depth,
+        ..image
+    };
+    let robot = image.robot_mask(&arm, &q, 0.04, &[])?;
+
+    // The perception library: what things there are. After a pick, a place or a pull, the scene
+    // passed in says so: that is the one place such a fact is said.
+    let distances: Vec<Box<dyn Fn(Vec3) -> f32 + Sync>> = fixtures
+        .iter()
+        .map(|fixture| Box::new(move |p| fixture.distance(p).value) as _)
+        .collect();
+    let known: Vec<&(dyn Fn(Vec3) -> f32 + Sync)> = distances.iter().map(|d| &**d).collect();
+    let scene = perception::look(&depth, &robot.on_robot, &known, perception::Scene::default());
+
+    // What is held as a shape is left out of the map: a reading within three deviations of
+    // the camera's noise of one is not fused, and the space each fills is free there.
+    let shapes: Vec<Obstacle> = fixtures.iter().chain(&scene.shapes).cloned().collect();
+    let held = (robot.clone()).with_shapes(&device, &image, &shapes, filter.noise.map(|c| 3.0 * c))?;
+    map.integrate(&device, &image, Some(&held))?;
+
+    // The world a plan is checked against: the shapes, and whatever was read that none
+    // explains. Where they explain all of it, there is no grid to make.
+    let mut obstacles = shapes;
+    if map.counts().occupied > 0 {
+        obstacles.push(Obstacle::from(map.grid(&device, Occlusion::Free)?));
+    }
+    let _worlds = device.upload(&[World::new(obstacles)])?;
+
+    // Grasps and rests of one object are taken on its pixels: the library's labels are the
+    // surface's flags, and the robot's mask alone stays the surface's mask.
+    let object: Vec<bool> = scene.object.iter().map(|of| *of == Some(0)).collect();
+    let _surface = Surface::from_depth(&device, &image, &object, Some(&robot), 0.005)?;
+    Ok(())
+}
+```
+
+The `perception` module stands in for the library; every call on batchplan's side is as a program run against one makes it, with the library's shapes turned into `Obstacle`s field for field.
+
+Said once, each to the memory that holds the thing:
+- **picked, placed, or gone**: to the scene. The map never held the object, so there is nothing to mark, and an object someone took away leaves the world in the look that sees its place empty;
+- **an object kept unseen**, as one the arm hides: it stays a shape, and the map reads free where it stands because the shape explains that space. If someone took it meanwhile, plans stay clear of it until a camera sees through;
+- **a pull or a push of something the map holds**, as a drawer: to the map, `map.clear(&shape, margin)` where it stood and where it stands.
+
+A thing passes from one memory to the other as the map weighs images. One that becomes a shape is seen through from that look on, and free once those looks outweigh the ones that filled it; `map.free(&shape, margin)` frees it at once. One that stops being a shape is read from that look on, and solid once its readings outweigh the looks that saw its place empty, three at most; `map.clear(&shape, margin)` where it stood makes its first reading count.
+
+Never-observed space is taken two ways, by where it lies:
+- Around the scene it is free, as it is for a world of shapes alone: `map.grid(&device, Occlusion::Free)`, or the grid of a `map.part` over where plans go, and none where `counts().occupied` is 0.
+- Inside a region the map holds for one large object it is solid: `map.part(&region, padding)?.grid(&device, Occlusion::Occupied)`. The copy the first grid is made of has that region marked free as far as the part reaches, `free(&region, 0.5 * 3f32.sqrt() * voxel)`, so the object's matter is in one grid only.
 
 ## Building grids on the GPU
 

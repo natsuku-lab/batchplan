@@ -1,5 +1,5 @@
 //! What the depth calls cost, a 640x480 image at a time: the image without the readings between
-//! two surfaces, which readings are the robot's, the image's points, a surface with its normals,
+//! two surfaces, which readings are the robot's or a known shape's, the image's points, a surface with its normals,
 //! a grid of the image, the image fused into a map, that map's grid, one object's part of it,
 //! and what a caller marks in it. For a camera over a table that sees the arm and for one the
 //! hand carries, with the Panda's 61 spheres and with it fitted to several hundred (a budget of
@@ -221,6 +221,26 @@ fn main() -> Result<()> {
                 sum(&grid)
             );
         }
+        // The scene's shapes left out with the robot, as a world that holds them as obstacles
+        // of its own would have them: what is then fused is what no shape explains.
+        let robot = masks[1].1.clone().expect("the Panda's mask");
+        let (median, best, held) = timed(21, || {
+            (robot.clone()).with_shapes(&device, &image, &scene.obstacles, [0.004, 0.0, 0.0])
+        });
+        let held = held?;
+        let on = held.on_robot.iter().filter(|&&on| on).count();
+        println!(
+            "  the scene's {} shapes left out too: median {median:.2} ms, best {best:.2} ({on} pixels)",
+            scene.obstacles.len()
+        );
+        let mut rest =
+            OccupancyMap::try_new(Vec3::new(-0.3, -0.8, -0.1), Vec3::new(1.1, 0.8, 0.7), 0.01)?;
+        let (median, best, fused) = timed(9, || rest.integrate(&device, &image, Some(&held)));
+        fused?;
+        println!(
+            "  the image fused into a map of 1.8M voxels without them: median {median:.2} ms, best {best:.2} ({} voxels occupied)",
+            rest.counts().occupied
+        );
         for unknown in [
             Occlusion::Free,
             Occlusion::OccupiedExceptRobotShadow,
