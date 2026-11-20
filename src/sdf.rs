@@ -564,10 +564,11 @@ impl RobotMask {
     /// the space before it free, and what only it hides shadow. The space a shape fills is free
     /// in a grid or a map of the image, and with it every voxel that reaches into the shape,
     /// its middle within half a voxel's diagonal of it, as a part of a map keeps them
-    /// ([`OccupancyMap::part`]): in every image, seen or not, as the robot's space is. So what
-    /// stands within the margin of a shape, or in a voxel that reaches into one, is taken for
-    /// the shape, and anything farther from every shape stays a reading like any other: what a
-    /// shape does not cover, as a handle on a mug measured as a cylinder, is the map's.
+    /// ([`OccupancyMap::part`]): in every image, seen or not, as the robot's space is. A
+    /// reading farther than the margin from every shape stays a reading like any other and
+    /// fills the voxel it falls in, one that reaches into a shape too, where it is kept as long
+    /// as images read it. What a shape does not cover, as a handle on a mug measured as a
+    /// cylinder, is the map's.
     ///
     /// `margin` is how far from a shape a reading at depth `z` may lie and be the shape's,
     /// `margin[0] + margin[1] * z + margin[2] * z * z` (meters): what the camera's noise reaches
