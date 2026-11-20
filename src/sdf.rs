@@ -705,6 +705,60 @@ impl RobotMask {
         Ok(self)
     }
 
+    /// The mask with every reading within `pixels` pixels of one it flags flagged too, along
+    /// rows, columns and diagonals (the larger of the two offsets at most `pixels`): the robot's,
+    /// a held object's or a shape's as the reading beside it is, with all that follows for a
+    /// flagged reading. `image` is the image the mask was made of; its rows are read on the
+    /// device's threads, each in a pass along the columns and one along the row, so the cost goes
+    /// by the image's pixels times `pixels`.
+    ///
+    /// `pixels` is a fact of the camera: how many pixels beside a depth jump it reads toward the
+    /// other surface. A sensor that samples each pixel's disparity a fraction of a pixel off
+    /// reads one; a stereo block matcher, half its window. Those readings lie between what the
+    /// mask flags and what is behind it, farther than the padding or the margin from either, and
+    /// would be obstacles in mid-air beside the robot and the shapes, where fingers go. The band
+    /// takes the ring of honest readings beside each flagged thing with them, as of a table
+    /// around an object on it. Zero changes nothing.
+    ///
+    /// Called after [`with_shapes`](Self::with_shapes), it grows the shapes' flags as well as the
+    /// robot's; called before, the robot's alone. A second call grows what the first left. The
+    /// space the mask frees in a grid or a map is what it was.
+    pub fn with_band(mut self, device: &Device, image: &DepthImage, pixels: usize) -> Result<Self> {
+        image.check_with(Some(&self))?;
+        let (width, height) = (image.width, image.height());
+        // A band as wide as the image reaches all of it.
+        let pixels = pixels.min(width.max(height));
+        // The flags as they were, read while each row's grow.
+        let flags = self.on_robot.clone();
+        device.install(|| {
+            let rows = self.on_robot.par_chunks_mut(width).enumerate();
+            rows.for_each_init(
+                || vec![false; width],
+                |near, (v, row)| {
+                    // Whether a flag lies within the band along the pixel's column.
+                    near.fill(false);
+                    for w in v.saturating_sub(pixels)..(v + pixels + 1).min(height) {
+                        for (close, &flag) in near.iter_mut().zip(&flags[w * width..][..width]) {
+                            *close |= flag;
+                        }
+                    }
+                    // Then whether one of those lies within it along the row: each marks the
+                    // band about it from where the one before left off.
+                    let mut end = 0;
+                    let flagged = near.iter().enumerate().filter(|(_, close)| **close);
+                    for (u, _) in flagged {
+                        let start = u.saturating_sub(pixels).max(end);
+                        end = (u + pixels + 1).min(width);
+                        for (x, own) in (start..end).zip(&mut row[start..end]) {
+                            *own |= image.reading(v * width + x).is_some();
+                        }
+                    }
+                },
+            );
+        });
+        Ok(self)
+    }
+
     /// A ball around each sphere and each held object, in that order: the sphere itself, and for
     /// an object every point within the padding of it.
     fn balls(&self) -> impl Iterator<Item = Vec4> + '_ {

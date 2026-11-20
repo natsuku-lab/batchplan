@@ -3739,6 +3739,204 @@ fn what_a_caller_holds_as_a_shape_is_left_out_of_a_map() {
     }
 }
 
+/// How many pixels apart `i` and `j` of an image `width` pixels wide lie along rows, columns and
+/// diagonals: the larger of their offsets.
+fn pixels_apart(i: usize, j: usize, width: usize) -> usize {
+    (i % width)
+        .abs_diff(j % width)
+        .max((i / width).abs_diff(j / width))
+}
+
+/// A band about what a mask flags flags exactly the readings within so many pixels of a flag,
+/// along rows, columns and diagonals, as a check of every pair of pixels says: for flags at an
+/// image's corners and edges, a single one, a diagonal line of them and none, in an image where
+/// some pixels have no reading, at bands of 0, 1, 2 and 5 pixels and one wider than the image.
+/// A mask of another image is an input error.
+#[test]
+fn a_band_flags_the_readings_within_so_many_pixels_of_a_flag() {
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    let (width, height) = (13, 9);
+    let pixel = |u: usize, v: usize| v * width + u;
+    // One pixel in seven has no reading, at 0 or no number; the flags below are all readings.
+    let depth: Vec<f32> = (0..width * height)
+        .map(|i| match ((3 * (i % width) + i / width) % 7, i % 2) {
+            (3, 0) => 0.0,
+            (3, _) => f32::NAN,
+            _ => 1.0 + 0.01 * i as f32,
+        })
+        .collect();
+    let image = DepthImage {
+        depth: &depth,
+        width,
+        intrinsics: Intrinsics {
+            fx: 10.0,
+            fy: 10.0,
+            cx: 6.0,
+            cy: 4.0,
+        },
+        camera: look_at(Vec3::new(5.0, 5.0, 2.0), Vec3::new(6.0, 6.0, 2.0)),
+    };
+    let read = |i: usize| depth[i] > 0.0;
+    let readings = (0..depth.len()).filter(|&i| read(i)).count();
+    let edges = [
+        pixel(0, 0),
+        pixel(width - 1, 0),
+        pixel(0, height - 1),
+        pixel(width - 1, height - 1),
+        pixel(width / 2, 0),
+        pixel(width / 2, height - 1),
+        pixel(0, height / 2),
+        pixel(width - 1, height / 2),
+    ];
+    let line: Vec<usize> = (0..6).map(|k| pixel(2 + k, 1 + k)).collect();
+    let flagged: [&[usize]; 4] = [&edges, &[pixel(width / 2, height / 2)], &line, &[]];
+    for device in devices() {
+        let unflagged = image.robot_mask(&robot, &q, 0.04, &[]).unwrap();
+        assert!(!unflagged.on_robot.contains(&true), "the arm is elsewhere");
+        for flags in flagged {
+            assert!(flags.iter().all(|&i| read(i)), "a flag is a reading's");
+            let mut mask = unflagged.clone();
+            for &i in flags {
+                mask.on_robot[i] = true;
+            }
+            for pixels in [0, 1, 2, 5, 2 * width] {
+                let near = |i: usize| flags.iter().any(|&j| pixels_apart(i, j, width) <= pixels);
+                let expected: Vec<bool> = (0..depth.len()).map(|i| read(i) && near(i)).collect();
+                let (before, after) = (flags.len(), expected.iter().filter(|&&f| f).count());
+                // The band reaches pixels without a reading, and past them; none is flagged.
+                let unread = (0..depth.len()).filter(|&i| !read(i) && near(i)).count();
+                match (before, pixels) {
+                    (0, _) => assert_eq!(after, 0),
+                    (_, 0) => assert_eq!(after, before),
+                    (_, p) if p > width => assert_eq!(after, readings),
+                    _ => assert!(after > before && unread > 0),
+                }
+                let banded = (mask.clone()).with_band(device, &image, pixels).unwrap();
+                assert!(
+                    banded.on_robot == expected,
+                    "{before} flags, a band of {pixels}: {} flagged where {after} are within it",
+                    banded.on_robot.iter().filter(|&&f| f).count()
+                );
+            }
+        }
+        // A mask of another image.
+        let other = DepthImage {
+            depth: &depth[..width * (height - 1)],
+            ..image
+        };
+        let refused = unflagged.clone().with_band(device, &other, 1);
+        assert!(matches!(refused, Err(Error::Input(_))));
+    }
+}
+
+/// A band about what a mask flags leaves out what a camera reads beside a held shape toward what
+/// lies behind it. A block on a table, both given as shapes, its outline read halfway to what is
+/// behind it, farther than the margin from either shape: fused without a band, those readings
+/// fill voxels in mid-air beside the block; with a band of one pixel, none. A second block no
+/// shape explains, three pixels from the first's outline, is the map's either way.
+#[test]
+fn a_band_leaves_out_what_is_read_beside_a_held_shape() {
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    let ([table, block, _], camera, k) = held_shapes();
+    let margin = [0.004, 0.0, 0.0];
+    let second = Obstacle::cuboid(Vec3::new(2.5, 0.09, 0.03), Vec3::splat(0.03));
+    let width = 640;
+    let mut depth = look_at_shapes(&[&table, &block, &second], camera, k);
+    let behind = look_at_shapes(&[&table, &second], camera, k);
+    let image = DepthImage {
+        depth: &depth,
+        width,
+        intrinsics: k,
+        camera,
+    };
+    let (ours, theirs) = (shape_depth(&image, &block), shape_depth(&image, &second));
+    // The block's readings, those with a pixel beside them that is not the block's, and the
+    // second block's.
+    let block_pixels: Vec<usize> = (0..depth.len()).filter(|&i| ours[i] == depth[i]).collect();
+    let outline: Vec<usize> = (block_pixels.iter().copied())
+        .filter(|&i| {
+            let (u, v) = (i % width, i / width);
+            let mut around =
+                (v - 1..=v + 1).flat_map(|v| (u - 1..=u + 1).map(move |u| v * width + u));
+            around.any(|j| ours[j] != depth[j])
+        })
+        .collect();
+    let seconds: Vec<usize> = (0..depth.len())
+        .filter(|&i| theirs[i] == depth[i])
+        .collect();
+    let apart = (seconds.iter())
+        .flat_map(|&i| outline.iter().map(move |&j| pixels_apart(i, j, width)))
+        .min();
+    assert_eq!(
+        apart,
+        Some(3),
+        "the second block stands three pixels from the outline"
+    );
+    assert!(block_pixels.len() > 3_000 && outline.len() > 200 && seconds.len() > 1_000);
+    // The outline read halfway to what lies behind it.
+    for &i in &outline {
+        assert!(behind[i] > depth[i], "pixel {i} has something behind it");
+        depth[i] = 0.5 * (depth[i] + behind[i]);
+    }
+    let image = DepthImage {
+        depth: &depth,
+        width,
+        intrinsics: k,
+        camera,
+    };
+    let points = image.points(None).unwrap();
+    let held = [table.clone(), block.clone()];
+    let beyond: Vec<usize> = (outline.iter().copied())
+        .filter(|&i| {
+            let p = points[i].expect("an outline pixel has a reading");
+            held.iter().all(|s| s.distance(p).value > margin[0])
+        })
+        .collect();
+    assert!(
+        beyond.len() > 80,
+        "{} of {} outline readings lie farther than the margin from both shapes",
+        beyond.len(),
+        outline.len()
+    );
+    // A voxel reaches into a shape where its middle lies within half its diagonal of it.
+    let reach = 0.5 * 3f32.sqrt() * 0.01;
+    for device in devices() {
+        let mask = image.robot_mask(&robot, &q, 0.04, &[]).unwrap();
+        assert!(!mask.on_robot.contains(&true), "the arm is elsewhere");
+        let mask = mask.with_shapes(device, &image, &held, margin).unwrap();
+        assert!(beyond.iter().all(|&i| !mask.on_robot[i]));
+        let banded = (mask.clone()).with_band(device, &image, 1).unwrap();
+        for (pixels, mask) in [(0, &mask), (1, &banded)] {
+            let mut map =
+                OccupancyMap::try_new(Vec3::new(2.0, -0.5, -0.1), Vec3::new(3.0, 0.5, 0.4), 0.01)
+                    .unwrap();
+            map.integrate(device, &image, Some(mask)).unwrap();
+            let occupied = map.occupied();
+            let reaches = |p: Vec3, shape: &Obstacle| shape.distance(p).value <= reach;
+            let its = occupied.iter().filter(|&&p| reaches(p, &second)).count();
+            let mid_air = (occupied.iter())
+                .filter(|&&p| ![&table, &block, &second].iter().any(|s| reaches(p, s)))
+                .count();
+            let beside = occupied.len() - its;
+            let on = device.name();
+            assert!(
+                its > 80,
+                "{its} voxels of the second block, a band of {pixels} on {on}"
+            );
+            if pixels == 0 {
+                assert!(
+                    mid_air > 15,
+                    "{mid_air} voxels in mid-air without a band on {on}"
+                );
+            } else {
+                assert_eq!(beside, 0, "voxels beside the block with a band on {on}");
+            }
+        }
+    }
+}
+
 /// A camera at `eye` looking at `target`, in OpenCV axes (x right, y down, z forward).
 fn look_at(eye: Vec3, target: Vec3) -> Pose {
     let forward = (target - eye).normalize();

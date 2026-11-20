@@ -10,6 +10,20 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- A band about what a mask flags: `mask.with_band(&device, &image, pixels)` flags every reading
+  within `pixels` pixels of one the mask flags, along rows, columns and diagonals, as that one's.
+  A depth camera reads the pixels beside a depth jump toward the other surface, one for a sensor
+  that samples each pixel's disparity a fraction of a pixel off and up to half the window for a
+  stereo block matcher; beside the arm or a shape given to `with_shapes`, those readings lie
+  farther than the padding or the margin from both surfaces and the filter keeps the ones near
+  either, so they were obstacles in mid-air where fingers go. `pixels` is that fact of the
+  camera. Called after `with_shapes` the band grows the shapes' flags with the robot's; its
+  price is the ring of readings around each flagged thing, as the table around an object on it
+  and the outline of an object no shape explains on a table given as one. A band of one pixel
+  about the Panda's mask and the scene's three shapes (`examples/perception.rs`, the camera
+  across the table) takes 0.12 ms for a 640×480 image on the M4 Pro's 14 threads and 0.17 on the
+  Ryzen's 32.
+
 - How much one image counts in a fused map: `map.with_weighing(Weighing)`. `Weighing::Evidence`,
   the default and the weighing until now, suits a stream of frames: a reading adds 0.85 to a
   voxel's log-odds and a ray through it takes 0.4, so it takes three images to fill a voxel seen

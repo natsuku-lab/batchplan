@@ -103,6 +103,13 @@ A cell's fixtures and the objects a caller has measured as shapes are obstacles 
 
 The readings are told apart on the device's threads, each pixel's point once for every shape. A shape is tested only in the pixels its box, grown by the margin, projects to once cut to the camera's view, and only where a point lies in that box: a floor or a wall around the cell costs by what of it the camera may see, and one behind the camera or beside its view costs nothing. With the scene's three shapes a 640×480 image takes 0.2 to 0.3 ms. A fuse with the mask frees the shapes' space as it frees the robot's ([below](#building-grids-on-the-gpu)). It finds that space a row of voxels at a time: every shape but a distance grid is convex, so a row of its box holds one run of voxels that reach into it, found by a few distance tests. A shape then costs a frame by the rows its box spans in the map rather than by their voxels: a wall turned across a corner of the map no longer tests every voxel of that corner, and a shape outside the map costs nothing.
 
+A depth camera also reads the pixels beside a depth jump toward the other surface: one for a sensor that samples each pixel's disparity a fraction of a pixel off, up to half its window for a stereo block matcher. Beside the outline of a shape or the arm, such a reading lies between it and what is behind it, farther than the margin or the padding from either, so it stays a reading: an obstacle in mid-air beside the object, where fingers go. The filter ([above](#readings-between-two-surfaces)) leaves out those far from both surfaces and keeps those near one. `mask.with_band(&device, &image, pixels)` flags every reading within `pixels` pixels of one the mask flags, along rows, columns and diagonals, as that one's, with all that follows for a flagged reading:
+- `pixels` is how many pixels beside a jump the camera reads toward the other surface, which its depth method sets, not a number to tune to a scene. A band of 0 changes nothing;
+- called after `with_shapes`, it grows the shapes' flags with the robot's; called before, the robot's alone. A second call grows what the first left. The space the mask frees in a grid or a map is what it was;
+- its price is the ring of readings, `pixels` wide, around each flagged thing: the table around an object on it, and the outline of whatever stands beside a flagged thing, as an object no shape explains on a table given as one, which keeps its readings inside that ring.
+
+The band runs on the device's threads, a pass along the columns and one along each row, so it costs by the image's pixels times `pixels`: a band of one pixel about the robot and the scene's three shapes takes 0.12 to 0.18 ms for a 640×480 image ([below](#building-grids-on-the-gpu)).
+
 `RobotMask::on_robot` holds the flags, one per pixel, and a caller may set more of them: the readings of an object it is about to grasp, as whatever told them apart says, where a fitted shape does not cover the object and its readings would stand in the fingers' way.
 
 ## Fused maps
@@ -199,7 +206,7 @@ A scene remembered twice, as objects and as voxels, has to be kept in step by wh
 
 - **What the caller holds as a shape is left out of the map** ([above](#shapes-the-caller-holds)): the robot, what a hand holds, the cell's fixtures, and the objects the perception library measured, seen or kept unseen. The shape itself is the obstacle.
 - **Everything else the cameras read is the map's**: what no object was made of, what a shape does not cover, and a thing whose shape is a poor solid, as a cabinet with a drawer open, for which the perception library's box only names a region (`map.part`).
-- **A plan is checked against both together**, the shapes and the map's grid. Nothing is taken out of that but readings within the margin of a shape, and what a voxel that reaches into one held from looks that read it no longer, so where the two differ the plan is the more careful one. Two choices give some of that up, and are the caller's to make: an occlusion rule under which shadow is free, and readings it flags itself.
+- **A plan is checked against both together**, the shapes and the map's grid. Nothing is taken out of that but readings within the margin of a shape, and what a voxel that reaches into one held from looks that read it no longer, so where the two differ the plan is the more careful one. Three choices give some of that up, and are the caller's to make: an occlusion rule under which shadow is free, readings it flags itself, and a band about the mask's flags ([above](#shapes-the-caller-holds)). The band's readings belong to no memory: they are left out as the shape's are, the ones a camera reads in mid-air beside its outline and the ring of what stands beside it.
 
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
@@ -292,10 +299,13 @@ fn main() -> Result<(), Error> {
     // What is held as a shape is left out of the map: a reading is a shape's within three
     // deviations of the camera's noise and the 5 mm this cell's shapes and camera are known
     // to, and the space each shape fills is free there. Noise alone would leave a camera
-    // stated without any a margin of zero.
+    // stated without any a margin of zero. This camera reads the pixel beside each depth jump
+    // toward the other surface: beside a shape, that reading is the shape's too.
     let shapes: Vec<Obstacle> = fixtures.iter().chain(&scene.shapes).cloned().collect();
     let margin = [0.005, 0.0, 3.0 * filter.noise[2]];
-    let held = (robot.clone()).with_shapes(&device, &image, &shapes, margin)?;
+    let held = (robot.clone())
+        .with_shapes(&device, &image, &shapes, margin)?
+        .with_band(&device, &image, 1)?;
     map.integrate(&device, &image, Some(&held))?;
 
     // The world a plan is checked against: the shapes, and whatever was read that none
@@ -343,7 +353,7 @@ Median build times for a 640×480 image of a table seen from 1 m:
 | M4 Pro (GPU) | 3.6 ms | 14.8 ms | 1.5 ms | 4.4 ms |
 | M4 Pro (CPU, 14 threads) | 6.4 ms | 36 ms | 2.2 ms | 6.9 ms |
 
-`examples/perception.rs` times each call for a 640×480 image that shows the arm: a tabletop seen from across the table, and from a camera on the Panda's palm that looks along its fingers. The mask is padded 4 cm, for the Panda's 61 spheres and for a Panda fitted with 573. Each figure is the quickest median of several runs (twenty on the M4 Pro, ten for the four rows of its CPU fusing, eight on the Ryzen and its Radeon, eight on each device for the two rows of the 13.4M-voxel map and for the fuse with the scene's three shapes left out, and eight for those shapes' readings told apart, on the M4 Pro each after a pause, as its first ten seconds of work run quicker than the rest) on machines doing other work beside them (a load of 3 to 10 on the M4 Pro's 14 cores and 13 to 14 for its CPU fusing; 10 to 32 on the Ryzen's 32, 7 to 14 for its CPU fusing; 3.5 to 7.5 on the M4 Pro and 2 to 10 on the Ryzen for the 13.4M-voxel map; 4.5 to 7.6 on the M4 Pro and 8 to 15.5 on the Ryzen for the fuse with the three shapes; 7 to 81 on the M4 Pro and 4.7 to 14 on the Ryzen for their readings told apart); each cell is the camera over the table, then the one on the hand.
+`examples/perception.rs` times each call for a 640×480 image that shows the arm: a tabletop seen from across the table, and from a camera on the Panda's palm that looks along its fingers. The mask is padded 4 cm, for the Panda's 61 spheres and for a Panda fitted with 573. Each figure is the quickest median of several runs (twenty on the M4 Pro, ten for the four rows of its CPU fusing, eight on the Ryzen and its Radeon, eight on each device for the two rows of the 13.4M-voxel map and for the fuse with the scene's three shapes left out, eight for those shapes' readings told apart and eight for the band about them, on the M4 Pro each after a pause, as its first ten seconds of work run quicker than the rest) on machines doing other work beside them (a load of 3 to 10 on the M4 Pro's 14 cores and 13 to 14 for its CPU fusing; 10 to 32 on the Ryzen's 32, 7 to 14 for its CPU fusing; 3.5 to 7.5 on the M4 Pro and 2 to 10 on the Ryzen for the 13.4M-voxel map; 4.5 to 7.6 on the M4 Pro and 8 to 15.5 on the Ryzen for the fuse with the three shapes; 7 to 81 on the M4 Pro and 4.7 to 14 on the Ryzen for their readings told apart; 7.4 to 43 on the M4 Pro and 2.8 to 3.0 on the Ryzen for the band); each cell is the camera over the table, then the one on the hand.
 
 The filter, the masks, the points and a surface are read on the host:
 
@@ -353,6 +363,7 @@ The filter, the masks, the points and a surface are read on the host:
 | Which readings are the robot's (`robot_mask`), 61 spheres | 0.07 ms, 0.42 ms | 0.06 ms, 0.41 ms |
 | The same, 573 spheres | 0.20 ms, 1.05 ms | 0.21 ms, 1.12 ms |
 | The scene's three shapes left out too (`with_shapes`) | 0.26 ms, 0.31 ms | 0.23 ms, 0.27 ms |
+| A band of a pixel about the robot and the shapes (`with_band`) | 0.12 ms, 0.14 ms | 0.17 ms, 0.18 ms |
 | The image's points (`points`) | 0.66 ms, 0.71 ms | 1.77 ms, 1.97 ms |
 | A surface with the table's normals (`Surface::from_depth`; 148,461 and 208,100 normals) | 3.0 ms, 3.8 ms | 3.4 ms, 3.4 ms |
 
