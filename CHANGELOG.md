@@ -33,7 +33,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   it hides is shadow; the space the shape fills is free in the map; what a shape does not
   cover stays a reading. So each thing has one memory, a shape or the map's voxels, and a plan
   is checked against both. The perception page says where a perception library meets
-  batchplan, with an example of one look through both.
+  batchplan, with an example of one look through both. A shape costs by what the camera may see
+  of it and by the rows of voxels it spans: it is tested only in the pixels its box, grown by
+  the margin and cut to the camera's view, projects to, so a floor or a wall around the cell
+  costs by what is seen of it and one behind the camera nothing, and its space in a map is
+  marked a run of voxels a row. With the scene's three shapes (`examples/perception.rs`, the
+  camera across the table) a 640×480 image takes 0.26 ms on the M4 Pro's 14 threads and 0.23 on
+  the Ryzen's 32, and the frame fused into a map of 1.8M voxels with them and the Panda's mask
+  1.3 ms on the M4 Pro's CPU, 1.5 on its GPU, 2.8 on the Ryzen and 1.0 on the Radeon 8060S.
 
 - `image.filtered(&DepthFilter)`: a depth image's depths without the readings that lie between
   two surfaces, which a depth camera gives where a pixel covers both a near surface and what is
@@ -257,33 +264,6 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   GPU's fuse is as it was: it sends the map to the device and back, so a frame fused into that
   map takes 8.3 to 9.7 ms on the Radeon 8060S and 4.7 to 6.5 on the M4 Pro's GPU, and a map that
   large now fuses quicker on a CPU device; any device fuses a map.
-
-- A mask given shapes (`with_shapes`) frees their space in a fused map at a cost that goes by the
-  rows of voxels each shape's box spans in the map, not by their voxels: every shape but a
-  distance grid is convex, so a row of its box holds one run of voxels that reach into it, found
-  by a few distance tests, where every voxel of the box was tested in every frame. The voxels are
-  those testing each one gives, but where rounding leaves one within 1e-5 m of reaching into the
-  shape; a grid is still tested voxel by voxel. A floor, or a wall turned across a corner of the
-  map, no longer costs every voxel of the box around it, and a shape outside the map costs
-  nothing. A 640×480 frame of the tabletop fused into a map of 1.8M voxels with the Panda's mask
-  and the scene's three shapes (`examples/perception.rs`, the quickest median of eight runs
-  alternated with the code before) takes 1.3 ms where 1.9 on the M4 Pro's CPU and 1.5 where 2.3
-  on its GPU, 2.8 where 3.1 on the Ryzen's 32 threads and 1.0 where 1.4 on the Radeon 8060S, from
-  the camera across the table; 0.9 where 1.4, 1.6 where 2.2, 1.4 where 1.7 and 1.2 where 1.5 from
-  the one on the hand. A mask without shapes runs the instructions it ran.
-
-- `with_shapes` tests a shape only in the pixels its box, grown by the margin, projects to once
-  cut to the camera's view, where a box that reached the plane the camera stands in was tested at
-  every pixel; each pixel's point is taken once for every shape, a point outside a shape's box
-  grown by the margin is no test of its distance, and each shape's rotation is made a matrix once
-  a call. A floor or a wall around the cell costs by what of it the camera may see, and one
-  behind the camera or beside its view nothing. The flags are those the margin gives, and a
-  reading past the depth at which a margin that grows with the square of the depth outruns the
-  depth a second time, which no pixel bound held, is now flagged where it lies within the margin.
-  A 640×480 image with the scene's three shapes (`examples/perception.rs`, the quickest median of
-  eight runs alternated with the code before) takes 0.26 ms where 0.37 on the M4 Pro's 14 threads
-  and 0.23 where 0.34 on the Ryzen's 32 from the camera across the table, and 0.31 where 0.44
-  and 0.27 where 0.41 from the one on the hand.
 
 - **Breaking:** a robot's `SphereOptions` are checked whether its spheres are fitted or given
   (`RobotOptions::collision_model`), before anything is read: a budget of zero, or a tolerance or

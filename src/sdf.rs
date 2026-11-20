@@ -595,11 +595,11 @@ impl RobotMask {
         let image = image.rigid();
         let width = image.width;
         let reach = |z: f32| margin[0] + (margin[1] + margin[2] * z) * z;
-        // The least and the greatest depth read, found once if a shape needs them.
-        let depths = OnceCell::new();
-        let depths = || *depths.get_or_init(|| device.install(|| depth_range(&image)));
+        // The nearest depth read, found once if a shape needs it.
+        let nearest = OnceCell::new();
+        let nearest = || *nearest.get_or_init(|| device.install(|| nearest_reading(&image)));
         let pixels: Vec<_> = (shapes.iter())
-            .map(|shape| shape_pixels(&image, shape, margin, &depths))
+            .map(|shape| shape_pixels(&image, shape, margin, &nearest))
             .collect();
         // Each shape's box, and how far past it rounding may leave a point within a reach of the
         // shape ([`ROUNDING`]), by its size and where it lies.
@@ -613,15 +613,26 @@ impl RobotMask {
         let frames: Vec<Mat3> = (shapes.iter())
             .map(|shape| world::frame(shape.pose().rotation))
             .collect();
+        // Whether `p`, a reading that reaches `reach`, is shape `k`'s: in its box grown by the
+        // reach, and no farther from it.
+        let within = |k: usize, p: Vec3, reach: f32| {
+            let (lo, hi, rounding) = boxes[k];
+            let past = reach + ROUNDING * reach + rounding;
+            p.cmpge(lo - past).all()
+                && p.cmple(hi + past).all()
+                && turned_distance(&shapes[k], frames[k], p) <= reach
+        };
         // The shapes some pixel may read, by their first column.
         let mut order: Vec<usize> = (0..shapes.len())
-            .filter(|&k| !pixels[k].0.is_empty() && !pixels[k].1.is_empty())
+            .filter(|&k| !pixels[k].rows.is_empty() && !pixels[k].columns.is_empty())
             .collect();
-        order.sort_unstable_by_key(|&k| pixels[k].1.start);
+        order.sort_unstable_by_key(|&k| pixels[k].columns.start);
+        // The least depth from which a reading may be some shape's at any pixel.
+        let deep = pixels.iter().map(|p| p.deep).fold(f32::INFINITY, f32::min);
         device.install(|| {
             let rows = self.on_robot.par_chunks_mut(width).enumerate();
             rows.for_each(|(v, row)| {
-                let reads = |k: usize| pixels[k].0.contains(&v);
+                let reads = |k: usize| pixels[k].rows.contains(&v);
                 let mut next = 0;
                 while next < order.len() {
                     if !reads(order[next]) {
@@ -629,15 +640,16 @@ impl RobotMask {
                         continue;
                     }
                     // The columns the next shapes the row may read cover without a gap.
-                    let (first, mut end) = (next, pixels[order[next]].1.end);
+                    let (first, mut end) = (next, pixels[order[next]].columns.end);
                     next += 1;
-                    while next < order.len() && pixels[order[next]].1.start <= end {
+                    while next < order.len() && pixels[order[next]].columns.start <= end {
                         if reads(order[next]) {
-                            end = end.max(pixels[order[next]].1.end);
+                            end = end.max(pixels[order[next]].columns.end);
                         }
                         next += 1;
                     }
-                    let (these, start) = (&order[first..next], pixels[order[first]].1.start);
+                    let these = &order[first..next];
+                    let start = pixels[order[first]].columns.start;
                     for (u, own) in (start..).zip(&mut row[start..end]) {
                         if *own {
                             continue;
@@ -646,7 +658,7 @@ impl RobotMask {
                         // The reading's point, taken once for every shape that may read it.
                         let mut point = None;
                         for &k in these {
-                            if !reads(k) || !pixels[k].1.contains(&u) {
+                            if !reads(k) || !pixels[k].columns.contains(&u) {
                                 continue;
                             }
                             let (p, reach) = match point {
@@ -658,17 +670,34 @@ impl RobotMask {
                                     *point.insert((p, reach(image.depth[i])))
                                 }
                             };
-                            let (lo, hi, rounding) = boxes[k];
-                            let past = reach + ROUNDING * reach + rounding;
-                            if p.cmpge(lo - past).all()
-                                && p.cmple(hi + past).all()
-                                && turned_distance(&shapes[k], frames[k], p) <= reach
-                            {
+                            if within(k, p, reach) {
                                 *own = true;
                                 break;
                             }
                         }
                     }
+                }
+                if deep == f32::INFINITY {
+                    return;
+                }
+                // A reading so deep that a shape's reach has outrun the depth again may be that
+                // shape's whatever its pixel. Few rows read that deep: a row's deepest reading
+                // is found by the depths' bits, which order as depths above zero do and compare
+                // several at a time, where the depths themselves, some of them no number, do not.
+                let depths = &image.depth[v * width..][..width];
+                let bits = depths.iter().map(|z| z.to_bits() as i32);
+                if bits.fold(i32::MIN, i32::max) < deep.to_bits() as i32 {
+                    return;
+                }
+                for (u, (own, &z)) in row.iter_mut().zip(depths).enumerate() {
+                    if *own || z < deep || z.is_nan() {
+                        continue;
+                    }
+                    let Some(p) = image.point(v * width + u, None) else {
+                        continue;
+                    };
+                    let reach = reach(z);
+                    *own = (0..shapes.len()).any(|k| z >= pixels[k].deep && within(k, p, reach));
                 }
             });
         });
@@ -905,40 +934,46 @@ fn shape_run(
 /// square roots of rounded values near zero, good to about √ε times its size.
 const ROUNDING: f32 = 4.0 * 3.452_669_8e-4;
 
-/// The least and the greatest depth `image` reads: infinity and zero where it reads none.
-fn depth_range(image: &DepthImage) -> (f32, f32) {
+/// The least depth `image` reads: infinity where it reads none.
+fn nearest_reading(image: &DepthImage) -> f32 {
     let rows = image.depth.par_chunks(image.width);
-    rows.map(|row| {
+    let nearest = rows.map(|row| {
         let readings = row.iter().filter(|z| z.is_finite() && **z > 0.0);
-        readings.fold((f32::INFINITY, 0f32), |(near, deep), &z| {
-            (near.min(z), deep.max(z))
-        })
-    })
-    .reduce(
-        || (f32::INFINITY, 0.0),
-        |(near, deep), (a, b)| (near.min(a), deep.max(b)),
-    )
+        readings.fold(f32::INFINITY, |near, &z| near.min(z))
+    });
+    nearest.reduce(|| f32::INFINITY, f32::min)
 }
 
-/// The rows and the columns of the pixels of `image` (made rigid) in which a reading may lie
-/// within the margin of `shape`, at most `margin[0] + (margin[1] + margin[2] * z) * z` from it
-/// at its depth `z` ([`RobotMask::with_shapes`]). `depths` gives the least and the greatest
-/// depth the image reads, asked for only where the shape needs them.
+/// The pixels of an image in which a reading may lie within the margin of a shape.
+#[derive(Debug, PartialEq)]
+struct Pixels {
+    /// Those its box, grown by the margin, projects to.
+    rows: Range<usize>,
+    columns: Range<usize>,
+    /// The depth from which a reading at any pixel may: infinity where none is that deep.
+    deep: f32,
+}
+
+/// The pixels of `image` (made rigid) in which a reading may lie within the margin of `shape`, at
+/// most `margin[0] + (margin[1] + margin[2] * z) * z` from it at its depth `z`
+/// ([`RobotMask::with_shapes`]). `nearest` gives the least depth the image reads, asked for only
+/// where the shape needs it.
 ///
 /// A reading of the shape lies no deeper than the far end of the shape's box and its own reach,
 /// which grows with its depth: the least depth `z` with `z = far + reach(z)`. It lies in the box
 /// grown by the reach there, in the camera's view and no nearer than the nearest reading, so its
 /// pixel is one that part of the grown box projects to: each face of the box is cut to the view
 /// and to that depth, and the pixels its corners then project to bound the shape's, grown by a
-/// pixel for rounding. A box behind the camera or beside its view has none. Where there is no
-/// such depth, or a reading lies past the greater depth with `z = far + reach(z)`, where the
-/// reach outruns the depth again, every pixel may read the shape.
+/// pixel for rounding. A box behind the camera or beside its view has none. Where a margin grows
+/// with the square of the depth there is a greater depth with `z = far + reach(z)`, past which
+/// the reach outruns the depth again: a reading that deep may be the shape's at any pixel
+/// (`deep`). Where there is no such depth at all, every pixel may read the shape.
 fn shape_pixels(
     image: &DepthImage,
     shape: &Obstacle,
     margin: [f32; 3],
-    depths: &dyn Fn() -> (f32, f32),
-) -> (Range<usize>, Range<usize>) {
+    nearest: &dyn Fn() -> f32,
+) -> Pixels {
     let Intrinsics { fx, fy, cx, cy } = image.intrinsics;
     let (width, height) = (image.width, image.height());
     let to_camera = image.camera.rotation.inverse();
@@ -953,11 +988,19 @@ fn shape_pixels(
     let (a, b, c) = (margin[2], 1.0 - margin[1], far + margin[0]);
     let root = (b * b - 4.0 * a * c).sqrt();
     let grown = 2.0 * c / (b + root) - far;
-    // A reading near the greater depth may be the shape's by rounding: it is taken as past it.
-    let past = |deepest: f32| deepest >= (b + root) / (2.0 * a) * (1.0 - ROUNDING);
-    if !(grown >= 0.0 && grown.is_finite()) || a > 0.0 && past(depths().1) {
-        return (0..height, 0..width);
+    if !(grown >= 0.0 && grown.is_finite()) {
+        return Pixels {
+            rows: 0..height,
+            columns: 0..width,
+            deep: f32::INFINITY,
+        };
     }
+    // A reading near the greater depth may be the shape's by rounding: it is taken as past it.
+    let deep = if a > 0.0 {
+        (b + root) / (2.0 * a) * (1.0 - ROUNDING)
+    } else {
+        f32::INFINITY
+    };
     let grown = corners(lo - grown, hi + grown);
     // The view, a pixel past the middles of the outer pixels, as planes `n . p + d >= 0` in the
     // camera's frame; and, where the box reaches the plane the camera stands in, no nearer than
@@ -976,7 +1019,7 @@ fn shape_pixels(
     if grown.iter().all(in_view) {
         seen.extend(grown);
     } else {
-        let nearest = grown.iter().any(|c| c.z <= 0.0).then(|| depths().0);
+        let nearest = grown.iter().any(|c| c.z <= 0.0).then(nearest);
         for face in 0..6 {
             // The face's corners in order around it.
             let (axis, end) = (face / 2, face % 2);
@@ -986,10 +1029,6 @@ fn shape_pixels(
             let mut polygon: Vec<Vec3> = around.iter().map(|&c| grown[c]).collect();
             if let Some(nearest) = nearest {
                 polygon = clipped(&polygon, Vec4::new(0.0, 0.0, 1.0, -nearest));
-                // A corner cut at the nearest depth lies on it, whatever rounding made of it.
-                for p in &mut polygon {
-                    p.z = p.z.max(nearest);
-                }
             }
             for side in sides {
                 polygon = clipped(&polygon, side);
@@ -1007,7 +1046,11 @@ fn shape_pixels(
         (to.ceil() + 2.0).min(Vec2::new(w, h)).max(Vec2::ZERO),
     );
     let (from, to) = (from.as_usizevec2(), to.as_usizevec2());
-    (from.y..to.y, from.x..to.x)
+    Pixels {
+        rows: from.y..to.y,
+        columns: from.x..to.x,
+        deep,
+    }
 }
 
 /// The part of the convex `polygon` on the side of `plane` where `n . p + d >= 0`, its corners in
@@ -2831,9 +2874,9 @@ mod tests {
             camera: Pose::new(Vec3::new(0.3, -0.2, 1.1), turn.normalize()),
         }
         .rigid();
-        let (nearest, _) = depth_range(&image);
+        let nearest = nearest_reading(&image);
         let Intrinsics { fx, fy, cx, cy } = image.intrinsics;
-        let depths = || depth_range(&image);
+        let depths = || nearest;
         let margin = [0.004, 0.0, 0.0];
         // Boxes behind the camera, crossing the plane it stands in, beside its view and in it,
         // and where the box's pixels are those of rays through it, or none where none pass.
@@ -2854,7 +2897,16 @@ mod tests {
                 half_extents: half,
                 rotation: Quat::from_rotation_z(rng.range(-3.0, 3.0)),
             };
-            let (rows, columns) = shape_pixels(&image, &shape, margin, &depths);
+            let Pixels {
+                rows,
+                columns,
+                deep,
+            } = shape_pixels(&image, &shape, margin, &depths);
+            assert_eq!(
+                deep,
+                f32::INFINITY,
+                "case {case}: a margin that does not grow"
+            );
             let (lo, hi) = shape.bounds();
             let (lo, hi) = (lo - margin[0], hi + margin[0]);
             let to_camera = image.camera.rotation.inverse();
@@ -2923,21 +2975,85 @@ mod tests {
             [behind, crossing, beside, seen]
         );
         // For a box half a meter off, whose box reaches 0.54 m deep: every pixel at a reach of
-        // 0.6 z², which outruns the depth everywhere, and at 0.17 z², which outruns it again past
-        // 5.3 m, where the image reads; at 0.1 z², which does so past 9.4 m, the pixels the box
-        // grown by 6 cm covers.
+        // 0.6 z², which outruns the depth everywhere; at 0.17 z² and at 0.1 z², the pixels the
+        // box grown by 6 cm or less covers, and any pixel from the depth at which the reach
+        // outruns the depth again, 5.28 m and 9.43 m.
         let ahead = Obstacle::cuboid(
             image.camera.position + image.camera.rotation * Vec3::new(0.1, 0.0, 0.45),
             Vec3::splat(0.05),
         );
-        for margin in [[0.0, 0.0, 0.6], [0.0, 0.0, 0.17]] {
-            let every = shape_pixels(&image, &ahead, margin, &depths);
-            assert_eq!(every, (0..height, 0..width), "{margin:?}");
+        let every = shape_pixels(&image, &ahead, [0.0, 0.0, 0.6], &depths);
+        assert_eq!((every.rows, every.columns), (0..height, 0..width));
+        for (square, again) in [(0.17, 5.28), (0.1, 9.43)] {
+            let Pixels {
+                rows,
+                columns,
+                deep,
+            } = shape_pixels(&image, &ahead, [0.0, 0.0, square], &depths);
+            assert!(
+                rows.len() < height && columns.len() < width,
+                "{square}: {rows:?} {columns:?}"
+            );
+            assert!((deep - again).abs() < 0.02, "{square}: from {deep} m");
         }
-        let (rows, columns) = shape_pixels(&image, &ahead, [0.0, 0.0, 0.1], &depths);
+    }
+
+    /// A reading within the margin of a shape is the shape's where rounding leaves the shape's
+    /// box short of it. A cylinder 2 m across lies a hair off the x axis: its rim reaches past
+    /// its end along x by its radius times that hair, which its box, taken from the square root
+    /// of a rounded value, leaves out. A reading 3.97 mm past the rim there lies within a margin
+    /// of 4 mm of the cylinder and farther than that from its box.
+    #[test]
+    fn a_reading_past_a_box_that_rounding_cut_short_is_its_shapes() {
+        let device = Device::cpu(&panda()).unwrap();
+        let margin = [0.004, 0.0, 0.0];
+        let (center, radius, half_height) = (Vec3::new(3.0, 0.0, 0.0), 1.0, 0.5);
+        let one = Intrinsics {
+            fx: 1.0,
+            fy: 1.0,
+            cx: 0.0,
+            cy: 0.0,
+        };
+        let (mut short, mut flagged) = (0, 0);
+        for step in 1..=30 {
+            let tilt = 1e-5 * step as f32;
+            let cylinder = Obstacle::Cylinder {
+                center,
+                rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2 - tilt),
+                radius,
+                half_height,
+            };
+            // The rim's point farthest along x, and a reading 3.97 mm past it, alone in its
+            // image.
+            let axis = Vec3::new(tilt.cos(), 0.0, tilt.sin());
+            let across = Vec3::new(tilt.sin(), 0.0, -tilt.cos());
+            let reading = center + axis * half_height + across * radius + Vec3::X * 0.00397;
+            let image = DepthImage {
+                depth: &[1.0],
+                width: 1,
+                intrinsics: one,
+                camera: Pose::new(reading - Vec3::Z, Quat::IDENTITY),
+            };
+            let point = image.point(0, None).expect("the one pixel reads");
+            let within = cylinder.distance(point).value <= margin[0];
+            let (_, upper) = cylinder.bounds();
+            short += usize::from(within && point.x > upper.x + margin[0]);
+            let mask = RobotMask {
+                on_robot: vec![false],
+                spheres: vec![],
+                held: vec![],
+                padding: 0.0,
+                shapes: vec![],
+            };
+            let mask = mask
+                .with_shapes(&device, &image, &[cylinder], margin)
+                .unwrap();
+            assert_eq!(mask.on_robot[0], within, "a tilt of {tilt}");
+            flagged += usize::from(within);
+        }
         assert!(
-            rows.len() < height && columns.len() < width,
-            "{rows:?} {columns:?}"
+            short > 0,
+            "none of {flagged} readings within the margin lies past the box and the margin"
         );
     }
 
