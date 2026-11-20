@@ -33,7 +33,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   it hides is shadow; the space the shape fills is free in the map; what a shape does not
   cover stays a reading. So each thing has one memory, a shape or the map's voxels, and a plan
   is checked against both. The perception page says where a perception library meets
-  batchplan, with an example of one look through both.
+  batchplan, with an example of one look through both. A shape costs by what the camera may see
+  of it and by the rows of voxels it spans: it is tested only in the pixels its box, grown by
+  the margin and cut to the camera's view, projects to, so a floor or a wall around the cell
+  costs by what is seen of it and one behind the camera nothing, and its space in a map is
+  marked a run of voxels a row. With the scene's three shapes (`examples/perception.rs`, the
+  camera across the table) a 640×480 image takes 0.26 ms on the M4 Pro's 14 threads and 0.23 on
+  the Ryzen's 32, and the frame fused into a map of 1.8M voxels with them and the Panda's mask
+  1.3 ms on the M4 Pro's CPU, 1.5 on its GPU, 2.8 on the Ryzen and 1.0 on the Radeon 8060S.
 
 - `image.filtered(&DepthFilter)`: a depth image's depths without the readings that lie between
   two surfaces, which a depth camera gives where a pixel covers both a near surface and what is

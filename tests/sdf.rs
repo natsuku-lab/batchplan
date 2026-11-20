@@ -3287,13 +3287,25 @@ fn a_mask_flags_the_readings_within_the_margin_of_a_shape() {
     // A box off to one side and a wall behind it, at margins that reach much farther for a
     // reading on the wall than for one at the box's far end: the pixels a box may be read in
     // are those of its reach at the deepest such reading (30 cm past the box at the first
-    // margin), and every pixel where the reach outruns the depth (the second).
+    // margin), and every pixel where the reach outruns the depth (the second). The reach
+    // outruns the depth again past 3.5 m at the first margin: a wall 4 m off is read within
+    // 3.2 m of the box, far past the box grown by its reach at 1.5 m. A second box nearer the
+    // camera is outrun again only past 4.6 m: the wall 4 m off is the first box's at any pixel
+    // and the second's in none but those of its own reach.
     let aside = Pose::new(Vec3::splat(5.0), Quat::IDENTITY);
-    let boxed = [Obstacle::cuboid(
-        aside.position + Vec3::new(-0.5, 0.0, 1.0),
-        Vec3::splat(0.05),
-    )];
-    for (margin, wall) in [([0.0, 0.0, 0.2], 1.3), ([0.0, 0.0, 0.3], 3.0)] {
+    let boxed = [
+        Obstacle::cuboid(
+            aside.position + Vec3::new(-0.5, 0.0, 1.0),
+            Vec3::splat(0.05),
+        ),
+        Obstacle::cuboid(aside.position + Vec3::new(0.3, 0.0, 0.3), Vec3::splat(0.05)),
+    ];
+    let walls = [
+        ([0.0, 0.0, 0.2], 1.3),
+        ([0.0, 0.0, 0.3], 3.0),
+        ([0.0, 0.0, 0.2], 4.0),
+    ];
+    for (margin, wall) in walls {
         let depth = vec![wall; 640 * 480];
         let image = DepthImage {
             depth: &depth,
@@ -3305,12 +3317,14 @@ fn a_mask_flags_the_readings_within_the_margin_of_a_shape() {
             .with_shapes(&devices()[0], &image, &boxed, margin)
             .unwrap();
         let reach = margin[2] * wall * wall;
-        let within = |p: &Option<Vec3>| p.is_some_and(|p| boxed[0].distance(p).value <= reach);
+        let within = |p: &Option<Vec3>| {
+            p.is_some_and(|p| boxed.iter().any(|s| s.distance(p).value <= reach))
+        };
         let expected: Vec<bool> = image.points(None).unwrap().iter().map(within).collect();
         let flags = expected.iter().filter(|&&f| f).count();
         assert!(
             flags > 10_000,
-            "{flags} readings of the wall within {reach} m of the box"
+            "{flags} readings of the wall within {reach} m of a box"
         );
         assert!(
             mask.on_robot == expected,
@@ -3336,6 +3350,172 @@ fn a_mask_flags_the_readings_within_the_margin_of_a_shape() {
         mask().with_shapes(&devices()[0], &image, &[flat], [0.004, 0.0, 0.0]),
     ] {
         assert!(matches!(refused, Err(Error::Input(_))));
+    }
+    // A cell's fixtures: a floor far larger than the view, a wall beside the camera whose box
+    // reaches behind it, a wall wholly behind it, which no reading lies within the margin of, and
+    // a thin wall turned 45 degrees about the vertical; each alone, and all with the table and
+    // the blocks.
+    let boxes = [
+        (Vec3::new(3.0, 0.0, -0.25), Vec3::new(8.0, 8.0, 0.05)),
+        (Vec3::new(2.8, 0.9, 0.4), Vec3::new(2.0, 0.02, 0.6)),
+        (Vec3::new(4.5, 0.0, 0.5), Vec3::new(0.02, 2.0, 1.0)),
+    ];
+    // The least and the greatest depth of each box's corners.
+    let depths = boxes.map(|(center, half)| {
+        let corners = (0..8).map(|c| {
+            let pick = BVec3::new(c & 1 > 0, c & 2 > 0, c & 4 > 0);
+            let corner = Vec3::select(pick, center + half, center - half);
+            (camera.rotation.inverse() * (corner - camera.position)).z
+        });
+        corners.fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), z| {
+            (a.min(z), b.max(z))
+        })
+    });
+    let [floor, beside, behind] = boxes.map(|(center, half)| Obstacle::cuboid(center, half));
+    assert!(
+        depths[..2]
+            .iter()
+            .all(|&(near, far)| near < 0.0 && far > 0.0)
+    );
+    assert!(depths[2].1 < 0.0, "the third wall is behind the camera");
+    let turned = Obstacle::Cuboid {
+        center: Vec3::new(1.9, -0.5, 0.3),
+        half_extents: Vec3::new(0.6, 0.01, 0.5),
+        rotation: Quat::from_rotation_z(PI / 4.0),
+    };
+    let cell = [floor, beside, behind, turned];
+    let scene: Vec<&Obstacle> = shapes.iter().chain(&cell).collect();
+    let depth = look_at_shapes(&scene, camera, k);
+    let image = DepthImage {
+        depth: &depth,
+        ..image
+    };
+    let points = image.points(None).unwrap();
+    let robot_mask = image.robot_mask(&robot, &q, 0.04, &[]).unwrap();
+    let all: Vec<Obstacle> = scene.iter().map(|s| (*s).clone()).collect();
+    let margins = [
+        [0.004, 0.0, 0.0],
+        [0.001, 0.002, 0.003],
+        [0.0, 0.0, 0.02],
+        [0.0, 0.0, 0.05],
+        [0.05, 0.05, 0.05],
+    ];
+    let alone = cell.iter().map(std::slice::from_ref);
+    for (which, held) in alone.chain([&all[..]]).enumerate() {
+        for margin in margins {
+            let mask = (robot_mask.clone())
+                .with_shapes(&devices()[0], &image, held, margin)
+                .unwrap();
+            let within = |(i, p): (usize, &Option<Vec3>)| {
+                let reach = margin[0] + (margin[1] + margin[2] * depth[i]) * depth[i];
+                p.is_some_and(|p| held.iter().any(|s| s.distance(p).value <= reach))
+            };
+            let expected: Vec<bool> = points.iter().enumerate().map(within).collect();
+            let flags = expected.iter().filter(|&&f| f).count();
+            // The wall behind the camera is read nowhere, the others in many pixels.
+            let least = [100_000, 10_000, 0, 20_000, 250_000][which];
+            assert!(
+                if which == 2 {
+                    flags == 0
+                } else {
+                    flags > least
+                },
+                "{flags} readings of shapes {which} at {margin:?}"
+            );
+            assert!(
+                mask.on_robot == expected,
+                "shapes {which} at {margin:?}: {} flagged where {flags}",
+                mask.on_robot.iter().filter(|&&f| f).count()
+            );
+        }
+    }
+}
+
+/// A mask given a distance grid as a shape flags the readings within the margin of the grid as
+/// it is turned: a bar measured as a grid and turned over a table, and a grid solid on its faces.
+#[test]
+fn a_mask_flags_the_readings_within_the_margin_of_a_turned_grid() {
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    let (shapes, camera, k) = held_shapes();
+    let turn = Quat::from_euler(EulerRot::XYZ, 0.3, -0.4, 0.9);
+    // A bar 16 by 6 by 4 cm, the distances to it at a grid's points.
+    let (dims, voxel, origin) = ([14u32, 9, 8], 0.02, Vec3::new(-0.13, -0.08, -0.07));
+    let bar = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.08, 0.03, 0.02));
+    let mut distances = vec![];
+    for k in 0..dims[2] {
+        for j in 0..dims[1] {
+            for i in 0..dims[0] {
+                let p = origin + Vec3::new(i as f32, j as f32, k as f32) * voxel;
+                distances.push(bar.distance(p).value);
+            }
+        }
+    }
+    let at = Vec3::new(2.5, 0.05, 0.15);
+    let grids = [
+        Obstacle::Sdf {
+            grid: Arc::new(SdfGrid::try_new(dims, voxel, origin, &distances).unwrap()),
+            center: at,
+            rotation: turn,
+        },
+        Obstacle::Sdf {
+            grid: Arc::new(
+                SdfGrid::try_new([6; 3], 0.02, Vec3::splat(-0.05), &[-0.03; 216]).unwrap(),
+            ),
+            center: at,
+            rotation: turn,
+        },
+    ];
+    // What the camera reads: the table, and the bar as a box where the grid stands.
+    let stand_in = bar.placed(Pose::new(at, turn));
+    let depth = look_at_shapes(&[&shapes[0], &stand_in], camera, k);
+    let image = DepthImage {
+        depth: &depth,
+        width: 640,
+        intrinsics: k,
+        camera,
+    };
+    let robot_mask = image.robot_mask(&robot, &q, 0.04, &[]).unwrap();
+    let points = image.points(None).unwrap();
+    for (which, grid) in grids.iter().enumerate() {
+        // Turned as it stands and not, the grid's readings are not the same ones.
+        let straight = match grid {
+            Obstacle::Sdf { grid, center, .. } => Obstacle::Sdf {
+                grid: Arc::clone(grid),
+                center: *center,
+                rotation: Quat::IDENTITY,
+            },
+            _ => unreachable!("both are grids"),
+        };
+        for margin in [[0.004, 0.0, 0.0], [0.001, 0.002, 0.003]] {
+            let mask = (robot_mask.clone())
+                .with_shapes(&devices()[0], &image, std::slice::from_ref(grid), margin)
+                .unwrap();
+            let reach = |i: usize| margin[0] + (margin[1] + margin[2] * depth[i]) * depth[i];
+            let within = |shape: &Obstacle| -> Vec<bool> {
+                let its = |(i, p): (usize, &Option<Vec3>)| {
+                    p.is_some_and(|p| shape.distance(p).value <= reach(i))
+                };
+                points.iter().enumerate().map(its).collect()
+            };
+            let expected = within(grid);
+            let flags = expected.iter().filter(|&&f| f).count();
+            assert!(flags > 500, "{flags} readings of grid {which}");
+            // The bar's readings tell how it is turned; the solid cube's need not.
+            let unturned = within(&straight);
+            let moved = (expected.iter().zip(&unturned))
+                .filter(|(a, b)| a != b)
+                .count();
+            assert!(
+                which == 1 || moved > 100,
+                "{moved} readings tell the bar's turn"
+            );
+            assert!(
+                mask.on_robot == expected,
+                "grid {which} at {margin:?}: {} flagged where {flags}",
+                mask.on_robot.iter().filter(|&&f| f).count()
+            );
+        }
     }
 }
 

@@ -101,7 +101,7 @@ A cell's fixtures and the objects a caller has measured as shapes are obstacles 
 
 `margin` is how far from a shape a reading at depth z may lie and be the shape's, `margin[0] + margin[1] z + margin[2] z²`: what the camera's noise reaches there, as three times a `DepthFilter`'s `noise`, and what the shapes and the camera's pose are off by. What only a shape hides is shadow as what only the robot hides is: solid under `Occlusion::Occupied`, and free under `OccupiedExceptRobotShadow` and `Band`, where a caller that gives shapes takes the space behind them for free.
 
-The readings are told apart on the device's threads, in 0.4 to 0.5 ms for a 640×480 image, and a fuse with the mask frees the shapes' space as it frees the robot's ([below](#building-grids-on-the-gpu)).
+The readings are told apart on the device's threads, each pixel's point once for every shape. A shape is tested only in the pixels its box, grown by the margin, projects to once cut to the camera's view, and only where a point lies in that box: a floor or a wall around the cell costs by what of it the camera may see, and one behind the camera or beside its view costs nothing. With the scene's three shapes a 640×480 image takes 0.2 to 0.3 ms. A fuse with the mask frees the shapes' space as it frees the robot's ([below](#building-grids-on-the-gpu)). It finds that space a row of voxels at a time: every shape but a distance grid is convex, so a row of its box holds one run of voxels that reach into it, found by a few distance tests. A shape then costs a frame by the rows its box spans in the map rather than by their voxels: a wall turned across a corner of the map no longer tests every voxel of that corner, and a shape outside the map costs nothing.
 
 `RobotMask::on_robot` holds the flags, one per pixel, and a caller may set more of them: the readings of an object it is about to grasp, as whatever told them apart says, where a fitted shape does not cover the object and its readings would stand in the fingers' way.
 
@@ -343,7 +343,7 @@ Median build times for a 640×480 image of a table seen from 1 m:
 | M4 Pro (GPU) | 3.6 ms | 14.8 ms | 1.5 ms | 4.4 ms |
 | M4 Pro (CPU, 14 threads) | 6.4 ms | 36 ms | 2.2 ms | 6.9 ms |
 
-`examples/perception.rs` times each call for a 640×480 image that shows the arm: a tabletop seen from across the table, and from a camera on the Panda's palm that looks along its fingers. The mask is padded 4 cm, for the Panda's 61 spheres and for a Panda fitted with 573. Each figure is the quickest median of several runs (twenty on the M4 Pro, ten for the four rows of its CPU fusing, eight on the Ryzen and its Radeon, and eight on each device for the two rows of the 13.4M-voxel map) on machines doing other work beside them (a load of 3 to 10 on the M4 Pro's 14 cores, 43 to 46 for the two rows with shapes and 13 to 14 for its CPU fusing; 10 to 32 on the Ryzen's 32, 7 to 14 for its CPU fusing; 3.5 to 7.5 on the M4 Pro and 2 to 10 on the Ryzen for the 13.4M-voxel map); each cell is the camera over the table, then the one on the hand.
+`examples/perception.rs` times each call for a 640×480 image that shows the arm: a tabletop seen from across the table, and from a camera on the Panda's palm that looks along its fingers. The mask is padded 4 cm, for the Panda's 61 spheres and for a Panda fitted with 573. Each figure is the quickest median of several runs (twenty on the M4 Pro, ten for the four rows of its CPU fusing, eight on the Ryzen and its Radeon, eight on each device for the two rows of the 13.4M-voxel map and for the fuse with the scene's three shapes left out, and eight for those shapes' readings told apart, on the M4 Pro each after a pause, as its first ten seconds of work run quicker than the rest) on machines doing other work beside them (a load of 3 to 10 on the M4 Pro's 14 cores and 13 to 14 for its CPU fusing; 10 to 32 on the Ryzen's 32, 7 to 14 for its CPU fusing; 3.5 to 7.5 on the M4 Pro and 2 to 10 on the Ryzen for the 13.4M-voxel map; 4.5 to 7.6 on the M4 Pro and 8 to 15.5 on the Ryzen for the fuse with the three shapes; 7 to 81 on the M4 Pro and 4.7 to 14 on the Ryzen for their readings told apart); each cell is the camera over the table, then the one on the hand.
 
 The filter, the masks, the points and a surface are read on the host:
 
@@ -352,7 +352,7 @@ The filter, the masks, the points and a surface are read on the host:
 | The image without the readings between two surfaces (`filtered`) | 0.73 ms, 0.73 ms | 0.98 ms, 0.99 ms |
 | Which readings are the robot's (`robot_mask`), 61 spheres | 0.07 ms, 0.42 ms | 0.06 ms, 0.41 ms |
 | The same, 573 spheres | 0.20 ms, 1.05 ms | 0.21 ms, 1.12 ms |
-| The scene's three shapes left out too (`with_shapes`) | 0.37 ms, 0.45 ms | 0.38 ms, 0.48 ms |
+| The scene's three shapes left out too (`with_shapes`) | 0.26 ms, 0.31 ms | 0.23 ms, 0.27 ms |
 | The image's points (`points`) | 0.66 ms, 0.71 ms | 1.77 ms, 1.97 ms |
 | A surface with the table's normals (`Surface::from_depth`; 148,461 and 208,100 normals) | 3.0 ms, 3.8 ms | 3.4 ms, 3.4 ms |
 
@@ -363,7 +363,7 @@ Fusing and grids run on the device:
 | Fusing the image into a 1.8M-voxel map, no mask | 1.6 ms, 1.5 ms | 1.2 ms, 1.2 ms | 3.8 ms, 3.0 ms | 0.8 ms, 0.9 ms |
 | With a mask of 61 spheres | 2.0 ms, 1.7 ms | 1.6 ms, 1.6 ms | 4.5 ms, 3.0 ms | 1.1 ms, 1.4 ms |
 | With a mask of 573 spheres | 2.3 ms, 1.8 ms | 1.7 ms, 1.9 ms | 4.5 ms, 3.3 ms | 1.6 ms, 1.6 ms |
-| With the robot's mask and the scene's three shapes left out | 2.0 ms, 1.5 ms | 2.3 ms, 2.0 ms | 3.1 ms, 1.8 ms | 1.5 ms, 1.6 ms |
+| With the robot's mask and the scene's three shapes left out | 1.3 ms, 0.9 ms | 1.5 ms, 1.6 ms | 2.8 ms, 1.4 ms | 1.0 ms, 1.2 ms |
 | Fusing the image into a 13.4M-voxel map (2.9 m by 2.9 m by 1.55 m), no mask | 2.4 ms, 1.6 ms | 4.7 ms, 6.5 ms | 5.2 ms, 3.1 ms | 8.4 ms, 8.3 ms |
 | With a mask of 61 spheres | 3.1 ms, 1.9 ms | 5.6 ms, 5.7 ms | 6.5 ms, 3.5 ms | 9.5 ms, 9.7 ms |
 | A 1 cm grid of the image, no mask (3.1M and 2.1M points) | 14.1 ms, 10.1 ms | 6.4 ms, 5.4 ms | 21 ms, 14.0 ms | 7.4 ms, 5.7 ms |
