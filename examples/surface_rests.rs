@@ -2,9 +2,9 @@
 //! among other things, seen in two 640x480 depth images; a can in a basket seen from above, and
 //! where to let it go to fall in; a tray laid across two bars, and a can laid along them, which
 //! rolls in between; a bottle laid flat on a sloping rack against the lip at its foot; a bottle
-//! stood upright on that rack, which the bare lip does not hold and a lip with a top does, found
-//! by looking closer, with why it has none where it has none; then 64 boxes of as many heights on
-//! the one table in one call, which reads the table once.
+//! stood upright on that rack, which the bare lip does not hold and a lip with a top does, with
+//! why it has none where it has none; then 64 boxes of as many heights on the one table in one
+//! call, which reads the table once.
 //!
 //! cargo run --release --example surface_rests [-- threads] [--dump dir]
 //!
@@ -370,8 +370,7 @@ fn main() -> Result<()> {
     // A wine bottle stood upright on that rack, the default options. Against the bare lip it has
     // no rest: for its rim behind to reach the slope its middle would stand past the lip. With
     // the lip's top 1 cm wide, as a rack's lip has, it stands against the lip, its rim behind on
-    // the slope and its bottom on the lip's top, in a strip 2 mm deep between the spots' rows,
-    // which looking closer about the spots where it nearly holds finds along the lip.
+    // the slope and its bottom on the lip's top, where a row of the spots lies over that strip.
     let wine = Obstacle::cylinder(Vec3::ZERO, 0.0215, 0.079);
     let bare = report(
         "a bare lip of that rack, a bottle stood upright on it",
