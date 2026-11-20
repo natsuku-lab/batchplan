@@ -383,7 +383,7 @@ fn main() -> Result<()> {
     let upright = [RestProblem::new(wine.clone(), 0)];
     let racks = std::slice::from_ref(&rack);
     let (ms, why) = quickest(5, || {
-        rest_failures(&device, &upright, racks, &[bare.clone()], &o)
+        rest_failures(&device, &upright, racks, std::slice::from_ref(&bare), &o)
     });
     println!("  why none, in {ms:.1} ms: {:?}", why?[0]);
     let mut topped = rack.clone();
