@@ -406,6 +406,11 @@ struct Scratch {
     touch: Touch,
     contacts: Vec<Contact>,
     statics: Statics,
+    /// What the last pose judged with `WHY` left: where its middle was set down, how far its
+    /// weight can be tipped there, and the first point in its way, if any.
+    center: Vec3,
+    tipping: f32,
+    blocking: Option<Vec3>,
 }
 
 /// One problem's object on its surface.
@@ -422,22 +427,29 @@ impl Setting<'_> {
     /// what it touches there holds it and it is clear, and with the rest comes whether it rolled
     /// there: one lying on its round side that is not held where it is set down is tried again
     /// where it rolls to, and what becomes of it is what became of it there.
-    fn rest(&self, rotation: Quat, middle: Vec2, s: &mut Scratch) -> Outcome {
+    ///
+    /// With `WHY`, `s` keeps what [`Scratch`] says of the last pose judged, and where it is not
+    /// held or tips, what would be in its way there even if it held.
+    fn rest<const WHY: bool>(&self, rotation: Quat, middle: Vec2, s: &mut Scratch) -> Outcome {
         let object = Turned::new(self.shape, rotation);
-        let (held, rolled) = match self.held(&object, middle, s) {
+        if WHY {
+            s.blocking = None;
+        }
+        let (held, rolled) = match self.held::<WHY>(&object, middle, s) {
             Ok(held) => (held, false),
             Err(missed) => {
                 let Some(to) = self.rolled(&object, middle, &s.contacts) else {
-                    return missed;
+                    return self.missed::<WHY>(missed, rotation, s);
                 };
-                match self.held(&object, to, s) {
+                match self.held::<WHY>(&object, to, s) {
                     Ok(held) => (held, true),
-                    Err(missed) => return missed,
+                    Err(missed) => return self.missed::<WHY>(missed, rotation, s),
                 }
             }
         };
         let (center, tipping) = held;
-        if !self.field.clear(&Turned::new(self.grown, rotation), center) {
+        let grown = Turned::new(self.grown, rotation);
+        if !self.field.clear::<WHY>(&grown, center, &mut s.blocking) {
             return Outcome::Blocked;
         }
         let rest = Rest {
@@ -451,7 +463,12 @@ impl Setting<'_> {
     /// Where the middle of `object` comes set down over `middle`, and how far its weight can be
     /// tipped there, if what it touches holds it; else what became of it. Its contacts are left
     /// in `s`.
-    fn held(&self, object: &Turned, middle: Vec2, s: &mut Scratch) -> Result<(Vec3, f32), Outcome> {
+    fn held<const WHY: bool>(
+        &self,
+        object: &Turned,
+        middle: Vec2,
+        s: &mut Scratch,
+    ) -> Result<(Vec3, f32), Outcome> {
         let o = self.o;
         s.contacts.clear();
         let height = self.field.set_down(object, middle);
@@ -459,15 +476,28 @@ impl Setting<'_> {
             return Err(Outcome::Unsupported);
         }
         let center = middle.extend(height);
+        if WHY {
+            s.center = center;
+        }
         s.touch
             .contacts(self.field, object, center, o.touching, &mut s.contacts);
         let size = self.shape.radius();
         match s
             .statics
-            .holds(&s.contacts, center, size, o.tipping, o.friction)
+            .holds::<WHY>(&s.contacts, center, size, o.tipping, o.friction)
         {
-            Holding::By(tipping) => Ok((center, tipping)),
-            Holding::Tips => Err(Outcome::Tips),
+            Holding::By(tipping) => {
+                if WHY {
+                    s.tipping = tipping;
+                }
+                Ok((center, tipping))
+            }
+            Holding::Tips => {
+                if WHY {
+                    s.tipping = s.statics.tips_by;
+                }
+                Err(Outcome::Tips)
+            }
             Holding::Not => Err(Outcome::Unheld),
         }
     }
@@ -746,7 +776,7 @@ impl<'a> Problem<'a> {
                     None => spots.at(k, o.spacing),
                     Some(k) => self.closer[k],
                 };
-                setting.rest(turned, over, scratch)
+                setting.rest::<false>(turned, over, scratch)
             })
             .collect();
         let seeds = seeds(&outcomes[..spots.count()], spots.across, spots.rows);
@@ -756,7 +786,7 @@ impl<'a> Problem<'a> {
             let more = nearer
                 .par_iter()
                 .map_init(Scratch::default, |scratch, &over| {
-                    setting.rest(turned, over, scratch)
+                    setting.rest::<false>(turned, over, scratch)
                 });
             outcomes.par_extend(more);
         }
@@ -898,4 +928,233 @@ mod tests {
         let (rested, across, rows) = grid(&["bbbbb", "btttb", "bttub", "bttrb", "bbbbb"]);
         assert_eq!(seeds(&rested, across, rows), [7, 8]);
     }
+}
+
+impl Setting<'_> {
+    /// `missed`, what became of the object set down turned by `rotation`; with `WHY`, where it
+    /// touched the support, what would be in its way where it was set down left in `s`.
+    #[inline(always)]
+    fn missed<const WHY: bool>(&self, missed: Outcome, rotation: Quat, s: &mut Scratch) -> Outcome {
+        if WHY && !matches!(missed, Outcome::Unsupported) {
+            let grown = Turned::new(self.grown, rotation);
+            self.field.clear::<true>(&grown, s.center, &mut s.blocking);
+        }
+        missed
+    }
+}
+
+impl Problem<'_> {
+    /// Where spot `k` of a turn `tried` lies, seen from above.
+    fn spot(&self, k: usize, tried: &Tried) -> Vec2 {
+        let count = self.spots.count();
+        match k.checked_sub(count) {
+            None => self.spots.at(k, self.setting.o.spacing),
+            Some(k) if k < self.closer.len() => self.closer[k],
+            Some(k) => tried.nearer[k - self.closer.len()],
+        }
+    }
+}
+
+/// Why a problem of [`rests_on`] has no rest ([`rest_failures`]): how near the search came.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum RestFailure {
+    /// Nothing of the support lies under the object anywhere it was set down.
+    Unsupported,
+    /// Set down, it touches the support and that does not hold it.
+    Unheld {
+        /// The object's frame set down there.
+        pose: Pose,
+        /// The corners of what it touches there, as [`Rest::support`].
+        support: Vec<Vec3>,
+        /// The unit mean of the directions the support pushes it along there: up on a level
+        /// support, leaning where it slopes, as the rotation that lies flat on a slope takes
+        /// the vertical to; zero where it touches nothing.
+        push: Vec3,
+        /// What would be in its way there even if it were held.
+        blocked: Option<Blocking>,
+    },
+    /// It is held, but its weight can be tipped by less than [`RestOptions::tipping`].
+    Tips {
+        /// The object's frame set down there.
+        pose: Pose,
+        /// The corners of what it touches there, as [`Rest::support`].
+        support: Vec<Vec3>,
+        /// How far its weight can be tipped there before what it touches no longer holds it
+        /// (radians), found as a rest's is.
+        tipping: f32,
+        /// What would be in its way there even if it held.
+        blocked: Option<Blocking>,
+    },
+    /// It rests, but for a point in its way.
+    Blocked {
+        /// The rest, as [`rests_on`] would give it.
+        rest: Rest,
+        /// What is in its way.
+        by: Blocking,
+    },
+}
+
+/// A point in the way of an object set down: within [`RestOptions::clearance`] of it, or over it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Blocking {
+    /// The point, the first the check meets.
+    pub point: Vec3,
+    /// Whether it is the support's own, an underside of it that faces down and was not seen
+    /// from above, and not a reading left unflagged. Flags that leave out part of what the
+    /// object would lie against give points that are not; a support seen from below gives
+    /// points that are.
+    pub support: bool,
+}
+
+/// Why each of `problems` has no rest, given `rests`, what [`rests_on`] found for them with `o`:
+/// `None` where it has one. The answer is how far the search came: in this order, a place where
+/// it rests but for a point in its way ([`RestFailure::Blocked`], the steadiest such place), one
+/// where it is held but tips too easily (`Tips`, the steadiest), one where it touches the
+/// support and is not held (`Unheld`, the one nearest the problem's `near`, or without one the
+/// middle of the support seen from above), and none where nothing of the support lies under it
+/// anywhere (`Unsupported`); of two alike, that at the lower turn, then at the lower spot.
+///
+/// Where it is not held or tips, what would be in its way there even if it held comes with it:
+/// flags that leave out part of what the object must lie against both leave it unheld and put
+/// that part in its way. The problems with no rest are searched again, every spot's outcome
+/// kept, and the places of the furthest stage judged once more for their details, so this costs
+/// about one more search of those problems; it runs only when asked for, here.
+pub fn rest_failures(
+    device: &Device,
+    problems: &[RestProblem],
+    surfaces: &[Surface],
+    rests: &[Vec<Rest>],
+    o: &RestOptions,
+) -> Result<Vec<Option<RestFailure>>> {
+    Read::checked(problems, surfaces, o)?;
+    ensure_input!(
+        rests.len() == problems.len(),
+        "{} lists of rests for {} problems",
+        rests.len(),
+        problems.len()
+    );
+    let failed: Vec<usize> = (0..problems.len())
+        .filter(|&k| rests[k].is_empty())
+        .collect();
+    let mut out: Vec<Option<RestFailure>> = vec![None; problems.len()];
+    if failed.is_empty() {
+        return Ok(out);
+    }
+    let again: Vec<RestProblem> = failed.iter().map(|&k| problems[k].clone()).collect();
+    let read = Read::checked(&again, surfaces, o)?;
+    let each = || {
+        let seen = read.seen(surfaces, o);
+        let each = again.par_iter().map(|p| match &seen[p.surface] {
+            Some(seen) => failure(p, seen, &surfaces[p.surface], o),
+            None => Some(RestFailure::Unsupported),
+        });
+        each.collect::<Vec<_>>()
+    };
+    for (k, failure) in failed.into_iter().zip(device.install(each)) {
+        out[k] = failure;
+    }
+    Ok(out)
+}
+
+/// How far the search came for `p` on `surface`, read as `seen`; `None` where it rests.
+fn failure(
+    p: &RestProblem,
+    seen: &Seen,
+    surface: &Surface,
+    o: &RestOptions,
+) -> Option<RestFailure> {
+    let problem = Problem::new(p, seen, o);
+    let kinds: Vec<usize> = (0..problem.turns.len())
+        .filter(|&k| problem.first[k] == k)
+        .collect();
+    let tried: Vec<Tried> = kinds.par_iter().map(|&k| problem.tried(k)).collect();
+    // How far each outcome came.
+    let stage = |f: &Outcome| match f {
+        Outcome::Unsupported => 0,
+        Outcome::Unheld => 1,
+        Outcome::Tips => 2,
+        Outcome::Blocked => 3,
+        Outcome::Rests(..) => 4,
+    };
+    let all = tried.iter().flat_map(|t| &t.outcomes);
+    let furthest = all.map(stage).max().unwrap_or(0);
+    match furthest {
+        0 => return Some(RestFailure::Unsupported),
+        4 => return None,
+        _ => {}
+    }
+    // The places of that stage, by turn and spot, in order.
+    let mut candidates: Vec<(usize, usize)> = vec![];
+    for (t, tried) in tried.iter().enumerate() {
+        let of_it = (0..tried.outcomes.len()).filter(|&k| stage(&tried.outcomes[k]) == furthest);
+        candidates.extend(of_it.map(|k| (t, k)));
+    }
+    let judge = |t: usize, k: usize, s: &mut Scratch| {
+        let over = problem.spot(k, &tried[t]);
+        problem
+            .setting
+            .rest::<true>(problem.turns[kinds[t]], over, s)
+    };
+    let (t, k) = if furthest == 1 {
+        // Not held: nearest where the caller would have it, or the support's middle.
+        let target = problem
+            .near
+            .unwrap_or(0.5 * (problem.spots.lower + problem.spots.upper));
+        let distance = |&(t, k): &(usize, usize)| problem.spot(k, &tried[t]).distance(target);
+        let nearest = candidates
+            .iter()
+            .copied()
+            .reduce(|a, b| if distance(&b) < distance(&a) { b } else { a });
+        nearest.expect("a place of the furthest stage")
+    } else {
+        // Held: the steadiest.
+        let steadiness: Vec<f32> = candidates
+            .par_iter()
+            .map_init(Scratch::default, |s, &(t, k)| {
+                judge(t, k, s);
+                s.tipping
+            })
+            .collect();
+        let steadiest =
+            (0..candidates.len()).reduce(|a, b| if steadiness[b] > steadiness[a] { b } else { a });
+        candidates[steadiest.expect("a place of the furthest stage")]
+    };
+    let mut s = Scratch::default();
+    let outcome = judge(t, k, &mut s);
+    let pose = Pose::new(s.center, problem.turns[kinds[t]]);
+    let support = s.statics.support(&s.contacts);
+    let blocking = s.blocking.map(|point| {
+        let at = surface.points.iter().position(|q| *q == point);
+        Blocking {
+            point,
+            support: at.is_some_and(|at| surface.object.is_empty() || surface.object[at]),
+        }
+    });
+    Some(match outcome {
+        Outcome::Blocked => RestFailure::Blocked {
+            rest: Rest {
+                pose,
+                support,
+                tipping: s.tipping,
+            },
+            by: blocking.expect("a point in the way of what is blocked"),
+        },
+        Outcome::Tips => RestFailure::Tips {
+            pose,
+            support,
+            tipping: s.tipping,
+            blocked: blocking,
+        },
+        _ => {
+            let push: Vec3 = s.contacts.iter().map(|c| c.push).sum();
+            RestFailure::Unheld {
+                pose,
+                support,
+                push: push.normalize_or_zero(),
+                blocked: blocking,
+            }
+        }
+    })
 }

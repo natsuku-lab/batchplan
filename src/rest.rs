@@ -11,4 +11,4 @@ mod shape;
 mod statics;
 
 pub use fall::{Fall, falls_into};
-pub use search::{Rest, RestOptions, RestProblem, rests_on};
+pub use search::{Blocking, Rest, RestFailure, RestOptions, RestProblem, rest_failures, rests_on};

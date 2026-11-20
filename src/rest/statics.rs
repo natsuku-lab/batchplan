@@ -156,13 +156,17 @@ pub(super) struct Statics {
     springs: Springs,
     base: Vec<DVec3>,
     tipped: Vec<DVec3>,
+    /// How far the weight could be tipped where [`holds`](Self::holds) with `WHY` last found it
+    /// tips (radians).
+    pub(super) tips_by: f32,
 }
 
 impl Statics {
     /// Whether `contacts` hold the weight of an object whose middle is `center`, and how far it can
     /// be tipped any way before they no longer do (radians), where that is at least `tipping`.
     /// `size` is the object's, the unit its torques are balanced in.
-    pub(super) fn holds(
+    /// With `WHY`, where it tips, how far it can be tipped is left in `tips_by`.
+    pub(super) fn holds<const WHY: bool>(
         &mut self,
         contacts: &[Contact],
         center: Vec3,
@@ -184,9 +188,9 @@ impl Statics {
             if contacts.iter().any(|c| c.push != first.push) {
                 push = contacts.iter().map(|c| c.push).sum::<Vec3>().normalize();
             }
-            return self.on_one_face(contacts, push, center, tipping, friction);
+            return self.on_one_face::<WHY>(contacts, push, center, tipping, friction);
         }
-        self.settled(contacts, center, size, tipping, friction)
+        self.settled::<WHY>(contacts, center, size, tipping, friction)
     }
 
     /// What `contacts`, those last judged, touch: the corners of the hull of the support's
@@ -221,7 +225,7 @@ impl Statics {
     /// [`holds`](Self::holds) where every contact lies on one flat piece of the object and is
     /// pushed along `push`: the weight's line, tipped, must meet the piece inside the hull of the
     /// contacts, within the friction cone about `push`.
-    fn on_one_face(
+    fn on_one_face<const WHY: bool>(
         &mut self,
         contacts: &[Contact],
         push: Vec3,
@@ -289,13 +293,16 @@ impl Statics {
         if least >= tipping {
             Holding::By(least)
         } else {
+            if WHY {
+                self.tips_by = least;
+            }
             Holding::Tips
         }
     }
 
     /// [`holds`](Self::holds) by the settle: the contacts of each flat piece first cut down to
     /// the corners of their hull, which carry any forces the piece's contacts can.
-    fn settled(
+    fn settled<const WHY: bool>(
         &mut self,
         contacts: &[Contact],
         center: Vec3,
@@ -351,6 +358,19 @@ impl Statics {
             })
         };
         if tipping > 0.0 && !tipped_by(tipping, &mut self.tipped) {
+            if WHY {
+                // How far it does hold, narrowed below `tipping` as a rest's is above it.
+                let (mut holds, mut gives) = (0.0, tipping);
+                while gives - holds > FINE {
+                    let middle = 0.5 * (holds + gives);
+                    if tipped_by(middle, &mut self.tipped) {
+                        holds = middle;
+                    } else {
+                        gives = middle;
+                    }
+                }
+                self.tips_by = holds;
+            }
             return Holding::Tips;
         }
         // How much farther: doubled until it gives, then narrowed.

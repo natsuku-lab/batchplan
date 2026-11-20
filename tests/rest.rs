@@ -12,8 +12,8 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 use batchplan::glam::{Mat3, Quat, Vec2, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{
-    DepthImage, Device, Error, Fall, Held, Intrinsics, Obstacle, Place, Pose, Rest, RestOptions,
-    RestProblem, Surface, TaskOptions, World, falls_into, rests_on,
+    DepthImage, Device, Error, Fall, Held, Intrinsics, Obstacle, Place, Pose, Rest, RestFailure,
+    RestOptions, RestProblem, Surface, TaskOptions, World, falls_into, rest_failures, rests_on,
 };
 
 /// Points 2 mm apart, as a depth camera reads a surface under a meter.
@@ -2455,5 +2455,253 @@ fn on_a_table_every_rest_stands_on_a_spot_of_the_grid() {
             assert_eq!(found.len(), *count, "scene {k}: {object:?}");
             assert!(found.iter().all(|r| on_the_grid(r, &o)), "scene {k}");
         }
+    }
+}
+
+/// Why `problem` has no rest on `surface`, through `rests_on` and `rest_failures`.
+fn failure(problem: &RestProblem, surface: &Surface, o: &RestOptions) -> Option<RestFailure> {
+    let (device, problems) = (device(), std::slice::from_ref(problem));
+    let surfaces = std::slice::from_ref(surface);
+    let found = rests_on(&device, problems, surfaces, o).unwrap();
+    rest_failures(&device, problems, surfaces, &found, o)
+        .unwrap()
+        .remove(0)
+}
+
+/// A post `2 half` square and 10 cm tall, its top at 0, the support.
+fn post(half: f32) -> Surface {
+    let mut s = Surface::default();
+    let (center, half) = (Vec3::new(0.0, 0.0, -0.05), Vec3::new(half, half, 0.05));
+    block(center, half, true, &mut s);
+    s
+}
+
+/// A table 6 cm square with walls not the support 2.9 cm to either side of its middle along x:
+/// a box 4 cm wide rests on it nowhere clear of them.
+fn between_walls() -> (Surface, Vec<Vec3>) {
+    let mut s = Surface::default();
+    level(Vec2::splat(-0.03), Vec2::splat(0.03), 0.0, true, &mut s);
+    let before = s.points.len();
+    for x in [-0.034, 0.034] {
+        let (center, half) = (Vec3::new(x, 0.0, 0.025), Vec3::new(0.005, 0.03, 0.025));
+        block(center, half, false, &mut s);
+    }
+    let walls = s.points[before..].to_vec();
+    (s, walls)
+}
+
+#[test]
+fn a_problem_without_rests_says_how_near_the_search_came() {
+    let o = RestOptions::default();
+    let tall = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.1));
+    // Nothing of the support anywhere: none of it flagged, or seen only from below.
+    let mut none = table();
+    none.object.fill(false);
+    let unsupported = Some(RestFailure::Unsupported);
+    assert_eq!(
+        failure(&RestProblem::new(a_box(), 0), &none, &o),
+        unsupported
+    );
+    let mut below = table();
+    below.normals.fill(-Vec3::Z);
+    assert_eq!(
+        failure(&RestProblem::new(a_box(), 0), &below, &o),
+        unsupported
+    );
+
+    // On a slope steeper than the friction, laid flat on it: held nowhere, pushed along the
+    // slope's normal, at the spot nearest the slope's middle, nothing in its way.
+    let tile = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.03, 0.03, 0.01));
+    let laid = RestProblem {
+        rotation: lying_on(30.0),
+        ..RestProblem::new(tile.clone(), 0)
+    };
+    let (sin, cos) = 30f32.to_radians().sin_cos();
+    let normal = Vec3::new(0.0, sin, cos);
+    let Some(RestFailure::Unheld {
+        pose,
+        support,
+        push,
+        blocked,
+    }) = failure(&laid, &slope(30.0, false), &o)
+    else {
+        panic!("not unheld");
+    };
+    assert!(push.angle_between(normal) < 1f32.to_radians(), "{push}");
+    assert!(blocked.is_none());
+    assert!(pose.position.truncate().length() < 0.008, "{pose:?}");
+    assert!(
+        (pose.rotation * Vec3::Z).angle_between(normal) < 1e-3,
+        "{pose:?}"
+    );
+    assert!(support.len() >= 3);
+    for c in &support {
+        assert!(c.dot(normal).abs() < 1e-3, "off the slope: {c}");
+        assert!(
+            tile.placed(pose).distance(*c).value.abs() < o.touching,
+            "{c}"
+        );
+    }
+    // An upright bottle there, the lip left unflagged and the place asked for at the lip: held
+    // nowhere, and the lip's points in its way.
+    let mut short = slope(30.0, true);
+    let slope_points = slope(30.0, false).points.len();
+    short.object[slope_points..].fill(false);
+    let foot = 0.1 * cos;
+    let at_the_lip = RestProblem {
+        near: Some(Vec3::new(0.0, foot, 0.0)),
+        ..RestProblem::new(bottle(), 0)
+    };
+    let Some(RestFailure::Unheld {
+        pose,
+        blocked: Some(by),
+        ..
+    }) = failure(&at_the_lip, &short, &o)
+    else {
+        panic!("not unheld with the lip in the way");
+    };
+    assert!(!by.support && by.point.y >= foot - 1e-3, "{by:?}");
+    assert!(
+        pose.position.truncate().distance(Vec2::new(0.0, foot)) < 0.012,
+        "{pose:?}"
+    );
+
+    // A box 20 cm tall on a post 1.5 cm across: held upright and tipping, as far as its middle
+    // is in from the post's edge allows, the steadiest of all, where the spots set closer find
+    // it; its support the post's top.
+    let Some(RestFailure::Tips {
+        pose,
+        support,
+        tipping,
+        blocked,
+    }) = failure(&RestProblem::new(tall.clone(), 0), &post(0.0075), &o)
+    else {
+        panic!("not tipping");
+    };
+    let inset = 0.0075 - pose.position.truncate().abs().max_element();
+    assert!(
+        (tipping - inset.atan2(0.1)).abs() < 0.5f32.to_radians(),
+        "{tipping} at {pose:?}"
+    );
+    assert!(
+        tipping < o.tipping && inset > 0.007,
+        "{tipping} at {pose:?}"
+    );
+    assert!(blocked.is_none());
+    assert!(support.len() >= 3);
+    for c in &support {
+        assert!(c.z.abs() < 1e-6 && c.truncate().abs().max_element() <= 0.0075 + 1e-6);
+    }
+
+    // The bottle against the rack's lip, its rim on the slope and its bottom on the lip, asked to
+    // tip 10 degrees: it tips, as far as the steadiest of its rests asked for 5 does, found as a
+    // rest's is.
+    let rack = slope(30.0, true);
+    let steadiest = rests(&bottle(), &rack, &o)
+        .iter()
+        .map(|r| r.tipping)
+        .fold(0.0, f32::max);
+    let steadier = RestOptions {
+        tipping: 10f32.to_radians(),
+        ..o
+    };
+    assert!(
+        steadiest > o.tipping && steadiest < steadier.tipping,
+        "{steadiest}"
+    );
+    let Some(RestFailure::Tips { tipping, .. }) =
+        failure(&RestProblem::new(bottle(), 0), &rack, &steadier)
+    else {
+        panic!("not tipping against the lip");
+    };
+    assert!(
+        (tipping - steadiest).abs() < 0.5f32.to_radians(),
+        "{tipping}, {steadiest}"
+    );
+
+    // A table between walls that are not the support: it would rest, but for a wall within the
+    // clearance; and the box 20 cm tall, which also tips at the table's edges, comes to that too.
+    let (walled, walls) = between_walls();
+    for object in [a_box(), tall] {
+        let Some(RestFailure::Blocked { rest, by }) =
+            failure(&RestProblem::new(object.clone(), 0), &walled, &o)
+        else {
+            panic!("not blocked: {object:?}");
+        };
+        assert!(walls.contains(&by.point) && !by.support, "{by:?}");
+        assert!(
+            distance(&object, &rest, by.point) < o.clearance,
+            "{by:?} {rest:?}"
+        );
+        assert!(
+            rest.tipping >= o.tipping && rest.support.len() >= 3,
+            "{rest:?}"
+        );
+        assert!((rest.pose.position.z - object_half_height(&object)).abs() < 1e-4);
+    }
+}
+
+#[test]
+fn why_none_is_the_same_alone_in_a_batch_and_on_any_device_and_says_nothing_where_one_rests() {
+    let robot = common::panda().unwrap();
+    let o = RestOptions::default();
+    let tall = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.1));
+    let (walled, _) = between_walls();
+    let surfaces = [table(), slope(30.0, false), post(0.0075), walled];
+    let problems = [
+        RestProblem::new(a_box(), 0),
+        RestProblem {
+            rotation: lying_on(30.0),
+            ..RestProblem::new(a_box(), 1)
+        },
+        RestProblem::new(tall.clone(), 2),
+        RestProblem::new(a_box(), 3),
+        RestProblem::new(tall, 3),
+    ];
+    let one = Device::cpu_threads(&robot, 1).unwrap();
+    let found = rests_on(&one, &problems, &surfaces, &o).unwrap();
+    let alone: Vec<Option<RestFailure>> = (0..problems.len())
+        .map(|k| {
+            let s = std::slice::from_ref(&surfaces[problems[k].surface]);
+            let p = RestProblem {
+                surface: 0,
+                ..problems[k].clone()
+            };
+            let found = rests_on(&one, std::slice::from_ref(&p), s, &o).unwrap();
+            rest_failures(&one, &[p], s, &found, &o).unwrap().remove(0)
+        })
+        .collect();
+    assert!(alone[0].is_none());
+    assert!(matches!(alone[1], Some(RestFailure::Unheld { .. })));
+    assert!(matches!(alone[2], Some(RestFailure::Tips { .. })));
+    assert!(matches!(alone[3], Some(RestFailure::Blocked { .. })));
+    assert!(matches!(alone[4], Some(RestFailure::Blocked { .. })));
+    let mut devices = vec![one, Device::cpu(&robot).unwrap()];
+    match Device::gpu(&robot) {
+        Ok(gpu) => devices.push(gpu),
+        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
+        Err(e) => panic!("no GPU: {e}"),
+    }
+    for device in &devices {
+        let together = rest_failures(device, &problems, &surfaces, &found, &o).unwrap();
+        assert_eq!(together, alone, "{}", device.name());
+    }
+    // Given no rests for a problem that has them, it says none either.
+    let device = &devices[0];
+    let unasked = rest_failures(device, &problems[..1], &surfaces, &[vec![]], &o).unwrap();
+    assert_eq!(unasked, [None]);
+    // Its input is checked as `rests_on`'s is, and the rests must be one list a problem.
+    let short = rest_failures(device, &problems, &surfaces, &found[1..], &o);
+    assert!(matches!(short, Err(Error::Input(why)) if why.contains("4 lists of rests for 5")));
+    let elsewhere = RestProblem::new(a_box(), 4);
+    let refused = rest_failures(device, &[elsewhere], &surfaces, &[vec![]], &o);
+    assert!(matches!(refused, Err(Error::Input(why)) if why.starts_with("problem 0: surface 4")));
+}
+
+/// Half the height of an upright box.
+fn object_half_height(object: &Obstacle) -> f32 {
+    match *object {
+        Obstacle::Cuboid { half_extents, .. } => half_extents.z,
+        _ => panic!("a box, got {object:?}"),
     }
 }

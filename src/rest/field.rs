@@ -165,7 +165,13 @@ impl Field {
 
     /// Whether `grown`, an object grown by the clearance it keeps, with its middle at `center`, is
     /// over everything that blocks: nothing that is not the support reaches into it or over it.
-    pub(super) fn clear(&self, grown: &Turned, center: Vec3) -> bool {
+    /// With `WHY`, the first point that does is left in `by`.
+    pub(super) fn clear<const WHY: bool>(
+        &self,
+        grown: &Turned,
+        center: Vec3,
+        by: &mut Option<Vec3>,
+    ) -> bool {
         let at = center.truncate();
         let [columns, rows] = self.window(at, grown.reach);
         for row in rows {
@@ -177,6 +183,9 @@ impl Field {
                 if let Some((lower, _)) = grown.span(p.truncate() - at)
                     && p.z > center.z + lower
                 {
+                    if WHY {
+                        *by = Some(*p);
+                    }
                     return false;
                 }
             }
