@@ -768,13 +768,16 @@ impl RobotMask {
                     }
                     // Then the least of those within the band along the row.
                     for (u, own) in row.iter_mut().enumerate() {
+                        if *own {
+                            continue;
+                        }
                         let Some(z) = image.reading(v * width + u) else {
                             continue;
                         };
                         let around =
                             &nearest[u.saturating_sub(pixels)..(u + pixels + 1).min(width)];
                         let least = around.iter().fold(f32::INFINITY, |least, &d| least.min(d));
-                        *own |= least < z - reach(z);
+                        *own = least < z - reach(z);
                     }
                 },
             );
