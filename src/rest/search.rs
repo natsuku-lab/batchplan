@@ -825,8 +825,11 @@ fn seeds(outcomes: &[Outcome], across: usize, spacing: f32) -> Vec<usize> {
             match outcomes[(row + dr) as usize * across + (column + dc) as usize] {
                 Outcome::Rests(..) | Outcome::Blocked => held = true,
                 Outcome::Tips(Some(there), false) | Outcome::Unheld(Some(there), false) => {
+                    // Farther by more than where the two lie is rounded to: over one piece the
+                    // place touched moves exactly as far as the object, to a rounding.
                     let apart = spacing * ((dc * dc + dr * dr) as f32).sqrt();
-                    jumps |= here.distance(there) > apart;
+                    let rounding = f32::EPSILON * (here.length() + there.length());
+                    jumps |= here.distance(there) > apart + rounding;
                 }
                 _ => {}
             }
