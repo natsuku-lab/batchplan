@@ -227,21 +227,21 @@ Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from
 
 ## Rests on a surface
 
-`examples/surface_rests.rs` finds where a held object rests on what cameras see (`rests_on`), and where to let it go to fall into a basket (`falls_into`), with the default options (spots 1 cm apart, 8 turns, cells 2 mm wide) on the M4 Pro's 14 threads, the quickest of five calls (of three for the 64 boxes) and of six runs, the machine's load between 3 and 23 from other work; on one thread, the quickest of three runs:
+`examples/surface_rests.rs` finds where a held object rests on what cameras see (`rests_on`), and where to let it go to fall into a basket (`falls_into`), with the default options (spots 1 cm apart, 8 turns, cells 2 mm wide) on the M4 Pro's 14 threads, the quickest of five calls (of three for the 64 boxes) and of six runs, the machine's load between 4 and 24 from other work; on one thread, the quickest of three runs:
 
 | | Points | Rests | Time | On one thread |
 |---|---|---|---|---|
-| A box 4 by 6 by 5 cm on a table 60 cm square among three blocks, in two 640×480 depth images | 392,708, 359,217 of them the table's | 23,616 | 55 ms | 523 ms |
+| A box 4 by 6 by 5 cm on a table 60 cm square among three blocks, in two 640×480 depth images | 392,708, 359,217 of them the table's | 23,616 | 55 ms | 528 ms |
 | A can in a basket 20 cm square, seen from above | 99,225 | 1,952, on its floor | 2.4 ms | 12 ms |
 | That can let go over that basket to fall in (`falls_into`) | 99,225 | 800 places to let go at | 1.1 ms | 1.6 ms |
-| A tray 12 by 6 cm across two bars 2 cm thick, 8 cm apart | 9,362 | 822 | 18 ms | 165 ms |
-| A can 6.6 cm across laid along those bars, rolling in between them | 9,362 | 60, both ways round for each centimeter along them | 23 ms | 223 ms |
-| A bottle 16 cm long laid flat on a rack sloping 30° against the lip at its foot, spots 2 mm apart at the one turn that lies flat | 10,117 | 150, all against the lip | 48 ms | 458 ms |
-| A wine bottle 4.3 cm across stood upright on that rack against the bare lip | 10,117 | none; `rest_failures` says why (`Unheld`) in 0.5 ms, 1.4 ms on one thread | 0.5 ms | 1.3 ms |
-| That bottle against the lip with a top 1 cm wide | 11,023 | 224, all against the lip | 0.6 ms | 2.2 ms |
-| 64 boxes of as many heights on that table in one call | 392,708 | 1,511,244 | 3.3 s, 52 ms a box | 34 s |
+| A tray 12 by 6 cm across two bars 2 cm thick, 8 cm apart | 9,362 | 822 | 18 ms | 167 ms |
+| A can 6.6 cm across laid along those bars, rolling in between them | 9,362 | 60, both ways round for each centimeter along them | 5.7 ms | 54 ms |
+| A bottle 16 cm long laid flat on a rack sloping 30° against the lip at its foot, spots 2 mm apart at the one turn that lies flat | 10,117 | 150, all against the lip | 46 ms | 478 ms |
+| A wine bottle 4.3 cm across stood upright on that rack against the bare lip | 10,117 | none; `rest_failures` says why (`Unheld`) in 0.6 ms, 1.4 ms on one thread | 0.5 ms | 1.4 ms |
+| That bottle against the lip with a top 1 cm wide | 11,023 | 224, all against the lip | 0.5 ms | 2.2 ms |
+| 64 boxes of as many heights on that table in one call | 392,708 | 1,511,244 | 3.2 s, 50 ms a box | 34 s |
 
-The table is read once for the 64 boxes. A flat bottom on a flat top is judged in closed form; the tray and the bottle touch two stretches of support that push different ways, which takes a balance of forces per pose and most of their time. [Looking closer](planning.md#picking-up-and-setting-down) starts in none of these scenes but the can's: laid across the cradle between the bars, held by both and tipping at every spot along it, it is set down 2,656 more times a call than the grid's 1,408, without a rest more, which takes 4.3 times the instructions on one thread. `scripts/validate_rests.py` lets go of up to 250 rests of each scene in MuJoCo, on the support as a height field: all stay on the table, in the basket and between the bars, 249 of 250 trays across the bars, 148 of 150 bottles laid on the rack, the others at the very end of the support, and 224 of 224 upright bottles against the lip with a top. Rests come at every turn; those of a turn that sets the shape down as an earlier one does are copied from it, not found again. A can or capsule on its side that is not held where it is set down is rolled to where it lies lowest, eleven more set-downs for that spot and a second reading of its contacts, so one laid where it has no rest anywhere, as on a flat top, costs the most.
+The table is read once for the 64 boxes. A flat bottom on a flat top is judged in closed form; the tray and the bottle touch two stretches of support that push different ways, which takes a balance of forces per pose and most of their time. [Looking closer](planning.md#picking-up-and-setting-down) starts in none of these scenes but the 64 boxes': one box, turned, tips at a place where the table read in two depth images steps by a couple of millimeters, touching the table on one side of the step there and on the other a spot away, and is set down 880 more times a call without a rest more, beside the grid's 968,192. `scripts/validate_rests.py` lets go of up to 250 rests of each scene in MuJoCo, on the support as a height field: all stay on the table, in the basket and between the bars, 249 of 250 trays across the bars, 148 of 150 bottles laid on the rack, the others at the very end of the support, and 224 of 224 upright bottles against the lip with a top. Rests come at every turn; those of a turn that sets the shape down as an earlier one does are copied from it, not found again. A can or capsule on its side that is not held where it is set down is rolled to where it lies lowest, eleven more set-downs for that spot and a second reading of its contacts, so one laid where it has no rest anywhere, as on a flat top, costs the most.
 
 ## Spheres for what a hand holds
 
