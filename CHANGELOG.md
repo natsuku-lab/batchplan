@@ -253,8 +253,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   1.6 where 5.5 from one on the Panda's hand; into a 2.9 m cube of 24.9M voxels, which the views
   reach farther down, 6.6 ms where 11.8 and 4.7 where 10.9 (best of eight runs alternated with
   the code before, at a load of 7 to 13). A map of 1.8M voxels that the camera across the table
-  sees nearly all of takes what it took, and from the hand 1.5 ms where 1.7. The GPU's fuse is
-  as it was.
+  sees nearly all of takes what it took, and from the hand 1.5 ms where 1.7. On the Ryzen AI Max+
+  395's 32 threads the 13.4M map takes 6.0 ms where 12.5 and 3.7 where 9.5 (ten rounds
+  alternated, at a load of 7 to 19). The GPU's fuse is as it was: it sends the map to the
+  device and back, so a map that large now fuses quicker on a CPU device, and any device
+  fuses a map.
 
 - **Breaking:** a robot's `SphereOptions` are checked whether its spheres are fitted or given
   (`RobotOptions::collision_model`), before anything is read: a budget of zero, or a tolerance or

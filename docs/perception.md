@@ -107,7 +107,7 @@ The readings are told apart on the device's threads, in 0.4 to 0.5 ms for a 640�
 
 ## Fused maps
 
-`OccupancyMap::try_new(lo, hi, voxel)` is a fixed grid in the world frame that fuses frames as OctoMap does. Each voxel holds the log-odds that it is occupied: a hit adds 0.85 and a miss subtracts 0.4, clamped to [−2, 3.5]. Something seen once and then seen through three times is free again; something seen in five images or more, nine times. Voxels behind readings, outside the image or beyond the map are not updated. On the CPU device a fuse visits only the voxels it can change, those the image may see, those holding one of its readings and those a mask frees, so its cost follows the view, not the map's size.
+`OccupancyMap::try_new(lo, hi, voxel)` is a fixed grid in the world frame that fuses frames as OctoMap does. Each voxel holds the log-odds that it is occupied: a hit adds 0.85 and a miss subtracts 0.4, clamped to [−2, 3.5]. Something seen once and then seen through three times is free again; something seen in five images or more, nine times. Voxels behind readings, outside the image or beyond the map are not updated. On the CPU device a fuse visits only the voxels it can change, those the image may see, those holding one of its readings and those a mask frees, so its cost follows the view, not the map's size. On the GPU device a fuse sends the map to the device and reads it back, so its cost follows the map's size: a map of 1.8M voxels fuses several times quicker there, and one of 13M quicker on the CPU device (two 640×480 frames in 10 ms on the Ryzen's 32 threads against 13 to 14 on its Radeon). Any device fuses a map, whichever the plans run on, so a caller with a large map fuses it on a CPU device.
 
 Those weights are the map's `Weighing`. `Weighing::Evidence`, the default, suits a stream of frames: what comes and goes settles, and one stray reading (noise, or a mixed pixel the filter kept) is outweighed by the looks that see through it. A caller that looks once every few seconds and acts on each look wants `map.with_weighing(Weighing::Latest)`: each image decides what it sees. A voxel it reads a surface in, or that holds one of its readings, is as surely occupied as a map holds anything (the upper clamp, 3.5), and a voxel its rays pass through is as surely free (the lower, −2). What the image does not see, outside it, behind its surfaces or along pixels without a reading, keeps what earlier images said, and space no image has observed, the robot's shadow and hidden space are marked as under `Evidence`. With a mask, the space the robot, what it holds and the mask's shapes fill is as surely free wherever it is, seen or not. One stray reading is then an obstacle until a look sees through it.
 
@@ -343,7 +343,7 @@ Median build times for a 640×480 image of a table seen from 1 m:
 | M4 Pro (GPU) | 3.6 ms | 14.8 ms | 1.5 ms | 4.4 ms |
 | M4 Pro (CPU, 14 threads) | 6.4 ms | 36 ms | 2.2 ms | 6.9 ms |
 
-`examples/perception.rs` times each call for a 640×480 image that shows the arm: a tabletop seen from across the table, and from a camera on the Panda's palm that looks along its fingers. The mask is padded 4 cm, for the Panda's 61 spheres and for a Panda fitted with 573. Each figure is the quickest median of several runs (twenty on the M4 Pro, ten for the four rows of its CPU fusing, eight on the Ryzen and its Radeon) on machines doing other work beside them (a load of 3 to 10 on the M4 Pro's 14 cores, 43 to 46 for the two rows with shapes and 13 to 14 for its CPU fusing; 10 to 32 on the Ryzen's 32); each cell is the camera over the table, then the one on the hand.
+`examples/perception.rs` times each call for a 640×480 image that shows the arm: a tabletop seen from across the table, and from a camera on the Panda's palm that looks along its fingers. The mask is padded 4 cm, for the Panda's 61 spheres and for a Panda fitted with 573. Each figure is the quickest median of several runs (twenty on the M4 Pro, ten for the four rows of its CPU fusing, eight on the Ryzen and its Radeon) on machines doing other work beside them (a load of 3 to 10 on the M4 Pro's 14 cores, 43 to 46 for the two rows with shapes and 13 to 14 for its CPU fusing; 10 to 32 on the Ryzen's 32, 7 to 14 for its CPU fusing); each cell is the camera over the table, then the one on the hand.
 
 The filter, the masks, the points and a surface are read on the host:
 
@@ -360,10 +360,10 @@ Fusing and grids run on the device:
 
 | | M4 Pro (CPU, 14 threads) | M4 Pro (GPU) | Ryzen AI Max+ 395 (CPU, 32 threads) | Radeon 8060S (GPU) |
 |---|---|---|---|---|
-| Fusing the image into a 1.8M-voxel map, no mask | 1.6 ms, 1.5 ms | 1.2 ms, 1.2 ms | 4.9 ms, 4.6 ms | 0.8 ms, 0.9 ms |
-| With a mask of 61 spheres | 2.0 ms, 1.7 ms | 1.6 ms, 1.6 ms | 5.4 ms, 5.0 ms | 1.1 ms, 1.4 ms |
-| With a mask of 573 spheres | 2.3 ms, 1.8 ms | 1.7 ms, 1.9 ms | 5.7 ms, 5.5 ms | 1.6 ms, 1.6 ms |
-| With the robot's mask and the scene's three shapes left out | 2.0 ms, 1.5 ms | 2.3 ms, 2.0 ms | 4.1 ms, 3.6 ms | 1.5 ms, 1.6 ms |
+| Fusing the image into a 1.8M-voxel map, no mask | 1.6 ms, 1.5 ms | 1.2 ms, 1.2 ms | 3.8 ms, 3.0 ms | 0.8 ms, 0.9 ms |
+| With a mask of 61 spheres | 2.0 ms, 1.7 ms | 1.6 ms, 1.6 ms | 4.5 ms, 3.0 ms | 1.1 ms, 1.4 ms |
+| With a mask of 573 spheres | 2.3 ms, 1.8 ms | 1.7 ms, 1.9 ms | 4.5 ms, 3.3 ms | 1.6 ms, 1.6 ms |
+| With the robot's mask and the scene's three shapes left out | 2.0 ms, 1.5 ms | 2.3 ms, 2.0 ms | 3.1 ms, 1.8 ms | 1.5 ms, 1.6 ms |
 | A 1 cm grid of the image, no mask (3.1M and 2.1M points) | 14.1 ms, 10.1 ms | 6.4 ms, 5.4 ms | 21 ms, 14.0 ms | 7.4 ms, 5.7 ms |
 | With a mask of 61 spheres (2.3M and 1.6M points) | 11.7 ms, 8.7 ms | 6.0 ms, 5.1 ms | 16.6 ms, 12.6 ms | 6.1 ms, 5.6 ms |
 | With a mask of 573 spheres | 11.5 ms, 8.8 ms | 6.0 ms, 5.4 ms | 16.4 ms, 12.7 ms | 6.4 ms, 5.1 ms |
