@@ -1027,63 +1027,91 @@ fn integrated<const MASK: bool, const LATEST: bool>(
     let inside = robot
         .filter(|_| MASK)
         .map_or_else(Vec::new, |r| r.inside(grid));
-    let update = |n: usize, l: &mut i8| {
-        let seen = if MASK {
-            image.classify::<false, true>(robot, set(&inside, n), grid.point(n), grid.voxel, 0.0)
-        } else {
-            image.sees::<false, false>(None, grid.point(n), grid.voxel, 0.0)
-        };
-        // Constants in place: chosen into locals, they compiled the copy that weighs evidence
-        // to other instructions.
-        let step = match seen {
-            _ if set(hit, n) => const { if LATEST { LATEST_HIT } else { HIT } },
-            Seen::Surface => const { if LATEST { LATEST_HIT } else { HIT } },
-            Seen::Free => const { if LATEST { LATEST_MISS } else { MISS } },
-            // Only the robot hides it: noted, until an image observes it or another surface
-            // hides it.
-            Seen::Shadow => {
-                if *l == UNOBSERVED {
-                    *l = SHADOWED;
-                }
-                return;
-            }
-            Seen::Hidden => {
-                if *l == UNOBSERVED || *l == SHADOWED {
-                    *l = OCCLUDED;
-                }
-                return;
-            }
-            Seen::Near | Seen::Unseen => return,
-        };
-        let from = if *l == UNOBSERVED || *l == SHADOWED || *l == OCCLUDED {
-            0
-        } else {
-            *l
-        };
-        // One image's step from either clamp passes the other, past what a byte holds.
-        let to = match LATEST {
-            true => from.saturating_add(step),
-            false => from + step,
-        };
-        *l = to.clamp(CLAMP.0, CLAMP.1);
-    };
+    let flags = [&inside[..], hit];
     let (planes, nx) = (view(image, grid), grid.dims.x as usize);
+    let camera = image.camera.position;
+    let top = grid.origin + (grid.dims - 1).as_vec3() * grid.voxel;
+    let mut corners = (0..8).map(|i| {
+        let pick = BVec3::new(i & 1 != 0, i & 2 != 0, i & 4 != 0);
+        Vec3::select(pick, top, grid.origin) - camera
+    });
+    // A map wholly in view is taken in whole rows: never fewer voxels than `span`, the same map.
+    let whole = corners.all(|c| planes.iter().all(|p| p.truncate().dot(c) + p.w >= 0.0));
     // Rows go to the threads a few at a time, at most 4,096 voxels' worth, as the view makes
     // their costs uneven: in rayon's own pieces, a few per thread until one is taken from
     // another, a fuse took 5% to 7% longer on the M4 Pro's 14 threads, and pieces of 570 to
     // 18,700 voxels fused alike.
     let rows = (log_odds.par_chunks_mut(nx).enumerate()).with_max_len((4096 / nx).max(1));
     rows.for_each(|(r, row)| {
-        let (first, seen) = (r * nx, span(&planes, image.camera.position, grid, r));
+        let seen = if whole {
+            0..nx
+        } else {
+            span(&planes, camera, grid, r)
+        };
+        let first = r * nx;
         let start = seen.start;
         for (x, l) in row[seen.clone()].iter_mut().enumerate() {
-            update(first + start + x, l);
+            update::<MASK, LATEST>(grid, image, robot, flags, first + start + x, l);
         }
         let past = [first..first + seen.start, first + seen.end..first + nx];
         for range in past {
-            flagged(hit, &inside, range, |n| update(n, &mut row[n - first]));
+            flagged(hit, &inside, range, |n| {
+                update::<MASK, LATEST>(grid, image, robot, flags, n, &mut row[n - first]);
+            });
         }
     });
+}
+
+/// Voxel `n`'s log-odds `l` after one image, as [`integrated`] takes it: `inside` holds the
+/// mask's bits (none without one) and `hit` the voxels holding a reading. Kept in line at both
+/// of its calls: out of line, a fuse into a map wholly in view retired 5% more instructions on
+/// the M4 Pro.
+#[inline(always)]
+fn update<const MASK: bool, const LATEST: bool>(
+    grid: &Layout,
+    image: &DepthImage,
+    robot: Option<&RobotMask>,
+    [inside, hit]: [&[u32]; 2],
+    n: usize,
+    l: &mut i8,
+) {
+    let seen = if MASK {
+        image.classify::<false, true>(robot, set(inside, n), grid.point(n), grid.voxel, 0.0)
+    } else {
+        image.sees::<false, false>(None, grid.point(n), grid.voxel, 0.0)
+    };
+    // Constants in place: chosen into locals, they compiled the copy that weighs evidence to
+    // other instructions.
+    let step = match seen {
+        _ if set(hit, n) => const { if LATEST { LATEST_HIT } else { HIT } },
+        Seen::Surface => const { if LATEST { LATEST_HIT } else { HIT } },
+        Seen::Free => const { if LATEST { LATEST_MISS } else { MISS } },
+        // Only the robot hides it: noted, until an image observes it or another surface hides it.
+        Seen::Shadow => {
+            if *l == UNOBSERVED {
+                *l = SHADOWED;
+            }
+            return;
+        }
+        Seen::Hidden => {
+            if *l == UNOBSERVED || *l == SHADOWED {
+                *l = OCCLUDED;
+            }
+            return;
+        }
+        Seen::Near | Seen::Unseen => return,
+    };
+    let from = if *l == UNOBSERVED || *l == SHADOWED || *l == OCCLUDED {
+        0
+    } else {
+        *l
+    };
+    // One image's step from either clamp passes the other, past what a byte holds.
+    let to = match LATEST {
+        true => from.saturating_add(step),
+        false => from + step,
+    };
+    *l = to.clamp(CLAMP.0, CLAMP.1);
 }
 
 /// The five half-spaces a voxel's middle lies in where it projects into `image`
