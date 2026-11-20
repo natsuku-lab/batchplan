@@ -2590,6 +2590,257 @@ fn every_device_fuses_alike_when_one_image_decides() {
     }
 }
 
+/// A fuse changes what the image sees, the voxels that hold its readings and, with a mask, the
+/// space the robot and the mask's shapes fill, and nothing else. The CPU visits only those voxels
+/// and the GPU every one, so the GPU's map is the reference. On a map 3 m across and 1.8 m high,
+/// after a look from high over it, a camera inside it looking out past its side, the top and
+/// bottom of its image running along the map's rows, and a zoomed one outside it looking in, turned
+/// to them, each see a table with a block on it, the floor and the arm: with no mask, with the arm
+/// masked out, and with the table, the block and a box neither camera sees given to the mask as
+/// well, under both weighings. The devices' maps differ at no more voxels than their
+/// classification does (one in 2,000, as `every_device_fuses_alike_when_one_image_decides`
+/// allows: a voxel within rounding of a pixel's edge or a reading's depth lands either way). On
+/// both, every voxel more than a voxel outside the view keeps what the look from above made it
+/// unless the mask frees it, as it frees the whole box; and the voxels holding a reading whose
+/// middles project past the image's edge take their hits, some of them in rows the view misses.
+#[test]
+fn a_fuse_changes_only_what_the_image_sees_and_the_mask_frees() {
+    let robot = common::panda().unwrap();
+    let q = robot.default_q().to_vec();
+    let k = Intrinsics {
+        fx: 525.0,
+        fy: 525.0,
+        cx: 319.5,
+        cy: 239.5,
+    };
+    let table = Obstacle::cuboid(Vec3::new(0.5, 0.0, 0.1), Vec3::new(0.3, 0.5, 0.05));
+    let block = Obstacle::cuboid(Vec3::new(0.5, 0.2, 0.2), Vec3::splat(0.05));
+    let floor = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.25), Vec3::new(3.0, 3.0, 0.05));
+    let aside = Obstacle::cuboid(Vec3::new(-1.1, -1.1, 0.4), Vec3::splat(0.1));
+    let (lo, hi, voxel) = (Vec3::new(-1.5, -1.5, -0.3), Vec3::new(1.5, 1.5, 1.5), 0.03);
+    let points = lattice(lo, hi, voxel);
+    // What `camera` reads of the scene, and of the arm before it.
+    let look = |camera: Pose, intrinsics: Intrinsics| {
+        let blank = vec![0.0; 640 * 480];
+        let image = DepthImage {
+            depth: &blank,
+            width: 640,
+            intrinsics,
+            camera,
+        };
+        let scene: Vec<f32> = scene_depth(&image, &[&table, &block, &floor, &aside])
+            .into_iter()
+            .map(|z| if z > 0.0 { z } else { f32::INFINITY })
+            .collect();
+        with_arm(
+            &DepthImage {
+                depth: &scene,
+                ..image
+            },
+            &robot,
+            &q,
+        )
+    };
+    // Whether `p` lies outside one of the half-spaces a point projects into `image` in, by more
+    // than `by` and, for a side slanted to the map's rows (x), `along` times the slant (meters),
+    // in doubles. A row's span reaches past the view by its margin and a voxel along the row at
+    // most (`sdf::span`): past `by` 1 mm and `along` two voxels, a voxel lies outside its span.
+    let outside = |image: &DepthImage, p: Vec3, by: f64, along: f64| {
+        let rotation = image.camera.rotation.as_dquat();
+        let c = rotation.inverse() * (p.as_dvec3() - image.camera.position.as_dvec3());
+        let Intrinsics { fx, fy, cx, cy } = image.intrinsics;
+        let sides = [
+            Vec3::Z,
+            Vec3::new(fx, 0.0, cx + 0.5),
+            Vec3::new(-fx, 0.0, 640.0 - cx - 0.5),
+            Vec3::new(0.0, fy, cy + 0.5),
+            Vec3::new(0.0, -fy, 480.0 - cy - 0.5),
+        ];
+        sides.iter().any(|n| {
+            let n = n.as_dvec3().normalize();
+            n.dot(c) < -(by + along * (rotation * n).x.abs())
+        })
+    };
+    // The log-odds at the clamps, as `occupancy` gives them.
+    let (bottom, top) = (1.0 / (1.0 + 2f32.exp()), 1.0 / (1.0 + (-3.5f32).exp()));
+    let raised = |was: Option<f32>, is: Option<f32>| {
+        is.is_some_and(|is| is > was.unwrap_or(0.5) || is == top)
+    };
+    let lowered = |was: Option<f32>, is: Option<f32>| {
+        is.is_some_and(|is| is < was.unwrap_or(0.5) || is == bottom)
+    };
+    let wide = Intrinsics {
+        fx: 200.0,
+        fy: 200.0,
+        ..k
+    };
+    let above = look_at(Vec3::new(0.1, 0.1, 2.4), Vec3::ZERO);
+    let from_above = look(above, wide);
+    let from_above = DepthImage {
+        depth: &from_above,
+        width: 640,
+        intrinsics: wide,
+        camera: above,
+    };
+    let spheres = robot.spheres(&q);
+    let reach = 0.5 * 3f32.sqrt() * voxel;
+    let zoomed = Intrinsics {
+        fx: 1000.0,
+        fy: 1000.0,
+        ..k
+    };
+    let cameras = [
+        (
+            "inside, looking out",
+            look_at(Vec3::new(0.5, -1.2, 0.7), Vec3::new(0.5, 1.0, 0.0)),
+            k,
+        ),
+        (
+            "outside, looking in",
+            look_at(Vec3::new(2.4, 0.9, 1.3), Vec3::new(0.4, 0.0, 0.1)),
+            zoomed,
+        ),
+    ];
+    let mut past_spans = 0;
+    for (name, camera, intrinsics) in cameras {
+        let depth = look(camera, intrinsics);
+        let image = DepthImage {
+            depth: &depth,
+            width: 640,
+            intrinsics,
+            camera,
+        };
+        let arm = image.robot_mask(&robot, &q, 0.04, &[]).unwrap();
+        let on = arm.on_robot.iter().filter(|&&on| on).count();
+        assert!(on > 1_000, "{name}: {on} readings of the arm");
+        let given = [table.clone(), block.clone(), aside.clone()];
+        let held = (arm.clone())
+            .with_shapes(cpu(), &image, &given, [0.004, 0.0, 0.0])
+            .unwrap();
+        let away: Vec<bool> = (points.iter())
+            .map(|&p| outside(&image, p, voxel.into(), 0.0))
+            .collect();
+        let unseen = away.iter().filter(|&&a| a).count();
+        assert!(
+            unseen * 3 > points.len() * 2,
+            "{name}: {unseen} of {} voxels outside the view",
+            points.len()
+        );
+        let in_aside: Vec<usize> = (0..points.len())
+            .filter(|&n| aside.distance(points[n]).value <= 0.0)
+            .collect();
+        let past_view = |n: &usize| outside(&image, points[*n], 1e-3, 2.0 * f64::from(voxel));
+        assert!(
+            in_aside.len() > 200 && in_aside.iter().all(past_view),
+            "{name}: the box's {} voxels lie outside the view and their rows' spans",
+            in_aside.len()
+        );
+        let masks = [
+            ("no mask", None),
+            ("the arm", Some(&arm)),
+            ("shapes", Some(&held)),
+        ];
+        for (label, mask) in masks {
+            // The middles of the voxels holding a reading whose middles project past the image's
+            // edge, of readings not within rounding of a voxel's face.
+            let mut edge: Vec<Vec3> = vec![];
+            for p in image.points(mask).unwrap().into_iter().flatten() {
+                let at = (p - lo) / voxel;
+                let on_map =
+                    at.cmpge(Vec3::splat(-0.5)).all() && at.cmplt((hi - lo) / voxel + 0.5).all();
+                let off_faces = ((at - at.floor() - 0.5).abs()).min_element() > 1e-3;
+                let middle = lo + at.round() * voxel;
+                if on_map && off_faces && outside(&image, middle, 1e-6, 0.0) {
+                    edge.push(middle);
+                }
+            }
+            edge.sort_unstable_by(|a, b| a.to_array().partial_cmp(&b.to_array()).unwrap());
+            edge.dedup();
+            assert!(
+                edge.len() > 30,
+                "{name}, {label}: {} voxels at the edge",
+                edge.len()
+            );
+            past_spans += (edge.iter())
+                .filter(|&&p| outside(&image, p, 1e-3, 2.0 * f64::from(voxel)))
+                .count();
+            // Which voxels the mask may free: inside a grown sphere or reaching into a shape,
+            // with a voxel to spare.
+            let freed = |p: Vec3| {
+                let in_arm = (spheres.iter())
+                    .any(|&[x, y, z, r]| (p - Vec3::new(x, y, z)).length() < r + 0.04 + voxel);
+                let in_shape = given.iter().any(|s| s.distance(p).value <= reach + voxel);
+                mask.is_some() && in_arm || label == "shapes" && in_shape
+            };
+            for weighing in [Weighing::Evidence, Weighing::Latest] {
+                let mut before = OccupancyMap::try_new(lo, hi, voxel)
+                    .unwrap()
+                    .with_weighing(weighing);
+                before.integrate(cpu(), &from_above, None).unwrap();
+                let was: Vec<Option<f32>> = points.iter().map(|&p| before.occupancy(p)).collect();
+                let fused: Vec<Vec<Option<f32>>> = (devices().iter())
+                    .map(|device| {
+                        let mut map = before.clone();
+                        map.integrate(device, &image, mask).unwrap();
+                        let name = device.name();
+                        let is: Vec<Option<f32>> =
+                            points.iter().map(|&p| map.occupancy(p)).collect();
+                        let kept = (0..points.len()).filter(|&n| away[n] && !freed(points[n]));
+                        for n in kept {
+                            assert_eq!(
+                                is[n], was[n],
+                                "{name}, {label}, {weighing:?}: {} outside the view",
+                                points[n]
+                            );
+                        }
+                        let box_freed = label == "shapes";
+                        for &n in in_aside.iter().filter(|_| box_freed) {
+                            assert!(
+                                lowered(was[n], is[n]),
+                                "{name}, {weighing:?}: {} in the box, {:?} after {:?}",
+                                points[n],
+                                is[n],
+                                was[n]
+                            );
+                        }
+                        for &p in &edge {
+                            let (was, is) = (before.occupancy(p), map.occupancy(p));
+                            assert!(
+                                raised(was, is),
+                                "{name}, {label}, {weighing:?}: {p} holds a reading, {is:?} after \
+                                 {was:?}"
+                            );
+                        }
+                        is
+                    })
+                    .collect();
+                let changed = (fused[0].iter().zip(&was)).filter(|(a, b)| a != b).count();
+                assert!(
+                    changed > 2_000,
+                    "{name}, {label}, {weighing:?}: {changed} voxels change"
+                );
+                for (device, is) in devices().iter().zip(&fused).skip(1) {
+                    let differ = (is.iter().zip(&fused[0])).filter(|(a, b)| a != b).count();
+                    eprintln!(
+                        "{name}, {label}, {weighing:?}, {}: {differ} of {} voxels differ",
+                        device.name(),
+                        points.len()
+                    );
+                    assert!(
+                        differ * 2000 <= points.len(),
+                        "{name}, {label}, {weighing:?}, {}: {differ} voxels differ",
+                        device.name()
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        past_spans > 60,
+        "{past_spans} voxels holding a reading lie outside their rows' spans"
+    );
+}
+
 /// A depth camera reads a pixel that mixes a near surface with what lies behind it somewhere
 /// between the two. Filtered, a reading between a nearer and a farther neighbour, or between one
 /// of them and a pixel without a reading, is left out; the surfaces on both sides keep every

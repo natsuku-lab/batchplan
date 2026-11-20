@@ -15,6 +15,7 @@
 
 use std::borrow::Cow;
 use std::num::FpCategory;
+use std::ops::Range;
 
 use glam::{BVec3, IVec3, UVec3, Vec2, Vec3, Vec4};
 use half::f16;
@@ -983,7 +984,8 @@ fn hits(
 }
 
 /// Fuses one image into a map's log-odds as [`OccupancyMap::integrate`] describes. `depth_hits`
-/// and `map_update` in grids.wgsl mirror it.
+/// and `map_update` in grids.wgsl mirror it, visiting every voxel; here only the voxels a change
+/// can reach are visited ([`integrated`]).
 pub(crate) fn integrate(
     grid: &Layout,
     log_odds: &mut [i8],
@@ -991,82 +993,207 @@ pub(crate) fn integrate(
     robot: Option<&RobotMask>,
     weighing: Weighing,
 ) {
-    let mut hit = vec![false; grid.points()];
+    // The voxels holding a reading, a bit each, laid out as `RobotMask::inside` lays its bits.
+    let mut hit = vec![0u32; grid.points().div_ceil(32)];
     for n in hits(grid, image, robot, |p| grid.contains(p)) {
-        hit[n] = true;
+        hit[n / 32] |= 1 << (n % 32);
     }
     match (robot.is_some(), weighing) {
-        (true, Weighing::Evidence) => integrated::<true, false>(grid, log_odds, image, robot, hit),
+        (true, Weighing::Evidence) => integrated::<true, false>(grid, log_odds, image, robot, &hit),
         (false, Weighing::Evidence) => {
-            integrated::<false, false>(grid, log_odds, image, robot, hit);
+            integrated::<false, false>(grid, log_odds, image, robot, &hit);
         }
-        (true, Weighing::Latest) => integrated::<true, true>(grid, log_odds, image, robot, hit),
-        (false, Weighing::Latest) => integrated::<false, true>(grid, log_odds, image, robot, hit),
+        (true, Weighing::Latest) => integrated::<true, true>(grid, log_odds, image, robot, &hit),
+        (false, Weighing::Latest) => integrated::<false, true>(grid, log_odds, image, robot, &hit),
     }
 }
 
 /// Updates the map with one image's classification, with masking and the weighing
 /// ([`Weighing::Latest`] if `LATEST`) selected before the voxel loop.
+///
+/// A voxel whose middle does not project into the image is unseen, and changes only if it holds
+/// a reading (`hit`; a reading at the image's border can land in a voxel whose middle projects
+/// just past it) or, with a mask, lies inside the robot or a shape the mask holds, which is free
+/// seen or not. So each row of voxels, x fastest, is updated over the span its middles may
+/// project in ([`span`]), and past it only at the voxels those bits name: a fuse's cost follows
+/// the view, not the map's size.
 fn integrated<const MASK: bool, const LATEST: bool>(
     grid: &Layout,
     log_odds: &mut [i8],
     image: &DepthImage,
     robot: Option<&RobotMask>,
-    hit: Vec<bool>,
+    hit: &[u32],
 ) {
     let inside = robot
         .filter(|_| MASK)
         .map_or_else(Vec::new, |r| r.inside(grid));
-    log_odds
-        .par_iter_mut()
-        .zip(hit)
-        .enumerate()
-        .for_each(|(n, (l, hit))| {
-            let seen = if MASK {
-                image.classify::<false, true>(
-                    robot,
-                    set(&inside, n),
-                    grid.point(n),
-                    grid.voxel,
-                    0.0,
-                )
-            } else {
-                image.sees::<false, false>(None, grid.point(n), grid.voxel, 0.0)
-            };
-            // Constants in place: chosen into locals, they compiled the copy that weighs evidence
-            // to other instructions.
-            let step = match seen {
-                _ if hit => const { if LATEST { LATEST_HIT } else { HIT } },
-                Seen::Surface => const { if LATEST { LATEST_HIT } else { HIT } },
-                Seen::Free => const { if LATEST { LATEST_MISS } else { MISS } },
-                // Only the robot hides it: noted, until an image observes it or another surface
-                // hides it.
-                Seen::Shadow => {
-                    if *l == UNOBSERVED {
-                        *l = SHADOWED;
-                    }
-                    return;
-                }
-                Seen::Hidden => {
-                    if *l == UNOBSERVED || *l == SHADOWED {
-                        *l = OCCLUDED;
-                    }
-                    return;
-                }
-                Seen::Near | Seen::Unseen => return,
-            };
-            let from = if *l == UNOBSERVED || *l == SHADOWED || *l == OCCLUDED {
-                0
-            } else {
-                *l
-            };
-            // One image's step from either clamp passes the other, past what a byte holds.
-            let to = match LATEST {
-                true => from.saturating_add(step),
-                false => from + step,
-            };
-            *l = to.clamp(CLAMP.0, CLAMP.1);
-        });
+    let flags = [&inside[..], hit];
+    let (planes, nx) = (view(image, grid), grid.dims.x as usize);
+    let camera = image.camera.position;
+    let top = grid.origin + (grid.dims - 1).as_vec3() * grid.voxel;
+    let mut corners = (0..8).map(|i| {
+        let pick = BVec3::new(i & 1 != 0, i & 2 != 0, i & 4 != 0);
+        Vec3::select(pick, top, grid.origin) - camera
+    });
+    // A map wholly in view is taken in whole rows: never fewer voxels than `span`, the same map.
+    let whole = corners.all(|c| planes.iter().all(|p| p.truncate().dot(c) + p.w >= 0.0));
+    // Rows go to the threads a few at a time, at most 4,096 voxels' worth, as the view makes
+    // their costs uneven: in rayon's own pieces, a few per thread until one is taken from
+    // another, a fuse took 5% to 7% longer on the M4 Pro's 14 threads, and pieces of 570 to
+    // 18,700 voxels fused alike.
+    let rows = (log_odds.par_chunks_mut(nx).enumerate()).with_max_len((4096 / nx).max(1));
+    rows.for_each(|(r, row)| {
+        let seen = if whole {
+            0..nx
+        } else {
+            span(&planes, camera, grid, r)
+        };
+        let first = r * nx;
+        let start = seen.start;
+        for (x, l) in row[seen.clone()].iter_mut().enumerate() {
+            update::<MASK, LATEST>(grid, image, robot, flags, first + start + x, l);
+        }
+        let past = [first..first + seen.start, first + seen.end..first + nx];
+        for range in past {
+            flagged(hit, &inside, range, |n| {
+                update::<MASK, LATEST>(grid, image, robot, flags, n, &mut row[n - first]);
+            });
+        }
+    });
+}
+
+/// Voxel `n`'s log-odds `l` after one image, as [`integrated`] takes it: `inside` holds the
+/// mask's bits (none without one) and `hit` the voxels holding a reading. Kept in line at both
+/// of its calls: out of line, a fuse into a map wholly in view retired 5% more instructions on
+/// the M4 Pro.
+#[inline(always)]
+fn update<const MASK: bool, const LATEST: bool>(
+    grid: &Layout,
+    image: &DepthImage,
+    robot: Option<&RobotMask>,
+    [inside, hit]: [&[u32]; 2],
+    n: usize,
+    l: &mut i8,
+) {
+    let seen = if MASK {
+        image.classify::<false, true>(robot, set(inside, n), grid.point(n), grid.voxel, 0.0)
+    } else {
+        image.sees::<false, false>(None, grid.point(n), grid.voxel, 0.0)
+    };
+    // Constants in place: chosen into locals, they compiled the copy that weighs evidence to
+    // other instructions.
+    let step = match seen {
+        _ if set(hit, n) => const { if LATEST { LATEST_HIT } else { HIT } },
+        Seen::Surface => const { if LATEST { LATEST_HIT } else { HIT } },
+        Seen::Free => const { if LATEST { LATEST_MISS } else { MISS } },
+        // Only the robot hides it: noted, until an image observes it or another surface hides it.
+        Seen::Shadow => {
+            if *l == UNOBSERVED {
+                *l = SHADOWED;
+            }
+            return;
+        }
+        Seen::Hidden => {
+            if *l == UNOBSERVED || *l == SHADOWED {
+                *l = OCCLUDED;
+            }
+            return;
+        }
+        Seen::Near | Seen::Unseen => return,
+    };
+    let from = if *l == UNOBSERVED || *l == SHADOWED || *l == OCCLUDED {
+        0
+    } else {
+        *l
+    };
+    // One image's step from either clamp passes the other, past what a byte holds.
+    let to = match LATEST {
+        true => from.saturating_add(step),
+        false => from + step,
+    };
+    *l = to.clamp(CLAMP.0, CLAMP.1);
+}
+
+/// The five half-spaces a voxel's middle lies in where it projects into `image`
+/// ([`DepthImage::project`]), in the frame of `grid`: per plane, its normal (xyz) and how far it
+/// is moved out (w), a point `p` lying in it where `normal · (p - camera) + w >= 0`. In the
+/// camera's frame, a point `c` projects where `c.z > 0` and its pixel `floor(fx c.x / c.z + cx +
+/// 0.5)` lies in `0..width`, likewise rows; multiplied through by `c.z`, each bound is linear in
+/// `c`. Each is moved out by its normal's length, or 1 where that is less, times a distance of a
+/// ten-thousandth of the largest coordinate among the grid's corners and the camera's position,
+/// at least 0.1 mm. A float carries a number to a part in ten million, so the distance is a
+/// thousand times what rounding moves a point, in `project` or here, and the bound moves by that
+/// times the normal's length. `project` also rounds its pixel, `cx` and 0.5 added to it, by a
+/// part in ten million of the normal's length and a pixel, which moves the bound by that times
+/// `c.z`: hundreds of times less than the margin, which the floor of 1 keeps where a focal length
+/// far under a pixel makes the normal short. The voxels the margin takes in can only be unseen.
+fn view(image: &DepthImage, grid: &Layout) -> [Vec4; 5] {
+    let Intrinsics { fx, fy, cx, cy } = image.intrinsics;
+    let (width, height) = (image.width as f32, image.height() as f32);
+    let camera = image.camera;
+    let top = grid.origin + (grid.dims - 1).as_vec3() * grid.voxel;
+    let largest = [grid.origin, top, camera.position]
+        .map(|p| p.abs().max_element())
+        .into_iter()
+        .fold(0.0, f32::max);
+    let distance = (1e-4 * largest).max(1e-4);
+    [
+        Vec3::Z,
+        Vec3::new(fx, 0.0, cx + 0.5),
+        Vec3::new(-fx, 0.0, width - cx - 0.5),
+        Vec3::new(0.0, fy, cy + 0.5),
+        Vec3::new(0.0, -fy, height - cy - 0.5),
+    ]
+    .map(|normal| (camera.rotation * normal).extend(normal.length().max(1.0) * distance))
+}
+
+/// The voxels of row `r` of `grid` (those with `x + dims.x * r` as index, x from 0) whose middles
+/// may lie in every half-space of `planes` ([`view`]), as the camera at `camera` sees them, its
+/// ends rounded outward: empty where the row misses the view.
+fn span(planes: &[Vec4; 5], camera: Vec3, grid: &Layout, r: usize) -> Range<usize> {
+    let (nx, ny) = (grid.dims.x, grid.dims.y as usize);
+    let (y, z) = ((r % ny) as u32, (r / ny) as u32);
+    let first = grid.origin + UVec3::new(0, y, z).as_vec3() * grid.voxel - camera;
+    let last = (nx - 1) as f32;
+    let (mut from, mut to) = (0.0, last);
+    for plane in planes {
+        // The plane at the row's voxel x: `at + x * step`, in it where at least 0.
+        let (at, step) = (plane.truncate().dot(first) + plane.w, plane.x * grid.voxel);
+        if step > 0.0 {
+            from = f32::max(from, -at / step);
+        } else if step < 0.0 {
+            to = f32::min(to, -at / step);
+        } else if at < 0.0 {
+            return 0..0;
+        }
+    }
+    let (from, to) = (from.floor(), to.ceil());
+    if from > to {
+        return 0..0;
+    }
+    from as usize..to as usize + 1
+}
+
+/// Calls `visit` with each voxel of `voxels` whose bit is set in `hit` or in `inside` (empty
+/// without a mask), in order.
+fn flagged(hit: &[u32], inside: &[u32], voxels: Range<usize>, mut visit: impl FnMut(usize)) {
+    if voxels.is_empty() {
+        return;
+    }
+    let (first, last) = (voxels.start / 32, (voxels.end - 1) / 32);
+    for (word, &hits) in (first..).zip(&hit[first..=last]) {
+        // The word's bits from the range's start to its end.
+        let (from, to) = (
+            voxels.start.max(32 * word) - 32 * word,
+            voxels.end.min(32 * word + 32) - 32 * word,
+        );
+        let within = (u32::MAX << from) & (u32::MAX >> (32 - to));
+        let mut bits = (hits | inside.get(word).copied().unwrap_or(0)) & within;
+        while bits != 0 {
+            visit(32 * word + bits.trailing_zeros() as usize);
+            bits &= bits - 1;
+        }
+    }
 }
 
 /// Signed distances (meters, negative inside) on a regular grid in its own frame: `dims` points
@@ -2000,7 +2127,7 @@ impl Default for DepthFilter {
 mod tests {
     use std::collections::HashMap;
 
-    use glam::Quat;
+    use glam::{Mat3, Quat};
 
     use super::*;
     use crate::{CollisionModel, RobotOptions};
@@ -2204,6 +2331,233 @@ mod tests {
         }
         let apart = |s: &Vec4| (0..3).any(|a| s[a] + s.w < grid.origin[a] || s[a] - s.w > top[a]);
         assert!(mask.spheres.iter().any(apart), "a sphere outside the grid");
+    }
+
+    /// Checks each row of `grid` against `image`: its span holds every voxel whose middle
+    /// projects into the image, and reaches past the view by no more than the margin `view` moves
+    /// each plane out by and a voxel. How many rows are empty, whole and partial, and how many
+    /// voxels project.
+    fn spans_against(grid: &Layout, image: &DepthImage, case: &str) -> ([usize; 3], usize) {
+        let planes = view(image, grid);
+        let top = grid.point(grid.points() - 1);
+        let (nx, rows) = (grid.dims.x as usize, grid.points() / grid.dims.x as usize);
+        // The planes in the camera's frame, and how far the span may reach past them, in
+        // doubles.
+        let Intrinsics { fx, fy, cx, cy } = image.intrinsics;
+        let (width, height) = (image.width as f32, image.height() as f32);
+        let sides_in_camera = [
+            Vec3::Z,
+            Vec3::new(fx, 0.0, cx + 0.5),
+            Vec3::new(-fx, 0.0, width - cx - 0.5),
+            Vec3::new(0.0, fy, cy + 0.5),
+            Vec3::new(0.0, -fy, height - cy - 0.5),
+        ]
+        .map(|n| n.as_dvec3());
+        let largest = [grid.origin, top, image.camera.position]
+            .map(|p| p.abs().max_element())
+            .into_iter()
+            .fold(0.0, f32::max);
+        let reach = f64::from((1e-4 * largest).max(1e-4)) * 1.01 + f64::from(grid.voxel);
+        let to_camera = image.camera.rotation.as_dquat().inverse();
+        let position = image.camera.position.as_dvec3();
+        let (mut kinds, mut projected) = ([0; 3], 0);
+        for r in 0..rows {
+            let seen = span(&planes, image.camera.position, grid, r);
+            for x in 0..nx {
+                let p = grid.point(r * nx + x);
+                if image.project(p).is_some() {
+                    assert!(
+                        seen.contains(&x),
+                        "{case}, row {r}: voxel {x} projects, outside {seen:?}"
+                    );
+                    projected += 1;
+                }
+                if seen.contains(&x) {
+                    let c = to_camera * (p.as_dvec3() - position);
+                    for (side, n) in sides_in_camera.iter().enumerate() {
+                        assert!(
+                            n.dot(c) >= -n.length().max(1.0) * reach,
+                            "{case}, row {r}: voxel {x} of {seen:?} past side {side}"
+                        );
+                    }
+                }
+            }
+            kinds[match seen.len() {
+                0 => 0,
+                n if n == nx => 1,
+                _ => 2,
+            }] += 1;
+        }
+        (kinds, projected)
+    }
+
+    /// A row's span holds every voxel whose middle projects into the image, and reaches past the
+    /// view by no more than its margin and a voxel. Of cameras posed at random inside, beside and
+    /// outside a small map, looking in, out, along a face and away, with images from one pixel to
+    /// 640 by 480 and focal lengths from a fifth of their width to three times it; of cameras on
+    /// the map's points turned by quarter turns, whose sides run at 45 degrees through the points
+    /// along whole rows, where a point projects or not by rounding alone; of each camera posed
+    /// alike about a map 10 km from the origin whose voxels, 0.05 to 0.2 mm, are finer than a
+    /// float's spacing there, where only a margin that grows with the coordinates holds what
+    /// rounding moves a point; and of a camera whose focal length is far under a pixel, whose
+    /// first column takes voxels a fraction of a millimeter past it by rounding alone.
+    #[test]
+    fn a_rows_span_holds_every_voxel_that_projects_into_the_image() {
+        let grid = Layout {
+            dims: UVec3::new(21, 17, 13),
+            origin: Vec3::new(-0.43, 0.27, -0.11),
+            voxel: 0.05,
+        };
+        let top = grid.point(grid.points() - 1);
+        let (mut rng, mut fine) = (crate::rng::Rng::new(19), crate::rng::Rng::new(23));
+        let depth = vec![1.0; 640 * 640];
+        // A camera at `eye` looking along `forward`, turned `roll` about it.
+        let look = |eye: Vec3, forward: Vec3, roll: f32| {
+            let forward = forward.normalize();
+            let right = forward.any_orthonormal_vector();
+            let turn = Quat::from_mat3(&Mat3::from_cols(right, forward.cross(right), forward));
+            Pose::new(eye, turn * Quat::from_rotation_z(roll))
+        };
+        let within = |rng: &mut crate::rng::Rng, grow: f32| {
+            let mut at = |a: usize| rng.range(grid.origin[a] - grow, top[a] + grow);
+            Vec3::new(at(0), at(1), at(2))
+        };
+        let (mut kinds, mut projected, mut on_sides, mut far_projected) = ([0; 3], 0, 0, 0);
+        for k in 0..480 {
+            let (image, sides) = if k % 3 == 0 {
+                // On a point of the map's lattice, or one past it, turned by quarter turns, its
+                // square image's sides 45 degrees off its axis.
+                let at =
+                    |rng: &mut crate::rng::Rng, n: u32| (rng.range(-3.0, n as f32 + 3.0)) as i32;
+                let point = IVec3::new(
+                    at(&mut rng, grid.dims.x),
+                    at(&mut rng, grid.dims.y),
+                    at(&mut rng, grid.dims.z),
+                );
+                let eye = grid.origin + point.as_vec3() * grid.voxel;
+                let mut turns =
+                    || (rng.range(0.0, 4.0) as i32) as f32 * std::f32::consts::FRAC_PI_2;
+                let turn = Quat::from_rotation_z(turns())
+                    * Quat::from_rotation_y(turns())
+                    * Quat::from_rotation_x(turns());
+                let side = [2, 8, 64, 640][k / 3 % 4];
+                let f = side as f32 / 2.0;
+                let image = DepthImage {
+                    depth: &depth[..side * side],
+                    width: side,
+                    intrinsics: Intrinsics {
+                        fx: f,
+                        fy: f,
+                        cx: f - 0.5,
+                        cy: f - 0.5,
+                    },
+                    camera: Pose::new(eye, turn),
+                };
+                (image, true)
+            } else {
+                let (width, height) = [(1, 1), (8, 6), (64, 48), (37, 211), (640, 480)][k % 5];
+                let middle = within(&mut rng, -0.2);
+                let (eye, forward) = match k % 4 {
+                    // Inside, looking in or out.
+                    0 => (within(&mut rng, 0.0), middle - within(&mut rng, 0.0)),
+                    // Beside a face, looking along it.
+                    1 => {
+                        let mut eye = within(&mut rng, 0.0);
+                        let axis = k / 4 % 3;
+                        eye[axis] = if k % 2 == 0 {
+                            grid.origin[axis]
+                        } else {
+                            top[axis]
+                        };
+                        eye[axis] += rng.range(-0.03, 0.03);
+                        let mut forward = Vec3::ZERO;
+                        forward[(axis + 1 + k / 12 % 2) % 3] = if k % 8 < 4 { 1.0 } else { -1.0 };
+                        (eye, forward)
+                    }
+                    // Outside, looking in or away.
+                    2 => {
+                        let eye = within(&mut rng, 1.5);
+                        let toward = middle - eye;
+                        (eye, if k % 8 < 4 { toward } else { -toward })
+                    }
+                    // Far off, looking in.
+                    _ => {
+                        let eye = within(&mut rng, 5.0);
+                        (eye, middle - eye)
+                    }
+                };
+                let fx = width as f32 * rng.range(0.2, 3.0);
+                let image = DepthImage {
+                    depth: &depth[..width * height],
+                    width,
+                    intrinsics: Intrinsics {
+                        fx,
+                        fy: fx * rng.range(0.5, 2.0),
+                        cx: rng.range(-0.5, width as f32 - 0.5),
+                        cy: rng.range(-0.5, height as f32 - 0.5),
+                    },
+                    camera: look(eye, forward, rng.range(0.0, 6.3)),
+                };
+                (image, false)
+            };
+            let image = image.rigid();
+            let (seen, voxels) = spans_against(&grid, &image, &format!("camera {k}"));
+            for (all, one) in kinds.iter_mut().zip(seen) {
+                *all += one;
+            }
+            projected += voxels;
+            on_sides += if sides { voxels } else { 0 };
+            // The camera posed alike about a map 10 km off, its voxels finer than a float's
+            // spacing there.
+            let far = Layout {
+                origin: Vec3::new(9_000.0, -4_000.0, 1_500.0),
+                voxel: fine.range(5e-5, 2e-4),
+                ..grid
+            };
+            let eye = far.origin + (image.camera.position - grid.origin) * (far.voxel / grid.voxel);
+            let image = DepthImage {
+                camera: Pose::new(eye, image.camera.rotation),
+                ..image
+            };
+            far_projected += spans_against(&far, &image, &format!("camera {k}, 10 km off")).1;
+        }
+        // A focal length far under a pixel: in the rows at y = 0, the voxels from x = 0.2 m on
+        // lie a fraction of a millimeter left of the image, and project into its first column by
+        // rounding alone.
+        let (lo, hi) = (Vec3::new(0.0, -0.05, -0.05), Vec3::new(1.95, 0.05, 0.05));
+        let line = OccupancyMap::try_new(lo, hi, 0.05).unwrap().grid;
+        let image = DepthImage {
+            depth: &depth[..640 * 480],
+            width: 640,
+            intrinsics: Intrinsics {
+                fx: 1e-4,
+                fy: 525.0,
+                cx: -0.5,
+                cy: 239.5,
+            },
+            camera: Pose::new(
+                Vec3::new(-0.5, -2e-4, 0.0),
+                Quat::from_mat3(&Mat3::from_cols(Vec3::NEG_Y, Vec3::NEG_Z, Vec3::X)),
+            ),
+        }
+        .rigid();
+        for z in 0..line.dims.z {
+            for x in 4..line.dims.x {
+                let p = line.point(line.index(UVec3::new(x, 1, z)));
+                let column = image.project(p).map(|(i, _)| i % 640);
+                assert_eq!(column, Some(0), "the voxel at {p}");
+            }
+        }
+        spans_against(&line, &image, "a focal length of 1e-4");
+        let [empty, whole, partial] = kinds;
+        assert!(
+            empty > 30_000 && whole > 7_000 && partial > 15_000,
+            "{empty} rows empty, {whole} whole, {partial} partial"
+        );
+        assert!(
+            projected > 250_000 && on_sides > 60_000 && far_projected > 250_000,
+            "{projected} voxels project, {on_sides} for cameras on the lattice, {far_projected} 10 km off"
+        );
     }
 
     /// Classification projects points in floating point, so a point within rounding of a pixel's

@@ -245,6 +245,19 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   8.8 and 0.9 where 1.4. Calls without a mask take what they took, with the same results to the
   bit.
 
+- A frame fused into a map on the CPU device costs by what its camera sees, not by the map's
+  size: a row of the map at a time, the fuse visits the voxels the image may see, and past them
+  only those holding one of its readings and those a mask frees, with the same map to the byte.
+  A 640×480 frame of a tabletop fused into a map of 13.4M voxels (2.9 m by 2.9 m by 1.55 m at
+  1 cm) takes 2.4 ms on the M4 Pro's 14 threads from a camera across the table, 1.4 times what a
+  map of 1.8M voxels it sees nearly all of takes, and 1.6 ms from one on the Panda's hand, which
+  sees less of it; with the Panda's mask, 3.1 and 1.9 ms. On the Ryzen AI Max+ 395's 32 threads
+  it takes 5.2 and 3.1 ms, and 6.5 and 3.5 with the mask (`examples/perception.rs`, the quickest
+  median of eight runs, at a load of 3.5 to 7.5 on the M4 Pro and 2 to 10 on the Ryzen). The
+  GPU's fuse is as it was: it sends the map to the device and back, so a frame fused into that
+  map takes 8.3 to 9.7 ms on the Radeon 8060S and 4.7 to 6.5 on the M4 Pro's GPU, and a map that
+  large now fuses quicker on a CPU device; any device fuses a map.
+
 - **Breaking:** a robot's `SphereOptions` are checked whether its spheres are fitted or given
   (`RobotOptions::collision_model`), before anything is read: a budget of zero, or a tolerance or
   voxel size that is not positive, is an `Error::Input` from `Robot::load`, `from_urdf` and
