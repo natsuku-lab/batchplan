@@ -9,9 +9,15 @@ use crate::surface::Surface;
 /// The most cells a surface is kept in: past it, `rests_on` asks for wider ones.
 pub(super) const MOST_CELLS: f32 = (1 << 22) as f32;
 
-/// A support point whose normal's z is under this faces down: it holds nothing up, and blocks.
-/// 30 degrees under level, so that the noise of a wall's normals, which are level, does not
-/// turn its points into undersides.
+/// A support point whose normal's z is under this faces down: unless it was seen from above, it
+/// holds nothing up, and blocks. 30 degrees under level, so that the noise of a wall's normals,
+/// which are level, does not turn its points into undersides.
+///
+/// A point seen from above (its `seen_from` higher than it) is the top of what is there whatever
+/// its normal says: a camera above a point sees no underside there, and the normals of a top read
+/// with noise, fitted over a few millimeters, can face down where it is seen at a slant. What this
+/// gives up is a face of the support that leans out over empty space, seen from above with what
+/// is over it out of view: it is taken as a top at its own height.
 const FACING: f32 = -0.5;
 
 /// A surface's points in cells seen from above, each cell with the highest point in it. The cells
@@ -31,7 +37,7 @@ pub(super) struct Field {
     /// support was seen, as the side of a wall is.
     floors: Vec<f32>,
     /// Per cell, the highest point in it that is not the support's, or is the support's, faces
-    /// down and has no support point of the cell over it.
+    /// down, was not seen from above and has no support point of the cell over it.
     blocks: Vec<Vec3>,
 }
 
@@ -72,7 +78,13 @@ impl Field {
                 }
                 let cell = row as usize * across + column as usize;
                 let support = s.object.is_empty() || s.object[k];
-                let holds = support && s.normals[k].z >= FACING;
+                // Where it was seen from, if known: `join` leaves the unknown infinite.
+                let from_above = || {
+                    s.seen_from
+                        .get(k)
+                        .is_some_and(|f| f.is_finite() && f.z > p.z)
+                };
+                let holds = support && (s.normals[k].z >= FACING || from_above());
                 if holds != holding || (support && !holds && p.z <= field.tops[cell].z) {
                     continue;
                 }
@@ -154,7 +166,13 @@ impl Field {
 
     /// Whether `grown`, an object grown by the clearance it keeps, with its middle at `center`, is
     /// over everything that blocks: nothing that is not the support reaches into it or over it.
-    pub(super) fn clear(&self, grown: &Turned, center: Vec3) -> bool {
+    /// With `WHY`, the first point that does is left in `by`.
+    pub(super) fn clear<const WHY: bool>(
+        &self,
+        grown: &Turned,
+        center: Vec3,
+        by: &mut Option<Vec3>,
+    ) -> bool {
         let at = center.truncate();
         let [columns, rows] = self.window(at, grown.reach);
         for row in rows {
@@ -166,6 +184,9 @@ impl Field {
                 if let Some((lower, _)) = grown.span(p.truncate() - at)
                     && p.z > center.z + lower
                 {
+                    if WHY {
+                        *by = Some(*p);
+                    }
                     return false;
                 }
             }

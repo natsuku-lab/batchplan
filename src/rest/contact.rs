@@ -92,6 +92,10 @@ const REACH: f32 = std::f32::consts::SQRT_2;
 impl Touch {
     /// The contacts of `object`, set down with its middle at `center`, with the support in
     /// `field`, into `contacts`.
+    // Out of line: a build of sixteen codegen units once inlined this into `Setting::held` and
+    // left that out of line, far from the balance it calls, and every rest on x86 took up to a
+    // fifth longer; which way it went turned on code elsewhere in the crate.
+    #[inline(never)]
     pub(super) fn contacts(
         &mut self,
         field: &Field,

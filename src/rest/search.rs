@@ -5,13 +5,13 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, TAU};
 
-use glam::{IVec3, Quat, Vec2, Vec3};
+use glam::{IVec2, IVec3, Quat, Vec2, Vec3};
 use rayon::prelude::*;
 
 use super::contact::Touch;
 use super::field::{self, Field};
 use super::shape::{Shape, Turned};
-use super::statics::{Contact, Statics};
+use super::statics::{Contact, Holding, Statics};
 use crate::device::Device;
 use crate::error::{Result, ensure_input, input};
 use crate::surface::Surface;
@@ -40,8 +40,10 @@ pub struct RestProblem {
     /// set down a cell of the support apart, [`RestOptions::touching`] wide, for a rest that the
     /// spots lie too far apart to find: a flat bottom wider than a dished plate's floor stands
     /// evenly on its raised ring only within millimeters of the middle. That is as many more
-    /// spots as cells lie within the spacing of the point, 77 at the defaults. None looks no
-    /// closer anywhere.
+    /// spots as cells lie within the spacing of the point, 77 at the defaults. It also says which
+    /// place where the object nearly rests is looked at closer at every turn: the one nearest it
+    /// ([`rests_on`]). None looks closer only where no spot rests, about the middle of the
+    /// support.
     pub near: Option<Vec3>,
 }
 
@@ -137,9 +139,10 @@ const SPREAD: usize = 1024;
 /// high it is.
 ///
 /// The support is read from above, as a height in each cell [`RestOptions::touching`] wide: what
-/// is under a cell's highest point is taken as solid, so a support point whose normal faces down,
-/// as a shelf seen from below, holds nothing up, and a cell no point lies in is empty space: a
-/// floor no camera saw holds nothing. Each spot [`RestOptions::spacing`] apart over the support is
+/// is under a cell's highest point is taken as solid, so a support point whose normal faces down
+/// and that was not seen from above ([`Surface::seen_from`] no higher than it, or not known), as a
+/// shelf seen from below, holds nothing up, and a cell no point lies in is empty space: a floor no
+/// camera saw holds nothing. Each spot [`RestOptions::spacing`] apart over the support is
 /// tried at each turn `o` gives, the object set straight down until it touches. It rests where
 /// what it then touches holds it: its contacts, as stiff springs that push and do not pull, carry
 /// its weight, with friction only where the weight presses, and still do with the weight tipped
@@ -147,10 +150,23 @@ const SPREAD: usize = 1024;
 /// come to rest, so on a slope it needs the `rotation` that lies flat on it. A can or a capsule
 /// laid on its side is the one thing that moves: where it is not held it rolls, up to half the
 /// spots' spacing and `touching` more, to where it lies lowest, as into the cradle between two
-/// bars or down to a lip, and rests there if that holds it. A rest narrower than the spots are
-/// apart is found where the problem says to look closer ([`RestProblem::near`]). Only the
-/// object's rest is checked: the hand that sets it down and its way there are
-/// [`place`](crate::place)'s to check, with what the object may touch as its `support`.
+/// bars or down to a lip, and rests there if that holds it.
+///
+/// A rest narrower than the spots are apart is looked for closer about one place a turn. Where
+/// the object nearly rests (as set down and not rolled, its contacts carry its weight upright
+/// and not with the weight tipped by `tipping`), a rest may lie within a spacing that the spots
+/// are too far apart to meet, as an upright bottle's against the lip at the foot of a sloping
+/// rack, which stands in a strip a few millimeters deep. Of the spots where it nearly rests at a
+/// turn, the one nearest where the problem would have the object ([`RestProblem::near`]), or
+/// without it the middle of the support, has the spots a cell ([`RestOptions::touching`]) apart
+/// within `spacing` of it tried too: with `near` at every turn, and without it only where no
+/// spot rests at any turn, so that a search that finds rests costs what it did. One place is
+/// looked at, not every place: such a strip is found near that spot and not along its length,
+/// so a caller that wants it elsewhere points there. Rests found there come in the order the
+/// others do. Where the problem says where it would have the object, the spots about that point
+/// are tried as well. Only the object's rest is checked: the hand that sets it down and its way
+/// there are [`place`](crate::place)'s to check, with what the object may touch as its
+/// `support`.
 ///
 /// They come at every turn, in an order whose first few are worth trying first: every spot at
 /// the first turn, then every spot at the next, and within a turn, the steadiest first and then
@@ -396,6 +412,11 @@ struct Scratch {
     touch: Touch,
     contacts: Vec<Contact>,
     statics: Statics,
+    /// What the last pose judged with `WHY` left: where its middle was set down, how far its
+    /// weight can be tipped there, and the first point in its way, if any.
+    center: Vec3,
+    tipping: f32,
+    blocking: Option<Vec3>,
 }
 
 /// One problem's object on its surface.
@@ -408,47 +429,83 @@ struct Setting<'a> {
 }
 
 impl Setting<'_> {
-    /// The rest of the object set down turned by `rotation` over `middle`, if what it touches
-    /// there holds it and it is clear, and whether it rolled there: one lying on its round side
-    /// that is not held where it is set down is tried again where it rolls to.
-    fn rest(&self, rotation: Quat, middle: Vec2, s: &mut Scratch) -> Option<(Rest, bool)> {
+    /// What becomes of the object set down turned by `rotation` over `middle`: it rests where
+    /// what it touches there holds it and it is clear, and with the rest comes whether it rolled
+    /// there: one lying on its round side that is not held where it is set down is tried again
+    /// where it rolls to, and what becomes of it is what became of it there.
+    ///
+    /// With `WHY`, `s` keeps what [`Scratch`] says of the last pose judged, and where it is not
+    /// held or tips, what would be in its way there even if it held.
+    fn rest<const WHY: bool>(&self, rotation: Quat, middle: Vec2, s: &mut Scratch) -> Outcome {
         let object = Turned::new(self.shape, rotation);
-        let (held, rolled) = match self.held(&object, middle, s) {
-            Some(held) => (held, false),
-            None => {
-                let to = self.rolled(&object, middle, &s.contacts)?;
-                (self.held(&object, to, s)?, true)
+        if WHY {
+            s.blocking = None;
+        }
+        let (held, rolled) = match self.held::<WHY>(&object, middle, s) {
+            Ok(held) => (held, false),
+            Err(missed) => {
+                let Some(to) = self.rolled(&object, middle, &s.contacts) else {
+                    return self.missed::<WHY>(missed, rotation, s);
+                };
+                match self.held::<WHY>(&object, to, s) {
+                    Ok(held) => (held, true),
+                    Err(missed) => return self.missed::<WHY>(missed.rolled(), rotation, s),
+                }
             }
         };
         let (center, tipping) = held;
-        if !self.field.clear(&Turned::new(self.grown, rotation), center) {
-            return None;
+        let grown = Turned::new(self.grown, rotation);
+        if !self.field.clear::<WHY>(&grown, center, &mut s.blocking) {
+            return Outcome::Blocked;
         }
         let rest = Rest {
             pose: Pose::new(center, rotation),
             support: s.statics.support(&s.contacts),
             tipping,
         };
-        Some((rest, rolled))
+        Outcome::Rests(rest, rolled)
     }
 
     /// Where the middle of `object` comes set down over `middle`, and how far its weight can be
-    /// tipped there, if what it touches holds it; its contacts are left in `s`.
-    fn held(&self, object: &Turned, middle: Vec2, s: &mut Scratch) -> Option<(Vec3, f32)> {
+    /// tipped there, if what it touches holds it; else what became of it. Its contacts are left
+    /// in `s`.
+    fn held<const WHY: bool>(
+        &self,
+        object: &Turned,
+        middle: Vec2,
+        s: &mut Scratch,
+    ) -> Result<(Vec3, f32), Outcome> {
         let o = self.o;
         s.contacts.clear();
         let height = self.field.set_down(object, middle);
         if height == f32::NEG_INFINITY {
-            return None;
+            return Err(Outcome::Unsupported);
         }
         let center = middle.extend(height);
+        if WHY {
+            s.center = center;
+        }
         s.touch
             .contacts(self.field, object, center, o.touching, &mut s.contacts);
         let size = self.shape.radius();
-        let tipping = s
+        match s
             .statics
-            .holds(&s.contacts, center, size, o.tipping, o.friction)?;
-        Some((center, tipping))
+            .holds::<WHY>(&s.contacts, center, size, o.tipping, o.friction)
+        {
+            Holding::By(tipping) => {
+                if WHY {
+                    s.tipping = tipping;
+                }
+                Ok((center, tipping))
+            }
+            Holding::Tips => {
+                if WHY {
+                    s.tipping = s.statics.tips_by;
+                }
+                Err(Outcome::Tips(false))
+            }
+            Holding::Not => Err(Outcome::Unheld),
+        }
     }
 
     /// Where a can or a capsule that lies on its side over `middle`, pushed sideways by
@@ -501,47 +558,15 @@ impl Setting<'_> {
 
 /// `p`'s rests on the surface it names, as `seen`.
 fn on(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Rest> {
-    let shape = Shape::of(&p.object);
-    let setting = Setting {
-        field: &seen.field,
-        shape,
-        grown: shape.grown(o.clearance),
-        o,
-    };
-    let (turns, first) = turns(shape, p.rotation, o);
+    let problem = Problem::new(p, seen, o);
     let spots = seen.spots;
-    // The spots a cell apart within a spacing of where the caller would have it, after the
-    // grid's.
-    let mut closer: Vec<Vec2> = vec![];
-    if let Some(near) = p.near {
-        let [across, rows] = Closer::about(near.truncate(), &spots, o);
-        for j in 0..rows.count {
-            for i in 0..across.count {
-                let cells = Vec2::new(across.first + i as f32, rows.first + j as f32);
-                let aside = cells * o.touching;
-                if aside.length() <= o.spacing {
-                    closer.push(near.truncate() + aside);
-                }
-            }
-        }
-    }
-    // Each turn's rests in their order, the turns side by side.
-    let each = (0..turns.len()).into_par_iter().map(|k| {
-        if first[k] != k {
-            return vec![];
-        }
-        let turned = turns[k];
-        let found: Vec<Option<(Rest, bool)>> = (0..spots.count() + closer.len())
-            .into_par_iter()
-            .map_init(Scratch::default, |scratch, k| {
-                let over = match k.checked_sub(spots.count()) {
-                    None => spots.at(k, o.spacing),
-                    Some(k) => closer[k],
-                };
-                setting.rest(turned, over, scratch)
-            })
-            .collect();
-        let any_alike = !closer.is_empty() || found.iter().flatten().any(|f| f.1);
+    // Each kind of turn's rests in their order, the kinds side by side.
+    let each = problem.search().into_par_iter().map(|(k, tried)| {
+        let rolled = |f: &Outcome| matches!(f, Outcome::Rests(_, true));
+        let any_alike = !problem.closer.is_empty()
+            || !tried.nearer.is_empty()
+            || tried.outcomes.iter().any(rolled);
+        let found = tried.outcomes;
         let mut kept: Vec<Rest> = Vec::with_capacity(found.len());
         // Spots to either side of a cradle roll to one place, and a spot set closer may be one
         // of the grid's: a place comes once, the first of two. Of two of which either rolled,
@@ -551,8 +576,8 @@ fn on(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Rest> {
         // with whether it rolled and whether it is of the closer spots.
         let one = o.touching.min(0.5 * o.spacing);
         let mut cells: HashMap<[i32; 3], Vec<(Vec3, bool, bool)>> = HashMap::new();
-        for (k, rest) in found.into_iter().enumerate() {
-            let Some((rest, rolled)) = rest else {
+        for (k, outcome) in found.into_iter().enumerate() {
+            let Outcome::Rests(rest, rolled) = outcome else {
                 continue;
             };
             let set_closer = k >= spots.count();
@@ -575,13 +600,17 @@ fn on(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Rest> {
             }
             kept.push(rest);
         }
-        spread_out(kept)
+        (k, spread_out(kept))
     });
+    let mut found: Vec<Vec<Rest>> = vec![vec![]; problem.turns.len()];
+    for (k, kept) in each.collect::<Vec<_>>() {
+        found[k] = kept;
+    }
     let turned = |r: &Rest, turn: Quat| Rest {
         pose: Pose::new(r.pose.position, turn),
         ..r.clone()
     };
-    at_every_turn(each.collect(), &turns, &first, turned)
+    at_every_turn(found, &problem.turns, &problem.first, turned)
 }
 
 /// The turns `o` gives of `rotation`, and for each the first that sets `shape` down as it does:
@@ -671,4 +700,552 @@ fn spread_out(found: Vec<Rest>) -> Vec<Rest> {
     let mut found: Vec<Option<Rest>> = found.into_iter().map(Some).collect();
     let taken = order.into_iter().map(|k| found[k as usize].take());
     taken.map(|r| r.expect("each rest is taken once")).collect()
+}
+
+/// What became of the object set down over one spot at one turn.
+#[derive(Clone, Debug)]
+enum Outcome {
+    /// It rests there, and whether it rolled there.
+    Rests(Rest, bool),
+    /// What it touches there holds it upright, and not with its weight tipped by `tipping`; and
+    /// whether it rolled there.
+    Tips(bool),
+    /// It would rest there but for something in its way.
+    Blocked,
+    /// What it touches there does not hold it.
+    Unheld,
+    /// Nothing of the support lies under it.
+    Unsupported,
+}
+
+/// One problem's object on its surface, as each of its turns is tried.
+struct Problem<'a> {
+    setting: Setting<'a>,
+    spots: Spots,
+    turns: Vec<Quat>,
+    /// Per turn, the first that sets the object down as it does.
+    first: Vec<usize>,
+    /// The spots a cell apart within a spacing of where the caller would have it.
+    closer: Vec<Vec2>,
+    near: Option<Vec2>,
+}
+
+/// What became of the object over each spot a turn tried, in order: the grid's, those about the
+/// problem's `near`, then `nearer`, those set closer about the one spot where it nearly rests
+/// nearest where the caller would have it ([`Problem::look_closer`]).
+struct Tried {
+    outcomes: Vec<Outcome>,
+    nearer: Vec<Vec2>,
+}
+
+impl<'a> Problem<'a> {
+    fn new(p: &RestProblem, seen: &'a Seen, o: &'a RestOptions) -> Self {
+        let shape = Shape::of(&p.object);
+        let setting = Setting {
+            field: &seen.field,
+            shape,
+            grown: shape.grown(o.clearance),
+            o,
+        };
+        let (turns, first) = turns(shape, p.rotation, o);
+        let spots = seen.spots;
+        let mut closer: Vec<Vec2> = vec![];
+        if let Some(near) = p.near {
+            let [across, rows] = Closer::about(near.truncate(), &spots, o);
+            for j in 0..rows.count {
+                for i in 0..across.count {
+                    let cells = Vec2::new(across.first + i as f32, rows.first + j as f32);
+                    let aside = cells * o.touching;
+                    if aside.length() <= o.spacing {
+                        closer.push(near.truncate() + aside);
+                    }
+                }
+            }
+        }
+        Self {
+            setting,
+            spots,
+            turns,
+            first,
+            closer,
+            near: p.near.map(Vec3::truncate),
+        }
+    }
+
+    /// Turn `k` tried over the grid's spots and those about `near`.
+    fn tried(&self, k: usize) -> Tried {
+        let (setting, spots, o) = (&self.setting, &self.spots, self.setting.o);
+        let turned = self.turns[k];
+        let outcomes: Vec<Outcome> = (0..spots.count() + self.closer.len())
+            .into_par_iter()
+            .map_init(Scratch::default, |scratch, k| {
+                let over = match k.checked_sub(spots.count()) {
+                    None => spots.at(k, o.spacing),
+                    Some(k) => self.closer[k],
+                };
+                setting.rest::<false>(turned, over, scratch)
+            })
+            .collect();
+        Tried {
+            outcomes,
+            nearer: vec![],
+        }
+    }
+
+    /// Each kind of turn tried ([`tried`](Self::tried)), and where the object nearly rests,
+    /// looked at closer about one place ([`look_closer`](Self::look_closer)): at every kind where
+    /// the caller says where it would have the object, and otherwise only where no spot of the
+    /// grid rests at any turn, so that a search that finds rests costs what it did.
+    fn search(&self) -> Vec<(usize, Tried)> {
+        let kinds: Vec<usize> = (0..self.turns.len())
+            .filter(|&k| self.first[k] == k)
+            .collect();
+        let mut tried: Vec<Tried> = kinds.par_iter().map(|&k| self.tried(k)).collect();
+        let grid = self.spots.count();
+        let rests = |t: &Tried| {
+            let mut on_the_grid = t.outcomes[..grid].iter();
+            on_the_grid.any(|f| matches!(f, Outcome::Rests(..)))
+        };
+        if self.near.is_some() || !tried.iter().any(rests) {
+            let each = kinds.par_iter().zip(tried.par_iter_mut());
+            each.for_each(|(&k, tried)| self.look_closer(k, tried));
+        }
+        kinds.into_iter().zip(tried).collect()
+    }
+
+    /// Turn `k`, `tried` over the grid, tried too over the spots a cell apart within a spacing
+    /// of one of the grid's ([`tipping_nearest`]): where the object nearly rests, a rest narrower
+    /// than the spots are apart may lie within a spacing, and of all such places the one nearest
+    /// where the caller would have it, or the middle of the support, is looked at. So what it
+    /// costs is bounded whatever the support and its noise: at most as many spots as `near` adds.
+    fn look_closer(&self, k: usize, tried: &mut Tried) {
+        let (setting, spots, o) = (&self.setting, &self.spots, self.setting.o);
+        let target = self.near.unwrap_or(0.5 * (spots.lower + spots.upper));
+        let grid = &tried.outcomes[..spots.count()];
+        let Some(nearest) = tipping_nearest(grid, spots, target, o.spacing) else {
+            return;
+        };
+        let nearer = nearer(spots.at(nearest, o.spacing), spots, self.near, o);
+        let turned = self.turns[k];
+        let more = nearer
+            .par_iter()
+            .map_init(Scratch::default, |scratch, &over| {
+                setting.rest::<false>(turned, over, scratch)
+            });
+        tried.outcomes.par_extend(more);
+        tried.nearer = nearer;
+    }
+}
+
+/// Of the grid's spots, `spacing` apart with `outcomes` in their order, the one where the object,
+/// set down and not rolled, was held but tipped too easily, nearest `target` seen from above;
+/// the first of two as near. An object that rolled is already where it lies lowest.
+fn tipping_nearest(
+    outcomes: &[Outcome],
+    spots: &Spots,
+    target: Vec2,
+    spacing: f32,
+) -> Option<usize> {
+    let tipping = (0..outcomes.len()).filter(|&k| matches!(outcomes[k], Outcome::Tips(false)));
+    let off = |k: usize| spots.at(k, spacing).distance(target);
+    tipping.min_by(|&a, &b| off(a).total_cmp(&off(b)))
+}
+
+/// The spots a cell (`touching`) apart on the lattice the field's cells are centred on, within
+/// `spacing` of `about` seen from above and over the support's box, row by row; but for those
+/// within `spacing` of `near`, wherever it lies, whose own spots cover them.
+fn nearer(about: Vec2, spots: &Spots, near: Option<Vec2>, o: &RestOptions) -> Vec<Vec2> {
+    let cell = o.touching;
+    let from = ((about - o.spacing).max(spots.lower) / cell)
+        .ceil()
+        .as_ivec2();
+    let to = ((about + o.spacing).min(spots.upper) / cell)
+        .floor()
+        .as_ivec2();
+    let covered = |at: Vec2| near.is_some_and(|near| at.distance(near) <= o.spacing);
+    let mut nearer = vec![];
+    for y in from.y..=to.y {
+        for x in from.x..=to.x {
+            let at = IVec2::new(x, y).as_vec2() * cell;
+            if at.distance(about) <= o.spacing && !covered(at) {
+                nearer.push(at);
+            }
+        }
+    }
+    nearer
+}
+
+impl Setting<'_> {
+    /// `missed`, what became of the object set down turned by `rotation`; with `WHY`, where it
+    /// touched the support, what would be in its way where it was set down left in `s`.
+    #[inline(always)]
+    fn missed<const WHY: bool>(&self, missed: Outcome, rotation: Quat, s: &mut Scratch) -> Outcome {
+        if WHY && !matches!(missed, Outcome::Unsupported) {
+            let grown = Turned::new(self.grown, rotation);
+            self.field.clear::<true>(&grown, s.center, &mut s.blocking);
+        }
+        missed
+    }
+}
+
+impl Problem<'_> {
+    /// Where spot `k` of a turn `tried` lies, seen from above.
+    fn spot(&self, k: usize, tried: &Tried) -> Vec2 {
+        let count = self.spots.count();
+        match k.checked_sub(count) {
+            None => self.spots.at(k, self.setting.o.spacing),
+            Some(k) if k < self.closer.len() => self.closer[k],
+            Some(k) => tried.nearer[k - self.closer.len()],
+        }
+    }
+}
+
+/// Why a problem of [`rests_on`] has no rest ([`rest_failures`]): how near the search came.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum RestFailure {
+    /// Nothing of the support lies under the object anywhere it was set down.
+    Unsupported,
+    /// Set down, it touches the support and that does not hold it.
+    Unheld {
+        /// The object's frame set down there.
+        pose: Pose,
+        /// The corners of what it touches there, as [`Rest::support`].
+        support: Vec<Vec3>,
+        /// The unit mean of the directions the support pushes it along there: up on a level
+        /// support, leaning where it slopes, as the rotation that lies flat on a slope takes
+        /// the vertical to; zero where it touches nothing.
+        push: Vec3,
+        /// What would be in its way there even if it were held.
+        blocked: Option<Blocking>,
+    },
+    /// It is held, but its weight can be tipped by less than [`RestOptions::tipping`].
+    Tips {
+        /// The object's frame set down there.
+        pose: Pose,
+        /// The corners of what it touches there, as [`Rest::support`].
+        support: Vec<Vec3>,
+        /// How far its weight can be tipped there before what it touches no longer holds it
+        /// (radians), found as a rest's is.
+        tipping: f32,
+        /// What would be in its way there even if it held.
+        blocked: Option<Blocking>,
+    },
+    /// It rests, but for a point in its way.
+    Blocked {
+        /// The rest, as [`rests_on`] would give it.
+        rest: Rest,
+        /// What is in its way.
+        by: Blocking,
+    },
+}
+
+/// A point in the way of an object set down: within [`RestOptions::clearance`] of it, or over it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Blocking {
+    /// The point, the first the check meets.
+    pub point: Vec3,
+    /// Whether it is the support's own, an underside of it that faces down and was not seen
+    /// from above, and not a reading left unflagged. Flags that leave out part of what the
+    /// object would lie against give points that are not; a support seen from below gives
+    /// points that are.
+    pub support: bool,
+}
+
+/// Why each of `problems` has no rest, given `rests`, what [`rests_on`] found for them with `o`:
+/// `None` where it has one. The answer is how far the search came: in this order, a place where
+/// it rests but for a point in its way ([`RestFailure::Blocked`], the steadiest such place), one
+/// where it is held but tips too easily (`Tips`, the steadiest), one where it touches the
+/// support and is not held (`Unheld`, the one nearest the problem's `near`, or without one the
+/// middle of the support seen from above), and none where nothing of the support lies under it
+/// anywhere (`Unsupported`); of two alike, that at the lower turn, then at the lower spot.
+///
+/// Where it is not held or tips, what would be in its way there even if it held comes with it:
+/// flags that leave out part of what the object must lie against both leave it unheld and put
+/// that part in its way. The problems with no rest are searched again, every spot's outcome
+/// kept, and where the furthest stage is `Tips` or `Blocked` each of its places is judged once
+/// more for the steadiest, so this costs one to two more searches of those problems: on a table
+/// where a box asked to tip 40 degrees tips everywhere, 63 ms to search and 126 ms to say why. It
+/// runs only when asked for, here.
+pub fn rest_failures(
+    device: &Device,
+    problems: &[RestProblem],
+    surfaces: &[Surface],
+    rests: &[Vec<Rest>],
+    o: &RestOptions,
+) -> Result<Vec<Option<RestFailure>>> {
+    Read::checked(problems, surfaces, o)?;
+    ensure_input!(
+        rests.len() == problems.len(),
+        "{} lists of rests for {} problems",
+        rests.len(),
+        problems.len()
+    );
+    let failed: Vec<usize> = (0..problems.len())
+        .filter(|&k| rests[k].is_empty())
+        .collect();
+    let mut out: Vec<Option<RestFailure>> = vec![None; problems.len()];
+    if failed.is_empty() {
+        return Ok(out);
+    }
+    let again: Vec<RestProblem> = failed.iter().map(|&k| problems[k].clone()).collect();
+    let read = Read::checked(&again, surfaces, o)?;
+    let each = || {
+        let seen = read.seen(surfaces, o);
+        let each = again.par_iter().map(|p| match &seen[p.surface] {
+            Some(seen) => failure(p, seen, &surfaces[p.surface], o),
+            None => Some(RestFailure::Unsupported),
+        });
+        each.collect::<Vec<_>>()
+    };
+    for (k, failure) in failed.into_iter().zip(device.install(each)) {
+        out[k] = failure;
+    }
+    Ok(out)
+}
+
+/// How far the search came for `p` on `surface`, read as `seen`; `None` where it rests.
+fn failure(
+    p: &RestProblem,
+    seen: &Seen,
+    surface: &Surface,
+    o: &RestOptions,
+) -> Option<RestFailure> {
+    let problem = Problem::new(p, seen, o);
+    let searched = problem.search();
+    let kinds: Vec<usize> = searched.iter().map(|(k, _)| *k).collect();
+    let tried: Vec<Tried> = searched.into_iter().map(|(_, tried)| tried).collect();
+    // How far each outcome came.
+    let stage = |f: &Outcome| match f {
+        Outcome::Unsupported => 0,
+        Outcome::Unheld => 1,
+        Outcome::Tips(_) => 2,
+        Outcome::Blocked => 3,
+        Outcome::Rests(..) => 4,
+    };
+    let all = tried.iter().flat_map(|t| &t.outcomes);
+    let furthest = all.map(stage).max().unwrap_or(0);
+    match furthest {
+        0 => return Some(RestFailure::Unsupported),
+        4 => return None,
+        _ => {}
+    }
+    // The places of that stage, by turn and spot, in order.
+    let mut candidates: Vec<(usize, usize)> = vec![];
+    for (t, tried) in tried.iter().enumerate() {
+        let of_it = (0..tried.outcomes.len()).filter(|&k| stage(&tried.outcomes[k]) == furthest);
+        candidates.extend(of_it.map(|k| (t, k)));
+    }
+    let judge = |t: usize, k: usize, s: &mut Scratch| {
+        let over = problem.spot(k, &tried[t]);
+        problem
+            .setting
+            .rest::<true>(problem.turns[kinds[t]], over, s)
+    };
+    let (t, k) = if furthest == 1 {
+        // Not held: nearest where the caller would have it, or the support's middle.
+        let target = problem
+            .near
+            .unwrap_or(0.5 * (problem.spots.lower + problem.spots.upper));
+        let distance = |&(t, k): &(usize, usize)| problem.spot(k, &tried[t]).distance(target);
+        let nearest = candidates
+            .iter()
+            .copied()
+            .reduce(|a, b| if distance(&b) < distance(&a) { b } else { a });
+        nearest.expect("a place of the furthest stage")
+    } else {
+        // Held: the steadiest.
+        let steadiness: Vec<f32> = candidates
+            .par_iter()
+            .map_init(Scratch::default, |s, &(t, k)| {
+                judge(t, k, s);
+                s.tipping
+            })
+            .collect();
+        let steadiest =
+            (0..candidates.len()).reduce(|a, b| if steadiness[b] > steadiness[a] { b } else { a });
+        candidates[steadiest.expect("a place of the furthest stage")]
+    };
+    let mut s = Scratch::default();
+    let outcome = judge(t, k, &mut s);
+    let pose = Pose::new(s.center, problem.turns[kinds[t]]);
+    let support = s.statics.support(&s.contacts);
+    let blocking = s.blocking.map(|point| {
+        let at = surface.points.iter().position(|q| *q == point);
+        Blocking {
+            point,
+            support: at.is_some_and(|at| surface.object.is_empty() || surface.object[at]),
+        }
+    });
+    Some(match outcome {
+        Outcome::Blocked => RestFailure::Blocked {
+            rest: Rest {
+                pose,
+                support,
+                tipping: s.tipping,
+            },
+            by: blocking.expect("a point in the way of what is blocked"),
+        },
+        Outcome::Tips(_) => RestFailure::Tips {
+            pose,
+            support,
+            tipping: s.tipping,
+            blocked: blocking,
+        },
+        _ => {
+            let push: Vec3 = s.contacts.iter().map(|c| c.push).sum();
+            RestFailure::Unheld {
+                pose,
+                support,
+                push: push.normalize_or_zero(),
+                blocked: blocking,
+            }
+        }
+    })
+}
+
+impl Outcome {
+    /// What became of the object where it rolled to: as it is, marked rolled.
+    fn rolled(self) -> Self {
+        match self {
+            Self::Tips(_) => Self::Tips(true),
+            other => other,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The spots' spacing in [`grid`], which binary fractions hold exactly, so that two spots
+    /// are as near a point halfway between them to the last bit.
+    const SPACING: f32 = 0.5;
+
+    /// A grid of outcomes from one letter a spot, the first row first, the spots `SPACING` apart
+    /// from the origin: `r` rests, `t` tips as set down, `o` tips where it rolled, `u` is not
+    /// held, `-` has nothing under it.
+    fn grid(rows: &[&str]) -> (Vec<Outcome>, Spots) {
+        let rest = Rest {
+            pose: Pose::IDENTITY,
+            support: vec![],
+            tipping: 0.1,
+        };
+        let each = rows.iter().flat_map(|row| row.chars());
+        let outcomes = each
+            .map(|c| match c {
+                'r' => Outcome::Rests(rest.clone(), false),
+                't' => Outcome::Tips(false),
+                'o' => Outcome::Tips(true),
+                'u' => Outcome::Unheld,
+                _ => Outcome::Unsupported,
+            })
+            .collect();
+        let (across, rows) = (rows[0].len(), rows.len());
+        let spots = Spots {
+            lower: Vec2::ZERO,
+            upper: Vec2::new(across as f32, rows as f32) * SPACING,
+            first: Vec2::ZERO,
+            across,
+            rows,
+        };
+        (outcomes, spots)
+    }
+
+    /// Of the spots where the object tipped as it was set down, the one nearest the target, the
+    /// first of two as near; none where it only rolled to a tip.
+    #[test]
+    fn the_place_looked_at_closer_is_the_tip_nearest_where_it_is_wanted() {
+        let nearest = |rows: &[&str], target: Vec2| {
+            let (outcomes, spots) = grid(rows);
+            tipping_nearest(&outcomes, &spots, target * SPACING, SPACING)
+        };
+        let corners = ["t-u", "---", "u-t"];
+        assert_eq!(nearest(&corners, Vec2::new(0.5, 0.5)), Some(0));
+        assert_eq!(nearest(&corners, Vec2::new(2.5, 2.5)), Some(8));
+        assert_eq!(nearest(&["o-t"], Vec2::new(0.5, 0.5)), Some(2));
+        assert_eq!(nearest(&["t-t"], Vec2::new(1.5, 0.5)), Some(0));
+        assert_eq!(nearest(&["r-u", "o--"], Vec2::new(0.5, 0.5)), None);
+    }
+
+    /// A table 30 cm square read every 2 mm, each point up to `noise` up or down, its normals up.
+    fn table(noise: f32) -> Surface {
+        let mut rng = crate::rng::Rng::new(5);
+        let mut s = Surface::default();
+        for i in -75..=75 {
+            for j in -75..=75 {
+                let z = if noise > 0.0 {
+                    rng.range(-noise, noise)
+                } else {
+                    0.0
+                };
+                s.points
+                    .push(Vec3::new(i as f32, j as f32, 0.0) * 0.002 + Vec3::Z * z);
+                s.normals.push(Vec3::Z);
+            }
+        }
+        s
+    }
+
+    /// `object` on `surface` searched as `rests_on` searches it: per kind of turn, the spots set
+    /// closer, whether any spot rests, and whether any of the grid's tips as set down.
+    fn searched(
+        object: Obstacle,
+        surface: &Surface,
+        o: &RestOptions,
+    ) -> Vec<(Vec<Vec2>, bool, bool)> {
+        let p = RestProblem::new(object, 0);
+        let surfaces = std::slice::from_ref(surface);
+        let read =
+            Read::checked(std::slice::from_ref(&p), surfaces, o).expect("a problem rests_on takes");
+        let seen = read.seen(surfaces, o).remove(0).expect("a support to read");
+        let problem = Problem::new(&p, &seen, o);
+        let each = problem.search().into_iter().map(|(_, tried)| {
+            let rests = tried
+                .outcomes
+                .iter()
+                .any(|f| matches!(f, Outcome::Rests(..)));
+            let grid = &tried.outcomes[..problem.spots.count()];
+            let tips = grid.iter().any(|f| matches!(f, Outcome::Tips(false)));
+            (tried.nearer, rests, tips)
+        });
+        each.collect()
+    }
+
+    /// Where the grid finds rests and no place is pointed at, nothing is set closer: a box 20 cm
+    /// tall on a table, which tips at the table's rim and rests inside it, costs what the grid
+    /// does.
+    #[test]
+    fn a_search_that_finds_rests_sets_nothing_closer() {
+        let o = RestOptions::default();
+        let tall = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.1));
+        let kinds = searched(tall, &table(0.0), &o);
+        assert!(kinds.iter().any(|(_, rests, _)| *rests));
+        assert!(kinds.iter().any(|(_, _, tips)| *tips));
+        assert!(kinds.iter().all(|(nearer, _, _)| nearer.is_empty()));
+    }
+
+    /// A slender bottle that tips everywhere on a table read with noise has no rest, and what is
+    /// set closer for it is at most one spot's disc a kind of turn, whatever the noise.
+    #[test]
+    fn where_nothing_rests_one_disc_a_turn_is_set_closer() {
+        let o = RestOptions::default();
+        let slender = Obstacle::cylinder(Vec3::ZERO, 0.01, 0.12);
+        let kinds = searched(slender, &table(0.001), &o);
+        // The lattice points within a spacing of a grid's spot, which lies half a spacing from the
+        // lattice's origin, in cells.
+        let spot = Vec2::splat(0.5 * o.spacing / o.touching);
+        let reach = (o.spacing / o.touching).ceil() as i32 + 1;
+        let around = (-reach..=reach).flat_map(|i| (-reach..=reach).map(move |j| (i, j)));
+        let disc = around
+            .map(|(i, j)| Vec2::new(i as f32, j as f32) + spot.round())
+            .filter(|at| at.distance(spot) * o.touching <= o.spacing)
+            .count();
+        assert!(kinds.iter().all(|(_, rests, _)| !rests));
+        assert!(kinds.iter().any(|(nearer, _, _)| !nearer.is_empty()));
+        for (nearer, _, _) in &kinds {
+            assert!(nearer.len() <= disc, "{} past {disc}", nearer.len());
+        }
+    }
 }

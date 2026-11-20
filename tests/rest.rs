@@ -6,13 +6,14 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
+use std::collections::HashSet;
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 use batchplan::glam::{Mat3, Quat, Vec2, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{
-    DepthImage, Device, Error, Fall, Held, Intrinsics, Obstacle, Place, Pose, Rest, RestOptions,
-    RestProblem, Surface, TaskOptions, World, falls_into, rests_on,
+    DepthImage, Device, Error, Fall, Held, Intrinsics, Obstacle, Place, Pose, Rest, RestFailure,
+    RestOptions, RestProblem, Surface, TaskOptions, World, falls_into, rest_failures, rests_on,
 };
 
 /// Points 2 mm apart, as a depth camera reads a surface under a meter.
@@ -641,13 +642,26 @@ fn near_where_the_caller_would_have_it_the_spots_are_a_cell_apart() {
     for r in &plain {
         assert!(found.contains(r), "lost: {r:?}");
     }
-    // Near a point off the plate, as far off as may be, nothing more is tried.
+    // Near a point off the plate, as far off as may be, none of the point's own spots is over
+    // it, and what is looked at closer is about the one spot where the bowl nearly rests nearest
+    // the point: every rest it had without, and those more within a spacing of one spot.
     for far in [0.5f32, 1e7, f32::MAX] {
         let off = RestProblem {
             near: Some(Vec3::new(far, 0.5, 0.0)),
             ..problem.clone()
         };
-        assert_eq!(rests(&off, &plate), plain, "{far}");
+        let found = rests(&off, &plate);
+        for r in &plain {
+            assert!(found.contains(r), "lost near {far}: {r:?}");
+        }
+        let more: Vec<Vec2> = found
+            .iter()
+            .filter(|r| !plain.contains(r))
+            .map(|r| r.pose.position.truncate())
+            .collect();
+        for at in &more {
+            assert!(at.distance(more[0]) <= 2.0 * o.spacing, "{at} near {far}");
+        }
     }
     // On a table, where a box rests at every spot, it rests at every closer spot too, at each
     // turn: those a cell apart out to the spacing from the point, each a place of its own but
@@ -1130,6 +1144,40 @@ fn a_support_seen_only_from_below_holds_nothing_up() {
     // Without normals, it is taken as it comes.
     above.normals.fill(Vec3::ZERO);
     assert!(!rests(&a_box(), &above, &RestOptions::default()).is_empty());
+}
+
+#[test]
+fn a_support_seen_from_above_holds_whatever_its_normals_say() {
+    // A board with a lip along it, read by a camera above it at a slant with enough noise that
+    // some normals fitted over 5 mm face down: where the camera's place is known they are the
+    // board's top, and the box rests where it does not when that place is not known.
+    let board = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.01), Vec3::new(0.15, 0.12, 0.01));
+    let lip = Obstacle::cuboid(Vec3::new(0.0, 0.08, 0.005), Vec3::new(0.15, 0.005, 0.005));
+    let eye = Vec3::new(0.5, 0.0, 0.3);
+    let s = measured(&[board, lip], &[0, 1], eye, Vec3::ZERO, 0.003);
+    let down = (0..s.points.len()).filter(|&k| s.object[k] && s.normals[k].z < -0.5);
+    assert!(down.count() > 20);
+    let o = RestOptions::default();
+    let known = rests(&a_box(), &s, &o);
+    let mut unknown = s.clone();
+    unknown.seen_from.clear();
+    let without = rests(&a_box(), &unknown, &o);
+    assert!(
+        known.len() > without.len() + 100,
+        "{} with where it was seen from, {} without",
+        known.len(),
+        without.len()
+    );
+    // A shelf seen from below holds nothing up, its place known or not: seen from a meter off,
+    // its points lie about one to a cell, each the highest of its own.
+    let shelf = Obstacle::cuboid(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.1, 0.1, 0.01));
+    let from_below = Vec3::new(0.1, 0.0, 0.05);
+    let mut under = seen(&[shelf], &[0], from_below, Vec3::new(0.0, 0.0, 1.0));
+    assert!(under.points.len() > 1000);
+    assert!(under.normals.iter().all(|n| n.z < -0.5));
+    assert!(rests(&a_box(), &under, &o).is_empty());
+    under.seen_from.fill(Vec3::INFINITY);
+    assert!(rests(&a_box(), &under, &o).is_empty());
 }
 
 #[test]
@@ -1663,18 +1711,40 @@ fn unbalanced(columns: &[[f64; 6]], b: [f64; 6]) -> f64 {
     dot(&rest, &rest).sqrt()
 }
 
-/// Whether forces at the support points within `touching` of the box `object` resting at `r`,
-/// each inside its friction cone (sixteen rays of it), can carry its weight with no torque about
-/// its middle: a check that shares nothing with `rests_on`. A point pushes along the box's own
-/// normal where it lies against the inside of a face, half a millimeter from its edges, and
-/// along its own elsewhere, as hard as it takes. Every point that near counts, more than touch
-/// it, so a rest that fails this cannot hold.
+/// Whether forces at the support points within `touching` of the box or cylinder `object`
+/// resting at `r`, each inside its friction cone (sixteen rays of it), can carry its weight with
+/// no torque about its middle: a check that shares nothing with `rests_on`. A point pushes along
+/// the object's own normal where it lies against the inside of a face, half a millimeter from
+/// its edges, and along its own elsewhere, as hard as it takes. Every point that near counts,
+/// more than touch it, so a rest that fails this cannot hold.
 fn holds(object: &Obstacle, r: &Rest, s: &Surface, o: &RestOptions) -> bool {
-    let Obstacle::Cuboid {
-        half_extents: half, ..
-    } = *object
-    else {
-        panic!("the check is written for boxes, got {object:?}");
+    // The face nearest a point in the object's frame: the way out of it, and whether the point
+    // lies inside its edges.
+    let face = |local: Vec3| match *object {
+        Obstacle::Cuboid {
+            half_extents: half, ..
+        } => {
+            let past = (local.abs() - half).to_array();
+            let axis = (0..3)
+                .max_by(|&a, &b| past[a].total_cmp(&past[b]))
+                .expect("three axes");
+            let inside = (0..3).all(|i| i == axis || local[i].abs() <= half[i] - 0.0005);
+            (Vec3::AXES[axis] * local[axis].signum(), inside)
+        }
+        Obstacle::Cylinder {
+            radius,
+            half_height,
+            ..
+        } => {
+            let across = local.truncate().length();
+            if local.z.abs() - half_height >= across - radius {
+                (Vec3::Z * local.z.signum(), across <= radius - 0.0005)
+            } else {
+                let out = (local.truncate() / across).extend(0.0);
+                (out, local.z.abs() <= half_height - 0.0005)
+            }
+        }
+        _ => panic!("the check is written for boxes and cylinders, got {object:?}"),
     };
     let placed = object.placed(r.pose);
     let cone = o.friction.atan();
@@ -1685,15 +1755,10 @@ fn holds(object: &Obstacle, r: &Rest, s: &Surface, o: &RestOptions) -> bool {
         if !support || distance > o.touching || distance < -1e-3 {
             continue;
         }
-        // The face it is nearest, and whether it lies inside that face's edges.
         let local = r.pose.rotation.inverse() * (p - r.pose.position);
-        let past = (local.abs() - half).to_array();
-        let axis = (0..3)
-            .max_by(|&a, &b| past[a].total_cmp(&past[b]))
-            .expect("three axes");
-        let inside = (0..3).all(|i| i == axis || local[i].abs() <= half[i] - 0.0005);
+        let (out, inside) = face(local);
         let push = if inside || s.normals[k] == Vec3::ZERO {
-            -(r.pose.rotation * (Vec3::AXES[axis] * local[axis].signum()))
+            -(r.pose.rotation * out)
         } else {
             s.normals[k]
         };
@@ -2263,4 +2328,501 @@ fn falls_do_not_depend_on_the_threads_the_batch_or_the_device() {
     let elsewhere = RestProblem::new(a_box(), 3);
     let refused = falls_into(&devices[0], &[elsewhere], &surfaces, &o);
     assert!(matches!(refused, Err(Error::Input(why)) if why.starts_with("problem 0: surface 3")));
+}
+
+/// A wine bottle stood upright, 4.3 cm across and 15.8 cm tall.
+fn bottle() -> Obstacle {
+    Obstacle::cylinder(Vec3::ZERO, 0.0215, 0.079)
+}
+
+/// Whether `r`'s middle stands over a spot of the grid `o` spaces, seen from above.
+fn on_the_grid(r: &Rest, o: &RestOptions) -> bool {
+    let cells = r.pose.position.truncate() / o.spacing - 0.5;
+    (cells - cells.round()).abs().max_element() < 1e-3
+}
+
+/// The spot of the grid over the lip's top of [`slope`] moved `along` x, nearest `x` along the
+/// lip, the first of two as near: where the bottle stood upright nearly rests.
+fn over_the_lip(x: f32, along: f32, o: &RestOptions) -> Vec2 {
+    let foot = 0.1 * 30f32.to_radians().cos();
+    let row = ((foot / o.spacing - 0.5).ceil() + 0.5) * o.spacing;
+    let below = ((x / o.spacing - 0.5).floor() + 0.5) * o.spacing;
+    let column = if x - below <= below + o.spacing - x {
+        below
+    } else {
+        below + o.spacing
+    };
+    let first = ((-0.1 + along) / o.spacing).floor() * o.spacing + 0.5 * o.spacing;
+    Vec2::new(column.max(first), row)
+}
+
+/// What every rest of the bottle against the lip of [`slope`] keeps: held by force and torque,
+/// tipping as far as asked, upright, over the lip's top and on the lattice of the support's
+/// cells or of the spots about `near`, each place once a turn, none on a spot of the grid.
+fn against_the_lip(found: &[Rest], rack: &Surface, near: Option<Vec2>, o: &RestOptions) {
+    let foot = 0.1 * 30f32.to_radians().cos();
+    let mut places = HashSet::new();
+    for r in found {
+        assert!(holds(&bottle(), r, rack, o), "{r:?}");
+        assert!(r.tipping >= o.tipping, "{r:?}");
+        assert!(up(r).z > 0.9999, "{r:?}");
+        assert!(!on_the_grid(r, o), "{r:?}");
+        let on = |origin: Vec2| {
+            let cells = (r.pose.position.truncate() - origin) / o.touching;
+            (cells - cells.round()).abs().max_element() < 1e-3
+        };
+        assert!(on(Vec2::ZERO) || near.is_some_and(on), "{r:?}");
+        // A place on its lattice: the support's cells', or the point's.
+        let origin = if on(Vec2::ZERO) {
+            Vec2::ZERO
+        } else {
+            near.unwrap_or_default()
+        };
+        let cells = (r.pose.position.truncate() - origin) / o.touching;
+        let place = (
+            origin.to_array().map(f32::to_bits),
+            cells.round().as_ivec2().to_array(),
+            r.pose.rotation.to_array().map(f32::to_bits),
+        );
+        assert!(places.insert(place), "twice: {r:?}");
+        let over = r.pose.position.y - foot;
+        assert!((0.0..0.004).contains(&over), "over the lip's top: {r:?}");
+    }
+}
+
+#[test]
+fn an_upright_bottle_is_found_against_the_lip_about_where_it_nearly_rests() {
+    // Stood upright on a slope of 30 degrees with a lip 1 cm high and 1 cm wide at its foot, the
+    // bottle rests where its rim behind lies on the slope and its bottom on the lip's top, its
+    // middle far enough in from the lip's edge to tip 5 degrees: a strip 2 mm deep between the
+    // rows of the grid a centimeter apart, which find no rest. On the lip's top it nearly rests,
+    // and about the spot there nearest the middle of the support the spots set closer find the
+    // strip, as far along the lip as the spacing each way. The rack lies 3.3 cm along x, so that
+    // the middle of the support is not the frame's origin.
+    let o = RestOptions::default();
+    let along = 0.033;
+    let mut rack = slope(30.0, true);
+    for p in &mut rack.points {
+        p.x += along;
+    }
+    let found = rests(&bottle(), &rack, &o);
+    assert!(!found.is_empty());
+    against_the_lip(&found, &rack, None, &o);
+    let spot = over_the_lip(along, along, &o);
+    let xs = found.iter().map(|r| r.pose.position.x);
+    let (least, most) = xs.fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), x| {
+        (a.min(x), b.max(x))
+    });
+    for r in &found {
+        let at = r.pose.position.truncate();
+        assert!(
+            at.distance(spot) <= o.spacing + 1e-6,
+            "{r:?} is not about {spot}"
+        );
+    }
+    assert!(most - least > o.spacing, "{least}..{most} along the lip");
+    assert!(rests(&bottle(), &slope(30.0, false), &o).is_empty());
+}
+
+#[test]
+fn near_where_the_caller_points_the_bottle_is_found_against_the_lip() {
+    // Told where it would have the bottle, the search looks closer about the spot where it nearly
+    // rests nearest that point: along the lip where the caller points, and below a point far up
+    // the slope, as a harness gives the middle of the rack's top.
+    let o = RestOptions::default();
+    let rack = slope(30.0, true);
+    let foot = 0.1 * 30f32.to_radians().cos();
+    let points = [
+        Vec2::new(-0.062, foot + 0.002),
+        Vec2::new(0.0, foot + 0.002),
+        Vec2::new(0.071, foot + 0.002),
+        Vec2::new(0.0, 0.005),
+    ];
+    for point in points {
+        let near = RestProblem {
+            near: Some(point.extend(0.1)),
+            ..RestProblem::new(bottle(), 0)
+        };
+        let found = rests_on(&device(), &[near], std::slice::from_ref(&rack), &o)
+            .unwrap()
+            .remove(0);
+        assert!(!found.is_empty(), "near {point}");
+        against_the_lip(&found, &rack, Some(point), &o);
+        let spot = over_the_lip(point.x, 0.0, &o);
+        for r in &found {
+            let at = r.pose.position.truncate();
+            let about = at.distance(spot).min(at.distance(point));
+            assert!(
+                about <= o.spacing + 1e-6,
+                "{r:?} near {point}, about {spot}"
+            );
+        }
+    }
+    // The rack turned half a degree, where a spot of the grid meets the strip: the grid finds
+    // that place, and with nothing pointed at nothing more is looked for; pointed far up the
+    // slope at the other end of the lip, the place below the point is found too.
+    let turn = Quat::from_rotation_z(0.5f32.to_radians());
+    let mut turned = slope(30.0, true);
+    for p in &mut turned.points {
+        *p = turn * *p;
+    }
+    for n in &mut turned.normals {
+        *n = turn * *n;
+    }
+    let plain = rests(&bottle(), &turned, &o);
+    assert!(!plain.is_empty());
+    assert!(plain.iter().all(|r| on_the_grid(r, &o)), "{plain:?}");
+    let ends = [-0.08f32, 0.08];
+    let gap = |x: f32| {
+        let off = plain.iter().map(|r| (r.pose.position.x - x).abs());
+        off.fold(f32::INFINITY, f32::min)
+    };
+    let x = if gap(ends[0]) > gap(ends[1]) {
+        ends[0]
+    } else {
+        ends[1]
+    };
+    assert!(gap(x) > 3.0 * o.spacing, "the grid's place lies at {x}");
+    let up_there = RestProblem {
+        near: Some(Vec3::new(x, -0.05, 0.1)),
+        ..RestProblem::new(bottle(), 0)
+    };
+    let found = rests_on(&device(), &[up_there], std::slice::from_ref(&turned), &o)
+        .unwrap()
+        .remove(0);
+    let below = found
+        .iter()
+        .filter(|r| (r.pose.position.x - x).abs() <= o.spacing + o.touching && !on_the_grid(r, &o));
+    assert!(below.count() > 0, "nothing near {x}: {found:?}");
+    for r in &plain {
+        assert!(found.contains(r), "lost: {r:?}");
+    }
+}
+
+#[test]
+fn a_place_near_the_point_comes_once_on_the_lattice_or_off_it() {
+    // Pointed at the lip, on the lattice of the support's cells and a tenth of a millimeter off
+    // it: the point's own spots and those set closer about the spot where the bottle nearly
+    // rests overlap, and a place both meet comes once.
+    let o = RestOptions::default();
+    let rack = slope(30.0, true);
+    let foot = 0.1 * 30f32.to_radians().cos();
+    let on = Vec2::new(0.0, ((foot + 0.002) / o.touching).round() * o.touching);
+    for point in [on, on + Vec2::splat(1e-4)] {
+        let near = RestProblem {
+            near: Some(point.extend(0.1)),
+            ..RestProblem::new(bottle(), 0)
+        };
+        let found = rests_on(&device(), &[near], std::slice::from_ref(&rack), &o)
+            .unwrap()
+            .remove(0);
+        assert!(!found.is_empty(), "near {point}");
+        for (k, r) in found.iter().enumerate() {
+            let at = r.pose.position.truncate();
+            let again = found[..k].iter().find(|q| {
+                q.pose.rotation == r.pose.rotation
+                    && q.pose.position.truncate().distance(at) < 0.5 * o.touching
+            });
+            assert!(again.is_none(), "near {point}, twice: {r:?} and {again:?}");
+        }
+    }
+}
+
+#[test]
+fn a_slender_bottle_that_tips_everywhere_on_a_noisy_table_has_no_rest() {
+    // 2 cm across and 24 cm tall, it tips past 5 degrees on any flat top; on a table read with
+    // a millimeter of noise the spots set closer about where it nearly rests find none either.
+    let o = RestOptions::default();
+    let slender = Obstacle::cylinder(Vec3::ZERO, 0.01, 0.12);
+    let mut rng = Rng::new(17);
+    let mut noisy = table();
+    for p in &mut noisy.points {
+        p.z += rng.range(-0.001, 0.001);
+    }
+    assert!(rests(&slender, &noisy, &o).is_empty());
+}
+
+/// [`table`] with two blocks on it, the support's where `flagged`.
+fn cluttered(flagged: bool) -> Surface {
+    let mut s = table();
+    let blocks = [
+        (Vec3::new(0.03, 0.0, 0.04), Vec3::new(0.03, 0.03, 0.04)),
+        (Vec3::new(-0.08, -0.07, 0.02), Vec3::new(0.02, 0.04, 0.02)),
+    ];
+    for (center, half) in blocks {
+        block(center, half, flagged, &mut s);
+    }
+    s
+}
+
+#[test]
+fn on_a_table_every_rest_stands_on_a_spot_of_the_grid() {
+    // Where a box or a can rests at a spot, and no place is pointed at, nothing is set closer: as
+    // many rests as the grid alone found, each on a spot of it.
+    let o = RestOptions::default();
+    let can = Obstacle::cylinder(Vec3::ZERO, 0.03, 0.05);
+    let tall = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.1));
+    let scenes = [
+        (
+            table(),
+            vec![(a_box(), 7200), (can.clone(), 7200), (tall, 6272)],
+        ),
+        (cluttered(false), vec![(a_box(), 4348), (can.clone(), 4368)]),
+        (cluttered(true), vec![(a_box(), 5596), (can, 5536)]),
+    ];
+    for (k, (s, objects)) in scenes.iter().enumerate() {
+        for (object, count) in objects {
+            let found = rests(object, s, &o);
+            assert_eq!(found.len(), *count, "scene {k}: {object:?}");
+            assert!(found.iter().all(|r| on_the_grid(r, &o)), "scene {k}");
+        }
+    }
+}
+
+/// Why `problem` has no rest on `surface`, through `rests_on` and `rest_failures`.
+fn failure(problem: &RestProblem, surface: &Surface, o: &RestOptions) -> Option<RestFailure> {
+    let (device, problems) = (device(), std::slice::from_ref(problem));
+    let surfaces = std::slice::from_ref(surface);
+    let found = rests_on(&device, problems, surfaces, o).unwrap();
+    rest_failures(&device, problems, surfaces, &found, o)
+        .unwrap()
+        .remove(0)
+}
+
+/// A post `2 half` square and 10 cm tall, its top at 0, the support.
+fn post(half: f32) -> Surface {
+    let mut s = Surface::default();
+    let (center, half) = (Vec3::new(0.0, 0.0, -0.05), Vec3::new(half, half, 0.05));
+    block(center, half, true, &mut s);
+    s
+}
+
+/// A table 6 cm square with walls not the support 2.9 cm to either side of its middle along x:
+/// a box 4 cm wide rests on it nowhere clear of them.
+fn between_walls() -> (Surface, Vec<Vec3>) {
+    let mut s = Surface::default();
+    level(Vec2::splat(-0.03), Vec2::splat(0.03), 0.0, true, &mut s);
+    let before = s.points.len();
+    for x in [-0.034, 0.034] {
+        let (center, half) = (Vec3::new(x, 0.0, 0.025), Vec3::new(0.005, 0.03, 0.025));
+        block(center, half, false, &mut s);
+    }
+    let walls = s.points[before..].to_vec();
+    (s, walls)
+}
+
+#[test]
+fn a_problem_without_rests_says_how_near_the_search_came() {
+    let o = RestOptions::default();
+    let tall = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.1));
+    // Nothing of the support anywhere: none of it flagged, or seen only from below.
+    let mut none = table();
+    none.object.fill(false);
+    let unsupported = Some(RestFailure::Unsupported);
+    assert_eq!(
+        failure(&RestProblem::new(a_box(), 0), &none, &o),
+        unsupported
+    );
+    let mut below = table();
+    below.normals.fill(-Vec3::Z);
+    assert_eq!(
+        failure(&RestProblem::new(a_box(), 0), &below, &o),
+        unsupported
+    );
+
+    // On a slope steeper than the friction, laid flat on it: held nowhere, pushed along the
+    // slope's normal, at the spot nearest the slope's middle, nothing in its way.
+    let tile = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.03, 0.03, 0.01));
+    let laid = RestProblem {
+        rotation: lying_on(30.0),
+        ..RestProblem::new(tile.clone(), 0)
+    };
+    let (sin, cos) = 30f32.to_radians().sin_cos();
+    let normal = Vec3::new(0.0, sin, cos);
+    let Some(RestFailure::Unheld {
+        pose,
+        support,
+        push,
+        blocked,
+    }) = failure(&laid, &slope(30.0, false), &o)
+    else {
+        panic!("not unheld");
+    };
+    assert!(push.angle_between(normal) < 1f32.to_radians(), "{push}");
+    assert!(blocked.is_none());
+    assert!(pose.position.truncate().length() < 0.008, "{pose:?}");
+    assert!(
+        (pose.rotation * Vec3::Z).angle_between(normal) < 1e-3,
+        "{pose:?}"
+    );
+    assert!(support.len() >= 3);
+    for c in &support {
+        assert!(c.dot(normal).abs() < 1e-3, "off the slope: {c}");
+        assert!(
+            tile.placed(pose).distance(*c).value.abs() < o.touching,
+            "{c}"
+        );
+    }
+    // An upright bottle there, the lip left unflagged and the place asked for at the lip: held
+    // nowhere, and the lip's points in its way.
+    let mut short = slope(30.0, true);
+    let slope_points = slope(30.0, false).points.len();
+    short.object[slope_points..].fill(false);
+    let foot = 0.1 * cos;
+    let at_the_lip = RestProblem {
+        near: Some(Vec3::new(0.0, foot, 0.0)),
+        ..RestProblem::new(bottle(), 0)
+    };
+    let Some(RestFailure::Unheld {
+        pose,
+        blocked: Some(by),
+        ..
+    }) = failure(&at_the_lip, &short, &o)
+    else {
+        panic!("not unheld with the lip in the way");
+    };
+    assert!(!by.support && by.point.y >= foot - 1e-3, "{by:?}");
+    assert!(
+        pose.position.truncate().distance(Vec2::new(0.0, foot)) < 0.012,
+        "{pose:?}"
+    );
+
+    // A box 20 cm tall on a post 1.5 cm across: held upright and tipping, as far as its middle
+    // is in from the post's edge allows, the steadiest of all, where the spots set closer about
+    // the spot nearest the post's middle find it; its support the post's top.
+    let Some(RestFailure::Tips {
+        pose,
+        support,
+        tipping,
+        blocked,
+    }) = failure(&RestProblem::new(tall.clone(), 0), &post(0.0075), &o)
+    else {
+        panic!("not tipping");
+    };
+    let inset = 0.0075 - pose.position.truncate().abs().max_element();
+    assert!(
+        (tipping - inset.atan2(0.1)).abs() < 0.5f32.to_radians(),
+        "{tipping} at {pose:?}"
+    );
+    assert!(
+        tipping < o.tipping && inset > 0.007,
+        "{tipping} at {pose:?}"
+    );
+    assert!(blocked.is_none());
+    assert!(support.len() >= 3);
+    for c in &support {
+        assert!(c.z.abs() < 1e-6 && c.truncate().abs().max_element() <= 0.0075 + 1e-6);
+    }
+
+    // The bottle against the rack's lip, its rim on the slope and its bottom on the lip, asked to
+    // tip 10 degrees: it tips, as far as the steadiest of its rests asked for 5 does, found as a
+    // rest's is.
+    let rack = slope(30.0, true);
+    let steadiest = rests(&bottle(), &rack, &o)
+        .iter()
+        .map(|r| r.tipping)
+        .fold(0.0, f32::max);
+    let steadier = RestOptions {
+        tipping: 10f32.to_radians(),
+        ..o
+    };
+    assert!(
+        steadiest > o.tipping && steadiest < steadier.tipping,
+        "{steadiest}"
+    );
+    let Some(RestFailure::Tips { tipping, .. }) =
+        failure(&RestProblem::new(bottle(), 0), &rack, &steadier)
+    else {
+        panic!("not tipping against the lip");
+    };
+    assert!(
+        (tipping - steadiest).abs() < 0.5f32.to_radians(),
+        "{tipping}, {steadiest}"
+    );
+
+    // A table between walls that are not the support: it would rest, but for a wall within the
+    // clearance; and the box 20 cm tall, which also tips at the table's edges, comes to that too.
+    let (walled, walls) = between_walls();
+    for object in [a_box(), tall] {
+        let Some(RestFailure::Blocked { rest, by }) =
+            failure(&RestProblem::new(object.clone(), 0), &walled, &o)
+        else {
+            panic!("not blocked: {object:?}");
+        };
+        assert!(walls.contains(&by.point) && !by.support, "{by:?}");
+        assert!(
+            distance(&object, &rest, by.point) < o.clearance,
+            "{by:?} {rest:?}"
+        );
+        assert!(
+            rest.tipping >= o.tipping && rest.support.len() >= 3,
+            "{rest:?}"
+        );
+        assert!((rest.pose.position.z - object_half_height(&object)).abs() < 1e-4);
+    }
+}
+
+#[test]
+fn why_none_is_the_same_alone_in_a_batch_and_on_any_device_and_says_nothing_where_one_rests() {
+    let robot = common::panda().unwrap();
+    let o = RestOptions::default();
+    let tall = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.1));
+    let (walled, _) = between_walls();
+    let surfaces = [table(), slope(30.0, false), post(0.0075), walled];
+    let problems = [
+        RestProblem::new(a_box(), 0),
+        RestProblem {
+            rotation: lying_on(30.0),
+            ..RestProblem::new(a_box(), 1)
+        },
+        RestProblem::new(tall.clone(), 2),
+        RestProblem::new(a_box(), 3),
+        RestProblem::new(tall, 3),
+    ];
+    let one = Device::cpu_threads(&robot, 1).unwrap();
+    let found = rests_on(&one, &problems, &surfaces, &o).unwrap();
+    let alone: Vec<Option<RestFailure>> = (0..problems.len())
+        .map(|k| {
+            let s = std::slice::from_ref(&surfaces[problems[k].surface]);
+            let p = RestProblem {
+                surface: 0,
+                ..problems[k].clone()
+            };
+            let found = rests_on(&one, std::slice::from_ref(&p), s, &o).unwrap();
+            rest_failures(&one, &[p], s, &found, &o).unwrap().remove(0)
+        })
+        .collect();
+    assert!(alone[0].is_none());
+    assert!(matches!(alone[1], Some(RestFailure::Unheld { .. })));
+    assert!(matches!(alone[2], Some(RestFailure::Tips { .. })));
+    assert!(matches!(alone[3], Some(RestFailure::Blocked { .. })));
+    assert!(matches!(alone[4], Some(RestFailure::Blocked { .. })));
+    let mut devices = vec![one, Device::cpu(&robot).unwrap()];
+    match Device::gpu(&robot) {
+        Ok(gpu) => devices.push(gpu),
+        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
+        Err(e) => panic!("no GPU: {e}"),
+    }
+    for device in &devices {
+        let together = rest_failures(device, &problems, &surfaces, &found, &o).unwrap();
+        assert_eq!(together, alone, "{}", device.name());
+    }
+    // Given no rests for a problem that has them, it says none either.
+    let device = &devices[0];
+    let unasked = rest_failures(device, &problems[..1], &surfaces, &[vec![]], &o).unwrap();
+    assert_eq!(unasked, [None]);
+    // Its input is checked as `rests_on`'s is, and the rests must be one list a problem.
+    let short = rest_failures(device, &problems, &surfaces, &found[1..], &o);
+    assert!(matches!(short, Err(Error::Input(why)) if why.contains("4 lists of rests for 5")));
+    let elsewhere = RestProblem::new(a_box(), 4);
+    let refused = rest_failures(device, &[elsewhere], &surfaces, &[vec![]], &o);
+    assert!(matches!(refused, Err(Error::Input(why)) if why.starts_with("problem 0: surface 4")));
+}
+
+/// Half the height of an upright box.
+fn object_half_height(object: &Obstacle) -> f32 {
+    match *object {
+        Obstacle::Cuboid { half_extents, .. } => half_extents.z,
+        _ => panic!("a box, got {object:?}"),
+    }
 }
