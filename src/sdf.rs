@@ -69,6 +69,43 @@ pub struct Intrinsics {
     pub cy: f32,
 }
 
+/// What a reading has on one side of it along a line through its pixel
+/// ([`DepthImage::filtered`]): a reading of the same surface, or the image's end.
+const SAME_SURFACE: u8 = 0;
+
+/// What the depth `beside` is to a reading `z`, where one surface steps at most `most` between
+/// the two: [`SAME_SURFACE`], nearer by more than that (1), farther by more (2), or a pixel
+/// without a reading (3). A pixel without a reading holds 0, and the image's end holds no
+/// number, which is neither nearer nor farther. Without a branch.
+#[inline(always)]
+fn beside(z: f32, beside: f32, most: f32) -> u8 {
+    let (nearer, farther) = (z - beside > most, beside - z > most);
+    u8::from(nearer) | (u8::from(farther) << 1) | (3 * u8::from(beside == 0.0))
+}
+
+/// What a depth camera's readings are held to before they are used
+/// ([`DepthImage::filtered`]): how far apart two neighbouring readings of one surface can lie.
+#[derive(Clone, Copy, Debug)]
+pub struct DepthFilter {
+    /// The camera's noise: a reading at depth `z` has a standard deviation of
+    /// `noise[0] + noise[1] * z + noise[2] * z * z` (meters, for `z` in meters). A stereo
+    /// camera's grows with the square of the depth, `[0, 0, e / (f * b)]` for a disparity error
+    /// of `e` pixels, a focal length of `f` pixels and a baseline of `b` meters; a
+    /// time-of-flight camera's has the first two. Zeros for depth without noise.
+    pub noise: [f32; 3],
+    /// The most a surface is turned from square on to the rays that meet it for its readings
+    /// to be taken as one surface's (radians): 80 degrees. Two neighbouring readings of a
+    /// surface turned that far lie 5.7 times as far apart in depth as across; past it a depth
+    /// camera reads a surface as it reads an edge, each pixel mixing what is near with what is
+    /// far. It is that turn at the image's middle: the step is held to this tangent times the
+    /// width between two pixels at that depth, which toward the corners of a wide lens is a
+    /// surface a few degrees steeper, so there the filter errs toward keeping readings.
+    pub steepest: f32,
+    /// How many standard deviations of the difference between two readings noise alone is
+    /// taken to reach: 4, which one pair in sixteen thousand exceeds.
+    pub deviations: f32,
+}
+
 /// What [`SdfGrid::from_depth`] assumes about space hidden behind observed surfaces, and
 /// [`OccupancyMap::grid`] about space no image has observed.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -198,6 +235,88 @@ impl DepthImage<'_> {
             self.camera.rotation * Vec3::new((u - cx) / fx * z, (v - cy) / fy * z, z)
                 + self.camera.position,
         )
+    }
+
+    /// The image's depths with the readings that lie between two surfaces left out (0, as are
+    /// pixels without a reading): those of pixels that mix a near surface with what lies behind
+    /// it, which a depth camera gives along every edge and which a grid or a map would hold as
+    /// points in mid-air. Filter first: the mask, the points, a surface, a grid and a map then
+    /// read an image of the filtered depths.
+    ///
+    /// A reading lies between where, along a row, a column or a diagonal through its pixel, the
+    /// pixel on one side is nearer by more than one surface can step, or has no reading, and
+    /// the pixel on the other side is farther by more than that, or has no reading, at least
+    /// one of the two a step. What one surface can step between two pixels is the width they
+    /// are apart at that depth times the tangent of [`steepest`](DepthFilter::steepest), and
+    /// [`deviations`](DepthFilter::deviations) of the noise in the difference of two readings.
+    /// So the nearest surface along an edge keeps its readings, an object's outline included,
+    /// and so does what lies behind it, but for a reading with a step on one side and no
+    /// reading across from it; depth without noise loses those, and what lies between by more
+    /// than the slope alone, as a surface seen more edge-on than `steepest`. Readings of that kind
+    /// that agree with one another stay, a few pixels along an edge: fusing more than one image
+    /// clears those.
+    pub fn filtered(&self, o: &DepthFilter) -> Result<Vec<f32>> {
+        self.check()?;
+        ensure_input!(
+            o.noise.iter().all(|c| c.is_finite() && *c >= 0.0),
+            "the noise's coefficients must not be negative, got {:?}",
+            o.noise
+        );
+        ensure_input!(
+            o.steepest > 0.0 && o.steepest < std::f32::consts::FRAC_PI_2,
+            "the steepest surface must be turned between 0 and a quarter turn, got {} rad",
+            o.steepest
+        );
+        ensure_input!(
+            o.deviations.is_finite() && o.deviations >= 0.0,
+            "the deviations must not be negative, got {}",
+            o.deviations
+        );
+        let Intrinsics { fx, fy, .. } = self.intrinsics;
+        let (width, height) = (self.width, self.height());
+        // How far a surface turned `steepest` steps from one pixel to the next, per meter of
+        // depth: along a row, along a column and along either diagonal.
+        let slope = o.steepest.tan();
+        let steps = [slope / fx, slope / fy, slope * (1.0 / fx).hypot(1.0 / fy)];
+        let [c0, c1, c2] = o.noise;
+        // The image with a pixel's margin around it, so both sides of every pixel are read
+        // alike: 0 where a pixel has no reading, and past the image's end a depth that is no
+        // number, which is neither nearer nor farther than any.
+        let wide = width + 2;
+        let mut padded = vec![f32::NAN; wide * (height + 2)];
+        let rows = padded.chunks_exact_mut(wide).skip(1).take(height);
+        for (v, row) in rows.enumerate() {
+            for (u, depth) in row[1..=width].iter_mut().enumerate() {
+                *depth = self.reading(v * width + u).unwrap_or(0.0);
+            }
+        }
+        let mut depths = vec![0.0; self.depth.len()];
+        let rows = depths.chunks_exact_mut(width);
+        for (v, row) in rows.enumerate() {
+            let above = &padded[v * wide..(v + 1) * wide];
+            let level = &padded[(v + 1) * wide..(v + 2) * wide];
+            let below = &padded[(v + 2) * wide..(v + 3) * wide];
+            for (u, kept) in row.iter_mut().enumerate() {
+                let z = level[u + 1];
+                let noise = o.deviations * std::f32::consts::SQRT_2 * (c0 + c1 * z + c2 * z * z);
+                // Each line through the pixel: what lies on one side of it, on the other, and
+                // the most one surface steps to either.
+                let lines = [
+                    (level[u], level[u + 2], z * steps[0] + noise),
+                    (above[u + 1], below[u + 1], z * steps[1] + noise),
+                    (above[u], below[u + 2], z * steps[2] + noise),
+                    (above[u + 2], below[u], z * steps[2] + noise),
+                ];
+                // Between: the two sides unlike, and neither the reading's own surface. Every
+                // line is judged, without a branch, so that pixels are judged several at once.
+                let between = lines.iter().fold(false, |between, &(one, other, most)| {
+                    let (one, other) = (beside(z, one, most), beside(z, other, most));
+                    between | ((one != other) & (one != SAME_SURFACE) & (other != SAME_SURFACE))
+                });
+                *kept = if between { 0.0 } else { z };
+            }
+        }
+        Ok(depths)
     }
 
     /// Each pixel's reading as a point in the frame the camera is posed in, row by row: pixel `i`
@@ -1635,6 +1754,19 @@ impl OccupancyMap {
                 .collect()
         });
         SdfGrid::from_occupancy(device, &self.grid, &banded)
+    }
+}
+
+// After the module's other impls: one placed before them renumbers each of theirs in its
+// functions' symbols, which reorders the crate's one codegen unit and changes how functions
+// that have nothing to do with it are compiled.
+impl Default for DepthFilter {
+    fn default() -> Self {
+        Self {
+            noise: [0.0; 3],
+            steepest: 80f32.to_radians(),
+            deviations: 4.0,
+        }
     }
 }
 

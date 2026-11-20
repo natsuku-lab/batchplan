@@ -10,6 +10,16 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- `image.filtered(&DepthFilter)`: a depth image's depths without the readings that lie between
+  two surfaces, which a depth camera gives where a pixel covers both a near surface and what is
+  behind it, and which a grid or a map would hold as points in mid-air. A reading goes where,
+  along a row, a column or a diagonal through its pixel, one side is nearer by more than one
+  surface can step, or has no reading, and the other side farther, or has none. What one surface
+  can step comes from how far it may be turned to the rays (`steepest`, 80 degrees) and from the
+  camera's `noise` (`deviations`, 4 of them). Surfaces keep their outlines, but for a reading
+  with a step on one side and no reading straight across; depth without noise loses those and
+  surfaces seen that edge-on, and nothing else.
+
 - What a caller knows of a fused map, said in the map's frame with any `Obstacle` as the shape:
   `map.free(&shape, margin)` marks the voxels within the margin free, as seen through once (where
   an object stood before the robot carried it away, or a shape the world holds as an obstacle

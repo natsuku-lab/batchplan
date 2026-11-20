@@ -39,7 +39,7 @@ cargo run --release --example latency [-- --cpu]                # one call's tim
 cargo run --release --example timing                            # timing's cost and the trajectories' durations, by kind of path, on one thread
 cargo run --release --example so101_tracking -- data/so101_tracking && .venv-so101/bin/python scripts/so101_tracking.py data/so101_tracking   # the SO-101 on BAM's servo model (docs/benchmarks.md#tracking-on-the-so-101s-servos)
 cargo run --release --example depth [-- --cpu]                  # a distance grid from a rendered depth image, then plans around it
-cargo run --release --example perception [-- --cpu [threads]]   # what each depth call costs for a 640x480 image: the robot's mask, the points, a surface, a grid, a frame fused and the map's grid, from over a table and from the hand
+cargo run --release --example perception [-- --cpu [threads]]   # what each depth call costs for a 640x480 image: the filter, the robot's mask, the points, a surface, a grid, a frame fused and the map's grid, from over a table and from the hand
 cargo run --release --example control_loop -- [seconds]         # a planner thread feeding a 50 Hz loop
 cargo run --release --features lerobot --example datagen -- --lerobot data/lerobot_demo 512 20   # --pick-place for pick-and-place, --file-mb N to split files sooner
 REMOTE=user@host SSH_OPTS='...' scripts/sync.sh '<command>'     # rsync to ~/batchplan on a GPU box and run there

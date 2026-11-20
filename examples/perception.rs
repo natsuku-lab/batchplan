@@ -1,8 +1,9 @@
-//! What the depth calls cost, a 640x480 image at a time: which readings are the robot's, the
-//! image's points, a surface with its normals, a grid of the image, the image fused into a map,
-//! that map's grid, one object's part of it, and what a caller marks in it. For a camera over a
-//! table that sees the arm and for one the hand carries, with the Panda's 61 spheres and with it
-//! fitted to several hundred (a budget of 576).
+//! What the depth calls cost, a 640x480 image at a time: the image without the readings between
+//! two surfaces, which readings are the robot's, the image's points, a surface with its normals,
+//! a grid of the image, the image fused into a map, that map's grid, one object's part of it,
+//! and what a caller marks in it. For a camera over a table that sees the arm and for one the
+//! hand carries, with the Panda's 61 spheres and with it fitted to several hundred (a budget of
+//! 576).
 //!
 //! cargo run --release --example perception [-- --cpu [threads]]
 
@@ -14,8 +15,8 @@ use std::time::Instant;
 use anyhow::Result;
 use batchplan::rng::Rng;
 use batchplan::{
-    DepthImage, Device, Intrinsics, Occlusion, OccupancyMap, Pose, Robot, RobotMask, RobotOptions,
-    SdfGrid, SdfOptions, SphereOptions, Surface, World,
+    DepthFilter, DepthImage, Device, Intrinsics, Occlusion, OccupancyMap, Pose, Robot, RobotMask,
+    RobotOptions, SdfGrid, SdfOptions, SphereOptions, Surface, World,
 };
 use glam::{Mat3, Quat, Vec3};
 use rayon::prelude::*;
@@ -150,6 +151,14 @@ fn main() -> Result<()> {
         };
         let readings = depth.iter().filter(|&&z| z > 0.0).count();
         println!("\n{name}: {readings} of {} pixels read", depth.len());
+
+        // The scene is rendered without noise: what goes is seen edge-on, or has a step on one
+        // side and nothing read straight across.
+        let (median, best, kept) = timed(21, || image.filtered(&DepthFilter::default()));
+        let out = kept?.iter().zip(&depth).filter(|(k, z)| k != z).count();
+        println!(
+            "  the image without the readings between two surfaces: median {median:.2} ms, best {best:.2} ({out} left out)"
+        );
 
         let mut masks: Vec<(String, Option<RobotMask>)> = vec![("no mask".into(), None)];
         for robot in [&panda, &fitted] {

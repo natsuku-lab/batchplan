@@ -71,6 +71,18 @@ A `DepthImage` is one frame: z distances in meters row by row (zero, negative or
 - free outside the image and along pixels without a reading;
 - free or solid behind observed surfaces, as `Occlusion` says (`Occlusion::Occupied` is the safe choice for a single view that does not see the robot). `Occlusion::Band(distance)` makes solid only what lies within `distance` behind an observed surface in depth (along the camera's z axis), and space past it free: a drawer pulled out over a table walls in `distance` below what the camera sees of it, not the space under it down to the table. The band grows toward collision as surfaces do, and a band of 0 is `Occlusion::Free`.
 
+### Readings between two surfaces
+
+A depth camera reads a pixel that covers both a near surface and what lies behind it somewhere between the two. Those readings are points in mid-air along every edge: obstacles where nothing is, in the space beside an object that a hand reaches into. `image.filtered(&DepthFilter { noise, ..Default::default() })` gives the image's depths with them left out (0, as a pixel without a reading), for an image that the mask, the points, a surface, a grid and a map then read, as the example under [Fused maps](#fused-maps) does.
+
+A reading is left out where, along a row, a column or a diagonal through its pixel, the pixel on one side is nearer by more than one surface can step, or has no reading, and the pixel on the other side is farther by more than that, or has no reading, at least one of the two a step. What one surface can step between two pixels is the width they are apart at that depth times the tangent of `steepest` (80 degrees from square on to the rays that meet it, at the image's middle; a few degrees steeper toward the corners of a wide lens), and `deviations` (4) of the noise in the difference of two readings. `noise` gives a reading's standard deviation at depth z as `noise[0] + noise[1] z + noise[2] z²`: for a stereo camera `[0, 0, e / (f b)]`, with a disparity error of `e` pixels, a focal length of `f` pixels and `b` meters between its two cameras. So:
+- the surface in front keeps its readings up to its outline, and so does what lies behind it. A wire one pixel wide stays, and so does what is seen through a slit;
+- a reading with a step on one side and no reading straight across from it goes: what the camera did not read there may be the other surface, as in the strip beside a near object that only one of a stereo camera's two cameras sees;
+- depth without noise loses those readings and surfaces seen more edge-on than `steepest`, and nothing else. Depth with noise the filter is not told of loses readings of flat surfaces too, wherever noise sets neighbours that far apart;
+- mixed readings that agree with one another stay, a few pixels along an edge. Fusing more than one image clears those: a view that sees through them counts against them.
+
+It runs on the calling thread and takes as long whatever the image holds: 0.7 ms for a 640×480 image on the M4 Pro and 1.0 ms on the Ryzen ([below](#building-grids-on-the-gpu)).
+
 ### Masking the robot
 
 A camera that sees the arm would make it an obstacle to itself. `image.robot_mask(&robot, &q, padding, &holding)` says which of the image's readings are the robot's at configuration `q` (`RobotMask::on_robot`, a flag per pixel): those whose points lie inside its collision spheres grown by `padding`, or within `padding` of an object a hand holds. `holding` names those objects, a `Held` each as a problem's `holding` takes one, placed where its hand holds it and with the fingers where it locks them; `&[]` for a robot that holds nothing. With the mask passed to `from_depth`, `OccupancyMap::integrate` or `Surface::from_depth`:
@@ -89,8 +101,8 @@ Grids from depth images grow toward collision by about three voxels, so set the 
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
 use batchplan::{
-    DepthImage, Device, Error, Intrinsics, Obstacle, Occlusion, OccupancyMap, Pose, Robot,
-    RobotOptions, World,
+    DepthFilter, DepthImage, Device, Error, Intrinsics, Obstacle, Occlusion, OccupancyMap, Pose,
+    Robot, RobotOptions, World,
 };
 
 fn main() -> Result<(), Error> {
@@ -110,12 +122,22 @@ fn main() -> Result<(), Error> {
         cy: 239.5,
     };
     let q = robot.default_q().to_vec(); // the arm's current state
+    // A stereo camera's noise: 0.08 pixels of disparity, its two cameras 5 cm apart.
+    let filter = DepthFilter {
+        noise: [0.0, 0.0, 0.08 / (intrinsics.fx * 0.05)],
+        ..Default::default()
+    };
     for depth in frames() {
         let image = DepthImage {
             depth: &depth,
             width: 640,
             intrinsics,
             camera,
+        };
+        let depth = image.filtered(&filter)?; // no readings between two surfaces
+        let image = DepthImage {
+            depth: &depth,
+            ..image
         };
         let mask = image.robot_mask(&robot, &q, 0.04, &[])?; // the arm is not an obstacle
         map.integrate(&device, &image, Some(&mask))?;
@@ -145,6 +167,23 @@ The shape is any `Obstacle`, turned as it is: a measured object's box, a ball ab
 
 `examples/depth.rs` renders a 640×480 depth image of a tabletop scene, builds a grid of 172×192×72 points from it, and plans Panda reaches with the grid as the only obstacle. IK reaches 48 of 64 grasp targets (the others lie in the camera's shadow, which `Occlusion::Occupied` treats as solid); all 48 plan, and their closest approach to the true scene is 27.0 mm.
 
+## With a perception library
+
+batchplan reads depth; it does not say what things are. A library that finds objects in images (their pixels, their shapes, their poses) meets it at the calls below. Each takes or gives plain data (flags per pixel, points, shapes), so neither library depends on the other.
+
+| The perception side has | It meets batchplan at |
+|---|---|
+| A camera's depths | `image.filtered(&filter)` first, and an image of the result for every call below |
+| No use for the arm in its images | `image.robot_mask(..)?.on_robot`, a flag per pixel to leave out of what it segments |
+| A need for points in the world's frame | `image.points(mask)`, a point per pixel in the frame the camera is posed in |
+| The pixels of one object | `Surface::from_depth(&device, &image, &object, mask, radius)` with its labels as the flags; `grasps_on`, `rests_on` and `falls_into` read the surface |
+| A shape fitted to an object | An `Obstacle` in the `World`, and a problem's `holding` once the object is picked; `map.free(&shape, margin)` on a copy of the map keeps what the cameras read of it from being an obstacle a second time |
+| An object it can only bound, as a cabinet with a drawer open | `map.part(&bounds, padding)?.grid(&device, Occlusion::Occupied)`, the object as the cameras saw into it |
+| Something that moved | `map.clear(&shape, margin)` where it was and where it is |
+| A question about what is known | `obstacle.distance(point)`, `grid.distance(point)`, `map.occupancy(point)`, `map.counts()` |
+
+Which pixels are which object's, and what shape and pose fit them, stay on the perception side. What the cameras saw of space, where the robot is in each image, and everything a plan is checked against stay here.
+
 ## Building grids on the GPU
 
 Point clouds, depth images and maps become grids on the device they are given. On a GPU, everything after the host computes a depth image's bounds, and with a mask the grid points the robot fills, runs in compute kernels; the CPU device runs the same steps on its threads. Which points the robot fills is found sphere by sphere over the points near each, once for both devices, so a robot fitted with several hundred spheres costs a frame what one of a few dozen does.
@@ -161,12 +200,13 @@ Median build times for a 640×480 image of a table seen from 1 m:
 | M4 Pro (GPU) | 3.6 ms | 14.8 ms | 1.5 ms | 4.4 ms |
 | M4 Pro (CPU, 14 threads) | 6.4 ms | 36 ms | 2.2 ms | 6.9 ms |
 
-`examples/perception.rs` times each call for a 640×480 image that shows the arm: a tabletop seen from across the table, and from a camera on the Panda's palm that looks along its fingers. The mask is padded 4 cm, for the Panda's 61 spheres and for a Panda fitted with 573. Each figure is the quickest median of several runs (twenty on the M4 Pro, eight on the Ryzen and its Radeon) on machines doing other work beside them (a load of 6 to 8 on the M4 Pro's 14 cores, 10 to 32 on the Ryzen's 32); each cell is the camera over the table, then the one on the hand.
+`examples/perception.rs` times each call for a 640×480 image that shows the arm: a tabletop seen from across the table, and from a camera on the Panda's palm that looks along its fingers. The mask is padded 4 cm, for the Panda's 61 spheres and for a Panda fitted with 573. Each figure is the quickest median of several runs (twenty on the M4 Pro, eight on the Ryzen and its Radeon) on machines doing other work beside them (a load of 3 to 10 on the M4 Pro's 14 cores, 10 to 32 on the Ryzen's 32); each cell is the camera over the table, then the one on the hand.
 
-The mask, the points and a surface are read on the host:
+The filter, the mask, the points and a surface are read on the host:
 
 | | M4 Pro (14 threads) | Ryzen AI Max+ 395 (32 threads) |
 |---|---|---|
+| The image without the readings between two surfaces (`filtered`) | 0.73 ms, 0.73 ms | 0.98 ms, 0.99 ms |
 | Which readings are the robot's (`robot_mask`), 61 spheres | 0.07 ms, 0.42 ms | 0.06 ms, 0.41 ms |
 | The same, 573 spheres | 0.20 ms, 1.05 ms | 0.21 ms, 1.12 ms |
 | The image's points (`points`) | 0.66 ms, 0.71 ms | 1.77 ms, 1.97 ms |
