@@ -79,11 +79,12 @@ impl Field {
                 let cell = row as usize * across + column as usize;
                 let support = s.object.is_empty() || s.object[k];
                 // Where it was seen from, if known: `join` leaves the unknown infinite.
-                let from_above = s
-                    .seen_from
-                    .get(k)
-                    .is_some_and(|f| f.is_finite() && f.z > p.z);
-                let holds = support && (s.normals[k].z >= FACING || from_above);
+                let from_above = || {
+                    s.seen_from
+                        .get(k)
+                        .is_some_and(|f| f.is_finite() && f.z > p.z)
+                };
+                let holds = support && (s.normals[k].z >= FACING || from_above());
                 if holds != holding || (support && !holds && p.z <= field.tops[cell].z) {
                     continue;
                 }
