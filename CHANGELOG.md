@@ -245,6 +245,17 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   8.8 and 0.9 where 1.4. Calls without a mask take what they took, with the same results to the
   bit.
 
+- A frame fused into a map on the CPU device costs by what its camera sees, not by the map's
+  size: a row of the map at a time, the fuse visits the voxels the image may see, and past them
+  only those holding one of its readings and those a mask frees, with the same map to the byte.
+  A 640×480 frame of a tabletop fused into a map of 13.4M voxels (2.9 m by 2.9 m by 1.55 m at
+  1 cm) takes 2.5 ms where 6.4 on the M4 Pro's 14 threads from a camera across the table, and
+  1.6 where 5.5 from one on the Panda's hand; into a 2.9 m cube of 24.9M voxels, which the views
+  reach farther down, 6.6 ms where 11.8 and 4.7 where 10.9 (best of eight runs alternated with
+  the code before, at a load of 7 to 13). A map of 1.8M voxels that the camera across the table
+  sees nearly all of takes what it took, and from the hand 1.5 ms where 1.7. The GPU's fuse is
+  as it was.
+
 - **Breaking:** a robot's `SphereOptions` are checked whether its spheres are fitted or given
   (`RobotOptions::collision_model`), before anything is read: a budget of zero, or a tolerance or
   voxel size that is not positive, is an `Error::Input` from `Robot::load`, `from_urdf` and
