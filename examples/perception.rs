@@ -1,9 +1,9 @@
 //! What the depth calls cost, a 640x480 image at a time: the image without the readings between
 //! two surfaces, which readings are the robot's or a known shape's, the image's points, a
 //! surface with its normals, a grid of the image, the image fused into a map, that map's grid,
-//! one object's part of it, and what a caller marks in it. For a camera over a table that sees
-//! the arm and for one the hand carries, with the Panda's 61 spheres and with it fitted to
-//! several hundred (a budget of 576).
+//! where it is occupied, one object's part of it, and what a caller marks in it. For a camera
+//! over a table that sees the arm and for one the hand carries, with the Panda's 61 spheres and
+//! with it fitted to several hundred (a budget of 576).
 //!
 //! cargo run --release --example perception [-- --cpu [threads]]
 
@@ -252,7 +252,13 @@ fn main() -> Result<()> {
                 sum(&grid?)
             );
         }
-        // One object's part of the map, as the cameras saw into its box, and what a caller marks.
+        // Where the map is occupied, one object's part of it, as the cameras saw into its box, and
+        // what a caller marks.
+        let (median, best, occupied) = timed(9, || map.occupied());
+        println!(
+            "  where the map is occupied: median {median:.2} ms, best {best:.2} ({} voxels)",
+            occupied.len()
+        );
         let object = &scene.obstacles[1];
         let (median, best, part) = timed(9, || map.part(object, 0.15));
         let part = part?;

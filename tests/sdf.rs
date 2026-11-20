@@ -1772,6 +1772,20 @@ fn a_caller_marks_space_free_or_no_longer_known() {
         assert!(matches!(map.clear(shape, margin), Err(Error::Input(_))));
         assert!(matches!(map.part(shape, margin), Err(Error::Input(_))));
     }
+    // So is a region whose part would pass a grid's limits, however little of it the map covers:
+    // more than 2^26 points, or a diagonal of 4,096 voxels.
+    let long = Obstacle::Capsule {
+        center: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        radius: 0.01,
+        half_length: 21.0,
+    };
+    for region in [Obstacle::cuboid(Vec3::ZERO, Vec3::splat(2.1)), long] {
+        assert!(
+            matches!(map.part(&region, 0.0), Err(Error::Input(_))),
+            "{region:?}"
+        );
+    }
 
     // In a fused scene: a ball on a table, carried away with no camera looking.
     let scene = TableScene::new();
@@ -2104,6 +2118,122 @@ fn a_part_keeps_the_readings_on_its_regions_faces() {
                 device.name()
             );
         }
+    }
+}
+
+/// A map says where it is occupied: the middles of the voxels more likely occupied than not, on
+/// its points and in their order, as many as it counts, on what the camera saw; of a part, those
+/// in its region alone. A block on a table seen from above, and a voxel at even odds, which is
+/// not occupied.
+#[test]
+fn a_map_says_where_it_is_occupied() {
+    let block = Obstacle::cuboid(Vec3::new(0.06, -0.03, 0.031), Vec3::new(0.04, 0.025, 0.031));
+    let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.05), Vec3::new(0.5, 0.5, 0.05));
+    let far = vec![0.0; 640 * 480];
+    let image = DepthImage {
+        depth: &far,
+        width: 640,
+        intrinsics: Intrinsics {
+            fx: 525.0,
+            fy: 525.0,
+            cx: 319.5,
+            cy: 239.5,
+        },
+        camera: Pose::new(Vec3::new(0.0, 0.0, 0.7), Quat::from_rotation_x(PI)),
+    };
+    let bare = shape_depth(&image, &table);
+    let both: Vec<f32> = (shape_depth(&image, &block).iter().zip(&bare))
+        .map(|(a, b)| a.min(*b))
+        .collect();
+    let (with, without) = (
+        DepthImage {
+            depth: &both,
+            ..image
+        },
+        DepthImage {
+            depth: &bare,
+            ..image
+        },
+    );
+    // Longer along x than along y, and the block off both axes: x and y are not alike.
+    let (lo, hi, voxel) = (
+        Vec3::new(-0.2, -0.15, -0.05),
+        Vec3::new(0.25, 0.15, 0.2),
+        0.01,
+    );
+    let reach = 0.5 * 3f32.sqrt() * voxel;
+    for device in devices() {
+        let name = device.name();
+        let fresh = OccupancyMap::try_new(lo, hi, voxel).unwrap();
+        assert!(fresh.occupied().is_empty(), "a new map");
+        let mut map = fresh.clone();
+        map.integrate(device, &with, None).unwrap();
+        let points = map.occupied();
+        assert_eq!(points.len(), map.counts().occupied, "{name}");
+        let (mut on_block, mut last) = (0, None);
+        for &p in &points {
+            assert!(map.occupancy(p).unwrap() > 0.5, "{name}: {p}");
+            let at = (p - lo) / voxel;
+            assert!(
+                (at - at.round()).abs().max_element() < 1e-3,
+                "{name}: {p} is off the map's points"
+            );
+            let [x, y, z] = at.round().to_array().map(|a| a as u32);
+            assert!(last < Some((z, y, x)), "{name}: {p} out of order");
+            last = Some((z, y, x));
+            let (from_block, from_table) = (block.distance(p).value, table.distance(p).value);
+            assert!(
+                from_block.abs().min(from_table.abs()) <= 2.0 * reach,
+                "{name}: {p} is {from_block} from the block and {from_table} from the table"
+            );
+            on_block += usize::from(from_block.abs() < from_table.abs());
+        }
+        assert!(
+            on_block > 30 && points.len() > on_block + 1_000,
+            "{name}: {on_block} of {} points on the block",
+            points.len()
+        );
+
+        // A part's are the map's within its reach of the region, and no voxel it leaves out.
+        let part = map.part(&block, 0.05).unwrap();
+        let kept = part.occupied();
+        assert_eq!(kept.len(), part.counts().occupied, "{name}");
+        let near: Vec<Vec3> = (points.iter())
+            .copied()
+            .filter(|&p| block.distance(p).value <= reach)
+            .collect();
+        assert!(
+            near.len() > 30,
+            "{name}: {} points near the block",
+            near.len()
+        );
+        assert_eq!(kept.len(), near.len(), "{name}");
+        for (&p, &q) in kept.iter().zip(&near) {
+            assert!(
+                p.distance(q) < 1e-5,
+                "{name}: {p} in the part, {q} in the map"
+            );
+            assert!(block.distance(p).value <= reach + 1e-5, "{name}: {p}");
+        }
+
+        // The block's top seen five times, seen through thirteen and seen twice more: even odds,
+        // which are not more likely occupied than not.
+        let mut even = fresh.clone();
+        let looks = [&with; 5]
+            .into_iter()
+            .chain([&without; 13])
+            .chain([&with; 2]);
+        for image in looks {
+            even.integrate(device, image, None).unwrap();
+        }
+        let top = Vec3::new(0.06, -0.03, 0.06);
+        assert_eq!(even.occupancy(top), Some(0.5), "{name}");
+        let occupied = even.occupied();
+        assert_eq!(occupied.len(), even.counts().occupied, "{name}");
+        assert!(
+            (occupied.iter()).all(|&p| even.occupancy(p).unwrap() > 0.5),
+            "{name}"
+        );
     }
 }
 

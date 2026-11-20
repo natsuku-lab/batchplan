@@ -10,6 +10,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- Where a fused map is occupied: `map.occupied()`, the middles of the voxels `counts` counts as
+  occupied, in the map's frame and in the order of its voxels, and of a part none it leaves out.
+  None means there is no grid to make; otherwise a part around them is a grid of what is there.
+  `part`'s documentation now says that a part's points cover its region and padding whatever the
+  map covers, and that one past a grid's size limits is an input error.
+
 - `mask.with_shapes(&device, &image, &shapes, margin)`: the mask with shapes the caller holds left out
   as the robot is, as a cell's fixtures and objects measured as shapes, which the world holds
   as obstacles of their own. A reading within the margin of a shape is not fused and what only

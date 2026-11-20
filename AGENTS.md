@@ -97,7 +97,7 @@ fn main() -> Result<(), Error> {
 | Running a motion while the world changes | `Follower`, `servo` | [live motion](docs/planning.md#live-motion) |
 | Obstacles from depth images or point clouds | `SdfGrid`, `OccupancyMap`, `DepthImage::filtered`, `DepthImage::robot_mask` | [perception](docs/perception.md) |
 | A perception library's labels and shapes, and what it needs back; keeping one memory of each thing between its objects and a fused map | `RobotMask::with_shapes` for what is held as a shape, `Surface::from_depth` with the labels as flags | [perception](docs/perception.md#with-a-perception-library) |
-| One object as the cameras saw into it (an open drawer, a basket), and space known empty or stale | `OccupancyMap::part`, `free`, `clear`, `counts` | [perception](docs/perception.md#what-a-caller-knows-and-one-objects-part) |
+| One object as the cameras saw into it (an open drawer, a basket), space known empty or stale, and where a map is occupied | `OccupancyMap::part`, `free`, `clear`, `counts`, `occupied` | [perception](docs/perception.md#what-a-caller-knows-and-one-objects-part) |
 | Training data | `datagen`, `npy::export`, `lerobot::export` | [training data](docs/training-data.md) |
 
 IK finds configurations; a plan finds the path to one, or to a pose, solving IK from the start itself. Solve IK first only to choose among its solutions. Every call takes many problems, each naming its world: batch them rather than calling once per problem, since each GPU call has a fixed cost.

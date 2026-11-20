@@ -1770,6 +1770,18 @@ impl OccupancyMap {
         counts
     }
 
+    /// The middles of the voxels more likely occupied than not, those [`counts`](Self::counts)
+    /// counts as occupied, in the map's frame and in the order of the voxels, x fastest. Of a
+    /// part, none it leaves out. None means there is nothing to make a grid of; otherwise a part
+    /// around them is a grid of what is there and no more.
+    #[must_use]
+    pub fn occupied(&self) -> Vec<Vec3> {
+        (self.log_odds.iter().enumerate())
+            .filter(|&(_, &l)| observed(l) && l > 0)
+            .map(|(n, _)| self.grid.point(n))
+            .collect()
+    }
+
     /// The part of the map inside `region`, a shape in the map's frame: a map of its own that
     /// reaches `padding` past the region's bounds, as a grid must reach past the solid it holds
     /// ([`SdfOptions::padding`]), with every voxel that does not reach into the region left out.
@@ -1780,6 +1792,11 @@ impl OccupancyMap {
     /// the object as the cameras saw into it, solid where a reading landed or nothing saw past,
     /// with nothing around it. Where the region reaches past the map, it was never observed; past
     /// a part it is taken from, it is left out. A part takes no images.
+    ///
+    /// The part's points cover the region and the padding, whatever the map covers: a region that
+    /// reaches past the map costs by its own size, never observed out there. One whose points
+    /// would number more than 2^26 (67 million), or whose diagonal would reach 4,096 voxels, is
+    /// an input error, as a grid that large is.
     pub fn part(&self, region: &Obstacle, padding: f32) -> Result<Self> {
         region.check().map_err(|e| input!("the region {e}"))?;
         ensure_input!(
