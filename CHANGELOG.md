@@ -258,6 +258,20 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   map takes 8.3 to 9.7 ms on the Radeon 8060S and 4.7 to 6.5 on the M4 Pro's GPU, and a map that
   large now fuses quicker on a CPU device; any device fuses a map.
 
+- A mask given shapes (`with_shapes`) frees their space in a fused map at a cost that goes by the
+  rows of voxels each shape's box spans in the map, not by their voxels: every shape but a
+  distance grid is convex, so a row of its box holds one run of voxels that reach into it, found
+  by a few distance tests, where every voxel of the box was tested in every frame. The voxels are
+  those testing each one gives, but where rounding leaves one within 1e-5 m of reaching into the
+  shape; a grid is still tested voxel by voxel. A floor, or a wall turned across a corner of the
+  map, no longer costs every voxel of the box around it, and a shape outside the map costs
+  nothing. A 640×480 frame of the tabletop fused into a map of 1.8M voxels with the Panda's mask
+  and the scene's three shapes (`examples/perception.rs`, the quickest median of eight runs
+  alternated with the code before) takes 1.3 ms where 1.9 on the M4 Pro's CPU and 1.5 where 2.3
+  on its GPU, 2.8 where 3.1 on the Ryzen's 32 threads and 1.0 where 1.4 on the Radeon 8060S, from
+  the camera across the table; 0.9 where 1.4, 1.6 where 2.2, 1.4 where 1.7 and 1.2 where 1.5 from
+  the one on the hand. A mask without shapes runs the instructions it ran.
+
 - **Breaking:** a robot's `SphereOptions` are checked whether its spheres are fitted or given
   (`RobotOptions::collision_model`), before anything is read: a budget of zero, or a tolerance or
   voxel size that is not positive, is an `Error::Input` from `Robot::load`, `from_urdf` and

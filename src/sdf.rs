@@ -696,8 +696,10 @@ impl RobotMask {
     /// fastest, the first the lowest of the first word ([`set`] reads one). Each ball marks the
     /// points it holds among those of its box, a slab of the grid at a time, so the cost goes
     /// by the balls' volumes and not by the grid's points times the spheres: a robot fitted
-    /// with several hundred costs a map's update what one of a few dozen does. Both devices
-    /// read these bits (`inside_robot` in grids.wgsl).
+    /// with several hundred costs a map's update what one of a few dozen does. A shape but a
+    /// grid marks each row of its box in one run ([`shape_run`]), so it costs by the rows its
+    /// box spans in the grid, not by their voxels. Both devices read these bits (`inside_robot`
+    /// in grids.wgsl).
     pub(crate) fn inside(&self, grid: &Layout) -> Vec<u32> {
         if self.shapes.is_empty() {
             self.inside_with::<false>(grid)
@@ -760,11 +762,30 @@ impl RobotMask {
                     if height < lo.z - reach || height > hi.z + reach {
                         continue;
                     }
-                    bits.resize((nx * ny).div_ceil(32), 0);
                     let (middle, half) = (0.5 * (lo + hi), 0.5 * (hi - lo) + reach);
-                    for y in span(middle.y, half.y, origin.y, ny) {
-                        for x in span(middle.x, half.x, origin.x, nx) {
-                            let n = x + nx * y;
+                    let rows = span(middle.y, half.y, origin.y, ny);
+                    let columns = span(middle.x, half.x, origin.x, nx);
+                    if rows.is_empty() || columns.is_empty() {
+                        continue;
+                    }
+                    bits.resize((nx * ny).div_ceil(32), 0);
+                    // Every shape but a grid is convex, and so is it grown: what reaches into it
+                    // along a row is one run of voxels, found by a few tests.
+                    let convex = !matches!(shape, Obstacle::Sdf { .. });
+                    let nearest = ((middle.x - origin.x) / voxel).round() as usize;
+                    for y in rows {
+                        let row = nx * y;
+                        if convex {
+                            let first = row + nx * ny * z;
+                            let run =
+                                shape_run(shape, grid, first, columns.clone(), nearest, reach);
+                            if let Some(run) = run {
+                                fill(&mut bits, row + run.start..row + run.end);
+                            }
+                            continue;
+                        }
+                        for x in columns.clone() {
+                            let n = x + row;
                             if set(&bits, n) {
                                 continue;
                             }
@@ -795,6 +816,78 @@ impl RobotMask {
 #[inline(always)]
 pub(crate) fn set(bits: &[u32], n: usize) -> bool {
     bits[n / 32] >> (n % 32) & 1 == 1
+}
+
+/// The voxels among `columns` of a row of `grid` that reach into a convex `shape`, their distance
+/// to it at most `reach`: one run, or none. The row's voxel `x` is point `first + x`; `nearest`
+/// is the row's voxel nearest the shape's middle, the first tried.
+///
+/// The shape grown by `reach` is convex, so along the row its distance falls to its least and
+/// then grows. Past a voxel farther than `reach`, it only grows on the side the distance's
+/// gradient points along the row, so bisecting toward the other side finds a voxel of the run
+/// in as many tests as the row's length has bits, or shows there is none; bisecting from that
+/// voxel finds each end. An end is a voxel within `reach`, and the one past it, if among
+/// `columns`, one beyond.
+fn shape_run(
+    shape: &Obstacle,
+    grid: &Layout,
+    first: usize,
+    columns: Range<usize>,
+    nearest: usize,
+    reach: f32,
+) -> Option<Range<usize>> {
+    let distance = |x: usize| shape.distance(grid.point(first + x));
+    let within = |x: usize| distance(x).value <= reach;
+    let (mut lo, mut hi) = (columns.start, columns.end - 1);
+    let mut x = nearest.clamp(lo, hi);
+    let inside = loop {
+        let d = distance(x);
+        if d.value <= reach {
+            break x;
+        }
+        if d.gradient.x > 0.0 && x > lo {
+            hi = x - 1;
+        } else if d.gradient.x < 0.0 && x < hi {
+            lo = x + 1;
+        } else {
+            return None;
+        }
+        x = lo + (hi - lo) / 2;
+    };
+    let (mut from, mut to) = (columns.start, inside);
+    while from < to {
+        let middle = from + (to - from) / 2;
+        if within(middle) {
+            to = middle;
+        } else {
+            from = middle + 1;
+        }
+    }
+    let start = from;
+    let (mut from, mut to) = (inside, columns.end - 1);
+    while from < to {
+        let middle = to - (to - from) / 2;
+        if within(middle) {
+            from = middle;
+        } else {
+            to = middle - 1;
+        }
+    }
+    Some(start..from + 1)
+}
+
+/// Sets bits `run` of `bits`, as [`set`] reads them, a word at a time.
+fn fill(bits: &mut [u32], run: Range<usize>) {
+    let (first, last) = (run.start / 32, (run.end - 1) / 32);
+    let head = u32::MAX << (run.start % 32);
+    let tail = u32::MAX >> (31 - (run.end - 1) % 32);
+    if first == last {
+        bits[first] |= head & tail;
+    } else {
+        bits[first] |= head;
+        bits[first + 1..last].fill(u32::MAX);
+        bits[last] |= tail;
+    }
 }
 
 /// What a depth image says about a point.
@@ -2126,6 +2219,7 @@ impl Default for DepthFilter {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use glam::{Mat3, Quat};
 
@@ -2331,6 +2425,206 @@ mod tests {
         }
         let apart = |s: &Vec4| (0..3).any(|a| s[a] + s.w < grid.origin[a] || s[a] - s.w > top[a]);
         assert!(mask.spheres.iter().any(apart), "a sphere outside the grid");
+    }
+
+    /// The points a mask marks in its shapes, those within half a voxel's diagonal of one, are
+    /// those of testing every point: for boxes, balls, cylinders and capsules turned every way,
+    /// from a few voxels across to a few hundred, on maps of 2 mm to 5 cm voxels, inside a map,
+    /// across its faces, mostly and wholly outside it, and thin slabs turned 45 degrees that fill
+    /// little of their box. A point within 1e-5 m of the reach may go either way, as rounding can
+    /// make a row's run of a convex shape ragged at its ends; for a distance grid, which need not
+    /// be convex, every point is held to the test.
+    #[test]
+    fn the_points_a_mask_marks_in_its_shapes_are_every_points() {
+        let mut rng = crate::rng::Rng::new(17);
+        // Two balls apart along x and a third above them, as a grid: a row can cross it twice.
+        let (blobs, blob_voxel) = ([18u32, 10, 12], 0.01);
+        let blob = |p: Vec3| {
+            let balls = [(0.04, 0.05, 0.05), (0.13, 0.05, 0.05), (0.085, 0.05, 0.09)];
+            let distances = balls.map(|(x, y, z)| (p - Vec3::new(x, y, z)).length() - 0.03);
+            distances.into_iter().fold(f32::INFINITY, f32::min)
+        };
+        let samples = (0..blobs.iter().product::<u32>())
+            .map(|n| blob(point(UVec3::from(blobs), Vec3::ZERO, blob_voxel, n)))
+            .collect::<Vec<_>>();
+        let grid_shape =
+            Arc::new(SdfGrid::try_new(blobs, blob_voxel, Vec3::ZERO, &samples).unwrap());
+        let turn = |rng: &mut crate::rng::Rng| {
+            let q = Quat::from_xyzw(rng.normal(), rng.normal(), rng.normal(), rng.normal());
+            q.normalize()
+        };
+        // Rows of a convex shape's box, by what the shape does in them: missed; covered from one
+        // end of the map to the other; entered and left inside the map; crossed though the voxel
+        // tried first lies outside; crossed in a box fewer than 8 voxels long. And shapes thin
+        // in their box, mostly outside the map and wholly outside it, and grids.
+        let (mut missed, mut covered, mut within, mut crossed, mut short) = (0, 0, 0, 0, 0);
+        let (mut thin, mut mostly_out, mut out, mut grids) = (0, 0, 0, 0);
+        let (mut tested, mut close) = (0usize, 0usize);
+        for case in 0..400 {
+            let voxel = [0.002, 0.005, 0.01, 0.02, 0.05][case % 5];
+            let dims = UVec3::new(
+                rng.range(16.0, 56.0) as u32,
+                rng.range(16.0, 40.0) as u32,
+                rng.range(16.0, 40.0) as u32,
+            );
+            let origin = Vec3::new(rng.normal(), rng.normal(), rng.normal());
+            let grid = Layout {
+                dims,
+                origin,
+                voxel,
+            };
+            let top = grid.point(grid.points() - 1);
+            let shapes: Vec<Obstacle> = (0..1 + case % 3)
+                .map(|k| {
+                    // Across, from 2 voxels to 300.
+                    let mut size = || voxel * 2.0 * 150f32.powf(rng.uniform());
+                    let (a, b, c) = (size(), size(), size());
+                    let rotation = match (case + k) % 7 {
+                        0 => Quat::IDENTITY,
+                        1 => Quat::from_rotation_z(std::f32::consts::FRAC_PI_4),
+                        _ => turn(&mut rng),
+                    };
+                    let mut shape = match (case + k) % 6 {
+                        0 | 4 => Obstacle::Cuboid {
+                            center: Vec3::ZERO,
+                            half_extents: 0.5 * Vec3::new(a, b, c),
+                            rotation,
+                        },
+                        // A slab a voxel or two thick, turned 45 degrees about z.
+                        5 => Obstacle::Cuboid {
+                            center: Vec3::ZERO,
+                            half_extents: Vec3::new(rng.range(0.3, 1.0) * voxel, b, c),
+                            rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_4)
+                                * Quat::from_rotation_x(rng.range(-0.3, 0.3)),
+                        },
+                        1 => Obstacle::sphere(Vec3::ZERO, 0.5 * a),
+                        2 => Obstacle::Cylinder {
+                            center: Vec3::ZERO,
+                            rotation,
+                            radius: 0.5 * a,
+                            half_height: 0.5 * b,
+                        },
+                        _ => Obstacle::Capsule {
+                            center: Vec3::ZERO,
+                            rotation,
+                            radius: 0.5 * a,
+                            half_length: 0.5 * b,
+                        },
+                    };
+                    // Every so often a distance grid instead.
+                    if (case + k) % 9 == 0 {
+                        shape = Obstacle::Sdf {
+                            grid: Arc::clone(&grid_shape),
+                            center: Vec3::ZERO,
+                            rotation: turn(&mut rng),
+                        };
+                    }
+                    // Its middle anywhere in the map's box grown by the shape's own; one in
+                    // eight well past it.
+                    let (lo, hi) = shape.bounds();
+                    let half = 0.5 * (hi - lo);
+                    let mut at = |a: usize| rng.range(origin[a] - half[a], top[a] + half[a]);
+                    let mut center = Vec3::new(at(0), at(1), at(2));
+                    if (case + k) % 8 == 3 {
+                        center.y = top.y + half.y + rng.range(2.0, 10.0) * voxel;
+                    }
+                    let pose = shape.pose();
+                    let middle = 0.5 * (lo + hi);
+                    shape.placed(Pose::new(center + pose.position - middle, pose.rotation))
+                })
+                .collect();
+            let mask = RobotMask {
+                on_robot: vec![],
+                spheres: vec![],
+                held: vec![],
+                padding: 0.0,
+                shapes: shapes.clone(),
+            };
+            let inside = mask.inside(&grid);
+            let reach = 0.5 * 3f32.sqrt() * voxel;
+            let [nx, ny, nz] = dims.to_array().map(|d| d as usize);
+            let distances: Vec<Vec<f32>> = (shapes.iter())
+                .map(|s| {
+                    (0..grid.points())
+                        .map(|n| s.distance(grid.point(n)).value)
+                        .collect()
+                })
+                .collect();
+            for n in 0..grid.points() {
+                let near = |d: &[f32], s: &Obstacle| {
+                    !matches!(s, Obstacle::Sdf { .. }) && (d[n] - reach).abs() <= 1e-5
+                };
+                if (distances.iter().zip(&shapes)).any(|(d, s)| near(d, s)) {
+                    close += 1;
+                    continue;
+                }
+                let expected = distances.iter().any(|d| d[n] <= reach);
+                assert_eq!(set(&inside, n), expected, "case {case}, point {n}");
+                tested += 1;
+            }
+            // What each shape is, and what it does in the rows the search takes.
+            for (shape, d) in shapes.iter().zip(&distances) {
+                let (lo, hi) = shape.bounds();
+                let box_volume = (hi - lo).element_product();
+                let volume = match *shape {
+                    Obstacle::Cuboid { half_extents, .. } => 8.0 * half_extents.element_product(),
+                    _ => box_volume,
+                };
+                thin += usize::from(volume < 0.1 * box_volume);
+                let overlap = (hi.min(top) - lo.max(origin))
+                    .max(Vec3::ZERO)
+                    .element_product();
+                out += usize::from(overlap == 0.0);
+                mostly_out += usize::from(overlap > 0.0 && overlap < 0.5 * box_volume);
+                if matches!(shape, Obstacle::Sdf { .. }) {
+                    grids += 1;
+                    continue;
+                }
+                let (middle, half) = (0.5 * (lo + hi), 0.5 * (hi - lo) + reach);
+                let from = ((middle.x - half.x - origin.x) / voxel).floor() - 1.0;
+                let to = ((middle.x + half.x - origin.x) / voxel).ceil() + 1.0;
+                let columns = from.max(0.0) as usize..(to + 1.0).clamp(0.0, nx as f32) as usize;
+                let first = (((middle.x - origin.x) / voxel).round() as usize)
+                    .clamp(columns.start, columns.end.max(1) - 1);
+                for row in 0..ny * nz {
+                    let (y, z) = (row % ny, row / ny);
+                    let at = |x: usize| x + nx * (y + ny * z);
+                    let (height, side) = (grid.point(at(0)).z, grid.point(at(0)).y);
+                    if columns.is_empty()
+                        || height < lo.z - reach
+                        || height > hi.z + reach
+                        || (side - middle.y).abs() > half.y + voxel
+                    {
+                        continue;
+                    }
+                    let runs: Vec<usize> = (0..nx).filter(|&x| d[at(x)] <= reach).collect();
+                    short += usize::from(columns.len() < 8 && !runs.is_empty());
+                    match (runs.first(), runs.last()) {
+                        (None, _) | (_, None) => missed += 1,
+                        (Some(&a), Some(&b)) => {
+                            covered += usize::from(a == 0 && b == nx - 1);
+                            within += usize::from(a > 0 && b < nx - 1);
+                            crossed += usize::from(d[at(first)] > reach);
+                        }
+                    }
+                }
+            }
+        }
+        let counts = [missed, covered, within, crossed, short];
+        assert!(
+            counts.iter().all(|&rows| rows > 2_000),
+            "rows missed, covered, entered and left, crossed beside the first try, short: \
+             {counts:?}"
+        );
+        let shapes = [thin, mostly_out, out, grids];
+        assert!(
+            shapes.iter().all(|&shapes| shapes > 50),
+            "shapes thin, mostly outside, wholly outside, grids: {shapes:?}"
+        );
+        assert!(
+            close * 1000 < tested,
+            "{close} points near the reach of {tested}"
+        );
     }
 
     /// Checks each row of `grid` against `image`: its span holds every voxel whose middle
