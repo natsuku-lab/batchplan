@@ -298,6 +298,30 @@ impl Shape {
         }
     }
 
+    /// How far from its middle it reaches (meters), where its rotation turns without stretching,
+    /// to within rounding: a box's corners, a cylinder's rim.
+    pub(crate) fn reach(&self) -> Option<f32> {
+        let (rotation, reach) = match *self {
+            Shape::Cuboid {
+                half_extents,
+                rotation,
+                ..
+            }
+            | Shape::OpenBox {
+                half_extents,
+                rotation,
+                ..
+            } => (rotation, half_extents.length()),
+            Shape::Cylinder {
+                rotation,
+                radius,
+                half_height,
+                ..
+            } => (rotation, radius.hypot(half_height)),
+        };
+        ((rotation.length_squared() - 1.0).abs() <= 4.0 * f32::EPSILON).then_some(reach)
+    }
+
     /// The height of its lowest point.
     pub(crate) fn lowest(&self) -> f32 {
         // The look's z axis in the shape's own frame: how far the shape reaches along it.

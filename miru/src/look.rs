@@ -1815,13 +1815,46 @@ struct Measured {
 
 impl Measured {
     fn of(readings: &Readings, previous: &Scene) -> Self {
-        let holds = previous.objects.iter();
         Self {
             fit: Fit::of(&readings.points),
-            holds: holds
-                .map(|before| readings.within(&before.shape.outer()))
-                .collect(),
+            holds: if previous.objects.is_empty() {
+                vec![]
+            } else {
+                Self::holds(readings, previous)
+            },
         }
+    }
+
+    /// Per object of `previous`, how many of `readings` its shape holds, where it holds more than
+    /// half of them.
+    ///
+    /// Of the box around the readings and their most slack: a shape whose middle lies farther
+    /// from that box than the shape reaches, that slack and what rounding can make of the
+    /// distances holds none of them, each outside it. Rounding makes a distance off by fewer than
+    /// thirty-two of a float's steps of the lengths it is taken from.
+    fn holds(readings: &Readings, previous: &Scene) -> Vec<Option<usize>> {
+        let (low, high) = (readings.points.iter()).fold(
+            (Vec3::INFINITY, Vec3::NEG_INFINITY),
+            |(low, high), point| (low.min(*point), high.max(*point)),
+        );
+        let slack = readings.slack.iter().copied().fold(0.0, f32::max);
+        let apart = |shape: &Shape| {
+            let (middle, Some(reach)) = (shape.middle(), shape.reach()) else {
+                return false;
+            };
+            let lengths = middle.length() + low.abs().max(high.abs()).length() + reach;
+            let rounding = 32.0 * f32::EPSILON * lengths;
+            middle.distance(middle.clamp(low, high)) > reach + slack + rounding
+        };
+        let holds = previous.objects.iter().map(|before| {
+            let shape = before.shape.outer();
+            if apart(&shape) {
+                None
+            } else {
+                readings.within(&shape)
+            }
+        });
+        holds.collect()
     }
 }
 
