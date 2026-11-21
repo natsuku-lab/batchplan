@@ -200,9 +200,10 @@ impl Shape {
     /// another part, as a wall's foot on the floor does, which no eye sees. Not generic, so that
     /// the parts' own calls are not of another closure each.
     fn parts_faces(&self, eye: Vec3, pixel: f32, most: usize, visit: &mut dyn FnMut(Vec3, f32)) {
+        let distance = self.distances();
         for part in self.parts().iter().flatten() {
             part.faces(eye, pixel, most, |point, angle| {
-                if self.distance(point) >= -fit::REACHED {
+                if distance(point) >= -fit::REACHED {
                     visit(point, angle);
                 }
             });
@@ -227,29 +228,47 @@ impl Shape {
                 let past = Vec2::new(own.truncate().length() - radius, own.z.abs() - half_height);
                 signed(past.extend(f32::NEG_INFINITY))
             }
-            Shape::OpenBox {
-                center,
-                half_extents,
-                rotation,
-                ..
-            } => {
-                // Inside, how deep it lies in the box and out of the room, the room taken up
-                // without end, as nothing over it is solid. Outside, the nearest part's distance,
-                // which is no part's where two parts meet inside it.
-                let (room_lower, room_upper) = self.room();
-                let own = rotation.inverse() * (p - center);
-                let middle = 0.5 * (room_lower.truncate() + room_upper);
-                let half = 0.5 * (room_upper - room_lower.truncate());
-                let room = ((own.truncate() - middle).abs() - half).extend(room_lower.z - own.z);
-                let inside = signed(own.abs() - half_extents).max(-signed(room));
-                if inside < 0.0 {
-                    return inside;
-                }
-                (self.parts().iter().flatten())
-                    .map(|part| part.distance(p))
-                    .fold(f32::INFINITY, f32::min)
-            }
+            Shape::OpenBox { .. } => self.open_distance(p, || self.parts()),
         }
+    }
+
+    /// [`Shape::distance`] from each point it is asked of, a box open at the top's parts made
+    /// once for all of them.
+    pub(crate) fn distances(&self) -> impl Fn(Vec3) -> f32 + '_ {
+        let parts = self.parts();
+        move |p| match self {
+            Shape::OpenBox { .. } => self.open_distance(p, || parts),
+            _ => self.distance(p),
+        }
+    }
+
+    /// [`Shape::distance`] of a box open at the top, `parts` making its parts where they are
+    /// needed ([`Shape::parts`]).
+    fn open_distance(&self, p: Vec3, parts: impl FnOnce() -> [Option<Shape>; 5]) -> f32 {
+        let Shape::OpenBox {
+            center,
+            half_extents,
+            rotation,
+            ..
+        } = *self
+        else {
+            return self.distance(p);
+        };
+        // Inside, how deep it lies in the box and out of the room, the room taken up without
+        // end, as nothing over it is solid. Outside, the nearest part's distance, which is no
+        // part's where two parts meet inside it.
+        let (room_lower, room_upper) = self.room();
+        let own = rotation.inverse() * (p - center);
+        let middle = 0.5 * (room_lower.truncate() + room_upper);
+        let half = 0.5 * (room_upper - room_lower.truncate());
+        let room = ((own.truncate() - middle).abs() - half).extend(room_lower.z - own.z);
+        let inside = signed(own.abs() - half_extents).max(-signed(room));
+        if inside < 0.0 {
+            return inside;
+        }
+        (parts().iter().flatten())
+            .map(|part| part.distance(p))
+            .fold(f32::INFINITY, f32::min)
     }
 
     /// How much space it takes up (cubic meters).

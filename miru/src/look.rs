@@ -1776,9 +1776,10 @@ impl Readings {
 
     /// How many of its readings lie in `shape` or on it, where more than half of them do.
     fn within(&self, shape: &Shape) -> Option<usize> {
+        let distance = shape.distances();
         let (mut within, mut outside) = (0, 0);
         for (point, slack) in self.points.iter().zip(&self.slack) {
-            if shape.distance(*point) <= *slack {
+            if distance(*point) <= *slack {
                 within += 1;
             } else {
                 outside += 1;
@@ -1794,9 +1795,10 @@ impl Readings {
     /// How much of it lies outside `shape`, in windows: fewer of its readings than fill one
     /// cannot be told from noise.
     fn outside(&self, shape: &Shape) -> f32 {
+        let distance = shape.distances();
         let readings = self.points.iter().zip(&self.slack).zip(&self.share);
         readings
-            .filter(|&((point, slack), _)| shape.distance(*point) > *slack)
+            .filter(|&((point, slack), _)| distance(*point) > *slack)
             .map(|(_, share)| share)
             .sum()
     }
@@ -2384,6 +2386,7 @@ fn sight(shape: &Shape, own: Option<usize>, seen: &Seen, labels: &[Label]) -> Si
     };
     // A view tells no more across a face than it has pixels across.
     let most = seen.width.max(seen.height);
+    let distance = shape.distances();
     shape.faces(eye, seen.pixel(), most, |point, angle| {
         let Some(i) = seen.project(point) else {
             sight.hidden += angle;
@@ -2396,7 +2399,7 @@ fn sight(shape: &Shape, own: Option<usize>, seen: &Seen, labels: &[Label]) -> Si
         let reading = seen.points[i];
         let unread = seen.kinds[i] == Kind::Robot || seen.inverse[i] == 0.0;
         let covered = unread
-            || (shape.distance(reading) > SIGMAS * seen.sigma(i)
+            || (distance(reading) > SIGMAS * seen.sigma(i)
                 && eye.distance_squared(reading) < eye.distance_squared(point));
         if covered {
             sight.hidden += angle;
