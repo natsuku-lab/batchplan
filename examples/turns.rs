@@ -5,7 +5,8 @@
 //! worlds in one call. For each, how many grips, how many get through and where the rest stop, and
 //! the call's time, the quickest of five, and the time to the first plan (`Turn::enough`); for the
 //! knob, how many grips make the turn from the configuration nearest the start against from any IK
-//! finds at the grip. The 64 knobs are turned to their first plans.
+//! finds at the grip, and how many configurations IK finds at a grip. The 64 knobs are turned to
+//! their first plans.
 //!
 //!   cargo run --release --example turns            # on the CPU
 //!   cargo run --release --example turns -- --gpu   # on the GPU
@@ -13,15 +14,16 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, PI, TAU};
 use std::time::Instant;
 
 use anyhow::Result;
 use batchplan::rng::Rng;
 use batchplan::{
-    DepthImage, Device, GraspOptions, IkProblem, Intrinsics, Obstacle, Pose, Robot, Screw, Surface,
-    TaskFailure, TaskOptions, TaskPlan, TaskResult, TaskStep, ToolPath, ToolPathOptions, Touch,
-    Turn, World, Worlds,
+    DepthImage, Device, GraspOptions, Held, IkProblem, Intrinsics, Obstacle, Pose, Robot, Screw,
+    Surface, TaskFailure, TaskOptions, TaskPlan, TaskResult, TaskStep, ToolPath, ToolPathOptions,
+    Touch, Turn, World, Worlds,
 };
 use glam::{Mat3, Quat, Vec2, Vec3};
 use rayon::prelude::*;
@@ -64,12 +66,15 @@ fn table() -> Obstacle {
     Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02))
 }
 
-/// One thing to turn: its world, which obstacle it is, the grips to try in the order to try them
-/// (in its frame), the line it turns about and how far.
+/// One thing to turn: its world, which obstacle it is and what it turns on, the grips to try in
+/// the order to try them (in its frame) and the fingers' joints at each, the line it turns about
+/// and how far.
 struct Thing {
     world: World,
     object: usize,
+    support: Vec<usize>,
     grips: Vec<Pose>,
+    locked: Vec<HashMap<String, f32>>,
     screw: Screw,
     angle: f32,
 }
@@ -77,8 +82,8 @@ struct Thing {
 /// A knob at `at` on the table: a box 24 x 20 x 10 cm, a dial 9 cm across and 1 cm thick on it,
 /// and a bar 9 x 2.5 cm standing 3 cm proud of the dial, turned `yaw` about the vertical. Its
 /// grips are taken from two depth images, one from either side across the bar, with the bar's
-/// readings flagged,
-/// and ordered by the moment they give about the knob's axis, the most first.
+/// readings flagged, and ordered by the moment they give about the knob's axis, the most first;
+/// the fingers are locked at each grip's opening, each standing at half of it.
 fn knob(device: &Device, at: Vec2, yaw: f32) -> Result<Thing> {
     let console = Obstacle::cuboid(at.extend(0.05), Vec3::new(0.12, 0.1, 0.05));
     let dial = Obstacle::cylinder(at.extend(0.105), 0.045, 0.005);
@@ -137,10 +142,16 @@ fn knob(device: &Device, at: Vec2, yaw: f32) -> Result<Thing> {
     let mut found = batchplan::grasps_on(device, 0, std::slice::from_ref(&seen), &o)?.remove(0);
     found.sort_by(|a, b| b.moment(&screw, &o).total_cmp(&a.moment(&screw, &o)));
     let to_bar = bar.pose().inverse();
+    let fingers = |opening: f32| {
+        let each = ["panda_finger_joint1", "panda_finger_joint2"];
+        each.map(|j| (j.to_string(), opening / 2.0)).into()
+    };
     Ok(Thing {
         world: World::new(scene.to_vec()),
         object: 3,
+        support: vec![2],
         grips: found.iter().map(|g| to_bar.mul_pose(g.pose)).collect(),
+        locked: found.iter().map(|g| fingers(g.opening)).collect(),
         screw,
         angle: FRAC_PI_2,
     })
@@ -158,8 +169,10 @@ fn cap(robot: &Robot) -> Result<Thing> {
     };
     Ok(Thing {
         grips: batchplan::grasps(&cap, &o)?,
+        locked: vec![],
         world: World::new(vec![table(), bottle, cap]),
         object: 2,
+        support: vec![1],
         screw: Screw {
             point: Vec3::new(0.45, 0.2, 0.15),
             direction: Vec3::Z,
@@ -184,8 +197,10 @@ fn lever(robot: &Robot) -> Result<Thing> {
     };
     Ok(Thing {
         grips: batchplan::grasps(&arm, &o)?,
+        locked: vec![],
         world: World::new(vec![table(), post, arm]),
         object: 2,
+        support: vec![1],
         screw: Screw::about(hinge, Vec3::Z),
         angle: FRAC_PI_3,
     })
@@ -202,8 +217,10 @@ fn wheel(robot: &Robot) -> Result<Thing> {
     };
     Ok(Thing {
         grips: batchplan::grasps(&rim, &o)?,
+        locked: vec![],
         world: World::new(vec![table(), pipe, rim]),
         object: 2,
+        support: vec![1],
         screw: Screw::about(Vec3::new(0.5, 0.15, 0.25), Vec3::Z),
         angle: FRAC_PI_4,
     })
@@ -251,9 +268,15 @@ fn the_rest(result: &TaskResult<Turn>) -> Vec<Turn> {
             Ok(plans) => plans.iter().map(|p| p.candidate).collect(),
             Err(_) => vec![],
         };
-        let left = (0..t.grasps.len()).filter(|g| !through.contains(g));
+        let left: Vec<usize> = (0..t.grasps.len())
+            .filter(|g| !through.contains(g))
+            .collect();
         Turn {
-            grasps: left.map(|g| t.grasps[g]).collect(),
+            grasps: left.iter().map(|&g| t.grasps[g]).collect(),
+            locked: left
+                .iter()
+                .filter_map(|&g| t.locked.get(g).cloned())
+                .collect(),
             ..t.clone()
         }
     });
@@ -261,69 +284,114 @@ fn the_rest(result: &TaskResult<Turn>) -> Vec<Turn> {
 }
 
 /// Of `thing`'s grips, how many make the turn from the configuration IK finds nearest the start,
-/// and how many from any it finds, followed as `turn` follows them.
+/// and how many from any it finds, followed as `turn` follows them: on the robot with its fingers
+/// where the grip locks them, holding the object in its world without it; and how many
+/// configurations IK finds at a grip, the fewest, the median and the most, over the grips that
+/// have one, and how many those are.
 fn from_nearest(
     robot: &Robot,
     device: &Device,
     thing: &Thing,
     o: &TaskOptions,
-) -> Result<[usize; 2]> {
+) -> Result<([usize; 2], [usize; 4])> {
     let start = robot.default_q();
-    let mut world = thing.world.clone();
-    world
+    let mut touching = thing.world.clone();
+    touching
         .touch
         .push(Touch::new(thing.object, robot.finger_links(0)));
-    let worlds = device.upload(&[world])?;
+    let mut without = thing.world.clone();
+    let object = without.remove(thing.object)?;
+    let shifted = |s: usize| if s > thing.object { s - 1 } else { s };
+    let touches = thing.support.iter().map(|&s| Touch::held(shifted(s), 0));
+    without.touch.extend(touches);
+    let worlds = device.upload(&[touching, without])?;
     let placed = thing.world.obstacles[thing.object].pose();
-    let at: Vec<Pose> = thing.grips.iter().map(|&g| placed.mul_pose(g)).collect();
-    let problems: Vec<IkProblem> = at
-        .iter()
-        .map(|&t| IkProblem {
-            world: 0,
-            targets: vec![Some(t)],
-            seed: Some(start.to_vec()),
-            hold: vec![],
-            holding: None,
-        })
-        .collect();
-    let solved = batchplan::solve_ik(device, &worlds, &problems, &o.ik)?;
     let along = ToolPathOptions {
         precision: o.tool_path.precision / 2.0,
         ..o.tool_path.clone()
     };
-    let (mut paths, mut whose) = (vec![], vec![]);
-    for (g, &pose) in at.iter().enumerate() {
-        let waypoints = thing.screw.path(pose, thing.angle, along.precision)?;
-        let distance = |i: usize| -> f32 {
-            let q = solved.solution(i);
-            q.iter().zip(start).map(|(a, b)| (a - b).powi(2)).sum()
-        };
-        let mut found: Vec<usize> = (g * solved.seeds..(g + 1) * solved.seeds)
-            .filter(|&i| solved.success[i])
-            .collect();
-        found.sort_by(|&a, &b| distance(a).total_cmp(&distance(b)));
-        for (k, &i) in found.iter().enumerate() {
-            paths.push(ToolPath {
-                world: 0,
-                start: solved.solution(i).to_vec(),
-                hand: 0,
-                waypoints: waypoints.clone(),
-                hold: vec![],
-                holding: None,
-            });
-            whose.push((g, k == 0));
+    // The grips by where they lock the fingers, each lot on the robot relocked so.
+    let mut lots: Vec<(HashMap<String, f32>, Vec<usize>)> = vec![];
+    for g in 0..thing.grips.len() {
+        let locked = thing.locked.get(g).cloned().unwrap_or_default();
+        match lots.iter_mut().find(|(l, _)| *l == locked) {
+            Some((_, grips)) => grips.push(g),
+            None => lots.push((locked, vec![g])),
         }
     }
-    let followed = batchplan::follow(device, &worlds, &paths, &along)?;
-    let (mut nearest, mut any) = (vec![false; at.len()], vec![false; at.len()]);
-    for (&(g, first), &f) in whose.iter().zip(&followed.fraction) {
-        if f == 1.0 {
-            any[g] = true;
-            nearest[g] |= first;
+    let (mut nearest, mut any) = (
+        vec![false; thing.grips.len()],
+        vec![false; thing.grips.len()],
+    );
+    let mut found_at: Vec<usize> = vec![];
+    for (locked, grips) in &lots {
+        let on = match locked.is_empty() {
+            true => device.with_robot(robot)?,
+            false => device.with_robot(&robot.relock(locked)?)?,
+        };
+        let at: Vec<Pose> = grips
+            .iter()
+            .map(|&g| placed.mul_pose(thing.grips[g]))
+            .collect();
+        let problems: Vec<IkProblem> = at
+            .iter()
+            .map(|&t| IkProblem {
+                world: 0,
+                targets: vec![Some(t)],
+                seed: Some(start.to_vec()),
+                hold: vec![],
+                holding: None,
+            })
+            .collect();
+        let solved = batchplan::solve_ik(&on, &worlds, &problems, &o.ik)?;
+        let (mut paths, mut whose) = (vec![], vec![]);
+        for (k, (&g, &pose)) in grips.iter().zip(&at).enumerate() {
+            let waypoints = thing.screw.path(pose, thing.angle, along.precision)?;
+            let distance = |i: usize| -> f32 {
+                let q = solved.solution(i);
+                q.iter().zip(start).map(|(a, b)| (a - b).powi(2)).sum()
+            };
+            let mut found: Vec<usize> = (k * solved.seeds..(k + 1) * solved.seeds)
+                .filter(|&i| solved.success[i])
+                .collect();
+            found.sort_by(|&a, &b| distance(a).total_cmp(&distance(b)));
+            if !found.is_empty() {
+                found_at.push(found.len());
+            }
+            let held = Held {
+                hand: 0,
+                object: object.placed(Pose::IDENTITY),
+                grasp: thing.grips[g],
+                locked: HashMap::new(),
+                spheres: Default::default(),
+            };
+            for (rank, &i) in found.iter().enumerate() {
+                paths.push(ToolPath {
+                    world: 1,
+                    start: solved.solution(i).to_vec(),
+                    hand: 0,
+                    waypoints: waypoints.clone(),
+                    hold: vec![],
+                    holding: Some(held.clone()),
+                });
+                whose.push((g, rank == 0));
+            }
+        }
+        let followed = batchplan::follow(&on, &worlds, &paths, &along)?;
+        for (&(g, first), &f) in whose.iter().zip(&followed.fraction) {
+            if f == 1.0 {
+                any[g] = true;
+                nearest[g] |= first;
+            }
         }
     }
     let count = |v: &[bool]| v.iter().filter(|&&b| b).count();
-    Ok([count(&nearest), count(&any)])
+    found_at.sort_unstable();
+    let spread = match found_at.len() {
+        0 => [0; 4],
+        k => [found_at[0], found_at[k / 2], found_at[k - 1], k],
+    };
+    Ok(([count(&nearest), count(&any)], spread))
 }
 
 /// Each of `things` as a task of a world of its own, by its grips in their order, `enough` plans
@@ -331,6 +399,8 @@ fn from_nearest(
 fn tasks_of(robot: &Robot, things: &[Thing], enough: Option<usize>) -> Vec<Turn> {
     let each = things.iter().enumerate().map(|(w, t)| Turn {
         screw: Some(t.screw),
+        support: t.support.clone(),
+        locked: t.locked.clone(),
         enough,
         ..Turn::new(
             w as u32,
@@ -387,13 +457,9 @@ fn main() -> Result<()> {
     let o = TaskOptions::default();
     // A first call builds what a device builds once.
     let knob_a = knob(&device, Vec2::new(0.5, 0.0), 0.4)?;
-    let warm = Turn::new(
-        0,
-        robot.default_q(),
-        knob_a.object,
-        knob_a.grips[..1].to_vec(),
-        0.1,
-    );
+    let mut warm = tasks_of(&robot, std::slice::from_ref(&knob_a), Some(1)).remove(0);
+    warm.grasps.truncate(1);
+    warm.locked.truncate(1);
     batchplan::turn(
         &device,
         &device.upload(std::slice::from_ref(&knob_a.world))?,
@@ -401,9 +467,13 @@ fn main() -> Result<()> {
         &o,
     )?;
     report("a knob, a quarter turn", &device, &robot, &knob_a, &o)?;
-    let [nearest, any] = from_nearest(&robot, &device, &knob_a, &o)?;
+    let ([nearest, any], [fewest, median, most, grips]) =
+        from_nearest(&robot, &device, &knob_a, &o)?;
     println!(
         "    of its grips, {nearest} make the turn from the configuration nearest the start, {any} from some configuration IK finds there"
+    );
+    println!(
+        "    IK finds {fewest} to {most} configurations at a grip, the median {median}, over the {grips} grips it finds any at"
     );
     report(
         "a cap, half a turn up its thread",

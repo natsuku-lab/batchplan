@@ -14,17 +14,20 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   knob, a cap, a lever or a valve's wheel, composed of IK, `follow` and `plan` as `pick` is.
   `Turn::new(world, start, object, grasps, angle)` turns `object` by `angle` about its `screw`
   (none: about the hand's own z axis, in place); each grasp is a candidate, and between the move
-  in and the move away the hand follows the grasp carried about the line, the fingers free to
-  touch the object. Every configuration IK finds at a grasp is followed through the turn, all of
-  the call's in one batch of tool paths, and the nearest the start that makes it is kept: a grasp
-  is not lost where the configuration nearest the start runs into a joint limit partway and
-  another makes the turn. A plan has its `turn` between `approach` and `depart`, and `placed` is
-  the object turned. A candidate that makes no turn stops at the new `TaskStep::Turn`, checked
+  in and the move away the hand follows the grasp carried about the line, holding the object as a
+  pick's lift does, so what the object sweeps is checked against everything but what it turns on
+  (`Turn::support`). Where the world holds the part that turns and what it turns in as one
+  obstacle, `Turn::stays` leaves the obstacle where it is, the fingers alone free to touch it,
+  and nothing checks the part's sweep. Every configuration IK finds at a grasp is followed through
+  the turn and the nearest the start that makes it is kept: a grasp is not lost where the
+  configuration nearest the start runs into a joint limit partway and another makes the turn. A
+  plan has its `turn` between `approach` and `depart`, and `placed` is the object where the turn
+  leaves it. A candidate that makes no turn stops at the new `TaskStep::Turn`, checked
   after the reach, with how far it turned (`CandidateStop::turned`). Of the example's knob's
   972 grips (`examples/turns.rs`), 714 make a quarter turn from the
   configuration nearest the start and 745 from some configuration at the grip; it takes 424 ms
   by all of them on the M4 Pro and 17 ms to its first plan (`docs/benchmarks.md`). Python binds
-  `Turn`, `turn` and `Screw`; its `TaskStep` values from `Approach` on are one more than they were.
+  `Turn`, `turn` and `Screw`.
 - `Screw { point, direction, pitch }`, a line and how far a thing carried about it moves along it
   a radian, with `Screw::about(point, direction)`: `carry(pose, angle)` carries a pose about it,
   and `path(pose, angle, precision)` gives the waypoints a tool path follows along its arc, as few
@@ -33,6 +36,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   for each newton each presses with, by friction, where they press on their patches, a soft
   fingertip's twist and the hand pushing along the closing line, the way round that gives less:
   grips for a turn ordered by what it asks of them.
+- **Breaking:** `TaskStep` has `Turn` between `Reach` and `Approach`, the order the steps are
+  checked in, so `Approach`, `Depart` and `Transit` are each one later, as numbers (`as isize`:
+  2, 3 and 4 become 3, 4 and 5) and in the derived order: the steps that were there keep their
+  order among themselves, and `Turn` sorts between `Reach` and `Approach`.
+- **Breaking:** in Python, `TaskStep`'s values from `Approach` on are one more than they were.
 - **Breaking:** `GraspOptions::near`, a point to grip a surface near: `grasps_on` gives, within
   each of the tiers it orders them by, the grasps nearest it first instead of spread over the
   object. `None`, the default, leaves every grasp as it was. A `GraspOptions` written out in full
