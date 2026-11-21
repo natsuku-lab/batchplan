@@ -164,7 +164,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Check that the tag names the crate's version
-        run: test "$GITHUB_REF_NAME" = "v$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+        run: test "$GITHUB_REF_NAME" = "v$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "batchplan") | .version')"
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
       - run: cargo publish

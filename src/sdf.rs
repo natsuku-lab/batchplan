@@ -601,15 +601,7 @@ impl RobotMask {
         let pixels: Vec<_> = (shapes.iter())
             .map(|shape| shape_pixels(&image, shape, margin, &nearest))
             .collect();
-        // Each shape's box, and how far past it rounding may leave a point within a reach of the
-        // shape ([`ROUNDING`]), by its size and where it lies.
-        let boxes: Vec<(Vec3, Vec3, f32)> = (shapes.iter())
-            .map(|shape| {
-                let (lo, hi) = shape.bounds();
-                let scale = (hi - lo).max_element() + lo.abs().max(hi.abs()).max_element();
-                (lo, hi, ROUNDING * scale)
-            })
-            .collect();
+        let boxes = shape_boxes(shapes);
         let frames: Vec<Mat3> = (shapes.iter())
             .map(|shape| world::frame(shape.pose().rotation))
             .collect();
@@ -2755,8 +2747,8 @@ const RUN: usize = 1024;
 /// Which of `shapes` each of `points` lies on: per point, the shape nearest it, as
 /// [`Obstacle::distance`] measures, where the point is no farther from that shape's surface than
 /// its `reach` (meters), as it never is inside the shape; of shapes as near, the first. None for a
-/// point farther than its reach from every shape, and for one whose reach is negative or no number,
-/// as a caller marks a point it has none for.
+/// point farther than its reach from every shape, for one whose reach is negative or no number,
+/// as a caller marks a point it has none for, and for one with a coordinate that is no number.
 ///
 /// It is how a depth camera's readings are held against the shapes a world is known to hold, as a
 /// cell's table and walls: a reading's reach is what its camera's noise allows at its depth, and a
@@ -2780,15 +2772,7 @@ pub fn on_shapes(
     for (k, shape) in shapes.iter().enumerate() {
         shape.check().map_err(|e| input!("shape {k} {e}"))?;
     }
-    // Each shape's box, and how far past it rounding may leave a point within a reach of the
-    // shape ([`ROUNDING`]), as [`RobotMask::with_shapes`] takes them.
-    let boxes: Vec<(Vec3, Vec3, f32)> = (shapes.iter())
-        .map(|shape| {
-            let (lo, hi) = shape.bounds();
-            let scale = (hi - lo).max_element() + lo.abs().max(hi.abs()).max_element();
-            (lo, hi, ROUNDING * scale)
-        })
-        .collect();
+    let boxes = shape_boxes(shapes);
     let frames: Vec<Mat3> = (shapes.iter())
         .map(|shape| world::frame(shape.pose().rotation))
         .collect();
@@ -2805,11 +2789,12 @@ pub fn on_shapes(
         runs.for_each_init(Vec::new, |among: &mut Vec<usize>, (run, on)| {
             let points = &points[run * RUN..][..on.len()];
             let reach = &reach[run * RUN..][..on.len()];
-            // The box of the run's points that have a reach, and the longest of their reaches.
+            // The box of the run's points that are numbers and have a reach, and the longest of
+            // their reaches.
             let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
             let mut longest = f32::NEG_INFINITY;
             for (&p, &reach) in points.iter().zip(reach) {
-                if reach >= 0.0 {
+                if reach >= 0.0 && !p.is_nan() {
                     (lo, hi) = (lo.min(p), hi.max(p));
                     longest = longest.max(reach);
                 }
@@ -2836,6 +2821,18 @@ pub fn on_shapes(
         });
     });
     Ok(on)
+}
+
+/// Each shape's box, and how far past it rounding may leave a point within a reach of the shape
+/// ([`ROUNDING`]), by its size and where it lies ([`RobotMask::with_shapes`], [`on_shapes`]).
+fn shape_boxes(shapes: &[Obstacle]) -> Vec<(Vec3, Vec3, f32)> {
+    (shapes.iter())
+        .map(|shape| {
+            let (lo, hi) = shape.bounds();
+            let scale = (hi - lo).max_element() + lo.abs().max(hi.abs()).max_element();
+            (lo, hi, ROUNDING * scale)
+        })
+        .collect()
 }
 
 // After the module's other impls, as its derives are impls too (see `Default for DepthFilter`).

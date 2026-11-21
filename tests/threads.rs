@@ -8,7 +8,7 @@ mod common;
 use batchplan::rng::Rng;
 use batchplan::{
     AttachedObject, Device, IkOptions, IkProblem, Obstacle, PlanOptions, PlanProblem, RrtOptions,
-    RrtProblem, ShortcutOptions, SphereOptions, World, rrt, shortcut,
+    RrtProblem, ShortcutOptions, SphereOptions, World, rrt, sdf, shortcut,
 };
 use glam::Vec3;
 
@@ -97,6 +97,22 @@ fn a_one_thread_device_works_on_its_one_thread() {
         })
         .unwrap();
     device.with_robot(&held).unwrap();
+    // Which of a table and a ball on it each of a few thousand points lies on, in runs.
+    let shapes = [
+        Obstacle::cuboid(Vec3::new(0.5, 0.0, -0.02), Vec3::new(0.6, 0.6, 0.02)),
+        Obstacle::sphere(Vec3::new(0.5, 0.0, 0.05), 0.05),
+    ];
+    let points: Vec<Vec3> = (0..4096)
+        .map(|i| {
+            Vec3::new(
+                0.2 + 0.01 * (i % 64) as f32,
+                -0.32 + 0.01 * (i / 64) as f32,
+                0.0,
+            )
+        })
+        .collect();
+    let on = sdf::on_shapes(&device, &shapes, &points, &vec![0.01; points.len()]).unwrap();
+    assert!(on.iter().all(Option::is_some));
     assert_eq!(
         threads(),
         at_start + 1,

@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 export RUSTFLAGS="-D warnings" RUSTDOCFLAGS="-D warnings"
 export CARGO_TARGET_DIR="${CHECK_TARGET_DIR:-$PWD/target/check}"
 nightly=(--config imports_granularity=Module,hex_literal_case=Lower,format_macro_matchers=true)
-for crate in . miru demos python; do
+for crate in . demos python; do
   (cd "$crate" && cargo fmt --check && cargo +nightly fmt --check -- "${nightly[@]}")
 done
 cargo clippy --all-targets

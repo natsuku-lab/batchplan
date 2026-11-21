@@ -5150,8 +5150,9 @@ fn shapes_to_lie_on() -> Vec<Obstacle> {
 /// Each point lies on the nearest of the shapes it is within its reach of, as the shapes' own
 /// distances say, and of two as near on the first: points in rows over the shapes, as an image
 /// reads them, and scattered about, on and inside them; reaches of nothing, of millimetres, of
-/// meters and without bound, and points marked as having none, some of them inside a shape. The
-/// same on one thread, on many, and whatever the points' order.
+/// meters and without bound, and points marked as having none, some of them inside a shape; and
+/// points with a coordinate that is no number, which lie on none. The same on one thread, on
+/// many, and whatever the points' order.
 #[test]
 fn points_lie_on_the_nearest_shape_within_their_reach() {
     let shapes = shapes_to_lie_on();
@@ -5178,9 +5179,16 @@ fn points_lie_on_the_nearest_shape_within_their_reach() {
         ));
     }
     let reaches = [0.0, 0.002, 0.01, 0.3, f32::INFINITY, -0.001, f32::NAN];
-    let reach: Vec<f32> = (0..points.len())
+    let mut reach: Vec<f32> = (0..points.len())
         .map(|i| reaches[(i + i / 300) % reaches.len()])
         .collect();
+    // Points among the rows with a coordinate that is no number and a reach: the first of a run
+    // (runs are 1,024 points), the middle of another and the last of a third.
+    let unnumbered = [3 * 1024, 40 * 1024 + 512, 101 * 1024 - 1];
+    for (axis, &i) in unnumbered.iter().enumerate() {
+        points[i][axis] = f32::NAN;
+        reach[i] = 0.01;
+    }
     // What the shapes' own distances say.
     let expected = |points: &[Vec3], reach: &[f32]| -> Vec<Option<(usize, f32)>> {
         let each = points.iter().zip(reach).map(|(&p, &reach)| {
@@ -5241,6 +5249,14 @@ fn points_lie_on_the_nearest_shape_within_their_reach() {
         .zip(&wanted)
         .filter(|&(&p, on)| table_top(p) && on.is_some_and(|on| on.0 == 0 && on.1 > 0.002));
     assert!(by_reach.count() > 100);
+    // A point with a coordinate that is no number lies on none, and most of its run on shapes:
+    // a run's box taken over it would leave them on none.
+    for i in unnumbered {
+        assert!(points[i].is_nan() && reach[i] >= 0.0 && wanted[i].is_none());
+        let run = &wanted[i / 1024 * 1024..][..1024];
+        let on = run.iter().flatten().count();
+        assert!(on > 500, "{on} points on shapes in the run of point {i}");
+    }
 }
 
 #[test]
