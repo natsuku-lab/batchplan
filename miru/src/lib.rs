@@ -77,10 +77,12 @@ mod error;
 mod fit;
 mod look;
 mod masks;
+mod memory;
 mod scene;
 mod segment;
 mod threads;
 mod view;
 
 pub use look::{Look, LookOptions, Noise, View, look};
+pub use memory::{Camera, Kept, Memory, MemoryOptions, Observed, Stance, observe};
 pub use scene::{Label, Object, Scene, Shape, Support};

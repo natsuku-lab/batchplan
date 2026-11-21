@@ -106,23 +106,11 @@ use std::fmt::Write as _;
 
 use batchplan::DepthFilter;
 use common::{
-    D405, D435, EYE, Frame, MIDDLE, Stereo, Thing, a_box, block, can, device, known, looking,
+    CAMERAS, EYE, Frame, MIDDLE, NEAR, Stereo, Thing, a_box, block, can, device, known, looking,
     sizes, standing_bowl, table, thin_tray, tray_with_block, turned,
 };
 use glam::{Quat, Vec3};
 use miru::{Label, Look, LookOptions, Noise, Scene, Shape, Support};
-
-/// Where the near camera stands: 40 cm from the table's middle, 55 degrees over it, turned 30
-/// degrees from the far one, the tests' `EYE`.
-const NEAR: Vec3 = Vec3::new(0.70, -0.115, 0.33);
-
-/// The three ways each scene is read: a name, and the camera of the far view and of the near one
-/// (none: the default camera, exact depth).
-const CAMERAS: [(&str, Option<Stereo>, Option<Stereo>); 3] = [
-    ("exact", None, None),
-    ("D435", Some(D435), Some(D435)),
-    ("D435+D405", Some(D435), Some(D405)),
-];
 
 /// What a row says of a thing, each asserted unless it is a listed gap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
