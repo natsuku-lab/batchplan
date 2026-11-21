@@ -86,8 +86,10 @@ jobs:
           BATCHPLAN_REQUIRE_GPU: 1
       - run: cargo test --release --no-default-features --no-fail-fast
         if: ${{ !cancelled() }}
-      - run: cargo test --release -p miru --no-fail-fast
+      - run: cargo test --release -p miru --features gpu --no-fail-fast
         if: ${{ !cancelled() }}
+        env:
+          BATCHPLAN_REQUIRE_GPU: 1
 
   # Robot computers without a usable GPU: the CPU-only build.
   aarch64:

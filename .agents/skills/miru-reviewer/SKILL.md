@@ -44,8 +44,9 @@ second to measuring what it does.
    Done when each claim of step 3 has its rows from all three cameras, base and change.
 5. **Fit with batchplan.** miru stands on batchplan's public interface and batchplan never on
    miru. In the change's worktree:
-   - `cargo test --release -p miru --features gpu --test batchplan` passes (without the feature
-     where the machine has no GPU): a look's fixtures and solids
+   - `BATCHPLAN_REQUIRE_GPU=1 cargo test --release -p miru --features gpu --test batchplan`
+     passes (without the variable and the feature where the machine has no GPU, and say so): a
+     look's fixtures and solids
      upload as a `World`, `RobotMask::with_shapes` takes them, its labels are the flags
      `Surface::from_depth` takes, a mask from `DepthImage::robot_mask` is a view's `robot`.
    - The seams still hold batchplan's own types (`DepthImage`, `Obstacle`, `Pose`, `Intrinsics`,
@@ -53,8 +54,8 @@ second to measuring what it does.
    - Nothing miru computes is something batchplan already gives (a shape's distance, a pixel's
      point, a mask): search batchplan's interface before accepting new arithmetic of that kind.
      What miru needs that batchplan lacks is a batchplan primitive first.
-   - Nothing of batchplan names miru: `git grep -n miru -- Cargo.toml src tests examples`
-     shows the workspace's member line and nothing else.
+   - Nothing of batchplan names miru: `git grep -n miru -- src tests examples` shows nothing,
+     and in `Cargo.toml` only the workspace's `members` line and the comments beside it do.
    - A scene is the same on one thread and on many, and on a GPU device where there is one
      (`cargo test --release -p miru`, the thread tests among them).
    Done when each of the five is run or read and its result is in your notes.
