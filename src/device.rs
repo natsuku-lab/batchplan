@@ -496,8 +496,10 @@ impl Device {
         self.instance
     }
 
-    /// Runs `op` on this device's threads, so that its parallel loops run there too.
-    pub(crate) fn install<R: Send>(&self, op: impl FnOnce() -> R + Send) -> R {
+    /// Runs `op` on this device's threads, so that the parallel loops in it (rayon's) run there
+    /// too and not on the global pool: how work done beside the device's own, as a crate built
+    /// on this one does, keeps to the threads the device was given. The calling thread waits.
+    pub fn install<R: Send>(&self, op: impl FnOnce() -> R + Send) -> R {
         self.backend.pool().install(op)
     }
 

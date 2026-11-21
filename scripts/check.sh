@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Every check CI's lint, demos and python jobs run, on the library, the demos crate and the Python
-# bindings: rustfmt with the style guide's options (stable, then the ones only nightly has), clippy
-# with each feature set, the docs, and ruff on the Python, all with warnings denied. Run it before
-# every push.
+# Every check CI's lint, demos and python jobs run, on the library, `miru`, the demos crate and the
+# Python bindings: rustfmt with the style guide's options (stable, then the ones only nightly has),
+# clippy with each feature set, the docs, and ruff on the Python, all with warnings denied. Run it
+# before every push.
 #
 #   scripts/check.sh
 set -euo pipefail
@@ -19,6 +19,8 @@ cargo clippy --all-targets
 cargo clippy --all-targets --features lerobot,usd
 cargo clippy --all-targets --no-default-features
 cargo doc --no-deps --features lerobot,usd
+cargo clippy -p miru --all-targets
+cargo doc --no-deps -p miru
 (cd demos && CARGO_TARGET_DIR="$CARGO_TARGET_DIR/demos" cargo clippy --release --all-targets)
 (cd python && CARGO_TARGET_DIR="$CARGO_TARGET_DIR/python" cargo clippy --all-targets)
 (cd python && uv run --only-group dev ruff check . && uv run --only-group dev ruff format --check .)

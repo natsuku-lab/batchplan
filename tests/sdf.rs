@@ -15,7 +15,7 @@ use batchplan::rng::Rng;
 use batchplan::{
     CollisionWeights, DepthFilter, DepthImage, Device, Distance, Error, Held, Intrinsics,
     JointTrajectory, Obstacle, Occlusion, OccupancyMap, Pose, Robot, RobotMask, SdfGrid,
-    SdfOptions, SphereOptions, Weighing, World,
+    SdfOptions, SphereOptions, Weighing, World, sdf,
 };
 use glam::{BVec3, EulerRot, Mat3, Quat, Vec2, Vec3};
 
@@ -5103,4 +5103,175 @@ fn every_device_builds_the_same_grids_from_occupancy() {
             );
         }
     }
+}
+
+/// The shapes [`points_lie_on_the_nearest_shape_within_their_reach`] asks of: a table, on it a
+/// turned box, a cylinder, a sphere, a capsule and a bar as a distance grid, the turned box once
+/// more, and a wall far from all of them.
+fn shapes_to_lie_on() -> Vec<Obstacle> {
+    let turn = Quat::from_euler(EulerRot::XYZ, 0.3, -0.4, 0.9);
+    let turned = Obstacle::Cuboid {
+        center: Vec3::new(0.3, -0.2, 0.05),
+        half_extents: Vec3::new(0.05, 0.08, 0.03),
+        rotation: turn,
+    };
+    let (dims, voxel, origin) = ([14u32, 9, 8], 0.02, Vec3::new(-0.13, -0.08, -0.07));
+    let bar = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.08, 0.03, 0.02));
+    let mut distances = vec![];
+    for k in 0..dims[2] {
+        for j in 0..dims[1] {
+            for i in 0..dims[0] {
+                let p = origin + Vec3::new(i as f32, j as f32, k as f32) * voxel;
+                distances.push(bar.distance(p).value);
+            }
+        }
+    }
+    vec![
+        Obstacle::cuboid(Vec3::new(0.5, 0.0, -0.02), Vec3::new(0.6, 0.6, 0.02)),
+        turned.clone(),
+        Obstacle::cylinder(Vec3::new(0.6, 0.2, 0.06), 0.04, 0.06),
+        Obstacle::sphere(Vec3::new(0.8, -0.3, 0.05), 0.05),
+        Obstacle::Capsule {
+            center: Vec3::new(0.2, 0.3, 0.1),
+            rotation: turn,
+            radius: 0.02,
+            half_length: 0.07,
+        },
+        Obstacle::Sdf {
+            grid: Arc::new(SdfGrid::try_new(dims, voxel, origin, &distances).unwrap()),
+            center: Vec3::new(0.7, 0.0, 0.04),
+            rotation: turn,
+        },
+        turned,
+        Obstacle::cuboid(Vec3::new(3.0, 0.0, 1.0), Vec3::new(0.01, 2.0, 1.0)),
+    ]
+}
+
+/// Each point lies on the nearest of the shapes it is within its reach of, as the shapes' own
+/// distances say, and of two as near on the first: points in rows over the shapes, as an image
+/// reads them, and scattered about, on and inside them; reaches of nothing, of millimetres, of
+/// meters and without bound, and points marked as having none, some of them inside a shape; and
+/// points with a coordinate that is no number, which lie on none. The same on one thread, on
+/// many, and whatever the points' order.
+#[test]
+fn points_lie_on_the_nearest_shape_within_their_reach() {
+    let shapes = shapes_to_lie_on();
+    let mut rng = Rng::new(11);
+    let mut points = vec![];
+    // Rows 4 mm apart at heights that cut through the shapes, each row a run of its own and more.
+    for z in [-0.021, 0.0, 0.001, 0.03, 0.058, 0.12] {
+        for row in 0..120 {
+            for column in 0..300 {
+                points.push(Vec3::new(
+                    -0.1 + 0.004 * column as f32,
+                    -0.24 + 0.004 * row as f32,
+                    z,
+                ));
+            }
+        }
+    }
+    // Scattered through the room, the far wall's too, so that a run's points lie far apart.
+    for _ in 0..20_000 {
+        points.push(Vec3::new(
+            rng.range(-0.3, 3.2),
+            rng.range(-1.0, 1.0),
+            rng.range(-0.1, 2.1),
+        ));
+    }
+    let reaches = [0.0, 0.002, 0.01, 0.3, f32::INFINITY, -0.001, f32::NAN];
+    let mut reach: Vec<f32> = (0..points.len())
+        .map(|i| reaches[(i + i / 300) % reaches.len()])
+        .collect();
+    // Points among the rows with a coordinate that is no number and a reach: the first of a run
+    // (runs are 1,024 points), the middle of another and the last of a third.
+    let unnumbered = [3 * 1024, 40 * 1024 + 512, 101 * 1024 - 1];
+    for (axis, &i) in unnumbered.iter().enumerate() {
+        points[i][axis] = f32::NAN;
+        reach[i] = 0.01;
+    }
+    // What the shapes' own distances say.
+    let expected = |points: &[Vec3], reach: &[f32]| -> Vec<Option<(usize, f32)>> {
+        let each = points.iter().zip(reach).map(|(&p, &reach)| {
+            let distances = shapes.iter().map(|shape| shape.distance(p).value);
+            let nearest = distances.enumerate().min_by(|a, b| a.1.total_cmp(&b.1));
+            nearest.filter(|&(_, distance)| reach >= 0.0 && distance <= reach)
+        });
+        each.collect()
+    };
+    let found = |device: &Device, points: &[Vec3], reach: &[f32]| -> Vec<Option<(usize, f32)>> {
+        let on = sdf::on_shapes(device, &shapes, points, reach).unwrap();
+        on.iter()
+            .map(|on| on.map(|on| (on.shape, on.distance)))
+            .collect()
+    };
+    let wanted = expected(&points, &reach);
+    assert_eq!(found(cpu(), &points, &reach), wanted);
+    // With no reach longer than a centimetre, a run of points comes within reach of few shapes'
+    // boxes, and its other shapes are left out for all of it.
+    let short: Vec<f32> = reach.iter().map(|reach| reach.min(0.01)).collect();
+    let wanted_short = expected(&points, &short);
+    assert_eq!(found(cpu(), &points, &short), wanted_short);
+    assert!(wanted_short.iter().flatten().count() > 10_000);
+    let alone = Device::cpu_threads(&common::panda().unwrap(), 1).unwrap();
+    assert_eq!(found(&alone, &points, &reach), wanted, "on one thread");
+    // The points in another order: each lies on what it did.
+    let mut order: Vec<usize> = (0..points.len()).collect();
+    for i in (1..order.len()).rev() {
+        order.swap(i, (rng.next_u64() % (i as u64 + 1)) as usize);
+    }
+    let shuffled: Vec<Vec3> = order.iter().map(|&i| points[i]).collect();
+    let shuffled_reach: Vec<f32> = order.iter().map(|&i| reach[i]).collect();
+    let again = found(cpu(), &shuffled, &shuffled_reach);
+    for (k, &i) in order.iter().enumerate() {
+        assert_eq!(again[k], wanted[i], "point {i} as number {k}");
+    }
+
+    // The points ask all of it: every shape but the turned box given again has points on it,
+    // which a point never lies on, the first of the two being as near; some lie inside a shape
+    // and some on none; a point marked as having no reach lies inside a shape; and a point lies
+    // on a shape that it reaches only by its reach, outside the shape's box.
+    let on = |shape: usize| wanted.iter().flatten().filter(|on| on.0 == shape).count();
+    for shape in [0, 1, 2, 3, 4, 5, 7] {
+        assert!(on(shape) > 20, "{} points on shape {shape}", on(shape));
+    }
+    assert_eq!(on(6), 0);
+    assert!(wanted.iter().flatten().filter(|on| on.1 < -0.005).count() > 100);
+    assert!(wanted.iter().filter(|on| on.is_none()).count() > 1000);
+    let inside = |p: Vec3| shapes.iter().any(|shape| shape.distance(p).value < -0.002);
+    let marked = points
+        .iter()
+        .zip(&reach)
+        .filter(|&(&p, &reach)| (reach.is_nan() || reach < 0.0) && inside(p));
+    assert!(marked.count() > 100);
+    let table_top = |p: Vec3| p.z > 0.002 && p.z < 0.2 && (p.x - 0.5).abs() < 0.5;
+    let by_reach = points
+        .iter()
+        .zip(&wanted)
+        .filter(|&(&p, on)| table_top(p) && on.is_some_and(|on| on.0 == 0 && on.1 > 0.002));
+    assert!(by_reach.count() > 100);
+    // A point with a coordinate that is no number lies on none, and most of its run on shapes:
+    // a run's box taken over it would leave them on none.
+    for i in unnumbered {
+        assert!(points[i].is_nan() && reach[i] >= 0.0 && wanted[i].is_none());
+        let run = &wanted[i / 1024 * 1024..][..1024];
+        let on = run.iter().flatten().count();
+        assert!(on > 500, "{on} points on shapes in the run of point {i}");
+    }
+}
+
+#[test]
+fn points_with_no_reach_each_or_a_shape_that_is_none_are_refused() {
+    let shapes = shapes_to_lie_on();
+    let points = [Vec3::ZERO; 3];
+    let refused =
+        |shapes: &[Obstacle], reach: &[f32]| match sdf::on_shapes(cpu(), shapes, &points, reach) {
+            Err(Error::Input(message)) => message,
+            other => panic!("not refused as input: {other:?}"),
+        };
+    assert!(refused(&shapes, &[0.01; 2]).contains("3 points with 2 reaches"));
+    let none = Obstacle::sphere(Vec3::ZERO, -1.0);
+    assert!(refused(&[shapes[0].clone(), none], &[0.01; 3]).contains("shape 1"));
+    // No shapes: every point lies on none.
+    let on = sdf::on_shapes(cpu(), &[], &points, &[0.01; 3]).unwrap();
+    assert!(on.iter().all(Option::is_none));
 }
