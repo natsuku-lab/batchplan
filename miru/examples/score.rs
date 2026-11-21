@@ -3,15 +3,25 @@
 //! that what `miru::look` makes of a recorded look and what the executor that recorded it measured
 //! are quoted under one definition.
 //!
-//!   cargo run --release --example score -- <set> [--recorded | --masks truth] [--again]
-//!       [--noise <factor>] [--shares] [--offsets] [--twin <set>] [--rooms] [--threads <n>]
-//!       [--images <dir>] [--digest] [run ...]
+//!   cargo run --release --example score -- <set> [--recorded | --masks truth|one
+//!       [--border <pixels>]] [--again] [--noise <factor>] [--shares] [--offsets] [--twin <set>]
+//!       [--rooms] [--threads <n>] [--images <dir>] [--digest] [run ...]
 //!
 //! `<set>` holds a folder per run, each with its fixtures and a folder per look
 //! (`examples/common`). `--recorded` scores the objects the recording's executor names under each
 //! pixel in place of miru's. `--masks truth` gives miru the simulator's truth as every view's
 //! masks, each pixel numbered by the truth object it shows: what no mask model can better, so
-//! what is still wrong with it is the look's own to mend. `--again` gives miru each look's frames
+//! what is still wrong with it is the look's own to mend. `--masks one` scores each truth object
+//! in view from a look of its own, whose masks are that object's pixels alone, numbered 1, and 0
+//! elsewhere in every view: what a model prompted for one thing gives. That look comes after the
+//! scene the look without masks comes after, and the run's next look after the one without
+//! masks; `--again`, `--offsets`, `--shares`, `--twin` and `--images`, which are of one scene per
+//! look, are refused with it. `--border` moves every mask's border by a number of pixels, as a
+//! model's masks are never exact: out where it is positive, each pixel in no mask taking the
+//! lowest number within that many pixels of it, so that a mask grows over the table and, with
+//! one mask, over its neighbours too; in where it is negative, each pixel keeping its number
+//! only where every pixel within that many of it has it too. `--again` gives miru each look's
+//! frames
 //! a second time, after the scene they gave, and says how many of that scene's objects keep their
 //! ids, each held against the object in its place in the second scene, and how many stay unseen:
 //! with nothing changed, all should keep them and none stay. `--noise` multiplies every view's
@@ -95,13 +105,24 @@ type Shares = BTreeMap<String, [usize; 3]>;
 /// What the pixels that show no truth object are counted under.
 const NO_OBJECT: &str = "(no truth object)";
 
+/// What miru is given of the truth as its views' masks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Masks {
+    /// Every truth object's pixels, each numbered by the object.
+    Truth,
+    /// One truth object's pixels alone, in a look of its own for each truth object in view.
+    One,
+}
+
 /// What the command line asks for.
 struct Asked {
     set: PathBuf,
     /// Score the recording's executor in place of miru.
     of_executor: bool,
-    /// Give miru the truth as every view's masks.
-    truth_masks: bool,
+    /// What of the truth to give miru as its views' masks; none for no masks.
+    masks: Option<Masks>,
+    /// How many pixels every mask's border is moved out, or in where negative.
+    border: i32,
     /// Give miru each look's frames a second time.
     again: bool,
     /// What every view's stated noise is multiplied by; none for the noise as stated.
@@ -126,19 +147,28 @@ struct Asked {
 
 impl Asked {
     /// What `args` ask for, the program's name left out: refused where they ask of the executor
-    /// what only miru's look has: masks, a second look, the noise and the scenes' digest.
+    /// what only miru's look has: masks, a second look, the noise and the scenes' digest; and
+    /// with one mask, what is of one scene per look.
     fn of(mut args: impl Iterator<Item = String>) -> Result<Self, Error> {
-        let usage = "usage: score <set> [--recorded | --masks truth] [--again] [--noise factor] \
-             [--shares] [--offsets] [--twin set] [--rooms] [--threads n] [--images dir] [--digest] \
-             [run ...]";
+        let usage = "usage: score <set> [--recorded | --masks truth|one [--border pixels]] \
+             [--again] [--noise factor] [--shares] [--offsets] [--twin set] [--rooms] \
+             [--threads n] [--images dir] [--digest] [run ...]";
         let set = PathBuf::from(args.next().ok_or(usage)?);
-        let (mut of_executor, mut truth_masks, mut again, mut rooms) = (false, false, false, false);
+        let (mut of_executor, mut masks, mut border, mut again) = (false, None, 0, false);
+        let mut rooms = false;
         let (mut images, mut only, mut shares, mut threads) = (None, vec![], false, None);
         let (mut offsets, mut digest, mut noise, mut twin) = (false, false, None, None);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--recorded" => of_executor = true,
-                "--masks" if args.next().as_deref() == Some("truth") => truth_masks = true,
+                "--masks" => {
+                    masks = match args.next().as_deref() {
+                        Some("truth") => Some(Masks::Truth),
+                        Some("one") => Some(Masks::One),
+                        _ => return Err(format!("--masks takes truth or one: {usage}").into()),
+                    }
+                }
+                "--border" => border = args.next().ok_or("--border takes pixels")?.parse()?,
                 "--again" => again = true,
                 "--noise" => {
                     let factor: f32 = args.next().ok_or("--noise takes a factor")?.parse()?;
@@ -162,8 +192,23 @@ impl Asked {
                 _ => only.push(arg),
             }
         }
-        if of_executor && truth_masks {
+        if of_executor && masks.is_some() {
             return Err(format!("masks are for miru's look, not the executor's: {usage}").into());
+        }
+        if border != 0 && masks.is_none() {
+            return Err(
+                format!("--border moves the masks' borders, and needs masks: {usage}").into(),
+            );
+        }
+        let of_one_scene =
+            again || offsets || shares || twin.is_some() || rooms || images.is_some();
+        if masks == Some(Masks::One) && of_one_scene {
+            return Err(format!(
+                "with one mask each truth object is scored from a look of its own, and --again, \
+                 --offsets, --shares, --twin, --rooms and --images are of one scene per look: \
+                 {usage}"
+            )
+            .into());
         }
         if of_executor && again {
             return Err(
@@ -193,7 +238,8 @@ impl Asked {
         Ok(Self {
             set,
             of_executor,
-            truth_masks,
+            masks,
+            border,
             again,
             noise,
             shares,
@@ -335,7 +381,8 @@ fn main() -> Result<(), Error> {
     let Asked {
         set,
         of_executor,
-        truth_masks,
+        masks,
+        border,
         again,
         noise: _,
         shares,
@@ -395,6 +442,12 @@ fn main() -> Result<(), Error> {
         for (_, folder) in &looks {
             let recorded = Recorded::load(folder)?;
             let name = folder.strip_prefix(&set)?.display().to_string();
+            let given = match masks {
+                Some(Masks::Truth) => truth_masks(&recorded, None, border),
+                _ => vec![],
+            };
+            // The scene this look comes after, as a look with one mask does too.
+            let previous = std::mem::take(&mut scene);
             let named: Vec<Vec<Label>>;
             let (labels, measured) = if of_executor {
                 println!("{name}: {} objects", recorded.measured);
@@ -402,13 +455,13 @@ fn main() -> Result<(), Error> {
                 (&named, recorded.measured)
             } else {
                 let start = Instant::now();
-                scene = looked(&recorded, &known, truth_masks, factor, &device, &scene)?;
+                scene = looked(&recorded, &known, &given, factor, &device, &previous)?;
                 let took = start.elapsed().as_secs_f64() * 1e3;
                 println!("{name}: {} objects in {took:.1} ms", scene.objects.len());
                 scenes.scene(&scene);
                 if again {
                     let start = Instant::now();
-                    let second = looked(&recorded, &known, truth_masks, factor, &device, &scene)?;
+                    let second = looked(&recorded, &known, &given, factor, &device, &scene)?;
                     let took = start.elapsed().as_secs_f64() * 1e3;
                     scenes.scene(&second);
                     let counts = [
@@ -424,14 +477,34 @@ fn main() -> Result<(), Error> {
                 }
                 (&scene.labels, scene.objects.len())
             };
-            let truths = recorded.truth.len();
-            let mut sum = Counts::none(truths, measured);
-            for (camera, labels) in recorded.cameras.iter().zip(labels) {
-                let counts = Counts::of(camera, labels, truths, measured);
+            let mut scored = verdicts_of(&recorded, labels, measured);
+            if masks == Some(Masks::One) {
+                let together = scored.last().expect("the cameras together");
+                let in_view: Vec<usize> = (0..together.len())
+                    .filter(|&t| together[t].is_some())
+                    .collect();
+                for t in in_view {
+                    let start = Instant::now();
+                    let given = truth_masks(&recorded, Some(t), border);
+                    let alone = looked(&recorded, &known, &given, factor, &device, &previous)?;
+                    let took = start.elapsed().as_secs_f64() * 1e3;
+                    let objects = alone.objects.len();
+                    println!(
+                        "  {} alone: {objects} objects in {took:.1} ms",
+                        recorded.truth[t]
+                    );
+                    scenes.scene(&alone);
+                    let theirs = verdicts_of(&recorded, &alone.labels, objects);
+                    for (ours, mut theirs) in scored.iter_mut().zip(theirs) {
+                        ours[t] = theirs[t].take();
+                    }
+                }
+            }
+            let (verdicts, by_view) = scored.split_last().expect("the cameras together");
+            for ((camera, labels), scored) in recorded.cameras.iter().zip(labels).zip(by_view) {
                 println!("  {}", camera.name);
                 let tally = by_camera.entry(camera.name.clone()).or_default();
-                report(&counts.verdicts(), &recorded.truth, tally);
-                sum.add(&counts);
+                report(scored, &recorded.truth, tally);
                 if shares {
                     let shares = labelled.entry(camera.name.clone()).or_default();
                     share(camera, labels, &recorded.truth, shares);
@@ -444,8 +517,7 @@ fn main() -> Result<(), Error> {
                 }
             }
             println!("  cameras together");
-            let verdicts = sum.verdicts();
-            report(&verdicts, &recorded.truth, &mut together);
+            report(verdicts, &recorded.truth, &mut together);
             if rooms {
                 let held = Held::of(&recorded, &scene, &mut owners);
                 held.report(&name, &recorded.truth, &scene, &mut holding, &mut cases);
@@ -459,7 +531,8 @@ fn main() -> Result<(), Error> {
                     .map(|object| middle(&object.shape))
                     .collect()
             };
-            for (t, scored) in verdicts.iter().enumerate() {
+            // Only with `--offsets`, which one mask refuses: its matched objects are not `scene`'s.
+            for (t, scored) in verdicts.iter().enumerate().filter(|_| offsets) {
                 // One matched lies in the object it is matched with: that one holds most of it.
                 if let Some(Scored {
                     verdict: Verdict::Matched,
@@ -480,10 +553,14 @@ fn main() -> Result<(), Error> {
                 if other.truth != recorded.truth {
                     return Err(format!("{name}: the twin shows other truth objects").into());
                 }
+                let given = match masks {
+                    Some(Masks::Truth) => truth_masks(&other, None, border),
+                    _ => vec![],
+                };
                 twin_scene = looked(
                     &other,
                     &twin_known,
-                    truth_masks,
+                    &given,
                     twin_factor,
                     &device,
                     &twin_scene,
@@ -494,7 +571,7 @@ fn main() -> Result<(), Error> {
                         Counts::of(camera, labels, other.truth.len(), twin_scene.objects.len());
                     theirs.add(&counts);
                 }
-                let (ours, theirs) = (matched(&verdicts), matched(&theirs.verdicts()));
+                let (ours, theirs) = (matched(verdicts), matched(&theirs.verdicts()));
                 for (t, pair) in ours.iter().zip(&theirs).enumerate() {
                     let (Some(object), Some(twin)) = pair else {
                         continue;
@@ -589,23 +666,56 @@ fn kept(first: &Scene, second: &Scene) -> usize {
     pairs.filter(|(was, is)| is.seen && is.id == was.id).count()
 }
 
-/// The scene miru makes of `recorded`'s views after `previous`, with `known` as its fixtures and,
-/// with `truth_masks`, the truth as every view's masks, each view's stated noise multiplied by
-/// `noise`, on `device`'s threads.
+/// The truth as a mask model would give it, per view of `recorded`: each pixel numbered by the
+/// truth object it shows, from 1, or with `one` 1 where it shows that one and 0 where it shows
+/// another; 0 where it shows none. Each mask's border moved `border` pixels ([`bordered`]).
+fn truth_masks(recorded: &Recorded, one: Option<usize>, border: i32) -> Vec<Vec<u32>> {
+    let number = |truth: &Option<usize>| match (*truth, one) {
+        (None, _) => 0,
+        (Some(object), None) => object as u32 + 1,
+        (Some(object), Some(one)) => u32::from(object == one),
+    };
+    (recorded.cameras.iter())
+        .map(|camera| {
+            let masks: Vec<u32> = camera.truth.iter().map(number).collect();
+            bordered(&masks, camera.width, border)
+        })
+        .collect()
+}
+
+/// `masks`, one view's of `width` pixels a row, with each mask's border moved `by` pixels, the
+/// pixels within that many of one being those of the square around it in the image: out where
+/// `by` is positive, each pixel in no mask taking the lowest number within `by` pixels of it,
+/// and in where it is negative, each pixel keeping its number only where every pixel within
+/// `-by` of it has it too.
+fn bordered(masks: &[u32], width: usize, by: i32) -> Vec<u32> {
+    let reach = by.unsigned_abs() as usize;
+    let height = masks.len() / width;
+    let around = |i: usize| {
+        let (x, y) = (i % width, i / width);
+        let rows = y.saturating_sub(reach)..(y + reach + 1).min(height);
+        let columns = x.saturating_sub(reach)..(x + reach + 1).min(width);
+        rows.flat_map(move |v| columns.clone().map(move |u| masks[v * width + u]))
+    };
+    let moved = |i: usize| match by.signum() {
+        1 if masks[i] == 0 => around(i).filter(|&mask| mask != 0).min().unwrap_or(0),
+        -1 if masks[i] != 0 && around(i).any(|mask| mask != masks[i]) => 0,
+        _ => masks[i],
+    };
+    (0..masks.len()).map(moved).collect()
+}
+
+/// The scene miru makes of `recorded`'s views after `previous`, with `known` as its fixtures and
+/// `masks` as its views' masks, none for a view past their end, each view's stated noise
+/// multiplied by `noise`, on `device`'s threads.
 fn looked(
     recorded: &Recorded,
     known: &[Obstacle],
-    truth_masks: bool,
+    masks: &[Vec<u32>],
     noise: f32,
     device: &Device,
     previous: &Scene,
 ) -> Result<Scene, Error> {
-    // The truth as a mask model would give it: 0 where a pixel shows no object.
-    let number = |truth: &Option<usize>| truth.map_or(0, |object| object as u32 + 1);
-    let masks: Vec<Vec<u32>> = (recorded.cameras.iter())
-        .filter(|_| truth_masks)
-        .map(|camera| camera.truth.iter().map(number).collect())
-        .collect();
     let views: Vec<View<'_>> = (recorded.cameras.iter().enumerate())
         .map(|(index, camera)| View {
             image: DepthImage {
@@ -902,6 +1012,25 @@ impl Counts {
         });
         scored.collect()
     }
+}
+
+/// Per camera of `recorded`, and last over its cameras together, how each truth object came out
+/// (`Counts::verdicts`), of `measured` objects that `labels` give per camera and pixel.
+fn verdicts_of(
+    recorded: &Recorded,
+    labels: &[Vec<Label>],
+    measured: usize,
+) -> Vec<Vec<Option<Scored>>> {
+    let truths = recorded.truth.len();
+    let mut sum = Counts::none(truths, measured);
+    let mut verdicts = vec![];
+    for (camera, labels) in recorded.cameras.iter().zip(labels) {
+        let counts = Counts::of(camera, labels, truths, measured);
+        verdicts.push(counts.verdicts());
+        sum.add(&counts);
+    }
+    verdicts.push(sum.verdicts());
+    verdicts
 }
 
 /// Prints each verdict of `scored`, which is per truth object of `names`, and adds it to `tally`
@@ -1417,7 +1546,7 @@ mod tests {
     /// The scene of [`slabs`] at the noise it states, the table known.
     fn two_slabs() -> Scene {
         let device = common::device(None).expect("a device");
-        let scene = looked(&slabs(), &[table()], false, 1.0, &device, &Scene::default());
+        let scene = looked(&slabs(), &[table()], &[], 1.0, &device, &Scene::default());
         scene.expect("a sound look")
     }
 
@@ -1528,6 +1657,7 @@ mod tests {
         let asked = |args: &[&str]| Asked::of(args.iter().map(|arg| (*arg).to_owned()));
         for miru_only in [
             &["--masks", "truth"][..],
+            &["--masks", "one"],
             &["--again"],
             &["--digest"],
             &["--noise", "0.25"],
@@ -1547,13 +1677,93 @@ mod tests {
         }
         let all = ["set", "--masks", "truth", "--again", "--digest", "run"];
         let both = asked(&all).expect("miru's alone");
-        assert!(both.truth_masks && both.again && both.digest && !both.of_executor);
+        assert!(both.masks == Some(Masks::Truth) && both.again && both.digest && !both.of_executor);
         assert_eq!(both.only, ["run"]);
         assert!(!asked(&["set"]).expect("a set alone").digest);
         let twin = asked(&["set", "--twin", "exact", "run"]).expect("a twin and a run");
         assert_eq!(twin.twin, Some(PathBuf::from("exact")));
         assert_eq!(twin.only, ["run"]);
         assert!(asked(&["set", "--twin"]).is_err(), "a twin needs its set");
+        assert!(asked(&["set", "--masks", "some"]).is_err(), "truth or one");
+    }
+
+    #[test]
+    fn one_mask_is_one_truth_objects_pixels_alone_and_refuses_what_is_of_one_scene() {
+        let asked = |args: &[&str]| Asked::of(args.iter().map(|arg| (*arg).to_owned()));
+        let one = asked(&["set", "--masks", "one", "--digest", "run"]).expect("one mask");
+        assert_eq!(
+            (one.masks, &one.only[..]),
+            (Some(Masks::One), &["run".to_owned()][..])
+        );
+        for of_one_scene in [
+            &["--again"][..],
+            &["--offsets"],
+            &["--shares"],
+            &["--twin", "exact"],
+            &["--rooms"],
+            &["--images", "dir"],
+        ] {
+            let args: Vec<&str> = [&["set", "--masks", "one"], of_one_scene].concat();
+            assert!(asked(&args).is_err(), "{args:?}");
+        }
+        // The slabs as two truth objects: the left one's pixels show the first, the right one's
+        // the second.
+        let mut recorded = slabs();
+        let camera = &mut recorded.cameras[0];
+        for (i, truth) in camera.truth.iter_mut().enumerate() {
+            if camera.depth[i] < 1.0 {
+                *truth = Some(usize::from(i % 64 >= 32));
+            }
+        }
+        let column = |masks: &[Vec<u32>], column: usize| masks[0][20 * 64 + column];
+        let every = truth_masks(&recorded, None, 0);
+        assert_eq!([0, 10, 50].map(|c| column(&every, c)), [0, 1, 2]);
+        let right = truth_masks(&recorded, Some(1), 0);
+        assert_eq!([0, 10, 50].map(|c| column(&right, c)), [0, 0, 1]);
+        assert_eq!(right[0].iter().filter(|&&mask| mask == 1).count(), 16 * 16);
+    }
+
+    #[test]
+    fn a_border_moved_out_takes_the_lowest_mask_near_and_moved_in_keeps_what_has_only_its_own() {
+        let asked = |args: &[&str]| Asked::of(args.iter().map(|arg| (*arg).to_owned()));
+        let moved = asked(&["set", "--masks", "one", "--border", "-2"]).expect("a border");
+        assert_eq!((moved.masks, moved.border), (Some(Masks::One), -2));
+        assert!(
+            asked(&["set", "--border", "1"]).is_err(),
+            "no masks to move"
+        );
+        assert!(
+            asked(&["set", "--masks", "truth", "--border"]).is_err(),
+            "no pixels"
+        );
+        // Five pixels a row: two masks side by side over three rows, and a row in none.
+        #[rustfmt::skip]
+        let masks = [
+            1, 1, 1, 2, 2,
+            1, 1, 1, 2, 2,
+            1, 1, 1, 2, 2,
+            0, 0, 0, 0, 0,
+        ];
+        assert_eq!(bordered(&masks, 5, 0), masks);
+        // In by one: what has another number or none within a pixel, the image's edge aside.
+        #[rustfmt::skip]
+        let shrunk = [
+            1, 1, 0, 0, 2,
+            1, 1, 0, 0, 2,
+            0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0,
+        ];
+        assert_eq!(bordered(&masks, 5, -1), shrunk);
+        // Out by one from the shrunk ones: a pixel in none takes the lowest number near it, and a
+        // pixel in a mask keeps its own.
+        #[rustfmt::skip]
+        let grown = [
+            1, 1, 1, 2, 2,
+            1, 1, 1, 2, 2,
+            1, 1, 1, 2, 2,
+            0, 0, 0, 0, 0,
+        ];
+        assert_eq!(bordered(&shrunk, 5, 1), grown);
     }
 
     #[test]
@@ -1683,7 +1893,7 @@ mod tests {
         // within three deviations of it at a hundred times that, where they read on the table.
         let (known, device) = ([table()], common::device(None).expect("a device"));
         let objects = |factor: f32| {
-            let scene = looked(&slabs(), &known, false, factor, &device, &Scene::default());
+            let scene = looked(&slabs(), &known, &[], factor, &device, &Scene::default());
             scene.expect("a sound look").objects.len()
         };
         assert_eq!((objects(1.0), objects(100.0)), (2, 0));

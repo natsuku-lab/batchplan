@@ -40,9 +40,13 @@
 //! 6. **Round things** ([`round`]). A part that hides another across their border, as a bowl's
 //!    outside does its inside along the near rim, is one part with it where the two are round
 //!    about one axis and end in one rim, unless the view's masks say they are two things.
-//! 7. **Masks** ([`masks::split`]). A part whose readings lie in several of the view's masks is
-//!    divided along them. What a side hides and the creases it meets in are its own: each
-//!    crossing of a border was counted under the mask its reading lies in ([`Side`]).
+//! 7. **Masks** ([`masks::split`]). A part whose readings lie in several of the view's masks, or
+//!    in a mask and in none, is divided along them: a side other than the part's largest is cut
+//!    off where it fills a window and is as wide as one ([`holding`]), as a sliver is a part
+//!    where it is, or lies in a mask and is most of what that mask covers in the view or the
+//!    part's largest side lies in another mask. What a side hides and the creases it meets in
+//!    are its own: each crossing of a border was counted under the mask its reading lies in
+//!    ([`Side`]).
 //!
 //! A reading may lie on a known shape, no farther off it than the camera's noise lets one on it
 //! read ([`Kind::Known`]), and be the shape's or a thing's: a plate's floor, the foot of a box.
@@ -370,7 +374,7 @@ pub(crate) fn parts(seen: &Seen, masks: &[u32], threads: usize) -> Parts {
     }
     // Those the masks divide, and with each side the borders of its own readings.
     let mut count = count as usize;
-    let cut = masks::split(&mut of, &mut count, &share, masks, seen);
+    let cut = masks::split(&mut of, &mut count, &share, &wanted, masks, seen);
     let now = |first: &mut [u32], (piece, mask): Side| {
         let part = renumbered[find(first, piece) as usize];
         cut.get(&(part, mask)).copied().unwrap_or(part)
@@ -413,7 +417,12 @@ pub(crate) fn parts(seen: &Seen, masks: &[u32], threads: usize) -> Parts {
 /// edges as a plane's is, of readings of the set alone. Asked of the sets numbered in `slivers`.
 /// Their readings are counted over every rectangle from the image's corner, and a window is
 /// looked through only where all of it is such readings.
-fn holding(seen: &Seen, wholes: &[u32], wanted: &[usize], slivers: Range<u32>) -> Vec<bool> {
+pub(crate) fn holding(
+    seen: &Seen,
+    wholes: &[u32],
+    wanted: &[usize],
+    slivers: Range<u32>,
+) -> Vec<bool> {
     let (width, height) = (seen.width, seen.height);
     let sliver = |i: usize| slivers.contains(&wholes[i]);
     let stride = width + 1;

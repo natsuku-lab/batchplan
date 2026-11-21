@@ -101,10 +101,13 @@ pub struct View<'a> {
     /// Per pixel, in the depth's order, the number of the thing a mask model says the pixel
     /// shows, and 0 where it says none: instance masks, from whatever model the caller runs. A
     /// number means a thing in this view only. Readings that the depth shows as one surface and
-    /// the masks as two things are two, where each has as many readings as the noise needs to
-    /// tell a surface by; and what the view shows mostly in one mask is one object, whatever
-    /// the depth shows between its parts. What it shows mostly in two masks is two objects,
-    /// whatever another view shows of them. The robot's readings and those outside the look's
+    /// the masks as two things, or as a thing and none, are two where those not in the larger
+    /// have as many readings as the noise needs to tell a surface by, and are as wide as the
+    /// window a plane is taken over, or lie in a mask that is mostly theirs, or lie in a mask
+    /// where the larger lies in another: otherwise they are the fringe of a mask, which a model
+    /// never draws exact to the pixel, and go with the larger. What the view shows mostly in one
+    /// mask is one object, whatever the depth shows between its parts. What it shows mostly in
+    /// two masks is two objects, whatever another view shows of them. The robot's readings and those outside the look's
     /// corners stay what they are whatever a mask says, and what reads as a known shape is a
     /// mask's thing only where it lies inside that thing, as a plate's floor does: the table
     /// that a loose mask takes in stays the table's. Empty for a view without a model.

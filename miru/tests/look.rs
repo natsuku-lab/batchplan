@@ -327,6 +327,201 @@ fn what_stands_on_another_is_an_object_of_its_own() {
     );
 }
 
+/// `frame` with thing `thing` alone under a mask, numbered 1, that a model drew `by` pixels
+/// outside its border, or inside where negative: a pixel is in it where any pixel within `by` of
+/// it shows the thing, or where every pixel within `-by` does.
+fn masked_by(frame: Frame, thing: usize, by: isize) -> Frame {
+    let (width, reach) = (common::WIDTH as isize, by.abs());
+    let height = frame.shows.len() as isize / width;
+    let shows = |u: isize, v: isize| frame.shows[(v * width + u) as usize] == Some(thing);
+    let masks: Vec<u32> = (0..frame.shows.len() as isize)
+        .map(|i| {
+            let (x, y) = (i % width, i / width);
+            let mut around = (y - reach..=y + reach)
+                .flat_map(|v| (x - reach..=x + reach).map(move |u| (u, v)))
+                .filter(|&(u, v)| u >= 0 && v >= 0 && u < width && v < height);
+            u32::from(if by > 0 {
+                around.any(|(u, v)| shows(u, v))
+            } else {
+                around.all(|(u, v)| shows(u, v))
+            })
+        })
+        .collect();
+    Frame { masks, ..frame }
+}
+
+/// The frame of a can on a box (things 1 and 2), the can under a mask of its own that a model
+/// drew `by` pixels outside its border, or inside where negative ([`masked_by`]). On depth as
+/// noisy as a real camera states, with `noisy`.
+fn can_on_a_box_masked(by: isize, noisy: bool) -> Frame {
+    let mut frame = frame_of(vec![
+        block(
+            Vec3::new(0.5, 0.0, 0.03),
+            Vec3::new(0.07, 0.07, 0.03),
+            [200, 200, 30],
+        ),
+        can(Vec3::new(0.5, 0.0, 0.09), 0.03, 0.03, [20, 20, 20]),
+    ]);
+    if noisy {
+        frame = frame.noisy(REAL, 1);
+    }
+    masked_by(frame, 2, by)
+}
+
+#[test]
+fn a_thing_whose_mask_stops_two_pixels_short_of_its_border_is_one_object_with_its_rim() {
+    for noisy in [false, true] {
+        let frame = can_on_a_box_masked(-2, noisy);
+        let scene = seen(&[&frame], &Scene::default());
+        let ((under, _), (over, over_share)) =
+            (object_of(&scene, &frame, 1), object_of(&scene, &frame, 2));
+        assert!(
+            under != over && over_share > 0.97,
+            "noisy {noisy}: the can is object {over} and holds {over_share} of its pixels: {:?}",
+            scene.objects
+        );
+        assert_eq!(scene.objects.len(), 2, "noisy {noisy}: {:?}", scene.objects);
+    }
+}
+
+#[test]
+fn a_thing_whose_mask_runs_two_pixels_past_its_border_leaves_the_box_under_it_its_readings() {
+    for noisy in [false, true] {
+        let frame = can_on_a_box_masked(2, noisy);
+        let scene = seen(&[&frame], &Scene::default());
+        let ((under, under_share), (over, over_share)) =
+            (object_of(&scene, &frame, 1), object_of(&scene, &frame, 2));
+        assert!(
+            under != over && under_share > 0.97 && over_share > 0.97,
+            "noisy {noisy}: the box is object {under} with {under_share} of its pixels, the can \
+             {over} with {over_share}: {:?}",
+            scene.objects
+        );
+        assert_eq!(scene.objects.len(), 2, "noisy {noisy}: {:?}", scene.objects);
+    }
+}
+
+#[test]
+#[ignore = "a rim goes with a wide unmasked neighbour in its part: README"]
+fn a_box_on_a_wider_box_keeps_its_rim_where_its_mask_stops_short() {
+    // A box on a wider one, their fronts flush: one surface to the depth. Its mask a pixel or two
+    // short of its border leaves the rim along the lower box in no mask, one side with the
+    // lower box, and the rim goes with it.
+    let lost: Vec<(isize, usize, usize)> = [-1, -2]
+        .into_iter()
+        .map(|by| {
+            let frame = frame_of(vec![
+                block(
+                    Vec3::new(0.5, 0.0, 0.03),
+                    Vec3::new(0.04, 0.08, 0.03),
+                    [200, 200, 30],
+                ),
+                block(
+                    Vec3::new(0.5, 0.0, 0.09),
+                    Vec3::new(0.04, 0.04, 0.03),
+                    [30, 30, 200],
+                ),
+            ]);
+            let frame = masked_by(frame, 2, by);
+            let scene = seen(&[&frame], &Scene::default());
+            let (under, _) = object_of(&scene, &frame, 1);
+            let (all, theirs) = labelled(&scene, &frame, 2, Label::Object(under));
+            (by, theirs, all)
+        })
+        .collect();
+    assert!(
+        lost.iter().all(|&(_, theirs, _)| theirs == 0),
+        "per pixels short, how many of the upper box's pixels are the lower box's, of all: \
+         {lost:?}"
+    );
+}
+
+/// `boxes` boxes 6 cm tall, side by side along y with their tops and fronts level, the first 10
+/// cm across and the rest 8, and between the first two a slab `thick` through, as long and as
+/// tall: one surface to the depth. Things 1, then the slab, 2, then the rest.
+fn boxes_about_a_slab(thick: f32, boxes: usize) -> Vec<Thing> {
+    let slab = block(
+        Vec3::new(0.5, 0.5 * thick, 0.03),
+        Vec3::new(0.04, 0.5 * thick, 0.03),
+        [30, 200, 30],
+    );
+    let after = (1..boxes).map(|k| {
+        block(
+            Vec3::new(0.5, thick + 0.04 + 0.08 * (k - 1) as f32, 0.03),
+            Vec3::new(0.04, 0.04, 0.03),
+            [30, 30, 200],
+        )
+    });
+    let first = block(
+        Vec3::new(0.5, -0.05, 0.03),
+        Vec3::new(0.04, 0.05, 0.03),
+        [200, 30, 30],
+    );
+    [first, slab].into_iter().chain(after).collect()
+}
+
+/// The object most of the pixels of `frame` that its masks number `mask` are in, and the share
+/// of them it holds, of those with a reading.
+fn object_under(scene: &Scene, frame: &Frame, mask: u32) -> (Option<usize>, f32) {
+    let mut held: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut all = 0;
+    for (i, label) in scene.labels[0].iter().enumerate() {
+        if frame.masks[i] == mask && frame.depth[i] > 0.0 {
+            all += 1;
+            if let Label::Object(object) = *label {
+                *held.entry(object).or_default() += 1;
+            }
+        }
+    }
+    let most = held.into_iter().max_by_key(|&(_, count)| count);
+    (
+        most.map(|(object, _)| object),
+        most.map_or(0.0, |(_, count)| count as f32 / all as f32),
+    )
+}
+
+#[test]
+fn a_slab_in_a_mask_of_its_own_between_a_box_in_none_and_one_in_another_is_an_object() {
+    // A slab 6 mm through, narrower than a window, between a box the model leaves out, the larger,
+    // and one it names: the slab is all there is of its mask, and a thing of its own.
+    let frame = frame_of(boxes_about_a_slab(0.006, 2)).masked(|thing| [0, 0, 2, 3][thing]);
+    let scene = seen(&[&frame], &Scene::default());
+    let (slab, share) = object_under(&scene, &frame, 2);
+    let (unmasked, masked) = (
+        object_of(&scene, &frame, 1).0,
+        object_of(&scene, &frame, 3).0,
+    );
+    assert!(
+        slab.is_some_and(|slab| slab != unmasked && slab != masked) && share > 0.9,
+        "the slab's mask is most in object {slab:?}, {share} of it; the boxes are objects \
+         {unmasked} and {masked}: {:?}",
+        scene.objects
+    );
+}
+
+#[test]
+fn a_slab_flush_beside_a_box_is_an_object_of_its_own_under_a_mask_of_its_own() {
+    // A slab 6 or 10 mm through flush against a box, tops level: one surface to the depth, and a
+    // model asked about the slab alone. Its mask is a thing narrower than a window, not the
+    // fringe of one, on exact depth and on depth as noisy as a real camera states.
+    for (thick, noisy) in [(0.006, false), (0.01, false), (0.006, true), (0.01, true)] {
+        let mut frame = frame_of(boxes_about_a_slab(thick, 1));
+        if noisy {
+            frame = frame.noisy(REAL, 1);
+        }
+        let frame = frame.masked(|thing| u32::from(thing == 2));
+        let scene = seen(&[&frame], &Scene::default());
+        let (slab, share) = object_under(&scene, &frame, 1);
+        let (box_, _) = object_of(&scene, &frame, 1);
+        assert!(
+            slab.is_some_and(|slab| slab != box_) && share > 0.9,
+            "{thick} m, noisy {noisy}: the slab's mask is most in object {slab:?}, {share} of \
+             it; the box is object {box_}: {:?}",
+            scene.objects
+        );
+    }
+}
+
 #[test]
 fn two_that_touch_are_two() {
     let frame = frame_of(vec![

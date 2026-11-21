@@ -242,20 +242,58 @@ thing in its own view only. `src/masks.rs` has the three rules. They act on the 
 tells apart: the robot's, the known shapes' and those outside the look's corners keep their labels
 whatever a mask says.
 
-- **Split.** A part that geometry made whose readings lie in more than one mask is divided along
-  the masks. Each side that fills a window, the least geometry makes a part of, is a part of its
-  own, with what its own readings hide and the creases they meet others in; fewer readings stay
-  with the largest side.
+- **Split.** A part that geometry made whose readings lie in more than one mask, or in a mask and
+  in none, is divided along them: the readings in no mask are a side as those in a mask are. A
+  side other than the part's largest, the one that fills the most windows, is a part of its own
+  where it fills a window, the least geometry makes a part of, and either is as wide as a window,
+  some reading of it having its whole window in it (the sliver rule's test), or lies in a mask
+  and either is more than half of all that mask covers in the view or the part's largest side
+  lies in another mask. Every other side stays with the part's largest side. A model's masks are
+  never exact to the pixel: a narrow side against readings in no mask is the fringe of a mask
+  whose body lies elsewhere, the rim of a thing just outside its mask or of a neighbour or the
+  table just inside it, unless it is all there is of a thin thing's mask; a narrow side beside
+  another mask is a thing the model names beside another. A side cut off takes what its own
+  readings hide and the creases they meet others in. A reading on a known shape in no mask, in a
+  part most of which lies in one, is the shape's again.
 - **Join.** The parts of a view more than half of whose readings lie in one mask are one object.
-- **Apart.** Two parts of a view that lie so in different masks are two objects, whatever else
-  would make them one.
+  Readings in no mask join nothing.
+- **Apart.** Two parts of a view that lie so in two different masks are two objects, whatever
+  else would make them one. A part in a mask and a part in none are not kept apart: where the
+  depth joins them, by another view, as a hollow's floor or as what hangs and what holds it up,
+  they are one. With one mask over a bowl on the cabinet in `libero-spatial-3-0` on
+  `rows4-stereo`, the bowl hangs on stray readings and is one object with the cabinet, as without
+  masks; with the truth as masks it is not. Keeping such parts apart as well breaks what a mask
+  that misses part of a thing still joins (a tray's floor its mask leaves out, a handle outside
+  the mask of the box it stands out of) and leaves a mask a few pixels short in pieces.
+
+A set of parts lies in the masks of every part joined to it so far, one a view at most: a part in
+no mask joined to one in a mask carries that mask into the joins after.
 
 The rest of a look is as without masks, as far as the three allow: parts of two views that show
 one surface are one object, taken from the two that share the most surface down, so that a part
 which would join two things of another view is one with the thing it shares most with; a
 hollow's floor is its walls'; and shapes, supports and ids are made of the result. Where two
-views' masks differ, each holds in its own view. With every view's masks empty, a look is
-geometry's alone.
+views' masks differ, each holds in its own view. With every view's masks empty, or every number
+0, a look is geometry's alone.
+
+A model's masks are never exact to the pixel. `cargo run --release --example score -- <set>
+--masks truth|one --border <pixels>` moves every mask's border in or out by that many pixels (with
+one mask, `--masks one`, each true object in view gets a look of its own whose masks are its
+pixels alone, as a model prompted for one thing gives; a mask grows over its neighbours too, and
+with the truth as masks over what shows none). Matched / merged / in pieces / missed of the 140
+over both cameras:
+
+| Set | Masks | 3 px short | 1 px short | exact | 1 px over | 3 px over |
+|---|---|---|---|---|---|---|
+| `rows4` | the truth | 126 / 0 / 14 / 0 | 133 / 0 / 7 / 0 | 135 / 0 / 5 / 0 | 135 / 0 / 5 / 0 | 135 / 0 / 5 / 0 |
+| | one | 126 / 0 / 14 / 0 | 133 / 0 / 7 / 0 | 135 / 0 / 5 / 0 | 135 / 0 / 5 / 0 | 134 / 4 / 2 / 0 |
+| `rows4-stereo` | the truth | 116 / 0 / 23 / 1 | 135 / 0 / 5 / 0 | 134 / 0 / 6 / 0 | 134 / 0 / 6 / 0 | 134 / 0 / 6 / 0 |
+| | one | 107 / 14 / 18 / 1 | 124 / 9 / 6 / 1 | 129 / 7 / 4 / 0 | 129 / 7 / 4 / 0 | 127 / 12 / 1 / 0 |
+| `rows4-stereo-filtered` | the truth | 121 / 0 / 19 / 0 | 134 / 0 / 6 / 0 | 134 / 0 / 6 / 0 | 134 / 0 / 6 / 0 | 134 / 0 / 6 / 0 |
+| | one | 116 / 9 / 15 / 0 | 130 / 3 / 6 / 1 | 132 / 2 / 5 / 1 | 133 / 2 / 4 / 1 | 131 / 6 / 3 / 0 |
+
+How that compares with Split before it asked a side's width, and what it leaves, is in "Where it
+stands".
 
 A model that needs prompts, points or boxes, takes two looks of one moment: look without masks,
 take a prompt from each object's pixels (`Scene::mask`), run the model, and look again with its
@@ -473,6 +511,50 @@ the run.
     that of the ramekin it stands on, 9% of it, and on `rows4-stereo` the cabinet's 118 in a
     bowl's, 3% of it.
   - No object shows no true object, on either set, by the same count.
+- **A mask a few pixels off its thing's border does about as well as an exact one**, by the table
+  in "Masks from a model" (`--masks truth|one --border <pixels>`). At 65ef83e, where Split cut every
+  side that filled a window, a mask 1 px short gave 39 / 0 / 101 / 0 on `rows4` with one mask,
+  12 / 3 / 125 / 0 and 23 / 0 / 117 / 0 on the stereo sets, and 39, 11 and 21 matched with the
+  truth; 3 px short 46, 30 and 27 matched with the truth; and 3 px over with one mask 106 / 33 /
+  1 / 0, 129 / 10 / 1 / 0 and 126 / 13 / 1 / 0: the rim just outside each mask, a pixel wide and
+  several windows long, was a part of its own that nothing joined back, and the fringe of a mask
+  grown over a neighbour was cut off the neighbour. What it leaves:
+  - **With one exact mask the stereo sets match fewer than at 65ef83e**: 129 / 7 / 4 / 0 and
+    132 / 2 / 5 / 1, from 132 / 2 / 6 / 0 and 134 / 0 / 6 / 0. Eight true objects over both
+    cameras, each a thing on or in another: on `rows4-stereo` the cabinet merges with the rack on
+    it (`libero-goal-1-1`), the bowl with the cookie box it stands on and the box with the bowl
+    (`libero-spatial-3-0`), the bowl with the ramekin under it and the ramekin with the bowl
+    (`libero-spatial-5-0`); on `rows4-stereo-filtered` no object holds most of the ramekin
+    (`libero-spatial-5-0`), and the bowl and the ramekin merge, each under a mask of its own
+    (`libero-spatial-5-1`). In each a strip narrower than a window lies in one part with the
+    masked thing and its unmasked neighbour: the neighbour's in the thing's part, which is what a
+    mask a pixel or two short leaves of the thing itself, or the thing's own in the neighbour's
+    part where it is not most of its mask, which is what a mask a pixel or two over takes of a
+    neighbour. Depth and mask together say the same of both, and no rule of Split tells them
+    apart.
+  - **A mask 1 px short leaves the ramekin in two pieces** in `libero-spatial-5-1` on `rows4`, with
+    one mask and with the truth (133 / 0 / 7 / 0, where asking the width alone between a mask and
+    none gave 134 / 0 / 6 / 0). Why is not traced.
+  - **A rim goes with any wide unmasked neighbour in its part**: a part's unmasked readings are one
+    side, whatever thing they are of. A box on a wider box, their fronts flush, under a mask 1 or
+    2 px short: 146 and 284 of its 1344 pixels are in the lower box's object, as at 65ef83e
+    (`a_box_on_a_wider_box_keeps_its_rim_where_its_mask_stops_short`, ignored).
+  - **At 3 px short what is left in pieces is what geometry already leaves apart**: a piece of the
+    thing with less than half its readings in the short mask, which no mask joins
+    (`libero-spatial-5-1` on `rows4`, the bowl on the ramekin under its mask alone: 163 of the
+    piece's 174 readings the bowl's, 50 of them in the mask; without masks the bowl is in two
+    pieces in that camera too).
+  - **With the truth as exact masks no row moves**, but a flat thing's readings on the table,
+    narrower than a window inside the table's part, stay the table's: in the table camera's
+    labels the stove's object holds 87 to 93% of its pixels on `rows4`, 85 to 94% and 88 to 95% on
+    the stereo sets, where it held 87 to 100%, 91 to 100% and 88 to 100%. At 1 and 3 px off the
+    truth's rows move as the table shows.
+  - **Asking a side's width costs nothing five alternated runs on one thread tell apart**, asked
+    only of the sides it may cut: 2614 against 2607 ms at the median for the 20 looks of
+    `rows4-stereo` with the truth as masks, and 21.9 against 22.3 s for its 140 looks under one
+    mask each, 65ef83e's the second, at a load from other work that spreads those runs from 21 to
+    25 s. Asked of every side of a view where any could be cut, it cost 1.3%, and of every side
+    of every view with masks, 2.7%.
 - **Two cameras' parts of one thing are not always joined.** On `rows4` the tomato sauce is
   matched in each camera and is two objects over both in 1 of its 2 looks, as the cookie box is
   in 4 of its 10: the 4 it is two in with the truth as masks, where what each camera sees of the

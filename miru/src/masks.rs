@@ -11,8 +11,15 @@
 //! as any other, and its part is a mask's thing's only where it lies inside that thing (`look`
 //! says).
 //!
-//! 1. **Split** ([`split`]). A part whose readings lie in more than one mask is divided along
-//!    the masks, into the sides that fill a window each.
+//! 1. **Split** ([`split`]). A part whose readings lie in more than one mask, or in a mask and
+//!    in none, is divided along them. Each side that fills a window, other than the part's
+//!    largest, is cut off where it is as wide as a window too, or where it lies in a mask and
+//!    either is more than half of all that mask covers in the view or the part's largest side
+//!    lies in another mask; any other stays with the part's largest side. A model's masks are
+//!    never exact to the pixel: a narrow side against readings in no mask is the fringe of a
+//!    mask whose body lies elsewhere, as the rim of a thing just outside its mask or of a
+//!    neighbour just inside it, unless it is all there is of a thin thing's mask; one between
+//!    two masks is a thing the model names beside another.
 //! 2. **Join** ([`joins`]). The parts most of whose readings lie in one mask are one object.
 //! 3. **Apart** ([`lies`]). Parts that lie in two masks of one view are two objects, whatever
 //!    else would make them one: a look joins none of them, by another view, as a hollow's floor
@@ -20,7 +27,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::segment::NONE;
+use crate::segment::{self, NONE};
 use crate::view::{Kind, Seen};
 
 /// Per part and mask (0 for the readings in none), the readings of the part that lie in the
@@ -38,11 +45,15 @@ fn sides(of: &[u32], share: &[f32], masks: &[u32]) -> BTreeMap<(u32, u32), (usiz
 }
 
 /// Divides each of the `count` parts, which `of` gives per pixel, whose readings lie in more
-/// than one of `masks` along them: every side that fills a window is a part of its own, and the
-/// readings of a smaller one stay with the largest side, a window being what geometry makes no
-/// part of less than either (`share` is each pixel's share of one). The readings in no mask are
-/// a side as those in one are. `masks` is one view's, a number per pixel or empty, and empty
-/// leaves the parts as they are.
+/// than one of `masks` along them. The readings in no mask are a side as those in one are. A
+/// side other than the part's largest is a part of its own where it fills a window, a window
+/// being what geometry makes no part of less than (`share` is each pixel's share of one), and
+/// either is as wide as one, some reading of it having its whole window in it
+/// ([`segment::holding`], of the radius `wanted` gives each reading), or lies in a mask and
+/// either holds more than half of the readings in parts that lie in that mask in the view or
+/// the part's largest side lies in another mask. Any other side's readings stay with the
+/// part's largest side. `masks` is one view's, a number per pixel or empty, and empty leaves
+/// the parts as they are.
 ///
 /// The largest side keeps the part's number; the others are numbered after the parts there
 /// were, and `count` raised by them. Returned is which were cut off: per part and mask, the
@@ -56,6 +67,7 @@ pub(crate) fn split(
     of: &mut [u32],
     count: &mut usize,
     share: &[f32],
+    wanted: &[usize],
     masks: &[u32],
     seen: &Seen,
 ) -> HashMap<(u32, u32), u32> {
@@ -80,9 +92,47 @@ pub(crate) fn split(
             *part = NONE;
         }
     }
-    for (&(part, mask), &(_, windows)) in &sides {
-        if windows >= 1.0 && mask != largest[part as usize].0 {
-            cut.insert((part, mask), *count as u32);
+    // Per mask, the readings in parts that lie in it.
+    let mut covers: HashMap<u32, usize> = HashMap::new();
+    for (&(_, mask), &(readings, _)) in &sides {
+        *covers.entry(mask).or_default() += readings;
+    }
+    // The sides that may be cut, in the order of `sides`, each with whether its mask says it is
+    // a thing however narrow: all there is of a thin thing's mask, or a thing the model names
+    // beside another.
+    let candidates: Vec<((u32, u32), bool)> = (sides.iter())
+        .filter(|&(&(part, mask), &(_, windows))| {
+            windows >= 1.0 && mask != largest[part as usize].0
+        })
+        .map(|(&(part, mask), &(readings, _))| {
+            let beside = largest[part as usize].0 != 0;
+            let named = mask != 0 && (2 * readings > covers[&mask] || beside);
+            ((part, mask), named)
+        })
+        .collect();
+    // Whether each side that only its width may cut holds a window, those sides numbered in
+    // their order and every other pixel in none.
+    let asked: HashMap<(u32, u32), u32> = (candidates.iter())
+        .filter(|&&(_, named)| !named)
+        .enumerate()
+        .map(|(number, &(side, _))| (side, number as u32))
+        .collect();
+    let holds = if asked.is_empty() {
+        vec![]
+    } else {
+        let side_of: Vec<u32> = (of.iter().zip(masks))
+            .map(|(&part, &mask)| asked.get(&(part, mask)).copied().unwrap_or(NONE))
+            .collect();
+        segment::holding(seen, &side_of, wanted, 0..asked.len() as u32)
+    };
+    for (side, named) in candidates {
+        let wide = || {
+            asked
+                .get(&side)
+                .is_some_and(|&n| holds.get(n as usize) == Some(&true))
+        };
+        if named || wide() {
+            cut.insert(side, *count as u32);
             *count += 1;
         }
     }
