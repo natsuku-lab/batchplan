@@ -5183,8 +5183,8 @@ fn points_lie_on_the_nearest_shape_within_their_reach() {
         .map(|i| reaches[(i + i / 300) % reaches.len()])
         .collect();
     // Points among the rows with a coordinate that is no number and a reach: the first of a run
-    // (runs are 1,024 points), the middle of another and the last of a third.
-    let unnumbered = [3 * 1024, 40 * 1024 + 512, 101 * 1024 - 1];
+    // (runs are 64 points), the middle of another and the last of a third.
+    let unnumbered = [48 * 64, 648 * 64 + 32, 1616 * 64 - 1];
     for (axis, &i) in unnumbered.iter().enumerate() {
         points[i][axis] = f32::NAN;
         reach[i] = 0.01;
@@ -5253,9 +5253,9 @@ fn points_lie_on_the_nearest_shape_within_their_reach() {
     // a run's box taken over it would leave them on none.
     for i in unnumbered {
         assert!(points[i].is_nan() && reach[i] >= 0.0 && wanted[i].is_none());
-        let run = &wanted[i / 1024 * 1024..][..1024];
+        let run = &wanted[i / 64 * 64..][..64];
         let on = run.iter().flatten().count();
-        assert!(on > 500, "{on} points on shapes in the run of point {i}");
+        assert!(on > 16, "{on} points on shapes in the run of point {i}");
     }
 }
 
