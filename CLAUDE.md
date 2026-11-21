@@ -45,6 +45,7 @@ cargo run --release --features lerobot --example datagen -- --lerobot data/lerob
 REMOTE=user@host SSH_OPTS='...' scripts/sync.sh '<command>'     # rsync to ~/batchplan on a GPU box and run there
 (cd demos && cargo clippy --release --all-targets && cargo run --release --bin handover -- 16 --save handover.rrd)   # Rerun demos: handover, pick, tasks, perception, replan (demos/README.md)
 (cd python && BATCHPLAN_REQUIRE_GPU=1 uv run pytest)            # the Python bindings (python/, PyO3 and maturin), built and tested through `import batchplan`
+cargo test --release -p miru                                    # miru (miru/), the workspace's other crate: what depth cameras show, as objects; its own rules and commands are in miru/AGENTS.md
 ```
 
 Checking a LeRobot export with the real package needs a git-ignored `.venv`:
@@ -87,6 +88,7 @@ These decisions are settled. Keep to them unless the user decides otherwise.
   - The core has no middleware and reads no environment variables; only tests and examples do (`BATCHPLAN_REQUIRE_GPU`, `BENCH_LLVMPIPE`).
   - The Python bindings are a crate of their own (`python/`), an adapter over the public API: each value class holds the Rust value and names every field (`value_class!`), so a field added in Rust fails to build there until it is bound.
   - LeRobot export is behind the `lerobot` cargo feature, so the Arrow/Parquet dependencies stay optional.
+  - `miru/` is a crate of its own in the workspace, not published: what depth cameras show, as objects. It is built on the library's public interface and the library never depends on it, in code, tests, examples or docs' code; what it needs of the library that the library does not offer becomes a public primitive of the library's first (`Device::install`, `sdf::on_shapes`).
 
 ## Invariants when editing
 

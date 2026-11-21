@@ -420,7 +420,7 @@ fn eigen(matrix: DMat3) -> [(f64, DVec3); 3] {
 
 #[cfg(test)]
 mod tests {
-    use batchplan::{DepthImage, Intrinsics, Pose};
+    use batchplan::{DepthImage, Device, Intrinsics, Pose, Robot, RobotOptions};
     use glam::{Quat, Vec3};
 
     use super::*;
@@ -476,7 +476,14 @@ mod tests {
             robot: &[],
             masks: &[],
         };
-        let seen = Seen::of(&view, &[], &LookOptions::default(), 1);
+        // A device to read the view on: nothing of its robot is read.
+        let urdf = r#"<robot name="none"><link name="base"/><link name="tip"/>
+            <joint name="joint" type="revolute"><parent link="base"/><child link="tip"/>
+            <axis xyz="0 0 1"/><limit lower="-1" upper="1" velocity="1" effort="1"/></joint>
+            </robot>"#;
+        let robot = Robot::from_urdf(urdf, &RobotOptions::default()).expect("a robot of one joint");
+        let device = Device::cpu_threads(&robot, 1).expect("a CPU device");
+        let seen = Seen::of(&device, &view, &[], &LookOptions::default(), 1).expect("a view");
         let i = 4 * 9 + 6;
         let with = |fit: [f32; 3]| {
             let mut planes = Planes {

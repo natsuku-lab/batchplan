@@ -910,30 +910,27 @@ the run.
     what hangs (`attach`), its floor meeting the walls along no crease the planes tell, and stays a
     box that is not solid; stating a real camera's noise it is open at the top
     (`a_lidless_box_seen_from_above_is_open_at_the_top_on_every_side`).
-- **Time**: a look of two 640 by 480 views takes 45 ms at the median on `rows4` and 50 ms on
-  `rows4-stereo` on an M4 Pro's 14 threads, 68 and 74 ms on two, and 108 and 117 ms on one
-  (`--threads`; the best of five runs of each set on 14 and on two threads and of seven on one,
-  of 69c089f's code before c4ba554's one line on an object's flag lay under it, alternated with
-  runs of 0fe68c2's so, which took 66 and 74, 84 and 90, and 132 and 149 ms, at a load of 4.9
-  to 8.6 from other work). The scenes are the same to the bit on 1, 2 and 14 threads, and as at
-  0fe68c2 (`--digest` on main, with and without truth masks, `--again`, three sets). On one
-  thread, reading the views takes about 42 ms of a look, which is where a caller's known shapes
-  are measured against every reading, telling them apart 43 ms on `rows4` and 55 on
-  `rows4-stereo`, and putting them together 25 ms (temporary timers at 69c089f, medians, at a
-  load of about 5). Each view is read in bands, the views are told apart at once, each on its
-  share of the look's threads, and what a view's telling apart does for each pixel by itself (the
-  links, the planes' fits, the normals) is done in bands of rows on that share; so are, in putting
-  them together, the objects' fits and the views held against one another. On 14 threads telling
-  the views apart takes 17 ms of a look on `rows4` and 22 on `rows4-stereo`, most of it one
-  thread's per view: the growth of the seeds over the readings beside them, 3 and 7 ms a view,
-  the floods that find the seeds, 3, and the sums the planes are fitted from, 2. Putting them
-  together takes 22 ms; at a413702 about 15 ms of it was one thread's, most of it gathering the
-  readings into objects three or four times a look (9 ms). No GPU is used. Asking which strips
-  hold a window adds nothing three alternated rounds tell apart: the best of three is 112 and 120
-  ms on one thread on `rows4` and `rows4-stereo`, and 46 and 52 ms on 14, where 4e9f9c1's code
-  took 115 and 126, and 46 and 51, at a load of 5.9 to 14.
+- **Time**: a look of two 640 by 480 views among a cell's 17 fixtures takes 43 ms at the median
+  on `rows4` and 46 ms on `rows4-stereo-filtered` on an M4 Pro's 14 threads, 52 and 58 ms on two,
+  and 78 and 91 ms on one (`cargo run --release -p miru --example score -- <set> --again --digest
+  --threads <n>`: the median look of the best of three rounds, alternated with the same looks
+  through miru's own repository's code at 1323ca7, which took 47 and 52, 72 and 76, and 112 and
+  121 ms, at a load of 7 to 15 from other work). The scenes are the same to the bit on 1, 2 and
+  14 threads, and the same as that code's (`--digest`, with and without truth masks, four sets).
+  What the crate saves is in reading the views, where the known shapes are held against every
+  reading: batchplan's `sdf::on_shapes` turns each shape's rotation into its matrix once and
+  measures a shape only against the runs of readings that come within reach of its box, where
+  asking each shape for its distance at each reading took 40 ms of a one-thread look. What is
+  left is mostly one thread's. On 14 threads telling the views apart takes about 17 ms of a
+  look, most of it per view the growth of the seeds over the readings beside them, the floods
+  that find the seeds and the sums the planes are fitted from, and putting the objects together
+  about 25 ms (timers in miru's own repository at 7bbfb07). No GPU is used. What is done for each
+  pixel by itself, and could be a kernel, is about 3 ms a view on 14 threads; the sums are in
+  double precision, which a kernel on Metal does not have; and what each pixel's step gives is
+  held against a threshold, so a GPU's rounding would make a scene depend on the device.
 
 ## Working on it
 
-`AGENTS.md` has the design rules, the style and the working rules. `scripts/check.sh` runs every
-lint; `cargo test` runs the tests, which render their own scenes.
+`AGENTS.md` has miru's design rules, and the repository's `CLAUDE.md` the style and the working
+rules. From the repository's root, `scripts/check.sh` runs every lint and `cargo test -p miru` the
+tests, which render their own scenes.

@@ -121,7 +121,9 @@ pub struct Look<'a> {
     /// of the world the robot plans in, in the look's frame. What reads on one and stands in
     /// front of none of it is its own ([`Label::Known`]), and no object is made of it; a reading
     /// on one is an object's where the object's own surface runs through it, as the foot of a box
-    /// and a plate's floor do. A scene names them by their index here.
+    /// and a plate's floor do. A scene names them by their index here. A shape given as a
+    /// distance grid is known no finer than its voxels: a reading is on it by the grid's own
+    /// distances, which a camera that reads to less than a voxel tells from the shape's.
     pub known: &'a [Obstacle],
 }
 
@@ -149,6 +151,12 @@ impl Default for LookOptions {
 ///
 /// An object that lies where one of `previous` did keeps that one's id; any other takes a new
 /// one. The first look of a session passes `Scene::default()`.
+///
+/// The look runs on `device`'s threads and reads nothing of its robot. The scene does not depend
+/// on how many threads there are: each view is read in bands and told apart by itself, and what
+/// is done per object or per two views (their measuring, which of them show one surface, whether
+/// a view shows where an object stood) is done item by item, the results taken in the items'
+/// order.
 ///
 /// What the look cannot see stays as `previous` had it. A view cannot see an object where its
 /// pixels are the robot's or have no reading, where what they read stands before the object, and
@@ -184,15 +192,20 @@ pub fn look(device: &Device, look: &Look<'_>, previous: &Scene, o: &LookOptions)
     for (index, view) in look.views.iter().enumerate() {
         check(index, view)?;
     }
-    device.install(|| told(look, previous, o, rayon::current_num_threads()))
+    device.install(|| checked(device, look, previous, o, rayon::current_num_threads()))
 }
 
-/// [`look`] of frames and options that have been checked, on the `threads` threads it was called
-/// on.
-fn told(look: &Look<'_>, previous: &Scene, o: &LookOptions, threads: usize) -> Result<Scene> {
-    let seen: Vec<Seen> = (look.views.iter())
-        .map(|view| Seen::of(view, look.known, o, threads))
-        .collect();
+/// [`look`] of frames and options that have been checked, on `device`'s threads, of which there
+/// are `threads`.
+fn checked(
+    device: &Device,
+    look: &Look<'_>,
+    previous: &Scene,
+    o: &LookOptions,
+    threads: usize,
+) -> Result<Scene> {
+    let seen = (look.views.iter()).map(|view| Seen::of(device, view, look.known, o, threads));
+    let seen: Vec<Seen> = seen.collect::<Result<_>>()?;
     let parts: Vec<Parts> = threads::each(threads, seen.len(), |view| {
         let threads = threads::share(threads, seen.len(), view);
         segment::parts(&seen[view], look.views[view].masks, threads)

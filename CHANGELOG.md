@@ -19,6 +19,18 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   back as obstacles. It is built on the library, which does not depend on it, and a look runs on
   the device's threads, the scene the same whatever their number. `miru/README.md` has what it
   tells apart and where it stands.
+- `sdf::on_shapes(&device, &shapes, &points, &reach)` says which of a world's shapes each point
+  lies on: per point, the shape nearest it and the distance to its surface, where that is no
+  more than the point's reach, and none for a point marked with a negative reach. A camera's
+  readings are held so against the shapes a cell is known to hold, each reading reaching as far
+  as its camera's noise allows at its depth. The points are taken a run at a time on the device's
+  threads, each shape's rotation turned into its matrix once and a shape measured only against
+  the runs that come within reach of its box. `miru` holds every reading of a look against its
+  known shapes with it: a look of two 640×480 views among a cell's 17 fixtures takes 78 ms on
+  one thread of the M4 Pro where asking each shape's distance at each reading took 139, and 43
+  on its 14 threads where that took 50, the scenes the same to the bit
+  (`cargo run --release -p miru --example score -- <set> --again --digest --threads <n>` on a set
+  of recorded looks, the median look of the best of three alternated rounds).
 - `Device::install(op)` runs `op` on the device's threads, so that rayon's parallel loops inside
   it run there and not on the global pool: how a crate built on the library, as `miru` is, keeps
   its work on the threads the device was given.

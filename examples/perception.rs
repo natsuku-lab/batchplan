@@ -16,7 +16,7 @@ use anyhow::Result;
 use batchplan::rng::Rng;
 use batchplan::{
     DepthFilter, DepthImage, Device, Intrinsics, Occlusion, OccupancyMap, Pose, Robot, RobotMask,
-    RobotOptions, SdfGrid, SdfOptions, SphereOptions, Surface, World,
+    RobotOptions, SdfGrid, SdfOptions, SphereOptions, Surface, World, sdf,
 };
 use glam::{Mat3, Quat, Vec3};
 use rayon::prelude::*;
@@ -245,6 +245,18 @@ fn main() -> Result<()> {
         println!(
             "  the scene's {} shapes left out too: median {median:.2} ms, best {best:.2} ({on} pixels)",
             scene.obstacles.len()
+        );
+        // Which of those shapes each reading off the robot lies on, within the same margin: what
+        // a library that tells objects apart asks of the shapes a world is known to hold.
+        let (at, reach): (Vec<Vec3>, Vec<f32>) = (points.iter())
+            .map(|p| p.map_or((Vec3::ZERO, -1.0), |p| (p, 0.004)))
+            .unzip();
+        let (median, best, on) = timed(21, || {
+            sdf::on_shapes(&device, &scene.obstacles, &at, &reach)
+        });
+        let on = on?.iter().flatten().count();
+        println!(
+            "  which of the shapes each reading lies on: median {median:.2} ms, best {best:.2} ({on} readings on one)"
         );
         // The pixel beside each outline that a camera reads toward what lies behind, at the
         // shapes' margin: behind the robot alone, where the table and the objects around the

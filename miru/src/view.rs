@@ -1,9 +1,10 @@
 //! One view's readings as points, sorted into what is already known (nothing, the robot) and what
 //! is left to tell apart: the readings on a known shape, and those on none.
 
-use batchplan::{Intrinsics, Obstacle, Pose};
+use batchplan::{Device, Intrinsics, Obstacle, Pose, sdf};
 use glam::Vec3;
 
+use crate::error::Result;
 use crate::look::{LookOptions, Noise, View};
 use crate::threads;
 
@@ -45,14 +46,23 @@ pub(crate) struct Seen {
 
 impl Seen {
     /// What `view` reads: its sizes, intrinsics and pose have been checked. Each reading is
-    /// sorted by itself, so the image is read in bands on up to `threads` threads.
-    pub(crate) fn of(view: &View<'_>, known: &[Obstacle], o: &LookOptions, threads: usize) -> Self {
+    /// sorted by itself, so the image is read in bands on up to `threads` threads, and the
+    /// readings are held against the known shapes on `device`'s ([`sdf::on_shapes`]).
+    pub(crate) fn of(
+        device: &Device,
+        view: &View<'_>,
+        known: &[Obstacle],
+        o: &LookOptions,
+        threads: usize,
+    ) -> Result<Self> {
         let image = &view.image;
         let Intrinsics { fx, fy, cx, cy } = image.intrinsics;
         let camera = Pose::new(image.camera.position, image.camera.rotation.normalize());
         let width = image.width;
         let pixels = image.depth.len();
-        // Where pixel `i` reads, one over its depth, what it is, and how far off a known shape.
+        // Where pixel `i` reads, one over its depth, what it is before the known shapes are
+        // asked, and how far from one a reading there may lie and be on it: less than nothing
+        // for a pixel that is asked of none.
         let read = |i: usize| {
             let z = image.depth[i];
             // A depth too small or too large for its inverse and its noise to be numbers is no
@@ -60,51 +70,60 @@ impl Seen {
             let sigma = view.noise.at(z);
             let spread = sigma / (z * z);
             if !(z.is_finite() && z > 0.0 && (1.0 / z).is_finite() && spread.is_finite()) {
-                return (Vec3::ZERO, 0.0, Kind::Nothing, 0.0);
+                return (Vec3::ZERO, 0.0, Kind::Nothing, -1.0);
             }
             // Integer pixel coordinates are pixel centres, as in OpenCV and batchplan.
             let (u, v) = ((i % width) as f32, (i / width) as f32);
             let point = camera.rotation * Vec3::new((u - cx) / fx * z, (v - cy) / fy * z, z)
                 + camera.position;
-            let (kind, off) = if view.robot.get(i).copied().unwrap_or(false) {
-                (Kind::Robot, 0.0)
+            let (kind, reach) = if view.robot.get(i).copied().unwrap_or(false) {
+                (Kind::Robot, -1.0)
             } else if !(point.cmpge(o.lower_corner).all() && point.cmple(o.upper_corner).all()) {
-                (Kind::Nothing, 0.0)
+                (Kind::Nothing, -1.0)
             } else {
-                let distances = known.iter().map(|shape| shape.distance(point).value);
-                let nearest = distances.enumerate().min_by(|a, b| a.1.total_cmp(&b.1));
-                match nearest {
-                    Some((index, distance)) if distance <= SIGMAS * sigma => {
-                        (Kind::Known(index), distance)
-                    }
-                    _ => (Kind::Open, 0.0),
-                }
+                (Kind::Open, SIGMAS * sigma)
             };
-            (point, 1.0 / z, kind, off)
+            (point, 1.0 / z, kind, reach)
         };
-        let band = pixels.div_ceil(threads).max(1);
-        let bands = threads::each(threads, pixels.div_ceil(band), |number| {
-            let readings = (number * band..pixels.min((number + 1) * band)).map(read);
-            readings.collect::<Vec<_>>()
-        });
         let mut seen = Seen {
             width,
             height: pixels / width,
             intrinsics: image.intrinsics,
             noise: view.noise,
             camera,
-            points: Vec::with_capacity(pixels),
-            inverse: Vec::with_capacity(pixels),
-            kinds: Vec::with_capacity(pixels),
-            off: Vec::with_capacity(pixels),
+            points: vec![Vec3::ZERO; pixels],
+            inverse: vec![0.0; pixels],
+            kinds: vec![Kind::Nothing; pixels],
+            off: vec![0.0; pixels],
         };
-        for (point, inverse, kind, off) in bands.into_iter().flatten() {
-            seen.points.push(point);
-            seen.inverse.push(inverse);
-            seen.kinds.push(kind);
-            seen.off.push(off);
-        }
-        seen
+        let mut reach = vec![-1.0; pixels];
+        let band = pixels.div_ceil(threads).max(1);
+        let bands = (seen.points.chunks_mut(band))
+            .zip(seen.inverse.chunks_mut(band))
+            .zip(seen.kinds.chunks_mut(band).zip(reach.chunks_mut(band)));
+        threads::each_piece(
+            threads,
+            bands.collect(),
+            |number, ((points, inverse), (kinds, reach))| {
+                for (k, i) in (number * band..).take(points.len()).enumerate() {
+                    (points[k], inverse[k], kinds[k], reach[k]) = read(i);
+                }
+            },
+        );
+        // A reading no farther from the known shape nearest it than a reading on it may read is
+        // on that shape.
+        let on = sdf::on_shapes(device, known, &seen.points, &reach)?;
+        let bands = (seen.kinds.chunks_mut(band))
+            .zip(seen.off.chunks_mut(band))
+            .zip(on.chunks(band));
+        threads::each_piece(threads, bands.collect(), |_, ((kinds, off), on)| {
+            for (k, on) in on.iter().enumerate() {
+                if let Some(on) = on {
+                    (kinds[k], off[k]) = (Kind::Known(on.shape), on.distance);
+                }
+            }
+        });
+        Ok(seen)
     }
 
     /// Whether pixel `i` has a reading to tell apart: one inside the look's corners that is not
