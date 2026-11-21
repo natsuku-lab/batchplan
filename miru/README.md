@@ -1075,26 +1075,30 @@ the run.
     what hangs (`attach`), its floor meeting the walls along no crease the planes tell, and stays a
     box that is not solid; stating a real camera's noise it is open at the top
     (`a_lidless_box_seen_from_above_is_open_at_the_top_on_every_side`).
-- **Time**: a look of two 640 by 480 views among a cell's 17 fixtures takes 44 ms at the median
-  on `rows4` and 50 ms on `rows4-stereo-filtered` on an M4 Pro's 14 threads, 53 and 60 ms on two,
-  and 78 and 94 ms on one; a later look with open boxes in it (`hand-in-drawer`) 82, 92 and
-  130 ms (`cargo run --release -p miru --example score -- <set> --again --digest --threads <n>`:
+- **Time**: a look of two 640 by 480 views among a cell's 17 fixtures takes 35 ms at the median
+  on `rows4` and 40 ms on `rows4-stereo-filtered` on an M4 Pro's 14 threads, 46 and 52 ms on two,
+  and 75 and 89 ms on one; a later look with open boxes in it (`hand-in-drawer`) 57, 70 and
+  110 ms (`cargo run --release -p miru --example score -- <set> --again --digest --threads <n>`:
   the median look of the best of three rounds, alternated with the same looks through miru's
-  own repository's code at dd15ef3, which took 48 and 55, 74 and 78, and 114 and 124 ms, and 86,
-  113 and 165 on the later looks, at a load of 6 to 9 from other work). The scenes are the same
+  own repository's code at dd15ef3, which took 48 and 53, 73 and 77, and 113 and 123 ms, and 84,
+  114 and 163 on the later looks, at a load of 6 to 17 from other work). The scenes are the same
   to the bit on 1, 2 and 14 threads, and the same as that code's (`--digest`: ten sets, with no
   masks, with the truth as masks and with one mask at a time).
-  What the crate saves is in reading the views, where the known shapes are held against every
-  reading: batchplan's `sdf::on_shapes` turns each shape's rotation into its matrix once and
+  Where the crate is ahead of that code: the known shapes are held against every reading by
+  batchplan's `sdf::on_shapes`, which turns each shape's rotation into its matrix once and
   measures a shape only against the runs of readings that come within reach of its box, where
-  asking each shape for its distance at each reading took 40 ms of a one-thread look. What is
-  left is mostly one thread's. On 14 threads telling the views apart takes about 17 ms of a
-  look, most of it per view the growth of the seeds over the readings beside them, the floods
-  that find the seeds and the sums the planes are fitted from, and putting the objects together
-  about 25 ms (timers in miru's own repository at 7bbfb07). No GPU is used. What is done for each
-  pixel by itself, and could be a kernel, is about 3 ms a view on 14 threads; the sums are in
-  double precision, which a kernel on Metal does not have; and what each pixel's step gives is
-  held against a threshold, so a GPU's rounding would make a scene depend on the device.
+  asking each shape for its distance at each reading took 40 ms of a one-thread look; a look
+  gathers its objects' readings in bands on its threads; an object is measured against no
+  earlier shape it lies far from, and against the others pair by pair on the threads; and a box
+  open at the top makes its parts once for all the points asked of it. What is left on 14
+  threads is mostly one thread's: telling the views apart takes about 18 ms of a first look, per
+  view the floods that find the seeds 2.7 ms, the growth of the seeds over the readings beside
+  them 3.3 (7.2 on a stereo camera's depth), the sums the planes are fitted from 2.1; those sums
+  made on several threads were no faster, the step being bound by memory. No GPU is used. What
+  is done for each pixel by itself, and could be a kernel, is about 3 ms a view on 14 threads;
+  the sums are in double precision, which a kernel on Metal does not have; and what each pixel's
+  step gives is held against a threshold, so a GPU's rounding would make a scene depend on the
+  device.
 
 ## Working on it
 

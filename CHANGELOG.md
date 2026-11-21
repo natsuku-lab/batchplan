@@ -22,6 +22,15 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   built on the library, which does not depend on it, and a look runs on the device's threads,
   the scene the same whatever their number. `miru/README.md` has what it tells apart and where it
   stands.
+- A look of `miru`'s is faster with every scene the same: its objects' readings are gathered in
+  bands on the look's threads, an object is measured against no earlier shape it lies far from and
+  against the others pair by pair on the threads, a box open at the top makes its parts once for
+  all the points asked of it, its room asks how far its floor reaches four times where it asked
+  twelve, and the hull's filter takes each side once. The median look of two 640×480 views on
+  the M4 Pro's 14 threads: 44 to 35 ms on first looks, 82 to 57 on later looks with open boxes;
+  on one thread 78 to 75 and 130 to 110 (`cargo run --release -p miru --example score -- <set>
+  --again --digest --threads <n>`, the best of three rounds alternated with miru's own
+  repository's code, whose scenes it gives to the bit).
 - `sdf::on_shapes(&device, &shapes, &points, &reach)` says which of a world's shapes each point
   lies on: per point, the shape nearest it and the distance to its surface, where that is no
   more than the point's reach, and none for a point marked with a negative reach. A camera's
