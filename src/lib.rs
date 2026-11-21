@@ -100,7 +100,7 @@ pub use spheres::{LinkQualification, Qualification, SphereGeometry, SphereOption
 pub use surface::{Grasp, Surface, grasps_on};
 pub use task::{
     CandidateStop, GraspOptions, Pick, Place, TaskFailure, TaskOptions, TaskPlan, TaskResult,
-    TaskStep, grasps, pick, place, place_poses,
+    TaskStep, Turn, grasps, pick, place, place_poses, turn,
 };
 pub use timing::{HandSpeed, JointState, Near, Trajectory, time};
 pub use tool_path::{ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, follow};
