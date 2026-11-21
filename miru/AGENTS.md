@@ -13,6 +13,8 @@ Run from the repository's root.
 cargo test -p miru                                     # unit tests, tests/look.rs on rendered scenes, the scorer's own rules, the README's and lib.rs's code
 scripts/check.sh                                       # the repository's lints, miru's among them: run before every push
 cargo run --release -p miru --example score -- <set> [--recorded | --masks truth|one [--border <pixels>]] [--again] [--noise <factor>] [--shares] [--offsets] [--twin <set>] [--rooms] [--threads <n>] [--images <dir>] [--digest] [run ...]   # score recorded looks against the simulator's truth (--recorded: their executor's; --masks truth: miru's with the truth as its masks; --masks one: each truth object from a look of its own whose masks are its pixels alone, as a model prompted for one thing gives, refused with --again, --offsets, --shares, --twin, --rooms and --images; --border: every mask's border moved out by that many pixels, or in where negative, as a model's masks are never exact; --again: each look's frames a second time; --noise: every view's stated noise multiplied by the factor; --shares: per kind, how much of it is an object's, a known shape's or no one's; --offsets: per kind, the median distance from above of a matched object's middle from the truth's, and how many matched ones are solid; --twin: the same scenes on other depth, each object matched in both held against itself, per kind: how much its half sizes exceed the twin's, and how many are round and solid where the twin is; --rooms: per kind, how many of a thing's own readings lie in the room of its object's solid box open at the top, and how many of another thing's inside a solid object's solids, by more than three deviations of their camera's noise, and the ten objects that hold the most of each; --threads: how many threads a look may use, the machine's by default)
+cargo test --release -p miru --test truth -- --nocapture   # the truth table: scenes built from known things, read through three cameras (the simulator's exact depth, an Intel RealSense D435, a D405, the two through batchplan's filter), a row per scene, camera and thing with what `look` made of it against what it is; what holds is asserted, what does not is a gap listed in the file
+cargo test --release -p miru --features gpu --test batchplan   # the fit with batchplan: a look's output through the library's own calls, on the CPU and the GPU
 cargo run --release -p miru --example score -- <set> --again --digest [--masks truth] [--threads <n>]   # one hash over every scene the set's looks give, the second looks' too, and nothing else: a change meant to leave the results alone, as one for speed, prints the same digest before and after, on both sets, with and without masks, on 1, 2 and the default threads
 ```
 
@@ -73,6 +75,12 @@ The repository's (`CLAUDE.md`, Style), with its lints (`Cargo.toml`'s workspace 
 
 The repository's (`CLAUDE.md`, Working rules), and:
 
+- **The crate has a reviewer of its own** (`.claude/agents/miru-reviewer.md`), run once on each
+  change under `miru/` before it is pushed. It holds what the change claims against the truth
+  table through all three cameras, then its fit with batchplan, then the rest.
+- **A gap in the truth table is closed by a change, never by the table.** A row that starts to
+  hold moves out of the file's gap list in the change that made it hold; an allowance is the
+  camera's stated noise and a pixel's width, and stays so.
 - **Look at the picture before reasoning about it.** When an object or a shape comes out wrong,
   open that look's label picture beside the camera's colour image (Commands) before tracing or
   designing anything. The two together show in a glance what a table of sizes hides: which

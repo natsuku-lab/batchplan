@@ -12,20 +12,19 @@
 //! Where a view has masks, those of a model that sees what the renderer does, they join what
 //! the depth shows no connection between and divide what it shows as one surface.
 
+#[allow(dead_code, reason = "each test file uses part of it")]
 mod common;
 
 use std::collections::BTreeMap;
 
 use batchplan::{Error, Obstacle};
 use common::{
-    Frame, Thing, ball, block, bowl, can, cup, device, device_of, known, known_as_grid, looking,
-    ring, table, turned, without,
+    EYE, Frame, MIDDLE, Thing, a_box, ball, block, bowl, can, cup, device, device_of, known,
+    known_as_grid, looking, ring, sizes, standing_bowl, table, thin_tray, tray_with_block, turned,
+    without,
 };
 use glam::{Quat, Vec2, Vec3};
 use miru::{Label, Look, LookOptions, Noise, Object, Scene, Shape, Support};
-
-/// Where the tests' camera stands: before the table, looking down on it at about 40 degrees.
-const EYE: Vec3 = Vec3::new(1.1, 0.0, 0.5);
 
 /// The frame the tests' camera reads of the table (thing 0) with `things` on it.
 fn frame_of(things: Vec<Thing>) -> Frame {
@@ -176,30 +175,6 @@ fn low(frame: &Frame, thing: usize) -> usize {
     let pixels = 0..frame.shows.len();
     let low = pixels.filter(|&i| frame.shows[i] == Some(thing) && on_the_table(frame, i));
     low.count()
-}
-
-/// The half sizes of a box seen from above (the lesser first) or twice a cylinder's radius, and
-/// the shape's middle and half height.
-fn sizes(shape: &Shape) -> ([f32; 2], Vec3, f32) {
-    match *shape {
-        Shape::Cuboid {
-            center,
-            half_extents: half,
-            ..
-        }
-        | Shape::OpenBox {
-            center,
-            half_extents: half,
-            ..
-        } => ([half.x.min(half.y), half.x.max(half.y)], center, half.z),
-        Shape::Cylinder {
-            center,
-            radius,
-            half_height,
-            ..
-        } => ([radius, radius], center, half_height),
-        _ => panic!("a shape these tests do not know: {shape:?}"),
-    }
 }
 
 #[test]
@@ -1780,20 +1755,12 @@ fn a_depth_no_camera_reads_changes_nothing_else() {
     }
 }
 
-/// A bowl with a wall 4 mm through: round about one axis, its rim too thin to show.
-fn standing_bowl(foot: Vec3) -> Thing {
-    bowl(foot, 0.03, 0.056, 0.05, 0.004, [40, 40, 40])
-}
-
 /// The same bowl with a wall 8 mm through. To the tests' camera its rim shows as a strip of its
 /// own between its outside and its inside, too thin for a plane, which only hanging over the
 /// hollow makes one with the rest (`a_thick_walled_bowl_is_one_object`).
 fn thick_bowl(foot: Vec3) -> Thing {
     bowl(foot, 0.03, 0.056, 0.05, 0.008, [40, 40, 40])
 }
-
-/// The middle of the table, where the tests' bowls stand.
-const MIDDLE: Vec3 = Vec3::new(0.5, 0.0, 0.0);
 
 /// The noise of a real camera: 2.8 mm at 1 m, growing with the square of the depth, as the
 /// recorded sets' table camera states.
@@ -2868,29 +2835,6 @@ fn a_plate_keeps_the_floor_that_reads_on_the_table() {
         "{known} of the table's {all} pixels are its own"
     );
     assert_eq!(scene.objects[0].on, Some(Support::Known(0)));
-}
-
-/// The box of the tests' first scene.
-fn a_box() -> Thing {
-    block(
-        Vec3::new(0.5, 0.0, 0.03),
-        Vec3::new(0.04, 0.06, 0.03),
-        [200, 30, 30],
-    )
-}
-
-/// A tray standing in the middle of the table, 24 cm square and 6 cm tall, with walls and a
-/// floor 1 cm through.
-fn thin_tray() -> Vec<Thing> {
-    let board = |at: Vec3, half: Vec3| block(at, half, [150, 110, 60]);
-    let (wall, up) = (0.115, 0.03);
-    vec![
-        board(Vec3::new(0.5, 0.0, 0.005), Vec3::new(0.11, 0.11, 0.005)),
-        board(Vec3::new(0.5 - wall, 0.0, up), Vec3::new(0.005, 0.12, up)),
-        board(Vec3::new(0.5 + wall, 0.0, up), Vec3::new(0.005, 0.12, up)),
-        board(Vec3::new(0.5, -wall, up), Vec3::new(0.12, 0.005, up)),
-        board(Vec3::new(0.5, wall, up), Vec3::new(0.12, 0.005, up)),
-    ]
 }
 
 #[test]
@@ -5156,17 +5100,6 @@ fn a_box_that_comes_back_as_two_ends_with_most_of_it_gone_is_two() {
     assert_eq!(after.objects.len(), 2, "{:?}", after.objects);
     let kept = (after.objects.iter()).filter(|object| object.id == before.objects[0].id);
     assert_eq!(kept.count(), 1, "{:?}", after.objects);
-}
-
-/// The thin tray with a block set down behind its near wall at `x`, on its floor.
-fn tray_with_block(x: f32) -> Vec<Thing> {
-    let mut things = thin_tray();
-    things.push(block(
-        Vec3::new(x, 0.0, 0.025),
-        Vec3::new(0.02, 0.02, 0.015),
-        [30, 30, 200],
-    ));
-    things
 }
 
 #[test]
