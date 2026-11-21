@@ -178,18 +178,36 @@ What holds a hollow's floor among the walls that rise around it, and is square f
 box open at the top (`src/fit.rs`, `room`). The box is turned as the least rectangle around the
 floor is, for the walls stand along the floor's sides where a handle or a wall that is a thing of
 its own turns the rectangle around the whole, and reaches around all its readings. A floor is a
-part the hollow rule joined more than half of whose planes face up; its top is as high as a
-window's worth of those readings reach. Each wall's inner face is where a window's worth of
-readings whose planes face into the room show it, above the floor by their slack: at their
-innermost window's worth. Where none do, the room reaches as far as a window's worth of the floor
-does, so a wall that hides the floor behind it is as thick as what it hides. A hollow whose floor
-is round from above, or with a face more than half of whose readings lie farther from it than
-their slack, is round, and stays a box that covers it. A shape kept from the look before takes in
-the room a look shows in its frame: a wall seen thinner is thinner, and one no look sees into
-stays. One measured afresh keeps the room it had as well, its box turned as it was where the
-look does not open it; the room ends where the look shows an inner face inside it, and is not
-kept where it does not lie in the box the look measures, by more than the readings' slack: the
-look sees a piece of the thing then, or another, or one turned apart from it.
+part the hollow rule joined, or one a view sees into (below), more than half of whose planes face
+up: of it, the readings no higher than its level by more than their slack, the level being the
+height more than half of the part's readings lie at or under, so that the strips of a wall read
+as the floor's edges are no floor. Its top is as high as a window's worth of those reach. Each
+wall's inner face is where a window's worth of readings whose planes face into the room show it,
+above the floor by their slack: at their innermost window's worth. Where none do, the room
+reaches as far as a window's worth of the floor does, so a wall that hides the floor behind it is
+as thick as what it hides. A hollow whose floor is round from above, or with a face more than
+half of whose readings lie farther from it than their slack, is round, and stays a box that
+covers it. A shape kept from the look before takes in the room a look shows in its frame: a wall
+seen thinner is thinner, and one no look sees into stays. One measured afresh keeps the room it
+had as well, its box turned as it was where the look does not open it; the room ends where the
+look shows an inner face inside it, and is not kept where it does not lie in the box the look
+measures, by more than the readings' slack: the look sees a piece of the thing then, or another,
+or one turned apart from it.
+
+A box a view sees into is open at the top as well, whether or not its floor is a thing of its
+own that hides nothing (`src/look.rs`, `sees_into`). A solid box shows a camera above it nothing
+under its top, so a part of a square object that faces up under walls of its own is a floor: the
+object's readings higher than the part's level by more than their slack add up to a window or
+more (fewer cannot be told from noise, as those that stray over a box's top on a camera's
+depth); none of them, but for less than a window's worth, stands over the floor itself, inside
+the least rectangle around it from above by more than its slack, which is what a room over it
+would span (what rises out of the middle of a top, as a burner out of a stove's, or beside a
+floor cut aslant, as the higher half of a box that rests tilted, leaves no room a box can hold);
+and the floor takes up more than half of the object from above, by the least outlines around
+the two (a notch in a thing, as between a cabinet's handles, leaves it the box that covers
+it). So a drawer's floor seen from a hand held over it, with what little of its
+walls the view takes in, is a floor with room over it and not a slab as tall as those walls;
+and a step is open over its lower part, its riser the one wall.
 
 What stands on the floor shows that the floor runs under it, and no wall stands where it does
 (`src/look.rs`, `hold_what_stands`). A thing whose lowest reading lies in the box, on or over the
@@ -320,6 +338,22 @@ room says is free, and of each solid object, how many of another thing's lie ins
 which the shape says are its own; each by more than three deviations of the reading's camera's
 noise, per kind, with the ten objects that hold the most of each (`examples/score.rs` has the
 rules).
+
+The numbers say that something is wrong; a picture says what. `--images <dir>` writes what each
+scored look made of each view as `<dir>/<run>-<look>-<camera>.png`: every pixel in the colour of
+what the look says it shows, each object a colour of its own, known shapes dark gray, the robot
+light gray, and black where it shows nothing. The recording keeps what the camera saw beside
+it, `<set>/<run>/<look>/<camera>.png`. Open the two side by side before reasoning about a shape
+or an object that came out wrong:
+
+```bash
+cargo run --release --example score -- <set> --images /tmp/labels r1   # only run r1
+open /tmp/labels/r1-7-robot0_eye_in_hand.png <set>/r1/7/robot0_eye_in_hand.png
+```
+
+In `hand-in-drawer` that pair shows at a glance what the object list could not: with the hand
+in the drawer the hand's camera sees the drawer's floor around the bowl and one strip of wall,
+and the 14 by 21 by 5 cm "box" the bowl was listed on is that floor.
 
 A true object is matched when one measured object is mostly it and holds most of it; merged when
 most of it is in a measured object that is not mostly it, or one that is mostly it holds most of
@@ -915,6 +949,53 @@ the run.
   out the readings that lie on no plane, tried at 3b7349f, cannot tell them from a rim or a surface
   that turns away from the camera: on `rows4` it moved the wine bottle's middle from 0.02 to 0.26
   cm off and a bowl's from 0.04 to 1.8.
+- **A box a view sees into is open at the top; a floor seen from over it is no solid slab.** In
+  batchplan-orchestrator's recording `hand-in-drawer` (libero-spatial-4 with the hand left in the
+  drawer over the bowl, two runs of 13 looks, exact depth) the hand's camera sees the drawer's
+  floor and little of its walls, and at 65ef83e the floor was an object of its own, a box 14 by
+  21 by 5 cm, solid because its readings lay on its bottom face, with the bowl inside it: every
+  grasp of the bowl's rim met it. `--rooms` counts that: readings of another thing inside a
+  solid shape, 273,061 over 12 objects at 65ef83e and 60 in one now; the drawer is a box open at
+  the top from the look with the hand over it on, in both runs. In `open4` r5 the drawer after
+  the bowl is lifted out, a solid box 20.8 by 11.7 by 5.2 cm at 65ef83e, is open, its room 20.1
+  by 11.6 cm. `--rooms`, 65ef83e to now, as boxes open at the top / those with their own thing's
+  readings in the room (pixels) / solid objects with another thing's readings inside (pixels):
+
+  | set | 65ef83e | now |
+  |---|---|---|
+  | `rows4` | 0 / 0 (0) / 1 (1,979) | 15 / 7 (4,728) / 1 (1,979) |
+  | `rows4-stereo` | 0 / 0 (0) / 11 (94,830) | the same |
+  | `rows4-stereo-filtered` | 1 / 1 (3,109) / 6 (3,368) | 2 / 2 (3,123) / 6 (3,368) |
+  | `open4` | 10 / 10 (86,712) / 3 (52) | 13 / 10 (86,712) / 3 (52) |
+  | `hand-in-drawer` | 1 / 1 (7,408) / 12 (273,061) | 22 / 5 (7,575) / 1 (60) |
+  | `work-miru2` | 0 / 0 (0) / 0 (0) | 10 / 6 (3,960) / 0 (0) |
+  | `one1` | 0 / 0 (0) / 0 (0) | 1 / 1 (627) / 0 (0) |
+  | `repro4-fix`, `repro4-fix2`, `repro4-nolook` | 6, 8, 4 open | the same |
+
+  The scorecards of all ten sets are as they were, every id is kept (`--again`), and
+  `rows4-stereo`'s digest is the same; `rows4`'s and `rows4-stereo-filtered`'s change by the
+  shapes. On one machine, runs alternated, a whole set took 1.3% and 1.0% longer on `rows4` and
+  `rows4-stereo` on one thread and 3% and 2.5% on fourteen, `open4` 1% less, and
+  `hand-in-drawer`, where the rule opens the drawer in most looks, 9% and 18% more: what a look
+  with boxes open at the top costs, here and before. What it leaves:
+  - **A wine rack's pieces open** (26 over the sets), and their rooms hold readings of the rack
+    that are other pieces' (the 4,728 pixels on `rows4`): the rack is still in pieces.
+  - **Slivers of a bowl open.** In `hand-in-drawer` ten pieces of the bowl on the cabinet's
+    top, each about 1.4 by 0.8 by 0.8 cm and an object of its own, are boxes open at the top,
+    and four hold 40 to 43 of the bowl's readings in their room; one in `open4`. On
+    `rows4-stereo-filtered` one more box than at 65ef83e is open, a wine rack's piece.
+  - **A sliver of a thing's own can still close its box.** In `hand-in-drawer` r1, with the
+    hand over the drawer, 180 pixels of the cabinet's body read as an object of their own lie
+    8 mm inside a wall of its box; the box covers the cabinet until the drawer is seen as its
+    own.
+  - **A room can still hold its own thing's readings**: the cabinet's top over the drawer's
+    opening (`open4`, `repro4`: up to 16,355 pixels in one box, at most 12 mm inside a face).
+    Drawing the room in to hold none of them was tried and set aside: under the top the floor
+    runs on, and what lies on it there then rested inside a wall, which closed the box
+    (`plans/perception/open-box/clear/`).
+  - **A step, a ledge and a post are held by rendered scenes with one mask over the thing**:
+    from above their parts meet in no crease a camera reads, and without the mask each is a
+    thing that stands on the next.
 - **A drawer pulled out is a box open at the top where a look sees into it.** In
   batchplan-orchestrator's recordings `repro4-fix` and `repro4-fix2` (libero-spatial-4, the bowl in
   the cabinet's open top drawer, exact depth, three runs each), look 3 has the hand's camera 20 cm

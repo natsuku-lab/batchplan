@@ -16,6 +16,14 @@ cargo run --release -p miru --example score -- <set> [--recorded | --masks truth
 cargo run --release -p miru --example score -- <set> --again --digest [--masks truth] [--threads <n>]   # one hash over every scene the set's looks give, the second looks' too, and nothing else: a change meant to leave the results alone, as one for speed, prints the same digest before and after, on both sets, with and without masks, on 1, 2 and the default threads
 ```
 
+To SEE what a look made of a view, write the label pictures and open one beside the recording's
+own colour image of that look:
+
+```bash
+cargo run --release -p miru --example score -- <set> --images <dir> [run ...]   # <dir>/<run>-<look>-<camera>.png per scored look and camera: each object a colour of its own, known shapes dark gray, the robot light gray, nothing black
+open <dir>/r1-7-robot0_eye_in_hand.png <set>/r1/7/robot0_eye_in_hand.png  # what the look says beside what the camera saw
+```
+
 A set is a folder of recorded looks as batchplan-orchestrator's benchmark writes them
 (`examples/common/mod.rs` has the layout); the sets live outside this repository.
 
@@ -65,6 +73,11 @@ The repository's (`CLAUDE.md`, Style), with its lints (`Cargo.toml`'s workspace 
 
 The repository's (`CLAUDE.md`, Working rules), and:
 
+- **Look at the picture before reasoning about it.** When an object or a shape comes out wrong,
+  open that look's label picture beside the camera's colour image (Commands) before tracing or
+  designing anything. The two together show in a glance what a table of sizes hides: which
+  surfaces the camera actually saw, and which of them the look gave to which object. An agent
+  can open both with its file reader; so can the user.
 - **Numbers come from named runs.** The README's table names its sets and command; rerun it
   when a change moves a number.
 - **A gap is written down with its run**, in the README's "Where it stands", not worked around

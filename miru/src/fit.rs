@@ -504,6 +504,14 @@ fn window(values: impl Iterator<Item = (f32, f32)>) -> Option<f32> {
     reached(values.into_iter())
 }
 
+/// The least of `values` that more than half of them lie at or before: where most of a floor
+/// lies, whatever of its walls is read with it. `None` where there are none.
+pub(crate) fn level(values: impl Iterator<Item = f32>) -> Option<f32> {
+    let mut values: Vec<f32> = values.collect();
+    let middle = values.len() / 2;
+    (!values.is_empty()).then(|| *values.select_nth_unstable_by(middle, f32::total_cmp).1)
+}
+
 /// As [`window`] from both ends: the nearest position that readings adding up to a window lie at
 /// or before, and the farthest that they lie at or beyond; `None` where all add up to less. Only
 /// the readings at either end are put in order, as many as it takes.
@@ -572,7 +580,36 @@ pub(crate) const REACHED: f32 = 1e-5;
 
 /// The convex hull of `points`, counterclockwise from its lowest leftmost corner (Andrew's
 /// monotone chain). Points on its sides are left out.
-fn hull(mut points: Vec<Vec2>) -> Vec<Vec2> {
+pub(crate) fn hull(mut points: Vec<Vec2>) -> Vec<Vec2> {
+    // A point inside the eight-sided outline through the farthest points toward eight sides
+    // is no corner of the hull, and most points are: only the rest are put in order (Akl and
+    // Toussaint). Inside by more than rounding can undo: sixteen times what a float holds of
+    // the largest coordinate.
+    let toward = [
+        Vec2::X,
+        Vec2::ONE,
+        Vec2::Y,
+        Vec2::new(-1.0, 1.0),
+        Vec2::NEG_X,
+        Vec2::NEG_ONE,
+        Vec2::NEG_Y,
+        Vec2::new(1.0, -1.0),
+    ];
+    if let Some(&first) = points.first() {
+        let mut ends = [first; 8];
+        for &point in &points {
+            for (end, toward) in ends.iter_mut().zip(toward) {
+                if point.dot(toward) > end.dot(toward) {
+                    *end = point;
+                }
+            }
+        }
+        let largest = ends.iter().map(|end| end.abs().max_element());
+        let margin = 16.0 * f32::EPSILON * largest.fold(0.0, f32::max);
+        let mut ends = ends.to_vec();
+        ends.dedup();
+        points.retain(|&point| !holds(&ends, point, margin));
+    }
     // Two points this order holds equal are the same to the bit, so no sort orders them apart.
     points.sort_unstable_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
     points.dedup();
@@ -601,10 +638,24 @@ fn hull(mut points: Vec<Vec2>) -> Vec<Vec2> {
     hull
 }
 
+/// The area a convex hull takes up, its corners in order.
+pub(crate) fn area(hull: &[Vec2]) -> f32 {
+    let around = hull.iter().zip(hull.iter().cycle().skip(1));
+    0.5 * around.map(|(a, b)| a.perp_dot(*b)).sum::<f32>().abs()
+}
+
+/// Whether `point` lies inside a convex hull, its corners counterclockwise, farther from each of
+/// its sides than `margin`.
+pub(crate) fn holds(hull: &[Vec2], point: Vec2, margin: f32) -> bool {
+    let mut sides = hull.iter().zip(hull.iter().cycle().skip(1));
+    hull.len() > 2
+        && sides.all(|(a, b)| (*b - *a).perp_dot(point - *a) > margin * (*b - *a).length())
+}
+
 /// The rectangle of least area around the corners of a convex hull: its middle, its half sizes
 /// along its own axes and its turn about z. One of its sides lies along one of the hull's, so
 /// each of those is tried.
-fn rectangle(hull: &[Vec2]) -> (Vec2, Vec2, f32) {
+pub(crate) fn rectangle(hull: &[Vec2]) -> (Vec2, Vec2, f32) {
     let sides = (0..hull.len()).map(|k| hull[(k + 1) % hull.len()] - hull[k]);
     let axes = sides.filter_map(Vec2::try_normalize);
     let least = axes

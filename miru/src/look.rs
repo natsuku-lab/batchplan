@@ -252,7 +252,7 @@ fn checked(
         let readings = &floors[object];
         (!sets.theirs[readings.set]).then(|| Measured::of(readings, previous))
     });
-    let floor_parts = hollows(&mut sets, &told, &floors, &said);
+    let mut floor_parts = hollows(&mut sets, &told, &floors, &said);
     let (mut objects, mut labels) = told.gather(&mut sets, /* with floors */ false);
     let before: Vec<(&Readings, &Measured)> = (floors.iter().zip(&said))
         .filter_map(|(readings, said)| Some((readings, said.as_ref()?)))
@@ -299,6 +299,11 @@ fn checked(
     let index: HashMap<usize, usize> = (objects.iter().enumerate())
         .map(|(object, readings)| (readings.set, object))
         .collect();
+    // A box a view sees into holds a floor too, whether or not the floor hides anything.
+    let square: Vec<bool> = (fits.iter())
+        .map(|fit| matches!(fit.shape(), Shape::Cuboid { .. }))
+        .collect();
+    told.sees_into(&labels, &objects, &square, &mut floor_parts, threads);
     // What holds a hollow's floor among walls and is a box from above is open at the top.
     let mut floored: Vec<usize> = (0..floor_parts.len())
         .filter(|&part| floor_parts[part])
@@ -525,24 +530,217 @@ impl Told<'_> {
         (objects, labels)
     }
 
+    /// Marks in `floors`, per part, the floors a view sees into.
+    ///
+    /// A solid box shows a camera above it nothing under its top, so what of a box faces up
+    /// under walls of its own is the floor of a hollow. A part of an object that `square` says is
+    /// fitted square is such a floor where more than half of its planes face up, more than half
+    /// of their normal, and:
+    ///
+    /// - the object rises over it: its readings higher than the part's level by more than their
+    ///   slack add up to a window or more. The level is the height more than half of the part's
+    ///   readings lie at or under ([`fit::level`]): the strips of a wall that are read as the
+    ///   floor's edges are of its part and rise with the rest. Fewer readings over it cannot be
+    ///   told from noise, as those that stray over a box's top on a camera's depth;
+    /// - none of what rises stands over the floor itself, inside the least rectangle from above
+    ///   around what of the part lies at its level by more than its slack, but for less than a
+    ///   window's worth: that rectangle is what a room over the floor spans
+    ///   ([`fit::Fit::open`]). Walls stand around a floor; what rises out of the middle of one, as
+    ///   a burner out of a stove's top, or beside a floor cut aslant, as the higher half of a
+    ///   box that rests tilted, leaves no room a box can hold;
+    /// - the floor takes up more than half of the object from above, by the least outlines
+    ///   around the two: a box is open at the top where a view sees into most of it, and a notch
+    ///   in a thing, as between a cabinet's handles, leaves it the box that covers it.
+    ///
+    /// [`hollows`] finds the floors that are things of their own and hide nothing, however
+    /// small; these are a part of their object already, as a drawer's floor seen from over it
+    /// with its walls.
+    fn sees_into(
+        &self,
+        labels: &[Vec<Label>],
+        objects: &[Readings],
+        square: &[bool],
+        floors: &mut [bool],
+        threads: usize,
+    ) {
+        // The cheap question first, of every part of a square object: whether anything of the
+        // object reads higher than the part's lowest by more than the least slack of the
+        // object's readings. Most parts that face up are a box's top, with nothing over it.
+        // Per object, its highest reading and its readings' least slack; per part, its object,
+        // its planes, those that face up, and its lowest reading.
+        let over: Vec<(f32, f32)> = (objects.iter())
+            .map(|readings| {
+                let highest = readings.points.iter().map(|point| point.z);
+                let least = readings.slack.iter().copied();
+                (
+                    highest.fold(f32::MIN, f32::max),
+                    least.fold(f32::MAX, f32::min),
+                )
+            })
+            .collect();
+        let parts = threads::each(threads, self.seen.len(), |view| {
+            let (seen, of) = (&self.seen[view], &self.parts[view]);
+            let next = self.first.get(view + 1).copied().unwrap_or(floors.len());
+            let mut parts = vec![(usize::MAX, 0_u32, 0_u32, f32::MAX); next - self.first[view]];
+            for (i, label) in labels[view].iter().enumerate() {
+                let Label::Object(object) = *label else {
+                    continue;
+                };
+                if !square[object] {
+                    continue;
+                }
+                let (owner, all, up, lowest) = &mut parts[of.of[i] as usize];
+                let normal = of.normals[i];
+                *owner = object;
+                *all += u32::from(normal != Vec3::ZERO);
+                *up += u32::from(normal.z > 0.5);
+                *lowest = lowest.min(seen.points[i].z);
+            }
+            parts
+        })
+        .concat();
+        let may: Vec<usize> = (0..parts.len())
+            .filter(|&part| {
+                let (object, all, up, lowest) = parts[part];
+                object != usize::MAX && 2 * up > all && over[object].0 > lowest + over[object].1
+            })
+            .collect();
+        if may.is_empty() {
+            return;
+        }
+        // Of the objects such a part is of, every part's readings: place, slack and share of a
+        // window.
+        let mut wanted = vec![false; objects.len()];
+        for &part in &may {
+            wanted[parts[part].0] = true;
+        }
+        let mut readings: Vec<Vec<(Vec3, f32, f32)>> = vec![Vec::new(); parts.len()];
+        for (view, ((seen, of), labels)) in self.seen.iter().zip(self.parts).zip(labels).enumerate()
+        {
+            for (i, label) in labels.iter().enumerate() {
+                if matches!(*label, Label::Object(object) if wanted[object]) {
+                    let part = self.first[view] + of.of[i] as usize;
+                    readings[part].push((seen.points[i], SIGMAS * seen.sigma(i), of.share[i]));
+                }
+            }
+        }
+        // Per object such a part is of, its parts.
+        let mut of_object: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (part, &(object, ..)) in parts.iter().enumerate() {
+            if object != usize::MAX && wanted[object] {
+                of_object.entry(object).or_default().push(part);
+            }
+        }
+        // The least outline around what lies at `points`, from above; and the farthest of
+        // them toward -x, -y, +x and +y, which lie on it, counterclockwise.
+        let outline = |points: &mut dyn Iterator<Item = Vec2>| fit::hull(points.collect());
+        let farthest = |points: &mut dyn Iterator<Item = Vec2>| {
+            let mut ends: Option<[Vec2; 4]> = None;
+            for point in points {
+                let ends = ends.get_or_insert([point; 4]);
+                if point.x < ends[0].x {
+                    ends[0] = point;
+                }
+                if point.y < ends[1].y {
+                    ends[1] = point;
+                }
+                if point.x > ends[2].x {
+                    ends[2] = point;
+                }
+                if point.y > ends[3].y {
+                    ends[3] = point;
+                }
+            }
+            ends.expect("a part has a reading")
+        };
+        // Per object, what its farthest readings span, which is no more than its outline's
+        // area, and that area once a part needs it. The questions that take one pass over the
+        // readings come before those that put them in order.
+        let mut wholes: BTreeMap<usize, (f32, Option<f32>)> = BTreeMap::new();
+        for part in may {
+            let object = parts[part].0;
+            let whole = || {
+                of_object[&object]
+                    .iter()
+                    .flat_map(|&other| readings[other].iter())
+            };
+            let own = &readings[part];
+            let (span, exact) = wholes.entry(object).or_insert_with(|| {
+                let ends = farthest(&mut whole().map(|reading| reading.0.truncate()));
+                (fit::area(&ends), None)
+            });
+            // The box around the part along x and y is no less than the floor's outline.
+            let (least, most) =
+                own.iter()
+                    .fold((Vec2::MAX, Vec2::MIN), |(least, most), reading| {
+                        let flat = reading.0.truncate();
+                        (least.min(flat), most.max(flat))
+                    });
+            if 2.0 * (most - least).element_product() <= *span {
+                continue;
+            }
+            let level = fit::level(own.iter().map(|reading| reading.0.z))
+                .expect("a part of an object has a reading");
+            // What of the object rises over the level: where, with its slack and share.
+            let over: Vec<(Vec2, f32, f32)> = whole()
+                .filter(|&&(point, slack, _)| point.z > level + slack)
+                .map(|&(point, slack, share)| (point.truncate(), slack, share))
+                .collect();
+            if over.iter().map(|reading| reading.2).sum::<f32>() < 1.0 {
+                continue;
+            }
+            // What of that stands over the floor, inside the least rectangle around it, which
+            // a room over it would span: first inside what the floor's farthest readings span,
+            // which lies in it.
+            let at_level: Vec<Vec2> = (own.iter())
+                .filter(|&&(point, slack, _)| point.z <= level + slack)
+                .map(|reading| reading.0.truncate())
+                .collect();
+            let stands = |inside: &dyn Fn(Vec2, f32) -> bool| {
+                let standing = over.iter().filter(|&&(at, slack, _)| inside(at, slack));
+                standing.map(|reading| reading.2).sum::<f32>() >= 1.0
+            };
+            let ends = farthest(&mut at_level.iter().copied());
+            if stands(&|at, slack| fit::holds(&ends, at, slack)) {
+                continue;
+            }
+            let floor = fit::hull(at_level);
+            let exact = *exact.get_or_insert_with(|| {
+                fit::area(&outline(&mut whole().map(|reading| reading.0.truncate())))
+            });
+            if 2.0 * fit::area(&floor) <= exact {
+                continue;
+            }
+            let (middle, half, yaw) = fit::rectangle(&floor);
+            let turn = Vec2::from_angle(-yaw);
+            floors[part] |=
+                !stands(&|at, slack| (half - turn.rotate(at - middle).abs()).min_element() > slack);
+        }
+    }
+
     /// Per object of `objects`, its readings as the room of a box open at the top is measured from
     /// them ([`fit::Reading`]): the pixels `labels` give it. A reading is of the floor where its
-    /// part is one that `floors`, per part, says is a hollow's floor, and more than half of that
-    /// part's planes face up, more than half of their normal: a wall's inner face that hides
-    /// nothing can be taken for a floor, and faces sideways.
+    /// part is one that `floors`, per part, says is a hollow's floor, more than half of that
+    /// part's planes face up, more than half of their normal, and it lies no higher than the
+    /// part's level by more than its slack ([`fit::level`]): a wall's inner face that hides
+    /// nothing can be taken for a floor, and faces sideways; and the strips of a wall that are
+    /// read as a floor's edges are of its part, and rise over it.
     fn readings(
         &self,
         labels: &[Vec<Label>],
         floors: &[bool],
         objects: &[usize],
     ) -> Vec<Vec<fit::Reading>> {
-        let slot: HashMap<usize, usize> = (objects.iter().enumerate())
-            .map(|(slot, &object)| (object, slot))
-            .collect();
-        // Per object, its readings and each one's part; per part of a floor, its planes and how
-        // many of them face up.
+        // Per object, its place among `objects`, where it is one of them.
+        let mut slot = vec![usize::MAX; objects.iter().max().map_or(0, |most| most + 1)];
+        for (place, &object) in objects.iter().enumerate() {
+            slot[object] = place;
+        }
+        // Per object, its readings and each one's part; per part of a floor, its planes, how
+        // many of them face up, and its readings' heights.
         let mut readings: Vec<Vec<(fit::Reading, usize)>> = vec![vec![]; objects.len()];
-        let mut planes: HashMap<usize, (usize, usize)> = HashMap::new();
+        let mut planes = vec![(0_usize, 0_usize); floors.len()];
+        let mut heights: Vec<Vec<f32>> = vec![Vec::new(); floors.len()];
         for (view, ((seen, parts), labels)) in
             self.seen.iter().zip(self.parts).zip(labels).enumerate()
         {
@@ -550,15 +748,15 @@ impl Told<'_> {
                 let Label::Object(object) = *label else {
                     continue;
                 };
-                let Some(&slot) = slot.get(&object) else {
+                let Some(&slot) = slot.get(object).filter(|&&slot| slot != usize::MAX) else {
                     continue;
                 };
                 let part = self.first[view] + parts.of[i] as usize;
                 let normal = parts.normals[i];
-                if floors[part] && normal != Vec3::ZERO {
-                    let (all, up) = planes.entry(part).or_default();
-                    *all += 1;
-                    *up += usize::from(normal.z > 0.5);
+                if floors[part] {
+                    heights[part].push(seen.points[i].z);
+                    planes[part].0 += usize::from(normal != Vec3::ZERO);
+                    planes[part].1 += usize::from(normal.z > 0.5);
                 }
                 let reading = fit::Reading {
                     point: seen.points[i],
@@ -570,12 +768,17 @@ impl Told<'_> {
                 readings[slot].push((reading, part));
             }
         }
-        let faces_up = |part: &usize| planes.get(part).is_some_and(|&(all, up)| 2 * up > all);
+        // Per part of a floor that faces up, its level.
+        let levels: Vec<Option<f32>> = (heights.into_iter().zip(&planes))
+            .map(|(heights, &(all, up))| fit::level(heights.into_iter()).filter(|_| 2 * up > all))
+            .collect();
         (readings.into_iter())
             .map(|readings| {
                 (readings.into_iter())
                     .map(|(reading, part)| fit::Reading {
-                        floor: reading.floor && faces_up(&part),
+                        floor: reading.floor
+                            && levels[part]
+                                .is_some_and(|level| reading.point.z <= level + reading.slack),
                         ..reading
                     })
                     .collect()

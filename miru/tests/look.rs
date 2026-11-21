@@ -4815,32 +4815,63 @@ fn a_thick_walled_bowl_seen_on_noisy_depth_is_no_box_open_at_the_top() {
 }
 
 #[test]
-fn a_tray_first_seen_as_a_box_that_covers_it_is_solid_once_a_look_sees_its_floor() {
-    // From straight above, on exact depth stating the tests' noise, the tray is one object whose
-    // floor the hollow rule does not join (its walls hang over it), a box that covers its room,
-    // not solid. From the tests' camera the floor is joined to the walls, and the tray, which
-    // keeps its id, is a box open at the top: solid, though it was not, for the look shows the
-    // room it holds.
+fn a_tray_first_seen_from_above_is_open_and_keeps_its_walls_seen_from_the_front() {
+    // From straight above, on exact depth stating the tests' noise, the look sees into the tray:
+    // its floor under walls that rise over it on every side, though the floor hides nothing and
+    // meets no wall in a crease the camera reads (the walls hang over it). It is a box open at
+    // the top, solid, each wall 3 cm through. From the tests' camera the near wall hides the
+    // floor behind it and alone would be as thick as what it hides: the tray keeps its id and
+    // the wall the look before saw thinner.
     let foot = Vec3::new(0.5, 0.0, 0.0);
     let half = Vec3::new(0.12, 0.12, 0.03);
+    let room = Room {
+        floor: Vec3::new(0.5, 0.0, 0.01),
+        half: Vec2::splat(0.09),
+        yaw: 0.0,
+    };
+    let every = [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y];
     let above = frame_from(
         tray(foot, half, [150, 110, 60]),
         Vec3::new(0.5, -0.001, 0.45),
     );
     let before = seen(&[&above], &Scene::default());
-    let (was, _) = object_of(&before, &above, 1);
-    let covered = &before.objects[was];
-    assert!(
-        !covered.solid && matches!(covered.shape, Shape::Cuboid { .. }),
-        "{covered:?}"
-    );
+    let tolerance = slack(&above, Vec3::new(0.5, 0.0, 0.01));
+    let (was, _) = assert_open(&before, &above, 1, &room, &every, tolerance, "from above");
+    assert_eq!(before.objects.len(), 1, "{:?}", before.objects);
     let front = frame_of(tray(foot, half, [150, 110, 60]));
-    let after = seen(&[&front], &before);
-    let (is, _) = object_of(&after, &front, 1);
-    let open = &after.objects[is];
+    let alone = seen(&[&front], &Scene::default());
+    let (near, _) = object_of(&alone, &front, 1);
+    let Shape::OpenBox {
+        half_extents,
+        room_lower,
+        room_upper,
+        ..
+    } = alone.objects[near].shape
+    else {
+        panic!("from the front alone: {:?}", alone.objects);
+    };
+    let walls =
+        (half_extents.truncate() - room_upper).max(half_extents.truncate() + room_lower.truncate());
     assert!(
-        open.id == covered.id && open.solid && matches!(open.shape, Shape::OpenBox { .. }),
-        "{open:?}"
+        walls.max_element() > 0.04,
+        "from the front alone: {:?}",
+        alone.objects
+    );
+    let after = seen(&[&front], &before);
+    let tolerance = slack(&front, Vec3::new(0.5, 0.0, 0.01));
+    let (is, _) = assert_open(
+        &after,
+        &front,
+        1,
+        &room,
+        &every,
+        tolerance,
+        "then from the front",
+    );
+    assert_eq!(
+        after.objects[is].id, before.objects[was].id,
+        "{:?}",
+        after.objects
     );
 }
 
@@ -5014,38 +5045,36 @@ fn open_tray() -> (Scene, Object) {
 }
 
 #[test]
-fn a_tray_seen_again_from_above_keeps_the_room_it_had() {
-    // The thin tray, open at the top from the tests' camera, then from straight above, unmoved:
-    // that look alone makes it a box that covers its room (its walls hang over its floor), but
-    // it shows nothing in the room it had. The tray stays the box open at the top it was, solid,
-    // its room as it was.
+fn a_tray_seen_again_from_above_has_the_room_that_look_sees_into() {
+    // The thin tray, open at the top from the tests' camera, whose near wall hides the floor
+    // behind it, so that the wall is taken to be as thick as what it hides. Then from straight
+    // above, unmoved: that look sees into the tray, the floor under walls that rise over it on
+    // every side, and reads each wall's inner face. The tray is the object it was, solid, and
+    // its room is as that look measures it: every wall as thin as it is.
     let (before, was) = open_tray();
-    let above = frame_from(thin_tray(), Vec3::new(0.5, -0.001, 0.45));
-    let after = seen(&[&above], &before);
-    let is = (after.objects.iter()).find(|object| object.id == was.id);
-    let is = is.unwrap_or_else(|| panic!("{} is gone: {:?}", was.id, after.objects));
-    // The room's least and most corner, and its floor's top, where the room is.
-    let room = |shape: &Shape| match *shape {
+    let near = match was.shape {
         Shape::OpenBox {
-            center,
-            rotation,
+            half_extents,
             room_lower,
             room_upper,
             ..
-        } => {
-            let corners = [room_lower.truncate(), room_upper]
-                .map(|corner| center + rotation * corner.extend(room_lower.z));
-            Some((corners[0].min(corners[1]), corners[0].max(corners[1])))
-        }
-        _ => None,
+        } => (half_extents.truncate() - room_upper)
+            .max(half_extents.truncate() + room_lower.truncate()),
+        _ => unreachable!("the first look gives a box open at the top"),
     };
-    let (Some((had_least, had_most)), Some((least, most))) = (room(&was.shape), room(&is.shape))
-    else {
-        panic!("{was:?} is now {is:?}");
+    assert!(near.max_element() > 0.04, "the first look's walls: {was:?}");
+    let above = frame_from(thin_tray(), Vec3::new(0.5, -0.001, 0.45));
+    let after = seen(&[&above], &before);
+    let room = Room {
+        floor: Vec3::new(0.5, 0.0, 0.01),
+        half: Vec2::splat(0.11),
+        yaw: 0.0,
     };
     let tolerance = slack(&above, Vec3::new(0.5, 0.0, 0.01));
-    let off = ((least - had_least).abs().max_element()).max((most - had_most).abs().max_element());
-    assert!(is.solid && off <= tolerance, "{was:?} is now {is:?}");
+    let every = [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y];
+    let (object, _) = assert_open(&after, &above, 1, &room, &every, tolerance, "from above");
+    assert_eq!(after.objects[object].id, was.id, "{:?}", after.objects);
+    assert_eq!(after.objects.len(), 1, "{:?}", after.objects);
 }
 
 #[test]
@@ -5782,4 +5811,151 @@ fn a_post_on_a_box_a_can_stands_on_stays_the_boxs() {
             );
         }
     }
+}
+
+/// A slab standing in the middle of the table, 24 cm by 16 cm and 2 cm tall, with `more` on it.
+fn slab_with(more: Vec<Thing>) -> Vec<Thing> {
+    let slab = block(
+        Vec3::new(0.5, 0.0, 0.01),
+        Vec3::new(0.08, 0.12, 0.01),
+        [120, 120, 120],
+    );
+    std::iter::once(slab).chain(more).collect()
+}
+
+/// Whether the one object the look from straight above makes of `things`, with one mask over
+/// them all, is a box open at the top; and the object. On exact depth stating the tests' noise,
+/// or with `seed` on depth with a real camera's noise drawn from it. From above a thing's parts
+/// at different heights meet in no crease the camera reads, and without the mask each is a
+/// thing that stands on the next.
+fn open_from_above(things: Vec<Thing>, seed: Option<u64>) -> (bool, Object) {
+    let mut above =
+        frame_from(things, Vec3::new(0.5, -0.001, 0.45)).masked(|thing| u32::from(thing > 0));
+    if let Some(seed) = seed {
+        above = above.noisy(REAL, seed);
+    }
+    let scene = seen(&[&above], &Scene::default());
+    assert_eq!(scene.objects.len(), 1, "{:?}", scene.objects);
+    let object = scene.objects[0].clone();
+    (matches!(object.shape, Shape::OpenBox { .. }), object)
+}
+
+#[test]
+fn a_step_is_open_over_its_lower_part_and_a_post_a_notch_or_a_tilt_opens_nothing() {
+    // A slab with a block of its own colour along one end, 4 cm of its 24, risen 4 cm over it:
+    // a step. From above the look sees into the box that holds it: the slab's top faces up under
+    // the block, which rises beside it and not out of it, and takes up most of the step. The
+    // step is a box open at the top, solid: its room over the slab, its one wall the block, and
+    // no wall where the slab runs out to the box's sides. On exact depth, and on depth with a
+    // real camera's noise.
+    let end = || {
+        block(
+            Vec3::new(0.5, 0.10, 0.04),
+            Vec3::new(0.08, 0.02, 0.02),
+            [120, 120, 120],
+        )
+    };
+    let (open, step) = open_from_above(slab_with(vec![end()]), None);
+    assert!(open && step.solid, "{step:?}");
+    let solids = step.shape.solids();
+    let holds = |point: Vec3| {
+        solids.iter().any(|solid| match *solid {
+            Obstacle::Cuboid {
+                center,
+                half_extents,
+                rotation,
+            } => {
+                let at = rotation.inverse() * (point - center);
+                (at.abs() - half_extents).max_element() <= 0.002
+            }
+            _ => false,
+        })
+    };
+    // The block and the slab are its solids; over the slab, clear of the block, is its room.
+    assert!(holds(Vec3::new(0.5, 0.10, 0.05)), "{step:?}");
+    assert!(holds(Vec3::new(0.5, -0.05, 0.01)), "{step:?}");
+    assert!(!holds(Vec3::new(0.5, -0.05, 0.04)), "{step:?}");
+    assert!(!holds(Vec3::new(0.5, 0.05, 0.04)), "{step:?}");
+    for seed in [1, 2] {
+        let (open, noisy) = open_from_above(slab_with(vec![end()]), Some(seed));
+        assert!(open && noisy.solid, "{seed}: {noisy:?}");
+    }
+
+    // The slab with a block in the middle of its top: the slab's top faces up under the block
+    // and takes up most of the thing, but the block stands over it. No box open at the top
+    // holds that: a room over the slab would hold the block. It is a box.
+    let post = block(
+        Vec3::new(0.5, 0.0, 0.04),
+        Vec3::new(0.03, 0.03, 0.02),
+        [120, 120, 120],
+    );
+    let (open, thing) = open_from_above(slab_with(vec![post]), None);
+    assert!(!open, "{thing:?}");
+
+    // A block 6 cm tall that covers the slab but for 6 cm at one end, where the slab's top
+    // shows: a notch a quarter of the thing. The look sees into it there, but not into most of
+    // the thing: it is a box.
+    let most = block(
+        Vec3::new(0.5, -0.03, 0.04),
+        Vec3::new(0.08, 0.09, 0.02),
+        [120, 120, 120],
+    );
+    let (open, thing) = open_from_above(slab_with(vec![most]), None);
+    assert!(!open, "{thing:?}");
+
+    // A block that rests tilted, 15 degrees about its diagonal and about a line 30 degrees
+    // from a side: its top is one part, and the lower half of it lies under the higher. The
+    // higher half rises beside that floor, outside its outline, which is cut aslant, but inside
+    // the rectangle a room over it would span: no room holds half the block. It is a box.
+    for about in [45.0_f32, 30.0] {
+        let axis = Quat::from_rotation_z(about.to_radians()) * Vec3::X;
+        let tilt = Quat::from_axis_angle(axis, 15.0_f32.to_radians());
+        let middle = Vec3::new(0.5, 0.0, 0.06);
+        let tilted = turned(
+            block(middle, Vec3::new(0.08, 0.08, 0.02), [120, 120, 120]),
+            middle,
+            tilt,
+        );
+        let (open, thing) = open_from_above(vec![tilted], None);
+        assert!(!open, "{about}: {thing:?}");
+    }
+}
+
+#[test]
+fn a_ledge_along_a_wall_is_no_floor_and_the_room_ends_at_it() {
+    // The tray with a ledge of its own colour along the inside of one wall, 4 cm wide and 2 cm
+    // over the floor. From above the look sees into the tray twice, onto its floor and onto
+    // the ledge. A hollow has one floor, its lowest: the tray is open at the top over the
+    // floor, and the ledge is in no room.
+    let foot = Vec3::new(0.5, 0.0, 0.0);
+    let mut things = tray(foot, Vec3::new(0.12, 0.12, 0.03), [150, 110, 60]);
+    things.push(block(
+        Vec3::new(0.5, 0.07, 0.02),
+        Vec3::new(0.09, 0.02, 0.01),
+        [150, 110, 60],
+    ));
+    let (open, ledged) = open_from_above(things, None);
+    assert!(open && ledged.solid, "{ledged:?}");
+    let Shape::OpenBox {
+        center,
+        rotation,
+        room_lower,
+        room_upper,
+        ..
+    } = ledged.shape
+    else {
+        unreachable!("it is open");
+    };
+    let floor = center.z + room_lower.z;
+    assert!(
+        (floor - 0.01).abs() < 0.002,
+        "its floor's top is at {floor}"
+    );
+    // Over the ledge's middle is not in the room; over the floor's is.
+    let in_room = |point: Vec3| {
+        let at = (rotation.inverse() * (point - center)).truncate();
+        at.cmpgt(room_lower.truncate()).all() && at.cmplt(room_upper).all()
+    };
+    assert!(in_room(Vec3::new(0.5, -0.03, 0.02)), "{ledged:?}");
+    assert!(!in_room(Vec3::new(0.5, 0.07, 0.04)), "{ledged:?}");
 }
