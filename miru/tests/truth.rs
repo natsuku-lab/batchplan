@@ -51,7 +51,9 @@
 //! cameras most boxes are larger than their things by more than the noise reaches, and not
 //! solid: in `a box`, a few of the readings the jitter puts between the box's far edge and the
 //! table behind it are kept by the filter and are the box's object, and its shape reaches out to
-//! them.
+//! them. A plate 5 mm thick on a box is one object with the box through every camera, the box's
+//! shape as tall as the two, so a plate set down on a box reads gone at the next look while it
+//! stands there (`tests/memory.rs`).
 //!
 //! | Scene | Camera | Thing | Shows |
 //! |---|---|---|---|
@@ -98,6 +100,12 @@
 //! | a can on a box, again | D435 | can | 2 objects, a box, not solid |
 //! | a can on a box, again | D435+D405 | box | 172 x 174 x 63 mm (+32 +34 +3; 24), not solid |
 //! | a can on a box, again | D435+D405 | can | a box, not solid |
+//! | a plate on a box | exact | box | 140 x 140 x 65 mm (+0 +0 +5; 7), not solid |
+//! | a plate on a box | exact | plate | the box's object: 140 x 140 x 65 mm (+80 +80 +60; 7), 30 mm off (6), on the table, not solid |
+//! | a plate on a box | D435 | box | 159 x 219 x 71 mm (+19 +79 +11; 24), 35 mm off (20), not solid |
+//! | a plate on a box | D435 | plate | the box's object: 159 x 219 x 71 mm (+99 +159 +66; 23), 44 mm off (19), on the table, not solid |
+//! | a plate on a box | D435+D405 | box | 160 x 219 x 71 mm (+20 +79 +11; 24), 35 mm off (20), not solid |
+//! | a plate on a box | D435+D405 | plate | the box's object: 160 x 219 x 71 mm (+100 +159 +66; 23), 44 mm off (19), on the table, not solid |
 
 #[allow(dead_code, reason = "each test file uses part of it")]
 mod common;
@@ -180,6 +188,12 @@ a can on a box, again | D435 | box | size solid
 a can on a box, again | D435 | can | objects kind solid
 a can on a box, again | D435+D405 | box | size solid
 a can on a box, again | D435+D405 | can | kind solid
+a plate on a box | exact | box | solid
+a plate on a box | exact | plate | size middle on solid
+a plate on a box | D435 | box | size middle solid
+a plate on a box | D435 | plate | size middle on solid
+a plate on a box | D435+D405 | box | size middle solid
+a plate on a box | D435+D405 | plate | size middle on solid
 ";
 
 /// The kind of a shape a look measures.
@@ -433,6 +447,21 @@ fn cases() -> Vec<Case> {
         truths,
         then: Some(can_on_a_box()),
     });
+    // A plate 6 cm square and 5 mm thick on a box 14 cm square and 6 cm tall: a thing set down on
+    // another (`Act::LetGo` in `tests/memory.rs`).
+    let (under, under_half) = (middle, Vec3::new(0.07, 0.07, 0.03));
+    let (plate, plate_half) = (Vec3::new(0.5, 0.0, 0.0625), Vec3::new(0.03, 0.03, 0.0025));
+    cases.push(Case::once(
+        "a plate on a box",
+        vec![
+            block(under, under_half, [200, 200, 30]),
+            block(plate, plate_half, [30, 200, 30]),
+        ],
+        vec![
+            a_box_truth("box", &[1], under, under_half),
+            a_box_truth("plate", &[2], plate, plate_half).on(0),
+        ],
+    ));
     cases
 }
 

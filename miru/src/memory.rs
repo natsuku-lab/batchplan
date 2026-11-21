@@ -8,7 +8,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use batchplan::{
     DepthFilter, DepthImage, Device, Held, IkOptions, Intrinsics, Obstacle, Occlusion,
@@ -18,7 +18,7 @@ use glam::Vec3;
 
 use crate::error::{Result, ensure_input};
 use crate::look::{Look, LookOptions, Noise, View};
-use crate::scene::{Object, Scene};
+use crate::scene::{Object, Scene, Support};
 use crate::view::SIGMAS;
 
 /// One depth camera's frame, and what is known of the camera: facts, so there is no default.
@@ -68,9 +68,48 @@ pub struct MemoryOptions {
     pub weighing: Weighing,
 }
 
+/// What the robot did, said once, to the memory that holds the thing ([`Memory::after`]).
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[allow(
+    missing_docs,
+    reason = "each act's doc says what its fields are: an object's id, a hand's hold, a pose and a \
+              distance in the robot's frame (meters)"
+)]
+pub enum Act {
+    /// A hand took object `id` and holds it as `held`. It leaves the objects, and so does what
+    /// stands on it, in turn; the hand holds it, and each look's mask leaves it out. Where it was
+    /// not solid the map held it: the room it took up is free there, as far as a voxel reaches,
+    /// and so is that of each thing that was not solid and left with it.
+    Picked { id: u32, held: Held },
+    /// The hand that holds object `id` set it down, its frame (its shape's middle, turned as the
+    /// shape was) at `at`: where a place plan's held object lies when it is let go. It is among
+    /// the objects again with its id, its shape placed there, unseen, and the next look answers
+    /// one of three for it:
+    /// - seen there: it is among the memory's objects, and some label of the look's scene names
+    ///   it;
+    /// - its place not seen: it is among the memory's objects, and no label names it;
+    /// - its place seen and empty: it is not among the memory's objects.
+    LetGo { id: u32, at: Pose },
+    /// The hand that holds object `id` lost it where nothing knows: it dropped, slipped, or was
+    /// let go in the air. It is in no hand and among no objects, and the next look finds it under
+    /// whatever id it gives.
+    Lost { id: u32 },
+    /// Object `id` and what stands on it, in turn, were pushed by `by`: their shapes move with
+    /// them, unseen, and the next look keeps their ids where it finds them there. Where one was
+    /// not solid the map held it: the room it took up is never seen, where it stood and where it
+    /// stands.
+    Pushed { id: u32, by: Vec3 },
+    /// Something of object `id` was drawn out by `by`, as a drawer out of a cabinet: the object
+    /// stays as it was until a look measures it afresh. Where it is not solid the map held it: the
+    /// room it takes up is never seen, where it stood and moved by `by` (batchplan's
+    /// `docs/perception.md`: "a pull or a push of something the map holds").
+    Drew { id: u32, by: Vec3 },
+}
+
 /// What carries from one look to the next: the objects and the ids given, what each hand holds,
 /// and the map of what the cameras read that no shape holds. A value: a look gives a new one
-/// ([`observe`]).
+/// ([`observe`]), as do acts ([`Memory::after`]).
 #[derive(Clone, Debug)]
 pub struct Memory {
     /// The shapes the world is known to hold, as [`Look::known`].
@@ -81,6 +120,8 @@ pub struct Memory {
     hands: Vec<Option<Holding>>,
     /// The map, shared by the memories made from it until a look fuses another.
     map: Arc<Map>,
+    /// What the acts since the map was fused tell it, in order.
+    marks: Vec<Mark>,
     /// How far from the robot's frame it reaches (meters): the look's corners and the map's.
     reach: f32,
     /// How far past an object's room its part of the map reaches (meters), as far as a grid must
@@ -93,13 +134,59 @@ pub struct Memory {
 struct Holding {
     id: u32,
     held: Held,
+    object: Object,
 }
 
-/// The map of what the cameras read, and its voxel.
+/// What an act tells the map, kept until a look fuses it: the voxels within a voxel's reach of
+/// `shape` are free (`OccupancyMap::free`), or never seen (`OccupancyMap::clear`).
+#[derive(Clone, Debug, PartialEq)]
+struct Mark {
+    shape: Obstacle,
+    free: bool,
+}
+
+impl Mark {
+    /// Tells `map`, of `voxel`.
+    fn on(&self, map: &mut OccupancyMap, voxel: f32) -> Result<()> {
+        let reach = voxel_reach(voxel);
+        match self.free {
+            true => map.free(&self.shape, reach),
+            false => map.clear(&self.shape, reach),
+        }
+    }
+}
+
+/// The map of what the cameras read, its voxel, and the parts of it made for the rooms objects
+/// take up, kept for every memory that shares the map.
 #[derive(Debug)]
 struct Map {
     fused: OccupancyMap,
     voxel: f32,
+    regions: Mutex<Vec<Region>>,
+}
+
+impl Map {
+    fn new(fused: OccupancyMap, voxel: f32) -> Map {
+        Map {
+            fused,
+            voxel,
+            regions: Mutex::default(),
+        }
+    }
+
+    /// The parts made so far. A part is whole once pushed, so one a panicking thread left is
+    /// whole too.
+    fn regions(&self) -> MutexGuard<'_, Vec<Region>> {
+        self.regions.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The map's part in the room an object takes up, after the marks a memory had, gridded.
+#[derive(Debug)]
+struct Region {
+    cover: Obstacle,
+    marks: Vec<Mark>,
+    grid: Option<Obstacle>,
 }
 
 impl Memory {
@@ -121,7 +208,8 @@ impl Memory {
             known: known.into(),
             scene: Scene::default(),
             hands: vec![None; robot.hands()],
-            map: Arc::new(Map { fused, voxel }),
+            map: Arc::new(Map::new(fused, voxel)),
+            marks: vec![],
             reach,
             padding: IkOptions::default().collision.margin + largest,
         })
@@ -144,6 +232,179 @@ impl Memory {
     pub fn held(&self, hand: usize) -> Option<(u32, &Held)> {
         let holding = self.hands.get(hand)?.as_ref()?;
         Some((holding.id, &holding.held))
+    }
+
+    /// The memory after `acts`, in order ([`Act`]): the objects and the hands at once, the map's
+    /// share when the map is next read, by [`Memory::world`] or the next look. The map is not
+    /// copied: memories after different acts share it, and the parts made of it for the rooms
+    /// objects take up. An id no object has, a let-go or a loss of what no hand holds, a pick into
+    /// a hand that holds something already or that the robot has not, and a pose or a distance
+    /// that is no number are an `Error::Input` naming the act.
+    pub fn after(&self, acts: &[Act]) -> Result<Memory> {
+        let mut memory = self.clone();
+        for (k, act) in acts.iter().enumerate() {
+            memory.act(k, act)?;
+        }
+        Ok(memory)
+    }
+
+    /// The memory after act `k`, `act`.
+    fn act(&mut self, k: usize, act: &Act) -> Result<()> {
+        match act {
+            Act::Picked { id, held } => {
+                let index = self.index(k, *id)?;
+                let hand = held.hand;
+                ensure_input!(
+                    hand < self.hands.len(),
+                    "act {k} picks object {id} into hand {hand}, of the robot's {}",
+                    self.hands.len()
+                );
+                if let Some(holding) = &self.hands[hand] {
+                    return Err(batchplan::Error::Input(format!(
+                        "act {k} picks object {id} into hand {hand}, which holds object {} already",
+                        holding.id
+                    )));
+                }
+                let object = self.scene.objects[index].clone();
+                for taken in self.take(index) {
+                    if !taken.solid {
+                        let shape = taken.shape.obstacle();
+                        self.marks.push(Mark { shape, free: true });
+                    }
+                }
+                let held = held.clone();
+                self.hands[hand] = Some(Holding {
+                    id: *id,
+                    held,
+                    object,
+                });
+            }
+            Act::LetGo { id, at } => {
+                ensure_input!(
+                    at.position.is_finite() && at.rotation.is_finite(),
+                    "act {k} lets go of object {id} at {at:?}, which is no pose"
+                );
+                let object = self.release(k, *id)?;
+                self.scene.objects.push(Object {
+                    shape: object.shape.placed(*at),
+                    on: None,
+                    ..object
+                });
+            }
+            Act::Lost { id } => {
+                self.release(k, *id)?;
+            }
+            Act::Pushed { id, by } => {
+                ensure_input!(
+                    by.is_finite(),
+                    "act {k} pushes object {id} by {by}, which is no distance"
+                );
+                let index = self.index(k, *id)?;
+                for moved in self.standing(index) {
+                    let object = &mut self.scene.objects[moved];
+                    let pose = object.shape.pose();
+                    let shape = object
+                        .shape
+                        .placed(Pose::new(pose.position + *by, pose.rotation));
+                    if !object.solid {
+                        for was in [object.shape.obstacle(), shape.obstacle()] {
+                            self.marks.push(Mark {
+                                shape: was,
+                                free: false,
+                            });
+                        }
+                    }
+                    object.shape = shape;
+                }
+            }
+            Act::Drew { id, by } => {
+                ensure_input!(
+                    by.is_finite(),
+                    "act {k} draws object {id} by {by}, which is no distance"
+                );
+                let object = &self.scene.objects[self.index(k, *id)?];
+                if !object.solid {
+                    let pose = object.shape.pose();
+                    let drawn = object
+                        .shape
+                        .placed(Pose::new(pose.position + *by, pose.rotation));
+                    for shape in [object.shape.obstacle(), drawn.obstacle()] {
+                        self.marks.push(Mark { shape, free: false });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Where object `id` is among the objects, for act `k`.
+    fn index(&self, k: usize, id: u32) -> Result<usize> {
+        let index = self.scene.objects.iter().position(|object| object.id == id);
+        index.ok_or_else(|| {
+            batchplan::Error::Input(format!(
+                "act {k} names object {id}, which the memory does not hold"
+            ))
+        })
+    }
+
+    /// The object the hand that holds `id` took, which no hand holds after this, for act `k`.
+    fn release(&mut self, k: usize, id: u32) -> Result<Object> {
+        let holds = |holding: &Option<Holding>| holding.as_ref().is_some_and(|h| h.id == id);
+        let hand = self.hands.iter().position(holds);
+        let holding = hand.and_then(|hand| self.hands[hand].take());
+        let holding = holding.ok_or_else(|| {
+            batchplan::Error::Input(format!(
+                "act {k} lets go of object {id}, which no hand holds"
+            ))
+        })?;
+        Ok(holding.object)
+    }
+
+    /// Object `index` and the objects that stand on it, in turn, in their order.
+    fn standing(&self, index: usize) -> Vec<usize> {
+        let mut standing = vec![index];
+        // Each round takes in what stands on one taken in before, until none does.
+        let mut grew = true;
+        while grew {
+            grew = false;
+            for (k, object) in self.scene.objects.iter().enumerate() {
+                let on =
+                    matches!(object.on, Some(Support::Object(under)) if standing.contains(&under));
+                if on && !standing.contains(&k) {
+                    standing.push(k);
+                    grew = true;
+                }
+            }
+        }
+        standing.sort_unstable();
+        standing
+    }
+
+    /// Takes object `index` and what stands on it, in turn, out of the objects, what the rest
+    /// stand on numbered as they are left; the objects taken, in their order.
+    fn take(&mut self, index: usize) -> Vec<Object> {
+        let gone = self.standing(index);
+        let mut now = vec![None; self.scene.objects.len()];
+        let (mut kept, mut taken) = (vec![], vec![]);
+        let objects = std::mem::take(&mut self.scene.objects)
+            .into_iter()
+            .enumerate();
+        for (k, object) in objects {
+            match gone.contains(&k) {
+                true => taken.push(object),
+                false => {
+                    now[k] = Some(kept.len());
+                    kept.push(object);
+                }
+            }
+        }
+        for object in &mut kept {
+            if let Some(Support::Object(under)) = object.on {
+                object.on = now[under].map(Support::Object);
+            }
+        }
+        self.scene.objects = kept;
+        taken
     }
 
     /// The world to plan `step` against on `device`, every obstacle named in [`Planned::of`]:
@@ -236,14 +497,29 @@ impl Memory {
     /// The map in `cover` as the cameras saw into it, gridded with never-seen space solid: solid
     /// where a reading landed or nothing saw past, free where a camera saw in. None where nothing
     /// in it is solid.
+    ///
+    /// Made once for a room and the acts since the map was fused: memories that share the map and
+    /// have had the same acts since, whatever their hands hold, share it.
     fn region(&self, device: &Device, cover: &Obstacle) -> Result<Option<Obstacle>> {
-        let part = self.map.fused.part(cover, self.padding)?;
-        let counts = part.counts();
-        if counts.occupied == 0 && counts.unobserved == 0 {
-            return Ok(None);
+        let made = |region: &&Region| region.cover == *cover && region.marks == self.marks;
+        if let Some(region) = self.map.regions().iter().find(made) {
+            return Ok(region.grid.clone());
         }
-        let grid = part.grid(device, Occlusion::Occupied)?;
-        Ok(Some(Obstacle::from_grid(grid)))
+        let mut part = self.map.fused.part(cover, self.padding)?;
+        for mark in &self.marks {
+            mark.on(&mut part, self.map.voxel)?;
+        }
+        let counts = part.counts();
+        let grid = match counts.occupied + counts.unobserved {
+            0 => None,
+            _ => Some(Obstacle::from_grid(part.grid(device, Occlusion::Occupied)?)),
+        };
+        self.map.regions().push(Region {
+            cover: cover.clone(),
+            marks: self.marks.clone(),
+            grid: grid.clone(),
+        });
+        Ok(grid)
     }
 
     /// What the map holds outside every one of `covers`, gridded with never-seen space free, as
@@ -253,7 +529,10 @@ impl Memory {
     /// them.
     fn unexplained(&self, device: &Device, covers: &[Obstacle]) -> Result<Option<Obstacle>> {
         let reach = voxel_reach(self.map.voxel);
-        let outside = |p: &Vec3| covers.iter().all(|cover| cover.distance(*p).value > reach);
+        // An act's mark leaves nothing occupied within a voxel's reach of its shape either.
+        let marked = self.marks.iter().map(|mark| &mark.shape);
+        let shapes: Vec<&Obstacle> = covers.iter().chain(marked).collect();
+        let outside = |p: &Vec3| shapes.iter().all(|shape| shape.distance(*p).value > reach);
         let points: Vec<Vec3> = self
             .map
             .fused
@@ -269,6 +548,9 @@ impl Memory {
         });
         let bounds = Obstacle::cuboid(0.5 * (lower + upper), 0.5 * (upper - lower) + reach);
         let mut part = self.map.fused.part(&bounds, self.padding)?;
+        for mark in &self.marks {
+            mark.on(&mut part, self.map.voxel)?;
+        }
         for cover in covers {
             part.free(cover, reach)?;
         }
@@ -491,6 +773,9 @@ pub fn observe(
     let voxel = memory.map.voxel;
     let padding = map_padding(voxel);
     let mut fused = memory.map.fused.clone();
+    for mark in &memory.marks {
+        mark.on(&mut fused, voxel)?;
+    }
     for ((camera, image), mask) in cameras.iter().zip(&images).zip(&masks) {
         // One mask where the stance's padding reaches past the map's.
         let mask = match padding > at.padding {
@@ -522,7 +807,8 @@ pub fn observe(
             labels: vec![],
             next_id: scene.next_id,
         },
-        map: Arc::new(Map { fused, voxel }),
+        map: Arc::new(Map::new(fused, voxel)),
+        marks: vec![],
         ..memory.clone()
     };
     Ok(Observed {

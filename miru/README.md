@@ -685,16 +685,21 @@ the run.
   cameras** (`cargo test --release -p miru --test truth -- --nocapture`): the simulator's exact
   depth, an Intel RealSense D435 by its datasheet, and the D435 with a D405 near, the two stereo
   ones through batchplan's filter (`DepthImage::filtered`), as a caller's depth comes to a look.
-  Twelve scenes, a row per scene, camera and thing: how many objects the thing came out as, and
+  Thirteen scenes, a row per scene, camera and thing: how many objects the thing came out as, and
   of the one that holds most of it, its shape's kind, size and middle, what it stands on, whether
   it is solid, the share of the thing's pixels it holds and, on a second look, its id. On exact
-  depth 17 of 20 rows are wholly right, 135 properties holding and 9 not; through the D435 none of
-  20, with 78 and 66; through the D435 with the D405 near none, with 86 and 58. The gaps on exact
-  depth are one scene's: a box 200 mm square and 60 mm tall with a round dial 90 mm across and
-  10 mm tall on it, and on the dial a bar 25 by 90 mm and 38 mm tall. The box is not solid, and the
+  depth 17 of 22 rows are wholly right, 144 properties holding and 14 not; through the D435 none of
+  22, with 85 and 73; through the D435 with the D405 near none, with 93 and 65. The gaps on exact
+  depth are two scenes'. A box 200 mm square and 60 mm tall with a round dial 90 mm across and
+  10 mm tall on it, and on the dial a bar 25 by 90 mm and 38 mm tall: the box is not solid, and the
   dial and the bar are one object, a box of 57 by 90 by 48 mm whose middle is 25 mm off the dial's
   and 17 mm off the bar's (6 allowed), not solid, standing on the box where the bar stands on the
-  dial. Every gap is listed row by row in `tests/truth.rs`'s doc, with what its object shows.
+  dial. And a plate 60 mm square and 5 mm thick on a box 140 mm square and 60 mm tall: the two are
+  one object through every camera, on exact depth the box's shape 5 mm taller than the box and not
+  solid. So a plate set down on a box (`Act::LetGo`) reads gone at the next look while it stands
+  there, through every camera that made an object of it on the table
+  (`a_plate_let_go_on_a_box_is_seen_there` in `tests/memory.rs`). Every gap is listed row by row
+  in `tests/truth.rs`'s doc, with what its object shows.
 - **What stays unseen is tested on rendered scenes alone**, and exact depth: the sets are first
   looks. An unseen object stays until a view shows its place, so a thing moved to stand before
   where it stood leaves the object it was behind it. And the robot's pixels say nothing either
