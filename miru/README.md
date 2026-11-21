@@ -9,8 +9,9 @@ miru is a crate of batchplan's repository, built on batchplan, which does not de
 view is batchplan's `DepthImage` with what a look needs besides, the shapes the world is known to
 hold are its `Obstacle`s, an object's solids come back as obstacles, and a look runs on a
 `Device`'s threads. Nothing in it knows a robot, a hand, a camera model or a table: the robot is
-a mask per pixel, and a look reads nothing of its device's robot. It is not published to
-crates.io; a program takes it from the repository with batchplan, at one revision.
+a mask per pixel, and a look reads nothing of its device's robot (`observe`, the look through
+batchplan, reads it to mask it). It is not published to crates.io; a program takes it from the
+repository with batchplan, at one revision.
 
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
@@ -69,29 +70,97 @@ gives the scene before with nothing seen. `Scene::next_id` is the id the next ne
 caller that gives ids of its own raises it past them, and never lowers it. A look with more new
 objects than a `u32` has ids left is refused.
 
-With batchplan, one look goes through both, each thing held in one memory: as a shape of the
-caller's or in batchplan's map of what the cameras read, never both. batchplan's
-`docs/perception.md` ("With a perception library") has the whole of it as a program; per view:
+With batchplan, one look is one call, `miru::observe`, and each thing is held in one memory: as
+a shape or in batchplan's map of what the cameras read, never both. A `Memory` carries the
+objects, what each hand holds and the map from look to look; what the robot did is said to it
+once (`Memory::after`), and it gives the world to plan a step against, every obstacle named
+(`Memory::world`):
 
-1. **Filter the depth** (`image.filtered(&filter)?`): it drops most of what a stereo camera reads
-   between a thing's edge and what lies behind it, which miru would take for the thing.
-2. **Mask the robot** (`image.robot_mask(&arm, &q, padding, &holding)?`): `View::robot` is its
-   `on_robot`, one flag a pixel.
+```rust,no_run
+use std::collections::HashMap;
+
+use batchplan::glam::{Quat, Vec3};
+use batchplan::{DepthImage, Device, Intrinsics, Obstacle, Pose, Robot, RobotOptions};
+use miru::{Act, Camera, Memory, MemoryOptions, Noise, Of, Stance, Step};
+
+fn main() -> Result<(), batchplan::Error> {
+    let robot = Robot::load("assets/franka/franka_panda.urdf", &RobotOptions::default())?;
+    let device = Device::cpu(&robot)?;
+    // the cell's fixtures, known without looking: a table
+    let table = Obstacle::cuboid(Vec3::new(0.5, 0.0, -0.02), Vec3::new(0.6, 0.6, 0.02));
+    let memory = Memory::try_new(&device, vec![table], &MemoryOptions::default())?;
+    // a frame as the camera read it, and what is known of the camera: facts, with no default
+    let depth = vec![1.0; 640 * 480];
+    let camera = Camera {
+        image: DepthImage {
+            depth: &depth,
+            width: 640,
+            intrinsics: Intrinsics { fx: 600.0, fy: 600.0, cx: 319.5, cy: 239.5 },
+            camera: Pose::new(Vec3::new(0.5, 0.0, 1.0), Quat::from_rotation_x(std::f32::consts::PI)),
+        },
+        color: &[],
+        noise: Noise::stereo(640.0, 0.05, 0.08), // its datasheet's
+        band: 1,       // pixels it reads beside a jump in depth toward the other surface
+        off_by: 0.005, // what its pose and the fixtures are off by
+        masks: &[],
+    };
+    // where the robot stood when the frame was taken, and how far past its spheres it reads
+    let q = robot.default_q().to_vec();
+    let locked = HashMap::new();
+    let stance = Stance { q: &q, locked: &locked, padding: 0.01 };
+    let seen = miru::observe(&device, &[camera], &stance, &memory)?;
+    // the world to plan a step against: the fixtures first, then each object
+    let planned = seen.memory.world(&device, &Step::default())?;
+    assert_eq!(planned.of.first(), Some(&Of::Known(0)));
+    if let Some(object) = seen.memory.objects().first() {
+        // its readings for grasps and rests, from the look kept
+        let _surface = seen.kept.surface(&device, object.id)?;
+        // what the robot did, said once
+        let by = Vec3::new(0.05, 0.0, 0.0);
+        let _pushed = seen.memory.after(&[Act::Pushed { id: object.id, by }])?;
+    }
+    Ok(())
+}
+```
+
+These are the steps it takes, as batchplan's `docs/perception.md` ("With a perception library")
+has them as a program; per camera:
+
+1. **Filter the depth** (`image.filtered(&filter)?`, at the camera's noise): it drops most of what
+   a stereo camera reads between a thing's edge and what lies behind it, which miru would take
+   for the thing.
+2. **Mask the robot** (`image.robot_mask(&arm, &q, padding, &holding)?`, the arm relocked with
+   the stance's locked joints, at its padding, holding what the memory's hands hold): `View::robot`
+   is its `on_robot`, one flag a pixel.
 3. **Give the fixtures** as `Look::known`: the obstacles themselves.
-4. **Look** (`miru::look`), with the scene before as `previous`. A pick, a place or a thing taken
-   away is said there, once, by changing that scene.
+4. **Look** (`miru::look`), with the memory's objects as `previous` and the corners as far as the
+   robot reaches (`Robot::reach`). A camera's noise is raised there by what it is off by, a third
+   for each of the three deviations a reading may lie from a shape and be on it: stated exact, a
+   camera 5 mm off its pose makes the table an object of its own.
 5. **Leave what is held as a shape out of the map.** The shapes are the fixtures and the solids
    (`Shape::solids`) of each object that is `solid`, and of no other, which come as obstacles: a
    box or a cylinder is itself, and a box open at the top, as a tray or a drawer pulled out, its
-   floor and four walls, so that a hand reaches into its room between walls held as thin boxes. An object that is not `solid` is never passed as its solids, a box
-   open at the top no more than a box (below):
-   `robot.clone().with_shapes(&device, &image, &shapes, margin)?`, then
-   `map.integrate(&device, &image, Some(&held))?`. `margin` is three times the view's `Noise`
-   (`[3 * constant, 3 * linear, 3 * quadratic]`) and what the shapes and the camera's pose are
-   off by.
-6. **Take grasps and rests on an object's own pixels**: the view's labels that name it, as
-   flags (`scene.labels[view].iter().map(|label| *label == Label::Object(object)).collect()`),
-   go to `Surface::from_depth(&device, &image, &flags, Some(&robot), radius)`.
+   floor and four walls, so that a hand reaches into its room between walls held as thin boxes.
+   An object that is not `solid` is never passed as its solids, a box open at the top no more
+   than a box (below): `robot.clone().with_shapes(&device, &image, &shapes, margin)?`, then
+   `.with_band(&device, &image, margin, band)?` and `map.integrate(&device, &image, Some(&held))?`.
+   `margin` is three times the camera's `Noise` (`[3 * constant, 3 * linear, 3 * quadratic]`) and
+   what the shapes and the camera's pose are off by. The map's mask is padded past what a grid of
+   it grows toward collision, 2√3 of its voxels (3.5 cm for batchplan's 1 cm), where the stance's
+   padding is less; what an act told the map since the last look is fused first.
+6. **Take grasps and rests on an object's own pixels** (`Kept::surface`): the view's labels that
+   name it, as flags (`scene.labels[view].iter().map(|label| *label == Label::Object(object)).collect()`),
+   go to `Surface::from_depth(&device, &image, &flags, Some(&robot), radius)`, the views joined.
+
+What the robot did is said once (`Act`): a pick takes the thing and what stands on it into a hand,
+which every mask then holds, and frees the map where a thing that was not solid stood; a let-go
+puts it back with its id where it was set down, unseen, and the next look says one of three of it:
+seen there (among the objects, a label naming it), its place not seen (among them, no label), or
+its place seen and empty (gone); a loss leaves it in no hand and no scene; a push moves the thing
+and what stands on it; and a draw, as of a drawer, leaves the object as it was. Where a pushed or
+drawn thing is not solid, the map is never seen where it stood and where it stands. Acts tell the
+map nothing at once: memories after different acts share it, and what each act says of it is
+fused when it is next read.
 
 Two things follow from step 5. What stands within the margin of a shape, or within about a
 voxel of it, is taken for the shape, so a shape larger than its thing takes in what stands
@@ -101,7 +170,10 @@ object that is not `solid`, as a bowl, a basket, or a cabinet with a drawer open
 seen into, is not passed as a shape where a hand reaches into it or the thing acted on stands in
 it (`on` says so): its shape would fill that room, and the map holds what was read of it. Kept
 away from, its shape still covers it and is the cheaper obstacle; which of the two a step needs
-is the caller's to say. The flag does not come and go with the view: an object that was not
+is the caller's to say (`Step`): `Memory::world` gives its part of the map, never-seen space
+solid in it, where the step names it in `into`, or where its room holds the robot at a
+configuration of `at` or the hand at a pose of `reach`, and the room it takes up otherwise; and
+last one grid of what the map holds that no shape and no room explains. The flag does not come and go with the view: an object that was not
 solid stays so while it continues, unless a look sees into it and it is a box open at the top.
 That one is solid, its room what the looks saw of the hollow: a wall whose inner face no view
 shows is as thick as what hides the floor before it, toward collision, until a look sees in. It
@@ -700,6 +772,22 @@ the run.
   there, through every camera that made an object of it on the table
   (`a_plate_let_go_on_a_box_is_seen_there` in `tests/memory.rs`). Every gap is listed row by row
   in `tests/truth.rs`'s doc, with what its object shows.
+- **A look through `observe` takes about 1.8 times a look alone.** On `rows4` its 20 looks take
+  94 and 82 ms at the median, against 47 and 45 ms for `look` on the same views after the same
+  scene, and on `hand-in-drawer` its 16 looks with truth 134 and 142 ms against 73 and 79 ms, on
+  an M4 Pro's 14 threads at a load of 14 to 17 from other work, the sets alternated (a program
+  written for the run, which loads each run's robot from its `robot.urdf` and `collision.json`
+  and the joints and fingers of each look, at a padding of 3 cm). The rest is batchplan's: the
+  filter, the two masks, the shapes and the band, and fusing the LIBERO Panda's map of 23.9M
+  voxels on the CPU device. Cloning that map, which each look does so that the memory it was
+  given stays as it was, takes 0.5 to 0.6 ms of it.
+- **Through a stereo camera the table leaves readings in the map that nothing explains.** A
+  reading of a known shape that lands past three deviations of the camera's stated noise from it
+  is no shape's, and the map holds it: on the scene of `tests/batchplan.rs`, 121 points of the
+  grid of what nothing explains are deep in solid through the D435 and 35 through the D435 with
+  the D405 near, nearly all nearest the table and within a few centimetres of a thing, and as many
+  with the cameras stated 5 mm off their poses and `off_by` 5 mm as with them stated where they
+  stand (the gaps of `tests/memory.rs`).
 - **What stays unseen is tested on rendered scenes alone**, and exact depth: the sets are first
   looks. An unseen object stays until a view shows its place, so a thing moved to stand before
   where it stood leaves the object it was behind it. And the robot's pixels say nothing either

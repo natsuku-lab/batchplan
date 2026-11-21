@@ -46,6 +46,11 @@ These are settled with the user. Keep to them unless the user decides otherwise.
 - **Any embodiment.** Nothing names or assumes a robot, a hand, a camera or a table. The robot
   is a mask per pixel, known shapes are obstacles, noise is each camera's own polynomial in
   depth, stereo or time of flight alike: all inputs. A look reads nothing of its device's robot.
+  `observe`, the look through batchplan, reads the device's robot and nothing else of it: its
+  joints and collision spheres to mask it (and the hands' links and spheres for `Step::reach`),
+  how far it reaches for the look's corners and the map, and its largest sphere for how far a
+  part of the map reaches; every number it uses is a fact the caller states, one batchplan's
+  defaults give, or one derived from those by a rule its doc names.
 - **One call, state in the result.** `look(&device, &Look, &previous, &options) -> Scene`. No
   handle of miru's, no run-time configuration, no plugins. What the next look needs is in the
   `Scene`.

@@ -63,6 +63,19 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   `miru/README.md` has what it tells apart and where it stands, and `miru/tests/truth.rs` holds
   it to scenes built from known things, read through the simulator's exact depth and two stereo
   cameras modelled from their datasheets.
+- `miru::observe(&device, &cameras, &stance, &memory)`: a look through the library and `miru`
+  as one call. Each `Camera` states its frame as read, its noise, the pixels it reads beside a
+  jump in depth and what its pose is off by; the `Stance` the robot's joints, its locked joints and
+  how far past its spheres its readings lie. The depth is filtered, the robot and what its hands
+  hold masked, the look taken after the `Memory`, and what no shape holds fused into the memory's
+  map, the map's mask padded past what its grid grows toward collision. `Memory::after(&[Act])`
+  says once what the robot did (picked, let go, lost, pushed, drew), the map's share kept until
+  it is next read, so memories after different acts share one map. `Memory::world(&device, &Step)`
+  gives the world to plan a step against, every obstacle named (`Of`): the fixtures, each object's
+  solids or the room it takes up, its part of the map where the step goes into it, and one grid of
+  what nothing explains. `Kept` holds a look's scene, filtered depth and masks, and
+  `Kept::surface` an object's readings for grasps and rests. A look through it takes about 1.8
+  times `miru::look` alone on recorded LIBERO looks (`miru/README.md`).
 - `sdf::on_shapes(&device, &shapes, &points, &reach)` says which of a world's shapes each point
   lies on: per point, the shape nearest it and the distance to its surface, where that is no
   more than the point's reach, and none for a point marked with a negative reach. A camera's
