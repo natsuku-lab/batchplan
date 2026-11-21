@@ -10,6 +10,18 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- `miru`, a crate of its own in the repository (`miru/`, not published to crates.io): what depth
+  cameras show, as objects. One call, `miru::look(&device, &look, &previous, &options)`, takes
+  every camera's `DepthImage` with its colour, its noise, the robot's mask and a mask model's
+  numbers where there are any, and the obstacles the world is known to hold, and gives a scene:
+  which pixels are one thing, a box, an upright cylinder or a box open at the top for each, what
+  it stands on, and the same id for an object from one look to the next. An object's solids come
+  back as obstacles. It is built on the library, which does not depend on it, and a look runs on
+  the device's threads, the scene the same whatever their number. `miru/README.md` has what it
+  tells apart and where it stands.
+- `Device::install(op)` runs `op` on the device's threads, so that rayon's parallel loops inside
+  it run there and not on the global pool: how a crate built on the library, as `miru` is, keeps
+  its work on the threads the device was given.
 - A band behind what a mask flags: `mask.with_band(&device, &image, margin, pixels)` flags a
   reading that lies behind a thing the mask holds (a sphere of the robot, a held object, a
   shape), beside a flagged reading of that thing within `pixels` pixels along rows, columns and

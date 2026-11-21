@@ -13,11 +13,22 @@ exclude = [".agents/", ".claude/", ".github/", "AGENTS.override.md", "CLAUDE.md"
 [package.metadata.docs.rs]
 features = ["lerobot", "usd"]
 
+# `miru` builds with the library: what depth cameras show, as objects, on batchplan's types and
+# devices. The library never depends on it. `demos/` and `python/` are crates of their own, each
+# with its lock file.
+[workspace]
+members = ["miru"]
+exclude = ["demos", "python"]
+
+# The math types in both crates' interfaces: one version, so a `Vec3` passes between them.
+[workspace.dependencies]
+glam = { version = "0.33", features = ["serde"] }
+
 [dependencies]
 anyhow = "1"
 bytemuck = { version = "1", features = ["derive"] }
 fearless_simd = "1.1"
-glam = { version = "0.33", features = ["serde"] }
+glam = { workspace = true }
 half = "2"
 mesh-loader = "0.1"
 parry3d = { version = "0.31", default-features = false, features = ["required-features", "std", "alloc"] }
@@ -44,8 +55,11 @@ lerobot = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
 # Load robots and scenes from OpenUSD (adds the pure-Rust openusd crates, which need Rust 1.96).
 usd = ["dep:openusd", "dep:openusd-schemas"]
 
-# Every build warns on these; CI denies warnings.
-[lints.clippy]
+[lints]
+workspace = true
+
+# Every build of the library and of `miru` warns on these; CI denies warnings.
+[workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 # Rules of Google's Rust style guide that clippy checks.
 wildcard_imports = "warn"
