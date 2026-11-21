@@ -10,8 +10,10 @@ Each scene's support becomes a height field of the highest point in each cell `t
 friction the rests were found with. A rest is let go where it was found and stepped for a second:
 it stays if it has moved less than 5 mm and turned less than 5 degrees. A rest that moves is a
 defect to explain, in `rests_on` or in this check. A fall (a scene that gives its hollow's `rim`)
-is let go where it was found and stepped for two seconds: it fell in and stays if its middle then
-lies under the rim, over a cell of the support, and moves slower than 5 mm a second.
+is let go where it was found and stepped for as long as its middle takes to fall to the lowest of
+the support, and then a rest's second to settle: it fell in and stays if its middle then lies under
+the rim, over a cell of the support, and it moves slower than 5 mm and turns slower than 5 degrees
+a second, no more in a second than a rest may in all.
 """
 import json
 import math
@@ -21,16 +23,14 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+# A rest's time to settle: ManiSkill2 settles a placement for half a second of steps, and another
+# half where the object still moves.
 SECONDS = 1.0
 # The balls the object's surface is made of for MuJoCo, and how far apart they lie (meters).
 BALL = 0.002
 STEP = 0.004
 MOST_MOVED = 0.005
 MOST_TURNED = math.radians(5.0)
-# A fall gets twice a rest's time, the first part of it to fall, and is still where it moves no
-# farther in a second than a rest may move in all.
-FALL_SECONDS = 2 * SECONDS
-STILL = MOST_MOVED / SECONDS
 
 
 def surface_of(kind, size):
@@ -156,18 +156,21 @@ def stays(model, data, rest):
     return moved, turned
 
 
-def falls_in(model, data, fall, rim, cells, cell):
-    """Whether a fall let go where it was found lies in the hollow and still after `FALL_SECONDS`,
-    and where its middle is then."""
+def falls_in(model, data, fall, rim, cells, cell, floor):
+    """Whether a fall let go where it was found lies in the hollow and still once its middle has had
+    the time to fall to `floor`, the lowest of the support, and a rest's `SECONDS` to settle, and
+    where its middle is then."""
     mujoco.mj_resetData(model, data)
     x, y, z, qx, qy, qz, qw = fall[:7]
     data.qpos[:] = [x, y, z, qw, qx, qy, qz]
     mujoco.mj_forward(model, data)
-    for _ in range(int(FALL_SECONDS / model.opt.timestep)):
+    falling = math.sqrt(2.0 * max(z - floor, 0.0) / -model.opt.gravity[2])
+    for _ in range(int((falling + SECONDS) / model.opt.timestep)):
         mujoco.mj_step(model, data)
     at = data.qpos[:3].copy()
     over = (round(at[0] / cell), round(at[1] / cell)) in cells
-    still = float(np.linalg.norm(data.qvel[:3])) < STILL
+    moving, turning = (float(np.linalg.norm(data.qvel[k : k + 3])) for k in (0, 3))
+    still = moving < MOST_MOVED / SECONDS and turning < MOST_TURNED / SECONDS
     return at[2] < rim and over and still, at
 
 
@@ -213,12 +216,14 @@ def check_falls(folder, name, scene, points, most):
         return 0
     cell = scene["touching"]
     cells = {(round(x / cell), round(y / cell)) for x, y in points[:, :2].astype(np.float64)}
+    floor = float(points[:, 2].min())
     model = model_of(points.astype(np.float64), scene["object"], scene["friction"], cell)
     data = mujoco.MjData(model)
     chosen = np.unique(np.linspace(0, len(falls) - 1, min(most, len(falls))).astype(int))
     out = []
     for k in chosen:
-        inside, at = falls_in(model, data, falls[k].astype(np.float64), scene["rim"], cells, cell)
+        fall = falls[k].astype(np.float64)
+        inside, at = falls_in(model, data, fall, scene["rim"], cells, cell, floor)
         if not inside:
             out.append((k, at))
     print(f"{name}: {len(chosen) - len(out)} of {len(chosen)} falls tried fall in and stay "
