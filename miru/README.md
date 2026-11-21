@@ -786,15 +786,14 @@ the run.
   plans carry, or where it stood, and no obstacle holds it: the nearest to its middle is 9.0 cm off
   on exact depth and through the D435 with the D405, 3.4 cm through the D435
   (`what_stood_on_a_picked_thing_is_in_a_memory` in `tests/memory.rs`).
-- **A look through `observe` takes about 1.8 times a look alone.** On `rows4` its 20 looks take
-  94 and 82 ms at the median, against 47 and 45 ms for `look` on the same views after the same
-  scene, and on `hand-in-drawer` its 16 looks with truth 134 and 142 ms against 73 and 79 ms, on
-  an M4 Pro's 14 threads at a load of 14 to 17 from other work, the sets alternated (a program
-  written for the run, which loads each run's robot from its `robot.urdf` and `collision.json`
-  and the joints and fingers of each look, at a padding of 3 cm). The rest is batchplan's: the
-  filter, the two masks, the shapes and the band, and fusing the LIBERO Panda's map of 23.9M
-  voxels on the CPU device. Cloning that map, which each look does so that the memory it was
-  given stays as it was, takes 0.5 to 0.6 ms of it.
+- **What a look through `observe` costs.** [FIGURES TO COME, for the coordinator: the medians
+  `cargo run --release -p miru --example score -- <set> --observe --threads <n>` prints on
+  `rows4` and `hand-in-drawer`, alternated runs, with the machine and its load; and `look` against
+  main through the scorer.] Over `look` alone it does batchplan's part: the filter, the two
+  masks, the shapes and the band, and fusing the map, for the LIBERO Panda 23.9M voxels on the CPU
+  device; and it clones that map, so that the memory it was given stays as it was. A `world` after
+  it reads the map's occupied voxels once for that look, and a world made again of the same
+  memory, or of one after acts that differ only in what is held, builds nothing again.
 - **Through a stereo camera the table leaves readings in the map that nothing explains.** A
   reading of a known shape that lands past three deviations of the camera's stated noise from it
   is no shape's, and the map holds it: on the scene of `tests/batchplan.rs`, 121 points of the

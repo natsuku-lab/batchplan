@@ -3,12 +3,18 @@
 //!
 //! A run's `cell.json` has the shapes its world is known to hold, its `fixtures`: each a `pose`
 //! and a `shape`, a `box` of `half_extents` or a `cylinder` of `radius` and `half_height` along
-//! its z axis. A look is a folder named by its number, with:
+//! its z axis; its `hands`, each with its `fingers` (a joint and the value it opens to); its
+//! `cameras`, each with a `name` and, where the camera reads beside a jump in depth toward the
+//! other surface, its `depth_band` in pixels; and the `sphere_tolerances` its robot's spheres were
+//! fitted to, per link: how far the link's surface may lie past them. The run's robot is
+//! `robot.urdf` with the spheres of `collision.json`. A look is a folder named by its number, with:
 //!
 //! - `look.json`: its `cameras`, each with a `name`, `width`, `height`, `intrinsics` (fx, fy, cx,
 //!   cy), `position` and `rotation` (x, y, z, w; the robot's base frame, OpenCV axes) and `noise`
 //!   (c0, c1, c2 of its depth's standard deviation, c0 + c1 z + c2 z^2 meters at z meters), and
-//!   the `objects` the executor that recorded the look measured, each with its `center`;
+//!   the `objects` the executor that recorded the look measured, each with its `center`; and the
+//!   robot's `joints` (`names` and `positions`) and `fingers` (joint to value) when the frames were
+//!   taken;
 //! - per camera `color_<camera>.npy` (u8, h x w x 3) and `depth_<camera>.npy` (f32, meters along
 //!   the optical axis, 0 for no reading);
 //! - what that executor made of each pixel: `robot_<camera>.npy` (bool, whether it took the
@@ -18,6 +24,7 @@
 //!   if any, and whose `frames` each have the truth `objects`' poses by `name`; and per camera
 //!   `body_<camera>.npy` (u16, the body each pixel shows, 65535 for none).
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -254,4 +261,82 @@ pub fn device(threads: Option<usize>) -> Result<Device, Error> {
         Some(threads) => Device::cpu_threads(&robot, threads)?,
         None => Device::cpu(&robot)?,
     })
+}
+
+/// The robot of the run recorded in `folder`, on a CPU device of `threads` threads (as many as the
+/// machine has where none), and what its cell says of it and of its cameras.
+pub struct Cell {
+    /// The device, whose robot is the run's: `robot.urdf` with the spheres of `collision.json`,
+    /// each hand's fingers locked where they open.
+    pub device: Device,
+    /// How far past the robot's spheres a reading of it may lie: the largest of the cell's
+    /// `sphere_tolerances`, how far a link's surface may lie past the spheres fitted to it.
+    pub padding: f32,
+    /// Per camera, by name, how many pixels beside a jump in depth it reads toward the other
+    /// surface: its `depth_band`, none where the cell states none.
+    pub bands: HashMap<String, usize>,
+}
+
+/// The run recorded in `folder`'s robot and cell, on `threads` threads.
+pub fn cell(folder: &Path, threads: Option<usize>) -> Result<Cell, Error> {
+    let cell = json(&folder.join("cell.json"))?;
+    let hands = cell["hands"].as_array().into_iter().flatten();
+    let fingers = hands.flat_map(|hand| hand["fingers"].as_array().into_iter().flatten());
+    let lock_joints = fingers
+        .map(|finger| {
+            let (Some(joint), Some(value)) = (finger[0].as_str(), finger[1].as_f64()) else {
+                return Err(format!("a finger of no joint and value: {finger}"));
+            };
+            Ok((joint.to_owned(), value as f32))
+        })
+        .collect::<Result<_, _>>()?;
+    let options = RobotOptions {
+        collision_model: Some(CollisionModel::load(folder.join("collision.json"))?),
+        lock_joints,
+        ..Default::default()
+    };
+    let robot = Robot::load(folder.join("robot.urdf"), &options)?;
+    let device = Device::cpu_threads(&robot, threads.unwrap_or(0))?;
+    let tolerances = cell["sphere_tolerances"].as_object();
+    let tolerances = tolerances
+        .ok_or("cell.json has no sphere_tolerances")?
+        .values();
+    let padding = tolerances.filter_map(Value::as_f64).fold(0.0, f64::max) as f32;
+    let cameras = cell["cameras"].as_array().into_iter().flatten();
+    let bands = cameras
+        .filter_map(|camera| {
+            let band = camera["depth_band"].as_u64().unwrap_or(0);
+            Some((camera["name"].as_str()?.to_owned(), band as usize))
+        })
+        .collect();
+    Ok(Cell {
+        device,
+        padding,
+        bands,
+    })
+}
+
+/// The robot's joints, in the order of `names`, and its fingers, as `Robot::relock` takes them,
+/// when the frames of the look recorded in `folder` were taken.
+pub fn stance(folder: &Path, names: &[String]) -> Result<(Vec<f32>, HashMap<String, f32>), Error> {
+    let look = json(&folder.join("look.json"))?;
+    let recorded = look["joints"]["names"].as_array().into_iter().flatten();
+    let recorded: Vec<&str> = recorded.filter_map(Value::as_str).collect();
+    let positions = numbers(&look["joints"]["positions"]);
+    let q = names
+        .iter()
+        .map(|name| {
+            let at = recorded.iter().position(|joint| joint == name);
+            let at = at.ok_or_else(|| format!("look.json has no joint {name}"))?;
+            positions
+                .get(at)
+                .copied()
+                .ok_or_else(|| format!("no position of {name}"))
+        })
+        .collect::<Result<_, _>>()?;
+    let fingers = look["fingers"].as_object().into_iter().flatten();
+    let fingers = fingers
+        .filter_map(|(joint, value)| Some((joint.clone(), value.as_f64()? as f32)))
+        .collect();
+    Ok((q, fingers))
 }

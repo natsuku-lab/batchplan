@@ -6,6 +6,7 @@
 //!   cargo run --release --example score -- <set> [--recorded | --masks truth|one
 //!       [--border <pixels>]] [--again] [--noise <factor>] [--shares] [--offsets] [--twin <set>]
 //!       [--rooms] [--threads <n>] [--images <dir>] [--digest] [run ...]
+//!   cargo run --release --example score -- <set> --observe [--threads <n>] [run ...]
 //!
 //! `<set>` holds a folder per run, each with its fixtures and a folder per look
 //! (`examples/common`). `--recorded` scores the objects the recording's executor names under each
@@ -58,6 +59,15 @@
 //! gave, the `--again` ones among them, and over nothing else: two builds that give the same scenes
 //! print the same digest, whatever their times. Naming runs scores those alone.
 //!
+//! `--observe` scores nothing: it times `miru::observe` on each run's looks, in order, after the
+//! memory the look before left, on a CPU device of the run's own robot (`common::cell`: its
+//! `robot.urdf` and `collision.json`, the stance's padding and each camera's band as its cell
+//! states them, its joints and fingers as each look's `look.json` has them, and `off_by` 0, the
+//! simulator's poses and shapes being exact). Per look and at the median over the set: what
+//! `observe` takes; what `miru::look` takes again on the views `observe` kept, after the same
+//! scene, which is the look inside it and must give the same scene; and what a `Memory::world`
+//! call for a step that goes into nothing takes after it, the first on that memory.
+//!
 //! Only pixels with a reading count. A measured object is *of* a truth object when more than half
 //! of its pixels on truth objects show that one, and a truth object *lies in* a measured object
 //! when more than half of its own pixels are that one's. A truth object that 50 pixels or more
@@ -87,7 +97,10 @@ use std::time::Instant;
 use batchplan::{DepthImage, Device, Intrinsics, Obstacle};
 use common::{Camera, Error, Recorded};
 use glam::{Vec2, Vec3};
-use miru::{Label, Look, LookOptions, Noise, Scene, Shape, Support, View};
+use miru::{
+    Label, Look, LookOptions, Memory, MemoryOptions, Noise, Scene, Shape, Stance, Step, Support,
+    View,
+};
 
 /// A truth object shown by fewer pixels is not in view: it is not scored, and lies in nothing.
 const IN_VIEW: usize = 50;
@@ -141,6 +154,8 @@ struct Asked {
     images: Option<PathBuf>,
     /// Print one hash over every scene miru's looks gave.
     digest: bool,
+    /// Time `miru::observe`, its look and a world after it, scoring nothing.
+    observe: bool,
     /// The runs to score, or none for all.
     only: Vec<String>,
 }
@@ -152,12 +167,14 @@ impl Asked {
     fn of(mut args: impl Iterator<Item = String>) -> Result<Self, Error> {
         let usage = "usage: score <set> [--recorded | --masks truth|one [--border pixels]] \
              [--again] [--noise factor] [--shares] [--offsets] [--twin set] [--rooms] \
-             [--threads n] [--images dir] [--digest] [run ...]";
+             [--threads n] [--images dir] [--digest] [run ...], or score <set> --observe \
+             [--threads n] [run ...]";
         let set = PathBuf::from(args.next().ok_or(usage)?);
         let (mut of_executor, mut masks, mut border, mut again) = (false, None, 0, false);
         let mut rooms = false;
         let (mut images, mut only, mut shares, mut threads) = (None, vec![], false, None);
         let (mut offsets, mut digest, mut noise, mut twin) = (false, false, None, None);
+        let mut observe = false;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--recorded" => of_executor = true,
@@ -188,9 +205,28 @@ impl Asked {
                     images = Some(PathBuf::from(args.next().ok_or("--images takes a folder")?))
                 }
                 "--digest" => digest = true,
+                "--observe" => observe = true,
                 flag if flag.starts_with("--") => return Err(format!("{flag}? {usage}").into()),
                 _ => only.push(arg),
             }
+        }
+        let scoring = of_executor
+            || masks.is_some()
+            || border != 0
+            || again
+            || noise.is_some()
+            || shares
+            || offsets
+            || twin.is_some()
+            || rooms
+            || images.is_some()
+            || digest;
+        if observe && scoring {
+            return Err(format!(
+                "--observe times miru's observe and scores nothing: it takes --threads and runs \
+                 alone: {usage}"
+            )
+            .into());
         }
         if of_executor && masks.is_some() {
             return Err(format!("masks are for miru's look, not the executor's: {usage}").into());
@@ -249,6 +285,7 @@ impl Asked {
             threads,
             images,
             digest,
+            observe,
             only,
         })
     }
@@ -392,16 +429,20 @@ fn main() -> Result<(), Error> {
         threads,
         images,
         digest,
+        observe,
         only,
     } = asked;
-    let device = common::device(threads)?;
-    let mut scenes = Digest::default();
     let mut runs: Vec<PathBuf> = fs::read_dir(&set)?
         .filter_map(|entry| Some(entry.ok()?.path()))
         .filter(|path| path.join("cell.json").exists())
         .filter(|path| only.is_empty() || only.iter().any(|run| path.ends_with(run)))
         .collect();
     runs.sort();
+    if observe {
+        return observed(&set, &runs, threads);
+    }
+    let device = common::device(threads)?;
+    let mut scenes = Digest::default();
     let (mut together, mut by_camera) = (Tally::new(), BTreeMap::<String, Tally>::new());
     let mut labelled = BTreeMap::<String, Shares>::new();
     // Per kind, how far each matched one's middle lies from the truth's (meters), and how many
@@ -422,13 +463,7 @@ fn main() -> Result<(), Error> {
         } else {
             common::fixtures(run)?
         };
-        // The looks that have their truth, by their number.
-        let mut looks: Vec<(usize, PathBuf)> = fs::read_dir(run)?
-            .filter_map(|entry| Some(entry.ok()?.path()))
-            .filter(|path| path.join("truth.json").exists())
-            .filter_map(|path| Some((path.file_name()?.to_str()?.parse().ok()?, path)))
-            .collect();
-        looks.sort();
+        let looks = looks(run)?;
         let mut scene = Scene::default();
         // The twin's run: its fixtures, and the scene of its looks so far.
         let twin_run = twin
@@ -1079,6 +1114,111 @@ fn middle(shape: &Shape) -> Vec2 {
 
 /// The median of `values`, which hold one at least: of an even number, the mean of the two in
 /// the middle, as Python's `statistics.median` takes it.
+/// The looks of the run recorded in `run` that have their truth, by their number, in order.
+fn looks(run: &Path) -> Result<Vec<(usize, PathBuf)>, Error> {
+    let mut looks: Vec<(usize, PathBuf)> = fs::read_dir(run)?
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| path.join("truth.json").exists())
+        .filter_map(|path| Some((path.file_name()?.to_str()?.parse().ok()?, path)))
+        .collect();
+    looks.sort();
+    Ok(looks)
+}
+
+/// `--observe`: times `miru::observe` on each of `runs` of `set`, on `threads` threads, the look
+/// inside it and a world after it (the module's doc).
+fn observed(set: &Path, runs: &[PathBuf], threads: Option<usize>) -> Result<(), Error> {
+    let since = |start: Instant| start.elapsed().as_secs_f64() as f32 * 1e3;
+    let (mut observing, mut looking, mut planning) = (vec![], vec![], vec![]);
+    let mut on = String::new();
+    for run in runs {
+        let cell = common::cell(run, threads)?;
+        let device = &cell.device;
+        let robot = device.robot();
+        on = device.name();
+        let known = common::fixtures(run)?;
+        let mut memory = Memory::try_new(device, known.clone(), &MemoryOptions::default())?;
+        let mut previous = Scene::default();
+        let corner = Vec3::splat(robot.reach());
+        let corners = LookOptions {
+            lower_corner: -corner,
+            upper_corner: corner,
+        };
+        for (_, folder) in looks(run)? {
+            let recorded = Recorded::load(&folder)?;
+            let (q, locked) = common::stance(&folder, robot.joint_names())?;
+            let cameras: Vec<miru::Camera> = (recorded.cameras.iter())
+                .map(|camera| miru::Camera {
+                    image: DepthImage {
+                        depth: &camera.depth,
+                        width: camera.width,
+                        intrinsics: camera.intrinsics,
+                        camera: camera.pose,
+                    },
+                    color: &camera.color,
+                    noise: camera.noise,
+                    band: cell.bands.get(&camera.name).copied().unwrap_or(0),
+                    off_by: 0.0,
+                    masks: &[],
+                })
+                .collect();
+            let stance = Stance {
+                q: &q,
+                locked: &locked,
+                padding: cell.padding,
+            };
+            let start = Instant::now();
+            let seen = miru::observe(device, &cameras, &stance, &memory)?;
+            let observe = since(start);
+            let views: Vec<View> = (0..cameras.len())
+                .map(|k| {
+                    Ok(View {
+                        image: seen.kept.image(k).ok_or("a kept view")?,
+                        color: cameras[k].color,
+                        noise: cameras[k].noise,
+                        robot: &seen.kept.robot(k).ok_or("a kept mask")?.on_robot,
+                        masks: &[],
+                    })
+                })
+                .collect::<Result<_, Error>>()?;
+            let look = Look {
+                views: &views,
+                known: &known,
+            };
+            let start = Instant::now();
+            let scene = miru::look(device, &look, &previous, &corners)?;
+            let its_look = since(start);
+            if &scene != seen.kept.scene() {
+                return Err(
+                    format!("{}: the look again gives another scene", folder.display()).into(),
+                );
+            }
+            let start = Instant::now();
+            let planned = seen.memory.world(device, &Step::default())?;
+            let world = since(start);
+            let name = folder.strip_prefix(set)?.display();
+            println!(
+                "{name}: observe {observe:.1} ms, its look {its_look:.1} ms, a world after it \
+                 {world:.1} ms ({} obstacles)",
+                planned.of.len()
+            );
+            observing.push(observe);
+            looking.push(its_look);
+            planning.push(world);
+            (previous, memory) = (scene, seen.memory);
+        }
+    }
+    println!(
+        "{} looks on {on}: at the median observe {:.1} ms, its look {:.1} ms, a world after it \
+         {:.1} ms",
+        observing.len(),
+        median(&observing),
+        median(&looking),
+        median(&planning)
+    );
+    Ok(())
+}
+
 fn median(values: &[f32]) -> f32 {
     let mut sorted = values.to_vec();
     sorted.sort_by(f32::total_cmp);
@@ -1704,6 +1844,29 @@ mod tests {
         assert_eq!(twin.only, ["run"]);
         assert!(asked(&["set", "--twin"]).is_err(), "a twin needs its set");
         assert!(asked(&["set", "--masks", "some"]).is_err(), "truth or one");
+    }
+
+    #[test]
+    fn observe_takes_threads_and_runs_alone() {
+        let asked = |args: &[&str]| Asked::of(args.iter().map(|arg| (*arg).to_owned()));
+        let timed = asked(&["set", "--observe", "--threads", "2", "run"]).expect("--observe");
+        assert!(timed.observe && timed.threads == Some(2) && timed.only == ["run"]);
+        assert!(!asked(&["set"]).expect("a set alone").observe);
+        for scoring in [
+            &["--recorded"][..],
+            &["--masks", "truth"],
+            &["--again"],
+            &["--noise", "0.5"],
+            &["--shares"],
+            &["--offsets"],
+            &["--twin", "exact"],
+            &["--rooms"],
+            &["--images", "dir"],
+            &["--digest"],
+        ] {
+            let args: Vec<&str> = [&["set", "--observe"], scoring].concat();
+            assert!(asked(&args).is_err(), "{args:?}");
+        }
     }
 
     #[test]

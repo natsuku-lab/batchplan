@@ -74,8 +74,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   gives the world to plan a step against, every obstacle named (`Of`): the fixtures, each object's
   solids or the room it takes up, its part of the map where the step goes into it, and one grid of
   what nothing explains. `Kept` holds a look's scene, filtered depth and masks, and
-  `Kept::surface` an object's readings for grasps and rests. A look through it takes about 1.8
-  times `miru::look` alone on recorded LIBERO looks (`miru/README.md`).
+  `Kept::surface` an object's readings for grasps and rests. [COST TO COME, for the coordinator:
+  what a look through it takes against `miru::look` alone, from `score <set> --observe`.]
 - `Robot::hand_spheres(hand)`: a hand's collision spheres in its IK frame at the default
   configuration, the fingers as the locked joints hold them and any object it holds with them
   (`HandSphere`: center, radius, whether a finger's and which side it stands to). Placed by a pose

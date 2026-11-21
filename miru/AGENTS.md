@@ -16,6 +16,7 @@ cargo run --release -p miru --example score -- <set> [--recorded | --masks truth
 cargo test --release -p miru --test truth -- --nocapture   # the truth table: scenes built from known things, read through three cameras (the simulator's exact depth, an Intel RealSense D435, a D405, the two through batchplan's filter), a row per scene, camera and thing with what `look` made of it against what it is; what holds is asserted, what does not is a gap listed in the file
 cargo test --release -p miru --features gpu --test batchplan   # the fit with batchplan: a look's output through the library's own calls, on the CPU and the GPU
 cargo run --release -p miru --example score -- <set> --again --digest [--masks truth] [--threads <n>]   # one hash over every scene the set's looks give, the second looks' too, and nothing else: a change meant to leave the results alone, as one for speed, prints the same digest before and after, on both sets, with and without masks, on 1, 2 and the default threads
+cargo run --release -p miru --example score -- <set> --observe [--threads <n>] [run ...]   # time miru::observe on each run's own robot (robot.urdf, collision.json, the cell's sphere tolerances and bands, each look's joints and fingers), the look inside it and a world after it, per look and at the median; scores nothing
 ```
 
 To SEE what a look made of a view, write the label pictures and open one beside the recording's
