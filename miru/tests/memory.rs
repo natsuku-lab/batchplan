@@ -1361,13 +1361,23 @@ fn acts_on_what_the_memory_does_not_hold_are_refused() {
 }
 
 /// Memories after acts that differ only in how the hand holds what it picked share the map: the
-/// bowl's part of it is made once, for both.
+/// bowl's part of it, and the grid of what nothing explains (a crumb 3 mm across that no object
+/// is made of), are each made once, for both.
 #[test]
 fn memories_after_different_holds_share_the_map() {
     let robot = panda();
     let device = Device::cpu(&robot).expect("a CPU device");
     let away = robot.default_q();
-    let things = acts_scene(&robot, away, Some(BOX), Some(BOWL), None);
+    let crumb = block(
+        Vec3::new(0.35, 0.3, 0.0015),
+        Vec3::splat(0.0015),
+        [200, 30, 200],
+    );
+    let mut things = vec![table()];
+    things.push(block(BOX, BOX_HALF, [200, 30, 30]));
+    things.push(common::standing_bowl(BOWL));
+    things.push(crumb);
+    things.push(arm(&robot, away));
     let rendered = render(&things);
     let seen = first_look(&device, &things, &rendered, (0, 0), away, 0.0);
     let ids = [1, 2].map(|thing| id_of(seen.kept.scene(), &rendered, thing).expect("an object"));
@@ -1379,30 +1389,39 @@ fn memories_after_different_holds_share_the_map() {
         ),
         ..held.clone()
     };
-    let grids: Vec<std::sync::Arc<batchplan::SdfGrid>> = [held, turned]
+    let grid = |obstacle: &Obstacle| match obstacle {
+        Obstacle::Sdf { grid, .. } => grid.clone(),
+        other => panic!("a part of the map that is no grid: {other:?}"),
+    };
+    let grids: Vec<[std::sync::Arc<batchplan::SdfGrid>; 2]> = [held, turned]
         .into_iter()
         .map(|held| {
             let memory = (seen.memory)
                 .after(&[Act::Picked { id: ids[0], held }])
                 .expect("a pick");
-            let planned = memory.world(
-                &device,
-                &Step {
-                    into: &[ids[1]],
-                    ..Step::default()
-                },
-            );
-            let planned = planned.expect("a world");
+            let step = Step {
+                into: &[ids[1]],
+                ..Step::default()
+            };
+            let planned = memory.world(&device, &step).expect("a world");
             let at = planned.of.iter().position(|of| *of == Of::Region(ids[1]));
-            match &planned.world.obstacles[at.expect("the bowl is a region")] {
-                Obstacle::Sdf { grid, .. } => grid.clone(),
-                other => panic!("a region that is no grid: {other:?}"),
-            }
+            let region = &planned.world.obstacles[at.expect("the bowl is a region")];
+            assert_eq!(
+                planned.of.last(),
+                Some(&Of::Unexplained),
+                "the map holds the crumb"
+            );
+            let unexplained = planned.world.obstacles.last().expect("the crumb's grid");
+            [grid(region), grid(unexplained)]
         })
         .collect();
     assert!(
-        std::sync::Arc::ptr_eq(&grids[0], &grids[1]),
+        std::sync::Arc::ptr_eq(&grids[0][0], &grids[1][0]),
         "the bowl's part is made twice"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&grids[0][1], &grids[1][1]),
+        "the grid of what nothing explains is made twice"
     );
 }
 

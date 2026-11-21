@@ -8,7 +8,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use batchplan::{
     DepthFilter, DepthImage, Device, GraspOptions, Held, IkOptions, Intrinsics, Obstacle,
@@ -171,7 +171,11 @@ impl Mark {
 struct Map {
     fused: OccupancyMap,
     voxel: f32,
+    /// The middles of its occupied voxels, found once, when first asked for.
+    occupied: OnceLock<Vec<Vec3>>,
     regions: Mutex<Vec<Region>>,
+    /// The grids of what it holds that nothing explains, made so far.
+    unexplained: Mutex<Vec<Unexplained>>,
 }
 
 impl Map {
@@ -179,8 +183,16 @@ impl Map {
         Map {
             fused,
             voxel,
+            occupied: OnceLock::new(),
             regions: Mutex::default(),
+            unexplained: Mutex::default(),
         }
+    }
+
+    /// The middles of its occupied voxels (`OccupancyMap::occupied`): the map is read for them
+    /// once, however many worlds are made of it.
+    fn occupied(&self) -> &[Vec3] {
+        self.occupied.get_or_init(|| self.fused.occupied())
     }
 
     /// The parts made so far. A part is whole once pushed, so one a panicking thread left is
@@ -188,12 +200,27 @@ impl Map {
     fn regions(&self) -> MutexGuard<'_, Vec<Region>> {
         self.regions.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    /// The grids of what nothing explains made so far, whole as the parts are.
+    fn unexplained(&self) -> MutexGuard<'_, Vec<Unexplained>> {
+        self.unexplained
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// The map's part in the room an object takes up, after the marks a memory had, gridded.
 #[derive(Debug)]
 struct Region {
     cover: Obstacle,
+    marks: Vec<Mark>,
+    grid: Option<Obstacle>,
+}
+
+/// What the map holds outside the rooms objects take up, after the marks a memory had, gridded.
+#[derive(Debug)]
+struct Unexplained {
+    covers: Vec<Obstacle>,
     marks: Vec<Mark>,
     grid: Option<Obstacle>,
 }
@@ -632,7 +659,26 @@ impl Memory {
     /// thing"): the part of the map over the occupied voxels that reach into no cover, each cover
     /// freed in it as far as a voxel reaches into it. None where no occupied voxel lies outside
     /// them.
+    ///
+    /// Made once for the rooms and the acts since the map was fused: memories that share the map
+    /// and have had the same acts since, whatever their hands hold, share it, and a world made
+    /// again of the same memory reads nothing of the map.
     fn unexplained(&self, device: &Device, covers: &[Obstacle]) -> Result<Option<Obstacle>> {
+        let made = |made: &&Unexplained| made.covers == covers && made.marks == self.marks;
+        if let Some(made) = self.map.unexplained().iter().find(made) {
+            return Ok(made.grid.clone());
+        }
+        let grid = self.unexplained_grid(device, covers)?;
+        self.map.unexplained().push(Unexplained {
+            covers: covers.to_vec(),
+            marks: self.marks.clone(),
+            grid: grid.clone(),
+        });
+        Ok(grid)
+    }
+
+    /// [`Memory::unexplained`], made.
+    fn unexplained_grid(&self, device: &Device, covers: &[Obstacle]) -> Result<Option<Obstacle>> {
         let reach = voxel_reach(self.map.voxel);
         // An act's mark leaves nothing occupied within a voxel's reach of its shape either.
         let marked = self.marks.iter().map(|mark| &mark.shape);
@@ -640,9 +686,9 @@ impl Memory {
         let outside = |p: &Vec3| shapes.iter().all(|shape| shape.distance(*p).value > reach);
         let points: Vec<Vec3> = self
             .map
-            .fused
             .occupied()
-            .into_iter()
+            .iter()
+            .copied()
             .filter(outside)
             .collect();
         let Some(&first) = points.first() else {
