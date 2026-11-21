@@ -1,4 +1,4 @@
-//! Picking objects up and setting them down, each a whole task in one call.
+//! Picking objects up, setting them down and turning them, each a whole task in one call.
 
 use std::collections::HashMap;
 
@@ -60,6 +60,9 @@ value_class! {
         /// each grasp at the opening that keeps them farthest from what is not the object's:
         /// false.
         narrow: bool,
+        /// A point to grip a surface near, in the surface's frame: `None`, the grasps spread over
+        /// the object. With a point, within each of their tiers, the pairs nearest it first.
+        near: Option<Vec3>,
     }
     methods {
         #[new]
@@ -80,7 +83,7 @@ value_class! {
 }
 
 value_class! {
-    /// How `pick` and `place` solve, follow, plan and time their steps.
+    /// How `pick`, `place`, `handover` and `turn` solve, follow, plan and time their steps.
     TaskOptions(batchplan::TaskOptions) {
         /// IK at each grasp or release.
         ik: batchplan::IkOptions,
@@ -303,9 +306,81 @@ value_class! {
     }
 }
 
-tuple_field!(batchplan::Pick, batchplan::Place, batchplan::Handover);
+value_class! {
+    /// A hand turning one obstacle of its world about a line, as a knob, a cap, a lever or a
+    /// valve's wheel turns.
+    Turn(batchplan::Turn) {
+        /// The world's index in the batch: the one the hand grips, turns and lets go in, and the
+        /// transit's unless `transit_world` names another.
+        world: u32,
+        /// The world the start is checked and the transit planned in, where it is another: as
+        /// many obstacles as `world` has, in its order, shaped or touched otherwise.
+        transit_world: Option<u32>,
+        /// Where the robot starts, at rest.
+        start: Vec<f32>,
+        /// Whether the path from the start to where the move in begins is planned: `True`.
+        /// Without it the plans hold the moves in and away and the turn alone (`TaskPlan.begin`
+        /// is where a way to them ends).
+        transit: bool,
+        /// The hand that turns it.
+        hand: usize,
+        /// The object: an obstacle of the world, by index. A distance grid cannot be turned.
+        object: usize,
+        /// Poses of the hand's IK frame that grip the object, in the object's frame, as
+        /// `Pick.grasps`; any one will do.
+        grasps: Vec<batchplan::Pose>,
+        /// How far back along its own z axis the hand begins to move in to a grasp, and moves
+        /// away to once it lets go (meters).
+        approach: f32,
+        /// The line the object turns about and how far it moves along it as it turns, in the
+        /// world's frame (`Screw`). `None` is the hand's own z axis through its IK frame at the
+        /// grasp, without a pitch: a turn in place.
+        screw: Option<batchplan::Screw>,
+        /// How far it turns (radians), right-handed about the screw's direction, or about the
+        /// hand's z axis where there is no screw: not 0.
+        angle: f32,
+        /// Where the hands must stay along the transit, as a pick's.
+        constraints: Vec<batchplan::HandConstraint>,
+        /// Per grasp, joints the robot was loaded with locked, at the values they keep through
+        /// the task by that grasp, as `Pick.locked`. Empty: every grasp as loaded.
+        locked: Vec<HashMap<String, f32>>,
+        /// How many plans will do, as `Pick.enough`: `None`, every grasp is tried.
+        enough: Option<usize>,
+    }
+    methods {
+        /// Hand 0 turns `object` of world `world` by `angle` radians about its own z axis, from
+        /// `start` by any of `grasps`, moving in to the grasp and away from it 10 cm along that
+        /// axis.
+        #[new]
+        #[pyo3(signature = (world, start, object, grasps, angle, **changes))]
+        fn new(
+            world: u32,
+            start: &Bound<'_, PyAny>,
+            object: usize,
+            grasps: &Bound<'_, PyAny>,
+            angle: f32,
+            changes: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<Self> {
+            let turn = batchplan::Turn::new(
+                world,
+                Vec::<f32>::from_py(start)?,
+                object,
+                Vec::from_py(grasps)?,
+                angle,
+            );
+            Ok(Self(Self::changed(turn, changes)?))
+        }
+    }
+}
 
-/// A task's steps, in order.
+tuple_field!(
+    batchplan::Pick,
+    batchplan::Place,
+    batchplan::Handover,
+    batchplan::Turn
+);
+
+/// A task's steps, in the order they are checked.
 #[pyclass(module = "batchplan", frozen, eq, eq_int, ord, hash)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd)]
 pub(crate) enum TaskStep {
@@ -313,6 +388,8 @@ pub(crate) enum TaskStep {
     Start,
     /// IK at the grasp, or where the hand lets go.
     Reach,
+    /// A turn's turn, from a configuration at the grasp: checked before the straight moves.
+    Turn,
     /// The straight move in, to there.
     Approach,
     /// The straight move away: lifting the object, or backing off from it.
@@ -326,6 +403,7 @@ impl TaskStep {
         Ok(match step {
             batchplan::TaskStep::Start => Self::Start,
             batchplan::TaskStep::Reach => Self::Reach,
+            batchplan::TaskStep::Turn => Self::Turn,
             batchplan::TaskStep::Approach => Self::Approach,
             batchplan::TaskStep::Depart => Self::Depart,
             batchplan::TaskStep::Transit => Self::Transit,
@@ -341,6 +419,7 @@ impl TaskStep {
         match self {
             Self::Start => batchplan::TaskStep::Start,
             Self::Reach => batchplan::TaskStep::Reach,
+            Self::Turn => batchplan::TaskStep::Turn,
             Self::Approach => batchplan::TaskStep::Approach,
             Self::Depart => batchplan::TaskStep::Depart,
             Self::Transit => batchplan::TaskStep::Transit,
@@ -349,7 +428,8 @@ impl TaskStep {
 }
 
 /// A task's motions by one candidate: run the transit and the approach, close (pick) or open
-/// (place) the gripper, then run the departure.
+/// (place) the gripper, then run the departure; after a turn, close the gripper, run the turn and
+/// open it before the departure.
 #[pyclass(module = "batchplan", frozen)]
 pub(crate) struct TaskPlan(batchplan::TaskPlan);
 
@@ -368,7 +448,8 @@ impl TaskPlan {
         self.0.transit.clone().map(Trajectory)
     }
 
-    /// Its motions in the order they run: the transit if it has one, the move in, the move away.
+    /// Its motions in the order they run: the transit if it has one, the move in, the turn if it
+    /// has one, the move away.
     #[getter]
     fn motions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let motions: Vec<Trajectory> = self.0.motions().cloned().map(Trajectory).collect();
@@ -389,6 +470,13 @@ impl TaskPlan {
         Trajectory(self.0.approach.clone())
     }
 
+    /// After a turn, the hand turning the object, the fingers closed on it, from where the move in
+    /// ends to where the move away starts; `None` for the rest.
+    #[getter]
+    fn turn(&self) -> Option<Trajectory> {
+        self.0.turn.clone().map(Trajectory)
+    }
+
     /// The straight move away: holding the object after a pick; the giver's after a handover.
     #[getter]
     fn depart(&self) -> Trajectory {
@@ -401,7 +489,8 @@ impl TaskPlan {
         self.0.held.clone().map(Held)
     }
 
-    /// After a place, the object where it was set down, to add to the world.
+    /// After a place, the object where it was set down, to add to the world; after a turn, the
+    /// object turned, to put in the world in its place.
     #[getter]
     fn placed(&self) -> Option<Obstacle> {
         self.0.placed.clone().map(Obstacle)
@@ -468,6 +557,13 @@ impl CandidateStop {
         self.0.contacts.to_py(py)
     }
 
+    /// At `TaskStep.Turn`: how far the hand turned before it stopped (radians, signed as the
+    /// task's angle), from the configuration that turned it farthest. `None` at every other step.
+    #[getter]
+    fn turned(&self) -> Option<f64> {
+        self.0.turned.map(field::shortest)
+    }
+
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
             "CandidateStop(step={:?}, why={})",
@@ -511,8 +607,9 @@ impl TaskFailure {
     }
 }
 
-/// What `pick` or `place` did with each task: per task, the motions of every candidate that got
-/// through, quickest first (a tuple of `TaskPlan`), or where each stopped (a `TaskFailure`).
+/// What `pick`, `place`, `handover` or `turn` did with each task: per task, the motions of every
+/// candidate that got through, quickest first (a tuple of `TaskPlan`), or where each stopped (a
+/// `TaskFailure`).
 #[pyclass(module = "batchplan", frozen)]
 pub(crate) struct TaskResult {
     problems: Py<PyAny>,
@@ -639,6 +736,30 @@ pub(crate) fn handover(
     TaskResult::new(py, result)
 }
 
+/// Turns each task's object by its angle about its screw, trying each of its grasps: IK at the
+/// grasp, where the fingers may touch the object, then the turn followed from every configuration
+/// IK finds there, nearest the start first, all of the call's at once, within the tool path's
+/// precision of its true arc; a grasp gets through where some configuration makes the whole turn
+/// and the moves in and away. The object stays where it was while the hand turns. Run the transit
+/// and the approach, close the gripper, run the turn, open the gripper, then run the departure,
+/// and put `placed` in the world in the object's place.
+#[pyfunction]
+#[pyo3(signature = (device, worlds, turns, options = None))]
+pub(crate) fn turn(
+    py: Python<'_>,
+    device: &Device,
+    worlds: &Worlds,
+    turns: &Bound<'_, PyAny>,
+    options: Option<&TaskOptions>,
+) -> PyResult<TaskResult> {
+    let turns = Vec::<batchplan::Turn>::from_py(turns)?;
+    let options = options.map(|o| o.0.clone()).unwrap_or_default();
+    let result = py
+        .detach(|| batchplan::turn(&device.device, &worlds.0, &turns, &options))
+        .or_raise()?;
+    TaskResult::new(py, result)
+}
+
 /// Grasps for the hand that takes `held`'s object, for `Handover.grasps`, at the object's other
 /// end: the giver's grasp turned half about the axis nearest its approach other than the one
 /// toward the end it holds (from the same side), and about the axis across both (from the other
@@ -703,6 +824,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Pick>()?;
     m.add_class::<Place>()?;
     m.add_class::<Handover>()?;
+    m.add_class::<Turn>()?;
     m.add_class::<TaskStep>()?;
     m.add_class::<TaskPlan>()?;
     m.add_class::<CandidateStop>()?;
@@ -711,6 +833,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pick, m)?)?;
     m.add_function(wrap_pyfunction!(place, m)?)?;
     m.add_function(wrap_pyfunction!(handover, m)?)?;
+    m.add_function(wrap_pyfunction!(turn, m)?)?;
     m.add_function(wrap_pyfunction!(handover_grasps, m)?)?;
     m.add_function(wrap_pyfunction!(handover_poses, m)?)?;
     m.add_function(wrap_pyfunction!(grasps, m)?)?;

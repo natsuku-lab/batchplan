@@ -10,6 +10,34 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- Turning a thing about a line in one call: `turn(&device, &worlds, &[Turn], &TaskOptions)`, a
+  knob, a cap, a lever or a valve's wheel, composed of IK, `follow` and `plan` as `pick` is.
+  `Turn::new(world, start, object, grasps, angle)` turns `object` by `angle` about its `screw`
+  (none: about the hand's own z axis, in place); each grasp is a candidate, and between the move
+  in and the move away the hand follows the grasp carried about the line, the fingers free to
+  touch the object. Every configuration IK finds at a grasp is followed through the turn, all of
+  the call's in one batch of tool paths, and the nearest the start that makes it is kept: a grasp
+  is not lost where the configuration nearest the start runs into a joint limit partway and
+  another makes the turn. A plan has its `turn` between `approach` and `depart`, and `placed` is
+  the object turned. A candidate that makes no turn stops at the new `TaskStep::Turn`, checked
+  after the reach, with how far it turned (`CandidateStop::turned`). Of the example's knob's
+  972 grips (`examples/turns.rs`), 714 make a quarter turn from the
+  configuration nearest the start and 745 from some configuration at the grip; it takes 424 ms
+  by all of them on the M4 Pro and 17 ms to its first plan (`docs/benchmarks.md`). Python binds
+  `Turn`, `turn` and `Screw`; its `TaskStep` values from `Approach` on are one more than they were.
+- `Screw { point, direction, pitch }`, a line and how far a thing carried about it moves along it
+  a radian, with `Screw::about(point, direction)`: `carry(pose, angle)` carries a pose about it,
+  and `path(pose, angle, precision)` gives the waypoints a tool path follows along its arc, as few
+  as keep the straight moves between them within `precision` of it, by the chord's sag.
+- `Grasp::moment(&screw, &options)`: the moment about a line that a grasp's fingertips can give
+  for each newton each presses with, by friction, where they press on their patches, a soft
+  fingertip's twist and the hand pushing along the closing line, the way round that gives less:
+  grips for a turn ordered by what it asks of them.
+- **Breaking:** `GraspOptions::near`, a point to grip a surface near: `grasps_on` gives, within
+  each of the tiers it orders them by, the grasps nearest it first instead of spread over the
+  object. `None`, the default, leaves every grasp as it was. A `GraspOptions` written out in full
+  needs the field.
+
 - `miru`, a crate of its own in the repository (`miru/`, not published to crates.io): what depth
   cameras show, as objects. One call, `miru::look(&device, &look, &previous, &options)`, takes
   every camera's `DepthImage` with its colour, its noise, the robot's mask and a mask model's

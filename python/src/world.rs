@@ -53,6 +53,62 @@ value_class! {
 }
 
 value_class! {
+    /// A line a thing turns about, and how far it moves along the line as it turns: a knob or a
+    /// valve's wheel about its axis, a lever about its hinge, a cap about its axis as its thread
+    /// carries it along.
+    Screw(batchplan::Screw) {
+        /// A point on the line (meters).
+        point: Vec3,
+        /// The line's direction, a unit vector: a positive angle turns right-handed about it.
+        direction: Vec3,
+        /// How far a thing carried about the line moves along `direction` for each radian it
+        /// turns (meters): 0 for a turn about an axis.
+        pitch: f32,
+    }
+    methods {
+        /// The line through `point` along `direction`, moving `pitch` along it a radian.
+        #[new]
+        #[pyo3(signature = (point, direction, pitch = 0.0))]
+        fn new(
+            point: &Bound<'_, PyAny>,
+            direction: &Bound<'_, PyAny>,
+            pitch: f32,
+        ) -> PyResult<Self> {
+            Ok(Self(batchplan::Screw {
+                pitch,
+                ..batchplan::Screw::about(Vec3::from_py(point)?, Vec3::from_py(direction)?)
+            }))
+        }
+
+        /// `pose` carried `angle` radians about the line, right-handed about `direction`, and
+        /// `pitch * angle` along it.
+        fn carry(&self, pose: &Pose, angle: f32) -> Pose {
+            Pose(self.0.carry(pose.0, angle))
+        }
+
+        /// The poses a frame at `pose` passes through carried `angle` about the line, after `pose`
+        /// and up to it carried all the way, as `ToolPath.waypoints` takes them: near enough
+        /// together that the straight moves `follow` makes between them stray at most
+        /// `precision` (meters) from its true path. Raises `InputError` for a screw that is not
+        /// finite or not unit, a pose that is not, an angle that is not finite or a precision not
+        /// above 0.
+        fn path<'py>(
+            &self,
+            py: Python<'py>,
+            pose: &Pose,
+            angle: f32,
+            precision: f32,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            self.0.path(pose.0, angle, precision).or_raise()?.to_py(py)
+        }
+
+        fn __eq__(&self, other: &Self) -> bool {
+            self.0 == other.0
+        }
+    }
+}
+
+value_class! {
     /// A signed distance to a surface, and its gradient.
     Distance(batchplan::Distance) {
         /// Meters: negative inside.

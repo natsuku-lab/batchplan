@@ -26,7 +26,7 @@
 
 Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-lab/batchplan-ros), or to generate [LeRobot training datasets](docs/training-data.md).
 
-- **Plan:** batched IK, RRT-Connect on SIMD collision checks, and B-spline paths, optionally optimized with L-BFGS, timed optimally within velocity, acceleration, jerk and hand speed limits. Paths can keep a cup upright or a tray level between two hands, follow straight lines, pick and place, join without stopping, and start while the robot moves.
+- **Plan:** batched IK, RRT-Connect on SIMD collision checks, and B-spline paths, optionally optimized with L-BFGS, timed optimally within velocity, acceleration, jerk and hand speed limits. Paths can keep a cup upright or a tray level between two hands, follow straight lines, pick and place, turn a knob, a cap or a lever, join without stopping, and start while the robot moves.
 - **Live motion:** follow a trajectory as the world changes, replan or stop in time, and servo the hand toward a moving target.
 - **Robots:** URDF, MJCF or OpenUSD, including mimic, ball and floating joints and closed loops, or several robots assembled into one. Collision spheres are fitted automatically. IK solves every hand at once, and one arm can hold still while another moves.
 - **Worlds:** boxes, spheres, cylinders, capsules and distance grids from meshes, point clouds or fused depth images, with the links allowed to touch them.
@@ -212,7 +212,7 @@ From here, the [guides](#where-to-find-things) go further: planning around [what
 |---|---|
 | [AGENTS.md](AGENTS.md) | For coding agents using batchplan: conventions, the lifecycle, which call fits a task, qualifying a robot, reading results, and diagnosing a failed request in order. |
 | [API](docs/api.md) | Every type and function, by task, with the guide for each. |
-| [Planning](docs/planning.md) | IK, searching and smoothing paths, keeping clear of obstacles, optional trajectory optimization, goals a turn away, moving the hand in straight lines, picking up and setting down, joining motions, timing, replanning mid-motion, live motion and servoing, and the options worth knowing. |
+| [Planning](docs/planning.md) | IK, searching and smoothing paths, keeping clear of obstacles, optional trajectory optimization, goals a turn away, moving the hand in straight lines, picking up and setting down, turning a thing about an axis, joining motions, timing, replanning mid-motion, live motion and servoing, and the options worth knowing. |
 | [Robots](docs/robots.md) | URDF, MJCF and OpenUSD; joint types, mimic joints and closed loops; several arms as one robot; collision spheres; holding objects; checking against meshes. |
 | [Worlds and perception](docs/perception.md) | Obstacles, allowed contacts, scenes, distance grids, depth images, masking the robot, and fused occupancy maps. |
 | [Training data](docs/training-data.md) | Reaches with recoveries, pick-and-place, handovers between two arms, reset states, and exporting to NumPy or LeRobot. |

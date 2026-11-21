@@ -407,6 +407,76 @@ fn main() -> Result<(), Error> {
 
   Run the transit and the approach, close the taker's gripper, open the giver's, then run the departure. Each plan names its `meeting` and the taker's `held`. `handover_poses(&robot, start, &held, to)` proposes meetings where both arms reach, in front of and halfway between their shoulders, the object at its tilt in the giver's hand with its held end toward the giver; `handover_grasps(&held)` turns the giver's grasp to the object's other end, from the same side and from the other. Each hand needs its own end: pick the object toward one with `GraspOptions::along` (0.75 holds it three quarters of the way to an end). A bar too short for both hands leaves them no room, and the failure names the links of both arms that collide.
 
+## Turning a thing about an axis
+
+`turn(&device, &worlds, &[Turn], &TaskOptions)` turns something about a line in one call: a knob, a cap, a lever, a valve's wheel, a door's handle. It runs as a pick does, a candidate per grasp, with a turn between the move in and the move away: the hand follows its grasp carried about a `Screw` by the task's angle, the fingers closed on the object, then lets go and backs off.
+
+```rust,no_run
+use batchplan::glam::Vec3;
+use batchplan::{
+    CollisionModel, Device, Error, GraspOptions, Obstacle, Pose, Robot, RobotOptions, Screw,
+    TaskOptions, Turn, World,
+};
+
+fn main() -> Result<(), Error> {
+    let fingers = [
+        ("panda_finger_joint1".to_string(), 0.04),
+        ("panda_finger_joint2".to_string(), 0.04),
+    ];
+    let options = RobotOptions {
+        ee_links: vec!["ee_link".into()],
+        lock_joints: fingers.into_iter().collect(),
+        collision_model: Some(CollisionModel::load("assets/franka/panda_collision.json")?),
+        ..Default::default()
+    };
+    let robot = Robot::load("assets/franka/franka_panda.urdf", &options)?;
+    let device = Device::cpu(&robot)?;
+    // A lever on a post, its hinge upright through the post, swung 60 degrees.
+    let table = Obstacle::cuboid(Vec3::new(0.4, 0.0, -0.02), Vec3::new(0.7, 0.8, 0.02));
+    let hinge = Vec3::new(0.45, -0.2, 0.15);
+    let post = Obstacle::cylinder(Vec3::new(hinge.x, hinge.y, 0.07), 0.015, 0.07);
+    let arm = Obstacle::cuboid(
+        hinge + Vec3::new(0.06, 0.0, 0.0075),
+        Vec3::new(0.075, 0.01, 0.0075),
+    );
+    let o = GraspOptions {
+        tip: robot.tip(0),
+        ..Default::default()
+    };
+    let grasps = batchplan::grasps(&arm.placed(Pose::IDENTITY), &o)?;
+    let turn = Turn {
+        screw: Some(Screw::about(hinge, Vec3::Z)),
+        ..Turn::new(0, robot.default_q(), 2, grasps, 60f32.to_radians())
+    };
+    let worlds = device.upload(&[World::new(vec![table, post, arm])])?;
+    match batchplan::turn(&device, &worlds, &[turn], &TaskOptions::default())?.outcomes.remove(0) {
+        // Run the transit and the approach, close the gripper, run the turn, open it and run the
+        // departure; the lever then stands where `placed` has it.
+        Ok(plans) => println!("{:.1} s, the lever at {:?}", plans[0].duration(), plans[0].placed),
+        Err(why) => println!("no turn: {why}"),
+    }
+    Ok(())
+}
+```
+
+- **The line.** `Screw { point, direction, pitch }` is a line in the world's frame and how far what turns about it moves along it for each radian (meters): 0 for a knob, a wheel or a lever; for a cap on a thread of 5 mm a turn, 0.005 / 2π, which turned right-handed about a `direction` up (anticlockwise seen from above) rises as it unscrews. `Screw::about(point, direction)` has no pitch. A task without one (`Turn::screw` `None`) turns about the hand's own z axis through its IK frame at the grasp: a turn in place, as a knob gripped on its axis turns. `screw.carry(pose, angle)` carries a pose about it, and `screw.path(pose, angle, precision)` gives the waypoints a `ToolPath` follows along the arc or helix, as few as keep the straight moves between them within `precision` of it: a frame `r` from the line turns by at most `4 asin(√(precision / 2r))` between two (the chord's sag), and never by more than a quarter turn, so that the shortest rotation between them is the screw's. A frame on the line needs only the quarter turns.
+- **Steps.** Each step is a batch for every candidate of the call:
+  1. The start, checked for collision.
+  2. IK at the grasp, the fingers free to touch the object: every configuration it finds, nearest the start first, not only the nearest.
+  3. The turn, followed from each of those configurations, the hand kept within the tool path's precision of its true arc: half of it for how far the straight moves between the screw's waypoints sag, half for how far the hand strays from them. A grasp none of whose configurations makes the whole turn stops here.
+  4. The straight move in, run backward from the grasp as a pick's, from each configuration that made the turn.
+  5. The straight move away, `approach` back along the hand's z axis from where the turn ends, the object where the turn leaves it.
+  6. The planned path from the start to where the move in begins, for the configuration nearest the start that got through steps 3 to 5.
+
+  Run the transit and the approach, close the gripper, run the turn (`TaskPlan::turn`), open the gripper and run the departure, then put `TaskPlan::placed` (the object carried through the angle) in the world in its place. `TaskOptions::min_fraction` applies to the moves in and away; the turn is made whole or not at all. The hand keeps under `TaskOptions::tool_speed` all along the turn, which it holds the object through. `enough`, `locked`, `transit_world`, `transit` and `constraints` are a pick's.
+- **Which configuration.** A grasp is one pose of the hand and many configurations of the arm, and the one nearest the start, which a pick takes, often runs into a joint limit partway through a long turn where another at the same grasp, the wrist over the other way, has the room. So every configuration IK finds at each grasp is followed through the turn, all of a call's in one batch of tool paths, and of those that make it the nearest the start is the plan's. Of the example's knob's 972 grips (`examples/turns.rs`), 714 make its quarter turn from the configuration nearest the start and 745 from some configuration IK finds at the grip; turned 170 degrees by a grasp across its middle (`tests/turn.rs`), the nearest stops a quarter of the way round with the last joint at its limit, and two of the eleven others IK finds there make it.
+- **What may touch.** Through the reach, the turn and the move away the fingers (`Robot::finger_links`, or the hand's links where it has none) may touch the object, and nothing else of the robot may; everything else of the world is an obstacle throughout. The object stays where it was in the world while the hand turns: the fingers hold it, what is round about the screw does not move, and what is not is theirs to touch. The palm and the arm are checked against it there, not as it turns; the move away sees it where the turn leaves it.
+- **Why it failed.** `TaskStep::Turn` comes after the reach and before the straight moves, and a candidate stopped there says how far the hand turned before it stopped (`CandidateStop::turned`, radians, signed as the task's angle) from the configuration that turned it farthest, and why: out of reach or at a joint limit (`Unreachable`), colliding (`Collision`, with what collides) or jumping. "none of 2 candidates got through: 2 turning (2 colliding)".
+- **Grips for a turn from what cameras saw.** Read each camera with `Surface::from_depth`, the thing's readings flagged as `object` and everything around it kept in the surface, so the hand is kept clear of it; join the views. `grasps_on` with `narrow` on (the fingers come in as open as keeps them off what stands around) and `floor` at the top of what the thing stands on (the dial under a knob's bar, the table under a lever) gives grasps of any shape. Order them by `grasp.moment(&screw, &options)` about the line the turn is to go about, the most first (for a turn in place, each grasp's own z axis through its frame: `Screw::about(g.pose.position, g.pose.rotation * Vec3::Z)`), bring each `pose` into the object's frame (`obstacle.pose().inverse().mul_pose(g.pose)`), and pass them to `turn`, with `enough` for how many plans will do. `GraspOptions::near` puts the grasps nearest a point first within each of the tiers `grasps_on` orders them by, for a caller told where to grip.
+  - **The moment** is what the two fingertips can give the thing about the line for each newton each presses with (meters): what turning it asks of the grip, as a grasp is judged by the wrench its task needs. A force `F` at a contact `c` gives `F · (ŝ × (c − q))` about the line through `q` along `ŝ`. Friction lets a fingertip push across the closing line `n` by up to `friction` times its press (Murray, Li and Sastry's point contact with friction, *A Mathematical Introduction to Robotic Manipulation*, 1994, §5.2.1), which gives `friction · |ŝ × (c − q)|` less its part along `n`; the press may sit anywhere on the fingertip's patch, `contact` in radius, which gives `contact · |n × ŝ|`; and a soft fingertip twists about `n` by up to `γ = 2/3 · friction · contact` times its press (their soft-finger contact, the press even over the patch), which gives `γ |n · ŝ|`. The two presses cancel while they are equal, but a parallel gripper's fingers close evenly about its frame, so the hand can put all of the closing force on either finger and push the thing along `n`: up to `2 |n · (ŝ × (m − q))|` more, `m` the grip's middle, less what friction loses on the finger it unloads. The moment is the most these give together, the way round that gives less. A bar 2.5 cm wide gripped across it on its axis (friction 0.5, patches 5 mm) gives 2.25 cm a newton, half of it friction; 3 cm along the bar from its axis, 8.25 cm, the push adding twice the 3 cm. A grip closing along the axis has friction alone, its slide and its twist.
+  - **Precedent.** MoveIt Task Constructor's `MoveRelative` takes a twist (`setDirection` with a `TwistStamped`) and its `GenerateGraspPose` samples grasps about a settable axis of the object (`setRotationAxis`, `setAngleDelta`); PickNik's `affordance_primitives` moves along a `ScrewAxis` of an origin, an axis and a pitch (`getTF(delta_theta)`); GPD filters its grasp candidates by approach direction (`filter_approach_direction`); MoveIt's perception tutorial fits a cylinder to a cloud by RANSAC and takes its axis. None of them orders grips by the turn they are to make, or checks many grips' turns, from every configuration of the arm, in one batched call: `turn` does both.
+- **Speed.** On the M4 Pro, other work loading it to 18 or 19, the example's knob takes 424 ms on the CPU device by all 972 grips and 17 ms to its first plan (`enough: Some(1)`); its cap, lever and wheel 6 to 13 ms; and 64 knobs in one call, to the first plan of each, 0.9 s. Its GPU takes as long: the turns, which are most of it, are followed on the CPU's threads on either device ([Benchmarks](benchmarks.md#turning-things-about-a-line)).
+
 ## Joining motions
 
 `join(&device, &worlds, &sequences, &JoinOptions)` runs consecutive motions without stopping between them, as MoveIt's Pilz planner blends a motion sequence. A `Sequence` names its world, its paths in order, each rest-to-rest as `plan` and `follow` return them and starting where the one before ends, and a blend radius for each join, as each item of a Pilz sequence gives its own.
