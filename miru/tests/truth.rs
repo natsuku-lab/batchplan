@@ -53,7 +53,8 @@
 //! table behind it are kept by the filter and are the box's object, and its shape reaches out to
 //! them. A plate 5 mm thick on a box is one object with the box through every camera, the box's
 //! shape as tall as the two, so a plate set down on a box reads gone at the next look while it
-//! stands there (`tests/memory.rs`).
+//! stands there (`tests/memory.rs`); and two boxes touching are one object through every camera,
+//! so of a box set down against another one reads gone.
 //!
 //! | Scene | Camera | Thing | Shows |
 //! |---|---|---|---|
@@ -106,6 +107,12 @@
 //! | a plate on a box | D435 | plate | the box's object: 159 x 219 x 71 mm (+99 +159 +66; 23), 44 mm off (19), on the table, not solid |
 //! | a plate on a box | D435+D405 | box | 160 x 219 x 71 mm (+20 +79 +11; 24), 35 mm off (20), not solid |
 //! | a plate on a box | D435+D405 | plate | the box's object: 160 x 219 x 71 mm (+100 +159 +66; 23), 44 mm off (19), on the table, not solid |
+//! | two boxes touching | exact | box 1 | the two boxes' object: 80 x 240 x 60 mm (+0 +120 +0; 7), 60 mm off (6) |
+//! | two boxes touching | exact | box 2 | the two boxes' object: 80 x 240 x 60 mm (+0 +120 +0; 7), 60 mm off (6) |
+//! | two boxes touching | D435 | box 1 | the two boxes' object: 158 x 262 x 68 mm (+78 +142 +8; 24), 71 mm off (20), not solid |
+//! | two boxes touching | D435 | box 2 | the two boxes' object: 158 x 262 x 68 mm (+78 +142 +8; 24), 64 mm off (20), not solid |
+//! | two boxes touching | D435+D405 | box 1 | the two boxes' object: 158 x 289 x 68 mm (+78 +169 +8; 24), 83 mm off (20), not solid |
+//! | two boxes touching | D435+D405 | box 2 | the two boxes' object: 158 x 289 x 68 mm (+78 +169 +8; 24), 52 mm off (20), not solid |
 
 #[allow(dead_code, reason = "each test file uses part of it")]
 mod common;
@@ -194,6 +201,12 @@ a plate on a box | D435 | box | size middle solid
 a plate on a box | D435 | plate | size middle on solid
 a plate on a box | D435+D405 | box | size middle solid
 a plate on a box | D435+D405 | plate | size middle on solid
+two boxes touching | exact | box 1 | size middle
+two boxes touching | exact | box 2 | size middle
+two boxes touching | D435 | box 1 | size middle solid
+two boxes touching | D435 | box 2 | size middle solid
+two boxes touching | D435+D405 | box 1 | size middle solid
+two boxes touching | D435+D405 | box 2 | size middle solid
 ";
 
 /// The kind of a shape a look measures.
@@ -460,6 +473,20 @@ fn cases() -> Vec<Case> {
         vec![
             a_box_truth("box", &[1], under, under_half),
             a_box_truth("plate", &[2], plate, plate_half).on(0),
+        ],
+    ));
+    // Two boxes 8 by 12 cm and 6 cm tall side by side, touching: a thing set down or pushed
+    // against another (`tests/memory.rs`).
+    let (first, second) = (Vec3::new(0.5, -0.06, 0.03), Vec3::new(0.5, 0.06, 0.03));
+    cases.push(Case::once(
+        "two boxes touching",
+        vec![
+            block(first, half, [200, 30, 30]),
+            block(second, half, [30, 30, 200]),
+        ],
+        vec![
+            a_box_truth("box 1", &[1], first, half),
+            a_box_truth("box 2", &[2], second, half),
         ],
     ));
     cases

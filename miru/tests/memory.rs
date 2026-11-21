@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use batchplan::{
     DepthFilter, DepthImage, Device, Held, IkOptions, IkProblem, Obstacle, Pose, Robot, RobotMask,
-    SphereOptions, World,
+    SphereOptions, Weighing, World,
 };
 use common::{
     CAMERAS, EYE, Frame, MIDDLE, NEAR, Stereo, Thing, arm, block, bowl, can, devices, known,
@@ -22,7 +22,7 @@ use common::{
 use glam::{Quat, Vec3};
 use miru::{
     Act, Camera, Label, Look, LookOptions, Memory, MemoryOptions, Noise, Observed, Of, Planned,
-    Scene, Shape, Stance, Step, observe,
+    Scene, Shape, Stance, Step, Support, observe,
 };
 
 /// The Panda's stance with its fingertips 2.3 cm over the top of the can of
@@ -45,6 +45,14 @@ a_camera_off_its_pose_is_held_to_what_it_is_off_by | D435+D405 | the map holds w
 a_plate_let_go_on_a_box_is_seen_there | exact | let go on the box, it reads gone | the look makes the plate one object with the box, which keeps the box's id and grows by the plate's 5 mm: `look`'s, as in `tests/truth.rs`'s \"a plate on a box\"
 a_plate_let_go_on_a_box_is_seen_there | D435 | let go on the box, it reads gone | as on exact depth
 a_plate_let_go_on_a_box_is_seen_there | D435+D405 | the plate on the table is no object | to the D405 the plate on the table is the table's, so there is nothing to pick
+what_stood_on_a_picked_thing_is_in_a_memory | exact | the nearest obstacle is 0.090 m from its middle | the hand and the masks hold the box alone, the can left the objects with it, and the map never held it: the nearest obstacle is the table
+what_stood_on_a_picked_thing_is_in_a_memory | D435 | the nearest obstacle is 0.034 m from its middle | as on exact depth, the nearest obstacle the grid of what nothing explains
+what_stood_on_a_picked_thing_is_in_a_memory | D435+D405 | the nearest obstacle is 0.090 m from its middle | as on exact depth
+a_thing_let_go_against_another_keeps_both_ids | exact | B, which did not move, reads gone | the look makes the two boxes one object, which keeps A's id: `look`'s, as in `tests/truth.rs`'s \"two boxes touching\"
+a_thing_let_go_against_another_keeps_both_ids | D435 | B, which did not move, reads gone | as on exact depth
+a_thing_let_go_against_another_keeps_both_ids | D435+D405 | A, let go there, reads gone | the two boxes are one object, which keeps B's id
+the_band_takes_what_a_camera_reads_beside_the_arm | D435 | the map holds 2 of 15 | the band gives up an outline read nearer than the arm by more than the margin, and what lies within it of a reading it keeps; without the band the map holds 10
+the_band_takes_what_a_camera_reads_beside_the_arm | D435+D405 | the map holds 8 of 20 | as through the D435; without the band the map holds 13
 ";
 
 /// The complaint listed for `test` through `camera`, if one is.
@@ -1968,4 +1976,407 @@ fn a_hold_a_restart_brings_back_is_held_and_let_go_as_its_shape() {
         "a_hold_a_restart_brings_back_is_held_and_let_go_as_its_shape",
         &found,
     );
+}
+
+/// A can 6 cm across and 6 cm tall standing on a box 14 cm square and 6 cm tall, at `at` on the
+/// table: the box, then the can.
+fn can_on_a_box(at: Vec3) -> [Thing; 2] {
+    [
+        block(
+            at + Vec3::new(0.0, 0.0, 0.03),
+            Vec3::new(0.07, 0.07, 0.03),
+            [200, 200, 30],
+        ),
+        can(at + Vec3::new(0.0, 0.0, 0.09), 0.03, 0.03, [20, 20, 20]),
+    ]
+}
+
+/// Two cans on boxes, one in the table's middle and one beside it: a pick of the middle box takes
+/// its can out of the objects with it, and what the other can stands on is its box among the
+/// objects left, renumbered; a push of the other box into the middle after that pick moves its can
+/// too, which a second look then finds there under its id.
+#[test]
+fn a_pick_takes_what_stands_on_the_thing_and_a_push_moves_it() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let (far, near) = (MIDDLE, Vec3::new(0.5, -0.26, 0.0));
+    let scene = |near: Vec3| {
+        let mut things = vec![table()];
+        things.extend(can_on_a_box(far));
+        things.extend(can_on_a_box(near));
+        things.push(arm(&robot, away));
+        things
+    };
+    let things = scene(near);
+    let rendered = render(&things);
+    // Into the middle, where a stack is told apart through every camera, the middle stack gone.
+    let by = far - near;
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seen = first_look(&device, &things, &rendered, (c, 10 * c as u64), away, 0.0);
+        let held_by = |thing| holder(seen.kept.scene(), &rendered, thing);
+        let [Some(far_box), Some(far_can), Some(near_box), Some(near_can)] =
+            [1, 2, 3, 4].map(held_by)
+        else {
+            found.push((*camera, Err("no object holds a box or a can".to_string())));
+            continue;
+        };
+        let objects = seen.memory.objects();
+        let on = |object: usize, under: usize| objects[object].on == Some(Support::Object(under));
+        let mut wrong = vec![];
+        if !(on(far_can, far_box) && on(near_can, near_box)) {
+            wrong.push("a can does not stand on its box".to_string());
+            found.push((*camera, outcome(&wrong)));
+            continue;
+        }
+        assert!(
+            far_box.min(far_can) < near_box,
+            "{camera}: the middle stack comes before the other's box, so taking it renumbers it"
+        );
+        let id = |object: usize| objects[object].id;
+        let held = grasped(&seen.memory, id(far_box));
+        let picked = (seen.memory)
+            .after(&[Act::Picked {
+                id: id(far_box),
+                held,
+            }])
+            .expect("a pick");
+        let left = picked.objects();
+        let index = |object: usize| left.iter().position(|o| o.id == id(object));
+        if index(far_can).is_some() {
+            wrong.push("picked, what stood on the box stays among the objects".to_string());
+        }
+        let stands = index(near_can).map(|can| left[can].on);
+        if stands != Some(index(near_box).map(Support::Object)) {
+            wrong.push(format!(
+                "picked, the near can stands on {stands:?}, not the near box"
+            ));
+        }
+        let pushed = picked
+            .after(&[Act::Pushed {
+                id: id(near_box),
+                by,
+            }])
+            .expect("a push");
+        let moved = pushed.objects().iter().find(|o| o.id == id(near_can));
+        let was = objects[near_can].shape;
+        if !moved
+            .is_some_and(|o| cover(&o.shape).pose().position == cover(&was).pose().position + by)
+        {
+            wrong.push("pushed, the near box leaves its can where it stood".to_string());
+        }
+        let mut things = vec![table()];
+        things.extend(can_on_a_box(near + by));
+        things.push(arm(&robot, away));
+        let (rendered, after) = second_look(
+            &device,
+            &things,
+            things.len() - 1,
+            (c, 10 * c as u64 + 5),
+            away,
+            &pushed,
+        );
+        let now = id_of(after.kept.scene(), &rendered, 2);
+        if now != Some(id(near_can)) {
+            wrong.push(format!(
+                "pushed and seen again, the near can is {now:?}, not {}",
+                id(near_can)
+            ));
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict(
+        "a_pick_takes_what_stands_on_the_thing_and_a_push_moves_it",
+        &found,
+    );
+}
+
+/// A can on a box, the box picked: what stood on it is in some memory, the objects, a hand's hold
+/// or the map, so that a plan meets it where it is. It is in none: the hand holds the box alone,
+/// the can left the objects with it, and the map never held it.
+#[test]
+fn what_stood_on_a_picked_thing_is_in_a_memory() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let at = Vec3::new(0.5, 0.0, 0.0);
+    let mut things = vec![table()];
+    things.extend(can_on_a_box(at));
+    things.push(arm(&robot, away));
+    let rendered = render(&things);
+    let can_middle = at + Vec3::new(0.0, 0.0, 0.09);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seen = first_look(&device, &things, &rendered, (c, 10 * c as u64), away, 0.0);
+        let Some(the_box) = id_of(seen.kept.scene(), &rendered, 1) else {
+            found.push((*camera, Err("no object holds the box".to_string())));
+            continue;
+        };
+        let held = grasped(&seen.memory, the_box);
+        let picked = (seen.memory)
+            .after(&[Act::Picked { id: the_box, held }])
+            .expect("a pick");
+        let planned = picked.world(&device, &Step::default()).expect("a world");
+        let nearest = (planned.world.obstacles.iter())
+            .map(|obstacle| obstacle.distance(can_middle).value)
+            .fold(f32::INFINITY, f32::min);
+        let wrong = match nearest < 0.0 {
+            true => vec![],
+            false => vec![format!(
+                "picked, nothing holds the can: the nearest obstacle is {nearest:.3} m from its middle"
+            )],
+        };
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("what_stood_on_a_picked_thing_is_in_a_memory", &found);
+}
+
+/// Box A let go flush against box B, which did not move: a second look keeps both ids, a label
+/// naming each. A look makes two boxes touching one object (`tests/truth.rs`, "two boxes
+/// touching"), so one of the two reads gone.
+#[test]
+fn a_thing_let_go_against_another_keeps_both_ids() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let (a, b) = (Vec3::new(0.45, -0.2, 0.03), Vec3::new(0.45, 0.1, 0.03));
+    let to = Vec3::new(b.x, b.y - 2.0 * BOX_HALF.y, b.z);
+    let scene = |a: Vec3| {
+        vec![
+            table(),
+            block(b, BOX_HALF, [30, 30, 200]),
+            block(a, BOX_HALF, [200, 30, 30]),
+            arm(&robot, away),
+        ]
+    };
+    let things = scene(a);
+    let rendered = render(&things);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seen = first_look(&device, &things, &rendered, (c, 10 * c as u64), away, 0.0);
+        let ids = [1, 2].map(|thing| id_of(seen.kept.scene(), &rendered, thing));
+        let [Some(b_id), Some(a_id)] = ids else {
+            found.push((*camera, Err("no object holds a box".to_string())));
+            continue;
+        };
+        let shape = seen
+            .memory
+            .objects()
+            .iter()
+            .find(|o| o.id == a_id)
+            .expect("A")
+            .shape;
+        let frame = cover(&shape).pose();
+        let held = grasped(&seen.memory, a_id);
+        let at = Pose::new(frame.position + (to - a), frame.rotation);
+        let let_go = (seen.memory)
+            .after(&[Act::Picked { id: a_id, held }, Act::LetGo { id: a_id, at }])
+            .expect("a pick and a let-go");
+        let things = scene(to);
+        let (_, after) = second_look(
+            &device,
+            &things,
+            things.len() - 1,
+            (c, 10 * c as u64 + 5),
+            away,
+            &let_go,
+        );
+        let named = |id: u32| {
+            let object = after.memory.objects().iter().position(|o| o.id == id);
+            let labels = after.kept.scene().labels.iter().flatten();
+            object.is_some_and(|object| labels.clone().any(|label| *label == Label::Object(object)))
+        };
+        let mut wrong = vec![];
+        if !named(a_id) {
+            wrong.push("A, let go there, reads gone".to_string());
+        }
+        if !named(b_id) {
+            wrong.push("B, which did not move, reads gone".to_string());
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("a_thing_let_go_against_another_keeps_both_ids", &found);
+}
+
+/// The Panda's fingers closed, the hand over the table in both views: the stance's locked joints
+/// say so, and the robot's mask holds the fingers where they are; no object is made of the arm.
+#[test]
+fn a_stance_masks_the_fingers_where_they_were_read() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let closed = HashMap::from([
+        ("panda_finger_joint1".to_string(), 0.0),
+        ("panda_finger_joint2".to_string(), 0.0),
+    ]);
+    let shut = robot.relock(&closed).expect("the fingers closed");
+    let things = vec![table(), arm(&shut, &OVER_THE_CAN)];
+    let rendered = render(&things);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let (frames, bands) = read(&rendered, c, 10 * c as u64);
+        let stance = Stance {
+            q: &OVER_THE_CAN,
+            locked: &closed,
+            padding: padding(&rendered, &frames, 1),
+        };
+        let cameras = cameras(&frames, bands, 0.0);
+        let seen = observe(&device, &cameras, &stance, &memory(&device)).expect("a look");
+        let wrong = match an_object_of(seen.kept.scene(), &rendered, 1)
+            || holder(seen.kept.scene(), &rendered, 1).is_some()
+        {
+            false => vec![],
+            true => vec!["the closed fingers are an object's".to_string()],
+        };
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("a_stance_masks_the_fingers_where_they_were_read", &found);
+}
+
+/// The 4 mm bowl, which is not solid, in a first look, and gone in a second that sees its place
+/// empty: under `Weighing::Latest` the second look decides, and the map holds nothing where its
+/// wall stood; under the default, `Weighing::Evidence`, one look through it does not outweigh one
+/// that read it, and the map still holds its wall.
+#[test]
+fn latest_lets_a_look_decide_what_it_sees() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let things = acts_scene(&robot, away, None, Some(BOWL), None);
+    let empty = acts_scene(&robot, away, None, None, None);
+    let rendered = render(&things);
+    let wall = BOWL + Vec3::new(0.0, 0.043, 0.025);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let mut wrong = vec![];
+        for (weighing, holds) in [(Weighing::Latest, false), (Weighing::Evidence, true)] {
+            let (frames, bands) = read(&rendered, c, 10 * c as u64);
+            let locked = HashMap::new();
+            let stance = Stance {
+                q: away,
+                locked: &locked,
+                padding: padding(&rendered, &frames, things.len() - 1),
+            };
+            let o = MemoryOptions { weighing };
+            let memory = Memory::try_new(&device, vec![known(&table())], &o).expect("a memory");
+            let seen = observe(&device, &cameras(&frames, bands, 0.0), &stance, &memory);
+            let seen = seen.expect("a look");
+            assert!(
+                (seen.memory.objects().iter()).any(|object| !object.solid),
+                "{camera}: the map holds the bowl"
+            );
+            let (_, after) = second_look(
+                &device,
+                &empty,
+                empty.len() - 1,
+                (c, 10 * c as u64 + 5),
+                away,
+                &seen.memory,
+            );
+            let planned = after
+                .memory
+                .world(&device, &Step::default())
+                .expect("a world");
+            let grid = (planned.of.last() == Some(&Of::Unexplained))
+                .then(|| planned.world.obstacles.last())
+                .flatten();
+            let held = grid.is_some_and(|grid| grid.distance(wall).value < 0.0);
+            if held != holds {
+                wrong.push(format!(
+                    "under {weighing:?}, the map holds the wall: {held}"
+                ));
+            }
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("latest_lets_a_look_decide_what_it_sees", &found);
+}
+
+/// The arm over the tray scene: what a camera reads in mid-air within one pixel of the arm's
+/// outline, farther than three deviations from every surface, is the arm's by the camera's band,
+/// and the map holds none of it; through a stereo camera it holds fewer of them with the band than
+/// without. Exact depth reads none.
+#[test]
+fn the_band_takes_what_a_camera_reads_beside_the_arm() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let things = reaching_over_a_tray(&robot, &OVER_THE_CAN);
+    let arm = things.len() - 1;
+    let rendered = render(&things);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let (frames, bands) = read(&rendered, c, 10 * c as u64);
+        let locked = HashMap::new();
+        let stance = Stance {
+            q: &OVER_THE_CAN,
+            locked: &locked,
+            padding: padding(&rendered, &frames, arm),
+        };
+        // Of the mid-air readings beside the arm's outline, how many, and how many the map holds,
+        // with the cameras' bands as `bands`.
+        let held = |bands: [usize; 2]| {
+            let seen = observe(
+                &device,
+                &cameras(&frames, bands, 0.0),
+                &stance,
+                &memory(&device),
+            );
+            let seen = seen.expect("a look");
+            let planned = seen
+                .memory
+                .world(&device, &Step::default())
+                .expect("a world");
+            let grid = (planned.of.last() == Some(&Of::Unexplained))
+                .then(|| planned.world.obstacles.last())
+                .flatten();
+            let [mut mixed, mut held] = [0, 0];
+            for (view, (truth, frame)) in rendered.iter().zip(&frames).enumerate() {
+                let image = seen.kept.image(view).expect("a kept view");
+                let (width, height) = (
+                    truth.width as isize,
+                    (truth.depth.len() / truth.width) as isize,
+                );
+                let arm_at = |x: isize, y: isize| {
+                    (0..width).contains(&x)
+                        && (0..height).contains(&y)
+                        && truth.shows[(y * width + x) as usize] == Some(arm)
+                };
+                for i in 0..image.depth.len() {
+                    let (u, v) = ((i % truth.width) as isize, (i / truth.width) as isize);
+                    let beside = (-1..=1).any(|dv| (-1..=1).any(|du| arm_at(u + du, v + dv)));
+                    if image.depth[i] <= 0.0 || truth.shows[i] == Some(arm) || !beside {
+                        continue;
+                    }
+                    let (k, z) = (frame.intrinsics, image.depth[i]);
+                    let ray = Vec3::new(
+                        (u as f32 - k.cx) / k.fx * z,
+                        (v as f32 - k.cy) / k.fy * z,
+                        z,
+                    );
+                    let p = frame.camera.rotation * ray + frame.camera.position;
+                    let off = (things.iter())
+                        .map(|thing| (thing.distance)(p).abs())
+                        .fold(f32::INFINITY, f32::min);
+                    if off > 3.0 * deviation(frame.noise, z) {
+                        mixed += 1;
+                        held += usize::from(grid.is_some_and(|grid| grid.distance(p).value < 0.0));
+                    }
+                }
+            }
+            (mixed, held)
+        };
+        let (mixed, with) = held(bands);
+        let mut wrong = vec![];
+        if with > 0 {
+            wrong.push(format!("the map holds {with} of {mixed}"));
+        }
+        if c > 0 {
+            let (_, without) = held([0, 0]);
+            if without <= with {
+                wrong.push(format!("without the band it holds {without}, no more"));
+            }
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("the_band_takes_what_a_camera_reads_beside_the_arm", &found);
 }

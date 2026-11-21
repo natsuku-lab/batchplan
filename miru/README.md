@@ -152,15 +152,18 @@ has them as a program; per camera:
    name it, as flags (`scene.labels[view].iter().map(|label| *label == Label::Object(object)).collect()`),
    go to `Surface::from_depth(&device, &image, &flags, Some(&robot), radius)`, the views joined.
 
-What the robot did is said once (`Act`): a pick takes the thing and what stands on it into a hand,
-which every mask then holds, and frees the map where a thing that was not solid stood; a let-go
-puts it back with its id where it was set down, unseen, and the next look says one of three of it:
-seen there (among the objects, a label naming it), its place not seen (among them, no label), or
-its place seen and empty (gone); a loss leaves it in no hand and no scene; a push moves the thing
-and what stands on it; and a draw, as of a drawer, leaves the object as it was. Where a pushed or
-drawn thing is not solid, the map is never seen where it stood and where it stands. Acts tell the
-map nothing at once: memories after different acts share it, and what each act says of it is
-fused when it is next read.
+What the robot did is said once (`Act`): a pick puts the thing into a hand, which every mask then
+holds, and frees the map where a thing that was not solid stood; what stood on it leaves the
+objects with it and is in no memory until a look finds it ("Where it stands"). A let-go puts it
+back with its id where it was set down, unseen, and the next look says one of three of it: seen
+there (among the objects, a label naming it), its place not seen (among them, no label), or its
+place seen and empty (gone). A loss leaves it in no hand and no scene; a push moves the thing and
+what stands on it; and a draw, as of a drawer, leaves the object as it was. Where a thing let go,
+pushed or drawn is not solid, the map is never seen where it lies, and where a pushed or drawn one
+stood. A pick of an id the memory never gave, above its next id, is a hold a restart brings back:
+it is held, and a let-go makes an object of its box or cylinder. Acts tell the map nothing at
+once: memories after different acts share it, and what each act says of it is fused when it is
+next read.
 
 Two things follow from step 5. What stands within the margin of a shape, or within about a
 voxel of it, is taken for the shape, so a shape larger than its thing takes in what stands
@@ -757,12 +760,12 @@ the run.
   cameras** (`cargo test --release -p miru --test truth -- --nocapture`): the simulator's exact
   depth, an Intel RealSense D435 by its datasheet, and the D435 with a D405 near, the two stereo
   ones through batchplan's filter (`DepthImage::filtered`), as a caller's depth comes to a look.
-  Thirteen scenes, a row per scene, camera and thing: how many objects the thing came out as, and
+  Fourteen scenes, a row per scene, camera and thing: how many objects the thing came out as, and
   of the one that holds most of it, its shape's kind, size and middle, what it stands on, whether
   it is solid, the share of the thing's pixels it holds and, on a second look, its id. On exact
-  depth 17 of 22 rows are wholly right, 144 properties holding and 14 not; through the D435 none of
-  22, with 85 and 73; through the D435 with the D405 near none, with 93 and 65. The gaps on exact
-  depth are two scenes'. A box 200 mm square and 60 mm tall with a round dial 90 mm across and
+  depth 17 of 24 rows are wholly right, 154 properties holding and 18 not; through the D435 none of
+  24, with 93 and 79; through the D435 with the D405 near none, with 101 and 71. The gaps on exact
+  depth are three scenes'. A box 200 mm square and 60 mm tall with a round dial 90 mm across and
   10 mm tall on it, and on the dial a bar 25 by 90 mm and 38 mm tall: the box is not solid, and the
   dial and the bar are one object, a box of 57 by 90 by 48 mm whose middle is 25 mm off the dial's
   and 17 mm off the bar's (6 allowed), not solid, standing on the box where the bar stands on the
@@ -770,8 +773,19 @@ the run.
   one object through every camera, on exact depth the box's shape 5 mm taller than the box and not
   solid. So a plate set down on a box (`Act::LetGo`) reads gone at the next look while it stands
   there, through every camera that made an object of it on the table
-  (`a_plate_let_go_on_a_box_is_seen_there` in `tests/memory.rs`). Every gap is listed row by row
-  in `tests/truth.rs`'s doc, with what its object shows.
+  (`a_plate_let_go_on_a_box_is_seen_there` in `tests/memory.rs`). And two boxes 80 by 120 mm and
+  60 mm tall, side by side and touching: they are one object through every camera, on exact depth
+  a box 80 by 240 mm. So a box set down flush against another reads gone at the next look, or the
+  other one does, which did not move: on exact depth and through the D435 the other, through the
+  D435 with the D405 near the one set down (`a_thing_let_go_against_another_keeps_both_ids`).
+  Every gap is listed row by row in `tests/truth.rs`'s doc, with what its object shows.
+- **What stood on a picked thing is in no memory until a look finds it.** `Act::Picked` takes the
+  thing and what stands on it, in turn, out of the objects, but the hand and the masks hold the
+  picked thing alone, and the map never held a solid thing that stood on it. A can standing on a
+  box whose box is picked is either riding in the hand, unmasked and missing from the `Held` that
+  plans carry, or where it stood, and no obstacle holds it: the nearest to its middle is 9.0 cm off
+  on exact depth and through the D435 with the D405, 3.4 cm through the D435
+  (`what_stood_on_a_picked_thing_is_in_a_memory` in `tests/memory.rs`).
 - **A look through `observe` takes about 1.8 times a look alone.** On `rows4` its 20 looks take
   94 and 82 ms at the median, against 47 and 45 ms for `look` on the same views after the same
   scene, and on `hand-in-drawer` its 16 looks with truth 134 and 142 ms against 73 and 79 ms, on
