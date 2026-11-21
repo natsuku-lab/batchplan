@@ -13,7 +13,8 @@ use std::f32::consts::TAU;
 use batchplan::glam::{Mat3, Quat, Vec2, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{
-    DepthImage, Device, Error, Grasp, GraspOptions, Intrinsics, Obstacle, Pose, Surface, grasps_on,
+    DepthImage, Device, Error, Grasp, GraspOptions, Intrinsics, Obstacle, Pose, Screw, Surface,
+    grasps_on,
 };
 
 /// Points 2 mm apart: a fingertip's patch of 5 mm holds a few dozen.
@@ -1889,6 +1890,10 @@ fn malformed_surfaces_and_options_are_input_errors() {
             ..o
         },
         GraspOptions { turns: 0, ..o },
+        GraspOptions {
+            near: Some(Vec3::new(0.0, f32::NAN, 0.0)),
+            ..o
+        },
         with_shell(0.0),
         with_shell(-0.01),
         with_shell(f32::NAN),
@@ -1899,4 +1904,164 @@ fn malformed_surfaces_and_options_are_input_errors() {
     // No surfaces, and a surface without points, give no grasps.
     assert!(grasps_on(&device, 0, &[], &o).unwrap().is_empty());
     assert!(grasps(&Surface::default(), &o).is_empty());
+}
+
+/// How many turns from above a grasp comes, of `turns` round its closing line, either way.
+fn turns_from_above(g: &Grasp, turns: usize) -> usize {
+    let toward = g.pose.rotation * Vec3::Z;
+    let angle = toward.angle_between(Vec3::NEG_Z);
+    (angle / (TAU / turns as f32)).round() as usize
+}
+
+/// The middle between the two points a grasp closes on.
+fn middle(g: &Grasp) -> Vec3 {
+    (g.contacts[0] + g.contacts[1]) / 2.0
+}
+
+#[test]
+fn grasps_near_a_point_come_nearest_first_turn_by_turn() {
+    // A bar 2 cm wide, 16 cm long and 10 cm tall: grasped across its width alone, all along it.
+    let half = Vec3::new(0.08, 0.01, 0.05);
+    let s = box_surface(half, &[]);
+    let o = GraspOptions::default();
+    let spread = grasps(&s, &o);
+    assert!(spread.len() > 4 * o.turns, "{}", spread.len());
+    let point = Vec3::new(0.05, 0.0, 0.05);
+    let near = grasps(
+        &s,
+        &GraspOptions {
+            near: Some(point),
+            ..o
+        },
+    );
+    // The same grasps, in another order.
+    let key = |g: &Grasp| {
+        let (p, r) = (g.pose.position, g.pose.rotation);
+        [
+            p.x,
+            p.y,
+            p.z,
+            r.x,
+            r.y,
+            r.z,
+            r.w,
+            g.contacts[0].x,
+            g.contacts[1].x,
+        ]
+    };
+    let sorted = |found: &[Grasp]| {
+        let mut found = found.to_vec();
+        found.sort_by(|a, b| key(a).partial_cmp(&key(b)).unwrap());
+        found
+    };
+    assert_eq!(sorted(&spread), sorted(&near));
+    assert_ne!(spread, near);
+    // Turn by turn as without the point, from above first, and within a turn the pairs nearest
+    // it first. From outside, a turn to one side is told from one as far to the other only by
+    // which way round its pair was found, so the tier of a turn either way may start over once.
+    let tiers = |found: &[Grasp]| {
+        let each = found.iter().map(|g| turns_from_above(g, o.turns));
+        each.collect::<Vec<usize>>()
+    };
+    assert_eq!(tiers(&spread), tiers(&near));
+    assert_eq!(turns_from_above(&near[0], o.turns), 0);
+    let tier = tiers(&near);
+    let mut start = 0;
+    while start < near.len() {
+        let end = (start..near.len()).find(|&k| tier[k] != tier[start]);
+        let end = end.unwrap_or(near.len());
+        let run = &near[start..end];
+        let over = run
+            .windows(2)
+            .filter(|w| middle(&w[0]).distance(point) > middle(&w[1]).distance(point) + 1e-6);
+        let sides = if tier[start] == 0 || 2 * tier[start] == o.turns {
+            0
+        } else {
+            1
+        };
+        assert!(over.count() <= sides, "turn {} from above", tier[start]);
+        start = end;
+    }
+    // The first grasps lie at the point, where without it they spread along the bar.
+    assert!(middle(&near[0]).truncate().distance(point.truncate()) < 2.0 * SPACING);
+    let far = |found: &[Grasp]| {
+        let first = found.iter().take(2 * 4).map(middle);
+        first.map(|m| m.x).fold(f32::NEG_INFINITY, f32::max)
+            - found
+                .iter()
+                .take(2 * 4)
+                .map(|g| middle(g).x)
+                .fold(f32::INFINITY, f32::min)
+    };
+    assert!(
+        far(&spread) > 0.08 && far(&near) < 0.02,
+        "{} and {}",
+        far(&spread),
+        far(&near)
+    );
+}
+
+#[test]
+fn a_grasps_moment_about_a_line_is_what_friction_its_patches_and_a_push_give() {
+    // A knob's bar 2.5 cm wide, 9 cm long and 3 cm tall, its axis upright through its middle:
+    // grasped across its width, the fingertips (friction 0.5, patches 5 mm) give it 0.5 x 1.25 cm
+    // each by friction and 5 mm each by where they press on their patches, 2.25 cm a newton,
+    // wherever along the bar; off the axis, the hand pushing with up to both fingers' force gives
+    // twice as much again as the grip is far from the axis.
+    let half = Vec3::new(0.045, 0.0125, 0.015);
+    let o = GraspOptions::default();
+    let found = grasps(&box_surface(half, &[]), &o);
+    let across: Vec<&Grasp> = found
+        .iter()
+        .filter(|g| (g.pose.rotation * Vec3::Y).y.abs() > 0.9999)
+        .collect();
+    // The axis through the middle of the grasps nearest the bar's middle.
+    let x = |g: &&Grasp| middle(g).x;
+    let nearest = across
+        .iter()
+        .map(x)
+        .min_by(|a, b| a.abs().total_cmp(&b.abs()));
+    let axis = Screw::about(Vec3::X * nearest.expect("grasps across the bar"), Vec3::Z);
+    let (mut at_axis, mut off_axis) = (0, 0);
+    for g in &across {
+        let off = middle(g).x - axis.point.x;
+        let moment = g.moment(&axis, &o);
+        let expected = 0.5 * 0.025 + 2.0 * 0.005 + 2.0 * off.abs();
+        assert!((moment - expected).abs() < 1e-5, "{moment} for {g:?}");
+        if off.abs() < 1e-5 {
+            assert!((moment - 0.0225).abs() < 1e-6, "{moment}");
+            at_axis += 1;
+        }
+        if (off.abs() - 0.03).abs() < 1e-5 {
+            assert!((moment - 0.0825).abs() < 1e-5, "{moment}");
+            off_axis += 1;
+        }
+    }
+    assert!(at_axis > 0 && off_axis > 0, "{at_axis} and {off_axis}");
+    // Closing along the line: the patches and the push give nothing, and friction gives each
+    // fingertip's slide across the line at its distance from it and its twist about the line, a
+    // patch pressed evenly twisting by 2/3 of friction times its radius.
+    let plates = plates_of(0.03, 0.02);
+    for g in grasps(&plates, &o) {
+        let line = g.pose.rotation * Vec3::Y;
+        let along = Screw::about(Vec3::new(0.0, 0.01, -0.02), line);
+        let from = (middle(&g) - along.point).reject_from(line).length();
+        let twist = 2.0 / 3.0 * o.friction * o.contact;
+        let expected = 2.0 * o.friction * from + 2.0 * twist;
+        assert!((g.moment(&along, &o) - expected).abs() < 1e-5, "{g:?}");
+    }
+    // An axis 5 mm across the bar from the middle of the grips: friction can give the farther
+    // finger's slide 5 mm more, which a push along the closing line works against one way round,
+    // and the moment is that way's: 2.25 cm and | 2 x 3 cm - 0.5 cm | 3 cm along the bar.
+    let aside = Screw::about(axis.point + Vec3::Y * 0.005, Vec3::Z);
+    for g in &across {
+        let off = middle(g).x - axis.point.x;
+        let expected = 0.0225 + (2.0 * off.abs() - 0.005).abs();
+        assert!((g.moment(&aside, &o) - expected).abs() < 1e-5, "{g:?}");
+    }
+    // Either way round the line alike.
+    let reversed = Screw::about(axis.point, Vec3::NEG_Z);
+    for g in &across {
+        assert!((g.moment(&reversed, &o) - g.moment(&axis, &o)).abs() < 1e-6);
+    }
 }

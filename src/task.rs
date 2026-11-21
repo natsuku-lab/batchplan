@@ -1298,8 +1298,9 @@ pub fn place_poses(object: &Obstacle, pose: Pose, turns: usize) -> Vec<Pose> {
 /// examples' Panda `ee_link`): by [`grasps`], for a box, ball, cylinder or capsule, and by
 /// [`grasps_on`](crate::grasps_on), for what cameras see of any shape. Both read `opening`,
 /// `turns`, `floor` and `overlap`; `depth`, `tip` and `along` are for `grasps` alone, whose
-/// hand is the options' own, and `friction`, `contact` and `approach` for `grasps_on` alone,
-/// whose hand is the robot's.
+/// hand is the options' own, and `friction`, `contact`, `approach` and `near` for `grasps_on`
+/// alone, whose hand is the robot's. [`Grasp::moment`](crate::Grasp::moment) reads `friction`
+/// and `contact`.
 #[derive(Clone, Copy, Debug)]
 pub struct GraspOptions {
     /// The widest the fingers open (meters): 8 cm.
@@ -1380,6 +1381,14 @@ pub struct GraspOptions {
     /// narrower. Lock the fingers there
     /// for the pick ([`Pick::locked`]); a call's grasps share at most sixteen openings.
     pub narrow: bool,
+    /// A point to grip a surface near, in its frame, for grasps of a surface: `None`, the pairs
+    /// of patches spread over the object. With a point, within each of the tiers
+    /// [`grasps_on`](crate::grasps_on) orders its grasps by (from above before a turn to either
+    /// side, pairs that face each other within half a friction cone of square before the rest,
+    /// walls seen from one side after all of these), the pairs whose middles lie nearest the
+    /// point come first, the squarest first of two as near: where a caller was told to grip, as
+    /// on a knob's axis or at a handle's middle. It orders the grasps and finds no others.
+    pub near: Option<Vec3>,
 }
 
 impl Default for GraspOptions {
@@ -1397,6 +1406,7 @@ impl Default for GraspOptions {
             approach: 0.1,
             shell: None,
             narrow: false,
+            near: None,
         }
     }
 }
