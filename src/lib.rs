@@ -105,7 +105,7 @@ pub use task::{
 pub use timing::{HandSpeed, JointState, Near, Trajectory, time};
 pub use tool_path::{ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, follow};
 pub use trajopt::{Goal, PlanFailure, PlanOptions, PlanProblem, PlanResult, plan};
-pub use types::{JointTrajectory, Pose, Solved, StartMotion};
+pub use types::{JointTrajectory, Pose, Screw, Solved, StartMotion};
 pub use world::{Distance, Obstacle, Touch, World};
 
 /// The math types in batchplan's interface (`Vec3`, `Quat`), so callers use the same version.
