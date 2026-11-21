@@ -90,6 +90,9 @@ pub enum Act {
     ///   it;
     /// - its place not seen: it is among the memory's objects, and no label names it;
     /// - its place seen and empty: it is not among the memory's objects.
+    ///
+    /// Where it is not solid the map holds it, and the room it takes up where it lies is never
+    /// seen, as a push leaves it, until a look reads it there.
     LetGo { id: u32, at: Pose },
     /// The hand that holds object `id` lost it where nothing knows: it dropped, slipped, or was
     /// let go in the air. It is in no hand and among no objects, and the next look finds it under
@@ -286,8 +289,14 @@ impl Memory {
                      unit rotation"
                 );
                 let object = self.release(k, *id)?;
+                let shape = object.shape.placed(*at);
+                // The map held a thing that is not solid where it lies now as what was there.
+                if !object.solid {
+                    let shape = shape.obstacle();
+                    self.marks.push(Mark { shape, free: false });
+                }
                 self.scene.objects.push(Object {
-                    shape: object.shape.placed(*at),
+                    shape,
                     on: None,
                     ..object
                 });
@@ -741,6 +750,11 @@ pub fn observe(
         robot.dof()
     );
     ensure_input!(
+        at.q.iter().all(|value| value.is_finite()),
+        "the stance's joints must be numbers, got {:?}",
+        at.q
+    );
+    ensure_input!(
         at.padding.is_finite() && at.padding >= 0.0,
         "the stance's padding must be finite and not negative, got {}",
         at.padding
@@ -893,14 +907,17 @@ fn raised(camera: &Camera<'_>) -> Noise {
 /// never meets the space it hides (batchplan's `docs/perception.md`, "Masking the robot").
 ///
 /// A grid made of a map grows by at most 2√3 voxels past a reading, as batchplan's `sdf.rs` builds
-/// it. A point of the grid stores at most its distance from the middle of the nearest occupied
-/// voxel less √3 voxels: less half a voxel's diagonal for the voxel's cube, and half a diagonal
-/// again so that interpolation never reads farther than the geometry (`finishing_table`).
-/// Trilinear interpolation reads at a point at most √3/2 voxels less than the distance there,
-/// the mean distance of the eight points around it from the point, distance being 1-Lipschitz. So
-/// the solid lies within 3√3/2 voxels of an occupied voxel's middle, and that middle lies within
-/// √3/2 of the reading that filled the voxel, where a pixel's footprint is no wider than a voxel.
-/// For 1 cm voxels, 3.46 cm.
+/// it. A free point of the grid stores at most its distance from the middle of the nearest
+/// occupied voxel less √3 voxels: less half a voxel's diagonal for the voxel's cube, and half a
+/// diagonal again so that interpolation never reads farther than the geometry
+/// (`finishing_table`). At a point farther than √3 voxels from every occupied middle the eight
+/// points of its cell are free, for they lie within √3 voxels of it, and trilinear interpolation
+/// reads there at most √3/2 voxels less than the distance at the point: the mean distance of the
+/// eight from it, distance being 1-Lipschitz. So the solid lies within 3√3/2 voxels of an occupied
+/// voxel's middle, and that middle within √3/2 of the reading that filled the voxel, where a
+/// pixel's footprint is no wider than a voxel: out to 3 m through the tests' pinhole of 300
+/// pixels, while a coarse array, as an 8x8 time-of-flight sensor's, is wider and grows a grid
+/// farther. For 1 cm voxels, 3.46 cm.
 fn map_padding(voxel: f32) -> f32 {
     2.0 * 3f32.sqrt() * voxel
 }

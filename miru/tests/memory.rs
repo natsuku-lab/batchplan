@@ -1564,3 +1564,90 @@ fn a_kept_look_gives_an_objects_surface() {
     }
     verdict("a_kept_look_gives_an_objects_surface", &found);
 }
+
+/// The wide bowl, which is not solid, picked and let go over a crumb the map holds: a step into it
+/// meets its wall where it stands. The map saw that place free before the bowl was there, and is
+/// never seen there after the let-go, so the bowl's part of the map is solid at its wall.
+#[test]
+fn a_thing_let_go_that_is_not_solid_is_never_seen_where_it_lies() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let (from, to) = (Vec3::new(0.45, -0.17, 0.0), Vec3::new(0.5, 0.17, 0.0));
+    let things = vec![
+        table(),
+        wide_bowl(from),
+        block(
+            to + Vec3::new(0.0, 0.0, 0.0015),
+            Vec3::splat(0.0015),
+            [200, 30, 200],
+        ),
+        arm(&robot, away),
+    ];
+    let rendered = render(&things);
+    let wall = to + Vec3::new(0.0, 0.12, 0.04);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seen = first_look(&device, &things, &rendered, (c, 10 * c as u64), away, 0.0);
+        let Some(bowl) = id_of(seen.kept.scene(), &rendered, 1) else {
+            found.push((*camera, Err("no object holds the bowl".to_string())));
+            continue;
+        };
+        let object = seen
+            .memory
+            .objects()
+            .iter()
+            .find(|o| o.id == bowl)
+            .expect("the bowl");
+        assert!(!object.solid, "{camera}: the bowl is not solid");
+        let frame = cover(&object.shape).pose();
+        let held = grasped(&seen.memory, bowl);
+        let at = Pose::new(frame.position + (to - from), frame.rotation);
+        let let_go = (seen.memory)
+            .after(&[Act::Picked { id: bowl, held }, Act::LetGo { id: bowl, at }])
+            .expect("a pick and a let-go");
+        let step = Step {
+            into: &[bowl],
+            ..Step::default()
+        };
+        let planned = let_go.world(&device, &step).expect("a world");
+        let at = planned
+            .of
+            .iter()
+            .position(|of| matches!(of, Of::Object(o) | Of::Region(o) if *o == bowl));
+        let reads = at.map(|at| planned.world.obstacles[at].distance(wall).value);
+        let wrong = match reads {
+            Some(distance) if distance < 0.0 => vec![],
+            _ => vec![format!("let go, its wall reads {reads:?}")],
+        };
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict(
+        "a_thing_let_go_that_is_not_solid_is_never_seen_where_it_lies",
+        &found,
+    );
+}
+
+/// A stance whose joint is no number is refused, naming it: the robot's mask would leave the arm
+/// out of none of the views, and the arm would be objects.
+#[test]
+fn a_stance_that_is_no_number_is_refused() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let things = reaching_over_a_tray(&robot, &OVER_THE_CAN);
+    let rendered = render(&things);
+    let cameras = cameras(&rendered, [0, 0], 0.0);
+    let mut q = OVER_THE_CAN;
+    q[3] = f32::NAN;
+    let locked = HashMap::new();
+    let stance = Stance {
+        q: &q,
+        locked: &locked,
+        padding: padding(&rendered, &rendered, things.len() - 1),
+    };
+    let refused = observe(&device, &cameras, &stance, &memory(&device));
+    let Err(batchplan::Error::Input(why)) = refused else {
+        panic!("a stance that is no number is taken: {refused:?}");
+    };
+    assert!(why.contains("NaN"), "{why}");
+}

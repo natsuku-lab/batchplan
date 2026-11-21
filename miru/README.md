@@ -99,7 +99,7 @@ fn main() -> Result<(), batchplan::Error> {
             camera: Pose::new(Vec3::new(0.5, 0.0, 1.0), Quat::from_rotation_x(std::f32::consts::PI)),
         },
         color: &[],
-        noise: Noise::stereo(640.0, 0.05, 0.08), // its datasheet's
+        noise: Noise::stereo(600.0, 0.05, 0.08), // its datasheet's
         band: 1,       // pixels it reads beside a jump in depth toward the other surface
         off_by: 0.005, // what its pose and the fixtures are off by
         masks: &[],
