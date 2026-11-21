@@ -613,7 +613,16 @@ pub(crate) fn hull(mut points: Vec<Vec2>) -> Vec<Vec2> {
         let margin = 16.0 * f32::EPSILON * largest.fold(0.0, f32::max);
         let mut ends = ends.to_vec();
         ends.dedup();
-        points.retain(|&point| !holds(&ends, point, margin));
+        // Each side's start, its run, and how far inside it a point must lie, as `holds` asks.
+        let sides: Vec<(Vec2, Vec2, f32)> = (ends.iter().zip(ends.iter().cycle().skip(1)))
+            .map(|(&a, &b)| (a, b - a, margin * (b - a).length()))
+            .collect();
+        if sides.len() > 2 {
+            let inside = |point: Vec2| {
+                (sides.iter()).all(|&(start, run, least)| run.perp_dot(point - start) > least)
+            };
+            points.retain(|&point| !inside(point));
+        }
     }
     // Two points this order holds equal are the same to the bit, so no sort orders them apart.
     points.sort_unstable_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
