@@ -23,6 +23,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::Range;
 
 use batchplan::{DepthImage, Device, Intrinsics, Obstacle, Pose};
 use glam::{Vec2, Vec3};
@@ -228,12 +229,7 @@ fn checked(
     let lies: Vec<Vec<u32>> = (parts.iter().zip(look.views))
         .map(|(parts, view)| masks::lies(&parts.of, parts.count, &parts.share, view.masks))
         .collect();
-    let told = Told {
-        look,
-        seen: &seen,
-        parts: &parts,
-        first: &first,
-    };
+    let told = Told::new(look, &seen, &parts, &first, threads);
     let mut sets = Sets::new(&lies, told.known());
     for (lies, first) in lies.iter().zip(&first) {
         for mask in masks::joins(lies) {
@@ -485,47 +481,226 @@ struct Told<'a> {
     parts: &'a [Parts],
     /// Each view's first part among all the views'.
     first: &'a [usize],
+    /// The views' rows in bands, which [`Told::gather`] reads on up to `threads` threads.
+    bands: Vec<Band>,
+    /// The parts that have readings, by their number among all the views', in the order the
+    /// views show them: view by view, and in a view as the rows meet the first reading of each.
+    order: Vec<usize>,
+    threads: usize,
 }
 
-impl Told<'_> {
+/// A band of one view's rows.
+struct Band {
+    view: usize,
+    pixels: Range<usize>,
+    /// Per part of the view, how many of its readings lie in the band.
+    readings: Vec<usize>,
+}
+
+/// The object of a part that is none's ([`Told::gather`]).
+const NO_OBJECT: usize = usize::MAX;
+
+impl<'a> Told<'a> {
+    /// The views of `look`, read as `seen`, told apart into `parts`, each view's first part
+    /// among all the views' at `first`, on up to `threads` threads.
+    fn new(
+        look: &'a Look<'a>,
+        seen: &'a [Seen],
+        parts: &'a [Parts],
+        first: &'a [usize],
+        threads: usize,
+    ) -> Self {
+        // Each view's rows in as many bands as there are threads.
+        let mut pixels: Vec<(usize, Range<usize>)> = vec![];
+        for (view, seen) in seen.iter().enumerate() {
+            let band = (seen.height.div_ceil(threads) * seen.width).max(1);
+            let all = seen.kinds.len();
+            let starts = (0..all).step_by(band);
+            pixels.extend(starts.map(|start| (view, start..all.min(start + band))));
+        }
+        // Per band, per part of its view, how many of its readings lie in the band and where
+        // the first does.
+        let counted = threads::each(threads, pixels.len(), |band| {
+            let (view, pixels) = &pixels[band];
+            let (seen, of) = (&seen[*view], &parts[*view]);
+            let (mut readings, mut firsts) = (vec![0; of.count], vec![usize::MAX; of.count]);
+            let own = of.of[pixels.clone()]
+                .iter()
+                .zip(&seen.kinds[pixels.clone()]);
+            for (i, (&part, kind)) in (pixels.start..).zip(own) {
+                if part != NONE && matches!(kind, Kind::Known(_) | Kind::Open) {
+                    let part = part as usize;
+                    if readings[part] == 0 {
+                        firsts[part] = i;
+                    }
+                    readings[part] += 1;
+                }
+            }
+            (readings, firsts)
+        });
+        let mut order = vec![];
+        for (view, of) in parts.iter().enumerate() {
+            let mut met = vec![usize::MAX; of.count];
+            let bands = (pixels.iter().zip(&counted)).filter(|((band, _), _)| *band == view);
+            for (_, (_, firsts)) in bands {
+                for (met, &first) in met.iter_mut().zip(firsts) {
+                    *met = (*met).min(first);
+                }
+            }
+            let mut shown: Vec<(usize, usize)> = (met.into_iter().enumerate())
+                .filter(|&(_, at)| at != usize::MAX)
+                .map(|(part, at)| (at, first[view] + part))
+                .collect();
+            shown.sort_unstable();
+            order.extend(shown.into_iter().map(|(_, part)| part));
+        }
+        let bands = (pixels.into_iter().zip(counted))
+            .map(|((view, pixels), (readings, _))| Band {
+                view,
+                pixels,
+                readings,
+            })
+            .collect();
+        Told {
+            look,
+            seen,
+            parts,
+            first,
+            bands,
+            order,
+            threads,
+        }
+    }
+
     /// Each object's readings, in the order the views show the objects, each with the set its
     /// parts are; and per view and pixel what the pixel shows. A part that is a known shape's
     /// ([`Sets::theirs`]) is no object's: its readings show what a reading in no part does, the
     /// shape it lies on or nothing. With `floors`, such a part is an object of its own, for
     /// [`hollows`] to make a floor of.
+    ///
+    /// The bands are read on threads of their own, each into its own stretch of each object's
+    /// readings, so that every object's are in the order the views and their rows show them.
     fn gather(&self, sets: &mut Sets, floors: bool) -> (Vec<Readings>, Vec<Vec<Label>>) {
-        // Per set, by its first part, its object.
-        let mut index = vec![None; sets.first.len()];
-        let mut objects: Vec<Readings> = vec![];
-        let mut labels = vec![];
-        for (view, (readings, parts)) in self.seen.iter().zip(self.parts).enumerate() {
-            let color = self.look.views[view].color;
-            let mut shown = Vec::with_capacity(readings.kinds.len());
-            for (i, kind) in readings.kinds.iter().enumerate() {
-                let part = (parts.of[i] != NONE).then(|| self.first[view] + parts.of[i] as usize);
-                let theirs = part.is_some_and(|part| sets.theirs[part]);
-                shown.push(match (*kind, part.filter(|_| floors || !theirs)) {
-                    (Kind::Nothing, _) => Label::Nothing,
-                    (Kind::Robot, _) => Label::Robot,
-                    (Kind::Known(shape), None) => Label::Known(shape),
-                    (Kind::Open, None) => Label::Nothing,
-                    (Kind::Known(_) | Kind::Open, Some(part)) => {
-                        let set = sets.find(part);
-                        let object = *index[set].get_or_insert_with(|| {
-                            objects.push(Readings {
-                                set,
-                                ..Default::default()
-                            });
-                            objects.len() - 1
-                        });
-                        let slack = SIGMAS * readings.sigma(i);
-                        let color = color.get(3 * i..3 * i + 3);
-                        objects[object].add(readings.points[i], slack, parts.share[i], color);
-                        Label::Object(object)
-                    }
-                });
+        // Per part, its object, the objects numbered as the views show them; per object, its
+        // set.
+        let mut object_of = vec![NO_OBJECT; sets.first.len()];
+        let mut index = vec![NO_OBJECT; sets.first.len()];
+        let mut sets_of: Vec<usize> = vec![];
+        for &part in &self.order {
+            if floors || !sets.theirs[part] {
+                let set = sets.find(part);
+                if index[set] == NO_OBJECT {
+                    index[set] = sets_of.len();
+                    sets_of.push(set);
+                }
+                object_of[part] = index[set];
             }
-            labels.push(shown);
+        }
+        let count = sets_of.len();
+        // Per band, how many readings of each object lie in it.
+        let within: Vec<Vec<usize>> = (self.bands.iter())
+            .map(|band| {
+                let mut within = vec![0; count];
+                let first = self.first[band.view];
+                for (part, &readings) in band.readings.iter().enumerate() {
+                    if let Some(within) = within.get_mut(object_of[first + part]) {
+                        *within += readings;
+                    }
+                }
+                within
+            })
+            .collect();
+        let mut objects: Vec<Readings> = (sets_of.into_iter().enumerate())
+            .map(|(object, set)| {
+                let all = within.iter().map(|within| within[object]).sum();
+                Readings {
+                    set,
+                    points: vec![Vec3::ZERO; all],
+                    slack: vec![0.0; all],
+                    share: vec![0.0; all],
+                    colors: ([0; 3], 0),
+                }
+            })
+            .collect();
+        let mut labels: Vec<Vec<Label>> = (self.seen.iter())
+            .map(|seen| vec![Label::Nothing; seen.kinds.len()])
+            .collect();
+        // Per band, its labels, and per object the stretch of its readings the band fills.
+        type Stretch<'b> = (&'b mut [Vec3], &'b mut [f32], &'b mut [f32]);
+        let mut rest: Vec<&mut [Label]> = labels.iter_mut().map(Vec::as_mut_slice).collect();
+        let mut pieces: Vec<(&mut [Label], Vec<Stretch<'_>>)> = (self.bands.iter())
+            .map(|band| {
+                let (own, after) =
+                    std::mem::take(&mut rest[band.view]).split_at_mut(band.pixels.len());
+                rest[band.view] = after;
+                (own, Vec::with_capacity(count))
+            })
+            .collect();
+        for (object, readings) in objects.iter_mut().enumerate() {
+            let mut points = readings.points.as_mut_slice();
+            let mut slack = readings.slack.as_mut_slice();
+            let mut share = readings.share.as_mut_slice();
+            for ((_, stretches), within) in pieces.iter_mut().zip(&within) {
+                let (own_points, after) = std::mem::take(&mut points).split_at_mut(within[object]);
+                points = after;
+                let (own_slack, after) = std::mem::take(&mut slack).split_at_mut(within[object]);
+                slack = after;
+                let (own_share, after) = std::mem::take(&mut share).split_at_mut(within[object]);
+                share = after;
+                stretches.push((own_points, own_slack, own_share));
+            }
+        }
+        // Per band, per object, the sum of its readings' colours there and how many had one.
+        let mut colors = vec![vec![([0_u64; 3], 0_u64); count]; self.bands.len()];
+        let work: Vec<_> = pieces.into_iter().zip(colors.iter_mut()).collect();
+        threads::each_piece(
+            self.threads,
+            work,
+            |number, ((labels, mut stretches), colors)| {
+                let band = &self.bands[number];
+                let (seen, parts) = (&self.seen[band.view], &self.parts[band.view]);
+                let (color, first) = (self.look.views[band.view].color, self.first[band.view]);
+                let mut next = vec![0; count];
+                for (label, i) in labels.iter_mut().zip(band.pixels.clone()) {
+                    let part = parts.of[i];
+                    let object = if part == NONE {
+                        NO_OBJECT
+                    } else {
+                        object_of[first + part as usize]
+                    };
+                    *label = match (seen.kinds[i], object) {
+                        (Kind::Nothing, _) => Label::Nothing,
+                        (Kind::Robot, _) => Label::Robot,
+                        (Kind::Known(shape), NO_OBJECT) => Label::Known(shape),
+                        (Kind::Open, NO_OBJECT) => Label::Nothing,
+                        (Kind::Known(_) | Kind::Open, object) => {
+                            let (points, slack, share) = &mut stretches[object];
+                            let at = next[object];
+                            next[object] += 1;
+                            points[at] = seen.points[i];
+                            slack[at] = SIGMAS * seen.sigma(i);
+                            share[at] = parts.share[i];
+                            if let Some(color) = color.get(3 * i..3 * i + 3) {
+                                let (sums, had) = &mut colors[object];
+                                for (sum, &byte) in sums.iter_mut().zip(color) {
+                                    *sum += u64::from(byte);
+                                }
+                                *had += 1;
+                            }
+                            Label::Object(object)
+                        }
+                    };
+                }
+            },
+        );
+        for (object, readings) in objects.iter_mut().enumerate() {
+            for colors in &colors {
+                let (sums, had) = colors[object];
+                for (sum, add) in readings.colors.0.iter_mut().zip(sums) {
+                    *sum += add;
+                }
+                readings.colors.1 += had;
+            }
         }
         (objects, labels)
     }
@@ -1563,7 +1738,6 @@ fn check(index: usize, view: &View<'_>) -> Result<()> {
 }
 
 /// One object's readings from every view.
-#[derive(Default)]
 struct Readings {
     /// The set its parts are.
     set: usize,
@@ -1577,18 +1751,6 @@ struct Readings {
 }
 
 impl Readings {
-    fn add(&mut self, point: Vec3, slack: f32, share: f32, color: Option<&[u8]>) {
-        self.points.push(point);
-        self.slack.push(slack);
-        self.share.push(share);
-        if let Some(color) = color {
-            for (sum, &byte) in self.colors.0.iter_mut().zip(color) {
-                *sum += u64::from(byte);
-            }
-            self.colors.1 += 1;
-        }
-    }
-
     /// Whether `shape`, its own, stands for the thing: whether more of its readings lie on the
     /// shape's surface than off it, each as far as its slack: inside it, or outside, where the
     /// shape leaves a reading out, as one parted from it as another's. A box's and a can's lie on
