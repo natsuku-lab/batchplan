@@ -1450,3 +1450,103 @@ fn a_plate_let_go_on_a_box_is_seen_there() {
     }
     verdict("a_plate_let_go_on_a_box_is_seen_there", &found);
 }
+
+/// On the scene of `tests/batchplan.rs`, each object's surface from a kept look is the README's
+/// step 6 written out: each view's filtered depth with the object's labels as flags and the
+/// robot's mask, a 5 mm patch, the views joined. It has a point per reading off the robot, view by
+/// view and row by row, flagged where the look labels the reading the object's; and on exact depth
+/// each flagged point lies within three deviations of the view's noise of its thing. An id the look
+/// has not has no surface.
+#[test]
+fn a_kept_look_gives_an_objects_surface() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let things = reaching_over_a_tray(&robot, &OVER_THE_CAN);
+    let rendered = render(&things);
+    // Each object's things: the box, the can and the tray's floor and walls.
+    let parts = [1..2, 2..3, 3..8];
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seen = first_look(
+            &device,
+            &things,
+            &rendered,
+            (c, 10 * c as u64),
+            &OVER_THE_CAN,
+            0.0,
+        );
+        let kept = &seen.kept;
+        let scene = kept.scene();
+        let mut wrong = vec![];
+        for part in parts.clone() {
+            let Some(object) = (part.clone())
+                .filter_map(|thing| holder(scene, &rendered, thing))
+                .next()
+            else {
+                wrong.push(format!("no object holds things {part:?}"));
+                continue;
+            };
+            let id = scene.objects[object].id;
+            let surface = kept.surface(&device, id).expect("a sound surface");
+            let surface = surface.expect("a surface of an object the look names");
+            let mut by_hand: Option<batchplan::Surface> = None;
+            let mut k = 0;
+            for (view, labels) in scene.labels.iter().enumerate() {
+                let image = kept.image(view).expect("a kept view");
+                let mask = kept.robot(view).expect("a kept mask");
+                let flags: Vec<bool> = labels
+                    .iter()
+                    .map(|label| *label == Label::Object(object))
+                    .collect();
+                let one =
+                    batchplan::Surface::from_depth(&device, &image, &flags, Some(mask), 0.005);
+                let one = one.expect("a sound surface");
+                let noise = rendered[view].noise;
+                let off_robot =
+                    (0..image.depth.len()).filter(|&i| image.depth[i] > 0.0 && !mask.on_robot[i]);
+                for i in off_robot {
+                    let its = labels[i] == Label::Object(object);
+                    if surface.object.get(k) != Some(&its) {
+                        wrong.push(format!(
+                            "view {view}, pixel {i}: flagged {:?}, labelled {its}",
+                            surface.object.get(k)
+                        ));
+                        break;
+                    }
+                    if its && c == 0 {
+                        let p = surface.points[k];
+                        let off = (part.clone())
+                            .map(|thing| (things[thing].distance)(p).abs())
+                            .fold(f32::INFINITY, f32::min);
+                        if off > 3.0 * deviation(noise, image.depth[i]) {
+                            wrong.push(format!("view {view}, pixel {i}: {off} m off its thing"));
+                            break;
+                        }
+                    }
+                    k += 1;
+                }
+                match &mut by_hand {
+                    Some(joined) => joined.join(one),
+                    None => by_hand = Some(one),
+                }
+            }
+            let by_hand = by_hand.expect("a look of two views");
+            if k != surface.points.len()
+                || surface.points != by_hand.points
+                || surface.normals != by_hand.normals
+                || surface.object != by_hand.object
+                || surface.seen_from != by_hand.seen_from
+            {
+                wrong.push(format!("things {part:?}: not the README's surface"));
+            }
+        }
+        let unknown = kept
+            .surface(&device, seen.memory.next_id())
+            .expect("a sound call");
+        if unknown.is_some() {
+            wrong.push("an id the look has not has a surface".to_string());
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("a_kept_look_gives_an_objects_surface", &found);
+}

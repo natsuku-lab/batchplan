@@ -11,14 +11,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use batchplan::{
-    DepthFilter, DepthImage, Device, Held, IkOptions, Intrinsics, Obstacle, Occlusion,
-    OccupancyMap, Pose, Robot, RobotMask, SdfOptions, Weighing, World,
+    DepthFilter, DepthImage, Device, GraspOptions, Held, IkOptions, Intrinsics, Obstacle,
+    Occlusion, OccupancyMap, Pose, Robot, RobotMask, SdfOptions, Surface, Weighing, World,
 };
 use glam::Vec3;
 
 use crate::error::{Result, ensure_input};
 use crate::look::{Look, LookOptions, Noise, View};
-use crate::scene::{Object, Scene, Support};
+use crate::scene::{Label, Object, Scene, Support};
 use crate::view::SIGMAS;
 
 /// One depth camera's frame, and what is known of the camera: facts, so there is no default.
@@ -659,6 +659,41 @@ impl Kept {
     #[must_use]
     pub fn robot(&self, camera: usize) -> Option<&RobotMask> {
         self.views.get(camera).map(|view| &view.robot)
+    }
+
+    /// Object `id`'s readings over the look's views as one surface, for its grasps and rests
+    /// (`grasps_on`, `rests_on`), as the README's "With batchplan" takes them in step 6: each
+    /// camera's filtered depth, a point for each reading off the robot, those the look's labels
+    /// give the object flagged as its, each with the normal of a fingertip's patch about it
+    /// (`GraspOptions::default().contact`), the views joined (`Surface::from_depth`,
+    /// `Surface::join`). On `device`'s threads. None where no label of the look names the object:
+    /// an id the look has not, or one it kept unseen.
+    pub fn surface(&self, device: &Device, id: u32) -> Result<Option<Surface>> {
+        let Some(object) = self.scene.objects.iter().position(|object| object.id == id) else {
+            return Ok(None);
+        };
+        let label = Label::Object(object);
+        if !self
+            .scene
+            .labels
+            .iter()
+            .flatten()
+            .any(|named| *named == label)
+        {
+            return Ok(None);
+        }
+        let radius = GraspOptions::default().contact;
+        let mut joined: Option<Surface> = None;
+        for (view, labels) in self.views.iter().zip(&self.scene.labels) {
+            let flags: Vec<bool> = labels.iter().map(|named| *named == label).collect();
+            let image = view.image();
+            let surface = Surface::from_depth(device, &image, &flags, Some(&view.robot), radius)?;
+            match &mut joined {
+                Some(joined) => joined.join(surface),
+                None => joined = Some(surface),
+            }
+        }
+        Ok(joined)
     }
 }
 
