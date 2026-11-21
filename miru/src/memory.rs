@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use batchplan::{
-    DepthFilter, DepthImage, Device, Held, Intrinsics, Obstacle, OccupancyMap, Pose, RobotMask,
-    SdfOptions, Weighing,
+    DepthFilter, DepthImage, Device, Held, IkOptions, Intrinsics, Obstacle, Occlusion,
+    OccupancyMap, Pose, Robot, RobotMask, SdfOptions, Weighing, World,
 };
 use glam::Vec3;
 
@@ -83,6 +83,9 @@ pub struct Memory {
     map: Arc<Map>,
     /// How far from the robot's frame it reaches (meters): the look's corners and the map's.
     reach: f32,
+    /// How far past an object's room its part of the map reaches (meters), as far as a grid must
+    /// be exact: the collision margin and the robot's largest sphere.
+    padding: f32,
 }
 
 /// What one hand holds, and the object it was when it was taken.
@@ -110,12 +113,17 @@ impl Memory {
         let voxel = SdfOptions::default().voxel;
         let corner = Vec3::splat(reach);
         let fused = OccupancyMap::try_new(-corner, corner, voxel)?.with_weighing(o.weighing);
+        // A grid is exact where its box reaches past every surface by the collision margin and
+        // the robot's largest sphere (batchplan's `docs/perception.md`, "Padding").
+        let spheres = robot.spheres(robot.default_q());
+        let largest = spheres.iter().map(|sphere| sphere[3]).fold(0.0, f32::max);
         Ok(Memory {
             known: known.into(),
             scene: Scene::default(),
             hands: vec![None; robot.hands()],
             map: Arc::new(Map { fused, voxel }),
             reach,
+            padding: IkOptions::default().collision.margin + largest,
         })
     }
 
@@ -137,6 +145,176 @@ impl Memory {
         let holding = self.hands.get(hand)?.as_ref()?;
         Some((holding.id, &holding.held))
     }
+
+    /// The world to plan `step` against on `device`, every obstacle named in [`Planned::of`]:
+    ///
+    /// 1. The known shapes, in their order, so that what was found to touch them still does.
+    /// 2. Each object, in the order of [`Memory::objects`]: one that is `solid` its solids
+    ///    ([`Shape::solids`](crate::Shape::solids)); one that is not the room it takes up, its
+    ///    shape's box or cylinder, unless the step goes into it: it is named in `into`, or that
+    ///    room holds some of the robot's spheres at a configuration of `at`, or of the hand's
+    ///    placed by a pose of `reach`. Then it is its part of the map as the cameras saw into
+    ///    it, never-seen space solid (`OccupancyMap::part`, gridded `Occlusion::Occupied`), or
+    ///    the room it takes up where nothing in that part is solid.
+    /// 3. What the map holds outside every room an object takes up, as one grid with never-seen
+    ///    space free, where it holds anything there.
+    ///
+    /// A part reaches past its object's room by the collision margin of batchplan's
+    /// `IkOptions::default()` and the robot's largest sphere: as far as a grid must be exact
+    /// (batchplan's `docs/perception.md`, "Padding"). An id in `into` that no object has, a
+    /// configuration of `at` that is not one of the robot's, and a pose of `reach` of a hand the
+    /// robot has not or that is no number are an `Error::Input`.
+    pub fn world(&self, device: &Device, step: &Step<'_>) -> Result<Planned> {
+        let robot = device.robot();
+        for id in step.into {
+            ensure_input!(
+                self.scene.objects.iter().any(|object| object.id == *id),
+                "the step goes into object {id}, which the memory does not hold"
+            );
+        }
+        for (k, q) in step.at.iter().enumerate() {
+            ensure_input!(
+                q.len() == robot.dof() && q.iter().all(|value| value.is_finite()),
+                "configuration {k} of the step needs a finite value for each of the robot's {} \
+                 joints, got {q:?}",
+                robot.dof()
+            );
+        }
+        for (k, (hand, pose)) in step.reach.iter().enumerate() {
+            ensure_input!(
+                *hand < robot.hands() && pose.position.is_finite() && pose.rotation.is_finite(),
+                "pose {k} of the step needs one of the robot's {} hands and a finite pose, got \
+                 hand {hand} at {pose:?}",
+                robot.hands()
+            );
+        }
+        // The robot's spheres where the step takes it.
+        let mut spheres: Vec<[f32; 4]> = step.at.iter().flat_map(|q| robot.spheres(q)).collect();
+        for &(hand, pose) in step.reach {
+            spheres.extend(hand_spheres(robot, hand, pose));
+        }
+        let mut obstacles = self.known.to_vec();
+        let mut of: Vec<Of> = (0..self.known.len()).map(Of::Known).collect();
+        let mut covers = vec![];
+        for object in &self.scene.objects {
+            if object.solid {
+                let solids = object.shape.solids();
+                of.extend(std::iter::repeat_n(Of::Object(object.id), solids.len()));
+                obstacles.extend(solids);
+                continue;
+            }
+            let cover = object.shape.obstacle();
+            let holds =
+                |&[x, y, z, radius]: &[f32; 4]| cover.distance(Vec3::new(x, y, z)).value < radius;
+            let into = step.into.contains(&object.id) || spheres.iter().any(holds);
+            let region = match into {
+                true => self.region(device, &cover)?,
+                false => None,
+            };
+            match region {
+                Some(region) => {
+                    obstacles.push(region);
+                    of.push(Of::Region(object.id));
+                }
+                None => {
+                    obstacles.push(cover.clone());
+                    of.push(Of::Object(object.id));
+                }
+            }
+            covers.push(cover);
+        }
+        if let Some(rest) = self.unexplained(device, &covers)? {
+            obstacles.push(rest);
+            of.push(Of::Unexplained);
+        }
+        Ok(Planned {
+            world: World::new(obstacles),
+            of,
+        })
+    }
+
+    /// The map in `cover` as the cameras saw into it, gridded with never-seen space solid: solid
+    /// where a reading landed or nothing saw past, free where a camera saw in. None where nothing
+    /// in it is solid.
+    fn region(&self, device: &Device, cover: &Obstacle) -> Result<Option<Obstacle>> {
+        let part = self.map.fused.part(cover, self.padding)?;
+        let counts = part.counts();
+        if counts.occupied == 0 && counts.unobserved == 0 {
+            return Ok(None);
+        }
+        let grid = part.grid(device, Occlusion::Occupied)?;
+        Ok(Some(Obstacle::from_grid(grid)))
+    }
+
+    /// What the map holds outside every one of `covers`, gridded with never-seen space free, as
+    /// the space around a scene is (batchplan's `docs/perception.md`, "One memory for each
+    /// thing"): the part of the map over the occupied voxels that reach into no cover, each cover
+    /// freed in it as far as a voxel reaches into it. None where no occupied voxel lies outside
+    /// them.
+    fn unexplained(&self, device: &Device, covers: &[Obstacle]) -> Result<Option<Obstacle>> {
+        let reach = voxel_reach(self.map.voxel);
+        let outside = |p: &Vec3| covers.iter().all(|cover| cover.distance(*p).value > reach);
+        let points: Vec<Vec3> = self
+            .map
+            .fused
+            .occupied()
+            .into_iter()
+            .filter(outside)
+            .collect();
+        let Some(&first) = points.first() else {
+            return Ok(None);
+        };
+        let (lower, upper) = (points.iter()).fold((first, first), |(lower, upper), p| {
+            (lower.min(*p), upper.max(*p))
+        });
+        let bounds = Obstacle::cuboid(0.5 * (lower + upper), 0.5 * (upper - lower) + reach);
+        let mut part = self.map.fused.part(&bounds, self.padding)?;
+        for cover in covers {
+            part.free(cover, reach)?;
+        }
+        Ok(Some(Obstacle::from_grid(
+            part.grid(device, Occlusion::Free)?,
+        )))
+    }
+}
+
+/// Where a step of a plan goes among the objects: a thing that is not solid is the room it takes
+/// up unless the step goes into it ([`Memory::world`]). A step that goes nowhere is the default.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Step<'a> {
+    /// Objects the step acts inside, by id: a place into a container, the owner of a handle a
+    /// pull draws.
+    pub into: &'a [u32],
+    /// Configurations the step starts from or passes, each in the order of the device's robot's
+    /// `joint_names()`.
+    pub at: &'a [&'a [f32]],
+    /// Poses a hand goes to: the hand, and where its IK frame is.
+    pub reach: &'a [(usize, Pose)],
+}
+
+/// The world to plan a step against ([`Memory::world`]), and what each of its obstacles is.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Planned {
+    /// The obstacles, with no touches: which links may touch which obstacle is the caller's to
+    /// say, by `of`.
+    pub world: World,
+    /// Per obstacle of `world`, in its order, what it stands for.
+    pub of: Vec<Of>,
+}
+
+/// What an obstacle of a [`Planned`] world stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Of {
+    /// A known shape, by its index among the memory's.
+    Known(usize),
+    /// An object, by its id: a solid of its shape where it is `solid`, else the room it takes up.
+    Object(u32),
+    /// An object that is not solid, by its id, as the cameras saw into it: its part of the map.
+    Region(u32),
+    /// What the map holds that no shape and no object's room explains.
+    Unexplained,
 }
 
 /// What a look gives: the memory after it, and what it keeps of its views.
@@ -399,4 +577,34 @@ fn raised(camera: &Camera<'_>) -> Noise {
 /// For 1 cm voxels, 3.46 cm.
 fn map_padding(voxel: f32) -> f32 {
     2.0 * 3f32.sqrt() * voxel
+}
+
+/// How far a voxel's cube reaches from its middle, half its diagonal (meters): a voxel whose
+/// middle lies that near a shape reaches into it, as `OccupancyMap::part` and
+/// `RobotMask::with_shapes` take it.
+fn voxel_reach(voxel: f32) -> f32 {
+    0.5 * 3f32.sqrt() * voxel
+}
+
+/// Hand `hand`'s collision spheres with its IK frame at `pose`, as `[x, y, z, radius]`: those of
+/// its links (`Robot::hand_links`), each where the robot's collision model puts it in its link's
+/// frame, and the link where it lies from the hand's frame at the robot's default configuration,
+/// the fingers as its locked joints hold them, as batchplan takes a hand's spheres for
+/// `Robot::tip`.
+fn hand_spheres(robot: &Robot, hand: usize, pose: Pose) -> Vec<[f32; 4]> {
+    let q = robot.default_q();
+    let frame = robot.ee_pose(q, hand).inverse();
+    let model = robot.collision_model();
+    let mut spheres = vec![];
+    for link in robot.hand_links(hand) {
+        let (Some(at), Some(own)) = (robot.link_pose(q, link), model.spheres.get(link)) else {
+            continue;
+        };
+        let placed = pose.mul_pose(frame.mul_pose(at));
+        for &[x, y, z, radius] in own {
+            let center = placed.position + placed.rotation * Vec3::new(x, y, z);
+            spheres.push([center.x, center.y, center.z, radius]);
+        }
+    }
+    spheres
 }

@@ -84,5 +84,7 @@ mod threads;
 mod view;
 
 pub use look::{Look, LookOptions, Noise, View, look};
-pub use memory::{Camera, Kept, Memory, MemoryOptions, Observed, Stance, observe};
+pub use memory::{
+    Camera, Kept, Memory, MemoryOptions, Observed, Of, Planned, Stance, Step, observe,
+};
 pub use scene::{Label, Object, Scene, Shape, Support};

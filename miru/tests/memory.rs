@@ -11,14 +11,15 @@ mod common;
 
 use std::collections::HashMap;
 
-use batchplan::{DepthFilter, DepthImage, Device, Robot, RobotMask};
+use batchplan::{DepthFilter, DepthImage, Device, Obstacle, Robot, RobotMask};
 use common::{
-    CAMERAS, EYE, Frame, MIDDLE, NEAR, Stereo, Thing, arm, block, can, devices, known, looking,
-    panda, table, thin_tray,
+    CAMERAS, EYE, Frame, MIDDLE, NEAR, Stereo, Thing, arm, block, bowl, can, devices, known,
+    looking, panda, table, thin_tray,
 };
 use glam::Vec3;
 use miru::{
-    Camera, Label, Look, LookOptions, Memory, MemoryOptions, Noise, Scene, Stance, observe,
+    Camera, Label, Look, LookOptions, Memory, MemoryOptions, Noise, Observed, Of, Planned, Scene,
+    Shape, Stance, Step, observe,
 };
 
 /// The Panda's stance with its fingertips 2.3 cm over the top of the can of
@@ -26,27 +27,40 @@ use miru::{
 /// the far view: what reads of the can's top lies nearer the fingers than a map's mask pads them.
 const OVER_THE_CAN: [f32; 7] = [0.349, 0.389, 0.0, -2.091, 0.0, 2.480, 0.799];
 
-/// The claims a stereo camera breaks, a line each: the test, the camera, and what it shows.
+/// The Panda's stance with its open fingers in the middle of [`wide_bowl`], their tips 5.4 cm
+/// over its floor and about 5 cm from its wall, its hand turned as `tests/batchplan.rs` holds it.
+const IN_BOWL: [f32; 7] = [0.115, 0.361, -0.103, -2.387, 0.094, 2.745, 0.382];
+
+/// The claims a stereo camera breaks, a line each: the test, the camera, the complaint the test
+/// makes through it, and what the scene shows. A complaint through a camera that is not listed for
+/// it fails the test, as does a listed one that no longer holds.
 const GAPS: &str = "
+a_world_is_the_known_shapes_then_each_object | D435 | the map holds what no shape explains | readings of the table that land past three deviations of the camera's noise from it: 121 points of the grid deep in solid, 119 of them nearest the table, none farther than 3.2 cm from a thing
+a_world_is_the_known_shapes_then_each_object | D435+D405 | the map holds what no shape explains | as through the D435: 35 points of the grid deep in solid, 33 of them nearest the table, and one 40 cm from any thing
+a_camera_off_its_pose_is_held_to_what_it_is_off_by | D435 | the map holds what no shape explains | the table is the table's, but the map holds readings of it past three deviations of the noise, as many as with the cameras stated where they stand: 148 points of the grid deep in solid against 149, all within 1.2 cm of the table
+a_camera_off_its_pose_is_held_to_what_it_is_off_by | D435+D405 | the map holds what no shape explains | as through the D435: 67 points deep in solid against 68
 ";
 
-/// Whether `test`'s claim through `camera` is a listed gap.
-fn gap(test: &str, camera: &str) -> bool {
+/// The complaint listed for `test` through `camera`, if one is.
+fn gap(test: &str, camera: &str) -> Option<&'static str> {
     let lines = GAPS.lines().filter(|line| !line.is_empty());
     let fields = lines.map(|line| line.split(" | ").collect::<Vec<_>>());
-    fields
+    let listed = fields
         .into_iter()
-        .any(|fields| fields[..2] == [test, camera])
+        .find(|fields| fields[..2] == [test, camera]);
+    listed.map(|fields| fields[2])
 }
 
-/// Asserts what `test` found through each camera: that it holds where no gap is listed, and that
-/// a listed gap still is one.
+/// Asserts what `test` found through each camera: that it holds where no gap is listed, that
+/// where one is it fails with the listed complaint alone (on every device it ran on), and that the
+/// gap still is one.
 fn verdict(test: &str, found: &[(&str, Result<(), String>)]) {
     let wrong: Vec<String> = (found.iter())
         .filter_map(|(camera, found)| match (found, gap(test, camera)) {
-            (Ok(()), false) | (Err(_), true) => None,
-            (Ok(()), true) => Some(format!("{camera}: a listed gap holds")),
-            (Err(why), false) => Some(format!("{camera}: {why}")),
+            (Ok(()), None) => None,
+            (Err(why), Some(listed)) if why.split("; ").all(|one| one.ends_with(listed)) => None,
+            (Ok(()), Some(_)) => Some(format!("{camera}: a listed gap holds")),
+            (Err(why), _) => Some(format!("{camera}: {why}")),
         })
         .collect();
     assert!(wrong.is_empty(), "{test}:\n{}", wrong.join("\n"));
@@ -112,6 +126,109 @@ fn cameras(frames: &[Frame; 2], bands: [usize; 2], off_by: f32) -> Vec<Camera<'_
             masks: &frame.masks,
         })
         .collect()
+}
+
+/// A bowl at the table's middle, 28 cm across at its rim and 8 cm tall, its floor 20 cm across
+/// and its wall 4 mm through: room for the Panda's open fingers.
+fn wide_bowl() -> Thing {
+    bowl(MIDDLE, 0.10, 0.14, 0.08, 0.004, [40, 40, 40])
+}
+
+/// `things`, the arm at `q` the last of them, as camera set `c` reads them with the draws of
+/// `seed`, looked at once after a memory of nothing on `device`, the cameras' poses and the known
+/// shapes off by `off_by`.
+fn first_look(
+    device: &Device,
+    things: &[Thing],
+    rendered: &[Frame; 2],
+    (c, seed): (usize, u64),
+    q: &[f32],
+    off_by: f32,
+) -> Observed {
+    let (frames, bands) = read(rendered, c, seed);
+    let locked = HashMap::new();
+    let stance = Stance {
+        q,
+        locked: &locked,
+        padding: padding(rendered, &frames, things.len() - 1),
+    };
+    let cameras = cameras(&frames, bands, off_by);
+    observe(device, &cameras, &stance, &memory(device)).expect("a look")
+}
+
+/// The object of `scene` that holds the most of thing `thing`'s pixels, if any holds one.
+fn holder(scene: &Scene, rendered: &[Frame; 2], thing: usize) -> Option<usize> {
+    let mut held = vec![0; scene.objects.len()];
+    for (labels, truth) in scene.labels.iter().zip(rendered) {
+        let its = (labels.iter().zip(&truth.shows)).filter(|(_, shows)| **shows == Some(thing));
+        for (label, _) in its {
+            if let Label::Object(object) = label {
+                held[*object] += 1;
+            }
+        }
+    }
+    let most = held.iter().copied().max().filter(|&most| most > 0)?;
+    held.iter().position(|&count| count == most)
+}
+
+/// The room `shape` takes up, as an obstacle: a box open at the top's box, and a box or a
+/// cylinder itself, field for field.
+fn cover(shape: &Shape) -> Obstacle {
+    match *shape {
+        Shape::Cuboid {
+            center,
+            half_extents,
+            rotation,
+        }
+        | Shape::OpenBox {
+            center,
+            half_extents,
+            rotation,
+            ..
+        } => Obstacle::Cuboid {
+            center,
+            half_extents,
+            rotation,
+        },
+        Shape::Cylinder {
+            center,
+            rotation,
+            radius,
+            half_height,
+        } => Obstacle::Cylinder {
+            center,
+            rotation,
+            radius,
+            half_height,
+        },
+        _ => panic!("a shape these tests do not know: {shape:?}"),
+    }
+}
+
+/// What is wrong with `planned` as the world `memory` gives a step that goes into nothing: the
+/// known table first, then each object's solids where it is solid and the room it takes up where
+/// it is not, in the memory's order, and what nothing explains last, if anything.
+fn laid_out(memory: &Memory, planned: &Planned) -> Vec<String> {
+    let mut expected: Vec<(Of, Obstacle)> = vec![(Of::Known(0), known(&table()))];
+    for object in memory.objects() {
+        let shapes = match object.solid {
+            true => object.shape.solids(),
+            false => vec![cover(&object.shape)],
+        };
+        expected.extend(
+            shapes
+                .into_iter()
+                .map(|shape| (Of::Object(object.id), shape)),
+        );
+    }
+    let laid: Vec<(Of, Obstacle)> = (planned.of.iter().copied())
+        .zip(planned.world.obstacles.iter().cloned())
+        .collect();
+    let shapes = laid.len() - usize::from(planned.of.last() == Some(&Of::Unexplained));
+    match laid[..shapes] == expected[..] && planned.world.touch.is_empty() {
+        true => vec![],
+        false => vec![format!("laid out as {:?}", planned.of)],
+    }
 }
 
 /// A memory of nothing seen, in a cell that knows its table.
@@ -304,8 +421,9 @@ fn a_look_with_no_cameras_sees_nothing() {
 }
 
 /// The far and the near camera stated 5 mm over where they read from: with `off_by` 5 mm the table
-/// is the table's, through each camera, and no object is made of it; with 0, on exact depth, whose
-/// three deviations at the table are under 5 mm, the table's readings are an object of their own.
+/// is the table's, through each camera, no object is made of it and the map holds nothing no shape
+/// explains; with 0, on exact depth, whose three deviations at the table are under 5 mm, the
+/// table's readings are an object of their own.
 #[test]
 fn a_camera_off_its_pose_is_held_to_what_it_is_off_by() {
     let robot = panda();
@@ -324,12 +442,17 @@ fn a_camera_off_its_pose_is_held_to_what_it_is_off_by() {
         for frame in &mut frames {
             frame.camera.position.z += 0.005;
         }
-        // Whether an object of the look holds more of the table's pixels than of anything else's.
-        let table_is_an_object = |off_by: f32| {
+        // Whether an object of the look holds more of the table's pixels than of anything else's,
+        // and whether the map holds what no shape explains.
+        let look = |off_by: f32| {
             let cameras = cameras(&frames, bands, off_by);
             let seen = observe(&device, &cameras, &stance, &memory(&device)).expect("a look");
+            let planned = seen
+                .memory
+                .world(&device, &Step::default())
+                .expect("a world");
             let scene = seen.kept.scene();
-            (0..scene.objects.len()).any(|object| {
+            let table_is_an_object = (0..scene.objects.len()).any(|object| {
                 let [mut table, mut other] = [0, 0];
                 for (labels, truth) in scene.labels.iter().zip(&rendered) {
                     for (label, shows) in labels.iter().zip(&truth.shows) {
@@ -342,16 +465,284 @@ fn a_camera_off_its_pose_is_held_to_what_it_is_off_by() {
                     }
                 }
                 table > other
-            })
+            });
+            (table_is_an_object, planned.of.contains(&Of::Unexplained))
         };
         let mut wrong = vec![];
-        if table_is_an_object(0.005) {
+        let (table_is_an_object, unexplained) = look(0.005);
+        if table_is_an_object {
             wrong.push("off by 5 mm and stated so, the table is an object".to_string());
         }
-        if c == 0 && !table_is_an_object(0.0) {
+        if unexplained {
+            wrong.push(
+                "off by 5 mm and stated so, the map holds what no shape explains".to_string(),
+            );
+        }
+        if c == 0 && !look(0.0).0 {
             wrong.push("off by 5 mm and stated exact, the table is the table's".to_string());
         }
         found.push((*camera, outcome(&wrong)));
     }
     verdict("a_camera_off_its_pose_is_held_to_what_it_is_off_by", &found);
+}
+
+/// On the scene of `tests/batchplan.rs`, a world for a step that goes into nothing is the known
+/// table, then each object's solids, or the room it takes up where it is not solid; what a shape
+/// explains is not in the map, so nothing is left unexplained; the arm at its stance touches
+/// nothing; and the world is the same on every device.
+#[test]
+fn a_world_is_the_known_shapes_then_each_object() {
+    let robot = panda();
+    let things = reaching_over_a_tray(&robot, &OVER_THE_CAN);
+    let rendered = render(&things);
+    let devices = devices(&robot);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let mut wrong = vec![];
+        let mut first: Option<Planned> = None;
+        for (name, device) in &devices {
+            let seen = first_look(
+                device,
+                &things,
+                &rendered,
+                (c, 10 * c as u64),
+                &OVER_THE_CAN,
+                0.0,
+            );
+            let planned = seen
+                .memory
+                .world(device, &Step::default())
+                .expect("a world");
+            wrong.extend(
+                laid_out(&seen.memory, &planned)
+                    .into_iter()
+                    .map(|why| format!("{name}: {why}")),
+            );
+            if planned.of.contains(&Of::Unexplained) {
+                wrong.push(format!("{name}: the map holds what no shape explains"));
+            }
+            let worlds = device.upload(std::slice::from_ref(&planned.world));
+            let worlds = worlds.expect("a world the device takes");
+            let contacts = device.contacts(&worlds, &[0], &OVER_THE_CAN, 0.0);
+            let contacts = contacts.expect("the arm's contacts");
+            if !contacts[0].is_empty() {
+                wrong.push(format!("{name}: the arm touches {:?}", contacts[0]));
+            }
+            let same = first.get_or_insert_with(|| planned.clone());
+            if planned.world.obstacles != same.world.obstacles || planned.of != same.of {
+                wrong.push(format!("{name}: another world than on the first device"));
+            }
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("a_world_is_the_known_shapes_then_each_object", &found);
+}
+
+/// A bowl is not solid: for a step that goes into nothing it is the room it takes up, solid in its
+/// middle; named in `into` it is its part of the map, free in its middle, where the cameras saw
+/// in, and solid at its wall; and it is that part as well where the robot at a configuration of
+/// `at`, or the hand at a pose of `reach`, stands in its room, and not where the robot stands
+/// clear of it.
+#[test]
+fn a_thing_that_is_not_solid_is_its_room_unless_a_step_goes_into_it() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let things = vec![table(), wide_bowl(), arm(&robot, away)];
+    let rendered = render(&things);
+    let (room, wall) = (Vec3::new(0.5, 0.0, 0.05), Vec3::new(0.5, 0.12, 0.04));
+    let in_bowl = robot.ee_pose(&IN_BOWL, 0);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seen = first_look(&device, &things, &rendered, (c, 10 * c as u64), away, 0.0);
+        let Some(bowl) = holder(seen.kept.scene(), &rendered, 1) else {
+            found.push((*camera, Err("no object holds the bowl".to_string())));
+            continue;
+        };
+        let object = &seen.kept.scene().objects[bowl];
+        let id = object.id;
+        // What the bowl's object is in the world for `step`.
+        let of = |step: &Step<'_>| {
+            let planned = seen.memory.world(&device, step).expect("a world");
+            let at = planned
+                .of
+                .iter()
+                .position(|of| matches!(of, Of::Object(o) | Of::Region(o) if *o == id));
+            let at = at.expect("every object is in the world");
+            (planned.of[at], planned.world.obstacles[at].clone())
+        };
+        let mut wrong = vec![];
+        if object.solid {
+            wrong.push("the bowl is solid".to_string());
+        }
+        let (of_nothing, shape) = of(&Step::default());
+        if of_nothing != Of::Object(id)
+            || shape != cover(&object.shape)
+            || shape.distance(room).value >= 0.0
+        {
+            wrong.push(format!("into nothing it is {of_nothing:?}, not its room"));
+        }
+        let (of_into, region) = of(&Step {
+            into: &[id],
+            ..Step::default()
+        });
+        if of_into != Of::Region(id)
+            || region.distance(room).value <= 0.0
+            || region.distance(wall).value >= 0.0
+        {
+            wrong.push(format!("named in `into` it is {of_into:?}, {:.3} m from its middle and {:.3} m from its wall", region.distance(room).value, region.distance(wall).value));
+        }
+        let (of_at, _) = of(&Step {
+            at: &[&IN_BOWL],
+            ..Step::default()
+        });
+        if of_at != Of::Region(id) {
+            wrong.push(format!("with the arm in it it is {of_at:?}"));
+        }
+        let (of_reach, _) = of(&Step {
+            reach: &[(0, in_bowl)],
+            ..Step::default()
+        });
+        if of_reach != Of::Region(id) {
+            wrong.push(format!("with the hand in it it is {of_reach:?}"));
+        }
+        let (of_away, _) = of(&Step {
+            at: &[away],
+            ..Step::default()
+        });
+        if of_away != Of::Object(id) {
+            wrong.push(format!("with the arm away it is {of_away:?}"));
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict(
+        "a_thing_that_is_not_solid_is_its_room_unless_a_step_goes_into_it",
+        &found,
+    );
+}
+
+/// The hand in the wide bowl as the cameras look: the space it hides in the bowl is solid in the
+/// bowl's part of the map, never seen, and the robot at its stance touches none of it, nor
+/// anything else: the map's mask is padded past what its grid grows toward collision.
+#[test]
+fn the_arms_shadow_in_the_map_does_not_reach_the_arm() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let things = vec![table(), wide_bowl(), arm(&robot, &IN_BOWL)];
+    let rendered = render(&things);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seen = first_look(
+            &device,
+            &things,
+            &rendered,
+            (c, 10 * c as u64),
+            &IN_BOWL,
+            0.0,
+        );
+        let step = Step {
+            at: &[&IN_BOWL],
+            ..Step::default()
+        };
+        let planned = seen.memory.world(&device, &step).expect("a world");
+        let mut wrong = vec![];
+        if !planned.of.iter().any(|of| matches!(of, Of::Region(_))) {
+            wrong.push("no region holds the arm".to_string());
+        }
+        let worlds = device.upload(std::slice::from_ref(&planned.world));
+        let worlds = worlds.expect("a world the device takes");
+        let contacts = device
+            .contacts(&worlds, &[0], &IN_BOWL, 0.0)
+            .expect("the arm's contacts");
+        if !contacts[0].is_empty() {
+            let named: Vec<String> = (contacts[0].iter())
+                .map(|contact| {
+                    format!(
+                        "{contact:?} of {:?}",
+                        match contact {
+                            batchplan::Contact::World { obstacle, .. } =>
+                                Some(planned.of[*obstacle]),
+                            _ => None,
+                        }
+                    )
+                })
+                .collect();
+            wrong.push(format!("the arm touches {}", named.join(", ")));
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("the_arms_shadow_in_the_map_does_not_reach_the_arm", &found);
+}
+
+/// What the map holds that no shape and no object's room explains is one grid, the last
+/// obstacle: solid at a crumb 3 mm across and a pebble 1 cm across wherever the look makes no
+/// object of one and it stands clear of the table by more than the table's margin, and free in the
+/// bowl's room and at its wall, in the box and over the table.
+#[test]
+fn what_no_room_explains_is_the_unexplained_grid_and_nothing_else() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let (crumb, pebble) = (Vec3::new(0.35, 0.3, 0.0015), Vec3::new(0.75, -0.25, 0.005));
+    let the_box = Vec3::new(0.35, -0.25, 0.03);
+    let things = vec![
+        table(),
+        common::standing_bowl(MIDDLE),
+        block(the_box, Vec3::new(0.04, 0.06, 0.03), [200, 30, 30]),
+        block(crumb, Vec3::splat(0.0015), [200, 30, 200]),
+        block(pebble, Vec3::splat(0.005), [200, 30, 200]),
+        arm(&robot, away),
+    ];
+    let rendered = render(&things);
+    let free = [
+        ("the bowl's room", Vec3::new(0.5, 0.0, 0.03)),
+        ("the bowl's wall", Vec3::new(0.5, 0.043, 0.025)),
+        ("the box", the_box),
+        ("the table", Vec3::new(0.6, 0.25, 0.005)),
+    ];
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let (frames, _) = read(&rendered, c, 10 * c as u64);
+        let seen = first_look(&device, &things, &rendered, (c, 10 * c as u64), away, 0.0);
+        let planned = seen
+            .memory
+            .world(&device, &Step::default())
+            .expect("a world");
+        let grid = (planned.of.last() == Some(&Of::Unexplained))
+            .then(|| planned.world.obstacles.last())
+            .flatten();
+        let solid_at = |p: Vec3| grid.is_some_and(|grid| grid.distance(p).value < 0.0);
+        let mut wrong = vec![];
+        let mut held = 0;
+        for (thing, (name, at, half)) in [
+            (3, ("the crumb", crumb, 0.0015)),
+            (4, ("the pebble", pebble, 0.005)),
+        ] {
+            // Clear of the table by more than three deviations of every camera that sees it.
+            let reach = (frames.iter())
+                .map(|frame| 3.0 * deviation(frame.noise, at.distance(frame.camera.position)))
+                .fold(0.0, f32::max);
+            let unmade = holder(seen.kept.scene(), &rendered, thing).is_none();
+            if unmade && 2.0 * half > reach {
+                held += 1;
+                if !solid_at(at) {
+                    wrong.push(format!("{name} is no object and not held"));
+                }
+            }
+        }
+        assert!(
+            c > 0 || held > 0,
+            "on exact depth the map holds something no room explains"
+        );
+        for (name, at) in free {
+            if solid_at(at) {
+                wrong.push(format!("the grid holds {name}"));
+            }
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict(
+        "what_no_room_explains_is_the_unexplained_grid_and_nothing_else",
+        &found,
+    );
 }

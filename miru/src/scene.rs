@@ -89,8 +89,8 @@ impl Shape {
     }
 
     /// A box or a cylinder as the obstacle it is, field for field, and a box open at the top as
-    /// its box.
-    fn obstacle(&self) -> Obstacle {
+    /// its box: the room the thing takes up, as an obstacle.
+    pub(crate) fn obstacle(&self) -> Obstacle {
         match *self {
             Shape::Cuboid {
                 center,
