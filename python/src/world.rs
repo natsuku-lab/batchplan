@@ -46,6 +46,12 @@ value_class! {
             Self(self.0.inverse())
         }
 
+        /// Whether it is finite with a unit rotation (to 1e-3): a pose every call that takes one
+        /// accepts.
+        fn is_unit(&self) -> bool {
+            self.0.is_unit()
+        }
+
         fn __eq__(&self, other: &Self) -> bool {
             self.0 == other.0
         }

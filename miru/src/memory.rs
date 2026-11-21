@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use batchplan::{
     DepthFilter, DepthImage, Device, GraspOptions, Held, IkOptions, Intrinsics, Obstacle,
-    Occlusion, OccupancyMap, Pose, Robot, RobotMask, SdfOptions, Surface, Weighing, World,
+    Occlusion, OccupancyMap, Pose, RobotMask, SdfOptions, Surface, Weighing, World,
 };
 use glam::Vec3;
 
@@ -281,8 +281,9 @@ impl Memory {
             }
             Act::LetGo { id, at } => {
                 ensure_input!(
-                    at.position.is_finite() && at.rotation.is_finite(),
-                    "act {k} lets go of object {id} at {at:?}, which is no pose"
+                    at.is_unit(),
+                    "act {k} lets go of object {id} at {at:?}, which is no finite pose with a \
+                     unit rotation"
                 );
                 let object = self.release(k, *id)?;
                 self.scene.objects.push(Object {
@@ -443,16 +444,20 @@ impl Memory {
         }
         for (k, (hand, pose)) in step.reach.iter().enumerate() {
             ensure_input!(
-                *hand < robot.hands() && pose.position.is_finite() && pose.rotation.is_finite(),
-                "pose {k} of the step needs one of the robot's {} hands and a finite pose, got \
-                 hand {hand} at {pose:?}",
+                *hand < robot.hands() && pose.is_unit(),
+                "pose {k} of the step needs one of the robot's {} hands and a finite pose with a \
+                 unit rotation, got hand {hand} at {pose:?}",
                 robot.hands()
             );
         }
         // The robot's spheres where the step takes it.
         let mut spheres: Vec<[f32; 4]> = step.at.iter().flat_map(|q| robot.spheres(q)).collect();
         for &(hand, pose) in step.reach {
-            spheres.extend(hand_spheres(robot, hand, pose));
+            let placed = (robot.hand_spheres(hand).into_iter()).map(|sphere| {
+                let center = pose.position + pose.rotation * sphere.center;
+                [center.x, center.y, center.z, sphere.radius]
+            });
+            spheres.extend(placed);
         }
         let mut obstacles = self.known.to_vec();
         let mut of: Vec<Of> = (0..self.known.len()).map(Of::Known).collect();
@@ -905,27 +910,4 @@ fn map_padding(voxel: f32) -> f32 {
 /// `RobotMask::with_shapes` take it.
 fn voxel_reach(voxel: f32) -> f32 {
     0.5 * 3f32.sqrt() * voxel
-}
-
-/// Hand `hand`'s collision spheres with its IK frame at `pose`, as `[x, y, z, radius]`: those of
-/// its links (`Robot::hand_links`), each where the robot's collision model puts it in its link's
-/// frame, and the link where it lies from the hand's frame at the robot's default configuration,
-/// the fingers as its locked joints hold them, as batchplan takes a hand's spheres for
-/// `Robot::tip`.
-fn hand_spheres(robot: &Robot, hand: usize, pose: Pose) -> Vec<[f32; 4]> {
-    let q = robot.default_q();
-    let frame = robot.ee_pose(q, hand).inverse();
-    let model = robot.collision_model();
-    let mut spheres = vec![];
-    for link in robot.hand_links(hand) {
-        let (Some(at), Some(own)) = (robot.link_pose(q, link), model.spheres.get(link)) else {
-            continue;
-        };
-        let placed = pose.mul_pose(frame.mul_pose(at));
-        for &[x, y, z, radius] in own {
-            let center = placed.position + placed.rotation * Vec3::new(x, y, z);
-            spheres.push([center.x, center.y, center.z, radius]);
-        }
-    }
-    spheres
 }

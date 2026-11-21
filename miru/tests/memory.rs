@@ -1275,7 +1275,7 @@ fn a_drawn_thing_is_never_seen_where_it_stood_and_where_it_stands() {
 
 /// Acts on what the memory does not hold are refused, naming the act and the object or hand: an
 /// id no object has, a let-go and a loss of what no hand holds, a pick into a hand that holds
-/// something and into a hand the robot has not.
+/// something and into a hand the robot has not, and a let-go at a rotation that is not unit.
 #[test]
 fn acts_on_what_the_memory_does_not_hold_are_refused() {
     let robot = panda();
@@ -1318,6 +1318,20 @@ fn acts_on_what_the_memory_does_not_hold_are_refused() {
             ],
             "act 1",
             ids[0].to_string(),
+        ),
+        (
+            vec![
+                Act::Picked {
+                    id: ids[0],
+                    held: held.clone(),
+                },
+                Act::LetGo {
+                    id: ids[0],
+                    at: Pose::new(BOX, Quat::from_xyzw(0.0, 0.0, 0.0, 2.0)),
+                },
+            ],
+            "act 1",
+            "unit rotation".to_string(),
         ),
         (
             vec![Act::Picked {

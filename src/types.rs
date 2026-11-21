@@ -40,8 +40,10 @@ impl Pose {
         }
     }
 
-    /// Whether it is finite with a unit rotation (to 1e-3).
-    pub(crate) fn is_unit(&self) -> bool {
+    /// Whether it is finite with a unit rotation (to 1e-3): a pose every call that takes one
+    /// accepts.
+    #[must_use]
+    pub fn is_unit(&self) -> bool {
         self.position.is_finite()
             && self.rotation.is_finite()
             && (self.rotation.length() - 1.0).abs() < 1e-3

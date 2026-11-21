@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
+use batchplan::glam::Vec3;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -188,6 +189,24 @@ value_class! {
 }
 
 tuple_field!(batchplan::Part, (String, batchplan::CollisionModel));
+
+value_class! {
+    /// One of a hand's collision spheres, in the hand's IK frame (`Robot.hand_spheres`).
+    HandSphere(batchplan::HandSphere) {
+        /// Its center in the hand's IK frame, `(x, y, z)` in meters.
+        center: Vec3,
+        /// Its radius (meters).
+        radius: f32,
+        /// Whether it is a finger's, not the palm's.
+        finger: bool,
+        /// Which way along the frame's y axis its finger stands from the frame, 1 or -1: the way
+        /// it moves as the fingers open. 0 for the palm's, and for a finger's that stands to
+        /// neither side.
+        side: f32,
+    }
+}
+
+tuple_field!(batchplan::HandSphere);
 
 value_class! {
     /// How `Robot.load` and `Robot.assemble` build a robot from its description.
@@ -439,6 +458,14 @@ impl Robot {
     fn tip(&self, hand: usize) -> PyResult<f64> {
         self.check_hand(hand)?;
         Ok(field::shortest(self.0.tip(hand)))
+    }
+
+    /// Hand `hand`'s collision spheres at the default configuration, in its IK frame: its palm's
+    /// and its fingers', as the locked joints hold them, and those of any object it holds.
+    /// Placed by a pose of the frame, they are the hand there, whatever the arm does.
+    fn hand_spheres<'py>(&self, py: Python<'py>, hand: usize) -> PyResult<Bound<'py, PyAny>> {
+        self.check_hand(hand)?;
+        self.0.hand_spheres(hand).to_py(py)
     }
 
     /// Every collision sphere at configuration `q`, in the robot's frame, `(n, 4)` as

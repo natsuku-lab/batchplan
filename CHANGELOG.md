@@ -76,6 +76,13 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   what nothing explains. `Kept` holds a look's scene, filtered depth and masks, and
   `Kept::surface` an object's readings for grasps and rests. A look through it takes about 1.8
   times `miru::look` alone on recorded LIBERO looks (`miru/README.md`).
+- `Robot::hand_spheres(hand)`: a hand's collision spheres in its IK frame at the default
+  configuration, the fingers as the locked joints hold them and any object it holds with them
+  (`HandSphere`: center, radius, whether a finger's and which side it stands to). Placed by a pose
+  of the frame they are the hand there, as grasps and places are checked. In Python,
+  `Robot.hand_spheres` and `HandSphere`.
+- `Pose::is_unit()`: whether a pose is finite with a unit rotation (to 1e-3), as every call that
+  takes one asks. In Python, `Pose.is_unit`.
 - `sdf::on_shapes(&device, &shapes, &points, &reach)` says which of a world's shapes each point
   lies on: per point, the shape nearest it and the distance to its surface, where that is no
   more than the point's reach, and none for a point marked with a negative reach. A camera's
