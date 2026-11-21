@@ -17,9 +17,10 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 use std::f32::consts::FRAC_1_SQRT_2;
 
-use glam::{Quat, Vec2};
+use glam::{Quat, Vec2, Vec3};
 use rayon::prelude::*;
 
+use super::field::Field;
 use super::search::{self, Read, RestOptions, RestProblem, Seen};
 use super::shape::{Shape, Turned};
 use crate::device::Device;
@@ -33,7 +34,9 @@ use crate::types::Pose;
 pub struct Fall {
     /// The object's frame where it is let go, in the surface's frame: one of [`Place::poses`].
     /// Its lowest point is at least [`RestOptions::clearance`] over the lowest of the hollow's
-    /// rim: that far for a shape that stands level, more for one turned askew.
+    /// rim, and the object that far clear of all around it there: that far over the rim for a
+    /// shape that stands level, unless something nearer stands higher, and more for one turned
+    /// askew.
     ///
     /// [`Place::poses`]: crate::Place::poses
     pub pose: Pose,
@@ -49,26 +52,37 @@ pub struct Fall {
 ///
 /// The object is not followed as it falls, and does not rest where it is let go; what is found
 /// is that it cannot leave. Let go straight down over each spot [`RestOptions::spacing`] apart,
-/// at each turn, the object grown by [`RestOptions::clearance`] lands at some height, on the
-/// support or on anything else there, as what is already in a basket; a hollow is
-/// where it would have to rise from that height to get out of the support any way, sliding
-/// over it as it is turned. It is held in where the hollow's rim is higher over where it lands
-/// than its own middle is, so that its weight lies under the rim. A hollow needs a floor, or a
-/// wall sloping in under the object, seen that far down somewhere in it: what no camera saw is
-/// no floor, and an upright wall is read as its top. Walls with a gap the object could pass
-/// through hold nothing in: whether it can leave is asked of it worn down by a level disc of
-/// half the diagonal between spots, which also takes a gap up to that much narrower than it
-/// for one it passes. An object that leaves less than [`RestOptions::touching`] of itself so
-/// worn, any way, has no falls: it could slip between the points seen of a solid wall. Space
-/// the spots nearer for it.
+/// at each turn, the object lands at some height, on the support or on anything else there, as
+/// what is already in a basket; a hollow is where it would have to rise from that height to get
+/// out of the support any way, sliding over it as it is turned. It is held in where the
+/// hollow's rim is higher over where it lands than its own middle is, so that its weight lies
+/// under the rim. A hollow needs a floor, or a wall sloping in under the object, seen that far
+/// down somewhere in it: what no camera saw is no floor, and an upright wall is read as its
+/// top. Walls with a gap the object could pass through hold nothing in: whether it can leave is
+/// asked of it worn down by a level disc of half the diagonal between spots, which also takes a
+/// gap up to that much narrower than it for one it passes. An object that leaves less than
+/// [`RestOptions::touching`] of itself so worn, any way, has no falls: it could slip between the
+/// points seen of a solid wall. Space the spots nearer for it.
+///
+/// It lands as it is, and [`RestOptions::clearance`] is kept where it is let go: over the rim
+/// and over all it would land on there, so that the hand lets go of it clear of what is around.
+/// A box that goes through a bowl's opening, and grown by the clearance would not, falls in.
+///
+/// With [`RestOptions::look_closer`], a hollow that holds the object in only nearer one place
+/// than the spots lie apart, as a bowl a box barely fits, is looked at closer as rests are: the
+/// spots a cell (`touching`) apart within the spacing of the problem's `near` are tried at
+/// every turn, or without it those of the spot of a hollow where the object lands the deepest
+/// under the rim, its lowest point, only where no spot holds it in at any turn, so that a search
+/// that finds falls costs what it did. Falls found there come after the spots' of their turn.
 ///
 /// A problem's `object`, `surface` and `rotation` are read as [`rests_on`](super::rests_on)
-/// reads them, and of the options `turns`, `spacing`, `touching` and `clearance`; the problems
-/// and options are checked as `rests_on` checks them, `near`, `tipping` and `friction` too,
-/// though falls read none of them. The falls come at every turn, and within a turn those with the most room
-/// around them first, and of those as roomy the nearest the middle of where it is held in, as
-/// the middle of a basket before its sides. The problems run in parallel on the device's
-/// threads, each surface read once, and a problem's falls are the same alone and among others.
+/// reads them, its `near` only to look closer, and of the options `turns`, `spacing`,
+/// `touching`, `clearance`, `look_closer` and `seen_from_above_holds`; the problems and options
+/// are checked as `rests_on` checks them, `tipping` and `friction` too, though falls read
+/// neither. The falls come at every turn, and within a turn those with the most room around them
+/// first, and of those as roomy the nearest the middle of where it is held in, as the middle of
+/// a basket before its sides. The problems run in parallel on the device's threads, each
+/// surface read once, and a problem's falls are the same alone and among others.
 pub fn falls_into(
     device: &Device,
     problems: &[RestProblem],
@@ -94,26 +108,45 @@ fn into(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Fall> {
     let (turns, first) = search::turns(shape, p.rotation, o);
     let each = (0..turns.len()).into_par_iter().map(|k| {
         if first[k] != k {
-            return vec![];
+            return (vec![], None);
         }
         at_turn(shape, grown, turns[k], seen, o)
     });
+    let (mut found, hollows): (Vec<Vec<Fall>>, Vec<Option<Hollows>>) = each.unzip();
+    // Looking closer: about `near` at every kind of turn, and without it only where no spot of
+    // any turn holds the object in, so that a search that finds falls costs what it did.
+    let near = p.near.map(Vec3::truncate);
+    if o.look_closer && (near.is_some() || found.iter().all(Vec::is_empty)) {
+        let each = found.par_iter_mut().zip(&hollows).zip(&turns);
+        each.for_each(|((found, hollows), &turn)| {
+            if let Some(hollows) = hollows {
+                found.extend(hollows.closer(shape, grown, turn, near, seen, o));
+            }
+        });
+    }
     let turned = |fall: &Fall, turn: Quat| Fall {
         pose: Pose::new(fall.pose.position, turn),
         sunk: fall.sunk,
     };
-    search::at_every_turn(each.collect(), &turns, &first, turned)
+    search::at_every_turn(found, &turns, &first, turned)
 }
 
-/// The falls of `shape`, `grown` by the clearance it keeps, turned by `turn`.
-fn at_turn(shape: Shape, grown: Shape, turn: Quat, seen: &Seen, o: &RestOptions) -> Vec<Fall> {
+/// The falls of `shape`, `grown` by the clearance it keeps, turned by `turn`; and with
+/// [`RestOptions::look_closer`], its hollows, for a closer look.
+fn at_turn(
+    shape: Shape,
+    grown: Shape,
+    turn: Quat,
+    seen: &Seen,
+    o: &RestOptions,
+) -> (Vec<Fall>, Option<Hollows>) {
     let (spots, field) = (seen.spots, &seen.field);
     let (across, rows) = (spots.across, spots.rows);
     // Whether it can leave is asked of it worn down by half the diagonal between spots: a way
     // out it fits through lies within that of a spot, where so worn it fits too. Worn thinner
     // than a cell of the support, it could slip between the points seen of a solid wall.
     let Some(worn) = shape.worn(FRAC_1_SQRT_2 * o.spacing, turn, o.touching) else {
-        return vec![];
+        return (vec![], None);
     };
     let leaves = Turned::new(worn, turn);
     let lands = |object: &Turned| {
@@ -128,10 +161,14 @@ fn at_turn(shape: Shape, grown: Shape, turn: Quat, seen: &Seen, o: &RestOptions)
     let level = filled(&low, across, rows);
     let hollow = |k: usize| level[k].is_finite() && level[k] > low[k];
     let rim: Vec<f32> = level.iter().map(|level| level - leaves.depth).collect();
-    // Where the object grown by its clearance lands over each spot, in its bottom's height,
-    // and how far that is under the rim; negative infinity where nothing was seen under it.
-    let grown = Turned::new(grown, turn);
-    let bottom: Vec<f32> = lands(&grown).into_iter().map(|z| z - grown.depth).collect();
+    // Where the object lands over each spot, in its bottom's height, and how far that is under
+    // the rim; negative infinity where nothing was seen under it. It lands as it is: the
+    // clearance it keeps is in where it is let go.
+    let object = Turned::new(shape, turn);
+    let bottom: Vec<f32> = lands(&object)
+        .into_iter()
+        .map(|z| z - object.depth)
+        .collect();
     let sunk = |k: usize| rim[k] - bottom[k];
     // The hollows, each the spots that adjoin one another, and how far down it lands in each.
     let around = |k: usize| {
@@ -170,7 +207,7 @@ fn at_turn(shape: Shape, grown: Shape, turn: Quat, seen: &Seen, o: &RestOptions)
     }
     // Held in: in a hollow it lands as deep in as its middle is over its bottom somewhere, where
     // it lands that deep itself, or on nothing that was seen (infinitely deep).
-    let middle = Turned::new(shape, turn).depth;
+    let middle = object.depth;
     let held = |k: usize| hollow(k) && deepest[of[k] as usize] >= middle && sunk(k) >= middle;
     // How many spots lie between each and the nearest that is not held in: its room.
     let mut room: Vec<u32> = (0..low.len())
@@ -210,16 +247,29 @@ fn at_turn(shape: Shape, grown: Shape, turn: Quat, seen: &Seen, o: &RestOptions)
             .then(ka.1.total_cmp(&kb.1))
             .then(a.cmp(&b))
     });
-    // Let go with the grown object's bottom at the rim: over all it would land on, so clear.
+    let grown = Turned::new(grown, turn);
     let fall = |k: usize| Fall {
-        pose: Pose::new(spots.at(k, o.spacing).extend(rim[k] + grown.depth), turn),
+        pose: let_go(&grown, spots.at(k, o.spacing), rim[k], field, turn),
         sunk: if bottom[k].is_finite() {
             sunk(k)
         } else {
             deepest[of[k] as usize]
         },
     };
-    order.into_iter().map(fall).collect()
+    // What a closer look reads of the turn: the rim where a hollow is, the spots that hold the
+    // object in, and the spot of a hollow where it lands the deepest under the rim on something
+    // seen, its lowest point.
+    let hollows = o.look_closer.then(|| {
+        let rim = (0..low.len()).map(|k| if hollow(k) { rim[k] } else { f32::NEG_INFINITY });
+        let seen_under = (0..low.len()).filter(|&k| hollow(k) && bottom[k].is_finite());
+        let lowest = seen_under.reduce(|a, b| if sunk(b) > sunk(a) { b } else { a });
+        Hollows {
+            rim: rim.collect(),
+            held: (0..low.len()).map(held).collect(),
+            lowest,
+        }
+    });
+    (order.into_par_iter().map(fall).collect(), hollows)
 }
 
 /// A height with the spot it is at, ordered by the height and then the spot.
@@ -276,4 +326,77 @@ fn filled(heights: &[f32], across: usize, rows: usize) -> Vec<f32> {
         }
     }
     level
+}
+
+/// Where to let go of the object turned by `turn` over `at`, given as `grown` by the clearance it
+/// keeps: the grown object's bottom at `rim`, the hollow's, or over all it would land on there
+/// where that is higher, so that the object is the clearance over the rim and clear of all
+/// around by it.
+fn let_go(grown: &Turned, at: Vec2, rim: f32, field: &Field, turn: Quat) -> Pose {
+    let bottom = rim.max(field.lands(grown, at) - grown.depth);
+    Pose::new(at.extend(bottom + grown.depth), turn)
+}
+
+/// What a turn's spots say of its hollows, kept for a closer look ([`RestOptions::look_closer`]).
+struct Hollows {
+    /// Per spot, the rim of the hollow it is in, in the object's bottom's height: what it would
+    /// have to rise to before it could leave from anywhere in the spot's cell, as from the spot
+    /// itself, which worn down by half the cell's diagonal is inside it there. Negative infinity
+    /// where the spot is in none.
+    rim: Vec<f32>,
+    /// Per spot, whether it holds the object in.
+    held: Vec<bool>,
+    /// The spot of a hollow where the object lands the deepest under the rim on something seen.
+    lowest: Option<usize>,
+}
+
+impl Hollows {
+    /// The falls at `turn` over the spots a cell (`touching`) apart within `spacing` of `near`,
+    /// or without it of the hollow's lowest point, as rests look closer: a container the object
+    /// barely fits holds it in where the spots may lie too far apart to meet. Each is held in
+    /// where the object lands under the rim of its cell's spot by as much as its middle is over
+    /// its bottom, on something seen. Where that spot holds the object in, one within half a
+    /// cell of it, or of a quarter of the spacing where that is less, is the same place, as for
+    /// rests. They come the nearest the middle of where they are held in first.
+    fn closer(
+        &self,
+        shape: Shape,
+        grown: Shape,
+        turn: Quat,
+        near: Option<Vec2>,
+        seen: &Seen,
+        o: &RestOptions,
+    ) -> Vec<Fall> {
+        let (spots, field) = (&seen.spots, &seen.field);
+        let about = match (near, self.lowest) {
+            (Some(near), _) => near,
+            (None, Some(lowest)) => spots.at(lowest, o.spacing),
+            (None, None) => return vec![],
+        };
+        let (object, grown) = (Turned::new(shape, turn), Turned::new(grown, turn));
+        let one = o.touching.min(0.5 * o.spacing);
+        let held = |at: Vec2| {
+            let k = spots.holding(at, o.spacing)?;
+            if self.held[k] && at.distance(spots.at(k, o.spacing)) < 0.5 * one {
+                return None;
+            }
+            let bottom = field.lands(&object, at) - object.depth;
+            let sunk = self.rim[k] - bottom;
+            (bottom.is_finite() && sunk >= object.depth).then_some((at, k, sunk))
+        };
+        let nearer = search::nearer(about, spots, None, o);
+        let found: Vec<(Vec2, usize, f32)> = nearer.into_par_iter().filter_map(held).collect();
+        let middle = found.iter().map(|f| f.0).sum::<Vec2>() / found.len() as f32;
+        let mut order: Vec<usize> = (0..found.len()).collect();
+        let from_middle = |i: usize| found[i].0.distance(middle);
+        order.sort_by(|&a, &b| from_middle(a).total_cmp(&from_middle(b)).then(a.cmp(&b)));
+        let fall = |i: usize| {
+            let (at, k, sunk) = found[i];
+            Fall {
+                pose: let_go(&grown, at, self.rim[k], field, turn),
+                sunk,
+            }
+        };
+        order.into_par_iter().map(fall).collect()
+    }
 }

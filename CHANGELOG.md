@@ -408,6 +408,22 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Fixed
 
+- `falls_into` found where the object lands with it grown by `RestOptions::clearance`, so an
+  object that goes through a container's opening only as it is landed on the rim everywhere and
+  had no place to be let go: a box of cream cheese 8.3 by 4.2 cm over LIBERO's bowl 11.2 cm
+  across, which let go over the bowl's middle falls in and stays. It lands as it is now, and the
+  clearance is kept where it is let go, over the rim and over all around it there. Every place
+  found before is found at the same pose, landing as deep or deeper, and more are found where the
+  object lands within the clearance of a wall or of something already inside: a can over the
+  example's basket has 1,152 where it had 800, and over two scans of a harness's basket 320 and
+  248 where it had 160 and 104. With `RestOptions::look_closer`, `falls_into` also looks closer
+  as `rests_on` does, for a container the object barely fits, which holds it in only nearer one
+  place than the spots lie apart: the spots a cell apart within the spacing of `near` are tried
+  at every turn, and without it, only where no spot holds the object in at any turn, those of
+  the spot where it lands the deepest under a hollow's rim. Over two recorded looks into that
+  bowl it found no place; it now finds 2 in one, 6.5 mm from the bowl's axis, and in the other,
+  where the spots alone find none, 52 by looking closer, within 4 mm of it.
+
 - A plan with a `time_budget` longer than the clock counts (`Duration::MAX`) panicked on adding
   it to the time; it now has no deadline. A plan whose search had `RrtOptions::max_iterations`
   of `usize::MAX` found nothing where it had to search again without its clearance: the samples

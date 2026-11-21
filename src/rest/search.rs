@@ -43,7 +43,8 @@ pub struct RestProblem {
     /// spots as cells lie within the spacing of the point, 77 at the defaults. With
     /// [`RestOptions::look_closer`] it also says which place where the object nearly rests is
     /// looked at closer at every turn: the one nearest it. None looks closer only where no spot
-    /// rests, about the middle of the support.
+    /// rests, about the middle of the support. [`falls_into`](crate::falls_into) reads it only
+    /// with `look_closer`, and looks closer about the point itself.
     pub near: Option<Vec3>,
 }
 
@@ -80,6 +81,9 @@ pub struct RestOptions {
     /// How far every point that is not the support's stays from the object (meters): 1 cm, twice
     /// the 5 mm a held object's spheres reach past it by default ([`Held::spheres`]), so that
     /// [`place`](crate::place) checks it clear where it was found clear.
+    /// [`falls_into`](crate::falls_into) keeps it where it lets go of the object, over the rim
+    /// and from every point around it there, the support's too; where the object lands is the
+    /// object's own.
     ///
     /// [`Held::spheres`]: crate::Held::spheres
     pub clearance: f32,
@@ -107,6 +111,11 @@ pub struct RestOptions {
     /// tries at most as many spots more as `near` adds. One place is looked at, not every place:
     /// such a strip is found near that spot and not along its length, so a caller that wants it
     /// elsewhere points there. Rests found there come in the order the others do.
+    ///
+    /// [`falls_into`](crate::falls_into) looks closer too, for a container the object barely
+    /// fits, which holds it in only nearer one place than the spots lie apart: about `near` at
+    /// every turn, and without it only where no spot holds it in at any turn, about the lowest
+    /// point of a hollow for the object.
     pub look_closer: bool,
     /// Whether a support point whose normal faces down holds the object up where it was seen
     /// from above ([`Surface::seen_from`] higher than it): off by default, and such a point is an
@@ -881,7 +890,7 @@ fn tipping_nearest(
 /// The spots a cell (`touching`) apart on the lattice the field's cells are centred on, within
 /// `spacing` of `about` seen from above and over the support's box, row by row; but for those
 /// within `spacing` of `near`, wherever it lies, whose own spots cover them.
-fn nearer(about: Vec2, spots: &Spots, near: Option<Vec2>, o: &RestOptions) -> Vec<Vec2> {
+pub(super) fn nearer(about: Vec2, spots: &Spots, near: Option<Vec2>, o: &RestOptions) -> Vec<Vec2> {
     let cell = o.touching;
     let from = ((about - o.spacing).max(spots.lower) / cell)
         .ceil()
@@ -1142,6 +1151,16 @@ impl Outcome {
             Self::Tips(_) => Self::Tips(true),
             other => other,
         }
+    }
+}
+
+impl Spots {
+    /// The spot `spacing` apart whose cell `at` lies in, seen from above, if there is one.
+    pub(super) fn holding(&self, at: Vec2, spacing: f32) -> Option<usize> {
+        let cell = (at / spacing).floor() - self.first;
+        let count = Vec2::new(self.across as f32, self.rows as f32);
+        let inside = cell.cmpge(Vec2::ZERO).all() && cell.cmplt(count).all();
+        inside.then(|| cell.y as usize * self.across + cell.x as usize)
     }
 }
 
