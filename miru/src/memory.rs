@@ -859,10 +859,13 @@ impl Kept {
 ///    corners of the map. A camera's noise is raised there by what it is off by, a third of it
 ///    for each of the three deviations a reading may lie from a shape and be on it, as
 ///    [`Noise`] says to.
-/// 4. The shapes are the known ones and the solids of each object that is `solid`, and the
-///    readings within three of the camera's deviations and what it is off by of one, the robot's
-///    and what lies within the camera's band behind any of them are left out of the map
-///    (`RobotMask::with_shapes` and `with_band`); the rest is fused (`OccupancyMap::integrate`).
+/// 4. What became a shape this look, an object that is `solid` and was no solid object of the
+///    memory's, is freed in the map first, as far as a reading of it may lie from it, so that what
+///    earlier looks read of it is not held twice (`OccupancyMap::free`). The shapes are the known
+///    ones and the solids of each object that is `solid`, and the readings within three of the
+///    camera's deviations and what it is off by of one, the robot's and what lies within the
+///    camera's band behind any of them are left out of the map (`RobotMask::with_shapes` and
+///    `with_band`); the rest is fused (`OccupancyMap::integrate`).
 ///    The map's mask is padded past what a grid of it grows toward collision, 2√3 of its voxels,
 ///    where that is more than the stance's padding.
 ///
@@ -966,6 +969,31 @@ pub fn observe(
     let mut fused = memory.map.fused.clone();
     for mark in &memory.marks {
         mark.on(&mut fused, voxel)?;
+    }
+    // What becomes a shape is read no more from this look on, but what earlier looks filled around
+    // it stays until seen through: it is freed before the fuse, as far as a reading of it may lie
+    // from it, its margin at its depth from each camera, and a voxel's reach past that, so that it
+    // takes the voxels its readings fell in (batchplan's `docs/perception.md`, "A thing passes from
+    // one memory to the other").
+    let was_shape = |id: u32| (memory.scene.objects.iter()).any(|o| o.id == id && o.solid);
+    let became: Vec<&Object> = (scene.objects.iter())
+        .filter(|object| object.solid && !was_shape(object.id))
+        .collect();
+    for object in became {
+        let middle = object.shape.pose().position;
+        let reach = (cameras.iter())
+            .map(|camera| {
+                let pose = camera.image.camera;
+                let depth = (pose.rotation.inverse() * (middle - pose.position))
+                    .z
+                    .max(0.0);
+                let margin = coefficients(raised(camera)).map(|coefficient| SIGMAS * coefficient);
+                margin[0] + (margin[1] + margin[2] * depth) * depth
+            })
+            .fold(0.0, f32::max);
+        for solid in object.shape.solids() {
+            fused.free(&solid, reach + voxel_reach(voxel))?;
+        }
     }
     for ((camera, image), mask) in cameras.iter().zip(&images).zip(&masks) {
         // One mask where the stance's padding reaches past the map's.

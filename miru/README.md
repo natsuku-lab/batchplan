@@ -147,7 +147,9 @@ has them as a program; per camera:
    `margin` is three times the camera's `Noise` (`[3 * constant, 3 * linear, 3 * quadratic]`) and
    what the shapes and the camera's pose are off by. The map's mask is padded past what a grid of
    it grows toward collision, 2√3 of its voxels (3.5 cm for batchplan's 1 cm), where the stance's
-   padding is less; what an act told the map since the last look is fused first.
+   padding is less; what an act told the map since the last look is fused first, and what becomes a
+   shape this look, a solid object the memory had not as one, is freed in it first as far as a
+   reading of it may lie, so that what earlier looks read of it is not held twice.
 6. **Take grasps and rests on an object's own pixels** (`Kept::surface`): the view's labels that
    name it, as flags (`scene.labels[view].iter().map(|label| *label == Label::Object(object)).collect()`),
    go to `Surface::from_depth(&device, &image, &flags, Some(&robot), radius)`, the views joined.
@@ -794,13 +796,15 @@ the run.
   device; and it clones that map, so that the memory it was given stays as it was. A `world` after
   it reads the map's occupied voxels once for that look, and a world made again of the same
   memory, or of one after acts that differ only in what is held, builds nothing again.
-- **Through a stereo camera the table leaves readings in the map that nothing explains.** A
-  reading of a known shape that lands past three deviations of the camera's stated noise from it
-  is no shape's, and the map holds it: on the scene of `tests/batchplan.rs`, 121 points of the
-  grid of what nothing explains are deep in solid through the D435 and 35 through the D435 with
-  the D405 near, nearly all nearest the table and within a few centimetres of a thing, and as many
-  with the cameras stated 5 mm off their poses and `off_by` 5 mm as with them stated where they
-  stand (the gaps of `tests/memory.rs`).
+- **Through a stereo camera a shape leaves readings in the map that nothing explains.** A reading
+  of a shape, known or an object's, that lands past three deviations of the camera's stated noise
+  from it is no shape's, and the map holds it: on the scene of `tests/batchplan.rs` the grid of
+  what nothing explains is solid beside the table through the D435 and through the D435 with the
+  D405 near, as much with the cameras stated 5 mm off their poses and `off_by` 5 mm as with them
+  stated where they stand (`a_world_is_the_known_shapes_then_each_object`,
+  `a_camera_off_its_pose_is_held_to_what_it_is_off_by`); and a pebble 1 cm across seen from 20 cm
+  as a solid object is held there by that look's own readings, as by a first look of that camera
+  alone, whatever earlier looks filled around it is freed (`what_becomes_a_shape_leaves_the_map`).
 - **What stays unseen is tested on rendered scenes alone**, and exact depth: the sets are first
   looks. An unseen object stays until a view shows its place, so a thing moved to stand before
   where it stood leaves the object it was behind it. And the robot's pixels say nothing either

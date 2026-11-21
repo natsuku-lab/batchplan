@@ -38,10 +38,10 @@ const IN_BOWL: [f32; 7] = [0.115, 0.361, -0.103, -2.387, 0.094, 2.745, 0.382];
 /// makes through it, and what the scene shows. A complaint through a camera that is not listed for
 /// it fails the test, as does a listed one that no longer holds.
 const GAPS: &str = "
-a_world_is_the_known_shapes_then_each_object | D435 | the map holds what no shape explains | readings of the table that land past three deviations of the camera's noise from it: 121 points of the grid deep in solid, 119 of them nearest the table, none farther than 3.2 cm from a thing
-a_world_is_the_known_shapes_then_each_object | D435+D405 | the map holds what no shape explains | as through the D435: 35 points of the grid deep in solid, 33 of them nearest the table, and one 40 cm from any thing
-a_camera_off_its_pose_is_held_to_what_it_is_off_by | D435 | the map holds what no shape explains | the table is the table's, but the map holds readings of it past three deviations of the noise, as many as with the cameras stated where they stand: 148 points of the grid deep in solid against 149, all within 1.2 cm of the table
-a_camera_off_its_pose_is_held_to_what_it_is_off_by | D435+D405 | the map holds what no shape explains | as through the D435: 67 points deep in solid against 68
+a_world_is_the_known_shapes_then_each_object | D435 | the map holds what no shape explains | readings of the table that land past three deviations of the camera's noise from it, nearest the table and within a few centimetres of a thing
+a_world_is_the_known_shapes_then_each_object | D435+D405 | the map holds what no shape explains | as through the D435
+a_camera_off_its_pose_is_held_to_what_it_is_off_by | D435 | the map holds what no shape explains | the table is the table's, but the map holds readings of it past three deviations of the noise, as it does with the cameras stated where they stand
+a_camera_off_its_pose_is_held_to_what_it_is_off_by | D435+D405 | the map holds what no shape explains | as through the D435
 a_plate_let_go_on_a_box_is_seen_there | exact | let go on the box, it reads gone | the look makes the plate one object with the box, which keeps the box's id and grows by the plate's 5 mm: `look`'s, as in `tests/truth.rs`'s \"a plate on a box\"
 a_plate_let_go_on_a_box_is_seen_there | D435 | let go on the box, it reads gone | as on exact depth
 a_plate_let_go_on_a_box_is_seen_there | D435+D405 | the plate on the table is no object | to the D405 the plate on the table is the table's, so there is nothing to pick
@@ -53,6 +53,8 @@ a_thing_let_go_against_another_keeps_both_ids | D435 | B, which did not move, re
 a_thing_let_go_against_another_keeps_both_ids | D435+D405 | A, let go there, reads gone | the two boxes are one object, which keeps B's id
 the_band_takes_what_a_camera_reads_beside_the_arm | D435 | the map holds 2 of 15 | the band gives up an outline read nearer than the arm by more than the margin, and what lies within it of a reading it keeps; without the band the map holds 10
 the_band_takes_what_a_camera_reads_beside_the_arm | D435+D405 | the map holds 8 of 20 | as through the D435; without the band the map holds 13
+what_becomes_a_shape_leaves_the_map | D435 | thing 2, a solid object now, is held by the map | the pebble's own readings from the near look lie past three deviations of that camera's noise from its shape: a first look by the near camera alone holds them too, as the table's are held; freed 3 cm farther, it is held still
+what_becomes_a_shape_leaves_the_map | D435+D405 | thing 2, a solid object now, is held by the map | as through the D435, the near look a D405's
 ";
 
 /// The complaint listed for `test` through `camera`, if one is.
@@ -2398,4 +2400,79 @@ fn the_band_takes_what_a_camera_reads_beside_the_arm() {
         found.push((*camera, outcome(&wrong)));
     }
     verdict("the_band_takes_what_a_camera_reads_beside_the_arm", &found);
+}
+
+/// A thing the map holds that becomes a shape: a crumb 3 mm across and a pebble 1 cm across that a
+/// first look through both cameras makes no object of, so that the map holds them, and that a look
+/// from 20 cm makes a solid object of. Under the default weighing that look does not outweigh the
+/// first, yet the map holds nothing at either where it is solid: what became a shape was freed
+/// before the fuse. Each thing is held so wherever a camera passes it from the map to a shape.
+#[test]
+fn what_becomes_a_shape_leaves_the_map() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let things_at = [
+        (1, Vec3::new(0.35, 0.3, 0.0015), Vec3::splat(0.0015)),
+        (2, Vec3::new(0.75, -0.25, 0.005), Vec3::splat(0.005)),
+    ];
+    let mut things = vec![table()];
+    things.extend(things_at.map(|(_, at, half)| block(at, half, [200, 30, 200])));
+    things.push(arm(&robot, away));
+    let rendered = render(&things);
+    let locked = HashMap::new();
+    let mut found = vec![];
+    for (c, (camera, _, near)) in CAMERAS.iter().enumerate() {
+        let first = first_look(&device, &things, &rendered, (c, 10 * c as u64), away, 0.0);
+        // What the map holds unexplained at `at`, where it holds anything.
+        let held_at = |memory: &Memory, at: Vec3| {
+            let planned = memory.world(&device, &Step::default()).expect("a world");
+            let grid = (planned.of.last() == Some(&Of::Unexplained))
+                .then(|| planned.world.obstacles.last())
+                .flatten();
+            grid.is_some_and(|grid| grid.distance(at).value < 0.0)
+        };
+        let mut wrong = vec![];
+        let mut passed = 0;
+        for (thing, at, _) in things_at {
+            if holder(first.kept.scene(), &rendered, thing).is_some() || !held_at(&first.memory, at)
+            {
+                continue;
+            }
+            // A look from 20 cm over the thing, a little aside, by the near camera of the set.
+            let view = looking(at + Vec3::new(0.08, 0.0, 0.2), at);
+            let truth = Frame::of(&things, view);
+            let frame = match near {
+                Some(stereo) => truth.clone().sensed(*stereo, 100 + 10 * c as u64),
+                None => truth.clone(),
+            };
+            let frames = [frame.clone(), frame];
+            let stance = Stance {
+                q: away,
+                locked: &locked,
+                padding: padding(&rendered, &frames, things.len() - 1),
+            };
+            let near_camera = cameras(&frames, [usize::from(c > 0); 2], 0.0);
+            let second = observe(&device, &near_camera[..1], &stance, &first.memory);
+            let second = second.expect("a look");
+            let shown = [truth.clone(), truth];
+            let solid = holder(second.kept.scene(), &shown, thing)
+                .is_some_and(|object| second.kept.scene().objects[object].solid);
+            if !solid {
+                continue;
+            }
+            passed += 1;
+            if held_at(&second.memory, at) {
+                wrong.push(format!(
+                    "thing {thing}, a solid object now, is held by the map"
+                ));
+            }
+        }
+        assert!(
+            passed > 0,
+            "{camera}: some thing passes from the map to a shape"
+        );
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("what_becomes_a_shape_leaves_the_map", &found);
 }
