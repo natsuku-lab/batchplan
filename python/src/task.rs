@@ -339,6 +339,16 @@ value_class! {
         /// How far it turns (radians), right-handed about the screw's direction, or about the
         /// hand's z axis where there is no screw: not 0.
         angle: f32,
+        /// Obstacles the object may touch as it turns, by index: what it turns in or on, as a
+        /// lever's mount, a cap's bottle or the panel a knob sits in, as `Pick.support`. Not read
+        /// where the object `stays`.
+        support: Vec<usize>,
+        /// Whether the obstacle stays where it is while the hand turns: `False`, the whole
+        /// obstacle turns, held by the hand and checked where it sweeps against everything else
+        /// but `support`. `True` where the world holds the part that turns and what it turns in
+        /// as one obstacle: then the obstacle stays where it is, the fingers alone may touch it,
+        /// and nothing checks the part's sweep.
+        stays: bool,
         /// Where the hands must stay along the transit, as a pick's.
         constraints: Vec<batchplan::HandConstraint>,
         /// Per grasp, joints the robot was loaded with locked, at the values they keep through
@@ -350,7 +360,7 @@ value_class! {
     methods {
         /// Hand 0 turns `object` of world `world` by `angle` radians about its own z axis, from
         /// `start` by any of `grasps`, moving in to the grasp and away from it 10 cm along that
-        /// axis.
+        /// axis, the object turning and touching nothing as it turns.
         #[new]
         #[pyo3(signature = (world, start, object, grasps, angle, **changes))]
         fn new(
@@ -490,7 +500,8 @@ impl TaskPlan {
     }
 
     /// After a place, the object where it was set down, to add to the world; after a turn, the
-    /// object turned, to put in the world in its place.
+    /// object where the turn leaves it, to put in the world in its place, or where it stood where
+    /// it stays (`Turn.stays`).
     #[getter]
     fn placed(&self) -> Option<Obstacle> {
         self.0.placed.clone().map(Obstacle)
@@ -738,11 +749,12 @@ pub(crate) fn handover(
 
 /// Turns each task's object by its angle about its screw, trying each of its grasps: IK at the
 /// grasp, where the fingers may touch the object, then the turn followed from every configuration
-/// IK finds there, nearest the start first, all of the call's at once, within the tool path's
-/// precision of its true arc; a grasp gets through where some configuration makes the whole turn
-/// and the moves in and away. The object stays where it was while the hand turns. Run the transit
-/// and the approach, close the gripper, run the turn, open the gripper, then run the departure,
-/// and put `placed` in the world in the object's place.
+/// IK finds there, nearest the start first, within the tool path's precision of its true arc; a
+/// grasp gets through where some configuration makes the whole turn and the moves in and away.
+/// The hand holds the object through the turn, which checks what it sweeps against everything
+/// else but its `support`, unless it `stays`. Run the transit and the approach, close the
+/// gripper, run the turn, open the gripper, then run the departure, and put `placed` in the world
+/// in the object's place.
 #[pyfunction]
 #[pyo3(signature = (device, worlds, turns, options = None))]
 pub(crate) fn turn(

@@ -6,7 +6,7 @@ use std::f32::consts::FRAC_PI_2;
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Result, ensure_input};
+use crate::error::{Result, ensure_input, input};
 use crate::world;
 
 /// A rigid placement: a position, then a rotation about it.
@@ -164,7 +164,8 @@ impl JointTrajectory {
 pub struct Screw {
     /// A point on the line (meters), in the frame the screw is given in.
     pub point: Vec3,
-    /// The line's direction, a unit vector: a positive angle turns right-handed about it.
+    /// The line's direction, a unit vector (to 1e-3, and never zero): a positive angle turns
+    /// right-handed about it.
     pub direction: Vec3,
     /// How far a thing carried about the line moves along `direction` for each radian it turns
     /// (meters): 0 for a turn about an axis. A cap of a right-handed thread 2 mm a turn, turned
@@ -183,8 +184,9 @@ impl Screw {
         }
     }
 
-    /// `pose` carried `angle` radians about the line, right-handed about `direction` (taken as
-    /// unit), and `pitch * angle` along it.
+    /// `pose` carried `angle` radians about the line, right-handed about `direction`, and
+    /// `pitch * angle` along it. The direction must be unit, as [`path`](Self::path) checks: a
+    /// zero one carries every pose to no number.
     #[must_use]
     pub fn carry(&self, pose: Pose, angle: f32) -> Pose {
         let axis = self.direction.normalize();
@@ -202,16 +204,29 @@ impl Screw {
     /// the straight moves [`follow`](crate::follow) makes between them stray at most `precision`
     /// (meters) from the frame's true path.
     ///
-    /// The frame lies `r` from the line, and the waypoints turn it by equal angles `Δ`. A straight
-    /// move between two of them strays from the circle they lie on by its sag, `r (1 − cos(Δ/2))`,
-    /// at its middle, and no more from a helix (along the line both move alike), so `Δ` is at most
-    /// `4 asin(√(precision / 2r))`. It turns by the shortest rotation between its ends, the screw's
-    /// own only under half a turn, so `Δ` is also at most a quarter turn, that far from where
-    /// rounding could make it the other way round. The count is the fewest that keep both: a frame
-    /// on the line needs only what its rotation needs. An `Error::Input` for a screw that is not
-    /// finite or whose direction is not unit (to 1e-3), a pose not finite with a unit rotation, an
-    /// angle that is not finite, or a precision not above 0, each with the value given.
+    /// The frame lies `r` from the line, and the waypoints turn it by equal angles `Δ`. A
+    /// straight move between two of them strays from the circle they lie on by its sag,
+    /// `r (1 − cos(Δ/2))`, at its middle, and no more from a helix (along the line both move
+    /// alike), so `Δ` is at most `4 asin(√(precision / 2r))`. It turns by the shortest rotation
+    /// between its ends, the screw's own only under half a turn, so `Δ` is also at most a quarter
+    /// turn: the two ends' rotations then lie at least cos(π/4) apart in their dot product, far
+    /// from the 0 at which rounding could make the shortest way the other way round. The count is
+    /// the fewest that keep both: a frame on the line needs only what its rotation needs. An
+    /// `Error::Input` for a screw that is not finite or whose direction is not unit (to 1e-3), a
+    /// pose not finite with a unit rotation, an angle that is not finite, a precision not above 0,
+    /// or more waypoints than can be held, each with the values given.
     pub fn path(&self, pose: Pose, angle: f32, precision: f32) -> Result<Vec<Pose>> {
+        let count = self.count(pose, angle, precision)?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(count)
+            .map_err(|_| unheld(angle, precision, count))?;
+        out.extend((1..=count).map(|k| self.carry(pose, angle * k as f32 / count as f32)));
+        Ok(out)
+    }
+
+    /// How many waypoints [`path`](Self::path) gives, or the `Error::Input` it returns: what a
+    /// call that follows the path later checks first.
+    pub(crate) fn count(&self, pose: Pose, angle: f32, precision: f32) -> Result<usize> {
         self.check()?;
         ensure_input!(
             pose.is_unit(),
@@ -229,8 +244,11 @@ impl Screw {
         let sagging = 4.0 * (precision / (2.0 * off.length())).sqrt().min(1.0).asin();
         let pieces = (angle.abs() / sagging).max(angle.abs() / FRAC_PI_2);
         let count = (pieces.ceil() as usize).max(1);
-        let each = (1..=count).map(|k| self.carry(pose, angle * k as f32 / count as f32));
-        Ok(each.collect())
+        // Whether that many can be held, asked of the allocator and given back.
+        Vec::<Pose>::new()
+            .try_reserve_exact(count)
+            .map_err(|_| unheld(angle, precision, count))?;
+        Ok(count)
     }
 
     /// That the screw is finite with a unit direction (to 1e-3).
@@ -247,4 +265,11 @@ impl Screw {
         );
         Ok(())
     }
+}
+
+/// The error for a screw's path of more waypoints than can be held.
+fn unheld(angle: f32, precision: f32, count: usize) -> crate::Error {
+    input!(
+        "a turn of {angle} rad at a precision of {precision} m takes {count} waypoints, more than can be held"
+    )
 }

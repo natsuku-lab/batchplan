@@ -1496,22 +1496,26 @@ impl Grasp {
     /// The moment about `screw`'s line that the grasp's two fingertips can give what they hold,
     /// for each newton each presses with (meters): what turning it about the line asks of the
     /// grip, to order grips for a [`turn`](crate::turn()) by, the most first. It reads the
-    /// options' `friction` and `contact`.
+    /// options' `friction` and `contact`; the screw's direction must be unit, as
+    /// [`Screw::path`] checks, or the moment is no number.
     ///
     /// A force `F` at a contact `c` gives `F · (ŝ × (c − q))` about the line through `q` along
-    /// `ŝ`, and each fingertip presses along the closing line `n`. Friction lets it push across `n`
-    /// by up to `friction` times its press, which gives `friction · |ŝ × (c − q)|` less its part
-    /// along `n`; the press may sit anywhere on its patch, `contact` in radius, which gives
+    /// `ŝ`, and each fingertip presses along the closing line `n`. Friction lets it push across
+    /// `n` by up to `friction` times its press, which gives `friction · |ŝ × (c − q)|` less its
+    /// part along `n`; the press may sit anywhere on its patch, `contact` in radius, which gives
     /// `contact · |n × ŝ|`; and a soft fingertip twists about `n` by up to `2/3 · friction ·
     /// contact` times its press (Murray, Li and Sastry's soft-finger contact, *A Mathematical
     /// Introduction to Robotic Manipulation*, 1994, §5.2.1, with the press even over the patch),
-    /// which gives that times `|n · ŝ|`. The two presses cancel while they are equal, but a parallel
-    /// gripper's fingers close evenly about its frame, so the hand can put all the closing force on
-    /// either finger and push the thing along `n`: up to `2 |n · (ŝ × (m − q))|` more, `m` the
-    /// middle between the contacts, less what friction loses on the finger it unloads. The moment is
-    /// the most these give together, the way round the line that gives less. A bar 2.5 cm wide
-    /// gripped across it on its axis gives 2.25 cm at the default options, half of it friction;
-    /// 3 cm along the bar from its axis, 8.25 cm.
+    /// which gives that times `|n · ŝ|`. The two presses cancel while they are equal, but a
+    /// parallel gripper's fingers close evenly about its frame, so the hand can put all the
+    /// closing force on either finger and push the thing along `n`: up to
+    /// `2 |n · (ŝ × (m − q))|` more, `m` the middle between the contacts, and friction's part
+    /// changes by what the loaded finger's lever gains over the unloaded one's, more where the
+    /// loaded one is the farther. The moment is the most these give together, the way round the
+    /// line that gives less. The patch's term puts the press at its edge and the twist's spreads
+    /// it evenly: they are separate bounds, exact together where the line is square to `n`, where
+    /// the twist gives nothing. A bar 2.5 cm wide gripped across it on its axis gives 2.25 cm at
+    /// the default options, half of it friction; 3 cm along the bar from its axis, 8.25 cm.
     #[must_use]
     pub fn moment(&self, screw: &Screw, o: &GraspOptions) -> f32 {
         let along = screw.direction.normalize();

@@ -855,6 +855,22 @@ fn malformed_screws_are_input_errors() {
             "inf",
         ),
         (good, frame, f32::NAN, 1e-3, "angle, got NaN"),
+        (
+            Screw::about(Vec3::ZERO, Vec3::ZERO),
+            frame,
+            1.0,
+            1e-3,
+            "unit, got [0, 0, 0] of length 0",
+        ),
+        // More waypoints than can be held: a turn of an angle too large, or a precision too fine.
+        (
+            good,
+            frame,
+            1e13,
+            1e-3,
+            "a turn of 10000000000000 rad at a precision of 0.001 m takes",
+        ),
+        (good, frame, 1.0, 1e-30, "waypoints, more than can be held"),
         (good, frame, 1.0, 0.0, "got 0 m"),
         (good, frame, 1.0, -1e-3, "got -0.001 m"),
         (

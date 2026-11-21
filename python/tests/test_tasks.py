@@ -331,8 +331,9 @@ def test_a_knob_is_turned_in_place_and_a_screw_carries_a_pose(tasks_robot):
     at = knob.pose.mul_pose(grasp)
     for device in devices(tasks_robot):
         worlds = device.upload([bp.World([table, knob])])
-        task = bp.Turn(0, tasks_robot.default_q, 1, [grasp], math.pi / 2)
+        task = bp.Turn(0, tasks_robot.default_q, 1, [grasp], math.pi / 2, support=[TABLE])
         assert task.screw is None and task.approach == pytest.approx(0.1)
+        assert task.support == (TABLE,) and not task.stays
         outcome = bp.turn(device, worlds, [task]).outcomes[0]
         assert isinstance(outcome, tuple) and outcome, f"{outcome} on {device}"
         plan = outcome[0]
