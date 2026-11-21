@@ -2566,40 +2566,107 @@ fn a_box_that_barely_fits_into_a_bowl_falls_in_where_it_is_looked_at_closer() {
 }
 
 #[test]
-fn what_is_let_go_beside_a_wall_taller_than_the_rim_is_let_go_over_it() {
-    // The pen's wall at -x stands 4 cm over the others. Beside it the can lands on the floor and
-    // would leave over the lower walls: let go the clearance over them, it would stand within
-    // the clearance of the tall wall. It is let go the clearance over all around it, the tall
-    // wall too.
+fn what_is_let_go_beside_what_stands_taller_than_the_rim_is_let_go_over_it() {
+    // The pen's wall at -x stands 4 cm over the others, the support's; or a block 4 cm square
+    // stands inside, 4 cm over the walls, and is not. Beside either the can lands on the floor
+    // and would leave over the lower walls: let go the clearance over them, it would stand within
+    // the clearance of what is taller. It is let go the clearance over all around it.
     let can = Obstacle::cylinder(Vec3::ZERO, 0.03, 0.04);
     let o = RestOptions::default();
-    let mut s = pen(0.08, 0.0);
-    let tall = Vec3::new(0.005, 0.09, 0.02);
-    block(Vec3::new(-0.105, 0.0, 0.11), tall, true, &mut s);
-    let found = falls(&can, &s, &o);
-    let mut beside = 0;
-    for f in &found {
-        let placed = can.placed(f.pose);
-        let from = s.points.iter().map(|p| placed.distance(*p).value);
-        let nearest = from.fold(f32::INFINITY, f32::min);
-        assert!(
-            nearest > o.clearance - 1e-4,
-            "{nearest} m from the pen: {f:?}"
-        );
-        assert!((f.sunk - 0.08).abs() < 1e-4, "{f:?}");
-        if f.pose.position.x - 0.03 - o.clearance < -0.1 {
-            assert!(
-                (f.pose.position.z - 0.04 - (0.13 + o.clearance)).abs() < 1e-4,
-                "{f:?}"
-            );
-            beside += 1;
-        }
+    // Each scene, and the middle and half the size of what stands taller, seen from above.
+    let mut scenes = vec![];
+    for (what, middle, half, support) in [
+        (
+            "the tall wall",
+            Vec2::new(-0.105, 0.0),
+            Vec2::new(0.005, 0.09),
+            true,
+        ),
+        (
+            "the tall block",
+            Vec2::new(-0.06, 0.0),
+            Vec2::splat(0.02),
+            false,
+        ),
+    ] {
+        let mut s = pen(0.08, 0.0);
+        let top = 0.13;
+        let bottom = if support { 0.09 } else { 0.01 };
+        let (z, height) = ((top + bottom) / 2.0, (top - bottom) / 2.0);
+        block(middle.extend(z), half.extend(height), support, &mut s);
+        scenes.push((what, s, middle, half));
     }
-    assert!(
-        beside > 0,
-        "{} falls, none beside the tall wall",
-        found.len()
+    for (what, s, middle, half) in scenes {
+        // Where the can grown by the clearance reaches over it.
+        let near_it = |at: Vec2| {
+            let off = ((at - middle).abs() - half).max(Vec2::ZERO).length();
+            off < 0.03 + o.clearance
+        };
+        let found = falls(&can, &s, &o);
+        let mut beside = 0;
+        for f in &found {
+            let placed = can.placed(f.pose);
+            let from = s.points.iter().map(|p| placed.distance(*p).value);
+            let nearest = from.fold(f32::INFINITY, f32::min);
+            assert!(
+                nearest > o.clearance - 1e-4,
+                "{nearest} m from {what}: {f:?}"
+            );
+            assert!((f.sunk - 0.08).abs() < 1e-4, "{what}: {f:?}");
+            if near_it(f.pose.position.truncate()) {
+                let over = f.pose.position.z - 0.04 - (0.13 + o.clearance);
+                assert!(over.abs() < 1e-4, "{what}: {f:?}");
+                beside += 1;
+            }
+        }
+        assert!(beside > 0, "{} falls, none beside {what}", found.len());
+    }
+}
+
+#[test]
+fn a_box_turned_askew_over_a_rib_is_held_in_where_it_sinks_itself() {
+    // A rib 4 mm wide and 2 cm tall runs across the floor of a pen whose walls stand 4 cm, all of
+    // it the support, and the box is tilted 10 degrees about x, at the one turn. Over the floor
+    // beside the rib, where it misses it, it lands on the floor and is held in. Over the spots
+    // 3.5 cm to the rib's -y side, where the edge of its bottom that it tilts up faces the rib,
+    // that edge lands on the rib, and the box's own lowest point, the other edge, comes under the
+    // rim by less than its middle is over it: let go there, it is not held in. Grown by the
+    // clearance it lands on the rib there too, and its lower corner, reaching farther, hangs that
+    // far under the rim; where it lands is the object's own.
+    let o = RestOptions {
+        turns: 1,
+        ..Default::default()
+    };
+    let mut s = pen(0.04, 0.0);
+    block(
+        Vec3::new(0.0, 0.0, 0.02),
+        Vec3::new(0.1, 0.002, 0.01),
+        true,
+        &mut s,
     );
+    let tilt = 10f32.to_radians();
+    let problem = RestProblem {
+        rotation: Quat::from_rotation_x(tilt),
+        ..RestProblem::new(a_box(), 0)
+    };
+    let found = falls_into(&device(), &[problem], std::slice::from_ref(&s), &o)
+        .unwrap()
+        .remove(0);
+    // Over the spots 3.5 cm to that side the edge it tilts up reaches over the rib.
+    let reach = HALF.y * tilt.cos() + HALF.z * tilt.sin();
+    assert!(-0.035 + reach > -0.002);
+    let middle = HALF.z * tilt.cos() + HALF.y * tilt.sin();
+    let mut rows: Vec<i32> = found
+        .iter()
+        .map(|f| (f.pose.position.y / o.spacing).floor() as i32)
+        .collect();
+    rows.sort_unstable();
+    rows.dedup();
+    assert_eq!(rows, [-5, 3, 4], "{found:?}");
+    assert_eq!(found.len(), 3 * 16);
+    for f in &found {
+        assert!(f.sunk >= middle, "{f:?}");
+    }
 }
 
 /// A wine bottle stood upright, 4.3 cm across and 15.8 cm tall.

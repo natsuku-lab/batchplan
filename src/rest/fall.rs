@@ -72,8 +72,10 @@ pub struct Fall {
 /// than the spots lie apart, as a bowl a box barely fits, is looked at closer as rests are: the
 /// spots a cell (`touching`) apart within the spacing of the problem's `near` are tried at
 /// every turn, or without it those of the spot of a hollow where the object lands the deepest
-/// under the rim, its lowest point, only where no spot holds it in at any turn, so that a search
-/// that finds falls costs what it did. Falls found there come after the spots' of their turn.
+/// under the rim, its lowest point, only where no spot holds it in at any turn: a search that
+/// finds falls tries no spot more than without the option, and keeps for the look it does not
+/// take each spot's rim and whether it holds the object in, at each kind of turn. Falls found
+/// there come after the spots' of their turn.
 ///
 /// A problem's `object`, `surface` and `rotation` are read as [`rests_on`](super::rests_on)
 /// reads them, its `near` only to look closer, and of the options `turns`, `spacing`,
@@ -114,7 +116,7 @@ fn into(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Fall> {
     });
     let (mut found, hollows): (Vec<Vec<Fall>>, Vec<Option<Hollows>>) = each.unzip();
     // Looking closer: about `near` at every kind of turn, and without it only where no spot of
-    // any turn holds the object in, so that a search that finds falls costs what it did.
+    // any turn holds the object in, so that a search that finds falls tries no spot more.
     let near = p.near.map(Vec3::truncate);
     if o.look_closer && (near.is_some() || found.iter().all(Vec::is_empty)) {
         let each = found.par_iter_mut().zip(&hollows).zip(&turns);
@@ -161,13 +163,20 @@ fn at_turn(
     let level = filled(&low, across, rows);
     let hollow = |k: usize| level[k].is_finite() && level[k] > low[k];
     let rim: Vec<f32> = level.iter().map(|level| level - leaves.depth).collect();
-    // Where the object lands over each spot, in its bottom's height, and how far that is under
-    // the rim; negative infinity where nothing was seen under it. It lands as it is: the
-    // clearance it keeps is in where it is let go.
+    // Where the object lands over each spot of a hollow, in its bottom's height, and how far that
+    // is under the rim; negative infinity where nothing was seen under it. Nothing reads it
+    // outside a hollow, where it is not looked for. It lands as it is: the clearance it keeps is
+    // in where it is let go.
     let object = Turned::new(shape, turn);
-    let bottom: Vec<f32> = lands(&object)
-        .into_iter()
-        .map(|z| z - object.depth)
+    let bottom: Vec<f32> = (0..low.len())
+        .into_par_iter()
+        .map(|k| {
+            if hollow(k) {
+                field.lands(&object, spots.at(k, o.spacing)) - object.depth
+            } else {
+                f32::NAN
+            }
+        })
         .collect();
     let sunk = |k: usize| rim[k] - bottom[k];
     // The hollows, each the spots that adjoin one another, and how far down it lands in each.
@@ -269,7 +278,7 @@ fn at_turn(
             lowest,
         }
     });
-    (order.into_par_iter().map(fall).collect(), hollows)
+    (order.into_iter().map(fall).collect(), hollows)
 }
 
 /// A height with the spot it is at, ordered by the height and then the spot.
@@ -333,7 +342,13 @@ fn filled(heights: &[f32], across: usize, rows: usize) -> Vec<f32> {
 /// where that is higher, so that the object is the clearance over the rim and clear of all
 /// around by it.
 fn let_go(grown: &Turned, at: Vec2, rim: f32, field: &Field, turn: Quat) -> Pose {
-    let bottom = rim.max(field.lands(grown, at) - grown.depth);
+    // Where it lands is looked for from the highest middle whose bottom, rounded, is not over the
+    // rim: what lies under that leaves it at the rim, and is passed over at a comparison a point.
+    let mut from = rim + grown.depth;
+    while from - grown.depth > rim {
+        from = from.next_down();
+    }
+    let bottom = rim.max(field.lands_from(grown, at, from) - grown.depth);
     Pose::new(at.extend(bottom + grown.depth), turn)
 }
 
@@ -397,6 +412,6 @@ impl Hollows {
                 sunk,
             }
         };
-        order.into_par_iter().map(fall).collect()
+        order.into_iter().map(fall).collect()
     }
 }
