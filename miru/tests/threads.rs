@@ -5,8 +5,8 @@
 #[allow(dead_code, reason = "each test file uses part of it")]
 mod common;
 
-use batchplan::{CollisionModel, Device, Intrinsics, Robot, RobotOptions};
-use common::{Frame, block, known, looking, table};
+use batchplan::Intrinsics;
+use common::{Frame, block, device_of, known, looking, table};
 use glam::Vec3;
 use miru::{Look, LookOptions, Scene};
 
@@ -28,26 +28,10 @@ fn threads() -> usize {
     info.pti_threadnum as usize
 }
 
-/// A device of one thread, its robot of one joint as `common::device_of`'s but given an empty
-/// collision model: fitting one, as that robot does, runs on rayon's global pool and starts it,
-/// with as many threads as the machine has, which would then take a look's work without starting
-/// another.
-fn one_thread_device() -> Device {
-    let urdf = r#"<robot name="none"><link name="base"/><link name="tip"/>
-        <joint name="joint" type="revolute"><parent link="base"/><child link="tip"/>
-        <axis xyz="0 0 1"/><limit lower="-1" upper="1" velocity="1" effort="1"/></joint></robot>"#;
-    let options = RobotOptions {
-        collision_model: Some(CollisionModel::default()),
-        ..Default::default()
-    };
-    let robot = Robot::from_urdf(urdf, &options).expect("a robot of one joint");
-    Device::cpu_threads(&robot, 1).expect("a CPU device")
-}
-
 #[test]
 fn a_look_on_a_one_thread_device_works_on_its_one_thread() {
     let at_start = threads();
-    let device = one_thread_device();
+    let device = device_of(Some(1));
     assert_eq!(
         threads(),
         at_start + 1,

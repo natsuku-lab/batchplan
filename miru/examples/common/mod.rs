@@ -21,7 +21,7 @@
 use std::fs;
 use std::path::Path;
 
-use batchplan::{Device, Intrinsics, Obstacle, Pose, Robot, RobotOptions};
+use batchplan::{CollisionModel, Device, Intrinsics, Obstacle, Pose, Robot, RobotOptions};
 use glam::{Quat, Vec2, Vec3};
 use miru::Noise;
 use serde_json::Value;
@@ -240,12 +240,16 @@ pub fn fixtures(folder: &Path) -> Result<Vec<Obstacle>, Error> {
 
 /// A device of `threads` threads, or of as many as the machine has, for looks to run on. A look
 /// reads nothing of a device's robot, and a recording has none to give, so this one's is a single
-/// joint.
+/// joint with an empty collision model, which leaves nothing to fit.
 pub fn device(threads: Option<usize>) -> Result<Device, Error> {
     let urdf = r#"<robot name="none"><link name="base"/><link name="tip"/>
         <joint name="joint" type="revolute"><parent link="base"/><child link="tip"/>
         <axis xyz="0 0 1"/><limit lower="-1" upper="1" velocity="1" effort="1"/></joint></robot>"#;
-    let robot = Robot::from_urdf(urdf, &RobotOptions::default())?;
+    let options = RobotOptions {
+        collision_model: Some(CollisionModel::default()),
+        ..Default::default()
+    };
+    let robot = Robot::from_urdf(urdf, &options)?;
     Ok(match threads {
         Some(threads) => Device::cpu_threads(&robot, threads)?,
         None => Device::cpu(&robot)?,

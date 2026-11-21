@@ -3,7 +3,9 @@
 
 use std::sync::LazyLock;
 
-use batchplan::{DepthImage, Device, Intrinsics, Obstacle, Pose, Robot, RobotOptions, SdfGrid};
+use batchplan::{
+    CollisionModel, DepthImage, Device, Intrinsics, Obstacle, Pose, Robot, RobotOptions, SdfGrid,
+};
 use glam::{Mat3, Quat, Vec2, Vec3};
 use miru::{Noise, View};
 
@@ -23,12 +25,17 @@ pub const NOISE: Noise = Noise {
 };
 
 /// A device of `threads` threads, or of as many as the machine has, for looks to run on. A look
-/// reads nothing of a device's robot, so this one's is a single joint.
+/// reads nothing of a device's robot, so this one's is a single joint, given an empty collision
+/// model: fitting one would start rayon's global pool, which no look may run on.
 pub fn device_of(threads: Option<usize>) -> Device {
     let urdf = r#"<robot name="none"><link name="base"/><link name="tip"/>
         <joint name="joint" type="revolute"><parent link="base"/><child link="tip"/>
         <axis xyz="0 0 1"/><limit lower="-1" upper="1" velocity="1" effort="1"/></joint></robot>"#;
-    let robot = Robot::from_urdf(urdf, &RobotOptions::default()).expect("a robot of one joint");
+    let options = RobotOptions {
+        collision_model: Some(CollisionModel::default()),
+        ..Default::default()
+    };
+    let robot = Robot::from_urdf(urdf, &options).expect("a robot of one joint");
     let device = match threads {
         Some(threads) => Device::cpu_threads(&robot, threads),
         None => Device::cpu(&robot),
