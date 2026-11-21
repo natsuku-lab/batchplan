@@ -18,7 +18,7 @@ use glam::Vec3;
 
 use crate::error::{Result, ensure_input};
 use crate::look::{Look, LookOptions, Noise, View};
-use crate::scene::{Label, Object, Scene, Support};
+use crate::scene::{Label, Object, Scene, Shape, Support};
 use crate::view::SIGMAS;
 
 /// One depth camera's frame, and what is known of the camera: facts, so there is no default.
@@ -81,6 +81,11 @@ pub enum Act {
     /// stands on it, in turn; the hand holds it, and each look's mask leaves it out. Where it was
     /// not solid the map held it: the room it took up is free there, as far as a voxel reaches,
     /// and so is that of each thing that was not solid and left with it.
+    ///
+    /// An id no object has and that is not under [`Memory::next_id`], as a hold a restart brings
+    /// back, is held all the same, and `next_id` rises past it; a let-go of it makes its object of
+    /// `Held::object`, a box or a cylinder. An id under `next_id` that no object has is refused,
+    /// and so is `u32::MAX`, which no id may rise past.
     Picked { id: u32, held: Held },
     /// The hand that holds object `id` set it down, its frame (its shape's middle, turned as the
     /// shape was) at `at`: where a place plan's held object lies when it is let go. It is among
@@ -132,12 +137,13 @@ pub struct Memory {
     padding: f32,
 }
 
-/// What one hand holds, and the object it was when it was taken.
+/// What one hand holds, and the object it was when it was taken: none for a hold the memory
+/// never saw as an object.
 #[derive(Clone, Debug)]
 struct Holding {
     id: u32,
     held: Held,
-    object: Object,
+    object: Option<Object>,
 }
 
 /// What an act tells the map, kept until a look fuses it: the voxels within a voxel's reach of
@@ -240,9 +246,10 @@ impl Memory {
     /// The memory after `acts`, in order ([`Act`]): the objects and the hands at once, the map's
     /// share when the map is next read, by [`Memory::world`] or the next look. The map is not
     /// copied: memories after different acts share it, and the parts made of it for the rooms
-    /// objects take up. An id no object has, a let-go or a loss of what no hand holds, a pick into
-    /// a hand that holds something already or that the robot has not, and a pose or a distance
-    /// that is no number are an `Error::Input` naming the act.
+    /// objects take up. An id no object has (but a pick's of a hold the memory never saw, as
+    /// [`Act::Picked`] says), a let-go or a loss of what no hand holds, a pick into a hand that
+    /// holds something already or that the robot has not, and a pose or a distance that is no
+    /// number are an `Error::Input` naming the act.
     pub fn after(&self, acts: &[Act]) -> Result<Memory> {
         let mut memory = self.clone();
         for (k, act) in acts.iter().enumerate() {
@@ -255,7 +262,6 @@ impl Memory {
     fn act(&mut self, k: usize, act: &Act) -> Result<()> {
         match act {
             Act::Picked { id, held } => {
-                let index = self.index(k, *id)?;
                 let hand = held.hand;
                 ensure_input!(
                     hand < self.hands.len(),
@@ -268,13 +274,36 @@ impl Memory {
                         holding.id
                     )));
                 }
-                let object = self.scene.objects[index].clone();
-                for taken in self.take(index) {
-                    if !taken.solid {
-                        let shape = taken.shape.obstacle();
-                        self.marks.push(Mark { shape, free: true });
+                let index = self
+                    .scene
+                    .objects
+                    .iter()
+                    .position(|object| object.id == *id);
+                let object = match index {
+                    Some(index) => {
+                        let object = self.scene.objects[index].clone();
+                        for taken in self.take(index) {
+                            if !taken.solid {
+                                let shape = taken.shape.obstacle();
+                                self.marks.push(Mark { shape, free: true });
+                            }
+                        }
+                        Some(object)
                     }
-                }
+                    // A hold a restart brings back: no id given since may be its.
+                    None => {
+                        let next = id.checked_add(1).filter(|_| *id >= self.scene.next_id);
+                        let Some(next) = next else {
+                            return Err(batchplan::Error::Input(format!(
+                                "act {k} picks object {id}, which the memory does not hold and \
+                                 which is under its next id, {}, or the last a `u32` has",
+                                self.scene.next_id
+                            )));
+                        };
+                        self.scene.next_id = next;
+                        None
+                    }
+                };
                 let held = held.clone();
                 self.hands[hand] = Some(Holding {
                     id: *id,
@@ -288,7 +317,7 @@ impl Memory {
                     "act {k} lets go of object {id} at {at:?}, which is no finite pose with a \
                      unit rotation"
                 );
-                let object = self.release(k, *id)?;
+                let object = Self::object_of(k, self.release(k, *id)?)?;
                 let shape = object.shape.placed(*at);
                 // The map held a thing that is not solid where it lies now as what was there.
                 if !object.solid {
@@ -357,17 +386,57 @@ impl Memory {
         })
     }
 
-    /// The object the hand that holds `id` took, which no hand holds after this, for act `k`.
-    fn release(&mut self, k: usize, id: u32) -> Result<Object> {
+    /// What the hand that holds `id` holds, which no hand holds after this, for act `k`.
+    fn release(&mut self, k: usize, id: u32) -> Result<Holding> {
         let holds = |holding: &Option<Holding>| holding.as_ref().is_some_and(|h| h.id == id);
         let hand = self.hands.iter().position(holds);
         let holding = hand.and_then(|hand| self.hands[hand].take());
-        let holding = holding.ok_or_else(|| {
+        holding.ok_or_else(|| {
             batchplan::Error::Input(format!(
                 "act {k} lets go of object {id}, which no hand holds"
             ))
-        })?;
-        Ok(holding.object)
+        })
+    }
+
+    /// The object `holding` took, for act `k`, which lets go of it; for a hold the memory never saw
+    /// as an object, one made of its `Held::object`, solid, a box or a cylinder.
+    fn object_of(k: usize, holding: Holding) -> Result<Object> {
+        let id = holding.id;
+        if let Some(object) = holding.object {
+            return Ok(object);
+        }
+        let pose = holding.held.object.pose();
+        let (center, rotation) = (pose.position, pose.rotation);
+        let shape = match holding.held.object {
+            Obstacle::Cuboid { half_extents, .. } => Shape::Cuboid {
+                center,
+                half_extents,
+                rotation,
+            },
+            Obstacle::Cylinder {
+                radius,
+                half_height,
+                ..
+            } => Shape::Cylinder {
+                center,
+                rotation,
+                radius,
+                half_height,
+            },
+            ref other => {
+                return Err(batchplan::Error::Input(format!(
+                    "act {k} lets go of object {id}, which the memory never saw and whose held \
+                     shape is no box or cylinder, so no object can be made of it: {other:?}"
+                )));
+            }
+        };
+        Ok(Object {
+            id,
+            shape,
+            solid: true,
+            color: None,
+            on: None,
+        })
     }
 
     /// Object `index` and the objects that stand on it, in turn, in their order.

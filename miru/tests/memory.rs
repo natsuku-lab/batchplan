@@ -1870,3 +1870,102 @@ fn a_hold_keeps_its_fingers_where_it_closed_them() {
     }
     verdict("a_hold_keeps_its_fingers_where_it_closed_them", &found);
 }
+
+/// A hold a restart brings back: a memory of nothing seen takes a pick of an id it never gave,
+/// above its next id, raises its next id past it and holds it; a let-go makes an object of the
+/// held box where it lies, and a second look that sees the box there keeps its id. A pick of an id
+/// under the next id that no object has, and of the last id a `u32` has, are refused, and so is a
+/// let-go of a hold the memory never saw whose shape is no box or cylinder, though it may be lost.
+#[test]
+fn a_hold_a_restart_brings_back_is_held_and_let_go_as_its_shape() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let fresh = memory(&device);
+    let held = Held {
+        hand: 0,
+        object: Obstacle::cuboid(Vec3::ZERO, BOX_HALF),
+        grasp: Pose::new(Vec3::new(0.0, 0.0, -0.02), Quat::IDENTITY),
+        locked: HashMap::new(),
+        spheres: SphereOptions::default(),
+    };
+    let id = fresh.next_id() + 7;
+    let pick = |id: u32, held: &Held| Act::Picked {
+        id,
+        held: held.clone(),
+    };
+    let restored = fresh
+        .after(&[pick(id, &held)])
+        .expect("a hold brought back");
+    assert_eq!(restored.held(0), Some((id, &held)), "the hand holds it");
+    assert_eq!(restored.next_id(), id + 1, "no later id is its");
+    assert!(restored.objects().is_empty(), "it is among no objects");
+    let refused = |memory: &Memory, acts: &[Act], named: &str| {
+        let Err(batchplan::Error::Input(why)) = memory.after(acts) else {
+            panic!("{acts:?} are taken");
+        };
+        assert!(why.contains(named), "{why}");
+    };
+    refused(&fresh, &[pick(u32::MAX, &held)], &u32::MAX.to_string());
+    refused(
+        &restored,
+        &[Act::Lost { id }, pick(id - 1, &held)],
+        "under its next id",
+    );
+    let capsule = Held {
+        object: Obstacle::capsule(Vec3::ZERO, 0.02, 0.05),
+        ..held
+    };
+    let let_go = |id| Act::LetGo {
+        id,
+        at: Pose::new(BOX, Quat::IDENTITY),
+    };
+    refused(
+        &fresh,
+        &[pick(id, &capsule), let_go(id)],
+        "no box or cylinder",
+    );
+    let lost = fresh.after(&[pick(id, &capsule), Act::Lost { id }]);
+    assert!(
+        lost.is_ok_and(|lost| lost.held(0).is_none()),
+        "a hold of any shape may be lost"
+    );
+
+    let along = Vec3::new(0.0, 0.15, 0.0);
+    let at = Pose::new(BOX + along, Quat::IDENTITY);
+    let set_down = restored.after(&[Act::LetGo { id, at }]).expect("a let-go");
+    let object = set_down.objects().iter().find(|o| o.id == id);
+    assert!(
+        object.is_some_and(|object| object.solid
+            && cover(&object.shape) == Obstacle::cuboid(BOX + along, BOX_HALF)),
+        "let go, it is the held box where it lies: {object:?}"
+    );
+    let things = acts_scene(&robot, away, Some(BOX + along), None, None);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let (_, after) = second_look(
+            &device,
+            &things,
+            things.len() - 1,
+            (c, 10 * c as u64 + 5),
+            away,
+            &set_down,
+        );
+        let kept = after.memory.objects().iter().position(|o| o.id == id);
+        let labels = after.kept.scene().labels.iter().flatten();
+        let named =
+            kept.is_some_and(|object| labels.clone().any(|label| *label == Label::Object(object)));
+        let wrong = match named {
+            true => vec![],
+            false => vec![format!(
+                "seen where it was let go, it is kept: {}, named: {named}",
+                kept.is_some()
+            )],
+        };
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict(
+        "a_hold_a_restart_brings_back_is_held_and_let_go_as_its_shape",
+        &found,
+    );
+}
