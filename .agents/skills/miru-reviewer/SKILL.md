@@ -72,9 +72,9 @@ All three are in `miru/tests/common` with the scenes; each states its own noise 
 
 | Camera | What it is | What it does to a scene |
 |---|---|---|
-| The default | The simulator's own depth: exact, with a stereo camera's noise stated | Nothing: every reading is the truth |
-| Intel RealSense D435 | Stereo, 50 mm between its imagers, 1 mm depth units, disparity matched to 0.08 of a pixel over 126 pixels, each pixel read half a pixel off | Noise that grows with the square of the depth, shadows beside every near edge, readings between two surfaces along edges, nothing nearer than its least distance, depths in whole units |
-| Intel RealSense D405 | The same matcher, 18 mm between its imagers, 0.1 mm units | The same errors, over seven times the noise at a distance, and it reads far nearer |
+| The default | The simulator's own depth: exact, stating the tests' noise, which grows with the square of the depth as a stereo camera's does (0.5 mm at 1 m) | Nothing: every reading is the truth |
+| Intel RealSense D435 | Stereo, 50 mm between its imagers, 1 mm depth units, disparity matched to 0.08 of a pixel over 126 pixels, each pixel read off where it lies by a deviation of half a pixel along each axis | Noise that grows with the square of the depth, shadows left of every near edge, readings between two surfaces along edges, nothing nearer than its least distance, depths in whole units and none past 65,535 of them |
+| Intel RealSense D405 | The same matcher, 18 mm between its imagers, 0.1 mm units | The same errors, nearly three times the D435's noise at a distance through one pinhole (50 / 18), reading from 4.3 cm where the D435 reads from 11.9 cm through the tests' pinhole, and nothing past 6.55 m |
 
 The crate's rule is that a change holds on exact depth and on a camera's depth both, and that
 what differs between them follows from the stated noise and from which pixels have no reading,

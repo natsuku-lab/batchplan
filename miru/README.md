@@ -679,8 +679,22 @@ the run.
   with the cookie box in 3 looks of the table camera and with the ramekin in 1 of the hand camera;
   on `rows4-stereo` the alphabet soup with the milk in 1 look of the hand camera, and a bowl with
   the cookie box in 1 look more of the table camera. Fourteen tests are on noisy depth, seven of
-  bowls and seven of boxes and what stands on, against or before them; none is on holed depth, of
-  which the recorded stereo set is the only check.
+  bowls and seven of boxes and what stands on, against or before them; none is on holed depth, which
+  the recorded stereo set and the truth table's two stereo readings (next) are the checks of.
+- **The truth table holds the look to scenes built from known things, read through three
+  cameras** (`cargo test --release -p miru --test truth -- --nocapture`): the simulator's exact
+  depth, an Intel RealSense D435 by its datasheet, and the D435 with a D405 near, the two stereo
+  ones through batchplan's filter (`DepthImage::filtered`), as a caller's depth comes to a look.
+  Twelve scenes, a row per scene, camera and thing: how many objects the thing came out as, and
+  of the one that holds most of it, its shape's kind, size and middle, what it stands on, whether
+  it is solid, the share of the thing's pixels it holds and, on a second look, its id. On exact
+  depth 17 of 20 rows are wholly right, 135 properties holding and 9 not; through the D435 none of
+  20, with 78 and 66; through the D435 with the D405 near none, with 86 and 58. The gaps on exact
+  depth are one scene's: a box 200 mm square and 60 mm tall with a round dial 90 mm across and
+  10 mm tall on it, and on the dial a bar 25 by 90 mm and 38 mm tall. The box is not solid, and the
+  dial and the bar are one object, a box of 57 by 90 by 48 mm whose middle is 25 mm off the dial's
+  and 17 mm off the bar's (6 allowed), not solid, standing on the box where the bar stands on the
+  dial. Every gap is listed row by row in `tests/truth.rs`'s doc, with what its object shows.
 - **What stays unseen is tested on rendered scenes alone**, and exact depth: the sets are first
   looks. An unseen object stays until a view shows its place, so a thing moved to stand before
   where it stood leaves the object it was behind it. And the robot's pixels say nothing either

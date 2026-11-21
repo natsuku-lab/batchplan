@@ -2475,3 +2475,123 @@ fn sight(shape: &Shape, own: Option<usize>, seen: &Seen, labels: &[Label]) -> Si
     });
     sight
 }
+
+#[cfg(test)]
+mod tests {
+    use glam::{DQuat, DVec3, Quat};
+
+    use super::*;
+
+    /// [`holds`] says what [`Readings::within`] says of a reading that lies as near a shape as its
+    /// shortcut lets one: on the ray from the shape's middle through a corner of a box or a point
+    /// of a cylinder's rim, past it by its distance from the shape, so that this is its distance
+    /// from the middle less the shape's reach, and with that distance as its slack, the least with
+    /// which it is held. Middles from the origin to 10 km off, half sizes from a millimeter to ten
+    /// meters, readings from a thousandth of the reach to a thousand times it past it, and
+    /// rotations whose length squared lies as far from 1 as [`Shape::reach`] takes, which shrink or
+    /// stretch what they turn by as much: one that shrinks measures a reading nearer than its
+    /// distance from the middle less the reach, which the shortcut's allowance for rounding must
+    /// cover. With a box's reach its largest half extent, its corners cut off, this fails, and so
+    /// it does with an allowance for rounding of four float steps or none.
+    #[test]
+    fn a_shape_far_from_readings_holds_what_measuring_them_says() {
+        let steps = f64::from(f32::EPSILON);
+        let turns = [
+            DQuat::IDENTITY,
+            DQuat::from_rotation_z(0.5),
+            DQuat::from_axis_angle(DVec3::new(1.0, 2.0, 3.0).normalize(), 0.7),
+            DQuat::from_axis_angle(DVec3::new(-0.3, 0.9, -0.4).normalize(), 2.9),
+        ];
+        // Each turn as itself and as a rotation whose length squared is up to four float steps
+        // off 1 either way.
+        let offs: [f64; 5] = [-4.0, -3.0, 0.0, 3.0, 4.0];
+        let rotations = (turns.iter()).flat_map(|&turn| {
+            offs.map(|off| (turn, (turn * (1.0 + off * steps).sqrt()).as_quat()))
+        });
+        let rotations: Vec<(DQuat, Quat)> = rotations.collect();
+        let middles = [
+            Vec3::ZERO,
+            Vec3::new(0.4, -0.3, 0.1),
+            Vec3::new(-30.0, 70.0, 5.0),
+            Vec3::new(8000.0, -6000.0, 100.0),
+        ];
+        let halves = [
+            DVec3::new(0.04, 0.06, 0.03),
+            DVec3::new(0.3, 0.2, 0.01),
+            DVec3::new(0.005, 0.5, 0.05),
+        ];
+        let sizes = (halves.iter()).flat_map(|&half| [0.2, 1.0, 20.0].map(|scale| half * scale));
+        let sizes: Vec<DVec3> = sizes.collect();
+        let sign = |bit: u32| if bit == 0 { 1.0 } else { -1.0 };
+        let (mut held, mut shrunk) = (0, 0);
+        for (&(turn, rotation), &middle) in pairs(&rotations, &middles) {
+            for &half in &sizes {
+                // A box's corners, and points of a cylinder's rim at its top and its bottom, in
+                // the shape's own frame.
+                let corners = (0..8_u32)
+                    .map(|k| half * DVec3::new(sign(k & 1), sign(k & 2), sign(k & 4)))
+                    .collect();
+                let rim = [0.3_f64, 2.0, 4.1].into_iter().flat_map(|angle| {
+                    let out = half.x * DVec3::new(angle.cos(), angle.sin(), 0.0);
+                    [half.z, -half.z].map(|z| out + z * DVec3::Z)
+                });
+                let shapes: [(Shape, Vec<DVec3>); 2] = [
+                    (
+                        Shape::Cuboid {
+                            center: middle,
+                            half_extents: half.as_vec3(),
+                            rotation,
+                        },
+                        corners,
+                    ),
+                    (
+                        Shape::Cylinder {
+                            center: middle,
+                            rotation,
+                            radius: half.x as f32,
+                            half_height: half.z as f32,
+                        },
+                        rim.collect(),
+                    ),
+                ];
+                for (shape, ends) in &shapes {
+                    let Some(reach) = shape.reach() else {
+                        continue;
+                    };
+                    shrunk += usize::from(rotation.length_squared() < 1.0 - 2.0 * f32::EPSILON);
+                    let pasts = [1e-3, 0.1, 1.0, 10.0, 1e3].map(|times| times * f64::from(reach));
+                    for (&end, past) in pairs(ends, &pasts) {
+                        let own = end * (1.0 + past / end.length());
+                        let point = (middle.as_dvec3() + turn * own).as_vec3();
+                        let slack = shape.distance(point).max(0.0);
+                        let readings = Readings {
+                            set: 0,
+                            points: vec![point],
+                            slack: vec![slack],
+                            share: vec![1.0],
+                            colors: ([0; 3], 0),
+                        };
+                        let measured = readings.within(shape);
+                        assert_eq!(measured, Some(1), "{shape:?} holds {point}");
+                        assert_eq!(
+                            holds(&readings, (point, point, slack), shape),
+                            measured,
+                            "{shape:?} said to hold {point} with a slack of {slack}"
+                        );
+                        held += 1;
+                    }
+                }
+            }
+        }
+        // The rotations that shrink are among those `Shape::reach` takes.
+        assert!(
+            held > 40_000 && shrunk > 400,
+            "{held} readings, {shrunk} shapes shrunk"
+        );
+    }
+
+    /// Each item of `a` with each of `b`.
+    fn pairs<'a, A, B>(a: &'a [A], b: &'a [B]) -> impl Iterator<Item = (&'a A, &'a B)> {
+        a.iter().flat_map(move |a| b.iter().map(move |b| (a, b)))
+    }
+}
