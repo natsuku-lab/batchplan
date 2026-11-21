@@ -1073,13 +1073,15 @@ the run.
     what hangs (`attach`), its floor meeting the walls along no crease the planes tell, and stays a
     box that is not solid; stating a real camera's noise it is open at the top
     (`a_lidless_box_seen_from_above_is_open_at_the_top_on_every_side`).
-- **Time**: a look of two 640 by 480 views among a cell's 17 fixtures takes 43 ms at the median
-  on `rows4` and 46 ms on `rows4-stereo-filtered` on an M4 Pro's 14 threads, 52 and 58 ms on two,
-  and 78 and 91 ms on one (`cargo run --release -p miru --example score -- <set> --again --digest
-  --threads <n>`: the median look of the best of three rounds, alternated with the same looks
-  through miru's own repository's code at 1323ca7, which took 47 and 52, 72 and 76, and 112 and
-  121 ms, at a load of 7 to 15 from other work). The scenes are the same to the bit on 1, 2 and
-  14 threads, and the same as that code's (`--digest`, with and without truth masks, four sets).
+- **Time**: a look of two 640 by 480 views among a cell's 17 fixtures takes 44 ms at the median
+  on `rows4` and 50 ms on `rows4-stereo-filtered` on an M4 Pro's 14 threads, 53 and 60 ms on two,
+  and 78 and 94 ms on one; a later look with open boxes in it (`hand-in-drawer`) 82, 92 and
+  130 ms (`cargo run --release -p miru --example score -- <set> --again --digest --threads <n>`:
+  the median look of the best of three rounds, alternated with the same looks through miru's
+  own repository's code at dd15ef3, which took 48 and 55, 74 and 78, and 114 and 124 ms, and 86,
+  113 and 165 on the later looks, at a load of 6 to 9 from other work). The scenes are the same
+  to the bit on 1, 2 and 14 threads, and the same as that code's (`--digest`: ten sets, with no
+  masks, with the truth as masks and with one mask at a time).
   What the crate saves is in reading the views, where the known shapes are held against every
   reading: batchplan's `sdf::on_shapes` turns each shape's rotation into its matrix once and
   measures a shape only against the runs of readings that come within reach of its box, where
