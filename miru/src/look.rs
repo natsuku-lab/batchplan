@@ -244,10 +244,17 @@ fn checked(
     same(&seen, &parts, &first, &mut sets, threads);
     let (floors, _) = told.gather(&mut sets, /* with floors */ true);
     // What each object says by itself, measured once; a known shape's part is no object's.
-    let said: Vec<Option<Measured>> = threads::each(threads, floors.len(), |object| {
-        let readings = &floors[object];
-        (!sets.theirs[readings.set]).then(|| Measured::of(readings, previous))
-    });
+    let own: Vec<&Readings> = (floors.iter())
+        .filter(|readings| !sets.theirs[readings.set])
+        .collect();
+    let mut measured = Measured::each(&own, previous, threads).into_iter();
+    let said: Vec<Option<Measured>> = (floors.iter())
+        .map(|readings| {
+            (!sets.theirs[readings.set])
+                .then(|| measured.next())
+                .flatten()
+        })
+        .collect();
     let mut floor_parts = hollows(&mut sets, &told, &floors, &said);
     let (mut objects, mut labels) = told.gather(&mut sets, /* with floors */ false);
     let before: Vec<(&Readings, &Measured)> = (floors.iter().zip(&said))
@@ -1814,48 +1821,70 @@ struct Measured {
 }
 
 impl Measured {
-    fn of(readings: &Readings, previous: &Scene) -> Self {
-        Self {
-            fit: Fit::of(&readings.points),
-            holds: if previous.objects.is_empty() {
-                vec![]
-            } else {
-                Self::holds(readings, previous)
-            },
-        }
-    }
-
-    /// Per object of `previous`, how many of `readings` its shape holds, where it holds more than
-    /// half of them.
-    ///
-    /// Of the box around the readings and their most slack: a shape whose middle lies farther
-    /// from that box than the shape reaches, that slack and what rounding can make of the
-    /// distances holds none of them, each outside it. Rounding makes a distance off by fewer than
-    /// thirty-two of a float's steps of the lengths it is taken from.
-    fn holds(readings: &Readings, previous: &Scene) -> Vec<Option<usize>> {
-        let (low, high) = (readings.points.iter()).fold(
-            (Vec3::INFINITY, Vec3::NEG_INFINITY),
-            |(low, high), point| (low.min(*point), high.max(*point)),
-        );
-        let slack = readings.slack.iter().copied().fold(0.0, f32::max);
-        let apart = |shape: &Shape| {
-            let (middle, Some(reach)) = (shape.middle(), shape.reach()) else {
-                return false;
-            };
-            let lengths = middle.length() + low.abs().max(high.abs()).length() + reach;
-            let rounding = 32.0 * f32::EPSILON * lengths;
-            middle.distance(middle.clamp(low, high)) > reach + slack + rounding
-        };
-        let holds = previous.objects.iter().map(|before| {
-            let shape = before.shape.outer();
-            if apart(&shape) {
-                None
-            } else {
-                readings.within(&shape)
-            }
+    /// What each of `objects` says by itself, on up to `threads` threads: each one's fit, and
+    /// each one held against each object of `previous` pair by pair, so that one with many
+    /// readings is not held against every earlier object on one thread.
+    fn each(objects: &[&Readings], previous: &Scene, threads: usize) -> Vec<Self> {
+        let count = previous.objects.len();
+        // Per object, its fit and, where there are earlier objects, the box around its readings
+        // and their most slack.
+        let fits = threads::each(threads, objects.len(), |object| {
+            let readings = objects[object];
+            let bounds = (count > 0).then(|| {
+                let (low, high) = (readings.points.iter()).fold(
+                    (Vec3::INFINITY, Vec3::NEG_INFINITY),
+                    |(low, high), point| (low.min(*point), high.max(*point)),
+                );
+                (
+                    low,
+                    high,
+                    readings.slack.iter().copied().fold(0.0, f32::max),
+                )
+            });
+            (Fit::of(&readings.points), bounds)
         });
-        holds.collect()
+        let pairs = threads::each(threads, objects.len() * count, |pair| {
+            let (object, before) = (pair / count, pair % count);
+            let bounds = fits[object]
+                .1
+                .expect("bounds where there are earlier objects");
+            holds(
+                objects[object],
+                bounds,
+                &previous.objects[before].shape.outer(),
+            )
+        });
+        let mut pairs = pairs.into_iter();
+        (fits.into_iter())
+            .map(|(fit, _)| Self {
+                fit,
+                holds: pairs.by_ref().take(count).collect(),
+            })
+            .collect()
     }
+}
+
+/// How many of `readings` `shape` holds, where it holds more than half of them
+/// ([`Readings::within`]). `bounds` are the lower and upper corners of the box around the
+/// readings and their most slack.
+///
+/// A shape whose middle lies farther from that box than the shape reaches, that slack and what
+/// rounding can make of the distances holds none of them, each outside it. Rounding makes a
+/// distance off by fewer than thirty-two of a float's steps of the lengths it is taken from.
+fn holds(
+    readings: &Readings,
+    (low, high, slack): (Vec3, Vec3, f32),
+    shape: &Shape,
+) -> Option<usize> {
+    let (middle, Some(reach)) = (shape.middle(), shape.reach()) else {
+        return readings.within(shape);
+    };
+    let lengths = middle.length() + low.abs().max(high.abs()).length() + reach;
+    let rounding = 32.0 * f32::EPSILON * lengths;
+    if middle.distance(middle.clamp(low, high)) > reach + slack + rounding {
+        return None;
+    }
+    readings.within(shape)
 }
 
 /// What each of `objects` says by itself: what an object of `before` said where it has the
@@ -1867,16 +1896,22 @@ fn remeasure(
     previous: &Scene,
     threads: usize,
 ) -> Vec<Measured> {
-    threads::each(threads, objects.len(), |object| {
-        let readings = &objects[object];
-        let same = before.iter().find(|(before, _)| {
-            before.set == readings.set && before.points.len() == readings.points.len()
-        });
-        same.map_or_else(
-            || Measured::of(readings, previous),
-            |(_, said)| (*said).clone(),
-        )
-    })
+    let same: Vec<Option<&Measured>> = (objects.iter())
+        .map(|readings| {
+            let same = before.iter().find(|(before, _)| {
+                before.set == readings.set && before.points.len() == readings.points.len()
+            });
+            same.map(|(_, said)| *said)
+        })
+        .collect();
+    let anew: Vec<&Readings> = (objects.iter().zip(&same))
+        .filter_map(|(readings, same)| same.is_none().then_some(readings))
+        .collect();
+    let mut anew = Measured::each(&anew, previous, threads).into_iter();
+    (same.into_iter())
+        .map(|same| same.cloned().or_else(|| anew.next()))
+        .collect::<Option<_>>()
+        .expect("one measured anew per object without one")
 }
 
 /// Which parts are one object. A view's masks say which of its parts are not: no set holds two
