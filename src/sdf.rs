@@ -2740,13 +2740,13 @@ impl<'a> Band<'a> {
     }
 }
 
-/// How many points [`on_shapes`] takes at a time: the shapes that none of a run's points can lie on
-/// are left out for the whole of it. A short run's box is tight and leaves out more, and a run
-/// costs a test of every shape's box whatever its length. Measured from 1 to 65,536 for the
-/// readings of two 640×480 views against a cell's 17 shapes, by the instructions a look retires
-/// on one thread: the fewest at 64, within 0.4% of that from 32 to 256, 1.0% more at 1,024, 1.6%
-/// more at 65,536 and 11% more with every point a run of its own.
-const RUN: usize = 64;
+/// How many points [`on_shapes`] takes at a time: a run is one piece of work for the device's
+/// threads, and the shapes that none of its points can lie on are left out for the whole of it.
+/// Measured from 1 to 65,536 for the readings of two 640×480 views against a cell's 17 shapes: on
+/// one thread a look retires within 1.6% of the same instructions from 64 up, and 11% more with
+/// every point a run of its own; on 14 threads runs of 64 take 3 to 11% longer than runs of 1,024
+/// (`examples/perception`, twelve alternated rounds), each being too little work to hand over.
+const RUN: usize = 1024;
 
 /// Which of `shapes` each of `points` lies on: per point, the shape nearest it, as
 /// [`Obstacle::distance`] measures, where the point is no farther from that shape's surface than
