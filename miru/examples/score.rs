@@ -4,7 +4,7 @@
 //! are quoted under one definition.
 //!
 //!   cargo run --release --example score -- <set> [--recorded | --masks truth] [--again]
-//!       [--noise <factor>] [--shares] [--offsets] [--twin <set>] [--threads <n>]
+//!       [--noise <factor>] [--shares] [--offsets] [--twin <set>] [--rooms] [--threads <n>]
 //!       [--images <dir>] [--digest] [run ...]
 //!
 //! `<set>` holds a folder per run, each with its fixtures and a folder per look
@@ -22,8 +22,18 @@
 //! shape of `<set>` takes up beyond the twin's, from above (the mean half width over the
 //! directions there, and the longest half side) and in height (the half height), and how many are
 //! round and solid where the twin is; the twin's views keep the noise their recording states.
-//! Masks, a second look, the noise, a twin and a digest (`--digest`) are miru's alone, and
-//! refused with `--recorded`.
+//! `--rooms` says, per kind, whether miru's shapes hold the matter the look's views read. A
+//! reading is a pixel with a reading that shows a truth object, its slack three deviations of its
+//! camera's noise at its depth, as the recording states it (the library's tolerance); an object's
+//! own truth object is the one most of its pixels on truth objects show, or, where the look shows
+//! it on none, the one it was of in the run's last look that did. Counted over a look's cameras
+//! together: of each solid box open at the top, its own truth object's readings in its room by
+//! more than their slack ([`in_room`]), which the room says are free; of each solid object, the
+//! readings of other truth objects inside one of its solids by more than their slack
+//! ([`in_solid`]), which the shape says are its own. The robot and the fixtures are no truth
+//! object. Under the table, the ten objects that hold the most of each.
+//! Masks, a second look, the noise, a twin, the rooms and a digest (`--digest`) are miru's alone,
+//! and refused with `--recorded`.
 //! `--threads` is how many threads a look may use, the machine's own number by default.
 //! `--shares` adds, per camera and kind of truth object, the share of its pixels that are an
 //! object's, a known shape's and nothing's, and the same of the pixels that show no truth object:
@@ -64,9 +74,9 @@ use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use batchplan::{DepthImage, Device, Obstacle};
+use batchplan::{DepthImage, Device, Intrinsics, Obstacle};
 use common::{Camera, Error, Recorded};
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 use miru::{Label, Look, LookOptions, Noise, Scene, Shape, Support, View};
 
 /// A truth object shown by fewer pixels is not in view: it is not scored, and lies in nothing.
@@ -102,6 +112,8 @@ struct Asked {
     offsets: bool,
     /// The set of the same scenes on other depth, to hold each matched object against.
     twin: Option<PathBuf>,
+    /// Say, per kind, what readings lie in a room or a solid of miru's shapes.
+    rooms: bool,
     /// How many threads miru's look may use; none for as many as the machine has.
     threads: Option<usize>,
     /// Where to write each view's labels as a PNG.
@@ -117,9 +129,10 @@ impl Asked {
     /// what only miru's look has: masks, a second look, the noise and the scenes' digest.
     fn of(mut args: impl Iterator<Item = String>) -> Result<Self, Error> {
         let usage = "usage: score <set> [--recorded | --masks truth] [--again] [--noise factor] \
-             [--shares] [--offsets] [--twin set] [--threads n] [--images dir] [--digest] [run ...]";
+             [--shares] [--offsets] [--twin set] [--rooms] [--threads n] [--images dir] [--digest] \
+             [run ...]";
         let set = PathBuf::from(args.next().ok_or(usage)?);
-        let (mut of_executor, mut truth_masks, mut again) = (false, false, false);
+        let (mut of_executor, mut truth_masks, mut again, mut rooms) = (false, false, false, false);
         let (mut images, mut only, mut shares, mut threads) = (None, vec![], false, None);
         let (mut offsets, mut digest, mut noise, mut twin) = (false, false, None, None);
         while let Some(arg) = args.next() {
@@ -137,6 +150,7 @@ impl Asked {
                 "--shares" => shares = true,
                 "--offsets" => offsets = true,
                 "--twin" => twin = Some(PathBuf::from(args.next().ok_or("--twin takes a set")?)),
+                "--rooms" => rooms = true,
                 "--threads" => {
                     threads = Some(args.next().ok_or("--threads takes a number")?.parse()?);
                 }
@@ -170,6 +184,12 @@ impl Asked {
                     .into(),
             );
         }
+        if of_executor && rooms {
+            return Err(
+                format!("only miru's shapes are held against the readings, the executor's are not recorded: {usage}")
+                    .into(),
+            );
+        }
         Ok(Self {
             set,
             of_executor,
@@ -179,6 +199,7 @@ impl Asked {
             shares,
             offsets,
             twin,
+            rooms,
             threads,
             images,
             digest,
@@ -320,6 +341,7 @@ fn main() -> Result<(), Error> {
         shares,
         offsets,
         twin,
+        rooms,
         threads,
         images,
         digest,
@@ -342,7 +364,11 @@ fn main() -> Result<(), Error> {
     let mut repeated = [0; 3];
     // Per kind, the matched objects held against their twins.
     let mut twins = BTreeMap::<String, Twins>::new();
+    // Per kind, what its objects' shapes hold; and every object that holds any, of each measure.
+    let (mut holding, mut cases) = (BTreeMap::<String, Rooms>::new(), [vec![], vec![]]);
     for run in &runs {
+        // Per object id, the truth object it was of in the run's last look that showed it on one.
+        let mut owners = BTreeMap::<u32, String>::new();
         // Only miru is told the known shapes.
         let known = if of_executor {
             vec![]
@@ -420,6 +446,10 @@ fn main() -> Result<(), Error> {
             println!("  cameras together");
             let verdicts = sum.verdicts();
             report(&verdicts, &recorded.truth, &mut together);
+            if rooms {
+                let held = Held::of(&recorded, &scene, &mut owners);
+                held.report(&name, &recorded.truth, &scene, &mut holding, &mut cases);
+            }
             let centers: Vec<Vec2> = if of_executor {
                 recorded.centers.clone()
             } else {
@@ -521,6 +551,9 @@ fn main() -> Result<(), Error> {
         for (kind, twins) in &twins {
             println!("{kind:32} {}", twins.line());
         }
+    }
+    if rooms {
+        rooms_table(&holding, &mut cases);
     }
     for (camera, tally) in &by_camera {
         table(camera, tally);
@@ -975,6 +1008,358 @@ fn picture(file: &Path, width: usize, labels: &[Label]) -> Result<(), Error> {
     Ok(())
 }
 
+/// How many deviations of its camera's noise a reading may lie off what it shows: the library's
+/// tolerance (`SIGMAS` in `src/view.rs`).
+const SIGMAS: f32 = 3.0;
+
+/// The standard deviation of a reading at `depth` (meters) by `noise`: the polynomial in depth a
+/// recording states (`examples/common`), as `miru::Noise` holds it.
+fn deviation(noise: Noise, depth: f32) -> f32 {
+    noise.constant + (noise.linear + noise.quadratic * depth) * depth
+}
+
+/// A reading of a truth object, in the look's frame.
+struct Reading {
+    point: Vec3,
+    /// How far it may lie off what it shows (meters): [`SIGMAS`] deviations of its camera's noise
+    /// at its depth, as the recording states it.
+    slack: f32,
+    /// The truth object it shows, by its index in the look's truth.
+    truth: usize,
+}
+
+/// `camera`'s readings of truth objects.
+fn readings(camera: &Camera) -> impl Iterator<Item = Reading> + '_ {
+    let Intrinsics { fx, fy, cx, cy } = camera.intrinsics;
+    let rotation = camera.pose.rotation.normalize();
+    let pixels = camera.truth.iter().zip(&camera.depth).enumerate();
+    pixels.filter_map(move |(i, (truth, &z))| {
+        let truth = truth.filter(|_| z > 0.0 && z.is_finite())?;
+        // Integer pixel coordinates are pixel centres, as the library takes them.
+        let (u, v) = ((i % camera.width) as f32, (i / camera.width) as f32);
+        let point = rotation * Vec3::new((u - cx) / fx * z, (v - cy) / fy * z, z);
+        Some(Reading {
+            point: point + camera.pose.position,
+            slack: SIGMAS * deviation(camera.noise, z),
+            truth,
+        })
+    })
+}
+
+/// A box open at the top's room, taken as far as its box, as every use of the shape takes it: its
+/// lower corner, and its upper corner along x and y, in the box's own frame. None for any other
+/// shape.
+fn room(shape: &Shape) -> Option<(Vec3, Vec2)> {
+    match *shape {
+        Shape::OpenBox {
+            half_extents: half,
+            room_lower,
+            room_upper,
+            ..
+        } => Some((
+            room_lower.clamp(-half, half),
+            room_upper.clamp(-half.truncate(), half.truncate()),
+        )),
+        _ => None,
+    }
+}
+
+/// Whether `p` lies in the room of `shape`, a box open at the top, by more than `slack`: inside
+/// its four inner faces and over its floor's top by more than that, and not over the box's top.
+/// False for any other shape.
+fn in_room(shape: &Shape, p: Vec3, slack: f32) -> bool {
+    let (
+        Shape::OpenBox {
+            center,
+            half_extents,
+            rotation,
+            ..
+        },
+        Some((lower, upper)),
+    ) = (*shape, room(shape))
+    else {
+        return false;
+    };
+    let own = rotation.inverse() * (p - center);
+    let across = (own.truncate() - lower.truncate()).min(upper - own.truncate());
+    across.min_element() > slack && own.z - lower.z > slack && own.z <= half_extents.z
+}
+
+/// Whether `p` lies inside a solid of `shape` by more than `slack`: in the box or the cylinder, or
+/// in a box open at the top's floor or one of its walls (`Shape::solids`), farther from that
+/// solid's surface than `slack`.
+fn in_solid(shape: &Shape, p: Vec3, slack: f32) -> bool {
+    let solids = shape.solids();
+    solids.iter().any(|solid| solid.distance(p).value < -slack)
+}
+
+/// What one look's shapes hold of the look's readings, over its cameras together.
+struct Held {
+    /// Per object, its own truth object, by its index in the look's truth: the one most of its
+    /// pixels on truth objects show, or, where the look shows it on none, the one its id was of in
+    /// the run's last look that did.
+    own: Vec<Option<usize>>,
+    /// Per object, how many of its own truth object's readings lie in its room ([`in_room`]):
+    /// asked of a solid box open at the top alone, 0 for any other.
+    in_room: Vec<usize>,
+    /// Per object and truth object, how many of that one's readings lie in the object's solids
+    /// ([`in_solid`]): asked of a solid object and of the truth objects but its own, 0 for any
+    /// other.
+    in_solid: Vec<Vec<usize>>,
+}
+
+impl Held {
+    /// What `scene`, miru's of `recorded`, holds of `recorded`'s readings. `owners` holds, per
+    /// object id, the truth object it was of in the run's looks before, and is brought up to this
+    /// one.
+    fn of(recorded: &Recorded, scene: &Scene, owners: &mut BTreeMap<u32, String>) -> Self {
+        let truths = recorded.truth.len();
+        // Per object, per truth object, the object's pixels that show that one.
+        let mut shown = vec![vec![0; truths]; scene.objects.len()];
+        for (camera, labels) in recorded.cameras.iter().zip(&scene.labels) {
+            for (label, truth) in labels.iter().zip(&camera.truth) {
+                if let (Label::Object(object), Some(truth)) = (*label, *truth) {
+                    shown[object][truth] += 1;
+                }
+            }
+        }
+        let own: Vec<Option<usize>> = (scene.objects.iter().zip(&shown))
+            .map(|(object, shown)| {
+                let most = (0..truths)
+                    .filter(|&t| shown[t] > 0)
+                    .max_by_key(|&t| (shown[t], Reverse(t)));
+                if let Some(most) = most {
+                    owners.insert(object.id, recorded.truth[most].clone());
+                }
+                let name = owners.get(&object.id)?;
+                recorded.truth.iter().position(|truth| truth == name)
+            })
+            .collect();
+        let readings: Vec<Reading> = recorded.cameras.iter().flat_map(readings).collect();
+        let rooms = (scene.objects.iter().zip(&own)).map(|(object, own)| match own {
+            Some(own) if object.solid => (readings.iter())
+                .filter(|r| r.truth == *own && in_room(&object.shape, r.point, r.slack))
+                .count(),
+            _ => 0,
+        });
+        let solids = (scene.objects.iter().zip(&own)).map(|(object, own)| {
+            let mut held = vec![0; truths];
+            if object.solid {
+                for r in readings.iter().filter(|r| Some(r.truth) != *own) {
+                    held[r.truth] += usize::from(in_solid(&object.shape, r.point, r.slack));
+                }
+            }
+            held
+        });
+        // In this order: both are counted before `own` moves.
+        Self {
+            in_room: rooms.collect(),
+            in_solid: solids.collect(),
+            own,
+        }
+    }
+
+    /// Prints each object of `scene` that holds readings of either measure, of the look `look`,
+    /// and adds it to that measure's `cases`; adds every object to `holding` under the kind of
+    /// its own truth object, of those `names` names.
+    fn report(
+        &self,
+        look: &str,
+        names: &[String],
+        scene: &Scene,
+        holding: &mut BTreeMap<String, Rooms>,
+        cases: &mut [Vec<Case>; 2],
+    ) {
+        println!("  rooms");
+        for (index, object) in scene.objects.iter().enumerate() {
+            let own = self.own[index].map_or(NO_OBJECT, |t| names[t].as_str());
+            let rooms = holding.entry(kind(own).to_owned()).or_default();
+            rooms.objects += 1;
+            rooms.solid += usize::from(object.solid);
+            rooms.open += usize::from(matches!(object.shape, Shape::OpenBox { .. }));
+            let in_solid = &self.in_solid[index];
+            let held = [self.in_room[index], in_solid.iter().sum()];
+            for (measure, (pixels, cases)) in held.into_iter().zip(cases.iter_mut()).enumerate() {
+                if pixels == 0 {
+                    continue;
+                }
+                let [objects, all, most] = &mut rooms.held[measure];
+                *objects += 1;
+                *all += pixels;
+                *most = (*most).max(pixels);
+                let others = (names.iter().zip(in_solid))
+                    .filter(|&(_, &n)| measure == 1 && n > 0)
+                    .map(|(name, &n)| (name.clone(), n));
+                let case = Case {
+                    look: look.to_owned(),
+                    index,
+                    id: object.id,
+                    seen: object.seen,
+                    own: own.to_owned(),
+                    shape: object.shape,
+                    pixels,
+                    others: others.collect(),
+                };
+                println!("    {}", case.line());
+                cases.push(case);
+            }
+        }
+    }
+}
+
+/// Of one kind of truth object, what its objects' shapes hold over a set's looks.
+#[derive(Default)]
+struct Rooms {
+    /// How many objects there were, how many of them solid, and how many open at the top.
+    objects: usize,
+    solid: usize,
+    open: usize,
+    /// Per measure, [`in_room`] and [`in_solid`]: how many objects hold readings, how many they
+    /// hold in all, and the most one holds.
+    held: [[usize; 3]; 2],
+}
+
+impl Rooms {
+    /// Adds `other`'s objects to these.
+    fn add(&mut self, other: &Self) {
+        self.objects += other.objects;
+        self.solid += other.solid;
+        self.open += other.open;
+        for (held, theirs) in self.held.iter_mut().zip(&other.held) {
+            *held = [
+                held[0] + theirs[0],
+                held[1] + theirs[1],
+                held[2].max(theirs[2]),
+            ];
+        }
+    }
+}
+
+/// An object that holds readings it should not.
+struct Case {
+    /// The look it is of, as its folder in the set.
+    look: String,
+    /// Its index among the look's objects.
+    index: usize,
+    id: u32,
+    seen: bool,
+    /// Its own truth object.
+    own: String,
+    shape: Shape,
+    /// How many readings it holds.
+    pixels: usize,
+    /// Of other truth objects' readings in its solids, how many of each.
+    others: Vec<(String, usize)>,
+}
+
+impl Case {
+    /// The object, its own truth object, its shape, and what it holds.
+    fn line(&self) -> String {
+        let unseen = if self.seen { "" } else { ", unseen" };
+        let others: Vec<String> = (self.others.iter())
+            .map(|(name, pixels)| format!("{name} {pixels}"))
+            .collect();
+        let others = if others.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", others.join(", "))
+        };
+        format!(
+            "object {} (id {}{unseen}) of {}, {}: {} pixels{others}",
+            self.index,
+            self.id,
+            self.own,
+            sizes(&self.shape),
+            self.pixels
+        )
+    }
+}
+
+/// A shape's kind and sizes and where it stands: a box's sides, a cylinder's diameter and height,
+/// a box open at the top's sides and its room's (centimeters); its middle (meters).
+fn sizes(shape: &Shape) -> String {
+    let sides = |half: Vec3| {
+        let [x, y, z] = (200.0 * half).to_array();
+        format!("{x:.1} x {y:.1} x {z:.1} cm")
+    };
+    let at = |c: Vec3| format!("at ({:.3}, {:.3}, {:.3})", c.x, c.y, c.z);
+    match *shape {
+        Shape::Cuboid {
+            center,
+            half_extents,
+            ..
+        } => format!("box {} {}", sides(half_extents), at(center)),
+        Shape::Cylinder {
+            center,
+            radius,
+            half_height,
+            ..
+        } => format!(
+            "cylinder {:.1} cm across, {:.1} cm tall {}",
+            200.0 * radius,
+            200.0 * half_height,
+            at(center)
+        ),
+        Shape::OpenBox {
+            center,
+            half_extents,
+            ..
+        } => {
+            let (lower, upper) = room(shape).expect("a box open at the top has a room");
+            let room = 0.5 * (upper - lower.truncate()).extend(half_extents.z - lower.z);
+            format!(
+                "open box {}, room {} {}",
+                sides(half_extents),
+                sides(room),
+                at(center)
+            )
+        }
+        _ => panic!("a shape the scorer does not know: {shape:?}"),
+    }
+}
+
+/// Prints `holding` as a table, a line per kind, those with most objects first, and their sum;
+/// then, of each measure, the ten objects of `cases` that hold the most.
+fn rooms_table(holding: &BTreeMap<String, Rooms>, cases: &mut [Vec<Case>; 2]) {
+    let measures = ["own readings in a room", "others' readings in a solid"];
+    println!(
+        "\n{:32} {:>7} {:>7} {:>7} {:>27} {:>27}",
+        "rooms, cameras together", "objects", "solid", "open", measures[0], measures[1]
+    );
+    println!(
+        "{:32} {:>7} {:>7} {:>7} {:>7} {:>9} {:>9} {:>7} {:>9} {:>9}",
+        "", "", "", "", "boxes", "pixels", "most", "objects", "pixels", "most"
+    );
+    let mut kinds: Vec<(&str, &Rooms)> = (holding.iter())
+        .map(|(kind, rooms)| (kind.as_str(), rooms))
+        .collect();
+    kinds.sort_by_key(|(_, rooms)| Reverse(rooms.objects));
+    let mut all = Rooms::default();
+    for (_, rooms) in &kinds {
+        all.add(rooms);
+    }
+    kinds.push(("all", &all));
+    for (kind, rooms) in kinds {
+        let [
+            [boxes, in_rooms, most_in_room],
+            [objects, in_solids, most_in_solid],
+        ] = rooms.held;
+        println!(
+            "{kind:32} {:>7} {:>7} {:>7} {boxes:>7} {in_rooms:>9} {most_in_room:>9} {objects:>7} \
+             {in_solids:>9} {most_in_solid:>9}",
+            rooms.objects, rooms.solid, rooms.open
+        );
+    }
+    for (measure, cases) in measures.iter().zip(cases) {
+        // The most first, and of as many, the first scored.
+        cases.sort_by_key(|case| Reverse(case.pixels));
+        println!("\nmost {measure}, cameras together");
+        for case in cases.iter().take(10) {
+            println!("  {} {}", case.look, case.line());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use batchplan::{Intrinsics, Pose};
@@ -1147,6 +1532,7 @@ mod tests {
             &["--digest"],
             &["--noise", "0.25"],
             &["--twin", "exact"],
+            &["--rooms"],
         ] {
             let alone: Vec<&str> = [&["set"], miru_only].concat();
             assert!(asked(&alone).is_ok(), "{alone:?}");
@@ -1325,6 +1711,206 @@ mod tests {
         assert!(asked(&["set", "--noise"]).is_err(), "no factor");
         for refused in ["less", "0", "-1", "inf", "NaN"] {
             assert!(asked(&["set", "--noise", refused]).is_err(), "{refused}");
+        }
+    }
+
+    /// How far a reading may lie off in the tests of rooms and solids, and how much nearer or
+    /// farther than that a point just inside or just outside it lies (meters).
+    const SLACK: f32 = 0.004;
+    const JUST: f32 = 1e-4;
+
+    /// A box open at the top 20 by 40 by 20 cm, turned about z, its floor 8 cm thick and its room
+    /// 16 by 30 cm along x and y, from 8 cm under its middle in x to past its side, which takes the
+    /// room as far as the side: no wall there.
+    fn tray() -> Shape {
+        Shape::OpenBox {
+            center: Vec3::new(0.5, -0.2, 0.1),
+            half_extents: Vec3::new(0.1, 0.2, 0.1),
+            rotation: Quat::from_rotation_z(0.7),
+            room_lower: Vec3::new(-0.08, -0.15, -0.02),
+            room_upper: Vec2::new(0.3, 0.15),
+        }
+    }
+
+    /// The point at `own` in the frame of `shape`, a box or one open at the top.
+    fn at(shape: &Shape, own: Vec3) -> Vec3 {
+        match *shape {
+            Shape::Cuboid {
+                center, rotation, ..
+            }
+            | Shape::Cylinder {
+                center, rotation, ..
+            }
+            | Shape::OpenBox {
+                center, rotation, ..
+            } => center + rotation * own,
+            _ => panic!("a shape the scorer does not know: {shape:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reading_is_in_a_room_inside_its_faces_and_over_its_floor_by_more_than_its_slack() {
+        let tray = tray();
+        let (inside, outside) = (SLACK + JUST, SLACK - JUST);
+        let points = [
+            ("the middle of the room", Vec3::new(0.01, 0.0, 0.04), true),
+            (
+                "in from the wall at -x",
+                Vec3::new(-0.08 + inside, 0.0, 0.04),
+                true,
+            ),
+            (
+                "in from -x by less",
+                Vec3::new(-0.08 + outside, 0.0, 0.04),
+                false,
+            ),
+            (
+                "in from the box's side at +x",
+                Vec3::new(0.1 - inside, 0.0, 0.04),
+                true,
+            ),
+            (
+                "in from +x by less",
+                Vec3::new(0.1 - outside, 0.0, 0.04),
+                false,
+            ),
+            (
+                "in from the wall at -y",
+                Vec3::new(0.0, -0.15 + inside, 0.04),
+                true,
+            ),
+            (
+                "in from -y by less",
+                Vec3::new(0.0, -0.15 + outside, 0.04),
+                false,
+            ),
+            (
+                "in from the wall at +y",
+                Vec3::new(0.0, 0.15 - inside, 0.04),
+                true,
+            ),
+            (
+                "in from +y by less",
+                Vec3::new(0.0, 0.15 - outside, 0.04),
+                false,
+            ),
+            ("over the floor", Vec3::new(0.0, 0.0, -0.02 + inside), true),
+            (
+                "over the floor by less",
+                Vec3::new(0.0, 0.0, -0.02 + outside),
+                false,
+            ),
+            ("under the box's top", Vec3::new(0.0, 0.0, 0.1 - JUST), true),
+            ("over the box's top", Vec3::new(0.0, 0.0, 0.1 + JUST), false),
+        ];
+        for (what, own, expected) in points {
+            assert_eq!(in_room(&tray, at(&tray, own), SLACK), expected, "{what}");
+        }
+        let cuboid = Shape::Cuboid {
+            center: Vec3::new(0.5, -0.2, 0.1),
+            half_extents: Vec3::new(0.1, 0.2, 0.1),
+            rotation: Quat::from_rotation_z(0.7),
+        };
+        let middle = at(&cuboid, Vec3::ZERO);
+        assert!(!in_room(&cuboid, middle, SLACK), "a box has no room");
+    }
+
+    #[test]
+    fn a_reading_is_in_a_solid_inside_its_surface_by_more_than_its_slack() {
+        let (inside, outside) = (SLACK + JUST, SLACK - JUST);
+        let cuboid = Shape::Cuboid {
+            center: Vec3::new(0.3, 0.1, 0.05),
+            half_extents: Vec3::new(0.05, 0.03, 0.02),
+            rotation: Quat::from_rotation_z(0.4),
+        };
+        let cylinder = Shape::Cylinder {
+            center: Vec3::new(0.6, 0.0, 0.05),
+            rotation: Quat::IDENTITY,
+            radius: 0.04,
+            half_height: 0.05,
+        };
+        // A radius at 1 radian about the cylinder's axis.
+        let across = |r: f32| Vec3::new(r * 1f32.cos(), r * 1f32.sin(), 0.0);
+        let tray = tray();
+        let points = [
+            ("the box's middle", &cuboid, Vec3::ZERO, true),
+            (
+                "in from the box's side",
+                &cuboid,
+                Vec3::new(0.05 - inside, 0.0, 0.0),
+                true,
+            ),
+            (
+                "in from the box's side by less",
+                &cuboid,
+                Vec3::new(0.05 - outside, 0.0, 0.0),
+                false,
+            ),
+            (
+                "over the box's bottom",
+                &cuboid,
+                Vec3::new(0.0, 0.0, -0.02 + inside),
+                true,
+            ),
+            (
+                "over its bottom by less",
+                &cuboid,
+                Vec3::new(0.0, 0.0, -0.02 + outside),
+                false,
+            ),
+            ("the cylinder's axis", &cylinder, Vec3::ZERO, true),
+            (
+                "in from the cylinder's side",
+                &cylinder,
+                across(0.04 - inside),
+                true,
+            ),
+            (
+                "in from its side by less",
+                &cylinder,
+                across(0.04 - outside),
+                false,
+            ),
+            (
+                "under the cylinder's top",
+                &cylinder,
+                Vec3::new(0.0, 0.0, 0.05 - inside),
+                true,
+            ),
+            (
+                "under its top by less",
+                &cylinder,
+                Vec3::new(0.0, 0.0, 0.05 - outside),
+                false,
+            ),
+            ("the tray's room", &tray, Vec3::new(0.01, 0.0, 0.04), false),
+            (
+                "under the floor's top",
+                &tray,
+                Vec3::new(0.0, 0.0, -0.02 - inside),
+                true,
+            ),
+            (
+                "under the floor's top by less",
+                &tray,
+                Vec3::new(0.0, 0.0, -0.02 - outside),
+                false,
+            ),
+            (
+                "in the tray's wall",
+                &tray,
+                Vec3::new(-0.08 - inside, 0.0, 0.04),
+                true,
+            ),
+            (
+                "in its wall by less",
+                &tray,
+                Vec3::new(-0.08 - outside, 0.0, 0.04),
+                false,
+            ),
+        ];
+        for (what, shape, own, expected) in points {
+            assert_eq!(in_solid(shape, at(shape, own), SLACK), expected, "{what}");
         }
     }
 }

@@ -275,7 +275,13 @@ at 1 m, and the hand camera a D405, 14.2 mm. miru's rows are
 of the scorecards recorded beside the sets. The rows with the truth as masks are the command with
 `--masks truth`, which gives every view the simulator's truth as its masks, each pixel numbered
 by the truth object it shows: no mask model can say more, so those rows are what a model can
-bring miru to, and what they leave is the look's own to mend.
+bring miru to, and what they leave is the look's own to mend. `--rooms` holds the shapes against
+what the views read, by the truth's thing under each reading, over a look's cameras together: of
+each solid box open at the top, how many of its own thing's readings lie in its room, which the
+room says is free, and of each solid object, how many of another thing's lie inside its solids,
+which the shape says are its own; each by more than three deviations of the reading's camera's
+noise, per kind, with the ten objects that hold the most of each (`examples/score.rs` has the
+rules).
 
 A true object is matched when one measured object is mostly it and holds most of it; merged when
 most of it is in a measured object that is not mostly it, or one that is mostly it holds most of

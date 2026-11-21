@@ -475,7 +475,7 @@ pub struct Scene {
     /// given. A caller that gives ids of its own takes them from here and raises this past them
     /// before the next look. It must never be lowered: an id is given once only as long as this
     /// only grows. A look that has more new objects than there are ids left below `u32::MAX` is
-    /// refused ([`Error::Input`](crate::Error::Input)).
+    /// refused ([`Error::Input`](batchplan::Error::Input)).
     pub next_id: u32,
 }
 
