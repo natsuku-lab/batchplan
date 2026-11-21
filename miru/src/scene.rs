@@ -498,11 +498,6 @@ pub struct Object {
     /// thing it touches most, as a bowl whose foot overhangs a box stands on the box. None with
     /// nothing under it.
     pub on: Option<Support>,
-    /// Whether this look saw it. False for an object kept from the scene before, which no view
-    /// could see ([`look`](crate::look)): nothing of it was measured and no label names it. Its
-    /// id, shape, whether it is solid and its colour are that scene's, as is what it stands on: an
-    /// object while that is still in the scene, a known shape by the index it had in that look.
-    pub seen: bool,
 }
 
 /// What one look saw, and what the next look needs of it.
@@ -510,7 +505,10 @@ pub struct Object {
 #[non_exhaustive]
 pub struct Scene {
     /// The objects, in the order the views show them: by view, then row by row. After them,
-    /// those of the scene before that no view could see ([`Object::seen`]), in its order.
+    /// those of the scene before that no view could see ([`look`](crate::look)), in its order:
+    /// nothing of one was measured and no label names it, and its id, shape, whether it is solid
+    /// and its colour are that scene's, as is what it stands on: an object while that is still in
+    /// the scene, a known shape by the index it had in that look.
     pub objects: Vec<Object>,
     /// Per view of the look, per pixel in the depth's order, what the pixel shows.
     pub labels: Vec<Vec<Label>>,
@@ -520,22 +518,6 @@ pub struct Scene {
     /// only grows. A look that has more new objects than there are ids left below `u32::MAX` is
     /// refused ([`Error::Input`](batchplan::Error::Input)).
     pub next_id: u32,
-}
-
-impl Scene {
-    /// Per pixel of view `view`, whether it shows object `object` (its index in
-    /// [`Scene::objects`]): the flags batchplan's `Surface::from_depth` takes for the object to
-    /// grasp or the support to rest on. As long as the view's depth, false everywhere for an
-    /// object the view does not show.
-    ///
-    /// # Panics
-    ///
-    /// If the look had no view `view`.
-    #[must_use]
-    pub fn mask(&self, view: usize, object: usize) -> Vec<bool> {
-        let shows = Label::Object(object);
-        self.labels[view].iter().map(|l| *l == shows).collect()
-    }
 }
 
 #[cfg(test)]

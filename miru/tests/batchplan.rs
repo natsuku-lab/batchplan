@@ -204,7 +204,8 @@ fn a_looks_output_goes_through_batchplans_calls_on_a_robots_device() {
         let off_robot = (0..labels.len()).filter(|&i| frame.depth[i] > 0.0 && !mask.on_robot[i]);
         let off_robot: Vec<usize> = off_robot.collect();
         for (thing, &object) in parts.iter().zip(&objects) {
-            let flags = scene.mask(0, object);
+            let flags = labels.iter().map(|label| *label == Label::Object(object));
+            let flags: Vec<bool> = flags.collect();
             let surface = Surface::from_depth(&device, &image, &flags, Some(&mask), 0.005);
             let surface = surface.expect("a sound surface");
             assert_eq!(surface.points.len(), off_robot.len(), "{name}");

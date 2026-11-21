@@ -16,9 +16,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   numbers where there are any, and the obstacles the world is known to hold, and gives a scene:
   which pixels are one thing, a box, an upright cylinder or a box open at the top for each, what
   it stands on, and the same id for an object from one look to the next. An object's solids come
-  back as obstacles. It is built on the library, which does not depend on it, and a look runs on
-  the device's threads, the scene the same whatever their number. `miru/README.md` has what it
-  tells apart and where it stands.
+  back as obstacles. `Object::seen` and `Scene::mask` are gone: a caller reads both from the
+  labels, an object the look saw being named by some pixel's `Label::Object` and one kept unseen
+  by none, and an object's flags for `Surface::from_depth` being the pixels that name it. It is
+  built on the library, which does not depend on it, and a look runs on the device's threads,
+  the scene the same whatever their number. `miru/README.md` has what it tells apart and where it
+  stands.
 - `sdf::on_shapes(&device, &shapes, &points, &reach)` says which of a world's shapes each point
   lies on: per point, the shape nearest it and the distance to its surface, where that is no
   more than the point's reach, and none for a point marked with a negative reach. A camera's

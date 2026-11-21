@@ -43,10 +43,11 @@ fn main() -> Result<(), batchplan::Error> {
     let scene = miru::look(&device, &look, &Scene::default(), &LookOptions::default())?;
     // scene.objects: id, shape (a box, an upright cylinder, or a box open at the top with the
     // room a look saw in it), whether that shape stands for the thing or only names the room it
-    // takes up (solid), colour, what it stands on, and whether this look saw it
+    // takes up (solid), colour and what it stands on
     // shape.solids(): the boxes and cylinders a shape is made of, as obstacles
-    // scene.labels[view][pixel]: Nothing, Robot, Known(shape) or Object(index)
-    // scene.mask(view, object): the flags Surface::from_depth takes
+    // scene.labels[view][pixel]: Nothing, Robot, Known(shape) or Object(index): an object this
+    // look saw is named by some pixel, one kept unseen by none; the flags Surface::from_depth
+    // takes are scene.labels[view].iter().map(|l| *l == Label::Object(index)).collect()
     println!("{} objects", scene.objects.len());
     Ok(())
 }
@@ -56,10 +57,10 @@ The next look passes this scene as `previous`. An object that stayed where it wa
 and what the look cannot see stays as that scene had it. A view cannot see an object where its
 pixels are the robot's or have no reading, where they read something that stands before the
 object, and where the object lies outside its image. An object that none of the look's continues
-stays, its `seen` false, unless some view shows more of where it stood than is hidden from it:
-reads there what lies on it or past it. One seen in part keeps the shape it had, unless a view
-shows more of the rest than is hidden from it, or its readings lie outside that shape by a
-window's worth, as when it moved or grew: then it is measured afresh. A thing whose shape stood
+stays, in the scene with no label naming it, unless some view shows more of where it stood than
+is hidden from it: reads there what lies on it or past it. One seen in part keeps the shape it had,
+unless a view shows more of the rest than is hidden from it, or its readings lie outside that shape
+by a window's worth, as when it moved or grew: then it is measured afresh. A thing whose shape stood
 for it (`solid`) and that comes back in pieces with the robot's arm over it is one object still,
 with its id: each piece lies in the solid of the shape it had and, in some view, at the robot's
 pixels with the object that continues the thing, and no view reads more of where that shape
@@ -88,8 +89,9 @@ caller's or in batchplan's map of what the cameras read, never both. batchplan's
    `map.integrate(&device, &image, Some(&held))?`. `margin` is three times the view's `Noise`
    (`[3 * constant, 3 * linear, 3 * quadratic]`) and what the shapes and the camera's pose are
    off by.
-6. **Take grasps and rests on an object's own pixels**:
-   `Surface::from_depth(&device, &image, &scene.mask(view, object), Some(&robot), radius)`.
+6. **Take grasps and rests on an object's own pixels**: the view's labels that name it, as
+   flags (`scene.labels[view].iter().map(|label| *label == Label::Object(object)).collect()`),
+   go to `Surface::from_depth(&device, &image, &flags, Some(&robot), radius)`.
 
 Two things follow from step 5. What stands within the margin of a shape, or within about a
 voxel of it, is taken for the shape, so a shape larger than its thing takes in what stands
@@ -314,8 +316,8 @@ How that compares with Split before it asked a side's width, and what it leaves,
 stands".
 
 A model that needs prompts, points or boxes, takes two looks of one moment: look without masks,
-take a prompt from each object's pixels (`Scene::mask`), run the model, and look again with its
-masks, after the same `previous`.
+take a prompt from each object's pixels (those labelled `Label::Object` with its index), run the
+model, and look again with its masks, after the same `previous`.
 
 ## Where it stands
 
@@ -743,10 +745,10 @@ the run.
     wrongly; 37 are pieces of one thing, as the stove's body on its foot piece or a rack's and a
     cabinet's pieces, whose readings the pieces still hold between them. No reading that a shape
     held is left out of every shape, nothing stands over what holds it by more than the
-    tolerance, and the 400 label images, every object's id, `on` and `seen` in each first look,
-    the scorecards and `--offsets` are as they were, but for 4 objects that become solid: the
-    ramekin under the bowl in three looks with the truth as masks on stereo depth, and a can's
-    top piece on `rows4-stereo-filtered`. Parting takes 0.25 ms of a look at the median on
+    tolerance, and the 400 label images, every object's id and `on` and whether it was seen in
+    each first look, the scorecards and `--offsets` are as they were, but for 4 objects that become
+    solid: the ramekin under the bowl in three looks with the truth as masks on stereo depth, and a
+    can's top piece on `rows4-stereo-filtered`. Parting takes 0.25 ms of a look at the median on
     `rows4` and 0.67 ms on `rows4-stereo`, 4.7 ms at most, on one thread, under 1% of a look;
     alternated with the code before, a look took 0.3% longer on `rows4` and 1.8% on
     `rows4-stereo` over five rounds at a load of 4, and as long and 0.3% longer over four at a

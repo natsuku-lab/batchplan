@@ -165,10 +165,10 @@ impl Default for LookOptions {
 /// What the look cannot see stays as `previous` had it. A view cannot see an object where its
 /// pixels are the robot's or have no reading, where what they read stands before the object, and
 /// where the object lies outside its image. An object of `previous` that none continues stays,
-/// unseen ([`Object::seen`]), unless some view shows more of where it stood than is hidden from
-/// it; and one that is seen in part keeps its shape, unless a view shows more of the rest than is
-/// hidden from it, or its readings lie outside that shape. So a look with no views gives the
-/// objects of `previous`, none seen.
+/// unseen (in the scene, and no label names it), unless some view shows more of where it stood
+/// than is hidden from it; and one that is seen in part keeps its shape, unless a view shows more
+/// of the rest than is hidden from it, or its readings lie outside that shape. So a look with no
+/// views gives the objects of `previous`, none seen.
 ///
 /// Readings are told apart by geometry: where the depth jumps, and where two surfaces meet in a
 /// concave crease, as things that touch or stand on one another do. One convex thing is one
@@ -454,7 +454,6 @@ fn checked(
                     }) && readings.solid(&shapes[k]))),
             color: readings.color(),
             on: stood[k].1,
-            seen: true,
         })
         .collect();
     // Where an object of `previous` is in this scene, if it is.
@@ -470,7 +469,6 @@ fn checked(
                 Some(Support::Object(under)) => now(under).map(Support::Object),
                 on => on,
             },
-            seen: false,
             ..object.clone()
         }
     }));
