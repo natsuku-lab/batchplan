@@ -450,11 +450,15 @@ fn room(center: Vec3, half: Vec2, rotation: Quat, readings: &[Reading]) -> Optio
     // on a wall.
     let up = (own.iter()).filter(|(_, normal, r)| r.floor && normal.z > 0.5);
     let top = window(up.map(|&(point, _, r)| (point.z, r.share)))?;
+    // Per axis, how far the floor reaches toward it and how far back: each asked once.
+    let mut spans = [(0.0, 0.0); 2];
+    for (axis, span) in spans.iter_mut().enumerate() {
+        let out = Vec3::AXES[axis];
+        *span = (reach(out)?, -reach(-out)?);
+    }
     let (mut lower, mut upper) = (Vec2::ZERO, Vec2::ZERO);
     for axis in 0..2 {
-        let (out, across) = (Vec3::AXES[axis], Vec3::AXES[1 - axis]);
-        let (high, low) = (reach(out)?, -reach(-out)?);
-        let (wide, narrow) = (reach(across)?, -reach(-across)?);
+        let ((high, low), (wide, narrow)) = (spans[axis], spans[1 - axis]);
         for sign in [-1.0, 1.0] {
             let faces = own.iter().filter(|&&(point, normal, r)| {
                 !r.floor
@@ -483,7 +487,8 @@ fn room(center: Vec3, half: Vec2, rotation: Quat, readings: &[Reading]) -> Optio
                     }
                     -sign * near
                 }
-                None => sign * reach(sign * out)?,
+                None if sign < 0.0 => low,
+                None => high,
             };
             let face = face.clamp(-half[axis], half[axis]);
             if sign < 0.0 {
