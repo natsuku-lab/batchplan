@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use batchplan::{
     DepthFilter, DepthImage, Device, GraspOptions, Held, IkOptions, Intrinsics, Obstacle,
-    Occlusion, OccupancyMap, Pose, RobotMask, SdfOptions, Surface, Weighing, World,
+    Occlusion, OccupancyMap, Pose, Robot, RobotMask, SdfOptions, Surface, Weighing, World,
 };
 use glam::Vec3;
 
@@ -424,9 +424,12 @@ impl Memory {
     ///    ([`Shape::solids`](crate::Shape::solids)); one that is not the room it takes up, its
     ///    shape's box or cylinder, unless the step goes into it: it is named in `into`, or that
     ///    room holds some of the robot's spheres at a configuration of `at`, or of the hand's
-    ///    placed by a pose of `reach`. Then it is its part of the map as the cameras saw into
-    ///    it, never-seen space solid (`OccupancyMap::part`, gridded `Occlusion::Occupied`), or
-    ///    the room it takes up where nothing in that part is solid.
+    ///    placed by a pose of `reach` (`Robot::hand_spheres`), the robot holding what the
+    ///    memory's hands hold: each hold's fingers relocked where it locks them and its thing
+    ///    attached (`Held::attachment`), so that a thing carried into a room takes the step into
+    ///    it. Then it is its part of the map as the cameras saw into it, never-seen space solid
+    ///    (`OccupancyMap::part`, gridded `Occlusion::Occupied`), or the room it takes up where
+    ///    nothing in that part is solid.
     /// 3. What the map holds outside every room an object takes up, as one grid with never-seen
     ///    space free, where it holds anything there.
     ///
@@ -459,10 +462,15 @@ impl Memory {
                 robot.hands()
             );
         }
-        // The robot's spheres where the step takes it.
-        let mut spheres: Vec<[f32; 4]> = step.at.iter().flat_map(|q| robot.spheres(q)).collect();
+        // The robot's spheres where the step takes it, holding what the hands hold.
+        let holding = match step.at.is_empty() && step.reach.is_empty() {
+            true => Cow::Borrowed(robot),
+            false => device.install(|| self.holding(robot))?,
+        };
+        let mut spheres: Vec<[f32; 4]> =
+            (step.at.iter()).flat_map(|q| holding.spheres(q)).collect();
         for &(hand, pose) in step.reach {
-            let placed = (robot.hand_spheres(hand).into_iter()).map(|sphere| {
+            let placed = (holding.hand_spheres(hand).into_iter()).map(|sphere| {
                 let center = pose.position + pose.rotation * sphere.center;
                 [center.x, center.y, center.z, sphere.radius]
             });
@@ -506,6 +514,20 @@ impl Memory {
             world: World::new(obstacles),
             of,
         })
+    }
+
+    /// `robot` holding what the memory's hands hold: each hold's fingers relocked where it locks
+    /// them and its thing attached to its hand.
+    fn holding<'a>(&self, robot: &'a Robot) -> Result<Cow<'a, Robot>> {
+        let mut holding = Cow::Borrowed(robot);
+        for held in self.hands.iter().flatten().map(|holding| &holding.held) {
+            if !held.locked.is_empty() {
+                holding = Cow::Owned(holding.relock(&held.locked)?);
+            }
+            let attachment = held.attachment(&holding)?;
+            holding = Cow::Owned(holding.attach(&attachment)?);
+        }
+        Ok(holding)
     }
 
     /// The map in `cover` as the cameras saw into it, gridded with never-seen space solid: solid

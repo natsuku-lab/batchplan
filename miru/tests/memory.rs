@@ -12,7 +12,8 @@ mod common;
 use std::collections::HashMap;
 
 use batchplan::{
-    DepthFilter, DepthImage, Device, Held, Obstacle, Pose, Robot, RobotMask, SphereOptions,
+    DepthFilter, DepthImage, Device, Held, IkOptions, IkProblem, Obstacle, Pose, Robot, RobotMask,
+    SphereOptions, World,
 };
 use common::{
     CAMERAS, EYE, Frame, MIDDLE, NEAR, Stereo, Thing, arm, block, bowl, can, devices, known,
@@ -1650,4 +1651,222 @@ fn a_stance_that_is_no_number_is_refused() {
         panic!("a stance that is no number is taken: {refused:?}");
     };
     assert!(why.contains("NaN"), "{why}");
+}
+
+/// The height of the top of `room`, a box or an upright cylinder.
+fn top_of(room: &Obstacle) -> f32 {
+    match *room {
+        Obstacle::Cylinder {
+            center,
+            half_height,
+            ..
+        } => center.z + half_height,
+        Obstacle::Cuboid {
+            center,
+            half_extents,
+            ..
+        } => center.z + half_extents.z,
+        _ => panic!("a room these tests do not know: {room:?}"),
+    }
+}
+
+/// Whether some of `spheres`, as `[x, y, z, radius]`, lies in `room`.
+fn in_room(spheres: &[[f32; 4]], room: &Obstacle) -> bool {
+    let holds = |&[x, y, z, radius]: &[f32; 4]| room.distance(Vec3::new(x, y, z)).value < radius;
+    spheres.iter().any(holds)
+}
+
+/// The box picked and held over the wide bowl, the hand 5 mm clear of the bowl's room and the box
+/// in it: a step that takes the hand there goes into the bowl, the bowl its part of the map,
+/// whether the step reaches that pose or passes a configuration that puts the hand there.
+#[test]
+fn a_held_thing_carried_into_a_room_takes_the_step_into_it() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let the_box = Vec3::new(0.45, -0.3, 0.03);
+    let things = vec![
+        table(),
+        wide_bowl(MIDDLE),
+        block(the_box, BOX_HALF, [200, 30, 30]),
+        arm(&robot, away),
+    ];
+    let rendered = render(&things);
+    let down = robot.ee_pose(&IN_BOWL, 0).rotation;
+    let worlds = device.upload(&[World::default()]).expect("an empty world");
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seen = first_look(&device, &things, &rendered, (c, 10 * c as u64), away, 0.0);
+        let ids = [1, 2].map(|thing| id_of(seen.kept.scene(), &rendered, thing));
+        let [Some(bowl), Some(boxed)] = ids else {
+            found.push((
+                *camera,
+                Err("no object holds the bowl or the box".to_string()),
+            ));
+            continue;
+        };
+        let object = seen
+            .memory
+            .objects()
+            .iter()
+            .find(|o| o.id == bowl)
+            .expect("the bowl");
+        let room = cover(&object.shape);
+        let held = grasped(&seen.memory, boxed);
+        let picked = (seen.memory)
+            .after(&[Act::Picked {
+                id: boxed,
+                held: held.clone(),
+            }])
+            .expect("a pick");
+        let over = top_of(&room) + robot.tip(0).max(0.0) + 0.005;
+        let pose = Pose::new(Vec3::new(0.5, 0.0, over), down);
+        let hand: Vec<[f32; 4]> = (robot.hand_spheres(0).into_iter())
+            .map(|sphere| {
+                let center = pose.position + pose.rotation * sphere.center;
+                [center.x, center.y, center.z, sphere.radius]
+            })
+            .collect();
+        let carried = pose.mul_pose(held.grasp.inverse()).position;
+        assert!(
+            !in_room(&hand, &room) && room.distance(carried).value < 0.0,
+            "{camera}: the hand is clear of the bowl's room and the box in it"
+        );
+        let problem = IkProblem {
+            seed: Some(IN_BOWL.to_vec()),
+            ..IkProblem::new(0, pose)
+        };
+        let ik = IkOptions {
+            seeds: 1,
+            ..IkOptions::default()
+        };
+        let solved = batchplan::solve_ik(&device, &worlds, &[problem], &ik).expect("an IK call");
+        let q = solved
+            .solved()
+            .next()
+            .expect("the hand there")
+            .solution
+            .to_vec();
+        assert!(
+            !in_room(&robot.spheres(&q), &room),
+            "{camera}: the arm is clear of the room"
+        );
+        // What the bowl is for `step`.
+        let of = |step: &Step<'_>| {
+            let planned = picked.world(&device, step).expect("a world");
+            let mut of = planned.of.iter().copied();
+            of.find(|of| matches!(of, Of::Object(o) | Of::Region(o) if *o == bowl))
+        };
+        let mut wrong = vec![];
+        let reaching = Step {
+            reach: &[(0, pose)],
+            ..Step::default()
+        };
+        if of(&reaching) != Some(Of::Region(bowl)) {
+            wrong.push(format!("reaching there, the bowl is {:?}", of(&reaching)));
+        }
+        let passing = Step {
+            at: &[&q],
+            ..Step::default()
+        };
+        if of(&passing) != Some(Of::Region(bowl)) {
+            wrong.push(format!("passing there, the bowl is {:?}", of(&passing)));
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict(
+        "a_held_thing_carried_into_a_room_takes_the_step_into_it",
+        &found,
+    );
+}
+
+/// A hold whose fingers closed on a cube 1 cm across, the hand pointing down beside the wide bowl,
+/// its fingertips 1.5 cm under the top of the bowl's room and its frame 4 cm outside it, the
+/// fingers opening toward it: open, a fingertip would be in the room; closed, as the hold locks
+/// them, none is, the palm is over it and the cube outside, and a step that reaches there does not
+/// go into the bowl.
+#[test]
+fn a_hold_keeps_its_fingers_where_it_closed_them() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let the_box = Vec3::new(0.45, -0.3, 0.03);
+    let things = vec![
+        table(),
+        wide_bowl(MIDDLE),
+        block(the_box, BOX_HALF, [200, 30, 30]),
+        arm(&robot, away),
+    ];
+    let rendered = render(&things);
+    let down = robot.ee_pose(&IN_BOWL, 0).rotation;
+    let toward = (down * Vec3::Y).with_z(0.0).normalize();
+    let closed = HashMap::from([
+        ("panda_finger_joint1".to_string(), 0.0),
+        ("panda_finger_joint2".to_string(), 0.0),
+    ]);
+    let placed = |robot: &Robot, pose: Pose| -> Vec<[f32; 4]> {
+        (robot.hand_spheres(0).into_iter())
+            .map(|sphere| {
+                let center = pose.position + pose.rotation * sphere.center;
+                [center.x, center.y, center.z, sphere.radius]
+            })
+            .collect()
+    };
+    let closed_robot = robot.relock(&closed).expect("the fingers closed");
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seen = first_look(&device, &things, &rendered, (c, 10 * c as u64), away, 0.0);
+        let ids = [1, 2].map(|thing| id_of(seen.kept.scene(), &rendered, thing));
+        let [Some(bowl), Some(boxed)] = ids else {
+            found.push((
+                *camera,
+                Err("no object holds the bowl or the box".to_string()),
+            ));
+            continue;
+        };
+        let object = seen
+            .memory
+            .objects()
+            .iter()
+            .find(|o| o.id == bowl)
+            .expect("the bowl");
+        let room = cover(&object.shape);
+        let Obstacle::Cylinder { center, radius, .. } = room else {
+            found.push((*camera, Err(format!("the bowl's room is {room:?}"))));
+            continue;
+        };
+        let at = center.with_z(top_of(&room) - 0.015) - toward * (radius + 0.04);
+        let pose = Pose::new(at, down);
+        let held = Held {
+            hand: 0,
+            object: Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.005)),
+            grasp: Pose::IDENTITY,
+            locked: closed.clone(),
+            spheres: SphereOptions::default(),
+        };
+        assert!(
+            in_room(&placed(&robot, pose), &room)
+                && !in_room(&placed(&closed_robot, pose), &room)
+                && room.distance(pose.position).value > 0.005,
+            "{camera}: open, a finger is in the room; closed, none is, and the cube is outside"
+        );
+        let picked = (seen.memory)
+            .after(&[Act::Picked { id: boxed, held }])
+            .expect("a pick");
+        let step = Step {
+            reach: &[(0, pose)],
+            ..Step::default()
+        };
+        let planned = picked.world(&device, &step).expect("a world");
+        let mut of = planned.of.iter().copied();
+        let of = of.find(|of| matches!(of, Of::Object(o) | Of::Region(o) if *o == bowl));
+        let wrong = match of {
+            Some(Of::Object(_)) => vec![],
+            other => vec![format!(
+                "the hand's closed fingers beside it make the bowl {other:?}"
+            )],
+        };
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("a_hold_keeps_its_fingers_where_it_closed_them", &found);
 }
