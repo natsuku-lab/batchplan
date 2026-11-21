@@ -16,9 +16,16 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   numbers where there are any, and the obstacles the world is known to hold, and gives a scene:
   which pixels are one thing, a box, an upright cylinder or a box open at the top for each, what
   it stands on, and the same id for an object from one look to the next. An object's solids come
-  back as obstacles. It is built on the library, which does not depend on it, and a look runs on
-  the device's threads, the scene the same whatever their number. `miru/README.md` has what it
-  tells apart and where it stands.
+  back as obstacles, and its labels say the rest: an object the look saw is named by some
+  pixel's `Label::Object`, one kept from the scene before that no view could see by none, and
+  the pixels that name it are its flags for `Surface::from_depth`. It is built on the library,
+  which does not depend on it, and a look runs on the device's threads, the scene the same
+  whatever their number: of two 640×480 views among a cell's 17 fixtures, 41 ms at the median
+  on the M4 Pro's 14 threads and 77 on one (`cargo run --release -p miru --example score --
+  <set> --again --digest --threads <n>` on a set of recorded looks, the best of three rounds).
+  `miru/README.md` has what it tells apart and where it stands, and `miru/tests/truth.rs` holds
+  it to scenes built from known things, read through the simulator's exact depth and two stereo
+  cameras modelled from their datasheets.
 - `sdf::on_shapes(&device, &shapes, &points, &reach)` says which of a world's shapes each point
   lies on: per point, the shape nearest it and the distance to its surface, where that is no
   more than the point's reach, and none for a point marked with a negative reach. A camera's
@@ -26,11 +33,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   as its camera's noise allows at its depth. The points are taken a run at a time on the device's
   threads, each shape's rotation turned into its matrix once and a shape measured only against
   the runs that come within reach of its box. `miru` holds every reading of a look against its
-  known shapes with it: a look of two 640×480 views among a cell's 17 fixtures takes 78 ms on
-  one thread of the M4 Pro where asking each shape's distance at each reading took 139, and 43
-  on its 14 threads where that took 50, the scenes the same to the bit
-  (`cargo run --release -p miru --example score -- <set> --again --digest --threads <n>` on a set
-  of recorded looks, the median look of the best of three alternated rounds).
+  known shapes with it: asking each shape's distance at each reading took a look of two 640×480
+  views among 17 fixtures 1.8 times as long on one thread of the M4 Pro and 1.2 times on its 14,
+  the scenes the same to the bit.
 - `Device::install(op)` runs `op` on the device's threads, so that rayon's parallel loops inside
   it run there and not on the global pool: how a crate built on the library, as `miru` is, keeps
   its work on the threads the device was given.

@@ -12,20 +12,19 @@
 //! Where a view has masks, those of a model that sees what the renderer does, they join what
 //! the depth shows no connection between and divide what it shows as one surface.
 
+#[allow(dead_code, reason = "each test file uses part of it")]
 mod common;
 
 use std::collections::BTreeMap;
 
 use batchplan::{Error, Obstacle};
 use common::{
-    Frame, Thing, ball, block, bowl, can, cup, device, device_of, known, known_as_grid, looking,
-    ring, table, turned, without,
+    EYE, Frame, MIDDLE, Thing, a_box, ball, block, bowl, can, cup, device, device_of, known,
+    known_as_grid, looking, ring, sizes, standing_bowl, table, thin_tray, tray_with_block, turned,
+    without,
 };
 use glam::{Quat, Vec2, Vec3};
 use miru::{Label, Look, LookOptions, Noise, Object, Scene, Shape, Support};
-
-/// Where the tests' camera stands: before the table, looking down on it at about 40 degrees.
-const EYE: Vec3 = Vec3::new(1.1, 0.0, 0.5);
 
 /// The frame the tests' camera reads of the table (thing 0) with `things` on it.
 fn frame_of(things: Vec<Thing>) -> Frame {
@@ -99,6 +98,12 @@ fn looked(look: &Look<'_>, previous: &Scene, options: &LookOptions) -> Scene {
         }
     }
     scene
+}
+
+/// Whether the look that gave `scene` saw its object `object`: some label names it. One kept
+/// from the scene before that no view could see is named by none.
+fn saw(scene: &Scene, object: usize) -> bool {
+    (scene.labels.iter().flatten()).any(|label| *label == Label::Object(object))
 }
 
 /// The object that holds most of the pixels showing thing `thing`, and the share of them it
@@ -178,30 +183,6 @@ fn low(frame: &Frame, thing: usize) -> usize {
     low.count()
 }
 
-/// The half sizes of a box seen from above (the lesser first) or twice a cylinder's radius, and
-/// the shape's middle and half height.
-fn sizes(shape: &Shape) -> ([f32; 2], Vec3, f32) {
-    match *shape {
-        Shape::Cuboid {
-            center,
-            half_extents: half,
-            ..
-        }
-        | Shape::OpenBox {
-            center,
-            half_extents: half,
-            ..
-        } => ([half.x.min(half.y), half.x.max(half.y)], center, half.z),
-        Shape::Cylinder {
-            center,
-            radius,
-            half_height,
-            ..
-        } => ([radius, radius], center, half_height),
-        _ => panic!("a shape these tests do not know: {shape:?}"),
-    }
-}
-
 #[test]
 fn a_box_on_a_known_table_is_one_object_with_its_shape_and_colour() {
     let frame = frame_of(vec![block(
@@ -255,9 +236,10 @@ fn a_box_on_a_known_table_is_one_object_with_its_shape_and_colour() {
     assert_eq!(box_.on, Some(Support::Known(0)));
     assert_eq!(box_.color, Some([200, 30, 30]));
     // Its mask is its pixels, as `Surface::from_depth` takes them.
-    let mask = scene.mask(0, object);
-    let labelled = scene.labels[0].iter().map(|l| *l == Label::Object(object));
-    assert!(mask.iter().copied().eq(labelled) && mask.iter().any(|&m| m));
+    let mask: Vec<bool> = (scene.labels[0].iter())
+        .map(|label| *label == Label::Object(object))
+        .collect();
+    assert!(mask.iter().any(|&m| m));
 }
 
 #[test]
@@ -739,7 +721,7 @@ fn a_block_half_under_the_robot_keeps_its_shape_and_its_id() {
         let (was, is) = (&before.objects[0], &after.objects[0]);
         assert_eq!(is.id, was.id);
         assert_eq!(is.shape, was.shape, "with {left} of it in view");
-        assert!(is.seen);
+        assert!(saw(&after, 0));
         assert_eq!(is.on, Some(Support::Known(0)));
         let (_, share) = object_of(&after, &under, 1);
         assert!(share > 0.95, "the object holds {share} of the pixels left");
@@ -798,7 +780,7 @@ fn a_tray_keeps_its_shape_seen_from_inside_it() {
     let after = seen(&[&inside], &before);
     assert_eq!(after.objects.len(), 1, "{:?}", after.objects);
     let (was, is) = (&before.objects[0], &after.objects[0]);
-    assert_eq!((is.id, is.shape, is.seen), (was.id, was.shape, true));
+    assert_eq!((is.id, is.shape, saw(&after, 0)), (was.id, was.shape, true));
 }
 
 #[test]
@@ -835,10 +817,9 @@ fn what_is_wholly_under_the_robot_stays_unseen_as_it_was() {
     };
     // The block is seen, and comes before the two that are not.
     assert_eq!(now(beside), 0);
-    assert!(after.objects[0].seen);
+    assert!(saw(&after, 0));
     for was in [under, over] {
         let is = &after.objects[now(was)];
-        assert!(!is.seen, "{is:?}");
         assert_eq!((is.shape, is.color), (was.shape, was.color));
         let named = after.labels[0].contains(&Label::Object(now(was)));
         assert!(!named, "a pixel shows object {}, which no view saw", was.id);
@@ -853,8 +834,12 @@ fn what_is_wholly_under_the_robot_stays_unseen_as_it_was() {
     let again = seen(&[&open], &after);
     assert_eq!(again.objects.len(), 3, "{:?}", again.objects);
     for (thing, was) in [under, over, beside].into_iter().enumerate() {
-        let is = &again.objects[object_of(&again, &open, thing + 1).0];
-        assert!(is.seen && is.id == was.id, "{was:?} is now {is:?}");
+        let (object, _) = object_of(&again, &open, thing + 1);
+        let is = &again.objects[object];
+        assert!(
+            saw(&again, object) && is.id == was.id,
+            "{was:?} is now {is:?}"
+        );
     }
 }
 
@@ -882,7 +867,7 @@ fn a_block_whose_pixels_are_the_robots_or_read_nothing_stays() {
         let after = seen(&[&frame], &before);
         assert_eq!(after.objects.len(), 1, "{how}: {:?}", after.objects);
         let (was, is) = (&before.objects[0], &after.objects[0]);
-        assert!(!is.seen, "{how}: {is:?}");
+        assert!(!saw(&after, 0), "{how}: {is:?}");
         assert_eq!((is.id, is.shape), (was.id, was.shape), "{how}");
     }
 }
@@ -910,7 +895,7 @@ fn what_the_views_see_through_is_gone() {
     assert_eq!(after.objects.len(), 1, "{:?}", after.objects);
     let stayed = &before.objects[object_of(&before, &both, 1).0];
     assert_eq!(after.objects[0].id, stayed.id);
-    assert!(after.objects[0].seen);
+    assert!(saw(&after, 0));
     // One view that shows the place is enough, whatever another cannot see: here a second
     // camera, pointed away from it.
     let scene: Vec<Thing> = std::iter::once(table()).chain([stays()]).collect();
@@ -936,7 +921,7 @@ fn a_block_that_becomes_part_of_a_larger_thing_is_not_kept_beside_it() {
     let hidden = frame_under(vec![small()], arm(-0.3, 0.3));
     let under = seen(&[&hidden], &before);
     assert_eq!(under.objects.len(), 1, "{:?}", under.objects);
-    assert!(!under.objects[0].seen);
+    assert!(!saw(&under, 0));
     // The arm gone, a block twice as long lies against it, as high and as deep: the two read
     // as one thing, most of which is not where the small block stood. The views read on the
     // small block all the same, so it is seen, and is not kept beside what it is now part of.
@@ -948,7 +933,7 @@ fn a_block_that_becomes_part_of_a_larger_thing_is_not_kept_beside_it() {
     let joined = frame_of(vec![small(), long]);
     let after = seen(&[&joined], &under);
     assert_eq!(after.objects.len(), 1, "{:?}", after.objects);
-    assert!(after.objects[0].seen && after.objects[0].id != before.objects[0].id);
+    assert!(saw(&after, 0) && after.objects[0].id != before.objects[0].id);
 }
 
 /// A drawer pulled out of a cabinet that stands beside it, seen from above and before: things 1
@@ -1124,15 +1109,18 @@ fn a_block_the_camera_no_longer_points_at_stays() {
     let (block, _) = object_of(&part, &cut, 1);
     assert_eq!(part.objects[block].id, before.objects[0].id);
     assert_eq!(part.objects[block].shape, before.objects[0].shape);
-    assert!(part.objects[block].seen);
+    assert!(saw(&part, block));
     // It turns to the can: the block is in no image, and stays.
     let away = toward(0.3);
     assert_eq!(pixels(&away, 1), 0);
     let after = seen(&[&away], &part);
     assert_eq!(after.objects.len(), 2, "{:?}", after.objects);
     let (came, stayed) = (&after.objects[0], &after.objects[1]);
-    assert!(came.seen && came.id != before.objects[0].id, "{came:?}");
-    assert!(!stayed.seen, "{stayed:?}");
+    assert!(
+        saw(&after, 0) && came.id != before.objects[0].id,
+        "{came:?}"
+    );
+    assert!(!saw(&after, 1), "{stayed:?}");
     assert_eq!(
         (stayed.id, stayed.shape, stayed.color, stayed.on),
         (
@@ -1167,8 +1155,11 @@ fn a_block_that_another_comes_to_stand_before_stays_unseen() {
     let after = seen(&[&both], &before);
     assert_eq!(after.objects.len(), 2, "{:?}", after.objects);
     let (came, stayed) = (&after.objects[0], &after.objects[1]);
-    assert!(came.seen && came.id != before.objects[0].id, "{came:?}");
-    assert!(!stayed.seen, "{stayed:?}");
+    assert!(
+        saw(&after, 0) && came.id != before.objects[0].id,
+        "{came:?}"
+    );
+    assert!(!saw(&after, 1), "{stayed:?}");
     assert_eq!(
         (stayed.id, stayed.shape),
         (before.objects[0].id, before.objects[0].shape)
@@ -1196,7 +1187,10 @@ fn a_thing_put_on_one_it_hides_stands_on_it() {
     let after = seen(&[&both], &before);
     assert_eq!(after.objects.len(), 2, "{:?}", after.objects);
     let (over, under) = (&after.objects[0], &after.objects[1]);
-    assert!(!under.seen && under.id == before.objects[0].id, "{under:?}");
+    assert!(
+        !saw(&after, 1) && under.id == before.objects[0].id,
+        "{under:?}"
+    );
     // The can stands on the block no view saw, and reaches down to its top and no farther.
     assert_eq!(over.on, Some(Support::Object(1)));
     let (_, center, half_height) = sizes(&over.shape);
@@ -1286,9 +1280,12 @@ fn a_block_in_a_tray_that_reads_nothing_stands_in_the_tray() {
     let after = seen(&[&unread], &before);
     assert_eq!(after.objects.len(), 2, "{:?}", after.objects);
     let (is, around) = (&after.objects[0], &after.objects[1]);
-    assert!(is.seen && is.id == before.objects[inside].id, "{is:?}");
     assert!(
-        !around.seen && around.id == before.objects[walls].id,
+        saw(&after, 0) && is.id == before.objects[inside].id,
+        "{is:?}"
+    );
+    assert!(
+        !saw(&after, 1) && around.id == before.objects[walls].id,
         "{around:?}"
     );
     assert_eq!(is.on, Some(Support::Object(1)));
@@ -1384,7 +1381,7 @@ fn a_mask_makes_one_object_of_a_block_the_robot_crosses() {
     let after = seen(&[&crossed], &before);
     assert_eq!(after.objects.len(), 1, "{:?}", after.objects);
     let (was, is) = (&before.objects[0], &after.objects[0]);
-    assert_eq!((is.id, is.shape, is.seen), (was.id, was.shape, true));
+    assert_eq!((is.id, is.shape, saw(&after, 0)), (was.id, was.shape, true));
 }
 
 #[test]
@@ -1400,11 +1397,7 @@ fn a_look_with_no_views_gives_the_scene_before_with_nothing_seen() {
     let before = seen(&[&frame], &Scene::default());
     assert_eq!(before.objects.len(), 2, "{:?}", before.objects);
     let after = seen(&[], &before);
-    let mut unseen = before.objects.clone();
-    for object in &mut unseen {
-        object.seen = false;
-    }
-    assert_eq!(after.objects, unseen);
+    assert_eq!(after.objects, before.objects);
     assert!(after.labels.is_empty());
     assert_eq!(after.next_id, before.next_id);
     // And the first look of all may have none.
@@ -1780,20 +1773,12 @@ fn a_depth_no_camera_reads_changes_nothing_else() {
     }
 }
 
-/// A bowl with a wall 4 mm through: round about one axis, its rim too thin to show.
-fn standing_bowl(foot: Vec3) -> Thing {
-    bowl(foot, 0.03, 0.056, 0.05, 0.004, [40, 40, 40])
-}
-
 /// The same bowl with a wall 8 mm through. To the tests' camera its rim shows as a strip of its
 /// own between its outside and its inside, too thin for a plane, which only hanging over the
 /// hollow makes one with the rest (`a_thick_walled_bowl_is_one_object`).
 fn thick_bowl(foot: Vec3) -> Thing {
     bowl(foot, 0.03, 0.056, 0.05, 0.008, [40, 40, 40])
 }
-
-/// The middle of the table, where the tests' bowls stand.
-const MIDDLE: Vec3 = Vec3::new(0.5, 0.0, 0.0);
 
 /// The noise of a real camera: 2.8 mm at 1 m, growing with the square of the depth, as the
 /// recorded sets' table camera states.
@@ -2790,8 +2775,8 @@ fn what_stands_in_a_shelf_does_not_hold_it_up_when_its_top_hides_it() {
             let same = after.objects.iter().position(|object| object.id == id);
             same.unwrap_or_else(|| panic!("object {id} is gone: {:?}", after.objects))
         };
-        assert!(after.objects[now(boards)].seen);
-        assert!(!after.objects[now(walls)].seen && !after.objects[now(inside)].seen);
+        assert!(saw(after, now(boards)));
+        assert!(!saw(after, now(walls)) && !saw(after, now(inside)));
         assert_eq!(after.objects[now(boards)].on, Some(Support::Known(0)));
         assert_eq!(
             after.objects[now(walls)].on,
@@ -2870,29 +2855,6 @@ fn a_plate_keeps_the_floor_that_reads_on_the_table() {
     assert_eq!(scene.objects[0].on, Some(Support::Known(0)));
 }
 
-/// The box of the tests' first scene.
-fn a_box() -> Thing {
-    block(
-        Vec3::new(0.5, 0.0, 0.03),
-        Vec3::new(0.04, 0.06, 0.03),
-        [200, 30, 30],
-    )
-}
-
-/// A tray standing in the middle of the table, 24 cm square and 6 cm tall, with walls and a
-/// floor 1 cm through.
-fn thin_tray() -> Vec<Thing> {
-    let board = |at: Vec3, half: Vec3| block(at, half, [150, 110, 60]);
-    let (wall, up) = (0.115, 0.03);
-    vec![
-        board(Vec3::new(0.5, 0.0, 0.005), Vec3::new(0.11, 0.11, 0.005)),
-        board(Vec3::new(0.5 - wall, 0.0, up), Vec3::new(0.005, 0.12, up)),
-        board(Vec3::new(0.5 + wall, 0.0, up), Vec3::new(0.005, 0.12, up)),
-        board(Vec3::new(0.5, -wall, up), Vec3::new(0.12, 0.005, up)),
-        board(Vec3::new(0.5, wall, up), Vec3::new(0.12, 0.005, up)),
-    ]
-}
-
 #[test]
 fn a_box_a_can_and_a_tray_are_solid_and_a_bowl_is_not() {
     // A box's readings and a can's lie on the faces of their shapes. Most of a bowl's lie inside
@@ -2949,9 +2911,13 @@ fn an_object_no_view_sees_stays_solid_or_not_as_it_was() {
     let after = seen(&[&hidden], &before);
     assert_eq!(after.objects.len(), 2, "{:?}", after.objects);
     for was in [boxed, round] {
-        let is = (after.objects.iter()).find(|object| object.id == was.id);
-        let is = is.unwrap_or_else(|| panic!("object {} is gone: {:?}", was.id, after.objects));
-        assert!(!is.seen && is.solid == was.solid, "{was:?} is now {is:?}");
+        let now = (after.objects.iter()).position(|object| object.id == was.id);
+        let now = now.unwrap_or_else(|| panic!("object {} is gone: {:?}", was.id, after.objects));
+        let is = &after.objects[now];
+        assert!(
+            !saw(&after, now) && is.solid == was.solid,
+            "{was:?} is now {is:?}"
+        );
     }
 }
 
@@ -2973,7 +2939,7 @@ fn a_thing_once_seen_hollow_stays_not_solid_while_its_inside_is_hidden() {
     assert_eq!(after.objects.len(), 1, "{:?}", after.objects);
     let (was, is) = (&open.objects[0], &after.objects[0]);
     assert!(
-        is.seen && is.id == was.id && !is.solid,
+        saw(&after, 0) && is.id == was.id && !is.solid,
         "{was:?} is now {is:?}"
     );
 }
@@ -5156,17 +5122,6 @@ fn a_box_that_comes_back_as_two_ends_with_most_of_it_gone_is_two() {
     assert_eq!(after.objects.len(), 2, "{:?}", after.objects);
     let kept = (after.objects.iter()).filter(|object| object.id == before.objects[0].id);
     assert_eq!(kept.count(), 1, "{:?}", after.objects);
-}
-
-/// The thin tray with a block set down behind its near wall at `x`, on its floor.
-fn tray_with_block(x: f32) -> Vec<Thing> {
-    let mut things = thin_tray();
-    things.push(block(
-        Vec3::new(x, 0.0, 0.025),
-        Vec3::new(0.02, 0.02, 0.015),
-        [30, 30, 200],
-    ));
-    things
 }
 
 #[test]

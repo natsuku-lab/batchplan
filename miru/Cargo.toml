@@ -13,6 +13,11 @@ batchplan = { path = "..", default-features = false }
 glam = { workspace = true }
 rayon = "1"
 
+[features]
+# A look on batchplan's GPU device as well, in `tests/batchplan.rs`: miru itself runs on any
+# device's threads and needs nothing of the GPU's.
+gpu = ["batchplan/gpu"]
+
 [lints]
 workspace = true
 

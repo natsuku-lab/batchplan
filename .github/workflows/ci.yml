@@ -29,6 +29,7 @@ jobs:
       - run: cargo doc --no-deps --features lerobot,usd
       # `miru`, the workspace's other crate: what depth cameras show, as objects.
       - run: cargo clippy -p miru --all-targets
+      - run: cargo clippy -p miru --all-targets --features gpu
       - run: cargo doc --no-deps -p miru
 
   # The Rerun demos, a crate of their own.
@@ -85,8 +86,10 @@ jobs:
           BATCHPLAN_REQUIRE_GPU: 1
       - run: cargo test --release --no-default-features --no-fail-fast
         if: ${{ !cancelled() }}
-      - run: cargo test --release -p miru --no-fail-fast
+      - run: cargo test --release -p miru --features gpu --no-fail-fast
         if: ${{ !cancelled() }}
+        env:
+          BATCHPLAN_REQUIRE_GPU: 1
 
   # Robot computers without a usable GPU: the CPU-only build.
   aarch64:

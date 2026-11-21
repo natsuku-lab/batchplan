@@ -20,6 +20,7 @@ cargo clippy --all-targets --features lerobot,usd
 cargo clippy --all-targets --no-default-features
 cargo doc --no-deps --features lerobot,usd
 cargo clippy -p miru --all-targets
+cargo clippy -p miru --all-targets --features gpu
 cargo doc --no-deps -p miru
 (cd demos && CARGO_TARGET_DIR="$CARGO_TARGET_DIR/demos" cargo clippy --release --all-targets)
 (cd python && CARGO_TARGET_DIR="$CARGO_TARGET_DIR/python" cargo clippy --all-targets)

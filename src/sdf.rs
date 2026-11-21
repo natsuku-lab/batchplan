@@ -2740,8 +2740,14 @@ impl<'a> Band<'a> {
     }
 }
 
-/// How many points [`on_shapes`] takes at a time: the shapes that none of a run's points can lie on
-/// are left out for the whole of it.
+/// How many points [`on_shapes`] takes at a time: a run is one piece of work for the device's
+/// threads, and the shapes that none of its points can lie on are left out for the whole of it.
+/// Measured, not derived. A program that asks it of pairs of 640×480 images' readings against 17
+/// shapes, among its other work, retires the fewest instructions on one thread with runs of 64,
+/// 1.0% more with 1,024, 1.6% more with 65,536 and 11% more with every point a run of its own.
+/// On an M4 Pro's 14 threads, one image against three shapes (`examples/perception`, twelve
+/// alternated rounds) took 11% longer with runs of 64 than of 1,024 from the hand's camera, and
+/// showed no difference the timer resolves from the camera over the table.
 const RUN: usize = 1024;
 
 /// Which of `shapes` each of `points` lies on: per point, the shape nearest it, as

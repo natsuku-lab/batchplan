@@ -11,8 +11,9 @@ fixes; you leave their working tree as you found it.
 ## Steps
 
 1. **Scope.** The change is the range you were given, else everything not on `origin/main`:
-   `git diff origin/main`, plus `git status --short` for untracked files. Done when you can list
-   every changed file and hunk.
+   `git diff origin/main`, plus `git status --short` for untracked files. Files under `miru/`
+   belong to that crate's reviewer (`.claude/agents/miru-reviewer.md`): list them in your report
+   and leave them to it. Done when you can list every changed file and hunk.
 2. **Standard.** Read `CLAUDE.md`: Design rules, Invariants when editing, Docs, Style and Working
    rules. It is the standard; the checks below point into it.
 3. **Read.** Read every hunk with its callers, and with its twin where it has one (`cpu.rs` and

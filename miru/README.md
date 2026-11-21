@@ -43,10 +43,11 @@ fn main() -> Result<(), batchplan::Error> {
     let scene = miru::look(&device, &look, &Scene::default(), &LookOptions::default())?;
     // scene.objects: id, shape (a box, an upright cylinder, or a box open at the top with the
     // room a look saw in it), whether that shape stands for the thing or only names the room it
-    // takes up (solid), colour, what it stands on, and whether this look saw it
+    // takes up (solid), colour and what it stands on
     // shape.solids(): the boxes and cylinders a shape is made of, as obstacles
-    // scene.labels[view][pixel]: Nothing, Robot, Known(shape) or Object(index)
-    // scene.mask(view, object): the flags Surface::from_depth takes
+    // scene.labels[view][pixel]: Nothing, Robot, Known(shape) or Object(index): an object this
+    // look saw is named by some pixel, one kept unseen by none; the flags Surface::from_depth
+    // takes are scene.labels[view].iter().map(|l| *l == Label::Object(index)).collect()
     println!("{} objects", scene.objects.len());
     Ok(())
 }
@@ -56,10 +57,10 @@ The next look passes this scene as `previous`. An object that stayed where it wa
 and what the look cannot see stays as that scene had it. A view cannot see an object where its
 pixels are the robot's or have no reading, where they read something that stands before the
 object, and where the object lies outside its image. An object that none of the look's continues
-stays, its `seen` false, unless some view shows more of where it stood than is hidden from it:
-reads there what lies on it or past it. One seen in part keeps the shape it had, unless a view
-shows more of the rest than is hidden from it, or its readings lie outside that shape by a
-window's worth, as when it moved or grew: then it is measured afresh. A thing whose shape stood
+stays, in the scene with no label naming it, unless some view shows more of where it stood than
+is hidden from it: reads there what lies on it or past it. One seen in part keeps the shape it had,
+unless a view shows more of the rest than is hidden from it, or its readings lie outside that shape
+by a window's worth, as when it moved or grew: then it is measured afresh. A thing whose shape stood
 for it (`solid`) and that comes back in pieces with the robot's arm over it is one object still,
 with its id: each piece lies in the solid of the shape it had and, in some view, at the robot's
 pixels with the object that continues the thing, and no view reads more of where that shape
@@ -88,8 +89,9 @@ caller's or in batchplan's map of what the cameras read, never both. batchplan's
    `map.integrate(&device, &image, Some(&held))?`. `margin` is three times the view's `Noise`
    (`[3 * constant, 3 * linear, 3 * quadratic]`) and what the shapes and the camera's pose are
    off by.
-6. **Take grasps and rests on an object's own pixels**:
-   `Surface::from_depth(&device, &image, &scene.mask(view, object), Some(&robot), radius)`.
+6. **Take grasps and rests on an object's own pixels**: the view's labels that name it, as
+   flags (`scene.labels[view].iter().map(|label| *label == Label::Object(object)).collect()`),
+   go to `Surface::from_depth(&device, &image, &flags, Some(&robot), radius)`.
 
 Two things follow from step 5. What stands within the margin of a shape, or within about a
 voxel of it, is taken for the shape, so a shape larger than its thing takes in what stands
@@ -314,8 +316,8 @@ How that compares with Split before it asked a side's width, and what it leaves,
 stands".
 
 A model that needs prompts, points or boxes, takes two looks of one moment: look without masks,
-take a prompt from each object's pixels (`Scene::mask`), run the model, and look again with its
-masks, after the same `previous`.
+take a prompt from each object's pixels (those labelled `Label::Object` with its index), run the
+model, and look again with its masks, after the same `previous`.
 
 ## Where it stands
 
@@ -677,8 +679,22 @@ the run.
   with the cookie box in 3 looks of the table camera and with the ramekin in 1 of the hand camera;
   on `rows4-stereo` the alphabet soup with the milk in 1 look of the hand camera, and a bowl with
   the cookie box in 1 look more of the table camera. Fourteen tests are on noisy depth, seven of
-  bowls and seven of boxes and what stands on, against or before them; none is on holed depth, of
-  which the recorded stereo set is the only check.
+  bowls and seven of boxes and what stands on, against or before them; none is on holed depth, which
+  the recorded stereo set and the truth table's two stereo readings (next) are the checks of.
+- **The truth table holds the look to scenes built from known things, read through three
+  cameras** (`cargo test --release -p miru --test truth -- --nocapture`): the simulator's exact
+  depth, an Intel RealSense D435 by its datasheet, and the D435 with a D405 near, the two stereo
+  ones through batchplan's filter (`DepthImage::filtered`), as a caller's depth comes to a look.
+  Twelve scenes, a row per scene, camera and thing: how many objects the thing came out as, and
+  of the one that holds most of it, its shape's kind, size and middle, what it stands on, whether
+  it is solid, the share of the thing's pixels it holds and, on a second look, its id. On exact
+  depth 17 of 20 rows are wholly right, 135 properties holding and 9 not; through the D435 none of
+  20, with 78 and 66; through the D435 with the D405 near none, with 86 and 58. The gaps on exact
+  depth are one scene's: a box 200 mm square and 60 mm tall with a round dial 90 mm across and
+  10 mm tall on it, and on the dial a bar 25 by 90 mm and 38 mm tall. The box is not solid, and the
+  dial and the bar are one object, a box of 57 by 90 by 48 mm whose middle is 25 mm off the dial's
+  and 17 mm off the bar's (6 allowed), not solid, standing on the box where the bar stands on the
+  dial. Every gap is listed row by row in `tests/truth.rs`'s doc, with what its object shows.
 - **What stays unseen is tested on rendered scenes alone**, and exact depth: the sets are first
   looks. An unseen object stays until a view shows its place, so a thing moved to stand before
   where it stood leaves the object it was behind it. And the robot's pixels say nothing either
@@ -743,10 +759,10 @@ the run.
     wrongly; 37 are pieces of one thing, as the stove's body on its foot piece or a rack's and a
     cabinet's pieces, whose readings the pieces still hold between them. No reading that a shape
     held is left out of every shape, nothing stands over what holds it by more than the
-    tolerance, and the 400 label images, every object's id, `on` and `seen` in each first look,
-    the scorecards and `--offsets` are as they were, but for 4 objects that become solid: the
-    ramekin under the bowl in three looks with the truth as masks on stereo depth, and a can's
-    top piece on `rows4-stereo-filtered`. Parting takes 0.25 ms of a look at the median on
+    tolerance, and the 400 label images, every object's id and `on` and whether it was seen in
+    each first look, the scorecards and `--offsets` are as they were, but for 4 objects that become
+    solid: the ramekin under the bowl in three looks with the truth as masks on stereo depth, and a
+    can's top piece on `rows4-stereo-filtered`. Parting takes 0.25 ms of a look at the median on
     `rows4` and 0.67 ms on `rows4-stereo`, 4.7 ms at most, on one thread, under 1% of a look;
     alternated with the code before, a look took 0.3% longer on `rows4` and 1.8% on
     `rows4-stereo` over five rounds at a load of 4, and as long and 0.3% longer over four at a
@@ -1073,26 +1089,30 @@ the run.
     what hangs (`attach`), its floor meeting the walls along no crease the planes tell, and stays a
     box that is not solid; stating a real camera's noise it is open at the top
     (`a_lidless_box_seen_from_above_is_open_at_the_top_on_every_side`).
-- **Time**: a look of two 640 by 480 views among a cell's 17 fixtures takes 44 ms at the median
-  on `rows4` and 50 ms on `rows4-stereo-filtered` on an M4 Pro's 14 threads, 53 and 60 ms on two,
-  and 78 and 94 ms on one; a later look with open boxes in it (`hand-in-drawer`) 82, 92 and
-  130 ms (`cargo run --release -p miru --example score -- <set> --again --digest --threads <n>`:
+- **Time**: a look of two 640 by 480 views among a cell's 17 fixtures takes 41 ms at the median
+  on `rows4` and 42 ms on `rows4-stereo-filtered` on an M4 Pro's 14 threads, 48 and 56 ms on two,
+  and 77 and 93 ms on one; a later look with open boxes in it (`hand-in-drawer`) 58, 71 and
+  115 ms (`cargo run --release -p miru --example score -- <set> --again --digest --threads <n>`:
   the median look of the best of three rounds, alternated with the same looks through miru's
-  own repository's code at dd15ef3, which took 48 and 55, 74 and 78, and 114 and 124 ms, and 86,
-  113 and 165 on the later looks, at a load of 6 to 9 from other work). The scenes are the same
+  own repository's code at dd15ef3, which took 50 and 55, 76 and 78, and 119 and 127 ms, and 90,
+  116 and 168 on the later looks, at a load of 8 to 14 from other work). The scenes are the same
   to the bit on 1, 2 and 14 threads, and the same as that code's (`--digest`: ten sets, with no
   masks, with the truth as masks and with one mask at a time).
-  What the crate saves is in reading the views, where the known shapes are held against every
-  reading: batchplan's `sdf::on_shapes` turns each shape's rotation into its matrix once and
+  Where the crate is ahead of that code: the known shapes are held against every reading by
+  batchplan's `sdf::on_shapes`, which turns each shape's rotation into its matrix once and
   measures a shape only against the runs of readings that come within reach of its box, where
-  asking each shape for its distance at each reading took 40 ms of a one-thread look. What is
-  left is mostly one thread's. On 14 threads telling the views apart takes about 17 ms of a
-  look, most of it per view the growth of the seeds over the readings beside them, the floods
-  that find the seeds and the sums the planes are fitted from, and putting the objects together
-  about 25 ms (timers in miru's own repository at 7bbfb07). No GPU is used. What is done for each
-  pixel by itself, and could be a kernel, is about 3 ms a view on 14 threads; the sums are in
-  double precision, which a kernel on Metal does not have; and what each pixel's step gives is
-  held against a threshold, so a GPU's rounding would make a scene depend on the device.
+  asking each shape for its distance at each reading took 40 ms of a one-thread look; a look
+  gathers its objects' readings in bands on its threads; an object is measured against no
+  earlier shape it lies far from, and against the others pair by pair on the threads; and a box
+  open at the top makes its parts once for all the points asked of it. What is left on 14
+  threads is mostly one thread's: telling the views apart takes about 18 ms of a first look, per
+  view the floods that find the seeds 2.7 ms, the growth of the seeds over the readings beside
+  them 3.3 (7.2 on a stereo camera's depth), the sums the planes are fitted from 2.1; those sums
+  made on several threads were no faster, the step being bound by memory. No GPU is used. What
+  is done for each pixel by itself, and could be a kernel, is about 3 ms a view on 14 threads;
+  the sums are in double precision, which a kernel on Metal does not have; and what each pixel's
+  step gives is held against a threshold, so a GPU's rounding would make a scene depend on the
+  device.
 
 ## Working on it
 

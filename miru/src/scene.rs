@@ -200,9 +200,10 @@ impl Shape {
     /// another part, as a wall's foot on the floor does, which no eye sees. Not generic, so that
     /// the parts' own calls are not of another closure each.
     fn parts_faces(&self, eye: Vec3, pixel: f32, most: usize, visit: &mut dyn FnMut(Vec3, f32)) {
+        let distance = self.distances();
         for part in self.parts().iter().flatten() {
             part.faces(eye, pixel, most, |point, angle| {
-                if self.distance(point) >= -fit::REACHED {
+                if distance(point) >= -fit::REACHED {
                     visit(point, angle);
                 }
             });
@@ -227,29 +228,47 @@ impl Shape {
                 let past = Vec2::new(own.truncate().length() - radius, own.z.abs() - half_height);
                 signed(past.extend(f32::NEG_INFINITY))
             }
-            Shape::OpenBox {
-                center,
-                half_extents,
-                rotation,
-                ..
-            } => {
-                // Inside, how deep it lies in the box and out of the room, the room taken up
-                // without end, as nothing over it is solid. Outside, the nearest part's distance,
-                // which is no part's where two parts meet inside it.
-                let (room_lower, room_upper) = self.room();
-                let own = rotation.inverse() * (p - center);
-                let middle = 0.5 * (room_lower.truncate() + room_upper);
-                let half = 0.5 * (room_upper - room_lower.truncate());
-                let room = ((own.truncate() - middle).abs() - half).extend(room_lower.z - own.z);
-                let inside = signed(own.abs() - half_extents).max(-signed(room));
-                if inside < 0.0 {
-                    return inside;
-                }
-                (self.parts().iter().flatten())
-                    .map(|part| part.distance(p))
-                    .fold(f32::INFINITY, f32::min)
-            }
+            Shape::OpenBox { .. } => self.open_distance(p, || self.parts()),
         }
+    }
+
+    /// [`Shape::distance`] from each point it is asked of, a box open at the top's parts made
+    /// once for all of them.
+    pub(crate) fn distances(&self) -> impl Fn(Vec3) -> f32 + '_ {
+        let parts = self.parts();
+        move |p| match self {
+            Shape::OpenBox { .. } => self.open_distance(p, || parts),
+            _ => self.distance(p),
+        }
+    }
+
+    /// [`Shape::distance`] of a box open at the top, `parts` making its parts where they are
+    /// needed ([`Shape::parts`]).
+    fn open_distance(&self, p: Vec3, parts: impl FnOnce() -> [Option<Shape>; 5]) -> f32 {
+        let Shape::OpenBox {
+            center,
+            half_extents,
+            rotation,
+            ..
+        } = *self
+        else {
+            return self.distance(p);
+        };
+        // Inside, how deep it lies in the box and out of the room, the room taken up without
+        // end, as nothing over it is solid. Outside, the nearest part's distance, which is no
+        // part's where two parts meet inside it.
+        let (room_lower, room_upper) = self.room();
+        let own = rotation.inverse() * (p - center);
+        let middle = 0.5 * (room_lower.truncate() + room_upper);
+        let half = 0.5 * (room_upper - room_lower.truncate());
+        let room = ((own.truncate() - middle).abs() - half).extend(room_lower.z - own.z);
+        let inside = signed(own.abs() - half_extents).max(-signed(room));
+        if inside < 0.0 {
+            return inside;
+        }
+        (parts().iter().flatten())
+            .map(|part| part.distance(p))
+            .fold(f32::INFINITY, f32::min)
     }
 
     /// How much space it takes up (cubic meters).
@@ -277,6 +296,30 @@ impl Shape {
             | Shape::Cylinder { center, .. }
             | Shape::OpenBox { center, .. } => center,
         }
+    }
+
+    /// How far from its middle it reaches (meters), where its rotation turns without stretching,
+    /// to within rounding: a box's corners, a cylinder's rim.
+    pub(crate) fn reach(&self) -> Option<f32> {
+        let (rotation, reach) = match *self {
+            Shape::Cuboid {
+                half_extents,
+                rotation,
+                ..
+            }
+            | Shape::OpenBox {
+                half_extents,
+                rotation,
+                ..
+            } => (rotation, half_extents.length()),
+            Shape::Cylinder {
+                rotation,
+                radius,
+                half_height,
+                ..
+            } => (rotation, radius.hypot(half_height)),
+        };
+        ((rotation.length_squared() - 1.0).abs() <= 4.0 * f32::EPSILON).then_some(reach)
     }
 
     /// The height of its lowest point.
@@ -455,11 +498,6 @@ pub struct Object {
     /// thing it touches most, as a bowl whose foot overhangs a box stands on the box. None with
     /// nothing under it.
     pub on: Option<Support>,
-    /// Whether this look saw it. False for an object kept from the scene before, which no view
-    /// could see ([`look`](crate::look)): nothing of it was measured and no label names it. Its
-    /// id, shape, whether it is solid and its colour are that scene's, as is what it stands on: an
-    /// object while that is still in the scene, a known shape by the index it had in that look.
-    pub seen: bool,
 }
 
 /// What one look saw, and what the next look needs of it.
@@ -467,7 +505,10 @@ pub struct Object {
 #[non_exhaustive]
 pub struct Scene {
     /// The objects, in the order the views show them: by view, then row by row. After them,
-    /// those of the scene before that no view could see ([`Object::seen`]), in its order.
+    /// those of the scene before that no view could see ([`look`](crate::look)), in its order:
+    /// nothing of one was measured and no label names it, and its id, shape, whether it is solid
+    /// and its colour are that scene's, as is what it stands on: an object while that is still in
+    /// the scene, a known shape by the index it had in that look.
     pub objects: Vec<Object>,
     /// Per view of the look, per pixel in the depth's order, what the pixel shows.
     pub labels: Vec<Vec<Label>>,
@@ -477,22 +518,6 @@ pub struct Scene {
     /// only grows. A look that has more new objects than there are ids left below `u32::MAX` is
     /// refused ([`Error::Input`](batchplan::Error::Input)).
     pub next_id: u32,
-}
-
-impl Scene {
-    /// Per pixel of view `view`, whether it shows object `object` (its index in
-    /// [`Scene::objects`]): the flags batchplan's `Surface::from_depth` takes for the object to
-    /// grasp or the support to rest on. As long as the view's depth, false everywhere for an
-    /// object the view does not show.
-    ///
-    /// # Panics
-    ///
-    /// If the look had no view `view`.
-    #[must_use]
-    pub fn mask(&self, view: usize, object: usize) -> Vec<bool> {
-        let shows = Label::Object(object);
-        self.labels[view].iter().map(|l| *l == shows).collect()
-    }
 }
 
 #[cfg(test)]

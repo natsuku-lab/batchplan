@@ -288,10 +288,10 @@ impl Digest {
     }
 
     /// Adds everything `scene` holds: each object's id, shape, whether it is solid, its colour,
-    /// what it stands on and whether it was seen, the next id, and every view's labels.
+    /// what it stands on and whether it was seen ([`saw`]), the next id, and every view's labels.
     fn scene(&mut self, scene: &Scene) {
         self.number(scene.objects.len());
-        for object in &scene.objects {
+        for (object, seen) in scene.objects.iter().zip(saw(scene)) {
             self.number(object.id as usize);
             match object.shape {
                 Shape::Cuboid {
@@ -351,7 +351,7 @@ impl Digest {
                 None => self.number(0),
                 Some(support) => panic!("a support the scorer does not know: {support:?}"),
             }
-            self.number(usize::from(object.seen));
+            self.number(usize::from(seen));
         }
         self.number(scene.next_id as usize);
         self.number(scene.labels.len());
@@ -467,7 +467,7 @@ fn main() -> Result<(), Error> {
                     let counts = [
                         scene.objects.len(),
                         kept(&scene, &second),
-                        second.objects.iter().filter(|object| !object.seen).count(),
+                        saw(&second).iter().filter(|seen| !**seen).count(),
                     ];
                     let [all, kept, unseen] = counts;
                     println!(
@@ -662,8 +662,21 @@ fn main() -> Result<(), Error> {
 /// again after it. The same frames show the same objects in the same order, so each is held
 /// against the one in its place: an id that another object of `first` had is not kept.
 fn kept(first: &Scene, second: &Scene) -> usize {
-    let pairs = first.objects.iter().zip(&second.objects);
-    pairs.filter(|(was, is)| is.seen && is.id == was.id).count()
+    let pairs = (first.objects.iter().zip(&second.objects)).zip(saw(second));
+    let kept = pairs.filter(|((was, is), seen)| *seen && is.id == was.id);
+    kept.count()
+}
+
+/// Per object of `scene`, whether the look that gave it saw it: some label names it. One kept
+/// from the scene before that no view could see is named by none.
+fn saw(scene: &Scene) -> Vec<bool> {
+    let mut seen = vec![false; scene.objects.len()];
+    for label in scene.labels.iter().flatten() {
+        if let Label::Object(object) = *label {
+            seen[object] = true;
+        }
+    }
+    seen
 }
 
 /// The truth as a mask model would give it, per view of `recorded`: each pixel numbered by the
@@ -1300,6 +1313,7 @@ impl Held {
         cases: &mut [Vec<Case>; 2],
     ) {
         println!("  rooms");
+        let seen = saw(scene);
         for (index, object) in scene.objects.iter().enumerate() {
             let own = self.own[index].map_or(NO_OBJECT, |t| names[t].as_str());
             let rooms = holding.entry(kind(own).to_owned()).or_default();
@@ -1323,7 +1337,7 @@ impl Held {
                     look: look.to_owned(),
                     index,
                     id: object.id,
-                    seen: object.seen,
+                    seen: seen[index],
                     own: own.to_owned(),
                     shape: object.shape,
                     pixels,
@@ -1560,9 +1574,14 @@ mod tests {
         second.objects[0].id = first.objects[1].id;
         second.objects[1].id = first.objects[0].id;
         assert_eq!(kept(&first, &second), 0);
-        // One no view saw has not kept its id either: it is counted as unseen.
+        // One no view saw, no label naming it, has not kept its id either: it is counted as
+        // unseen.
         let mut second = first.clone();
-        second.objects[1].seen = false;
+        for label in second.labels.iter_mut().flatten() {
+            if *label == Label::Object(1) {
+                *label = Label::Nothing;
+            }
+        }
         assert_eq!(kept(&first, &second), 1);
     }
 
@@ -1866,7 +1885,11 @@ mod tests {
                 scene.objects[0].on = Some(Support::Object(1));
             }),
             ("seen", |scene| {
-                scene.objects[0].seen = !scene.objects[0].seen
+                for label in scene.labels.iter_mut().flatten() {
+                    if *label == Label::Object(0) {
+                        *label = Label::Nothing;
+                    }
+                }
             }),
             ("the next id", |scene| scene.next_id += 1),
         ];
