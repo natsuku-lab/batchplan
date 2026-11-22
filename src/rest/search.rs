@@ -890,6 +890,8 @@ fn tipping_nearest(
 /// The spots a cell (`touching`) apart on the lattice the field's cells are centred on, within
 /// `spacing` of `about` seen from above and over the support's box, row by row; but for those
 /// within `spacing` of `near`, wherever it lies, whose own spots cover them.
+// In line, as before `falls_into` called it too: shared, it left the search's closer look.
+#[inline(always)]
 pub(super) fn nearer(about: Vec2, spots: &Spots, near: Option<Vec2>, o: &RestOptions) -> Vec<Vec2> {
     let cell = o.touching;
     let from = ((about - o.spacing).max(spots.lower) / cell)

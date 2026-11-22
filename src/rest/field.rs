@@ -228,6 +228,9 @@ impl Field {
     /// How high the middle of `object` lands let go straight down over `at`, as
     /// [`lands`](Self::lands) says, or `from` where that is higher: what lies under `from` is
     /// passed over at a comparison a point.
+    // In line: out of line on the Ryzen, the falls into a basket and a bowl took 10% and 25%
+    // longer in one codegen unit.
+    #[inline(always)]
     pub(super) fn lands_from(&self, object: &Turned, at: Vec2, from: f32) -> f32 {
         let on_support = self.down_onto(&self.tops, object, at, from);
         self.down_onto(&self.blocks, object, at, on_support)
