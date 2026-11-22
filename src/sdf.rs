@@ -18,7 +18,7 @@ use std::cell::OnceCell;
 use std::num::FpCategory;
 use std::ops::Range;
 
-use glam::{BVec3, IVec3, Mat3, UVec3, Vec2, Vec3, Vec4};
+use glam::{BVec3, IVec3, Mat3, Quat, UVec3, Vec2, Vec3, Vec4};
 use half::f16;
 use parry3d::shape::{TriMesh as ParryMesh, TriMeshFlags};
 use rayon::prelude::*;
@@ -509,22 +509,7 @@ impl DepthImage<'_> {
             .collect();
         let mut on_robot = vec![false; self.depth.len()];
         let rows = on_robot.par_chunks_mut(width).enumerate();
-        rows.for_each(|(v, row)| {
-            for (k, center, r, us, vs) in &balls {
-                if !vs.contains(&v) {
-                    continue;
-                }
-                for u in us.clone() {
-                    let Some(z) = self.reading(v * width + u).filter(|_| !row[u]) else {
-                        continue;
-                    };
-                    // The reading in the camera's frame.
-                    let p = Vec3::new((u as f32 - cx) / fx * z, (v as f32 - cy) / fy * z, z);
-                    row[u] = (p - *center).length_squared() < r * r
-                        && mask.holds(*k, camera.rotation * p + camera.position);
-                }
-            }
-        });
+        rows.for_each(|(v, row)| mask_row(self, &camera, &mask, &balls, v, row));
         Ok(RobotMask { on_robot, ..mask })
     }
 }
@@ -619,73 +604,7 @@ impl RobotMask {
         device.install(|| {
             let rows = self.on_robot.par_chunks_mut(width).enumerate();
             rows.for_each(|(v, row)| {
-                let reads = |k: usize| pixels[k].rows.contains(&v);
-                let mut next = 0;
-                while next < order.len() {
-                    if !reads(order[next]) {
-                        next += 1;
-                        continue;
-                    }
-                    // The columns the next shapes the row may read cover without a gap.
-                    let (first, mut end) = (next, pixels[order[next]].columns.end);
-                    next += 1;
-                    while next < order.len() && pixels[order[next]].columns.start <= end {
-                        if reads(order[next]) {
-                            end = end.max(pixels[order[next]].columns.end);
-                        }
-                        next += 1;
-                    }
-                    let these = &order[first..next];
-                    let start = pixels[order[first]].columns.start;
-                    for (u, own) in (start..).zip(&mut row[start..end]) {
-                        if *own {
-                            continue;
-                        }
-                        let i = v * width + u;
-                        // The reading's point, taken once for every shape that may read it.
-                        let mut point = None;
-                        for &k in these {
-                            if !reads(k) || !pixels[k].columns.contains(&u) {
-                                continue;
-                            }
-                            let (p, reach) = match point {
-                                Some(found) => found,
-                                None => {
-                                    let Some(p) = image.point(i, None) else {
-                                        break;
-                                    };
-                                    *point.insert((p, reach(image.depth[i])))
-                                }
-                            };
-                            if within(k, p, reach) {
-                                *own = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if deep == f32::INFINITY {
-                    return;
-                }
-                // A reading so deep that a shape's reach has outrun the depth again may be that
-                // shape's whatever its pixel. Few rows read that deep: a row's deepest reading
-                // is found by the depths' bits, which order as depths above zero do and compare
-                // several at a time, where the depths themselves, some of them no number, do not.
-                let depths = &image.depth[v * width..][..width];
-                let bits = depths.iter().map(|z| z.to_bits() as i32);
-                if bits.fold(i32::MIN, i32::max) < deep.to_bits() as i32 {
-                    return;
-                }
-                for (u, (own, &z)) in row.iter_mut().zip(depths).enumerate() {
-                    if *own || z < deep || z.is_nan() {
-                        continue;
-                    }
-                    let Some(p) = image.point(v * width + u, None) else {
-                        continue;
-                    };
-                    let reach = reach(z);
-                    *own = (0..shapes.len()).any(|k| z >= pixels[k].deep && within(k, p, reach));
-                }
+                shape_row(v, row, &image, &pixels, &order, deep, &reach, &within);
             });
         });
         self.shapes.extend_from_slice(shapes);
@@ -1088,13 +1007,8 @@ fn shape_pixels(
     let (width, height) = (image.width, image.height());
     let to_camera = image.camera.rotation.inverse();
     let (lo, hi) = shape.bounds();
-    let corners = |lo: Vec3, hi: Vec3| {
-        [0, 1, 2, 3, 4, 5, 6, 7].map(|c| {
-            let corner = Vec3::select(BVec3::new(c & 1 > 0, c & 2 > 0, c & 4 > 0), hi, lo);
-            to_camera * (corner - image.camera.position)
-        })
-    };
-    let far = corners(lo, hi).iter().fold(0f32, |far, c| far.max(c.z));
+    let far = (corners(lo, hi, to_camera, image.camera.position).iter())
+        .fold(0f32, |far, c| far.max(c.z));
     let (a, b, c) = (margin[2], 1.0 - margin[1], far + margin[0]);
     let root = (b * b - 4.0 * a * c).sqrt();
     let grown = 2.0 * c / (b + root) - far;
@@ -1111,7 +1025,7 @@ fn shape_pixels(
     } else {
         f32::INFINITY
     };
-    let grown = corners(lo - grown, hi + grown);
+    let grown = corners(lo - grown, hi + grown, to_camera, image.camera.position);
     // The view, a pixel past the middles of the outer pixels, as planes `n . p + d >= 0` in the
     // camera's frame; and, where the box reaches the plane the camera stands in, no nearer than
     // the nearest reading.
@@ -1361,7 +1275,7 @@ pub(crate) fn depth_occupancy(
         (_, false) => classified::<false, false>(grid, image, robot, behind, 0.0),
     };
     // Dense images resolve surfaces finer than voxels project; their points are solid too.
-    for n in hits(grid, image, robot, |_| true) {
+    for n in hits(image, |i| hit(grid, image, robot, i)) {
         occupied[n] = true;
     }
     occupied
@@ -1392,21 +1306,12 @@ fn classified<const BAND: bool, const MASK: bool>(
         .collect()
 }
 
-/// The grid point holding each reading off the robot that `keep` accepts.
-fn hits(
-    grid: &Layout,
-    image: &DepthImage,
-    robot: Option<&RobotMask>,
-    keep: impl Fn(Vec3) -> bool + Sync,
-) -> Vec<usize> {
+/// The grid point holding each reading of `image` that `keep` keeps, as [`hit`] and
+/// [`hit_inside`] give it.
+fn hits(image: &DepthImage, keep: impl Fn(usize) -> Option<usize> + Send + Sync) -> Vec<usize> {
     (0..image.depth.len())
         .into_par_iter()
-        .filter_map(|i| {
-            image
-                .point(i, robot)
-                .filter(|&p| keep(p))
-                .map(|p| grid.nearest(p))
-        })
+        .filter_map(keep)
         .collect()
 }
 
@@ -1422,7 +1327,7 @@ pub(crate) fn integrate(
 ) {
     // The voxels holding a reading, a bit each, laid out as `RobotMask::inside` lays its bits.
     let mut hit = vec![0u32; grid.points().div_ceil(32)];
-    for n in hits(grid, image, robot, |p| grid.contains(p)) {
+    for n in hits(image, |i| hit_inside(grid, image, robot, i)) {
         hit[n / 32] |= 1 << (n % 32);
     }
     match (robot.is_some(), weighing) {
@@ -1564,14 +1469,14 @@ fn view(image: &DepthImage, grid: &Layout) -> [Vec4; 5] {
         .into_iter()
         .fold(0.0, f32::max);
     let distance = (1e-4 * largest).max(1e-4);
+    let rotation = camera.rotation;
     [
-        Vec3::Z,
-        Vec3::new(fx, 0.0, cx + 0.5),
-        Vec3::new(-fx, 0.0, width - cx - 0.5),
-        Vec3::new(0.0, fy, cy + 0.5),
-        Vec3::new(0.0, -fy, height - cy - 0.5),
+        moved_out(Vec3::Z, rotation, distance),
+        moved_out(Vec3::new(fx, 0.0, cx + 0.5), rotation, distance),
+        moved_out(Vec3::new(-fx, 0.0, width - cx - 0.5), rotation, distance),
+        moved_out(Vec3::new(0.0, fy, cy + 0.5), rotation, distance),
+        moved_out(Vec3::new(0.0, -fy, height - cy - 0.5), rotation, distance),
     ]
-    .map(|normal| (camera.rotation * normal).extend(normal.length().max(1.0) * distance))
 }
 
 /// The voxels of row `r` of `grid` (those with `x + dims.x * r` as index, x from 0) whose middles
@@ -2857,6 +2762,174 @@ fn check_q(robot: &Robot, q: &[f32]) -> Result<()> {
         robot.dof()
     );
     Ok(())
+}
+
+/// Row `v` of the mask [`RobotMask::with_shapes`] sets, `row`: a reading it does not yet flag is
+/// flagged where it lies `within` the `reach` at its depth of a shape whose `pixels` hold it, the
+/// shapes taken in `order`, and, from the depth `deep` on, of any shape. In line, as a build of
+/// one codegen unit has it: out of line, leaving the shapes out took a third longer on the Ryzen.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the closure of `with_shapes`' rows, named to say where it is compiled"
+)]
+#[inline(always)]
+fn shape_row(
+    v: usize,
+    row: &mut [bool],
+    image: &DepthImage,
+    pixels: &[Pixels],
+    order: &[usize],
+    deep: f32,
+    reach: &impl Fn(f32) -> f32,
+    within: &impl Fn(usize, Vec3, f32) -> bool,
+) {
+    let width = image.width;
+    let reads = |k: usize| pixels[k].rows.contains(&v);
+    let mut next = 0;
+    while next < order.len() {
+        if !reads(order[next]) {
+            next += 1;
+            continue;
+        }
+        // The columns the next shapes the row may read cover without a gap.
+        let (first, mut end) = (next, pixels[order[next]].columns.end);
+        next += 1;
+        while next < order.len() && pixels[order[next]].columns.start <= end {
+            if reads(order[next]) {
+                end = end.max(pixels[order[next]].columns.end);
+            }
+            next += 1;
+        }
+        let these = &order[first..next];
+        let start = pixels[order[first]].columns.start;
+        for (u, own) in (start..).zip(&mut row[start..end]) {
+            if *own {
+                continue;
+            }
+            let i = v * width + u;
+            // The reading's point, taken once for every shape that may read it.
+            let mut point = None;
+            for &k in these {
+                if !reads(k) || !pixels[k].columns.contains(&u) {
+                    continue;
+                }
+                let (p, reach) = match point {
+                    Some(found) => found,
+                    None => {
+                        let Some(p) = image.point(i, None) else {
+                            break;
+                        };
+                        *point.insert((p, reach(image.depth[i])))
+                    }
+                };
+                if within(k, p, reach) {
+                    *own = true;
+                    break;
+                }
+            }
+        }
+    }
+    if deep == f32::INFINITY {
+        return;
+    }
+    // A reading so deep that a shape's reach has outrun the depth again may be that shape's
+    // whatever its pixel. Few rows read that deep: a row's deepest reading is found by the depths'
+    // bits, which order as depths above zero do and compare several at a time, where the depths
+    // themselves, some of them no number, do not.
+    let depths = &image.depth[v * width..][..width];
+    let bits = depths.iter().map(|z| z.to_bits() as i32);
+    if bits.fold(i32::MIN, i32::max) < deep.to_bits() as i32 {
+        return;
+    }
+    for (u, (own, &z)) in row.iter_mut().zip(depths).enumerate() {
+        if *own || z < deep || z.is_nan() {
+            continue;
+        }
+        let Some(p) = image.point(v * width + u, None) else {
+            continue;
+        };
+        let reach = reach(z);
+        *own = (0..pixels.len()).any(|k| z >= pixels[k].deep && within(k, p, reach));
+    }
+}
+
+/// The corners of the box from `lo` to `hi` turned by `to_camera` about `camera`
+/// ([`shape_pixels`]): corner `c` at `hi` along the axes of its set bits, x first. In line on x86
+/// and out of line elsewhere, as a build of one codegen unit has it.
+#[cfg_attr(target_arch = "x86_64", inline(always))]
+#[cfg_attr(not(target_arch = "x86_64"), inline(never))]
+fn corners(lo: Vec3, hi: Vec3, to_camera: Quat, camera: Vec3) -> [Vec3; 8] {
+    let mut corners = [Vec3::ZERO; 8];
+    for (c, corner) in corners.iter_mut().enumerate() {
+        let at = Vec3::select(BVec3::new(c & 1 > 0, c & 2 > 0, c & 4 > 0), hi, lo);
+        *corner = to_camera * (at - camera);
+    }
+    corners
+}
+
+/// The grid point holding reading `i` of `image` if it is off the robot ([`hits`]). In line in
+/// the closure that takes each reading, as [`hit_inside`] is.
+#[inline(always)]
+fn hit(grid: &Layout, image: &DepthImage, robot: Option<&RobotMask>, i: usize) -> Option<usize> {
+    image.point(i, robot).map(|p| grid.nearest(p))
+}
+
+/// [`hit`] of a reading in the grid's box. In line: with the box's test a closure `hits` was
+/// handed, a fuse took 3% to 15% longer on the Ryzen, in one codegen unit and in sixteen.
+#[inline(always)]
+fn hit_inside(
+    grid: &Layout,
+    image: &DepthImage,
+    robot: Option<&RobotMask>,
+    i: usize,
+) -> Option<usize> {
+    (image.point(i, robot))
+        .filter(|&p| grid.contains(p))
+        .map(|p| grid.nearest(p))
+}
+
+/// A plane of [`view`] whose normal is `normal` in the camera's frame: turned by `rotation`, and
+/// moved out by its length, or 1 where that is less, times `distance`. In line, as a build of one
+/// codegen unit has it.
+#[inline(always)]
+fn moved_out(normal: Vec3, rotation: Quat, distance: f32) -> Vec4 {
+    (rotation * normal).extend(normal.length().max(1.0) * distance)
+}
+
+/// A ball of [`DepthImage::robot_mask`] in the camera's frame with the pixels whose readings may
+/// lie in it: its index among the mask's balls, its center and radius, and the columns and the
+/// rows of those pixels.
+type BallPixels = (usize, Vec3, f32, Range<usize>, Range<usize>);
+
+/// Row `v` of the pixels [`DepthImage::robot_mask`] marks, `row`: a reading it does not yet mark
+/// is the robot's where its point in the frame of `camera` lies in one of `balls` whose pixels
+/// hold it, and `mask` holds it there. Out of line: in the loop over the rows, as both builds had
+/// it, the mask took 12% to 31% longer on the Ryzen and up to 16% on the M4 Pro.
+#[inline(never)]
+fn mask_row(
+    image: &DepthImage,
+    camera: &Pose,
+    mask: &RobotMask,
+    balls: &[BallPixels],
+    v: usize,
+    row: &mut [bool],
+) {
+    let Intrinsics { fx, fy, cx, cy } = image.intrinsics;
+    let width = image.width;
+    for (k, center, r, us, vs) in balls {
+        if !vs.contains(&v) {
+            continue;
+        }
+        for u in us.clone() {
+            let Some(z) = image.reading(v * width + u).filter(|_| !row[u]) else {
+                continue;
+            };
+            // The reading in the camera's frame.
+            let p = Vec3::new((u as f32 - cx) / fx * z, (v as f32 - cy) / fy * z, z);
+            row[u] = (p - *center).length_squared() < r * r
+                && mask.holds(*k, camera.rotation * p + camera.position);
+        }
+    }
 }
 
 #[cfg(test)]
