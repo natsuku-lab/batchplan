@@ -34,6 +34,74 @@ fn load(path: &str) -> Robot {
     Robot::load(common::asset(path), &RobotOptions::default()).unwrap()
 }
 
+#[test]
+fn parallel_jaw_motion_matches_the_calibrated_stroke_on_both_sides() {
+    let panda = common::panda().unwrap();
+    let closed = HashMap::from([
+        ("panda_finger_joint1".into(), 0.0),
+        ("panda_finger_joint2".into(), 0.0),
+    ]);
+    let gap = |loaded, capacity, locks| {
+        panda
+            .parallel_jaw_opening(0, loaded, capacity, 0.0, locks)
+            .unwrap()
+    };
+    assert_eq!(gap(0.080, 0.060, &closed), Some(0.080));
+    assert_eq!(gap(0.080f32.next_down(), 0.080, &closed), Some(0.080));
+    assert_eq!(gap(0.060, 0.060, &closed), None);
+    let one = HashMap::from([("panda_finger_joint1".into(), 0.0)]);
+    assert_eq!(gap(0.080, 0.060, &one), None);
+    assert!(
+        panda
+            .parallel_jaw_opening(1, 0.080, 0.060, 0.0, &closed)
+            .is_err()
+    );
+    assert!(
+        panda
+            .parallel_jaw_opening(0, 0.080, 0.081, 0.0, &closed)
+            .is_err()
+    );
+}
+
+/// A rotating mimic can return to its initial orientation at closure even though it sweeps a
+/// sphere sideways in between. The two endpoint sphere sets alone cannot establish a slide.
+#[test]
+fn a_revolving_finger_mimic_cannot_qualify_as_a_slide() {
+    let mut options = common::panda_options();
+    let model = options.collision_model.as_mut().unwrap();
+    model
+        .spheres
+        .insert("tip".into(), vec![[0.01, 0.0, 0.0, 0.003]]);
+    let urdf = include_str!("../assets/franka/franka_panda.urdf").replace(
+        "</robot>",
+        r#"<link name="tip"/>
+           <joint name="swing" type="revolute"><parent link="panda_leftfinger"/><child link="tip"/>
+             <axis xyz="0 0 1"/><limit lower="0" upper="7" effort="1" velocity="1"/>
+             <mimic joint="panda_finger_joint1" multiplier="157.07963268"/>
+           </joint></robot>"#,
+    );
+    let urdf = urdf.replace("meshes/", &common::asset("franka/meshes/"));
+    let robot = Robot::from_urdf(&urdf, &options).unwrap();
+    let closed = HashMap::from([
+        ("panda_finger_joint1".into(), 0.0),
+        ("panda_finger_joint2".into(), 0.0),
+    ]);
+    let shut = robot.relock(&closed).unwrap();
+    let open = robot.hand_spheres(0);
+    assert!(open.iter().any(|s| s.radius == 0.003 && s.side != 0.0));
+    assert!(
+        open.iter()
+            .zip(shut.hand_spheres(0))
+            .all(|(a, b)| { (a.center - Vec3::Y * a.side * 0.040).distance(b.center) < 1e-6 })
+    );
+    assert_eq!(
+        robot
+            .parallel_jaw_opening(0, 0.080, 0.080, 0.0, &closed)
+            .unwrap(),
+        None
+    );
+}
+
 fn devices(robot: &Robot) -> Vec<Device> {
     let mut devices = vec![Device::cpu(robot).unwrap()];
     match Device::gpu(robot) {

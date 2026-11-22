@@ -512,6 +512,22 @@ impl Robot {
         Ok(field::shortest(self.0.tip(hand)))
     }
 
+    /// The calibrated loaded gap for measured grasps, or None if the hand does not model
+    /// opposed sliding jaws over the commanded stroke.
+    fn parallel_jaw_opening(
+        &self,
+        hand: usize,
+        loaded_gap: f32,
+        capacity: f32,
+        closed_gap: f32,
+        closed: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<f32>> {
+        let closed = HashMap::<String, f32>::from_py(closed)?;
+        self.0
+            .parallel_jaw_opening(hand, loaded_gap, capacity, closed_gap, &closed)
+            .or_raise()
+    }
+
     /// Hand `hand`'s collision spheres at the default configuration, in its IK frame: its palm's
     /// and its fingers', as the locked joints hold them, and those of any object it holds.
     /// Placed by a pose of the frame, they are the hand there, whatever the arm does.

@@ -10,6 +10,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- `grasps_on_with_capacity` accepts a maximum graspable width separate from the loaded pad gap.
+  It checks the fully open hand and, for symmetric sliding jaws, commandable partial openings.
+  `Robot::parallel_jaw_opening` checks this model against the calibrated stroke and joint locks.
+
 - `miru::Observed::grip_worlds` prepares a kept observation for grasp planning. Project one
   candidate at a time to split the material between its finger pads from the collision world.
   A whole-body pick retains the object's ID and the collision geometry left behind.

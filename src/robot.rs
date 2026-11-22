@@ -1405,6 +1405,86 @@ impl Robot {
         })
     }
 
+    /// The loaded gap for measured grasps when this hand models opposed sliding jaws. Use it for
+    /// grasp generation and [`Grasp::closes_on`](crate::Grasp::closes_on). Check once at the loaded
+    /// opening and the calibrated joint locks for the closed gap, in meters. Intermediate joint
+    /// commands must interpolate linearly between these locks. The gaps describe the pad
+    /// calibration supplied by the caller.
+    ///
+    /// Checks the driving joints (including mimics), both jaws, and every collision sphere of the
+    /// hand. A positive result describes their modeled motion over this stroke. Physical contact
+    /// still depends on the observed object and the gripper. Returns `None` for unsupported motion,
+    /// including a closed gap above the smallest contact width or preshape generated. If the
+    /// computed loaded gap and capacity differ by one floating-point step, returns the capacity
+    /// so generation, projection and commands share its exact representation.
+    /// Invalid calibration inputs or joint locks return an error.
+    pub fn parallel_jaw_opening(
+        &self,
+        hand: usize,
+        loaded_gap: f32,
+        capacity: f32,
+        closed_gap: f32,
+        closed: &HashMap<String, f32>,
+    ) -> error::Result<Option<f32>> {
+        ensure_input!(hand < self.hands(), "hand {hand} of {}", self.hands());
+        ensure_input!(
+            loaded_gap.is_finite() && loaded_gap > closed_gap && closed_gap >= 0.0,
+            "expected a loaded gap above the nonnegative closed gap, got {loaded_gap} and {closed_gap} m"
+        );
+        ensure_input!(
+            capacity > 0.0 && capacity.is_finite(),
+            "expected a finite positive grasp capacity, got {capacity} m"
+        );
+        let gap = if loaded_gap.to_bits().abs_diff(capacity.to_bits()) <= 1 {
+            capacity
+        } else {
+            loaded_gap
+        };
+        ensure_input!(
+            capacity <= gap,
+            "grasp capacity {capacity} m exceeds the loaded gap {gap} m"
+        );
+        let shut = self.relock(closed)?;
+        if closed_gap > crate::surface::smallest_gap(capacity) {
+            return Ok(None);
+        }
+        let frame = &self.links[self.ee_links[hand]];
+        let links = self.hand_links(hand);
+        if self.links.iter().enumerate().any(|(i, link)| {
+            self.sphere_ranges[i][1] > 0
+                && links.contains(&link.name.as_str())
+                && link.chain != frame.chain
+        }) {
+            return Ok(None);
+        }
+        // With only affine translations, agreement at both ends holds throughout the stroke.
+        // A lock that carries the IK frame would also change the pose commanded to the arm.
+        let ancestors = std::iter::successors(Some(self.ee_links[hand]), |&i| self.links[i].parent);
+        let driven = self
+            .locked
+            .iter()
+            .filter(|link| closed.contains_key(&link.joint));
+        for link in driven {
+            if !link.prismatic
+                || !link.curve.is_linear()
+                || ancestors.clone().any(|i| i == link.link)
+            {
+                return Ok(None);
+            }
+        }
+        let open = self.hand_spheres(hand);
+        if !open.iter().any(|s| s.side < 0.0) || !open.iter().any(|s| s.side > 0.0) {
+            return Ok(None);
+        }
+        let travel = (loaded_gap - closed_gap) * 0.5;
+        let mut spheres = open.iter().zip(shut.hand_spheres(hand));
+        let matches = spheres.all(|(a, b)| {
+            let expected = a.center - Vec3::Y * (a.side * travel);
+            expected.distance(b.center) <= travel * 1e-4
+        });
+        Ok(matches.then_some(gap))
+    }
+
     /// Hand `hand`'s collision spheres at the default configuration, in its IK frame: its palm's
     /// and its fingers', as the locked joints hold them, and those of any object it holds
     /// ([`Robot::hand_links`]). Placed by a pose of the frame, they are the hand there, whatever

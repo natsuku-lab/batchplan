@@ -345,6 +345,11 @@ const BACK: f32 = 0.002;
 /// 5 mm apart for a hand that opens 8 cm, a quarter of a fingertip's patch to each finger.
 const OPENINGS: i32 = 16;
 
+/// The smallest contact or preshape whose width a measured hand must be able to reach.
+pub(crate) fn smallest_gap(capacity: f32) -> f32 {
+    THINNEST.min(capacity / OPENINGS as f32)
+}
+
 impl GraspOptions {
     /// Orders measured grasps by the moment their finger contacts can exert about this turn's
     /// axis, greatest first. Equal moments retain the input order. Give the measured screw in
@@ -417,6 +422,24 @@ pub fn grasps_on(
     surfaces: &[Surface],
     o: &GraspOptions,
 ) -> Result<Vec<Vec<Grasp>>> {
+    grasps_on_with_capacity(device, hand, surfaces, o, o.opening)
+}
+
+/// As [`grasps_on`], for a hand whose maximum graspable width (`capacity`, meters) may be
+/// smaller than the gap between its pads as loaded ([`GraspOptions::opening`]). Contact pairs
+/// fit within the capacity. With [`GraspOptions::narrow`], the preshapes are the loaded gap
+/// and 15/16 through 1/16 of the capacity. Each moving finger slides half the change in gap
+/// along the closing line. Use the chosen [`Grasp::opening`] to obtain the commanded locks.
+/// [`Robot::parallel_jaw_opening`](crate::Robot::parallel_jaw_opening) checks the model and
+/// gives the calibrated loaded gap to use here and in closing-region projection. With narrowing
+/// disabled, the loaded hand geometry is used directly.
+pub fn grasps_on_with_capacity(
+    device: &Device,
+    hand: usize,
+    surfaces: &[Surface],
+    o: &GraspOptions,
+    capacity: f32,
+) -> Result<Vec<Vec<Grasp>>> {
     let hands = device.robot().hands();
     ensure_input!(hand < hands, "hand {hand} of {hands}");
     ensure_input!(
@@ -438,6 +461,11 @@ pub fn grasps_on(
         o.contact,
         o.overlap,
         o.approach
+    );
+    ensure_input!(
+        capacity > 0.0 && capacity <= o.opening,
+        "grasp capacity {capacity} m must be positive and at most the loaded gap {} m",
+        o.opening
     );
     if let Some(floor) = o.floor {
         ensure_input!(floor.is_finite(), "the floor must be finite, got {floor}");
@@ -482,7 +510,25 @@ pub fn grasps_on(
     // The fingers first: they are the likeliest to be in the way.
     let mut hand = device.robot().hand_spheres(hand);
     hand.sort_by_key(|sphere| !sphere.finger);
-    let each = || surfaces.par_iter().map(|s| on(s, &hand, o)).collect();
+    let partial = (capacity < o.opening && o.narrow).then(|| {
+        let inset = (o.opening - capacity) * 0.5;
+        hand.iter()
+            .map(|sphere| HandSphere {
+                center: sphere.center - Vec3::Y * (sphere.side * inset),
+                ..*sphere
+            })
+            .collect::<Vec<_>>()
+    });
+    let open = OpenHand {
+        spheres: &hand,
+        at_capacity: partial.as_deref(),
+        gap: o.opening,
+    };
+    let options = GraspOptions {
+        opening: capacity,
+        ..*o
+    };
+    let each = || surfaces.par_iter().map(|s| on(s, open, &options)).collect();
     Ok(device.install(each))
 }
 
@@ -499,8 +545,17 @@ struct Pair {
     order: usize,
 }
 
+/// The geometry and pad gap at the loaded joint positions.
+#[derive(Clone, Copy)]
+struct OpenHand<'a> {
+    spheres: &'a [HandSphere],
+    at_capacity: Option<&'a [HandSphere]>,
+    gap: f32,
+}
+
 /// One surface's grasps for a hand of spheres `hand`.
-fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
+fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
+    let hand = open.spheres;
     let (pairs, one_sided) = pairs(s, o);
     if pairs.is_empty() && one_sided.is_empty() {
         return vec![];
@@ -519,7 +574,7 @@ fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
         + reach;
     if o.narrow {
         // What stands around is sought as far out as the fingers could come in.
-        extent += o.opening / 2.0;
+        extent += open.gap / 2.0;
     }
     let middles = pairs.iter().chain(&one_sided).map(|pair| pair.middle);
     let lower = middles.clone().fold(Vec3::INFINITY, Vec3::min) - extent;
@@ -534,7 +589,7 @@ fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
     let clear = |pose: &Pose, width: f32| {
         let (closing, toward) = (pose.rotation * Vec3::Y, pose.rotation * Vec3::Z);
         if let Some(floor) = o.floor {
-            let tips = (pose.position + toward * reach).z - closing.z.abs() * o.opening / 2.0;
+            let tips = (pose.position + toward * reach).z - closing.z.abs() * open.gap / 2.0;
             if pose.position.z.min(tips) < floor {
                 return false;
             }
@@ -574,7 +629,7 @@ fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
                             pose,
                             contacts: [pair.middle - half, pair.middle + half],
                             one_sided,
-                            opening: o.opening,
+                            opening: open.gap,
                         });
                         break;
                     }
@@ -592,7 +647,7 @@ fn on(s: &Surface, hand: &[HandSphere], o: &GraspOptions) -> Vec<Grasp> {
         // Fingers that may come in narrower are checked out of line, which leaves the open
         // hand's check the code it is without them.
         let of = |pair: &Pair| match o.narrow {
-            true => narrowly(pair, one_sided, &near, hand, reach, o),
+            true => narrowly(pair, one_sided, &near, open, reach, o),
             false => of(pair, one_sided),
         };
         let each: Vec<Vec<Vec<Grasp>>> = lot.par_iter().map(of).collect();
@@ -615,7 +670,7 @@ fn narrowly(
     pair: &Pair,
     one_sided: bool,
     near: &Near,
-    hand: &[HandSphere],
+    open: OpenHand<'_>,
     reach: f32,
     o: &GraspOptions,
 ) -> Vec<Vec<Grasp>> {
@@ -638,11 +693,11 @@ fn narrowly(
             while back == 0.0 || reach - back >= o.overlap {
                 let pose = Pose::new(pair.middle - toward * back, rotation);
                 let whole = narrower.is_none();
-                match narrowed(near, hand, &pose, pair.width, reach, o, whole) {
+                match narrowed(near, open, &pose, pair.width, reach, o, whole) {
                     Some((opening, /* open */ true)) => {
                         let opening = match whole {
                             true => opening,
-                            false => narrowed(near, hand, &pose, pair.width, reach, o, true)
+                            false => narrowed(near, open, &pose, pair.width, reach, o, true)
                                 .map_or(opening, |(opening, _)| opening),
                         };
                         narrower = Some((pose, opening));
@@ -680,17 +735,22 @@ fn narrowly(
 /// for, the opening the whole one. `reach` is how far the hand reaches past its frame.
 fn narrowed(
     near: &Near,
-    hand: &[HandSphere],
+    open: OpenHand<'_>,
     pose: &Pose,
     width: f32,
     reach: f32,
     o: &GraspOptions,
     whole: bool,
 ) -> Option<(f32, bool)> {
+    let hand = open.spheres;
     let (closing, toward) = (pose.rotation * Vec3::Y, pose.rotation * Vec3::Z);
     // A finger's way from one opening to the next, and how many take it onto its patch: a
     // rounding short of one more is one more.
     let step = o.opening / (2 * OPENINGS) as f32;
+    let gap = |k: i32| {
+        let origin = if k > 0 { o.opening } else { open.gap };
+        origin - 2.0 * k as f32 * step
+    };
     let most = match whole {
         true => ((o.opening - width) / 2.0 / step + 1e-3) as i32,
         false => 0,
@@ -711,7 +771,7 @@ fn narrowed(
         }
         let tip = (pose.position + toward * reach).z;
         for k in -most..=most {
-            if tip - closing.z.abs() * (o.opening / 2.0 - k as f32 * step) < floor {
+            if tip - closing.z.abs() * (gap(k) / 2.0) < floor {
                 others |= span(k, k);
             }
         }
@@ -737,14 +797,14 @@ fn narrowed(
     // until none is left to mark, and says whether the hand is in something at every one. Of
     // the openings it has, none is left once it is in something at each; of those past open,
     // which only place the nearest thing that is not the object's, once that is at each.
-    let fingers = |taken: &mut u64, others: &mut u64, first: i32, last: i32| {
+    let mut fingers = |first: i32, last: i32, spheres: &[HandSphere]| {
         let all = span(first, last);
         let marked = |taken: u64, others: u64| match first < 0 {
             true => others & all == all,
             false => taken & all == all,
         };
-        for sphere in hand.iter().filter(|sphere| sphere.side != 0.0) {
-            if marked(*taken, *others) {
+        for sphere in spheres.iter().filter(|sphere| sphere.side != 0.0) {
+            if marked(taken, others) {
                 break;
             }
             let (from, center) = swept(sphere);
@@ -781,20 +841,28 @@ fn narrowed(
                     let farther = ((farther / step).floor() as i32).min(last);
                     at |= span(nearer, farther);
                 }
-                *taken |= at;
+                taken |= at;
                 if !object {
-                    *others |= at;
+                    others |= at;
                 }
-                marked(*taken, *others)
+                marked(taken, others)
             });
         }
-        *taken & all == all
+        taken & all == all
     };
     // The openings it has, then what stands around past the widest of them.
-    if fingers(&mut taken, &mut others, 0, most) {
+    let blocked = match open.at_capacity {
+        Some(partial) if most > 0 => {
+            // Only the full command goes to the loaded joints.
+            let full = fingers(0, 0, hand);
+            fingers(1, most, partial) && full
+        }
+        _ => fingers(0, most, hand),
+    };
+    if blocked {
         return None;
     }
-    fingers(&mut taken, &mut others, -most, -1);
+    fingers(-most, -1, hand);
     let free = |k: i32| taken & span(k, k) == 0;
     // How many openings lie between this one and the nearest at which the hand is in what is
     // not the object's, and in anything.
@@ -809,7 +877,7 @@ fn narrowed(
     };
     let clear = (0..=most).filter(|&k| free(k));
     let best = clear.max_by_key(|&k| (from_others(k), room(k), -k))?;
-    Some((o.opening - 2.0 * best as f32 * step, free(0)))
+    Some((gap(best), free(0)))
 }
 
 /// `pairs`, those that face each other most squarely first, in an order that spreads them:

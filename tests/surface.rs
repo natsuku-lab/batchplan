@@ -607,6 +607,74 @@ fn clear_at(hand: &[(Vec3, f32)], g: &Grasp, s: &Surface, approach: f32, others:
     })
 }
 
+#[test]
+fn measured_grasps_use_the_loaded_gap_and_only_commandable_openings() {
+    let loaded = 0.070;
+    let capacity = 0.060;
+    let locks = ["panda_finger_joint1", "panda_finger_joint2"]
+        .map(|joint| (joint.to_string(), loaded / 2.0))
+        .into_iter()
+        .collect();
+    let device = Device::cpu(&common::panda().unwrap().relock(&locks).unwrap()).unwrap();
+    let options = GraspOptions {
+        opening: loaded,
+        narrow: true,
+        ..GraspOptions::default()
+    };
+    let search = |s: &Surface, capacity| {
+        batchplan::grasps_on_with_capacity(&device, 0, std::slice::from_ref(s), &options, capacity)
+            .map(|mut sets| sets.remove(0))
+    };
+    let wide = plates_of(0.064, 0.005);
+    assert!(!search(&wide, loaded).unwrap().is_empty());
+    assert!(
+        search(&wide, capacity).unwrap().is_empty(),
+        "pair exceeds capacity"
+    );
+    for invalid in [0.0, -0.01, loaded + 0.001, f32::NAN] {
+        assert!(matches!(search(&wide, invalid), Err(Error::Input(_))));
+    }
+    let mut s = plates_of(0.045, 0.005);
+    let free = search(&s, capacity).unwrap();
+    assert!(!free.is_empty() && free.iter().all(|g| g.opening == loaded));
+    the_object(&mut s);
+    for sign in [-1.0, 1.0] {
+        face(
+            Vec3::X * sign * 0.044,
+            Vec3::X * -sign,
+            [Vec3::Y, Vec3::Z],
+            [0.05, 0.01],
+            &mut s,
+        );
+    }
+    s.object.resize(s.points.len(), false);
+    let found = search(&s, capacity).unwrap();
+    assert!(
+        found.iter().any(|g| (g.opening - 0.045).abs() < 1e-6),
+        "{found:?}"
+    );
+    let wrong = hand_open(0.055);
+    assert!(
+        found.iter().any(|g| (g.opening - 0.045).abs() < 1e-6
+            && !clear_at(&wrong, g, &s, options.approach, false)),
+        "at least one passage blocks a 7.5 mm slide but admits a 12.5 mm slide per finger"
+    );
+    for g in &found {
+        assert!(g.opening == loaded || g.opening < capacity);
+        assert!(clear_at(
+            &hand_open(g.opening),
+            g,
+            &s,
+            options.approach,
+            false
+        ));
+    }
+    assert_eq!(
+        search(&s, loaded).unwrap(),
+        grasps_on(&device, 0, &[s], &options).unwrap()[0]
+    );
+}
+
 /// Fingers that may come in narrower (`GraspOptions::narrow`) take, of sixteenths of the opening
 /// the Panda relocked there is clear at, way in included, the one farthest from any at which it
 /// would be in what is not the object's, as far past open as the fingers close; of those as far,
