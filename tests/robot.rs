@@ -49,6 +49,15 @@ fn parallel_jaw_motion_matches_the_calibrated_stroke_on_both_sides() {
     assert_eq!(gap(0.080, 0.060, &closed), Some(0.080));
     assert_eq!(gap(0.080f32.next_down(), 0.080, &closed), Some(0.080));
     assert_eq!(gap(0.060, 0.060, &closed), None);
+    let two_mm = closed.keys().map(|name| (name.clone(), 0.001)).collect();
+    assert_eq!(
+        panda
+            .parallel_jaw_opening(0, 0.080, 0.016, 0.002, &two_mm)
+            .unwrap(),
+        Some(0.080)
+    );
+    let past_stop = closed.keys().map(|name| (name.clone(), -0.01)).collect();
+    assert_eq!(gap(0.100, 0.060, &past_stop), None);
     let one = HashMap::from([("panda_finger_joint1".into(), 0.0)]);
     assert_eq!(gap(0.080, 0.060, &one), None);
     assert!(
@@ -61,6 +70,85 @@ fn parallel_jaw_motion_matches_the_calibrated_stroke_on_both_sides() {
             .parallel_jaw_opening(0, 0.080, 0.081, 0.0, &closed)
             .is_err()
     );
+}
+
+#[test]
+fn an_unchanged_torso_lock_does_not_change_jaw_qualification() {
+    let mut options = common::panda_options();
+    options.lock_joints.insert("panda_joint1".into(), 0.0);
+    options.default_q.as_mut().unwrap().remove(0);
+    let robot = Robot::load(common::asset("franka/franka_panda.urdf"), &options).unwrap();
+    let mut closed = HashMap::from([
+        ("panda_finger_joint1".into(), 0.0),
+        ("panda_finger_joint2".into(), 0.0),
+    ]);
+    let opening = |locks| {
+        robot
+            .parallel_jaw_opening(0, 0.080, 0.060, 0.0, locks)
+            .unwrap()
+    };
+    assert_eq!(opening(&closed), Some(0.080));
+    closed.insert("panda_joint1".into(), 0.0);
+    assert_eq!(
+        robot
+            .parallel_jaw_opening(0, 0.080, 0.060, 0.0, &closed)
+            .unwrap(),
+        Some(0.080)
+    );
+    closed.insert("panda_joint1".into(), 0.2);
+    assert_eq!(
+        robot
+            .parallel_jaw_opening(0, 0.080, 0.060, 0.0, &closed)
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn jaw_axes_and_coupled_limits_are_checked_even_far_from_the_origin() {
+    let urdf = r#"<robot name="jaws">
+      <link name="base"/><link name="palm"/><link name="left"/><link name="right"/><link name="rack"/>
+      <joint name="base_slide" type="prismatic"><parent link="base"/><child link="palm"/>
+        <axis xyz="1 0 0"/><limit effort="1" velocity="1" lower="0" upper="100000"/></joint>
+      <joint name="l" type="prismatic"><parent link="palm"/><child link="left"/>
+        <axis xyz="0 1 0"/><limit effort="1" velocity="1" lower="0" upper="0.04"/></joint>
+      <joint name="r" type="prismatic"><parent link="palm"/><child link="right"/>
+        <axis xyz="0 -1 0"/><limit effort="1" velocity="1" lower="0" upper="0.04"/></joint>
+      <joint name="coupled" type="prismatic"><parent link="base"/><child link="rack"/>
+        <axis xyz="0 0 1"/><limit effort="1" velocity="1" lower="0" upper="0.05"/>
+        <mimic joint="l"/></joint></robot>"#;
+    let mut model = CollisionModel::default();
+    for link in ["palm", "left", "right"] {
+        model
+            .spheres
+            .insert(link.into(), vec![[0.0, 0.0, 0.0, 0.001]]);
+    }
+    let closed = HashMap::from([("l".into(), 0.0), ("r".into(), 0.0)]);
+    let check = |text: &str, position| {
+        let options = RobotOptions {
+            ee_links: vec!["palm".into()],
+            lock_joints: HashMap::from([("l".into(), 0.04), ("r".into(), 0.04)]),
+            default_q: Some(vec![position]),
+            collision_model: Some(model.clone()),
+            ..Default::default()
+        };
+        Robot::from_urdf(text, &options)
+            .unwrap()
+            .parallel_jaw_opening(0, 0.08, 0.06, 0.0, &closed)
+            .unwrap()
+    };
+    let skew = urdf
+        .replace("0 1 0", "0.01 1 0")
+        .replace("0 -1 0", "-0.01 -1 0");
+    for position in [0.0, 65536.0] {
+        assert_eq!(check(urdf, position), Some(0.08));
+        assert_eq!(check(&skew, position), None);
+    }
+    let limited = urdf.replace(
+        "lower=\"0\" upper=\"0.05\"",
+        "lower=\"0.01\" upper=\"0.05\"",
+    );
+    assert_eq!(check(&limited, 0.0), None, "the coupled rack hits its stop");
 }
 
 /// A rotating mimic can return to its initial orientation at closure even though it sweeps a

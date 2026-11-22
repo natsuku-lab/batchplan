@@ -347,7 +347,12 @@ const OPENINGS: i32 = 16;
 
 /// The smallest contact or preshape whose width a measured hand must be able to reach.
 pub(crate) fn smallest_gap(capacity: f32) -> f32 {
-    THINNEST.min(capacity / OPENINGS as f32)
+    let step = capacity / (2 * OPENINGS) as f32;
+    THINNEST.min(capacity - 2.0 * last_opening(capacity, THINNEST, step) as f32 * step)
+}
+
+fn last_opening(capacity: f32, width: f32, step: f32) -> i32 {
+    (((capacity - width) / 2.0 / step + 1e-3) as i32).clamp(0, OPENINGS - 1)
 }
 
 impl GraspOptions {
@@ -752,7 +757,7 @@ fn narrowed(
         origin - 2.0 * k as f32 * step
     };
     let most = match whole {
-        true => ((o.opening - width) / 2.0 / step + 1e-3) as i32,
+        true => last_opening(o.opening, width, step),
         false => 0,
     };
     // The openings from `first` to `last`, as bits: one for each count of steps the fingers

@@ -148,6 +148,9 @@ struct LockedLink {
     origin: Transform,
     axis: Vec3,
     prismatic: bool,
+    /// The driver value folded into this robot and the range of the joint it drives.
+    value: f32,
+    limits: [f32; 2],
     /// The link's joint's value from the locked joint's.
     curve: Curve,
 }
@@ -979,6 +982,18 @@ impl Robot {
     /// is moved from where it was locked when the collision model was fitted
     /// ([`CollisionModel::locked_joints`]), or a value is not finite.
     pub fn relock(&self, joints: &HashMap<String, f32>) -> error::Result<Robot> {
+        self.check_locks(joints)?;
+        let mut robot = self.clone();
+        for held in &mut robot.locked {
+            if let Some(&value) = joints.get(&held.joint) {
+                held.value = value;
+                robot.links[held.link].origin = held.origin(value);
+            }
+        }
+        Ok(robot)
+    }
+
+    fn check_locks(&self, joints: &HashMap<String, f32>) -> error::Result<()> {
         for (name, &value) in joints {
             ensure_input!(
                 self.locked.iter().any(|l| l.joint == *name),
@@ -997,13 +1012,7 @@ impl Robot {
                 "joint '{name}' locked at {value}, not a finite value"
             );
         }
-        let mut robot = self.clone();
-        for held in &self.locked {
-            if let Some(&value) = joints.get(&held.joint) {
-                robot.links[held.link].origin = held.origin(value);
-            }
-        }
-        Ok(robot)
+        Ok(())
     }
 
     /// The hand whose IK frame `joint`, locked when the robot was loaded, carries, if it carries
@@ -1411,8 +1420,7 @@ impl Robot {
     /// commands must interpolate linearly between these locks. The gaps describe the pad
     /// calibration supplied by the caller.
     ///
-    /// Checks the driving joints (including mimics), both jaws, and every collision sphere of the
-    /// hand. A positive result describes their modeled motion over this stroke. Physical contact
+    /// Checks the driving joints and their limits (including mimics), both jaws, and the hand spheres. A positive result describes their modeled motion over this stroke. Physical contact
     /// still depends on the observed object and the gripper. Returns `None` for unsupported motion,
     /// including a closed gap above the smallest contact width or preshape generated. If the
     /// computed loaded gap and capacity differ by one floating-point step, returns the capacity
@@ -1444,7 +1452,7 @@ impl Robot {
             capacity <= gap,
             "grasp capacity {capacity} m exceeds the loaded gap {gap} m"
         );
-        let shut = self.relock(closed)?;
+        self.check_locks(closed)?;
         if closed_gap > crate::surface::smallest_gap(capacity) {
             return Ok(None);
         }
@@ -1459,28 +1467,53 @@ impl Robot {
         }
         // With only affine translations, agreement at both ends holds throughout the stroke.
         // A lock that carries the IK frame would also change the pose commanded to the arm.
-        let ancestors = std::iter::successors(Some(self.ee_links[hand]), |&i| self.links[i].parent);
-        let driven = self
-            .locked
+        let ancestors = |i| std::iter::successors(Some(i), |&i: &usize| self.links[i].parent);
+        let hand_links = self
+            .links
             .iter()
-            .filter(|link| closed.contains_key(&link.joint));
-        for link in driven {
-            if !link.prismatic
-                || !link.curve.is_linear()
-                || ancestors.clone().any(|i| i == link.link)
-            {
+            .enumerate()
+            .filter(|(_, link)| links.contains(&link.name.as_str()));
+        let moving_hand: HashSet<_> = hand_links.flat_map(|(i, _)| ancestors(i)).collect();
+        let fk = self.fk(&self.default_q);
+        let into_hand = fk.rot[self.ee_links[hand]].transpose();
+        let mut displacement = vec![Vec3::ZERO; self.links.len()];
+        for link in &self.locked {
+            let Some(&end) = closed.get(&link.joint) else {
+                continue;
+            };
+            if end == link.value {
+                continue;
+            }
+            let [lo, hi] = link.limits;
+            let within = |q| (lo..=hi).contains(&link.curve.value(q));
+            if !link.curve.is_linear() || !within(link.value) || !within(end) {
                 return Ok(None);
             }
+            if !moving_hand.contains(&link.link) {
+                continue;
+            }
+            if !link.prismatic || ancestors(self.ee_links[hand]).any(|i| i == link.link) {
+                return Ok(None);
+            }
+            let stroke = (end - link.value) * link.curve.0[1];
+            displacement[link.link] = into_hand * (fk.rot[link.link] * link.axis) * stroke;
         }
-        let open = self.hand_spheres(hand);
-        if !open.iter().any(|s| s.side < 0.0) || !open.iter().any(|s| s.side > 0.0) {
+        for (i, link) in self.links.iter().enumerate() {
+            if let Some(parent) = link.parent {
+                let carried = displacement[parent];
+                displacement[i] += carried;
+            }
+        }
+        let open = self.hand_spheres_by_link(hand, &fk);
+        if !open.iter().any(|(_, s)| s.side < 0.0) || !open.iter().any(|(_, s)| s.side > 0.0) {
             return Ok(None);
         }
+        // Compare displacement vectors directly. Subtracting world positions can lose a jaw's
+        // entire transverse motion on a robot whose base is far from the origin.
         let travel = (loaded_gap - closed_gap) * 0.5;
-        let mut spheres = open.iter().zip(shut.hand_spheres(hand));
-        let matches = spheres.all(|(a, b)| {
-            let expected = a.center - Vec3::Y * (a.side * travel);
-            expected.distance(b.center) <= travel * 1e-4
+        let matches = open.iter().all(|(link, sphere)| {
+            let expected = Vec3::NEG_Y * (sphere.side * travel);
+            expected.distance(displacement[*link]) <= travel * 1e-4
         });
         Ok(matches.then_some(gap))
     }
@@ -1491,7 +1524,13 @@ impl Robot {
     /// the arm does: what [`grasps_on`](crate::grasps_on) holds a grasp's hand against.
     #[must_use]
     pub fn hand_spheres(&self, hand: usize) -> Vec<HandSphere> {
-        let fk = self.fk(&self.default_q);
+        self.hand_spheres_by_link(hand, &self.fk(&self.default_q))
+            .into_iter()
+            .map(|(_, sphere)| sphere)
+            .collect()
+    }
+
+    fn hand_spheres_by_link(&self, hand: usize, fk: &Fk) -> Vec<(usize, HandSphere)> {
         let frame = self.ee_links[hand];
         let (rot, pos) = (fk.rot[frame], fk.pos[frame]);
         let links = self.hand_links(hand);
@@ -1530,7 +1569,7 @@ impl Robot {
                 sphere.side = middle.signum();
             }
         }
-        spheres.into_iter().map(|(_, sphere)| sphere).collect()
+        spheres
     }
 
     /// Every collision sphere at configuration `q`, in the robot's frame, as `[x, y, z, radius]`,
@@ -2053,6 +2092,11 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
                     origin,
                     axis: joint.axis,
                     prismatic,
+                    value,
+                    limits: given(joint).position.unwrap_or(match joint.kind {
+                        JointType::Continuous => [f32::NEG_INFINITY, f32::INFINITY],
+                        _ => [joint.lower, joint.upper],
+                    }),
                     curve,
                 };
                 origin = held.origin(value);
