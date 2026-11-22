@@ -282,6 +282,52 @@ impl Grasp {
     pub fn width(&self) -> f32 {
         (self.contacts[1] - self.contacts[0]).length()
     }
+
+    /// Whether a ball in the surface's frame lies wholly in the gap this grasp closes, along
+    /// its y axis. The ball's projection must fit inside the silhouette of a finger sphere on
+    /// either side, and clear every sphere of the hand at the opening the grasp chose. Pass
+    /// the same hand spheres and `GraspOptions::opening` that `grasps_on` used.
+    #[must_use]
+    pub fn closes_on(
+        &self,
+        hand: &[HandSphere],
+        loaded_opening: f32,
+        at: Vec3,
+        radius: f32,
+    ) -> bool {
+        if !(at.is_finite()
+            && radius.is_finite()
+            && radius >= 0.0
+            && self.pose.is_unit()
+            && self.opening > 0.0
+            && loaded_opening.is_finite()
+            && self.opening <= loaded_opening)
+        {
+            return false;
+        }
+        let pose = self.pose.rigid();
+        let p = pose.rotation.conjugate() * (at - pose.position);
+        if p.y.abs() + radius > self.opening * 0.5 {
+            return false;
+        }
+        let inward = (loaded_opening - self.opening) * 0.5;
+        let (mut left, mut right) = (false, false);
+        for sphere in hand {
+            let center = sphere.center - Vec3::Y * sphere.side * inward;
+            let delta = p - center;
+            if delta.length_squared() < (sphere.radius + radius).powi(2) {
+                return false;
+            }
+            let across = Vec2::new(delta.x, delta.z);
+            if sphere.radius >= radius
+                && across.length_squared() <= (sphere.radius - radius).powi(2)
+            {
+                left |= sphere.side < 0.0 && delta.y > 0.0;
+                right |= sphere.side > 0.0 && delta.y < 0.0;
+            }
+        }
+        left && right
+    }
 }
 
 /// The fewest points a patch a fingertip presses on holds: fewer say too little of where the
@@ -300,6 +346,19 @@ const BACK: f32 = 0.002;
 const OPENINGS: i32 = 16;
 
 impl GraspOptions {
+    /// Orders measured grasps by the moment their finger contacts can exert about this turn's
+    /// axis, greatest first. Equal moments retain the input order. Give the measured screw in
+    /// the grasps' frame, or `None` to turn each hand about its own z axis.
+    pub fn order_for_turn(&self, grasps: &mut [Grasp], screw: Option<Screw>) {
+        let moment = |g: &Grasp| {
+            let axis = screw.unwrap_or_else(|| {
+                Screw::about(g.pose.position, g.pose.rigid().rotation * Vec3::Z)
+            });
+            g.moment(&axis, self)
+        };
+        grasps.sort_by(|a, b| moment(b).total_cmp(&moment(a)));
+    }
+
     /// The openings a grasp may come in at where [`narrow`](GraspOptions::narrow) lets it
     /// (meters), widest first: `opening` and each sixteenth of it less. A place may let go at
     /// the same ([`Place::open`](crate::Place::open)), each as the fingers' joint values.

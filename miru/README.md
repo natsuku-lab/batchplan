@@ -192,6 +192,74 @@ shape that stands for the thing either: it is a box that covers it, not solid.
 `examples/score.rs` computes no robot mask: a recorded look carries each view's as its executor
 computed it, and its fixtures are the obstacles its run's `cell.json` names.
 
+## Planning a grip on part of an object
+
+For a complete pick, pull or turn, prepare the current observation once and pass the ordered
+grasps to `GripWorlds::plan`. The cell supplies its own finger-joint calibration, mounted
+touches and motion options. For example, a straight draw can require that the fingers close
+on the point selected in a depth image:
+
+```rust,no_run
+use std::collections::HashMap;
+use batchplan::{Device, Grasp, Touch, TaskOptions};
+use glam::Vec3;
+use miru::{GripOutcome, GripSearch, GripTarget, Observed, Step};
+
+fn draw(
+    seen: &Observed, device: &Device, hand: usize, id: u32, loaded_opening: f32,
+    q: &[f32], grasps: &[Grasp], point: Vec3, outward: Vec3, distance: f32,
+    mounted: &[Touch], finger_locks: impl Fn(f32) -> HashMap<String, f32>,
+    should_stop: impl FnMut() -> bool,
+) -> Result<GripOutcome, batchplan::Error> {
+    let step = Step { at: &[q], ..Step::default() };
+    let prepared = seen.grip_worlds(device, &step, hand, id, loaded_opening)?;
+    let search = GripSearch { target: Some(GripTarget::Point(point)), ..GripSearch::default() };
+    prepared.plan(grasps, &search, &TaskOptions::default(), should_stop, |c| {
+        c.touches.extend_from_slice(mounted);
+        let mut task = c.pull(q, outward, distance);
+        task.locked = vec![finger_locks(c.candidate.opening)];
+        task
+    })
+}
+```
+
+The search keeps `batch` candidate worlds in flight plus the requested winners. The first
+`enough` feasible candidates in input order are returned quickest first, with their original
+indices, finger openings and exact locked joint settings. `GripPlan::world(stage)` gives the collision world to follow each
+motion against, with its touch permissions and obstacle names. Failed motions carry their own
+obstacle names. The result counts actual batched solver calls. A cancellation yields `GripOutcome::Interrupted`, including any work completed.
+An approximate target can use `GripTarget::Near` with an explicit radius about the measured
+contact midpoint, or `None` allows the whole surface.
+
+For a custom motion, `prepared.project(&candidate)?` yields a single collision world or
+`None` when there is no attributable contact part. These worlds contain dense distance grids:
+drop each rejected projection before proceeding. Projection requires the memory of the same
+look. After a simulated act, another split requires a new observation. The regular
+`Memory::world` and unsplit picks remain available for planning from predicted memory. A very
+large solid or local refinement can exceed batchplan's distance-grid size limit and return an
+input error.
+
+`Gripped.scene` starts with every collision enabled. Its `part` is the sole obstacle that the
+fingers may touch while grasping; `grasp` is the hand pose in that obstacle's frame. A grasp on
+the rim of a bowl leaves the opposite rim, the fingers' approach to it, other objects and any
+unattributed cells subject to collision checks. The local room uses finer voxels near the hand:
+current rays may resolve the contents of a coarse cell, while old material lacking a fresh
+reading and space no camera saw through stay in the residual collision world.
+
+For a pick, give `Pick` the result's `part`, `grasp` and `body`. A body is available only
+when no other perceived object stands on the target. Its shape covers the whole object,
+including any hollow interior while carried. The pick checks contact and computes the departure
+world with the other indices the body vacates. After picking, call `observed.picked(&grip, &held)?`
+with the returned hold. It carries the object's ID into the hand, preserves residual occupancy
+in the old room and retains the identity of additional measured fixture cells. For a known
+support, collect every obstacle with the fixture's `Of::Known(index)` for held-only contact.
+
+A turn or pull uses the fixed world's `part` and leaves the rest in place. `Gripped.owner` names
+the current object that supplied the contact readings. A handle can have its own perceived ID
+even when mechanically attached to a drawer. The caller identifies the assembly for an act on
+the drawer and supplies the axis of a turn or pull independently. An overlapping object or
+unresolved wall can still prevent a grip.
+
 ## How it tells things apart
 
 By geometry, at the scale the camera's stated noise allows; `src/segment.rs` has the

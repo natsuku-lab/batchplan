@@ -2932,6 +2932,188 @@ fn mask_row(
     }
 }
 
+impl OccupancyMap {
+    /// Marks the voxels within `margin` of `shape` occupied, with the weight of one hit
+    /// or the voxel's existing evidence where it is stronger. This can carry a collision
+    /// obstacle back into a map when the piece it belonged to leaves the world. Subsequent
+    /// depth images update those voxels as usual.
+    pub fn occupy(&mut self, shape: &Obstacle, margin: f32) -> Result<()> {
+        self.mark(shape, margin, |l| l.max(HIT))
+    }
+
+    /// A map of an analytic primitive as solid voxels, including every voxel its surface intersects.
+    /// The rest of the map, out to the given padding, is free.
+    pub fn from_shape(shape: &Obstacle, o: &SdfOptions) -> Result<Self> {
+        ensure_input!(
+            !matches!(shape, Obstacle::Sdf { .. }),
+            "rasterizing a solid requires an analytic primitive, got a distance grid"
+        );
+        shape.check().map_err(|e| input!("the shape {e}"))?;
+        let (lo, hi) = shape.bounds();
+        let grid = layout(lo, hi, o)?;
+        let reach = 0.5 * 3f32.sqrt() * grid.voxel;
+        let log_odds = (0..grid.points())
+            .map(|n| {
+                if shape.distance(grid.point(n)).value <= reach {
+                    HIT
+                } else {
+                    MISS
+                }
+            })
+            .collect();
+        Ok(Self {
+            grid,
+            log_odds,
+            part: true,
+            weighing: Weighing::Latest,
+        })
+    }
+
+    /// Refines each voxel into `divisions` cubes along each edge, fusing the same views in
+    /// the smaller cubes. Voxel centres align with the parent cells' boundaries. Where the
+    /// views show nothing, a free parent stays free and an unknown or occupied parent stays
+    /// unknown or occupied. An occupied parent with no fresh hit stays occupied throughout:
+    /// the current views cannot locate its old material more finely. Observed hits in every
+    /// view stay occupied even where another view sees past them. A shadow stays free under
+    /// `OccupiedExceptRobotShadow` only while no surface has hidden it. A part's excluded voxels
+    /// stay excluded.
+    pub fn refined(
+        &self,
+        device: &Device,
+        views: &[(&DepthImage<'_>, Option<&RobotMask>)],
+        divisions: u32,
+    ) -> Result<Self> {
+        ensure_input!(
+            divisions > 0,
+            "a voxel needs at least one division, got {divisions}"
+        );
+        let voxel = self.grid.voxel / divisions as f32;
+        ensure_input!(
+            voxel > 0.0,
+            "voxel spacing {} divided by {divisions} is zero",
+            self.grid.voxel
+        );
+        let dims = self.grid.dims.as_u64vec3() * u64::from(divisions);
+        ensure_input!(
+            dims.cmple(glam::U64Vec3::splat(MAX_POINTS)).all(),
+            "refining {:?} voxels into {divisions} per edge is too large",
+            self.grid.dims
+        );
+        let extent = dims.as_vec3() - 1.0;
+        ensure_input!(
+            extent.as_dvec3().length_squared() < MAX_DIAGONAL
+                && dims.element_product() <= MAX_POINTS,
+            "a refined grid of {dims:?} voxels is too large"
+        );
+        let grid = Layout {
+            dims: dims.as_uvec3(),
+            origin: self.grid.origin - (self.grid.voxel - voxel) * 0.5,
+            voxel,
+        };
+        let mut fine = Self {
+            grid,
+            log_odds: vec![UNOBSERVED; grid.points()],
+            part: false,
+            weighing: Weighing::Evidence,
+        };
+        let mut current = Self {
+            grid: self.grid,
+            log_odds: vec![UNOBSERVED; self.grid.points()],
+            part: false,
+            weighing: Weighing::Evidence,
+        };
+        for &(image, mask) in views {
+            fine.integrate(device, image, mask)?;
+            current.integrate(device, image, mask)?;
+        }
+        for &(image, mask) in views {
+            let image = image.rigid();
+            for i in 0..image.depth.len() {
+                if let Some(p) = image.point(i, mask) {
+                    for map in [&mut current, &mut fine] {
+                        if map.grid.contains(p) {
+                            map.log_odds[map.grid.nearest(p)] = HIT;
+                        }
+                    }
+                }
+            }
+        }
+        // The small cubes tile their parent's cube exactly, including when divisions is even.
+        for (n, value) in fine.log_odds.iter_mut().enumerate() {
+            let n = n as u32;
+            let at = UVec3::new(
+                n % grid.dims.x,
+                n / grid.dims.x % grid.dims.y,
+                n / (grid.dims.x * grid.dims.y),
+            );
+            let k = self.grid.index(at / divisions);
+            let parent = self.log_odds[k];
+            if parent == APART
+                || (parent > 0 && current.log_odds[k] <= 0)
+                || (!observed(*value)
+                    && (observed(parent) || *value == UNOBSERVED || parent == OCCLUDED))
+            {
+                *value = parent;
+            }
+        }
+        fine.part = true;
+        Ok(fine)
+    }
+
+    /// Separates the occupied voxels that contain a reading of `take` and none of `keep`.
+    /// Each must also pass `inside`, given its centre and the radius of the ball enclosing the
+    /// entire voxel. No unknown, unobserved, or mixed voxel is removed. The separated voxels
+    /// retain their original coordinates and occupancy, with free space around them in a part
+    /// of the map padded by `padding`. None means there was nothing to separate.
+    pub fn take_readings(
+        &mut self,
+        take: &[Vec3],
+        keep: &[Vec3],
+        padding: f32,
+        inside: impl Fn(Vec3, f32) -> bool,
+    ) -> Result<Option<Self>> {
+        ensure_input!(
+            padding.is_finite() && padding >= 0.0,
+            "invalid map padding {padding}"
+        );
+        let mut marked = vec![false; self.grid.points()];
+        for (points, value) in [(take, true), (keep, false)] {
+            for &p in points {
+                ensure_input!(p.is_finite(), "a reading must be finite, got {p}");
+                if self.grid.contains(p) {
+                    marked[self.grid.nearest(p)] = value;
+                }
+            }
+        }
+        let reach = 0.5 * 3f32.sqrt() * self.grid.voxel;
+        let mut lower = Vec3::INFINITY;
+        let mut upper = Vec3::NEG_INFINITY;
+        for (n, marked) in marked.iter_mut().enumerate() {
+            if !*marked {
+                continue;
+            }
+            let p = self.grid.point(n);
+            *marked = self.log_odds[n] > 0 && inside(p, reach);
+            if *marked {
+                lower = lower.min(p);
+                upper = upper.max(p);
+            }
+        }
+        if !lower.is_finite() {
+            return Ok(None);
+        }
+        let bounds = Obstacle::cuboid((lower + upper) * 0.5, (upper - lower) * 0.5 + reach);
+        let mut taken = self.part(&bounds, padding)?;
+        taken.log_odds.fill(APART);
+        for (n, _) in marked.into_iter().enumerate().filter(|(_, marked)| *marked) {
+            let at = taken.grid.nearest(self.grid.point(n));
+            taken.log_odds[at] = self.log_odds[n];
+            self.log_odds[n] = MISS;
+        }
+        Ok(Some(taken))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

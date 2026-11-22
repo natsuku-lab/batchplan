@@ -152,7 +152,7 @@ fn knob(device: &Device, at: Vec2, yaw: f32) -> Result<Thing> {
     };
     let screw = Screw::about(at.extend(0.11), Vec3::Z);
     let mut found = batchplan::grasps_on(device, 0, std::slice::from_ref(&seen), &o)?.remove(0);
-    found.sort_by(|a, b| b.moment(&screw, &o).total_cmp(&a.moment(&screw, &o)));
+    o.order_for_turn(&mut found, Some(screw));
     let to_bar = bar.pose().inverse();
     let fingers = |opening: f32| {
         let each = ["panda_finger_joint1", "panda_finger_joint2"];

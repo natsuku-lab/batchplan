@@ -113,6 +113,50 @@ fn closes_on(g: &Grasp) -> (Vec3, [Vec3; 2]) {
     (line, g.contacts)
 }
 
+/// Material must fit between both pads at once and clear the rest of the hand.
+#[test]
+fn the_closing_region_requires_two_pads_and_a_clear_gap_for_the_whole_ball() {
+    let device = device();
+    let hand = device.robot().hand_spheres(0);
+    let g = grasps(&plates_of(0.04, 0.005), &GraspOptions::default())[0];
+    let to_world = |p| g.pose.position + g.pose.rotation * p;
+    let radius = 0.001;
+    let at = hand
+        .iter()
+        .filter(|s| s.side < 0.0)
+        .map(|s| Vec3::new(s.center.x, 0.0, s.center.z))
+        .find(|p| g.closes_on(&hand, GraspOptions::default().opening, to_world(*p), radius))
+        .expect("both finger silhouettes contain a ball at least 2 mm wide");
+    let p = to_world(at);
+    for side in [-1.0, 1.0] {
+        let one: Vec<_> = hand.iter().copied().filter(|s| s.side != side).collect();
+        assert!(
+            !g.closes_on(&one, GraspOptions::default().opening, p, radius),
+            "the pad on {side} is missing"
+        );
+    }
+    let largest = hand
+        .iter()
+        .filter(|s| s.side != 0.0)
+        .map(|s| s.radius)
+        .fold(0.0, f32::max);
+    assert!(largest < g.opening * 0.5);
+    assert!(
+        !g.closes_on(&hand, GraspOptions::default().opening, p, largest + radius),
+        "the ball extends past the pads"
+    );
+    let mut blocked = hand;
+    let palm = blocked
+        .iter_mut()
+        .find(|s| s.side == 0.0)
+        .expect("the hand has a palm");
+    palm.center = at;
+    assert!(
+        !g.closes_on(&blocked, GraspOptions::default().opening, p, radius),
+        "the palm occupies the closing gap"
+    );
+}
+
 #[test]
 fn a_box_is_grasped_across_each_side_that_fits_and_no_other() {
     let half = Vec3::new(0.02, 0.03, 0.06);
@@ -2011,6 +2055,26 @@ fn a_grasps_moment_about_a_line_is_what_friction_its_patches_and_a_push_give() {
     let half = Vec3::new(0.045, 0.0125, 0.015);
     let o = GraspOptions::default();
     let found = grasps(&box_surface(half, &[]), &o);
+    for screw in [Some(Screw::about(Vec3::ZERO, Vec3::Z)), None] {
+        let mut ranked = found.clone();
+        o.order_for_turn(&mut ranked, screw);
+        let moments: Vec<_> = ranked
+            .iter()
+            .map(|g| {
+                let axis = screw
+                    .unwrap_or_else(|| Screw::about(g.pose.position, g.pose.rotation * Vec3::Z));
+                g.moment(&axis, &o)
+            })
+            .collect();
+        assert!(
+            moments[0] > *moments.last().unwrap(),
+            "the bar has grips with unequal leverage"
+        );
+        assert!(
+            moments.windows(2).all(|m| m[0] >= m[1]),
+            "strongest grip first"
+        );
+    }
     let across: Vec<&Grasp> = found
         .iter()
         .filter(|g| (g.pose.rotation * Vec3::Y).y.abs() > 0.9999)
@@ -2064,4 +2128,38 @@ fn a_grasps_moment_about_a_line_is_what_friction_its_patches_and_a_push_give() {
     for g in &across {
         assert!((g.moment(&reversed, &o) - g.moment(&axis, &o)).abs() < 1e-6);
     }
+}
+
+#[test]
+fn the_grasp_closing_region_uses_a_rigid_frame() {
+    let robot = common::panda().unwrap();
+    let hand = robot.hand_spheres(0);
+    let mut surface = Surface::default();
+    for side in [-1.0, 1.0] {
+        face(
+            Vec3::new(0.0, side * 0.01, 0.10),
+            side * Vec3::Y,
+            [Vec3::X, Vec3::Z],
+            [0.012; 2],
+            &mut surface,
+        );
+    }
+    let grasp = grasps(&surface, &GraspOptions::default())[0];
+    let mut rounded = grasp;
+    rounded.pose.rotation *= 0.9992;
+    assert!(rounded.pose.is_unit());
+    // A ball grazing the side of a Panda pad at the open grasp.
+    let local = Vec3::new(-0.00909, -0.03838, 0.00606);
+    let point = grasp.pose.position + grasp.pose.rotation * local;
+    assert!(!grasp.closes_on(&hand, GraspOptions::default().opening, point, 0.0008));
+    assert!(!rounded.closes_on(&hand, GraspOptions::default().opening, point, 0.0008));
+
+    let mut wider = grasp;
+    wider.opening += 0.01;
+    let between = (grasp.contacts[0] + grasp.contacts[1]) * 0.5;
+    assert!(grasp.closes_on(&hand, GraspOptions::default().opening, between, 0.0));
+    assert!(
+        !wider.closes_on(&hand, GraspOptions::default().opening, between, 0.0),
+        "the loaded hand cannot open to this width"
+    );
 }

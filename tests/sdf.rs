@@ -5308,3 +5308,112 @@ fn points_with_no_reach_each_or_a_shape_that_is_none_are_refused() {
     let on = sdf::on_shapes(cpu(), &[], &points, &[0.01; 3]).unwrap();
     assert!(on.iter().all(Option::is_none));
 }
+
+#[test]
+fn separating_grasp_readings_keeps_mixed_voxels_and_unknown_space() {
+    let voxel = 0.01;
+    let mut map = OccupancyMap::try_new(-Vec3::splat(0.06), Vec3::splat(0.06), voxel).unwrap();
+    let own = -2.0 * voxel * Vec3::X;
+    let mixed = 2.0 * voxel * Vec3::X;
+    let foreign = mixed + 0.1 * voxel * Vec3::Y;
+    for point in [own, mixed] {
+        map.occupy(&Obstacle::sphere(point, 0.1 * voxel), 0.0)
+            .unwrap();
+    }
+    assert_eq!(map.counts().occupied, 2);
+    let unknown = map.counts().unobserved;
+    let before = map.occupied();
+    let detached = map
+        .take_readings(&[own, mixed], &[foreign], 0.02, |_, _| true)
+        .unwrap()
+        .expect("one occupied voxel contains only a grasp reading");
+    assert_eq!(detached.counts().occupied, 1);
+    assert_eq!(map.counts().occupied, 1);
+    assert_eq!(map.counts().unobserved, unknown);
+    assert!(detached.occupancy(own).is_some_and(|p| p > 0.5));
+    assert!(map.occupancy(own).is_some_and(|p| p < 0.5));
+    assert!(map.occupancy(mixed).is_some_and(|p| p > 0.5));
+    assert_eq!(map.occupancy(Vec3::ZERO), None);
+    let mut together = map.occupied();
+    together.extend(detached.occupied());
+    for point in before {
+        assert!(together.iter().any(|p| point.distance(*p) < 1e-6));
+    }
+    // Without fresh rays, refinement cannot open a hole in what remains.
+    let refined = map.refined(cpu(), &[], 2).unwrap();
+    assert_eq!(refined.counts().occupied, 8);
+    assert_eq!(refined.counts().unobserved, 8 * unknown);
+    assert!(refined.occupancy(mixed).is_some_and(|p| p > 0.5));
+    assert_eq!(refined.occupancy(Vec3::ZERO), None);
+}
+
+#[test]
+fn refining_a_map_remembers_what_hid_each_cell() {
+    let robot = common::panda().unwrap();
+    let ([table, block, _], camera, intrinsics) = held_shapes();
+    let depth = look_at_shapes(&[&table, &block], camera, intrinsics);
+    let image = DepthImage {
+        depth: &depth,
+        width: 640,
+        intrinsics,
+        camera,
+    };
+    let hidden = Vec3::new(2.4, 0.0, 0.02);
+    let new = || {
+        OccupancyMap::try_new(hidden - Vec3::splat(0.1), hidden + Vec3::splat(0.1), 0.01).unwrap()
+    };
+    let shapes = [table, block];
+    for device in devices() {
+        let mask = image
+            .robot_mask(&robot, robot.default_q(), 0.04, &[])
+            .unwrap()
+            .with_shapes(device, &image, &shapes, [0.004, 0.0, 0.0])
+            .unwrap();
+        let distance = |map: &OccupancyMap| {
+            map.grid(device, Occlusion::OccupiedExceptRobotShadow)
+                .unwrap()
+                .distance(hidden)
+                .value
+        };
+        let mut behind_surface = new();
+        behind_surface.integrate(device, &image, None).unwrap();
+        assert!(behind_surface.occupancy(hidden).is_none() && distance(&behind_surface) <= 0.0);
+        let shadowed_again = behind_surface
+            .refined(device, &[(&image, Some(&mask))], 2)
+            .unwrap();
+        assert!(
+            distance(&shadowed_again) <= 0.0,
+            "a surface previously hid this space"
+        );
+
+        let mut behind_mask = new();
+        behind_mask.integrate(device, &image, Some(&mask)).unwrap();
+        // Keep a solid away from the shadow so a grid can be built even if every unknown is shadow.
+        behind_mask
+            .occupy(&Obstacle::sphere(hidden + 0.07 * Vec3::Y, 0.01), 0.0)
+            .unwrap();
+        assert!(behind_mask.occupancy(hidden).is_none() && distance(&behind_mask) > 0.0);
+        let without_new_views = behind_mask.refined(device, &[], 2).unwrap();
+        assert!(
+            distance(&without_new_views) > 0.0,
+            "only the mask ever hid this space"
+        );
+    }
+}
+
+#[test]
+fn a_grid_with_a_thin_negative_pocket_cannot_be_voxelized_as_a_primitive() {
+    let mut distances = [1.0; 27];
+    distances[13] = -0.001;
+    let grid = SdfGrid::try_new([3; 3], 0.01, Vec3::ZERO, &distances).unwrap();
+    let shape = Obstacle::from_grid(grid);
+    assert!(shape.distance(Vec3::splat(0.01)).value < 0.0);
+    let options = SdfOptions {
+        voxel: 0.02,
+        padding: 0.0,
+    };
+    assert!(matches!(
+        OccupancyMap::from_shape(&shape, &options),
+        Err(Error::Input(_))
+    ));
+}

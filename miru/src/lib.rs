@@ -75,6 +75,8 @@ struct Readme;
 
 mod error;
 mod fit;
+mod grip;
+mod grip_plan;
 mod look;
 mod masks;
 mod memory;
@@ -83,6 +85,11 @@ mod segment;
 mod threads;
 mod view;
 
+pub use grip::{GripWorlds, Gripped};
+pub use grip_plan::{
+    GripCandidate, GripFailure, GripOutcome, GripPlan, GripPlans, GripSearch, GripStop, GripTarget,
+    GripTask,
+};
 pub use look::{Look, LookOptions, Noise, View, look};
 pub use memory::{
     Act, Camera, Kept, Memory, MemoryOptions, Observed, Of, Planned, Stance, Step, Under, observe,
