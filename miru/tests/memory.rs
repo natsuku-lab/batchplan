@@ -3294,3 +3294,60 @@ fn a_supported_can_refuses_the_entire_pick_before_planning_candidates() {
         "a refusal cannot hide invalid input"
     );
 }
+
+#[test]
+fn a_world_point_names_only_readings_at_its_depth_and_keeps_disagreement() {
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let point = Vec3::new(0.45, 0.40, 0.20);
+    let upper = point + Vec3::Z * 0.02;
+    let known = [point + Vec3::Z * 0.001, upper - Vec3::Z * 0.001]
+        .map(|p| Obstacle::cuboid(p, Vec3::new(0.1, 0.1, 0.001)));
+    let memory = Memory::try_new(&device, known.to_vec(), &MemoryOptions::default()).unwrap();
+    let depths = [0.5; 17 * 17];
+    let camera = |at, rotation| Camera {
+        image: DepthImage {
+            width: 17,
+            depth: &depths,
+            camera: Pose::new(at, rotation),
+            intrinsics: batchplan::Intrinsics {
+                fx: 100.0,
+                fy: 100.0,
+                cx: 8.0,
+                cy: 8.0,
+            },
+        },
+        noise: Noise {
+            constant: 0.002,
+            linear: 0.0,
+            quadratic: 0.0,
+        },
+        off_by: 0.006,
+        color: &[],
+        masks: &[],
+        band: 0,
+    };
+    let below = camera(point - 0.5 * Vec3::Z, Quat::IDENTITY);
+    let above = camera(
+        upper + 0.5 * Vec3::Z,
+        Quat::from_rotation_x(std::f32::consts::PI),
+    );
+    let stance = Stance {
+        q: robot.default_q(),
+        locked: &HashMap::new(),
+        padding: 0.0,
+    };
+    let observed = observe(&device, &[below, above, below], &stance, &memory).unwrap();
+    let kept = observed.kept;
+    assert_eq!(kept.scene().labels[0][8 * 17 + 8], Label::Known(0));
+    assert_eq!(kept.scene().labels[1][8 * 17 + 8], Label::Known(1));
+    assert_eq!(kept.labels_at(point).unwrap(), [Label::Known(0)]);
+    assert_eq!(kept.labels_at(upper).unwrap(), [Label::Known(1)]);
+    assert_eq!(
+        kept.labels_at(point.midpoint(upper)).unwrap(),
+        [Label::Known(0), Label::Known(1)]
+    );
+    assert!(kept.labels_at(upper + Vec3::Z * 0.03).unwrap().is_empty());
+    assert!(kept.labels_at(point + Vec3::X).unwrap().is_empty());
+    assert!(kept.labels_at(Vec3::NAN).is_err());
+}

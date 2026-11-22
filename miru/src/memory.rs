@@ -818,6 +818,7 @@ pub struct Kept {
 /// One camera's depth as a look read it.
 #[derive(Clone, Debug)]
 struct KeptView {
+    noise: Noise,
     depth: Vec<f32>,
     width: usize,
     intrinsics: Intrinsics,
@@ -843,6 +844,36 @@ impl Kept {
     #[must_use]
     pub fn scene(&self) -> &Scene {
         &self.scene
+    }
+
+    /// The distinct labels at a point in the look's frame, in camera order. Each camera
+    /// contributes the label of the pixel the point projects to if its filtered depth agrees
+    /// along the optical axis within three deviations of its noise plus its calibration allowance.
+    /// A nearer occluder, a missing reading or a camera looking elsewhere supplies no label.
+    /// Empty means no supporting reading. Multiple labels mean the views disagree. A valid
+    /// unassigned reading contributes [`Label::Nothing`]. Object indices refer to [`Self::scene`].
+    pub fn labels_at(&self, point: Vec3) -> Result<Vec<Label>> {
+        ensure_input!(point.is_finite(), "look point must be finite, got {point}");
+        let mut found = Vec::new();
+        for (view, labels) in self.views.iter().zip(&self.scene.labels) {
+            let camera = view.camera;
+            let local = camera.rotation.normalize().conjugate() * (point - camera.position);
+            let height = view.depth.len() / view.width;
+            let Some(i) = crate::view::pixel_at(local, view.intrinsics, view.width, height) else {
+                continue;
+            };
+            let z = view.depth[i];
+            let tolerance = SIGMAS * view.noise.at(z);
+            if z.is_finite()
+                && z > 0.0
+                && tolerance.is_finite()
+                && (local.z - z).abs() <= tolerance
+                && !found.contains(&labels[i])
+            {
+                found.push(labels[i]);
+            }
+        }
+        Ok(found)
     }
 
     /// Camera `camera`'s depth as the look read it: filtered, with the camera's pinhole and pose.
@@ -1061,6 +1092,7 @@ pub fn observe(
 
     let views = (filtered.into_iter().zip(cameras).zip(masks))
         .map(|((depth, camera), robot)| KeptView {
+            noise: raised(camera),
             depth,
             width: camera.image.width,
             intrinsics: camera.image.intrinsics,

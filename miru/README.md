@@ -194,6 +194,13 @@ computed it, and its fixtures are the obstacles its run's `cell.json` names.
 
 ## Planning a grip on part of an object
 
+To select an object at a point measured in the robot frame, call `kept.labels_at(point)?`.
+Each camera contributes its label only when its filtered reading agrees with the point's
+depth within the camera's noise and calibration allowance. A sole `Label::Object(i)` names
+`kept.scene().objects[i].id`. An empty result has no supporting reading, and distinct labels
+identify an ambiguous point. A pixel supplied with its originating view already has a label in
+`kept.scene().labels`.
+
 For a complete pick, pull or turn, prepare the current observation once and pass the ordered
 grasps to `GripWorlds::plan`. The cell supplies its own finger-joint calibration, mounted
 touches and motion options. For example, a straight draw can require that the fingers close

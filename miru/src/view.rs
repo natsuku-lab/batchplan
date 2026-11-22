@@ -197,16 +197,26 @@ impl Seen {
 
     /// The pixel `p` projects to; `None` behind or beside the camera.
     pub(crate) fn project(&self, p: Vec3) -> Option<usize> {
-        let Intrinsics { fx, fy, cx, cy } = self.intrinsics;
         let c = self.camera.rotation.inverse() * (p - self.camera.position);
-        if c.z <= 0.0 {
-            return None;
-        }
-        let (u, v) = (
-            (fx * c.x / c.z + cx + 0.5).floor(),
-            (fy * c.y / c.z + cy + 0.5).floor(),
-        );
-        (u >= 0.0 && v >= 0.0 && u < self.width as f32 && v < self.height as f32)
-            .then(|| v as usize * self.width + u as usize)
+        pixel_at(c, self.intrinsics, self.width, self.height)
     }
+}
+
+/// The pixel containing the ray through a point in the camera's frame.
+pub(crate) fn pixel_at(
+    c: Vec3,
+    intrinsics: Intrinsics,
+    width: usize,
+    height: usize,
+) -> Option<usize> {
+    let Intrinsics { fx, fy, cx, cy } = intrinsics;
+    if c.z <= 0.0 {
+        return None;
+    }
+    let (u, v) = (
+        (fx * c.x / c.z + cx + 0.5).floor(),
+        (fy * c.y / c.z + cy + 0.5).floor(),
+    );
+    (u >= 0.0 && v >= 0.0 && u < width as f32 && v < height as f32)
+        .then(|| v as usize * width + u as usize)
 }
