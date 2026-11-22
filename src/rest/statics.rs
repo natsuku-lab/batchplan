@@ -72,6 +72,7 @@ fn weight(tilt: f32, around: f32) -> Wrench {
 /// indices into `points`, into `corners`, sorting them in `order`: one or two where they are all
 /// at one point or on one line. Points that come row by row, as a field's cells give them, are
 /// in order already, or nearly.
+#[inline(never)]
 fn hull(points: &[Vec2], order: &mut Vec<(u64, u32)>, corners: &mut Vec<u32>) {
     // A coordinate as a whole number that sorts as it does.
     let key = |v: f32| {
@@ -166,6 +167,7 @@ impl Statics {
     /// be tipped any way before they no longer do (radians), where that is at least `tipping`.
     /// `size` is the object's, the unit its torques are balanced in.
     /// With `WHY`, where it tips, how far it can be tipped is left in `tips_by`.
+    #[inline(always)]
     pub(super) fn holds<const WHY: bool>(
         &mut self,
         contacts: &[Contact],
@@ -195,6 +197,7 @@ impl Statics {
 
     /// What `contacts`, those last judged, touch: the corners of the hull of the support's
     /// points, seen from above, anticlockwise.
+    #[inline(never)]
     pub(super) fn support(&mut self, contacts: &[Contact]) -> Vec<Vec3> {
         if !self.from_above {
             self.flat.clear();
@@ -209,6 +212,11 @@ impl Statics {
     /// The hull of `contacts`, all on one flat piece of the object whose push is `push`, as their
     /// places across it from the first: its corners into `self.corners`, and where they are into
     /// `self.outline`, anticlockwise seen from the object.
+    // Inlined on x86 and out of line elsewhere, as `within_cones` is: built in sixteen units, the
+    // pair out of line made a bottle's rests on a slope 13% slower on the Ryzen, and inlined 4% on
+    // the M4 Pro.
+    #[cfg_attr(target_arch = "x86_64", inline(always))]
+    #[cfg_attr(not(target_arch = "x86_64"), inline(never))]
     fn across(&mut self, contacts: impl Iterator<Item = Contact>, origin: Vec3, axes: [Vec3; 2]) {
         self.flat.clear();
         let flat = contacts.map(|c| {
@@ -225,6 +233,7 @@ impl Statics {
     /// [`holds`](Self::holds) where every contact lies on one flat piece of the object and is
     /// pushed along `push`: the weight's line, tipped, must meet the piece inside the hull of the
     /// contacts, within the friction cone about `push`.
+    #[inline(always)]
     fn on_one_face<const WHY: bool>(
         &mut self,
         contacts: &[Contact],
@@ -302,6 +311,7 @@ impl Statics {
 
     /// [`holds`](Self::holds) by the settle: the contacts of each flat piece first cut down to
     /// the corners of their hull, which carry any forces the piece's contacts can.
+    #[inline(always)]
     fn settled<const WHY: bool>(
         &mut self,
         contacts: &[Contact],
@@ -421,6 +431,7 @@ impl Springs {
     /// resists across its direction too, and where its force would leave its friction cone it
     /// slips, carrying `mu` times its push against the slip. The forces come back in `forces`.
     /// Whether the settle came to rest with the load carried.
+    #[inline(never)]
     fn settle(
         &mut self,
         load: Wrench,
@@ -547,6 +558,8 @@ impl Springs {
     }
 
     /// Whether each of `forces` pushes and lies within its contact's friction cone.
+    #[cfg_attr(target_arch = "x86_64", inline(always))]
+    #[cfg_attr(not(target_arch = "x86_64"), inline(never))]
     fn within_cones(&self, forces: &[DVec3], mu: f64) -> bool {
         forces.iter().zip(&self.n).all(|(f, n)| {
             let along = f.dot(*n);
@@ -557,6 +570,7 @@ impl Springs {
 
 /// The solution of six linear equations, by elimination with the largest pivot of each column;
 /// none where they do not determine one.
+#[inline(never)]
 fn solve(mut a: [[f64; 6]; 6], mut b: Wrench) -> Option<Wrench> {
     for column in 0..6 {
         let pivot = (column..6)
