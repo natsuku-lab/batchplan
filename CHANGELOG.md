@@ -10,6 +10,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- `Pull` and `pull` plan a straight draw by a handle in Rust and Python. The hand keeps its
+  orientation and moves a signed distance along a world direction. Each plan gives the draw
+  between its approach and departure, and a stopped draw reports the planned distance in meters.
+  A stationary distance grid may be the contact obstacle of a pull or a turn.
+
 - Turning a thing about a line in one call: `turn(&device, &worlds, &[Turn], &TaskOptions)`, a
   knob, a cap, a lever or a valve's wheel, composed of IK, `follow` and `plan` as `pick` is.
   `Turn::new(world, start, object, grasps, angle)` turns `object` by `angle` about its `screw`

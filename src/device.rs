@@ -647,7 +647,7 @@ impl Device {
 
     /// Whether `worlds` were uploaded to this device, for links named as this robot's: their
     /// touch sets hold link indices.
-    fn check_worlds(&self, worlds: &Worlds) -> Result<()> {
+    pub(crate) fn check_worlds(&self, worlds: &Worlds) -> Result<()> {
         ensure_input!(
             worlds.device == self.id,
             "these worlds were uploaded to a different device"

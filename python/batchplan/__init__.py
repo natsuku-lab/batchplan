@@ -41,6 +41,7 @@ from batchplan._native import (
     PlanProblem,
     PlanResult,
     Pose,
+    Pull,
     Robot,
     RobotOptions,
     RrtOptions,
@@ -78,6 +79,7 @@ from batchplan._native import (
     place,
     place_poses,
     plan,
+    pull,
     solve_ik,
     turn,
 )
@@ -121,6 +123,7 @@ __all__ = [
     "PlanProblem",
     "PlanResult",
     "Pose",
+    "Pull",
     "Robot",
     "RobotOptions",
     "RrtOptions",
@@ -158,6 +161,7 @@ __all__ = [
     "place",
     "place_poses",
     "plan",
+    "pull",
     "solve_ik",
     "turn",
 ]

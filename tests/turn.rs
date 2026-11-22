@@ -993,3 +993,248 @@ fn a_grasp_a_little_off_unit_is_turned_in_place() {
         .is_ok()
     );
 }
+
+/// A horizontal rail and a handle whose frame is turned relative to it. Each task pulls from
+/// above with open fingers, through a different world in the same batch.
+#[test]
+fn drawer_draws_are_signed_world_translations_and_stops_report_meters() {
+    let robot = panda();
+    let handle = knob(Vec2::new(0.50, 0.05), 0.42);
+    let clear = World::new(vec![table(), handle.clone()]);
+    let direction = Vec3::NEG_X;
+    let grasp = from_above(1.0);
+    let at = handle.pose().mul_pose(grasp);
+    // The stop meets the hand on its way in the positive x direction. A negative distance
+    // along the world's -x axis goes that way even though the handle's frame is turned.
+    let mut blocked = clear.clone();
+    let wall = Obstacle::cuboid(Vec3::new(0.62, 0.05, 0.08), Vec3::new(0.008, 0.10, 0.08));
+    blocked.obstacles.push(wall);
+    let tasks = [0.08, -0.08, -0.18].map(|distance| {
+        let world = u32::from(distance < -0.1);
+        batchplan::Pull::new(
+            world,
+            robot.default_q(),
+            KNOB,
+            vec![grasp],
+            direction,
+            distance,
+        )
+    });
+    let o = TaskOptions::default();
+    for device in devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(&[clear.clone(), blocked.clone()]).unwrap();
+        let result = batchplan::pull(&device, &worlds, &tasks, &o).unwrap();
+        for (t, outcome) in result.problems.iter().zip(&result.outcomes[..2]) {
+            let plans = outcome
+                .as_ref()
+                .unwrap_or_else(|why| panic!("{name}: {why}"));
+            let plan = &plans[0];
+            let draw = plan.pull.as_ref().expect("a pull plan has a draw");
+            assert_eq!(plan.motions().count(), 4, "{name}: includes draw");
+            assert!(plan.turn.is_none() && plan.placed.is_none() && plan.held.is_none());
+            assert_eq!(last(&plan.approach), first(draw), "{name}");
+            assert_eq!(last(draw), first(&plan.depart), "{name}");
+            for motion in plan.motions() {
+                motion.check(&robot).unwrap();
+            }
+            let poses = hand_poses(&robot, draw);
+            let end = at.position + direction * t.distance;
+            assert!(
+                poses.last().unwrap().position.distance(end) < o.tool_path.precision,
+                "{name}"
+            );
+            for pose in poses {
+                let off = (pose.position - at.position).reject_from_normalized(direction);
+                assert!(off.length() <= o.tool_path.precision, "{name}: {off}");
+                assert!(
+                    pose.rotation.angle_between(at.rotation) < o.tool_path.rotation_precision,
+                    "{name}"
+                );
+            }
+            let away = robot.ee_pose(&last(&plan.depart), 0);
+            assert!(
+                away.position
+                    .distance(end - at.rotation * Vec3::Z * t.approach)
+                    < 2e-3,
+                "{name}"
+            );
+        }
+        let failure = result.outcomes[2]
+            .as_ref()
+            .expect_err("the wall stops the hand");
+        assert_eq!(failure.step(), TaskStep::Pull, "{name}: {failure}");
+        let stop = &failure.candidates[0];
+        let drawn = stop.pulled.expect("a stopped draw reports a distance");
+        assert!((-0.18..-0.01).contains(&drawn), "{name}: {drawn}");
+        assert!(stop.turned.is_none(), "{name}: metres belong to a pull");
+        assert!(
+            stop.contacts
+                .iter()
+                .any(|c| matches!(c, Contact::World { obstacle: 2, .. })),
+            "{name}: {:?}",
+            stop.contacts
+        );
+        let alone = batchplan::pull(&device, &worlds, &tasks[2..], &o).unwrap();
+        assert_eq!(alone.outcomes[0].as_ref().unwrap_err(), failure, "{name}");
+    }
+}
+
+#[test]
+fn a_placed_grid_is_a_contact_target_for_a_fixed_fixture() {
+    let robot = panda();
+    // One occupied grid cell at the center of a handle with a rotated local frame.
+    let pose = Pose::new(Vec3::new(0.51, 0.07, 0.14), Quat::from_rotation_z(0.55));
+    let cell = SdfGrid::try_new([3; 3], 0.01, -Vec3::splat(0.01), &[0.0; 27]).unwrap();
+    let supplied = Pose::new(pose.position, pose.rotation * 1.0008);
+    let grid = Obstacle::from_grid(cell).placed(supplied);
+    let grasp = from_above(1.0);
+    let supplied_grasp = Pose::new(grasp.position, grasp.rotation * 1.0008);
+    assert!(supplied.is_unit() && supplied_grasp.is_unit());
+    assert!(!supplied.mul_pose(supplied_grasp).is_unit());
+    let world = World::new(vec![table(), grid]);
+    let axis = Vec3::NEG_Y;
+    let o = TaskOptions::default();
+    let pull = batchplan::Pull::new(0, robot.default_q(), 1, vec![supplied_grasp], axis, 0.05);
+    let turn = Turn {
+        stays: true,
+        ..Turn::new(0, robot.default_q(), 1, vec![supplied_grasp], 0.3)
+    };
+    let at = pose.mul_pose(grasp);
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[world]).unwrap();
+    let pulled = batchplan::pull(&device, &worlds, &[pull], &o).unwrap();
+    let drawn = pulled.outcomes[0].as_ref().unwrap()[0]
+        .pull
+        .as_ref()
+        .unwrap();
+    let end = robot.ee_pose(&last(drawn), 0);
+    assert!(end.position.distance(at.position + axis * 0.05) < o.tool_path.precision);
+    let turned = batchplan::turn(&device, &worlds, &[turn], &o).unwrap();
+    let plan = &turned.outcomes[0].as_ref().unwrap()[0];
+    assert_eq!(plan.placed.as_ref().unwrap().pose(), supplied);
+    let end = robot.ee_pose(&last(plan.turn.as_ref().unwrap()), 0);
+    assert!(end.position.distance(at.position) < o.tool_path.precision);
+    assert!(
+        end.rotation
+            .angle_between(at.rotation * Quat::from_rotation_z(0.3))
+            < o.tool_path.rotation_precision
+    );
+}
+
+#[test]
+fn pulls_reject_bad_directions_and_distances_before_searching() {
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[World::new(vec![table()])]).unwrap();
+    for (direction, distance, message) in [
+        (Vec3::ZERO, 0.1, "direction"),
+        (Vec3::Y * 2.0, 0.1, "direction"),
+        (Vec3::NAN, 0.1, "direction"),
+        (Vec3::Z, 0.0, "distance"),
+        (Vec3::Z, f32::NAN, "distance"),
+        (Vec3::Z, f32::MAX, "poses"),
+    ] {
+        let task = batchplan::Pull::new(
+            0,
+            robot.default_q(),
+            0,
+            vec![Pose::IDENTITY],
+            direction,
+            distance,
+        );
+        let error =
+            batchplan::pull(&device, &worlds, &[task], &TaskOptions::default()).unwrap_err();
+        assert!(
+            matches!(error, Error::Input(_)) && error.to_string().contains(message),
+            "{error}"
+        );
+    }
+    // The step count alone fits, but the tool path cannot measure the displacement in f32.
+    let options = TaskOptions {
+        tool_path: batchplan::ToolPathOptions {
+            step: 1e24,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let too_far =
+        batchplan::Pull::new(0, robot.default_q(), 0, vec![Pose::IDENTITY], Vec3::Y, 1e24);
+    let error = batchplan::pull(&device, &worlds, &[too_far], &options).unwrap_err();
+    assert!(matches!(error, Error::Input(_)), "{error}");
+}
+
+#[test]
+fn a_hand_without_finger_links_cannot_touch_the_contact_grid() {
+    let reference = panda();
+    let robot = Robot::load(
+        common::asset("franka/franka_panda.urdf"),
+        &batchplan::RobotOptions {
+            finger_links: [("ee_link".into(), vec![])].into(),
+            ..common::panda_options()
+        },
+    )
+    .unwrap();
+    assert!(robot.finger_links(0).is_empty() && !robot.hand_links(0).is_empty());
+    let at = reference.ee_pose(reference.default_q(), 0);
+    let finger = reference
+        .hand_spheres(0)
+        .into_iter()
+        .find(|s| s.finger)
+        .unwrap();
+    let center = at.position + at.rotation * finger.center;
+    let grid = SdfGrid::try_new([3; 3], 0.01, -Vec3::splat(0.01), &[0.0; 27]).unwrap();
+    let target = Obstacle::from_grid(grid).placed(Pose::new(center, Quat::IDENTITY));
+    let grasp = target.pose().inverse().mul_pose(at);
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[World::new(vec![target])]).unwrap();
+    let o = TaskOptions::default();
+    let pull = batchplan::Pull {
+        transit: false,
+        ..batchplan::Pull::new(0, robot.default_q(), 0, vec![grasp], Vec3::X, 0.03)
+    };
+    let turn = Turn {
+        transit: false,
+        stays: true,
+        ..Turn::new(0, robot.default_q(), 0, vec![grasp], 0.2)
+    };
+    let pulls = batchplan::pull(&device, &worlds, &[pull], &o).unwrap();
+    let turns = batchplan::turn(&device, &worlds, &[turn], &o).unwrap();
+    for outcome in [pulls.outcomes, turns.outcomes] {
+        let failure = outcome[0]
+            .as_ref()
+            .expect_err("no finger has permission to touch the target");
+        assert_eq!(failure.step(), TaskStep::Reach);
+        assert!(
+            failure.candidates[0]
+                .contacts
+                .iter()
+                .any(|c| matches!(c, Contact::World { obstacle: 0, .. }))
+        );
+    }
+}
+
+#[test]
+fn a_draw_without_a_transit_checks_which_device_prepared_its_worlds() {
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let other = Device::cpu(&robot).unwrap();
+    let world = World::new(vec![table(), knob(Vec2::new(0.5, 0.05), 0.3)]);
+    let worlds = other.upload(&[world]).unwrap();
+    let task = batchplan::Pull {
+        transit: false,
+        ..batchplan::Pull::new(
+            0,
+            robot.default_q(),
+            KNOB,
+            vec![from_above(1.0)],
+            Vec3::Y,
+            0.05,
+        )
+    };
+    let error = batchplan::pull(&device, &worlds, &[task], &TaskOptions::default()).unwrap_err();
+    assert!(
+        matches!(error, Error::Input(_)) && error.to_string().contains("different device"),
+        "{error}"
+    );
+}

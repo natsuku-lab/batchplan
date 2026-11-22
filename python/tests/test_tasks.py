@@ -378,3 +378,25 @@ def test_a_knob_is_turned_in_place_and_a_screw_carries_a_pose(tasks_robot):
     near = bp.GraspOptions(near=(0.1, 0.0, 0.0))
     np.testing.assert_allclose(near.near, (0.1, 0.0, 0.0))
     assert bp.GraspOptions().near is None
+
+
+def test_a_drawer_is_drawn_along_the_signed_world_direction(tasks_robot):
+    handle = bp.Obstacle.cuboid((0.50, 0.05, 0.015), (0.045, 0.0125, 0.015))
+    grasp = bp.Pose((0.0, 0.0, 0.005), (0.0, 1.0, 0.0, 0.0))
+    task = bp.Pull(0, tasks_robot.default_q, 1, [grasp], (1.0, 0.0, 0.0), -0.08, enough=1)
+    device = bp.Device.cpu(tasks_robot)
+    worlds = device.upload([bp.World([scene().obstacles[TABLE], handle])])
+    result = bp.pull(device, worlds, [task])
+    plan = result.outcomes[0][0]
+    assert plan.pull is not None and plan.turn is None
+    assert len(plan.motions) == 4 and plan.held is None and plan.placed is None
+    np.testing.assert_allclose(
+        tasks_robot.ee_pose(plan.pull.end).position, (0.42, 0.05, 0.02), atol=1e-3
+    )
+    assert bp.TaskStep.Reach < bp.TaskStep.Pull < bp.TaskStep.Approach
+    for changes, message in [
+        ({"distance": 0.0}, "distance"),
+        ({"direction": (0, 2, 0)}, "direction"),
+    ]:
+        with pytest.raises(bp.InputError, match=message):
+            bp.pull(device, worlds, [task.replace(**changes)])

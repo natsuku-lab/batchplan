@@ -480,6 +480,30 @@ fn main() -> Result<(), Error> {
   - **Precedent.** MoveIt Task Constructor's `MoveRelative` takes a twist (`setDirection` with a `TwistStamped`) and its `GenerateGraspPose` samples grasps about a settable axis of the object (`setRotationAxis`, `setAngleDelta`); PickNik's `affordance_primitives` moves along a `ScrewAxis` of an origin, an axis and a pitch (`getTF(delta_theta)`); GPD filters its grasp candidates by approach direction (`filter_approach_direction`); MoveIt's perception tutorial fits a cylinder to a cloud by RANSAC and takes its axis. None of them orders grips by the turn they are to make, or checks many grips' turns, from every configuration of the arm, in one batched call: `turn` does both.
 - **Speed.** On the M4 Pro, other work loading it to 11–15, the example's knob takes 457 ms on the CPU device by all 972 grips and 18.5 ms to its first plan (`enough: Some(1)`); its cap, lever and wheel 6 to 14 ms; and 64 knobs in one call, to the first plan of each, 1.0 s. On the Ryzen AI Max+ 395's 32 threads, 390 ms, 16 ms, 6 to 12 ms and 0.83 s. Each machine's GPU takes within an eighth of what its CPU device does: the turns, which are most of it, are followed on the CPU's threads on either device ([Benchmarks](benchmarks.md#turning-things-about-a-line)).
 
+## Drawing a handle along a line
+
+Use `Pull::new(world, start, object, grasps, direction, distance)` for a drawer. The grasps are
+in the contact obstacle's frame. The unit direction is in the world frame, and the signed distance
+is in meters. Each grip keeps its orientation as it travels that distance. For a door, use
+[`turn`](#turning-a-thing-about-an-axis) with the hinge's point and direction.
+
+Give `batchplan::pull` the device, uploaded worlds, a slice of pulls and the task options. Each
+pull tries every IK solution at each grasp through the draw, then plans the approach, release
+and transit as a turn does. The hand's fingers may touch the indexed obstacle through the
+approach, draw and departure. A distance grid can be the contact obstacle for a pull or for a
+turn whose obstacle stays. A task that names a grid takes its grasps in that grid obstacle's
+frame, including its placement. Give the approach and transit worlds matching obstacle indices.
+
+Run the transit and approach, close the gripper, run `TaskPlan::pull`, open the gripper and run
+the departure. The fixture stays at its measured pose throughout planning. The arm is checked
+along its path. The moving drawer's swept volume is outside this model. A candidate stopped
+during the draw reports the signed meters planned in `CandidateStop::pulled` at
+`TaskStep::Pull`, with its reason and contacts. At an execution force stop the controller
+measures how far the handle actually travelled before updating the world.
+
+Run `cargo run --release --example turns -- --fixtures` for a drawer and a hinged door grasped
+from two rendered depth images.
+
 ## Joining motions
 
 `join(&device, &worlds, &sequences, &JoinOptions)` runs consecutive motions without stopping between them, as MoveIt's Pilz planner blends a motion sequence. A `Sequence` names its world, its paths in order, each rest-to-rest as `plan` and `follow` return them and starting where the one before ends, and a blend radius for each join, as each item of a Pilz sequence gives its own.
