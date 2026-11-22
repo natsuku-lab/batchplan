@@ -3350,4 +3350,21 @@ fn a_world_point_names_only_readings_at_its_depth_and_keeps_disagreement() {
     assert!(kept.labels_at(upper + Vec3::Z * 0.03).unwrap().is_empty());
     assert!(kept.labels_at(point + Vec3::X).unwrap().is_empty());
     assert!(kept.labels_at(Vec3::NAN).is_err());
+
+    let unusable = [1e-22; 17 * 17];
+    let camera = Camera {
+        image: DepthImage {
+            depth: &unusable,
+            ..below.image
+        },
+        ..below
+    };
+    let observed = observe(&device, &[camera], &stance, &memory).unwrap();
+    assert_eq!(
+        observed.kept.image(0).unwrap().depth[8 * 17 + 8],
+        unusable[0]
+    );
+    assert_eq!(observed.kept.scene().labels[0][8 * 17 + 8], Label::Nothing);
+    let near_camera = below.image.camera.position + 0.002 * Vec3::Z;
+    assert!(observed.kept.labels_at(near_camera).unwrap().is_empty());
 }

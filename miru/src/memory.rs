@@ -863,10 +863,11 @@ impl Kept {
                 continue;
             };
             let z = view.depth[i];
-            let tolerance = SIGMAS * view.noise.at(z);
-            if z.is_finite()
-                && z > 0.0
-                && tolerance.is_finite()
+            let Some(sigma) = view.noise.at_reading(z) else {
+                continue;
+            };
+            let tolerance = SIGMAS * sigma;
+            if tolerance.is_finite()
                 && (local.z - z).abs() <= tolerance
                 && !found.contains(&labels[i])
             {

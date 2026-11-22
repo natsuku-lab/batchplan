@@ -76,6 +76,14 @@ impl Noise {
     pub(crate) fn at(&self, depth: f32) -> f32 {
         self.constant + (self.linear + self.quadratic * depth) * depth
     }
+
+    /// Noise at a usable depth. The look also represents readings and their spread in inverse depth.
+    pub(crate) fn at_reading(&self, depth: f32) -> Option<f32> {
+        let sigma = self.at(depth);
+        let spread = sigma / (depth * depth);
+        (depth.is_finite() && depth > 0.0 && depth.recip().is_finite() && spread.is_finite())
+            .then_some(sigma)
+    }
 }
 
 /// One camera's frame.
