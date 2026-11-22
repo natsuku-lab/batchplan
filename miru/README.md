@@ -790,10 +790,8 @@ the run.
   plans carry, or where it stood, and no obstacle holds it: the nearest to its middle is 9.0 cm off
   on exact depth and through the D435 with the D405, 3.4 cm through the D435
   (`what_stood_on_a_picked_thing_is_in_a_memory` in `tests/memory.rs`).
-- **What a look through `observe` costs.** [FIGURES TO COME, for the coordinator: the medians
-  `cargo run --release -p miru --example score -- <set> --observe --threads <n>` prints on
-  `rows4` and `hand-in-drawer`, alternated runs, with the machine and its load; and `look` against
-  main through the scorer.] Over `look` alone it does batchplan's part: the filter, the two
+- **What a look through `observe` costs is not yet timed.** `cargo run --release -p miru --example
+  score -- <set> --observe --threads <n>` prints it per look and at the median. Over `look` alone it does batchplan's part: the filter, the two
   masks, the shapes and the band, and fusing the map, for the LIBERO Panda 23.9M voxels on the CPU
   device; and it clones that map, so that the memory it was given stays as it was. A `world` after
   it reads the map's occupied voxels once for that look, and a world made again of the same
