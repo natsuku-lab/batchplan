@@ -790,12 +790,16 @@ the run.
   plans carry, or where it stood, and no obstacle holds it: the nearest to its middle is 9.0 cm off
   on exact depth and through the D435 with the D405, 3.4 cm through the D435
   (`what_stood_on_a_picked_thing_is_in_a_memory` in `tests/memory.rs`).
-- **What a look through `observe` costs is not yet timed.** `cargo run --release -p miru --example
-  score -- <set> --observe --threads <n>` prints it per look and at the median. Over `look` alone it does batchplan's part: the filter, the two
-  masks, the shapes and the band, and fusing the map, for the LIBERO Panda 23.9M voxels on the CPU
-  device; and it clones that map, so that the memory it was given stays as it was. A `world` after
-  it reads the map's occupied voxels once for that look, and a world made again of the same
-  memory, or of one after acts that differ only in what is held, builds nothing again.
+- **What a look through `observe` costs.** On `rows4`, at the median of its 20 looks, 237 ms
+  against the 72 ms of the look inside it on one of an M4 Pro's threads and 56 against 34 ms on its
+  14; on `hand-in-drawer`, 280 against 116 ms and 82 against 60 ms; a `world` after it 6.0 to
+  6.1 ms on either (`cargo run --release -p miru --example score -- <set> --observe --threads <n>`,
+  which prints it per look and at the median: the median of three runs, at a load of 5 to 9). Over
+  `look` alone it does batchplan's part: the filter, the two masks, the shapes and the band, and
+  fusing the map, for the LIBERO Panda 23.9M voxels on the CPU device; and it clones that map, so
+  that the memory it was given stays as it was. A `world` after it reads the map's occupied voxels
+  once for that look, and a world made again of the same memory, or of one after acts that differ
+  only in what is held, builds nothing again.
 - **Through a stereo camera a shape leaves readings in the map that nothing explains.** A reading
   of a shape, known or an object's, that lands past three deviations of the camera's stated noise
   from it is no shape's, and the map holds it: on the scene of `tests/batchplan.rs` the grid of

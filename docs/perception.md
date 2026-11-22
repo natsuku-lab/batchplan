@@ -361,13 +361,15 @@ Median build times for a 640×480 image of a table seen from 1 m:
 
 `examples/perception.rs` times each call for a 640×480 image that shows the arm: a tabletop seen from across the table, and from a camera on the Panda's palm that looks along its fingers. The mask is padded 4 cm, for the Panda's 61 spheres and for a Panda fitted with 573. Each figure is the quickest median of several runs (twenty on the M4 Pro, ten for the four rows of its CPU fusing, eight on the Ryzen and its Radeon, eight on each device for the two rows of the 13.4M-voxel map and for the fuse with the scene's three shapes left out, eight for those shapes' readings told apart and eight for the two rows of the band, on the M4 Pro each after a pause, as its first ten seconds of work run quicker than the rest) on machines doing other work beside them (a load of 3 to 10 on the M4 Pro's 14 cores and 13 to 14 for its CPU fusing; 10 to 32 on the Ryzen's 32, 7 to 14 for its CPU fusing; 3.5 to 7.5 on the M4 Pro and 2 to 10 on the Ryzen for the 13.4M-voxel map; 4.5 to 7.6 on the M4 Pro and 8 to 15.5 on the Ryzen for the fuse with the three shapes; 7 to 81 on the M4 Pro and 4.7 to 14 on the Ryzen for their readings told apart; 4.7 to 9.0 on the M4 Pro and 3.5 to 12.2 on the Ryzen for the band); each cell is the camera over the table, then the one on the hand.
 
+The two robot-mask rows below use twenty runs of `perception --cpu 14` on the M4 Pro, each after a ten-second pause (load 3.7 to 11.0). The Ryzen mask rows and all six Ryzen CPU fuse rows use eight runs of `perception --cpu 32` (load 7.3 to 13.2).
+
 The filter, the masks, the points and a surface are read on the host:
 
 | | M4 Pro (14 threads) | Ryzen AI Max+ 395 (32 threads) |
 |---|---|---|
 | The image without the readings between two surfaces (`filtered`) | 0.73 ms, 0.73 ms | 0.98 ms, 0.99 ms |
-| Which readings are the robot's (`robot_mask`), 61 spheres | 0.07 ms, 0.42 ms | 0.06 ms, 0.41 ms |
-| The same, 573 spheres | 0.20 ms, 1.05 ms | 0.21 ms, 1.12 ms |
+| Which readings are the robot's (`robot_mask`), 61 spheres | 0.07 ms, 0.36 ms | 0.06 ms, 0.28 ms |
+| The same, 573 spheres | 0.18 ms, 0.88 ms | 0.19 ms, 0.80 ms |
 | The scene's three shapes left out too (`with_shapes`) | 0.26 ms, 0.31 ms | 0.23 ms, 0.27 ms |
 | Which of the scene's three shapes each reading off the robot lies on (`sdf::on_shapes`) | 0.27 ms, 0.32 ms | 0.48 ms, 0.50 ms |
 | A band of a pixel behind the robot's mask alone, 61 spheres (`with_band`) | 0.17 ms, 0.20 ms | 0.23 ms, 0.24 ms |
@@ -379,12 +381,12 @@ Fusing and grids run on the device:
 
 | | M4 Pro (CPU, 14 threads) | M4 Pro (GPU) | Ryzen AI Max+ 395 (CPU, 32 threads) | Radeon 8060S (GPU) |
 |---|---|---|---|---|
-| Fusing the image into a 1.8M-voxel map, no mask | 1.6 ms, 1.5 ms | 1.2 ms, 1.2 ms | 3.8 ms, 3.0 ms | 0.8 ms, 0.9 ms |
-| With a mask of 61 spheres | 2.0 ms, 1.7 ms | 1.6 ms, 1.6 ms | 4.5 ms, 3.0 ms | 1.1 ms, 1.4 ms |
-| With a mask of 573 spheres | 2.3 ms, 1.8 ms | 1.7 ms, 1.9 ms | 4.5 ms, 3.3 ms | 1.6 ms, 1.6 ms |
-| With the robot's mask and the scene's three shapes left out | 1.3 ms, 0.9 ms | 1.5 ms, 1.6 ms | 2.8 ms, 1.4 ms | 1.0 ms, 1.2 ms |
-| Fusing the image into a 13.4M-voxel map (2.9 m by 2.9 m by 1.55 m), no mask | 2.4 ms, 1.6 ms | 4.7 ms, 6.5 ms | 5.2 ms, 3.1 ms | 8.4 ms, 8.3 ms |
-| With a mask of 61 spheres | 3.1 ms, 1.9 ms | 5.6 ms, 5.7 ms | 6.5 ms, 3.5 ms | 9.5 ms, 9.7 ms |
+| Fusing the image into a 1.8M-voxel map, no mask | 1.6 ms, 1.5 ms | 1.2 ms, 1.2 ms | 3.4 ms, 2.7 ms | 0.8 ms, 0.9 ms |
+| With a mask of 61 spheres | 2.0 ms, 1.7 ms | 1.6 ms, 1.6 ms | 4.3 ms, 3.0 ms | 1.1 ms, 1.4 ms |
+| With a mask of 573 spheres | 2.3 ms, 1.8 ms | 1.7 ms, 1.9 ms | 4.4 ms, 3.2 ms | 1.6 ms, 1.6 ms |
+| With the robot's mask and the scene's three shapes left out | 1.3 ms, 0.9 ms | 1.5 ms, 1.6 ms | 2.6 ms, 1.3 ms | 1.0 ms, 1.2 ms |
+| Fusing the image into a 13.4M-voxel map (2.9 m by 2.9 m by 1.55 m), no mask | 2.4 ms, 1.6 ms | 4.7 ms, 6.5 ms | 5.4 ms, 3.3 ms | 8.4 ms, 8.3 ms |
+| With a mask of 61 spheres | 3.1 ms, 1.9 ms | 5.6 ms, 5.7 ms | 6.4 ms, 3.5 ms | 9.5 ms, 9.7 ms |
 | A 1 cm grid of the image, no mask (3.1M and 2.1M points) | 14.1 ms, 10.1 ms | 6.4 ms, 5.4 ms | 21 ms, 14.0 ms | 7.4 ms, 5.7 ms |
 | With a mask of 61 spheres (2.3M and 1.6M points) | 11.7 ms, 8.7 ms | 6.0 ms, 5.1 ms | 16.6 ms, 12.6 ms | 6.1 ms, 5.6 ms |
 | With a mask of 573 spheres | 11.5 ms, 8.8 ms | 6.0 ms, 5.4 ms | 16.4 ms, 12.7 ms | 6.4 ms, 5.1 ms |
