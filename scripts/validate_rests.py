@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Lets go of each rest `rests_on` found, in MuJoCo, and sees whether it stays.
+"""Lets go of each rest `rests_on` found, in MuJoCo, and sees whether it stays; and of each fall
+`falls_into` found, and sees whether it falls in and stays.
 
     cargo run --release --example surface_rests -- --dump data/rests
     uv run --with mujoco --with numpy python scripts/validate_rests.py data/rests
@@ -8,7 +9,11 @@ Each scene's support becomes a height field of the highest point in each cell `t
 `rests_on` reads it, and the object a body of its own shape, its mass at its middle, with the
 friction the rests were found with. A rest is let go where it was found and stepped for a second:
 it stays if it has moved less than 5 mm and turned less than 5 degrees. A rest that moves is a
-defect to explain, in `rests_on` or in this check.
+defect to explain, in `rests_on` or in this check. A fall (a scene that gives its hollow's `rim`)
+is let go where it was found and stepped for as long as its middle takes to fall to the lowest of
+the support, and then a rest's second to settle: it fell in and stays if its middle then lies under
+the rim, over a cell of the support, and it moves slower than 5 mm and turns slower than 5 degrees
+a second, no more in a second than a rest may in all.
 """
 import json
 import math
@@ -18,6 +23,8 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+# A rest's time to settle: ManiSkill2 settles a placement for half a second of steps, and another
+# half where the object still moves.
 SECONDS = 1.0
 # The balls the object's surface is made of for MuJoCo, and how far apart they lie (meters).
 BALL = 0.002
@@ -149,6 +156,24 @@ def stays(model, data, rest):
     return moved, turned
 
 
+def falls_in(model, data, fall, rim, cells, cell, floor):
+    """Whether a fall let go where it was found lies in the hollow and still once its middle has had
+    the time to fall to `floor`, the lowest of the support, and a rest's `SECONDS` to settle, and
+    where its middle is then."""
+    mujoco.mj_resetData(model, data)
+    x, y, z, qx, qy, qz, qw = fall[:7]
+    data.qpos[:] = [x, y, z, qw, qx, qy, qz]
+    mujoco.mj_forward(model, data)
+    falling = math.sqrt(2.0 * max(z - floor, 0.0) / -model.opt.gravity[2])
+    for _ in range(int((falling + SECONDS) / model.opt.timestep)):
+        mujoco.mj_step(model, data)
+    at = data.qpos[:3].copy()
+    over = (round(at[0] / cell), round(at[1] / cell)) in cells
+    moving, turning = (float(np.linalg.norm(data.qvel[k : k + 3])) for k in (0, 3))
+    still = moving < MOST_MOVED / SECONDS and turning < MOST_TURNED / SECONDS
+    return at[2] < rim and over and still, at
+
+
 def main():
     folder = Path(sys.argv[1])
     most = int(sys.argv[2]) if len(sys.argv) > 2 else 250
@@ -157,6 +182,9 @@ def main():
         scene = json.loads(about.read_text())
         name = about.stem
         points = np.fromfile(folder / f"{name}.points.f32", dtype="<f4").reshape(-1, 3)
+        if "rim" in scene:
+            failed += check_falls(folder, name, scene, points, most)
+            continue
         rests = np.fromfile(folder / f"{name}.rests.f32", dtype="<f4").reshape(-1, 8)
         if len(rests) == 0:
             print(f"{name}: no rests")
@@ -178,6 +206,32 @@ def main():
                   f"{math.degrees(rests[k, 7]):.1f} deg: moved {moved * 1e3:.1f} mm, "
                   f"turned {math.degrees(turned):.1f} deg")
     sys.exit(1 if failed else 0)
+
+
+def check_falls(folder, name, scene, points, most):
+    """How many of a scene's falls, spread over them, do not fall in and stay."""
+    falls = np.fromfile(folder / f"{name}.falls.f32", dtype="<f4").reshape(-1, 8)
+    if len(falls) == 0:
+        print(f"{name}: no falls")
+        return 0
+    cell = scene["touching"]
+    cells = {(round(x / cell), round(y / cell)) for x, y in points[:, :2].astype(np.float64)}
+    floor = float(points[:, 2].min())
+    model = model_of(points.astype(np.float64), scene["object"], scene["friction"], cell)
+    data = mujoco.MjData(model)
+    chosen = np.unique(np.linspace(0, len(falls) - 1, min(most, len(falls))).astype(int))
+    out = []
+    for k in chosen:
+        fall = falls[k].astype(np.float64)
+        inside, at = falls_in(model, data, fall, scene["rim"], cells, cell, floor)
+        if not inside:
+            out.append((k, at))
+    print(f"{name}: {len(chosen) - len(out)} of {len(chosen)} falls tried fall in and stay "
+          f"({len(falls)} found)")
+    for k, at in out[:8]:
+        print(f"    fall {k} let go at {falls[k, :3].round(4)} turned {falls[k, 3:7].round(3)}: "
+              f"its middle ends at {at.round(4)}")
+    return len(out)
 
 
 if __name__ == "__main__":

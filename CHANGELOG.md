@@ -177,11 +177,26 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   `falls_into(&device, &[RestProblem], &[Surface], &RestOptions)`, with the same problems,
   surfaces and options as `rests_on`. Each `Fall` gives a `pose` to let go at, for
   `Place::poses`, its bottom at least `clearance` over the rim of a hollow of what was seen that
-  the object lands in deeper than its middle is over its bottom, and how deep (`sunk`). Whether
-  it could leave is asked of it worn down by half the spots' diagonal, so a gap it fits through
-  holds nothing in. A basket, a bin or an open drawer has falls; a tray, a plate or a table, a
-  container whose floor (or a wall sloping in under the object) was not seen that deep, and an
-  object thinner than that wearing leaves a cell of, have none.
+  the object lands in deeper than its middle is over its bottom, and how deep (`sunk`). The
+  object lands as it is, and the clearance is kept where it is let go, over the rim and clear of
+  all around it there: a box of cream cheese 8.3 by 4.2 cm goes through the opening of LIBERO's
+  bowl, 11.2 cm across, and grown by the clearance would not, and it falls in. As first merged,
+  `falls_into` landed the object grown by the clearance. An object standing or lying level keeps
+  every place it had then, at the same pose and as deep or deeper, and gains those within the
+  clearance of a wall or of something already inside: a can over the example's basket has 1,152
+  where it had 800, and over two scans of a harness's basket 320 and 248 where it had 160 and
+  104. Turned askew over a narrow support, a place that only the grown object's lower corner,
+  hanging under the support, held in is no longer given. Whether it could leave is asked of it
+  worn down by half the spots' diagonal, so a gap it fits through holds nothing in. A basket, a
+  bin or an open drawer has falls; a tray, a plate or a table, a container whose floor (or a wall
+  sloping in under the object) was not seen that deep, and an object thinner than that wearing
+  leaves a cell of, have none. With `RestOptions::look_closer` it looks closer as `rests_on`
+  does, for a container the object barely fits, which holds it in only nearer one place than the
+  spots lie apart: the spots a cell apart within the spacing of `near` are tried at every turn,
+  and without it, only where no spot holds the object in at any turn, those of the spot where it
+  lands the deepest under a hollow's rim. Over two recorded looks into that bowl it finds 2
+  places in one, 6.5 mm from the bowl's axis, and in the other, where the spots alone find none,
+  52 by looking closer, within 4 mm of it.
 
 - Where a held object rests on what cameras see: `rests_on(&device, &[RestProblem], &[Surface],
   &RestOptions)`. A problem names the object, how it is turned as it is set down (`rotation`:
