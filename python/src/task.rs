@@ -13,7 +13,7 @@ use crate::field::{self, Field, tuple_field, value_class};
 use crate::held::Held;
 use crate::robot::Robot;
 use crate::timing::Trajectory;
-use crate::world::{Obstacle, Pose};
+use crate::world::{Obstacle, Pose, World};
 
 value_class! {
     /// Grasps `grasps` proposes for a parallel gripper.
@@ -114,6 +114,23 @@ value_class! {
 }
 
 value_class! {
+    /// The full shape to carry and the other obstacles that leave when one part is picked up.
+    PickBody(batchplan::PickBody) {
+        /// The whole body's collision shape, at its pose in the world.
+        shape: batchplan::Obstacle,
+        /// The other obstacle indices that depart with the contact part, each given once.
+        other_parts: Vec<usize>,
+    }
+    methods {
+        #[new]
+        #[pyo3(signature = (shape, other_parts))]
+        fn new(shape: &Obstacle, other_parts: Vec<usize>) -> Self {
+            Self(batchplan::PickBody { shape: shape.0.clone(), other_parts })
+        }
+    }
+}
+
+value_class! {
     /// A hand picking up one obstacle of its world.
     Pick(batchplan::Pick) {
         /// The world's index in the batch: the one the hand grasps and moves in in, and every
@@ -133,8 +150,10 @@ value_class! {
         transit: bool,
         /// The hand that picks it up.
         hand: usize,
-        /// The object: an obstacle of the world, by index. A distance grid cannot be picked up.
+        /// The contact obstacle, by index. Grasps are expressed in its frame.
         object: usize,
+        /// The whole body carried when the fingers grasp a part of it.
+        body: Option<batchplan::PickBody>,
         /// Poses of the hand's IK frame that grasp the object, in the object's frame (its center
         /// and rotation); any one will do. `grasps` proposes some for a box, ball, cylinder or
         /// capsule.
@@ -160,6 +179,11 @@ value_class! {
         enough: Option<usize>,
     }
     methods {
+        /// The world for executing the lift with the returned hold attached.
+        fn lift_world(&self, departure: &World) -> PyResult<World> {
+            self.0.lift_world(&departure.0).map(World).or_raise()
+        }
+
         /// Hand 0 picks up `object` of world `world` from `start` by any of `grasps`, moving in
         /// 10 cm along the hand's z axis and lifting the object 10 cm, off nothing it rests on.
         #[new]
@@ -939,6 +963,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GraspOptions>()?;
     m.add_class::<TaskOptions>()?;
     m.add_class::<Pick>()?;
+    m.add_class::<PickBody>()?;
     m.add_class::<Place>()?;
     m.add_class::<Handover>()?;
     m.add_class::<Turn>()?;

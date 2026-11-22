@@ -21,6 +21,7 @@
 //! its own (`transit_world`, `depart_world`), so that what the hand may touch at the grasp is not
 //! what it may touch on the way there.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::f32::consts::TAU;
 use std::fmt;
@@ -42,6 +43,17 @@ use crate::trajopt::{self, PlanOptions, PlanProblem};
 use crate::types::{Pose, Screw};
 use crate::world::{Obstacle, Touch, World};
 
+/// The body lifted when the hand grasps one part of a larger object.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PickBody {
+    /// Collision shape of the entire body at its initial pose in the world. A distance grid
+    /// cannot be attached. The returned hold uses this shape's frame.
+    pub shape: Obstacle,
+    /// World obstacles that leave with the grasped part. They remain collidable on approach.
+    /// Give each index once, excluding the grasped part and supports.
+    pub other_parts: Vec<usize>,
+}
+
 /// A hand picking up one obstacle of its world.
 #[derive(Clone, Debug)]
 pub struct Pick {
@@ -62,8 +74,11 @@ pub struct Pick {
     pub transit: bool,
     /// The hand that picks it up.
     pub hand: usize,
-    /// The object: an obstacle of the world, by index. A distance grid cannot be picked up.
+    /// The obstacle the fingers may touch on approach. Grasps are in this obstacle's frame.
+    /// A grid can be gripped when `body` supplies the shape carried on departure.
     pub object: usize,
+    /// What moves when `object` is only the contact part. None lifts that obstacle alone.
+    pub body: Option<PickBody>,
     /// Poses of the hand's IK frame that grasp the object, in the object's frame (its center and
     /// rotation); any one will do. [`grasps`] proposes some for a box, ball, cylinder or capsule.
     pub grasps: Vec<Pose>,
@@ -97,6 +112,75 @@ pub struct Pick {
 }
 
 impl Pick {
+    /// The world for executing the lift with the returned hold attached. Pass the original
+    /// departure world of this pick. Obstacles keep their order after the moving parts leave,
+    /// and the held link may touch the listed supports. Invalid obstacle indices give
+    /// an input error.
+    pub fn lift_world(&self, departure: &World) -> Result<World> {
+        self.check_parts(departure, format_args!("pick"))?;
+        for &support in &self.support {
+            ensure_input!(
+                support < departure.obstacles.len() && support != self.object,
+                "pick support {support} must be another of the world's {} obstacles",
+                departure.obstacles.len()
+            );
+        }
+        self.lift_in(departure, &self.parts(), self.hand)
+    }
+
+    fn lift_in(&self, departure: &World, parts: &[usize], hand: usize) -> Result<World> {
+        let mut world = departure.clone();
+        for &part in parts.iter().rev() {
+            world.remove(part)?;
+        }
+        if self.hand == hand {
+            let shifted = |s: usize| s - parts.partition_point(|&part| part < s);
+            world
+                .touch
+                .extend(self.support.iter().map(|&s| Touch::held(shifted(s), hand)));
+        }
+        Ok(world)
+    }
+
+    fn check_parts(&self, world: &World, what: fmt::Arguments<'_>) -> Result<()> {
+        ensure_input!(
+            self.object < world.obstacles.len(),
+            "{what}: obstacle {} of {}",
+            self.object,
+            world.obstacles.len()
+        );
+        if let Some(body) = &self.body {
+            for (k, &part) in body.other_parts.iter().enumerate() {
+                ensure_input!(
+                    part < world.obstacles.len()
+                        && part != self.object
+                        && !body.other_parts[..k].contains(&part)
+                        && !self.support.contains(&part),
+                    "{what}: body part {part} must be a distinct obstacle among {}, separate from the contact part {} and supports {:?}",
+                    world.obstacles.len(),
+                    self.object,
+                    self.support
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The indices removed on lift, in increasing order. An ordinary pick borrows its one index.
+    fn parts(&self) -> Cow<'_, [usize]> {
+        let Some(body) = self
+            .body
+            .as_ref()
+            .filter(|body| !body.other_parts.is_empty())
+        else {
+            return Cow::Borrowed(std::slice::from_ref(&self.object));
+        };
+        let mut parts = body.other_parts.clone();
+        parts.push(self.object);
+        parts.sort_unstable();
+        Cow::Owned(parts)
+    }
+
     /// Hand 0 picks up `object` of world `world` from `start` by any of `grasps`, moving in 10 cm
     /// along the hand's z axis and lifting the object 10 cm, off nothing it rests on.
     #[must_use]
@@ -109,6 +193,7 @@ impl Pick {
             transit: true,
             hand: 0,
             object,
+            body: None,
             grasps,
             approach: 0.1,
             lift: Vec3::Z * 0.1,
@@ -668,7 +753,18 @@ fn check_picks(robot: &Robot, worlds: &Worlds, tasks: &[Pick], o: &TaskOptions) 
     let mut checked: Vec<&HashMap<String, f32>> = vec![];
     for (i, t) in tasks.iter().enumerate() {
         let world = check_task(robot, worlds, i, &Steps::of_pick(t), &t.start, t.hand)?;
-        check_object(world, i, t.object, "picked up")?;
+        if let Some(body) = &t.body {
+            t.check_parts(world, format_args!("task {i}"))?;
+            ensure_input!(
+                !matches!(body.shape, Obstacle::Sdf { .. }),
+                "task {i}: a distance grid cannot be carried as the pick body"
+            );
+            body.shape
+                .check()
+                .map_err(|e| input!("task {i}: pick body {:?} {e}", body.shape))?;
+        } else {
+            check_object(world, i, t.object, "picked up")?;
+        }
         check_poses(i, "grasp", &t.grasps)?;
         ensure_input!(
             t.approach.is_finite()
@@ -736,9 +832,11 @@ fn picked(
     let robot = device.robot();
     let mut candidates = vec![];
     for (t, task) in tasks.iter().enumerate() {
-        let object = worlds[task.world as usize].obstacles[task.object].pose();
+        let object = worlds[task.world as usize].obstacles[task.object]
+            .pose()
+            .rigid();
         for (index, &grasp) in task.grasps.iter().enumerate() {
-            let at = object.mul_pose(grasp);
+            let at = object.mul_pose(grasp.rigid());
             let poses = [
                 behind(at, task.approach),
                 at,
@@ -774,7 +872,11 @@ fn picked(
             .iter()
             .map(|t| {
                 let mut w = worlds[t.world as usize].clone();
-                w.touch.push(Touch::new(t.object, fingers(robot, t.hand)));
+                let links = match t.body {
+                    Some(_) => robot.finger_links(t.hand),
+                    None => fingers(robot, t.hand),
+                };
+                w.touch.push(Touch::new(t.object, links));
                 w
             })
             .collect();
@@ -809,19 +911,17 @@ fn picked(
         let holder = |k: usize, held: &Held| fitted.holder(device, robot, k, held);
         // The worlds a hand lifts in: each without its object, the held link of that hand's
         // tasks touching their supports.
+        let removed: Vec<_> = tasks.iter().map(Pick::parts).collect();
         let lifting = |hand: usize| {
             tasks
                 .iter()
-                .map(|t| {
-                    let mut w = worlds[Steps::of_pick(t).depart_world as usize].clone();
-                    w.remove(t.object)?;
-                    if t.hand == hand {
-                        let shifted = |s: usize| if s > t.object { s - 1 } else { s };
-                        let link = held::held_link(hand);
-                        let touches = t.support.iter().map(|&s| Touch::new(shifted(s), [&link]));
-                        w.touch.extend(touches);
-                    }
-                    Ok(w)
+                .zip(&removed)
+                .map(|(t, parts)| {
+                    t.lift_in(
+                        &worlds[Steps::of_pick(t).depart_world as usize],
+                        parts,
+                        hand,
+                    )
                 })
                 .collect::<Result<Vec<World>>>()
         };
@@ -850,12 +950,14 @@ fn picked(
             )?;
             // Contacts name obstacles as the task's world does, which still holds the object.
             for c in group.iter_mut() {
-                let object = tasks[c.task].object;
                 for contact in &mut c.contacts {
-                    if let Contact::World { obstacle, .. } = contact
-                        && *obstacle >= object
-                    {
-                        *obstacle += 1;
+                    if let Contact::World { obstacle, .. } = contact {
+                        for &part in removed[c.task].iter() {
+                            if *obstacle < part {
+                                break;
+                            }
+                            *obstacle += 1;
+                        }
                     }
                 }
             }
@@ -2180,11 +2282,23 @@ pub(crate) fn fingers(robot: &Robot, hand: usize) -> Vec<&str> {
 
 /// What `task`'s grasp `index` leaves the hand holding.
 fn held(task: &Pick, worlds: &Worlds, index: usize) -> Held {
+    let part = &worlds[task.world as usize].obstacles[task.object];
+    let (shape, grasp) = match &task.body {
+        Some(body) => (
+            &body.shape,
+            body.shape
+                .pose()
+                .rigid()
+                .inverse()
+                .mul_pose(part.pose().rigid().mul_pose(task.grasps[index].rigid())),
+        ),
+        None => (part, task.grasps[index]),
+    };
     Held {
         locked: task.locked.get(index).cloned().unwrap_or_default(),
         hand: task.hand,
-        object: worlds[task.world as usize].obstacles[task.object].placed(Pose::IDENTITY),
-        grasp: task.grasps[index],
+        object: shape.placed(Pose::IDENTITY),
+        grasp,
         spheres: Default::default(),
     }
 }

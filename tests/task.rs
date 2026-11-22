@@ -2673,3 +2673,78 @@ fn a_place_stops_at_as_many_plans_as_will_do_in_its_poses_order() {
         }
     }
 }
+
+#[test]
+fn gripping_one_part_lifts_the_whole_body_and_keeps_its_neighbors() {
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let body = scene(vec![]).obstacles[BOX].clone();
+    let center = body.pose().position;
+    let patch =
+        Obstacle::cuboid(center + 0.015 * Vec3::Z, Vec3::new(HALF.x, HALF.y, 0.015)).placed(
+            Pose::new(center + Vec3::Z * 0.015, Quat::from_rotation_z(PI)),
+        );
+    let rest = Obstacle::cuboid(center - 0.015 * Vec3::Z, Vec3::new(HALF.x, HALF.y, 0.015));
+    let table = scene(vec![]).obstacles[TABLE].clone();
+    let grasp = body.pose().mul_pose(top());
+    let local = patch.pose().inverse().mul_pose(grasp);
+    let mut patch_pose = patch.pose();
+    patch_pose.rotation *= 1.0008;
+    let patch = patch.placed(patch_pose);
+    let local = Pose::new(local.position, local.rotation * 1.0008);
+    assert!(patch_pose.is_unit() && local.is_unit());
+    assert!(
+        !patch_pose.mul_pose(local).is_unit(),
+        "the two rounding errors accumulate"
+    );
+    let task = Pick {
+        body: Some(batchplan::PickBody {
+            shape: body.clone(),
+            other_parts: vec![0],
+        }),
+        support: vec![2],
+        ..Pick::new(0, robot.default_q(), 1, vec![local])
+    };
+    let mut world = World::new(vec![rest, patch, table.clone()]);
+    let after = task.lift_world(&world).unwrap();
+    assert_eq!(after.obstacles, [table]);
+    assert_eq!(after.touch, [Touch::held(0, 0)]);
+    // Overlapping indices erase collidable material or leave a support pointing at another
+    // obstacle. Check the step world on its own and before planning.
+    let uploaded = device.upload(std::slice::from_ref(&world)).unwrap();
+    for invalid in [vec![0, 0], vec![1], vec![2], vec![3]] {
+        let mut bad = task.clone();
+        bad.body.as_mut().unwrap().other_parts = invalid;
+        assert!(matches!(bad.lift_world(&world), Err(Error::Input(_))));
+        assert!(matches!(
+            batchplan::pick(&device, &uploaded, &[bad], &TaskOptions::default()),
+            Err(Error::Input(_))
+        ));
+    }
+    let plans = pick_in(
+        &device,
+        world.clone(),
+        task.clone(),
+        &TaskOptions::default(),
+    )
+    .unwrap();
+    let held = plans[0].held.as_ref().unwrap();
+    assert_eq!(held.object, body.placed(Pose::IDENTITY));
+    assert!(held.grasp.position.distance(top().position) < 1e-6);
+    assert!(held.grasp.rotation.dot(top().rotation).abs() > 0.99999);
+
+    // A lid over the contact part stops the lifted body; it is still obstacle 3 in diagnostics.
+    world.obstacles.push(Obstacle::cuboid(
+        Vec3::new(0.45, 0.2, 0.068),
+        Vec3::new(0.01, 0.015, 0.004),
+    ));
+    let failure = pick_in(&device, world, task, &TaskOptions::default()).unwrap_err();
+    assert_eq!(failure.candidates[0].step, TaskStep::Depart);
+    assert!(
+        failure.candidates[0]
+            .contacts
+            .iter()
+            .any(|contact| matches!(contact, Contact::World { obstacle: 3, .. })),
+        "{failure:?}"
+    );
+}

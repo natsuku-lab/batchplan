@@ -10,6 +10,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- A pick can grasp one obstacle and lift the body it belongs to. `PickBody` describes the carried
+  shape and the other obstacles that move with it. `Pick::lift_world` builds the departure world
+  for execution. **Breaking:** Rust literals that list every field of `Pick` need `body: None`
+  when the contact obstacle is the whole object.
+
 - `Pull` and `pull` plan a straight draw by a handle in Rust and Python. The hand keeps its
   orientation and moves a signed distance along a world direction. Each plan gives the draw
   between its approach and departure, and a stopped draw reports the planned distance in meters.

@@ -240,6 +240,8 @@ fn main() -> Result<(), Error> {
 
 `pick(&device, &worlds, &[Pick], &TaskOptions)` and `place(&device, &worlds, &[Place], &TaskOptions)` each do a whole task in one call: three motions from rest to rest, or the last two alone for a task that leaves its transit out. The `transit` is a planned path from the start to where the hand begins to move in, the `approach` a straight move in (to the grasp, or down to where the object goes), and the `depart` a straight move away (lifting the object, or backing off from it). Close or open the gripper between the approach and the departure. Every motion is checked with the fingers where the start has them, so open them first.
 
+When the world represents a movable object in pieces, give `Pick::object` the index of the part the fingers may touch. Express each grasp in that part's frame. In `Pick::body`, give the shape of the entire body in world coordinates and the indices of the other pieces that move with it. They still block the hand on approach. Once the gripper closes, the returned `Held` uses the body's frame and the departure checks that shape against the remaining world. An enclosing box or cylinder for a hollow body also fills its interior during the lift. Call `pick.lift_world(&departure_world)` to reproduce the departure checks with that hold attached. A failure's contacts name obstacles by their indices before the pieces were removed.
+
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
 use batchplan::{

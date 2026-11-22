@@ -400,3 +400,15 @@ def test_a_drawer_is_drawn_along_the_signed_world_direction(tasks_robot):
     ]:
         with pytest.raises(bp.InputError, match=message):
             bp.pull(device, worlds, [task.replace(**changes)])
+
+
+def test_split_pick_remaps_the_held_support_in_the_departure_world():
+    box = scene().obstacles[BOX]
+    table = scene().obstacles[TABLE]
+    part = bp.Obstacle.sphere((0.45, 0.2, 0.05), 0.01)
+    body = bp.PickBody(box, [0])
+    pick = bp.Pick(0, [], 2, [], body=body, support=[1])
+    departure = pick.lift_world(bp.World([box, table, part]))
+    assert pick.body.shape.pose == box.pose and pick.body.other_parts == (0,)
+    assert len(departure.obstacles) == 1 and departure.obstacles[0].pose == table.pose
+    assert departure.touch == (bp.Touch.held(0, 0),)
