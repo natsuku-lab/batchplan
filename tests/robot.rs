@@ -2578,6 +2578,17 @@ fn an_outer_reach_bound_keeps_fk_poses_and_accounts_for_ik_tolerance() {
         ..options.clone()
     };
     assert!(Robot::load(&path, &locked).unwrap().hand_reach(0).is_none());
+    std::fs::write(
+        &path,
+        arm.replacen("axis xyz=\"0 0 1\"", "axis xyz=\"0 0 0\"", 1),
+    )
+    .unwrap();
+    assert!(
+        Robot::load(&path, &options)
+            .unwrap()
+            .hand_reach(0)
+            .is_none()
+    );
     std::fs::write(&path, arm.replacen("revolute", "prismatic", 1)).unwrap();
     assert!(
         Robot::load(&path, &options)

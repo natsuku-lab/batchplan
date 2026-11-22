@@ -31,6 +31,12 @@ impl HandReach {
             match link.joint {
                 JointKind::Fixed => {}
                 JointKind::Revolute { axis, .. } => {
+                    // Some descriptions give a zero axis. Their FK is not a rotation about
+                    // a line and cannot justify this certificate.
+                    if !axis.is_finite() || (axis.length_squared() - 1.0).abs() > 8.0 * f32::EPSILON
+                    {
+                        return None;
+                    }
                     joints.push((frame, axis.as_dvec3().normalize()));
                     frame = Transform::IDENTITY;
                 }
