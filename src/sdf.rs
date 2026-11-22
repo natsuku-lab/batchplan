@@ -431,11 +431,7 @@ impl DepthImage<'_> {
         self.check()?;
         let camera = self.rigid().camera;
         let to_camera = camera.rotation.inverse();
-        ensure_input!(
-            q.len() == robot.dof() && q.iter().all(|v| v.is_finite()),
-            "q needs a finite value for each of the robot's {} joints, got {q:?}",
-            robot.dof()
-        );
+        check_q(robot, q)?;
         ensure_input!(
             padding.is_finite() && padding >= 0.0,
             "the padding must not be negative, got {padding}"
@@ -2849,6 +2845,18 @@ pub struct OnShape {
     pub shape: usize,
     /// How far from the shape's surface the point lies (meters): negative inside it.
     pub distance: f32,
+}
+
+/// Why `q` is no configuration of `robot` ([`DepthImage::robot_mask`]), if it is not. Out of line:
+/// checked in the mask, every value's check made six of the mask's closures leave it.
+#[inline(never)]
+fn check_q(robot: &Robot, q: &[f32]) -> Result<()> {
+    ensure_input!(
+        q.len() == robot.dof() && q.iter().all(|v| v.is_finite()),
+        "q needs a finite value for each of the robot's {} joints, got {q:?}",
+        robot.dof()
+    );
+    Ok(())
 }
 
 #[cfg(test)]
