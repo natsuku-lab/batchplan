@@ -3197,3 +3197,100 @@ fn gripping_the_knob_leaves_the_panel_and_dial_in_collision() {
         }
     }
 }
+
+/// Two separate physical objects: lifting the lower box would carry the can standing on it.
+#[test]
+fn a_supported_can_refuses_the_entire_pick_before_planning_candidates() {
+    let robot = panda();
+    let device = Device::cpu_threads(&robot, 1).unwrap();
+    let q = robot.default_q();
+    let mut things = vec![
+        table(),
+        block(
+            MIDDLE + Vec3::Z * 0.035,
+            Vec3::new(0.021, 0.025, 0.035),
+            [210, 30, 30],
+        ),
+        can(MIDDLE + Vec3::Z * 0.09, 0.015, 0.02, [20; 3]),
+        arm(&robot, q),
+    ];
+    let render = [-0.28, 0.28].map(|side| {
+        Frame::of(
+            &things,
+            looking(Vec3::new(MIDDLE.x, side, 0.30), MIDDLE + Vec3::Z * 0.04),
+        )
+    });
+    let seen = first_look(&device, &things, &render, (0, 0), q, 0.0);
+    let base = id_of(seen.kept.scene(), &render, 1).expect("the lower box");
+    let can = id_of(seen.kept.scene(), &render, 2).expect("the upper can");
+    assert_ne!(base, can);
+    let options = GraspOptions {
+        turns: 1,
+        shell: Some(0.015),
+        ..Default::default()
+    };
+    // Keep the same candidate before and after the can is set down on the box.
+    things.remove(2);
+    let bare_render = render
+        .each_ref()
+        .map(|view| Frame::of(&things, view.camera));
+    let empty = first_look(&device, &things, &bare_render, (0, 0), q, 0.0);
+    let box_id = id_of(empty.kept.scene(), &bare_render, 1).expect("the bare box");
+    let surface = empty.kept.surface(&device, box_id).unwrap().unwrap();
+    let options = GraspOptions {
+        turns: 1,
+        ..options
+    };
+    let g = batchplan::grasps_on(&device, 0, &[surface], &options)
+        .unwrap()
+        .remove(0)
+        .into_iter()
+        .next()
+        .expect("the bare box has a grip");
+    let source = seen
+        .grip_worlds(&device, &Step::default(), 0, base, options.opening)
+        .unwrap();
+    let inputs = [g; 5];
+    let run = |grasps: &[batchplan::Grasp], search: &miru::GripSearch, stop: bool| {
+        source.plan(
+            grasps,
+            search,
+            &batchplan::TaskOptions::default(),
+            || stop,
+            |_| -> batchplan::Pick { panic!("a blocked pick must never request a motion") },
+        )
+    };
+    let search = miru::GripSearch::default();
+    let miru::GripOutcome::Complete(result) = run(&inputs, &search, false).unwrap() else {
+        panic!("the search was not interrupted");
+    };
+    let blocked = result.blocked.expect("one reason for the entire pick");
+    assert_eq!(blocked.object, base);
+    assert_eq!(blocked.supports, [can]);
+    assert!(result.plans.is_empty() && result.failures.is_empty());
+    assert_eq!(result.batches, 0);
+    assert!(matches!(
+        run(&inputs, &search, true).unwrap(),
+        miru::GripOutcome::Interrupted(_)
+    ));
+    let elsewhere = miru::GripSearch {
+        target: Some(miru::GripTarget::Near {
+            point: MIDDLE + Vec3::Z,
+            radius: 0.0,
+        }),
+        ..search
+    };
+    let miru::GripOutcome::Complete(empty) = run(&inputs, &elsewhere, false).unwrap() else {
+        panic!("the search was not interrupted");
+    };
+    assert!(
+        empty.blocked.is_none(),
+        "no candidate was eligible for the target"
+    );
+    let mut bad = inputs;
+    bad[4].opening = f32::NAN;
+    assert!(
+        run(&bad, &search, false).is_err(),
+        "a refusal cannot hide invalid input"
+    );
+}

@@ -227,7 +227,8 @@ The search keeps `batch` candidate worlds in flight plus the requested winners. 
 `enough` feasible candidates in input order are returned quickest first, with their original
 indices, finger openings and exact locked joint settings. `GripPlan::world(stage)` gives the collision world to follow each
 motion against, with its touch permissions and obstacle names. Failed motions carry their own
-obstacle names. The result counts actual batched solver calls. A cancellation yields `GripOutcome::Interrupted`, including any work completed.
+obstacle names. When another object stands on a pick target, `GripPlans::blocked` names the
+target and the objects it supports once, before any candidate world is projected. The result counts actual batched solver calls. A cancellation yields `GripOutcome::Interrupted`, including any work completed.
 An approximate target can use `GripTarget::Near` with an explicit radius about the measured
 contact midpoint, or `None` allows the whole surface.
 

@@ -88,7 +88,7 @@ mod view;
 pub use grip::{GripWorlds, Gripped};
 pub use grip_plan::{
     GripCandidate, GripFailure, GripOutcome, GripPlan, GripPlans, GripSearch, GripStop, GripTarget,
-    GripTask,
+    GripTask, SupportedObjects,
 };
 pub use look::{Look, LookOptions, Noise, View, look};
 pub use memory::{

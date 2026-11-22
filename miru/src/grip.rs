@@ -8,6 +8,7 @@ use batchplan::{
 use glam::Vec3;
 
 use crate::error::{Result, ensure_input};
+use crate::grip_plan::SupportedObjects;
 use crate::memory::{Map, Memory, Observed, Of, Planned, Step};
 use crate::scene::Label;
 
@@ -50,6 +51,7 @@ pub struct GripWorlds<'a> {
     observed: &'a Observed,
     pub(crate) device: &'a Device,
     pub(crate) hand_index: usize,
+    pub(crate) blocked: Option<SupportedObjects>,
     loaded_opening: f32,
     hand: Vec<HandSphere>,
     id: u32,
@@ -206,10 +208,21 @@ impl Observed {
             .views()
             .map(|(image, mask, _)| (image, Some(mask)))
             .collect();
+        let supports: Vec<_> = memory
+            .standing(index)
+            .into_iter()
+            .filter(|&i| i != index)
+            .map(|i| memory.objects()[i].id)
+            .collect();
+        let blocked = (!supports.is_empty()).then_some(SupportedObjects {
+            object: id,
+            supports,
+        });
         Ok(GripWorlds {
             observed: self,
             device,
             hand_index,
+            blocked,
             loaded_opening,
             hand,
             id,
@@ -385,7 +398,7 @@ impl GripWorlds<'_> {
             retained,
             fixtures: self.fixtures.clone(),
         };
-        let body = (memory.standing(index).len() == 1).then(|| PickBody {
+        let body = self.blocked.is_none().then(|| PickBody {
             shape: cover.clone(),
             other_parts,
         });

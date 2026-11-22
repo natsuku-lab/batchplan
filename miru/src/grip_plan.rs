@@ -25,6 +25,20 @@ pub enum GripTarget {
     },
 }
 
+impl GripTarget {
+    fn accepts(self, source: &GripWorlds<'_>, candidate: &Grasp) -> bool {
+        match self {
+            Self::Point(point) => source.closes_on(candidate, point),
+            Self::Near { point, radius } => {
+                candidate.contacts[0]
+                    .midpoint(candidate.contacts[1])
+                    .distance(point)
+                    <= radius
+            }
+        }
+    }
+}
+
 /// Which grasps to plan on, how many complete plans will do, and how much to keep in flight.
 #[derive(Clone, Copy, Debug)]
 pub struct GripSearch {
@@ -145,8 +159,6 @@ impl GripPlan {
 pub enum GripStop {
     /// The look could not isolate a contact part.
     NoPart,
-    /// The target cannot move as one body.
-    NoBody,
     /// A batchplan motion stopped. Its contact indices name obstacles in `of`; the dense
     /// collision grids have already been dropped.
     Motion {
@@ -167,10 +179,23 @@ pub struct GripFailure {
     pub reason: GripStop,
 }
 
+/// The perceived objects that would be displaced by picking their support.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SupportedObjects {
+    /// The proposed pick target's ID.
+    pub object: u32,
+    /// Other perceived IDs standing on the target, directly or transitively, in memory order.
+    pub supports: Vec<u32>,
+}
+
 /// The requested prefix of feasible candidates and diagnostics for attempted failures.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct GripPlans {
+    /// A pick was refused before projection because another perceived object stands on its target.
+    /// Set once for the whole search, when at least one supplied grasp meets its target selector.
+    pub blocked: Option<SupportedObjects>,
     /// Actual calls to a batched motion solver, excluding projection-only batches.
     pub batches: usize,
     /// In trajectory-duration order, ties in original input order.
@@ -292,7 +317,9 @@ impl GripWorlds<'_> {
     /// The first `enough` candidates that succeed in input order are returned in increasing
     /// duration order. Each batch is checked by the corresponding batched batchplan primitive;
     /// IK on the GPU can round differently at different batch sizes. `should_stop` is polled
-    /// before projection, before planning a batch, and after batch completion.
+    /// before projection, before planning a batch, and after batch completion. A pick that
+    /// would take another object with it checks candidate inputs and selection, records the
+    /// supported IDs once in [`GripPlans::blocked`], and projects no candidate worlds.
     pub fn plan<T: GripTask>(
         &self,
         grasps: &[Grasp],
@@ -316,6 +343,7 @@ impl GripWorlds<'_> {
         }
         let mut result = GripPlans::default();
         let mut candidates = grasps.iter().enumerate();
+        let blocked = if T::PICK { self.blocked.as_ref() } else { None };
         let enough = search.enough.unwrap_or(usize::MAX);
         let interrupted = loop {
             let mut batch = vec![];
@@ -326,20 +354,18 @@ impl GripWorlds<'_> {
                     stopped = true;
                     break;
                 }
-                if let Some(target) = search.target {
+                if blocked.is_some() || search.target.is_some() {
                     self.validate(candidate)?;
-                    let matches = match target {
-                        GripTarget::Point(point) => self.closes_on(candidate, point),
-                        GripTarget::Near { point, radius } => {
-                            candidate.contacts[0]
-                                .midpoint(candidate.contacts[1])
-                                .distance(point)
-                                <= radius
-                        }
-                    };
-                    if !matches {
-                        continue;
-                    }
+                }
+                if search
+                    .target
+                    .is_some_and(|target| !target.accepts(self, candidate))
+                {
+                    continue;
+                }
+                if let Some(blocked) = blocked {
+                    result.blocked.get_or_insert_with(|| blocked.clone());
+                    continue;
                 }
                 let Some(mut split) = self.project(candidate)? else {
                     result.failures.push(GripFailure {
@@ -348,13 +374,6 @@ impl GripWorlds<'_> {
                     });
                     continue;
                 };
-                if T::PICK && split.body.is_none() {
-                    result.failures.push(GripFailure {
-                        candidate: index,
-                        reason: GripStop::NoBody,
-                    });
-                    continue;
-                }
                 let world = u32::try_from(batch.len()).map_err(|_| {
                     batchplan::Error::Input(format!(
                         "a grip search has too many worlds in a batch: {}",
