@@ -14,6 +14,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   candidate at a time to split the material between its finger pads from the collision world.
   A whole-body pick retains the object's ID and the collision geometry left behind.
   `Grasp::closes_on` tests a ball against the closing region at the chosen opening.
+  `GripWorlds::with_reach_bound` can reject kinematically impossible targets before projection.
+  `Robot::hand_reach` exposes the same geometric check to Rust and Python callers.
   `Kept::labels_at` reports the labels supported by filtered depth at a measured 3D point.
 
 - A pick can grasp one obstacle and lift the body it belongs to. `PickBody` describes the carried

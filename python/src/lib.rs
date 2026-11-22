@@ -33,6 +33,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<robot::HandSphere>()?;
     m.add_class::<robot::RobotOptions>()?;
     m.add_class::<robot::Robot>()?;
+    m.add_class::<robot::HandReach>()?;
     m.add_class::<device::Contact>()?;
     m.add_class::<device::Device>()?;
     m.add_class::<device::Worlds>()?;

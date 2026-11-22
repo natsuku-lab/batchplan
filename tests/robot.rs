@@ -2502,3 +2502,87 @@ fn a_link_too_thin_for_a_sphere_inside_it_is_refused_by_name() {
         );
     }
 }
+
+#[test]
+fn an_outer_reach_bound_keeps_fk_poses_and_accounts_for_ik_tolerance() {
+    let options = batchplan::IkOptions::default();
+    let mut rng = Rng::new(407);
+    for robot in [
+        common::panda().unwrap(),
+        load(UR5E),
+        common::two_pandas().unwrap(),
+    ] {
+        for hand in 0..robot.hands() {
+            let bound = robot.hand_reach(hand).expect("revolute chain");
+            for _ in 0..128 {
+                let pose = robot.ee_pose(&random_q(&robot, &mut rng), hand);
+                assert!(!bound.excludes(pose, &options));
+                let far = Pose::new(pose.position + Vec3::X * 10.0, pose.rotation);
+                assert!(bound.excludes(far, &options));
+            }
+        }
+    }
+
+    let dir = scratch("outer-reach");
+    let path = dir.join("arm.urdf");
+    let arm = r#"<robot name="arm">
+      <link name="base"/><link name="one"/><link name="two"/><link name="three"/><link name="tcp"/>
+      <joint name="a" type="revolute"><parent link="base"/><child link="one"/><axis xyz="0 0 1"/>
+        <limit lower="-1" upper="1" effort="1" velocity="1"/></joint>
+      <joint name="b" type="revolute"><parent link="one"/><child link="two"/>
+        <origin xyz="1 0 0"/><axis xyz="0 0 1"/><limit lower="-1" upper="1" effort="1" velocity="1"/></joint>
+      <joint name="c" type="revolute"><parent link="two"/><child link="three"/>
+        <origin xyz="1 0 0"/><axis xyz="0 0 1"/><limit lower="-1" upper="1" effort="1" velocity="1"/></joint>
+      <joint name="tip" type="fixed"><parent link="three"/><child link="tcp"/><origin xyz="0.5 0 0"/></joint>
+    </robot>"#;
+    std::fs::write(&path, arm).unwrap();
+    let options = RobotOptions {
+        ee_links: vec!["tcp".into()],
+        ..Default::default()
+    };
+    let robot = Robot::load(&path, &options).unwrap();
+    let bound = robot.hand_reach(0).unwrap();
+    let straight = robot.ee_pose(&[0.0; 3], 0);
+    assert_eq!(straight.position, Vec3::X * 2.5);
+    let tight = batchplan::IkOptions {
+        position_tolerance: 1e-6,
+        rotation_tolerance: 1e-6,
+        ..Default::default()
+    };
+    assert!(!bound.excludes(straight, &tight));
+    let translated = Pose::new(straight.position + Vec3::X * 0.003, straight.rotation);
+    assert!(bound.excludes(translated, &tight));
+    assert!(!bound.excludes(
+        translated,
+        &batchplan::IkOptions {
+            position_tolerance: 0.004,
+            ..tight
+        }
+    ));
+    // IK accepts nearly unit quaternions and uses their matrix directly. Normalizing such a
+    // target for the wrist-circle calculation may move it outside a tight angular tolerance.
+    let loose_rotation = Pose::new(translated.position, straight.rotation * 0.9992);
+    assert!(loose_rotation.is_unit());
+    assert!(!bound.excludes(loose_rotation, &tight));
+    let rotated = Pose::new(straight.position, Quat::from_rotation_y(0.1));
+    assert!(bound.excludes(rotated, &tight));
+    assert!(!bound.excludes(
+        rotated,
+        &batchplan::IkOptions {
+            rotation_tolerance: 0.11,
+            ..tight
+        }
+    ));
+    let locked = RobotOptions {
+        lock_joints: HashMap::from([("a".into(), 0.0)]),
+        ..options.clone()
+    };
+    assert!(Robot::load(&path, &locked).unwrap().hand_reach(0).is_none());
+    std::fs::write(&path, arm.replacen("revolute", "prismatic", 1)).unwrap();
+    assert!(
+        Robot::load(&path, &options)
+            .unwrap()
+            .hand_reach(0)
+            .is_none()
+    );
+}

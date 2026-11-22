@@ -2829,6 +2829,39 @@ fn the_split_world_reaches_a_grip_and_lifts_only_attributable_material() {
             enough: Some(1),
         };
         let opts = batchplan::TaskOptions::default();
+        let mut outside = *g;
+        outside.pose.position.x += 5.0;
+        let bounded = seen
+            .grip_worlds(&device, &Step::default(), 0, id, options.opening)
+            .unwrap()
+            .with_reach_bound();
+        let miru::GripOutcome::Complete(rejected) = bounded
+            .plan(
+                &[outside],
+                &search,
+                &opts,
+                || false,
+                |_| -> batchplan::Pick { panic!("a certified rejection needs no projected task") },
+            )
+            .unwrap()
+        else {
+            panic!("an uninterrupted search completes");
+        };
+        assert_eq!(rejected.batches, 0);
+        assert!(
+            matches!(rejected.failures[0].reason, miru::GripStop::OutsideReach { at }
+            if at == outside.pose)
+        );
+        let miru::GripOutcome::Complete(mixed_search) = bounded
+            .plan(&[outside, *g], &search, &opts, || false, configure)
+            .unwrap()
+        else {
+            panic!("an uninterrupted search completes");
+        };
+        assert_eq!(mixed_search.batches, 1);
+        if !mixed {
+            assert_eq!(mixed_search.plans[0].plan.candidate, 1);
+        }
         let miru::GripOutcome::Complete(mut found) = source
             .plan(&candidates, &search, &opts, || false, configure)
             .unwrap()

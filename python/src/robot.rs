@@ -300,6 +300,21 @@ value_class! {
     }
 }
 
+/// An outer bound on the poses of one hand.
+#[pyclass(module = "batchplan", frozen)]
+pub(crate) struct HandReach(batchplan::HandReach);
+
+#[pymethods]
+impl HandReach {
+    /// Whether the requested pose lies beyond the arm even allowing IK's pose tolerances.
+    #[pyo3(signature = (target, options = None))]
+    fn excludes(&self, target: &Pose, options: Option<&crate::ik::IkOptions>) -> bool {
+        let defaults = batchplan::IkOptions::default();
+        self.0
+            .excludes(target.0, options.map_or(&defaults, |o| &o.0))
+    }
+}
+
 /// A robot's kinematic tree and collision spheres, from URDF or MJCF. Immutable once loaded.
 #[pyclass(module = "batchplan", frozen)]
 pub(crate) struct Robot(pub(crate) batchplan::Robot);
@@ -431,6 +446,13 @@ impl Robot {
     #[getter]
     fn reach(&self) -> f64 {
         field::shortest(self.0.reach())
+    }
+
+    /// An outer bound on this hand's poses, or None for a chain without a certificate.
+    #[pyo3(signature = (hand = 0))]
+    fn hand_reach(&self, hand: usize) -> PyResult<Option<HandReach>> {
+        self.check_hand(hand)?;
+        Ok(self.0.hand_reach(hand).map(HandReach))
     }
 
     /// World pose of hand `hand`'s IK target frame at configuration `q`.

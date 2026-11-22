@@ -80,7 +80,10 @@ impl HandReach {
     /// maximum reach, allowing both of IK's pose tolerances. Invalid inputs supply no bound.
     #[must_use]
     pub fn excludes(&self, target: Pose, options: &IkOptions) -> bool {
+        // IK accepts slightly nonunit rotations and uses their unnormalized matrix. Only
+        // apply the circle argument to rigid targets up to ordinary quaternion roundoff.
         if !target.is_unit()
+            || (target.rotation.length_squared() - 1.0).abs() > 8.0 * f32::EPSILON
             || !(options.position_tolerance > 0.0 && options.rotation_tolerance > 0.0)
         {
             return false;

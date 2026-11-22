@@ -156,12 +156,16 @@ def test_a_start_in_collision_names_what_it_touches(ur5e_robot):
 def test_unreachable_targets_say_so(ur5e_robot):
     device = bp.Device.cpu(ur5e_robot)
     worlds = device.upload([bp.World()])
-    problems = [bp.IkProblem(0, bp.Pose((3.0, 0.0, 0.3), DOWN))]
+    target = bp.Pose((3.0, 0.0, 0.3), DOWN)
+    reach = ur5e_robot.hand_reach()
+    assert reach.excludes(target)
+    problems = [bp.IkProblem(0, target)]
     result = bp.solve_ik(device, worlds, problems)
     failures = bp.ik_failures(device, worlds, result)
     assert isinstance(failures, tuple) and isinstance(failures[0], bp.IkFailure.Unreachable)
     # Within ten meters of the target, a seed reaches it.
     loose = bp.IkOptions(position_tolerance=10.0, rotation_tolerance=10.0)
+    assert not reach.excludes(target, loose)
     assert isinstance(bp.ik_failures(device, worlds, result, loose)[0], bp.IkFailure.Collides)
 
 
