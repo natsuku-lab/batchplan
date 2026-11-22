@@ -24,10 +24,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   plan has its `turn` between `approach` and `depart`, and `placed` is the object where the turn
   leaves it. A candidate that makes no turn stops at the new `TaskStep::Turn`, checked
   after the reach, with how far it turned (`CandidateStop::turned`). Of the example's knob's
-  972 grips (`examples/turns.rs`), 714 make a quarter turn from the
-  configuration nearest the start and 745 from some configuration at the grip; it takes 424 ms
-  by all of them on the M4 Pro and 17 ms to its first plan (`docs/benchmarks.md`). Python binds
-  `Turn`, `turn` and `Screw`.
+  972 grips (`examples/turns.rs`), 799 make a quarter turn from the configuration nearest the
+  start and 834 from some configuration at the grip on the M4 Pro (797 and 836 on the Ryzen); it
+  takes 457 ms by all of them on the M4 Pro's CPU device and 18.5 ms to its first plan, and
+  390 ms and 16 ms on the Ryzen's (`docs/benchmarks.md`). Python binds `Turn`, `turn` and
+  `Screw`.
 - `Screw { point, direction, pitch }`, a line and how far a thing carried about it moves along it
   a radian, with `Screw::about(point, direction)`: `carry(pose, angle)` carries a pose about it,
   and `path(pose, angle, precision)` gives the waypoints a tool path follows along its arc, as few
