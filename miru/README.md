@@ -157,9 +157,11 @@ has them as a program; per camera:
 What the robot did is said once (`Act`): a pick puts the thing into a hand, which every mask then
 holds, and frees the map where a thing that was not solid stood; what stood on it leaves the
 objects with it and is in no memory until a look finds it ("Where it stands"). A let-go puts it
-back with its id where it was set down, unseen, and the next look says one of three of it: seen
-there (among the objects, a label naming it), its place not seen (among them, no label), or its
-place seen and empty (gone). A loss leaves it in no hand and no scene; a push moves the thing and
+back with its id where it was set down, unseen, standing on what the caller set it down on, a
+known shape or an object (`Under`, as its place plan's support), so that a push or a pick of that
+carries it along until the next look measures it afresh; and that look says one of three of it:
+seen there (among the objects, a label naming it), its place not seen (among them, no label), or
+its place seen and empty (gone). A loss leaves it in no hand and no scene; a push moves the thing and
 what stands on it; and a draw, as of a drawer, leaves the object as it was. Where a thing let go,
 pushed or drawn is not solid, the map is never seen where it lies, and where a pushed or drawn one
 stood. A pick of an id the memory never gave, above its next id, is a hold a restart brings back:

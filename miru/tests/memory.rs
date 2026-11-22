@@ -22,7 +22,7 @@ use common::{
 use glam::{Quat, Vec3};
 use miru::{
     Act, Camera, Label, Look, LookOptions, Memory, MemoryOptions, Noise, Observed, Of, Planned,
-    Scene, Shape, Stance, Step, Support, observe,
+    Scene, Shape, Stance, Step, Support, Under, observe,
 };
 
 /// The Panda's stance with its fingertips 2.3 cm over the top of the can of
@@ -1014,7 +1014,9 @@ fn a_thing_let_go_is_seen_there_or_unseen_or_gone() {
         // or nowhere.
         let let_go = |by: Vec3, there: bool| {
             let at = Pose::new(frame.position + by, frame.rotation);
-            let memory = picked.after(&[Act::LetGo { id, at }]).expect("a let-go");
+            let memory = picked
+                .after(&[Act::LetGo { id, at, on: None }])
+                .expect("a let-go");
             let things = acts_scene(&robot, away, there.then_some(BOX + by), None, None);
             let (rendered, after) = second_look(
                 &device,
@@ -1311,6 +1313,7 @@ fn acts_on_what_the_memory_does_not_hold_are_refused() {
             vec![Act::LetGo {
                 id: ids[0],
                 at: Pose::IDENTITY,
+                on: None,
             }],
             "act 0",
             ids[0].to_string(),
@@ -1339,6 +1342,7 @@ fn acts_on_what_the_memory_does_not_hold_are_refused() {
                 Act::LetGo {
                     id: ids[0],
                     at: Pose::new(BOX, Quat::from_xyzw(0.0, 0.0, 0.0, 2.0)),
+                    on: None,
                 },
             ],
             "act 1",
@@ -1470,7 +1474,8 @@ fn a_plate_let_go_on_a_box_is_seen_there() {
         let frame = cover(&shape).pose();
         let at = Pose::new(frame.position + (on_box - on_table), frame.rotation);
         let held = grasped(&seen.memory, id);
-        let let_go = (seen.memory).after(&[Act::Picked { id, held }, Act::LetGo { id, at }]);
+        let let_go =
+            (seen.memory).after(&[Act::Picked { id, held }, Act::LetGo { id, at, on: None }]);
         let let_go = let_go.expect("a pick and a let-go");
         let things = scene(on_box);
         let (_, after) = second_look(
@@ -1634,7 +1639,14 @@ fn a_thing_let_go_that_is_not_solid_is_never_seen_where_it_lies() {
         let held = grasped(&seen.memory, bowl);
         let at = Pose::new(frame.position + (to - from), frame.rotation);
         let let_go = (seen.memory)
-            .after(&[Act::Picked { id: bowl, held }, Act::LetGo { id: bowl, at }])
+            .after(&[
+                Act::Picked { id: bowl, held },
+                Act::LetGo {
+                    id: bowl,
+                    at,
+                    on: None,
+                },
+            ])
             .expect("a pick and a let-go");
         let step = Step {
             into: &[bowl],
@@ -1948,6 +1960,7 @@ fn a_hold_a_restart_brings_back_is_held_and_let_go_as_its_shape() {
     let let_go = |id| Act::LetGo {
         id,
         at: Pose::new(BOX, Quat::IDENTITY),
+        on: None,
     };
     refused(
         &fresh,
@@ -1962,7 +1975,9 @@ fn a_hold_a_restart_brings_back_is_held_and_let_go_as_its_shape() {
 
     let along = Vec3::new(0.0, 0.15, 0.0);
     let at = Pose::new(BOX + along, Quat::IDENTITY);
-    let set_down = restored.after(&[Act::LetGo { id, at }]).expect("a let-go");
+    let set_down = restored
+        .after(&[Act::LetGo { id, at, on: None }])
+        .expect("a let-go");
     let object = set_down.objects().iter().find(|o| o.id == id);
     assert!(
         object.is_some_and(|object| object.solid
@@ -2192,7 +2207,14 @@ fn a_thing_let_go_against_another_keeps_both_ids() {
         let held = grasped(&seen.memory, a_id);
         let at = Pose::new(frame.position + (to - a), frame.rotation);
         let let_go = (seen.memory)
-            .after(&[Act::Picked { id: a_id, held }, Act::LetGo { id: a_id, at }])
+            .after(&[
+                Act::Picked { id: a_id, held },
+                Act::LetGo {
+                    id: a_id,
+                    at,
+                    on: None,
+                },
+            ])
             .expect("a pick and a let-go");
         let things = scene(to);
         let (_, after) = second_look(
@@ -2475,4 +2497,95 @@ fn what_becomes_a_shape_leaves_the_map() {
         found.push((*camera, outcome(&wrong)));
     }
     verdict("what_becomes_a_shape_leaves_the_map", &found);
+}
+
+/// A box picked and let go on what the caller set it down on: on the table, a known shape, it
+/// stands on the table; on a second box, it stands on that box among the objects, so that a push
+/// of the second box carries it and a pick of it takes it along. A known shape past those the
+/// memory knows, an id no object has and the box's own id are refused, naming the act.
+#[test]
+fn a_thing_let_go_stands_on_what_it_was_set_down_on() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let (under, under_half) = (Vec3::new(0.5, 0.2, 0.03), Vec3::new(0.07, 0.07, 0.03));
+    let things = vec![
+        table(),
+        block(BOX, BOX_HALF, [200, 30, 30]),
+        block(under, under_half, [200, 200, 30]),
+        arm(&robot, away),
+    ];
+    let rendered = render(&things);
+    let seen = first_look(&device, &things, &rendered, (0, 0), away, 0.0);
+    let [a, b] = [1, 2].map(|thing| id_of(seen.kept.scene(), &rendered, thing).expect("a box"));
+    let held = grasped(&seen.memory, a);
+    let shape = seen
+        .memory
+        .objects()
+        .iter()
+        .find(|o| o.id == a)
+        .expect("the box")
+        .shape;
+    let frame = cover(&shape).pose();
+    let on_table = Pose::new(frame.position + Vec3::new(0.0, -0.1, 0.0), frame.rotation);
+    let on_box = Pose::new(
+        under + Vec3::new(0.0, 0.0, under_half.z + BOX_HALF.z),
+        frame.rotation,
+    );
+    let let_go = |at: Pose, on: Option<Under>| {
+        (seen.memory).after(&[
+            Act::Picked {
+                id: a,
+                held: held.clone(),
+            },
+            Act::LetGo { id: a, at, on },
+        ])
+    };
+    let on = |memory: &Memory, id: u32| {
+        let object = memory.objects().iter().find(|o| o.id == id);
+        object.and_then(|object| object.on)
+    };
+    let tabled = let_go(on_table, Some(Under::Known(0))).expect("a let-go on the table");
+    assert_eq!(on(&tabled, a), Some(Support::Known(0)), "on the table");
+    let stacked = let_go(on_box, Some(Under::Object(b))).expect("a let-go on the box");
+    let index = stacked
+        .objects()
+        .iter()
+        .position(|o| o.id == b)
+        .expect("the box under");
+    assert_ne!(
+        index, b as usize,
+        "the box under has an index that is not its id"
+    );
+    assert_eq!(on(&stacked, a), Some(Support::Object(index)), "on the box");
+    let by = Vec3::new(0.0, 0.1, 0.0);
+    let pushed = stacked.after(&[Act::Pushed { id: b, by }]).expect("a push");
+    let carried = pushed.objects().iter().find(|o| o.id == a);
+    let carried = carried.map(|object| cover(&object.shape).pose().position);
+    assert_eq!(
+        carried,
+        Some(on_box.position + by),
+        "a push of the box under carries it"
+    );
+    let lifted = (stacked.after(&[Act::Picked {
+        id: b,
+        held: grasped(&stacked, b),
+    }]))
+    .expect("a pick");
+    assert!(
+        lifted.objects().iter().all(|o| o.id != a),
+        "a pick of the box under takes it along"
+    );
+    let unknown = seen.memory.next_id();
+    let refused = [
+        (Under::Known(1), "known shape 1".to_string()),
+        (Under::Object(unknown), format!("object {unknown}")),
+        (Under::Object(a), "itself".to_string()),
+    ];
+    for (under, named) in refused {
+        let Err(batchplan::Error::Input(why)) = let_go(on_box, Some(under.clone())) else {
+            panic!("a let-go on {under:?} is taken");
+        };
+        assert!(why.contains("act 1") && why.contains(&named), "{why}");
+    }
 }

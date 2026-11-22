@@ -96,9 +96,18 @@ pub enum Act {
     /// - its place not seen: it is among the memory's objects, and no label names it;
     /// - its place seen and empty: it is not among the memory's objects.
     ///
+    /// It stands `on` what the caller set it down on, as its place plan's support: a known shape
+    /// or another object ([`Under`]), so that a push or a pick of that carries it along, until the
+    /// next look measures it afresh; on nothing where `on` is none. A known shape past those the
+    /// memory knows, an id no object has and its own id are refused.
+    ///
     /// Where it is not solid the map holds it, and the room it takes up where it lies is never
     /// seen, as a push leaves it, until a look reads it there.
-    LetGo { id: u32, at: Pose },
+    LetGo {
+        id: u32,
+        at: Pose,
+        on: Option<Under>,
+    },
     /// The hand that holds object `id` lost it where nothing knows: it dropped, slipped, or was
     /// let go in the air. It is in no hand and among no objects, and the next look finds it under
     /// whatever id it gives.
@@ -338,12 +347,31 @@ impl Memory {
                     object,
                 });
             }
-            Act::LetGo { id, at } => {
+            Act::LetGo { id, at, on } => {
                 ensure_input!(
                     at.is_unit(),
                     "act {k} lets go of object {id} at {at:?}, which is no finite pose with a \
                      unit rotation"
                 );
+                let support = match *on {
+                    None => None,
+                    Some(Under::Known(shape)) => {
+                        ensure_input!(
+                            shape < self.known.len(),
+                            "act {k} lets go of object {id} on known shape {shape}, of the {} \
+                             the memory knows",
+                            self.known.len()
+                        );
+                        Some(Support::Known(shape))
+                    }
+                    Some(Under::Object(under)) => {
+                        ensure_input!(
+                            under != *id,
+                            "act {k} lets go of object {id} on object {under}, itself"
+                        );
+                        Some(Support::Object(self.index(k, under)?))
+                    }
+                };
                 let object = Self::object_of(k, self.release(k, *id)?)?;
                 let shape = object.shape.placed(*at);
                 // The map held a thing that is not solid where it lies now as what was there.
@@ -353,7 +381,7 @@ impl Memory {
                 }
                 self.scene.objects.push(Object {
                     shape,
-                    on: None,
+                    on: support,
                     ..object
                 });
             }
@@ -1092,4 +1120,14 @@ fn map_padding(voxel: f32) -> f32 {
 /// `RobotMask::with_shapes` take it.
 fn voxel_reach(voxel: f32) -> f32 {
     0.5 * 3f32.sqrt() * voxel
+}
+
+/// What a thing let go was set down on ([`Act::LetGo`]): a known shape, by its index among those
+/// [`Memory::try_new`] was given, or an object, by its id.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Under {
+    /// A known shape, by its index among the memory's.
+    Known(usize),
+    /// An object, by its id.
+    Object(u32),
 }
