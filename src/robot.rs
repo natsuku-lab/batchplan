@@ -1420,8 +1420,9 @@ impl Robot {
     /// commands must interpolate linearly between these locks. The gaps describe the pad
     /// calibration supplied by the caller.
     ///
-    /// Checks the driving joints and their limits (including mimics), both jaws, and the hand spheres. A positive result describes their modeled motion over this stroke. Physical contact
-    /// still depends on the observed object and the gripper. Returns `None` for unsupported motion,
+    /// Checks the driving joints and their limits (including mimics), both jaws, and the hand
+    /// spheres. A positive result describes their modeled motion over this stroke. Physical contact
+    /// depends on the observed object and the gripper. Returns `None` for unsupported motion,
     /// including a closed gap above the smallest contact width or preshape generated. If the
     /// computed loaded gap and capacity differ by one floating-point step, returns the capacity
     /// so generation, projection and commands share its exact representation.
