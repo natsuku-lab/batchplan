@@ -11,74 +11,12 @@
 #[allow(dead_code, reason = "each test file uses part of it")]
 mod common;
 
-use std::collections::HashMap;
-
-use batchplan::{CollisionModel, Device, Robot, RobotOptions, Surface, World};
-use common::{EYE, Frame, MIDDLE, NOISE, Thing, block, can, known, looking, table, thin_tray};
+use batchplan::{Surface, World};
+use common::{
+    EYE, Frame, MIDDLE, NOISE, arm, block, can, devices, known, looking, panda, table, thin_tray,
+};
 use glam::Vec3;
 use miru::{Label, Look, LookOptions, Scene};
-
-/// The Franka Panda as the library's examples load it (`examples/common/mod.rs`): its fingers
-/// held open, a tool frame below the hand, and the collision spheres converted from cuRobo.
-fn panda() -> Robot {
-    let asset = |path: &str| format!("{}/../assets/franka/{path}", env!("CARGO_MANIFEST_DIR"));
-    let fingers = [
-        ("panda_finger_joint1".to_string(), 0.04),
-        ("panda_finger_joint2".to_string(), 0.04),
-    ];
-    let spheres = CollisionModel::load(asset("panda_collision.json")).expect("the Panda's spheres");
-    let options = RobotOptions {
-        ee_links: vec!["ee_link".into()],
-        lock_joints: HashMap::from(fingers),
-        default_q: Some(vec![0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]),
-        collision_model: Some(spheres),
-        ..Default::default()
-    };
-    Robot::load(asset("franka_panda.urdf"), &options).expect("the Panda")
-}
-
-/// The devices a look runs on here: the CPU's of one thread and of all of them, and the GPU's
-/// where there is one.
-fn devices(robot: &Robot) -> Vec<(&'static str, Device)> {
-    let cpus = [
-        ("one thread", Device::cpu_threads(robot, 1)),
-        ("all threads", Device::cpu(robot)),
-    ];
-    let cpus = cpus.map(|(name, device)| (name, device.expect("a CPU device")));
-    #[cfg(feature = "gpu")]
-    let gpu = match Device::gpu(robot) {
-        Ok(gpu) => Some(("the GPU", gpu)),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => {
-            eprintln!("skipping GPU: {e}");
-            None
-        }
-        Err(e) => panic!("no GPU: {e}"),
-    };
-    #[cfg(not(feature = "gpu"))]
-    let gpu = {
-        eprintln!("skipping GPU: miru's `gpu` feature is off");
-        None
-    };
-    cpus.into_iter().chain(gpu).collect()
-}
-
-/// The arm at `q`, drawn as the collision spheres the robot is checked by.
-fn arm(robot: &Robot, q: &[f32]) -> Thing {
-    let spheres: Vec<(Vec3, f32)> = (robot.spheres(q).into_iter())
-        .map(|[x, y, z, radius]| (Vec3::new(x, y, z), radius))
-        .collect();
-    let distance = move |p: Vec3| {
-        let each = spheres
-            .iter()
-            .map(|(center, radius)| p.distance(*center) - radius);
-        each.fold(f32::INFINITY, f32::min)
-    };
-    Thing {
-        distance: Box::new(distance),
-        color: [90, 90, 90],
-        solid: None,
-    }
-}
 
 #[test]
 fn a_looks_output_goes_through_batchplans_calls_on_a_robots_device() {

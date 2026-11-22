@@ -449,15 +449,20 @@ const SIDED: f32 = 1e-3;
 
 /// One of a hand's collision spheres, in the hand's IK frame ([`Robot::hand_spheres`]).
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct HandSphere {
-    pub(crate) center: Vec3,
-    pub(crate) radius: f32,
-    /// Whether it is a finger's, not the palm's.
-    pub(crate) finger: bool,
-    /// Which way along the frame's y axis its finger stands from the frame, 1 or -1: the way it
-    /// moves as the fingers open. 0 for the palm's, and for a finger's that stands to neither
+#[non_exhaustive]
+pub struct HandSphere {
+    /// Its center in the hand's IK frame (meters).
+    pub center: Vec3,
+    /// Its radius (meters).
+    pub radius: f32,
+    /// Whether its link is one of [`Robot::finger_links`] for the hand: a finger's, or, where the
+    /// fingers are found rather than named (`RobotOptions::finger_links`), a held object's too.
+    pub finger: bool,
+    /// For a sphere whose link is one of [`Robot::finger_links`], which way along the frame's y
+    /// axis its link's spheres stand from the frame, 1 or -1: the way a finger moves as the
+    /// fingers open. 0 for any other sphere, and for one of such a link that stands to neither
     /// side.
-    pub(crate) side: f32,
+    pub side: f32,
 }
 
 /// World-frame kinematic state for one configuration, per link. Hot loops reuse one per thread
@@ -1384,8 +1389,11 @@ impl Robot {
     }
 
     /// Hand `hand`'s collision spheres at the default configuration, in its IK frame: its palm's
-    /// and its fingers', as the locked joints hold them.
-    pub(crate) fn hand_spheres(&self, hand: usize) -> Vec<HandSphere> {
+    /// and its fingers', as the locked joints hold them, and those of any object it holds
+    /// ([`Robot::hand_links`]). Placed by a pose of the frame, they are the hand there, whatever
+    /// the arm does: what [`grasps_on`](crate::grasps_on) holds a grasp's hand against.
+    #[must_use]
+    pub fn hand_spheres(&self, hand: usize) -> Vec<HandSphere> {
         let fk = self.fk(&self.default_q);
         let frame = self.ee_links[hand];
         let (rot, pos) = (fk.rot[frame], fk.pos[frame]);

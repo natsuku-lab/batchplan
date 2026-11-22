@@ -1,6 +1,6 @@
 //! What a look found: the objects, and what each pixel of each view shows.
 
-use batchplan::Obstacle;
+use batchplan::{Obstacle, Pose};
 use glam::{Quat, Vec2, Vec3};
 
 use crate::fit;
@@ -89,8 +89,8 @@ impl Shape {
     }
 
     /// A box or a cylinder as the obstacle it is, field for field, and a box open at the top as
-    /// its box.
-    fn obstacle(&self) -> Obstacle {
+    /// its box: the room the thing takes up, as an obstacle.
+    pub(crate) fn obstacle(&self) -> Obstacle {
         match *self {
             Shape::Cuboid {
                 center,
@@ -456,6 +456,56 @@ impl Shape {
             }
             // Its parts' faces are visited above.
             Shape::OpenBox { .. } => {}
+        }
+    }
+
+    /// The shape with its frame, its center and its rotation, at `pose`: the same box, cylinder
+    /// or box open at the top, its room where it was in its own frame.
+    pub(crate) fn placed(&self, pose: Pose) -> Shape {
+        let (center, rotation) = (pose.position, pose.rotation);
+        match *self {
+            Shape::Cuboid { half_extents, .. } => Shape::Cuboid {
+                center,
+                half_extents,
+                rotation,
+            },
+            Shape::Cylinder {
+                radius,
+                half_height,
+                ..
+            } => Shape::Cylinder {
+                center,
+                rotation,
+                radius,
+                half_height,
+            },
+            Shape::OpenBox {
+                half_extents,
+                room_lower,
+                room_upper,
+                ..
+            } => Shape::OpenBox {
+                center,
+                half_extents,
+                rotation,
+                room_lower,
+                room_upper,
+            },
+        }
+    }
+
+    /// Its frame: its center and its rotation.
+    pub(crate) fn pose(&self) -> Pose {
+        match *self {
+            Shape::Cuboid {
+                center, rotation, ..
+            }
+            | Shape::Cylinder {
+                center, rotation, ..
+            }
+            | Shape::OpenBox {
+                center, rotation, ..
+            } => Pose::new(center, rotation),
         }
     }
 }

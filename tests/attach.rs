@@ -824,3 +824,36 @@ fn a_held_shape_turned_by_a_rotation_not_quite_unit_is_not_stretched() {
         }
     }
 }
+
+/// What a hand holds is among its spheres (`Robot::hand_spheres`): a ball fixed to the hand adds
+/// its spheres to the hand's, each placed by the hand's pose where the robot holding it has it.
+#[test]
+fn a_hands_spheres_take_in_what_it_holds() {
+    let robot = common::panda().unwrap();
+    let ball = AttachedObject {
+        name: "ball".into(),
+        link: "panda_hand".into(),
+        shapes: vec![Obstacle::sphere(Vec3::new(0.0, 0.03, 0.12), 0.02)],
+        touch_links: FINGERS.iter().map(|s| s.to_string()).collect(),
+        spheres: SphereOptions::default(),
+    };
+    let holding = robot.attach(&ball).unwrap();
+    let q = holding.default_q();
+    // Attached objects are links after every one of the robot's, so their spheres come last.
+    let everywhere = holding.spheres(q);
+    let held = &everywhere[robot.spheres(q).len()..];
+    assert!(!held.is_empty(), "the ball has spheres");
+    let hand = holding.hand_spheres(0);
+    assert_eq!(hand.len(), robot.hand_spheres(0).len() + held.len());
+    let frame = holding.ee_pose(q, 0);
+    for &[x, y, z, radius] in held {
+        let at = |sphere: &batchplan::HandSphere| {
+            let center = frame.position + frame.rotation * sphere.center;
+            center.distance(Vec3::new(x, y, z)) < 1e-5 && (sphere.radius - radius).abs() < 1e-6
+        };
+        assert!(
+            hand.iter().any(at),
+            "the ball's sphere at {x}, {y}, {z} is no hand sphere"
+        );
+    }
+}

@@ -51,7 +51,10 @@
 //! cameras most boxes are larger than their things by more than the noise reaches, and not
 //! solid: in `a box`, a few of the readings the jitter puts between the box's far edge and the
 //! table behind it are kept by the filter and are the box's object, and its shape reaches out to
-//! them.
+//! them. A plate 5 mm thick on a box is one object with the box through every camera, the box's
+//! shape as tall as the two, so a plate set down on a box reads gone at the next look while it
+//! stands there (`tests/memory.rs`); and two boxes touching are one object through every camera,
+//! so of a box set down against another one reads gone.
 //!
 //! | Scene | Camera | Thing | Shows |
 //! |---|---|---|---|
@@ -98,6 +101,18 @@
 //! | a can on a box, again | D435 | can | 2 objects, a box, not solid |
 //! | a can on a box, again | D435+D405 | box | 172 x 174 x 63 mm (+32 +34 +3; 24), not solid |
 //! | a can on a box, again | D435+D405 | can | a box, not solid |
+//! | a plate on a box | exact | box | 140 x 140 x 65 mm (+0 +0 +5; 7), not solid |
+//! | a plate on a box | exact | plate | the box's object: 140 x 140 x 65 mm (+80 +80 +60; 7), 30 mm off (6), on the table, not solid |
+//! | a plate on a box | D435 | box | 159 x 219 x 71 mm (+19 +79 +11; 24), 35 mm off (20), not solid |
+//! | a plate on a box | D435 | plate | the box's object: 159 x 219 x 71 mm (+99 +159 +66; 23), 44 mm off (19), on the table, not solid |
+//! | a plate on a box | D435+D405 | box | 160 x 219 x 71 mm (+20 +79 +11; 24), 35 mm off (20), not solid |
+//! | a plate on a box | D435+D405 | plate | the box's object: 160 x 219 x 71 mm (+100 +159 +66; 23), 44 mm off (19), on the table, not solid |
+//! | two boxes touching | exact | box 1 | the two boxes' object: 80 x 240 x 60 mm (+0 +120 +0; 7), 60 mm off (6) |
+//! | two boxes touching | exact | box 2 | the two boxes' object: 80 x 240 x 60 mm (+0 +120 +0; 7), 60 mm off (6) |
+//! | two boxes touching | D435 | box 1 | the two boxes' object: 158 x 262 x 68 mm (+78 +142 +8; 24), 71 mm off (20), not solid |
+//! | two boxes touching | D435 | box 2 | the two boxes' object: 158 x 262 x 68 mm (+78 +142 +8; 24), 64 mm off (20), not solid |
+//! | two boxes touching | D435+D405 | box 1 | the two boxes' object: 158 x 289 x 68 mm (+78 +169 +8; 24), 83 mm off (20), not solid |
+//! | two boxes touching | D435+D405 | box 2 | the two boxes' object: 158 x 289 x 68 mm (+78 +169 +8; 24), 52 mm off (20), not solid |
 
 #[allow(dead_code, reason = "each test file uses part of it")]
 mod common;
@@ -106,23 +121,11 @@ use std::fmt::Write as _;
 
 use batchplan::DepthFilter;
 use common::{
-    D405, D435, EYE, Frame, MIDDLE, Stereo, Thing, a_box, block, can, device, known, looking,
+    CAMERAS, EYE, Frame, MIDDLE, NEAR, Stereo, Thing, a_box, block, can, device, known, looking,
     sizes, standing_bowl, table, thin_tray, tray_with_block, turned,
 };
 use glam::{Quat, Vec3};
 use miru::{Label, Look, LookOptions, Noise, Scene, Shape, Support};
-
-/// Where the near camera stands: 40 cm from the table's middle, 55 degrees over it, turned 30
-/// degrees from the far one, the tests' `EYE`.
-const NEAR: Vec3 = Vec3::new(0.70, -0.115, 0.33);
-
-/// The three ways each scene is read: a name, and the camera of the far view and of the near one
-/// (none: the default camera, exact depth).
-const CAMERAS: [(&str, Option<Stereo>, Option<Stereo>); 3] = [
-    ("exact", None, None),
-    ("D435", Some(D435), Some(D435)),
-    ("D435+D405", Some(D435), Some(D405)),
-];
 
 /// What a row says of a thing, each asserted unless it is a listed gap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,6 +195,18 @@ a can on a box, again | D435 | box | size solid
 a can on a box, again | D435 | can | objects kind solid
 a can on a box, again | D435+D405 | box | size solid
 a can on a box, again | D435+D405 | can | kind solid
+a plate on a box | exact | box | solid
+a plate on a box | exact | plate | size middle on solid
+a plate on a box | D435 | box | size middle solid
+a plate on a box | D435 | plate | size middle on solid
+a plate on a box | D435+D405 | box | size middle solid
+a plate on a box | D435+D405 | plate | size middle on solid
+two boxes touching | exact | box 1 | size middle
+two boxes touching | exact | box 2 | size middle
+two boxes touching | D435 | box 1 | size middle solid
+two boxes touching | D435 | box 2 | size middle solid
+two boxes touching | D435+D405 | box 1 | size middle solid
+two boxes touching | D435+D405 | box 2 | size middle solid
 ";
 
 /// The kind of a shape a look measures.
@@ -445,6 +460,35 @@ fn cases() -> Vec<Case> {
         truths,
         then: Some(can_on_a_box()),
     });
+    // A plate 6 cm square and 5 mm thick on a box 14 cm square and 6 cm tall: a thing set down on
+    // another (`Act::LetGo` in `tests/memory.rs`).
+    let (under, under_half) = (middle, Vec3::new(0.07, 0.07, 0.03));
+    let (plate, plate_half) = (Vec3::new(0.5, 0.0, 0.0625), Vec3::new(0.03, 0.03, 0.0025));
+    cases.push(Case::once(
+        "a plate on a box",
+        vec![
+            block(under, under_half, [200, 200, 30]),
+            block(plate, plate_half, [30, 200, 30]),
+        ],
+        vec![
+            a_box_truth("box", &[1], under, under_half),
+            a_box_truth("plate", &[2], plate, plate_half).on(0),
+        ],
+    ));
+    // Two boxes 8 by 12 cm and 6 cm tall side by side, touching: a thing set down or pushed
+    // against another (`tests/memory.rs`).
+    let (first, second) = (Vec3::new(0.5, -0.06, 0.03), Vec3::new(0.5, 0.06, 0.03));
+    cases.push(Case::once(
+        "two boxes touching",
+        vec![
+            block(first, half, [200, 30, 30]),
+            block(second, half, [30, 30, 200]),
+        ],
+        vec![
+            a_box_truth("box 1", &[1], first, half),
+            a_box_truth("box 2", &[2], second, half),
+        ],
+    ));
     cases
 }
 

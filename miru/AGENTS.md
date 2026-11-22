@@ -16,6 +16,7 @@ cargo run --release -p miru --example score -- <set> [--recorded | --masks truth
 cargo test --release -p miru --test truth -- --nocapture   # the truth table: scenes built from known things, read through three cameras (the simulator's exact depth, an Intel RealSense D435, a D405, the two through batchplan's filter), a row per scene, camera and thing with what `look` made of it against what it is; what holds is asserted, what does not is a gap listed in the file
 cargo test --release -p miru --features gpu --test batchplan   # the fit with batchplan: a look's output through the library's own calls, on the CPU and the GPU
 cargo run --release -p miru --example score -- <set> --again --digest [--masks truth] [--threads <n>]   # one hash over every scene the set's looks give, the second looks' too, and nothing else: a change meant to leave the results alone, as one for speed, prints the same digest before and after, on both sets, with and without masks, on 1, 2 and the default threads
+cargo run --release -p miru --example score -- <set> --observe [--threads <n>] [run ...]   # time miru::observe on each run's own robot (robot.urdf, collision.json, the cell's sphere tolerances and bands, each look's joints and fingers), the look inside it and a world after it, per look and at the median; scores nothing
 ```
 
 To SEE what a look made of a view, write the label pictures and open one beside the recording's
@@ -46,6 +47,11 @@ These are settled with the user. Keep to them unless the user decides otherwise.
 - **Any embodiment.** Nothing names or assumes a robot, a hand, a camera or a table. The robot
   is a mask per pixel, known shapes are obstacles, noise is each camera's own polynomial in
   depth, stereo or time of flight alike: all inputs. A look reads nothing of its device's robot.
+  `observe`, the look through batchplan, reads the device's robot and nothing else of it: its
+  joints and collision spheres to mask it (and the hands' links and spheres for `Step::reach`),
+  how far it reaches for the look's corners and the map, and its largest sphere for how far a
+  part of the map reaches; every number it uses is a fact the caller states, one batchplan's
+  defaults give, or one derived from those by a rule its doc names.
 - **One call, state in the result.** `look(&device, &Look, &previous, &options) -> Scene`. No
   handle of miru's, no run-time configuration, no plugins. What the next look needs is in the
   `Scene`.

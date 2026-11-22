@@ -189,6 +189,55 @@ value_class! {
 
 tuple_field!(batchplan::Part, (String, batchplan::CollisionModel));
 
+/// One of a hand's collision spheres, in the hand's IK frame (`Robot.hand_spheres`).
+#[pyclass(module = "batchplan", frozen)]
+pub(crate) struct HandSphere(batchplan::HandSphere);
+
+#[pymethods]
+impl HandSphere {
+    /// Its center in the hand's IK frame, `(x, y, z)` in meters.
+    #[getter]
+    fn center<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.0.center.to_py(py)
+    }
+
+    /// Its radius (meters).
+    #[getter]
+    fn radius(&self) -> f64 {
+        field::shortest(self.0.radius)
+    }
+
+    /// Whether its link is one of `Robot.finger_links` for the hand: a finger's, or, where the
+    /// fingers are found rather than named (`RobotOptions.finger_links`), a held object's too.
+    #[getter]
+    fn finger(&self) -> bool {
+        self.0.finger
+    }
+
+    /// For a sphere whose link is one of `Robot.finger_links`, which way along the frame's y
+    /// axis its link's spheres stand from the frame, 1 or -1: the way a finger moves as the
+    /// fingers open. 0 for any other sphere, and for one of such a link that stands to neither
+    /// side.
+    #[getter]
+    fn side(&self) -> f64 {
+        field::shortest(self.0.side)
+    }
+
+    fn __repr__(&self) -> String {
+        let batchplan::HandSphere {
+            center,
+            radius,
+            finger,
+            side,
+            ..
+        } = self.0;
+        format!(
+            "HandSphere(center={:?}, radius={radius}, finger={finger}, side={side})",
+            center.to_array()
+        )
+    }
+}
+
 value_class! {
     /// How `Robot.load` and `Robot.assemble` build a robot from its description.
     RobotOptions(batchplan::RobotOptions) {
@@ -439,6 +488,18 @@ impl Robot {
     fn tip(&self, hand: usize) -> PyResult<f64> {
         self.check_hand(hand)?;
         Ok(field::shortest(self.0.tip(hand)))
+    }
+
+    /// Hand `hand`'s collision spheres at the default configuration, in its IK frame: its palm's
+    /// and its fingers', as the locked joints hold them, and those of any object it holds.
+    /// Placed by a pose of the frame, they are the hand there, whatever the arm does.
+    fn hand_spheres<'py>(&self, py: Python<'py>, hand: usize) -> PyResult<Bound<'py, PyAny>> {
+        self.check_hand(hand)?;
+        let spheres = self.0.hand_spheres(hand).into_iter();
+        let spheres: Vec<Bound<'py, HandSphere>> = spheres
+            .map(|sphere| Bound::new(py, HandSphere(sphere)))
+            .collect::<PyResult<_>>()?;
+        Ok(pyo3::types::PyTuple::new(py, spheres)?.into_any())
     }
 
     /// Every collision sphere at configuration `q`, in the robot's frame, `(n, 4)` as

@@ -3,6 +3,7 @@
 //! or as a camera whose depth is off by a stated noise reads it ([`Frame::noisy`]), or as a
 //! stereo camera reads it by its datasheet ([`Frame::sensed`], [`D435`], [`D405`]).
 
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use batchplan::{
@@ -32,6 +33,18 @@ pub const EYE: Vec3 = Vec3::new(1.1, 0.0, 0.5);
 /// The middle of the table, where the tests' bowls stand.
 pub const MIDDLE: Vec3 = Vec3::new(0.5, 0.0, 0.0);
 
+/// Where the near camera stands: 40 cm from the table's middle, 55 degrees over it, turned 30
+/// degrees from the far one, the tests' `EYE`.
+pub const NEAR: Vec3 = Vec3::new(0.70, -0.115, 0.33);
+
+/// The three ways a scene is read: a name, and the camera of the far view and of the near one
+/// (none: the default camera, exact depth).
+pub const CAMERAS: [(&str, Option<Stereo>, Option<Stereo>); 3] = [
+    ("exact", None, None),
+    ("D435", Some(D435), Some(D435)),
+    ("D435+D405", Some(D435), Some(D405)),
+];
+
 /// A device of `threads` threads, or of as many as the machine has, for looks to run on. A look
 /// reads nothing of a device's robot, so this one's is a single joint, given an empty collision
 /// model: fitting one would start rayon's global pool, which no look may run on.
@@ -55,6 +68,68 @@ pub fn device_of(threads: Option<usize>) -> Device {
 pub fn device() -> &'static Device {
     static DEVICE: LazyLock<Device> = LazyLock::new(|| device_of(None));
     &DEVICE
+}
+
+/// The Franka Panda as the library's examples load it (`examples/common/mod.rs`): its fingers
+/// held open, a tool frame below the hand, and the collision spheres converted from cuRobo.
+pub fn panda() -> Robot {
+    let asset = |path: &str| format!("{}/../assets/franka/{path}", env!("CARGO_MANIFEST_DIR"));
+    let fingers = [
+        ("panda_finger_joint1".to_string(), 0.04),
+        ("panda_finger_joint2".to_string(), 0.04),
+    ];
+    let spheres = CollisionModel::load(asset("panda_collision.json")).expect("the Panda's spheres");
+    let options = RobotOptions {
+        ee_links: vec!["ee_link".into()],
+        lock_joints: HashMap::from(fingers),
+        default_q: Some(vec![0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]),
+        collision_model: Some(spheres),
+        ..Default::default()
+    };
+    Robot::load(asset("franka_panda.urdf"), &options).expect("the Panda")
+}
+
+/// The devices a look runs on here: the CPU's of one thread and of all of them, and the GPU's
+/// where there is one.
+pub fn devices(robot: &Robot) -> Vec<(&'static str, Device)> {
+    let cpus = [
+        ("one thread", Device::cpu_threads(robot, 1)),
+        ("all threads", Device::cpu(robot)),
+    ];
+    let cpus = cpus.map(|(name, device)| (name, device.expect("a CPU device")));
+    #[cfg(feature = "gpu")]
+    let gpu = match Device::gpu(robot) {
+        Ok(gpu) => Some(("the GPU", gpu)),
+        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => {
+            eprintln!("skipping GPU: {e}");
+            None
+        }
+        Err(e) => panic!("no GPU: {e}"),
+    };
+    #[cfg(not(feature = "gpu"))]
+    let gpu = {
+        eprintln!("skipping GPU: miru's `gpu` feature is off");
+        None
+    };
+    cpus.into_iter().chain(gpu).collect()
+}
+
+/// The arm at `q`, drawn as the collision spheres the robot is checked by.
+pub fn arm(robot: &Robot, q: &[f32]) -> Thing {
+    let spheres: Vec<(Vec3, f32)> = (robot.spheres(q).into_iter())
+        .map(|[x, y, z, radius]| (Vec3::new(x, y, z), radius))
+        .collect();
+    let distance = move |p: Vec3| {
+        let each = spheres
+            .iter()
+            .map(|(center, radius)| p.distance(*center) - radius);
+        each.fold(f32::INFINITY, f32::min)
+    };
+    Thing {
+        distance: Box::new(distance),
+        color: [90, 90, 90],
+        solid: None,
+    }
 }
 
 /// One thing of a scene: the signed distance to its surface, its colour, and the obstacle it is
