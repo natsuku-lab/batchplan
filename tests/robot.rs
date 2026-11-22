@@ -2596,4 +2596,17 @@ fn an_outer_reach_bound_keeps_fk_poses_and_accounts_for_ik_tolerance() {
             .hand_reach(0)
             .is_none()
     );
+
+    let skewed = r#"<mujoco><worldbody><body name="a" xyaxes="1 1 0 1 1.0000002 0">
+      <joint name="aa" type="hinge" axis="0 0 1"/><body name="b">
+      <joint name="bb" type="hinge" axis="0 0 1"/><body name="tcp" pos="1 0 0"/>
+      </body></body></worldbody></mujoco>"#;
+    let path = dir.join("skewed.xml");
+    std::fs::write(&path, skewed).unwrap();
+    assert!(
+        Robot::load(&path, &options)
+            .unwrap()
+            .hand_reach(0)
+            .is_none()
+    );
 }

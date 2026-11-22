@@ -1,6 +1,6 @@
 //! An outer bound on a serial chain's reachable hand poses, including the tool orientation.
 
-use glam::DVec3;
+use glam::{DMat3, DVec3};
 
 use crate::robot::{JointKind, Link, Transform};
 use crate::{IkOptions, Pose};
@@ -25,6 +25,15 @@ impl HandReach {
         let mut scale = 0.0;
         let mut count = 0;
         for link in links {
+            let rotation = link.origin.rot.as_dmat3();
+            if !link.origin.trans.is_finite()
+                || !rotation.is_finite()
+                || rotation.determinant() <= 0.0
+                || !(rotation.transpose() * rotation)
+                    .abs_diff_eq(DMat3::IDENTITY, 8.0 * f64::from(f32::EPSILON))
+            {
+                return None;
+            }
             frame = frame.mul(&link.origin);
             count += 1;
             scale += link.origin.trans.as_dvec3().length();
@@ -70,6 +79,12 @@ impl HandReach {
         let back = frame.rot.as_dmat3().transpose();
         let center = back * (-frame.trans.as_dvec3() - axis * offset.dot(axis));
         let radius = offset.cross(axis).length();
+        // Bound compounded transform error even on long chains. When the product-error
+        // estimate itself ceases to be finite, leave the ordinary solver in charge.
+        let error = 64.0 * f64::from(f32::EPSILON) * f64::from(count);
+        if error >= 1.0 {
+            return None;
+        }
         Some(Self {
             shoulder,
             arm,
@@ -78,7 +93,7 @@ impl HandReach {
             radius,
             // The loaded transforms and the solver's FK use f32. Grow by the accumulated
             // relative error of their matrix products at the scale of this particular chain.
-            roundoff: 64.0 * f64::from(f32::EPSILON) * f64::from(count) * (1.0 + scale),
+            roundoff: (error / (1.0 - error)) * (1.0 + scale),
         })
     }
 
