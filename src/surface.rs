@@ -45,7 +45,7 @@ use crate::error::{Result, ensure_input, input};
 use crate::robot::HandSphere;
 use crate::sdf::{DepthImage, RobotMask};
 use crate::task::GraspOptions;
-use crate::types::Pose;
+use crate::types::{Pose, Screw};
 
 /// Points on the surfaces seen and the normals out of them, in one frame: what [`grasps_on`]
 /// finds grasps on.
@@ -346,7 +346,8 @@ const RINGS: usize = 8;
 /// They come in an order whose first few are worth trying first: every pair from above (where
 /// its line is not upright), then every pair a turn to either side, and so on round; and within
 /// a turn, the pairs that face each other within half a friction cone of square before the rest,
-/// spread over the object, each the farthest from those before it. With a
+/// spread over the object, each the farthest from those before it, or with a point to grip near
+/// ([`GraspOptions::near`]) the nearest it first. With a
 /// [`shell`](GraspOptions::shell), grasps of walls seen from one side follow all of these, in the
 /// same order among themselves: they rest on the cameras having seen past the wall, not on its
 /// other side, so the grasps without the option come first and unchanged. The surfaces run in
@@ -386,6 +387,12 @@ pub fn grasps_on(
         ensure_input!(
             shell > 0.0 && shell.is_finite(),
             "a shell must be a finite positive thickness, got {shell} m"
+        );
+    }
+    if let Some(near) = o.near {
+        ensure_input!(
+            near.is_finite(),
+            "the point to grip near must be finite, got {near}"
         );
     }
     for (i, s) in surfaces.iter().enumerate() {
@@ -749,12 +756,19 @@ fn narrowed(
 /// `pairs`, those that face each other most squarely first, in an order that spreads them:
 /// first those within half a friction cone of square, then the rest, each lot starting with its
 /// squarest pair and going on with the pair farthest from every one before it. Past
-/// [`SPREAD`] pairs of a lot, the rest follow as they came.
-fn spread(pairs: Vec<Pair>, cone: f32) -> Vec<Pair> {
+/// [`SPREAD`] pairs of a lot, the rest follow as they came. With a point `near`, each lot's
+/// pairs come nearest it first instead.
+fn spread(pairs: Vec<Pair>, cone: f32, near: Option<Vec3>) -> Vec<Pair> {
     let well = ((1.0 + cone) / 2.0).sqrt();
     let (square, askew): (Vec<Pair>, Vec<Pair>) = pairs.into_iter().partition(|p| p.square >= well);
     let mut out = Vec::with_capacity(square.len() + askew.len());
     for mut lot in [square, askew] {
+        if let Some(point) = near {
+            let from = |p: &Pair| p.middle.distance_squared(point);
+            lot.sort_by(|a, b| from(a).total_cmp(&from(b)).then(a.order.cmp(&b.order)));
+            out.extend(lot);
+            continue;
+        }
         // How far each pair left is from the nearest one taken, squared.
         let mut from: Vec<f32> = vec![f32::INFINITY; lot.len()];
         let mut next = 0;
@@ -950,7 +964,7 @@ fn pairs(s: &Surface, o: &GraspOptions) -> (Vec<Pair>, Vec<Pair>) {
         for (order, pair) in pairs.iter_mut().enumerate() {
             pair.order = order;
         }
-        spread(pairs, cone)
+        spread(pairs, cone, o.near)
     };
     (in_order(pairs), in_order(one_sided))
 }
@@ -1476,6 +1490,52 @@ fn spacing(rays: &[Vec2], low: Vec2, span: Vec2) -> Option<f32> {
     }
     let middle = apart.len() / 2;
     Some(*apart.select_nth_unstable_by(middle, f32::total_cmp).1)
+}
+
+impl Grasp {
+    /// The moment about `screw`'s line that the grasp's two fingertips can give what they hold,
+    /// for each newton each presses with (meters): what turning it about the line asks of the
+    /// grip, to order grips for a [`turn`](crate::turn()) by, the most first. It reads the
+    /// options' `friction` and `contact`; the screw's direction must be unit, as
+    /// [`Screw::path`] checks, or the moment is no number.
+    ///
+    /// A force `F` at a contact `c` gives `F · (ŝ × (c − q))` about the line through `q` along
+    /// `ŝ`, and each fingertip presses along the closing line `n`. Friction lets it push across
+    /// `n` by up to `friction` times its press, which gives `friction · |ŝ × (c − q)|` less its
+    /// part along `n`; the press may sit anywhere on its patch, `contact` in radius, which gives
+    /// `contact · |n × ŝ|`; and a soft fingertip twists about `n` by up to `2/3 · friction ·
+    /// contact` times its press (Murray, Li and Sastry's soft-finger contact, *A Mathematical
+    /// Introduction to Robotic Manipulation*, 1994, §5.2.1, with the press even over the patch),
+    /// which gives that times `|n · ŝ|`. The two presses cancel while they are equal, but a
+    /// parallel gripper's fingers close evenly about its frame, so the hand can put all the
+    /// closing force on either finger and push the thing along `n`: up to
+    /// `2 |n · (ŝ × (m − q))|` more, `m` the middle between the contacts, and friction's part
+    /// changes by what the loaded finger's lever gains over the unloaded one's, more where the
+    /// loaded one is the farther. The moment is the most these give together, the way round the
+    /// line that gives less. The patch's term puts the press at its edge and the twist's spreads
+    /// it evenly: they are separate bounds, exact together where the line is square to `n`, where
+    /// the twist gives nothing. A bar 2.5 cm wide gripped across it on its axis gives 2.25 cm at
+    /// the default options, half of it friction; 3 cm along the bar from its axis, 8.25 cm.
+    #[must_use]
+    pub fn moment(&self, screw: &Screw, o: &GraspOptions) -> f32 {
+        let along = screw.direction.normalize();
+        let [first, second] = self.contacts;
+        let closing = (second - first)
+            .try_normalize()
+            .unwrap_or_else(|| self.pose.rotation * Vec3::Y);
+        // How far a push across the closing line at `c` acts from the screw's line.
+        let lever = |c: Vec3| {
+            let arm = along.cross(c - screw.point);
+            (arm - closing * arm.dot(closing)).length()
+        };
+        let (near, far) = (lever(first), lever(second));
+        let twist = 2.0 / 3.0 * o.friction * o.contact;
+        let patches = o.contact * closing.cross(along).length() + twist * closing.dot(along).abs();
+        let held = o.friction * (near + far) + 2.0 * patches;
+        let middle = (first + second) / 2.0;
+        let pushed = 2.0 * closing.dot(along.cross(middle - screw.point)).abs();
+        held + (pushed - o.friction * (near - far).abs()).abs()
+    }
 }
 
 #[cfg(test)]

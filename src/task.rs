@@ -1,11 +1,13 @@
-//! Whole tasks in one call: a hand picking up an object ([`pick`]) or setting down the one it holds
-//! ([`place`]). Each is three motions from rest to rest: a planned path from the start to where the
-//! hand begins to move in, a straight move in (to the grasp, or down to where the object goes), and
-//! a straight move away (lifting the object, or backing off from it). The gripper closes or opens
-//! between the second and the third. Every motion is checked with the fingers where the robot was
-//! loaded with them, so open them first, unless the task says otherwise: a pick's grasps may keep
-//! them narrower ([`Pick::locked`]), a hold says where they closed ([`Held::locked`]), and a place
-//! may name how far they open where it lets go ([`Place::open`]).
+//! Whole tasks in one call: a hand picking up an object ([`pick`]), setting down the one it holds
+//! ([`place`]) or turning one about a line ([`turn`]). Each is three motions from rest to rest: a
+//! planned path from the start to where the hand begins to move in, a straight move in (to the
+//! grasp, or down to where the object goes), and a straight move away (lifting the object, or
+//! backing off from it). The gripper closes or opens between the second and the third; a turn's
+//! hand closes, turns the object, and opens between them. Every motion is checked with the fingers
+//! where the robot was loaded with them, so open them first, unless the task says otherwise: a
+//! pick's or a turn's grasps may keep them narrower ([`Pick::locked`], [`Turn::locked`]), a hold
+//! says where they closed ([`Held::locked`]), and a place may name how far they open where it
+//! lets go ([`Place::open`]).
 //!
 //! A task's candidates, its grasps or the poses it may set the object at, run with every other
 //! task's, step by step, each step a batch for those whose fingers and held object are alike: IK
@@ -35,9 +37,9 @@ use crate::held::{self, Fitted, Held};
 use crate::ik::{self, IkFailure, IkOptions, IkProblem, IkResult};
 use crate::robot::Robot;
 use crate::timing::{HandSpeed, Near, Trajectory};
-use crate::tool_path::{self, ToolPath, ToolPathOptions, ToolPathStop};
+use crate::tool_path::{self, ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop};
 use crate::trajopt::{self, PlanOptions, PlanProblem};
-use crate::types::Pose;
+use crate::types::{Pose, Screw};
 use crate::world::{Obstacle, Touch, World};
 
 /// A hand picking up one obstacle of its world.
@@ -201,8 +203,8 @@ impl Place {
     }
 }
 
-/// How [`pick`], [`place`] and [`handover`](crate::handover()) solve, follow, plan and time
-/// their steps.
+/// How [`pick`], [`place`], [`handover`](crate::handover()) and [`turn`] solve, follow, plan
+/// and time their steps.
 #[derive(Clone, Debug)]
 pub struct TaskOptions {
     /// IK at each grasp or release.
@@ -210,14 +212,17 @@ pub struct TaskOptions {
     /// The planned paths from the start. `start_tolerance` applies to the task's initial
     /// configuration too, even when its transit is disabled; the result retains a corrected start.
     pub plan: PlanOptions,
-    /// The straight moves.
+    /// The straight moves, and a turn's, which follows it at half its precision: the other half
+    /// is for how far the straight moves between the screw's waypoints sag from the arc.
     pub tool_path: ToolPathOptions,
-    /// The hand's speed cap on the straight moves (m/s): 10 cm/s. `f32::INFINITY` leaves it
-    /// uncapped, the moves as fast as the joints' limits allow.
+    /// The hand's speed cap on the straight moves and on a turn (m/s): 10 cm/s. `f32::INFINITY`
+    /// leaves it uncapped, the moves as fast as the joints' limits allow.
     pub tool_speed: f32,
-    /// Where the cap holds (m): within this distance of the hand's position at the grasp or
-    /// release, which the move in ends at and the move away starts from, the rest of each move
-    /// as fast as the joints' limits allow ([`HandSpeed::near`]). `None`: along all of both.
+    /// Where the cap holds on the straight moves (m): within this distance of the hand's position
+    /// at the grasp or release, which the move in ends at and the move away starts from, the rest
+    /// of each move as fast as the joints' limits allow ([`HandSpeed::near`]). `None`: along all
+    /// of both. A turn, which the hand holds the object through, is capped all along whatever
+    /// this says.
     pub tool_speed_near: Option<f32>,
     /// How much of each straight move a candidate must make, in (0, 1]: 1, all of it. Less lets
     /// an obstacle shorten the move in or away rather than stop the candidate; a move stopped
@@ -238,7 +243,7 @@ impl Default for TaskOptions {
     }
 }
 
-/// A task's steps, in order.
+/// A task's steps, in the order they are checked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum TaskStep {
@@ -246,6 +251,10 @@ pub enum TaskStep {
     Start,
     /// IK at the grasp, or where the hand lets go.
     Reach,
+    /// The turn of a [`turn`], the hand following the grasp about the screw from a configuration
+    /// at the grasp: checked before the straight moves, which then run from the configurations
+    /// that make it. A pick, a place or a handover skips it.
+    Turn,
     /// The straight move in, to there.
     Approach,
     /// The straight move away: lifting the object, or backing off from it.
@@ -255,9 +264,10 @@ pub enum TaskStep {
     Transit,
 }
 
-const STEPS: [TaskStep; 5] = [
+const STEPS: [TaskStep; 6] = [
     TaskStep::Start,
     TaskStep::Reach,
+    TaskStep::Turn,
     TaskStep::Approach,
     TaskStep::Depart,
     TaskStep::Transit,
@@ -272,14 +282,19 @@ pub struct TaskPlan {
     /// The planned path from the start to where the move in begins; none for a task that leaves
     /// its transit out.
     pub transit: Option<Trajectory>,
-    /// The straight move in. The gripper closes (pick) or opens (place) at its end; in a
+    /// The straight move in. The gripper closes (pick, turn) or opens (place) at its end; in a
     /// handover the taker's closes, then the giver's opens.
     pub approach: Trajectory,
+    /// After a [`turn`], the hand turning the object, the fingers closed on it, from where the
+    /// move in ends to where the move away starts. Open the gripper after it. None for the rest.
+    pub turn: Option<Trajectory>,
     /// The straight move away: holding the object after a pick; the giver's after a handover.
     pub depart: Trajectory,
     /// After a pick, what the hand holds; after a handover, what the taker holds.
     pub held: Option<Held>,
-    /// After a place, the object where it was set down, to add to the world.
+    /// After a place, the object where it was set down, to add to the world; after a turn, the
+    /// object where the turn leaves it, to put in the world in its place, or where it stood where
+    /// it stays ([`Turn::stays`]).
     pub placed: Option<Obstacle>,
     /// After a place that says how far its hand may open ([`Place::open`]), which of those the
     /// hand lets go at and moves away with, by index.
@@ -289,9 +304,11 @@ pub struct TaskPlan {
 }
 
 impl TaskPlan {
-    /// Its motions in the order they run: the transit if it has one, the move in, the move away.
+    /// Its motions in the order they run: the transit if it has one, the move in, the turn if it
+    /// has one, the move away.
     pub fn motions(&self) -> impl Iterator<Item = &Trajectory> {
-        self.transit.iter().chain([&self.approach, &self.depart])
+        let transit = self.transit.iter().chain([&self.approach]);
+        transit.chain(self.turn.iter()).chain([&self.depart])
     }
 
     /// Seconds its motions take, one after another.
@@ -331,6 +348,10 @@ pub struct CandidateStop {
     /// world; in a place, `world.obstacles.len()` is the object where it is set down, and in a
     /// handover, the object where it changes hands.
     pub contacts: Vec<Contact>,
+    /// At [`TaskStep::Turn`]: how far the hand turned before it stopped (radians, signed as the
+    /// task's angle), from the configuration at the grasp that turned it farthest, whose stop
+    /// `why` and `contacts` are. None at every other step.
+    pub turned: Option<f32>,
 }
 
 /// Why none of a task's candidates got through: each one's step and reason, in the task's order.
@@ -376,6 +397,7 @@ impl fmt::Display for TaskFailure {
             let doing = match step {
                 TaskStep::Start => "starting in collision",
                 TaskStep::Reach => "at the grasp or release",
+                TaskStep::Turn => "turning",
                 TaskStep::Approach => "moving in",
                 TaskStep::Depart => "moving away",
                 TaskStep::Transit => "with no path from the start",
@@ -410,7 +432,7 @@ impl fmt::Display for TaskFailure {
     }
 }
 
-/// What [`pick`], [`place`] or [`handover`](crate::handover()) did with each task.
+/// What [`pick`], [`place`], [`handover`](crate::handover()) or [`turn`] did with each task.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct TaskResult<T> {
@@ -442,13 +464,26 @@ pub fn pick(
     )?;
     let tasks = corrected.as_ref();
     check_picks(robot, worlds, tasks, o)?;
-    let whole = |t: &Pick| t.enough.is_none() && t.locked.iter().all(HashMap::is_empty);
+    by_grasps(device, worlds, tasks, o, picked)
+}
+
+/// Each task's plans by its grasps, as [`Pick::enough`] and [`Pick::locked`] say how a pick's are
+/// tried, `each` ([`picked`] or [`turned`]) running checked tasks with some of their grasps that
+/// keep the robot's locked joints as its device's robot has them.
+fn by_grasps<T: Gripping>(
+    device: &Device,
+    worlds: &Worlds,
+    tasks: &[T],
+    o: &TaskOptions,
+    each: impl Fn(&Device, &Worlds, &[T], &TaskOptions) -> Result<TaskResult<T>> + Sync,
+) -> Result<TaskResult<T>> {
+    let whole = |t: &T| t.plans_wanted().is_none() && t.locks().iter().all(HashMap::is_empty);
     if tasks.iter().all(whole) {
-        return picked(device, worlds, tasks, o);
+        return each(device, worlds, tasks, o);
     }
     let as_loaded = HashMap::new();
-    let counts: Vec<usize> = tasks.iter().map(|t| t.grasps.len()).collect();
-    let enough: Vec<Option<usize>> = tasks.iter().map(|t| t.enough).collect();
+    let counts: Vec<usize> = tasks.iter().map(|t| t.gripped_by().len()).collect();
+    let enough: Vec<Option<usize>> = tasks.iter().map(Gripping::plans_wanted).collect();
     let outcomes = in_waves(&counts, &enough, |next| {
         // A relocked robot for each set of locked joints' values, and for it each task with
         // the grasps that keep them, a batch of their own, the groups in parallel; a device
@@ -456,7 +491,7 @@ pub fn pick(
         let mut groups: Vec<Group<'_>> = vec![];
         for (i, t) in tasks.iter().enumerate() {
             for grasp in next[i].clone() {
-                let locked = t.locked.get(grasp).unwrap_or(&as_loaded);
+                let locked = t.locks().get(grasp).unwrap_or(&as_loaded);
                 let k = groups.iter().position(|g| g.locked == locked);
                 let k = k.unwrap_or_else(|| {
                     groups.push(Group {
@@ -471,21 +506,17 @@ pub fn pick(
                 }
             }
         }
-        let results: Vec<TaskResult<Pick>> = device.in_turns(&mut groups, |_, group| {
-            let mine: Vec<Pick> = group
+        let results: Vec<TaskResult<T>> = device.in_turns(&mut groups, |_, group| {
+            let mine: Vec<T> = group
                 .tasks
                 .iter()
-                .map(|(i, grasps)| Pick {
-                    grasps: grasps.iter().map(|&g| tasks[*i].grasps[g]).collect(),
-                    locked: vec![group.locked.clone(); grasps.len()],
-                    ..tasks[*i].clone()
-                })
+                .map(|(i, grasps)| tasks[*i].by(grasps, group.locked))
                 .collect();
             if group.locked.is_empty() {
-                picked(device, worlds, &mine, o)
+                each(device, worlds, &mine, o)
             } else {
                 let relocked = device.with_robot(&device.robot().relock(group.locked)?)?;
-                picked(&relocked, worlds, &mine, o)
+                each(&relocked, worlds, &mine, o)
             }
         })?;
         let mut wave: Vec<Wave> = tasks.iter().map(|_| Wave::default()).collect();
@@ -603,7 +634,7 @@ struct Opening<'a, 'c> {
     candidates: Vec<&'c mut Candidate>,
 }
 
-/// The grasps of a call's picks that keep the robot's locked joints at one set of values.
+/// The grasps of a call's picks or turns that keep the robot's locked joints at one set of values.
 struct Group<'a> {
     locked: &'a HashMap<String, f32>,
     /// Each task with one, and its grasps that do, in order.
@@ -617,18 +648,7 @@ fn check_picks(robot: &Robot, worlds: &Worlds, tasks: &[Pick], o: &TaskOptions) 
     let mut checked: Vec<&HashMap<String, f32>> = vec![];
     for (i, t) in tasks.iter().enumerate() {
         let world = check_task(robot, worlds, i, &Steps::of_pick(t), &t.start, t.hand)?;
-        let object = world.obstacles.get(t.object).ok_or_else(|| {
-            input!(
-                "task {i}: obstacle {} of {}",
-                t.object,
-                world.obstacles.len()
-            )
-        })?;
-        ensure_input!(
-            !matches!(object, Obstacle::Sdf { .. }),
-            "task {i}: obstacle {} is a distance grid, which cannot be picked up",
-            t.object
-        );
+        check_object(world, i, t.object, "picked up")?;
         check_poses(i, "grasp", &t.grasps)?;
         ensure_input!(
             t.approach.is_finite()
@@ -640,21 +660,47 @@ fn check_picks(robot: &Robot, worlds: &Worlds, tasks: &[Pick], o: &TaskOptions) 
             t.lift
         );
         check_support(i, world, &t.support, Some(t.object))?;
-        ensure_input!(
-            t.enough != Some(0),
-            "task {i}: at least one plan must be enough, got 0"
-        );
-        ensure_input!(
-            t.locked.is_empty() || t.locked.len() == t.grasps.len(),
-            "task {i}: locked joints' values for {} grasps of {}",
-            t.locked.len(),
-            t.grasps.len()
-        );
-        for (grasp, locked) in t.locked.iter().enumerate() {
-            if !checked.contains(&locked) {
-                held::check_locked(robot, locked, &format!("task {i}, grasp {grasp}"))?;
-                checked.push(locked);
-            }
+        check_tries(robot, i, t, &mut checked)?;
+    }
+    Ok(())
+}
+
+/// That task `i`'s `object` is one of `world`'s obstacles and can be gripped to be `done` so: not
+/// a distance grid.
+fn check_object(world: &World, i: usize, object: usize, done: &str) -> Result<()> {
+    let obstacle = world
+        .obstacles
+        .get(object)
+        .ok_or_else(|| input!("task {i}: obstacle {object} of {}", world.obstacles.len()))?;
+    ensure_input!(
+        !matches!(obstacle, Obstacle::Sdf { .. }),
+        "task {i}: obstacle {object} is a distance grid, which cannot be {done}"
+    );
+    Ok(())
+}
+
+/// That task `i` wants at least one plan and keeps locked joints the robot has at values it may
+/// take, per grasp: each set of values checked once among those in `checked`.
+fn check_tries<'a>(
+    robot: &Robot,
+    i: usize,
+    t: &'a impl Gripping,
+    checked: &mut Vec<&'a HashMap<String, f32>>,
+) -> Result<()> {
+    ensure_input!(
+        t.plans_wanted() != Some(0),
+        "task {i}: at least one plan must be enough, got 0"
+    );
+    ensure_input!(
+        t.locks().is_empty() || t.locks().len() == t.gripped_by().len(),
+        "task {i}: locked joints' values for {} grasps of {}",
+        t.locks().len(),
+        t.gripped_by().len()
+    );
+    for (grasp, locked) in t.locks().iter().enumerate() {
+        if !checked.contains(&locked) {
+            held::check_locked(robot, locked, &format!("task {i}, grasp {grasp}"))?;
+            checked.push(locked);
         }
     }
     Ok(())
@@ -1072,7 +1118,7 @@ fn placed(
             match found {
                 Some(k) => {
                     c.grasped = solutions[i][k * n..(k + 1) * n].to_vec();
-                    c.passed += 1;
+                    c.past_reach();
                 }
                 None if solutions[i].is_empty() => {}
                 None => {
@@ -1254,8 +1300,9 @@ pub fn place_poses(object: &Obstacle, pose: Pose, turns: usize) -> Vec<Pose> {
 /// examples' Panda `ee_link`): by [`grasps`], for a box, ball, cylinder or capsule, and by
 /// [`grasps_on`](crate::grasps_on), for what cameras see of any shape. Both read `opening`,
 /// `turns`, `floor` and `overlap`; `depth`, `tip` and `along` are for `grasps` alone, whose
-/// hand is the options' own, and `friction`, `contact` and `approach` for `grasps_on` alone,
-/// whose hand is the robot's.
+/// hand is the options' own, and `friction`, `contact`, `approach` and `near` for `grasps_on`
+/// alone, whose hand is the robot's. [`Grasp::moment`](crate::Grasp::moment) reads `friction`
+/// and `contact`.
 #[derive(Clone, Copy, Debug)]
 pub struct GraspOptions {
     /// The widest the fingers open (meters): 8 cm.
@@ -1336,6 +1383,14 @@ pub struct GraspOptions {
     /// narrower. Lock the fingers there
     /// for the pick ([`Pick::locked`]); a call's grasps share at most sixteen openings.
     pub narrow: bool,
+    /// A point to grip a surface near, in its frame, for grasps of a surface: `None`, the pairs
+    /// of patches spread over the object. With a point, within each of the tiers
+    /// [`grasps_on`](crate::grasps_on) orders its grasps by (from above before a turn to either
+    /// side, pairs that face each other within half a friction cone of square before the rest,
+    /// walls seen from one side after all of these), the pairs whose middles lie nearest the
+    /// point come first, the squarest first of two as near: where a caller was told to grip, as
+    /// on a knob's axis or at a handle's middle. It orders the grasps and finds no others.
+    pub near: Option<Vec3>,
 }
 
 impl Default for GraspOptions {
@@ -1353,6 +1408,7 @@ impl Default for GraspOptions {
             approach: 0.1,
             shell: None,
             narrow: false,
+            near: None,
         }
     }
 }
@@ -1626,6 +1682,36 @@ impl Candidate {
         }
     }
 
+    /// Passes the reach, and the turn that a pick, a place or a handover does not make.
+    fn past_reach(&mut self) {
+        self.passed += 2;
+    }
+
+    /// A try of this candidate of a turn from configuration `q` at its grasp, which IK found: past
+    /// its reach, at its turn.
+    fn tried_from(&self, q: &[f32]) -> Self {
+        Self {
+            task: self.task,
+            index: self.index,
+            world: self.world,
+            transit_world: self.transit_world,
+            transits: self.transits,
+            hand: self.hand,
+            start: self.start.clone(),
+            rest: self.rest.clone(),
+            poses: self.poses,
+            passed: self.passed + 1,
+            stop: None,
+            contacts: vec![],
+            grasped: q.to_vec(),
+            opening: None,
+            approach: vec![],
+            depart: vec![],
+            transit: vec![],
+            giver: None,
+        }
+    }
+
     /// The hand that moves away: its own, or a handover's giver.
     fn away_hand(&self) -> usize {
         self.giver.as_ref().map_or(self.hand, |g| g.hand)
@@ -1719,7 +1805,7 @@ pub(crate) fn reach(
     for (i, c) in live.iter_mut().enumerate() {
         if let Some(q) = solved.nearest(i, &c.rest) {
             c.grasped = q.to_vec();
-            c.passed += 1;
+            c.past_reach();
         }
     }
     classify(device, worlds, live, &solved, o)
@@ -2013,6 +2099,7 @@ pub(crate) fn choose(
                 false => None,
             },
             approach: Trajectory::with_hand_speed(robot, &c.approach, &[speed(c.hand, in_end)])?,
+            turn: None,
             depart: Trajectory::with_hand_speed(
                 robot,
                 &c.depart,
@@ -2042,6 +2129,7 @@ pub(crate) fn choose(
                             step: STEPS[c.passed],
                             why: c.stop,
                             contacts: c.contacts.clone(),
+                            turned: None,
                         })
                         .collect(),
                 });
@@ -2148,6 +2236,16 @@ impl<'a> Steps<'a> {
             constraints: &t.constraints,
         }
     }
+
+    fn of_turn(t: &'a Turn) -> Self {
+        Self {
+            world: t.world,
+            transit_world: t.transit_world.unwrap_or(t.world),
+            depart_world: t.world,
+            transit: t.transit,
+            constraints: &t.constraints,
+        }
+    }
 }
 
 /// Task `i`'s world, after checking its steps' worlds, its start and its hand.
@@ -2217,4 +2315,522 @@ fn check_support(i: usize, world: &World, support: &[usize], object: Option<usiz
         ));
     }
     Ok(())
+}
+
+/// A hand turning one obstacle of its world about a line, as a knob, a cap, a lever or a valve's
+/// wheel turns.
+#[derive(Clone, Debug)]
+pub struct Turn {
+    /// The world's index in the batch: the one the hand grips, turns and lets go in, and the
+    /// transit's unless `transit_world` names another.
+    pub world: u32,
+    /// The world the start is checked and the transit planned in, where it is another: as many
+    /// obstacles as `world` has, in its order, shaped or touched ([`World::touch`]) otherwise.
+    pub transit_world: Option<u32>,
+    /// Where the robot starts, at rest.
+    pub start: Vec<f32>,
+    /// Whether the path from the start to where the move in begins is planned: true. Without it
+    /// the plans hold the moves in and away and the turn alone ([`TaskPlan::begin`] is where a way
+    /// to them ends), and the start, which is not checked for collision, only says which
+    /// configuration at a grasp is nearest and where the joints other hands move wait.
+    pub transit: bool,
+    /// The hand that turns it.
+    pub hand: usize,
+    /// The object: an obstacle of the world, by index. A distance grid cannot be turned.
+    pub object: usize,
+    /// Poses of the hand's IK frame that grip the object, in the object's frame (its center and
+    /// rotation), as [`Pick::grasps`]; any one will do.
+    pub grasps: Vec<Pose>,
+    /// How far back along its own z axis the hand begins to move in to a grasp, and moves away to
+    /// once it lets go (meters).
+    pub approach: f32,
+    /// The line the object turns about and how far it moves along it as it turns, in the world's
+    /// frame: a knob's or a wheel's axis, a lever's hinge, a cap's axis and its thread's pitch.
+    /// None is the hand's own z axis through its IK frame at the grasp, without a pitch: a turn in
+    /// place, as a knob gripped on its axis turns.
+    pub screw: Option<Screw>,
+    /// How far it turns (radians), right-handed about the screw's direction, or about the hand's
+    /// z axis where there is no screw: not 0.
+    pub angle: f32,
+    /// Obstacles the object may touch as it turns, by index: what it turns in or on, as a
+    /// lever's mount, a cap's bottle or the panel a knob sits in, as [`Pick::support`] is what a
+    /// picked object may touch as it leaves. Not read where the object `stays`.
+    pub support: Vec<usize>,
+    /// Whether the obstacle stays where it is while the hand turns: false, the whole obstacle
+    /// turns, held by the hand through the turn and checked where it sweeps against everything
+    /// else of the world but `support`. True where the world holds the part that turns and what
+    /// it turns in as one obstacle, as a knob a camera could not tell from its panel: then the
+    /// obstacle stays where it is, the fingers alone may touch it, and nothing checks the part's
+    /// sweep.
+    pub stays: bool,
+    /// Where the hands must stay along the transit ([`HandConstraint`]), as a pick's. The start
+    /// must keep them; a grasp whose move in begins where they break stops at the transit.
+    pub constraints: Vec<HandConstraint>,
+    /// Per grasp, joints the robot was loaded with locked, at the values they keep through the
+    /// task by that grasp, as [`Pick::locked`]: the fingers opened only as far as the grasp has
+    /// room for ([`Grasp::opening`](crate::Grasp::opening)). A call's grasps are grouped by these,
+    /// a relocked robot for each group. Empty: every grasp as loaded.
+    pub locked: Vec<HashMap<String, f32>>,
+    /// How many plans will do, as [`Pick::enough`]: `None`, every grasp is tried; with a count,
+    /// the grasps are tried in their order, 32 and then twice as many each time, until that many
+    /// have got through.
+    pub enough: Option<usize>,
+}
+
+impl Turn {
+    /// Hand 0 turns `object` of world `world` by `angle` radians about its own z axis, from `start`
+    /// by any of `grasps`, moving in to the grasp and away from it 10 cm along that axis, the
+    /// object turning and touching nothing as it turns.
+    #[must_use]
+    pub fn new(
+        world: u32,
+        start: impl Into<Vec<f32>>,
+        object: usize,
+        grasps: Vec<Pose>,
+        angle: f32,
+    ) -> Self {
+        Self {
+            world,
+            transit_world: None,
+            start: start.into(),
+            transit: true,
+            hand: 0,
+            object,
+            grasps,
+            approach: 0.1,
+            screw: None,
+            angle,
+            support: vec![],
+            stays: false,
+            constraints: vec![],
+            locked: vec![],
+            enough: None,
+        }
+    }
+
+    /// The line a hand turns about from a grasp at `at` in the world: the task's screw, or the
+    /// hand's z axis through its frame there, made unit as a grasp's rotation may not quite be.
+    fn screw_at(&self, at: Pose) -> Screw {
+        self.screw
+            .unwrap_or_else(|| Screw::about(at.position, (at.rotation * Vec3::Z).normalize()))
+    }
+}
+
+/// Turns each task's object by its angle about its screw, trying each of its grasps. IK solves at
+/// the grasp, where the fingers ([`Robot::finger_links`], or the hand's links if it has none) may
+/// touch the object, as at a pick's, and the turn is followed from every configuration it finds
+/// there, nearest the start first. The hand's IK frame is carried about the screw
+/// ([`Screw::path`]) and kept within the tool path's precision of its true arc: half of it for
+/// how far the straight moves between the screw's waypoints sag from the arc, half for how far
+/// the hand strays from them. A grasp gets through where some configuration at it makes the
+/// whole turn within the joints' ranges and clear of the world, then the moves in and away: the
+/// nearest such is its plan's. So a grasp is not lost where the configuration nearest the start
+/// runs into a joint limit halfway and another at the same grasp makes the turn; where none
+/// does, its stop says how far the one that turned farthest got ([`CandidateStop::turned`]).
+/// [`TaskOptions::min_fraction`] holds for the moves in and away; the turn is made whole or not
+/// at all.
+///
+/// The hand holds the object through the turn, as a pick's lift holds what it picked up: the
+/// object is part of the robot there, and its world is the task's without it, so what the
+/// object sweeps is checked against everything else of the world but its `support`, and against
+/// the arm. A task whose obstacle `stays` turns with the obstacle where it is instead, the
+/// fingers alone free to touch it, and nothing checks the part's sweep. Through the reach and
+/// the move in the fingers may touch the object, and nothing else of the robot may; the move
+/// away goes back along the hand's z axis from where the turn ends, the fingers free to touch
+/// the object where the turn leaves it ([`TaskPlan::placed`]). The turn is timed with the hand
+/// under [`TaskOptions::tool_speed`] all along. Run the transit and the approach, close the
+/// gripper, run the turn, open the gripper, then run the departure, and put `placed` in the world
+/// in the object's place.
+pub fn turn(
+    device: &Device,
+    worlds: &Worlds,
+    tasks: &[Turn],
+    o: &TaskOptions,
+) -> Result<TaskResult<Turn>> {
+    let robot = device.robot();
+    let corrected = robot.correct_starts(
+        tasks,
+        o.plan.start_tolerance,
+        "task",
+        |t| &t.start,
+        |t| &mut t.start,
+    )?;
+    let tasks = corrected.as_ref();
+    check_turns(robot, worlds, tasks, o)?;
+    by_grasps(device, worlds, tasks, o, turned)
+}
+
+/// That `tasks` and `o` can be turned by `robot` in `worlds`, each task named by its index: every
+/// grasp's turn too, as [`Screw::path`] gives its waypoints.
+fn check_turns(robot: &Robot, worlds: &Worlds, tasks: &[Turn], o: &TaskOptions) -> Result<()> {
+    check_options(o)?;
+    let along = turning_options(o);
+    // The locked joints' values found good, each once however many grasps keep them.
+    let mut checked: Vec<&HashMap<String, f32>> = vec![];
+    for (i, t) in tasks.iter().enumerate() {
+        let world = check_task(robot, worlds, i, &Steps::of_turn(t), &t.start, t.hand)?;
+        check_object(world, i, t.object, "turned")?;
+        check_poses(i, "grasp", &t.grasps)?;
+        ensure_input!(
+            t.approach.is_finite() && t.approach > 0.0,
+            "task {i} needs a positive approach, got {} m",
+            t.approach
+        );
+        if let Some(screw) = &t.screw {
+            screw.check().map_err(|e| input!("task {i}: {e}"))?;
+        }
+        ensure_input!(
+            t.angle.is_finite() && t.angle != 0.0,
+            "task {i} turns by a finite angle other than 0, got {} rad",
+            t.angle
+        );
+        check_support(i, world, &t.support, Some(t.object))?;
+        check_tries(robot, i, t, &mut checked)?;
+        let object = world.obstacles[t.object].pose();
+        for (g, &grasp) in t.grasps.iter().enumerate() {
+            let at = object.mul_pose(grasp);
+            let counted = t.screw_at(at).count(at, t.angle, along.precision);
+            counted.map_err(|e| input!("task {i}, grasp {g}: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// How a turn is followed: at half the tool path's precision, the other half being for how far
+/// the straight moves between the screw's waypoints sag from the arc. The two add, and neither is
+/// held tighter than the other.
+fn turning_options(o: &TaskOptions) -> ToolPathOptions {
+    ToolPathOptions {
+        precision: o.tool_path.precision / 2.0,
+        ..o.tool_path.clone()
+    }
+}
+
+/// [`turn`] for checked tasks that keep the robot's locked joints as `device`'s robot has them.
+fn turned(
+    device: &Device,
+    worlds: &Worlds,
+    tasks: &[Turn],
+    o: &TaskOptions,
+) -> Result<TaskResult<Turn>> {
+    let robot = device.robot();
+    let n = robot.dof();
+    let along = turning_options(o);
+    // Per grasp of each task, in order: a candidate, the waypoints its turn follows and the
+    // object as the turn leaves it.
+    let mut candidates = vec![];
+    let mut ways: Vec<Vec<Pose>> = vec![];
+    let mut placed: Vec<Obstacle> = vec![];
+    let mut first = vec![];
+    for (t, task) in tasks.iter().enumerate() {
+        first.push(candidates.len());
+        let object = &worlds[task.world as usize].obstacles[task.object];
+        for (index, &grasp) in task.grasps.iter().enumerate() {
+            let at = object.pose().mul_pose(grasp);
+            let screw = task.screw_at(at);
+            let end = screw.carry(at, task.angle);
+            let poses = [behind(at, task.approach), at, behind(end, task.approach)];
+            let steps = Steps::of_turn(task);
+            let c = Candidate::new(t, index, &steps, task.hand, &task.start, poses);
+            candidates.push(c);
+            ways.push(screw.path(at, task.angle, along.precision)?);
+            placed.push(match task.stays {
+                true => object.clone(),
+                false => object.placed(screw.carry(object.pose(), task.angle)),
+            });
+        }
+    }
+    let id = |c: &Candidate| first[c.task] + c.index;
+
+    // Starts clear of everything, the object included.
+    let worlds_of: Vec<u32> = tasks
+        .iter()
+        .map(|t| Steps::of_turn(t).transit_world)
+        .collect();
+    start(
+        device,
+        worlds,
+        &mut live(&mut candidates, TaskStep::Start),
+        &worlds_of,
+    )?;
+
+    // Each configuration IK finds at a grasp, the fingers touching the object, is a try of its
+    // own, nearest the start first.
+    let mut tries: Vec<Candidate> = vec![];
+    let mut reaching = live(&mut candidates, TaskStep::Reach);
+    let touching: Vec<World> = tasks
+        .iter()
+        .map(|t| {
+            let mut w = worlds[t.world as usize].clone();
+            w.touch.push(Touch::new(t.object, fingers(robot, t.hand)));
+            w
+        })
+        .collect();
+    let touching = device.upload(&touching)?;
+    if !reaching.is_empty() {
+        let solved = solve(device, &touching, &reaching, &by_task, &o.ik)?;
+        for (k, c) in reaching.iter().enumerate() {
+            let found = nearest_first(&solved, k, &c.rest);
+            tries.extend(found.chunks(n).map(|q| c.tried_from(q)));
+        }
+        classify(device, &touching, &mut reaching, &solved, &o.ik)?;
+    }
+
+    // Every try's turn: where it is whole, its motion (`made`); where not, how far it got.
+    let path_of = |c: &Candidate| ToolPath {
+        world: c.task as u32,
+        start: c.grasped.clone(),
+        hand: c.hand,
+        waypoints: ways[id(c)].clone(),
+        hold: vec![],
+        holding: None,
+    };
+    let mut made: Vec<Vec<f32>> = vec![vec![]; tries.len()];
+    let mut turned: Vec<Option<f32>> = vec![None; tries.len()];
+    let mut take = |i: usize, c: &mut Candidate, r: &mut ToolPathResult, k: usize| {
+        if r.fraction[k] == 1.0 && !r.paths[k].is_empty() {
+            made[i] = std::mem::take(&mut r.paths[k]);
+            c.passed += 1;
+        } else {
+            c.stop = r.stopped[k];
+            c.contacts = std::mem::take(&mut r.contacts[k]);
+            turned[i] = Some(r.fraction[k] * tasks[c.task].angle);
+        }
+    };
+    // Where the obstacle stays, the fingers turn in it, every such try one batch.
+    let (staying, holding): (Vec<usize>, Vec<usize>) =
+        (0..tries.len()).partition(|&i| tasks[tries[i].task].stays);
+    if !staying.is_empty() {
+        let paths: Vec<ToolPath> = staying.iter().map(|&i| path_of(&tries[i])).collect();
+        let mut followed = tool_path::follow(device, &touching, &paths, &along)?;
+        for (k, &i) in staying.iter().enumerate() {
+            take(i, &mut tries[i], &mut followed, k);
+        }
+    }
+    // Where it turns, the hand holds it as the grasp does, in its task's world without it,
+    // touching the task's support: the tries of each grasp a batch on a device holding it, built
+    // and run as a pick's lifts are, the object's spheres fitted once.
+    let mut grips: Vec<(Held, Vec<usize>)> = vec![];
+    for i in holding {
+        let c = &tries[i];
+        match grips.last_mut() {
+            Some((_, group)) if id(&tries[group[0]]) == id(c) => group.push(i),
+            _ => {
+                let t = &tasks[c.task];
+                let held = Held {
+                    locked: t.locked.get(c.index).cloned().unwrap_or_default(),
+                    hand: t.hand,
+                    object: worlds[t.world as usize].obstacles[t.object].placed(Pose::IDENTITY),
+                    grasp: t.grasps[c.index],
+                    spheres: Default::default(),
+                };
+                grips.push((held, vec![i]));
+            }
+        }
+    }
+    if !grips.is_empty() {
+        let helds: Vec<&Held> = grips.iter().map(|(held, _)| held).collect();
+        let fitted = Fitted::new(device, robot, &helds)?;
+        // One upload per hand: what one hand holds is the link its worlds name.
+        let without = |hand: usize| {
+            tasks
+                .iter()
+                .map(|t| {
+                    let mut w = worlds[t.world as usize].clone();
+                    w.remove(t.object)?;
+                    if t.hand == hand {
+                        let shifted = |s: usize| if s > t.object { s - 1 } else { s };
+                        let touches = t.support.iter().map(|&s| Touch::held(shifted(s), hand));
+                        w.touch.extend(touches);
+                    }
+                    Ok(w)
+                })
+                .collect::<Result<Vec<World>>>()
+        };
+        let mut uploads: Vec<(usize, Worlds)> = vec![];
+        for (held, _) in &grips {
+            if uploads.iter().all(|(hand, _)| *hand != held.hand) {
+                uploads.push((held.hand, device.upload(&without(held.hand)?)?));
+            }
+        }
+        let each = device.in_turns(&mut grips, |k, (held, group)| {
+            let (_, uploaded) = uploads
+                .iter()
+                .find(|(hand, _)| *hand == held.hand)
+                .expect("every hand that turns an object has its worlds");
+            // Built where it is used, so that building one overlaps the other grasps' turns.
+            let holder = fitted.holder(device, robot, k, held)?;
+            let paths: Vec<ToolPath> = group.iter().map(|&i| path_of(&tries[i])).collect();
+            tool_path::follow(&holder, uploaded, &paths, &along)
+        })?;
+        for ((_, group), mut followed) in grips.iter().zip(each) {
+            for (k, &i) in group.iter().enumerate() {
+                take(i, &mut tries[i], &mut followed, k);
+                // Contacts name obstacles as the task's world does, which still holds the object.
+                let object = tasks[tries[i].task].object;
+                for contact in &mut tries[i].contacts {
+                    if let Contact::World { obstacle, .. } = contact
+                        && *obstacle >= object
+                    {
+                        *obstacle += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // In to the grasp from each configuration that makes the turn, then away from where it ends,
+    // in a world per grasp with the object where the turn leaves it.
+    let mut moving = live(&mut tries, TaskStep::Approach);
+    straight(device, &touching, &mut moving, &by_task, Leg::In, o)?;
+    let departing = STEPS.iter().position(|&s| s == TaskStep::Depart);
+    let departing = departing.expect("every step is listed");
+    for (c, made) in tries.iter_mut().zip(&made) {
+        if c.passed == departing {
+            c.grasped = made[made.len() - n..].to_vec();
+        }
+    }
+    let mut leaving = live(&mut tries, TaskStep::Depart);
+    if !leaving.is_empty() {
+        let mut grasps: Vec<usize> = leaving.iter().map(|c| id(c)).collect();
+        grasps.dedup();
+        let left: Vec<World> = grasps
+            .iter()
+            .map(|&g| {
+                let c = &candidates[g];
+                let t = &tasks[c.task];
+                let mut w = worlds[t.world as usize].clone();
+                w.obstacles[t.object] = placed[g].clone();
+                w.touch.push(Touch::new(t.object, fingers(robot, t.hand)));
+                w
+            })
+            .collect();
+        let left = device.upload(&left)?;
+        let in_its = |_: usize, c: &Candidate| {
+            let g = grasps.binary_search(&id(c));
+            g.expect("every grasp moving away has its world") as u32
+        };
+        straight(device, &left, &mut leaving, &in_its, Leg::Away, o)?;
+    }
+
+    // Each grasp's try: the first, nearest the start, that is through the move away; or where
+    // none is, the one that got farthest, nearest first, and at the turn the one that turned
+    // farthest.
+    let mut chosen: Vec<Option<usize>> = vec![None; candidates.len()];
+    let far = |i: usize| turned[i].unwrap_or(0.0).abs();
+    let mut tries = tries.into_iter().enumerate().peekable();
+    while let Some((mut b, mut best)) = tries.next() {
+        let g = id(&best);
+        while let Some((i, next)) = tries.next_if(|(_, c)| id(c) == g) {
+            if next.passed > best.passed || next.passed == best.passed && far(i) > far(b) {
+                (b, best) = (i, next);
+            }
+        }
+        candidates[g] = best;
+        chosen[g] = Some(b);
+    }
+
+    // From the start, around the object as it stands.
+    let constraints: Vec<&[HandConstraint]> = tasks.iter().map(|t| &t.constraints[..]).collect();
+    transit(
+        device,
+        worlds,
+        &mut live(&mut candidates, TaskStep::Transit),
+        &constraints,
+        &o.plan,
+    )?;
+
+    let mut outcomes = choose(device, tasks.len(), &candidates, o, |c| {
+        (None, Some(placed[id(c)].clone()))
+    })?;
+    // Each plan's turn, timed with the hand under the tool speed all along it, which the hand
+    // holds the object through, the plans then quickest first again; and how far each stop at the
+    // turn got.
+    let mut plans: Vec<(usize, &mut TaskPlan)> = vec![];
+    for (t, outcome) in outcomes.iter_mut().enumerate() {
+        match outcome {
+            Ok(found) => plans.extend(found.iter_mut().map(|plan| (t, plan))),
+            Err(failure) => {
+                for (k, stop) in failure.candidates.iter_mut().enumerate() {
+                    let tried = chosen[first[t] + k];
+                    if stop.step == TaskStep::Turn {
+                        stop.turned = tried.and_then(|i| turned[i]);
+                    }
+                }
+            }
+        }
+    }
+    let timed = |(t, plan): &mut (usize, &mut TaskPlan)| -> Result<()> {
+        let tried = chosen[first[*t] + plan.candidate].expect("a plan's grasp has its try");
+        let cap = HandSpeed {
+            hand: tasks[*t].hand,
+            linear: o.tool_speed,
+            angular: f32::INFINITY,
+            near: None,
+        };
+        plan.turn = Some(Trajectory::with_hand_speed(robot, &made[tried], &[cap])?);
+        Ok(())
+    };
+    device.install(|| plans.par_iter_mut().try_for_each(timed))?;
+    for found in outcomes.iter_mut().filter_map(|o| o.as_mut().ok()) {
+        found.sort_by(|a, b| a.duration().total_cmp(&b.duration()));
+    }
+    Ok(TaskResult {
+        problems: tasks.to_vec(),
+        outcomes,
+    })
+}
+
+/// A task that grips its object by any of its grasps, each keeping the robot's locked joints at
+/// values of its own, tried as [`Pick::enough`] says: a pick or a turn.
+trait Gripping: Clone + Send + Sync {
+    fn gripped_by(&self) -> &[Pose];
+    fn locks(&self) -> &[HashMap<String, f32>];
+    fn plans_wanted(&self) -> Option<usize>;
+    /// The task by its grasps `grasps` alone, each keeping the locked joints at `locked`.
+    fn by(&self, grasps: &[usize], locked: &HashMap<String, f32>) -> Self;
+}
+
+impl Gripping for Pick {
+    fn gripped_by(&self) -> &[Pose] {
+        &self.grasps
+    }
+
+    fn locks(&self) -> &[HashMap<String, f32>] {
+        &self.locked
+    }
+
+    fn plans_wanted(&self) -> Option<usize> {
+        self.enough
+    }
+
+    fn by(&self, grasps: &[usize], locked: &HashMap<String, f32>) -> Self {
+        Pick {
+            grasps: grasps.iter().map(|&g| self.grasps[g]).collect(),
+            locked: vec![locked.clone(); grasps.len()],
+            ..self.clone()
+        }
+    }
+}
+
+impl Gripping for Turn {
+    fn gripped_by(&self) -> &[Pose] {
+        &self.grasps
+    }
+
+    fn locks(&self) -> &[HashMap<String, f32>] {
+        &self.locked
+    }
+
+    fn plans_wanted(&self) -> Option<usize> {
+        self.enough
+    }
+
+    fn by(&self, grasps: &[usize], locked: &HashMap<String, f32>) -> Self {
+        Turn {
+            grasps: grasps.iter().map(|&g| self.grasps[g]).collect(),
+            locked: vec![locked.clone(); grasps.len()],
+            ..self.clone()
+        }
+    }
 }

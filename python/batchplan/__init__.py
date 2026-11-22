@@ -43,6 +43,7 @@ from batchplan._native import (
     Robot,
     RobotOptions,
     RrtOptions,
+    Screw,
     ShortcutOptions,
     Solved,
     SphereGeometry,
@@ -60,6 +61,7 @@ from batchplan._native import (
     ToolPathStop,
     Touch,
     Trajectory,
+    Turn,
     UnsafeError,
     World,
     Worlds,
@@ -76,6 +78,7 @@ from batchplan._native import (
     place_poses,
     plan,
     solve_ik,
+    turn,
 )
 from batchplan._native import (
     # Kept out of `__all__`: `from batchplan import *` would replace Python's `time` module.
@@ -119,6 +122,7 @@ __all__ = [
     "Robot",
     "RobotOptions",
     "RrtOptions",
+    "Screw",
     "ShortcutOptions",
     "Solved",
     "SphereGeometry",
@@ -136,6 +140,7 @@ __all__ = [
     "ToolPathStop",
     "Touch",
     "Trajectory",
+    "Turn",
     "UnsafeError",
     "World",
     "Worlds",
@@ -152,4 +157,5 @@ __all__ = [
     "place_poses",
     "plan",
     "solve_ik",
+    "turn",
 ]

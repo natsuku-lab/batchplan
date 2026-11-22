@@ -47,6 +47,7 @@ impl Field {
     /// `s` read once, its support between `lower` and `upper` seen from above, in cells
     /// `cell` wide, with what else of it lies within `margin` of the support; with `ABOVE`, a
     /// support point that faces down and was seen from above holds.
+    #[inline(always)]
     pub(super) fn new<const ABOVE: bool>(
         s: &Surface,
         lower: Vec2,
@@ -120,7 +121,7 @@ impl Field {
 
     /// The columns and the rows whose cells may hold a point within `reach` of `at`, seen from
     /// above.
-    #[inline]
+    #[inline(never)]
     pub(super) fn window(&self, at: Vec2, reach: Vec2) -> [std::ops::Range<usize>; 2] {
         let clamp = |v: i32, most: usize| v.clamp(0, most as i32) as usize;
         [
@@ -133,6 +134,7 @@ impl Field {
 
     /// How high the middle of `object` comes to rest set straight down over `at`: the least height
     /// at which none of the support is in it. Negative infinity where no support is under it.
+    #[inline(never)]
     pub(super) fn set_down(&self, object: &Turned, at: Vec2) -> f32 {
         self.down_onto(&self.tops, object, at, f32::NEG_INFINITY)
     }
@@ -140,6 +142,10 @@ impl Field {
     /// How high the middle of `object` lands let go straight down over `at`: on the support or on
     /// anything else that is there, as another object already in a basket. Negative infinity
     /// where nothing is under it.
+    // Out of line on x86 and inlined elsewhere: built in sixteen units on the Ryzen, inlined it
+    // made a fall into a basket 9% slower.
+    #[cfg_attr(target_arch = "x86_64", inline(never))]
+    #[cfg_attr(not(target_arch = "x86_64"), inline(always))]
     pub(super) fn lands(&self, object: &Turned, at: Vec2) -> f32 {
         let on_support = self.set_down(object, at);
         self.down_onto(&self.blocks, object, at, on_support)
@@ -170,6 +176,7 @@ impl Field {
     /// Whether `grown`, an object grown by the clearance it keeps, with its middle at `center`, is
     /// over everything that blocks: nothing that is not the support reaches into it or over it.
     /// With `WHY`, the first point that does is left in `by`.
+    #[inline(always)]
     pub(super) fn clear<const WHY: bool>(
         &self,
         grown: &Turned,

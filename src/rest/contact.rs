@@ -459,6 +459,7 @@ impl Touch {
 /// the plane of the patch's points by more than `touching`, as a ball set on a cup's rim does,
 /// the support is no plane under it, and each point of the patch pushes where it is, along the
 /// normal there.
+#[inline(never)]
 fn round(
     near: &[Near],
     members: &[(u32, u32)],
@@ -516,6 +517,7 @@ fn round(
 /// side of `object` above them lies, its radius where it lies on the plane and less where it
 /// reaches through it, and how far off the plane the farthest of the points is. None where
 /// the points tell no plane.
+#[inline(never)]
 fn above(
     near: &[Near],
     members: &[(u32, u32)],
@@ -540,6 +542,7 @@ fn above(
 /// The unit normal, upward, of the plane through the support points `of`, by least squares over
 /// their heights; none where they are fewer than three or spread no wider than one row of cells
 /// can, which tells no plane.
+#[inline(never)]
 fn fit(of: &[Vec3], cell: f32) -> Option<Vec3> {
     if of.len() < 3 {
         return None;

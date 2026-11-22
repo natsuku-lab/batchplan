@@ -211,6 +211,27 @@ These are end-to-end `follow` measurements, including path construction and chec
 
 The failed pick has every grasp blocked or out of reach. Grasp IK dominates picking; the GPU gains from batching tasks. Place candidates are checked with their held objects, grouped by hold.
 
+## Turning things about a line
+
+`examples/turns.rs` turns things with the Panda (`turn`): a knob, a bar 9 × 2.5 cm standing 3 cm proud of a dial 9 cm across on a box, its grips found on what two 640×480 depth images see (`grasps_on`, `narrow`, the floor at the dial's top) and ordered by their moment about its axis (`Grasp::moment`), turned a quarter turn about the axis; a cap 4 cm across unscrewed half a turn up a thread of 5 mm a turn; a lever 15 cm long swung 60 degrees about its hinge; a wheel 20 cm across turned 45 degrees by its rim, these three by the grips `grasps` proposes; and 64 such knobs at random places and turns, each in a world of its own, in one call. Times are 00b7c85's, the quickest of five calls, the least of three runs: on the M4 Pro with its 14 threads, the CPU device and its GPU (Metal), other work loading the machine to 11–15; and on the Ryzen AI Max+ 395 with its 32 threads, the CPU device and its Radeon 8060S (RADV), at a load of 3 to 23, most of it the runs' own threads. "First plan" is the call with `enough: Some(1)`, which tries the grips in their order 32 at a time; the cap's, the lever's and the wheel's times are every grip's and the first plan's.
+
+| | Grips | Through | Where the rest stop |
+|---|---|---|---|
+| A knob, a quarter turn | 972 | 779 | 113 at the reach, 25 turning, 55 moving in (Ryzen: 23 turning, 57 moving in) |
+| A cap, half a turn up its thread | 24 | 10 | 8 turning, 3 moving in, 3 moving away |
+| A lever, 60 degrees about its hinge | 16 | 6 | 8 at the reach, 2 moving away |
+| A wheel by its rim, 45 degrees | 16 | 3 | 4 at the reach, 2 turning, 2 moving in, 5 moving away |
+| 64 knobs in 64 worlds | 60,374 | every knob | |
+
+| Device | Knob, every grip | Knob, first plan | Cap | Lever | Wheel | 64 knobs, first plans |
+|---|---|---|---|---|---|---|
+| M4 Pro, 14 threads | 457 ms | 18.5 ms | 14.0 / 14.0 ms | 6.4 / 6.3 ms | 6.6 / 6.5 ms | 978 ms |
+| M4 Pro's GPU | 515 ms | 18.9 ms | 13.8 / 13.9 ms | 7.6 / 7.6 ms | 7.9 / 7.7 ms | 976 ms |
+| Ryzen AI Max+ 395, 32 threads | 390 ms | 16.0 ms | 12.2 / 12.4 ms | 7.0 / 6.4 ms | 6.6 / 6.1 ms | 830 ms |
+| Radeon 8060S | 367 ms | 17.7 ms | 13.1 / 13.9 ms | 7.7 / 7.4 ms | 7.9 / 7.4 ms | 772 ms |
+
+The counts are the same on both devices of each machine and on every run, but at the knob the two machines differ: of its 972 grips, 799 make its turn from the configuration IK finds nearest the start, which a pick would take, and 834 from some configuration IK finds at the grip, all of which get past the turn, on the M4 Pro, and 797 and 836 on the Ryzen; the cap, the lever, the wheel and the 64 knobs are alike on both. Every configuration IK finds at a grasp is followed through the turn: at the knob, 4 to 35 at the default IK's 64 seeds on the M4 Pro and 5 to 36 on the Ryzen, the median 19 on both, over the 859 grips it finds any at (the example prints it), so following them is most of a call that tries every grip; one that stops at its first plan tries 32 grips.
+
 ## Grasps of a surface
 
 `examples/surface_grasps.rs` finds the grasps of what cameras see (`grasps_on`) for the Panda's hand of 22 spheres, open 8 cm, on the M4 Pro's 14 threads, the quickest of five calls (of three for the 64 bowls), and of six runs on a machine building beside them:
@@ -480,6 +501,9 @@ cargo run --release --example bench -- 512
 # Tool paths, and picks and places on random tabletops
 cargo run --release --example tool_paths
 cargo run --release --example tasks -- 64
+
+# Turning a knob, a cap, a lever and a wheel, and 64 knobs in one call
+cargo run --release --example turns            # -- --gpu on the GPU
 
 # Joining pick-like motions on one reBot (after scripts/fetch_rebot.sh), or the SO-101; timing by kind of path
 cargo run --release --example join

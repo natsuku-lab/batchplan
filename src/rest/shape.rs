@@ -242,7 +242,7 @@ impl Turned {
 
     /// Over the point `offset` from its middle, seen from above: the heights of its underside and
     /// of its top, from its middle; none where it does not reach over that point.
-    #[inline]
+    #[inline(never)]
     pub(super) fn span(&self, offset: Vec2) -> Option<(f32, f32)> {
         let from = self.x * offset.x + self.y * offset.y;
         if let Shape::Cuboid(_) = self.shape {
@@ -260,13 +260,14 @@ impl Turned {
 
     /// The point of its underside `lower` from its middle over the point `offset` from it, in its
     /// own frame.
-    #[inline]
+    #[inline(always)]
     pub(super) fn local(&self, offset: Vec2, lower: f32) -> Vec3 {
         self.x * offset.x + self.y * offset.y + self.up * lower
     }
 
     /// The piece of its surface the point `at` of it (in its own frame) lies on, and the unit
     /// direction out of it there, in the surface's frame.
+    #[inline(never)]
     pub(super) fn piece_at(&self, at: Vec3) -> (Piece, Vec3) {
         match self.shape {
             Shape::Cuboid(half) => {
@@ -308,6 +309,7 @@ impl Turned {
 
     /// The point of it nearest `from`, both from its middle in the surface's frame, where `from`
     /// is outside it.
+    #[inline(always)]
     pub(super) fn nearest(&self, from: Vec3) -> Vec3 {
         let at = self.frame.transpose() * from;
         let nearest = match self.shape {
@@ -339,6 +341,7 @@ impl Turned {
     /// The piece of it that faces the unit direction `toward` (in the shape's frame) the most,
     /// and how squarely the flat `piece` faces it less than that one does: nought for that piece
     /// itself.
+    #[inline(always)]
     pub(super) fn facing(&self, piece: Piece, toward: Vec3) -> (Piece, f32) {
         match self.shape {
             Shape::Cuboid(_) => {
@@ -369,6 +372,7 @@ impl Turned {
     /// `lower` to `upper`, the corners of the part of it that is near the plane; else the edge,
     /// the line or the point of it that reaches farthest toward the plane. A piece that stands
     /// `beside` the one that faces the plane meets it along an edge at most.
+    #[inline(never)]
     pub(super) fn meets(
         &self,
         piece: Piece,

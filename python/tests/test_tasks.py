@@ -319,3 +319,62 @@ def test_holds_and_picks_say_where_the_fingers_are(tasks_robot):
             worlds,
             [bp.Pick(0, tasks_robot.default_q, 0, grasps, locked=[{"x": 0.0}] * len(grasps))],
         )
+
+
+def test_a_knob_is_turned_in_place_and_a_screw_carries_a_pose(tasks_robot):
+    # A bar 9 x 2.5 x 3 cm on the table, gripped from above at its middle across it, 1 cm under
+    # its top: the hand's z axis down, its y axis across the bar.
+    half = (0.045, 0.0125, 0.015)
+    knob = bp.Obstacle.cuboid((0.5, 0.05, half[2]), half)
+    table = scene().obstacles[TABLE]
+    grasp = bp.Pose((0.0, 0.0, half[2] - 0.01), (0.0, 1.0, 0.0, 0.0))
+    at = knob.pose.mul_pose(grasp)
+    for device in devices(tasks_robot):
+        worlds = device.upload([bp.World([table, knob])])
+        task = bp.Turn(0, tasks_robot.default_q, 1, [grasp], math.pi / 2, support=[TABLE])
+        assert task.screw is None and task.approach == pytest.approx(0.1)
+        assert task.support == (TABLE,) and not task.stays
+        outcome = bp.turn(device, worlds, [task]).outcomes[0]
+        assert isinstance(outcome, tuple) and outcome, f"{outcome} on {device}"
+        plan = outcome[0]
+        assert [m.duration for m in plan.motions] == [
+            m.duration for m in (plan.transit, plan.approach, plan.turn, plan.depart)
+        ]
+        np.testing.assert_array_equal(plan.turn.start, plan.approach.end)
+        np.testing.assert_array_equal(plan.depart.start, plan.turn.end)
+        # In place: about the hand's own z axis, which points down through the bar's middle.
+        about = bp.Screw(at.position, (0.0, 0.0, -1.0))
+        end = about.carry(at, math.pi / 2)
+        ended = tasks_robot.ee_pose(plan.turn.end)
+        np.testing.assert_allclose(ended.position, at.position, atol=1e-3)
+        assert abs(np.dot(ended.rotation, end.rotation)) > 1 - 1e-4
+        np.testing.assert_allclose(
+            plan.placed.pose.rotation, (0.0, 0.0, -math.sqrt(0.5), math.sqrt(0.5)), atol=1e-6
+        )
+        # A post where the fingers come halfway round stops the turn there, saying how far.
+        post = bp.Obstacle.cuboid(
+            (0.5 + 0.06 * math.sqrt(0.5), 0.05 + 0.06 * math.sqrt(0.5), half[2]),
+            (0.008, 0.008, half[2]),
+        )
+        blocked = device.upload([bp.World([table, knob, post])])
+        failure = bp.turn(device, blocked, [task]).outcomes[0]
+        assert isinstance(failure, bp.TaskFailure)
+        assert failure.step == bp.TaskStep.Turn and failure.at(bp.TaskStep.Turn) == 1
+        stop = failure.candidates[0]
+        assert isinstance(stop.why, bp.ToolPathStop.Collision)
+        assert 0.1 < stop.turned < math.pi / 4, stop.turned
+        with pytest.raises(bp.InputError, match="other than 0"):
+            bp.turn(device, worlds, [task.replace(angle=0.0)])
+    # A screw's waypoints along its helix, up to the pose carried all the way.
+    screw = bp.Screw((0.5, 0.0, 0.2), (0.0, 0.0, 1.0), pitch=0.001)
+    frame = bp.Pose((0.6, 0.0, 0.2))
+    waypoints = screw.path(frame, math.pi / 2, 1e-3)
+    assert len(waypoints) > 1 and waypoints[-1] == screw.carry(frame, math.pi / 2)
+    np.testing.assert_allclose(
+        waypoints[-1].position, (0.5, 0.1, 0.2 + 0.001 * math.pi / 2), atol=1e-6
+    )
+    with pytest.raises(bp.InputError, match="unit"):
+        bp.Screw((0.0, 0.0, 0.0), (0.0, 0.0, 2.0)).path(frame, 1.0, 1e-3)
+    near = bp.GraspOptions(near=(0.1, 0.0, 0.0))
+    np.testing.assert_allclose(near.near, (0.1, 0.0, 0.0))
+    assert bp.GraspOptions().near is None

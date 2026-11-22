@@ -5,11 +5,13 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
+use std::f32::consts::{FRAC_PI_2, PI};
+
 use batchplan::rng::Rng;
 use batchplan::{
     CollisionModel, CollisionWeights, Contact, Device, Error, HandSpeed, Obstacle, Pose, Robot,
-    RobotOptions, ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, Touch, Trajectory,
-    World,
+    RobotOptions, Screw, ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, Touch,
+    Trajectory, World,
 };
 use glam::{Quat, Vec3};
 
@@ -657,6 +659,230 @@ fn malformed_paths_are_input_errors() {
     ];
     for (bad, options, says) in cases {
         let err = batchplan::follow(&device, &worlds, &[bad], &options).unwrap_err();
+        assert!(
+            matches!(&err, Error::Input(m) if m.contains(says)),
+            "{err:?}"
+        );
+    }
+}
+
+/// How far `p` lies from the line through `point` along the unit `direction`, and how far along it.
+fn about_line(p: Vec3, point: Vec3, direction: Vec3) -> (f32, f32) {
+    let along = (p - point).dot(direction);
+    ((p - point - direction * along).length(), along)
+}
+
+#[test]
+fn a_frame_carried_about_a_screw_ends_where_trigonometry_says() {
+    // A frame 10 cm from an upright line and 5 cm above its point, turned a quarter turn.
+    let point = Vec3::new(0.5, -0.1, 0.2);
+    let screw = Screw::about(point, Vec3::Z);
+    let rotation = Quat::from_rotation_x(0.7) * Quat::from_rotation_y(-0.3);
+    let frame = Pose::new(point + Vec3::new(0.1, 0.0, 0.05), rotation);
+    let precision = 0.001;
+    let path = screw.path(frame, FRAC_PI_2, precision).unwrap();
+    let count = path.len();
+    // A quarter turn right-handed about +z takes +x to +y, and the frame's axes with it, as the
+    // last waypoint and `carry` have them; every waypoint before it is a turn of its own share.
+    let end = point + Vec3::new(0.0, 0.1, 0.05);
+    for (k, pose) in path.iter().enumerate() {
+        let angle = FRAC_PI_2 * (k + 1) as f32 / count as f32;
+        let at = point + Vec3::new(0.1 * angle.cos(), 0.1 * angle.sin(), 0.05);
+        assert!(pose.position.distance(at) < 1e-6, "{k}: {pose:?}");
+        let turned = Quat::from_rotation_z(angle) * rotation;
+        assert!(pose.rotation.angle_between(turned) < 1e-5, "{k}: {pose:?}");
+        let (off, along) = about_line(pose.position, point, Vec3::Z);
+        assert!((off - 0.1).abs() < 1e-6 && (along - 0.05).abs() < 1e-6);
+    }
+    assert!(path[count - 1].position.distance(end) < 1e-6);
+    assert_eq!(path[count - 1], screw.carry(frame, FRAC_PI_2));
+    // The straight moves between them sag from the circle by at most the precision, at their
+    // middles; one fewer would sag more: the count follows from the sag, not from a step.
+    let sag = |pieces: usize| 0.1 * (1.0 - (FRAC_PI_2 / pieces as f32 / 2.0).cos());
+    let ends = std::iter::once(frame).chain(path.iter().copied());
+    let ends: Vec<Pose> = ends.collect();
+    for pair in ends.windows(2) {
+        let middle = (pair[0].position + pair[1].position) / 2.0;
+        let (off, _) = about_line(middle, point, Vec3::Z);
+        assert!(0.1 - off <= precision, "sags {} m", 0.1 - off);
+    }
+    assert!(
+        sag(count) <= precision && sag(count - 1) > precision,
+        "{count}"
+    );
+    // The other way round, it ends as far the other way.
+    let back = screw.path(frame, -FRAC_PI_2, precision).unwrap();
+    assert_eq!(back.len(), count);
+    let other = point + Vec3::new(0.0, -0.1, 0.05);
+    assert!(back[count - 1].position.distance(other) < 1e-6);
+    // A frame on the line needs only what its rotation does: a quarter turn at most between
+    // waypoints, so that the shortest rotation between them is the screw's.
+    let on = Pose::new(point + Vec3::Z * 0.3, rotation);
+    assert_eq!(screw.path(on, PI, precision).unwrap().len(), 2);
+    assert_eq!(screw.path(on, -1.0, precision).unwrap().len(), 1);
+    assert_eq!(screw.path(frame, 0.0, precision).unwrap(), vec![frame]);
+}
+
+#[test]
+fn a_screw_with_a_pitch_advances_along_its_line_as_it_turns() {
+    // A tilted line, 3 mm along it a radian, and a frame 4 cm from it turned back 3/4 of a turn.
+    let direction = Vec3::new(0.2, -0.3, 1.0).normalize();
+    let screw = Screw {
+        point: Vec3::new(0.4, 0.1, 0.3),
+        direction,
+        pitch: 0.003,
+    };
+    let frame = Pose::new(
+        screw.point + direction.any_orthonormal_vector() * 0.04,
+        Quat::from_rotation_z(0.4),
+    );
+    let (angle, precision) = (-1.5 * PI, 2e-4);
+    let path = screw.path(frame, angle, precision).unwrap();
+    let count = path.len();
+    let helix = |share: f32| screw.carry(frame, angle * share);
+    for (k, pose) in path.iter().enumerate() {
+        let share = (k + 1) as f32 / count as f32;
+        let (off, along) = about_line(pose.position, screw.point, direction);
+        assert!((off - 0.04).abs() < 1e-6, "{k}: {off} m from the line");
+        assert!(
+            (along - screw.pitch * angle * share).abs() < 1e-6,
+            "{k}: {along} m along it"
+        );
+        assert!(pose.position.distance(helix(share).position) < 1e-6);
+    }
+    let (_, advanced) = about_line(path[count - 1].position, screw.point, direction);
+    assert!((advanced + 0.003 * 1.5 * PI).abs() < 1e-6, "{advanced}");
+    // A straight move between two waypoints strays from the helix by at most the precision, a
+    // point along it measured from the helix's at the same share of the turn.
+    let ends = std::iter::once(frame).chain(path.iter().copied());
+    let ends: Vec<Pose> = ends.collect();
+    for (k, pair) in ends.windows(2).enumerate() {
+        for s in 0..=16 {
+            let t = s as f32 / 16.0;
+            let on_chord = pair[0].position.lerp(pair[1].position, t);
+            let share = (k as f32 + t) / count as f32;
+            let off = on_chord.distance(helix(share).position);
+            assert!(off <= precision * 1.001, "{k} at {t}: {off} m");
+        }
+    }
+}
+
+#[test]
+fn a_hand_follows_a_screws_waypoints_within_the_precision_of_its_arc() {
+    // An upright hinge 10 cm beside the hand: the hand swings a quarter turn about it, as round a
+    // lever's. Half the precision is the waypoints' sag, half how far `follow` strays from them.
+    let robot = panda();
+    let start = robot.ee_pose(robot.default_q(), 0);
+    let hinge = start.position + Vec3::new(0.1, 0.0, 0.0);
+    let screw = Screw::about(hinge, Vec3::Z);
+    let precision = 0.001;
+    let o = ToolPathOptions {
+        precision: precision / 2.0,
+        ..ToolPathOptions::default()
+    };
+    let waypoints = screw.path(start, FRAC_PI_2, precision / 2.0).unwrap();
+    let end = screw.carry(start, FRAC_PI_2);
+    for device in devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(&[World::default()]).unwrap();
+        let swing = path(&robot, waypoints.clone());
+        let result = batchplan::follow(&device, &worlds, &[swing], &o).unwrap();
+        assert_eq!(result.fraction[0], 1.0, "{name}: {:?}", result.stopped[0]);
+        let poses = hand_poses(&robot, &result.paths[0]);
+        assert!(poses.len() > 50, "{name}: {} samples", poses.len());
+        let mut farthest = 0.0f32;
+        for pose in &poses {
+            // Off the arc: its distance from the circle, and the rotation the arc has where the
+            // hand is about the hinge.
+            let (off, along) = about_line(pose.position, hinge, Vec3::Z);
+            let along = along - (start.position - hinge).dot(Vec3::Z);
+            let strays = ((off - 0.1).powi(2) + along.powi(2)).sqrt();
+            assert!(strays <= precision, "{name}: {strays} m off the arc");
+            let from = pose.position - hinge;
+            let angle = from.y.atan2(from.x) - PI;
+            let angle = (angle + PI).rem_euclid(2.0 * PI) - PI;
+            let turned = Quat::from_rotation_z(angle) * start.rotation;
+            let twisted = pose.rotation.angle_between(turned);
+            assert!(
+                twisted <= o.rotation_precision + 1e-3,
+                "{name}: {twisted} rad"
+            );
+            farthest = farthest.max(angle);
+        }
+        // It swings all the way, and ends where the screw carries the hand.
+        assert!(
+            (farthest - FRAC_PI_2).abs() < 1e-2,
+            "{name}: {farthest} rad"
+        );
+        let last = poses[poses.len() - 1];
+        assert!(last.position.distance(end.position) <= precision, "{name}");
+    }
+}
+
+#[test]
+fn malformed_screws_are_input_errors() {
+    let frame = Pose::new(Vec3::new(0.1, 0.0, 0.0), Quat::IDENTITY);
+    let good = Screw::about(Vec3::ZERO, Vec3::Z);
+    let cases = [
+        (
+            Screw {
+                direction: Vec3::new(0.0, 0.0, 2.0),
+                ..good
+            },
+            frame,
+            1.0,
+            1e-3,
+            "[0, 0, 2]",
+        ),
+        (
+            Screw {
+                point: Vec3::new(f32::NAN, 0.0, 0.0),
+                ..good
+            },
+            frame,
+            1.0,
+            1e-3,
+            "NaN",
+        ),
+        (
+            Screw {
+                pitch: f32::INFINITY,
+                ..good
+            },
+            frame,
+            1.0,
+            1e-3,
+            "inf",
+        ),
+        (good, frame, f32::NAN, 1e-3, "angle, got NaN"),
+        (
+            Screw::about(Vec3::ZERO, Vec3::ZERO),
+            frame,
+            1.0,
+            1e-3,
+            "unit, got [0, 0, 0] of length 0",
+        ),
+        // More waypoints than can be held: a turn of an angle too large, or a precision too fine.
+        (
+            good,
+            frame,
+            1e13,
+            1e-3,
+            "a turn of 10000000000000 rad at a precision of 0.001 m takes",
+        ),
+        (good, frame, 1.0, 1e-30, "waypoints, more than can be held"),
+        (good, frame, 1.0, 0.0, "got 0 m"),
+        (good, frame, 1.0, -1e-3, "got -0.001 m"),
+        (
+            good,
+            Pose::new(Vec3::ZERO, Quat::from_xyzw(0.0, 0.0, 0.0, 2.0)),
+            1.0,
+            1e-3,
+            "unit rotation",
+        ),
+    ];
+    for (screw, pose, angle, precision, says) in cases {
+        let err = screw.path(pose, angle, precision).unwrap_err();
         assert!(
             matches!(&err, Error::Input(m) if m.contains(says)),
             "{err:?}"

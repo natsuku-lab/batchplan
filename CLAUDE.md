@@ -31,6 +31,7 @@ cargo run --release --example datagen -- data/demo 512 20       # .npy dataset: 
 cargo run --release --example tool_paths                        # straight moves and pours: one at a time on one thread, and 64 at once
 cargo run --release --example constraints [-- 64 5 --zone]      # the gripper kept upright past a pillar (solved, time, largest tilt, optimized, against unconstrained), and two arms carrying a tray level
 cargo run --release --example tasks -- 64                       # picks and places on random tabletops: how many get through, where the rest stop, per batch size
+cargo run --release --example turns [-- --gpu]                  # a knob, a cap, a lever and a wheel turned (`turn`), and 64 knobs in one call: grips, how many get through, where the rest stop, how long
 cargo run --release --example surface_grasps                   # grasps of what cameras see: a bowl as points, a box in two depth images, 64 bowls in one call, and what each costs
 cargo run --release --example surface_rests [-- threads] [--dump data/rests] && uv run --with mujoco --with numpy python scripts/validate_rests.py data/rests   # where a held object rests on what cameras see: a box on a table among others, a can in a basket and where to let it go to fall in, a tray across two bars and a can rolling in between them, a bottle against a rack's lip, 64 boxes in one call; then each rest let go in MuJoCo
 cargo run --release --example held_spheres                     # how spheres cover a held plate, can and capsule with 64 and 256 to spend: how many, how far past, how long
