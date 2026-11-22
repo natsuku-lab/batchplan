@@ -74,8 +74,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   gives the world to plan a step against, every obstacle named (`Of`): the fixtures, each object's
   solids or the room it takes up, its part of the map where the step goes into it, and one grid of
   what nothing explains. `Kept` holds a look's scene, filtered depth and masks, and
-  `Kept::surface` an object's readings for grasps and rests. What it costs over `miru::look`
-  alone is not yet timed; `score <set> --observe` prints it.
+  `Kept::surface` an object's readings for grasps and rests. On the M4 Pro a look through it
+  takes 237 ms at the median of a recorded set's 20 looks against the 72 of the look inside it on
+  one thread, and 56 against 34 ms on 14 (`score <set> --observe` on `rows4`).
 - `Robot::hand_spheres(hand)`: a hand's collision spheres in its IK frame at the default
   configuration, the fingers as the locked joints hold them and any object it holds with them
   (`HandSphere`: center, radius, whether its link is one of `Robot::finger_links`, which takes
@@ -365,6 +366,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   `Error::Input` their call returns for those options. In Python, `options.check()` raises it.
 
 ### Changed
+
+- On the CPU, a robot mask (`DepthImage::robot_mask`) takes 11% to 23% less time on the Ryzen
+  and up to 15% less on the M4 Pro, and fusing an image into a map up to 13% less on the Ryzen,
+  however the crate is split into codegen units: the work each row and each reading takes is a
+  function whose inlining the code decides (`examples/perception.rs` on one thread, alternated
+  with the code before).
 
 - **Breaking:** a robot mask judges each reading by where its point lies:
   `image.robot_mask(&robot, &q, padding, &holding)` marks a reading the robot's where its point

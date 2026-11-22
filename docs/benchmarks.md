@@ -254,8 +254,8 @@ Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from
 |---|---|---|---|---|
 | A box 4 by 6 by 5 cm on a table 60 cm square among three blocks, in two 640×480 depth images | 392,708, 359,217 of them the table's | 23,616 | 57 ms | 540 ms |
 | A can in a basket 20 cm square, seen from above | 99,225 | 1,952, on its floor | 2.4 ms | 12 ms |
-| That can let go over that basket to fall in (`falls_into`) | 99,225 | 1,152 places to let go at | not yet timed | not yet timed |
-| A box of cream cheese 8.3 by 4.2 by 1.9 cm let go over a bowl 11.2 cm across that it barely fits (`falls_into` with `look_closer`) | 2,821 | none at the spots; 52 places looking closer, the first over the bowl's axis | not yet timed | not yet timed |
+| That can let go over that basket to fall in (`falls_into`) | 99,225 | 1,152 places to let go at | 1.2 ms | 1.3 ms |
+| A box of cream cheese 8.3 by 4.2 by 1.9 cm let go over a bowl 11.2 cm across that it barely fits (`falls_into` with `look_closer`) | 2,821 | none at the spots; 52 places looking closer, the first over the bowl's axis | 0.3 ms | 1.1 ms |
 | A tray 12 by 6 cm across two bars 2 cm thick, 8 cm apart | 9,362 | 822 | 18 ms | 170 ms |
 | A can 6.6 cm across laid along those bars, rolling in between them | 9,362 | 60, both ways round for each centimeter along them | 6.0 ms | 56 ms |
 | A bottle 16 cm long laid flat on a rack sloping 30° against the lip at its foot, spots 2 mm apart at the one turn that lies flat | 10,117 | 150, all against the lip | 48 ms | 479 ms |
