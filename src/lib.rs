@@ -52,6 +52,7 @@ mod loops;
 pub mod meshes;
 mod mjcf;
 pub mod npy;
+mod reach;
 mod rest;
 pub mod rng;
 pub mod robot;
@@ -85,6 +86,7 @@ pub use live::{
     servo,
 };
 pub use meshes::{Clearance, MeshModel};
+pub use reach::HandReach;
 pub use rest::{
     Blocking, Fall, Rest, RestFailure, RestOptions, RestProblem, falls_into, rest_failures,
     rests_on,

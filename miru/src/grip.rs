@@ -52,6 +52,7 @@ pub struct GripWorlds<'a> {
     pub(crate) device: &'a Device,
     pub(crate) hand_index: usize,
     pub(crate) blocked: Option<SupportedObjects>,
+    pub(crate) reach: Option<batchplan::HandReach>,
     loaded_opening: f32,
     hand: Vec<HandSphere>,
     id: u32,
@@ -223,6 +224,7 @@ impl Observed {
             device,
             hand_index,
             blocked,
+            reach: None,
             loaded_opening,
             hand,
             id,
@@ -239,6 +241,14 @@ impl Observed {
 }
 
 impl GripWorlds<'_> {
+    /// Check the hand's kinematic outer bound before projecting each candidate for [`Self::plan`].
+    /// A certified failure keeps its original index. Chains without a bound use normal projection.
+    #[must_use]
+    pub fn with_reach_bound(mut self) -> Self {
+        self.reach = self.device.robot().hand_reach(self.hand_index);
+        self
+    }
+
     pub(crate) fn validate(&self, g: &Grasp) -> Result<()> {
         let id = self.id;
         ensure_input!(

@@ -157,6 +157,12 @@ impl GripPlan {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum GripStop {
+    /// The requested hand pose is provably outside the loaded chain's reach, even allowing
+    /// the IK tolerances. No world was projected for this candidate.
+    OutsideReach {
+        /// Requested hand pose in the look's frame.
+        at: batchplan::Pose,
+    },
     /// The look could not isolate a contact part.
     NoPart,
     /// A batchplan motion stopped. Its contact indices name obstacles in `of`; the dense
@@ -365,6 +371,18 @@ impl GripWorlds<'_> {
                 }
                 if let Some(blocked) = blocked {
                     result.blocked.get_or_insert_with(|| blocked.clone());
+                    continue;
+                }
+                if self
+                    .reach
+                    .as_ref()
+                    .is_some_and(|reach| reach.excludes(candidate.pose, &options.ik))
+                {
+                    self.validate(candidate)?;
+                    result.failures.push(GripFailure {
+                        candidate: index,
+                        reason: GripStop::OutsideReach { at: candidate.pose },
+                    });
                     continue;
                 }
                 let Some(mut split) = self.project(candidate)? else {

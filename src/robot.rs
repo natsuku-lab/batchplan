@@ -1240,6 +1240,23 @@ impl Robot {
         self.pose_of(&self.fk(q), self.ee_links[hand])
     }
 
+    /// An outer bound for hand `hand`'s IK targets. None for an absent hand, a chain with a
+    /// prismatic or relockable joint, or fewer than two moving joints. The bound allows the
+    /// full circle at every revolute joint, including joints with restricted travel.
+    #[must_use]
+    pub fn hand_reach(&self, hand: usize) -> Option<crate::HandReach> {
+        let mut path = Vec::new();
+        let mut at = Some(*self.ee_links.get(hand)?);
+        while let Some(i) = at {
+            if self.locked.iter().any(|joint| joint.link == i) {
+                return None;
+            }
+            path.push(&self.links[i]);
+            at = self.links[i].parent;
+        }
+        crate::HandReach::of(path.into_iter().rev())
+    }
+
     /// The prefix of the part hand `hand`'s frame belongs to (`left_`), on a robot made of parts.
     pub(crate) fn hand_prefix(&self, hand: usize) -> Option<&str> {
         let link = &self.links[self.ee_links[hand]].name;
