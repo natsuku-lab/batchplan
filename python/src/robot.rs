@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-use batchplan::glam::Vec3;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -190,23 +189,54 @@ value_class! {
 
 tuple_field!(batchplan::Part, (String, batchplan::CollisionModel));
 
-value_class! {
-    /// One of a hand's collision spheres, in the hand's IK frame (`Robot.hand_spheres`).
-    HandSphere(batchplan::HandSphere) {
-        /// Its center in the hand's IK frame, `(x, y, z)` in meters.
-        center: Vec3,
-        /// Its radius (meters).
-        radius: f32,
-        /// Whether it is a finger's, not the palm's.
-        finger: bool,
-        /// Which way along the frame's y axis its finger stands from the frame, 1 or -1: the way
-        /// it moves as the fingers open. 0 for the palm's, and for a finger's that stands to
-        /// neither side.
-        side: f32,
+/// One of a hand's collision spheres, in the hand's IK frame (`Robot.hand_spheres`).
+#[pyclass(module = "batchplan", frozen)]
+pub(crate) struct HandSphere(batchplan::HandSphere);
+
+#[pymethods]
+impl HandSphere {
+    /// Its center in the hand's IK frame, `(x, y, z)` in meters.
+    #[getter]
+    fn center<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.0.center.to_py(py)
+    }
+
+    /// Its radius (meters).
+    #[getter]
+    fn radius(&self) -> f64 {
+        field::shortest(self.0.radius)
+    }
+
+    /// Whether its link is one of `Robot.finger_links` for the hand: a finger's, or, where the
+    /// fingers are found rather than named (`RobotOptions.finger_links`), a held object's too.
+    #[getter]
+    fn finger(&self) -> bool {
+        self.0.finger
+    }
+
+    /// For a sphere whose link is one of `Robot.finger_links`, which way along the frame's y
+    /// axis its link's spheres stand from the frame, 1 or -1: the way a finger moves as the
+    /// fingers open. 0 for any other sphere, and for one of such a link that stands to neither
+    /// side.
+    #[getter]
+    fn side(&self) -> f64 {
+        field::shortest(self.0.side)
+    }
+
+    fn __repr__(&self) -> String {
+        let batchplan::HandSphere {
+            center,
+            radius,
+            finger,
+            side,
+            ..
+        } = self.0;
+        format!(
+            "HandSphere(center={:?}, radius={radius}, finger={finger}, side={side})",
+            center.to_array()
+        )
     }
 }
-
-tuple_field!(batchplan::HandSphere);
 
 value_class! {
     /// How `Robot.load` and `Robot.assemble` build a robot from its description.
@@ -465,7 +495,11 @@ impl Robot {
     /// Placed by a pose of the frame, they are the hand there, whatever the arm does.
     fn hand_spheres<'py>(&self, py: Python<'py>, hand: usize) -> PyResult<Bound<'py, PyAny>> {
         self.check_hand(hand)?;
-        self.0.hand_spheres(hand).to_py(py)
+        let spheres = self.0.hand_spheres(hand).into_iter();
+        let spheres: Vec<Bound<'py, HandSphere>> = spheres
+            .map(|sphere| Bound::new(py, HandSphere(sphere)))
+            .collect::<PyResult<_>>()?;
+        Ok(pyo3::types::PyTuple::new(py, spheres)?.into_any())
     }
 
     /// Every collision sphere at configuration `q`, in the robot's frame, `(n, 4)` as

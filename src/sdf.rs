@@ -432,9 +432,8 @@ impl DepthImage<'_> {
         let camera = self.rigid().camera;
         let to_camera = camera.rotation.inverse();
         ensure_input!(
-            q.len() == robot.dof(),
-            "q has {} values, the robot {} joints",
-            q.len(),
+            q.len() == robot.dof() && q.iter().all(|v| v.is_finite()),
+            "q needs a finite value for each of the robot's {} joints, got {q:?}",
             robot.dof()
         );
         ensure_input!(

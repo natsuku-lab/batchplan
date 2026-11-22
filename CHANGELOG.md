@@ -78,11 +78,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   what a look through it takes against `miru::look` alone, from `score <set> --observe`.]
 - `Robot::hand_spheres(hand)`: a hand's collision spheres in its IK frame at the default
   configuration, the fingers as the locked joints hold them and any object it holds with them
-  (`HandSphere`: center, radius, whether a finger's and which side it stands to). Placed by a pose
-  of the frame they are the hand there, as grasps and places are checked. In Python,
-  `Robot.hand_spheres` and `HandSphere`.
-- `Pose::is_unit()`: whether a pose is finite with a unit rotation (to 1e-3), as every call that
-  takes one asks. In Python, `Pose.is_unit`.
+  (`HandSphere`: center, radius, whether its link is one of `Robot::finger_links`, which takes
+  in a held object where the fingers are found rather than named, and which side such a link
+  stands to). Placed by a pose of the frame they are the hand there, what `grasps_on` holds a
+  grasp's hand against. In Python, `Robot.hand_spheres` and `HandSphere`.
+- `Pose::is_unit()`: whether a pose is finite with a unit rotation (to 1e-3): a pose every call
+  that takes one accepts. In Python, `Pose.is_unit`.
 - `sdf::on_shapes(&device, &shapes, &points, &reach)` says which of a world's shapes each point
   lies on: per point, the shape nearest it and the distance to its surface, where that is no
   more than the point's reach, and none for a point marked with a negative reach. A camera's

@@ -22,7 +22,7 @@ Guide: [robots.md](robots.md).
 | `Robot::attach(&AttachedObject)`, `Robot::detach(name)` | The robot holding an object fixed to one of its links, or without it. |
 | `Robot::relock(&joints)` | The robot with joints it locked at load held at new values, as a torso that moved ([guide](robots.md#kinematics)). |
 | `dof`, `joint_names`, `lower`, `upper`, `continuous`, `default_q`, `max_velocity`, `max_acceleration`, `max_jerk` | The robot's joints and their limits. |
-| `hands`, `hand_joints(hand)`, `hand_links(hand)`, `finger_links(hand)`, `tip(hand)`, `ee_pose(q, hand)`, `link_pose(q, link)` | Hands and forward kinematics; `hand_links` names a hand and its fingers, for allowed contacts, `finger_links` its fingers alone, and `tip` how far its spheres reach past its frame. |
+| `hands`, `hand_joints(hand)`, `hand_links(hand)`, `finger_links(hand)`, `tip(hand)`, `hand_spheres(hand)`, `ee_pose(q, hand)`, `link_pose(q, link)` | Hands and forward kinematics; `hand_links` names a hand and its fingers, for allowed contacts, `finger_links` its fingers alone, `tip` how far its spheres reach past its frame, and `hand_spheres` those spheres in its frame (`HandSphere`: center, radius, whether a finger link's and which side), what it holds among them. |
 | `spheres(q)`, `reach()` | Every collision sphere at a configuration, and a bound on how far they reach from the base in any. |
 | `qualify()` | How well the spheres fit the geometry (`Qualification`): per link (`LinkQualification`) the `overhang`, the `uncovered` share of the surface, how deep the `gap` and the `thickness`, and each hand's tip ([guide](robots.md#qualifying-a-robot)). |
 | `breach(constraints, q)` | Why a configuration breaks `HandConstraint`s, if it does, tested as `plan` tests its start and goals: to keep only goals that keep them before planning. |
@@ -152,7 +152,7 @@ Guide: [training-data.md](training-data.md).
 
 | | |
 |---|---|
-| `Pose` | A position and rotation: `Pose::new`, `Pose::IDENTITY`, `mul_pose`, `inverse`. |
+| `Pose` | A position and rotation: `Pose::new`, `Pose::IDENTITY`, `mul_pose`, `inverse`, and `is_unit`: whether it is finite with a unit rotation, a pose every call that takes one accepts. |
 | `Screw` | A line (`point`, unit `direction`) and how far a thing carried about it moves along it a radian (`pitch`); `Screw::about(point, direction)` without one. `carry(pose, angle)` carries a pose about it, and `path(pose, angle, precision)` gives the waypoints a `ToolPath` follows along the arc, as few as keep the straight moves between them within `precision` of it. |
 | `Solved` | What `solved()` yields: the problem's index in the batch, the problem, and its answer. |
 | `Error`, `error::Result` | Every fallible call's error: bad input, a file that cannot load, the GPU, threads, an unsafe trajectory, or a failed write. |

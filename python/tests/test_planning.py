@@ -369,6 +369,19 @@ def test_robots_report_their_joints_reach_and_links(ur5e_robot):
         placed = hand.mul_pose(bp.Pose(sphere.center)).position
         gaps = np.abs(everywhere - [*placed, sphere.radius]).max(axis=1)
         assert gaps.min() < 1e-5, f"{sphere} is no sphere of the robot's"
+    # What the hand holds is among them: a ball fixed to it adds its spheres, placed by the hand's
+    # pose where the robot holding it has them.
+    palm = ur5e_robot.hand_links(0)[0]
+    ball = bp.Obstacle.sphere((0.0, 0.0, 0.05), 0.02)
+    holding = ur5e_robot.attach(bp.AttachedObject("ball", palm, [ball]))
+    held = holding.spheres(q)[len(everywhere) :]
+    holds = holding.hand_spheres(0)
+    assert len(held) > 0 and len(holds) == len(spheres) + len(held)
+    placed = [[*hand.mul_pose(bp.Pose(s.center)).position, s.radius] for s in holds]
+    for row in held:
+        assert np.abs(np.array(placed) - row).max(axis=1).min() < 1e-5, f"{row} is no hand sphere"
+    with pytest.raises(bp.InputError):
+        ur5e_robot.hand_spheres(1)
     np.testing.assert_allclose(tool.position, hand.position, atol=1e-6)
     assert same_rotation(tool.rotation, hand.rotation)
     assert np.linalg.norm(ur5e_robot.link_pose(q, "wrist_1_link").position - hand.position) > 0.1

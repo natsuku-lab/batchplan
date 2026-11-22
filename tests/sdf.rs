@@ -1244,6 +1244,39 @@ fn depth_images_become_grids_on(device: &Device) {
     }
 }
 
+/// A robot's mask refuses a configuration with a joint that is no number, naming `q`: masked so,
+/// a fraction of the arm's readings would be its own and the rest the world's.
+#[test]
+fn a_robot_mask_refuses_a_joint_that_is_no_number() {
+    let robot = common::panda().unwrap();
+    let depth = vec![1.0; 64 * 48];
+    let image = DepthImage {
+        depth: &depth,
+        width: 64,
+        intrinsics: Intrinsics {
+            fx: 60.0,
+            fy: 60.0,
+            cx: 31.5,
+            cy: 23.5,
+        },
+        camera: Pose::new(Vec3::new(0.5, 0.0, 1.0), Quat::from_rotation_x(PI)),
+    };
+    assert!(
+        image
+            .robot_mask(&robot, robot.default_q(), 0.01, &[])
+            .is_ok()
+    );
+    for (joint, value) in [(1, f32::NAN), (3, f32::INFINITY)] {
+        let mut q = robot.default_q().to_vec();
+        q[joint] = value;
+        let mask = image.robot_mask(&robot, &q, 0.01, &[]);
+        assert!(
+            matches!(&mask, Err(Error::Input(m)) if m.contains('q') && m.contains(&value.to_string())),
+            "joint {joint} at {value}: {mask:?}"
+        );
+    }
+}
+
 /// An L-shaped prism 10 cm tall whose convex hull also fills the notch at x, y in (0.1, 0.2).
 fn l_prism_obj() -> String {
     use std::fmt::Write;
