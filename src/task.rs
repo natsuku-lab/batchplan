@@ -315,6 +315,17 @@ pub struct TaskOptions {
     pub min_fraction: f32,
 }
 
+impl TaskOptions {
+    /// Validates the common task options and the options of each underlying solver. This also
+    /// checks stages a particular candidate may never reach.
+    pub fn check(&self) -> Result<()> {
+        check_options(self)?;
+        self.ik.check()?;
+        self.plan.check()?;
+        self.tool_path.check()
+    }
+}
+
 impl Default for TaskOptions {
     fn default() -> Self {
         Self {

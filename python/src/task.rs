@@ -110,6 +110,11 @@ value_class! {
         fn new(changes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
             Ok(Self(Self::changed(Default::default(), changes)?))
         }
+
+        /// Validates the options of the task and all its solver stages.
+        fn check(&self) -> PyResult<()> {
+            self.0.check().or_raise()
+        }
     }
 }
 

@@ -2848,6 +2848,16 @@ fn the_split_world_reaches_a_grip_and_lifts_only_attributable_material() {
             panic!("an uninterrupted search completes");
         };
         assert_eq!(rejected.batches, 0);
+        let invalid = batchplan::TaskOptions {
+            min_fraction: 0.0,
+            ..opts.clone()
+        };
+        assert!(
+            bounded
+                .plan(&[outside], &search, &invalid, || false, configure)
+                .is_err()
+        );
+
         assert!(
             matches!(rejected.failures[0].reason, miru::GripStop::OutsideReach { at }
             if at == outside.pose)

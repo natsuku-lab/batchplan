@@ -347,6 +347,9 @@ impl GripWorlds<'_> {
             };
             ensure_input!(valid, "invalid grip target {target:?}");
         }
+        if self.reach.is_some() {
+            options.check()?;
+        }
         let mut result = GripPlans::default();
         let mut candidates = grasps.iter().enumerate();
         let blocked = if T::PICK { self.blocked.as_ref() } else { None };

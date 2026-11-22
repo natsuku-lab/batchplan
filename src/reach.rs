@@ -77,7 +77,8 @@ impl HandReach {
     }
 
     /// True only when even the closest point of the wrist circle lies beyond the arm's
-    /// maximum reach, allowing both of IK's pose tolerances. Invalid inputs supply no bound.
+    /// maximum reach, allowing both of IK's pose tolerances. An unusable pose or tolerance
+    /// supplies no bound.
     #[must_use]
     pub fn excludes(&self, target: Pose, options: &IkOptions) -> bool {
         // IK accepts slightly nonunit rotations and uses their unnormalized matrix. Only
