@@ -1536,7 +1536,9 @@ pub struct GraspOptions {
     pub near: Option<Vec3>,
     /// A point to enclose between the pads in surface grasps. After the ordinary grasps,
     /// sample intermediate approaches around nearby contact pairs and append only those whose
-    /// fingers close on this point. Ordinary grasps come first, including ones that miss it.
+    /// fingers close on this point. Finally try shallower insertions of point-enclosing grasps,
+    /// retaining the contact patches and the required overlap. Ordinary grasps come first,
+    /// including ones that miss the point.
     pub close_on: Option<Vec3>,
 }
 

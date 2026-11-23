@@ -2301,6 +2301,16 @@ fn refining_approaches_for_a_point_keeps_the_original_grasps_and_closes_on_the_p
             added.iter().all(|g| !original.contains(g)),
             "coarse rolls are not tried twice"
         );
+        assert!(
+            original.iter().any(|g| added.iter().any(|other| {
+                let displacement = g.pose.position - other.pose.position;
+                g.contacts == other.contacts
+                    && g.pose.rotation == other.pose.rotation
+                    && displacement.dot(g.pose.rotation * Vec3::Z) > 0.001
+                    && displacement.cross(g.pose.rotation * Vec3::Z).length() < 1e-6
+            })),
+            "the same contact pair and roll admit a shallower insertion"
+        );
         let far = get(&GraspOptions {
             close_on: Some(Vec3::splat(2.0)),
             ..options

@@ -419,8 +419,9 @@ const RINGS: usize = 8;
 /// ([`GraspOptions::near`]) the nearest it first. With a
 /// [`shell`](GraspOptions::shell), grasps supported by views past a wall follow those with
 /// both sides seen. [`GraspOptions::close_on`] appends intermediate approaches that enclose the
-/// point after all ordinary grasps, again with two seen sides first. The surfaces run in parallel
-/// on the device's threads, and a surface's grasps are the same alone and among others.
+/// point after all ordinary grasps, again with two seen sides first. Finally it tries shallower
+/// insertions of those grasps that enclose the point, in parent grasp order. The surfaces run on
+/// the device's threads, and a surface's grasps are the same alone and among others.
 pub fn grasps_on(
     device: &Device,
     hand: usize,
@@ -722,6 +723,40 @@ fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
             extra.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
             grasps.extend(extra.into_iter().map(|(_, _, g)| g));
         }
+        // The deepest point-clear insertion may put the palm into the collision world.
+        // Keep each ranked grasp first, then try shallower insertions on the same patches.
+        let shallower = |g: &Grasp| {
+            let mut extra = Vec::new();
+            if !g.closes_on(hand, open.gap, point, 0.0) {
+                return extra;
+            }
+            let toward = g.pose.rotation * Vec3::Z;
+            let middle = g.contacts[0].midpoint(g.contacts[1]);
+            let depth = reach - (middle - g.pose.position).dot(toward);
+            let mut back = BACK;
+            while depth - back >= o.overlap {
+                let pose = Pose::new(g.pose.position - toward * back, g.pose.rotation);
+                let opening = if o.narrow {
+                    narrowed(&near, open, &pose, g.width(), reach, o, true).map(|(gap, _)| gap)
+                } else {
+                    clear(&pose, g.width()).then_some(open.gap)
+                };
+                if let Some(opening) = opening {
+                    let next = Grasp {
+                        pose,
+                        opening,
+                        ..*g
+                    };
+                    if next.closes_on(hand, open.gap, point, 0.0) {
+                        extra.push(next);
+                    }
+                }
+                back += BACK;
+            }
+            extra
+        };
+        let depths: Vec<_> = grasps.par_iter().flat_map_iter(shallower).collect();
+        grasps.extend(depths);
     }
     grasps
 }

@@ -10,8 +10,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
-- Surface grasps can try additional approaches around contact pairs near a measured point. Set
-  `GraspOptions::close_on` to append them after the ordinary grasps. **Breaking:** Rust literals
+- Surface grasps can try additional approach angles and shallower insertions on contact pairs
+  near a measured point. Set `GraspOptions::close_on` to append them after the ordinary grasps. **Breaking:** Rust literals
   that specify every field of `GraspOptions` need `close_on: None` for the previous behavior.
 
 - `Kept::extractions` reports the straight lift that clears a measured open container at the
