@@ -6004,7 +6004,7 @@ fn a_bowl_in_a_drawer_owns_its_wall_and_leaves_the_drawer() {
         color: [64; 3],
         solid: None,
         distance: Box::new(move |p| {
-            let yaw = 0.42542091_f32.atan2(-0.90499561);
+            let yaw = 0.425_420_9_f32.atan2(-0.904_995_6);
             let at = Quat::from_rotation_z(-yaw) * (p - origin);
             boards
                 .iter()
