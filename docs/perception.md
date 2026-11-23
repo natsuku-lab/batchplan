@@ -195,6 +195,13 @@ The shape is any `Obstacle`, turned as it is: a measured object's box, a ball ab
 
 `examples/depth.rs` renders a 640×480 depth image of a tabletop scene, builds a grid of 172×192×72 points from it, and plans Panda reaches with the grid as the only obstacle. IK reaches 48 of 64 grasp targets (the others lie in the camera's shadow, which `Occlusion::Occupied` treats as solid); all 48 plan, and their closest approach to the true scene is 27.0 mm.
 
+When depth pixels carry object labels, `map.take_surfaces` separates occupied voxels supported
+by the selected pixels. A pixel supplies both its endpoint and the surface at its measured
+depth across the pixel. A voxel whose camera-aligned bounding box meets a foreign reading stays
+in the source map. Supply the views whose labels are known and a predicate on the whole voxel
+to restrict the separated material. Hidden space and occupancy without a selected hit stay.
+The attribution describes those views; earlier observations in a fused map carry no labels.
+
 ## With a perception library
 
 batchplan reads depth; it does not say what things are. It cleans a camera's depths, says which readings are the robot's, keeps what the cameras saw of space and gives its distance field. A library that says what things are (which pixels are one thing, its shape, what it stands on, what is still there while hidden) meets batchplan at plain data, and batchplan depends on none. [`miru`](../miru/README.md), a crate of this repository, is one, built on batchplan: its one call takes the image, the robot's flags and the fixtures as batchplan has them, gives each object's solids as obstacles, and runs on the device's threads. The program below stands in for any:

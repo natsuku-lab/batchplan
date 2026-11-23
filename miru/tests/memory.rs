@@ -434,6 +434,20 @@ fn a_look_with_no_cameras_sees_nothing() {
     assert_eq!(none.memory.next_id(), first.memory.next_id());
     assert!(none.kept.scene().labels.is_empty(), "no view's labels");
     assert!(none.kept.image(0).is_none() && none.kept.robot(0).is_none());
+    let remembered = first.memory.objects()[0].id;
+    for id in [remembered, u32::MAX] {
+        let lifts = none
+            .kept
+            .extractions(id, 0.01)
+            .expect("an optional measurement");
+        assert!(lifts.is_empty(), "no current reading of object {id}");
+        for invalid in [-0.01, f32::NAN, f32::INFINITY] {
+            assert!(matches!(
+                none.kept.extractions(id, invalid),
+                Err(batchplan::Error::Input(_))
+            ));
+        }
+    }
 }
 
 /// The far and the near camera stated 5 mm over where they read from: with `off_by` 5 mm the table
@@ -3416,4 +3430,185 @@ fn a_world_point_names_only_readings_at_its_depth_and_keeps_disagreement() {
     assert_eq!(observed.kept.scene().labels[0][8 * 17 + 8], Label::Nothing);
     let near_camera = below.image.camera.position + 0.002 * Vec3::Z;
     assert!(observed.kept.labels_at(near_camera).unwrap().is_empty());
+}
+
+/// A block resting on the measured floor still fits after the tray is turned.
+#[test]
+fn a_block_resting_flush_in_a_turned_tray_has_an_extraction() {
+    let robot = panda();
+    let device = Device::cpu_threads(&robot, 2).expect("a CPU device");
+    let at = Vec3::new(0.5, 0.0, 0.0);
+    let yaw = Quat::from_rotation_z(0.65);
+    let mut standing = thin_tray();
+    let target = standing.len() + 1;
+    standing.push(block(
+        at + Vec3::new(-0.028, 0.014, 0.032),
+        Vec3::new(0.023, 0.018, 0.022),
+        [130; 3],
+    ));
+    let mut things = vec![table()];
+    for thing in standing {
+        things.push(Thing {
+            color: thing.color,
+            solid: None,
+            distance: Box::new(move |p| (thing.distance)(at + yaw.inverse() * (p - at))),
+        });
+    }
+    let frames = [EYE, Vec3::new(0.52, -0.055, 0.55)].map(|eye| {
+        Frame::of(&things, looking(eye, MIDDLE))
+            .masked(|i| if i == target { 2 } else { u32::from(i > 0) })
+    });
+    let stance = Stance {
+        q: robot.default_q(),
+        locked: &HashMap::new(),
+        padding: 0.0,
+    };
+    let obs = observe(
+        &device,
+        &cameras(&frames, [0; 2], 0.0),
+        &stance,
+        &memory(&device),
+    )
+    .expect("a sound look");
+    let scene = obs.kept.scene();
+    let (index, root) = scene
+        .objects
+        .iter()
+        .enumerate()
+        .find(|(_, o)| matches!(o.shape, Shape::OpenBox { .. }))
+        .expect("the tray opening is seen");
+    let child = scene
+        .objects
+        .iter()
+        .find(|o| o.on == Some(Support::Object(index)))
+        .expect("the block is seen standing on the tray");
+    let lifts = obs
+        .kept
+        .extractions(child.id, 0.005)
+        .expect("a sound margin");
+    assert_eq!(lifts.len(), 1, "the block is flush with the measured floor");
+    assert_eq!(lifts[0].container, root.id);
+    assert!(
+        lifts[0].lift.distance(Vec3::Z * 0.055) < 0.0001,
+        "the 50 mm room's depth plus the 5 mm margin"
+    );
+}
+
+/// A second camera hits an occupied bowl voxel although its bead return ends in the next voxel.
+#[test]
+fn a_foreign_projective_hit_on_the_opposite_rim_stays_in_the_lift_world() {
+    let robot = panda();
+    let device = Device::cpu_threads(&robot, 2).expect("a CPU device");
+    let q = robot.default_q();
+    let cell = Vec3::new(0.52242327, -0.13757662, 0.08242336);
+    let endpoint = Vec3::new(0.5235493, -0.14448546, cell.z);
+    let center = endpoint - 0.001 * Vec3::Z;
+    let bead = Obstacle::sphere(center, 0.001);
+    let things = [
+        table(),
+        wide_bowl(MIDDLE),
+        Thing {
+            color: [130, 80, 112],
+            solid: Some(bead.clone()),
+            distance: Box::new(move |p| (p - center).length() - 0.001),
+        },
+        arm(&robot, q),
+    ];
+    let views = render(&things);
+    let mut cams = cameras(&views, [0; 2], 0.0);
+    let k = batchplan::Intrinsics {
+        fx: 13.0,
+        fy: 13.0,
+        cx: 1.0,
+        cy: 1.0,
+    };
+    let pose = Pose::new(
+        endpoint + 0.25 * Vec3::Z,
+        Quat::from_rotation_x(std::f32::consts::PI),
+    );
+    let mut sparse = Frame::through(&things, pose, k, (3, 3));
+    assert_eq!(
+        sparse.shows[4],
+        Some(2),
+        "the central pixel returns from the known bead"
+    );
+    for (i, z) in sparse.depth.iter_mut().enumerate() {
+        if i != 4 {
+            *z = 0.0;
+        }
+    }
+    cams.push(Camera {
+        image: sparse.view().image,
+        color: &[],
+        noise: common::NOISE,
+        band: 0,
+        off_by: 0.0,
+        masks: &[],
+    });
+    let mem = Memory::try_new(
+        &device,
+        vec![known(&table()), bead],
+        &MemoryOptions::default(),
+    )
+    .unwrap();
+    let locked = HashMap::new();
+    let seen = observe(
+        &device,
+        &cams,
+        &Stance {
+            q,
+            locked: &locked,
+            padding: 0.0,
+        },
+        &mem,
+    )
+    .unwrap();
+    assert_eq!(seen.kept.scene().labels[2][4], Label::Known(1));
+    let id = id_of(seen.kept.scene(), &views, 1).expect("the bowl is seen");
+    let options = GraspOptions {
+        turns: 1,
+        shell: Some(0.015),
+        ..Default::default()
+    };
+    let surface = seen.kept.surface(&device, id).unwrap().unwrap();
+    let choices = batchplan::grasps_on(&device, 0, &[surface], &options)
+        .unwrap()
+        .remove(0);
+    let grasp = choices
+        .iter()
+        .max_by(|a, b| {
+            a.pose
+                .position
+                .distance(cell)
+                .total_cmp(&b.pose.position.distance(cell))
+        })
+        .unwrap();
+    assert!(
+        grasp.pose.position.distance(cell) > 0.20,
+        "the hit is outside the refined hand window"
+    );
+    let prepared = seen
+        .grip_worlds(&device, &Step::default(), 0, id, options.opening)
+        .unwrap();
+    let split = prepared
+        .project(grasp)
+        .unwrap()
+        .expect("a measured rim surface");
+    let body = split
+        .body
+        .as_ref()
+        .expect("the bowl supports no other object");
+    let retained = split
+        .scene
+        .world
+        .obstacles
+        .iter()
+        .enumerate()
+        .filter(|(k, _)| *k != split.part && !body.other_parts.contains(k))
+        .map(|(_, obstacle)| obstacle.distance(cell).value)
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        retained <= 0.0,
+        "the bowl must leave the mixed coarse cell occupied on lift, got {retained} m"
+    );
 }

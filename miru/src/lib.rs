@@ -74,6 +74,7 @@
 struct Readme;
 
 mod error;
+mod extraction;
 mod fit;
 mod grip;
 mod grip_plan;
@@ -85,6 +86,7 @@ mod segment;
 mod threads;
 mod view;
 
+pub use extraction::Extraction;
 pub use grip::{GripWorlds, Gripped};
 pub use grip_plan::{
     GripCandidate, GripFailure, GripOutcome, GripPlan, GripPlans, GripSearch, GripStop, GripTarget,

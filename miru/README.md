@@ -154,6 +154,12 @@ has them as a program; per camera:
    name it, as flags (`scene.labels[view].iter().map(|label| *label == Label::Object(object)).collect()`),
    go to `Surface::from_depth(&device, &image, &flags, Some(&robot), radius)`, the views joined.
 
+For a pick out of an open container, `kept.extractions(id, margin)` gives each visible opening
+that contains the body's measured footprint. Its lift takes the body's lowest point above the
+lip by the requested margin, along the opening axis. An absent or unseen target gives an empty
+list. Use `kept.is_current(&memory)` when planning from a memory that may have advanced, and
+check the requested lift through the ordinary pick planner.
+
 What the robot did is said once (`Act`): a pick puts the thing into a hand, which every mask then
 holds, and frees the map where a thing that was not solid stood; what stood on it leaves the
 objects with it and is in no memory until a look finds it ("Where it stands"). A let-go puts it
@@ -257,7 +263,10 @@ fingers may touch while grasping; `grasp` is the hand pose in that obstacle's fr
 the rim of a bowl leaves the opposite rim, the fingers' approach to it, other objects and any
 unattributed cells subject to collision checks. The local room uses finer voxels near the hand:
 current rays may resolve the contents of a coarse cell, while old material lacking a fresh
-reading and space no camera saw through stay in the residual collision world.
+reading and space no camera saw through stay in the residual collision world. A hollow
+object carries cells hit by its labelled pixels, including surface cells beside the central
+ray of a pixel. A cell whose volume also meets a differently labelled reading stays in the
+collision world throughout the lift.
 
 For a pick, give `Pick` the result's `part`, `grasp` and `body`. A body is available only
 when no other perceived object stands on the target. Its shape covers the whole object,

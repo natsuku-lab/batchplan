@@ -59,11 +59,19 @@ pub struct GripWorlds<'a> {
     index: usize,
     base: Planned,
     maps: Vec<OccupancyMap>,
+    coarse: Option<Attributed>,
     mine: Vec<Vec3>,
     other: Vec<Vec3>,
     views: Vec<(DepthImage<'a>, Option<&'a RobotMask>)>,
     fixtures: Vec<(usize, Obstacle)>,
     divisions: u32,
+}
+
+/// The coarse region before choosing which hand-sized window to refine.
+#[derive(Debug)]
+struct Attributed {
+    stationary: OccupancyMap,
+    moving: Option<OccupancyMap>,
 }
 
 impl Observed {
@@ -204,11 +212,25 @@ impl Observed {
         } else {
             maps.push(memory.map.fused.part(&cover, memory.padding)?);
         }
-        let views = self
+        let views: Vec<_> = self
             .kept
             .views()
             .map(|(image, mask, _)| (image, Some(mask)))
             .collect();
+        let coarse = if object.solid {
+            None
+        } else {
+            let images: Vec<_> = views.iter().map(|(image, mask)| (image, *mask)).collect();
+            let mut stationary = maps[0].clone();
+            let moving = stationary.take_surfaces(
+                device,
+                &images,
+                |v, i| self.kept.scene().labels[v][i] == Label::Object(index),
+                memory.padding,
+                |_, _| true,
+            )?;
+            Some(Attributed { stationary, moving })
+        };
         let supports: Vec<_> = memory
             .standing(index)
             .into_iter()
@@ -231,6 +253,7 @@ impl Observed {
             index,
             base: scene,
             maps,
+            coarse,
             mine,
             other,
             views,
@@ -298,11 +321,8 @@ impl GripWorlds<'_> {
         let mut other_parts = vec![];
         let mut pieces = vec![];
         for source in &self.maps {
-            let mut owner = source.clone();
             let mut bound = None;
-            let mut local = if object.solid {
-                owner
-            } else {
+            let mut local = if let Some(coarse) = &self.coarse {
                 // The coarse grid can grow toward the hand by two voxel diagonals. Refine
                 // the whole volume its spheres check out to that distance and the margin.
                 let halo = 2.0 * 3f32.sqrt() * voxel + IkOptions::default().collision.margin;
@@ -314,24 +334,27 @@ impl GripWorlds<'_> {
                     upper = upper.max(p + (sphere.radius + halo));
                 }
                 let region = Obstacle::cuboid((lower + upper) * 0.5, (upper - lower) * 0.5);
-                let local = owner.part(&region, 0.0)?;
+                let local = source.part(&region, 0.0)?;
                 // A selected coarse cube can extend a diagonal past the box.
                 bound = Some(Obstacle::cuboid(
                     (lower + upper) * 0.5,
                     (upper - lower) * 0.5 + 2.0 * crate::memory::voxel_reach(voxel),
                 ));
-                owner.free(&region, crate::memory::voxel_reach(voxel))?;
-                if let Some(outside) =
-                    owner.take_readings(&self.mine, &self.other, memory.padding, |_, _| true)?
-                {
-                    other_parts.push(add_map(
-                        device,
-                        &mut scene,
-                        &outside,
-                        Occlusion::Free,
-                        Of::Object(id),
-                    )?);
+                let radius = crate::memory::voxel_reach(voxel);
+                if let Some(mut outside) = coarse.moving.clone() {
+                    outside.free(&region, radius)?;
+                    if outside.counts().occupied > 0 {
+                        other_parts.push(add_map(
+                            device,
+                            &mut scene,
+                            &outside,
+                            Occlusion::Free,
+                            Of::Object(id),
+                        )?);
+                    }
                 }
+                let mut owner = coarse.stationary.clone();
+                owner.free(&region, radius)?;
                 let counts = owner.counts();
                 if counts.occupied + counts.unobserved > 0 {
                     add_map(
@@ -343,25 +366,40 @@ impl GripWorlds<'_> {
                     )?;
                 }
                 local.refined(device, &views, self.divisions)?
+            } else {
+                source.clone()
             };
-            if let Some(part) =
-                local.take_readings(&self.mine, &self.other, memory.padding, |p, r| {
-                    g.closes_on(hand, self.loaded_opening, p, r)
-                })?
-            {
-                pieces.push(part);
-            }
-            if !object.solid
-                && let Some(outside) =
-                    local.take_readings(&self.mine, &self.other, memory.padding, |_, _| true)?
-            {
-                other_parts.push(add_map(
-                    device,
-                    &mut scene,
-                    &outside,
-                    Occlusion::Free,
-                    Of::Object(id),
-                )?);
+            let closes = |p, r| g.closes_on(hand, self.loaded_opening, p, r);
+            if object.solid {
+                if let Some(part) =
+                    local.take_readings(&self.mine, &self.other, memory.padding, closes)?
+                {
+                    pieces.push(part);
+                }
+            } else if let Some(mut material) = local.take_surfaces(
+                device,
+                &views,
+                |view, pixel| {
+                    self.observed.kept.scene().labels[view][pixel] == Label::Object(index)
+                },
+                memory.padding,
+                |_, _| true,
+            )? {
+                let readings = material.occupied();
+                if let Some(part) =
+                    material.take_readings(&readings, &[], memory.padding, closes)?
+                {
+                    pieces.push(part);
+                }
+                if material.counts().occupied > 0 {
+                    other_parts.push(add_map(
+                        device,
+                        &mut scene,
+                        &material,
+                        Occlusion::Free,
+                        Of::Object(id),
+                    )?);
+                }
             }
             let counts = local.counts();
             if counts.occupied + counts.unobserved > 0 {

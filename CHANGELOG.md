@@ -10,6 +10,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- `Kept::extractions` reports the straight lift that clears a measured open container at the
+  object's observed attitude and a caller-specified margin.
+
 - `grasps_on_with_capacity` accepts a maximum graspable width separate from the loaded pad gap.
   It checks the fully open hand and, for symmetric sliding jaws, commandable partial openings.
   `Robot::parallel_jaw_opening` checks this model against the calibrated stroke and joint locks.
@@ -476,6 +479,13 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   64), are fitted as before.
 
 ### Fixed
+
+- Measured grasps of hollow objects now attribute the area of a depth pixel as well as its
+  endpoint. A voxel also hit by another surface stays in the collision world during lift.
+
+- Miru can separate a bowl wall from an adjacent drawer edge in a depth view where both were
+  assigned to one surface. It checks the visible rim and follows the measured wall, including
+  projecting lips and spouts.
 
 - A plan with a `time_budget` longer than the clock counts (`Duration::MAX`) panicked on adding
   it to the time; it now has no deadline. A plan whose search had `RrtOptions::max_iterations`
