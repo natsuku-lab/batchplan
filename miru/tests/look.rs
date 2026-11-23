@@ -5942,3 +5942,136 @@ fn a_ledge_along_a_wall_is_no_floor_and_the_room_ends_at_it() {
     assert!(in_room(Vec3::new(0.5, -0.03, 0.02)), "{ledged:?}");
     assert!(!in_room(Vec3::new(0.5, 0.07, 0.04)), "{ledged:?}");
 }
+
+/// A faceted ceramic bowl inside a drawer whose stepped front hides part of the bowl's wall.
+#[test]
+fn a_bowl_in_a_drawer_owns_its_wall_and_leaves_the_drawer() {
+    let origin = Vec3::new(0.74515, -0.13, 0.15056);
+    let profile = [
+        (0.0, 0.007),
+        (0.016, 0.007),
+        (0.026, 0.010),
+        (0.035, 0.015),
+        (0.039, 0.020),
+        (0.044, 0.030),
+        (0.047, 0.039),
+        (0.051, 0.047),
+        (0.054, 0.051),
+        (0.055, 0.052),
+        (0.056, 0.051),
+        (0.054, 0.047),
+        (0.051, 0.040),
+        (0.047, 0.030),
+        (0.043, 0.020),
+        (0.039, 0.015),
+        (0.032, 0.010),
+        (0.025, 0.005),
+        (0.024, 0.001),
+        (0.021, 0.000),
+        (0.020, 0.001),
+        (0.000, 0.005),
+    ];
+    let side = std::f32::consts::TAU / 24.0;
+    let bowl = Thing {
+        color: [64; 3],
+        solid: None,
+        distance: Box::new(move |p| {
+            let w = p - origin;
+            let angle = (w.y.atan2(w.x) - 0.04).rem_euclid(side) - 0.5 * side;
+            let r = w.truncate().length() * angle.cos();
+            let point = Vec2::new(r, w.z);
+            profile
+                .windows(2)
+                .map(|ab| {
+                    let at = |(radius, z)| Vec2::new(radius * (0.5 * side).cos(), z);
+                    let start = at(ab[0]);
+                    let span = at(ab[1]) - start;
+                    let along = ((point - start).dot(span) / span.length_squared()).clamp(0.0, 1.0);
+                    (point - start - span * along).length()
+                })
+                .fold(f32::INFINITY, f32::min)
+        }),
+    };
+    let boards = [
+        ((-0.0036, -0.0695, 0.0259), (0.111, 0.0038, 0.0351)),
+        ((-0.0036, -0.0628, 0.0259), (0.1085, 0.003, 0.0336)),
+        ((-0.0036, 0.097, 0.0259), (0.1085, 0.003, 0.0336)),
+        ((0.103, 0.017, 0.0259), (0.003, 0.08, 0.0336)),
+        ((-0.111, 0.017, 0.0259), (0.003, 0.08, 0.0336)),
+        ((-0.0036, 0.017, -0.0035), (0.1085, 0.083, 0.004)),
+    ];
+    let drawer = Thing {
+        color: [64; 3],
+        solid: None,
+        distance: Box::new(move |p| {
+            let yaw = 0.42542091_f32.atan2(-0.90499561);
+            let at = Quat::from_rotation_z(-yaw) * (p - origin);
+            boards
+                .iter()
+                .map(|&(c, h)| {
+                    let d = (at - Vec3::from(c)).abs() - Vec3::from(h);
+                    d.max(Vec3::ZERO).length() + d.max_element().min(0.0)
+                })
+                .fold(f32::INFINITY, f32::min)
+        }),
+    };
+    let floor = block(
+        Vec3::new(0.5, 0.0, -0.032),
+        Vec3::new(0.6, 0.6, 0.020),
+        [64; 3],
+    );
+    let fixtures = [known(&floor)];
+    let pose = batchplan::Pose::new(
+        Vec3::new(1.318613, 0.0, 0.69835),
+        Quat::from_xyzw(0.6380177, 0.6380177, -0.30484983, -0.30484983),
+    );
+    let k = batchplan::Intrinsics {
+        fx: 579.4113,
+        fy: 579.4113,
+        cx: 189.5,
+        cy: 94.5,
+    };
+    let mut frame = Frame::through(&[floor, bowl, drawer], pose, k, (240, 200));
+    frame.noise = Noise {
+        quadratic: 0.002761424,
+        ..REAL
+    };
+    let scene = looked(
+        &Look {
+            views: &[frame.view()],
+            known: &fixtures,
+        },
+        &Scene::default(),
+        &LookOptions::default(),
+    );
+    let mut owners = BTreeMap::new();
+    for (shown, label) in frame.shows.iter().zip(&scene.labels[0]) {
+        if *shown == Some(1)
+            && let Label::Object(owner) = label
+        {
+            *owners.entry(*owner).or_insert(0usize) += 1;
+        }
+    }
+    let (&owner, &count) = owners
+        .iter()
+        .max_by_key(|(_, count)| *count)
+        .expect("visible bowl");
+    assert!(
+        100 * count >= 99 * pixels(&frame, 1),
+        "one owner must cover the visible bowl, got {owners:?}"
+    );
+    assert!(
+        pixels(&frame, 2) > 12000,
+        "the drawer fills the background behind the rim"
+    );
+    let drawer = frame
+        .shows
+        .iter()
+        .zip(&scene.labels[0])
+        .filter(|(shown, label)| **shown == Some(2) && **label == Label::Object(owner))
+        .count();
+    assert_eq!(
+        drawer, 0,
+        "the bowl owner's pixels include the drawer front"
+    );
+}
