@@ -1,7 +1,6 @@
 //! Straight lifts out of openings measured in the same look as the object.
 
-use batchplan::Pose;
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 
 use crate::error::{Result, ensure_input};
 use crate::memory::Kept;
@@ -61,6 +60,7 @@ impl Kept {
 
 fn lift_out(container: &Shape, body: &Shape, margin: f32) -> Option<Vec3> {
     let Shape::OpenBox {
+        center,
         half_extents,
         rotation,
         ..
@@ -68,34 +68,42 @@ fn lift_out(container: &Shape, body: &Shape, margin: f32) -> Option<Vec3> {
     else {
         return None;
     };
-    let Pose {
-        position,
-        rotation: local,
-    } = container.pose().inverse().mul_pose(body.pose());
-    let extent = |axis: Vec3| {
-        let direction = local.inverse() * axis;
+    let pose = body.pose();
+    let axes = rotation.as_dquat().normalize();
+    let position = axes.inverse() * (pose.position.as_dvec3() - center.as_dvec3());
+    let into_body = pose.rotation.as_dquat().normalize().inverse() * axes;
+    let extent = |axis: DVec3| {
+        let direction = into_body * axis;
         match *body {
             Shape::Cuboid { half_extents, .. } | Shape::OpenBox { half_extents, .. } => {
-                direction.abs().dot(half_extents)
+                direction.abs().dot(half_extents.as_dvec3())
             }
             Shape::Cylinder {
                 radius,
                 half_height,
                 ..
-            } => radius * direction.truncate().length() + half_height * direction.z.abs(),
+            } => {
+                f64::from(radius) * direction.truncate().length()
+                    + f64::from(half_height) * direction.z.abs()
+            }
         }
     };
-    let half = Vec3::new(extent(Vec3::X), extent(Vec3::Y), extent(Vec3::Z));
+    let half = DVec3::new(extent(DVec3::X), extent(DVec3::Y), extent(DVec3::Z));
     let (floor, upper) = container.room();
     let bottom = position - half;
     let top = position + half;
-    let inside =
-        bottom.cmpge(floor).all() && top.truncate().cmple(upper).all() && bottom.z < half_extents.z;
-    inside.then(|| rotation * Vec3::Z * (half_extents.z - bottom.z + margin))
+    // A body flush with a face can land on either side by the roundoff of the frame change.
+    let roundoff = 32.0 * f64::EPSILON * (position.abs() + half).max_element();
+    let lip = f64::from(half_extents.z);
+    let inside = bottom.cmpge(floor.as_dvec3() - roundoff).all()
+        && top.truncate().cmple(upper.as_dvec2() + roundoff).all()
+        && bottom.z < lip - roundoff;
+    inside.then(|| (axes * DVec3::Z * (lip - bottom.z + f64::from(margin))).as_vec3())
 }
 
 #[cfg(test)]
 mod tests {
+    use batchplan::Pose;
     use glam::{Quat, Vec2};
 
     use super::*;
@@ -120,7 +128,8 @@ mod tests {
         let expected = 0.04 + 0.03 * tilt.sin() + 0.018 * tilt.cos() + 0.005;
         let lift = lift_out(&container, &body, 0.005).expect("the cylinder lies inside");
         assert!(lift.distance(rotation * Vec3::Z * expected) < 1e-6);
-        for offset in [Vec3::X * 0.075, -Vec3::Z * 0.1, Vec3::Z * 0.1] {
+        let just_below_floor = -0.035 + 0.03 * tilt.sin() + 0.018 * tilt.cos() - 1e-6;
+        for offset in [Vec3::X * 0.075, Vec3::Z * just_below_floor, Vec3::Z * 0.1] {
             let pose = body.pose();
             let outside = body.placed(Pose::new(pose.position + rotation * offset, pose.rotation));
             assert!(lift_out(&container, &outside, 0.005).is_none(), "{offset}");
