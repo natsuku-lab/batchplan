@@ -813,17 +813,6 @@ fn grasped(memory: &Memory, id: u32) -> Held {
     }
 }
 
-/// The box as the hand holds it at `q` as `held` does: where its frame lies, the hand's frame at
-/// `held.grasp` in it.
-fn box_in_hand(robot: &Robot, q: &[f32], held: &Held) -> Thing {
-    let at = robot.ee_pose(q, held.hand).mul_pose(held.grasp.inverse());
-    common::turned(
-        block(at.position, BOX_HALF, [200, 30, 30]),
-        at.position,
-        at.rotation,
-    )
-}
-
 /// The id of the object of `memory`, after a look whose scene is `scene`, that holds the most of
 /// thing `thing`'s pixels.
 fn id_of(scene: &Scene, rendered: &[Frame; 2], thing: usize) -> Option<u32> {
@@ -880,14 +869,34 @@ fn a_picked_thing_in_the_hand_is_no_object() {
     let away = robot.default_q();
     let things = acts_scene(&robot, away, Some(BOX), None, None);
     let rendered = render(&things);
+    // The grasp is oblique to both sides, whichever one the fitted box names as its x axis.
+    let hand_in_box = Pose::new(
+        Vec3::new(0.0, 0.0, -0.02),
+        Quat::from_rotation_z(std::f32::consts::FRAC_PI_4),
+    );
+    let hand_at_pick = Pose::new(BOX, Quat::IDENTITY).mul_pose(hand_in_box);
+    let carried = robot
+        .ee_pose(&OVER_THE_CAN, 0)
+        .mul_pose(hand_in_box.inverse());
+    let holding = common::turned(
+        block(carried.position, BOX_HALF, [200, 30, 30]),
+        carried.position,
+        carried.rotation,
+    );
+    let lifted = acts_scene(&robot, &OVER_THE_CAN, None, None, Some(holding));
+    let arm = lifted.len() - 2;
     let mut found = vec![];
     for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
         let seen = first_look(&device, &things, &rendered, (c, 10 * c as u64), away, 0.0);
-        let Some(id) = id_of(seen.kept.scene(), &rendered, 1) else {
+        let scene = seen.kept.scene();
+        let Some(index) = holder(scene, &rendered, 1) else {
             found.push((*camera, Err("no object holds the box".to_string())));
             continue;
         };
-        let held = grasped(&seen.memory, id);
+        let object = &scene.objects[index];
+        let id = object.id;
+        let mut held = grasped(&seen.memory, id);
+        held.grasp = cover(&object.shape).pose().inverse().mul_pose(hand_at_pick);
         let picked = (seen.memory)
             .after(&[Act::Picked {
                 id,
@@ -898,12 +907,9 @@ fn a_picked_thing_in_the_hand_is_no_object() {
         if picked.held(0) != Some((id, &held)) || picked.objects().iter().any(|o| o.id == id) {
             wrong.push("the hand does not hold the box alone".to_string());
         }
-        let holding = box_in_hand(&robot, &OVER_THE_CAN, &held);
-        let things = acts_scene(&robot, &OVER_THE_CAN, None, None, Some(holding));
-        let arm = things.len() - 2;
         let (rendered, after) = second_look(
             &device,
-            &things,
+            &lifted,
             arm,
             (c, 10 * c as u64 + 5),
             &OVER_THE_CAN,
