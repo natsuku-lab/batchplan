@@ -15,7 +15,7 @@
 //!    Wallner, "Line geometry for 3D shape understanding and reconstruction", ECCV 2004), and
 //!    kept where each part's normals miss it by no more than its planes' own errors make of
 //!    them.
-//! 3. **One circle** ([`Shell::one_circle`]). About that axis the two edges lie on one circle,
+//! 3. **One circle** ([`Shell::wall`]). About that axis the two edges lie on one circle,
 //!    at one radius and one height: the rim.
 //! 4. **A shell** ([`Shell::faces`]). The part in front faces away from the axis and the part
 //!    behind toward it, as a wall's outside and its inside do.
@@ -35,6 +35,19 @@ use glam::{DMat3, DVec3};
 use super::{NONE, Planes};
 use crate::view::{SIGMAS, Seen};
 
+/// A common rim between the inside of a shell and all or part of its outside.
+pub(super) struct Join {
+    pub(super) outside: u32,
+    pub(super) inside: u32,
+    pub(super) wall: Wall,
+}
+
+/// The outside readings that can be attributed to the shell.
+pub(super) enum Wall {
+    Whole,
+    Pixels(Vec<usize>),
+}
+
 /// The pairs of parts that are the outside and the inside of one round hollow thing. `of` says
 /// each pixel's part, of `count` parts; `on_shape` whether a part is of readings on a known
 /// shape, which no part of readings on none is made one with, so neither of a pair is; `width`
@@ -48,7 +61,7 @@ pub(super) fn shells(
     on_shape: &dyn Fn(u32) -> bool,
     width: &dyn Fn(usize) -> f32,
     hidden: &[(usize, usize)],
-) -> Vec<(u32, u32)> {
+) -> Vec<Join> {
     // Per part in front, of readings on no shape, and part behind (`NONE` for a reading in no
     // part), the readings in front along their border.
     let mut edges: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
@@ -89,13 +102,12 @@ pub(super) fn shells(
     }
 
     let surface = |part: u32| surfaces[part as usize].as_ref().expect("a candidate's");
-    let is_shell = |&(outside, inside, near, ref far): &(u32, u32, &[usize], Vec<usize>)| {
+    let join = |&(outside, inside, near, ref far): &(u32, u32, &[usize], Vec<usize>)| {
+        let (a, b) = (outside, inside);
         let outer_edges = edges.range((outside, 0)..=(outside, u32::MAX));
         let silhouette = outer_edges.flat_map(|(_, edge)| edge.iter().copied());
         let (outside, inside) = (surface(outside), surface(inside));
-        let Some(axis) = outside.lines.with(&inside.lines).axis() else {
-            return false;
-        };
+        let axis = outside.lines.with(&inside.lines).axis()?;
         let shell = Shell {
             seen,
             planes,
@@ -103,16 +115,26 @@ pub(super) fn shells(
             axis,
         };
         // The circle first: it is asked of the edges alone, and few pairs have it.
-        shell.one_circle(near, far, silhouette)
-            && shell.turns(&outside.readings)
+        let wall = shell.wall(near, far, silhouette, of, a)?;
+        let selected;
+        let readings = match &wall {
+            Wall::Whole => &outside.readings,
+            Wall::Pixels(pixels) => {
+                selected = pixels.iter().copied().filter(|&i| planes.has[i]).collect();
+                &selected
+            }
+        };
+        (shell.turns(readings)
             && shell.turns(&inside.readings)
-            && shell.faces(&outside.readings, /* away */ true)
-            && shell.faces(&inside.readings, /* away */ false)
+            && shell.faces(readings, /* away */ true)
+            && shell.faces(&inside.readings, /* away */ false))
+        .then_some(Join {
+            outside: a,
+            inside: b,
+            wall,
+        })
     };
-    let shells = candidates.iter().filter(|candidate| is_shell(candidate));
-    shells
-        .map(|&(outside, inside, ..)| (outside, inside))
-        .collect()
+    candidates.iter().filter_map(join).collect()
 }
 
 /// The share one reading is of a window `width` pixels wide: the readings of one window share
@@ -138,25 +160,28 @@ struct Shell<'a> {
 }
 
 impl Shell<'_> {
-    /// Whether the two edges `near` and `far` lie on one circle about the axis: more than half
-    /// of each edge, a window's width at least.
+    /// The outside that turns into the inside where the two edges lie on one circle about the
+    /// axis. More than half of each edge, a window's width at least, must lie on that circle.
     ///
     /// The circle is the one at the middle radius and the middle height of all their readings,
     /// so that of the longer edge where the two differ. A reading lies on it within three
     /// deviations of its depth and half a window's width: the two edges of a rim may lie that
     /// far apart, half of what a rim can be wide before it shows as a surface with planes of
     /// its own.
-    fn one_circle(
+    fn wall(
         &self,
         near: &[usize],
         far: &[usize],
         silhouette: impl Iterator<Item = usize>,
-    ) -> bool {
+        of: &[u32],
+        part: u32,
+    ) -> Option<Wall> {
         let (seen, eye) = (self.seen, self.seen.eye());
         let place = |&i: &usize| {
             let (out, up) = self.axis.around((seen.points[i] - eye).as_dvec3());
             (out.length(), up)
         };
+        let reach = |i| f64::from(0.5 * (self.width)(i) * seen.spacing(i) + SIGMAS * seen.sigma(i));
         let middle = |mut values: Vec<f64>| {
             values.sort_unstable_by(f64::total_cmp);
             values[values.len() / 2]
@@ -171,31 +196,87 @@ impl Shell<'_> {
             for &i in edge {
                 let (around, up) = place(&i);
                 let window = (self.width)(i);
-                let reach = f64::from(0.5 * window * seen.spacing(i) + SIGMAS * seen.sigma(i));
+                let slack = reach(i);
                 all += 1.0 / window;
-                if (around - radius).abs() <= reach && (up - height).abs() <= reach {
+                if (around - radius).abs() <= slack && (up - height).abs() <= slack {
                     on += 1.0 / window;
                 }
             }
             on >= 1.0 && 2.0 * on > all
         });
-        // A silhouette extending past that circle at its height belongs to more than this wall.
+        // A projecting edge can be a lip or spout. Follow the measured wall from its rim
+        // before testing whether a separate edge is compatible with a concentric outer lip.
         if !shared {
-            return false;
+            return None;
         }
-        let mut past = 0.0;
+        let mut beyond = Vec::new();
+        let mut length = 0.;
         for i in silhouette {
             let (around, up) = place(&i);
             let window = (self.width)(i);
-            let reach = f64::from(0.5 * window * seen.spacing(i) + SIGMAS * seen.sigma(i));
-            if (up - height).abs() <= reach && around > radius + reach {
-                past += 1.0 / window;
-                if past >= 1.0 {
-                    return false;
+            let slack = reach(i);
+            if (up - height).abs() <= slack && around > radius + slack {
+                length += 1.0 / window;
+                beyond.push(i);
+            }
+        }
+        if length < 1.0 {
+            return Some(Wall::Whole);
+        }
+        let mut reached = vec![false; of.len()];
+        let mut visit = Vec::new();
+        for &i in near {
+            let (r, h) = place(&i);
+            let slack = reach(i);
+            if (r - radius).abs() > slack || (h - height).abs() > slack {
+                continue;
+            }
+            reached[i] = true;
+            visit.push(i);
+        }
+        while let Some(i) = visit.pop() {
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    let Some(j) = seen.step(i, (dx, dy)) else {
+                        continue;
+                    };
+                    if reached[j] || of[j] != part {
+                        continue;
+                    }
+                    let delta = (seen.inverse[i] - seen.inverse[j]).abs();
+                    let slack = SIGMAS * seen.spread(i).hypot(seen.spread(j));
+                    if delta <= slack {
+                        reached[j] = true;
+                        visit.push(j);
+                    }
                 }
             }
         }
-        true
+        let separate: Vec<_> = beyond.into_iter().filter(|&i| !reached[i]).collect();
+        if separate.is_empty() {
+            return Some(Wall::Whole);
+        }
+        // A rolled lip can hide its join to the wall while showing its own outer circle.
+        let outer_radius = middle(separate.iter().map(|i| place(i).0).collect());
+        let mut off = 0.0;
+        for i in separate {
+            let window = (self.width)(i);
+            let slack = reach(i);
+            if (place(&i).0 - outer_radius).abs() > slack {
+                off += 1.0 / window;
+            }
+        }
+        if off < 1.0 {
+            Some(Wall::Whole)
+        } else {
+            Some(Wall::Pixels(
+                reached
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, ok)| ok.then_some(i))
+                    .collect(),
+            ))
+        }
     }
 
     /// Whether the planes of `readings`, one part's, are of a surface that turns about the

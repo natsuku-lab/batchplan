@@ -346,9 +346,20 @@ pub(crate) fn parts(seen: &Seen, masks: &[u32], threads: usize) -> Parts {
         &width,
         &sides.hidden,
     );
-    for (a, b) in shells {
+    let mut split = false;
+    for join in shells {
+        let (a, b) = (join.outside, join.inside);
         let apart = |a: u32, b: u32| a != 0 && b != 0 && a != b;
         if !apart(lies[a as usize], lies[b as usize]) {
+            if let round::Wall::Pixels(pixels) = join.wall {
+                for i in pixels {
+                    if of[i] == a {
+                        of[i] = b;
+                    }
+                }
+                split = true;
+                continue;
+            }
             let (a, b) = (find(&mut first, a), find(&mut first, b));
             first[a.max(b) as usize] = a.min(b);
         }
@@ -358,6 +369,13 @@ pub(crate) fn parts(seen: &Seen, masks: &[u32], threads: usize) -> Parts {
             *part = find(&mut first, *part);
         }
     }
+
+    // A reassigned wall has its own border with the surface it came from.
+    let sides = if split {
+        borders(&walker, &planes, &of, &surface, masks, &width)
+    } else {
+        sides
+    };
 
     // The parts, numbered as the rows meet them.
     let mut renumbered = vec![NONE; all as usize];
