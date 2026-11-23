@@ -10,6 +10,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- Picks and moving turns accept the collision sphere fit for the object they carry through
+  `TaskOptions::held_spheres`. A pick returns the same fit for the following place.
+  **Breaking:** Rust literals that list every field of `TaskOptions` need `held_spheres`.
+
 - `grasps_on_with_capacity` accepts a maximum graspable width separate from the loaded pad gap.
   It checks the fully open hand and, for symmetric sliding jaws, commandable partial openings.
   `Robot::parallel_jaw_opening` checks this model against the calibrated stroke and joint locks.

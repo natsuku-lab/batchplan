@@ -37,6 +37,7 @@ use crate::error::{Result, ensure_input, input};
 use crate::held::{self, Fitted, Held};
 use crate::ik::{self, IkFailure, IkOptions, IkProblem, IkResult};
 use crate::robot::Robot;
+use crate::spheres::SphereOptions;
 use crate::timing::{HandSpeed, Near, Trajectory};
 use crate::tool_path::{self, ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop};
 use crate::trajopt::{self, PlanOptions, PlanProblem};
@@ -292,6 +293,10 @@ impl Place {
 /// and time their steps.
 #[derive(Clone, Debug)]
 pub struct TaskOptions {
+    /// Collision spheres for the carried object created by a pick or a moving turn. A larger
+    /// budget and smaller tolerance can fit closer to narrow walls. The returned hold keeps
+    /// the same options when passed to a place. Defaults to [`SphereOptions::default`].
+    pub held_spheres: SphereOptions,
     /// IK at each grasp or release.
     pub ik: IkOptions,
     /// The planned paths from the start. `start_tolerance` applies to the task's initial
@@ -329,6 +334,7 @@ impl TaskOptions {
 impl Default for TaskOptions {
     fn default() -> Self {
         Self {
+            held_spheres: SphereOptions::default(),
             ik: IkOptions::default(),
             plan: PlanOptions::default(),
             tool_path: ToolPathOptions::default(),
@@ -911,7 +917,7 @@ fn picked(
     if !departing.is_empty() {
         let mut alike: Vec<(Held, Vec<&mut Candidate>)> = vec![];
         for c in departing {
-            let holding = held(&tasks[c.task], worlds, c.index);
+            let holding = held(&tasks[c.task], worlds, c.index, o.held_spheres);
             match alike.iter_mut().find(|(h, _)| *h == holding) {
                 Some((_, group)) => group.push(c),
                 None => alike.push((holding, vec![c])),
@@ -987,7 +993,10 @@ fn picked(
     )?;
 
     let outcomes = choose(device, tasks.len(), &candidates, o, |c| {
-        (Some(held(&tasks[c.task], worlds, c.index)), None)
+        (
+            Some(held(&tasks[c.task], worlds, c.index, o.held_spheres)),
+            None,
+        )
     })?;
     Ok(TaskResult {
         problems: tasks.to_vec(),
@@ -2292,7 +2301,7 @@ pub(crate) fn fingers(robot: &Robot, hand: usize) -> Vec<&str> {
 }
 
 /// What `task`'s grasp `index` leaves the hand holding.
-fn held(task: &Pick, worlds: &Worlds, index: usize) -> Held {
+fn held(task: &Pick, worlds: &Worlds, index: usize, spheres: SphereOptions) -> Held {
     let part = &worlds[task.world as usize].obstacles[task.object];
     let (shape, grasp) = match &task.body {
         Some(body) => (
@@ -2310,7 +2319,7 @@ fn held(task: &Pick, worlds: &Worlds, index: usize) -> Held {
         hand: task.hand,
         object: shape.placed(Pose::IDENTITY),
         grasp,
-        spheres: Default::default(),
+        spheres,
     }
 }
 
@@ -2335,6 +2344,7 @@ pub(crate) fn check_poses(i: usize, what: &str, poses: &[Pose]) -> Result<()> {
 }
 
 pub(crate) fn check_options(o: &TaskOptions) -> Result<()> {
+    o.held_spheres.check().map_err(crate::Error::Input)?;
     ensure_input!(
         o.tool_speed > 0.0,
         "the tool speed must be positive, got {}",
@@ -3033,7 +3043,7 @@ fn articulated(
                     object: worlds[t.steps.world as usize].obstacles[t.object]
                         .placed(Pose::IDENTITY),
                     grasp: t.grasps[c.index],
-                    spheres: Default::default(),
+                    spheres: o.held_spheres,
                 };
                 grips.push((held, vec![i]));
             }

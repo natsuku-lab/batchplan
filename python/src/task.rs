@@ -85,6 +85,8 @@ value_class! {
 value_class! {
     /// How `pick`, `place`, `handover` and `turn` solve, follow, plan and time their steps.
     TaskOptions(batchplan::TaskOptions) {
+        /// Sphere fit for objects carried by a pick or a moving turn.
+        held_spheres: batchplan::SphereOptions,
         /// IK at each grasp or release.
         ik: batchplan::IkOptions,
         /// The planned paths from the start; start_tolerance also corrects the task's initial
