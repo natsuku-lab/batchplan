@@ -725,6 +725,13 @@ fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
         }
         // The deepest point-clear insertion may put the palm into the collision world.
         // Keep each ranked grasp first, then try shallower insertions on the same patches.
+        let fingertip = |side| {
+            hand.iter()
+                .filter(|s| s.side == side)
+                .map(|s| s.center.z + s.radius)
+                .fold(f32::NEG_INFINITY, f32::max)
+        };
+        let finger_reach = fingertip(-1.0).min(fingertip(1.0));
         let shallower = |g: &Grasp| {
             let mut extra = Vec::new();
             if !g.closes_on(hand, open.gap, point, 0.0) {
@@ -732,7 +739,7 @@ fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
             }
             let toward = g.pose.rotation * Vec3::Z;
             let middle = g.contacts[0].midpoint(g.contacts[1]);
-            let depth = reach - (middle - g.pose.position).dot(toward);
+            let depth = finger_reach - (middle - g.pose.position).dot(toward);
             let mut back = BACK;
             while depth - back >= o.overlap {
                 let pose = Pose::new(g.pose.position - toward * back, g.pose.rotation);

@@ -2326,3 +2326,54 @@ fn refining_approaches_for_a_point_keeps_the_original_grasps_and_closes_on_the_p
         Err(Error::Input(_))
     ));
 }
+
+#[test]
+fn a_long_palm_cannot_supply_the_finger_overlap_of_a_shallower_grasp() {
+    let mut model = common::panda_options();
+    let spheres = &mut model.collision_model.as_mut().unwrap().spheres;
+    spheres
+        .get_mut("panda_hand")
+        .unwrap()
+        .push([0.10, 0.0, 0.16, 0.005]);
+    let robot = batchplan::Robot::load(common::asset("franka/franka_panda.urdf"), &model).unwrap();
+    let device = Device::cpu_threads(&robot, 4).unwrap();
+    let hand = robot.hand_spheres(0);
+    let fingertip = hand
+        .iter()
+        .filter(|s| s.finger)
+        .map(|s| s.center.z + s.radius)
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!(
+        robot.tip(0) > fingertip + 0.04,
+        "the palm extends beyond the fingers"
+    );
+    let options = GraspOptions {
+        turns: 4,
+        close_on: Some(Vec3::new(0.051, 0.01, 0.049)),
+        ..Default::default()
+    };
+    let surface = box_surface(Vec3::new(0.08, 0.01, 0.05), &[]);
+    let grasps = grasps_on(&device, 0, &[surface], &options)
+        .unwrap()
+        .remove(0);
+    let mut alternatives = 0;
+    for (i, g) in grasps.iter().enumerate() {
+        if grasps[..i].iter().any(|before| {
+            before.contacts == g.contacts
+                && before.pose.rotation == g.pose.rotation
+                && before.pose.position != g.pose.position
+        }) {
+            alternatives += 1;
+            let middle = g.contacts[0].midpoint(g.contacts[1]);
+            let insertion = (middle - g.pose.position).dot(g.pose.rotation * Vec3::Z);
+            assert!(
+                fingertip - insertion >= options.overlap - 1e-6,
+                "the palm cannot make up the missing overlap"
+            );
+        }
+    }
+    assert!(
+        alternatives > 0,
+        "the fingers reach more than one insertion"
+    );
+}
