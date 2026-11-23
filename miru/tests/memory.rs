@@ -12,8 +12,8 @@ mod common;
 use std::collections::HashMap;
 
 use batchplan::{
-    DepthFilter, DepthImage, Device, Held, IkOptions, IkProblem, Obstacle, Pose, Robot, RobotMask,
-    SphereOptions, Weighing, World,
+    DepthFilter, DepthImage, Device, GraspOptions, Held, IkOptions, IkProblem, Obstacle, Pose,
+    Robot, RobotMask, SphereOptions, Weighing, World,
 };
 use common::{
     CAMERAS, EYE, Frame, MIDDLE, NEAR, Stereo, Thing, arm, block, bowl, can, devices, known,
@@ -813,17 +813,6 @@ fn grasped(memory: &Memory, id: u32) -> Held {
     }
 }
 
-/// The box as the hand holds it at `q` as `held` does: where its frame lies, the hand's frame at
-/// `held.grasp` in it.
-fn box_in_hand(robot: &Robot, q: &[f32], held: &Held) -> Thing {
-    let at = robot.ee_pose(q, held.hand).mul_pose(held.grasp.inverse());
-    common::turned(
-        block(at.position, BOX_HALF, [200, 30, 30]),
-        at.position,
-        at.rotation,
-    )
-}
-
 /// The id of the object of `memory`, after a look whose scene is `scene`, that holds the most of
 /// thing `thing`'s pixels.
 fn id_of(scene: &Scene, rendered: &[Frame; 2], thing: usize) -> Option<u32> {
@@ -880,14 +869,34 @@ fn a_picked_thing_in_the_hand_is_no_object() {
     let away = robot.default_q();
     let things = acts_scene(&robot, away, Some(BOX), None, None);
     let rendered = render(&things);
+    // The grasp is oblique to both sides, whichever one the fitted box names as its x axis.
+    let hand_in_box = Pose::new(
+        Vec3::new(0.0, 0.0, -0.02),
+        Quat::from_rotation_z(std::f32::consts::FRAC_PI_4),
+    );
+    let hand_at_pick = Pose::new(BOX, Quat::IDENTITY).mul_pose(hand_in_box);
+    let carried = robot
+        .ee_pose(&OVER_THE_CAN, 0)
+        .mul_pose(hand_in_box.inverse());
+    let holding = common::turned(
+        block(carried.position, BOX_HALF, [200, 30, 30]),
+        carried.position,
+        carried.rotation,
+    );
+    let lifted = acts_scene(&robot, &OVER_THE_CAN, None, None, Some(holding));
+    let arm = lifted.len() - 2;
     let mut found = vec![];
     for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
         let seen = first_look(&device, &things, &rendered, (c, 10 * c as u64), away, 0.0);
-        let Some(id) = id_of(seen.kept.scene(), &rendered, 1) else {
+        let scene = seen.kept.scene();
+        let Some(index) = holder(scene, &rendered, 1) else {
             found.push((*camera, Err("no object holds the box".to_string())));
             continue;
         };
-        let held = grasped(&seen.memory, id);
+        let object = &scene.objects[index];
+        let id = object.id;
+        let mut held = grasped(&seen.memory, id);
+        held.grasp = cover(&object.shape).pose().inverse().mul_pose(hand_at_pick);
         let picked = (seen.memory)
             .after(&[Act::Picked {
                 id,
@@ -898,12 +907,9 @@ fn a_picked_thing_in_the_hand_is_no_object() {
         if picked.held(0) != Some((id, &held)) || picked.objects().iter().any(|o| o.id == id) {
             wrong.push("the hand does not hold the box alone".to_string());
         }
-        let holding = box_in_hand(&robot, &OVER_THE_CAN, &held);
-        let things = acts_scene(&robot, &OVER_THE_CAN, None, None, Some(holding));
-        let arm = things.len() - 2;
         let (rendered, after) = second_look(
             &device,
-            &things,
+            &lifted,
             arm,
             (c, 10 * c as u64 + 5),
             &OVER_THE_CAN,
@@ -2588,4 +2594,826 @@ fn a_thing_let_go_stands_on_what_it_was_set_down_on() {
         };
         assert!(why.contains("act 1") && why.contains(&named), "{why}");
     }
+}
+
+/// The wide bowl's rim has measured material between the fingers through every camera.
+#[test]
+fn a_grasp_of_the_rim_separates_its_own_readings() {
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let away = robot.default_q();
+    let things = vec![table(), wide_bowl(MIDDLE), arm(&robot, away)];
+    let rendered = render(&things);
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seen = first_look(&device, &things, &rendered, (c, 10 * c as u64), away, 0.0);
+        let id = id_of(seen.kept.scene(), &rendered, 1).expect("the bowl has an object");
+        let surface = seen
+            .kept
+            .surface(&device, id)
+            .unwrap()
+            .expect("the bowl's surface");
+        let options = batchplan::GraspOptions {
+            turns: 1,
+            shell: Some(0.015),
+            ..Default::default()
+        };
+        let gs = batchplan::grasps_on(&device, 0, &[surface], &options)
+            .unwrap()
+            .remove(0);
+        let g = gs.first().expect("a grasp of the rim");
+        let prepared = seen
+            .grip_worlds(&device, &Step::default(), 0, id, options.opening)
+            .unwrap();
+        // The nearest finger surface is 1 cm above even the highest reading. The coarse
+        // hand window still contains the rim, but there is no material between the pads.
+        let finger_tip = robot
+            .hand_spheres(0)
+            .iter()
+            .filter(|s| s.side != 0.0)
+            .map(|s| s.center.z + s.radius)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let surface = seen.kept.surface(&device, id).unwrap().unwrap();
+        let highest = surface
+            .points
+            .iter()
+            .zip(&surface.object)
+            .filter(|(_, own)| **own)
+            .map(|(p, _)| p.z)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut above = *g;
+        above.pose = Pose::new(
+            Vec3::new(
+                g.contacts[0].x,
+                g.contacts[0].y,
+                highest + 0.01 + finger_tip,
+            ),
+            Quat::from_rotation_x(std::f32::consts::PI),
+        );
+        assert!(
+            prepared.project(&above).unwrap().is_none(),
+            "{camera}: the fingers close in air"
+        );
+        let split = prepared
+            .project(g)
+            .unwrap()
+            .expect("material between the fingers");
+        assert_eq!(split.scene.of[split.part], Of::Gripped(id), "{camera}");
+        assert!(
+            split.scene.world.touch.is_empty(),
+            "the projection adds no touch"
+        );
+        let part = &split.scene.world.obstacles[split.part];
+        assert!(
+            g.contacts
+                .iter()
+                .any(|p| part.distance(*p).value <= GraspOptions::default().contact),
+            "{camera}: its contact is on the selected patch"
+        );
+        let opposite = MIDDLE
+            + Vec3::new(
+                MIDDLE.x - g.contacts[0].x,
+                MIDDLE.y - g.contacts[0].y,
+                g.contacts[0].z,
+            );
+        let wall = split
+            .scene
+            .world
+            .obstacles
+            .iter()
+            .enumerate()
+            .any(|(k, o)| k != split.part && o.distance(opposite).value <= 0.0);
+        assert!(
+            wall,
+            "{camera}: the opposite rim must still collide, at {opposite:?}"
+        );
+        assert!(
+            part.distance(opposite).value > 0.08,
+            "{camera}: only the gripped rim belongs to the part"
+        );
+        let index = seen
+            .memory
+            .objects()
+            .iter()
+            .position(|o| o.id == id)
+            .unwrap();
+        let supporting = seen
+            .memory
+            .objects()
+            .iter()
+            .any(|o| o.on == Some(Support::Object(index)));
+        assert_eq!(
+            split.body.is_none(),
+            supporting,
+            "{camera}: what stands on it prevents a whole-body pick"
+        );
+        if let Some(body) = &split.body {
+            let held = Held {
+                hand: 0,
+                object: body.shape.placed(Pose::IDENTITY),
+                grasp: body
+                    .shape
+                    .pose()
+                    .inverse()
+                    .mul_pose(part.pose().mul_pose(split.grasp)),
+                locked: HashMap::new(),
+                spheres: Default::default(),
+            };
+            let after = seen.picked(&split, &held).unwrap();
+            let next = after.world(&device, &Step::default()).unwrap();
+            let prior = seen
+                .memory
+                .after(&[Act::Picked { id, held }])
+                .unwrap()
+                .world(&device, &Step::default())
+                .unwrap();
+            let lo = MIDDLE - Vec3::new(0.14, 0.14, 0.0);
+            let hi = MIDDLE + Vec3::new(0.14, 0.14, 0.08);
+            let mut preserved = 0;
+            for x in 0..16 {
+                for y in 0..16 {
+                    for z in 0..8 {
+                        let fraction = Vec3::new(x as f32 / 15.0, y as f32 / 15.0, z as f32 / 7.0);
+                        let p = lo + (hi - lo) * fraction;
+                        let retained = split.scene.of.iter().enumerate().any(|(k, of)| {
+                            *of == Of::Region(id)
+                                && !body.other_parts.contains(&k)
+                                && split.scene.world.obstacles[k].distance(p).value <= 0.0
+                        });
+                        if retained
+                            && prior
+                                .world
+                                .obstacles
+                                .iter()
+                                .all(|o| o.distance(p).value > 0.0)
+                        {
+                            assert!(
+                                next.world
+                                    .obstacles
+                                    .iter()
+                                    .any(|o| o.distance(p).value <= 0.0),
+                                "{camera}: the bowl would have cleared residual material at {p:?}"
+                            );
+                            preserved += 1;
+                        }
+                    }
+                }
+            }
+            assert!(
+                preserved > 0,
+                "{camera}: the rim pickup left material in the old room"
+            );
+        }
+    }
+}
+
+/// Two views on opposite sides of the same 4.2 by 5 by 7 cm box and its table. From 30 cm
+/// up the support's readings separate from the box's. From 18 cm up two bottom-edge voxels
+/// hold both and block the lift. The permitted finger contact is identical in both cases.
+#[test]
+fn the_split_world_reaches_a_grip_and_lifts_only_attributable_material() {
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let q = robot.default_q();
+    let things = vec![
+        table(),
+        block(
+            MIDDLE + Vec3::Z * 0.035,
+            Vec3::new(0.021, 0.025, 0.035),
+            [210, 30, 30],
+        ),
+        arm(&robot, q),
+    ];
+    for (height, mixed) in [(0.30, false), (0.18, true)] {
+        let rendered = [-0.28, 0.28].map(|side| {
+            Frame::of(
+                &things,
+                looking(Vec3::new(MIDDLE.x, side, height), MIDDLE + Vec3::Z * 0.04),
+            )
+        });
+        let seen = first_look(&device, &things, &rendered, (0, 0), q, 0.0);
+        let id = id_of(seen.kept.scene(), &rendered, 1).expect("the box has an object");
+        let surface = seen
+            .kept
+            .surface(&device, id)
+            .unwrap()
+            .expect("the box's surface");
+        let options = GraspOptions {
+            turns: 1,
+            ..Default::default()
+        };
+        let gs = batchplan::grasps_on(&device, 0, std::slice::from_ref(&surface), &options)
+            .unwrap()
+            .remove(0);
+        let g = gs.first().expect("the fingers can close on the box");
+        let source = seen
+            .grip_worlds(&device, &Step::default(), 0, id, options.opening)
+            .unwrap();
+        assert!(seen.kept.is_current(&seen.memory));
+        let mut air = *g;
+        air.pose.position.z += 0.3;
+        let candidates = [air, *g, *g];
+        let configure = |c: &mut miru::GripCandidate<'_>| {
+            c.touches.push(batchplan::Touch::new(0, ["panda_link0"]));
+            batchplan::Pick {
+                support: c
+                    .of
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(k, of)| (*of == Of::Known(0)).then_some(k))
+                    .collect(),
+                transit: false,
+                lift: Vec3::Z * 0.08,
+                ..c.pick(q)
+            }
+        };
+        let search = miru::GripSearch {
+            target: Some(miru::GripTarget::Near {
+                point: g.contacts[0].midpoint(g.contacts[1]),
+                radius: 0.0,
+            }),
+            batch: 2,
+            enough: Some(1),
+        };
+        let opts = batchplan::TaskOptions::default();
+        let mut outside = *g;
+        outside.pose.position.x += 5.0;
+        let bounded = seen
+            .grip_worlds(&device, &Step::default(), 0, id, options.opening)
+            .unwrap()
+            .with_reach_bound();
+        let miru::GripOutcome::Complete(rejected) = bounded
+            .plan(
+                &[outside],
+                &search,
+                &opts,
+                || false,
+                |_| -> batchplan::Pick { panic!("a certified rejection needs no projected task") },
+            )
+            .unwrap()
+        else {
+            panic!("an uninterrupted search completes");
+        };
+        assert_eq!(rejected.batches, 0);
+        let invalid = batchplan::TaskOptions {
+            min_fraction: 0.0,
+            ..opts.clone()
+        };
+        assert!(
+            bounded
+                .plan(&[outside], &search, &invalid, || false, configure)
+                .is_err()
+        );
+
+        assert!(
+            matches!(rejected.failures[0].reason, miru::GripStop::OutsideReach { at }
+            if at == outside.pose)
+        );
+        let miru::GripOutcome::Complete(mixed_search) = bounded
+            .plan(&[outside, *g], &search, &opts, || false, configure)
+            .unwrap()
+        else {
+            panic!("an uninterrupted search completes");
+        };
+        assert_eq!(mixed_search.batches, 1);
+        if !mixed {
+            assert_eq!(mixed_search.plans[0].plan.candidate, 1);
+        }
+        let miru::GripOutcome::Complete(mut found) = source
+            .plan(&candidates, &search, &opts, || false, configure)
+            .unwrap()
+        else {
+            panic!("an uninterrupted search completes");
+        };
+        assert_eq!(
+            found.batches, 1,
+            "two projected candidates fit into one batch"
+        );
+        assert_eq!(found.failures[0].candidate, 0);
+        assert!(matches!(found.failures[0].reason, miru::GripStop::NoPart));
+        if mixed {
+            assert!(found.plans.is_empty());
+            assert_eq!(found.failures.len(), candidates.len());
+            let miru::GripStop::Motion { stop, of } = &found.failures[1].reason else {
+                panic!("the mixed boundary stops the departure");
+            };
+            assert_eq!(
+                stop.step,
+                batchplan::TaskStep::Depart,
+                "the grasp and approach were clear"
+            );
+            assert!(
+                stop.contacts.iter().any(|contact| matches!(contact,
+                batchplan::Contact::World { obstacle, .. } if of[*obstacle] == Of::Region(id))),
+                "unattributed boundary material must remain in the lift world"
+            );
+            continue;
+        }
+        let winner = found.plans.pop().expect("a whole pick");
+        assert_eq!(winner.plan.candidate, 1, "the earlier feasible input wins");
+        assert_eq!(winner.grasp.opening, g.opening);
+        let transit = winner.world(batchplan::TaskStep::Transit);
+        let contact = winner.world(batchplan::TaskStep::Approach);
+        let depart = winner.world(batchplan::TaskStep::Depart);
+        assert_eq!(
+            transit.world.touch,
+            [batchplan::Touch::new(0, ["panda_link0"])]
+        );
+        assert_eq!(
+            contact.world.touch[1],
+            batchplan::Touch::new(winner.grip.part, robot.finger_links(0))
+        );
+        assert!(depart.of.iter().all(|of| *of == Of::Known(0)));
+        assert!(
+            depart
+                .of
+                .iter()
+                .enumerate()
+                .all(|(i, _)| depart.world.touch.contains(&batchplan::Touch::held(i, 0)))
+        );
+        let split = winner.grip;
+        let plan = &winner.plan;
+        let body = split.body.as_ref().expect("nothing stands on the box");
+        assert!(
+            !body.other_parts.is_empty(),
+            "the picked part is smaller than the body"
+        );
+
+        // The third candidate would lift the least, but two earlier ones already succeeded.
+        let search = miru::GripSearch {
+            enough: Some(2),
+            batch: 3,
+            target: None,
+        };
+        let miru::GripOutcome::Complete(first_two) = source
+            .plan(
+                &[*g; 3],
+                &search,
+                &opts,
+                || false,
+                |c| {
+                    let mut pick = configure(c);
+                    pick.lift = Vec3::Z * [0.08, 0.04, 0.02][c.index];
+                    pick
+                },
+            )
+            .unwrap()
+        else {
+            panic!("an uninterrupted search completes");
+        };
+        let indices: Vec<_> = first_two.plans.iter().map(|p| p.plan.candidate).collect();
+        assert_eq!(
+            indices,
+            [1, 0],
+            "the first two successes sort by their durations"
+        );
+        assert!(first_two.plans[0].plan.duration() < first_two.plans[1].plan.duration());
+        // A fixed part uses one contact world from the approach through the departure.
+        // The neighboring fixtures and their obstacle numbers persist in every phase.
+        let fixed = miru::GripSearch::default();
+        let miru::GripOutcome::Complete(draw) = source
+            .plan(
+                &[*g],
+                &fixed,
+                &opts,
+                || false,
+                |c| batchplan::Pull {
+                    transit: false,
+                    locked: vec![HashMap::from([("panda_finger_joint1".to_string(), 0.04)])],
+                    ..c.pull(q, Vec3::Z, 0.01)
+                },
+            )
+            .unwrap()
+        else {
+            panic!("a completed search");
+        };
+        assert_eq!(
+            draw.plans[0].locked,
+            HashMap::from([("panda_finger_joint1".to_string(), 0.04)]),
+            "an exact per-joint command survives independently of the nominal opening"
+        );
+        let draw = &draw.plans.first().expect("a full draw along z").plan;
+        assert!(draw.pull.is_some() && draw.turn.is_none() && draw.held.is_none());
+        let miru::GripOutcome::Complete(turn) = source
+            .plan(
+                &[*g],
+                &fixed,
+                &opts,
+                || false,
+                |c| batchplan::Turn {
+                    transit: false,
+                    ..c.turn(
+                        q,
+                        Some(batchplan::Screw {
+                            point: g.pose.position + Vec3::X * 0.04,
+                            direction: Vec3::Z,
+                            pitch: 0.0,
+                        }),
+                        0.01,
+                    )
+                },
+            )
+            .unwrap()
+        else {
+            panic!("a completed search");
+        };
+        let turned = turn
+            .plans
+            .first()
+            .expect("the fixed part allows a small angle");
+        assert!(turned.plan.turn.is_some() && turned.plan.pull.is_none());
+        assert_eq!(
+            turned.world(batchplan::TaskStep::Turn).world.touch,
+            turned.world(batchplan::TaskStep::Depart).world.touch
+        );
+        let point = surface
+            .points
+            .iter()
+            .zip(&surface.object)
+            .find_map(|(p, &own)| {
+                (own && g.closes_on(&robot.hand_spheres(0), options.opening, *p, 0.0)).then_some(*p)
+            })
+            .expect("at least one measured point between both pads");
+        let search = miru::GripSearch {
+            target: Some(miru::GripTarget::Point(point)),
+            batch: 1,
+            enough: Some(2),
+        };
+        let mut invalid = *g;
+        invalid.pose.position.z = f32::NAN;
+        assert!(
+            source
+                .plan(&[invalid], &search, &opts, || false, configure)
+                .is_err(),
+            "a point selector must report invalid source geometry before testing membership"
+        );
+        let queried = std::cell::Cell::new(false);
+        let mut polls_after_config = 0;
+        let cancelled = || {
+            if queried.get() {
+                polls_after_config += 1;
+            }
+            polls_after_config >= 2
+        };
+        let miru::GripOutcome::Interrupted(partial) = source
+            .plan(&candidates, &search, &opts, cancelled, |c| {
+                assert_eq!(
+                    c.index, 1,
+                    "the fingers in air do not close on the asked point"
+                );
+                queried.set(true);
+                configure(c)
+            })
+            .unwrap()
+        else {
+            panic!("a cancellation after the first batch must remain explicit");
+        };
+        assert_eq!(partial.plans.len(), 1);
+        assert!(
+            partial.failures.is_empty(),
+            "the point selector excluded the displaced grasp"
+        );
+        let held = plan.held.as_ref().expect("the pick holds the box");
+        assert_eq!(held.object, body.shape.placed(Pose::IDENTITY));
+        let after = seen.picked(&split, held).unwrap();
+        assert!(!seen.kept.is_current(&after));
+        assert_eq!(after.held(0).expect("a hold").0, id);
+        let next_world = after.world(&device, &Step::default()).unwrap();
+        let fixture_parts = split
+            .scene
+            .of
+            .iter()
+            .filter(|of| **of == Of::Known(0))
+            .count();
+        assert!(
+            fixture_parts > 1,
+            "the box and table had a distinct fixture-only patch"
+        );
+        assert_eq!(
+            next_world
+                .of
+                .iter()
+                .filter(|of| **of == Of::Known(0))
+                .count(),
+            fixture_parts,
+            "the extra fixture cells keep their identity for the next held-only support contact"
+        );
+        assert!(
+            !next_world.of.contains(&Of::Unexplained),
+            "pure table evidence must not leave an unattributed obstacle under the lifted box"
+        );
+        let empty = rendered.clone().map(|mut f| {
+            f.depth.fill(0.0);
+            f
+        });
+        let cameras = cameras(&empty, [0; 2], 0.0);
+        let blank = observe(
+            &device,
+            &cameras,
+            &Stance {
+                q,
+                locked: &HashMap::new(),
+                padding: 0.0,
+            },
+            &after,
+        )
+        .unwrap();
+        let next_world = blank.memory.world(&device, &Step::default()).unwrap();
+        assert_eq!(
+            next_world
+                .of
+                .iter()
+                .filter(|of| **of == Of::Known(0))
+                .count(),
+            fixture_parts,
+            "a blind camera cannot remove fixture evidence"
+        );
+        let mut wrong = held.clone();
+        wrong.grasp.position.x += 0.01;
+        assert!(
+            seen.picked(&split, &wrong).is_err(),
+            "a different grip cannot transfer the body"
+        );
+        let other = first_look(&device, &things, &rendered, (0, 0), q, 0.0);
+        assert!(
+            other.picked(&split, held).is_err(),
+            "identical pixels from a new look are a different world"
+        );
+        let mut stale = seen.clone();
+        stale.memory = after;
+        assert!(
+            stale
+                .grip_worlds(&device, &Step::default(), 0, id, options.opening)
+                .is_err(),
+            "an act invalidates the old picture"
+        );
+        let mut fixed = split.scene.world.clone();
+        fixed
+            .touch
+            .push(batchplan::Touch::new(split.part, robot.finger_links(0)));
+        let fixed = device.upload(&[fixed]).unwrap();
+        let movement = batchplan::ToolPath {
+            world: 0,
+            start: plan.approach.end(),
+            hand: 0,
+            waypoints: vec![Pose::new(g.pose.position + Vec3::Z * 0.01, g.pose.rotation)],
+            hold: vec![],
+            holding: None,
+        };
+        let followed = batchplan::follow(
+            &device,
+            &fixed,
+            &[movement],
+            &batchplan::ToolPathOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            followed.fraction,
+            [1.0],
+            "the fixed part permits the straight draw"
+        );
+    }
+}
+
+/// A bar on a round dial over a panel, as the knob in the truth table. Select a grip whose
+/// measured contact is on the protruding bar, and check the panel and the other end of the
+/// dial independently of which objects the camera made of them.
+#[test]
+fn gripping_the_knob_leaves_the_panel_and_dial_in_collision() {
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let q = robot.default_q();
+    let bar = MIDDLE + Vec3::Z * 0.089;
+    let half = Vec3::new(0.0125, 0.045, 0.019);
+    let things = vec![
+        table(),
+        block(
+            MIDDLE + Vec3::Z * 0.03,
+            Vec3::new(0.10, 0.10, 0.03),
+            [200; 3],
+        ),
+        can(MIDDLE + Vec3::Z * 0.065, 0.045, 0.005, [60; 3]),
+        block(bar, half, [20; 3]),
+        arm(&robot, q),
+    ];
+    let rendered = [-0.27, 0.27].map(|side| {
+        Frame::of(
+            &things,
+            looking(Vec3::new(MIDDLE.x + side, -0.04, 0.25), bar),
+        )
+    });
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seen = first_look(&device, &things, &rendered, (c, 10 * c as u64), q, 0.0);
+        let id = id_of(seen.kept.scene(), &rendered, 3).expect("the bar is visible");
+        let surface = seen.kept.surface(&device, id).unwrap().unwrap();
+        let options = GraspOptions {
+            turns: 8,
+            shell: Some(0.015),
+            ..Default::default()
+        };
+        let gs = batchplan::grasps_on(&device, 0, &[surface], &options)
+            .unwrap()
+            .remove(0);
+        let prepared = seen
+            .grip_worlds(&device, &Step::default(), 0, id, options.opening)
+            .unwrap();
+        let grips = gs.iter().filter(|g| {
+            g.contacts
+                .iter()
+                .any(|p| (*p - bar).abs().cmple(half + options.contact).all() && p.z > bar.z)
+        });
+        let split = grips
+            .filter_map(|g| prepared.project(g).unwrap())
+            .next()
+            .unwrap_or_else(|| panic!("{camera}: no measured contact on the upper bar"));
+        for p in [
+            MIDDLE + Vec3::new(0.09, 0.0, 0.06),
+            MIDDLE + Vec3::new(0.035, 0.0, 0.07),
+        ] {
+            assert!(
+                split.scene.world.obstacles[split.part].distance(p).value > 0.0,
+                "{camera}: the bar's contact patch includes the panel or dial at {p:?}"
+            );
+            assert!(
+                split
+                    .scene
+                    .world
+                    .obstacles
+                    .iter()
+                    .enumerate()
+                    .any(|(i, o)| i != split.part && o.distance(p).value <= 0.0),
+                "{camera}: no obstacle covers the panel or dial at {p:?}"
+            );
+        }
+    }
+}
+
+/// Two separate physical objects: lifting the lower box would carry the can standing on it.
+#[test]
+fn a_supported_can_refuses_the_entire_pick_before_planning_candidates() {
+    let robot = panda();
+    let device = Device::cpu_threads(&robot, 1).unwrap();
+    let q = robot.default_q();
+    let mut things = vec![
+        table(),
+        block(
+            MIDDLE + Vec3::Z * 0.035,
+            Vec3::new(0.021, 0.025, 0.035),
+            [210, 30, 30],
+        ),
+        can(MIDDLE + Vec3::Z * 0.09, 0.015, 0.02, [20; 3]),
+        arm(&robot, q),
+    ];
+    let render = [-0.28, 0.28].map(|side| {
+        Frame::of(
+            &things,
+            looking(Vec3::new(MIDDLE.x, side, 0.30), MIDDLE + Vec3::Z * 0.04),
+        )
+    });
+    let seen = first_look(&device, &things, &render, (0, 0), q, 0.0);
+    let base = id_of(seen.kept.scene(), &render, 1).expect("the lower box");
+    let can = id_of(seen.kept.scene(), &render, 2).expect("the upper can");
+    assert_ne!(base, can);
+    let options = GraspOptions {
+        turns: 1,
+        shell: Some(0.015),
+        ..Default::default()
+    };
+    // Keep the same candidate before and after the can is set down on the box.
+    things.remove(2);
+    let bare_render = render
+        .each_ref()
+        .map(|view| Frame::of(&things, view.camera));
+    let empty = first_look(&device, &things, &bare_render, (0, 0), q, 0.0);
+    let box_id = id_of(empty.kept.scene(), &bare_render, 1).expect("the bare box");
+    let surface = empty.kept.surface(&device, box_id).unwrap().unwrap();
+    let options = GraspOptions {
+        turns: 1,
+        ..options
+    };
+    let g = batchplan::grasps_on(&device, 0, &[surface], &options)
+        .unwrap()
+        .remove(0)
+        .into_iter()
+        .next()
+        .expect("the bare box has a grip");
+    let source = seen
+        .grip_worlds(&device, &Step::default(), 0, base, options.opening)
+        .unwrap();
+    let inputs = [g; 5];
+    let run = |grasps: &[batchplan::Grasp], search: &miru::GripSearch, stop: bool| {
+        source.plan(
+            grasps,
+            search,
+            &batchplan::TaskOptions::default(),
+            || stop,
+            |_| -> batchplan::Pick { panic!("a blocked pick must never request a motion") },
+        )
+    };
+    let search = miru::GripSearch::default();
+    let miru::GripOutcome::Complete(result) = run(&inputs, &search, false).unwrap() else {
+        panic!("the search was not interrupted");
+    };
+    let blocked = result.blocked.expect("one reason for the entire pick");
+    assert_eq!(blocked.object, base);
+    assert_eq!(blocked.supports, [can]);
+    assert!(result.plans.is_empty() && result.failures.is_empty());
+    assert_eq!(result.batches, 0);
+    assert!(matches!(
+        run(&inputs, &search, true).unwrap(),
+        miru::GripOutcome::Interrupted(_)
+    ));
+    let elsewhere = miru::GripSearch {
+        target: Some(miru::GripTarget::Near {
+            point: MIDDLE + Vec3::Z,
+            radius: 0.0,
+        }),
+        ..search
+    };
+    let miru::GripOutcome::Complete(empty) = run(&inputs, &elsewhere, false).unwrap() else {
+        panic!("the search was not interrupted");
+    };
+    assert!(
+        empty.blocked.is_none(),
+        "no candidate was eligible for the target"
+    );
+    let mut bad = inputs;
+    bad[4].opening = f32::NAN;
+    assert!(
+        run(&bad, &search, false).is_err(),
+        "a refusal cannot hide invalid input"
+    );
+}
+
+#[test]
+fn a_world_point_names_only_readings_at_its_depth_and_keeps_disagreement() {
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let point = Vec3::new(0.45, 0.40, 0.20);
+    let upper = point + Vec3::Z * 0.02;
+    let known = [point + Vec3::Z * 0.001, upper - Vec3::Z * 0.001]
+        .map(|p| Obstacle::cuboid(p, Vec3::new(0.1, 0.1, 0.001)));
+    let memory = Memory::try_new(&device, known.to_vec(), &MemoryOptions::default()).unwrap();
+    let depths = [0.5; 17 * 17];
+    let camera = |at, rotation| Camera {
+        image: DepthImage {
+            width: 17,
+            depth: &depths,
+            camera: Pose::new(at, rotation),
+            intrinsics: batchplan::Intrinsics {
+                fx: 100.0,
+                fy: 100.0,
+                cx: 8.0,
+                cy: 8.0,
+            },
+        },
+        noise: Noise {
+            constant: 0.002,
+            linear: 0.0,
+            quadratic: 0.0,
+        },
+        off_by: 0.006,
+        color: &[],
+        masks: &[],
+        band: 0,
+    };
+    let below = camera(point - 0.5 * Vec3::Z, Quat::IDENTITY);
+    let above = camera(
+        upper + 0.5 * Vec3::Z,
+        Quat::from_rotation_x(std::f32::consts::PI),
+    );
+    let stance = Stance {
+        q: robot.default_q(),
+        locked: &HashMap::new(),
+        padding: 0.0,
+    };
+    let observed = observe(&device, &[below, above, below], &stance, &memory).unwrap();
+    let kept = observed.kept;
+    assert_eq!(kept.scene().labels[0][8 * 17 + 8], Label::Known(0));
+    assert_eq!(kept.scene().labels[1][8 * 17 + 8], Label::Known(1));
+    assert_eq!(kept.labels_at(point).unwrap(), [Label::Known(0)]);
+    assert_eq!(kept.labels_at(upper).unwrap(), [Label::Known(1)]);
+    assert_eq!(
+        kept.labels_at(point.midpoint(upper)).unwrap(),
+        [Label::Known(0), Label::Known(1)]
+    );
+    assert!(kept.labels_at(upper + Vec3::Z * 0.03).unwrap().is_empty());
+    assert!(kept.labels_at(point + Vec3::X).unwrap().is_empty());
+    assert!(kept.labels_at(Vec3::NAN).is_err());
+
+    let unusable = [1e-22; 17 * 17];
+    let camera = Camera {
+        image: DepthImage {
+            depth: &unusable,
+            ..below.image
+        },
+        ..below
+    };
+    let observed = observe(&device, &[camera], &stance, &memory).unwrap();
+    assert_eq!(
+        observed.kept.image(0).unwrap().depth[8 * 17 + 8],
+        unusable[0]
+    );
+    assert_eq!(observed.kept.scene().labels[0][8 * 17 + 8], Label::Nothing);
+    let near_camera = below.image.camera.position + 0.002 * Vec3::Z;
+    assert!(observed.kept.labels_at(near_camera).unwrap().is_empty());
 }

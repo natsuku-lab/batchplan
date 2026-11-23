@@ -52,6 +52,7 @@ mod loops;
 pub mod meshes;
 mod mjcf;
 pub mod npy;
+mod reach;
 mod rest;
 pub mod rng;
 pub mod robot;
@@ -85,6 +86,7 @@ pub use live::{
     servo,
 };
 pub use meshes::{Clearance, MeshModel};
+pub use reach::HandReach;
 pub use rest::{
     Blocking, Fall, Rest, RestFailure, RestOptions, RestProblem, falls_into, rest_failures,
     rests_on,
@@ -99,10 +101,10 @@ pub use sdf::{
 };
 pub use shortcut::ShortcutOptions;
 pub use spheres::{LinkQualification, Qualification, SphereGeometry, SphereOptions};
-pub use surface::{Grasp, Surface, grasps_on};
+pub use surface::{Grasp, Surface, grasps_on, grasps_on_with_capacity};
 pub use task::{
-    CandidateStop, GraspOptions, Pick, Place, TaskFailure, TaskOptions, TaskPlan, TaskResult,
-    TaskStep, Turn, grasps, pick, place, place_poses, turn,
+    CandidateStop, GraspOptions, Pick, PickBody, Place, Pull, TaskFailure, TaskOptions, TaskPlan,
+    TaskResult, TaskStep, Turn, grasps, pick, place, place_poses, pull, turn,
 };
 pub use timing::{HandSpeed, JointState, Near, Trajectory, time};
 pub use tool_path::{ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, follow};

@@ -13,7 +13,7 @@ use crate::field::{self, Field, tuple_field, value_class};
 use crate::held::Held;
 use crate::robot::Robot;
 use crate::timing::Trajectory;
-use crate::world::{Obstacle, Pose};
+use crate::world::{Obstacle, Pose, World};
 
 value_class! {
     /// Grasps `grasps` proposes for a parallel gripper.
@@ -110,6 +110,28 @@ value_class! {
         fn new(changes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
             Ok(Self(Self::changed(Default::default(), changes)?))
         }
+
+        /// Validates the options of the task and all its solver stages.
+        fn check(&self) -> PyResult<()> {
+            self.0.check().or_raise()
+        }
+    }
+}
+
+value_class! {
+    /// The full shape to carry and the other obstacles that leave when one part is picked up.
+    PickBody(batchplan::PickBody) {
+        /// The whole body's collision shape, at its pose in the world.
+        shape: batchplan::Obstacle,
+        /// The other obstacle indices that depart with the contact part, each given once.
+        other_parts: Vec<usize>,
+    }
+    methods {
+        #[new]
+        #[pyo3(signature = (shape, other_parts))]
+        fn new(shape: &Obstacle, other_parts: Vec<usize>) -> Self {
+            Self(batchplan::PickBody { shape: shape.0.clone(), other_parts })
+        }
     }
 }
 
@@ -133,8 +155,10 @@ value_class! {
         transit: bool,
         /// The hand that picks it up.
         hand: usize,
-        /// The object: an obstacle of the world, by index. A distance grid cannot be picked up.
+        /// The contact obstacle, by index. Grasps are expressed in its frame.
         object: usize,
+        /// The whole body carried when the fingers grasp a part of it.
+        body: Option<batchplan::PickBody>,
         /// Poses of the hand's IK frame that grasp the object, in the object's frame (its center
         /// and rotation); any one will do. `grasps` proposes some for a box, ball, cylinder or
         /// capsule.
@@ -160,6 +184,11 @@ value_class! {
         enough: Option<usize>,
     }
     methods {
+        /// The world for executing the lift with the returned hold attached.
+        fn lift_world(&self, departure: &World) -> PyResult<World> {
+            self.0.lift_world(&departure.0).map(World).or_raise()
+        }
+
         /// Hand 0 picks up `object` of world `world` from `start` by any of `grasps`, moving in
         /// 10 cm along the hand's z axis and lifting the object 10 cm, off nothing it rests on.
         #[new]
@@ -324,7 +353,7 @@ value_class! {
         transit: bool,
         /// The hand that turns it.
         hand: usize,
-        /// The object: an obstacle of the world, by index. A distance grid cannot be turned.
+        /// The contact obstacle by index. A distance grid can be gripped where it stays.
         object: usize,
         /// Poses of the hand's IK frame that grip the object, in the object's frame, as
         /// `Pick.grasps`; any one will do.
@@ -383,16 +412,80 @@ value_class! {
     }
 }
 
+value_class! {
+    /// A hand drawing a handle along a line while the fixture stays in the planning world.
+    Pull(batchplan::Pull) {
+        /// The world's index in the batch: the one the hand grips, draws and lets go in, and the
+        /// transit's unless `transit_world` names another.
+        world: u32,
+        /// The world the start is checked and the transit planned in, where it is another: as
+        /// many obstacles as `world` has, in its order, shaped or touched otherwise.
+        transit_world: Option<u32>,
+        /// Where the robot starts, at rest.
+        start: Vec<f32>,
+        /// Whether the path from the start to where the move in begins is planned: `True`.
+        /// Without it the plans hold the moves in and away and the draw alone (`TaskPlan.begin`
+        /// is where a way to them ends).
+        transit: bool,
+        /// The hand that draws it.
+        hand: usize,
+        /// The contact obstacle's index in the world. A stationary distance grid may be contacted.
+        object: usize,
+        /// Poses of the hand's IK frame that grip the object, in the object's frame, as
+        /// `Pick.grasps`; any one will do.
+        grasps: Vec<batchplan::Pose>,
+        /// How far back along its own z axis the hand begins to move in to a grasp, and moves
+        /// away to once it lets go (meters).
+        approach: f32,
+        /// The line's unit direction in the world frame.
+        direction: Vec3,
+        /// Signed nonzero distance along the line in meters.
+        distance: f32,
+        /// Where the hands must stay along the transit, as a pick's.
+        constraints: Vec<batchplan::HandConstraint>,
+        /// Per grasp, joints the robot was loaded with locked, at the values they keep through
+        /// the task by that grasp, as `Pick.locked`. Empty: every grasp as loaded.
+        locked: Vec<HashMap<String, f32>>,
+        /// How many plans will do, as `Pick.enough`: `None`, every grasp is tried.
+        enough: Option<usize>,
+    }
+    methods {
+        /// Pull the contact obstacle with hand 0 using one of its local grasp poses.
+        #[new]
+        #[pyo3(signature = (world, start, object, grasps, direction, distance, **changes))]
+        fn new(
+            world: u32,
+            start: &Bound<'_, PyAny>,
+            object: usize,
+            grasps: &Bound<'_, PyAny>,
+            direction: &Bound<'_, PyAny>,
+            distance: f32,
+            changes: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<Self> {
+            let pull = batchplan::Pull::new(
+                world,
+                Vec::<f32>::from_py(start)?,
+                object,
+                Vec::from_py(grasps)?,
+                Vec3::from_py(direction)?,
+                distance,
+            );
+            Ok(Self(Self::changed(pull, changes)?))
+        }
+    }
+}
+
 tuple_field!(
     batchplan::Pick,
     batchplan::Place,
     batchplan::Handover,
-    batchplan::Turn
+    batchplan::Turn,
+    batchplan::Pull
 );
 
 /// A task's steps, in the order they are checked.
 #[pyclass(module = "batchplan", frozen, eq, eq_int, ord, hash)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TaskStep {
     /// The start, checked for collision.
     Start,
@@ -400,12 +493,20 @@ pub(crate) enum TaskStep {
     Reach,
     /// A turn's turn, from a configuration at the grasp: checked before the straight moves.
     Turn,
+    /// A pull's straight draw from the grasp.
+    Pull = 6,
     /// The straight move in, to there.
-    Approach,
+    Approach = 3,
     /// The straight move away: lifting the object, or backing off from it.
     Depart,
     /// The planned path from the start to where the move in begins.
     Transit,
+}
+
+impl PartialOrd for TaskStep {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.rust().cmp(&other.rust()))
+    }
 }
 
 impl TaskStep {
@@ -414,6 +515,7 @@ impl TaskStep {
             batchplan::TaskStep::Start => Self::Start,
             batchplan::TaskStep::Reach => Self::Reach,
             batchplan::TaskStep::Turn => Self::Turn,
+            batchplan::TaskStep::Pull => Self::Pull,
             batchplan::TaskStep::Approach => Self::Approach,
             batchplan::TaskStep::Depart => Self::Depart,
             batchplan::TaskStep::Transit => Self::Transit,
@@ -430,6 +532,7 @@ impl TaskStep {
             Self::Start => batchplan::TaskStep::Start,
             Self::Reach => batchplan::TaskStep::Reach,
             Self::Turn => batchplan::TaskStep::Turn,
+            Self::Pull => batchplan::TaskStep::Pull,
             Self::Approach => batchplan::TaskStep::Approach,
             Self::Depart => batchplan::TaskStep::Depart,
             Self::Transit => batchplan::TaskStep::Transit,
@@ -485,6 +588,12 @@ impl TaskPlan {
     #[getter]
     fn turn(&self) -> Option<Trajectory> {
         self.0.turn.clone().map(Trajectory)
+    }
+
+    /// A pull's straight draw from the grasp with the fingers closed.
+    #[getter]
+    fn pull(&self) -> Option<Trajectory> {
+        self.0.pull.as_deref().cloned().map(Trajectory)
     }
 
     /// The straight move away: holding the object after a pick; the giver's after a handover.
@@ -573,6 +682,12 @@ impl CandidateStop {
     #[getter]
     fn turned(&self) -> Option<f64> {
         self.0.turned.map(field::shortest)
+    }
+
+    /// At `TaskStep.Pull`, the planned part of the draw in signed meters.
+    #[getter]
+    fn pulled(&self) -> Option<f64> {
+        self.0.pulled.map(field::shortest)
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -772,6 +887,25 @@ pub(crate) fn turn(
     TaskResult::new(py, result)
 }
 
+/// Plans each grip, straight draw and release in a fixed world. The draw keeps its orientation,
+/// and a stop along it reports its signed distance in meters.
+#[pyfunction]
+#[pyo3(signature = (device, worlds, pulls, options = None))]
+pub(crate) fn pull(
+    py: Python<'_>,
+    device: &Device,
+    worlds: &Worlds,
+    pulls: &Bound<'_, PyAny>,
+    options: Option<&TaskOptions>,
+) -> PyResult<TaskResult> {
+    let pulls = Vec::<batchplan::Pull>::from_py(pulls)?;
+    let options = options.map(|o| o.0.clone()).unwrap_or_default();
+    let result = py
+        .detach(|| batchplan::pull(&device.device, &worlds.0, &pulls, &options))
+        .or_raise()?;
+    TaskResult::new(py, result)
+}
+
 /// Grasps for the hand that takes `held`'s object, for `Handover.grasps`, at the object's other
 /// end: the giver's grasp turned half about the axis nearest its approach other than the one
 /// toward the end it holds (from the same side), and about the axis across both (from the other
@@ -834,9 +968,11 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GraspOptions>()?;
     m.add_class::<TaskOptions>()?;
     m.add_class::<Pick>()?;
+    m.add_class::<PickBody>()?;
     m.add_class::<Place>()?;
     m.add_class::<Handover>()?;
     m.add_class::<Turn>()?;
+    m.add_class::<Pull>()?;
     m.add_class::<TaskStep>()?;
     m.add_class::<TaskPlan>()?;
     m.add_class::<CandidateStop>()?;
@@ -846,6 +982,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(place, m)?)?;
     m.add_function(wrap_pyfunction!(handover, m)?)?;
     m.add_function(wrap_pyfunction!(turn, m)?)?;
+    m.add_function(wrap_pyfunction!(pull, m)?)?;
     m.add_function(wrap_pyfunction!(handover_grasps, m)?)?;
     m.add_function(wrap_pyfunction!(handover_poses, m)?)?;
     m.add_function(wrap_pyfunction!(grasps, m)?)?;

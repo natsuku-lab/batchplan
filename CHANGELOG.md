@@ -10,6 +10,28 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- `grasps_on_with_capacity` accepts a maximum graspable width separate from the loaded pad gap.
+  It checks the fully open hand and, for symmetric sliding jaws, commandable partial openings.
+  `Robot::parallel_jaw_opening` checks this model against the calibrated stroke and joint locks.
+
+- `miru::Observed::grip_worlds` prepares a kept observation for grasp planning. Project one
+  candidate at a time to split the material between its finger pads from the collision world.
+  A whole-body pick retains the object's ID and the collision geometry left behind.
+  `Grasp::closes_on` tests a ball against the closing region at the chosen opening.
+  `GripWorlds::with_reach_bound` can reject kinematically impossible targets before projection.
+  `Robot::hand_reach` exposes the same geometric check to Rust and Python callers.
+  `Kept::labels_at` reports the labels supported by filtered depth at a measured 3D point.
+
+- A pick can grasp one obstacle and lift the body it belongs to. `PickBody` describes the carried
+  shape and the other obstacles that move with it. `Pick::lift_world` builds the departure world
+  for execution. **Breaking:** Rust literals that list every field of `Pick` need `body: None`
+  when the contact obstacle is the whole object.
+
+- `Pull` and `pull` plan a straight draw by a handle in Rust and Python. The hand keeps its
+  orientation and moves a signed distance along a world direction. Each plan gives the draw
+  between its approach and departure, and a stopped draw reports the planned distance in meters.
+  A stationary distance grid may be the contact obstacle of a pull or a turn.
+
 - Turning a thing about a line in one call: `turn(&device, &worlds, &[Turn], &TaskOptions)`, a
   knob, a cap, a lever or a valve's wheel, composed of IK, `follow` and `plan` as `pick` is.
   `Turn::new(world, start, object, grasps, angle)` turns `object` by `angle` about its `screw`

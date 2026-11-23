@@ -8,7 +8,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
 use batchplan::{
     DepthFilter, DepthImage, Device, GraspOptions, Held, IkOptions, Intrinsics, Obstacle,
@@ -130,20 +130,24 @@ pub enum Act {
 #[derive(Clone, Debug)]
 pub struct Memory {
     /// The shapes the world is known to hold, as [`Look::known`].
-    known: Arc<[Obstacle]>,
+    pub(crate) known: Arc<[Obstacle]>,
+    /// Additional collision cells attributable only to known, stationary fixtures.
+    fixture_parts: Vec<(usize, Obstacle)>,
     /// The objects and the next id, without labels: what the next look takes as `previous`.
     scene: Scene,
     /// Per hand of the robot, what it holds.
     hands: Vec<Option<Holding>>,
     /// The map, shared by the memories made from it until a look fuses another.
-    map: Arc<Map>,
+    pub(crate) map: Arc<Map>,
     /// What the acts since the map was fused tell it, in order.
     marks: Vec<Mark>,
     /// How far from the robot's frame it reaches (meters): the look's corners and the map's.
     reach: f32,
+    /// Whether an act followed the look that supplied the depth.
+    acted: bool,
     /// How far past an object's room its part of the map reaches (meters), as far as a grid must
     /// be exact: the collision margin and the robot's largest sphere.
-    padding: f32,
+    pub(crate) padding: f32,
 }
 
 /// What one hand holds, and the object it was when it was taken: none for a hold the memory
@@ -177,9 +181,9 @@ impl Mark {
 /// The map of what the cameras read, its voxel, and the parts of it made for the rooms objects
 /// take up, kept for every memory that shares the map.
 #[derive(Debug)]
-struct Map {
-    fused: OccupancyMap,
-    voxel: f32,
+pub(crate) struct Map {
+    pub(crate) fused: OccupancyMap,
+    pub(crate) voxel: f32,
     /// The middles of its occupied voxels, found once, when first asked for.
     occupied: OnceLock<Vec<Vec3>>,
     regions: Mutex<Vec<Region>>,
@@ -251,11 +255,13 @@ impl Memory {
         let largest = spheres.iter().map(|sphere| sphere[3]).fold(0.0, f32::max);
         Ok(Memory {
             known: known.into(),
+            fixture_parts: vec![],
             scene: Scene::default(),
             hands: vec![None; robot.hands()],
             map: Arc::new(Map::new(fused, voxel)),
             marks: vec![],
             reach,
+            acted: false,
             padding: IkOptions::default().collision.margin + largest,
         })
     }
@@ -288,6 +294,7 @@ impl Memory {
     /// number are an `Error::Input` naming the act.
     pub fn after(&self, acts: &[Act]) -> Result<Memory> {
         let mut memory = self.clone();
+        memory.acted |= !acts.is_empty();
         for (k, act) in acts.iter().enumerate() {
             memory.act(k, act)?;
         }
@@ -495,7 +502,7 @@ impl Memory {
     }
 
     /// Object `index` and the objects that stand on it, in turn, in their order.
-    fn standing(&self, index: usize) -> Vec<usize> {
+    pub(crate) fn standing(&self, index: usize) -> Vec<usize> {
         let mut standing = vec![index];
         // Each round takes in what stands on one taken in before, until none does.
         let mut grew = true;
@@ -602,6 +609,10 @@ impl Memory {
         }
         let mut obstacles = self.known.to_vec();
         let mut of: Vec<Of> = (0..self.known.len()).map(Of::Known).collect();
+        for (fixture, part) in &self.fixture_parts {
+            of.push(Of::Known(*fixture));
+            obstacles.push(part.clone());
+        }
         let mut covers = vec![];
         for object in &self.scene.objects {
             if object.solid {
@@ -768,12 +779,18 @@ pub struct Planned {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Of {
-    /// A known shape, by its index among the memory's.
+    /// A known shape, by its index among the memory's. Additional obstacles may carry readings
+    /// attributable only to the same fixture during a split or after the pick.
     Known(usize),
-    /// An object, by its id: a solid of its shape where it is `solid`, else the room it takes up.
+    /// An object by ID: a solid of its shape, its room, or, in a gripped world, its measured
+    /// material outside the contact part.
     Object(u32),
-    /// An object that is not solid, by its id, as the cameras saw into it: its part of the map.
+    /// An object's room as the cameras saw into it. In a gripped world this may also be a
+    /// residual of a solid shape or material whose ownership is uncertain. Only the indices
+    /// in the gripped result identify what may be touched or vacated.
     Region(u32),
+    /// Observed material in the chosen grasp's closing region, by object id.
+    Gripped(u32),
     /// What the map holds that no shape and no object's room explains.
     Unexplained,
 }
@@ -792,6 +809,8 @@ pub struct Observed {
 /// filtered depth and the robot's mask, as the look read them.
 #[derive(Clone, Debug)]
 pub struct Kept {
+    /// Identifies the map fused at this look without extending its lifetime.
+    pub(crate) map: Weak<Map>,
     scene: Scene,
     views: Vec<KeptView>,
 }
@@ -799,6 +818,7 @@ pub struct Kept {
 /// One camera's depth as a look read it.
 #[derive(Clone, Debug)]
 struct KeptView {
+    noise: Noise,
     depth: Vec<f32>,
     width: usize,
     intrinsics: Intrinsics,
@@ -824,6 +844,37 @@ impl Kept {
     #[must_use]
     pub fn scene(&self) -> &Scene {
         &self.scene
+    }
+
+    /// The distinct labels at a point in the look's frame, in camera order. Each camera
+    /// contributes the label of the pixel the point projects to if its filtered depth agrees
+    /// along the optical axis within three deviations of its noise plus its calibration allowance.
+    /// A nearer occluder, a missing reading or a camera looking elsewhere supplies no label.
+    /// Empty means no supporting reading. Multiple labels mean the views disagree. A valid
+    /// unassigned reading contributes [`Label::Nothing`]. Object indices refer to [`Self::scene`].
+    pub fn labels_at(&self, point: Vec3) -> Result<Vec<Label>> {
+        ensure_input!(point.is_finite(), "look point must be finite, got {point}");
+        let mut found = Vec::new();
+        for (view, labels) in self.views.iter().zip(&self.scene.labels) {
+            let camera = view.camera;
+            let local = camera.rotation.normalize().conjugate() * (point - camera.position);
+            let height = view.depth.len() / view.width;
+            let Some(i) = crate::view::pixel_at(local, view.intrinsics, view.width, height) else {
+                continue;
+            };
+            let z = view.depth[i];
+            let Some(sigma) = view.noise.at_reading(z) else {
+                continue;
+            };
+            let tolerance = SIGMAS * sigma;
+            if tolerance.is_finite()
+                && (local.z - z).abs() <= tolerance
+                && !found.contains(&labels[i])
+            {
+                found.push(labels[i]);
+            }
+        }
+        Ok(found)
     }
 
     /// Camera `camera`'s depth as the look read it: filtered, with the camera's pinhole and pose.
@@ -933,6 +984,7 @@ pub fn observe(
     };
     if cameras.is_empty() {
         let kept = Kept {
+            map: Arc::downgrade(&memory.map),
             scene: memory.scene.clone(),
             views: vec![],
         };
@@ -1041,6 +1093,7 @@ pub fn observe(
 
     let views = (filtered.into_iter().zip(cameras).zip(masks))
         .map(|((depth, camera), robot)| KeptView {
+            noise: raised(camera),
             depth,
             width: camera.image.width,
             intrinsics: camera.image.intrinsics,
@@ -1055,12 +1108,14 @@ pub fn observe(
             next_id: scene.next_id,
         },
         map: Arc::new(Map::new(fused, voxel)),
+        acted: false,
         marks: vec![],
         ..memory.clone()
     };
+    let map = Arc::downgrade(&memory.map);
     Ok(Observed {
         memory,
-        kept: Kept { scene, views },
+        kept: Kept { scene, views, map },
     })
 }
 
@@ -1118,7 +1173,7 @@ fn map_padding(voxel: f32) -> f32 {
 /// How far a voxel's cube reaches from its middle, half its diagonal (meters): a voxel whose
 /// middle lies that near a shape reaches into it, as `OccupancyMap::part` and
 /// `RobotMask::with_shapes` take it.
-fn voxel_reach(voxel: f32) -> f32 {
+pub(crate) fn voxel_reach(voxel: f32) -> f32 {
     0.5 * 3f32.sqrt() * voxel
 }
 
@@ -1130,4 +1185,66 @@ pub enum Under {
     Known(usize),
     /// An object, by its id.
     Object(u32),
+}
+
+impl Memory {
+    /// Transfers one object's attributable material out of its measured room, preserving the
+    /// collision evidence left there in the fused map for plans after the lift.
+    pub(crate) fn after_grip(
+        &self,
+        index: usize,
+        held: &Held,
+        shape: &Obstacle,
+        retained: &[Obstacle],
+        fixtures: &[(usize, Obstacle)],
+    ) -> Result<Self> {
+        let id = self.scene.objects[index].id;
+        let mut next = self.after(&[Act::Picked {
+            id,
+            held: held.clone(),
+        }])?;
+        for part in fixtures {
+            if !next.fixture_parts.contains(part) {
+                next.fixture_parts.push(part.clone());
+            }
+        }
+        let solid = self.scene.objects[index].solid;
+        if !solid || !retained.is_empty() {
+            let voxel = self.map.voxel;
+            let reach = voxel_reach(voxel);
+            let mut fused = self.map.fused.clone();
+            if !solid {
+                fused.free(shape, reach)?;
+            }
+            for kept in retained {
+                fused.occupy(kept, reach)?;
+            }
+            next.map = Arc::new(Map::new(fused, voxel));
+            next.marks.clear();
+        }
+        Ok(next)
+    }
+
+    pub(crate) fn hands(&self) -> usize {
+        self.hands.len()
+    }
+
+    pub(crate) fn current(&self, source: &Weak<Map>) -> bool {
+        source.ptr_eq(&Arc::downgrade(&self.map)) && !self.acted
+    }
+}
+
+impl Kept {
+    /// Whether these views belong to this memory's latest look and no act has followed it.
+    #[must_use]
+    pub fn is_current(&self, memory: &Memory) -> bool {
+        memory.current(&self.map)
+    }
+
+    pub(crate) fn views(&self) -> impl Iterator<Item = (DepthImage<'_>, &RobotMask, &[Label])> {
+        self.views
+            .iter()
+            .zip(&self.scene.labels)
+            .map(|(view, labels)| (view.image(), &view.robot, labels.as_slice()))
+    }
 }

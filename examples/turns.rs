@@ -10,6 +10,7 @@
 //!
 //!   cargo run --release --example turns            # on the CPU
 //!   cargo run --release --example turns -- --gpu   # on the GPU
+//!   cargo run --release --example turns -- --fixtures  # a drawer draw and a hinged door swing
 
 #[path = "common/mod.rs"]
 mod common;
@@ -79,32 +80,21 @@ struct Thing {
     angle: f32,
 }
 
-/// A knob at `at` on the table: a box 24 x 20 x 10 cm, a dial 9 cm across and 1 cm thick on it,
-/// and a bar 9 x 2.5 cm standing 3 cm proud of the dial, turned `yaw` about the vertical. Its
-/// grips are taken from two depth images, one from either side across the bar, with the bar's
-/// readings flagged, and ordered by the moment they give about the knob's axis, the most first;
-/// the fingers are locked at each grip's opening, each standing at half of it.
-fn knob(device: &Device, at: Vec2, yaw: f32) -> Result<Thing> {
-    let console = Obstacle::cuboid(at.extend(0.05), Vec3::new(0.12, 0.1, 0.05));
-    let dial = Obstacle::cylinder(at.extend(0.105), 0.045, 0.005);
-    let half = Vec3::new(0.045, 0.0125, 0.015);
-    let bar = Obstacle::cuboid(Vec3::ZERO, half).placed(Pose::new(
-        at.extend(0.11 + half.z),
-        Quat::from_rotation_z(yaw),
-    ));
-    let scene = [table(), console, dial, bar.clone()];
+/// Read a handle from the scene through both cameras, flagging the handle's surface pixels.
+fn seen_bar(
+    device: &Device,
+    scene: &[Obstacle],
+    bar: &Obstacle,
+    cameras: [Pose; 2],
+) -> Result<Surface> {
     let k = Intrinsics {
         fx: 600.0,
         fy: 600.0,
         cx: WIDTH as f32 / 2.0,
         cy: HEIGHT as f32 / 2.0,
     };
-    let middle = bar.pose().position;
     let mut seen = Surface::default();
-    // One camera on either side of the bar, across it, 30 cm out and 30 cm up.
-    let across = Quat::from_rotation_z(yaw) * Vec3::Y;
-    for side in [1.0, -1.0] {
-        let camera = look_at(middle + across * side * 0.3 + Vec3::Z * 0.3, middle);
+    for camera in cameras {
         let depth = render(
             |p| {
                 let each = scene.iter().map(|o| o.distance(p).value);
@@ -132,6 +122,28 @@ fn knob(device: &Device, at: Vec2, yaw: f32) -> Result<Thing> {
             .collect();
         seen.join(Surface::from_depth(device, &image, &object, None, 0.005)?);
     }
+    Ok(seen)
+}
+
+/// A knob at `at` on the table: a box 24 x 20 x 10 cm, a dial 9 cm across and 1 cm thick on it,
+/// and a bar 9 x 2.5 cm standing 3 cm proud of the dial, turned `yaw` about the vertical. Its
+/// grips are taken from two depth images, one from either side across the bar, with the bar's
+/// readings flagged, and ordered by the moment they give about the knob's axis, the most first;
+/// the fingers are locked at each grip's opening, each standing at half of it.
+fn knob(device: &Device, at: Vec2, yaw: f32) -> Result<Thing> {
+    let console = Obstacle::cuboid(at.extend(0.05), Vec3::new(0.12, 0.1, 0.05));
+    let dial = Obstacle::cylinder(at.extend(0.105), 0.045, 0.005);
+    let half = Vec3::new(0.045, 0.0125, 0.015);
+    let bar = Obstacle::cuboid(Vec3::ZERO, half).placed(Pose::new(
+        at.extend(0.11 + half.z),
+        Quat::from_rotation_z(yaw),
+    ));
+    let scene = [table(), console, dial, bar.clone()];
+    let middle = bar.pose().position;
+    let across = Quat::from_rotation_z(yaw) * Vec3::Y;
+    let cameras =
+        [1.0, -1.0].map(|side| look_at(middle + across * side * 0.3 + Vec3::Z * 0.3, middle));
+    let seen = seen_bar(device, &scene, &bar, cameras)?;
     // The fingers come in as narrow as keeps them off the dial, above its top.
     let o = GraspOptions {
         narrow: true,
@@ -140,7 +152,7 @@ fn knob(device: &Device, at: Vec2, yaw: f32) -> Result<Thing> {
     };
     let screw = Screw::about(at.extend(0.11), Vec3::Z);
     let mut found = batchplan::grasps_on(device, 0, std::slice::from_ref(&seen), &o)?.remove(0);
-    found.sort_by(|a, b| b.moment(&screw, &o).total_cmp(&a.moment(&screw, &o)));
+    o.order_for_turn(&mut found, Some(screw));
     let to_bar = bar.pose().inverse();
     let fingers = |opening: f32| {
         let each = ["panda_finger_joint1", "panda_finger_joint2"];
@@ -445,6 +457,66 @@ fn report(
     Ok(())
 }
 
+/// The same handle on two fixtures: a drawer that comes straight out and a door whose hinge
+/// stands behind and to one side of its grip. Two cameras on opposite sides of the handle's
+/// height see the pads that close above and below it.
+fn fixtures(device: &Device) -> Result<()> {
+    let middle = Vec3::new(0.49, 0.04, 0.22);
+    let bar = Obstacle::cuboid(middle, Vec3::new(0.012, 0.055, 0.012));
+    let face = Obstacle::cuboid(Vec3::new(0.57, 0.0, 0.18), Vec3::new(0.018, 0.19, 0.18));
+    let scene = vec![table(), face, bar.clone()];
+    let cameras = [-1.0, 1.0]
+        .map(|side| look_at(middle + Vec3::new(-0.24, side * 0.08, side * 0.15), middle));
+    let surface = seen_bar(device, &scene, &bar, cameras)?;
+    let options = GraspOptions {
+        near: Some(middle),
+        approach: 0.05,
+        ..Default::default()
+    };
+    let found = batchplan::grasps_on(device, 0, &[surface], &options)?.remove(0);
+    let grasped: Vec<Pose> = found
+        .iter()
+        .map(|g| bar.pose().inverse().mul_pose(g.pose))
+        .collect();
+    let pulls = [batchplan::Pull {
+        enough: Some(1),
+        approach: options.approach,
+        ..batchplan::Pull::new(
+            0,
+            device.robot().default_q(),
+            2,
+            grasped.clone(),
+            Vec3::NEG_X,
+            0.08,
+        )
+    }];
+    let hinge = Vec3::new(0.55, -0.16, middle.z);
+    let turns = [Turn {
+        stays: true,
+        screw: Some(Screw::about(hinge, Vec3::Z)),
+        enough: Some(1),
+        approach: options.approach,
+        ..Turn::new(0, device.robot().default_q(), 2, grasped, FRAC_PI_4)
+    }];
+    let worlds = device.upload(&[World::new(scene)])?;
+    let o = TaskOptions::default();
+    let draw = batchplan::pull(device, &worlds, &pulls, &o)?
+        .outcomes
+        .remove(0)
+        .map_err(|failure| anyhow::anyhow!("{failure}"))?;
+    let swing = batchplan::turn(device, &worlds, &turns, &o)?
+        .outcomes
+        .remove(0)
+        .map_err(|failure| anyhow::anyhow!("{failure}"))?;
+    println!(
+        "{} measured grasps; 8 cm drawer draw in {:.2} s, 45 degree door swing in {:.2} s",
+        found.len(),
+        draw[0].duration(),
+        swing[0].duration()
+    );
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let gpu = std::env::args().any(|a| a == "--gpu");
     let robot = common::panda()?;
@@ -454,6 +526,9 @@ fn main() -> Result<()> {
         Device::cpu(&robot)?
     };
     println!("{}", device.name());
+    if std::env::args().any(|a| a == "--fixtures") {
+        return fixtures(&device);
+    }
     let o = TaskOptions::default();
     // A first call builds what a device builds once.
     let knob_a = knob(&device, Vec2::new(0.5, 0.0), 0.4)?;

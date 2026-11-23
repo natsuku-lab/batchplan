@@ -34,6 +34,162 @@ fn load(path: &str) -> Robot {
     Robot::load(common::asset(path), &RobotOptions::default()).unwrap()
 }
 
+#[test]
+fn parallel_jaw_motion_matches_the_calibrated_stroke_on_both_sides() {
+    let panda = common::panda().unwrap();
+    let closed = HashMap::from([
+        ("panda_finger_joint1".into(), 0.0),
+        ("panda_finger_joint2".into(), 0.0),
+    ]);
+    let gap = |loaded, capacity, locks| {
+        panda
+            .parallel_jaw_opening(0, loaded, capacity, 0.0, locks)
+            .unwrap()
+    };
+    assert_eq!(gap(0.080, 0.060, &closed), Some(0.080));
+    assert_eq!(gap(0.080f32.next_down(), 0.080, &closed), Some(0.080));
+    assert_eq!(gap(0.060, 0.060, &closed), None);
+    let two_mm = closed.keys().map(|name| (name.clone(), 0.001)).collect();
+    assert_eq!(
+        panda
+            .parallel_jaw_opening(0, 0.080, 0.016, 0.002, &two_mm)
+            .unwrap(),
+        Some(0.080)
+    );
+    let past_stop = closed.keys().map(|name| (name.clone(), -0.01)).collect();
+    assert_eq!(gap(0.100, 0.060, &past_stop), None);
+    let one = HashMap::from([("panda_finger_joint1".into(), 0.0)]);
+    assert_eq!(gap(0.080, 0.060, &one), None);
+    assert!(
+        panda
+            .parallel_jaw_opening(1, 0.080, 0.060, 0.0, &closed)
+            .is_err()
+    );
+    assert!(
+        panda
+            .parallel_jaw_opening(0, 0.080, 0.081, 0.0, &closed)
+            .is_err()
+    );
+}
+
+#[test]
+fn an_unchanged_torso_lock_does_not_change_jaw_qualification() {
+    let mut options = common::panda_options();
+    options.lock_joints.insert("panda_joint1".into(), 0.0);
+    options.default_q.as_mut().unwrap().remove(0);
+    let robot = Robot::load(common::asset("franka/franka_panda.urdf"), &options).unwrap();
+    let mut closed = HashMap::from([
+        ("panda_finger_joint1".into(), 0.0),
+        ("panda_finger_joint2".into(), 0.0),
+    ]);
+    let opening = |locks| {
+        robot
+            .parallel_jaw_opening(0, 0.080, 0.060, 0.0, locks)
+            .unwrap()
+    };
+    assert_eq!(opening(&closed), Some(0.080));
+    closed.insert("panda_joint1".into(), 0.0);
+    assert_eq!(
+        robot
+            .parallel_jaw_opening(0, 0.080, 0.060, 0.0, &closed)
+            .unwrap(),
+        Some(0.080)
+    );
+    closed.insert("panda_joint1".into(), 0.2);
+    assert_eq!(
+        robot
+            .parallel_jaw_opening(0, 0.080, 0.060, 0.0, &closed)
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn jaw_axes_and_coupled_limits_are_checked_even_far_from_the_origin() {
+    let urdf = r#"<robot name="jaws">
+      <link name="base"/><link name="palm"/><link name="left"/><link name="right"/><link name="rack"/>
+      <joint name="base_slide" type="prismatic"><parent link="base"/><child link="palm"/>
+        <axis xyz="1 0 0"/><limit effort="1" velocity="1" lower="0" upper="100000"/></joint>
+      <joint name="l" type="prismatic"><parent link="palm"/><child link="left"/>
+        <axis xyz="0 1 0"/><limit effort="1" velocity="1" lower="0" upper="0.04"/></joint>
+      <joint name="r" type="prismatic"><parent link="palm"/><child link="right"/>
+        <axis xyz="0 -1 0"/><limit effort="1" velocity="1" lower="0" upper="0.04"/></joint>
+      <joint name="coupled" type="prismatic"><parent link="base"/><child link="rack"/>
+        <axis xyz="0 0 1"/><limit effort="1" velocity="1" lower="0" upper="0.05"/>
+        <mimic joint="l"/></joint></robot>"#;
+    let mut model = CollisionModel::default();
+    for link in ["palm", "left", "right"] {
+        model
+            .spheres
+            .insert(link.into(), vec![[0.0, 0.0, 0.0, 0.001]]);
+    }
+    let closed = HashMap::from([("l".into(), 0.0), ("r".into(), 0.0)]);
+    let check = |text: &str, position| {
+        let options = RobotOptions {
+            ee_links: vec!["palm".into()],
+            lock_joints: HashMap::from([("l".into(), 0.04), ("r".into(), 0.04)]),
+            default_q: Some(vec![position]),
+            collision_model: Some(model.clone()),
+            ..Default::default()
+        };
+        Robot::from_urdf(text, &options)
+            .unwrap()
+            .parallel_jaw_opening(0, 0.08, 0.06, 0.0, &closed)
+            .unwrap()
+    };
+    let skew = urdf
+        .replace("0 1 0", "0.01 1 0")
+        .replace("0 -1 0", "-0.01 -1 0");
+    for position in [0.0, 65536.0] {
+        assert_eq!(check(urdf, position), Some(0.08));
+        assert_eq!(check(&skew, position), None);
+    }
+    let limited = urdf.replace(
+        "lower=\"0\" upper=\"0.05\"",
+        "lower=\"0.01\" upper=\"0.05\"",
+    );
+    assert_eq!(check(&limited, 0.0), None, "the coupled rack hits its stop");
+}
+
+/// A rotating mimic can return to its initial orientation at closure even though it sweeps a
+/// sphere sideways in between. The two endpoint sphere sets alone cannot establish a slide.
+#[test]
+fn a_revolving_finger_mimic_cannot_qualify_as_a_slide() {
+    let mut options = common::panda_options();
+    let model = options.collision_model.as_mut().unwrap();
+    model
+        .spheres
+        .insert("tip".into(), vec![[0.01, 0.0, 0.0, 0.003]]);
+    let urdf = include_str!("../assets/franka/franka_panda.urdf").replace(
+        "</robot>",
+        r#"<link name="tip"/>
+           <joint name="swing" type="revolute"><parent link="panda_leftfinger"/><child link="tip"/>
+             <axis xyz="0 0 1"/><limit lower="0" upper="7" effort="1" velocity="1"/>
+             <mimic joint="panda_finger_joint1" multiplier="157.07963268"/>
+           </joint></robot>"#,
+    );
+    let urdf = urdf.replace("meshes/", &common::asset("franka/meshes/"));
+    let robot = Robot::from_urdf(&urdf, &options).unwrap();
+    let closed = HashMap::from([
+        ("panda_finger_joint1".into(), 0.0),
+        ("panda_finger_joint2".into(), 0.0),
+    ]);
+    let shut = robot.relock(&closed).unwrap();
+    let open = robot.hand_spheres(0);
+    assert!(open.iter().any(|s| s.radius == 0.003 && s.side != 0.0));
+    assert!(
+        open.iter()
+            .zip(shut.hand_spheres(0))
+            .all(|(a, b)| { (a.center - Vec3::Y * a.side * 0.040).distance(b.center) < 1e-6 })
+    );
+    assert_eq!(
+        robot
+            .parallel_jaw_opening(0, 0.080, 0.080, 0.0, &closed)
+            .unwrap(),
+        None
+    );
+}
+
 fn devices(robot: &Robot) -> Vec<Device> {
     let mut devices = vec![Device::cpu(robot).unwrap()];
     match Device::gpu(robot) {
@@ -2501,4 +2657,112 @@ fn a_link_too_thin_for_a_sphere_inside_it_is_refused_by_name() {
             "{l:?}"
         );
     }
+}
+
+#[test]
+fn an_outer_reach_bound_keeps_fk_poses_and_accounts_for_ik_tolerance() {
+    let options = batchplan::IkOptions::default();
+    let mut rng = Rng::new(407);
+    for robot in [
+        common::panda().unwrap(),
+        load(UR5E),
+        common::two_pandas().unwrap(),
+    ] {
+        for hand in 0..robot.hands() {
+            let bound = robot.hand_reach(hand).expect("revolute chain");
+            for _ in 0..128 {
+                let pose = robot.ee_pose(&random_q(&robot, &mut rng), hand);
+                assert!(!bound.excludes(pose, &options));
+                let far = Pose::new(pose.position + Vec3::X * 10.0, pose.rotation);
+                assert!(bound.excludes(far, &options));
+            }
+        }
+    }
+
+    let dir = scratch("outer-reach");
+    let path = dir.join("arm.urdf");
+    let arm = r#"<robot name="arm">
+      <link name="base"/><link name="one"/><link name="two"/><link name="three"/><link name="tcp"/>
+      <joint name="a" type="revolute"><parent link="base"/><child link="one"/><axis xyz="0 0 1"/>
+        <limit lower="-1" upper="1" effort="1" velocity="1"/></joint>
+      <joint name="b" type="revolute"><parent link="one"/><child link="two"/>
+        <origin xyz="1 0 0"/><axis xyz="0 0 1"/><limit lower="-1" upper="1" effort="1" velocity="1"/></joint>
+      <joint name="c" type="revolute"><parent link="two"/><child link="three"/>
+        <origin xyz="1 0 0"/><axis xyz="0 0 1"/><limit lower="-1" upper="1" effort="1" velocity="1"/></joint>
+      <joint name="tip" type="fixed"><parent link="three"/><child link="tcp"/><origin xyz="0.5 0 0"/></joint>
+    </robot>"#;
+    std::fs::write(&path, arm).unwrap();
+    let options = RobotOptions {
+        ee_links: vec!["tcp".into()],
+        ..Default::default()
+    };
+    let robot = Robot::load(&path, &options).unwrap();
+    let bound = robot.hand_reach(0).unwrap();
+    let straight = robot.ee_pose(&[0.0; 3], 0);
+    assert_eq!(straight.position, Vec3::X * 2.5);
+    let tight = batchplan::IkOptions {
+        position_tolerance: 1e-6,
+        rotation_tolerance: 1e-6,
+        ..Default::default()
+    };
+    assert!(!bound.excludes(straight, &tight));
+    let translated = Pose::new(straight.position + Vec3::X * 0.003, straight.rotation);
+    assert!(bound.excludes(translated, &tight));
+    assert!(!bound.excludes(
+        translated,
+        &batchplan::IkOptions {
+            position_tolerance: 0.004,
+            ..tight
+        }
+    ));
+    // IK accepts nearly unit quaternions and uses their matrix directly. Normalizing such a
+    // target for the wrist-circle calculation may move it outside a tight angular tolerance.
+    let loose_rotation = Pose::new(translated.position, straight.rotation * 0.9992);
+    assert!(loose_rotation.is_unit());
+    assert!(!bound.excludes(loose_rotation, &tight));
+    let rotated = Pose::new(straight.position, Quat::from_rotation_y(0.1));
+    assert!(bound.excludes(rotated, &tight));
+    assert!(!bound.excludes(
+        rotated,
+        &batchplan::IkOptions {
+            rotation_tolerance: 0.11,
+            ..tight
+        }
+    ));
+    let locked = RobotOptions {
+        lock_joints: HashMap::from([("a".into(), 0.0)]),
+        ..options.clone()
+    };
+    assert!(Robot::load(&path, &locked).unwrap().hand_reach(0).is_none());
+    std::fs::write(
+        &path,
+        arm.replacen("axis xyz=\"0 0 1\"", "axis xyz=\"0 0 0\"", 1),
+    )
+    .unwrap();
+    assert!(
+        Robot::load(&path, &options)
+            .unwrap()
+            .hand_reach(0)
+            .is_none()
+    );
+    std::fs::write(&path, arm.replacen("revolute", "prismatic", 1)).unwrap();
+    assert!(
+        Robot::load(&path, &options)
+            .unwrap()
+            .hand_reach(0)
+            .is_none()
+    );
+
+    let skewed = r#"<mujoco><worldbody><body name="a" xyaxes="1 1 0 1 1.0000002 0">
+      <joint name="aa" type="hinge" axis="0 0 1"/><body name="b">
+      <joint name="bb" type="hinge" axis="0 0 1"/><body name="tcp" pos="1 0 0"/>
+      </body></body></worldbody></mujoco>"#;
+    let path = dir.join("skewed.xml");
+    std::fs::write(&path, skewed).unwrap();
+    assert!(
+        Robot::load(&path, &options)
+            .unwrap()
+            .hand_reach(0)
+            .is_none()
+    );
 }
