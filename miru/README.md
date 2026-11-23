@@ -154,6 +154,12 @@ has them as a program; per camera:
    name it, as flags (`scene.labels[view].iter().map(|label| *label == Label::Object(object)).collect()`),
    go to `Surface::from_depth(&device, &image, &flags, Some(&robot), radius)`, the views joined.
 
+For a pick out of an open container, `kept.extractions(id, margin)` gives each visible opening
+that contains the body's measured footprint. Its lift takes the body's lowest point above the
+lip by the requested margin, along the opening axis. An absent or unseen target gives an empty
+list. Use `kept.is_current(&memory)` when planning from a memory that may have advanced, and
+check the requested lift through the ordinary pick planner.
+
 What the robot did is said once (`Act`): a pick puts the thing into a hand, which every mask then
 holds, and frees the map where a thing that was not solid stood; what stood on it leaves the
 objects with it and is in no memory until a look finds it ("Where it stands"). A let-go puts it

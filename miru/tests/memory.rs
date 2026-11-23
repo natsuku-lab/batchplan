@@ -434,6 +434,20 @@ fn a_look_with_no_cameras_sees_nothing() {
     assert_eq!(none.memory.next_id(), first.memory.next_id());
     assert!(none.kept.scene().labels.is_empty(), "no view's labels");
     assert!(none.kept.image(0).is_none() && none.kept.robot(0).is_none());
+    let remembered = first.memory.objects()[0].id;
+    for id in [remembered, u32::MAX] {
+        let lifts = none
+            .kept
+            .extractions(id, 0.01)
+            .expect("an optional measurement");
+        assert!(lifts.is_empty(), "no current reading of object {id}");
+        for invalid in [-0.01, f32::NAN, f32::INFINITY] {
+            assert!(matches!(
+                none.kept.extractions(id, invalid),
+                Err(batchplan::Error::Input(_))
+            ));
+        }
+    }
 }
 
 /// The far and the near camera stated 5 mm over where they read from: with `off_by` 5 mm the table
@@ -3416,4 +3430,66 @@ fn a_world_point_names_only_readings_at_its_depth_and_keeps_disagreement() {
     assert_eq!(observed.kept.scene().labels[0][8 * 17 + 8], Label::Nothing);
     let near_camera = below.image.camera.position + 0.002 * Vec3::Z;
     assert!(observed.kept.labels_at(near_camera).unwrap().is_empty());
+}
+
+/// A block resting on the measured floor still fits after the tray is turned.
+#[test]
+fn a_block_resting_flush_in_a_turned_tray_has_an_extraction() {
+    let robot = panda();
+    let device = Device::cpu_threads(&robot, 2).expect("a CPU device");
+    let at = Vec3::new(0.5, 0.0, 0.0);
+    let yaw = Quat::from_rotation_z(0.65);
+    let mut standing = thin_tray();
+    let target = standing.len() + 1;
+    standing.push(block(
+        at + Vec3::new(-0.028, 0.014, 0.032),
+        Vec3::new(0.023, 0.018, 0.022),
+        [130; 3],
+    ));
+    let mut things = vec![table()];
+    for thing in standing {
+        things.push(Thing {
+            color: thing.color,
+            solid: None,
+            distance: Box::new(move |p| (thing.distance)(at + yaw.inverse() * (p - at))),
+        });
+    }
+    let frames = [EYE, Vec3::new(0.52, -0.055, 0.55)].map(|eye| {
+        Frame::of(&things, looking(eye, MIDDLE))
+            .masked(|i| if i == target { 2 } else { u32::from(i > 0) })
+    });
+    let stance = Stance {
+        q: robot.default_q(),
+        locked: &HashMap::new(),
+        padding: 0.0,
+    };
+    let obs = observe(
+        &device,
+        &cameras(&frames, [0; 2], 0.0),
+        &stance,
+        &memory(&device),
+    )
+    .expect("a sound look");
+    let scene = obs.kept.scene();
+    let (index, root) = scene
+        .objects
+        .iter()
+        .enumerate()
+        .find(|(_, o)| matches!(o.shape, Shape::OpenBox { .. }))
+        .expect("the tray opening is seen");
+    let child = scene
+        .objects
+        .iter()
+        .find(|o| o.on == Some(Support::Object(index)))
+        .expect("the block is seen standing on the tray");
+    let lifts = obs
+        .kept
+        .extractions(child.id, 0.005)
+        .expect("a sound margin");
+    assert_eq!(lifts.len(), 1, "the block is flush with the measured floor");
+    assert_eq!(lifts[0].container, root.id);
+    assert!(
+        lifts[0].lift.distance(Vec3::Z * 0.055) < 0.0001,
+        "the 50 mm room's depth plus the 5 mm margin"
+    );
 }
