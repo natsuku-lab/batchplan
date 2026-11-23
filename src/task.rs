@@ -1507,8 +1507,8 @@ pub struct GraspOptions {
     /// from one side is closed on only across all of it, where the cameras saw past its far side.
     /// The space found lies past where the wall ends by what the rays leave unseen: under a bowl's
     /// flared wall seen from above, 5.5 to 11.5 mm behind the inner side of a 3 mm wall near its
-    /// rim, so 1.5 cm suits. In each group (ordinary or appended by `close_on`), grasps of two
-    /// patches seen come first.
+    /// rim, so 1.5 cm suits. Grasps of two patches seen come first among the ordinary grasps
+    /// and again among the intermediate angles. Shallower insertions follow their parent order.
     pub shell: Option<f32>,
     /// Whether the fingers may come in to a grasp of a surface less open than `opening`: false,
     /// every grasp is checked with the fingers as the robot's locked joints hold them. With it,
