@@ -2748,3 +2748,46 @@ fn gripping_one_part_lifts_the_whole_body_and_keeps_its_neighbors() {
         "{failure:?}"
     );
 }
+
+#[test]
+fn a_pick_can_fit_its_carried_cylinder_beside_a_wall() {
+    let robot = panda();
+    let device = Device::cpu_threads(&robot, 4).unwrap();
+    let center = Vec3::new(0.45, 0.2, 0.023);
+    let radius = 0.056;
+    let mut w = scene(vec![]);
+    w.obstacles[BOX] = Obstacle::cylinder(center, radius, 0.023);
+    let wall = |gap| {
+        Obstacle::cuboid(
+            center + Vec3::X * (radius + gap + 0.005),
+            Vec3::new(0.005, 0.09, 0.055),
+        )
+    };
+    let side = w.obstacles.len();
+    w.obstacles.push(wall(0.0035));
+    let grasp = Pose::new(Vec3::new(-0.03, 0.0, 0.022), top_across().rotation);
+    let task = pick_from(&robot, vec![grasp]);
+    let ordinary = TaskOptions::default();
+    let f = pick_in(&device, w.clone(), task.clone(), &ordinary).unwrap_err();
+    assert_eq!(f.candidates[0].step, TaskStep::Depart);
+    let precise = TaskOptions {
+        held_spheres: batchplan::SphereOptions {
+            budget: 256,
+            tolerance: 0.001,
+            ..Default::default()
+        },
+        ..ordinary
+    };
+    let plans = pick_in(&device, w.clone(), task.clone(), &precise)
+        .expect("the finer cylinder clears the wall");
+    assert_eq!(
+        plans[0].held.as_ref().unwrap().spheres,
+        precise.held_spheres
+    );
+    w.obstacles[side] = wall(-0.0035);
+    let failure = pick_in(&device, w, task, &precise).unwrap_err();
+    assert_eq!(failure.candidates[0].step, TaskStep::Depart);
+    assert!(failure.candidates[0].contacts.iter().any(|contact|
+        matches!(contact, Contact::World { link, obstacle, .. } if link == "held by hand 0" && *obstacle == side)
+    ));
+}

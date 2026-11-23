@@ -30,6 +30,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   for execution. **Breaking:** Rust literals that list every field of `Pick` need `body: None`
   when the contact obstacle is the whole object.
 
+- Picks and moving turns accept the collision sphere fit for the object they carry through
+  `TaskOptions::held_spheres`. A pick returns the same fit for the following place.
+  **Breaking:** Rust literals that list every field of `TaskOptions` need `held_spheres`.
+
 - `Pull` and `pull` plan a straight draw by a handle in Rust and Python. The hand keeps its
   orientation and moves a signed distance along a world direction. Each plan gives the draw
   between its approach and departure, and a stopped draw reports the planned distance in meters.
