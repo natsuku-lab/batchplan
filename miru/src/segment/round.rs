@@ -90,6 +90,8 @@ pub(super) fn shells(
 
     let surface = |part: u32| surfaces[part as usize].as_ref().expect("a candidate's");
     let is_shell = |&(outside, inside, near, ref far): &(u32, u32, &[usize], Vec<usize>)| {
+        let outer_edges = edges.range((outside, 0)..=(outside, u32::MAX));
+        let silhouette = outer_edges.flat_map(|(_, edge)| edge.iter().copied());
         let (outside, inside) = (surface(outside), surface(inside));
         let Some(axis) = outside.lines.with(&inside.lines).axis() else {
             return false;
@@ -101,7 +103,7 @@ pub(super) fn shells(
             axis,
         };
         // The circle first: it is asked of the edges alone, and few pairs have it.
-        shell.one_circle(near, far)
+        shell.one_circle(near, far, silhouette)
             && shell.turns(&outside.readings)
             && shell.turns(&inside.readings)
             && shell.faces(&outside.readings, /* away */ true)
@@ -144,7 +146,12 @@ impl Shell<'_> {
     /// deviations of its depth and half a window's width: the two edges of a rim may lie that
     /// far apart, half of what a rim can be wide before it shows as a surface with planes of
     /// its own.
-    fn one_circle(&self, near: &[usize], far: &[usize]) -> bool {
+    fn one_circle(
+        &self,
+        near: &[usize],
+        far: &[usize],
+        silhouette: impl Iterator<Item = usize>,
+    ) -> bool {
         let (seen, eye) = (self.seen, self.seen.eye());
         let place = |&i: &usize| {
             let (out, up) = self.axis.around((seen.points[i] - eye).as_dvec3());
@@ -159,7 +166,7 @@ impl Shell<'_> {
             middle(places().map(|(radius, _)| radius).collect()),
             middle(places().map(|(_, height)| height).collect()),
         );
-        [near, far].into_iter().all(|edge| {
+        let shared = [near, far].into_iter().all(|edge| {
             let (mut on, mut all) = (0.0, 0.0);
             for &i in edge {
                 let (around, up) = place(&i);
@@ -171,7 +178,24 @@ impl Shell<'_> {
                 }
             }
             on >= 1.0 && 2.0 * on > all
-        })
+        });
+        // A silhouette extending past that circle at its height belongs to more than this wall.
+        if !shared {
+            return false;
+        }
+        let mut past = 0.0;
+        for i in silhouette {
+            let (around, up) = place(&i);
+            let window = (self.width)(i);
+            let reach = f64::from(0.5 * window * seen.spacing(i) + SIGMAS * seen.sigma(i));
+            if (up - height).abs() <= reach && around > radius + reach {
+                past += 1.0 / window;
+                if past >= 1.0 {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Whether the planes of `readings`, one part's, are of a surface that turns about the
