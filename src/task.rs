@@ -1533,6 +1533,10 @@ pub struct GraspOptions {
     /// point come first, the squarest first of two as near: where a caller was told to grip, as
     /// on a knob's axis or at a handle's middle. It orders the grasps and finds no others.
     pub near: Option<Vec3>,
+    /// A point to enclose between the pads in surface grasps. After the ordinary grasps,
+    /// sample intermediate approaches around nearby contact pairs and append only those whose
+    /// fingers close on this point. Ordinary grasps come first, including ones that miss it.
+    pub close_on: Option<Vec3>,
 }
 
 impl Default for GraspOptions {
@@ -1551,6 +1555,7 @@ impl Default for GraspOptions {
             shell: None,
             narrow: false,
             near: None,
+            close_on: None,
         }
     }
 }

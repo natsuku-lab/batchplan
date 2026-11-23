@@ -2231,3 +2231,63 @@ fn the_grasp_closing_region_uses_a_rigid_frame() {
         "the loaded hand cannot open to this width"
     );
 }
+
+#[test]
+fn refining_approaches_for_a_point_keeps_the_original_grasps_and_closes_on_the_point() {
+    let device = device();
+    let surface = box_surface(Vec3::new(0.08, 0.01, 0.05), &[]);
+    let hand = device.robot().hand_spheres(0);
+    let at = Vec3::new(0.051, 0.01, 0.049);
+    let get = |o: &GraspOptions| {
+        grasps_on(&device, 0, std::slice::from_ref(&surface), o)
+            .unwrap()
+            .remove(0)
+    };
+    for narrow in [false, true] {
+        let options = GraspOptions {
+            turns: 4,
+            narrow,
+            ..Default::default()
+        };
+        let original = get(&options);
+        let extra = get(&GraspOptions {
+            close_on: Some(at),
+            ..options
+        });
+        assert!(
+            !original.is_empty(),
+            "the bar has measured antipodal contacts"
+        );
+        assert!(
+            extra.starts_with(&original),
+            "existing successes keep their rank"
+        );
+        let added = &extra[original.len()..];
+        assert!(
+            !added.is_empty(),
+            "intermediate rolls cover the named point"
+        );
+        assert!(
+            added
+                .iter()
+                .all(|g| g.closes_on(&hand, options.opening, at, 0.0))
+        );
+        assert!(
+            added.iter().all(|g| !original.contains(g)),
+            "coarse rolls are not tried twice"
+        );
+        let far = get(&GraspOptions {
+            close_on: Some(Vec3::splat(2.0)),
+            ..options
+        });
+        assert_eq!(far, original, "neither pad can cover the distant point");
+    }
+    let invalid = GraspOptions {
+        close_on: Some(Vec3::NAN),
+        ..Default::default()
+    };
+    assert!(matches!(
+        grasps_on(&device, 0, &[surface], &invalid),
+        Err(Error::Input(_))
+    ));
+}
