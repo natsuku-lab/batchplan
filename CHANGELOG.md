@@ -484,6 +484,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Fixed
 
+- Miru resolves a hollow support near a measured grip on a solid target. A hand can approach
+  through an observed gap while the support walls and unseen material remain collision-checked.
+
 - Measured grasps of hollow objects now attribute the area of a depth pixel as well as its
   endpoint. A voxel also hit by another surface stays in the collision world during lift.
 

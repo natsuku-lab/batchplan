@@ -250,6 +250,14 @@ target and the objects it supports once, before any candidate world is projected
 An approximate target can use `GripTarget::Near` with an explicit radius about the measured
 contact midpoint, or `None` allows the whole surface.
 
+When a solid target stands on a hollow object, the kept depth views also resolve that support
+near the measured contacts. The stationary map excludes fresh returns labelled as the target
+and covered by its fitted solid. Returns outside the fit, other objects and unseen material
+still take part in collision checks. The rest of the support uses the coarse occupancy map.
+Several obstacles can therefore name the same support. Keep all returned slots when following
+a motion. The first projection in a new window builds the fine grid, and consecutive grasps in
+the same window reuse it during the search.
+
 For a custom motion, `prepared.project(&candidate)?` yields a single collision world or
 `None` when there is no attributable contact part. These worlds contain dense distance grids:
 drop each rejected projection before proceeding. Projection requires the memory of the same
