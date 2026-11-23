@@ -1851,6 +1851,34 @@ fn a_bowl_is_one_object_from_a_shallower_and_a_steeper_camera() {
     }
 }
 
+/// One bowl with a lip or pouring tab molded into its wall.
+fn bowl_with_rim(rim: Thing) -> Thing {
+    let bowl = bowl(MIDDLE, 0.037, 0.056, 0.050, 0.004, [40; 3]);
+    Thing {
+        distance: Box::new(move |p| (bowl.distance)(p).min((rim.distance)(p))),
+        color: bowl.color,
+        solid: None,
+    }
+}
+
+#[test]
+fn a_bowl_with_a_projecting_round_lip_is_one_object() {
+    let lip = ring(MIDDLE + Vec3::Z * 0.044, 0.054, 0.064, 0.002, [40; 3]);
+    let frame = frame_from(vec![bowl_with_rim(lip)], eye_above(30.0));
+    assert_whole(&frame, "a bowl with a projecting lip");
+}
+
+#[test]
+fn a_bowl_with_a_pouring_tab_is_one_object() {
+    let tab = block(
+        MIDDLE + Vec3::new(0.0, 0.056, 0.048),
+        Vec3::new(0.010, 0.008, 0.003),
+        [40; 3],
+    );
+    let frame = frame_from(vec![bowl_with_rim(tab)], eye_above(23.0));
+    assert_whole(&frame, "a bowl with a pouring tab");
+}
+
 #[test]
 fn a_ramekin_is_one_object() {
     // Upright walls and a flat floor: a cylinder's outside before a cylinder's inside.

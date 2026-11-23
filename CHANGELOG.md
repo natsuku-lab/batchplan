@@ -473,6 +473,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Fixed
 
+- Miru can separate a bowl wall from an adjacent drawer edge in a depth view where both were
+  assigned to one surface. It checks the visible rim and follows the measured wall, including
+  projecting lips and spouts.
+
 - A plan with a `time_budget` longer than the clock counts (`Duration::MAX`) panicked on adding
   it to the time; it now has no deadline. A plan whose search had `RrtOptions::max_iterations`
   of `usize::MAX` found nothing where it had to search again without its clearance: the samples
