@@ -263,7 +263,10 @@ fingers may touch while grasping; `grasp` is the hand pose in that obstacle's fr
 the rim of a bowl leaves the opposite rim, the fingers' approach to it, other objects and any
 unattributed cells subject to collision checks. The local room uses finer voxels near the hand:
 current rays may resolve the contents of a coarse cell, while old material lacking a fresh
-reading and space no camera saw through stay in the residual collision world.
+reading and space no camera saw through stay in the residual collision world. A hollow
+object carries cells hit by its labelled pixels, including surface cells beside the central
+ray of a pixel. A cell whose volume also meets a differently labelled reading stays in the
+collision world throughout the lift.
 
 For a pick, give `Pick` the result's `part`, `grasp` and `body`. A body is available only
 when no other perceived object stands on the target. Its shape covers the whole object,

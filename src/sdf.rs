@@ -2164,6 +2164,9 @@ fn observed(l: i8) -> bool {
 pub struct OccupancyMap {
     grid: Layout,
     log_odds: Vec<i8>,
+    /// Occupied cells copied from unresolved parents during refinement, one bit per cell
+    /// when any are present. Their current-view pixels cannot identify the old material.
+    inherited: Vec<u32>,
     /// Whether this is a part of a map, some of its voxels left out: it takes no images.
     part: bool,
     /// How much each image counts.
@@ -2223,6 +2226,7 @@ impl OccupancyMap {
         Ok(Self {
             grid,
             log_odds: vec![UNOBSERVED; grid.points()],
+            inherited: vec![],
             part: false,
             weighing: Weighing::Evidence,
         })
@@ -2336,6 +2340,7 @@ impl OccupancyMap {
         // A voxel's cube reaches this far from its middle.
         let reach = 0.5 * 3f32.sqrt() * voxel;
         let mut log_odds = vec![APART; grid.points()];
+        let mut inherited = vec![];
         for at in (grid.among(lo - reach, hi + reach).into_iter()).flat_map(points) {
             // The same point of the map, at the map's own coordinates, whatever the padding.
             let of_map = first + at.as_ivec3();
@@ -2345,7 +2350,13 @@ impl OccupancyMap {
             }
             let reached = of_map.cmpge(IVec3::ZERO).all() && of_map.cmplt(dims).all();
             log_odds[grid.index(at)] = match reached {
-                true => self.log_odds[self.grid.index(of_map.as_uvec3())],
+                true => {
+                    let n = self.grid.index(of_map.as_uvec3());
+                    if !self.inherited.is_empty() && set(&self.inherited, n) {
+                        mark_inherited(&mut inherited, &grid, grid.index(at));
+                    }
+                    self.log_odds[n]
+                }
                 // Past a map nothing was observed; past a part of one, the voxel was left out.
                 false if self.part => APART,
                 false => UNOBSERVED,
@@ -2354,6 +2365,7 @@ impl OccupancyMap {
         Ok(Self {
             grid,
             log_odds,
+            inherited,
             part: true,
             weighing: self.weighing,
         })
@@ -2394,6 +2406,9 @@ impl OccupancyMap {
             let l = self.log_odds[n];
             if l != APART && shape.distance(self.grid.point(n)).value <= margin {
                 self.log_odds[n] = to(l);
+                if self.log_odds[n] <= 0 && !self.inherited.is_empty() {
+                    self.inherited[n / 32] &= !(1 << (n % 32));
+                }
             }
         }
         Ok(())
@@ -2888,6 +2903,47 @@ fn hit_inside(
         .map(|p| grid.nearest(p))
 }
 
+/// Mark an occupied cell whose location is known only at its parent's resolution.
+fn mark_inherited(bits: &mut Vec<u32>, grid: &Layout, n: usize) {
+    if bits.is_empty() {
+        bits.resize(grid.points().div_ceil(32), 0);
+    }
+    bits[n / 32] |= 1 << (n % 32);
+}
+
+/// Whether an unselected pixel (negative depth) meets the voxel's camera-frame box.
+fn foreign_surface(image: &DepthImage, depths: &[f32], center: Vec3, extent: Vec3) -> bool {
+    let lo = center - extent;
+    let hi = center + extent;
+    if hi.z <= 0.0 {
+        return false;
+    }
+    let span = |lower: f32, upper: f32, f: f32, c: f32, count: usize| {
+        if lo.z <= 0.0 {
+            return 0..count;
+        }
+        let left = lower / if lower < 0.0 { lo.z } else { hi.z };
+        let right = upper / if upper < 0.0 { hi.z } else { lo.z };
+        // Half a pixel on either side of its centre belongs to the pixel.
+        let start = (left * f + c - 0.5).ceil().max(0.0) as usize;
+        let end = ((right * f + c + 0.5).floor() + 1.0).max(0.0) as usize;
+        start.min(count)..end.min(count)
+    };
+    let Intrinsics { fx, fy, cx, cy } = image.intrinsics;
+    let columns = span(lo.x, hi.x, fx, cx, image.width);
+    let rows = span(lo.y, hi.y, fy, cy, image.height());
+    for row in rows {
+        let at = row * image.width;
+        if depths[at + columns.start..at + columns.end]
+            .iter()
+            .any(|&d| d < 0.0 && -d >= lo.z && -d <= hi.z)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// A plane of [`view`] whose normal is `normal` in the camera's frame: turned by `rotation`, and
 /// moved out by its length, or 1 where that is less, times `distance`. In line, as a build of one
 /// codegen unit has it.
@@ -2964,6 +3020,7 @@ impl OccupancyMap {
         Ok(Self {
             grid,
             log_odds,
+            inherited: vec![],
             part: true,
             weighing: Weighing::Latest,
         })
@@ -3013,12 +3070,14 @@ impl OccupancyMap {
         let mut fine = Self {
             grid,
             log_odds: vec![UNOBSERVED; grid.points()],
+            inherited: vec![],
             part: false,
             weighing: Weighing::Evidence,
         };
         let mut current = Self {
             grid: self.grid,
             log_odds: vec![UNOBSERVED; self.grid.points()],
+            inherited: vec![],
             part: false,
             weighing: Weighing::Evidence,
         };
@@ -3048,12 +3107,16 @@ impl OccupancyMap {
             );
             let k = self.grid.index(at / divisions);
             let parent = self.log_odds[k];
-            if parent == APART
+            let unresolved = !self.inherited.is_empty() && set(&self.inherited, k);
+            let copied = parent == APART
                 || (parent > 0 && current.log_odds[k] <= 0)
                 || (!observed(*value)
-                    && (observed(parent) || *value == UNOBSERVED || parent == OCCLUDED))
-            {
+                    && (observed(parent) || *value == UNOBSERVED || parent == OCCLUDED));
+            if copied {
                 *value = parent;
+            }
+            if *value > 0 && (copied || (unresolved && parent > 0)) {
+                mark_inherited(&mut fine.inherited, &grid, n as usize);
             }
         }
         fine.part = true;
@@ -3085,6 +3148,90 @@ impl OccupancyMap {
                 }
             }
         }
+        self.take_marked(marked, padding, inside)
+    }
+
+    /// Separates occupied cells hit by selected depth pixels. A selected pixel supplies its
+    /// endpoint and cells whose centres project to it at the measured depth. A cell stays if
+    /// its enclosing box in any camera frame overlaps an unselected pixel at that pixel's depth.
+    /// This includes mixed cells at pixel boundaries even when the map was fused on another
+    /// device. Unknown cells, occupied children inherited from an unresolved parent, and cells without a
+    /// selected hit stay. Supply all views of interest.
+    /// `selected` takes the view index and row-major pixel index.
+    pub fn take_surfaces(
+        &mut self,
+        device: &Device,
+        views: &[(&DepthImage<'_>, Option<&RobotMask>)],
+        selected: impl Fn(usize, usize) -> bool,
+        padding: f32,
+        inside: impl Fn(Vec3, f32) -> bool,
+    ) -> Result<Option<Self>> {
+        ensure_input!(
+            padding.is_finite() && padding >= 0.0,
+            "invalid map padding {padding}"
+        );
+        let mut votes = vec![0_u8; self.grid.points()];
+        for (v, &(image, mask)) in views.iter().enumerate() {
+            image.check_with(mask)?;
+            let image = image.rigid();
+            let mut depths = vec![0.0; image.depth.len()];
+            for (pixel, depth) in depths.iter_mut().enumerate() {
+                let Some(z) = image.reading(pixel) else {
+                    continue;
+                };
+                if mask.is_some_and(|mask| mask.on_robot[pixel]) {
+                    continue;
+                }
+                let take = selected(v, pixel);
+                *depth = if take { z } else { -z };
+                if let Some(n) = hit_inside(&self.grid, &image, mask, pixel) {
+                    votes[n] |= if take { 1 } else { 2 };
+                }
+            }
+            let to_camera = image.camera.rotation.inverse();
+            // The enclosing camera-aligned box of a world-aligned voxel.
+            let axes = Mat3::from_quat(to_camera);
+            let extent = (axes.x_axis.abs() + axes.y_axis.abs() + axes.z_axis.abs())
+                * (0.5 * self.grid.voxel);
+            device.install(|| {
+                votes.par_iter_mut().enumerate().for_each(|(n, bits)| {
+                    if *bits >= 2 || self.log_odds[n] <= 0 {
+                        return;
+                    }
+                    let p = self.grid.point(n);
+                    if let Some((i, z)) = image.project(p)
+                        && depths[i] > 0.0
+                        && z >= depths[i] - 0.5 * self.grid.voxel
+                        && z <= depths[i] + 0.5 * self.grid.voxel
+                    {
+                        *bits |= 1;
+                    }
+                    let c = to_camera * (p - image.camera.position);
+                    // Allow for the grid origin, translation and quaternion products rounding
+                    // differently when the source map was cropped or fused on another device.
+                    let world = p.abs().max(self.grid.origin.abs()).max_element();
+                    let span = MAX_DIAGONAL.sqrt() as f32 * self.grid.voxel;
+                    let error = f32::EPSILON * (4.0 * (world + span) + 32.0 * c.length());
+                    if foreign_surface(&image, &depths, c, extent + error) {
+                        *bits |= 2;
+                    }
+                });
+            });
+        }
+        let marked = votes
+            .into_iter()
+            .enumerate()
+            .map(|(n, bits)| bits == 1 && (self.inherited.is_empty() || !set(&self.inherited, n)))
+            .collect();
+        self.take_marked(marked, padding, inside)
+    }
+
+    fn take_marked(
+        &mut self,
+        mut marked: Vec<bool>,
+        padding: f32,
+        inside: impl Fn(Vec3, f32) -> bool,
+    ) -> Result<Option<Self>> {
         let reach = 0.5 * 3f32.sqrt() * self.grid.voxel;
         let mut lower = Vec3::INFINITY;
         let mut upper = Vec3::NEG_INFINITY;
@@ -3105,9 +3252,14 @@ impl OccupancyMap {
         let bounds = Obstacle::cuboid((lower + upper) * 0.5, (upper - lower) * 0.5 + reach);
         let mut taken = self.part(&bounds, padding)?;
         taken.log_odds.fill(APART);
+        taken.inherited.clear();
         for (n, _) in marked.into_iter().enumerate().filter(|(_, marked)| *marked) {
             let at = taken.grid.nearest(self.grid.point(n));
             taken.log_odds[at] = self.log_odds[n];
+            if !self.inherited.is_empty() && set(&self.inherited, n) {
+                mark_inherited(&mut taken.inherited, &taken.grid, at);
+                self.inherited[n / 32] &= !(1 << (n % 32));
+            }
             self.log_odds[n] = MISS;
         }
         Ok(Some(taken))

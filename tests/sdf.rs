@@ -5417,3 +5417,182 @@ fn a_grid_with_a_thin_negative_pocket_cannot_be_voxelized_as_a_primitive() {
         Err(Error::Input(_))
     ));
 }
+
+#[test]
+fn a_pixel_owns_its_surface_cells_unless_another_view_also_hits_them() {
+    let map = OccupancyMap::try_new(
+        Vec3::new(-0.04, -0.02, 0.98),
+        Vec3::new(0.04, 0.02, 1.02),
+        0.01,
+    )
+    .unwrap();
+    let front = DepthImage {
+        depth: &[1.0],
+        width: 1,
+        intrinsics: Intrinsics {
+            fx: 10.0,
+            fy: 10.0,
+            cx: 0.0,
+            cy: 0.0,
+        },
+        camera: Pose::IDENTITY,
+    };
+    let beside = DepthImage {
+        intrinsics: Intrinsics {
+            fx: 45.0,
+            ..front.intrinsics
+        },
+        camera: Pose::new(0.01 * Vec3::X, Quat::IDENTITY),
+        ..front
+    };
+    let views = [(&front, None), (&beside, None)];
+    let mut occupied = map.refined(cpu(), &views, 1).unwrap();
+    let unknown = occupied.counts().unobserved;
+    let all = occupied.counts().occupied;
+    let selected = occupied
+        .take_surfaces(cpu(), &views, |view, _| view == 0, 0.02, |_, _| true)
+        .unwrap()
+        .expect("the wide pixel sees either side of the other view");
+    let alone = Vec3::new(-0.02, 0.0, 1.0);
+    let shared = Vec3::Z;
+    assert!(
+        selected.occupancy(alone).is_some_and(|v| v > 0.5),
+        "the selected pixel sees the surface here although its endpoint lies elsewhere"
+    );
+    assert!(
+        occupied.occupancy(shared).is_some_and(|v| v > 0.5),
+        "the second camera projects a foreign hit where the first camera's endpoint lands"
+    );
+    assert_eq!(selected.counts().occupied + occupied.counts().occupied, all);
+    assert_eq!(occupied.counts().unobserved, unknown);
+}
+
+#[test]
+fn a_foreign_depth_hit_at_a_pixel_boundary_stays_when_planning_on_cpu() {
+    let a = 0.0213_f32;
+    let rotation = Quat::from_euler(EulerRot::XYZ, a, a * 0.33, -0.45 * a);
+    let p = rotation * Vec3::new(0.0625, 0.0, 1.0);
+    let map = OccupancyMap::try_new(p, p + Vec3::splat(0.008), 0.002).unwrap();
+    let foreign = DepthImage {
+        depth: &[0.0, 1.0],
+        width: 2,
+        intrinsics: Intrinsics {
+            fx: 8.0,
+            fy: 8.0,
+            cx: 0.0,
+            cy: 0.0,
+        },
+        camera: Pose::new(Vec3::ZERO, rotation),
+    };
+    let both = DepthImage {
+        depth: &[1.0, 1.0],
+        ..foreign
+    };
+    for device in devices() {
+        let mut reference = map.clone();
+        reference.integrate(device, &foreign, None).unwrap();
+        let hits = reference.occupied();
+        assert!(
+            !hits.is_empty(),
+            "the foreign pixel supplied occupied cells"
+        );
+        let mut full = map.clone();
+        full.integrate(device, &both, None).unwrap();
+        full.take_surfaces(cpu(), &[(&both, None)], |_, px| px == 0, 0.002, |_, _| true)
+            .unwrap();
+        for hit in hits {
+            assert!(
+                full.occupancy(hit).is_some_and(|v| v > 0.5),
+                "foreign hit {hit}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_selected_surface_includes_the_far_depth_boundary_used_by_fusion() {
+    let edge = Vec3::new(0.02, 0.0, 1.001);
+    let mut map = OccupancyMap::try_new(edge, edge + Vec3::splat(0.004), 0.002).unwrap();
+    let image = DepthImage {
+        depth: &[1.0],
+        width: 1,
+        intrinsics: Intrinsics {
+            fx: 10.0,
+            fy: 10.0,
+            cx: 0.0,
+            cy: 0.0,
+        },
+        camera: Pose::IDENTITY,
+    };
+    map.integrate(cpu(), &image, None).unwrap();
+    assert!(map.occupancy(edge).is_some_and(|v| v > 0.5));
+    let selected = map
+        .take_surfaces(cpu(), &[(&image, None)], |_, _| true, 0.002, |_, _| true)
+        .unwrap()
+        .expect("the cell is hit away from the pixel's central endpoint");
+    assert!(selected.occupancy(edge).is_some_and(|v| v > 0.5));
+}
+
+#[test]
+fn a_fine_surface_hit_keeps_unresolved_occupancy_inherited_from_its_parent() {
+    let p = Vec3::Z;
+    let lower = Vec3::new(-0.02, -0.02, 0.98);
+    let mut map = OccupancyMap::try_new(lower, Vec3::new(0.02, 0.02, 1.02), 0.01).unwrap();
+    map.free(&Obstacle::cuboid(p, Vec3::splat(0.1)), 0.0)
+        .unwrap();
+    let old = DepthImage {
+        depth: &[1.0],
+        width: 1,
+        intrinsics: Intrinsics {
+            fx: 1200.0,
+            fy: 1200.0,
+            cx: 0.0,
+            cy: 0.0,
+        },
+        camera: Pose::new(Vec3::new(0.004, 0.0, 0.0), Quat::IDENTITY),
+    };
+    map.integrate(cpu(), &old, None).unwrap();
+    assert!(map.occupancy(p).unwrap() > 0.5);
+    let own = DepthImage {
+        depth: &[1.0],
+        width: 1,
+        intrinsics: Intrinsics {
+            fx: 100.0,
+            fy: 100.0,
+            cx: 0.0,
+            cy: 0.0,
+        },
+        camera: Pose::new(Vec3::new(0.007, 0.0, 0.0), Quat::IDENTITY),
+    };
+    let mut fresh = OccupancyMap::try_new(lower, Vec3::new(0.02, 0.02, 1.02), 0.01).unwrap();
+    fresh.integrate(cpu(), &own, None).unwrap();
+    assert!(
+        !fresh.occupancy(p).is_some_and(|a| a > 0.5),
+        "the target view cannot locate the old cell more finely"
+    );
+    let mut fine = map.refined(cpu(), &[(&own, None)], 5).unwrap();
+    let q = p + 0.004 * Vec3::X;
+    assert!(fine.occupancy(q).unwrap() > 0.5);
+    let mut cropped = fine
+        .part(&Obstacle::cuboid(q, Vec3::splat(0.012)), 0.002)
+        .unwrap();
+    for region in [&mut fine, &mut cropped] {
+        region
+            .take_surfaces(cpu(), &[(&own, None)], |_, _| true, 0.002, |_, _| true)
+            .unwrap()
+            .expect("the selected pixel also hits cells outside the old parent");
+        assert!(
+            region.occupancy(q).is_some_and(|v| v > 0.5),
+            "the current pixel cannot identify the material inherited from the old parent"
+        );
+    }
+    let replacement = Obstacle::sphere(q, 0.0005);
+    cropped.free(&replacement, 0.0).unwrap();
+    assert!(cropped.occupancy(q).is_some_and(|v| v < 0.5));
+    cropped.occupy(&replacement, 0.0).unwrap();
+    let part = cropped
+        .take_surfaces(cpu(), &[(&own, None)], |_, _| true, 0.002, |_, _| true)
+        .unwrap()
+        .expect("the former cell now contains newly occupied material");
+    assert!(part.occupancy(q).is_some_and(|v| v > 0.5));
+}

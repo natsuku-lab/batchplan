@@ -476,6 +476,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Fixed
 
+- Measured grasps of hollow objects now attribute the area of a depth pixel as well as its
+  endpoint. A voxel also hit by another surface stays in the collision world during lift.
+
 - Miru can separate a bowl wall from an adjacent drawer edge in a depth view where both were
   assigned to one surface. It checks the visible rim and follows the measured wall, including
   projecting lips and spouts.
