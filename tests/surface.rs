@@ -637,6 +637,31 @@ fn measured_grasps_use_the_loaded_gap_and_only_commandable_openings() {
     let mut s = plates_of(0.045, 0.005);
     let free = search(&s, capacity).unwrap();
     assert!(!free.is_empty() && free.iter().all(|g| g.opening == loaded));
+    // This reading is outside half the capacity but inside the loaded finger gap.
+    let point = Vec3::new(-0.031, -0.00525, -0.01025);
+    let angles = |close_on| {
+        let options = GraspOptions {
+            turns: 3,
+            close_on,
+            ..options
+        };
+        batchplan::grasps_on_with_capacity(&device, 0, std::slice::from_ref(&s), &options, capacity)
+            .unwrap()
+            .remove(0)
+    };
+    let coarse = angles(None);
+    let refined = angles(Some(point));
+    assert!(refined.starts_with(&coarse));
+    let hand = device.robot().hand_spheres(0);
+    let added = &refined[coarse.len()..];
+    assert!(
+        added.iter().any(|g| {
+            let middle = g.contacts[0].midpoint(g.contacts[1]);
+            (point - middle).dot(g.pose.rotation * Vec3::Y).abs() > capacity / 2.0
+        }),
+        "the loaded jaws admit a reading beyond half the graspable width"
+    );
+    assert!(added.iter().all(|g| g.closes_on(&hand, loaded, point, 0.0)));
     the_object(&mut s);
     for sign in [-1.0, 1.0] {
         face(

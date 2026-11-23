@@ -417,10 +417,10 @@ const RINGS: usize = 8;
 /// a turn, the pairs that face each other within half a friction cone of square before the rest,
 /// spread over the object, each the farthest from those before it, or with a point to grip near
 /// ([`GraspOptions::near`]) the nearest it first. With a
-/// [`shell`](GraspOptions::shell), grasps of walls seen from one side follow all of these, in the
-/// same order among themselves: they rest on the cameras having seen past the wall, not on its
-/// other side, so the grasps without the option come first and unchanged. The surfaces run in
-/// parallel on the device's threads, and a surface's grasps are the same alone and among others.
+/// [`shell`](GraspOptions::shell), grasps supported by views past a wall follow those with
+/// both sides seen. [`GraspOptions::close_on`] appends intermediate approaches that enclose the
+/// point after all ordinary grasps, again with two seen sides first. The surfaces run in parallel
+/// on the device's threads, and a surface's grasps are the same alone and among others.
 pub fn grasps_on(
     device: &Device,
     hand: usize,
