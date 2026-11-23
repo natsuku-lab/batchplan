@@ -665,6 +665,14 @@ impl Memory {
         Ok(holding)
     }
 
+    pub(crate) fn room_map(&self, cover: &Obstacle) -> Result<OccupancyMap> {
+        let mut part = self.map.fused.part(cover, self.padding)?;
+        for mark in &self.marks {
+            mark.on(&mut part, self.map.voxel)?;
+        }
+        Ok(part)
+    }
+
     /// The map in `cover` as the cameras saw into it, gridded with never-seen space solid: solid
     /// where a reading landed or nothing saw past, free where a camera saw in. None where nothing
     /// in it is solid.
@@ -676,10 +684,7 @@ impl Memory {
         if let Some(region) = self.map.regions().iter().find(made) {
             return Ok(region.grid.clone());
         }
-        let mut part = self.map.fused.part(cover, self.padding)?;
-        for mark in &self.marks {
-            mark.on(&mut part, self.map.voxel)?;
-        }
+        let part = self.room_map(cover)?;
         let counts = part.counts();
         let grid = match counts.occupied + counts.unobserved {
             0 => None,

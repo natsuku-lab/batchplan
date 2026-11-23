@@ -3612,3 +3612,156 @@ fn a_foreign_projective_hit_on_the_opposite_rim_stays_in_the_lift_world() {
         "the bowl must leave the mixed coarse cell occupied on lift, got {retained} m"
     );
 }
+
+/// A block stands in a bowl. Two views see the block and the bowl but miss a patch on top
+/// of the block. A third view can contribute one known bead in that patch.
+#[test]
+fn a_grip_resolves_its_support_without_copying_the_block_or_losing_a_foreign_hit() {
+    let robot = panda();
+    let device = Device::cpu_threads(&robot, 4).unwrap();
+    let q = robot.default_q();
+    let center = MIDDLE + Vec3::new(0.024, 0.004, 0.033);
+    let bead_center = MIDDLE + Vec3::new(0.035, 0.005, 0.06255);
+    let radius = 0.00055;
+    let bead = Obstacle::sphere(bead_center, radius);
+    let witness = bead_center + Vec3::Z * radius;
+    let things = [
+        table(),
+        wide_bowl(MIDDLE),
+        block(center, Vec3::new(0.021, 0.025, 0.029), [100, 10, 50]),
+        Thing {
+            color: [20, 150, 10],
+            solid: Some(bead.clone()),
+            distance: Box::new(move |p| p.distance(bead_center) - radius),
+        },
+        arm(&robot, q),
+    ];
+    let mut frames = [-0.28, 0.28].map(|side| {
+        let camera = looking(
+            MIDDLE + Vec3::new(0.0, side, 0.30),
+            center + Vec3::Z * 0.007,
+        );
+        Frame::of(&things, camera).masked(|i| match i {
+            1 | 2 => i as u32,
+            _ => 0,
+        })
+    });
+    for frame in &mut frames {
+        let points = frame.view().image.points(None).unwrap();
+        for (depth, point) in frame.depth.iter_mut().zip(points) {
+            if point.is_some_and(|p| p.distance(witness) < 0.011) {
+                *depth = 0.0;
+            }
+        }
+    }
+    let intrinsics = batchplan::Intrinsics {
+        fx: 110.0,
+        fy: 110.0,
+        cx: 1.0,
+        cy: 1.0,
+    };
+    let down = Pose::new(
+        witness + Vec3::Z * 0.20,
+        Quat::from_rotation_x(std::f32::consts::PI),
+    );
+    let mut third = Frame::through(&things, down, intrinsics, (3, 3));
+    assert_eq!(third.shows[4], Some(3), "the center ray reaches the bead");
+    let hit = third.depth[4];
+    third.depth.fill(0.0);
+    third.depth[4] = hit;
+
+    let memory = Memory::try_new(
+        &device,
+        vec![known(&table()), bead],
+        &MemoryOptions::default(),
+    )
+    .unwrap();
+    let locks = HashMap::new();
+    let stance = Stance {
+        q,
+        locked: &locks,
+        padding: 0.0,
+    };
+    for sees_bead in [false, true] {
+        let mut views = cameras(&frames, [0; 2], 0.0);
+        if sees_bead {
+            views.push(Camera {
+                image: third.view().image,
+                color: &[],
+                noise: common::NOISE,
+                band: 0,
+                off_by: 0.0,
+                masks: &[],
+            });
+        }
+        let seen = observe(&device, &views, &stance, &memory).unwrap();
+        let scene = seen.kept.scene();
+        if sees_bead {
+            assert_eq!(
+                scene.labels[2][4],
+                Label::Known(1),
+                "this hit belongs to the bead"
+            );
+        }
+        let id = id_of(scene, &frames, 2).expect("the two views see the block");
+        let target = scene.objects.iter().find(|o| o.id == id).unwrap();
+        let Some(Support::Object(parent)) = target.on else {
+            panic!("the block rests in the bowl")
+        };
+        let bowl = &scene.objects[parent];
+        assert!(target.solid && !bowl.solid);
+        let options = GraspOptions {
+            turns: 1,
+            ..Default::default()
+        };
+        let surface = seen.kept.surface(&device, id).unwrap().unwrap();
+        let grasps = batchplan::grasps_on(&device, 0, &[surface], &options)
+            .unwrap()
+            .remove(0);
+        let source = seen
+            .grip_worlds(&device, &Step::default(), 0, id, options.opening)
+            .unwrap();
+        let split = grasps
+            .iter()
+            .find_map(|g| source.project(g).unwrap())
+            .expect("the block has a measured grip");
+        let distance = |world: &Planned, at| {
+            world
+                .of
+                .iter()
+                .zip(&world.world.obstacles)
+                .filter(|(of, _)| matches!(**of, Of::Object(id) | Of::Region(id) if id == bowl.id))
+                .map(|(_, obstacle)| obstacle.distance(at).value)
+                .fold(f32::INFINITY, f32::min)
+        };
+        let ordinary = seen
+            .memory
+            .world(
+                &device,
+                &Step {
+                    into: &[bowl.id],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let on_block = MIDDLE + Vec3::new(0.035, 0.020, 0.062);
+        assert!(
+            distance(&ordinary, on_block) > 0.01,
+            "the map excludes the block"
+        );
+        assert!(
+            distance(&split.scene, on_block) > 0.0,
+            "the block must stay out of the stationary support"
+        );
+        assert!(split.scene.world.touch.is_empty());
+        assert_eq!(
+            distance(&split.scene, witness) <= 0.0,
+            sees_bead,
+            "only the third view contributes the foreign hit"
+        );
+        assert!(
+            distance(&split.scene, MIDDLE + Vec3::new(0.0, -0.134, 0.070)) <= 0.0,
+            "the far rim stays in collision"
+        );
+    }
+}

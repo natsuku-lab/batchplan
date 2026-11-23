@@ -10,7 +10,7 @@ use glam::Vec3;
 use crate::error::{Result, ensure_input};
 use crate::grip_plan::SupportedObjects;
 use crate::memory::{Map, Memory, Observed, Of, Planned, Step};
-use crate::scene::Label;
+use crate::scene::{Label, Support};
 
 /// A world for one candidate grip. Its obstacle order applies to every index here and to
 /// contacts reported while executing the candidate.
@@ -54,6 +54,7 @@ pub struct GripWorlds<'a> {
     pub(crate) blocked: Option<SupportedObjects>,
     pub(crate) reach: Option<batchplan::HandReach>,
     loaded_opening: f32,
+    support: Option<SupportRoom>,
     hand: Vec<HandSphere>,
     id: u32,
     index: usize,
@@ -65,6 +66,21 @@ pub struct GripWorlds<'a> {
     views: Vec<(DepthImage<'a>, Option<&'a RobotMask>)>,
     fixtures: Vec<(usize, Obstacle)>,
     divisions: u32,
+}
+
+/// Independently modeled target returns are masked in the support's depth views.
+#[derive(Debug)]
+struct SupportRoom {
+    index: usize,
+    masks: Vec<RobotMask>,
+}
+
+/// The latest support window needed by a sequence of grasps. Its centre is snapped to the
+/// same lattice for a candidate projected alone or in a batch.
+#[derive(Debug)]
+pub(crate) struct SupportWindow {
+    center: Vec3,
+    scene: Planned,
 }
 
 /// The coarse region before choosing which hand-sized window to refine.
@@ -139,8 +155,34 @@ impl Observed {
         let (mut mine, mut other) = (vec![], vec![]);
         let mut fixtures = vec![Vec::new(); memory.known.len()];
         let mut unassigned = vec![];
+        let mut support = match object.on {
+            Some(Support::Object(index)) if object.solid && !memory.objects()[index].solid => {
+                Some(SupportRoom {
+                    index,
+                    masks: Vec::new(),
+                })
+            }
+            _ => None,
+        };
+        let solids = if object.solid {
+            object.shape.solids()
+        } else {
+            Vec::new()
+        };
         for (image, mask, labels) in self.kept.views() {
             let points = device.install(|| image.points(Some(mask)))?;
+            if let Some(room) = &mut support {
+                let mut background = mask.clone();
+                let readings = labels.iter().zip(&points).zip(&mut background.on_robot);
+                for ((label, point), masked) in readings {
+                    if *label == Label::Object(index)
+                        && point.is_some_and(|p| solids.iter().any(|s| s.distance(p).value <= 0.0))
+                    {
+                        *masked = true;
+                    }
+                }
+                room.masks.push(background);
+            }
             for (p, label) in points.into_iter().zip(labels) {
                 if let Some(p) = p {
                     if *label == Label::Object(index) {
@@ -168,7 +210,7 @@ impl Observed {
         let mut maps = vec![];
         let mut fixture_parts = vec![];
         if object.solid {
-            for solid in object.shape.solids() {
+            for solid in solids {
                 let mut map = OccupancyMap::from_shape(&solid, &fine)?;
                 if let Some(mut ambiguous) =
                     map.take_readings(&other, &[], memory.padding, |_, _| true)?
@@ -248,6 +290,7 @@ impl Observed {
             blocked,
             reach: None,
             loaded_opening,
+            support,
             hand,
             id,
             index,
@@ -291,11 +334,100 @@ impl GripWorlds<'_> {
         grasp.closes_on(&self.hand, self.loaded_opening, point, 0.0)
     }
 
+    /// A hollow support stays collision geometry throughout the grip. Near the closing patches
+    /// a coarse cell may fill the gap between the support and the hand. Refine that part
+    /// from every current camera, retaining the other coarse cells and the parent's unseen space.
+    fn support_scene(
+        &self,
+        at: Vec3,
+        views: &[(&DepthImage<'_>, Option<&RobotMask>)],
+        window: &mut Option<SupportWindow>,
+    ) -> Result<Planned> {
+        let memory = &self.observed.memory;
+        let Some(room) = &self.support else {
+            return Ok(self.base.clone());
+        };
+        let support = &memory.objects()[room.index];
+        let cover = support.shape.obstacle();
+        // The fine tile, including the rounding to coarse cells, need never have more samples
+        // per axis than the robot's entire map. Large hands retain the coarse map farther out.
+        let voxel = memory.map.voxel;
+        let budget = 2.0 * self.device.robot().reach() / self.divisions as f32;
+        let span = self
+            .loaded_opening
+            .min((budget - 4.0 * voxel) / 3.0)
+            .max(voxel);
+        let center = (at / span).round() * span;
+        if cover.distance(at).value > span {
+            return Ok(self.base.clone());
+        }
+        if let Some(cached) = window.as_ref().filter(|w| w.center == center) {
+            return Ok(cached.scene.clone());
+        }
+        let mut scene = self.base.clone();
+        let Some(slot) = scene
+            .of
+            .iter()
+            .position(|of| matches!(*of, Of::Object(id) | Of::Region(id) if id == support.id))
+        else {
+            return Ok(scene);
+        };
+        // The window extends at least one tile span past the contact midpoint. Its boundary
+        // lies on the coarse map before subdivision.
+        let half = Vec3::splat(1.5 * span);
+        let region = Obstacle::cuboid(center, half);
+        let radius = crate::memory::voxel_reach(memory.map.voxel);
+        let mut outside = memory.room_map(&cover)?;
+        let background: Vec<_> = views
+            .iter()
+            .zip(&room.masks)
+            .map(|((image, _), mask)| (*image, Some(mask)))
+            .collect();
+        let local =
+            outside
+                .part(&region, 0.0)?
+                .refined(self.device, &background, self.divisions)?;
+        outside.free(&region, radius)?;
+        let bounds = Obstacle::cuboid(center, half + 2.0 * radius);
+        let inside = local.part(&bounds, memory.padding)?;
+        let mut first = true;
+        for part in [outside, inside] {
+            let counts = part.counts();
+            if counts.occupied + counts.unobserved > 0 {
+                let grid = self
+                    .device
+                    .install(|| part.grid(self.device, Occlusion::Occupied))?;
+                let obstacle = Obstacle::from_grid(grid);
+                if first {
+                    scene.world.obstacles[slot] = obstacle;
+                    scene.of[slot] = Of::Region(support.id);
+                    first = false;
+                } else {
+                    scene.world.obstacles.push(obstacle);
+                    scene.of.push(Of::Region(support.id));
+                }
+            }
+        }
+        *window = Some(SupportWindow {
+            center,
+            scene: scene.clone(),
+        });
+        Ok(scene)
+    }
+
     /// Splits only this grasp's measured closing region. Returns `None` when there is no
     /// attributable occupied cell there or more than one solid supplies the contact. The
     /// scene has no touch permissions. Keep its indices and the chosen opening together when
     /// planning or reporting collisions. Drop an unsuccessful result before projecting the next.
     pub fn project(&self, g: &Grasp) -> Result<Option<Gripped>> {
+        self.project_in(g, &mut None)
+    }
+
+    pub(crate) fn project_in(
+        &self,
+        g: &Grasp,
+        window: &mut Option<SupportWindow>,
+    ) -> Result<Option<Gripped>> {
         let id = self.id;
         self.validate(g)?;
         let hand = &self.hand;
@@ -311,13 +443,14 @@ impl GripWorlds<'_> {
         let object = &memory.objects()[index];
         let voxel = memory.map.voxel;
         let cover = object.shape.obstacle();
-        let mut scene = self.base.clone();
         let views: Vec<_> = self
             .views
             .iter()
             .map(|(image, mask)| (image, *mask))
             .collect();
         let pose = Pose::new(g.pose.position, g.pose.rotation.normalize());
+        let mut scene =
+            self.support_scene(g.contacts[0].midpoint(g.contacts[1]), &views, window)?;
         let mut other_parts = vec![];
         let mut pieces = vec![];
         for source in &self.maps {

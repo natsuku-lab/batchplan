@@ -63,6 +63,8 @@ value_class! {
         /// A point to grip a surface near, in the surface's frame: `None`, the grasps spread over
         /// the object. With a point, within each of their tiers, the pairs nearest it first.
         near: Option<Vec3>,
+        /// An optional point for additional approaches whose fingers close on it.
+        close_on: Option<Vec3>,
     }
     methods {
         #[new]

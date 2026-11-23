@@ -417,10 +417,11 @@ const RINGS: usize = 8;
 /// a turn, the pairs that face each other within half a friction cone of square before the rest,
 /// spread over the object, each the farthest from those before it, or with a point to grip near
 /// ([`GraspOptions::near`]) the nearest it first. With a
-/// [`shell`](GraspOptions::shell), grasps of walls seen from one side follow all of these, in the
-/// same order among themselves: they rest on the cameras having seen past the wall, not on its
-/// other side, so the grasps without the option come first and unchanged. The surfaces run in
-/// parallel on the device's threads, and a surface's grasps are the same alone and among others.
+/// [`shell`](GraspOptions::shell), grasps supported by views past a wall follow those with
+/// both sides seen. [`GraspOptions::close_on`] appends intermediate approaches that enclose the
+/// point after all ordinary grasps, again with two seen sides first. Finally it tries shallower
+/// insertions of those grasps that enclose the point, in parent grasp order. The surfaces run on
+/// the device's threads, and a surface's grasps are the same alone and among others.
 pub fn grasps_on(
     device: &Device,
     hand: usize,
@@ -485,6 +486,12 @@ pub fn grasps_on_with_capacity(
         ensure_input!(
             near.is_finite(),
             "the point to grip near must be finite, got {near}"
+        );
+    }
+    if let Some(at) = o.close_on {
+        ensure_input!(
+            at.is_finite(),
+            "the point to close on must be finite, got {at}"
         );
     }
     for (i, s) in surfaces.iter().enumerate() {
@@ -610,15 +617,15 @@ fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
     };
     // A pair's grasps, by turn: from above first, where the line is not upright, then a turn to
     // either side of that, and so on round to from below.
-    let of = |pair: &Pair, one_sided: bool| {
+    let full = |pair: &Pair, one_sided: bool, turns: usize| {
         let down = Vec3::NEG_Z.reject_from_normalized(pair.line);
         let first = down
             .try_normalize()
             .unwrap_or_else(|| pair.line.any_orthonormal_vector());
-        let by_turn = (0..o.turns).map(|turn| {
+        let by_turn = (0..turns).map(|turn| {
             let mut grasps = Vec::with_capacity(2);
             let side = if turn % 2 == 1 { 1.0 } else { -1.0 };
-            let angle = side * turn.div_ceil(2) as f32 * TAU / o.turns as f32;
+            let angle = side * turn.div_ceil(2) as f32 * TAU / turns as f32;
             let toward = Quat::from_axis_angle(pair.line, angle) * first;
             for closing in [pair.line, -pair.line] {
                 let axes = Mat3::from_cols(closing.cross(toward), closing, toward);
@@ -647,21 +654,116 @@ fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
     };
     // Every pair from above, then every pair a turn on: the pairs being spread over the object,
     // so are the first few grasps. Those of walls seen from one side after the rest, alike.
+    let proposals = |pair: &Pair, one_sided: bool, turns: usize| match o.narrow {
+        true => narrowly(pair, one_sided, &near, open, reach, o, turns),
+        false => full(pair, one_sided, turns),
+    };
     let mut grasps = vec![];
     for (lot, one_sided) in [(&pairs, false), (&one_sided, true)] {
-        // Fingers that may come in narrower are checked out of line, which leaves the open
-        // hand's check the code it is without them.
-        let of = |pair: &Pair| match o.narrow {
-            true => narrowly(pair, one_sided, &near, open, reach, o),
-            false => of(pair, one_sided),
-        };
-        let each: Vec<Vec<Vec<Grasp>>> = lot.par_iter().map(of).collect();
+        let each: Vec<_> = lot
+            .par_iter()
+            .map(|p| proposals(p, one_sided, o.turns))
+            .collect();
         for turn in 0..o.turns {
             let at_turn = each
                 .iter()
                 .flat_map(|by_turn| by_turn[turn].iter().copied());
             grasps.extend(at_turn);
         }
+    }
+    if let Some(point) = o.close_on {
+        let back = (reach - o.overlap).max(0.0);
+        let radial_limit = hand
+            .iter()
+            .filter(|s| s.side != 0.0)
+            .map(|s| {
+                s.center
+                    .x
+                    .hypot(s.center.z)
+                    .max(s.center.x.hypot(s.center.z - back))
+                    + s.radius
+            })
+            .fold(0.0, f32::max);
+        for (lot, one_sided) in [(&pairs, false), (&one_sided, true)] {
+            let extras = |pair: &Pair| {
+                let delta = point - pair.middle;
+                let radial = delta.reject_from_normalized(pair.line).length();
+                if delta.dot(pair.line).abs() > open.gap * 0.5 || radial > radial_limit {
+                    return Vec::new();
+                }
+                // Resolve the point's orbit about the contact line to the same spatial
+                // increment used for insertion. Dyadic subdivisions retain the coarse angles.
+                let mut turns = o.turns;
+                while TAU * radial / turns as f32 > BACK {
+                    let Some(next) = turns.checked_mul(2) else {
+                        break;
+                    };
+                    turns = next;
+                }
+                if turns == o.turns {
+                    return Vec::new();
+                }
+                let every = turns / o.turns;
+                let by_turn = proposals(pair, one_sided, turns);
+                let mut extra = Vec::new();
+                for (turn, gs) in by_turn.into_iter().enumerate() {
+                    let offset = turn.div_ceil(2);
+                    if offset % every != 0 {
+                        for g in gs {
+                            if g.closes_on(hand, open.gap, point, 0.0) {
+                                extra.push((offset as f64 / turns as f64, turn % 2 == 0, g));
+                            }
+                        }
+                    }
+                }
+                extra
+            };
+            let each: Vec<_> = lot.par_iter().map(extras).collect();
+            let mut extra: Vec<_> = each.into_iter().flatten().collect();
+            extra.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            grasps.extend(extra.into_iter().map(|(_, _, g)| g));
+        }
+        // The deepest point-clear insertion may put the palm into the collision world.
+        // Keep each ranked grasp first, then try shallower insertions on the same patches.
+        let fingertip = |side| {
+            hand.iter()
+                .filter(|s| s.side == side)
+                .map(|s| s.center.z + s.radius)
+                .fold(f32::NEG_INFINITY, f32::max)
+        };
+        let finger_reach = fingertip(-1.0).min(fingertip(1.0));
+        let shallower = |g: &Grasp| {
+            let mut extra = Vec::new();
+            if !g.closes_on(hand, open.gap, point, 0.0) {
+                return extra;
+            }
+            let toward = g.pose.rotation * Vec3::Z;
+            let middle = g.contacts[0].midpoint(g.contacts[1]);
+            let depth = finger_reach - (middle - g.pose.position).dot(toward);
+            let mut back = BACK;
+            while depth - back >= o.overlap {
+                let pose = Pose::new(g.pose.position - toward * back, g.pose.rotation);
+                let opening = if o.narrow {
+                    narrowed(&near, open, &pose, g.width(), reach, o, true).map(|(gap, _)| gap)
+                } else {
+                    clear(&pose, g.width()).then_some(open.gap)
+                };
+                if let Some(opening) = opening {
+                    let next = Grasp {
+                        pose,
+                        opening,
+                        ..*g
+                    };
+                    if next.closes_on(hand, open.gap, point, 0.0) {
+                        extra.push(next);
+                    }
+                }
+                back += BACK;
+            }
+            extra
+        };
+        let depths: Vec<_> = grasps.par_iter().flat_map_iter(shallower).collect();
+        grasps.extend(depths);
     }
     grasps
 }
@@ -678,15 +780,16 @@ fn narrowly(
     open: OpenHand<'_>,
     reach: f32,
     o: &GraspOptions,
+    turns: usize,
 ) -> Vec<Vec<Grasp>> {
     let down = Vec3::NEG_Z.reject_from_normalized(pair.line);
     let first = down
         .try_normalize()
         .unwrap_or_else(|| pair.line.any_orthonormal_vector());
-    let by_turn = (0..o.turns).map(|turn| {
+    let by_turn = (0..turns).map(|turn| {
         let mut grasps = Vec::with_capacity(2);
         let side = if turn % 2 == 1 { 1.0 } else { -1.0 };
-        let angle = side * turn.div_ceil(2) as f32 * TAU / o.turns as f32;
+        let angle = side * turn.div_ceil(2) as f32 * TAU / turns as f32;
         let toward = Quat::from_axis_angle(pair.line, angle) * first;
         for closing in [pair.line, -pair.line] {
             let axes = Mat3::from_cols(closing.cross(toward), closing, toward);

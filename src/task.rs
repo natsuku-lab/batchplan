@@ -1507,7 +1507,8 @@ pub struct GraspOptions {
     /// from one side is closed on only across all of it, where the cameras saw past its far side.
     /// The space found lies past where the wall ends by what the rays leave unseen: under a bowl's
     /// flared wall seen from above, 5.5 to 11.5 mm behind the inner side of a 3 mm wall near its
-    /// rim, so 1.5 cm suits. These grasps follow every grasp of two patches seen.
+    /// rim, so 1.5 cm suits. Grasps of two patches seen come first among the ordinary grasps
+    /// and again among the intermediate angles. Shallower insertions follow their parent order.
     pub shell: Option<f32>,
     /// Whether the fingers may come in to a grasp of a surface less open than `opening`: false,
     /// every grasp is checked with the fingers as the robot's locked joints hold them. With it,
@@ -1533,6 +1534,12 @@ pub struct GraspOptions {
     /// point come first, the squarest first of two as near: where a caller was told to grip, as
     /// on a knob's axis or at a handle's middle. It orders the grasps and finds no others.
     pub near: Option<Vec3>,
+    /// A point to enclose between the pads in surface grasps. After the ordinary grasps,
+    /// sample intermediate approaches around nearby contact pairs and append only those whose
+    /// fingers close on this point. Finally try shallower insertions of point-enclosing grasps,
+    /// retaining the contact patches and the required overlap. Ordinary grasps come first,
+    /// including ones that miss the point.
+    pub close_on: Option<Vec3>,
 }
 
 impl Default for GraspOptions {
@@ -1551,6 +1558,7 @@ impl Default for GraspOptions {
             shell: None,
             narrow: false,
             near: None,
+            close_on: None,
         }
     }
 }

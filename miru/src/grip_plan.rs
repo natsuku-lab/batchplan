@@ -354,6 +354,7 @@ impl GripWorlds<'_> {
         let mut candidates = grasps.iter().enumerate();
         let blocked = if T::PICK { self.blocked.as_ref() } else { None };
         let enough = search.enough.unwrap_or(usize::MAX);
+        let mut window = None;
         let interrupted = loop {
             let mut batch = vec![];
             let mut tasks = vec![];
@@ -388,7 +389,7 @@ impl GripWorlds<'_> {
                     });
                     continue;
                 }
-                let Some(mut split) = self.project(candidate)? else {
+                let Some(mut split) = self.project_in(candidate, &mut window)? else {
                     result.failures.push(GripFailure {
                         candidate: index,
                         reason: GripStop::NoPart,

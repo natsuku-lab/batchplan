@@ -637,6 +637,31 @@ fn measured_grasps_use_the_loaded_gap_and_only_commandable_openings() {
     let mut s = plates_of(0.045, 0.005);
     let free = search(&s, capacity).unwrap();
     assert!(!free.is_empty() && free.iter().all(|g| g.opening == loaded));
+    // This reading is outside half the capacity but inside the loaded finger gap.
+    let point = Vec3::new(-0.031, -0.00525, -0.01025);
+    let angles = |close_on| {
+        let options = GraspOptions {
+            turns: 3,
+            close_on,
+            ..options
+        };
+        batchplan::grasps_on_with_capacity(&device, 0, std::slice::from_ref(&s), &options, capacity)
+            .unwrap()
+            .remove(0)
+    };
+    let coarse = angles(None);
+    let refined = angles(Some(point));
+    assert!(refined.starts_with(&coarse));
+    let hand = device.robot().hand_spheres(0);
+    let added = &refined[coarse.len()..];
+    assert!(
+        added.iter().any(|g| {
+            let middle = g.contacts[0].midpoint(g.contacts[1]);
+            (point - middle).dot(g.pose.rotation * Vec3::Y).abs() > capacity / 2.0
+        }),
+        "the loaded jaws admit a reading beyond half the graspable width"
+    );
+    assert!(added.iter().all(|g| g.closes_on(&hand, loaded, point, 0.0)));
     the_object(&mut s);
     for sign in [-1.0, 1.0] {
         face(
@@ -2230,4 +2255,123 @@ fn the_grasp_closing_region_uses_a_rigid_frame() {
         !wider.closes_on(&hand, GraspOptions::default().opening, between, 0.0),
         "the loaded hand cannot open to this width"
     );
+}
+
+#[test]
+fn refining_approaches_for_a_point_keeps_the_original_grasps_and_closes_on_the_point() {
+    let device = device();
+    let surface = box_surface(Vec3::new(0.08, 0.01, 0.05), &[]);
+    let hand = device.robot().hand_spheres(0);
+    let at = Vec3::new(0.051, 0.01, 0.049);
+    let get = |o: &GraspOptions| {
+        grasps_on(&device, 0, std::slice::from_ref(&surface), o)
+            .unwrap()
+            .remove(0)
+    };
+    for narrow in [false, true] {
+        let options = GraspOptions {
+            turns: 4,
+            narrow,
+            ..Default::default()
+        };
+        let original = get(&options);
+        let extra = get(&GraspOptions {
+            close_on: Some(at),
+            ..options
+        });
+        assert!(
+            !original.is_empty(),
+            "the bar has measured antipodal contacts"
+        );
+        assert!(
+            extra.starts_with(&original),
+            "existing successes keep their rank"
+        );
+        let added = &extra[original.len()..];
+        assert!(
+            !added.is_empty(),
+            "intermediate rolls cover the named point"
+        );
+        assert!(
+            added
+                .iter()
+                .all(|g| g.closes_on(&hand, options.opening, at, 0.0))
+        );
+        assert!(
+            added.iter().all(|g| !original.contains(g)),
+            "coarse rolls are not tried twice"
+        );
+        assert!(
+            original.iter().any(|g| added.iter().any(|other| {
+                let displacement = g.pose.position - other.pose.position;
+                g.contacts == other.contacts
+                    && g.pose.rotation == other.pose.rotation
+                    && displacement.dot(g.pose.rotation * Vec3::Z) > 0.001
+                    && displacement.cross(g.pose.rotation * Vec3::Z).length() < 1e-6
+            })),
+            "the same contact pair and roll admit a shallower insertion"
+        );
+        let far = get(&GraspOptions {
+            close_on: Some(Vec3::splat(2.0)),
+            ..options
+        });
+        assert_eq!(far, original, "neither pad can cover the distant point");
+    }
+    let invalid = GraspOptions {
+        close_on: Some(Vec3::NAN),
+        ..Default::default()
+    };
+    assert!(matches!(
+        grasps_on(&device, 0, &[surface], &invalid),
+        Err(Error::Input(_))
+    ));
+}
+
+#[test]
+fn insertion_overlap_comes_from_both_fingers() {
+    let surface = plates_of(0.045, 0.005);
+    let options = GraspOptions {
+        turns: 3,
+        close_on: Some(Vec3::new(0.0, -0.00525, -0.01025)),
+        ..Default::default()
+    };
+    let short = common::panda().unwrap().tip(0);
+    for extended in ["panda_hand", "panda_leftfinger"] {
+        let mut model = common::panda_options();
+        let spheres = &mut model.collision_model.as_mut().unwrap().spheres;
+        spheres
+            .get_mut(extended)
+            .unwrap()
+            .push([0.10, 0.0, 0.16, 0.005]);
+        let robot =
+            batchplan::Robot::load(common::asset("franka/franka_panda.urdf"), &model).unwrap();
+        let device = Device::cpu_threads(&robot, 4).unwrap();
+        assert!(
+            robot.tip(0) > short + 0.04,
+            "the extension reaches past the ordinary fingertips"
+        );
+        let grasps = grasps_on(&device, 0, std::slice::from_ref(&surface), &options)
+            .unwrap()
+            .remove(0);
+        let mut alternatives = 0;
+        for (i, g) in grasps.iter().enumerate() {
+            if grasps[..i].iter().any(|before| {
+                before.contacts == g.contacts
+                    && before.pose.rotation == g.pose.rotation
+                    && before.pose.position != g.pose.position
+            }) {
+                alternatives += 1;
+                let middle = g.contacts[0].midpoint(g.contacts[1]);
+                let back = (middle - g.pose.position).dot(g.pose.rotation * Vec3::Z);
+                assert!(
+                    short - back >= options.overlap - 1e-6,
+                    "both fingers must overlap the patches"
+                );
+            }
+        }
+        assert!(
+            alternatives > 0,
+            "the fingers reach more than one insertion"
+        );
+    }
 }
