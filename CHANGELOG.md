@@ -10,10 +10,6 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
-- Picks and moving turns accept the collision sphere fit for the object they carry through
-  `TaskOptions::held_spheres`. A pick returns the same fit for the following place.
-  **Breaking:** Rust literals that list every field of `TaskOptions` need `held_spheres`.
-
 - `grasps_on_with_capacity` accepts a maximum graspable width separate from the loaded pad gap.
   It checks the fully open hand and, for symmetric sliding jaws, commandable partial openings.
   `Robot::parallel_jaw_opening` checks this model against the calibrated stroke and joint locks.
@@ -30,6 +26,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   shape and the other obstacles that move with it. `Pick::lift_world` builds the departure world
   for execution. **Breaking:** Rust literals that list every field of `Pick` need `body: None`
   when the contact obstacle is the whole object.
+
+- Picks and moving turns accept the collision sphere fit for the object they carry through
+  `TaskOptions::held_spheres`. A pick returns the same fit for the following place.
+  **Breaking:** Rust literals that list every field of `TaskOptions` need `held_spheres`.
 
 - `Pull` and `pull` plan a straight draw by a handle in Rust and Python. The hand keeps its
   orientation and moves a signed distance along a world direction. Each plan gives the draw
