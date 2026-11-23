@@ -10,6 +10,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- `Kept::extractions` reports the straight lift that clears a measured open container at the
+  object's observed attitude and a caller-specified margin.
+
 - `grasps_on_with_capacity` accepts a maximum graspable width separate from the loaded pad gap.
   It checks the fully open hand and, for symmetric sliding jaws, commandable partial openings.
   `Robot::parallel_jaw_opening` checks this model against the calibrated stroke and joint locks.

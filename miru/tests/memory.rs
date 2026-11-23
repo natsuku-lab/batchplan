@@ -434,6 +434,20 @@ fn a_look_with_no_cameras_sees_nothing() {
     assert_eq!(none.memory.next_id(), first.memory.next_id());
     assert!(none.kept.scene().labels.is_empty(), "no view's labels");
     assert!(none.kept.image(0).is_none() && none.kept.robot(0).is_none());
+    let remembered = first.memory.objects()[0].id;
+    for id in [remembered, u32::MAX] {
+        let lifts = none
+            .kept
+            .extractions(id, 0.01)
+            .expect("an optional measurement");
+        assert!(lifts.is_empty(), "no current reading of object {id}");
+        for invalid in [-0.01, f32::NAN, f32::INFINITY] {
+            assert!(matches!(
+                none.kept.extractions(id, invalid),
+                Err(batchplan::Error::Input(_))
+            ));
+        }
+    }
 }
 
 /// The far and the near camera stated 5 mm over where they read from: with `off_by` 5 mm the table
