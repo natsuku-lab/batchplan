@@ -6075,3 +6075,196 @@ fn a_bowl_in_a_drawer_owns_its_wall_and_leaves_the_drawer() {
         "the bowl owner's pixels include the drawer front"
     );
 }
+
+mod separating_wall {
+    use super::common::{
+        CAMERAS, D435, Frame, MIDDLE, Thing, block, device, known, looking, table,
+    };
+    use batchplan::DepthFilter;
+    use glam::Vec3;
+    use miru::{Label, Look, LookOptions, Scene, Shape, Support};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Case {
+        InteriorBlock,
+        ExteriorBlock,
+        MissingWallPatch,
+    }
+
+    fn tray(case: Case) -> Vec<Thing> {
+        let wood = |x, y, z, hx, hy, hz| {
+            block(
+                MIDDLE + Vec3::new(x, y, z),
+                Vec3::new(hx, hy, hz),
+                [160, 110, 65],
+            )
+        };
+        let mut things = vec![
+            table(),
+            wood(0., 0., 0.005, 0.11, 0.09, 0.005),
+            wood(0.105, 0., 0.035, 0.005, 0.09, 0.035),
+            wood(-0.105, 0., 0.035, 0.005, 0.09, 0.035),
+            wood(0., 0.085, 0.035, 0.10, 0.005, 0.035),
+            wood(0., -0.085, 0.035, 0.10, 0.005, 0.035),
+        ];
+        for y in [-0.074, 0.074] {
+            things.push(wood(0.134, y, 0.030, 0.024, 0.009, 0.030));
+        }
+        things.push(wood(0.128, 0., 0.012, 0.023, 0.075, 0.012));
+        let (center, half) = if case == Case::InteriorBlock {
+            (Vec3::new(0.025, 0., 0.032), Vec3::new(0.010, 0.022, 0.022))
+        } else {
+            (Vec3::new(0.137, 0., 0.033), Vec3::new(0.010, 0.022, 0.009))
+        };
+        things.push(block(MIDDLE + center, half, [35, 65, 220]));
+        things
+    }
+
+    fn mask_inward_patch(frame: &mut Frame) -> usize {
+        let k = frame.intrinsics;
+        let mut removed = 0;
+        for (i, depth) in frame.depth.iter_mut().enumerate() {
+            if frame.shows[i] != Some(2) || *depth <= 0. {
+                continue;
+            }
+            let ray = Vec3::new(
+                ((i % frame.width) as f32 - k.cx) / k.fx,
+                ((i / frame.width) as f32 - k.cy) / k.fy,
+                1.,
+            );
+            let v = frame.camera.position + frame.camera.rotation * (ray * *depth) - MIDDLE;
+            if (v.x - 0.100).abs() < 0.003 && v.y.hypot(v.z - 0.034) < 0.012 {
+                *depth = 0.;
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    #[test]
+    fn an_exterior_piece_needs_the_wall_in_front_of_it() {
+        for case in [
+            Case::InteriorBlock,
+            Case::ExteriorBlock,
+            Case::MissingWallPatch,
+        ] {
+            let things = tray(case);
+            let child = things.len() - 1;
+            let eyes = [Vec3::new(0.87, 0.08, 0.28), Vec3::new(0.405, -0.012, 0.42)];
+            let raw = eyes.map(|eye| {
+                Frame::of(&things, looking(eye, MIDDLE + Vec3::new(0.04, 0., 0.03)))
+                    .masked(|n| if n == child { 2 } else { u32::from(n != 0) })
+            });
+            for (name, far, near) in CAMERAS {
+                let mut removed = 0;
+                let frames: Vec<_> = raw
+                    .iter()
+                    .zip([far, near])
+                    .enumerate()
+                    .map(|(i, (f, cam))| {
+                        let mut f = f.clone();
+                        if let Some(cam) = cam {
+                            f = f.sensed(cam, 49 + i as u64);
+                            let n = f.noise;
+                            f.depth = f
+                                .view()
+                                .image
+                                .filtered(&DepthFilter {
+                                    noise: [n.constant, n.linear, n.quadratic],
+                                    ..Default::default()
+                                })
+                                .unwrap();
+                        } else {
+                            // Exact ranges with the D435's stated precision, for the matched noise control.
+                            f.noise = D435.noise(f.intrinsics.fx);
+                        }
+                        if case == Case::MissingWallPatch {
+                            removed += mask_inward_patch(&mut f);
+                        }
+                        f
+                    })
+                    .collect();
+                assert_eq!(removed > 0, case == Case::MissingWallPatch);
+                let views: Vec<_> = frames.iter().map(Frame::view).collect();
+                let scene = miru::look(
+                    device(),
+                    &Look {
+                        views: &views,
+                        known: &[known(&table())],
+                    },
+                    &Scene::default(),
+                    &LookOptions::default(),
+                )
+                .unwrap();
+                let owner = |thing: usize| {
+                    let mut hits = vec![0; scene.objects.len()];
+                    for (f, labels) in frames.iter().zip(&scene.labels) {
+                        for (hit, label) in f.shows.iter().zip(labels) {
+                            if *hit == Some(thing)
+                                && let Label::Object(n) = label
+                            {
+                                hits[*n] += 1;
+                            }
+                        }
+                    }
+                    let (index, &count) = hits.iter().enumerate().max_by_key(|(_, n)| *n).unwrap();
+                    assert!(
+                        count > 500,
+                        "{case:?} through {name}: {count} labeled pixels"
+                    );
+                    index
+                };
+                let (part, box_id) = (owner(child), owner(1));
+                assert_ne!(box_id, part, "{case:?} through {name}");
+                let obstacle = &scene.objects[part];
+                assert_eq!(obstacle.on, Some(Support::Object(box_id)));
+                let container = &scene.objects[box_id];
+                let open = matches!(container.shape, Shape::OpenBox { .. });
+                println!(
+                    "{case:?} {name}: open={open} tray_solid={} child_solid={} missing={removed}",
+                    container.solid, obstacle.solid
+                );
+                if name == "exact" && case == Case::ExteriorBlock {
+                    let mut previous = scene.clone();
+                    previous.objects[part].solid = false;
+                    let next = miru::look(
+                        device(),
+                        &Look {
+                            views: &views,
+                            known: &[known(&table())],
+                        },
+                        &previous,
+                        &LookOptions::default(),
+                    )
+                    .expect("same views and a previously hollow part");
+                    let by_id = |id| {
+                        next.objects
+                            .iter()
+                            .find(|o| o.id == id)
+                            .expect("same thing")
+                    };
+                    assert!(!by_id(obstacle.id).solid);
+                    assert!(!matches!(by_id(container.id).shape, Shape::OpenBox { .. }));
+                }
+                if name == "exact" {
+                    assert!(obstacle.solid);
+                    assert_eq!(open, case != Case::MissingWallPatch);
+                    if case == Case::InteriorBlock {
+                        let p = MIDDLE + Vec3::new(0.025, 0., 0.032);
+                        assert!(
+                            obstacle
+                                .shape
+                                .solids()
+                                .iter()
+                                .any(|s| s.distance(p).value < 0.)
+                        );
+                    }
+                } else if case == Case::MissingWallPatch
+                    || (case == Case::ExteriorBlock && !obstacle.solid)
+                {
+                    assert!(!open, "opening needs a solid piece and observed wall");
+                }
+            }
+        }
+    }
+}
