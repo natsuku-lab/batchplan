@@ -10,6 +10,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- `prefer_measured_contacts` orders completed surface picks by evidence for the closing
+  contacts, retaining every checked alternative for placement.
+
+- `pick_with_preferred_grasps` accepts a preferred prefix per pick and batches supplemental
+  grasps for tasks whose preferred grasps all failed.
+
 - A placement can carry a predicted downward fall for each release pose. Departure checks the
   volume swept during settling and reports the expected landing. **Breaking:** exhaustive
   Rust `Place` literals need `falls: vec![]` for a placement in contact.

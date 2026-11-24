@@ -39,6 +39,8 @@ def test_a_picked_box_is_carried_and_set_down(tasks_robot):
         outcome = bp.pick(device, worlds, [task]).outcomes[0]
         assert isinstance(outcome, tuple) and outcome, f"{outcome} on {device}"
         plan = outcome[0]
+        preferred = bp.pick_with_preferred_grasps(device, worlds, [task], [len(task.grasps)])
+        assert [p.candidate for p in preferred.outcomes[0]] == [p.candidate for p in outcome]
         for motion in (plan.transit, plan.approach, plan.depart):
             motion.check(tasks_robot)
         np.testing.assert_array_equal(plan.transit.start, tasks_robot.default_q)

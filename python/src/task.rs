@@ -830,6 +830,34 @@ pub(crate) fn pick(
     TaskResult::new(py, result)
 }
 
+/// Tries each pick's preferred prefix first. Only failed tasks try their remaining grasps.
+/// A zero count asks for an ordinary pick. Indices refer to the full input task.
+#[pyfunction]
+#[pyo3(signature = (device, worlds, picks, preferred, options = None))]
+pub(crate) fn pick_with_preferred_grasps(
+    py: Python<'_>,
+    device: &Device,
+    worlds: &Worlds,
+    picks: &Bound<'_, PyAny>,
+    preferred: Vec<usize>,
+    options: Option<&TaskOptions>,
+) -> PyResult<TaskResult> {
+    let picks = Vec::<batchplan::Pick>::from_py(picks)?;
+    let options = options.map(|o| o.0.clone()).unwrap_or_default();
+    let result = py
+        .detach(|| {
+            batchplan::pick_with_preferred_grasps(
+                &device.device,
+                &worlds.0,
+                &picks,
+                &preferred,
+                &options,
+            )
+        })
+        .or_raise()?;
+    TaskResult::new(py, result)
+}
+
 /// Sets down each task's held object, trying each of its poses. IK solves where the hand lets go,
 /// holding the object, which may touch what it is set on there and on the move in, run backward
 /// from there. Run transit and approach holding the object, open the gripper, then follow the
@@ -992,6 +1020,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TaskFailure>()?;
     m.add_class::<TaskResult>()?;
     m.add_function(wrap_pyfunction!(pick, m)?)?;
+    m.add_function(wrap_pyfunction!(pick_with_preferred_grasps, m)?)?;
     m.add_function(wrap_pyfunction!(place, m)?)?;
     m.add_function(wrap_pyfunction!(handover, m)?)?;
     m.add_function(wrap_pyfunction!(turn, m)?)?;
