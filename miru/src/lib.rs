@@ -86,6 +86,7 @@ mod memory;
 mod scene;
 mod segment;
 mod threads;
+mod turn;
 mod view;
 
 pub use bar::BarOnDisk;
@@ -101,3 +102,4 @@ pub use memory::{
     Act, Camera, Kept, Memory, MemoryOptions, Observed, Of, Planned, Stance, Step, Under, observe,
 };
 pub use scene::{Label, Object, Scene, Shape, Support};
+pub use turn::{GripSource, TurnGrip, TurnGrips, TurnGroup};

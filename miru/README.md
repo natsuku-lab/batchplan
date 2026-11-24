@@ -312,6 +312,21 @@ evidence on one side gives `Incomplete`, and an unseen target gives `None`. A hi
 can produce the same readings as an empty space. Use the full planning world and execution
 guards throughout the motion.
 
+To turn a control, `Kept::turn_grips` proposes the grips in groups to plan in order, each
+with the closure evidence `observed_closures` gives at its pose, and the screw to turn about:
+through the measured disk's centre where `bar_on_disk` resolves, else through the middle of the
+object's fitted shape, along the outward normal given as `up`. The first group is the bar's
+poses, fully open, to try in order. The second is the grips from above the fitted shape,
+generated at the loaded width, whose closures show `BothSides`: fully open, and alike, so plan
+them with `Turn::enough` `None` and take the quickest. The last is the grasps of the measured
+surface (`grasps_on_with_capacity` with the hand's capacity), ordered by their moment about the
+screw, those showing `BothSides` first, each at its own opening, and then the remaining shape
+grips whose evidence is `Incomplete`. An empty group is left out. Fully open is
+`GraspOptions::opening`, the width a surface grasp gives the hand as loaded. The evidence is the
+latest endpoints' alone: it says nothing of hidden material, of contact normals or of whether
+the control turns about that line. Plan each motion against the current world and guard it in
+execution.
+
 ## How it tells things apart
 
 By geometry, at the scale the camera's stated noise allows; `src/segment.rs` has the
