@@ -3425,3 +3425,78 @@ impl Gripping for Pull {
         }
     }
 }
+
+/// What [`place_nearest`] chose: the alternative that sets the object down nearest the spot, and
+/// its plan that does.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct NearestPlace {
+    /// The task's index among the alternatives.
+    pub task: usize,
+    /// The task as [`place`] planned it, its start corrected within
+    /// [`PlanOptions::start_tolerance`].
+    pub problem: Place,
+    /// Its plan that sets the object down nearest the spot.
+    pub plan: TaskPlan,
+}
+
+/// Alternatives for one placement: the same object set down at the same poses from different
+/// starts or holds, as each of several picks leaves it. Plans them in one batch, each as [`place`]
+/// does, and returns the alternative whose plan sets the object down nearest `near` in x and y
+/// (the support sets z): the earliest task among equally near ones. Distance is from each plan's
+/// [`TaskPlan::placed`], the expected landing. Each task keeps its own [`Place::enough`]; of a
+/// task's several plans, the nearest counts for it, the quickest among equally near ones. Where
+/// none gets through, each task's failure comes back, in task order (none for no tasks). A `near`
+/// that is not finite is an input error.
+// Compiled where it is called: this crate's own code stays as it was without it (`nm -n`).
+#[inline]
+pub fn place_nearest(
+    device: &Device,
+    worlds: &Worlds,
+    tasks: &[Place],
+    near: Vec3,
+    o: &TaskOptions,
+) -> Result<std::result::Result<NearestPlace, Vec<TaskFailure>>> {
+    ensure_input!(
+        near.is_finite(),
+        "the point to set the object down near must be finite, got {near}"
+    );
+    let TaskResult {
+        mut problems,
+        outcomes,
+    } = place(device, worlds, tasks, o)?;
+    // The nearest plan so far, its squared distance and its task; and the tasks' failures.
+    let mut nearest: Option<(f32, usize, TaskPlan)> = None;
+    let mut failures = vec![];
+    for (task, outcome) in outcomes.into_iter().enumerate() {
+        let plans = match outcome {
+            Ok(plans) => plans,
+            Err(failure) => {
+                failures.push(failure);
+                continue;
+            }
+        };
+        for plan in plans {
+            let placed = plan
+                .placed
+                .as_ref()
+                .expect("a place's plan says where it sets the object down");
+            let at = placed.pose().position.truncate();
+            let distance = at.distance_squared(near.truncate());
+            if nearest
+                .as_ref()
+                .is_none_or(|(least, _, _)| distance < *least)
+            {
+                nearest = Some((distance, task, plan));
+            }
+        }
+    }
+    Ok(match nearest {
+        Some((_, task, plan)) => Ok(NearestPlace {
+            task,
+            problem: problems.swap_remove(task),
+            plan,
+        }),
+        None => Err(failures),
+    })
+}

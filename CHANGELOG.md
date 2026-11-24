@@ -20,6 +20,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- `place_nearest` plans one placement from several picks' starts and holds in one batch and
+  returns the one that sets the object down nearest a spot in x and y, or each one's failure.
+
 - `prefer_measured_contacts` orders completed surface picks by evidence for the closing
   contacts, retaining every checked alternative for placement.
 

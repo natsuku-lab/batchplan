@@ -810,6 +810,39 @@ impl TaskResult {
     }
 }
 
+/// What `place_nearest` chose: the alternative that sets the object down nearest the spot, and its
+/// plan that does.
+#[pyclass(module = "batchplan", frozen)]
+pub(crate) struct NearestPlace(batchplan::NearestPlace);
+
+#[pymethods]
+impl NearestPlace {
+    /// The task's index among the alternatives.
+    #[getter]
+    fn task(&self) -> usize {
+        self.0.task
+    }
+
+    /// The task as `place` planned it, its start corrected within `PlanOptions.start_tolerance`.
+    #[getter]
+    fn problem<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.0.problem.to_py(py)
+    }
+
+    /// Its plan that sets the object down nearest the spot.
+    #[getter]
+    fn plan(&self) -> TaskPlan {
+        TaskPlan(self.0.plan.clone())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "NearestPlace(task={}, candidate={})",
+            self.0.task, self.0.plan.candidate
+        )
+    }
+}
+
 /// Picks up each task's object, trying each of its grasps. IK solves at the grasp, where the
 /// fingers may touch the object, and the move in runs backward from there. The move away holds the
 /// object, which may touch what it rests on. Run the transit and the approach, close the gripper,
@@ -880,6 +913,38 @@ pub(crate) fn place(
         .detach(|| batchplan::place(&device.device, &worlds.0, &places, &options))
         .or_raise()?;
     TaskResult::new(py, result)
+}
+
+/// Alternatives for one placement: the same object set down at the same poses from different
+/// starts or holds, as each of several picks leaves it. Plans them in one batch, each as `place`
+/// does, and returns the alternative whose plan sets the object down nearest `near` in x and y (the
+/// support sets z), the earliest task among equally near ones, as a `NearestPlace`. Distance is
+/// from each plan's `placed`, the expected landing. Each task keeps its own `enough`; of a task's
+/// several plans, the nearest counts for it, the quickest among equally near ones. Where none gets
+/// through, a tuple of each task's `TaskFailure`, in task order (empty for no tasks). A `near` that
+/// is not finite raises `InputError`.
+#[pyfunction]
+#[pyo3(signature = (device, worlds, places, near, options = None))]
+pub(crate) fn place_nearest<'py>(
+    py: Python<'py>,
+    device: &Device,
+    worlds: &Worlds,
+    places: &Bound<'_, PyAny>,
+    near: &Bound<'_, PyAny>,
+    options: Option<&TaskOptions>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let places = Vec::<batchplan::Place>::from_py(places)?;
+    let near = Vec3::from_py(near)?;
+    let options = options.map(|o| o.0.clone()).unwrap_or_default();
+    let result = py
+        .detach(|| batchplan::place_nearest(&device.device, &worlds.0, &places, near, &options))
+        .or_raise()?;
+    match result {
+        Ok(nearest) => NearestPlace(nearest).into_bound_py_any(py),
+        Err(failures) => {
+            PyTuple::new(py, failures.into_iter().map(TaskFailure))?.into_bound_py_any(py)
+        }
+    }
 }
 
 /// Passes each task's held object to the hand that takes it, trying each meeting with each of the
@@ -1020,9 +1085,11 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CandidateStop>()?;
     m.add_class::<TaskFailure>()?;
     m.add_class::<TaskResult>()?;
+    m.add_class::<NearestPlace>()?;
     m.add_function(wrap_pyfunction!(pick, m)?)?;
     m.add_function(wrap_pyfunction!(pick_with_preferred_grasps, m)?)?;
     m.add_function(wrap_pyfunction!(place, m)?)?;
+    m.add_function(wrap_pyfunction!(place_nearest, m)?)?;
     m.add_function(wrap_pyfunction!(handover, m)?)?;
     m.add_function(wrap_pyfunction!(turn, m)?)?;
     m.add_function(wrap_pyfunction!(pull, m)?)?;
