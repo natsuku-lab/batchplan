@@ -1017,10 +1017,11 @@ fn picked(
 
 /// Sets down each task's held object, trying each of its poses. IK solves where the hand lets go,
 /// holding the object, which may touch what it is set on there and on the move in, run backward
-/// from there. The move away lets the fingers touch the object where it now stands. Run the
-/// transit and the approach holding the object, open the gripper, then run the departure. A task
-/// that names how far its hand may open ([`Place::open`]) is solved where it lets go with the
-/// fingers where they hold the object, and backs off at the first opening it is clear with
+/// from there. Run transit and approach holding the object, open the gripper, then follow the
+/// departure. The releasing fingers may touch the object. When a fall is specified, check the
+/// follower against the returned `falling` obstacle through departure. Verify the expected
+/// landing in `placed` after release. If the task specifies [`Place::open`], the solver keeps
+/// the fingers at the holding aperture until release, then backs off at the first clear opening
 /// ([`TaskPlan::opening`]): open the gripper that far, and follow the departure on the robot
 /// relocked there. A task that says how many plans will do ([`Place::enough`]) tries its poses in
 /// their order until that many have got through. `device` is the robot's without the object; each

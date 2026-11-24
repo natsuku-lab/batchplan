@@ -832,9 +832,10 @@ pub(crate) fn pick(
 
 /// Sets down each task's held object, trying each of its poses. IK solves where the hand lets go,
 /// holding the object, which may touch what it is set on there and on the move in, run backward
-/// from there. The move away lets the fingers touch the object where it now stands. Run the
-/// transit and the approach holding the object, open the gripper, then run the departure. `device`
-/// is the robot's without the object; each task's `held` is attached to it here.
+/// from there. Run transit and approach holding the object, open the gripper, then follow the
+/// departure. The releasing fingers may touch the object. When a fall is specified, check the
+/// follower against the returned `falling` obstacle through departure. Verify the expected
+/// landing in `placed` after release. Each task attaches its `held` to the robot on `device`.
 #[pyfunction]
 #[pyo3(signature = (device, worlds, places, options = None))]
 pub(crate) fn place(
