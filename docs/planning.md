@@ -317,6 +317,14 @@ fn main() -> Result<(), Error> {
 - **A world per step.** A task's `world` is the one the hand grasps or lets go in, and each other step's unless that names its own: `transit_world` for the start and the planned path, `depart_world` for the move away. Each holds the task's obstacles, in the same order, shaped or touched (`World::touch`) otherwise, so a hand that may lean on the bin an object stands in at the grasp plans its way there touching nothing, or around the bin as measured where the grasp sees it as a box. Several ways of allowing a task are several tasks of one call, and the first of them with a plan is the one to run.
 - **Moves without the way to them.** A task with `transit: false` runs steps 2 to 4 alone and keeps every candidate that passes them: its plans hold the two straight moves (`TaskPlan::transit` is `None`, `TaskPlan::motions` gives what there is in order), `TaskPlan::begin` is where a way to them must end and `TaskPlan::end` where the next begins. Its start is not checked for collision, and its constraints, which are the transit's, are not applied: the start only says which solution of a grasp or release is nearest and where the joints other hands move wait (a place's `idle` still says the latter where it is given). So a program of many tasks need not plan them one after another: every pick's moves solve in one call and every place's in a second (each holding what its pick's grasp holds, in the world its step of the program leaves), and every way between them is one `plan`, the carries `holding` their objects. `join` then runs each way on into the move in after it, a carry with its `holding`:
 
+A batch may include preferred and supplemental grasps for each task. Pass the same ordered
+`Pick` values to `pick_with_preferred_grasps`, along with the number of preferred grasps for
+each task. For example, an application can append the primitive grasps obtained with a different
+`GraspOptions::along` fraction. If any preferred grasp completes the pick, only preferred plans
+are returned for that task. If all fail, the remaining grasps of failed tasks form another batch.
+All reported indices and named stops use the original ordering. A downstream place is planned
+from the returned holds.
+
   ```rust,no_run
   # use batchplan::{Device, Error, JoinOptions, Pick, PlanOptions, PlanProblem, Sequence, TaskOptions, Worlds};
   # fn run(device: &Device, worlds: &Worlds, picks: Vec<Pick>) -> Result<(), Error> {

@@ -13,6 +13,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- `pick_with_preferred_grasps` accepts a preferred prefix per pick and batches supplemental
+  grasps for tasks whose preferred grasps all failed.
+
 - `OccupancyMap::occupied_field` can sample clearance to whole occupied voxels more closely
   within a caller-specified point budget. Miru exposes this for unexplained material through
   `Memory::with_unexplained_field`.
