@@ -70,7 +70,8 @@ value_class! {
         budget: usize,
         /// How far spheres may reach beyond the geometry (meters) before the fit spends more of
         /// the budget. When the budget cannot reach it, the fit uses the smallest overhang it can.
-        /// An object a robot holds always reaches it, however many spheres that takes.
+        /// An object a robot holds always reaches it, however many spheres that takes, and is
+        /// held whole by its spheres unless `max_overhang` holds them back.
         tolerance: f32,
         /// The farthest any sphere may reach beyond the geometry (meters), whatever the budget;
         /// 0 keeps every sphere inside. It leaves surface outside the spheres where the budget

@@ -271,15 +271,13 @@ The table is read once for the 64 boxes. A flat bottom on a flat top is judged i
 
 | | To spend | Spheres | Past its side | Past its ends | Time |
 |---|---|---|---|---|---|
-| A plate 13.9 cm across, 18 mm thick | 64 | 95, fitted | 4.6 mm | 5.0 mm | 108 ms |
-| | 256 | 145, covered | 4.7 mm | 4.7 mm | 0.13 ms |
-| A bowl 11.2 cm across, 5.1 cm deep | 64 | 72, fitted | 4.8 mm | 5.0 mm | 43 ms |
-| | 256 | 129, fitted | 4.9 mm | 5.0 mm | 8.1 ms |
-| A can 6.6 cm across, 12 cm tall | 64 | 41, fitted | 4.8 mm | 5.0 mm | 32 ms |
-| | 256 | 90, fitted | 4.7 mm | 5.0 mm | 7.7 ms |
+| A plate 13.9 cm across, 18 mm thick | 64 | 145, covered after a fit of more | 4.7 mm | 4.7 mm | 88 ms |
+| | 256 | 145, covered | 4.7 mm | 4.7 mm | 0.11 ms |
+| A bowl 11.2 cm across, 5.1 cm deep | 64 or 256 | 98, fitted | 4.9 mm | 5.0 mm | 50 ms |
+| A can 6.6 cm across, 12 cm tall | 64 or 256 | 55, fitted | 4.9 mm | 5.0 mm | 30 ms |
 | A capsule 4 cm across, 14 cm long | 64 or 256 | 5, covered | 3.6 mm | 3.6 mm | 0.02 ms |
 
-The budget does not cap what a hand holds: each shape takes what the 5 mm takes. A cover the budget gives within the tolerance is kept, as the 256 give the plate's layer and the bowl's and the can's fits. The 64 give none, so each is fitted with no budget from candidates the medial balls of its samples join, and with fewer spheres: that fit, a fit within the budget tried first for the round shapes, is the time, with the machine's load at 12 to 15. Before, 64 fitted spheres reached 8.6 and 10.6 mm past the plate's side and faces, 9.1 and 8.1 mm past the bowl's and 7.1 and 6.7 mm past the can's.
+The budget does not cap what a hand holds: each shape takes what the 5 mm takes, and its spheres hold all of it. The 64 have no layer of the plate within the tolerance, so it is fitted first, and the fit takes more spheres than the layer's 145, which is then taken: the fit is the time. Before, 64 fitted spheres reached 8.6 and 10.6 mm past the plate's side and faces, 9.1 and 8.1 mm past the bowl's and 7.1 and 6.7 mm past the can's, and left 1.1, 1.2 and 0.7 mm of each outside them (on a grid of its surface 0.5 mm apart).
 
 ## Joining motions
 

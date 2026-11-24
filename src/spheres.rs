@@ -56,7 +56,8 @@ pub struct SphereOptions {
     pub budget: usize,
     /// How far spheres may reach beyond the geometry (meters) before the fit spends more of the
     /// budget. When the budget cannot reach it, the fit uses the smallest overhang it can. An
-    /// object a robot holds always reaches it, however many spheres that takes: for it, the
+    /// object a robot holds always reaches it, however many spheres that takes, and its spheres
+    /// hold all of it, but for rounding, unless `max_overhang` holds them back: for it, the
     /// tolerance is the knob.
     pub tolerance: f32,
     /// The farthest any sphere may reach beyond the geometry (meters), whatever the budget: each
@@ -275,13 +276,15 @@ struct LinkFit {
 }
 
 impl LinkFit {
-    /// With `medial`, each sample also proposes its medial ball ([`LinkFit::medial`]).
+    /// With `surface`, points of the surface every final sphere set must contain in place of
+    /// random dense samples, each sample also proposes its medial ball ([`LinkFit::medial`]) and
+    /// covers drop redundant picks.
     fn new(
         meshes: &[TriMesh],
         o: &SphereOptions,
         rng: &mut Rng,
         parallel: bool,
-        medial: bool,
+        surface: Option<&[(Vec3, Vec3)]>,
     ) -> Option<Self> {
         use parry3d::query::PointQuery;
 
@@ -293,16 +296,22 @@ impl LinkFit {
             return None;
         }
         let (samples, normals): (Vec<Vec3>, Vec<Vec3>) = sampled.into_iter().unzip();
-        let area: f32 = meshes
-            .iter()
-            .flat_map(|m| {
-                m.triangles
+        let dense = match surface {
+            Some(surface) => surface.to_vec(),
+            None => {
+                let area: f32 = meshes
                     .iter()
-                    .map(|&t| description::triangle_area(m.corners(t)))
-            })
-            .sum();
-        let count = ((area / DENSE_AREA) as usize).clamp(DENSE_SAMPLES, MAX_DENSE_SAMPLES);
-        let dense = surface_samples(meshes, count, rng);
+                    .flat_map(|m| {
+                        m.triangles
+                            .iter()
+                            .map(|&t| description::triangle_area(m.corners(t)))
+                    })
+                    .sum();
+                let count = ((area / DENSE_AREA) as usize).clamp(DENSE_SAMPLES, MAX_DENSE_SAMPLES);
+                surface_samples(meshes, count, rng)
+            }
+        };
+        let medial = surface.is_some();
         let solids = solids(meshes);
         let (lo, hi) = samples
             .iter()
@@ -545,9 +554,14 @@ impl LinkFit {
             let mut added: Vec<(Vec3, f32)> = vec![];
             for i in left {
                 let (p, n) = (self.samples[i], self.normals[i]);
-                if !any_reaches(&added, p)
-                    && let Some(candidate) = self.tangent(p, n, overhang)
-                {
+                if any_reaches(&added, p) {
+                    continue;
+                }
+                // Where no sphere inside reaches it, as at a vertex whose averaged normal leads out
+                // of a part thinner than `MIN_TANGENT_DEPTH`, a cover that must hold its samples
+                // centers one on it, so growing another to it never reaches past the overhang.
+                let own = self.tangent(p, n, overhang);
+                if let Some(candidate) = own.or_else(|| self.medial.then_some((p, 0.0))) {
                     added.push(candidate);
                 }
             }
@@ -744,7 +758,7 @@ pub(crate) fn measure(
         o,
         &mut Rng::new(o.rng_seed.wrapping_add(1)),
         /* parallel */ true,
-        /* medial */ false,
+        /* surface */ None,
     )?;
     Some(fit.measure(link, spheres))
 }
@@ -815,9 +829,6 @@ pub(crate) struct Fitted {
     pub(crate) relative_overhang: f32,
     /// What every link's tolerance was scaled by for the budget: 1 where it reached them.
     pub(crate) scale: f32,
-    /// Whether every link's spheres keep within its tolerance: the budget reached every one with
-    /// no growth past it.
-    pub(crate) reached: bool,
 }
 
 /// Spheres for each link's meshes (in the link frame), at most `o.budget` in total. Where the
@@ -825,7 +836,9 @@ pub(crate) struct Fitted {
 /// its tolerance times the least growth, from 1 to `BOUND_GROWTH`, the budget affords; otherwise at
 /// most twice its tolerance scaled up by the smallest factor the budget can achieve; but for the
 /// parts the module doc names. A budget of `usize::MAX` reaches every tolerance: the covers pick
-/// as many spheres as the tolerances take, at most one per sample. With `parallel`, the work runs
+/// as many spheres as the tolerances take, at most one per sample. With `surface`, one link's
+/// spheres contain those points of its surface in place of random samples, and its candidates
+/// take in its samples' medial balls ([`LinkFit::new`]). With `parallel`, the work runs
 /// on the current rayon pool; without, on the calling thread alone, without registering it with
 /// any pool.
 pub(crate) fn fit(
@@ -833,14 +846,18 @@ pub(crate) fn fit(
     tolerances: &[f32],
     o: &SphereOptions,
     parallel: bool,
-    medial: bool,
+    surface: Option<&[(Vec3, Vec3)]>,
 ) -> Fitted {
     debug_assert!(o.check().is_ok(), "callers check the options");
     debug_assert_eq!(links.len(), tolerances.len());
+    debug_assert!(
+        surface.is_none() || links.len() == 1,
+        "a surface is one link's"
+    );
     let mut rng = Rng::new(o.rng_seed);
     let mut fits: Vec<Option<LinkFit>> = links
         .iter()
-        .map(|m| LinkFit::new(m, o, &mut rng, parallel, medial))
+        .map(|m| LinkFit::new(m, o, &mut rng, parallel, surface))
         .collect();
 
     // Cover every link at the scale the budget allows, refining each cover until spheres grow by
@@ -894,7 +911,6 @@ pub(crate) fn fit(
     // what the covers in hand reach. Each try refines its own copy of those covers, so one past the
     // budget leaves no samples behind.
     let mut fitted = None;
-    let mut reached = false;
     if scale == 1.0 {
         let within = |growth: f32| {
             let mut trial = fits.clone();
@@ -902,7 +918,6 @@ pub(crate) fn fit(
             (total(&covers) <= o.budget).then_some((trial, covers))
         };
         let mut best = within(1.0);
-        reached = best.is_some();
         if best.is_none() {
             let loose = grown(&fits, &picks);
             let (mut lo, mut hi) = (1.0, relative(&loose));
@@ -935,7 +950,6 @@ pub(crate) fn fit(
         relative_overhang: relative(&fitted),
         spheres: fitted.into_iter().map(|f| f.0).collect(),
         scale,
-        reached,
     }
 }
 
@@ -1186,6 +1200,172 @@ fn box_cells(half: Vec3, tolerance: f32, budget: usize) -> Option<UVec3> {
         }
     }
     best.map(|b| b.2)
+}
+
+/// Points on the surfaces of `shapes`, as they are placed, with their outward unit normals, and
+/// how far any point of those surfaces lies from the nearest of them at most, with what rounding
+/// moves a point of that size: grids whose cells are at most a spacing across along each
+/// direction of a face, a ring or a meridian, so every point lies within the spacing over
+/// `sqrt(2)` of a corner of its cell. The spacing is the one at which `MAX_DENSE_SAMPLES` points
+/// cover the surfaces' area, but no coarser than keeps that distance within half the `tolerance`.
+/// A distance grid has no surface here.
+pub(crate) fn surface_grid(shapes: &[Obstacle], tolerance: f32) -> (Vec<(Vec3, Vec3)>, f32) {
+    use std::f32::consts::{FRAC_1_SQRT_2, FRAC_PI_2};
+
+    /// Cells at most `spacing` across along `length`, one at least.
+    fn cells(length: f32, spacing: f32) -> usize {
+        ((length / spacing).ceil() as usize).max(1)
+    }
+
+    /// Points around a ring of radius `r` about z at height `z`, each with `normal(angle)`, at
+    /// most `spacing` apart on a ring of radius `wide`: the widest of the cells it corners, so a
+    /// point of them lies within the spacing over `sqrt(2)` of one.
+    fn ring(
+        out: &mut Vec<(Vec3, Vec3)>,
+        spacing: f32,
+        (r, wide): (f32, f32),
+        z: f32,
+        normal: impl Fn(f32) -> Vec3,
+    ) {
+        let around = if r > 0.0 {
+            cells(TAU * wide, spacing).max(3)
+        } else {
+            1
+        };
+        for k in 0..around {
+            let a = TAU * k as f32 / around as f32;
+            out.push((Vec3::new(r * a.cos(), r * a.sin(), z), normal(a)));
+        }
+    }
+
+    /// The side of a cylinder about z of `radius` from `-half` to `half`.
+    fn side(out: &mut Vec<(Vec3, Vec3)>, spacing: f32, radius: f32, half: f32) {
+        let along = cells(2.0 * half, spacing);
+        for k in 0..=along {
+            let z = half * (2.0 * k as f32 / along as f32 - 1.0);
+            ring(out, spacing, (radius, radius), z, |a| {
+                Vec3::new(a.cos(), a.sin(), 0.0)
+            });
+        }
+    }
+
+    /// A sphere's half about z of `radius` centered at height `z`, from its equator to its pole
+    /// on the side of `up`, by its parallels.
+    fn cap(out: &mut Vec<(Vec3, Vec3)>, spacing: f32, radius: f32, z: f32, up: f32) {
+        let steps = cells(FRAC_PI_2 * radius, spacing);
+        let polar = |k: usize| FRAC_PI_2 * k.min(steps) as f32 / steps as f32;
+        for k in 0..=steps {
+            let (s, c) = polar(k).sin_cos();
+            let normal = |a: f32| Vec3::new(s * a.cos(), s * a.sin(), up * c);
+            let wide = radius * polar(k + 1).sin();
+            ring(
+                out,
+                spacing,
+                (radius * s, wide),
+                z + up * radius * c,
+                normal,
+            );
+        }
+    }
+
+    let area: f32 = shapes
+        .iter()
+        .map(|shape| match *shape {
+            Obstacle::Sphere { radius, .. } => 2.0 * TAU * radius * radius,
+            Obstacle::Cuboid {
+                half_extents: h, ..
+            } => 8.0 * (h.x * h.y + h.y * h.z + h.z * h.x),
+            Obstacle::Cylinder {
+                radius,
+                half_height,
+                ..
+            } => TAU * radius * (radius + 2.0 * half_height),
+            Obstacle::Capsule {
+                radius,
+                half_length,
+                ..
+            } => 2.0 * TAU * radius * (radius + half_length),
+            Obstacle::Sdf { .. } => 0.0,
+        })
+        .sum();
+    let spacing = (area / MAX_DENSE_SAMPLES as f32)
+        .sqrt()
+        .min(0.5 * tolerance / FRAC_1_SQRT_2);
+    let mut out = vec![];
+    for shape in shapes {
+        let mut own = vec![];
+        let (center, rotation) = match *shape {
+            Obstacle::Sphere { center, radius } => {
+                for up in [-1.0, 1.0] {
+                    cap(&mut own, spacing, radius, 0.0, up);
+                }
+                (center, Quat::IDENTITY)
+            }
+            Obstacle::Cuboid {
+                center,
+                half_extents: h,
+                rotation,
+            } => {
+                for axis in 0..3 {
+                    let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+                    let (nu, nv) = (cells(2.0 * h[u], spacing), cells(2.0 * h[v], spacing));
+                    for side in [-1.0, 1.0] {
+                        let mut normal = Vec3::ZERO;
+                        normal[axis] = side;
+                        for i in 0..=nu {
+                            for j in 0..=nv {
+                                let mut p = normal * h[axis];
+                                p[u] = h[u] * (2.0 * i as f32 / nu as f32 - 1.0);
+                                p[v] = h[v] * (2.0 * j as f32 / nv as f32 - 1.0);
+                                own.push((p, normal));
+                            }
+                        }
+                    }
+                }
+                (center, rotation)
+            }
+            Obstacle::Cylinder {
+                center,
+                rotation,
+                radius,
+                half_height,
+            } => {
+                side(&mut own, spacing, radius, half_height);
+                for up in [-1.0, 1.0] {
+                    let rings = cells(radius, spacing);
+                    for k in 0..=rings {
+                        let r = |k: usize| radius * k.min(rings) as f32 / rings as f32;
+                        let z = up * half_height;
+                        ring(&mut own, spacing, (r(k), r(k + 1)), z, |_| Vec3::Z * up);
+                    }
+                }
+                (center, rotation)
+            }
+            Obstacle::Capsule {
+                center,
+                rotation,
+                radius,
+                half_length,
+            } => {
+                side(&mut own, spacing, radius, half_length);
+                for up in [-1.0, 1.0] {
+                    cap(&mut own, spacing, radius, up * half_length, up);
+                }
+                (center, rotation)
+            }
+            Obstacle::Sdf { .. } => continue,
+        };
+        let rotation = world::unit(rotation);
+        let placed = own
+            .into_iter()
+            .map(|(p, n)| (center + rotation * p, rotation * n));
+        out.extend(placed);
+    }
+    let extent = out
+        .iter()
+        .map(|(p, _)| p.abs().max_element())
+        .fold(0.0, f32::max);
+    (out, spacing * FRAC_1_SQRT_2 + ROUNDING * extent)
 }
 
 /// Link pairs not worth checking for self-collision, by the rules of MoveIt's setup assistant:
@@ -1574,7 +1754,7 @@ mod tests {
             &SphereOptions::default(),
             &mut Rng::new(1),
             /* parallel */ false,
-            /* medial */ false,
+            /* surface */ None,
         )
         .expect("a box has a surface");
         let (p, overhang) = (Vec3::new(face, 0.026_000_006, 0.0), 0.001);
@@ -1659,7 +1839,7 @@ mod tests {
             &o,
             &mut Rng::new(3),
             /* parallel */ false,
-            /* medial */ false,
+            /* surface */ None,
         )
         .expect("the shapes have surface");
         for overhang in [0.0005, 0.002, 0.01, 0.05] {
@@ -1683,12 +1863,13 @@ mod tests {
         let half = Vec3::new(0.12, 0.0125, 0.025);
         let mesh = Geometry::Box { half }.mesh().expect("a box meshes");
         let o = SphereOptions::default();
+        let (surface, _) = surface_grid(&[Obstacle::cuboid(Vec3::ZERO, half)], o.tolerance);
         let fit = LinkFit::new(
             &[mesh],
             &o,
             &mut Rng::new(3),
             /* parallel */ false,
-            /* medial */ true,
+            Some(&surface),
         )
         .expect("the box has surface");
         let middle = fit

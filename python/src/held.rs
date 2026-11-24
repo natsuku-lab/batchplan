@@ -25,8 +25,9 @@ value_class! {
         /// object, as `Robot.relock` takes them: the fingers where they closed on it. Empty: as
         /// loaded.
         locked: HashMap<String, f32>,
-        /// How spheres cover it: within `tolerance` of its surface (5 mm), however many spheres
-        /// that takes, which `budget` does not cap. A smaller tolerance fits closer, with more.
+        /// How spheres cover it: they hold all of it and reach no more than `tolerance` (5 mm)
+        /// past it, however many spheres that takes, which `budget` does not cap. A smaller
+        /// tolerance fits closer, with more.
         spheres: batchplan::SphereOptions,
     }
     methods {
@@ -69,9 +70,9 @@ value_class! {
         shapes: Vec<batchplan::Obstacle>,
         /// Other links it may touch.
         touch_links: Vec<String>,
-        /// How spheres cover the shapes: within `tolerance` of them, however many spheres that
-        /// takes, which `budget` does not cap. A single shape is fitted in its own frame, so where
-        /// it sits on `link` does not change its spheres.
+        /// How spheres cover the shapes: they hold all of them and reach no more than `tolerance`
+        /// past them, however many spheres that takes, which `budget` does not cap. A single shape
+        /// is fitted in its own frame, so where it sits on `link` does not change its spheres.
         spheres: batchplan::SphereOptions,
     }
     methods {

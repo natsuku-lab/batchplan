@@ -272,7 +272,16 @@ pub(crate) fn triangle_area([a, b, c]: [Vec3; 3]) -> f32 {
 impl Shape {
     /// The shape as an outward-facing triangle mesh in its link's frame.
     pub(crate) fn mesh(&self) -> Result<TriMesh> {
-        let mut mesh = self.geometry.mesh()?;
+        self.placed(self.geometry.mesh()?)
+    }
+
+    /// [`Shape::mesh`], with a round shape cut into sectors fine enough that its mesh lies no
+    /// farther than `error` inside it ([`Geometry::mesh_within`]).
+    pub(crate) fn mesh_within(&self, error: f32) -> Result<TriMesh> {
+        self.placed(self.geometry.mesh_within(error)?)
+    }
+
+    fn placed(&self, mut mesh: TriMesh) -> Result<TriMesh> {
         for v in &mut mesh.vertices {
             *v = self.origin.rot * *v + self.origin.trans;
         }
@@ -283,30 +292,55 @@ impl Shape {
 impl Geometry {
     /// The geometry as an outward-facing triangle mesh in its own frame.
     pub(crate) fn mesh(&self) -> Result<TriMesh> {
+        self.mesh_in(SECTORS)
+    }
+
+    /// [`Geometry::mesh`], with a cylinder, capsule or sphere cut into at least `SECTORS` sectors
+    /// and as many more as keep its mesh within `error` of it: a chord across a sector of radius
+    /// `r` lies `r (1 - cos(pi / sectors))` inside it, and a capsule's or a sphere's facets that
+    /// much again, along their meridians.
+    pub(crate) fn mesh_within(&self, error: f32) -> Result<TriMesh> {
+        let (radius, directions) = match *self {
+            Geometry::Cylinder { radius, .. } => (radius, 1.0),
+            Geometry::Capsule { radius, .. } | Geometry::Sphere { radius } => (radius, 2.0),
+            _ => return self.mesh(),
+        };
+        let chord = (1.0 - error / (directions * radius)).clamp(-1.0, 1.0);
+        let sectors = (PI / chord.acos()).ceil();
+        // Even, so a capsule's or a sphere's half profile has whole steps.
+        let sectors = (sectors as u32).max(SECTORS).next_multiple_of(2);
+        self.mesh_in(sectors)
+    }
+
+    fn mesh_in(&self, sectors: u32) -> Result<TriMesh> {
+        let steps = sectors / 2;
         let mut mesh = match self {
             Geometry::Box { half } => box_mesh(*half),
-            Geometry::Sphere { radius } => sphere_mesh(Vec3::splat(*radius)),
-            Geometry::Ellipsoid { radii } => sphere_mesh(*radii),
+            Geometry::Sphere { radius } => sphere_mesh(Vec3::splat(*radius), sectors),
+            Geometry::Ellipsoid { radii } => sphere_mesh(*radii, sectors),
             Geometry::Plane => bail!("a plane has no finite surface to fit spheres to"),
             Geometry::Cylinder {
                 radius,
                 half_length,
-            } => lathe(&[
-                (0.0, -half_length),
-                (*radius, -half_length),
-                (*radius, *half_length),
-                (0.0, *half_length),
-            ]),
+            } => lathe(
+                &[
+                    (0.0, -half_length),
+                    (*radius, -half_length),
+                    (*radius, *half_length),
+                    (0.0, *half_length),
+                ],
+                sectors,
+            ),
             Geometry::Capsule {
                 radius,
                 half_length,
             } => {
-                let mut profile: Vec<(f32, f32)> = (0..=6)
-                    .map(|k| polar(*radius, PI * k as f32 / 12.0, -half_length))
-                    .collect();
-                profile
-                    .extend((6..=12).map(|k| polar(*radius, PI * k as f32 / 12.0, *half_length)));
-                lathe(&profile)
+                let half = steps / 2;
+                let at = |k: u32, z: f32| polar(*radius, PI * k as f32 / steps as f32, z);
+                let mut profile: Vec<(f32, f32)> =
+                    (0..=half).map(|k| at(k, -half_length)).collect();
+                profile.extend((half..=steps).map(|k| at(k, *half_length)));
+                lathe(&profile, sectors)
             }
             Geometry::Mesh { path, scale } => load_mesh(path, *scale)?,
             Geometry::TriMesh(mesh) => mesh.clone(),
@@ -325,11 +359,12 @@ impl Geometry {
     }
 }
 
-fn sphere_mesh(radii: Vec3) -> TriMesh {
-    let profile: Vec<(f32, f32)> = (0..=12)
-        .map(|k| polar(1.0, PI * k as f32 / 12.0, 0.0))
+fn sphere_mesh(radii: Vec3, sectors: u32) -> TriMesh {
+    let steps = sectors / 2;
+    let profile: Vec<(f32, f32)> = (0..=steps)
+        .map(|k| polar(1.0, PI * k as f32 / steps as f32, 0.0))
         .collect();
-    let mut mesh = lathe(&profile);
+    let mut mesh = lathe(&profile, sectors);
     for v in &mut mesh.vertices {
         *v *= radii;
     }
@@ -346,10 +381,13 @@ fn polar(radius: f32, angle: f32, z_offset: f32) -> (f32, f32) {
     )
 }
 
-/// Revolves a (radius, z) profile from bottom to top about the z axis. Profile points with zero
-/// radius become single pole vertices.
-fn lathe(profile: &[(f32, f32)]) -> TriMesh {
-    const SECTORS: u32 = 24;
+/// Sectors a round shape's mesh is cut into about its axis, and twice the steps of a capsule's or
+/// a sphere's profile from pole to pole.
+const SECTORS: u32 = 24;
+
+/// Revolves a (radius, z) profile from bottom to top about the z axis in `sectors`. Profile
+/// points with zero radius become single pole vertices.
+fn lathe(profile: &[(f32, f32)], sectors: u32) -> TriMesh {
     let mut mesh = TriMesh::default();
     let rings: Vec<Vec<u32>> = profile
         .iter()
@@ -357,19 +395,19 @@ fn lathe(profile: &[(f32, f32)]) -> TriMesh {
             let first = mesh.vertices.len() as u32;
             if r <= 0.0 {
                 mesh.vertices.push(Vec3::new(0.0, 0.0, z));
-                return vec![first; SECTORS as usize];
+                return vec![first; sectors as usize];
             }
-            mesh.vertices.extend((0..SECTORS).map(|j| {
-                let a = TAU * j as f32 / SECTORS as f32;
+            mesh.vertices.extend((0..sectors).map(|j| {
+                let a = TAU * j as f32 / sectors as f32;
                 Vec3::new(r * a.cos(), r * a.sin(), z)
             }));
-            (first..first + SECTORS).collect()
+            (first..first + sectors).collect()
         })
         .collect();
     for pair in rings.windows(2) {
         let (lo, hi) = (&pair[0], &pair[1]);
-        for j in 0..SECTORS as usize {
-            let k = (j + 1) % SECTORS as usize;
+        for j in 0..sectors as usize {
+            let k = (j + 1) % sectors as usize;
             let (a, b, c, d) = (lo[j], lo[k], hi[k], hi[j]);
             if a != b {
                 mesh.triangles.push([a, b, c]);

@@ -300,8 +300,8 @@ impl Place {
 /// and time their steps.
 #[derive(Clone, Debug)]
 pub struct TaskOptions {
-    /// Collision spheres for the carried object created by a pick or a moving turn: within the
-    /// tolerance of it, however many spheres that takes ([`Held::spheres`]). A smaller tolerance
+    /// Collision spheres for the carried object created by a pick or a moving turn: holding all of
+    /// it, within the tolerance of it, however many spheres that takes ([`Held::spheres`]). A smaller tolerance
     /// fits closer to narrow walls; the budget does not cap them. The returned hold keeps the
     /// same options when passed to a place. Defaults to [`SphereOptions::default`].
     pub held_spheres: SphereOptions,
