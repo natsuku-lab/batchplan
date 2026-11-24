@@ -645,7 +645,9 @@ fn cylinder_overhang(spheres: &[[f32; 4]], radius: f32, half_height: f32) -> f32
 fn held_discs_rods_and_capsules_are_covered_without_fitting() {
     let robot = common::panda().unwrap();
     // A plate 14 cm across and 18 mm thick: one layer of spheres at its middle height, within
-    // the tolerance where the budget reaches it. A fit of as many spheres is not.
+    // the tolerance. 256 cover it directly in a layer of rings of one width, 145 spheres, and its
+    // tiles' layer of rings of the widths and sectors that take fewest is taken, fewer: a bigger
+    // budget never costs more. A fit of as many spheres is not within the tolerance.
     let plate = |center, rotation| Obstacle::Cylinder {
         center,
         rotation,
@@ -657,7 +659,7 @@ fn held_discs_rods_and_capsules_are_covered_without_fitting() {
         ..Default::default()
     };
     let spheres = held_round(&robot, plate, fine, /* with_a_ball */ false);
-    assert!(spheres.len() <= 160, "{} spheres", spheres.len());
+    assert!(spheres.len() < 145, "{} spheres", spheres.len());
     assert!(spheres.iter().all(|s| s[2].abs() < 1e-6), "one layer");
     let past = cylinder_overhang(&spheres, 0.0695, 0.009);
     assert!(past <= fine.tolerance + 1e-5, "{past} m past the plate");
@@ -672,19 +674,15 @@ fn held_discs_rods_and_capsules_are_covered_without_fitting() {
             "{a:?} against {b:?}"
         );
     }
-    // The default 64 have no layer within the tolerance, and do not cap the plate's spheres: its
-    // tiles' layer covers it, rings of the widths and the fewest sectors that take fewest
-    // spheres, fewer than that layer's rings of one width and a fit.
+    // The default 64 have no direct layer within the tolerance, and do not cap the plate's
+    // spheres: it takes the same layer.
     let coarse = held_round(
         &robot,
         plate,
         SphereOptions::default(),
         /* with_a_ball */ false,
     );
-    assert!(coarse.len() < spheres.len(), "{} spheres", coarse.len());
-    assert!(coarse.iter().all(|s| s[2].abs() < 1e-6), "one layer");
-    let past = cylinder_overhang(&coarse, 0.0695, 0.009);
-    assert!(past <= fine.tolerance + 1e-5, "{past} m past the plate");
+    assert_eq!(coarse, spheres);
     // A rod 8 mm across and 14 cm long: a line of spheres along its axis.
     let rod = |center, rotation| Obstacle::Cylinder {
         center,

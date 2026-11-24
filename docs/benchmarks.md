@@ -271,13 +271,12 @@ The table is read once for the 64 boxes. A flat bottom on a flat top is judged i
 
 | | To spend | Spheres | Past its side | Past its ends | Time |
 |---|---|---|---|---|---|
-| A plate 13.9 cm across, 18 mm thick | 64 | 75, its tiles' layer | 5.0 mm | 5.0 mm | 0.78 ms |
-| | 256 | 145, covered | 4.7 mm | 4.7 mm | 0.11 ms |
+| A plate 13.9 cm across, 18 mm thick | 64 or 256 | 75, its tiles' layer | 5.0 mm | 5.0 mm | 0.3 ms |
 | A bowl 11.2 cm across, 5.1 cm deep | 64 or 256 | 98, fitted | 4.9 mm | 5.0 mm | 50 ms |
 | A can 6.6 cm across, 12 cm tall | 64 or 256 | 55, fitted | 4.9 mm | 5.0 mm | 30 ms |
 | A capsule 4 cm across, 14 cm long | 64 or 256 | 5, covered | 3.6 mm | 3.6 mm | 0.02 ms |
 
-The budget does not cap what a hand holds: each shape takes what the 5 mm takes, and its spheres hold all of it. The 64 have no layer of rings of one width within the tolerance, so the plate takes its tiles' layer, rings of the widths and sectors that take fewest spheres, without a fit; 256 keep the layer of 145 they cover it with directly, as before. Before, 64 fitted spheres reached 8.6 and 10.6 mm past the plate's side and faces, 9.1 and 8.1 mm past the bowl's and 7.1 and 6.7 mm past the can's, and left 1.1, 1.2 and 0.7 mm of each outside them (on a grid of its surface 0.5 mm apart).
+The budget does not cap what a hand holds: each shape takes what the 5 mm takes, and its spheres hold all of it. The plate takes its tiles' layer, rings of the widths and sectors that take fewest spheres, without a fit: the 64 have no layer of rings of one width within the tolerance, and the 256 have one of 145, more, so a bigger budget costs no more. Before, 64 fitted spheres reached 8.6 and 10.6 mm past the plate's side and faces, 9.1 and 8.1 mm past the bowl's and 7.1 and 6.7 mm past the can's, and left 1.1, 1.2 and 0.7 mm of each outside them (on a grid of its surface 0.5 mm apart).
 
 ## Joining motions
 
