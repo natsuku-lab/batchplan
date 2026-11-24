@@ -479,14 +479,19 @@ fn held_shapes_keep_within_a_limit_on_overhang() {
         held.iter()
             .all(|s| s[0].hypot(s[1]) < 1e-6 && s[2].abs() <= half_length + 1e-6)
     );
-    // A budget of two, which cannot keep it along the axis, does not cap them: the same spheres.
+    // Two spheres along the axis cannot keep it: fitted, they are held to it off the axis too.
     let few = held_round(
         &robot,
         capsule,
         with(2, Some(limit)),
         /* with_a_ball */ false,
     );
-    assert_eq!(few, held);
+    let past = |s: &[f32; 4]| {
+        let along = s[2].clamp(-half_length, half_length);
+        Vec3::new(s[0], s[1], s[2] - along).length() + s[3] - radius
+    };
+    let farthest = few.iter().map(past).fold(f32::NEG_INFINITY, f32::max);
+    assert!(!few.is_empty() && farthest <= limit + 1e-6, "{farthest}");
     let plate = |center, rotation| Obstacle::Cylinder {
         center,
         rotation,
@@ -667,15 +672,24 @@ fn held_discs_rods_and_capsules_are_covered_without_fitting() {
             "{a:?} against {b:?}"
         );
     }
-    // The default 64 have no layer within the tolerance, and do not cap the plate's spheres: it
-    // takes the same layer, where a fit within the tolerance takes more.
+    // The default 64 have no layer within the tolerance, and do not cap the plate's spheres: it is
+    // fitted within the tolerance, with fewer spheres than the layer.
     let coarse = held_round(
         &robot,
         plate,
         SphereOptions::default(),
         /* with_a_ball */ false,
     );
-    assert_eq!(coarse, spheres);
+    let past = |s: &[f32; 4]| {
+        let side = Vec3::new(s[0], s[1], 0.0).length() + s[3] - 0.0695;
+        side.max(s[2].abs() + s[3] - 0.009)
+    };
+    let reach = coarse.iter().map(past).fold(f32::NEG_INFINITY, f32::max);
+    assert!(
+        reach <= fine.tolerance && coarse.len() < spheres.len(),
+        "{} spheres reach {reach} m past the plate",
+        coarse.len()
+    );
     // A rod 8 mm across and 14 cm long: a line of spheres along its axis.
     let rod = |center, rotation| Obstacle::Cylinder {
         center,
@@ -759,10 +773,11 @@ fn held_discs_rods_and_capsules_are_covered_without_fitting() {
 }
 
 /// A held object's spheres reach its tolerance whatever its budget: the tolerance is the knob.
-/// A bowl 11.2 cm across and 5.1 cm deep, fitted, which 64 spheres left 9.1 mm past its side,
-/// takes as many as the default 5 mm does, the same at any budget; so do a box and a capsule that
-/// 64 cannot cover directly within it. A can and a box that 256 already held within it keep the
-/// spheres they had.
+/// A bowl 11.2 cm across and 5.1 cm deep, which 64 fitted spheres left 9.1 mm past its side,
+/// takes as many as the default 5 mm does, the same at a budget of one; so do a box and a capsule
+/// that 64 cannot cover directly within it. A budget whose own fit or cells reach the tolerance
+/// keeps them: the bowl's at 256 and 1,024, a can's at 256, a box's cells at 256. Where the
+/// budget does not, the samples' medial balls fit the bowl and the can with fewer spheres.
 #[test]
 fn a_held_objects_spheres_reach_its_tolerance_whatever_its_budget() {
     let robot = common::panda().unwrap();
@@ -794,10 +809,17 @@ fn a_held_objects_spheres_reach_its_tolerance_whatever_its_budget() {
         "{} spheres reach {reach} m past the bowl",
         spheres.len()
     );
-    for budget in [1, 1024] {
-        let other = held_round(&robot, bowl, options(budget), /* with_a_ball */ false);
-        assert_eq!(other, spheres, "at a budget of {budget}");
-    }
+    let one = held_round(&robot, bowl, options(1), /* with_a_ball */ false);
+    assert_eq!(one, spheres, "at a budget of one");
+    let enough = held_round(&robot, bowl, options(256), /* with_a_ball */ false);
+    let more = held_round(&robot, bowl, options(1024), /* with_a_ball */ false);
+    assert_eq!(more, enough, "the budget's own fit");
+    assert!(
+        past(&enough, 0.05603, 0.02537) <= default.tolerance && spheres.len() < enough.len(),
+        "{} spheres where the budget's own fit has {}",
+        spheres.len(),
+        enough.len()
+    );
     let can = |center, rotation| Obstacle::Cylinder {
         center,
         rotation,
@@ -806,9 +828,12 @@ fn a_held_objects_spheres_reach_its_tolerance_whatever_its_budget() {
     };
     let enough = held_round(&robot, can, options(256), /* with_a_ball */ false);
     assert!(enough.len() < 256 && past(&enough, 0.033, 0.06) <= default.tolerance);
-    assert_eq!(
-        held_round(&robot, can, default, /* with_a_ball */ false),
-        enough
+    let fewer = held_round(&robot, can, default, /* with_a_ball */ false);
+    assert!(
+        past(&fewer, 0.033, 0.06) <= default.tolerance && fewer.len() < enough.len(),
+        "{} spheres where 256 have {}",
+        fewer.len(),
+        enough.len()
     );
     let attached = |shape: Obstacle, spheres: SphereOptions| {
         let held = robot
@@ -828,11 +853,12 @@ fn a_held_objects_spheres_reach_its_tolerance_whatever_its_budget() {
     };
     let reach = boxed.iter().map(reach).fold(f32::NEG_INFINITY, f32::max);
     assert!(
-        boxed.len() > default.budget && reach <= default.tolerance,
+        reach <= default.tolerance,
         "{} spheres reach {reach} m past the box",
         boxed.len()
     );
-    // A capsule 1 cm across and 1.21 m long.
+    // A capsule 1 cm across and 1.21 m long: a line of spheres along its axis, which a fit within
+    // the tolerance does not spend fewer on.
     let (radius, half_length) = (0.005, 0.6);
     let rod = attached(
         Obstacle::Capsule {
@@ -848,8 +874,9 @@ fn a_held_objects_spheres_reach_its_tolerance_whatever_its_budget() {
         Vec3::new(s[0], s[1], s[2] - along).length() + s[3] - radius
     };
     let reach = rod.iter().map(reach).fold(f32::NEG_INFINITY, f32::max);
+    let on_axis = rod.iter().all(|s| s[0].hypot(s[1]) < 1e-6);
     assert!(
-        rod.len() > default.budget && reach <= default.tolerance,
+        reach <= default.tolerance && on_axis,
         "{} spheres reach {reach} m past the capsule",
         rod.len()
     );
@@ -866,11 +893,10 @@ fn a_held_objects_spheres_reach_its_tolerance_whatever_its_budget() {
 }
 
 /// A held shape's rotation a thousandth off a unit quaternion, which is accepted, turns it as the
-/// unit one does: a long board, covered directly, and a long rod, fitted, keep their spheres
-/// where they were, alone and the board with a ball (covered as they are placed). Together they
-/// are fitted as they are placed, where the rounding of a rotation can tip which spheres the fit
-/// picks: their spheres reach no farther past the board and the rod as the unit rotation places
-/// them than the tolerance.
+/// unit one does: a long board and a long rod, each fitted in its own frame, keep their spheres
+/// where they were. Together, and the board with a ball, they are fitted as they are placed, where
+/// the rounding of a rotation can tip which spheres the fit picks: their spheres reach no farther
+/// past the shapes as the unit rotation places them than the tolerance.
 #[test]
 fn a_held_shape_turned_by_a_rotation_not_quite_unit_is_not_stretched() {
     let robot = common::panda().unwrap();
@@ -908,16 +934,22 @@ fn a_held_shape_turned_by_a_rotation_not_quite_unit_is_not_stretched() {
             .unwrap();
         held.collision_model().spheres["box"].clone()
     };
-    // How far the farthest of `spheres` reaches past the board and the rod, as `turn` places them.
-    let past = |spheres: &[[f32; 4]]| {
+    // How far the farthest of `spheres` reaches past the board and the rod or the ball, as
+    // `turn` places them.
+    let past = |spheres: &[[f32; 4]], ball: bool| {
         let reach = |s: &[f32; 4]| {
-            let local = |center: Vec3| turn.inverse() * (Vec3::new(s[0], s[1], s[2]) - center);
+            let c = Vec3::new(s[0], s[1], s[2]);
+            let local = |center: Vec3| turn.inverse() * (c - center);
             let q = local(Vec3::new(0.0, 0.0, 0.1)).abs() - Vec3::new(0.6, 0.03, 0.01);
             let board = q.max(Vec3::ZERO).length() + q.max_element().min(0.0);
-            let p = local(Vec3::new(0.0, 0.05, 0.1));
-            let d = Vec2::new(p.truncate().length() - 0.02, p.z.abs() - 0.6);
-            let rod = d.max(Vec2::ZERO).length() + d.max_element().min(0.0);
-            s[3] + board.min(rod)
+            let other = if ball {
+                c.distance(Vec3::new(0.0, 0.0, 0.2)) - 0.03
+            } else {
+                let p = local(Vec3::new(0.0, 0.05, 0.1));
+                let d = Vec2::new(p.truncate().length() - 0.02, p.z.abs() - 0.6);
+                d.max(Vec2::ZERO).length() + d.max_element().min(0.0)
+            };
+            s[3] + board.min(other)
         };
         spheres.iter().map(reach).fold(f32::NEG_INFINITY, f32::max)
     };
@@ -931,8 +963,9 @@ fn a_held_shape_turned_by_a_rotation_not_quite_unit_is_not_stretched() {
                 .map(|s| Vec3::new(s[0], s[1], s[2] - 0.1).length())
                 .fold(0.0, f32::max);
             assert!(reach > 0.5, "the spheres reach {reach} from the hand");
-            if k == 2 {
-                let (unit, scaled) = (past(&unit), past(&scaled));
+            if k >= 2 {
+                let ball = k == 3;
+                let (unit, scaled) = (past(&unit, ball), past(&scaled, ball));
                 assert!(
                     unit <= tolerance + 1e-5 && scaled <= tolerance + 1e-5,
                     "norm {norm}: {scaled} m past them, against {unit} m"

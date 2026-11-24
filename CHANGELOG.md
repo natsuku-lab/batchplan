@@ -419,22 +419,26 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 - What a robot holds is covered within its tolerance whatever its `SphereOptions::budget`, which
   now caps the robot's own spheres only (`AttachedObject::spheres`, `Held::spheres`,
-  `TaskOptions::held_spheres`): the tolerance is the knob. A held object takes as many spheres as
-  its tolerance does, so a large or thin one takes more, and every check of it checks each.
-  Covers that met the tolerance within the budget are the same to the bit. At the default 5 mm
-  and 64, a bowl 11.2 cm across and 5.1 cm deep goes from 64 spheres reaching 9.1 mm past its side
-  to 129 within 5 mm, a plate 14 cm across from 64 reaching 10.6 mm past its faces to a layer of
-  145 within 4.7 mm, and a can 6.6 cm across from 64 reaching 7.1 mm to 90 within 5 mm
-  (`examples/held_spheres.rs`). A box or a capsule the budget cannot cover directly within the
-  tolerance is no longer covered past it: it is fitted, or covered with more spheres where that
-  takes no more than the fit. The blocks `examples/handover/` carries, which 42 to 64 spheres
-  covered 9.0 to 10.6 mm past them, take 144 to 257, and its handovers of 64 to 1,000 tasks
-  take 5 to 8% longer on the M4 Pro's GPU and 6 to 16% on its CPU (runs alternated with the
-  code before). So that fitting is paid once per object, `datagen::handover` fits a carried
-  object once for all its grasps, where it attached it at each, and `datagen::reset_states` once
-  per shape, where it attached it at each hold; and a device for a robot holding an object of
-  many spheres is made in time linear in them, where pairing its spheres with the robot's took
-  time quadratic in them.
+  `TaskOptions::held_spheres`): the tolerance is the knob. A cover the budget gives within the
+  tolerance, direct or fitted, is kept, the same to the bit. Where it gives none, the object is
+  fitted with as many spheres as the tolerance takes, from candidates the medial balls of its
+  surface samples join (each sample's largest ball inside the shape that touches it, centered on
+  the medial axis: the middle of a slab, the bisector of an edge), and picks that others make
+  redundant are dropped; a direct cover within the tolerance is taken instead where it has no
+  more spheres. At the default 5 mm and 64, a bowl 11.2 cm across and 5.1 cm deep goes from 64
+  spheres reaching 9.1 mm past its side to 72 within 5 mm, a plate 14 cm across from 64 reaching
+  10.6 mm past its faces to 95 within 5 mm, and a can 6.6 cm across from 64 reaching 7.1 mm to
+  41 within 5 mm (`examples/held_spheres.rs`); with 256 to spend, which held them within 5 mm
+  before, they keep their 129, 145 and 90. Fitting one costs tens of milliseconds where it cost
+  a few, once per object and device. A box or a capsule the budget cannot cover directly within
+  the tolerance is no longer covered past it. The blocks `examples/handover/` carries, which 42
+  to 64 spheres covered 9.0 to 10.6 mm past them, take 126 to 152 within 5 mm, and its handovers
+  of 1 to 1,000 tasks take as long as before on the M4 Pro's GPU and CPU, within the spread of
+  runs alternated with the code before. So that fitting is paid once per object,
+  `datagen::handover` fits a carried object once for all its grasps, where it attached it at
+  each, and `datagen::reset_states` once per shape, where it attached it at each hold; and a
+  device for a robot holding an object of many spheres is made in time linear in them, where
+  pairing its spheres with the robot's took time quadratic in them.
 
 - On the CPU, a robot mask (`DepthImage::robot_mask`) takes 11% to 23% less time on the Ryzen
   and up to 15% less on the M4 Pro, and fusing an image into a map up to 13% less on the Ryzen,

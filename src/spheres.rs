@@ -269,10 +269,20 @@ struct LinkFit {
     largest: f32,
     /// Whether its loops run on the current rayon pool, or on the calling thread alone.
     parallel: bool,
+    /// Whether its samples propose their medial balls, and covers drop the picks others make
+    /// redundant.
+    medial: bool,
 }
 
 impl LinkFit {
-    fn new(meshes: &[TriMesh], o: &SphereOptions, rng: &mut Rng, parallel: bool) -> Option<Self> {
+    /// With `medial`, each sample also proposes its medial ball ([`LinkFit::medial`]).
+    fn new(
+        meshes: &[TriMesh],
+        o: &SphereOptions,
+        rng: &mut Rng,
+        parallel: bool,
+        medial: bool,
+    ) -> Option<Self> {
         use parry3d::query::PointQuery;
 
         let vertices = vertex_normals(meshes);
@@ -360,7 +370,7 @@ impl LinkFit {
         }
         let largest = candidates.iter().map(|c| c.1).fold(0.0, f32::max);
         let stride = candidates.len().div_ceil(MAX_CANDIDATES).max(1);
-        Some(Self {
+        let mut fit = Self {
             samples,
             normals,
             joined: vec![false; dense.len()],
@@ -369,7 +379,25 @@ impl LinkFit {
             solids,
             largest,
             parallel,
-        })
+            medial,
+        };
+        if medial {
+            // No ball inside the geometry is wider than its bounds' narrowest side.
+            let widest = 0.5 * extent.min_element();
+            let ball = |(&p, &n): (&Vec3, &Vec3)| fit.medial(p, n, widest);
+            let balls: Vec<(Vec3, f32)> = if parallel {
+                let samples = fit.samples.par_iter().zip(&fit.normals);
+                samples.filter_map(ball).collect()
+            } else {
+                fit.samples
+                    .iter()
+                    .zip(&fit.normals)
+                    .filter_map(ball)
+                    .collect()
+            };
+            fit.candidates.extend(balls);
+        }
+        Some(fit)
     }
 
     /// How `spheres` (`[x, y, z, radius]`, in the meshes' frame) fit this geometry: their largest
@@ -468,6 +496,35 @@ impl LinkFit {
                 *u &= !c;
             }
         }
+        if self.medial {
+            // A later pick can reach all an earlier one did: drop each pick, in the order they
+            // were made, whose every sample another pick reaches.
+            let reached_by = |pick: usize| {
+                let words = cover[pick].iter().enumerate();
+                words.flat_map(|(w, &word)| {
+                    let bits = std::iter::successors((word != 0).then_some(word), |b| {
+                        let rest = b & (b - 1);
+                        (rest != 0).then_some(rest)
+                    });
+                    bits.map(move |b| 64 * w + b.trailing_zeros() as usize)
+                })
+            };
+            let mut count = vec![0u32; self.samples.len()];
+            for &pick in &picks {
+                for i in reached_by(pick) {
+                    count[i] += 1;
+                }
+            }
+            picks.retain(|&pick| {
+                let redundant = reached_by(pick).all(|i| count[i] > 1);
+                if redundant {
+                    for i in reached_by(pick) {
+                        count[i] -= 1;
+                    }
+                }
+                !redundant
+            });
+        }
         let left = (0..self.samples.len())
             .filter(|&i| uncovered[i / 64] & (1 << (i % 64)) != 0)
             .collect();
@@ -543,6 +600,29 @@ impl LinkFit {
             }
             depth = (0.5 * depth).max(MIN_TANGENT_DEPTH);
         }
+    }
+
+    /// The medial ball at surface point `p`: the largest inside the geometry that touches `p`,
+    /// centered along its inward normal `-n` and no wider than `widest`, found by halving the
+    /// interval of its radius down to `MIN_TANGENT_DEPTH` (the shrinking ball of Ma, Bae and Choi).
+    /// Its center lies on the medial axis, where a sphere reaches the most surface for its
+    /// overhang: the middle of a slab, which covers both its faces, or the bisector of an edge.
+    /// Returned as its center and the depth of that center. `None` where `n` is zero.
+    fn medial(&self, p: Vec3, n: Vec3, widest: f32) -> Option<(Vec3, f32)> {
+        if n == Vec3::ZERO {
+            return None;
+        }
+        // Whether the ball of radius `r` along the normal touches the surface at `p` alone.
+        let inside = |r: f32| {
+            let pad = ROUNDING * (p.abs().max_element() + r);
+            inscribed(&self.solids, p - n * r).is_some_and(|(_, depth)| depth + pad >= r)
+        };
+        let (mut lo, mut hi) = (0.0f32, widest);
+        while hi - lo > MIN_TANGENT_DEPTH {
+            let mid = 0.5 * (lo + hi);
+            if inside(mid) { lo = mid } else { hi = mid }
+        }
+        inscribed(&self.solids, p - n * lo).filter(|ball| ball.1 > MIN_TANGENT_DEPTH)
     }
 
     /// The picked spheres, grown until every sample is inside one, and the largest growth. Each
@@ -664,6 +744,7 @@ pub(crate) fn measure(
         o,
         &mut Rng::new(o.rng_seed.wrapping_add(1)),
         /* parallel */ true,
+        /* medial */ false,
     )?;
     Some(fit.measure(link, spheres))
 }
@@ -734,6 +815,9 @@ pub(crate) struct Fitted {
     pub(crate) relative_overhang: f32,
     /// What every link's tolerance was scaled by for the budget: 1 where it reached them.
     pub(crate) scale: f32,
+    /// Whether every link's spheres keep within its tolerance: the budget reached every one with
+    /// no growth past it.
+    pub(crate) reached: bool,
 }
 
 /// Spheres for each link's meshes (in the link frame), at most `o.budget` in total. Where the
@@ -749,13 +833,14 @@ pub(crate) fn fit(
     tolerances: &[f32],
     o: &SphereOptions,
     parallel: bool,
+    medial: bool,
 ) -> Fitted {
     debug_assert!(o.check().is_ok(), "callers check the options");
     debug_assert_eq!(links.len(), tolerances.len());
     let mut rng = Rng::new(o.rng_seed);
     let mut fits: Vec<Option<LinkFit>> = links
         .iter()
-        .map(|m| LinkFit::new(m, o, &mut rng, parallel))
+        .map(|m| LinkFit::new(m, o, &mut rng, parallel, medial))
         .collect();
 
     // Cover every link at the scale the budget allows, refining each cover until spheres grow by
@@ -809,6 +894,7 @@ pub(crate) fn fit(
     // what the covers in hand reach. Each try refines its own copy of those covers, so one past the
     // budget leaves no samples behind.
     let mut fitted = None;
+    let mut reached = false;
     if scale == 1.0 {
         let within = |growth: f32| {
             let mut trial = fits.clone();
@@ -816,6 +902,7 @@ pub(crate) fn fit(
             (total(&covers) <= o.budget).then_some((trial, covers))
         };
         let mut best = within(1.0);
+        reached = best.is_some();
         if best.is_none() {
             let loose = grown(&fits, &picks);
             let (mut lo, mut hi) = (1.0, relative(&loose));
@@ -848,6 +935,7 @@ pub(crate) fn fit(
         relative_overhang: relative(&fitted),
         spheres: fitted.into_iter().map(|f| f.0).collect(),
         scale,
+        reached,
     }
 }
 
@@ -1481,8 +1569,14 @@ mod tests {
         for v in &mut mesh.vertices {
             v.x = if v.x > 0.0 { face } else { -0.05 };
         }
-        let mut fit = LinkFit::new(&[mesh], &SphereOptions::default(), &mut Rng::new(1), false)
-            .expect("a box has a surface");
+        let mut fit = LinkFit::new(
+            &[mesh],
+            &SphereOptions::default(),
+            &mut Rng::new(1),
+            /* parallel */ false,
+            /* medial */ false,
+        )
+        .expect("a box has a surface");
         let (p, overhang) = (Vec3::new(face, 0.026_000_006, 0.0), 0.001);
         let (c, r) = fit
             .tangent(p, Vec3::X, overhang)
@@ -1560,8 +1654,14 @@ mod tests {
         }
         mesh.append(fin);
         let o = SphereOptions::default();
-        let fit = LinkFit::new(&[mesh], &o, &mut Rng::new(3), /* parallel */ false)
-            .expect("the shapes have surface");
+        let fit = LinkFit::new(
+            &[mesh],
+            &o,
+            &mut Rng::new(3),
+            /* parallel */ false,
+            /* medial */ false,
+        )
+        .expect("the shapes have surface");
         for overhang in [0.0005, 0.002, 0.01, 0.05] {
             for limit in [3, usize::MAX] {
                 let (picks, _) = fit.greedy(overhang, limit);
@@ -1572,6 +1672,54 @@ mod tests {
                     "overhang {overhang}"
                 );
             }
+        }
+    }
+
+    /// A box's medial balls lie on its medial axis: one from the middle of a wide face on the box's
+    /// middle plane, touching both wide faces, and one from near an edge on the edge's bisector.
+    /// A cover from them keeps no pick whose every sample the others reach.
+    #[test]
+    fn medial_balls_lie_on_the_medial_axis_and_covers_keep_no_redundant_pick() {
+        let half = Vec3::new(0.12, 0.0125, 0.025);
+        let mesh = Geometry::Box { half }.mesh().expect("a box meshes");
+        let o = SphereOptions::default();
+        let fit = LinkFit::new(
+            &[mesh],
+            &o,
+            &mut Rng::new(3),
+            /* parallel */ false,
+            /* medial */ true,
+        )
+        .expect("the box has surface");
+        let middle = fit
+            .medial(Vec3::new(0.0, half.y, 0.0), Vec3::Y, half.y)
+            .expect("inside the box");
+        assert!(
+            middle.0.y.abs() <= MIN_TANGENT_DEPTH && (middle.1 - half.y).abs() <= MIN_TANGENT_DEPTH,
+            "{middle:?}"
+        );
+        let edge = fit
+            .medial(Vec3::new(0.0, half.y, half.z - 0.004), Vec3::Y, half.y)
+            .expect("inside the box");
+        let (from_side, from_top) = (half.y - edge.0.y, half.z - edge.0.z);
+        assert!(
+            (from_side - from_top).abs() <= MIN_TANGENT_DEPTH
+                && (edge.1 - from_side.min(from_top)).abs() < 1e-6,
+            "{edge:?}"
+        );
+        let (picks, _) = fit.greedy(o.tolerance, usize::MAX);
+        assert!(picks.len() > 1);
+        for &pick in &picks {
+            let others: Vec<(Vec3, f32)> = picks
+                .iter()
+                .filter(|&&other| other != pick)
+                .map(|&other| fit.candidates[other])
+                .collect();
+            let its_own = fit.samples.iter().any(|&p| {
+                reaches(p, fit.candidates[pick], o.tolerance)
+                    && !others.iter().any(|&other| reaches(p, other, o.tolerance))
+            });
+            assert!(its_own, "pick {pick} reaches no sample the others miss");
         }
     }
 }
