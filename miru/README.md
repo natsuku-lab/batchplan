@@ -300,6 +300,15 @@ joints and check each pose with the ordinary collision world. The fitted disk ce
 pivot **if the control turns about the centre of that face**. A stationary bar over a disk looks
 the same. An unresolved disk or bar, or a hand with no admissible pose, gives no proposal.
 
+For hand poses supplied by a caller, `Kept::observed_closures` checks a fully open straight
+approach and both fingers' closing sweeps against the retained depth endpoints. Pass poses in the
+observation frame and the same qualified closed and loaded widths used for the hand. Results
+correspond to the input order. `BothSides` means each finger swept through a target reading
+on its own side. A foreign endpoint in either closing sweep gives `Obstructed`. Missing target
+evidence on one side gives `Incomplete`, and an unseen target gives `None`. A hidden obstruction
+can produce the same readings as an empty space. Use the full planning world and execution
+guards throughout the motion.
+
 ## How it tells things apart
 
 By geometry, at the scale the camera's stated noise allows; `src/segment.rs` has the

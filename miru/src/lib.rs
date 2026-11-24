@@ -74,6 +74,7 @@
 struct Readme;
 
 mod bar;
+mod closure;
 mod error;
 mod extraction;
 mod fit;
@@ -88,6 +89,7 @@ mod threads;
 mod view;
 
 pub use bar::BarOnDisk;
+pub use closure::ClosureEvidence;
 pub use extraction::Extraction;
 pub use grip::{GripWorlds, Gripped};
 pub use grip_plan::{

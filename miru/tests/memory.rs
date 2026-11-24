@@ -3765,3 +3765,89 @@ fn a_grip_resolves_its_support_without_copying_the_block_or_losing_a_foreign_hit
         );
     }
 }
+
+#[test]
+fn proposed_jaw_closures_distinguish_target_foreign_and_missing_readings() {
+    use miru::ClosureEvidence::{BothSides, Incomplete, Obstructed};
+
+    let robot = panda();
+    let device = Device::cpu_threads(&robot, 2).unwrap();
+    let q = robot.default_q().to_vec();
+    let middle = Vec3::new(0.5, 0.0, 0.05);
+    let bar = || block(middle, Vec3::new(0.022, 0.009, 0.025), [180, 30, 30]);
+    let things = [table(), bar(), arm(&robot, &q)];
+    let views = |things: &[Thing]| {
+        [-0.35, 0.35].map(|y| Frame::of(things, looking(middle + Vec3::new(0.08, y, 0.2), middle)))
+    };
+    let rendered = views(&things);
+    let pin = block(
+        middle + Vec3::Y * 0.026,
+        Vec3::new(0.010, 0.002, 0.010),
+        [30, 180, 30],
+    );
+    let pin_obstacle = known(&pin);
+    let guard = views(&[table(), bar(), pin, arm(&robot, &q)]);
+    let fixed = Memory::try_new(
+        &device,
+        vec![known(&things[0]), pin_obstacle],
+        &MemoryOptions::default(),
+    )
+    .unwrap();
+    let hand = robot.hand_spheres(0);
+    let tip = hand
+        .iter()
+        .filter(|s| s.finger)
+        .max_by(|a, b| a.center.z.total_cmp(&b.center.z))
+        .unwrap();
+    let down = Quat::from_rotation_x(std::f32::consts::PI);
+    let at = middle - down * Vec3::new(tip.center.x, 0.0, tip.center.z);
+    let poses = [
+        Pose::new(at, down),
+        Pose::new(at + Vec3::X * 0.10, down),
+        Pose::new(at - Vec3::Z * middle.z, down),
+    ];
+    let options = GraspOptions {
+        approach: 0.06,
+        ..Default::default()
+    };
+    for (c, (name, ..)) in CAMERAS.iter().enumerate() {
+        let seen = first_look(&device, &things, &rendered, (c, 31), &q, 0.0);
+        let id = id_of(seen.kept.scene(), &rendered, 1).expect("the rendered bar is visible");
+        let closures = |id, poses: &[Pose]| {
+            seen.kept
+                .observed_closures(&device, id, 0, 0.0..=0.08, poses, &options)
+        };
+        assert_eq!(
+            closures(id, &poses).unwrap().unwrap(),
+            [BothSides, Incomplete, Obstructed],
+            "{name}"
+        );
+        let (frames, bands) = read(&guard, c, 31);
+        let locked = HashMap::new();
+        let stance = Stance {
+            q: &q,
+            locked: &locked,
+            padding: 0.0,
+        };
+        let with_guard = observe(&device, &cameras(&frames, bands, 0.0), &stance, &fixed).unwrap();
+        let kept = &with_guard.kept;
+        let id = id_of(kept.scene(), &guard, 1).expect("the bar remains visible beside the pin");
+        assert!(
+            kept.scene()
+                .labels
+                .iter()
+                .flatten()
+                .any(|label| *label == Label::Known(1)),
+            "the foreign pin is visible on {name}"
+        );
+        assert_eq!(
+            kept.observed_closures(&device, id, 0, 0.0..=0.08, &poses[..1], &options)
+                .unwrap()
+                .unwrap(),
+            [Obstructed],
+            "the moving finger sweeps into the stationary pin on {name}"
+        );
+        assert!(closures(u32::MAX, &poses).unwrap().is_none());
+        assert!(closures(id, &[Pose::new(Vec3::NAN, down)]).is_err());
+    }
+}
