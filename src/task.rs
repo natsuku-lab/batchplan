@@ -236,8 +236,8 @@ pub struct Place {
     /// rests at on a support cameras see.
     pub poses: Vec<Pose>,
     /// Expected downward travel after release, in meters along world −z, one value per pose.
-    /// Empty sets down at the release itself. Supply a measured rest or container fall that
-    /// supports a vertical translation at the same attitude. Departure checks an enclosure of
+    /// Empty sets down at the release itself. Supply a measured displacement to a resting
+    /// pose at the same attitude. Departure checks an enclosure of
     /// the object throughout that translation. The returned placed pose is the expected rest;
     /// the caller verifies where the object actually settled.
     pub falls: Vec<f32>,

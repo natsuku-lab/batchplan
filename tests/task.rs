@@ -2848,3 +2848,43 @@ fn a_pick_can_fit_its_carried_cylinder_beside_a_wall() {
         matches!(contact, Contact::World { link, obstacle, .. } if link == "held by hand 0" && *obstacle == side)
     ));
 }
+
+#[test]
+fn the_release_sweep_stops_a_palm_below_the_falling_object() {
+    let robot = panda();
+    let held = Held {
+        hand: 0,
+        object: Obstacle::cuboid(Vec3::ZERO, HALF),
+        grasp: grasp(Vec3::Z, Vec3::X),
+        locked: Default::default(),
+        spheres: Default::default(),
+    };
+    let release = Pose::new(Vec3::new(0.5, -0.12, 0.55), Quat::IDENTITY);
+    let task = Place {
+        transit: false,
+        ..Place::new(0, robot.default_q(), held, vec![release])
+    };
+    for device in devices(&robot) {
+        let worlds = device.upload(&[World::default()]).unwrap();
+        let plan = |task: &Place| {
+            batchplan::place(
+                &device,
+                &worlds,
+                std::slice::from_ref(task),
+                &TaskOptions::default(),
+            )
+            .unwrap()
+            .outcomes
+            .remove(0)
+        };
+        assert!(plan(&task).is_ok(), "the palm is clear at release");
+        let falling = Place {
+            falls: vec![0.1],
+            ..task.clone()
+        };
+        let stopped = plan(&falling).expect_err("the drop passes through the palm");
+        let stop = &stopped.candidates[0];
+        assert_eq!(stop.step, TaskStep::Depart);
+        assert!(stop.contacts.iter().any(|c| matches!(c, Contact::World { link, obstacle: 0, distance } if link == "panda_hand" && *distance < 0.0)), "{stop:?}");
+    }
+}
