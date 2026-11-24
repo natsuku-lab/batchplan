@@ -2321,18 +2321,27 @@ pub(crate) fn placed_spheres(spheres: &[[f32; 4]], pose: Pose) -> Vec<[f32; 4]> 
 
 /// [`object_spheres`] for `shapes` as they are placed: spheres that hold all of them and reach no
 /// farther past them than the tolerance, however many that takes. Covered directly where the
-/// budget has a cover within it, which holds them by construction. Else fitted with no budget to
-/// points of their surfaces no farther apart than holding each with a margin holds the rest
-/// ([`spheres::surface_grid`]), from candidates the samples' medial balls join, unless a direct
-/// cover within the tolerance takes no more spheres than that fit. Under a limit on overhang the
-/// fit's spheres are held to it instead, which leaves some of the shapes outside them. Attaching
-/// happens inside control processes: fit on the caller's rayon pool if it has one, otherwise on
-/// the calling thread alone, never on the global pool. (A one-thread pool on the calling thread
-/// would leave it registered with rayon for good, and every parallel loop it started afterwards
-/// would run on that one thread.)
+/// budget has a cover within it, which holds them by construction; past it, thin cylinders,
+/// capsules and balls are by their surfaces' tiles ([`spheres::cover_tiles`]), unless a direct
+/// cover takes fewer spheres. Else fitted with no budget to points of their surfaces no
+/// farther apart than holding each with a margin holds the rest ([`spheres::surface_grid`]), from
+/// candidates the samples' medial balls join, unless a direct cover within the tolerance takes no
+/// more spheres than that fit. Under a limit on overhang the fit's spheres are held to it instead,
+/// which leaves some of the shapes outside them. Attaching happens inside control processes: fit
+/// on the caller's rayon pool if it has one, otherwise on the calling thread alone, never on the
+/// global pool. (A one-thread pool on the calling thread would leave it registered with rayon for
+/// good, and every parallel loop it started afterwards would run on that one thread.)
 fn covered(shapes: &[Obstacle], o: &SphereOptions) -> error::Result<Vec<[f32; 4]>> {
     if let Some(covered) = spheres::cover_primitives(shapes, o) {
         return Ok(covered);
+    }
+    if let Some(tiles) = spheres::cover_tiles(shapes, o) {
+        // A direct cover of fewer spheres within the tolerance, where there is one.
+        let fewer = SphereOptions {
+            budget: tiles.len() - 1,
+            ..*o
+        };
+        return Ok(spheres::cover_primitives(shapes, &fewer).unwrap_or(tiles));
     }
     // Every point of the shapes' surfaces lies within `apart` of a point of `surface`: spheres that
     // hold each of those with `apart` to spare hold all of it, and fitted within the tolerance less

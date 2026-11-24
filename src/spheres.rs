@@ -1513,6 +1513,147 @@ pub(crate) fn within(
     Ok(())
 }
 
+/// Spheres for an attached object's `shapes` (in its link's frame) by their surfaces' tiles, as
+/// many as the tolerance takes, or the smaller of it and `o.max_overhang`: a thin cylinder's layer
+/// ([`cylinder_layer`]), a capsule's line of spheres, a ball itself. Each holds its shape by
+/// construction, a sphere through the corners of each tile. `None` where a shape has none: a box
+/// or a stout cylinder, which the fit covers, or a distance grid.
+pub(crate) fn cover_tiles(shapes: &[Obstacle], o: &SphereOptions) -> Option<Vec<[f32; 4]>> {
+    let tolerance = o.tolerance.min(o.max_overhang.unwrap_or(f32::INFINITY));
+    let mut spheres = vec![];
+    for shape in shapes {
+        let (center, rotation, own) = match *shape {
+            Obstacle::Sphere { center, radius } => {
+                (center, Quat::IDENTITY, vec![[0.0, 0.0, 0.0, radius]])
+            }
+            Obstacle::Cuboid { .. } | Obstacle::Sdf { .. } => return None,
+            Obstacle::Cylinder {
+                center,
+                rotation,
+                radius,
+                half_height,
+            } => (
+                center,
+                rotation,
+                cylinder_layer(radius, half_height, tolerance)?,
+            ),
+            Obstacle::Capsule {
+                center,
+                rotation,
+                radius,
+                half_length,
+            } => {
+                let own = capsule_cover(radius, half_length, tolerance, usize::MAX)?;
+                (center, rotation, own)
+            }
+        };
+        let rotation = world::unit(rotation);
+        for [x, y, z, radius] in own {
+            let p = center + rotation * Vec3::new(x, y, z);
+            spheres.push([p.x, p.y, p.z, radius]);
+        }
+    }
+    Some(spheres)
+}
+
+/// Spheres in one layer at a thin cylinder's middle height that cover it about its z axis and
+/// reach no more than `tolerance` past it, `None` where it is too thick for any: rings from the
+/// rim in, each cut into the fewest equal sectors whose spheres reach the tolerance, each sphere
+/// on its sector's middle line through the farthest corners of the sector's tiles on both faces
+/// (and on the side, for the outer ring), from where along that line it reaches least past the
+/// cylinder. A sector's tiles lie inside a ball that holds their corners and is centered on its
+/// middle line, the farthest point of a ring's sector or of the side's patch being a corner. The
+/// outer ring is as wide as takes fewest spheres for the area it covers, and so is each ring
+/// inside it, of widths in half tolerances; the middle one is a disc. A sphere at the middle
+/// height reaches the side at its faces only where the cylinder is at most `2 (1 + sqrt(2))`
+/// tolerances thick.
+fn cylinder_layer(radius: f32, half_height: f32, tolerance: f32) -> Option<Vec<[f32; 4]>> {
+    (tolerance > 0.0).then_some(())?;
+    let h = half_height;
+    // A ring's sphere from `inner` to `outer` in `around` sectors: where along the middle line,
+    // its radius, and how far it reaches past the cylinder, at least.
+    let sphere = |inner: f32, outer: f32, around: u32| {
+        let half = PI / around as f32;
+        let farthest = |at: f32| {
+            let to = |r: f32| r * r + at * at - 2.0 * r * at * half.cos();
+            (to(inner).max(to(outer)) + h * h).sqrt()
+        };
+        let past = |at: f32| farthest(at) - h.min(radius - at);
+        let (mut low, mut high) = (0.0f32, outer);
+        for _ in 0..48 {
+            let (a, b) = (low + (high - low) / 3.0, high - (high - low) / 3.0);
+            if past(a) <= past(b) {
+                high = b;
+            } else {
+                low = a;
+            }
+        }
+        let at = if around == 1 { 0.0 } else { 0.5 * (low + high) };
+        (at, farthest(at), past(at))
+    };
+    // The fewest sectors of a ring whose spheres reach the tolerance; more never reach farther.
+    let sectors = |inner: f32, outer: f32| {
+        let most = ((TAU * outer / (0.25 * tolerance)).ceil() as u32).max(1);
+        if sphere(inner, outer, most).2 > tolerance {
+            return None;
+        }
+        let (mut low, mut high) = (1, most);
+        while low < high {
+            let mid = (low + high) / 2;
+            if sphere(inner, outer, mid).2 <= tolerance {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        Some(low)
+    };
+    // From `outer` in, the ring of fewest sectors for its area, as (inner radius, sectors).
+    let ring = |outer: f32| {
+        let widths = (1..=12).map(|k| (k as f32 * 0.5 * tolerance).min(outer));
+        let options = widths.filter_map(|w| {
+            let inner = outer - w;
+            let around = sectors(inner, outer)?;
+            Some((
+                inner,
+                around,
+                around as f32 / (outer * outer - inner * inner),
+            ))
+        });
+        options.min_by(|a, b| a.2.total_cmp(&b.2))
+    };
+    let mut rings = vec![];
+    let mut outer = radius;
+    while outer > 0.0 {
+        let (inner, around, _) = ring(outer)?;
+        rings.push((inner.max(0.0), outer, around));
+        outer = inner;
+    }
+    let mut spheres = vec![];
+    for (inner, outer, around) in rings {
+        let (at, _, past) = sphere(inner, outer, around);
+        (past <= tolerance).then_some(())?;
+        for k in 0..around {
+            let middle = TAU * (k as f32 + 0.5) / around as f32;
+            let half = PI / around as f32;
+            let center = Vec3::new(at * middle.cos(), at * middle.sin(), 0.0);
+            // Through the tiles' corners as placed, widened a hair.
+            let mut farthest = 0.0f32;
+            for r in [inner, outer] {
+                for side in [-1.0, 1.0] {
+                    let angle = middle + side * half;
+                    for z in [-h, h] {
+                        let corner = Vec3::new(r * angle.cos(), r * angle.sin(), z);
+                        farthest = farthest.max(corner.distance(center));
+                    }
+                }
+            }
+            spheres.push([center.x, center.y, center.z, farthest * HAIR]);
+        }
+    }
+    Some(spheres)
+}
+
 /// Points on the surfaces of `shapes`, as they are placed, with their outward unit normals, and
 /// how far any point of those surfaces lies from the nearest of them at most, with what rounding
 /// moves a point of that size: grids whose cells are at most a spacing across along each

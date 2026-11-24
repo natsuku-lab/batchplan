@@ -672,15 +672,19 @@ fn held_discs_rods_and_capsules_are_covered_without_fitting() {
             "{a:?} against {b:?}"
         );
     }
-    // The default 64 have no layer within the tolerance, and do not cap the plate's spheres: it
-    // takes the same layer, where a fit that holds all of it within the tolerance takes more.
+    // The default 64 have no layer within the tolerance, and do not cap the plate's spheres: its
+    // tiles' layer covers it, rings of the widths and the fewest sectors that take fewest
+    // spheres, fewer than that layer's rings of one width and a fit.
     let coarse = held_round(
         &robot,
         plate,
         SphereOptions::default(),
         /* with_a_ball */ false,
     );
-    assert_eq!(coarse, spheres);
+    assert!(coarse.len() < spheres.len(), "{} spheres", coarse.len());
+    assert!(coarse.iter().all(|s| s[2].abs() < 1e-6), "one layer");
+    let past = cylinder_overhang(&coarse, 0.0695, 0.009);
+    assert!(past <= fine.tolerance + 1e-5, "{past} m past the plate");
     // A rod 8 mm across and 14 cm long: a line of spheres along its axis.
     let rod = |center, rotation| Obstacle::Cylinder {
         center,
@@ -864,8 +868,9 @@ fn a_held_objects_spheres_reach_its_tolerance_whatever_its_budget() {
 /// shapes that test that hardest: a bowl, fitted; a slab 2 mm thick, where a sphere crosses its
 /// faces steeply; a sheet 0.08 mm thick, too thin for a center inside it to reach its faces; a bar
 /// 12 mm square and 60 cm long, fitted for a budget of 8; a cylinder whose
-/// mesh of 24 sides lies farther inside it than the tolerance left past a margin; and a mug, a
-/// cylinder with a box through its side, fitted as one. Points of each surface at random, its
+/// mesh of 24 sides lies farther inside it than the tolerance left past a margin; a mug, a
+/// cylinder with a box through its side, fitted as one; and a plate and a wheel's rim, which a
+/// layer of rings covers past the budget. Points of each surface at random, its
 /// corners, its edges and rims, and its rims at the middles of the 24 sectors each lie inside a
 /// sphere, and every sphere's radius and its center's signed distance to the shapes sum to no more
 /// than the tolerance.
@@ -908,6 +913,12 @@ fn a_held_objects_spheres_hold_all_of_it() {
         ),
         ("a disc", vec![cylinder(0.03, 0.005)], options(64, 0.0004)),
         ("a mug", mug, options(64, 0.005)),
+        ("a plate", vec![cylinder(0.0695, 0.009)], options(64, 0.005)),
+        (
+            "a wheel's rim",
+            vec![cylinder(0.1, 0.01)],
+            options(64, 0.005),
+        ),
     ];
     let mut rng = Rng::new(17);
     for (name, shapes, spheres) in cases {

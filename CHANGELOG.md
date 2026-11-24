@@ -427,11 +427,18 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   lies from one, within the tolerance less that margin, from candidates the medial balls of its
   surface samples join (each sample's largest ball inside the shape that touches it, centered on
   the medial axis), and picks others make redundant are dropped; a direct cover within the
-  tolerance is taken instead where it has no more spheres. At the default 5 mm and 64, a bowl
+  tolerance is taken instead where it has no more spheres. Cylinders no thicker than
+  `2 (1 + sqrt(2))` tolerances, capsules and balls are not fitted but covered by their surfaces'
+  tiles, in under a millisecond, within the smaller of the tolerance and `max_overhang` where that
+  is set: a thin cylinder is a layer at its middle height of rings from the rim in, each as wide
+  and in as few sectors as takes fewest spheres for its area, each sphere through the corners of
+  its sector's tiles, which holds it by construction. At the default 5 mm and 64, a bowl
   11.2 cm across and 5.1 cm deep goes from 64 spheres reaching 9.1 mm past its side and leaving
   1.2 mm of it outside them to 98 within 5 mm holding all of it, a plate 14 cm across from 64
-  reaching 10.6 mm past its faces to a layer of 145 within 4.7 mm, and a can 6.6 cm across from
-  64 reaching 7.1 mm to 55 within 5 mm (`examples/held_spheres.rs`). Fitting one costs tens of
+  reaching 10.6 mm past its faces to a layer of 75 within 5 mm (at a budget of 256, its layer of
+  145 within 4.7 mm, as before), a valve's wheel 20 cm across (`examples/turns.rs`) from 64
+  reaching 15 mm to 144, and a can 6.6 cm across from 64 reaching 7.1 mm to 55 within 5 mm
+  (`examples/held_spheres.rs`). Fitting one costs tens of
   milliseconds where it cost a few, once per object and device. A box or a capsule the budget
   cannot cover directly within the tolerance is no longer covered past it. The blocks
   `examples/handover/` carries, which 42 to 64 spheres covered 9.0 to 10.6 mm past them, take
