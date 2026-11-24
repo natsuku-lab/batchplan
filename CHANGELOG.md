@@ -547,6 +547,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Fixed
 
+- Two groups of one call that hold the same object fit its spheres once: the second waits for
+  the first and takes what it fitted, where both missed the device's kept spheres and fitted it.
 - Miru can preserve a measured container opening when a separate solid lies behind its observed
   inner wall. The exterior piece keeps its own collision geometry.
 

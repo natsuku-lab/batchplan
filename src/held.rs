@@ -235,36 +235,55 @@ const KEPT: usize = 64;
 
 /// Spheres fitted to held objects, in their own frames, kept by the devices that share hardware:
 /// fitting a cylinder or a capsule takes milliseconds, and every call holding it would fit it again.
-/// The least recently used goes first past [`KEPT`].
+/// The least recently used goes first past [`KEPT`]. Calls that fit one object alike at once, as
+/// two groups of one call do, wait for the first: it is fitted once.
 #[derive(Default)]
 pub(crate) struct Fits(Mutex<VecDeque<Fit>>);
 
-/// An object, the options it was fitted by and its spheres.
-type Fit = (Obstacle, SphereOptions, Arc<[[f32; 4]]>);
+/// An object, the options it was fitted by and its spheres, once fitted.
+type Fit = (Obstacle, SphereOptions, Slot);
+
+/// Where one object's spheres are kept, held while they are fitted.
+type Slot = Arc<Mutex<Option<Arc<[[f32; 4]]>>>>;
 
 impl Fits {
-    /// The spheres kept for `object` fitted by `options`, now the most recently used.
-    fn get(&self, object: &Obstacle, options: &SphereOptions) -> Option<Arc<[[f32; 4]]>> {
+    /// The slot kept for `object` fitted by `options`, now the most recently used: a new, empty
+    /// one where there is none.
+    fn slot(&self, object: &Obstacle, options: &SphereOptions) -> Slot {
         // A panic elsewhere cannot leave the list half changed: each change is one call on it.
         let mut kept = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let k = kept
+        let fit = match kept
             .iter()
-            .position(|(o, f, _)| o == object && f == options)?;
-        let fit = kept.remove(k)?;
-        let spheres = fit.2.clone();
+            .position(|(o, f, _)| o == object && f == options)
+        {
+            Some(k) => kept.remove(k).expect("a position in the list"),
+            None => {
+                if kept.len() == KEPT {
+                    kept.pop_front();
+                }
+                (object.clone(), *options, Slot::default())
+            }
+        };
+        let slot = fit.2.clone();
         kept.push_back(fit);
-        Some(spheres)
+        slot
+    }
+
+    /// The spheres kept for `object` fitted by `options`, now the most recently used.
+    #[cfg(test)]
+    fn get(&self, object: &Obstacle, options: &SphereOptions) -> Option<Arc<[[f32; 4]]>> {
+        let kept = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let known = kept.iter().any(|(o, f, _)| o == object && f == options);
+        drop(kept);
+        let slot = known.then(|| self.slot(object, options))?;
+        slot.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     /// Keeps `spheres` for `object` fitted by `options`.
+    #[cfg(test)]
     fn keep(&self, object: Obstacle, options: SphereOptions, spheres: Arc<[[f32; 4]]>) {
-        let mut kept = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if kept.iter().all(|(o, f, _)| *o != object || *f != options) {
-            if kept.len() == KEPT {
-                kept.pop_front();
-            }
-            kept.push_back((object, options, spheres));
-        }
+        let slot = self.slot(&object, &options);
+        *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(spheres);
     }
 
     /// `object`'s spheres in its own frame, fitted by `options`: as kept, or fitted and kept.
@@ -273,12 +292,14 @@ impl Fits {
         object: &Obstacle,
         options: &SphereOptions,
     ) -> Result<Arc<[[f32; 4]]>> {
-        if let Some(spheres) = self.get(object, options) {
-            return Ok(spheres);
+        let slot = self.slot(object, options);
+        let mut kept = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(spheres) = &*kept {
+            return Ok(spheres.clone());
         }
         let fitted: Arc<[[f32; 4]]> =
             robot::object_spheres(std::slice::from_ref(object), options)?.into();
-        self.keep(object.clone(), *options, fitted.clone());
+        *kept = Some(fitted.clone());
         Ok(fitted)
     }
 }
@@ -541,5 +562,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Calls that fit one object alike at once, as two groups of one call do, fit it once: each
+    /// gets the same spheres, which the first fitted and the others waited for.
+    #[test]
+    fn an_object_fitted_at_once_alike_is_fitted_once() {
+        let fits = Fits::default();
+        let bowl = Obstacle::cylinder(glam::Vec3::ZERO, 0.056, 0.025);
+        let options = SphereOptions::default();
+        let fitted: Vec<Arc<[[f32; 4]]>> = std::thread::scope(|scope| {
+            let fitting: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| fits.spheres(&bowl, &options).unwrap()))
+                .collect();
+            let joined = fitting.into_iter().map(|h| h.join().expect("a fit"));
+            joined.collect()
+        });
+        assert!(fitted.windows(2).all(|w| Arc::ptr_eq(&w[0], &w[1])));
     }
 }
