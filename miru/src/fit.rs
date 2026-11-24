@@ -534,6 +534,72 @@ fn room(center: Vec3, half: Vec2, rotation: Quat, readings: &[Reading]) -> Optio
     lower.cmplt(upper).all().then(|| (lower.extend(top), upper))
 }
 
+/// Whether a current inner wall separates every reading of another part from the room.
+/// Correspondence is in the plane of the wall, so a crop, a hole or a conflict below the
+/// floor cannot be filled in by extending a face that was only seen elsewhere.
+pub(crate) fn behind_wall(
+    room: &Shape,
+    readings: &[Reading],
+    points: &[Vec3],
+    slack: &[f32],
+) -> bool {
+    let Shape::OpenBox {
+        center,
+        rotation,
+        half_extents,
+        ..
+    } = *room
+    else {
+        return false;
+    };
+    let (floor, upper) = room.room();
+    let local = |p: Vec3| rotation.inverse() * (p - center);
+    for axis in 0..2 {
+        let tangent = 1 - axis;
+        for (side, edge) in [(-1.0, floor[axis]), (1.0, upper[axis])] {
+            if !points
+                .iter()
+                .zip(slack)
+                .all(|(&p, &s)| side * (local(p)[axis] - edge) > s)
+            {
+                continue;
+            }
+            let mut wall: Vec<_> = readings
+                .iter()
+                .filter_map(|r| {
+                    let p = local(r.point);
+                    let normal = rotation.inverse() * r.normal;
+                    (!r.floor
+                        && -side * normal[axis] > 0.5
+                        && (p[axis] - edge).abs() <= r.slack
+                        && p.z > floor.z + r.slack
+                        && p.z <= half_extents.z
+                        && p[tangent] >= floor[tangent]
+                        && p[tangent] <= upper[tangent])
+                        .then_some((p[tangent], p.z, r.slack))
+                })
+                .collect();
+            wall.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            let behind = points.iter().zip(slack).all(|(&p, &s)| {
+                let p = local(p);
+                let first = wall.partition_point(|q| q.0 < p[tangent] - s);
+                wall[first..]
+                    .iter()
+                    .take_while(|q| q.0 <= p[tangent] + s)
+                    .any(|&(t, z, w)| {
+                        let distance = Vec2::new(p[tangent] - t, p.z - z);
+                        distance.length_squared() <= s.min(w).powi(2)
+                            && side * (p[axis] - edge) > s + w
+                    })
+            });
+            if behind {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Of `values`, each a position and the share of a window its reading is, the farthest position
 /// that readings adding up to a window lie at or beyond; `None` where all add up to less.
 fn window(values: impl Iterator<Item = (f32, f32)>) -> Option<f32> {

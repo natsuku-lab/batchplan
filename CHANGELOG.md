@@ -499,6 +499,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Fixed
 
+- Miru can preserve a measured container opening when a separate solid lies behind its observed
+  inner wall. The exterior piece keeps its own collision geometry.
+
 - Miru resolves a hollow support near a measured grip on a solid target. A hand can approach
   through an observed gap while the support walls and unseen material remain collision-checked.
 

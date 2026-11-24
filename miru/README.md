@@ -1225,6 +1225,13 @@ the run.
     top, each about 1.4 by 0.8 by 0.8 cm and an object of its own, are boxes open at the top,
     and four hold 40 to 43 of the bowl's readings in their room; one in `open4`. On
     `rows4-stereo-filtered` one more box than at 65ef83e is open, a wine rack's piece.
+  - **A separate solid behind a visible inner wall can leave the room open.** Each reading of
+    the solid must have a matching inward-facing wall reading between it and the room, within
+    the uncertainty of both readings along the face. In a rendered tray with a block on an
+    exterior ledge, exact depth preserves the opening and the block. Removing depth in a patch of
+    the intervening wall closes the room. With simulated D435 and paired D435/D405 depth, the
+    block lacks a solid fit and the room closes. A room can still contain separately represented
+    obstacles. Use the full planning world to check clearance.
   - **A sliver of a thing's own can still close its box.** In `hand-in-drawer` r1, with the
     hand over the drawer, 180 pixels of the cabinet's body read as an object of their own lie
     8 mm inside a wall of its box; the box covers the cabinet until the drawer is seen as its

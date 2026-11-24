@@ -439,14 +439,79 @@ fn checked(
         &rested,
     );
     let hide = told.hides_floors(&labels, &floor_parts);
-    let closed = hold_what_stands(&objects, &mut fits, &mut kept, &stood, &hide);
-    // A room widened or closed changes what the things in it stand on.
-    let now = bodies(&fits, &kept);
-    if (now.iter().zip(&closed))
-        .any(|((shape, _), &closed)| closed || matches!(shape, Shape::OpenBox { .. }))
-    {
-        stood = stand(&fits, &now, look.known, floor, &held, &rested);
-    }
+    let mut separated = Vec::new();
+    let mut closed = hold_what_stands(
+        &objects,
+        &mut fits,
+        &mut kept,
+        &stood,
+        &hide,
+        &floored,
+        &mut separated,
+    );
+    let mut restand = closed.iter().any(|&b| b)
+        || fits.iter().zip(&kept).any(|(fit, kept)| {
+            matches!(kept.unwrap_or_else(|| fit.shape()), Shape::OpenBox { .. })
+        });
+    let (shapes, solid) = loop {
+        if restand {
+            stood = stand(
+                &fits,
+                &bodies(&fits, &kept),
+                look.known,
+                floor,
+                &held,
+                &rested,
+            );
+        }
+        let shapes: Vec<_> = kept
+            .iter()
+            .zip(&stood)
+            .map(|(kept, (fit, _))| kept.unwrap_or_else(|| fit.shape()))
+            .collect();
+        let shapes = cut(&shapes, &cuts, &kept);
+        let solid: Vec<_> = objects
+            .iter()
+            .enumerate()
+            .map(|(k, readings)| {
+                !closed[k]
+                    && (matches!(shapes[k], Shape::OpenBox { .. })
+                        || (was[k].is_none_or(|before| {
+                            let before = &previous.objects[before];
+                            before.solid && !matches!(before.shape, Shape::OpenBox { .. })
+                        }) && readings.solid(&shapes[k])))
+            })
+            .collect();
+        // A wall may stand for the room only while the piece behind it has a solid of its own
+        // in the resulting scene. Closing a room can change where another object stands.
+        restand = false;
+        for &(room, part, witnessed) in &separated {
+            if closed[room] {
+                continue;
+            }
+            let wall_remains = || {
+                shapes[room] == witnessed
+                    || floored
+                        .binary_search_by_key(&room, |(k, _)| *k)
+                        .is_ok_and(|i| {
+                            fit::behind_wall(
+                                &shapes[room],
+                                &floored[i].1,
+                                &objects[part].points,
+                                &objects[part].slack,
+                            )
+                        })
+            };
+            if !solid[part] || matches!(shapes[part], Shape::OpenBox { .. }) || !wall_remains() {
+                close_room(&mut kept[room], &mut fits[room]);
+                closed[room] = true;
+                restand = true;
+            }
+        }
+        if !restand {
+            break (shapes, solid);
+        }
+    };
 
     // The scene says the id after its newest, which must be a number too: the last id a `u32`
     // holds is never given.
@@ -458,10 +523,6 @@ fn checked(
         previous.next_id
     );
     let mut next_id = previous.next_id;
-    let shapes: Vec<Shape> = (kept.iter().zip(&stood))
-        .map(|(kept, (fit, _))| kept.unwrap_or_else(|| fit.shape()))
-        .collect();
-    let shapes = cut(&shapes, &cuts, &kept);
     let mut all: Vec<Object> = (objects.iter().enumerate())
         .map(|(k, readings)| Object {
             id: was[k].map_or_else(
@@ -472,15 +533,7 @@ fn checked(
                 |before| previous.objects[before].id,
             ),
             shape: shapes[k],
-            // What showed its inside once is not made solid by a look that cannot see into it,
-            // nor what was open at the top by a look that leaves it a box that covers it; one
-            // open at the top shows the room it holds.
-            solid: !closed[k]
-                && (matches!(shapes[k], Shape::OpenBox { .. })
-                    || (was[k].is_none_or(|before| {
-                        let before = &previous.objects[before];
-                        before.solid && !matches!(before.shape, Shape::OpenBox { .. })
-                    }) && readings.solid(&shapes[k]))),
+            solid: solid[k],
             color: readings.color(),
             on: stood[k].1,
         })
@@ -2128,6 +2181,8 @@ fn hold_what_stands(
     kept: &mut [Option<Shape>],
     stood: &[(Fit, Option<Support>)],
     hide: &BTreeMap<(usize, usize), f32>,
+    floored: &[(usize, Vec<fit::Reading>)],
+    separated: &mut Vec<(usize, usize, Shape)>,
 ) -> Vec<bool> {
     let mut closed = vec![false; objects.len()];
     let shape =
@@ -2166,19 +2221,41 @@ fn hold_what_stands(
             fit.shape()
         });
         let rests_inside = (0..objects.len()).any(|j| {
-            j != k
-                && stood[j].1 == Some(Support::Object(k))
-                && widened.distance(lowest[j].0) < -lowest[j].1
+            if j == k
+                || stood[j].1 != Some(Support::Object(k))
+                || widened.distance(lowest[j].0) >= -lowest[j].1
+            {
+                return false;
+            }
+            if floored
+                .binary_search_by_key(&k, |(i, _)| *i)
+                .is_ok_and(|i| {
+                    fit::behind_wall(
+                        &widened,
+                        &floored[i].1,
+                        &objects[j].points,
+                        &objects[j].slack,
+                    )
+                })
+            {
+                separated.push((k, j, widened));
+                return false;
+            }
+            true
         });
         if rests_inside {
-            match &mut kept[k] {
-                Some(shape) => *shape = shape.outer(),
-                None => fits[k].close(),
-            }
+            close_room(&mut kept[k], &mut fits[k]);
             closed[k] = true;
         }
     }
     closed
+}
+
+fn close_room(kept: &mut Option<Shape>, fit: &mut Fit) {
+    match kept {
+        Some(shape) => *shape = shape.outer(),
+        None => fit.close(),
+    }
 }
 
 /// Whether object `over` of `scene` stood on its object `under`, itself or through what it
