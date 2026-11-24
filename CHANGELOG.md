@@ -10,12 +10,24 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- `prefer_measured_contacts` orders completed surface picks by evidence for the closing
+  contacts, retaining every checked alternative for placement.
+
+- `pick_with_preferred_grasps` accepts a preferred prefix per pick and batches supplemental
+  grasps for tasks whose preferred grasps all failed.
+
+- A placement can carry a predicted downward fall for each release pose. Departure checks the
+  volume swept during settling and reports the expected landing. **Breaking:** exhaustive
+  Rust `Place` literals need `falls: vec![]` for a placement in contact.
+
 - Surface grasps can try additional approach angles and shallower insertions on contact pairs
   near a measured point. Set `GraspOptions::close_on` to append them after the ordinary grasps. **Breaking:** Rust literals
   that specify every field of `GraspOptions` need `close_on: None` for the previous behavior.
 
 - `Kept::extractions` reports the straight lift that clears a measured open container at the
-  object's observed attitude and a caller-specified margin.
+  object's observed attitude and a caller-specified margin. It recognizes flush contact when the
+  fitted heights of a body and its measured support differ by a single precision step, or the
+  freshly fitted body stood on a measured upright container floor.
 
 - `grasps_on_with_capacity` accepts a maximum graspable width separate from the loaded pad gap.
   It checks the fully open hand and, for symmetric sliding jaws, commandable partial openings.

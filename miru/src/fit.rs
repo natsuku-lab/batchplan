@@ -230,6 +230,39 @@ impl Fit {
         self.bottom = self.bottom.min(height);
     }
 
+    /// Checks the height at which the support search stopped, before center/half-height
+    /// encoding. The lowest reading must be over the inside of that floor.
+    pub(crate) fn stood_on_floor(&self, container: &Shape, body: &Shape) -> bool {
+        let Shape::OpenBox {
+            center,
+            rotation,
+            half_extents,
+            ..
+        } = *container
+        else {
+            return false;
+        };
+        if rotation.x != 0.0 || rotation.y != 0.0 {
+            return false;
+        }
+        let (lower, upper) = container.room();
+        let plane = f64::from(center.z) + f64::from(lower.z);
+        let height = plane as f32;
+        if lower.z <= -half_extents.z
+            || f64::from(self.lowest.z) < plane
+            || (f64::from(self.bottom) - plane).abs() > f64::from(REACHED)
+            || self.bottom < height.next_down()
+            || self.bottom > height.next_up()
+        {
+            return false;
+        }
+        let own = rotation.as_dquat().normalize().inverse()
+            * (self.lowest.as_dvec3() - center.as_dvec3());
+        own.truncate().cmpgt(lower.truncate().as_dvec2()).all()
+            && own.truncate().cmplt(upper.as_dvec2()).all()
+            && self.shape() == *body
+    }
+
     /// The fit as a shape: an upright cylinder or a box turned about z.
     pub(crate) fn shape(&self) -> Shape {
         let (middle, half_height) = (
@@ -822,6 +855,74 @@ fn through_three(a: Vec2, b: Vec2, c: Vec2) -> (Vec2, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_floor_return_is_still_a_witness_after_center_encoding() {
+        let container = Shape::OpenBox {
+            center: Vec3::new(0.5, 0.0, 0.78000504),
+            half_extents: Vec3::new(0.12, 0.12, 0.030005038),
+            rotation: Quat::from_rotation_z(0.65),
+            room_lower: Vec3::new(-0.1099, -0.1099, -0.019995153),
+            room_upper: Vec2::splat(0.1099),
+        };
+        let floor = 0.7600099;
+        let fit = Fit::of(&[
+            Vec3::new(0.48, -0.02, floor),
+            Vec3::new(0.48, 0.02, floor),
+            Vec3::new(0.52, -0.02, 0.80400985),
+            Vec3::new(0.52, 0.02, 0.80400985),
+        ]);
+        let Shape::Cuboid {
+            center,
+            half_extents,
+            ..
+        } = fit.shape()
+        else {
+            panic!("these four readings fit a cuboid");
+        };
+        assert!(f64::from(center.z) - f64::from(half_extents.z) < f64::from(floor) - 2e-8);
+        assert!(fit.stood_on_floor(&container, &fit.shape()));
+    }
+
+    #[test]
+    fn a_floor_witness_requires_readings_over_the_standing_plane() {
+        for (scale, height) in [(0.25, -0.5), (1.0, 0.15), (4.0, 2.0)] {
+            let center = Vec3::new(scale, -scale, height);
+            let half = scale * Vec3::new(0.12, 0.08, 0.04);
+            let level = 0.01 * scale;
+            let container = Shape::OpenBox {
+                center,
+                half_extents: half,
+                rotation: Quat::from_rotation_z(-0.6),
+                room_lower: (-half.truncate()).extend(level),
+                room_upper: half.truncate(),
+            };
+            let plane = height + level;
+            let lowest = center.with_z(plane + scale * 0.002);
+            let mut fit = Fit::of(&[lowest, lowest + scale * Vec3::new(0.02, 0.01, 0.04)]);
+            fit.stand_on(plane);
+            let body = fit.shape();
+            assert!(fit.stood_on_floor(&container, &body));
+            // A reading below the floor and a support search that ended below it are independent
+            // reasons to withhold a witness, even if its shape is exactly the one published.
+            let penetrating = Fit {
+                lowest: lowest.with_z(plane - scale * 0.001),
+                ..fit
+            };
+            assert!(!penetrating.stood_on_floor(&container, &penetrating.shape()));
+            let deep = Fit {
+                bottom: plane - scale * 1e-5,
+                ..fit
+            };
+            assert!(!deep.stood_on_floor(&container, &deep.shape()));
+            let outside = Fit {
+                lowest: lowest + Vec3::X * scale,
+                ..fit
+            };
+            assert!(!outside.stood_on_floor(&container, &outside.shape()));
+            assert!(!fit.stood_on_floor(&container, &deep.shape()));
+        }
+    }
 
     /// The circle through three points passes each of them, and three on a line are spanned by
     /// the two ends.
