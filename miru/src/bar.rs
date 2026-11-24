@@ -451,52 +451,9 @@ fn hand_fits(
     options: &GraspOptions,
     resolution: f32,
 ) -> bool {
-    let stroke = gaps.end() - gaps.start();
-    let inverse = pose.rotation.conjugate();
-    let disk_depth = (pose.position - disk).dot(outward);
-    let approach = Vec3::Z * options.approach;
-    let mut lo = Vec3::splat(f32::INFINITY);
-    let mut hi = Vec3::splat(f32::NEG_INFINITY);
-    for s in hand {
-        let closed = s.center - Vec3::Y * s.side * stroke * 0.5;
-        let start = s.center - approach;
-        for at in [closed, s.center, start] {
-            if options
-                .floor
-                .is_some_and(|z| pose.position.z + (pose.rotation * at).z - s.radius < z)
-            {
-                return false;
-            }
-            lo = lo.min(at - s.radius);
-            hi = hi.max(at + s.radius);
-        }
-    }
-    let mut contacted = [false; 2];
-    for (i, p) in surface.points.iter().enumerate() {
-        let at = inverse * (*p - pose.position);
-        if at.cmplt(lo).any() || at.cmpgt(hi).any() {
-            continue;
-        }
-        let ours = surface.object.is_empty() || surface.object[i];
-        for s in hand {
-            let d = at - s.center;
-            let open = Vec3::new(d.x, d.y, d.z - d.z.clamp(-options.approach, 0.0));
-            if open.length_squared() <= s.radius * s.radius {
-                return false;
-            }
-            let end = -s.side * stroke * 0.5;
-            let close = Vec3::new(d.x, d.y - d.y.clamp(end.min(0.0), end.max(0.0)), d.z);
-            if close.length_squared() <= s.radius * s.radius {
-                if !s.finger || s.side == 0.0 || !ours || at.z >= disk_depth - resolution {
-                    return false;
-                }
-                if at.y * s.side > 0.0 {
-                    contacted[usize::from(s.side > 0.0)] = true;
-                }
-            }
-        }
-    }
-    contacted == [true, true]
+    let depth_limit = (pose.position - disk).dot(outward) - resolution;
+    crate::closure::inspect(surface, pose, hand, gaps, options, depth_limit)
+        == crate::ClosureEvidence::BothSides
 }
 
 #[cfg(test)]
