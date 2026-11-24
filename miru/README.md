@@ -290,6 +290,16 @@ even when mechanically attached to a drawer. The caller identifies the assembly 
 the drawer and supplies the axis of a turn or pull independently. An overlapping object or
 unresolved wall can still prevent a grip.
 
+For a request to turn a centred control, `Kept::bar_on_disk` can measure a narrow raised bar
+over a circular face. Depth rays must reach behind its outer edge over more than half the circumference. Give it the outward unit normal, the hand and its calibrated closed and loaded
+gaps (`Robot::parallel_jaw_opening`), and the grasp options. The requested depth places the IK
+frame below the crest. The measurement uses the median of the target readings' larger pixel
+width or depth deviation as its spatial resolution. Each returned pose passed the open approach,
+floor, capacity and symmetric closing-sweep checks on the measured points. Use the fully open
+joints and check each pose with the ordinary collision world. The fitted disk centre can be the
+pivot **if the control turns about the centre of that face**. A stationary bar over a disk looks
+the same. An unresolved disk or bar, or a hand with no admissible pose, gives no proposal.
+
 ## How it tells things apart
 
 By geometry, at the scale the camera's stated noise allows; `src/segment.rs` has the
