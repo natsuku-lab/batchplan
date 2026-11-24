@@ -445,19 +445,15 @@ impl LinkFit {
     /// and the samples they leave: without a limit, those no candidate reaches.
     fn greedy(&self, overhang: f32, limit: usize) -> (Vec<usize>, Vec<usize>) {
         let words = self.samples.len().div_ceil(64);
-        // Samples by x, so each candidate tests only those within its reach along x.
-        let mut by_x: Vec<usize> = (0..self.samples.len()).collect();
-        by_x.sort_by(|&a, &b| self.samples[a].x.total_cmp(&self.samples[b].x));
-        let xs: Vec<f32> = by_x.iter().map(|&i| self.samples[i].x).collect();
+        // Samples in columns along z, so each candidate tests only those within its reach.
+        let columns = Columns::new(&self.samples);
         let reached = |&(c, r): &(Vec3, f32)| {
             let mut bits = vec![0u64; words];
             // Padded past rounding, so the window keeps every sample `reaches` accepts: a sample
             // left out would get its own candidate again every refinement.
             let reach = r + overhang;
-            let pad = 4.0 * f32::EPSILON * (c.x.abs() + reach);
-            let first = xs.partition_point(|&x| x < c.x - reach - pad);
-            let last = xs.partition_point(|&x| x <= c.x + reach + pad);
-            for &i in &by_x[first..last] {
+            let pad = 4.0 * f32::EPSILON * (c.abs().max_element() + reach);
+            for i in columns.within(c, reach + pad) {
                 if reaches(self.samples[i], (c, r), overhang) {
                     bits[i / 64] |= 1 << (i % 64);
                 }
@@ -642,7 +638,7 @@ impl LinkFit {
     /// The picked spheres, grown until every sample is inside one, and the largest growth. Each
     /// sample outside them grows the pick that reaches it with the least overhang, judged by the
     /// picks' original radii so growth cannot snowball onto one sphere.
-    fn spheres(&self, picks: &[usize]) -> (Vec<[f32; 4]>, f32) {
+    fn spheres(&self, picks: &[usize], near: f32) -> (Vec<[f32; 4]>, f32) {
         // A cover that picked nothing still needs one sphere to grow: the largest candidate.
         let largest = (0..self.candidates.len())
             .max_by(|&a, &b| self.candidates[a].1.total_cmp(&self.candidates[b].1));
@@ -652,16 +648,32 @@ impl LinkFit {
             picks.to_vec()
         };
         let mut spheres: Vec<(Vec3, f32)> = picks.iter().map(|&i| self.candidates[i]).collect();
+        // Each sample is tested against the spheres whose box, grown by `near`, holds it, and those
+        // grown past that: the others neither hold it nor reach it with less growth than `near`.
+        // Where none of those does, against all, as without them.
+        let cells = SphereCells::new(&spheres, near);
+        let mut beyond: Vec<usize> = vec![];
         let dense = self.dense.iter().map(|(p, _)| p);
         for &s in self.samples.iter().chain(dense) {
-            if spheres.iter().any(|&(c, r)| (s - c).length() <= r) {
+            let close = cells.at(s);
+            let held = |&j: &usize| (s - spheres[j].0).length() <= spheres[j].1;
+            if close.iter().chain(&beyond).any(held) {
                 continue;
             }
             let overhang = |a: usize| (s - spheres[a].0).length() - self.candidates[picks[a]].1;
-            let j = (0..spheres.len())
-                .min_by(|&a, &b| overhang(a).total_cmp(&overhang(b)))
+            let least = |a: &usize, b: &usize| overhang(*a).total_cmp(&overhang(*b));
+            let j = close
+                .iter()
+                .copied()
+                .min_by(least)
+                .filter(|&j| overhang(j) <= near)
+                .or_else(|| (0..spheres.len()).min_by(least))
                 .expect("a sphere");
+            let far = overhang(j) > near;
             spheres[j].1 = (s - spheres[j].0).length();
+            if far && !beyond.contains(&j) {
+                beyond.push(j);
+            }
         }
         let growth = picks
             .iter()
@@ -836,9 +848,10 @@ pub(crate) struct Fitted {
 /// its tolerance times the least growth, from 1 to `BOUND_GROWTH`, the budget affords; otherwise at
 /// most twice its tolerance scaled up by the smallest factor the budget can achieve; but for the
 /// parts the module doc names. A budget of `usize::MAX` reaches every tolerance: the covers pick
-/// as many spheres as the tolerances take, at most one per sample. With `surface`, one link's
-/// spheres contain those points of its surface in place of random samples, and its candidates
-/// take in its samples' medial balls ([`LinkFit::new`]). With `parallel`, the work runs
+/// as many spheres as the tolerances take, at most one per sample. With `surface` (a held
+/// object's, whose budget is that), one link's spheres contain those points of its surface in
+/// place of random samples, its candidates take in its samples' medial balls ([`LinkFit::new`]),
+/// and one cover reaches them within the tolerance, with no scale to search for. With `parallel`, the work runs
 /// on the current rayon pool; without, on the calling thread alone, without registering it with
 /// any pool.
 pub(crate) fn fit(
@@ -872,31 +885,14 @@ pub(crate) fn fit(
             })
             .collect()
     };
-    let total = |picks: &[Vec<usize>]| picks.iter().map(Vec::len).sum::<usize>();
-    let mut scale = search_scale(&fits, tolerances, o, None);
-    let mut picks: Option<Vec<Vec<usize>>> = None;
-    for _ in 0..MAX_SEARCHES {
-        let covers = cover(&mut fits, scale, BOUND_GROWTH);
-        if total(&covers) <= o.budget {
-            picks = Some(covers);
-            break;
-        }
-        scale = search_scale(&fits, tolerances, o, Some(scale));
-    }
-    // Past the searches, the covers the last one counted, which keep to the budget.
-    let picks = picks.unwrap_or_else(|| {
-        fits.iter()
-            .zip(tolerances)
-            .map(|(f, &tolerance)| {
-                f.as_ref()
-                    .map_or(vec![], |f| f.greedy(tolerance * scale, usize::MAX).0)
-            })
-            .collect()
-    });
     let grown = |fits: &[Option<LinkFit>], picks: &[Vec<usize>]| -> Vec<(Vec<[f32; 4]>, f32)> {
         fits.iter()
             .zip(picks)
-            .map(|(f, picks)| f.as_ref().map_or((vec![], 0.0), |f| f.spheres(picks)))
+            .zip(tolerances)
+            .map(|((f, picks), &tolerance)| {
+                let near = BOUND_GROWTH * tolerance;
+                f.as_ref().map_or((vec![], 0.0), |f| f.spheres(picks, near))
+            })
             .collect()
     };
     // The largest of each link's growth over its tolerance.
@@ -907,36 +903,65 @@ pub(crate) fn fit(
             .map(|(f, &t)| f.1 / t)
             .fold(0.0, f32::max)
     };
-    // Where the budget reaches the tolerances, the least growth it affords, down to none, below
-    // what the covers in hand reach. Each try refines its own copy of those covers, so one past the
-    // budget leaves no samples behind.
-    let mut fitted = None;
-    if scale == 1.0 {
-        let within = |growth: f32| {
-            let mut trial = fits.clone();
-            let covers = cover(&mut trial, 1.0, growth);
-            (total(&covers) <= o.budget).then_some((trial, covers))
-        };
-        let mut best = within(1.0);
-        if best.is_none() {
-            let loose = grown(&fits, &picks);
-            let (mut lo, mut hi) = (1.0, relative(&loose));
-            while hi - lo > GROWTH_PRECISION {
-                let mid = 0.5 * (lo + hi);
-                match within(mid) {
-                    Some(t) => (best, hi) = (Some(t), mid),
-                    None => lo = mid,
+    let total = |picks: &[Vec<usize>]| picks.iter().map(Vec::len).sum::<usize>();
+    let (scale, mut fitted) = if surface.is_some() {
+        // A held object's surface, with no budget: one cover that reaches every point of it
+        // within the tolerance, with no scale to search for and no growth to trade.
+        let covers = cover(&mut fits, 1.0, 1.0);
+        (1.0, grown(&fits, &covers))
+    } else {
+        let mut scale = search_scale(&fits, tolerances, o, None);
+        let mut picks: Option<Vec<Vec<usize>>> = None;
+        for _ in 0..MAX_SEARCHES {
+            let covers = cover(&mut fits, scale, BOUND_GROWTH);
+            if total(&covers) <= o.budget {
+                picks = Some(covers);
+                break;
+            }
+            scale = search_scale(&fits, tolerances, o, Some(scale));
+        }
+        // Past the searches, the covers the last one counted, which keep to the budget.
+        let picks = picks.unwrap_or_else(|| {
+            fits.iter()
+                .zip(tolerances)
+                .map(|(f, &tolerance)| {
+                    f.as_ref()
+                        .map_or(vec![], |f| f.greedy(tolerance * scale, usize::MAX).0)
+                })
+                .collect()
+        });
+        // Where the budget reaches the tolerances, the least growth it affords, down to none,
+        // below what the covers in hand reach. Each try refines its own copy of those covers, so
+        // one past the budget leaves no samples behind.
+        let mut fitted = None;
+        if scale == 1.0 {
+            let within = |growth: f32| {
+                let mut trial = fits.clone();
+                let covers = cover(&mut trial, 1.0, growth);
+                (total(&covers) <= o.budget).then_some((trial, covers))
+            };
+            let mut best = within(1.0);
+            if best.is_none() {
+                let loose = grown(&fits, &picks);
+                let (mut lo, mut hi) = (1.0, relative(&loose));
+                while hi - lo > GROWTH_PRECISION {
+                    let mid = 0.5 * (lo + hi);
+                    match within(mid) {
+                        Some(t) => (best, hi) = (Some(t), mid),
+                        None => lo = mid,
+                    }
+                }
+                if best.is_none() {
+                    fitted = Some(loose);
                 }
             }
-            if best.is_none() {
-                fitted = Some(loose);
+            if let Some((trial, covers)) = best {
+                fitted = Some(grown(&trial, &covers));
             }
         }
-        if let Some((trial, covers)) = best {
-            fitted = Some(grown(&trial, &covers));
-        }
-    }
-    let mut fitted = fitted.unwrap_or_else(|| grown(&fits, &picks));
+        let fitted = fitted.unwrap_or_else(|| grown(&fits, &picks));
+        (scale, fitted)
+    };
     if let Some(limit) = o.max_overhang {
         // The tries above share each link's geometry with `fits`.
         for (f, (spheres, reach)) in fits.iter().zip(&mut fitted) {
@@ -1098,15 +1123,19 @@ fn cylinder_cover(
     tolerance: f32,
     budget: usize,
 ) -> Option<Vec<[f32; 4]>> {
-    // A line of `count` spheres along the axis, each through the rim of its slice.
+    // A line of `count` spheres along the axis, each through the rim of its slice: how far they
+    // reach past the faces between slices, which grows with the count, and past the cylinder.
+    let past_line = |count: usize| {
+        let half = half_height / count as f32;
+        let sphere = radius.hypot(half) * HAIR;
+        (sphere - half, (sphere - half).max(sphere - radius))
+    };
     let line = |count: usize| {
         let half = half_height / count as f32;
         let sphere = radius.hypot(half) * HAIR;
-        let past = (sphere - half).max(sphere - radius);
-        let spheres = (0..count)
+        (0..count)
             .map(|k| [0.0, 0.0, -half_height + (2 * k + 1) as f32 * half, sphere])
-            .collect::<Vec<_>>();
-        (past, spheres)
+            .collect::<Vec<_>>()
     };
     // One layer's spheres as (distance from the axis, cells around it, radius), and how far
     // they reach past the cylinder, for `rings` rings (the middle disc one of them) whose cells
@@ -1146,15 +1175,23 @@ fn cylinder_cover(
         }
         (overhang, layer)
     };
-    // The fewest spheres within the tolerance, of the lines and the layers.
-    let lines = (1..=budget).map(line).find(|(past, _)| *past <= tolerance);
-    let mut best = lines.map(|(_, spheres)| spheres);
-    for rings in 2.. {
+    // The fewest spheres within the tolerance, of the lines and the layers. A line reaches past
+    // the faces between its slices farther the more it has, so none past the first that reaches
+    // more than the tolerance there can; and a layer that is, nor any with more spheres than the
+    // fewest found.
+    let lines = (1..=budget)
+        .take_while(|&count| past_line(count).0 <= tolerance)
+        .find(|&count| past_line(count).1 <= tolerance);
+    let mut best = lines.map(line);
+    // A layer reaches at least `(sqrt(2) - 1)` of the half height past the cylinder: at its rim, a
+    // sphere through a corner of the side reaches past the side or the faces by that.
+    let layers = (std::f32::consts::SQRT_2 - 1.0) * half_height <= tolerance;
+    for rings in (2..).take_while(|_| layers) {
         let mut any = false;
         for fine in [1.0, 1.5, 2.0, 3.0] {
             let (overhang, layer) = layer(rings, fine);
             let count: usize = layer.iter().map(|ring| ring.1).sum();
-            if count > budget {
+            if count > budget || best.as_ref().is_some_and(|b| count >= b.len()) {
                 continue;
             }
             any = true;
@@ -1185,9 +1222,15 @@ fn cylinder_cover(
 /// budget has none.
 fn box_cells(half: Vec3, tolerance: f32, budget: usize) -> Option<UVec3> {
     let mut best: Option<(usize, f32, UVec3)> = None;
+    // No grid of more cells than the fewest found within the tolerance can be taken.
+    let most =
+        |best: &Option<(usize, f32, UVec3)>| best.as_ref().map_or(budget, |b| b.0.min(budget));
     for x in 1..=budget {
-        for y in 1..=budget / x {
-            for z in 1..=budget / (x * y) {
+        if x > most(&best) {
+            break;
+        }
+        for y in 1..=most(&best) / x {
+            for z in 1..=most(&best) / (x * y) {
                 let cells = UVec3::new(x as u32, y as u32, z as u32);
                 let cell = half / cells.as_vec3();
                 let overhang = cell.length() - cell.min_element();
@@ -2537,6 +2580,157 @@ fn cover_rect_2d_within(
         }
     }
     best
+}
+
+/// How many columns [`Columns`] lays along the longer of x and y.
+const COLUMNS: usize = 32;
+
+/// Points bucketed into square columns over x and y, each sorted along z: the points within a
+/// box about a center are those of the columns it spans, within its z range in each.
+struct Columns {
+    /// The columns' corner, their width and how many there are along x and y.
+    origin: Vec3,
+    width: f32,
+    counts: [usize; 2],
+    /// Per column, where its points start in `order`, and one past the last column's end.
+    starts: Vec<usize>,
+    /// The points' indices, column by column, each column's by z, and their z.
+    order: Vec<usize>,
+    zs: Vec<f32>,
+}
+
+impl Columns {
+    /// [`COLUMNS`] columns along the longer of the points' bounds over x and y.
+    fn new(points: &[Vec3]) -> Self {
+        let (lo, hi) = points
+            .iter()
+            .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(a, b), &p| {
+                (a.min(p), b.max(p))
+            });
+        let size = (hi - lo).max(Vec3::splat(f32::MIN_POSITIVE));
+        let width = size.x.max(size.y) / COLUMNS as f32;
+        let counts = [
+            ((size.x / width) as usize + 1).min(COLUMNS),
+            ((size.y / width) as usize + 1).min(COLUMNS),
+        ];
+        let column = |p: Vec3| {
+            let at = |v: f32, n: usize| ((v / width) as usize).min(n - 1);
+            at(p.x - lo.x, counts[0]) * counts[1] + at(p.y - lo.y, counts[1])
+        };
+        let mut order: Vec<usize> = (0..points.len()).collect();
+        order.sort_by(|&a, &b| {
+            column(points[a])
+                .cmp(&column(points[b]))
+                .then(points[a].z.total_cmp(&points[b].z))
+        });
+        let mut starts = vec![0; counts[0] * counts[1] + 1];
+        for &i in &order {
+            starts[column(points[i]) + 1] += 1;
+        }
+        for k in 1..starts.len() {
+            starts[k] += starts[k - 1];
+        }
+        let zs = order.iter().map(|&i| points[i].z).collect();
+        Self {
+            origin: lo,
+            width,
+            counts,
+            starts,
+            order,
+            zs,
+        }
+    }
+
+    /// The points within `reach` of `center` along each axis, and some just past it.
+    fn within(&self, center: Vec3, reach: f32) -> impl Iterator<Item = usize> + '_ {
+        let span = |v: f32, origin: f32, n: usize| {
+            let column = |v: f32| (v / self.width).floor().clamp(0.0, (n - 1) as f32) as usize;
+            column(v - reach - origin)..column(v + reach - origin) + 1
+        };
+        let xs = span(center.x, self.origin.x, self.counts[0]);
+        let ys = span(center.y, self.origin.y, self.counts[1]);
+        let columns = xs.flat_map(move |x| ys.clone().map(move |y| x * self.counts[1] + y));
+        columns.flat_map(move |column| {
+            let (start, end) = (self.starts[column], self.starts[column + 1]);
+            let zs = &self.zs[start..end];
+            let first = zs.partition_point(|&z| z < center.z - reach);
+            let last = zs.partition_point(|&z| z <= center.z + reach);
+            self.order[start + first..start + last].iter().copied()
+        })
+    }
+}
+
+/// How many cells [`SphereCells`] lays along each axis of its spheres' bounds.
+const SPHERE_CELLS: usize = 16;
+
+/// Spheres bucketed by the cells of a grid their boxes, grown by a margin, overlap: the spheres
+/// that may hold a point within that margin past their radius are those of the point's cell.
+struct SphereCells {
+    origin: Vec3,
+    width: Vec3,
+    /// Per cell, where its spheres start in `members`, and one past the last cell's end.
+    starts: Vec<usize>,
+    /// The spheres' indices, cell by cell, each cell's in increasing order.
+    members: Vec<usize>,
+}
+
+impl SphereCells {
+    fn new(spheres: &[(Vec3, f32)], margin: f32) -> Self {
+        let reach =
+            |&(c, r): &(Vec3, f32)| (c - Vec3::splat(r + margin), c + Vec3::splat(r + margin));
+        let (lo, hi) = spheres
+            .iter()
+            .map(reach)
+            .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(a, b), (l, h)| {
+                (a.min(l), b.max(h))
+            });
+        let width = ((hi - lo) / SPHERE_CELLS as f32).max(Vec3::splat(f32::MIN_POSITIVE));
+        let cell = |p: Vec3| {
+            let at = ((p - lo) / width)
+                .floor()
+                .clamp(Vec3::ZERO, Vec3::splat((SPHERE_CELLS - 1) as f32));
+            at.as_uvec3()
+        };
+        let index =
+            |c: UVec3| (c.x as usize * SPHERE_CELLS + c.y as usize) * SPHERE_CELLS + c.z as usize;
+        let mut lists = vec![vec![]; SPHERE_CELLS * SPHERE_CELLS * SPHERE_CELLS];
+        for (j, sphere) in spheres.iter().enumerate() {
+            let (l, h) = reach(sphere);
+            let (l, h) = (cell(l), cell(h));
+            for x in l.x..=h.x {
+                for y in l.y..=h.y {
+                    for z in l.z..=h.z {
+                        lists[index(UVec3::new(x, y, z))].push(j);
+                    }
+                }
+            }
+        }
+        let mut starts = Vec::with_capacity(lists.len() + 1);
+        let mut members = vec![];
+        for list in lists {
+            starts.push(members.len());
+            members.extend(list);
+        }
+        starts.push(members.len());
+        Self {
+            origin: lo,
+            width,
+            starts,
+            members,
+        }
+    }
+
+    /// The spheres whose grown boxes may hold `p`; none where it lies outside them all.
+    fn at(&self, p: Vec3) -> &[usize] {
+        let at = (p - self.origin) / self.width;
+        let n = SPHERE_CELLS as f32;
+        if !(at.cmpge(Vec3::ZERO).all() && at.cmplt(Vec3::splat(n)).all()) {
+            return &[];
+        }
+        let c = at.as_uvec3();
+        let k = (c.x as usize * SPHERE_CELLS + c.y as usize) * SPHERE_CELLS + c.z as usize;
+        &self.members[self.starts[k]..self.starts[k + 1]]
+    }
 }
 
 #[cfg(test)]
