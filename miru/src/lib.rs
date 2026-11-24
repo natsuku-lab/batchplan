@@ -73,6 +73,7 @@
 #[doc = include_str!("../README.md")]
 struct Readme;
 
+mod bar;
 mod error;
 mod extraction;
 mod fit;
@@ -86,6 +87,7 @@ mod segment;
 mod threads;
 mod view;
 
+pub use bar::BarOnDisk;
 pub use extraction::Extraction;
 pub use grip::{GripWorlds, Gripped};
 pub use grip_plan::{

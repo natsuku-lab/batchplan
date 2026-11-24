@@ -1255,6 +1255,27 @@ impl Kept {
         memory.current(&self.map)
     }
 
+    pub(crate) fn bar_resolution(&self, target: Label) -> Option<f32> {
+        let mut widths = vec![];
+        for (v, labels) in self.views.iter().zip(&self.scene.labels) {
+            let focal = v.intrinsics.fx.min(v.intrinsics.fy);
+            for (i, label) in labels.iter().enumerate() {
+                let z = v.depth[i];
+                if *label == target
+                    && !v.robot.on_robot[i]
+                    && let Some(sigma) = v.noise.at_reading(z)
+                {
+                    widths.push(sigma.max(z / focal));
+                }
+            }
+        }
+        if widths.is_empty() {
+            return None;
+        }
+        let middle = widths.len() / 2;
+        Some(*widths.select_nth_unstable_by(middle, f32::total_cmp).1)
+    }
+
     pub(crate) fn views(&self) -> impl Iterator<Item = (DepthImage<'_>, &RobotMask, &[Label])> {
         self.views
             .iter()
