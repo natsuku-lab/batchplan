@@ -22,7 +22,13 @@ fn things(kind: u32) -> Vec<Thing> {
             [30; 3],
         ),
     ];
-    {
+    if kind == 100 {
+        things.push(block(
+            MIDDLE + Vec3::Z * 0.006,
+            Vec3::new(0.16, 0.16, 0.006),
+            [150; 3],
+        ));
+    } else {
         let mut disk = can(MIDDLE + Vec3::Z * 0.006, 0.044, 0.006, [150; 3]);
         if kind > 0 {
             for i in 0..kind {
@@ -41,8 +47,8 @@ fn things(kind: u32) -> Vec<Thing> {
     things
 }
 #[test]
-fn a_scalloped_face_cannot_be_used_as_a_disk() {
-    for pegs in [0, 12] {
+fn a_measured_disk_requires_an_intact_face_and_a_visible_edge() {
+    for pegs in [0, 12, 100] {
         let things = things(pegs);
         let raw = [EYE, NEAR].map(|eye| Frame::of(&things, looking(eye, MIDDLE + Vec3::Z * 0.02)));
         for (name, far, near) in CAMERAS {
@@ -58,6 +64,25 @@ fn a_scalloped_face_cannot_be_used_as_a_disk() {
                         ..Default::default()
                     };
                     f.depth = f.view().image.filtered(&filter).unwrap();
+                }
+                if pegs == 100 {
+                    let k = f.intrinsics;
+                    for (i, z) in f.depth.iter_mut().enumerate() {
+                        let ray = Vec3::new(
+                            ((i % f.width) as f32 - k.cx) / k.fx,
+                            ((i / f.width) as f32 - k.cy) / k.fy,
+                            1.0,
+                        );
+                        let point = f.camera.position + f.camera.rotation * (ray * *z);
+                        if f.shows[i] == Some(2)
+                            && point
+                                .truncate()
+                                .distance(MIDDLE.truncate() + glam::Vec2::X * 0.004)
+                                > 0.044
+                        {
+                            *z = 0.0;
+                        }
+                    }
                 }
                 let flags: Vec<_> = f.shows.iter().map(|x| *x == Some(1)).collect();
                 for (z, t) in f.depth.iter().zip(&flags) {
@@ -76,10 +101,10 @@ fn a_scalloped_face_cannot_be_used_as_a_disk() {
             widths.sort_by(f32::total_cmp);
             let tol = widths[widths.len() / 2];
             let out = BarOnDisk::measure(&surface, Vec3::Z, 0.005, tol).unwrap();
-            if pegs == 12 {
+            if pegs != 0 {
                 assert!(
                     out.is_none(),
-                    "{name} looked through gaps in the proposed face"
+                    "{name} accepted scene {pegs} as a circular face"
                 );
             } else if name == "exact" {
                 let face =

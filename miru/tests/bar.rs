@@ -12,12 +12,15 @@ fn sample(whole_disk: bool, split_bar: bool) -> Surface {
     let mut point = |x: f32, y: f32, z: f32, target: bool| {
         surface.points.push(Vec3::new(x, y, z));
         surface.object.push(target);
+        surface.seen_from.push(Vec3::new(x, y, 0.3));
     };
     for i in -50..=50 {
         for j in -50_i32..=50 {
             let (x, y) = (i as f32 * 0.001, j as f32 * 0.001);
             if x.hypot(y) < 0.044 && (whole_disk || x > 0.004) {
                 point(x, y, 0.0, false);
+            } else if x.hypot(y) > 0.045 {
+                point(x, y, -0.015, false);
             }
             if x.abs() <= 0.032 && y.abs() <= 0.009 && (!split_bar || y.abs() > 0.004) {
                 point(x, y, 0.023, true);
@@ -37,7 +40,7 @@ fn opposite_grips_over_a_measured_disk_follow_the_surface_frame() {
     let mut s = sample(true, false);
     let frame = Pose::new(Vec3::new(0.18, 0.09, 0.35), Quat::from_rotation_y(1.1));
     let up = frame.rotation * Vec3::Z;
-    for p in &mut s.points {
+    for p in s.points.iter_mut().chain(&mut s.seen_from) {
         *p = frame.position + frame.rotation * *p;
     }
     let bar = BarOnDisk::measure(&s, up, DEPTH, RESOLUTION)
@@ -66,6 +69,7 @@ fn a_hidden_disk_two_bars_and_an_intervening_surface_have_no_single_grip() {
     let mut s = sample(true, false);
     s.points.push(Vec3::new(0.0, 0.0, 0.025));
     s.object.push(false);
+    s.seen_from.push(Vec3::Z);
     assert!(
         BarOnDisk::measure(&s, Vec3::Z, DEPTH, RESOLUTION)
             .unwrap()
@@ -99,9 +103,7 @@ fn separate_posts_do_not_supply_a_circular_face() {
 #[test]
 fn a_ray_through_the_proposed_face_refutes_it() {
     let mut window = sample(true, false);
-    window
-        .seen_from
-        .resize(window.points.len(), Vec3::splat(f32::INFINITY));
+
     window.points.push(Vec3::new(0.0, 0.03, -0.02));
     window.seen_from.push(Vec3::new(0.0, 0.03, 0.3));
     window.object.push(false);

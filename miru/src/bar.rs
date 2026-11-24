@@ -33,7 +33,8 @@ impl BarOnDisk {
     /// contribute to the bar. All surface points can contribute to the disk, regardless of owner.
     /// Neither the estimate nor a missing estimate changes the collision world or its touches.
     /// `resolution` is the spatial tolerance of the surface in meters. `insertion` is how far
-    /// below the crest to put the hand frame. Returns none where either feature is unresolved.
+    /// below the crest to put the hand frame. Rays in `seen_from` must show space beyond the rim.
+    /// Returns none where either feature is unresolved.
     pub fn measure(
         surface: &Surface,
         outward: Vec3,
@@ -148,6 +149,10 @@ impl BarOnDisk {
         if !measured_face(&layer, center, radius, resolution) {
             return Ok(None);
         }
+        // A missing depth boundary can cut a perfect circle out of an unbroken slab.
+        // Require observed rays that pass outside the measured rim and reach below the face.
+        let sectors = (std::f32::consts::TAU * radius / (2.0 * resolution)).ceil() as usize;
+        let mut exterior = vec![false; sectors];
         for (p, eye) in surface.points.iter().zip(&surface.seen_from) {
             if !eye.is_finite() {
                 continue;
@@ -161,9 +166,19 @@ impl BarOnDisk {
                 continue;
             }
             let cross = start.lerp(end, (start.z - level) / (start.z - end.z));
-            if cross.truncate().distance(center) < radius - 2.0 * resolution {
+            let offset = cross.truncate() - center;
+            let distance = offset.length();
+            if distance < radius - 2.0 * resolution {
                 return Ok(None);
             }
+            if distance >= radius + resolution && distance <= radius + 3.0 * resolution {
+                let theta = offset.to_angle().rem_euclid(std::f32::consts::TAU);
+                let bin = (theta * sectors as f32 / std::f32::consts::TAU) as usize;
+                exterior[bin.min(sectors - 1)] = true;
+            }
+        }
+        if exterior.iter().filter(|seen| **seen).count() <= sectors / 2 {
+            return Ok(None);
         }
         let across = bar.along.perp();
         let off = center - bar.center;
@@ -413,7 +428,7 @@ impl Kept {
                 bar.center,
                 outward,
                 &spheres,
-                loaded - closed,
+                closed..=loaded,
                 options,
                 resolution,
             )
@@ -432,10 +447,11 @@ fn hand_fits(
     disk: Vec3,
     outward: Vec3,
     hand: &[HandSphere],
-    stroke: f32,
+    gaps: RangeInclusive<f32>,
     options: &GraspOptions,
     resolution: f32,
 ) -> bool {
+    let stroke = gaps.end() - gaps.start();
     let inverse = pose.rotation.conjugate();
     let disk_depth = (pose.position - disk).dot(outward);
     let approach = Vec3::Z * options.approach;
@@ -481,4 +497,80 @@ fn hand_fits(
         }
     }
     contacted == [true, true]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use batchplan::{CollisionModel, Robot, RobotOptions};
+
+    #[test]
+    fn stops_at_the_measured_closed_gap() {
+        let r = 0.003;
+        let loaded = 0.080;
+        let closed = 0.002;
+        let urdf = r#"<robot name="test"><link name="base"/><link name="palm"/><link name="left"/><link name="right"/>
+ <joint name="arm" type="revolute"><parent link="base"/><child link="palm"/><axis xyz="0 0 1"/><limit lower="-3" upper="3" effort="1" velocity="1"/></joint>
+ <joint name="l" type="prismatic"><parent link="palm"/><child link="left"/><origin xyz="0 0.003 0"/><axis xyz="0 1 0"/><limit lower="0.001" upper="0.04" effort="1" velocity="1"/></joint>
+ <joint name="r" type="prismatic"><parent link="palm"/><child link="right"/><origin xyz="0 -0.003 0"/><axis xyz="0 -1 0"/><limit lower="0.001" upper="0.04" effort="1" velocity="1"/></joint></robot>"#;
+        let model = CollisionModel {
+            spheres: ["left", "right"]
+                .into_iter()
+                .map(|n| (n.to_string(), vec![[0., 0., 0., r]]))
+                .collect(),
+            ..Default::default()
+        };
+        let robot = Robot::from_urdf(
+            urdf,
+            &RobotOptions {
+                lock_joints: ["l", "r"]
+                    .into_iter()
+                    .map(|n| (n.to_string(), loaded / 2.))
+                    .collect(),
+                collision_model: Some(model),
+                ee_links: vec!["palm".into()],
+                finger_links: std::collections::HashMap::from([(
+                    "palm".into(),
+                    vec!["left".into(), "right".into()],
+                )]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let locks = ["l", "r"]
+            .into_iter()
+            .map(|n| (n.to_string(), closed / 2.))
+            .collect();
+        assert_eq!(
+            robot
+                .parallel_jaw_opening(0, loaded, 0.016, closed, &locks)
+                .unwrap(),
+            Some(loaded)
+        );
+        let hand = robot.hand_spheres(0);
+        let s = Surface {
+            points: vec![Vec3::new(0., -0.0006, 0.), Vec3::new(0., 0.0006, 0.)],
+            object: vec![true, true],
+            ..Surface::default()
+        };
+        let options = GraspOptions {
+            opening: 0.016,
+            approach: 0.020,
+            ..Default::default()
+        };
+        let check = |travel| {
+            hand_fits(
+                &s,
+                Pose::IDENTITY,
+                Vec3::Z * 0.020,
+                Vec3::NEG_Z,
+                &hand,
+                travel,
+                &options,
+                0.00015,
+            )
+        };
+        assert!(check(0.0..=loaded));
+        assert!(!check(closed..=loaded));
+    }
 }
