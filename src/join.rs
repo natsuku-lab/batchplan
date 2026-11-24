@@ -170,7 +170,10 @@ pub fn join(
     }
     // A robot holding an object keeps its joints and their limits, so the bare robot times every
     // blend; only the collision checks run on the device that holds it.
-    let holds: Vec<Option<&Held>> = sequences.iter().map(|s| s.holding.as_ref()).collect();
+    let holds: Vec<_> = sequences
+        .iter()
+        .map(|s| s.holding.as_ref().map(|h| (h, &worlds[s.world as usize])))
+        .collect();
     let parts = held::by_hold(device, &holds, |on, items| {
         let mut searches: Vec<_> = items
             .iter()

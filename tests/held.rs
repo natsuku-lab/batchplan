@@ -721,7 +721,10 @@ fn a_hold_cannot_move_a_joint_that_carries_the_hand() {
 /// tolerance of 12 mm reach farthest past it: held with those, which reach farther than the gap,
 /// it reads as against the ball and does not move; held with spheres that stay within the gap
 /// (`Held::spheres`), the default's within 5 mm whatever their budget or a limit on how far they
-/// reach, it goes.
+/// reach, it goes. With the ball a distance grid 2 mm apart, the 12 mm it states are fitted no
+/// coarser than the grid, and it goes too; a world whose only grid is 1 cm apart leaves the
+/// default's 5 mm as stated, to the bit; and a slide holding it at 12 mm stays as it is beside one
+/// in a world with a finer grid, each fitted for its own world.
 #[test]
 fn a_held_plate_passes_a_neighbor_a_few_millimeters_away_with_finer_spheres() {
     let robot = common::panda().unwrap();
@@ -759,11 +762,41 @@ fn a_held_plate_passes_a_neighbor_a_few_millimeters_away_with_finer_spheres() {
         .expect("the plate has spheres");
     assert!(past_side(&farthest) > 0.006, "{farthest:?}");
     let toward = Vec3::new(farthest[0], farthest[1], 0.0).normalize();
-    let beside = Obstacle::sphere(at + toward * (radius + 0.006 + 0.03), 0.03);
-    let world = World {
-        touch: vec![Touch::held(0, 0)],
-        ..World::new(vec![table, beside])
+    let (ball_at, ball_radius) = (at + toward * (radius + 0.006 + 0.03), 0.03);
+    let beside = Obstacle::sphere(ball_at, ball_radius);
+    // The ball as a grid 2 mm apart, each value its distance less half a cell's diagonal, as the
+    // library's builders keep them; and a grid 1 cm apart well away from the plate.
+    let grid = |center: Vec3, half: f32, voxel: f32| {
+        let n = (2.0 * half / voxel).ceil() as u32 + 1;
+        let origin = center - Vec3::splat(half);
+        let mut distances = vec![];
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let p = origin + Vec3::new(i as f32, j as f32, k as f32) * voxel;
+                    let reach = 0.5 * 3f32.sqrt() * voxel;
+                    distances.push(p.distance(ball_at) - ball_radius - reach);
+                }
+            }
+        }
+        let grid = SdfGrid::try_new([n; 3], voxel, origin, &distances).unwrap();
+        Obstacle::Sdf {
+            grid: std::sync::Arc::new(grid),
+            center: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+        }
     };
+    let fine_grid = grid(ball_at, 0.06, 0.002);
+    let far_grid = grid(Vec3::new(0.0, 0.8, 0.5), 0.03, 0.01);
+    let world = |obstacles: Vec<Obstacle>| World {
+        touch: vec![Touch::held(0, 0)],
+        ..World::new(obstacles)
+    };
+    let scenes = [
+        world(vec![table.clone(), beside.clone()]),
+        world(vec![table.clone(), fine_grid]),
+        world(vec![table, beside, far_grid]),
+    ];
     let hand = Pose::new(at + Vec3::Z * 0.06, down);
     let plate = |spheres: SphereOptions| Held {
         hand: 0,
@@ -777,7 +810,7 @@ fn a_held_plate_passes_a_neighbor_a_few_millimeters_away_with_finer_spheres() {
     let fine = SphereOptions::default();
     for device in devices(&robot) {
         let name = device.name();
-        let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
+        let worlds = device.upload(&scenes).unwrap();
         let reach = IkProblem {
             seed: Some(ready.clone()),
             holding: Some(plate(fine)),
@@ -786,8 +819,8 @@ fn a_held_plate_passes_a_neighbor_a_few_millimeters_away_with_finer_spheres() {
         let solved =
             batchplan::solve_ik(&device, &worlds, &[reach], &IkOptions::default()).unwrap();
         let start = solved.nearest(0, &ready).expect("over the plate").to_vec();
-        let slide = |spheres: SphereOptions| ToolPath {
-            world: 0,
+        let slide = |world: u32, spheres: SphereOptions| ToolPath {
+            world,
             start: start.clone(),
             hand: 0,
             waypoints: vec![Pose::new(hand.position - toward * 0.05, hand.rotation)],
@@ -799,7 +832,13 @@ fn a_held_plate_passes_a_neighbor_a_few_millimeters_away_with_finer_spheres() {
             max_overhang: Some(0.004),
             ..Default::default()
         };
-        let paths = [slide(coarse), slide(fine), slide(held_in)];
+        let paths = [
+            slide(0, coarse),
+            slide(0, fine),
+            slide(0, held_in),
+            slide(1, coarse),
+            slide(2, fine),
+        ];
         let followed =
             batchplan::follow(&device, &worlds, &paths, &ToolPathOptions::default()).unwrap();
         assert_eq!(followed.fraction[0], 0.0, "{name}");
@@ -810,13 +849,28 @@ fn a_held_plate_passes_a_neighbor_a_few_millimeters_away_with_finer_spheres() {
             "{name}: {:?}",
             followed.contacts[0]
         );
-        for path in [1, 2] {
+        for path in [1, 2, 3] {
             assert_eq!(
                 followed.fraction[path], 1.0,
                 "{name}: {:?} {:?}",
                 followed.stopped[path], followed.contacts[path]
             );
         }
+        // The 1 cm grid leaves the default's 5 mm spheres as they were, to the bit.
+        assert_eq!(followed.paths[4], followed.paths[1], "{name}");
+        assert_eq!(followed.fraction[4], followed.fraction[1], "{name}");
+        assert_eq!(followed.contacts[4], followed.contacts[1], "{name}");
+        // Alone, the coarse slide beside the ball goes as it does in the batch.
+        let alone = batchplan::follow(
+            &device,
+            &worlds,
+            std::slice::from_ref(&paths[0]),
+            &ToolPathOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(alone.paths[0], followed.paths[0], "{name}");
+        assert_eq!(alone.fraction[0], followed.fraction[0], "{name}");
+        assert_eq!(alone.contacts[0], followed.contacts[0], "{name}");
     }
 }
 

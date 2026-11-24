@@ -220,15 +220,20 @@ pub fn reset_states(
 
     // One check per hand and object in it, on a robot holding the object.
     let uploaded = device.upload(&scenes)?;
-    let mut groups: Vec<(Hold, Vec<usize>)> = vec![];
+    // Held objects' spheres no coarser than the finest grid in each state's world.
+    let stated = SphereOptions::default();
+    let mut groups: Vec<(Hold, f32, Vec<usize>)> = vec![];
     for (i, (_, held)) in states.iter().enumerate() {
-        match groups.iter_mut().find(|(g, _)| same_hold(g, held)) {
-            Some((_, members)) => members.push(i),
-            None => groups.push((held.clone(), vec![i])),
+        let tolerance = held::tolerance_in(stated.tolerance, [&scenes[i]]);
+        let alike =
+            |(g, t, _): &&mut (Hold, f32, Vec<usize>)| same_hold(g, held) && *t == tolerance;
+        match groups.iter_mut().find(alike) {
+            Some((_, _, members)) => members.push(i),
+            None => groups.push((held.clone(), tolerance, vec![i])),
         }
     }
     let mut free = vec![false; states.len()];
-    for (held, members) in groups {
+    for (held, tolerance, members) in groups {
         let holder;
         let checker = match held {
             None => device,
@@ -241,7 +246,10 @@ pub fn reset_states(
                     .map(|l| l.name.clone())
                     .collect();
                 // Fitted once per shape on the device, wherever the hand holds it.
-                let options = SphereOptions::default();
+                let options = SphereOptions {
+                    tolerance,
+                    ..stated
+                };
                 let own = device
                     .fits()
                     .spheres(&object.placed(Pose::IDENTITY), &options)?;
@@ -933,7 +941,8 @@ pub fn handover(
     // object fitted once for all its grasps.
     let mut grasped: Vec<(Held, Vec<usize>)> = vec![];
     for (k, e) in going.iter().enumerate() {
-        let held = e.up.held.clone().expect("a pick holds what it picked up");
+        let stated = e.up.held.as_ref().expect("a pick holds what it picked up");
+        let held = held::in_worlds(stated, [&clear_worlds[e.task]]).into_owned();
         match grasped.iter_mut().find(|(h, _)| *h == held) {
             Some((_, alike)) => alike.push(k),
             None => grasped.push((held, vec![k])),

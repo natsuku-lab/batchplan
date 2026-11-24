@@ -27,7 +27,8 @@ value_class! {
         locked: HashMap<String, f32>,
         /// How spheres cover it: they hold all of it and reach no more than `tolerance` (5 mm)
         /// past it, however many spheres that takes, which `budget` does not cap. A smaller
-        /// tolerance fits closer, with more.
+        /// tolerance fits closer, with more. A call holding it fits them no coarser than the
+        /// finest distance grid in the item's world; `attachment` keeps the stated tolerance.
         spheres: batchplan::SphereOptions,
     }
     methods {

@@ -642,7 +642,8 @@ impl Follower {
             return Ok(Some(holder.clone()));
         }
         held.check(device.robot(), worlds, "the follower")?;
-        let mut built = held::holders(device, device.robot(), &[held])?;
+        let held = held::in_worlds(held, [&worlds[self.world as usize]]);
+        let mut built = held::holders(device, device.robot(), &[&held])?;
         let holder = Arc::new(built.remove(0));
         self.holder = Some((device.instance(), holder.clone()));
         Ok(Some(holder))

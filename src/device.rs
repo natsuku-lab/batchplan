@@ -472,7 +472,12 @@ impl Device {
                 held.check(self.robot(), worlds, &format!("item {item}"))?;
             }
         }
-        let parts = held::by_hold(self, holding, |on, items| {
+        let holds: Vec<_> = holding
+            .iter()
+            .zip(item_world)
+            .map(|(held, &w)| held.map(|h| (h, &worlds[w as usize])))
+            .collect();
+        let parts = held::by_hold(self, &holds, |on, items| {
             if items.len() == item_world.len() {
                 return on.contacts(worlds, item_world, q, within);
             }

@@ -431,7 +431,10 @@ pub fn plan(
         .filter(|&pi| goals.failures[pi].is_none())
         .collect();
     let resolved = held::subset(&goals.problems, &planning);
-    let holds: Vec<Option<&Held>> = resolved.iter().map(|p| p.holding.as_ref()).collect();
+    let holds: Vec<_> = resolved
+        .iter()
+        .map(|p| p.holding.as_ref().map(|h| (h, &worlds[p.world as usize])))
+        .collect();
     let parts = held::by_hold(device, &holds, |on, items| {
         planned(on, worlds, &held::subset(&resolved, items), o, deadline)
     })?;

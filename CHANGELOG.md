@@ -417,6 +417,13 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Changed
 
+- A call holding an object fits its spheres no coarser than the field it is checked against: the
+  tolerance is the smaller of the one `Held::spheres` (or `TaskOptions::held_spheres`) states and
+  the finest voxel of any distance grid in the item's own world, never another item's, and items
+  whose tolerances differ so are fitted and run apart. A cover coarser than the grid read gaps the
+  grid resolves as contacts: a bowl lifted under stereo noise passes covered at 2.5 mm and not at
+  5. A world with no grid finer than the stated tolerance gives the same results to the bit;
+  `Held::attachment`, which has no world, keeps the stated tolerance.
 - What a robot holds is covered within its tolerance whatever its `SphereOptions::budget`, which
   now caps the robot's own spheres only (`AttachedObject::spheres`, `Held::spheres`,
   `TaskOptions::held_spheres`): the tolerance is the knob. Its spheres also hold all of it, no

@@ -118,13 +118,17 @@ pub fn handover(
         );
     }
     // A device holding each task's object, as `place` builds them.
+    let fitted: Vec<_> = tasks
+        .iter()
+        .map(|t| held::in_worlds(&t.held, task::step_worlds(worlds, &steps(t))))
+        .collect();
     let mut helds: Vec<&Held> = vec![];
     let mut holder_of = vec![];
-    for t in tasks {
-        let h = match helds.iter().position(|held| **held == t.held) {
+    for held in &fitted {
+        let h = match helds.iter().position(|h| *h == held.as_ref()) {
             Some(h) => h,
             None => {
-                helds.push(&t.held);
+                helds.push(held);
                 helds.len() - 1
             }
         };
