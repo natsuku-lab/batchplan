@@ -5596,3 +5596,77 @@ fn a_fine_surface_hit_keeps_unresolved_occupancy_inherited_from_its_parent() {
         .expect("the former cell now contains newly occupied material");
     assert!(part.occupancy(q).is_some_and(|v| v > 0.5));
 }
+
+#[test]
+fn occupied_corner_field_bounds_the_full_cubes_at_seams_and_past_its_faces() {
+    let device = cpu();
+    let voxel = 0.01;
+    let mut map = OccupancyMap::try_new(Vec3::splat(-0.08), Vec3::splat(0.08), voxel).unwrap();
+    assert!(map.occupied_field(device, 1, 1_000_000).is_err());
+    let centers = [Vec3::new(-0.035, -0.015, 0.0), Vec3::new(0.035, 0.025, 0.0)];
+    let mut blocks = Vec::new();
+    for center in centers {
+        map.occupy(&Obstacle::cuboid(center, Vec3::splat(0.016)), 0.0)
+            .unwrap();
+        let cluster: Vec<_> = map
+            .occupied()
+            .into_iter()
+            .filter(|p| (p.x - center.x).abs() < 0.022)
+            .collect();
+        assert!(
+            cluster.len() >= 18,
+            "multiple touching voxels make one solid"
+        );
+        let lower = cluster.iter().copied().reduce(Vec3::min).unwrap() - Vec3::splat(0.5 * voxel);
+        let upper = cluster.iter().copied().reduce(Vec3::max).unwrap() + Vec3::splat(0.5 * voxel);
+        assert_eq!(
+            cluster.len(),
+            ((upper - lower) / voxel)
+                .round()
+                .as_uvec3()
+                .element_product() as usize
+        );
+        blocks.push(Obstacle::cuboid(
+            (upper + lower) * 0.5,
+            (upper - lower) * 0.5,
+        ));
+    }
+    assert!(map.occupied_field(device, 0, usize::MAX).is_err());
+    assert!(
+        map.occupied_field(device, u32::MAX, usize::MAX)
+            .unwrap()
+            .is_none()
+    );
+    assert!(map.occupied_field(device, 4, 200).unwrap().is_none());
+    let ordinary = map.grid(device, Occlusion::Free).unwrap();
+    let field = map.occupied_field(device, 4, 1_000_000).unwrap().unwrap();
+    let exact = |p: Vec3| {
+        blocks
+            .iter()
+            .map(|b| b.distance(p).value)
+            .fold(f32::INFINITY, f32::min)
+    };
+    let mut closest_gain = 0.0f32;
+    for x in -24..=24 {
+        for y in -23..=23 {
+            for z in -15..=15 {
+                let p = Vec3::new(x as f32 * 0.0113, y as f32 * 0.0067, z as f32 * 0.0093);
+                let truth = exact(p);
+                let value = field.distance(p).value;
+                assert!(value <= truth + 5e-7, "at {p}: {value} exceeds {truth}");
+                if truth > 0.003 && truth < 0.009 && ordinary.distance(p).value < 0.0 {
+                    closest_gain = closest_gain.max(value);
+                }
+            }
+        }
+    }
+    assert!(
+        closest_gain > 0.004,
+        "a checked close pass clears by {closest_gain}"
+    );
+    let center = blocks[0].pose().position;
+    assert!(
+        field.distance(center).value < -voxel,
+        "the interior includes shared faces"
+    );
+}

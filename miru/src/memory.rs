@@ -749,6 +749,11 @@ impl Memory {
         for cover in covers {
             part.free(cover, reach)?;
         }
+        // Bound the finer residual field to eight MiB of uploaded half floats. A larger part
+        // keeps the map's ordinary field and all other object regions retain their own policy.
+        if let Some(grid) = part.occupied_field(device, 4, 4 * 1024 * 1024)? {
+            return Ok(Some(Obstacle::from_grid(grid)));
+        }
         Ok(Some(Obstacle::from_grid(
             part.grid(device, Occlusion::Free)?,
         )))
