@@ -373,6 +373,9 @@ impl Lanes {
                 )
             })
             .collect();
+        // Per sphere, its group in the link pair being grouped: found by search, the groups of a
+        // held object's hundreds of spheres took a time quadratic in them.
+        let mut group_of = vec![usize::MAX; robot.spheres.len()];
         let pair_groups = pairs
             .iter()
             .map(|(a, b, spheres)| {
@@ -386,10 +389,14 @@ impl Lanes {
                 for &[i, j] in spheres {
                     // `i` on `a`, `j` on `b`; grouped by the sphere not on the tighter link.
                     let (other, on_tight) = if tight == b { (i, j) } else { (j, i) };
-                    match groups.iter_mut().find(|(k, _)| *k == other) {
-                        Some((_, js)) => js.push(on_tight),
-                        None => groups.push((other, vec![on_tight])),
+                    if group_of[other] == usize::MAX {
+                        group_of[other] = groups.len();
+                        groups.push((other, vec![]));
                     }
+                    groups[group_of[other]].1.push(on_tight);
+                }
+                for &(other, _) in &groups {
+                    group_of[other] = usize::MAX;
                 }
                 (tight, groups)
             })

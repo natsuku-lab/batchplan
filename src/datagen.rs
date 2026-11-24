@@ -8,10 +8,11 @@ use rayon::prelude::*;
 
 use crate::device::{self, Device, Worlds};
 use crate::error::{Result, ensure_input, input};
-use crate::held::Held;
+use crate::held::{self, Held};
 use crate::ik::{self, IkOptions, IkProblem};
 use crate::rng::Rng;
-use crate::robot::{AttachedObject, Robot};
+use crate::robot::{self, AttachedObject, Robot};
+use crate::spheres::SphereOptions;
 use crate::spline;
 use crate::task::{self, Pick, Place, TaskOptions, TaskPlan, TaskResult};
 use crate::timing::{HandSpeed, Near, Trajectory};
@@ -239,13 +240,20 @@ pub fn reset_states(
                     .filter(|l| l.chain == robot.links[ee].chain)
                     .map(|l| l.name.clone())
                     .collect();
-                holder = device.with_robot(&robot.attach(&AttachedObject {
+                // Fitted once per shape on the device, wherever the hand holds it.
+                let options = SphereOptions::default();
+                let own = device
+                    .fits()
+                    .spheres(&object.placed(Pose::IDENTITY), &options)?;
+                let placed = robot::placed_spheres(&own, object.pose());
+                let attached = AttachedObject {
                     name: "held object".into(),
                     link: robot.links[ee].name.clone(),
                     shapes: vec![object],
                     touch_links,
-                    spheres: Default::default(),
-                })?)?;
+                    spheres: options,
+                };
+                holder = device.with_robot(&robot.attach_with(&attached, || Ok(placed))?)?;
                 &holder
             }
         };
@@ -921,20 +929,20 @@ pub fn handover(
     }
     going.retain(|e| !e.meet.is_empty());
 
-    // There both at once, holding the object as the giver grasps it: a device per grasp.
-    let mut holders: Vec<(Held, Device, Vec<usize>)> = vec![];
+    // There both at once, holding the object as the giver grasps it: a device per grasp, each
+    // object fitted once for all its grasps.
+    let mut grasped: Vec<(Held, Vec<usize>)> = vec![];
     for (k, e) in going.iter().enumerate() {
         let held = e.up.held.clone().expect("a pick holds what it picked up");
-        match holders.iter_mut().find(|(h, _, _)| *h == held) {
-            Some((_, _, alike)) => alike.push(k),
-            None => {
-                let holder = device.with_robot(&robot.attach(&held.attachment(robot)?)?)?;
-                holders.push((held, holder, vec![k]));
-            }
+        match grasped.iter_mut().find(|(h, _)| *h == held) {
+            Some((_, alike)) => alike.push(k),
+            None => grasped.push((held, vec![k])),
         }
     }
+    let helds: Vec<&Held> = grasped.iter().map(|(held, _)| held).collect();
+    let holders = held::holders(device, robot, &helds)?;
     let mut planned = vec![false; going.len()];
-    for (_, holder, alike) in &holders {
+    for ((_, alike), holder) in grasped.iter().zip(&holders) {
         let problems: Vec<PlanProblem> = alike
             .iter()
             .map(|&k| {

@@ -255,6 +255,21 @@ impl Fits {
             kept.push_back((object, options, spheres));
         }
     }
+
+    /// `object`'s spheres in its own frame, fitted by `options`: as kept, or fitted and kept.
+    pub(crate) fn spheres(
+        &self,
+        object: &Obstacle,
+        options: &SphereOptions,
+    ) -> Result<Arc<[[f32; 4]]>> {
+        if let Some(spheres) = self.get(object, options) {
+            return Ok(spheres);
+        }
+        let fitted: Arc<[[f32; 4]]> =
+            robot::object_spheres(std::slice::from_ref(object), options)?.into();
+        self.keep(object.clone(), *options, fitted.clone());
+        Ok(fitted)
+    }
 }
 
 /// Held objects' spheres: each object fitted once, in its own frame, to be placed by each grasp of
@@ -287,13 +302,7 @@ impl Fitted {
         }
         let fits = device.fits();
         let spheres = device.in_turns(&mut objects, |_, (object, options)| {
-            if let Some(spheres) = fits.get(object, options) {
-                return Ok(spheres);
-            }
-            let fitted: Arc<[[f32; 4]]> =
-                robot::object_spheres(std::slice::from_ref(object), options)?.into();
-            fits.keep(object.clone(), *options, fitted.clone());
-            Ok(fitted)
+            fits.spheres(object, options)
         })?;
         Ok(Self { spheres, object_of })
     }

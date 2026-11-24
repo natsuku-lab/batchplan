@@ -428,8 +428,13 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   (`examples/held_spheres.rs`). A box or a capsule the budget cannot cover directly within the
   tolerance is no longer covered past it: it is fitted, or covered with more spheres where that
   takes no more than the fit. The blocks `examples/handover/` carries, which 42 to 64 spheres
-  covered 9.0 to 10.6 mm past them, take 144 to 257, and its 512 handovers about 1.5 times as
-  long on the M4 Pro, on its GPU and its CPU (runs alternated with the code before).
+  covered 9.0 to 10.6 mm past them, take 144 to 257, and its handovers of 64 to 1,000 tasks
+  take 5 to 8% longer on the M4 Pro's GPU and 6 to 16% on its CPU (runs alternated with the
+  code before). So that fitting is paid once per object, `datagen::handover` fits a carried
+  object once for all its grasps, where it attached it at each, and `datagen::reset_states` once
+  per shape, where it attached it at each hold; and a device for a robot holding an object of
+  many spheres is made in time linear in them, where pairing its spheres with the robot's took
+  time quadratic in them.
 
 - On the CPU, a robot mask (`DepthImage::robot_mask`) takes 11% to 23% less time on the Ryzen
   and up to 15% less on the M4 Pro, and fusing an image into a map up to 13% less on the Ryzen,
