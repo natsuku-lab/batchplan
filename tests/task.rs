@@ -2995,3 +2995,63 @@ fn the_release_sweep_stops_a_palm_below_the_falling_object() {
         assert!(stop.contacts.iter().any(|c| matches!(c, Contact::World { link, obstacle: 0, distance } if link == "panda_hand" && *distance < 0.0)), "{stop:?}");
     }
 }
+
+#[test]
+fn completed_picks_can_prefer_tightly_measured_contacts() {
+    let robot = panda();
+    let device = Device::cpu_threads(&robot, 1).unwrap();
+    let world = scene(vec![]);
+    let mut surface = Surface::default();
+    seen(
+        world.obstacles[BOX].pose().position,
+        HALF,
+        true,
+        &mut surface,
+    );
+    let mut found = batchplan::grasps_on(&device, 0, &[surface], &GraspOptions::default()).unwrap();
+    let observed = found[0].pop().expect("the box has opposed measured faces");
+    assert!(!observed.one_sided);
+
+    let worlds = device.upload(&[world]).unwrap();
+    let pick = pick_from(&robot, vec![top_across()]);
+    let mut result = batchplan::pick(&device, &worlds, &[pick], &TaskOptions::default()).unwrap();
+    let plan = result.outcomes.pop().unwrap().unwrap().pop().unwrap();
+
+    // A sparse set of returned plans. The two grasps with both contacts measured and the two equal
+    // one-sided spans must keep their incoming order even though their indices are reversed.
+    let mut grasps = [observed; 7];
+    grasps[6].contacts = [Vec3::ZERO, Vec3::Y * 0.075];
+    grasps[2].contacts = [Vec3::ZERO, Vec3::Y * 0.010];
+    for (index, width) in [(0, 0.065), (3, 0.025), (5, 0.025)] {
+        grasps[index].one_sided = true;
+        grasps[index].contacts = [Vec3::ZERO, Vec3::Y * width];
+    }
+    let mut plans: Vec<_> = [0, 6, 5, 3, 2]
+        .map(|candidate| {
+            let mut p = plan.clone();
+            p.candidate = candidate;
+            p
+        })
+        .into();
+    let indices = |plans: &[TaskPlan]| plans.iter().map(|p| p.candidate).collect::<Vec<_>>();
+    let original = indices(&plans);
+    assert!(matches!(
+        batchplan::prefer_measured_contacts(&mut plans, &grasps[..6]),
+        Err(Error::Input(_))
+    ));
+    assert_eq!(indices(&plans), original);
+    let mut invalid = grasps;
+    invalid[3].contacts[1].y = f32::NAN;
+    assert!(matches!(
+        batchplan::prefer_measured_contacts(&mut plans, &invalid),
+        Err(Error::Input(_))
+    ));
+    assert_eq!(indices(&plans), original);
+    batchplan::prefer_measured_contacts(&mut plans, &grasps).unwrap();
+    assert_eq!(indices(&plans), [6, 2, 5, 3, 0]);
+    batchplan::prefer_measured_contacts(&mut plans[4..], &grasps).unwrap();
+    assert_eq!(
+        plans[4].candidate, 0,
+        "the only feasible wide span remains available"
+    );
+}
