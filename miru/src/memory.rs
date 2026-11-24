@@ -17,7 +17,7 @@ use batchplan::{
 use glam::Vec3;
 
 use crate::error::{Result, ensure_input};
-use crate::look::{Look, LookOptions, Noise, View};
+use crate::look::{self, Look, LookOptions, Noise, View};
 use crate::scene::{Label, Object, Scene, Shape, Support};
 use crate::view::SIGMAS;
 
@@ -817,6 +817,8 @@ pub struct Kept {
     /// Identifies the map fused at this look without extending its lifetime.
     pub(crate) map: Weak<Map>,
     scene: Scene,
+    /// Indices of freshly fitted bodies standing on the observed floor of their support.
+    pub(crate) floors: Vec<usize>,
     views: Vec<KeptView>,
 }
 
@@ -991,6 +993,7 @@ pub fn observe(
         let kept = Kept {
             map: Arc::downgrade(&memory.map),
             scene: memory.scene.clone(),
+            floors: vec![],
             views: vec![],
         };
         return Ok(Observed {
@@ -1040,7 +1043,8 @@ pub fn observe(
         views: &views,
         known: &memory.known,
     };
-    let scene = crate::look(device, &look, &memory.scene, &options)?;
+    let mut floors = Vec::new();
+    let scene = look::with_floors(device, &look, &memory.scene, &options, Some(&mut floors))?;
 
     let shapes: Vec<Obstacle> = (memory.known.iter().cloned())
         .chain(
@@ -1120,7 +1124,12 @@ pub fn observe(
     let map = Arc::downgrade(&memory.map);
     Ok(Observed {
         memory,
-        kept: Kept { scene, views, map },
+        kept: Kept {
+            scene,
+            floors,
+            views,
+            map,
+        },
     })
 }
 
