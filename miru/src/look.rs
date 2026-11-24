@@ -195,6 +195,17 @@ impl Default for LookOptions {
 /// masks, takes the prompts from that scene's labels, runs its model and looks again, after the
 /// same `previous`, with the masks it gave.
 pub fn look(device: &Device, look: &Look<'_>, previous: &Scene, o: &LookOptions) -> Result<Scene> {
+    with_floors(device, look, previous, o, None)
+}
+
+/// As `look`, optionally keeping which freshly fitted bodies stood on a measured floor.
+pub(crate) fn with_floors(
+    device: &Device,
+    look: &Look<'_>,
+    previous: &Scene,
+    o: &LookOptions,
+    standing_on_floor: Option<&mut Vec<usize>>,
+) -> Result<Scene> {
     ensure_input!(
         o.lower_corner.cmplt(o.upper_corner).all(),
         "a look's corners need lower < upper, got {} and {}",
@@ -204,7 +215,16 @@ pub fn look(device: &Device, look: &Look<'_>, previous: &Scene, o: &LookOptions)
     for (index, view) in look.views.iter().enumerate() {
         check(index, view)?;
     }
-    device.install(|| checked(device, look, previous, o, rayon::current_num_threads()))
+    device.install(|| {
+        checked(
+            device,
+            look,
+            previous,
+            o,
+            rayon::current_num_threads(),
+            standing_on_floor,
+        )
+    })
 }
 
 /// [`look`] of frames and options that have been checked, on `device`'s threads, of which there
@@ -215,6 +235,7 @@ fn checked(
     previous: &Scene,
     o: &LookOptions,
     threads: usize,
+    standing_on_floor: Option<&mut Vec<usize>>,
 ) -> Result<Scene> {
     let seen = (look.views.iter()).map(|view| Seen::of(device, view, look.known, o, threads));
     let seen: Vec<Seen> = seen.collect::<Result<_>>()?;
@@ -533,6 +554,17 @@ fn checked(
             ..object.clone()
         }
     }));
+    if let Some(floors) = standing_on_floor {
+        for (body, (fit, support)) in stood.iter().enumerate() {
+            if let Some(Support::Object(under)) = *support
+                && kept[body].is_none()
+                && held[body].is_none()
+                && fit.stood_on_floor(&all[under].shape, &shapes[body])
+            {
+                floors.push(body);
+            }
+        }
+    }
     Ok(Scene {
         objects: all,
         labels,

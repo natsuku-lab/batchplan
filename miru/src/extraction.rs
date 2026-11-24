@@ -23,7 +23,8 @@ impl Kept {
     /// The container must also have readings, and the object must reach into the
     /// box above its floor. Results follow the look's object order. A lift is a geometric request
     /// at the object's measured attitude. For a body measured standing on this container, a floor
-    /// discrepancy of one single-precision step across the box height counts as contact.
+    /// discrepancy of one single-precision step across the box height counts as contact. A fresh
+    /// fit can also establish contact by its standing height on an upright floor before encoding.
     /// Plan it with the step's collision world.
     pub fn extractions(&self, id: u32, margin: f32) -> Result<Vec<Extraction>> {
         ensure_input!(
@@ -44,11 +45,16 @@ impl Kept {
             return Ok(Vec::new());
         }
         let body = &scene.objects[target].shape;
+        let witnessed = self.floors.contains(&target);
         let mut found = Vec::new();
         for (index, container) in scene.objects.iter().enumerate() {
-            let supported = scene.objects[target].on == Some(Support::Object(index));
+            let support = match scene.objects[target].on {
+                Some(Support::Object(i)) if i == index && witnessed => Floor::Witnessed,
+                Some(Support::Object(i)) if i == index => Floor::Support,
+                _ => Floor::Other,
+            };
             if index != target
-                && let Some(lift) = lift_out(&container.shape, body, margin, supported)
+                && let Some(lift) = lift_out(&container.shape, body, margin, support)
                 && visible(index)
             {
                 found.push(Extraction {
@@ -61,7 +67,14 @@ impl Kept {
     }
 }
 
-fn lift_out(container: &Shape, body: &Shape, margin: f32, supported: bool) -> Option<Vec3> {
+#[derive(Clone, Copy, PartialEq)]
+enum Floor {
+    Other,
+    Support,
+    Witnessed,
+}
+
+fn lift_out(container: &Shape, body: &Shape, margin: f32, support: Floor) -> Option<Vec3> {
     let Shape::OpenBox {
         center,
         half_extents,
@@ -100,18 +113,19 @@ fn lift_out(container: &Shape, body: &Shape, margin: f32, supported: bool) -> Op
     let lip = f64::from(half_extents.z);
     // A measured support and its body store their heights separately in f32. At floor contact
     // allow one representable step across the box height, independent of its distance from the origin.
-    let floor_step = if supported && top.z > f64::from(floor.z) {
+    let floor_step = if support != Floor::Other && top.z > f64::from(floor.z) {
         2.0 * f64::from(half_extents.z - half_extents.z.next_down())
     } else {
         0.0
     };
-    let inside = bottom.z >= f64::from(floor.z) - floor_step - roundoff
-        && bottom
-            .truncate()
-            .cmpge(floor.as_dvec3().truncate() - roundoff)
-            .all()
+    let inside = bottom
+        .truncate()
+        .cmpge(floor.as_dvec3().truncate() - roundoff)
+        .all()
         && top.truncate().cmple(upper.as_dvec2() + roundoff).all()
-        && bottom.z < lip - roundoff;
+        && bottom.z < lip - roundoff
+        && (bottom.z >= f64::from(floor.z) - floor_step - roundoff
+            || (support == Floor::Witnessed && top.z > f64::from(floor.z)));
     inside.then(|| (axes * DVec3::Z * (lip - bottom.z + f64::from(margin))).as_vec3())
 }
 
@@ -152,15 +166,20 @@ mod tests {
                     radius: scale * 0.056,
                     half_height: height,
                 };
-                assert!(lift_out(&container, &body, 0.0, /* supported */ false).is_none());
-                let lift = lift_out(&container, &body, 0.0, /* supported */ true)
+                assert!(lift_out(&container, &body, 0.0, Floor::Other).is_none());
+                let lift = lift_out(&container, &body, 0.0, Floor::Support)
                     .expect("flush at fitted precision");
                 let expected = center.z + half.z - (middle - height);
                 assert!((lift.z - expected).abs() <= f32::EPSILON * expected);
+                let overhang = body.placed(Pose::new(
+                    body.pose().position + rotation * Vec3::Y * half.y,
+                    rotation,
+                ));
+                assert!(lift_out(&container, &overhang, 0.0, Floor::Witnessed).is_none());
                 for offset in [Vec3::NEG_Z * (scale * 1e-6), rotation * Vec3::Y * half.y] {
                     let pose = body.pose();
                     let outside = body.placed(Pose::new(pose.position + offset, pose.rotation));
-                    assert!(lift_out(&container, &outside, 0.0, /* supported */ true).is_none());
+                    assert!(lift_out(&container, &outside, 0.0, Floor::Support).is_none());
                 }
             }
         }
@@ -184,15 +203,15 @@ mod tests {
             half_height: 0.018,
         };
         let expected = 0.04 + 0.03 * tilt.sin() + 0.018 * tilt.cos() + 0.005;
-        let lift = lift_out(&container, &body, 0.005, /* supported */ false)
-            .expect("the cylinder lies inside");
+        let lift =
+            lift_out(&container, &body, 0.005, Floor::Other).expect("the cylinder lies inside");
         assert!(lift.distance(rotation * Vec3::Z * expected) < 1e-6);
         let just_below_floor = -0.035 + 0.03 * tilt.sin() + 0.018 * tilt.cos() - 1e-6;
         for offset in [Vec3::X * 0.075, Vec3::Z * just_below_floor, Vec3::Z * 0.1] {
             let pose = body.pose();
             let outside = body.placed(Pose::new(pose.position + rotation * offset, pose.rotation));
             assert!(
-                lift_out(&container, &outside, 0.005, /* supported */ true).is_none(),
+                lift_out(&container, &outside, 0.005, Floor::Support).is_none(),
                 "{offset}"
             );
         }
