@@ -44,7 +44,7 @@ use crate::device::Device;
 use crate::error::{Result, ensure_input, input};
 use crate::robot::HandSphere;
 use crate::sdf::{DepthImage, RobotMask};
-use crate::task::GraspOptions;
+use crate::task::{GraspOptions, TaskPlan};
 use crate::types::{Pose, Screw};
 
 /// Points on the surfaces seen and the normals out of them, in one frame: what [`grasps_on`]
@@ -353,6 +353,42 @@ pub(crate) fn smallest_gap(capacity: f32) -> f32 {
 
 fn last_opening(capacity: f32, width: f32, step: f32) -> i32 {
     (((capacity - width) / 2.0 / step + 1e-3) as i32).clamp(0, OPENINGS - 1)
+}
+
+/// Orders the completed plans of one surface pick by the evidence for where its jaws will close.
+/// Plans with two measured contacts come first. For a wall seen from one side, a shorter span
+/// to observed free space leaves less room for the unseen contact. Equal ranks keep their order.
+///
+/// Pass the original surface grasps in the order supplied to the pick. Only returned plans are
+/// reordered, so grasp indices, trajectories and holds stay together. Use this when any grip on
+/// the object will do. Keep the original order when proximity to a requested point takes priority.
+/// The span measures uncertainty in the contact location, not how far the object will slip.
+///
+/// An out-of-range candidate or a nonfinite one-sided width returns an error before reordering.
+pub fn prefer_measured_contacts(plans: &mut [TaskPlan], grasps: &[Grasp]) -> Result<()> {
+    for plan in plans.iter() {
+        let index = plan.candidate;
+        let grasp = grasps.get(index).ok_or_else(|| {
+            input!(
+                "pick candidate {index} has no corresponding surface grasp among {}",
+                grasps.len()
+            )
+        })?;
+        if grasp.one_sided {
+            let width = grasp.width();
+            ensure_input!(
+                width.is_finite(),
+                "grasp {index} has nonfinite contact span {width}"
+            );
+        }
+    }
+    let key = |plan: &TaskPlan| {
+        let grasp = &grasps[plan.candidate];
+        // Finite nonnegative widths have the same order as their bits.
+        grasp.one_sided.then(|| grasp.width().to_bits())
+    };
+    plans.sort_by_key(key);
+    Ok(())
 }
 
 impl GraspOptions {

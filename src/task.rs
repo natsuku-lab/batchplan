@@ -235,6 +235,12 @@ pub struct Place {
     /// object's symmetric turns at one spot, and [`rests_on`](crate::rests_on) the poses it
     /// rests at on a support cameras see.
     pub poses: Vec<Pose>,
+    /// Expected downward travel after release, in meters along world −z, one value per pose.
+    /// Empty sets down at the release itself. Supply a measured displacement to a resting
+    /// pose at the same attitude. Departure checks an enclosure of
+    /// the object throughout that translation. The returned placed pose is the expected rest;
+    /// the caller verifies where the object actually settled.
+    pub falls: Vec<f32>,
     /// How the hand moves in to where it lets go, in the world's frame (meters).
     pub lower: Vec3,
     /// How far back along its own z axis the hand moves once it lets go (meters).
@@ -279,6 +285,7 @@ impl Place {
             idle: None,
             held,
             poses,
+            falls: vec![],
             lower: Vec3::Z * -0.1,
             retreat: 0.1,
             open: vec![],
@@ -402,6 +409,10 @@ pub struct TaskPlan {
     /// object where the turn leaves it, to put in the world in its place, or where it stood where
     /// it stays ([`Turn::stays`]).
     pub placed: Option<Obstacle>,
+    /// For a place with a positive fall, the released body as checked during departure.
+    /// It encloses the release, the expected landing and the translation between them.
+    /// Check the follower against this obstacle with the releasing fingers allowed to touch it.
+    pub falling: Option<Obstacle>,
     /// After a place that says how far its hand may open ([`Place::open`]), which of those the
     /// hand lets go at and moves away with, by index.
     pub opening: Option<usize>,
@@ -575,6 +586,94 @@ pub fn pick(
     tasks: &[Pick],
     o: &TaskOptions,
 ) -> Result<TaskResult<Pick>> {
+    let tasks = checked_picks(device, worlds, tasks, o)?;
+    by_grasps(device, worlds, &tasks, o, picked)
+}
+
+/// Tries the first `preferred[i]` grasps of each pick as one ordinary batch. A task with any
+/// complete pick returns those plans. Only tasks with no complete preferred grasp try the
+/// remaining grasps, together in a second batch. Zero preferred grasps means to try the entire
+/// task in the ordinary batch.
+///
+/// Candidate indices and finger locks refer to the original task. When both groups stop, every
+/// grasp has a stop in its original order. [`Pick::enough`] applies within each group. A later
+/// placement has no bearing on which group a pick returns.
+pub fn pick_with_preferred_grasps(
+    device: &Device,
+    worlds: &Worlds,
+    tasks: &[Pick],
+    preferred: &[usize],
+    o: &TaskOptions,
+) -> Result<TaskResult<Pick>> {
+    ensure_input!(
+        preferred.len() == tasks.len(),
+        "{} preferred grasp counts for {} picks",
+        preferred.len(),
+        tasks.len()
+    );
+    let tasks = checked_picks(device, worlds, tasks, o)?;
+    for (i, (&count, task)) in preferred.iter().zip(tasks.iter()).enumerate() {
+        ensure_input!(
+            count <= task.grasps.len(),
+            "task {i} prefers {count} of {} grasps",
+            task.grasps.len()
+        );
+    }
+    let has_fallback = |i: usize| preferred[i] > 0 && preferred[i] < tasks[i].grasps.len();
+    if !(0..tasks.len()).any(has_fallback) {
+        return by_grasps(device, worlds, &tasks, o, picked);
+    }
+    let mut first = tasks.to_vec();
+    for (i, task) in first.iter_mut().enumerate() {
+        if has_fallback(i) {
+            task.grasps.truncate(preferred[i]);
+            task.locked.truncate(preferred[i]);
+        }
+    }
+    let mut result = by_grasps(device, worlds, &first, o, picked)?;
+    let mut indices = vec![];
+    let mut remaining = vec![];
+    for (i, outcome) in result.outcomes.iter().enumerate() {
+        if outcome.is_err() && has_fallback(i) {
+            let mut task = tasks[i].clone();
+            task.grasps.drain(..preferred[i]);
+            if !task.locked.is_empty() {
+                task.locked.drain(..preferred[i]);
+            }
+            indices.push(i);
+            remaining.push(task);
+        }
+    }
+    if !remaining.is_empty() {
+        let tried = by_grasps(device, worlds, &remaining, o, picked)?;
+        for (i, outcome) in indices.into_iter().zip(tried.outcomes) {
+            match outcome {
+                Ok(mut plans) => {
+                    for plan in &mut plans {
+                        plan.candidate += preferred[i];
+                    }
+                    result.outcomes[i] = Ok(plans);
+                }
+                Err(stopped) => {
+                    let first = result.outcomes[i]
+                        .as_mut()
+                        .expect_err("only failed picks try more grasps");
+                    first.candidates.extend(stopped.candidates);
+                }
+            }
+        }
+    }
+    result.problems = tasks.into_owned();
+    Ok(result)
+}
+
+/// Corrects measured starts and checks the full pick, including every candidate and finger lock.
+fn checked_picks<'a>(
+    device: &Device,
+    worlds: &Worlds,
+    tasks: &'a [Pick],
+    o: &TaskOptions,
+) -> Result<Cow<'a, [Pick]>> {
     let robot = device.robot();
     let corrected = robot.correct_starts(
         tasks,
@@ -583,9 +682,8 @@ pub fn pick(
         |t| &t.start,
         |t| &mut t.start,
     )?;
-    let tasks = corrected.as_ref();
-    check_picks(robot, worlds, tasks, o)?;
-    by_grasps(device, worlds, tasks, o, picked)
+    check_picks(robot, worlds, &corrected, o)?;
+    Ok(corrected)
 }
 
 /// Each task's plans by its grasps, as [`Pick::enough`] and [`Pick::locked`] say how a pick's are
@@ -1006,10 +1104,11 @@ fn picked(
 
 /// Sets down each task's held object, trying each of its poses. IK solves where the hand lets go,
 /// holding the object, which may touch what it is set on there and on the move in, run backward
-/// from there. The move away lets the fingers touch the object where it now stands. Run the
-/// transit and the approach holding the object, open the gripper, then run the departure. A task
-/// that names how far its hand may open ([`Place::open`]) is solved where it lets go with the
-/// fingers where they hold the object, and backs off at the first opening it is clear with
+/// from there. Run transit and approach holding the object, open the gripper, then follow the
+/// departure. The releasing fingers may touch the object. When a fall is specified, check the
+/// follower against the returned `falling` obstacle through departure. Verify the expected
+/// landing in `placed` after release. If the task specifies [`Place::open`], the solver keeps
+/// the fingers at the holding aperture until release, then backs off at the first clear opening
 /// ([`TaskPlan::opening`]): open the gripper that far, and follow the departure on the robot
 /// relocked there. A task that says how many plans will do ([`Place::enough`]) tries its poses in
 /// their order until that many have got through. `device` is the robot's without the object; each
@@ -1059,6 +1158,12 @@ pub fn place(
         t.held.check(robot, worlds, &format!("task {i}"))?;
         check_poses(i, "pose", &t.poses)?;
         ensure_input!(
+            t.falls.is_empty()
+                || (t.falls.len() == t.poses.len()
+                    && t.falls.iter().all(|z| z.is_finite() && *z >= 0.0)),
+            "task {i} needs one finite nonnegative fall per release pose, or none"
+        );
+        ensure_input!(
             t.lower.is_finite()
                 && t.lower != Vec3::ZERO
                 && t.retreat.is_finite()
@@ -1089,6 +1194,11 @@ pub fn place(
         let going: Vec<usize> = (0..tasks.len()).filter(|&i| !next[i].is_empty()).collect();
         let some = going.iter().map(|&i| Place {
             poses: tasks[i].poses[next[i].clone()].to_vec(),
+            falls: tasks[i]
+                .falls
+                .get(next[i].clone())
+                .unwrap_or_default()
+                .to_vec(),
             ..tasks[i].clone()
         });
         let some: Vec<Place> = some.collect();
@@ -1314,7 +1424,9 @@ fn placed(
             .map(|c| {
                 let t = &tasks[c.task];
                 let mut w = worlds[Steps::of_place(t).depart_world as usize].clone();
-                w.obstacles.push(t.held.object.placed(t.poses[c.index]));
+                let released = t.held.object.placed(t.poses[c.index]);
+                let fall = t.falls.get(c.index).copied().unwrap_or_default();
+                w.obstacles.push(released.falling(fall));
                 let object = w.obstacles.len() - 1;
                 w.touch
                     .push(Touch::new(object, fingers(robot, t.held.hand)));
@@ -1401,10 +1513,26 @@ fn placed(
         transit(&holders[h], worlds, group, &constraints, &o.plan)
     })?;
 
-    let outcomes = choose(device, tasks.len(), &candidates, o, |c| {
+    let mut outcomes = choose(device, tasks.len(), &candidates, o, |c| {
         let t = &tasks[c.task];
-        (None, Some(t.held.object.placed(t.poses[c.index])))
+        let mut at = t.poses[c.index];
+        at.position.z -= t.falls.get(c.index).copied().unwrap_or_default();
+        (None, Some(t.held.object.placed(at)))
     })?;
+    for (task, outcome) in tasks.iter().zip(&mut outcomes) {
+        if let Ok(plans) = outcome {
+            for plan in plans {
+                if let Some(&fall) = task.falls.get(plan.candidate).filter(|&&z| z > 0.0) {
+                    plan.falling = Some(
+                        task.held
+                            .object
+                            .placed(task.poses[plan.candidate])
+                            .falling(fall),
+                    );
+                }
+            }
+        }
+    }
     Ok(TaskResult {
         problems: tasks.to_vec(),
         outcomes,
@@ -2258,6 +2386,7 @@ pub(crate) fn choose(
             )?,
             held,
             placed,
+            falling: None,
             opening: c.opening,
             meeting: c.giver.as_ref().map(|g| g.meeting),
         })

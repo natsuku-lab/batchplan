@@ -973,6 +973,63 @@ fn a_place_names_the_object_it_sets_down_after_its_worlds_obstacles() {
     );
 }
 
+/// A release stays at the commanded height while the predicted scene and the departure
+/// collision enclosure account for the selected drop, including candidates in later waves.
+#[test]
+fn placing_above_a_rest_returns_its_landing_and_the_checked_fall() {
+    let robot = panda();
+    let o = TaskOptions::default();
+    let rest = Pose::new(Vec3::new(0.45, -0.2, HALF.z), Quat::IDENTITY);
+    let taken = Pose::new(Vec3::new(0.3, -0.25, HALF.z), Quat::IDENTITY);
+    let before = scene(vec![Obstacle::cuboid(taken.position, Vec3::splat(0.03))]);
+    let mut after = before.clone();
+    after.remove(BOX).unwrap();
+    for device in devices(&robot) {
+        let worlds = device.upload(&[before.clone(), after.clone()]).unwrap();
+        let picked =
+            batchplan::pick(&device, &worlds, &[pick_from(&robot, vec![top()])], &o).unwrap();
+        let picked = &picked.outcomes[0].as_ref().unwrap()[0];
+        let drop = 0.008;
+        let release = Pose::new(rest.position + Vec3::Z * drop, rest.rotation);
+        let mut poses = vec![taken; 40];
+        poses.push(release);
+        let mut falls = vec![0.002; 40];
+        falls.push(drop);
+        let task = Place {
+            support: vec![TABLE],
+            enough: Some(1),
+            falls,
+            ..Place::new(1, picked.end(), picked.held.clone().unwrap(), poses)
+        };
+        let run = |t: &Place| batchplan::place(&device, &worlds, std::slice::from_ref(t), &o);
+        let plan = run(&task).unwrap().outcomes.remove(0).unwrap().remove(0);
+        assert_eq!(plan.candidate, 40);
+        let landed = plan.placed.as_ref().unwrap();
+        assert!(landed.pose().position.distance(rest.position) < 1e-6);
+        let swept = plan.falling.unwrap();
+        let top = release.position + Vec3::Z * HALF.z;
+        let bottom = rest.position - Vec3::Z * HALF.z;
+        assert!(swept.distance(top).value < 1e-6 && swept.distance(bottom).value < 1e-6);
+        let on = Place {
+            falls: vec![],
+            ..task.clone()
+        };
+        let exact = run(&on).unwrap().outcomes.remove(0).unwrap().remove(0);
+        assert!(exact.falling.is_none());
+        assert_eq!(exact.placed.unwrap().pose(), release);
+        assert_eq!(exact.approach.control_points, plan.approach.control_points);
+        for invalid in [vec![drop], vec![f32::NAN; 41], vec![-drop; 41]] {
+            assert!(matches!(
+                run(&Place {
+                    falls: invalid,
+                    ..task.clone()
+                }),
+                Err(Error::Input(_))
+            ));
+        }
+    }
+}
+
 /// A held object collides where its grasp holds it, whatever else the call holds: a bar taken from
 /// the side near its foot meets a slab over its top as it lifts, in the same call as a cube taken
 /// from above, and taken near its top too, it clears a higher slab the foot's grasp would lift it
@@ -2172,6 +2229,113 @@ fn a_pick_stops_at_as_many_plans_as_will_do_in_its_grasps_order() {
     }
 }
 
+#[test]
+fn a_failed_pick_tries_its_remaining_grasps_without_displacing_a_preferred_plan() {
+    let robot = panda();
+    let options = TaskOptions::default();
+    let stopped = top();
+    let clear = top_across();
+    for device in devices(&robot) {
+        let worlds = device.upload(&[scene(vec![post()])]).unwrap();
+        let tasks = [
+            pick_from(&robot, vec![clear, clear]),
+            pick_from(&robot, vec![stopped, clear]),
+            pick_from(&robot, vec![stopped, stopped]),
+        ];
+        let mut first = tasks.clone();
+        for task in &mut first {
+            task.grasps.truncate(1);
+        }
+        let mut expected = batchplan::pick(&device, &worlds, &first, &options)
+            .unwrap()
+            .outcomes;
+        assert!(
+            expected[1].is_err() && expected[2].is_err(),
+            "two picks must try their second grasp"
+        );
+        let mut found =
+            batchplan::pick_with_preferred_grasps(&device, &worlds, &tasks, &[1; 3], &options)
+                .unwrap();
+        let refused = found.outcomes.pop().unwrap().unwrap_err();
+        assert_eq!(
+            refused.candidates.len(),
+            2,
+            "both groups must report their stop"
+        );
+        assert_eq!(
+            refused.candidates[0],
+            expected[2].as_ref().unwrap_err().candidates[0]
+        );
+        let recovered = found.outcomes.pop().unwrap().unwrap();
+        assert_eq!(
+            recovered[0].candidate, 1,
+            "the fallback retains its original index"
+        );
+        let ordinary = expected.remove(0).unwrap();
+        let plans = found.outcomes.pop().unwrap().unwrap();
+        assert_eq!(
+            plans.len(),
+            1,
+            "a preferred success excludes supplemental candidates"
+        );
+        assert_eq!(
+            plans[0].approach.control_points,
+            ordinary[0].approach.control_points
+        );
+        assert_eq!(
+            plans[0].depart.control_points,
+            ordinary[0].depart.control_points
+        );
+        assert_eq!(
+            found.problems[1].grasps.len(),
+            2,
+            "the result carries the whole task"
+        );
+        let narrow = std::collections::HashMap::from([
+            ("panda_finger_joint1".to_owned(), 0.01),
+            ("panda_finger_joint2".to_owned(), 0.01),
+        ]);
+        let different_locks = Pick {
+            locked: vec![Default::default(), narrow.clone()],
+            enough: Some(4),
+            ..pick_from(&robot, vec![stopped, stopped])
+        };
+        let result = batchplan::pick_with_preferred_grasps(
+            &device,
+            &worlds,
+            &[different_locks],
+            &[1],
+            &options,
+        )
+        .unwrap();
+        let held = result.outcomes[0].as_ref().unwrap()[0]
+            .held
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            held.locked, narrow,
+            "the supplemental pick retains its own preshape"
+        );
+        assert!(matches!(
+            batchplan::pick_with_preferred_grasps(&device, &worlds, &tasks, &[1], &options),
+            Err(Error::Input(_))
+        ));
+        assert!(matches!(
+            batchplan::pick_with_preferred_grasps(&device, &worlds, &tasks, &[1, 3, 1], &options),
+            Err(Error::Input(_))
+        ));
+        let mut bad = tasks[0].clone();
+        bad.grasps[1].position.x = f32::NAN;
+        assert!(
+            matches!(
+                batchplan::pick_with_preferred_grasps(&device, &worlds, &[bad], &[1], &options),
+                Err(Error::Input(_))
+            ),
+            "an unused fallback must still be validated"
+        );
+    }
+}
+
 /// Points 2 mm apart on the top and sides of a box at `at`, as cameras around it would see
 /// them, with the normals out of them: the object's, or what stands beside it.
 fn seen(at: Vec3, half: Vec3, object: bool, s: &mut Surface) {
@@ -2790,4 +2954,104 @@ fn a_pick_can_fit_its_carried_cylinder_beside_a_wall() {
     assert!(failure.candidates[0].contacts.iter().any(|contact|
         matches!(contact, Contact::World { link, obstacle, .. } if link == "held by hand 0" && *obstacle == side)
     ));
+}
+
+#[test]
+fn the_release_sweep_stops_a_palm_below_the_falling_object() {
+    let robot = panda();
+    let held = Held {
+        hand: 0,
+        object: Obstacle::cuboid(Vec3::ZERO, HALF),
+        grasp: grasp(Vec3::Z, Vec3::X),
+        locked: Default::default(),
+        spheres: Default::default(),
+    };
+    let release = Pose::new(Vec3::new(0.5, -0.12, 0.55), Quat::IDENTITY);
+    let task = Place {
+        transit: false,
+        ..Place::new(0, robot.default_q(), held, vec![release])
+    };
+    for device in devices(&robot) {
+        let worlds = device.upload(&[World::default()]).unwrap();
+        let plan = |task: &Place| {
+            batchplan::place(
+                &device,
+                &worlds,
+                std::slice::from_ref(task),
+                &TaskOptions::default(),
+            )
+            .unwrap()
+            .outcomes
+            .remove(0)
+        };
+        assert!(plan(&task).is_ok(), "the palm is clear at release");
+        let falling = Place {
+            falls: vec![0.1],
+            ..task.clone()
+        };
+        let stopped = plan(&falling).expect_err("the drop passes through the palm");
+        let stop = &stopped.candidates[0];
+        assert_eq!(stop.step, TaskStep::Depart);
+        assert!(stop.contacts.iter().any(|c| matches!(c, Contact::World { link, obstacle: 0, distance } if link == "panda_hand" && *distance < 0.0)), "{stop:?}");
+    }
+}
+
+#[test]
+fn completed_picks_can_prefer_tightly_measured_contacts() {
+    let robot = panda();
+    let device = Device::cpu_threads(&robot, 1).unwrap();
+    let world = scene(vec![]);
+    let mut surface = Surface::default();
+    seen(
+        world.obstacles[BOX].pose().position,
+        HALF,
+        true,
+        &mut surface,
+    );
+    let mut found = batchplan::grasps_on(&device, 0, &[surface], &GraspOptions::default()).unwrap();
+    let observed = found[0].pop().expect("the box has opposed measured faces");
+    assert!(!observed.one_sided);
+
+    let worlds = device.upload(&[world]).unwrap();
+    let pick = pick_from(&robot, vec![top_across()]);
+    let mut result = batchplan::pick(&device, &worlds, &[pick], &TaskOptions::default()).unwrap();
+    let plan = result.outcomes.pop().unwrap().unwrap().pop().unwrap();
+
+    // A sparse set of returned plans. The two grasps with both contacts measured and the two equal
+    // one-sided spans must keep their incoming order even though their indices are reversed.
+    let mut grasps = [observed; 7];
+    grasps[6].contacts = [Vec3::ZERO, Vec3::Y * 0.075];
+    grasps[2].contacts = [Vec3::ZERO, Vec3::Y * 0.010];
+    for (index, width) in [(0, 0.065), (3, 0.025), (5, 0.025)] {
+        grasps[index].one_sided = true;
+        grasps[index].contacts = [Vec3::ZERO, Vec3::Y * width];
+    }
+    let mut plans: Vec<_> = [0, 6, 5, 3, 2]
+        .map(|candidate| {
+            let mut p = plan.clone();
+            p.candidate = candidate;
+            p
+        })
+        .into();
+    let indices = |plans: &[TaskPlan]| plans.iter().map(|p| p.candidate).collect::<Vec<_>>();
+    let original = indices(&plans);
+    assert!(matches!(
+        batchplan::prefer_measured_contacts(&mut plans, &grasps[..6]),
+        Err(Error::Input(_))
+    ));
+    assert_eq!(indices(&plans), original);
+    let mut invalid = grasps;
+    invalid[3].contacts[1].y = f32::NAN;
+    assert!(matches!(
+        batchplan::prefer_measured_contacts(&mut plans, &invalid),
+        Err(Error::Input(_))
+    ));
+    assert_eq!(indices(&plans), original);
+    batchplan::prefer_measured_contacts(&mut plans, &grasps).unwrap();
+    assert_eq!(indices(&plans), [6, 2, 5, 3, 0]);
+    batchplan::prefer_measured_contacts(&mut plans[4..], &grasps).unwrap();
+    assert_eq!(
+        plans[4].candidate, 0,
+        "the only feasible wide span remains available"
+    );
 }
