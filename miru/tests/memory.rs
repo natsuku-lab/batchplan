@@ -3432,12 +3432,19 @@ fn a_world_point_names_only_readings_at_its_depth_and_keeps_disagreement() {
     assert!(observed.kept.labels_at(near_camera).unwrap().is_empty());
 }
 
-/// A block resting on the measured floor still fits after the tray is turned.
+/// A turned tray whose fitted world heights are reconstructed independently still gives a lift.
 #[test]
 fn a_block_resting_flush_in_a_turned_tray_has_an_extraction() {
     let robot = panda();
     let device = Device::cpu_threads(&robot, 2).expect("a CPU device");
+    for raised in [0.0, 0.75] {
+        assert_flush_tray_extraction(&device, raised);
+    }
+}
+
+fn assert_flush_tray_extraction(device: &Device, raised: f32) {
     let at = Vec3::new(0.5, 0.0, 0.0);
+    let raised = Vec3::Z * raised;
     let yaw = Quat::from_rotation_z(0.65);
     let mut standing = thin_tray();
     let target = standing.len() + 1;
@@ -3446,37 +3453,38 @@ fn a_block_resting_flush_in_a_turned_tray_has_an_extraction() {
         Vec3::new(0.023, 0.018, 0.022),
         [130; 3],
     ));
-    let mut things = vec![table()];
+    let mut things = vec![block(
+        at + raised - Vec3::Z * 0.01,
+        Vec3::new(0.5, 0.5, 0.01),
+        [150; 3],
+    )];
+    let memory = Memory::try_new(device, vec![known(&things[0])], &MemoryOptions::default())
+        .expect("a memory with the raised table");
     for thing in standing {
         things.push(Thing {
             color: thing.color,
             solid: None,
-            distance: Box::new(move |p| (thing.distance)(at + yaw.inverse() * (p - at))),
+            distance: Box::new(move |p| (thing.distance)(at + yaw.inverse() * (p - at - raised))),
         });
     }
-    let frames = [EYE, Vec3::new(0.52, -0.055, 0.55)].map(|eye| {
-        Frame::of(&things, looking(eye, MIDDLE))
+    let rendered = [EYE, Vec3::new(0.52, -0.055, 0.55)].map(|eye| {
+        Frame::of(&things, looking(eye + raised, MIDDLE + raised))
             .masked(|i| if i == target { 2 } else { u32::from(i > 0) })
     });
     let stance = Stance {
-        q: robot.default_q(),
+        q: device.robot().default_q(),
         locked: &HashMap::new(),
         padding: 0.0,
     };
-    let obs = observe(
-        &device,
-        &cameras(&frames, [0; 2], 0.0),
-        &stance,
-        &memory(&device),
-    )
-    .expect("a sound look");
+    let obs =
+        observe(device, &cameras(&rendered, [0; 2], 0.0), &stance, &memory).expect("a sound look");
     let scene = obs.kept.scene();
     let (index, root) = scene
         .objects
         .iter()
         .enumerate()
         .find(|(_, o)| matches!(o.shape, Shape::OpenBox { .. }))
-        .expect("the tray opening is seen");
+        .expect("the raised tray opening is seen");
     let child = scene
         .objects
         .iter()
@@ -3486,7 +3494,11 @@ fn a_block_resting_flush_in_a_turned_tray_has_an_extraction() {
         .kept
         .extractions(child.id, 0.005)
         .expect("a sound margin");
-    assert_eq!(lifts.len(), 1, "the block is flush with the measured floor");
+    assert_eq!(
+        lifts.len(),
+        1,
+        "the block is flush with the measured floor at translation {raised}"
+    );
     assert_eq!(lifts[0].container, root.id);
     assert!(
         lifts[0].lift.distance(Vec3::Z * 0.055) < 0.0001,

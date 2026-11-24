@@ -26,7 +26,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 - `Kept::extractions` reports the straight lift that clears a measured open container at the
   object's observed attitude and a caller-specified margin. It recognizes flush contact when the
-  fitted heights of a body and its measured support differ by a single precision step.
+  fitted heights of a body and its measured support differ by a single precision step, or the
+  freshly fitted body stood on a measured upright container floor.
 
 - `grasps_on_with_capacity` accepts a maximum graspable width separate from the loaded pad gap.
   It checks the fully open hand and, for symmetric sliding jaws, commandable partial openings.
