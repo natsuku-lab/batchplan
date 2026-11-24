@@ -156,9 +156,12 @@ has them as a program; per camera:
 
 For a pick out of an open container, `kept.extractions(id, margin)` gives each visible opening
 that contains the body's measured footprint. Its lift takes the body's lowest point above the
-lip by the requested margin, along the opening axis. An absent or unseen target gives an empty
-list. Use `kept.is_current(&memory)` when planning from a memory that may have advanced, and
-check the requested lift through the ordinary pick planner.
+lip by the requested margin, along the opening axis. When the body stands on the container,
+floor contact within one single-precision step across the container height is accepted. For an
+upright opening, the look also keeps whether the freshly fitted body stood on the measured
+floor. This preserves contact when storing its center and half-height rounds its bottom below
+the floor. An absent or unseen target gives an empty list. Use `kept.is_current(&memory)` when
+planning from a memory that may have advanced, and check the requested lift through the ordinary pick planner.
 
 What the robot did is said once (`Act`): a pick puts the thing into a hand, which every mask then
 holds, and frees the map where a thing that was not solid stood; what stood on it leaves the
