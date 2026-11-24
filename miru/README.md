@@ -195,6 +195,12 @@ that room, it is a box that covers them, and not solid, for it was open at the t
 at the top that something rests in, its lowest reading inside the box's walls or floor, is no
 shape that stands for the thing either: it is a box that covers it, not solid.
 
+For close passes beside that last grid, `memory.with_unexplained_field(divisions, max_points)?`
+samples distances to the same occupied cubes on a finer lattice. Later looks and predicted acts
+inherit the choice. An oversized field falls back to the ordinary grid. Each distinct fine field
+holds up to two bytes per budgeted point, so a batch of different memories may need several times
+that much device memory. Object regions retain their existing treatment of unknown space.
+
 `examples/score.rs` computes no robot mask: a recorded look carries each view's as its executor
 computed it, and its fixtures are the obstacles its run's `cell.json` names.
 

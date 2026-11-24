@@ -5669,4 +5669,55 @@ fn occupied_corner_field_bounds_the_full_cubes_at_seams_and_past_its_faces() {
         field.distance(center).value < -voxel,
         "the interior includes shared faces"
     );
+    // Move the field across the robot's outermost sphere. Check the same near-contact
+    // clearances through the uploaded representation on every available device.
+    let robot = device.robot();
+    let q = robot.default_q();
+    let spheres = robot.spheres(q);
+    let outer = spheres
+        .iter()
+        .max_by(|a, b| (a[0] + a[3]).total_cmp(&(b[0] + b[3])))
+        .unwrap();
+    let first_face = map
+        .occupied()
+        .into_iter()
+        .map(|p| p.x)
+        .fold(f32::INFINITY, f32::min)
+        - 0.5 * voxel;
+    let target = Vec3::new(
+        outer[0] + outer[3] - first_face,
+        outer[1] - center.y,
+        outer[2] - center.z,
+    );
+    let field = Obstacle::from_grid(field);
+    for gap in [-0.006, 0.007] {
+        let shift = target + gap * Vec3::X;
+        // Obstacle::from_grid poses its center at the center of the grid's box.
+        let moved = field.pose().position + shift;
+        let obstacle = field.placed(Pose::new(moved, Quat::IDENTITY));
+        let least = spheres
+            .iter()
+            .map(|s| obstacle.distance(Vec3::new(s[0], s[1], s[2])).value - s[3])
+            .fold(f32::INFINITY, f32::min);
+        assert_eq!(
+            least > 0.0,
+            gap > 0.0,
+            "expected a signed near-contact control: {least}"
+        );
+        let world = World::new(vec![obstacle]);
+        for device in devices() {
+            let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
+            let weights = CollisionWeights {
+                world: 1.0,
+                margin: 0.05,
+                ..CollisionWeights::NONE
+            };
+            let checked = device.evaluate(&worlds, &[0], q, &weights).unwrap();
+            assert!(
+                (checked.world_clearance[0] - least).abs() < 1e-4,
+                "{}",
+                device.name()
+            );
+        }
+    }
 }

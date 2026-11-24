@@ -2420,7 +2420,8 @@ impl OccupancyMap {
     /// samples. The returned grid has one more sample per axis than the subdivided map.
     ///
     /// Returns `None` if the requested grid exceeds the point budget or the device-independent
-    /// grid size limits. Construction takes linear space and time in the number of samples and
+    /// grid size or coordinate precision limits. An empty occupied set is an input error when the
+    /// field fits these limits. Construction takes linear space and time in the number of samples and
     /// runs on the device's CPU pool. The resulting field can be queried on either backend.
     pub fn occupied_field(
         &self,

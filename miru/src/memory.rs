@@ -139,6 +139,8 @@ pub struct Memory {
     hands: Vec<Option<Holding>>,
     /// The map, shared by the memories made from it until a look fuses another.
     pub(crate) map: Arc<Map>,
+    /// Sampling of the unexplained field, shared by future looks and predicted acts.
+    unexplained_sampling: Option<FieldSampling>,
     /// What the acts since the map was fused tell it, in order.
     marks: Vec<Mark>,
     /// How far from the robot's frame it reaches (meters): the look's corners and the map's.
@@ -233,9 +235,16 @@ struct Region {
 /// What the map holds outside the rooms objects take up, after the marks a memory had, gridded.
 #[derive(Debug)]
 struct Unexplained {
+    sampling: Option<FieldSampling>,
     covers: Vec<Obstacle>,
     marks: Vec<Mark>,
     grid: Option<Obstacle>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FieldSampling {
+    divisions: u32,
+    max_points: usize,
 }
 
 impl Memory {
@@ -256,6 +265,7 @@ impl Memory {
         Ok(Memory {
             known: known.into(),
             fixture_parts: vec![],
+            unexplained_sampling: None,
             scene: Scene::default(),
             hands: vec![None; robot.hands()],
             map: Arc::new(Map::new(fused, voxel)),
@@ -264,6 +274,25 @@ impl Memory {
             acted: false,
             padding: IkOptions::default().collision.margin + largest,
         })
+    }
+
+    /// Samples distances to unexplained occupied voxels more closely in subsequent worlds.
+    /// Each full source voxel stays occupied. `divisions` is the number of intervals per voxel
+    /// edge. Each distinct field has a budget of `max_points` half-float samples. A field that
+    /// exceeds the budget uses the ordinary grid. Object regions keep their own grid policy.
+    ///
+    /// Set this once when creating a memory. Future looks and acts inherit the setting. Budget
+    /// for all distinct fields in a batch and for the larger temporary arrays during construction.
+    pub fn with_unexplained_field(mut self, divisions: u32, max_points: usize) -> Result<Self> {
+        ensure_input!(
+            divisions > 0,
+            "zero subdivisions for the unexplained distance field"
+        );
+        self.unexplained_sampling = Some(FieldSampling {
+            divisions,
+            max_points,
+        });
+        Ok(self)
     }
 
     /// The objects as the last look left them, in its order: an object's `on` indexes these.
@@ -708,12 +737,17 @@ impl Memory {
     /// and have had the same acts since, whatever their hands hold, share it, and a world made
     /// again of the same memory reads nothing of the map.
     fn unexplained(&self, device: &Device, covers: &[Obstacle]) -> Result<Option<Obstacle>> {
-        let made = |made: &&Unexplained| made.covers == covers && made.marks == self.marks;
+        let made = |made: &&Unexplained| {
+            made.sampling == self.unexplained_sampling
+                && made.covers == covers
+                && made.marks == self.marks
+        };
         if let Some(made) = self.map.unexplained().iter().find(made) {
             return Ok(made.grid.clone());
         }
         let grid = self.unexplained_grid(device, covers)?;
         self.map.unexplained().push(Unexplained {
+            sampling: self.unexplained_sampling,
             covers: covers.to_vec(),
             marks: self.marks.clone(),
             grid: grid.clone(),
@@ -749,9 +783,10 @@ impl Memory {
         for cover in covers {
             part.free(cover, reach)?;
         }
-        // Bound the finer residual field to eight MiB of uploaded half floats. A larger part
-        // keeps the map's ordinary field and all other object regions retain their own policy.
-        if let Some(grid) = part.occupied_field(device, 4, 4 * 1024 * 1024)? {
+        if let Some(sampling) = self.unexplained_sampling
+            && let Some(grid) =
+                part.occupied_field(device, sampling.divisions, sampling.max_points)?
+        {
             return Ok(Some(Obstacle::from_grid(grid)));
         }
         Ok(Some(Obstacle::from_grid(

@@ -13,6 +13,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- `OccupancyMap::occupied_field` can sample clearance to whole occupied voxels more closely
+  within a caller-specified point budget. Miru exposes this for unexplained material through
+  `Memory::with_unexplained_field`.
+
 - A placement can carry a predicted downward fall for each release pose. Departure checks the
   volume swept during settling and reports the expected landing. **Breaking:** exhaustive
   Rust `Place` literals need `falls: vec![]` for a placement in contact.
