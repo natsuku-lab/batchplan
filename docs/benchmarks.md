@@ -267,17 +267,17 @@ The table is read once for the 64 boxes. A flat bottom on a flat top is judged i
 
 ## Spheres for what a hand holds
 
-`examples/held_spheres.rs` holds three round shapes with the default 64 spheres to spend and with 256 (`Held::spheres`), within the default 5 mm, on the M4 Pro: how many spheres each takes, how far they reach past it, and how long covering or fitting it took.
+`examples/held_spheres.rs` holds four round shapes with the default 64 spheres to spend and with 256 (`Held::spheres`), within the default 5 mm, on the M4 Pro: how many spheres each takes, how far they reach past it, and how long covering or fitting it took.
 
 | | To spend | Spheres | Past its side | Past its ends | Time |
 |---|---|---|---|---|---|
-| A plate 13.9 cm across, 18 mm thick | 64 | 64, fitted | 8.6 mm | 10.6 mm | 27 ms |
-| | 256 | 145, covered | 4.7 mm | 4.7 mm | 0.14 ms |
-| A can 6.6 cm across, 12 cm tall | 64 | 64, fitted | 7.1 mm | 6.7 mm | 8.4 ms |
-| | 256 | 90, fitted | 4.7 mm | 5.0 mm | 7.2 ms |
+| A plate 13.9 cm across, 18 mm thick | 64 | 145, covered after a fit of more | 4.7 mm | 4.7 mm | 71 ms |
+| | 256 | 145, covered | 4.7 mm | 4.7 mm | 0.11 ms |
+| A bowl 11.2 cm across, 5.1 cm deep | 64 or 256 | 129, fitted | 4.9 mm | 5.0 mm | 7.1 ms |
+| A can 6.6 cm across, 12 cm tall | 64 or 256 | 90, fitted | 4.7 mm | 5.0 mm | 7.2 ms |
 | A capsule 4 cm across, 14 cm long | 64 or 256 | 5, covered | 3.6 mm | 3.6 mm | 0.02 ms |
 
-Fitted, as stout shapes are, a thin wide one keeps reaching past its tolerance until it has a few hundred spheres; covered in one layer, the plate is within it at 145.
+The budget does not cap what a hand holds: each shape takes what the 5 mm takes. The 64 have no layer of the plate within it, so the plate is fitted first, and a fit within it takes more spheres than the layer's 145, which is then taken: the fit is the time. Before, 64 fitted spheres reached 8.6 and 10.6 mm past the plate's side and faces, 9.1 and 8.1 mm past the bowl's and 7.1 and 6.7 mm past the can's.
 
 ## Joining motions
 

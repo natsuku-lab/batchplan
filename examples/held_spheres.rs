@@ -1,6 +1,7 @@
-//! How spheres cover what a hand holds, and what covering or fitting it costs: a plate, a can
-//! and a capsule held by the Panda, with the default 64 spheres and with 256 to spend. For each,
-//! how many spheres it takes and how far they reach past its side and past its ends.
+//! How spheres cover what a hand holds, and what covering or fitting it costs: a plate, a bowl, a
+//! can and a capsule held by the Panda, with the default 64 spheres and with 256 to spend, which
+//! do not cap them. For each, how many spheres it takes and how far they reach past its side and
+//! past its ends.
 //!
 //! cargo run --release --example held_spheres
 
@@ -34,6 +35,12 @@ fn main() -> Result<()> {
     };
     let shapes = [
         ("a plate 13.9 cm across, 18 mm thick", 0.0695, 0.009, false),
+        (
+            "a bowl 11.2 cm across, 5.1 cm deep",
+            0.05603,
+            0.02537,
+            false,
+        ),
         ("a can 6.6 cm across, 12 cm tall", 0.033, 0.06, false),
         ("a capsule 4 cm across, 14 cm long", 0.02, 0.05, true),
     ];

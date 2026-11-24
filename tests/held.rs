@@ -717,10 +717,10 @@ fn a_hold_cannot_move_a_joint_that_carries_the_hand() {
     }
 }
 
-/// A plate slid over a table away from a box 6 mm from its side: held with the default spheres,
-/// which reach farther than that past a shape so thin and wide, it reads as against the box and
-/// does not move; held with spheres that stay within the gap (`Held::spheres`), by a larger budget
-/// or a limit on how far they reach, it goes.
+/// A plate slid over a table away from a box 6 mm from its side: held with spheres that reach
+/// farther than that past it, by a tolerance of 12 mm, it reads as against the box and does not
+/// move; held with spheres that stay within the gap (`Held::spheres`), the default's within 5 mm
+/// whatever their budget or a limit on how far they reach, it goes.
 #[test]
 fn a_held_plate_passes_a_neighbor_a_few_millimeters_away_with_finer_spheres() {
     let robot = common::panda().unwrap();
@@ -750,12 +750,9 @@ fn a_held_plate_passes_a_neighbor_a_few_millimeters_away_with_finer_spheres() {
         locked: Default::default(),
         spheres,
     };
-    // Within the 5 mm the default asks for, which the default's 64 spheres cannot reach on a
-    // shape so thin and wide; the 256 leave room for where IK puts the hand (to 1 mm and 0.01 rad).
-    let fine = SphereOptions {
-        budget: 256,
-        ..Default::default()
-    };
+    // Within the 5 mm the default asks for, which leave room for where IK puts the hand (to 1 mm
+    // and 0.01 rad).
+    let fine = SphereOptions::default();
     for device in devices(&robot) {
         let name = device.name();
         let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
@@ -775,12 +772,16 @@ fn a_held_plate_passes_a_neighbor_a_few_millimeters_away_with_finer_spheres() {
             hold: vec![],
             holding: Some(plate(spheres)),
         };
-        // Or with the default's 64 held within 4 mm of it, which leave some of it outside them.
+        // Or held within 4 mm of it, which leaves some of it outside them.
         let held_in = SphereOptions {
             max_overhang: Some(0.004),
             ..Default::default()
         };
-        let paths = [slide(SphereOptions::default()), slide(fine), slide(held_in)];
+        let coarse = SphereOptions {
+            tolerance: 0.012,
+            ..Default::default()
+        };
+        let paths = [slide(coarse), slide(fine), slide(held_in)];
         let followed =
             batchplan::follow(&device, &worlds, &paths, &ToolPathOptions::default()).unwrap();
         assert_eq!(followed.fraction[0], 0.0, "{name}");

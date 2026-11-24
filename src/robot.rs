@@ -441,8 +441,9 @@ pub struct AttachedObject {
     pub shapes: Vec<Obstacle>,
     /// Other links it may touch.
     pub touch_links: Vec<String>,
-    /// How spheres are fitted to the shapes; a held object rarely needs more than 8 to 16. A single
-    /// shape is fitted in its own frame, so where it sits on `link` does not change its spheres.
+    /// How spheres cover the shapes: within `tolerance` of them, however many spheres that takes,
+    /// which `budget` does not cap. A single shape is fitted in its own frame, so where it sits on
+    /// `link` does not change its spheres.
     pub spheres: SphereOptions,
 }
 
@@ -2312,10 +2313,13 @@ pub(crate) fn placed_spheres(spheres: &[[f32; 4]], pose: Pose) -> Vec<[f32; 4]> 
     spheres.iter().map(place).collect()
 }
 
-/// [`object_spheres`] for `shapes` as they are placed. Attaching happens inside control processes:
-/// fit on the caller's rayon pool if it has one, otherwise on the calling thread alone, never on
-/// the global pool. (A one-thread pool on the calling thread would leave it registered with rayon
-/// for good, and every parallel loop it started afterwards would run on that one thread.)
+/// [`object_spheres`] for `shapes` as they are placed: within the tolerance however many spheres
+/// that takes. Covered directly where the budget has a cover within it, else fitted with no
+/// budget, unless a direct cover within it takes no more spheres than the fit. Attaching happens
+/// inside control processes: fit on the caller's rayon pool if it has one, otherwise on the
+/// calling thread alone, never on the global pool. (A one-thread pool on the calling thread would
+/// leave it registered with rayon for good, and every parallel loop it started afterwards would
+/// run on that one thread.)
 fn covered(shapes: &[Obstacle], o: &SphereOptions) -> error::Result<Vec<[f32; 4]>> {
     if let Some(covered) = spheres::cover_primitives(shapes, o) {
         return Ok(covered);
@@ -2324,13 +2328,23 @@ fn covered(shapes: &[Obstacle], o: &SphereOptions) -> error::Result<Vec<[f32; 4]
         .iter()
         .map(|shape| attached_shape(shape)?.mesh().map_err(|e| input!("{e:#}")))
         .collect::<error::Result<Vec<TriMesh>>>()?;
+    let unbounded = SphereOptions {
+        budget: usize::MAX,
+        ..*o
+    };
     let fitted = spheres::fit(
         &[meshes],
         &[o.tolerance],
-        o,
+        &unbounded,
         rayon::current_thread_index().is_some(),
     );
-    Ok(fitted.spheres.into_iter().flatten().collect())
+    let fitted: Vec<[f32; 4]> = fitted.spheres.into_iter().flatten().collect();
+    // A direct cover within the tolerance of no more spheres than the fit's, as a disc's one layer.
+    let direct = SphereOptions {
+        budget: fitted.len(),
+        ..*o
+    };
+    Ok(spheres::cover_primitives(shapes, &direct).unwrap_or(fitted))
 }
 
 /// An attached object's shape, placed in its link's frame.

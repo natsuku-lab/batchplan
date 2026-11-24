@@ -50,10 +50,14 @@ pub enum SphereGeometry {
 /// How spheres are fitted to a robot's links.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SphereOptions {
-    /// Spheres for the whole robot.
+    /// Spheres for the whole robot, at most. It caps the robot's own spheres only: an object it
+    /// holds ([`AttachedObject::spheres`](crate::AttachedObject::spheres),
+    /// [`Held::spheres`](crate::Held::spheres)) takes as many as its `tolerance` does.
     pub budget: usize,
     /// How far spheres may reach beyond the geometry (meters) before the fit spends more of the
-    /// budget. When the budget cannot reach it, the fit uses the smallest overhang it can.
+    /// budget. When the budget cannot reach it, the fit uses the smallest overhang it can. An
+    /// object a robot holds always reaches it, however many spheres that takes: for it, the
+    /// tolerance is the knob.
     pub tolerance: f32,
     /// The farthest any sphere may reach beyond the geometry (meters), whatever the budget: each
     /// sphere's radius is at most how deep its center lies inside plus this
@@ -677,7 +681,7 @@ fn search_scale(
         let mut total = 0;
         for (f, &tolerance) in fits.iter().zip(tolerances) {
             let Some(f) = f else { continue };
-            let (picks, left) = f.greedy(tolerance * scale, o.budget + 1 - total);
+            let (picks, left) = f.greedy(tolerance * scale, (o.budget - total).saturating_add(1));
             total += picks.len() + usize::from(!left.is_empty());
             if total > o.budget {
                 return false;
@@ -736,8 +740,10 @@ pub(crate) struct Fitted {
 /// budget reaches every tolerance (`tolerances`, per link), each closed link's overhang is at most
 /// its tolerance times the least growth, from 1 to `BOUND_GROWTH`, the budget affords; otherwise at
 /// most twice its tolerance scaled up by the smallest factor the budget can achieve; but for the
-/// parts the module doc names. With `parallel`, the work runs on the current rayon pool; without,
-/// on the calling thread alone, without registering it with any pool.
+/// parts the module doc names. A budget of `usize::MAX` reaches every tolerance: the covers pick
+/// as many spheres as the tolerances take, at most one per sample. With `parallel`, the work runs
+/// on the current rayon pool; without, on the calling thread alone, without registering it with
+/// any pool.
 pub(crate) fn fit(
     links: &[Vec<TriMesh>],
     tolerances: &[f32],
@@ -850,15 +856,14 @@ pub(crate) fn fit(
 /// covered by the sphere through its corners; a capsule is spheres along its axis; and a
 /// cylinder that is thin or slender, a disc or a rod, is one layer of rings of cells or one line
 /// of spheres where that reaches `o.tolerance` within the budget ([`cylinder_cover`]). A stout
-/// cylinder, or a thin one the budget cannot bring within the tolerance, is left to the fit,
-/// which spends fewer spheres on its inside; so is a distance grid. A box's sphere reaches past
-/// its faces by its radius less the cell's smallest half size, so of the covers within the
-/// tolerance the one of fewest spheres is taken, or where the budget cannot reach it, the least
-/// overhang the budget can; so for a capsule. The shapes but the spheres share the budget the
-/// spheres leave. Microseconds, where fitting takes milliseconds, and within the tolerance on a
-/// thin wide shape, where a fit of as many spheres is not. Under `o.max_overhang` the covers are
-/// those within the smaller of it and the tolerance, and where the budget has none within it,
-/// the shapes are left to the fit, which holds its spheres to it.
+/// cylinder is left to the fit, which spends fewer spheres on its inside; so is a distance grid. A
+/// box's sphere reaches past its faces by its radius less the cell's smallest half size, so of the
+/// covers within the tolerance the one of fewest spheres is taken; so for a capsule. The shapes but
+/// the spheres share the budget the spheres leave, and where it has no cover of a shape within the
+/// tolerance, the shapes are left to the fit too. Microseconds, where fitting takes milliseconds,
+/// and within the tolerance on a thin wide shape in fewer spheres than a fit. Under
+/// `o.max_overhang` the covers are those within the smaller of it and the tolerance, and where the
+/// budget has none within it, the shapes are left to the fit, which holds its spheres to it.
 pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option<Vec<[f32; 4]>> {
     if shapes.iter().any(|s| matches!(s, Obstacle::Sdf { .. })) {
         return None;
@@ -894,7 +899,7 @@ pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option
                 half_extents,
                 rotation,
             } => {
-                let cells = box_cells(half_extents, tolerance, each);
+                let cells = box_cells(half_extents, tolerance, each)?;
                 let cell = half_extents / cells.as_vec3();
                 // A hair wide, so rounding never leaves a corner uncovered.
                 let radius = cell.length() * HAIR;
@@ -928,7 +933,7 @@ pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option
                 radius,
                 half_length,
             } => {
-                let own = capsule_cover(radius, half_length, tolerance, each);
+                let own = capsule_cover(radius, half_length, tolerance, each)?;
                 if own[0][3] - radius > limit {
                     return None;
                 }
@@ -944,11 +949,16 @@ pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option
 const HAIR: f32 = 1.0 + 1e-6;
 
 /// Spheres along a capsule's axis (z) that cover it: the fewest that reach no more than
-/// `tolerance` past it, else `budget` of them. Evenly spaced from end to end, each wide enough
-/// to reach the capsule's side halfway to the next.
-fn capsule_cover(radius: f32, half_length: f32, tolerance: f32, budget: usize) -> Vec<[f32; 4]> {
+/// `tolerance` past it, `None` where more than `budget` would. Evenly spaced from end to end,
+/// each wide enough to reach the capsule's side halfway to the next.
+fn capsule_cover(
+    radius: f32,
+    half_length: f32,
+    tolerance: f32,
+    budget: usize,
+) -> Option<Vec<[f32; 4]>> {
     if half_length <= 0.0 {
-        return vec![[0.0, 0.0, 0.0, radius]];
+        return Some(vec![[0.0, 0.0, 0.0, radius]]);
     }
     // With `count` spheres: half the spacing between two, and how far each reaches past the side.
     let half_gap = |count: usize| half_length / (count - 1).max(1) as f32;
@@ -956,17 +966,15 @@ fn capsule_cover(radius: f32, half_length: f32, tolerance: f32, budget: usize) -
         1 => half_length + radius,
         _ => radius.hypot(half_gap(count)) * HAIR,
     };
-    let within = (1..=budget).find(|&count| covering(count) - radius <= tolerance);
-    let count = within.unwrap_or(budget);
+    let count = (1..=budget).find(|&count| covering(count) - radius <= tolerance)?;
     if count == 1 {
-        return vec![[0.0, 0.0, 0.0, covering(1)]];
+        return Some(vec![[0.0, 0.0, 0.0, covering(1)]]);
     }
-    (0..count)
-        .map(|k| {
-            let z = -half_length + 2.0 * half_gap(count) * k as f32;
-            [0.0, 0.0, z, covering(count)]
-        })
-        .collect()
+    let spheres = (0..count).map(|k| {
+        let z = -half_length + 2.0 * half_gap(count) * k as f32;
+        [0.0, 0.0, z, covering(count)]
+    });
+    Some(spheres.collect())
 }
 
 /// How wide a cylinder's cover makes its middle disc, in ring widths: a disc of that radius
@@ -1071,29 +1079,25 @@ fn cylinder_cover(
 }
 
 /// The cells per axis splitting a box of `half` extents for `cover_primitives`: the fewest within
-/// `tolerance` of overhang and `budget` spheres, else the least overhang within the budget.
-fn box_cells(half: Vec3, tolerance: f32, budget: usize) -> UVec3 {
-    let mut best: Option<(bool, usize, f32, UVec3)> = None;
+/// `tolerance` of overhang and `budget` spheres, the least overhang of those, `None` where the
+/// budget has none.
+fn box_cells(half: Vec3, tolerance: f32, budget: usize) -> Option<UVec3> {
+    let mut best: Option<(usize, f32, UVec3)> = None;
     for x in 1..=budget {
         for y in 1..=budget / x {
             for z in 1..=budget / (x * y) {
                 let cells = UVec3::new(x as u32, y as u32, z as u32);
                 let cell = half / cells.as_vec3();
                 let overhang = cell.length() - cell.min_element();
-                let candidate = (overhang <= tolerance, x * y * z, overhang, cells);
-                let better = |b: &(bool, usize, f32, UVec3)| match (candidate.0, b.0) {
-                    (true, false) => true,
-                    (false, true) => false,
-                    (true, true) => (candidate.1, candidate.2) < (b.1, b.2),
-                    (false, false) => (candidate.2, candidate.1) < (b.2, b.1),
-                };
-                if best.as_ref().is_none_or(better) {
+                let candidate = (x * y * z, overhang, cells);
+                let better = |b: &(usize, f32, UVec3)| (candidate.0, candidate.1) < (b.0, b.1);
+                if overhang <= tolerance && best.as_ref().is_none_or(better) {
                     best = Some(candidate);
                 }
             }
         }
     }
-    best.map_or(UVec3::ONE, |b| b.3)
+    best.map(|b| b.2)
 }
 
 /// Link pairs not worth checking for self-collision, by the rules of MoveIt's setup assistant:

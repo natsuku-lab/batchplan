@@ -316,12 +316,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   (`Touch::held`) is not a contact, and one call takes items holding different objects.
 
 - **Breaking:** how spheres cover what a hand holds is the caller's to set: `Held::spheres`, a
-  `SphereOptions` (64 spheres within 5 mm by default, as before). A thin wide object, as a plate
-  14 cm across, is fitted to 8.6 mm past its side at the default, so that a neighbor a few
-  millimeters away reads as touching it; with `budget: 256` it is covered within 4.7 mm. One
-  call takes one object held with different options, each fitted on its own. A `Held` literal
-  needs the new field (`spheres: SphereOptions::default()`); a pick's `TaskPlan::held` carries the
-  default. In Python, `Held(..., spheres=SphereOptions(budget=256))`.
+  `SphereOptions` (within 5 mm by default, as many spheres as that takes). A smaller tolerance
+  fits closer to a neighbor a few millimeters away, with more spheres. One call takes one object
+  held with different options, each fitted on its own. A `Held` literal needs the new field
+  (`spheres: SphereOptions::default()`); a pick's `TaskPlan::held` carries the default. In
+  Python, `Held(..., spheres=SphereOptions(tolerance=0.002))`.
 
 - **Breaking:** grasps of what cameras see, whatever its shape:
   `grasps_on(&device, hand, &[Surface], &GraspOptions)`. A grasp closes on two patches of the
@@ -417,6 +416,20 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   `Error::Input` their call returns for those options. In Python, `options.check()` raises it.
 
 ### Changed
+
+- What a robot holds is covered within its tolerance whatever its `SphereOptions::budget`, which
+  now caps the robot's own spheres only (`AttachedObject::spheres`, `Held::spheres`,
+  `TaskOptions::held_spheres`): the tolerance is the knob. A held object takes as many spheres as
+  its tolerance does, so a large or thin one takes more, and every check of it checks each.
+  Covers that met the tolerance within the budget are the same to the bit. At the default 5 mm
+  and 64, a bowl 11.2 cm across and 5.1 cm deep goes from 64 spheres reaching 9.1 mm past its side
+  to 129 within 5 mm, a plate 14 cm across from 64 reaching 10.6 mm past its faces to a layer of
+  145 within 4.7 mm, and a can 6.6 cm across from 64 reaching 7.1 mm to 90 within 5 mm
+  (`examples/held_spheres.rs`). A box or a capsule the budget cannot cover directly within the
+  tolerance is no longer covered past it: it is fitted, or covered with more spheres where that
+  takes no more than the fit. The blocks `examples/handover/` carries, which 42 to 64 spheres
+  covered 9.0 to 10.6 mm past them, take 144 to 257, and its 512 handovers about 1.5 times as
+  long on the M4 Pro, on its GPU and its CPU (runs alternated with the code before).
 
 - On the CPU, a robot mask (`DepthImage::robot_mask`) takes 11% to 23% less time on the Ryzen
   and up to 15% less on the M4 Pro, and fusing an image into a map up to 13% less on the Ryzen,

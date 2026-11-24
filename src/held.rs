@@ -29,10 +29,10 @@ pub struct Held {
     /// loaded. To attach the object yourself, relock first, then attach [`Held::attachment`].
     /// Empty: as loaded.
     pub locked: HashMap<String, f32>,
-    /// How spheres cover it: within `tolerance` of its surface where `budget` spheres can, the
-    /// defaults being 5 mm and 64. A thin wide object, as a plate, takes more to stay within a
-    /// few millimeters of its sides: a gap narrower than what its spheres reach past it reads as
-    /// a contact. Its own `max_overhang` holds them, whatever the robot was loaded with.
+    /// How spheres cover it: within `tolerance` of its surface (5 mm by default), however many
+    /// spheres that takes, which `budget` does not cap. A gap narrower than what its spheres reach
+    /// past it reads as a contact: a smaller tolerance fits closer, with more spheres. Its own
+    /// `max_overhang` holds them, whatever the robot was loaded with.
     pub spheres: SphereOptions,
 }
 
