@@ -442,8 +442,8 @@ pub struct AttachedObject {
     /// Other links it may touch.
     pub touch_links: Vec<String>,
     /// How spheres cover the shapes: they hold all of them and reach no more than `tolerance` past
-    /// them, however many spheres that takes, which `budget` does not cap. A single shape is fitted in its own frame, so where it sits on
-    /// `link` does not change its spheres.
+    /// them, however many spheres that takes, which `budget` does not cap. A single shape is fitted
+    /// in its own frame, so where it sits on `link` does not change its spheres.
     pub spheres: SphereOptions,
 }
 
@@ -2325,10 +2325,11 @@ pub(crate) fn placed_spheres(spheres: &[[f32; 4]], pose: Pose) -> Vec<[f32; 4]> 
 /// points of their surfaces no farther apart than holding each with a margin holds the rest
 /// ([`spheres::surface_grid`]), from candidates the samples' medial balls join, unless a direct
 /// cover within the tolerance takes no more spheres than that fit. Under a limit on overhang the
-/// fit's spheres are held to it instead, which leaves some of the shapes outside them. Attaching happens inside control processes: fit on the
-/// caller's rayon pool if it has one, otherwise on the calling thread alone, never on the global
-/// pool. (A one-thread pool on the calling thread would leave it registered with rayon for good,
-/// and every parallel loop it started afterwards would run on that one thread.)
+/// fit's spheres are held to it instead, which leaves some of the shapes outside them. Attaching
+/// happens inside control processes: fit on the caller's rayon pool if it has one, otherwise on
+/// the calling thread alone, never on the global pool. (A one-thread pool on the calling thread
+/// would leave it registered with rayon for good, and every parallel loop it started afterwards
+/// would run on that one thread.)
 fn covered(shapes: &[Obstacle], o: &SphereOptions) -> error::Result<Vec<[f32; 4]>> {
     if let Some(covered) = spheres::cover_primitives(shapes, o) {
         return Ok(covered);
