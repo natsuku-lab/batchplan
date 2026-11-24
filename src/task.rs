@@ -586,6 +586,94 @@ pub fn pick(
     tasks: &[Pick],
     o: &TaskOptions,
 ) -> Result<TaskResult<Pick>> {
+    let tasks = checked_picks(device, worlds, tasks, o)?;
+    by_grasps(device, worlds, &tasks, o, picked)
+}
+
+/// Tries the first `preferred[i]` grasps of each pick as one ordinary batch. A task with any
+/// complete pick returns those plans. Only tasks with no complete preferred grasp try the
+/// remaining grasps, together in a second batch. Zero preferred grasps means to try the entire
+/// task in the ordinary batch.
+///
+/// Candidate indices and finger locks refer to the original task. When both groups stop, every
+/// grasp has a stop in its original order. [`Pick::enough`] applies within each group. A later
+/// placement has no bearing on which group a pick returns.
+pub fn pick_with_preferred_grasps(
+    device: &Device,
+    worlds: &Worlds,
+    tasks: &[Pick],
+    preferred: &[usize],
+    o: &TaskOptions,
+) -> Result<TaskResult<Pick>> {
+    ensure_input!(
+        preferred.len() == tasks.len(),
+        "{} preferred grasp counts for {} picks",
+        preferred.len(),
+        tasks.len()
+    );
+    let tasks = checked_picks(device, worlds, tasks, o)?;
+    for (i, (&count, task)) in preferred.iter().zip(tasks.iter()).enumerate() {
+        ensure_input!(
+            count <= task.grasps.len(),
+            "task {i} prefers {count} of {} grasps",
+            task.grasps.len()
+        );
+    }
+    let has_fallback = |i: usize| preferred[i] > 0 && preferred[i] < tasks[i].grasps.len();
+    if !(0..tasks.len()).any(has_fallback) {
+        return by_grasps(device, worlds, &tasks, o, picked);
+    }
+    let mut first = tasks.to_vec();
+    for (i, task) in first.iter_mut().enumerate() {
+        if has_fallback(i) {
+            task.grasps.truncate(preferred[i]);
+            task.locked.truncate(preferred[i]);
+        }
+    }
+    let mut result = by_grasps(device, worlds, &first, o, picked)?;
+    let mut indices = vec![];
+    let mut remaining = vec![];
+    for (i, outcome) in result.outcomes.iter().enumerate() {
+        if outcome.is_err() && has_fallback(i) {
+            let mut task = tasks[i].clone();
+            task.grasps.drain(..preferred[i]);
+            if !task.locked.is_empty() {
+                task.locked.drain(..preferred[i]);
+            }
+            indices.push(i);
+            remaining.push(task);
+        }
+    }
+    if !remaining.is_empty() {
+        let tried = by_grasps(device, worlds, &remaining, o, picked)?;
+        for (i, outcome) in indices.into_iter().zip(tried.outcomes) {
+            match outcome {
+                Ok(mut plans) => {
+                    for plan in &mut plans {
+                        plan.candidate += preferred[i];
+                    }
+                    result.outcomes[i] = Ok(plans);
+                }
+                Err(stopped) => {
+                    let first = result.outcomes[i]
+                        .as_mut()
+                        .expect_err("only failed picks try more grasps");
+                    first.candidates.extend(stopped.candidates);
+                }
+            }
+        }
+    }
+    result.problems = tasks.into_owned();
+    Ok(result)
+}
+
+/// Corrects measured starts and checks the full pick, including every candidate and finger lock.
+fn checked_picks<'a>(
+    device: &Device,
+    worlds: &Worlds,
+    tasks: &'a [Pick],
+    o: &TaskOptions,
+) -> Result<Cow<'a, [Pick]>> {
     let robot = device.robot();
     let corrected = robot.correct_starts(
         tasks,
@@ -594,9 +682,8 @@ pub fn pick(
         |t| &t.start,
         |t| &mut t.start,
     )?;
-    let tasks = corrected.as_ref();
-    check_picks(robot, worlds, tasks, o)?;
-    by_grasps(device, worlds, tasks, o, picked)
+    check_picks(robot, worlds, &corrected, o)?;
+    Ok(corrected)
 }
 
 /// Each task's plans by its grasps, as [`Pick::enough`] and [`Pick::locked`] say how a pick's are
