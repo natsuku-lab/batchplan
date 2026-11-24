@@ -5596,3 +5596,128 @@ fn a_fine_surface_hit_keeps_unresolved_occupancy_inherited_from_its_parent() {
         .expect("the former cell now contains newly occupied material");
     assert!(part.occupancy(q).is_some_and(|v| v > 0.5));
 }
+
+#[test]
+fn occupied_corner_field_bounds_the_full_cubes_at_seams_and_past_its_faces() {
+    let device = cpu();
+    let voxel = 0.01;
+    let mut map = OccupancyMap::try_new(Vec3::splat(-0.08), Vec3::splat(0.08), voxel).unwrap();
+    assert!(map.occupied_field(device, 1, 1_000_000).is_err());
+    let centers = [Vec3::new(-0.035, -0.015, 0.0), Vec3::new(0.035, 0.025, 0.0)];
+    let mut blocks = Vec::new();
+    for center in centers {
+        map.occupy(&Obstacle::cuboid(center, Vec3::splat(0.016)), 0.0)
+            .unwrap();
+        let cluster: Vec<_> = map
+            .occupied()
+            .into_iter()
+            .filter(|p| (p.x - center.x).abs() < 0.022)
+            .collect();
+        assert!(
+            cluster.len() >= 18,
+            "multiple touching voxels make one solid"
+        );
+        let lower = cluster.iter().copied().reduce(Vec3::min).unwrap() - Vec3::splat(0.5 * voxel);
+        let upper = cluster.iter().copied().reduce(Vec3::max).unwrap() + Vec3::splat(0.5 * voxel);
+        assert_eq!(
+            cluster.len(),
+            ((upper - lower) / voxel)
+                .round()
+                .as_uvec3()
+                .element_product() as usize
+        );
+        blocks.push(Obstacle::cuboid(
+            (upper + lower) * 0.5,
+            (upper - lower) * 0.5,
+        ));
+    }
+    assert!(map.occupied_field(device, 0, usize::MAX).is_err());
+    assert!(
+        map.occupied_field(device, u32::MAX, usize::MAX)
+            .unwrap()
+            .is_none()
+    );
+    assert!(map.occupied_field(device, 4, 200).unwrap().is_none());
+    let ordinary = map.grid(device, Occlusion::Free).unwrap();
+    let field = map.occupied_field(device, 4, 1_000_000).unwrap().unwrap();
+    let exact = |p: Vec3| {
+        blocks
+            .iter()
+            .map(|b| b.distance(p).value)
+            .fold(f32::INFINITY, f32::min)
+    };
+    let mut closest_gain = 0.0f32;
+    for x in -24..=24 {
+        for y in -23..=23 {
+            for z in -15..=15 {
+                let p = Vec3::new(x as f32 * 0.0113, y as f32 * 0.0067, z as f32 * 0.0093);
+                let truth = exact(p);
+                let value = field.distance(p).value;
+                assert!(value <= truth + 5e-7, "at {p}: {value} exceeds {truth}");
+                if truth > 0.003 && truth < 0.009 && ordinary.distance(p).value < 0.0 {
+                    closest_gain = closest_gain.max(value);
+                }
+            }
+        }
+    }
+    assert!(
+        closest_gain > 0.004,
+        "a checked close pass clears by {closest_gain}"
+    );
+    let center = blocks[0].pose().position;
+    assert!(
+        field.distance(center).value < -voxel,
+        "the interior includes shared faces"
+    );
+    // Move the field across the robot's outermost sphere. Check the same near-contact
+    // clearances through the uploaded representation on every available device.
+    let robot = device.robot();
+    let q = robot.default_q();
+    let spheres = robot.spheres(q);
+    let outer = spheres
+        .iter()
+        .max_by(|a, b| (a[0] + a[3]).total_cmp(&(b[0] + b[3])))
+        .unwrap();
+    let first_face = map
+        .occupied()
+        .into_iter()
+        .map(|p| p.x)
+        .fold(f32::INFINITY, f32::min)
+        - 0.5 * voxel;
+    let target = Vec3::new(
+        outer[0] + outer[3] - first_face,
+        outer[1] - center.y,
+        outer[2] - center.z,
+    );
+    let field = Obstacle::from_grid(field);
+    for gap in [-0.006, 0.007] {
+        let shift = target + gap * Vec3::X;
+        // Obstacle::from_grid poses its center at the center of the grid's box.
+        let moved = field.pose().position + shift;
+        let obstacle = field.placed(Pose::new(moved, Quat::IDENTITY));
+        let least = spheres
+            .iter()
+            .map(|s| obstacle.distance(Vec3::new(s[0], s[1], s[2])).value - s[3])
+            .fold(f32::INFINITY, f32::min);
+        assert_eq!(
+            least > 0.0,
+            gap > 0.0,
+            "expected a signed near-contact control: {least}"
+        );
+        let world = World::new(vec![obstacle]);
+        for device in devices() {
+            let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
+            let weights = CollisionWeights {
+                world: 1.0,
+                margin: 0.05,
+                ..CollisionWeights::NONE
+            };
+            let checked = device.evaluate(&worlds, &[0], q, &weights).unwrap();
+            assert!(
+                (checked.world_clearance[0] - least).abs() < 1e-4,
+                "{}",
+                device.name()
+            );
+        }
+    }
+}

@@ -1406,6 +1406,33 @@ fn memories_after_different_holds_share_the_map() {
     things.push(arm(&robot, away));
     let rendered = render(&things);
     let seen = first_look(&device, &things, &rendered, (0, 0), away, 0.0);
+    // The branches share the observation. Each queries the same crumb with its own budget.
+    let residual = |memory: &Memory| {
+        let world = memory.world(&device, &Step::default()).expect("a world");
+        assert_eq!(world.of.last(), Some(&Of::Unexplained));
+        match world.world.obstacles.last().expect("a residual") {
+            Obstacle::Sdf { grid, .. } => grid.clone(),
+            other => panic!("expected a field, got {other:?}"),
+        }
+    };
+    let coarse = residual(&seen.memory);
+    let fine = seen
+        .memory
+        .clone()
+        .with_unexplained_field(2, 1_000_000)
+        .unwrap();
+    let small_budget = seen.memory.clone().with_unexplained_field(2, 1).unwrap();
+    let thirds = seen
+        .memory
+        .clone()
+        .with_unexplained_field(3, 1_000_000)
+        .unwrap();
+    assert_eq!(residual(&thirds).voxel(), coarse.voxel() / 3.0);
+    let finer = residual(&fine);
+    assert_eq!(finer.voxel(), coarse.voxel() * 0.5);
+    assert_eq!(residual(&small_budget).voxel(), coarse.voxel());
+    assert!(std::sync::Arc::ptr_eq(&finer, &residual(&fine)));
+    assert!(std::sync::Arc::ptr_eq(&coarse, &residual(&seen.memory)));
     let ids = [1, 2].map(|thing| id_of(seen.kept.scene(), &rendered, thing).expect("an object"));
     let held = grasped(&seen.memory, ids[0]);
     let turned = Held {

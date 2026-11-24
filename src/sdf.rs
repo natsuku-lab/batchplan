@@ -2414,6 +2414,126 @@ impl OccupancyMap {
         Ok(())
     }
 
+    /// A distance field of the observed occupied voxels, sampled at their corners. Unknown and
+    /// excluded voxels have the same treatment as in a grid built with [`Occlusion::Free`].
+    /// Each voxel remains a full cube. `divisions` changes only the spacing of the distance
+    /// samples. The returned grid has one more sample per axis than the subdivided map.
+    ///
+    /// Returns `None` if the requested grid exceeds the point budget or the device-independent
+    /// grid size or coordinate precision limits. An empty occupied set is an input error when the
+    /// field fits these limits. Construction takes linear space and time in the number of samples and
+    /// runs on the device's CPU pool. The resulting field can be queried on either backend.
+    pub fn occupied_field(
+        &self,
+        device: &Device,
+        divisions: u32,
+        max_points: usize,
+    ) -> Result<Option<SdfGrid>> {
+        ensure_input!(
+            divisions > 0,
+            "zero subdivisions for the occupied distance field"
+        );
+        let dims = self.grid.dims.as_u64vec3() * u64::from(divisions) + 1;
+        let limit = MAX_POINTS.min(max_points as u64);
+        if dims.max_element() > limit
+            || dims.x * dims.y > limit / dims.z
+            || (dims - 1).as_dvec3().length_squared() >= MAX_DIAGONAL
+        {
+            return Ok(None);
+        }
+        let voxel = self.grid.voxel / divisions as f32;
+        let grid = Layout {
+            dims: dims.as_uvec3(),
+            origin: self.grid.origin - Vec3::splat(0.5 * self.grid.voxel),
+            voxel,
+        };
+        let upper = grid.origin + (grid.dims - 1).as_vec3() * voxel;
+        let rounding = 8.0 * f32::EPSILON * upper.abs().max(grid.origin.abs()).max_element();
+        if !voxel.is_normal() || !upper.is_finite() || rounding >= voxel {
+            return Ok(None);
+        }
+        let mut adjacent = vec![0u8; grid.points()];
+        let mut lower = grid.dims;
+        let mut upper = UVec3::ZERO;
+        for (index, &odds) in self.log_odds.iter().enumerate() {
+            if !observed(odds) || odds <= 0 {
+                continue;
+            }
+            let n = index as u32;
+            let dims = self.grid.dims;
+            let cell = UVec3::new(n % dims.x, n / dims.x % dims.y, n / (dims.x * dims.y));
+            let start = cell * divisions;
+            lower = lower.min(start);
+            upper = upper.max(start + divisions);
+            // A face, edge or corner of the parent has respectively four, two or one adjacent
+            // child cubes inside it. An interior node has all eight.
+            let share = |x| if x == 0 || x == divisions { 1 } else { 2 };
+            for z in 0..=divisions {
+                for y in 0..=divisions {
+                    for x in 0..=divisions {
+                        let i = grid.index(start + UVec3::new(x, y, z));
+                        adjacent[i] += share(x) * share(y) * share(z);
+                    }
+                }
+            }
+        }
+        ensure_input!(
+            lower != grid.dims,
+            "no occupied voxel for the distance field"
+        );
+        device.install(|| {
+            let boundary: Vec<_> = adjacent.iter().map(|&n| n > 0 && n < 8).collect();
+            // Every exposed face is axis aligned. The nearest point of that face to a lattice
+            // node is also a lattice node, so these distances to boundary nodes are exact.
+            let squared = squared_edt(&boundary, grid.dims.to_array().map(|d| d as usize));
+            let diagonal = 3.0_f64.sqrt();
+            let mut values: Vec<_> = squared
+                .into_par_iter()
+                .zip(adjacent)
+                .map(|(n, adjacent)| {
+                    let d = match adjacent {
+                        0 => f64::from(n).sqrt(),
+                        8 => -f64::from(n).sqrt(),
+                        _ => 0.0,
+                    };
+                    // For a free point t from its closest surface point, the weighted mean of
+                    // the squared corner distances to that point is at most t² + 3/4 (voxel
+                    // units). Each corner lies at most one diagonal from the query. Closer
+                    // to or inside the surface the signed distance is 1-Lipschitz.
+                    let half = 0.5 * diagonal;
+                    let shift = if d > diagonal {
+                        half.min(0.375 / (d - diagonal))
+                    } else {
+                        half
+                    };
+                    at_most(((d - shift) * f64::from(voxel) - f64::from(rounding)) as f32).to_bits()
+                })
+                .collect();
+            // Outside the grid the sampler adds distance to the clamped point. On each face
+            // the distance along its outward normal alone bounds this extension.
+            let top = grid.dims - 1;
+            for axis in 0..3 {
+                let (a, b) = ((axis + 1) % 3, (axis + 2) % 3);
+                for (side, gap) in [(0, lower[axis]), (top[axis], top[axis] - upper[axis])] {
+                    let cap = at_most(gap as f32 * voxel - rounding);
+                    let mut coord = UVec3::ZERO;
+                    coord[axis] = side;
+                    for y in 0..=top[b] {
+                        coord[b] = y;
+                        for x in 0..=top[a] {
+                            coord[a] = x;
+                            let value = &mut values[grid.index(coord)];
+                            if f16::from_bits(*value) > cap {
+                                *value = cap.to_bits();
+                            }
+                        }
+                    }
+                }
+            }
+            SdfGrid::checked(grid.dims.into(), voxel, grid.origin, values).map(Some)
+        })
+    }
+
     /// The distance grid of the map: voxels more likely occupied than not are solid, and voxels
     /// never observed are solid or free as `unknown` says. Errors if nothing is solid.
     pub fn grid(&self, device: &Device, unknown: Occlusion) -> Result<SdfGrid> {
