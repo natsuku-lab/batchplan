@@ -2501,8 +2501,17 @@ impl OccupancyMap {
                     // units). Each corner lies at most one diagonal from the query. Closer
                     // to or inside the surface the signed distance is 1-Lipschitz.
                     let half = 0.5 * diagonal;
-                    let shift = if d > diagonal {
-                        half.min(0.375 / (d - diagonal))
+                    let m = d - diagonal;
+                    let shift = if m > (27.0_f64 / 8.0).sqrt() {
+                        // A query's offset R to a weighted corner has covariance <= I/4.
+                        // For the unit normal n to the nearest surface, E|R_perp|² <= 1/2.
+                        // All corners are at least m from that surface point. Their distance
+                        // minus its tangent plane is |R_perp|² / (distance + projection);
+                        // projection >= sqrt(m² - 3) since |R| <= sqrt(3). The tangent
+                        // plane interpolates exactly. This bound wins when m² > 27/8.
+                        0.5 / (m + (m * m - 3.0).sqrt())
+                    } else if m > 0.0 {
+                        half.min(0.375 / m)
                     } else {
                         half
                     };
