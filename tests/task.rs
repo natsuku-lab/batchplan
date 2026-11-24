@@ -973,6 +973,63 @@ fn a_place_names_the_object_it_sets_down_after_its_worlds_obstacles() {
     );
 }
 
+/// A release stays at the commanded height while the predicted scene and the departure
+/// collision enclosure account for the selected drop, including candidates in later waves.
+#[test]
+fn placing_above_a_rest_returns_its_landing_and_the_checked_fall() {
+    let robot = panda();
+    let o = TaskOptions::default();
+    let rest = Pose::new(Vec3::new(0.45, -0.2, HALF.z), Quat::IDENTITY);
+    let taken = Pose::new(Vec3::new(0.3, -0.25, HALF.z), Quat::IDENTITY);
+    let before = scene(vec![Obstacle::cuboid(taken.position, Vec3::splat(0.03))]);
+    let mut after = before.clone();
+    after.remove(BOX).unwrap();
+    for device in devices(&robot) {
+        let worlds = device.upload(&[before.clone(), after.clone()]).unwrap();
+        let picked =
+            batchplan::pick(&device, &worlds, &[pick_from(&robot, vec![top()])], &o).unwrap();
+        let picked = &picked.outcomes[0].as_ref().unwrap()[0];
+        let drop = 0.008;
+        let release = Pose::new(rest.position + Vec3::Z * drop, rest.rotation);
+        let mut poses = vec![taken; 40];
+        poses.push(release);
+        let mut falls = vec![0.002; 40];
+        falls.push(drop);
+        let task = Place {
+            support: vec![TABLE],
+            enough: Some(1),
+            falls,
+            ..Place::new(1, picked.end(), picked.held.clone().unwrap(), poses)
+        };
+        let run = |t: &Place| batchplan::place(&device, &worlds, std::slice::from_ref(t), &o);
+        let plan = run(&task).unwrap().outcomes.remove(0).unwrap().remove(0);
+        assert_eq!(plan.candidate, 40);
+        let landed = plan.placed.as_ref().unwrap();
+        assert!(landed.pose().position.distance(rest.position) < 1e-6);
+        let swept = plan.falling.unwrap();
+        let top = release.position + Vec3::Z * HALF.z;
+        let bottom = rest.position - Vec3::Z * HALF.z;
+        assert!(swept.distance(top).value < 1e-6 && swept.distance(bottom).value < 1e-6);
+        let on = Place {
+            falls: vec![],
+            ..task.clone()
+        };
+        let exact = run(&on).unwrap().outcomes.remove(0).unwrap().remove(0);
+        assert!(exact.falling.is_none());
+        assert_eq!(exact.placed.unwrap().pose(), release);
+        assert_eq!(exact.approach.control_points, plan.approach.control_points);
+        for invalid in [vec![drop], vec![f32::NAN; 41], vec![-drop; 41]] {
+            assert!(matches!(
+                run(&Place {
+                    falls: invalid,
+                    ..task.clone()
+                }),
+                Err(Error::Input(_))
+            ));
+        }
+    }
+}
+
 /// A held object collides where its grasp holds it, whatever else the call holds: a bar taken from
 /// the side near its foot meets a slab over its top as it lifts, in the same call as a cube taken
 /// from above, and taken near its top too, it clears a higher slab the foot's grasp would lift it
@@ -2790,4 +2847,44 @@ fn a_pick_can_fit_its_carried_cylinder_beside_a_wall() {
     assert!(failure.candidates[0].contacts.iter().any(|contact|
         matches!(contact, Contact::World { link, obstacle, .. } if link == "held by hand 0" && *obstacle == side)
     ));
+}
+
+#[test]
+fn the_release_sweep_stops_a_palm_below_the_falling_object() {
+    let robot = panda();
+    let held = Held {
+        hand: 0,
+        object: Obstacle::cuboid(Vec3::ZERO, HALF),
+        grasp: grasp(Vec3::Z, Vec3::X),
+        locked: Default::default(),
+        spheres: Default::default(),
+    };
+    let release = Pose::new(Vec3::new(0.5, -0.12, 0.55), Quat::IDENTITY);
+    let task = Place {
+        transit: false,
+        ..Place::new(0, robot.default_q(), held, vec![release])
+    };
+    for device in devices(&robot) {
+        let worlds = device.upload(&[World::default()]).unwrap();
+        let plan = |task: &Place| {
+            batchplan::place(
+                &device,
+                &worlds,
+                std::slice::from_ref(task),
+                &TaskOptions::default(),
+            )
+            .unwrap()
+            .outcomes
+            .remove(0)
+        };
+        assert!(plan(&task).is_ok(), "the palm is clear at release");
+        let falling = Place {
+            falls: vec![0.1],
+            ..task.clone()
+        };
+        let stopped = plan(&falling).expect_err("the drop passes through the palm");
+        let stop = &stopped.candidates[0];
+        assert_eq!(stop.step, TaskStep::Depart);
+        assert!(stop.contacts.iter().any(|c| matches!(c, Contact::World { link, obstacle: 0, distance } if link == "panda_hand" && *distance < 0.0)), "{stop:?}");
+    }
 }

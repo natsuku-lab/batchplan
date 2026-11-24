@@ -244,6 +244,8 @@ value_class! {
         /// Poses of the object's frame to set it down at; any one will do. `place_poses` gives an
         /// object's symmetric turns at one spot.
         poses: Vec<batchplan::Pose>,
+        /// Downward settling distance for each release, in meters. Empty places at release.
+        falls: Vec<f32>,
         /// How the hand moves in to where it lets go, in the world's frame (meters).
         lower: Vec3,
         /// How far back along its own z axis the hand moves once it lets go (meters).
@@ -620,6 +622,12 @@ impl TaskPlan {
         self.0.placed.clone().map(Obstacle)
     }
 
+    /// The released object's collision enclosure during departure for a place with a fall.
+    #[getter]
+    fn falling(&self) -> Option<Obstacle> {
+        self.0.falling.clone().map(Obstacle)
+    }
+
     /// After a place that says how far its hand may open (`Place.open`), which of those the
     /// hand lets go at and moves away with, by index.
     #[getter]
@@ -824,9 +832,10 @@ pub(crate) fn pick(
 
 /// Sets down each task's held object, trying each of its poses. IK solves where the hand lets go,
 /// holding the object, which may touch what it is set on there and on the move in, run backward
-/// from there. The move away lets the fingers touch the object where it now stands. Run the
-/// transit and the approach holding the object, open the gripper, then run the departure. `device`
-/// is the robot's without the object; each task's `held` is attached to it here.
+/// from there. Run transit and approach holding the object, open the gripper, then follow the
+/// departure. The releasing fingers may touch the object. When a fall is specified, check the
+/// follower against the returned `falling` obstacle through departure. Verify the expected
+/// landing in `placed` after release. Each task attaches its `held` to the robot on `device`.
 #[pyfunction]
 #[pyo3(signature = (device, worlds, places, options = None))]
 pub(crate) fn place(
