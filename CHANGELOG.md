@@ -8,6 +8,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+- Miru measures a raised bar over a circular face and checks fully open approach and finger
+  closure against the measured points with `Kept::bar_on_disk`.
+
 ### Added
 
 - Surface grasps can try additional approach angles and shallower insertions on contact pairs

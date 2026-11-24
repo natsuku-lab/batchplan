@@ -1331,3 +1331,13 @@ the run.
 `AGENTS.md` has miru's design rules, and the repository's `CLAUDE.md` the style and the working
 rules. From the repository's root, `scripts/check.sh` runs every lint and `cargo test -p miru` the
 tests, which render their own scenes.
+
+For a request to turn a centred control, `Kept::bar_on_disk` can measure a narrow raised bar
+over a circular face. Give it the outward unit normal, the hand and its calibrated loaded
+gap (`Robot::parallel_jaw_opening`), and the grasp options. The requested depth places the IK
+frame below the crest. The measurement uses the median of the target readings' larger pixel
+width or depth deviation as its spatial resolution. Each returned pose passed the open approach,
+floor, capacity and symmetric closing-sweep checks on the measured points. Use the fully open
+joints and check each pose with the ordinary collision world. The fitted disk centre can be the
+pivot **if the control turns about the centre of that face**. A stationary bar over a disk looks
+the same. An unresolved disk or bar, or a hand with no admissible pose, gives no proposal.
