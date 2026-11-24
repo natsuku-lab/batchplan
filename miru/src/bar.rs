@@ -1,5 +1,8 @@
 //! A raised bar over a measured circular face.
 
+use std::collections::HashMap;
+use std::ops::RangeInclusive;
+
 use batchplan::{Device, GraspOptions, HandSphere, Pose, Surface};
 use glam::{DMat3, DVec3, Mat3, Quat, Vec2, Vec3};
 
@@ -58,6 +61,12 @@ impl BarOnDisk {
         ensure_input!(
             surface.points.iter().all(|p| p.is_finite()),
             "nonfinite surface point"
+        );
+        ensure_input!(
+            surface.seen_from.is_empty() || surface.seen_from.len() == surface.points.len(),
+            "{} ray origins for {} points",
+            surface.seen_from.len(),
+            surface.points.len()
         );
         let (u, v) = outward.any_orthonormal_pair();
         let basis = Mat3::from_cols(u, v, outward);
@@ -122,12 +131,12 @@ impl BarOnDisk {
         if top - insertion - level <= 2.0 * resolution {
             return Ok(None);
         }
-        let layer = near
+        let layer: Vec<Vec2> = near
             .iter()
             .filter(|p| (p.z - level).abs() <= resolution)
             .map(|p| p.truncate())
             .collect();
-        let hull = fit::hull(layer);
+        let hull = fit::hull(layer.clone());
         // A search boundary is not evidence of a circular edge.
         let edge: Vec<_> = hull
             .into_iter()
@@ -136,6 +145,26 @@ impl BarOnDisk {
         let Some((center, radius)) = circle(&edge, resolution) else {
             return Ok(None);
         };
+        if !measured_face(&layer, center, radius, resolution) {
+            return Ok(None);
+        }
+        for (p, eye) in surface.points.iter().zip(&surface.seen_from) {
+            if !eye.is_finite() {
+                continue;
+            }
+            let end = local * *p;
+            if end.z >= level - resolution {
+                continue;
+            }
+            let start = local * *eye;
+            if start.z <= level + resolution {
+                continue;
+            }
+            let cross = start.lerp(end, (start.z - level) / (start.z - end.z));
+            if cross.truncate().distance(center) < radius - 2.0 * resolution {
+                return Ok(None);
+            }
+        }
         let across = bar.along.perp();
         let off = center - bar.center;
         if off.dot(across).abs() > bar.width / 2.0
@@ -216,6 +245,49 @@ fn densest(sorted: &[f32], band: f32) -> Option<f32> {
     (best.len() >= 3).then(|| quantile(&sorted[best], 0.5))
 }
 
+// An arc of corners alone can come from disconnected posts. Over more than half the circle,
+// require actual face readings across its outer half, at the resolution at which it was fitted.
+fn measured_face(points: &[Vec2], center: Vec2, radius: f32, resolution: f32) -> bool {
+    let spacing = 2.0 * resolution;
+    let sectors = (std::f32::consts::TAU * radius / spacing).ceil() as usize;
+    let steps = (radius * 0.5 / spacing).ceil() as usize;
+    if sectors < 4
+        || steps == 0
+        || sectors.saturating_mul(steps) > 4usize.saturating_mul(points.len())
+    {
+        return false;
+    }
+    let mut cells = HashMap::<(i32, i32), Vec<Vec2>>::new();
+    for p in points {
+        let q = *p - center;
+        let at = (q / spacing).floor().as_ivec2();
+        cells.entry((at.x, at.y)).or_default().push(q);
+    }
+    let reached = |p: Vec2| {
+        let at = (p / spacing).floor().as_ivec2();
+        (-1..=1).any(|dy| {
+            (-1..=1).any(|dx| {
+                cells.get(&(at.x + dx, at.y + dy)).is_some_and(|points| {
+                    points
+                        .iter()
+                        .any(|q| q.distance_squared(p) <= 2.0 * resolution * resolution)
+                })
+            })
+        })
+    };
+    let mut seen = 0;
+    for i in 0..sectors {
+        let along = Vec2::from_angle(std::f32::consts::TAU * i as f32 / sectors as f32);
+        if (0..=steps).all(|j| {
+            let distance = radius * 0.5 + (radius * 0.5 - resolution) * (j as f32 / steps as f32);
+            reached(along * distance)
+        }) {
+            seen += 1;
+        }
+    }
+    seen > sectors / 2
+}
+
 fn circle(points: &[Vec2], resolution: f32) -> Option<(Vec2, f32)> {
     if points.len() < 3 {
         return None;
@@ -260,7 +332,7 @@ fn circle(points: &[Vec2], resolution: f32) -> Option<(Vec2, f32)> {
 
 impl Kept {
     /// Measures a bar over a disk and checks its proposed poses against this look's depth.
-    /// Supply a loaded gap qualified by `Robot::parallel_jaw_opening` for symmetric sliding jaws.
+    /// Supply the calibrated closed through loaded gaps qualified by `Robot::parallel_jaw_opening`.
     /// `options.opening` limits the graspable width. `depth` places the IK frame below the crest,
     /// `overlap` bounds fingertip insertion, and `approach` and `floor` bound the approach.
     /// The returned poses use the fully open hand. Both closing sweeps must encounter target
@@ -273,9 +345,10 @@ impl Kept {
         id: u32,
         outward: Vec3,
         hand: usize,
-        loaded: f32,
+        gaps: RangeInclusive<f32>,
         options: &GraspOptions,
     ) -> Result<Option<BarOnDisk>> {
+        let (closed, loaded) = gaps.into_inner();
         let robot = device.robot();
         ensure_input!(
             hand < robot.hands(),
@@ -283,11 +356,14 @@ impl Kept {
             robot.hands()
         );
         ensure_input!(
-            loaded.is_finite()
+            closed.is_finite()
+                && closed >= 0.0
+                && closed < loaded
+                && loaded.is_finite()
                 && options.opening.is_finite()
                 && options.opening > 0.0
                 && loaded >= options.opening,
-            "invalid capacity {} or loaded gap {loaded}",
+            "invalid capacity {} or jaw gaps {closed} through {loaded}",
             options.opening
         );
         ensure_input!(
@@ -332,7 +408,14 @@ impl Kept {
         }
         bar.grasps.retain(|&pose| {
             hand_fits(
-                &surface, pose, bar.center, outward, &spheres, loaded, options, resolution,
+                &surface,
+                pose,
+                bar.center,
+                outward,
+                &spheres,
+                loaded - closed,
+                options,
+                resolution,
             )
         });
         Ok((!bar.grasps.is_empty()).then_some(bar))
@@ -349,7 +432,7 @@ fn hand_fits(
     disk: Vec3,
     outward: Vec3,
     hand: &[HandSphere],
-    loaded: f32,
+    stroke: f32,
     options: &GraspOptions,
     resolution: f32,
 ) -> bool {
@@ -359,7 +442,7 @@ fn hand_fits(
     let mut lo = Vec3::splat(f32::INFINITY);
     let mut hi = Vec3::splat(f32::NEG_INFINITY);
     for s in hand {
-        let closed = s.center - Vec3::Y * s.side * loaded * 0.5;
+        let closed = s.center - Vec3::Y * s.side * stroke * 0.5;
         let start = s.center - approach;
         for at in [closed, s.center, start] {
             if options
@@ -385,7 +468,7 @@ fn hand_fits(
             if open.length_squared() <= s.radius * s.radius {
                 return false;
             }
-            let end = -s.side * loaded * 0.5;
+            let end = -s.side * stroke * 0.5;
             let close = Vec3::new(d.x, d.y - d.y.clamp(end.min(0.0), end.max(0.0)), d.z);
             if close.length_squared() <= s.radius * s.radius {
                 if !s.finger || s.side == 0.0 || !ours || at.z >= disk_depth - resolution {

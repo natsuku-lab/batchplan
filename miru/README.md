@@ -1333,8 +1333,8 @@ rules. From the repository's root, `scripts/check.sh` runs every lint and `cargo
 tests, which render their own scenes.
 
 For a request to turn a centred control, `Kept::bar_on_disk` can measure a narrow raised bar
-over a circular face. Give it the outward unit normal, the hand and its calibrated loaded
-gap (`Robot::parallel_jaw_opening`), and the grasp options. The requested depth places the IK
+over a circular face. Give it the outward unit normal, the hand and its calibrated closed and loaded
+gaps (`Robot::parallel_jaw_opening`), and the grasp options. The requested depth places the IK
 frame below the crest. The measurement uses the median of the target readings' larger pixel
 width or depth deviation as its spatial resolution. Each returned pose passed the open approach,
 floor, capacity and symmetric closing-sweep checks on the measured points. Use the fully open

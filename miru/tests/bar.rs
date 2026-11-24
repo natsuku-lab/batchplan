@@ -72,3 +72,42 @@ fn a_hidden_disk_two_bars_and_an_intervening_surface_have_no_single_grip() {
             .is_none()
     );
 }
+
+#[test]
+fn separate_posts_do_not_supply_a_circular_face() {
+    let mut posts = Surface::default();
+    let scene = sample(true, false);
+    for (p, ours) in scene.points.into_iter().zip(scene.object) {
+        let v = p.truncate();
+        let angle = v.to_angle();
+        let step = std::f32::consts::TAU / 12.0;
+        if ours
+            || ((v.length() - 0.042).abs() < 0.002
+                && (angle - (angle / step).round() * step).abs() < 0.038)
+        {
+            posts.points.push(p);
+            posts.object.push(ours);
+        }
+    }
+    assert!(
+        BarOnDisk::measure(&posts, Vec3::Z, DEPTH, RESOLUTION)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_ray_through_the_proposed_face_refutes_it() {
+    let mut window = sample(true, false);
+    window
+        .seen_from
+        .resize(window.points.len(), Vec3::splat(f32::INFINITY));
+    window.points.push(Vec3::new(0.0, 0.03, -0.02));
+    window.seen_from.push(Vec3::new(0.0, 0.03, 0.3));
+    window.object.push(false);
+    assert!(
+        BarOnDisk::measure(&window, Vec3::Z, DEPTH, RESOLUTION)
+            .unwrap()
+            .is_none()
+    );
+}
