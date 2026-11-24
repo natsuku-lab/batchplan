@@ -13,6 +13,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- A placement can carry a predicted downward fall for each release pose. Departure checks the
+  volume swept during settling and reports the expected landing. **Breaking:** exhaustive
+  Rust `Place` literals need `falls: vec![]` for a placement in contact.
+
 - Surface grasps can try additional approach angles and shallower insertions on contact pairs
   near a measured point. Set `GraspOptions::close_on` to append them after the ordinary grasps. **Breaking:** Rust literals
   that specify every field of `GraspOptions` need `close_on: None` for the previous behavior.
