@@ -235,6 +235,12 @@ pub struct Place {
     /// object's symmetric turns at one spot, and [`rests_on`](crate::rests_on) the poses it
     /// rests at on a support cameras see.
     pub poses: Vec<Pose>,
+    /// Expected downward travel after release, in meters along world −z, one value per pose.
+    /// Empty sets down at the release itself. Supply a measured rest or container fall that
+    /// supports a vertical translation at the same attitude. Departure checks an enclosure of
+    /// the object throughout that translation. The returned placed pose is the expected rest;
+    /// the caller verifies where the object actually settled.
+    pub falls: Vec<f32>,
     /// How the hand moves in to where it lets go, in the world's frame (meters).
     pub lower: Vec3,
     /// How far back along its own z axis the hand moves once it lets go (meters).
@@ -279,6 +285,7 @@ impl Place {
             idle: None,
             held,
             poses,
+            falls: vec![],
             lower: Vec3::Z * -0.1,
             retreat: 0.1,
             open: vec![],
@@ -402,6 +409,10 @@ pub struct TaskPlan {
     /// object where the turn leaves it, to put in the world in its place, or where it stood where
     /// it stays ([`Turn::stays`]).
     pub placed: Option<Obstacle>,
+    /// For a place with a positive fall, the released body as checked during departure.
+    /// It encloses the release, the expected landing and the translation between them.
+    /// Check the follower against this obstacle with the releasing fingers allowed to touch it.
+    pub falling: Option<Obstacle>,
     /// After a place that says how far its hand may open ([`Place::open`]), which of those the
     /// hand lets go at and moves away with, by index.
     pub opening: Option<usize>,
@@ -1059,6 +1070,12 @@ pub fn place(
         t.held.check(robot, worlds, &format!("task {i}"))?;
         check_poses(i, "pose", &t.poses)?;
         ensure_input!(
+            t.falls.is_empty()
+                || (t.falls.len() == t.poses.len()
+                    && t.falls.iter().all(|z| z.is_finite() && *z >= 0.0)),
+            "task {i} needs one finite nonnegative fall per release pose, or none"
+        );
+        ensure_input!(
             t.lower.is_finite()
                 && t.lower != Vec3::ZERO
                 && t.retreat.is_finite()
@@ -1089,6 +1106,11 @@ pub fn place(
         let going: Vec<usize> = (0..tasks.len()).filter(|&i| !next[i].is_empty()).collect();
         let some = going.iter().map(|&i| Place {
             poses: tasks[i].poses[next[i].clone()].to_vec(),
+            falls: tasks[i]
+                .falls
+                .get(next[i].clone())
+                .unwrap_or_default()
+                .to_vec(),
             ..tasks[i].clone()
         });
         let some: Vec<Place> = some.collect();
@@ -1314,7 +1336,9 @@ fn placed(
             .map(|c| {
                 let t = &tasks[c.task];
                 let mut w = worlds[Steps::of_place(t).depart_world as usize].clone();
-                w.obstacles.push(t.held.object.placed(t.poses[c.index]));
+                let released = t.held.object.placed(t.poses[c.index]);
+                let fall = t.falls.get(c.index).copied().unwrap_or_default();
+                w.obstacles.push(released.falling(fall));
                 let object = w.obstacles.len() - 1;
                 w.touch
                     .push(Touch::new(object, fingers(robot, t.held.hand)));
@@ -1401,10 +1425,26 @@ fn placed(
         transit(&holders[h], worlds, group, &constraints, &o.plan)
     })?;
 
-    let outcomes = choose(device, tasks.len(), &candidates, o, |c| {
+    let mut outcomes = choose(device, tasks.len(), &candidates, o, |c| {
         let t = &tasks[c.task];
-        (None, Some(t.held.object.placed(t.poses[c.index])))
+        let mut at = t.poses[c.index];
+        at.position.z -= t.falls.get(c.index).copied().unwrap_or_default();
+        (None, Some(t.held.object.placed(at)))
     })?;
+    for (task, outcome) in tasks.iter().zip(&mut outcomes) {
+        if let Ok(plans) = outcome {
+            for plan in plans {
+                if let Some(&fall) = task.falls.get(plan.candidate).filter(|&&z| z > 0.0) {
+                    plan.falling = Some(
+                        task.held
+                            .object
+                            .placed(task.poses[plan.candidate])
+                            .falling(fall),
+                    );
+                }
+            }
+        }
+    }
     Ok(TaskResult {
         problems: tasks.to_vec(),
         outcomes,
@@ -2258,6 +2298,7 @@ pub(crate) fn choose(
             )?,
             held,
             placed,
+            falling: None,
             opening: c.opening,
             meeting: c.giver.as_ref().map(|g| g.meeting),
         })

@@ -561,6 +561,50 @@ impl Obstacle {
         }
     }
 
+    /// A single collision obstacle enclosing every position on a vertical fall at fixed attitude.
+    pub(crate) fn falling(self, distance: f32) -> Self {
+        if distance == 0.0 {
+            return self;
+        }
+        let half = distance * 0.5;
+        let pose = self.pose();
+        let middle = Pose::new(pose.position - Vec3::Z * half, pose.rotation);
+        let delta = (pose.rotation.conjugate() * Vec3::Z).abs() * half;
+        match self {
+            Self::Sphere { radius, .. } => Self::capsule(middle.position, radius, half),
+            Self::Cuboid { half_extents, .. } => {
+                Self::cuboid(Vec3::ZERO, half_extents + delta).placed(middle)
+            }
+            Self::Cylinder {
+                radius,
+                half_height,
+                ..
+            } => Self::cylinder(
+                Vec3::ZERO,
+                radius + delta.truncate().length(),
+                half_height + delta.z,
+            )
+            .placed(middle),
+            Self::Capsule {
+                radius,
+                half_length,
+                ..
+            } => Self::capsule(
+                Vec3::ZERO,
+                radius + delta.truncate().length(),
+                half_length + delta.z,
+            )
+            .placed(middle),
+            Self::Sdf { .. } => {
+                // The local grid bounds include the part of its field that extends past its faces.
+                let (lo, hi) = self.placed(Pose::IDENTITY).bounds();
+                let center = middle.position + middle.rotation * ((hi + lo) * 0.5);
+                Self::cuboid(Vec3::ZERO, (hi - lo) * 0.5 + delta)
+                    .placed(Pose::new(center, middle.rotation))
+            }
+        }
+    }
+
     /// The corners of the smallest box along the frame's axes that holds the obstacle; a
     /// distance grid's is that of its points' box, grown by how far the grid reads solid past it.
     pub(crate) fn bounds(&self) -> (Vec3, Vec3) {

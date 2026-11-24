@@ -244,6 +244,8 @@ value_class! {
         /// Poses of the object's frame to set it down at; any one will do. `place_poses` gives an
         /// object's symmetric turns at one spot.
         poses: Vec<batchplan::Pose>,
+        /// Downward settling distance for each release, in meters. Empty places at release.
+        falls: Vec<f32>,
         /// How the hand moves in to where it lets go, in the world's frame (meters).
         lower: Vec3,
         /// How far back along its own z axis the hand moves once it lets go (meters).
@@ -618,6 +620,12 @@ impl TaskPlan {
     #[getter]
     fn placed(&self) -> Option<Obstacle> {
         self.0.placed.clone().map(Obstacle)
+    }
+
+    /// The released object's collision enclosure during departure for a place with a fall.
+    #[getter]
+    fn falling(&self) -> Option<Obstacle> {
+        self.0.falling.clone().map(Obstacle)
     }
 
     /// After a place that says how far its hand may open (`Place.open`), which of those the
