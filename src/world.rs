@@ -567,7 +567,7 @@ impl Obstacle {
             return self;
         }
         let half = distance * 0.5;
-        let pose = self.pose();
+        let pose = self.pose().rigid();
         let middle = Pose::new(pose.position - Vec3::Z * half, pose.rotation);
         let delta = (pose.rotation.conjugate() * Vec3::Z).abs() * half;
         match self {
@@ -805,4 +805,48 @@ pub(crate) fn capsule_distance(
     let v = lp - Vec3::new(0.0, 0.0, lp.z.clamp(-half_length, half_length));
     let len = v.length();
     (len - radius, r * if len > 1e-9 { v / len } else { Vec3::X })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_vertical_fall_encloses_every_translated_body() {
+        let span = 0.14;
+        let q = Quat::from_rotation_x(0.56) * Quat::from_rotation_y(0.91);
+        let at = Pose::new(Vec3::new(0.38, -0.14, 0.21), q * 0.9991);
+        let half = Vec3::new(0.012, 0.025, 0.033);
+        let grid = SdfGrid::try_new([2, 2, 2], 0.02, half, &[-0.01; 8]).unwrap();
+        let shapes = [
+            Obstacle::cuboid(Vec3::ZERO, half),
+            Obstacle::sphere(Vec3::ZERO, 0.025),
+            Obstacle::cylinder(Vec3::ZERO, 0.025, 0.033),
+            Obstacle::capsule(Vec3::ZERO, 0.025, 0.033),
+            Obstacle::from_grid(grid),
+        ];
+        for shape in shapes {
+            let body = shape.placed(at);
+            assert_eq!(body.clone().falling(0.0), body);
+            let sweep = body.clone().falling(span);
+            // Project probes onto each original surface in world coordinates. A collision at
+            // that position of the released body must also collide with the departure envelope.
+            for x in -2..=2 {
+                for y in -2..=2 {
+                    for z in -2..=2 {
+                        let p = at.position + Vec3::new(x as f32, y as f32, z as f32) * 0.045;
+                        let d = body.distance(p);
+                        let surface = p - d.value * d.gradient;
+                        if body.distance(surface).value.abs() > 1e-6 {
+                            continue;
+                        }
+                        for t in [0.0, 0.2, 0.5, 0.8, 1.0] {
+                            let hit = sweep.distance(surface - Vec3::Z * (span * t));
+                            assert!(hit.value < 1e-6, "{body:?} at {t}: {hit:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
