@@ -75,7 +75,8 @@ value_class! {
         tolerance: f32,
         /// The farthest any sphere may reach beyond the geometry (meters), whatever the budget;
         /// 0 keeps every sphere inside. It leaves surface outside the spheres where the budget
-        /// cannot cover it within that, and needs closed geometry. `None`: no limit.
+        /// cannot cover it within that (a held box, thin cylinder or capsule is covered whole), and
+        /// needs closed geometry. `None`: no limit.
         max_overhang: Option<f32>,
         /// Largest spacing of the interior grid that proposes sphere centers (meters). Small links
         /// use a finer grid.

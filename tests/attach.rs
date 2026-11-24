@@ -370,7 +370,8 @@ fn held_boxes_and_balls_are_covered_without_fitting() {
 }
 
 /// Held shapes under a limit on how far their spheres reach (`SphereOptions::max_overhang`):
-/// covered whole where the budget has a cover within it, else fitted and held to it.
+/// covered whole where the budget has a cover within it, or a box by its medial cover past it,
+/// else fitted and held to it.
 #[test]
 fn held_shapes_keep_within_a_limit_on_overhang() {
     let robot = common::panda().unwrap();
@@ -435,17 +436,20 @@ fn held_shapes_keep_within_a_limit_on_overhang() {
     let covered = boxed(with(512, Some(limit)));
     assert!(whole(&covered), "a cover within the limit leaves none out");
     assert!(past(&covered) <= limit + 1e-6, "{}", past(&covered));
-    // 64 have none within the limit: fitted, held to it, and some of the box left out. Without
-    // the limit, they cover it within the tolerance however many that takes.
+    // 64 have none within the limit: the box's medial cover holds all of it within the limit
+    // however many spheres that takes, as without it within the tolerance.
     let free = boxed(with(64, None));
     assert!(
         whole(&free) && past(&free) > limit + 5e-4,
         "{}",
         past(&free)
     );
-    let fitted = boxed(with(64, Some(limit)));
-    assert!(past(&fitted) <= limit + 1e-6, "{}", past(&fitted));
-    assert!(!whole(&fitted), "the limit costs coverage");
+    let medial = boxed(with(64, Some(limit)));
+    assert!(past(&medial) <= limit + 1e-6, "{}", past(&medial));
+    assert!(
+        whole(&medial),
+        "a box's cover within the limit leaves none out"
+    );
     // Held to nothing past it, every sphere is inside the box.
     let inside = boxed(with(64, Some(0.0)));
     assert!(past(&inside) <= 1e-6, "{}", past(&inside));
@@ -769,8 +773,8 @@ fn held_discs_rods_and_capsules_are_covered_without_fitting() {
 /// A bowl 11.2 cm across and 5.1 cm deep, which 64 fitted spheres left 9.1 mm past its side,
 /// takes as many as the default 5 mm does, the same at budgets of 1, 256 and 1,024, and fewer than
 /// the 129 a fit from the grid's candidates alone took to reach 5 mm; so do a box and a capsule
-/// that 64 cannot cover directly within it. A box that 256 cover directly within it keeps those
-/// cells.
+/// that 64 cannot cover directly within it. A box that 256 cover directly with a grid of cells
+/// takes its medial cover of fewer spheres at every budget.
 #[test]
 fn a_held_objects_spheres_reach_its_tolerance_whatever_its_budget() {
     let robot = common::panda().unwrap();
@@ -850,25 +854,39 @@ fn a_held_objects_spheres_reach_its_tolerance_whatever_its_budget() {
         "{} spheres reach {reach} m past the capsule",
         rod.len()
     );
-    // A box 5 by 5 by 7 cm, which 256 cover directly within it, keeps those cells, of one size,
-    // where a fit within it takes fewer spheres.
-    let cells = attached(
-        Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.025, 0.025, 0.035)),
-        options(256),
-    );
-    assert!(
-        cells.len() > default.budget && cells.iter().all(|s| s[3] == cells[0][3]),
-        "{cells:?}"
-    );
+    // A box 5 by 5 by 7 cm, which 256 cover directly with a grid of cells within it, takes its
+    // medial cover of fewer spheres at any budget: a bigger budget never costs more.
+    let block = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.025, 0.025, 0.035));
+    let medial = attached(block.clone(), default);
+    for budget in [1, 256, 1024] {
+        assert_eq!(
+            attached(block.clone(), options(budget)),
+            medial,
+            "at {budget}"
+        );
+    }
 }
+
+/// Boxes a held object's medial cover takes: the blocks `examples/handover/` passes, a 6 cm cube,
+/// a cereal box and a box thinner than either tolerance.
+const MEDIAL_BOXES: [(&str, Vec3); 7] = [
+    ("block 1", Vec3::new(0.12, 0.0125, 0.025)),
+    ("block 2", Vec3::new(0.125, 0.016, 0.028)),
+    ("block 3", Vec3::new(0.13, 0.015, 0.027)),
+    ("block 4", Vec3::new(0.14, 0.0175, 0.03)),
+    ("a 6 cm cube", Vec3::new(0.03, 0.03, 0.03)),
+    ("a cereal box", Vec3::new(0.095, 0.035, 0.135)),
+    ("a thin box", Vec3::new(0.07, 0.05, 0.0005)),
+];
 
 /// A held object's spheres hold all of it and reach no farther past it than the tolerance, on the
 /// shapes that test that hardest: a bowl, fitted; a slab 2 mm thick, where a sphere crosses its
 /// faces steeply; a sheet 0.08 mm thick, too thin for a center inside it to reach its faces; a bar
 /// 12 mm square and 60 cm long, fitted for a budget of 8; a cylinder whose
 /// mesh of 24 sides lies farther inside it than the tolerance left past a margin; a mug, a
-/// cylinder with a box through its side, fitted as one; and a plate and a wheel's rim, which a
-/// layer of rings covers past the budget. Points of each surface at random, its
+/// cylinder with a box through its side, fitted as one; a plate and a wheel's rim, which a layer
+/// of rings covers past the budget; and the boxes a medial cover takes past it, at 5 and 1 mm.
+/// Points of each surface at random, its
 /// corners, its edges and rims, and its rims at the middles of the 24 sectors each lie inside a
 /// sphere, and every sphere's radius and its center's signed distance to the shapes sum to no more
 /// than the tolerance.
@@ -917,7 +935,11 @@ fn a_held_objects_spheres_hold_all_of_it() {
             vec![cylinder(0.1, 0.01)],
             options(64, 0.005),
         ),
-    ];
+    ]
+    .into_iter()
+    .chain(MEDIAL_BOXES.into_iter().flat_map(|(name, half)| {
+        [0.005, 0.001].map(|tolerance| (name, vec![cuboid(half)], options(64, tolerance)))
+    }));
     let mut rng = Rng::new(17);
     for (name, shapes, spheres) in cases {
         let held = robot
@@ -1136,5 +1158,259 @@ fn a_hands_spheres_take_in_what_it_holds() {
             hand.iter().any(at),
             "the ball's sphere at {x}, {y}, {z} is no hand sphere"
         );
+    }
+}
+
+/// Checks dense deterministic samples of a solid cuboid (corners, edges, faces, and interior)
+/// for strict `f32` enclosure (gap 0) and per-sphere exact overhang via `Obstacle::distance`.
+fn check_box_cover_samples(
+    name: &str,
+    shape: &Obstacle,
+    half: Vec3,
+    pose: Pose,
+    spheres: &[[f32; 4]],
+    reach_limit: f32,
+    rng: &mut Rng,
+) {
+    assert!(!spheres.is_empty(), "{name}: empty sphere cover");
+    let to_world = |local: Vec3| pose.position + pose.rotation * local;
+    let mut points = Vec::new();
+
+    // All 8 corners.
+    for corner in 0..8 {
+        let sign = |bit: i32| if corner & bit == 0 { -1.0 } else { 1.0 };
+        points.push(to_world(half * Vec3::new(sign(1), sign(2), sign(4))));
+    }
+    // Dense uniform samples along all 12 edges.
+    for axis in 0..3 {
+        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+        for su in [-1.0, 1.0] {
+            for sv in [-1.0, 1.0] {
+                for step in 0..=200 {
+                    let t = 2.0 * step as f32 / 200.0 - 1.0;
+                    let mut p = Vec3::ZERO;
+                    p[axis] = t * half[axis];
+                    p[u] = su * half[u];
+                    p[v] = sv * half[v];
+                    points.push(to_world(p));
+                }
+            }
+        }
+    }
+    // Face centers and box center (catching any missing mid-plane sheet).
+    points.push(to_world(Vec3::ZERO));
+    for axis in 0..3 {
+        for sign in [-1.0, 1.0] {
+            let mut p = Vec3::ZERO;
+            p[axis] = sign * half[axis];
+            points.push(to_world(p));
+        }
+    }
+    // Fresh deterministic samples across faces, edges, and solid interior.
+    for _ in 0..40_000 {
+        let mut p = Vec3::new(
+            rng.range(-half.x, half.x),
+            rng.range(-half.y, half.y),
+            rng.range(-half.z, half.z),
+        );
+        points.push(to_world(p));
+        let axis = (rng.uniform() * 3.0) as usize % 3;
+        p[axis] = if rng.uniform() < 0.5 {
+            -half[axis]
+        } else {
+            half[axis]
+        };
+        points.push(to_world(p));
+        let other = (axis + 1 + (rng.uniform() * 2.0) as usize % 2) % 3;
+        p[other] = if rng.uniform() < 0.5 {
+            -half[other]
+        } else {
+            half[other]
+        };
+        points.push(to_world(p));
+    }
+
+    let outside = |p: &Vec3| {
+        spheres
+            .iter()
+            .map(|s| p.distance(Vec3::new(s[0], s[1], s[2])) - s[3])
+            .fold(f32::INFINITY, f32::min)
+    };
+    let gap = points.iter().map(outside).fold(0.0f32, f32::max);
+    let reach = spheres
+        .iter()
+        .map(|s| s[3] + shape.distance(Vec3::new(s[0], s[1], s[2])).value)
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!(
+        gap <= 0.0,
+        "{name} ({} spheres): leaves {gap:e} m outside every sphere",
+        spheres.len()
+    );
+    assert!(
+        reach <= reach_limit,
+        "{name} ({} spheres): reaches {reach} m past box (limit {reach_limit})",
+        spheres.len()
+    );
+}
+
+/// Held cuboids that `box_cells` cannot cover within the budget use the closed-form medial cover:
+/// strict solid enclosure (gap 0) and exact overhang `<= tolerance` on the four handover blocks,
+/// the 6 cm cube, the cereal box, and a thin box with `c < tolerance` at both 5 mm and 1 mm,
+/// axis-aligned and rotated, using far fewer spheres than the fitted cover.
+#[test]
+fn held_cuboids_enclose_the_solid_box_within_tolerance_at_5mm_and_1mm() {
+    let robot = common::panda().unwrap();
+    let cases: [(&str, Vec3, usize, usize); 7] = [
+        (
+            "block 1 (240x25x50 mm)",
+            Vec3::new(0.120, 0.0125, 0.025),
+            95,
+            924,
+        ),
+        (
+            "block 2 (250x32x56 mm)",
+            Vec3::new(0.125, 0.016, 0.028),
+            109,
+            1020,
+        ),
+        (
+            "block 3 (260x30x54 mm)",
+            Vec3::new(0.130, 0.015, 0.027),
+            112,
+            1047,
+        ),
+        (
+            "block 4 (280x35x60 mm)",
+            Vec3::new(0.140, 0.0175, 0.030),
+            121,
+            1125,
+        ),
+        ("6 cm cube", Vec3::new(0.030, 0.030, 0.030), 45, 484),
+        (
+            "cereal box (190x65x280 mm)",
+            Vec3::new(0.095, 0.0325, 0.140),
+            238,
+            1973,
+        ),
+        (
+            "thin box (140x100x1 mm)",
+            Vec3::new(0.070, 0.050, 0.0005),
+            195,
+            2863,
+        ),
+    ];
+    let mut rng = Rng::new(23);
+    for tolerance in [0.005f32, 0.001] {
+        for &(name, half, max_at_5mm, max_at_1mm) in &cases {
+            let shape = Obstacle::cuboid(Vec3::ZERO, half);
+            let held = robot
+                .attach(&AttachedObject {
+                    shapes: vec![shape.clone()],
+                    spheres: SphereOptions {
+                        tolerance,
+                        ..Default::default()
+                    },
+                    ..held_box(&FINGERS)
+                })
+                .unwrap();
+            let spheres = &held.collision_model().spheres["box"];
+            let label = format!("{name} @ {:.0} mm", tolerance * 1e3);
+            check_box_cover_samples(
+                &label,
+                &shape,
+                half,
+                Pose::IDENTITY,
+                spheres,
+                tolerance,
+                &mut rng,
+            );
+            let max_spheres = if tolerance == 0.005 {
+                max_at_5mm
+            } else {
+                max_at_1mm
+            };
+            assert!(
+                spheres.len() <= max_spheres,
+                "{label}: got {} spheres, expected <= {max_spheres}",
+                spheres.len()
+            );
+        }
+    }
+    // Rotated and translated box: still strictly enclosed, with overhang within `f32` rotation
+    // rounding (`8 * f32::EPSILON * scale`).
+    let pose = Pose::new(
+        Vec3::new(0.02, -0.01, 0.09),
+        (Quat::from_rotation_x(0.7) * Quat::from_rotation_y(1.1) * Quat::from_rotation_z(0.5))
+            .normalize(),
+    );
+    let half = Vec3::new(0.095, 0.0325, 0.140);
+    let shape = Obstacle::Cuboid {
+        center: pose.position,
+        half_extents: half,
+        rotation: pose.rotation,
+    };
+    let held = robot
+        .attach(&AttachedObject {
+            shapes: vec![shape.clone()],
+            spheres: SphereOptions::default(),
+            ..held_box(&FINGERS)
+        })
+        .unwrap();
+    let spheres = &held.collision_model().spheres["box"];
+    let scale = pose.position.abs().max_element() + half.length() + 0.005;
+    check_box_cover_samples(
+        "rotated cereal box @ 5 mm",
+        &shape,
+        half,
+        pose,
+        spheres,
+        0.005 + 8.0 * f32::EPSILON * scale,
+        &mut rng,
+    );
+}
+
+/// Sweeps thin-box, hybrid-slab, slender-rod, cube, and general regime boundaries (`c / tau`
+/// across `[0, 5]`) through `Robot::attach` to verify strict enclosure and overhang everywhere.
+#[test]
+fn held_cuboids_cover_every_thickness_regime_and_boundary() {
+    let robot = common::panda().unwrap();
+    let tolerance = 0.005f32;
+    let ratios = [
+        0.0f32, 0.01, 0.2, 0.5, 0.9, 1.0, 1.2, 1.35, 1.366, 1.37, 1.5, 1.8, 2.1, 2.22, 2.23, 2.5,
+        3.0, 4.0, 5.0,
+    ];
+    let mut rng = Rng::new(31);
+    for &ratio in &ratios {
+        let c = ratio * tolerance;
+        let shapes = [
+            ("wide", Vec3::new(0.09, 0.06, c)),
+            ("narrow", Vec3::new(0.11, (c + 0.004).max(0.014), c)),
+            ("cube-like", Vec3::new(c.max(0.01), c.max(0.01), c)),
+        ];
+        for (kind, half) in shapes {
+            let shape = Obstacle::cuboid(Vec3::ZERO, half);
+            let held = robot
+                .attach(&AttachedObject {
+                    shapes: vec![shape.clone()],
+                    spheres: SphereOptions {
+                        budget: 1,
+                        tolerance,
+                        ..Default::default()
+                    },
+                    ..held_box(&FINGERS)
+                })
+                .unwrap();
+            let spheres = &held.collision_model().spheres["box"];
+            let label = format!("{kind} c/tau={ratio} ({half:?})");
+            check_box_cover_samples(
+                &label,
+                &shape,
+                half,
+                Pose::IDENTITY,
+                spheres,
+                tolerance,
+                &mut rng,
+            );
+        }
     }
 }

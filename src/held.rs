@@ -34,7 +34,8 @@ pub struct Held {
     /// spheres that takes, which `budget` does not cap. A gap narrower than what its spheres reach
     /// past it reads as a contact: a smaller tolerance fits closer, with more spheres. Its own
     /// `max_overhang` holds them, whatever the robot was loaded with, and then leaves some of it
-    /// outside them.
+    /// outside them, but for a box, a thin cylinder or a capsule, which their tiles hold whole
+    /// within the smaller of the two.
     pub spheres: SphereOptions,
 }
 

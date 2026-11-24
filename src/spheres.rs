@@ -1526,7 +1526,12 @@ pub(crate) fn cover_tiles(shapes: &[Obstacle], o: &SphereOptions) -> Option<Vec<
             Obstacle::Sphere { center, radius } => {
                 (center, Quat::IDENTITY, vec![[0.0, 0.0, 0.0, radius]])
             }
-            Obstacle::Cuboid { .. } | Obstacle::Sdf { .. } => return None,
+            Obstacle::Cuboid {
+                center,
+                half_extents,
+                rotation,
+            } => (center, rotation, box_cover(half_extents, tolerance)?),
+            Obstacle::Sdf { .. } => return None,
             Obstacle::Cylinder {
                 center,
                 rotation,
@@ -1820,6 +1825,720 @@ pub(crate) fn surface_grid(shapes: &[Obstacle], tolerance: f32) -> (Vec<(Vec3, V
     (out, spacing * FRAC_1_SQRT_2 + ROUNDING * extent)
 }
 
+/// Sphere centers of a box's medial cover in its axes sorted longest first, each with the radius it
+/// needs where that is less than its depth and the tolerance allow.
+type Centers = Vec<(f64, f64, f64, Option<f64>)>;
+
+/// Deterministic enclosing sphere cover of the axis-aligned box `[-half_extents, half_extents]`
+/// whose spheres reach at most `tolerance` past the box: recursive concentric medial shells
+/// (corners on the 3-face ray, edges on the 45-degree bisector) closing onto a staggered
+/// mid-plane sheet, with exact thin-box, hybrid-slab, slender-rod and single-sphere regimes.
+///
+/// All layout runs in `f64` for a tolerance shrunk by four times [`ROUNDING`] of the box's size,
+/// and each emitted `f32` sphere takes the largest radius that still keeps `radius - depth <=
+/// tolerance` in `f32`, absorbing casting and rotation rounding so enclosure holds strictly in
+/// `f32`. Returns `None` only when `half_extents` is negative or non-finite, or `tolerance` does
+/// not exceed the rounding slack.
+fn box_cover(half_extents: Vec3, tolerance: f32) -> Option<Vec<[f32; 4]>> {
+    use std::f64::consts::SQRT_2;
+
+    if !half_extents.is_finite() || half_extents.min_element() < 0.0 || tolerance.is_nan() {
+        return None;
+    }
+    if tolerance <= 0.0 {
+        return None;
+    }
+    let mut permutation = [0usize, 1, 2];
+    permutation.sort_by(|&i, &j| half_extents[j].total_cmp(&half_extents[i]));
+    let sorted_half = [
+        f64::from(half_extents[permutation[0]]),
+        f64::from(half_extents[permutation[1]]),
+        f64::from(half_extents[permutation[2]]),
+    ];
+    let [a, b, c] = sorted_half;
+    let raw_tolerance = f64::from(tolerance);
+
+    // Center casting (<= sqrt(3)/2 ulp), depth subtraction (<= 1 ulp), radius round-down (<= 2
+    // ulp) and subsequent pose rotation (`ROUNDING` = 8 ulp) total under 12 ulp of `a + tolerance`;
+    // 4 * ROUNDING (32 ulp) leaves strict positive enclosure headroom in `f32`.
+    let slack = 4.0 * f64::from(ROUNDING) * (a + raw_tolerance);
+    let effective_tolerance = raw_tolerance - slack;
+    if effective_tolerance <= 0.0 {
+        return None;
+    }
+
+    let emit = |centers: Centers| -> Vec<[f32; 4]> {
+        let mut out = Vec::with_capacity(centers.len());
+        for (x, y, z, exact_radius) in centers {
+            let local = [
+                x.clamp(-a, a) as f32,
+                y.clamp(-b, b) as f32,
+                z.clamp(-c, c) as f32,
+            ];
+            let depth = (half_extents[permutation[0]] - local[0].abs())
+                .min(half_extents[permutation[1]] - local[1].abs())
+                .min(half_extents[permutation[2]] - local[2].abs())
+                .max(0.0);
+            let mut radius = match exact_radius {
+                Some(required) => ((required + 0.5 * slack) as f32).min(depth + tolerance),
+                None => depth + tolerance,
+            };
+            while radius - depth > tolerance {
+                radius = radius.next_down();
+            }
+            let mut unpermuted = [0.0f32; 3];
+            for axis in 0..3 {
+                unpermuted[permutation[axis]] = local[axis];
+            }
+            out.push([unpermuted[0], unpermuted[1], unpermuted[2], radius]);
+        }
+        out
+    };
+
+    let face_radius_squared =
+        2.0 * effective_tolerance * c + effective_tolerance * effective_tolerance;
+    let face_radius = face_radius_squared.sqrt();
+
+    // Regime 0: a single sphere at the origin encloses the whole box.
+    let diagonal = (a * a + b * b + c * c).sqrt();
+    if diagonal <= c + effective_tolerance {
+        return Some(emit(vec![(0.0, 0.0, 0.0, Some(diagonal))]));
+    }
+
+    // Regime 1: slender rod — a single line of spheres along the long axis. An end center on the
+    // x-axis reaches corner (a, b, c) iff b^2 + c^2 <= face_radius^2.
+    if b * b + c * c < face_radius_squared {
+        let max_half_step = (face_radius_squared - b * b).sqrt();
+        let count = (a / max_half_step).ceil().max(1.0) as usize;
+        let half_step = a / count as f64;
+        let max_x = a - c;
+        let mut centers = Vec::with_capacity(count);
+        for k in 0..count {
+            let left = -a + (2 * k) as f64 * half_step;
+            let right = -a + (2 * k + 2) as f64 * half_step;
+            let x = (0.5 * (left + right)).clamp(-max_x, max_x);
+            let max_dx = (x - left).abs().max((right - x).abs());
+            let required = (max_dx * max_dx + b * b + c * c).sqrt();
+            centers.push((x, 0.0, 0.0, Some(required)));
+        }
+        return Some(emit(centers));
+    }
+
+    // Corner medial ray d_x = d_y = d_z = t covers the corner iff 3*t^2 <= (t + tau)^2, giving
+    // t <= (sqrt(3) + 1) / 2 * tau.
+    let corner_inset = 0.5 * (3.0_f64.sqrt() + 1.0) * effective_tolerance;
+
+    // Regime 2a (thin box, including all c <= tau): every sphere lies on z = 0 with depth c,
+    // reducing to a 2D disk cover of [-a, a] x [-b, b] centered in [-(a-c), a-c] x [-(b-c), b-c].
+    if c <= corner_inset {
+        let sheet = cover_rect_2d_within(a, b, face_radius, a - c, b - c)?;
+        let centers = sheet.into_iter().map(|(x, y)| (x, y, 0.0, None)).collect();
+        return Some(emit(centers));
+    }
+
+    // One shared z = 0 edge row beats two separate edge rows iff its half-reach
+    // sqrt(2*tau*c + tau^2 - c^2) exceeds half the single-edge optimum sqrt(2)*tau / 2, i.e.,
+    // c < (1 + sqrt(6) / 2) * tau.
+    let slab_merge_limit = (1.0 + 0.5 * 6.0_f64.sqrt()) * effective_tolerance;
+
+    // Regime 2b (hybrid thin slab): 8 corner spheres + 4 merged z = 0 edge rows + z = 0 sheet.
+    if c < slab_merge_limit {
+        let mut centers = Vec::new();
+        push_box_corners(
+            &mut centers,
+            a - corner_inset,
+            b - corner_inset,
+            c - corner_inset,
+        );
+        let slab_half_step = (face_radius_squared - c * c).sqrt();
+        let x_edge_length = (2.0 * a - 4.0 * corner_inset).max(0.0);
+        let y_edge_length = (2.0 * b - 4.0 * corner_inset).max(0.0);
+        for (length, along_x) in [(x_edge_length, true), (y_edge_length, false)] {
+            if length > 0.0 {
+                let count = (length / (2.0 * slab_half_step)).ceil() as usize;
+                let step = length / count as f64;
+                for sign in [-1.0, 1.0] {
+                    for k in 0..count {
+                        let coord = -0.5 * length + (k as f64 + 0.5) * step;
+                        if along_x {
+                            centers.push((coord, sign * (b - c), 0.0, None));
+                        } else {
+                            centers.push((sign * (a - c), coord, 0.0, None));
+                        }
+                    }
+                }
+            }
+        }
+        let inner_a = (a - 2.0 * c).max(0.0);
+        let inner_b = (b - 2.0 * c).max(0.0);
+        if inner_a > 0.0 && inner_b > 0.0 {
+            let sheet = cover_rect_2d_within(inner_a, inner_b, face_radius, a - c, b - c)?;
+            for (x, y) in sheet {
+                centers.push((x, y, 0.0, None));
+            }
+        }
+        return Some(emit(centers));
+    }
+
+    // Regime 3 (general 3D box): recursive concentric medial shells closing onto z = 0.
+    // On each axis, try the minimum edge count and exact geometric-threshold counts where the
+    // bisector strip width crosses 2*corner_inset, c, or c - face_radius/sqrt(2) (capped at
+    // 2*n_min + 1, since adding more than n_min spheres per edge always costs more than Shell 2).
+    let edge_lengths = sorted_half.map(|extent| (2.0 * extent - 4.0 * corner_inset).max(0.0));
+    let candidates_per_axis = [0usize, 1, 2].map(|axis| {
+        edge_count_candidates(
+            edge_lengths[axis],
+            effective_tolerance,
+            corner_inset,
+            c,
+            face_radius,
+            SQRT_2,
+        )
+    });
+
+    let mut best: Option<Centers> = None;
+    for &nx in &candidates_per_axis[0] {
+        for &ny in &candidates_per_axis[1] {
+            for &nz in &candidates_per_axis[2] {
+                if let Some(candidate) = build_general_box_cover(
+                    sorted_half,
+                    effective_tolerance,
+                    face_radius,
+                    corner_inset,
+                    edge_lengths,
+                    [nx, ny, nz],
+                ) && best
+                    .as_ref()
+                    .is_none_or(|b_vec| candidate.len() < b_vec.len())
+                {
+                    best = Some(candidate);
+                }
+            }
+        }
+    }
+    best.map(emit)
+}
+
+/// Candidate Sphere counts for one axis's Shell 1 edge rows: the minimum that covers the edge,
+/// one step off the vertical tangent of `t(h)` at `h = sqrt(2)*tau`, and the exact counts where
+/// the bisector strip width reaches `2*corner_inset`, `c`, or `c - face_radius/sqrt(2)`.
+fn edge_count_candidates(
+    length: f64,
+    tau: f64,
+    corner_inset: f64,
+    min_half: f64,
+    face_radius: f64,
+    sqrt_2: f64,
+) -> Vec<usize> {
+    if length <= 0.0 {
+        return vec![0];
+    }
+    let min_count = (length / (2.0 * sqrt_2 * tau)).ceil() as usize;
+    // Shell 2's step delta_2 >= (sqrt(11/4) + 1/2)*tau > sqrt(2)*tau, so Shell 2 uses fewer than
+    // `min_count` spheres per edge; bumping Shell 1 past 2*min_count + 1 can never win.
+    let cap = 2 * min_count + 1;
+    let mut counts = vec![min_count];
+    if min_count < cap {
+        counts.push(min_count + 1);
+    }
+    let max_bisector_width = 2.0 * (1.0 + sqrt_2) * tau;
+    let target_widths = [
+        2.0 * corner_inset,
+        min_half,
+        (min_half - face_radius / sqrt_2).max(0.0),
+    ];
+    for width in target_widths {
+        if width > 2.0 * tau && width < max_bisector_width {
+            let target_depth = 0.5 * width;
+            let discriminant = 2.0 * tau * tau - (target_depth - tau) * (target_depth - tau);
+            if discriminant > 0.0 {
+                let target_half_step = discriminant.sqrt();
+                let count = (length / (2.0 * target_half_step)).ceil() as usize;
+                if count >= min_count && count <= cap && !counts.contains(&count) {
+                    counts.push(count);
+                }
+            }
+        }
+    }
+    counts.sort_unstable();
+    counts
+}
+
+/// Emits the 8 sign combinations of `(x, y, z)` for a box's corners or corner-ray shell.
+fn push_box_corners(out: &mut Centers, x: f64, y: f64, z: f64) {
+    for sx in [-1.0, 1.0] {
+        for sy in [-1.0, 1.0] {
+            for sz in [-1.0, 1.0] {
+                out.push((sx * x, sy * y, sz * z, None));
+            }
+        }
+    }
+}
+
+/// Emits the 4 edge-medial rows of `count` uniformly spaced spheres along `axis` over
+/// `[-length/2, length/2]`, inset by `bisector_depth` from the other two faces.
+fn push_box_edge_rows(
+    out: &mut Centers,
+    axis: usize,
+    half: [f64; 3],
+    length: f64,
+    count: usize,
+    bisector_depth: f64,
+) {
+    let j = (axis + 1) % 3;
+    let k = (axis + 2) % 3;
+    let step = length / count as f64;
+    let offset_j = half[j] - bisector_depth;
+    let offset_k = half[k] - bisector_depth;
+    for sj in [-1.0, 1.0] {
+        for sk in [-1.0, 1.0] {
+            for index in 0..count {
+                let mut point = [0.0f64; 3];
+                point[axis] = -0.5 * length + (index as f64 + 0.5) * step;
+                point[j] = sj * offset_j;
+                point[k] = sk * offset_k;
+                out.push((point[0], point[1], point[2], None));
+            }
+        }
+    }
+}
+
+/// Builds the Regime 3 recursive medial-shell + staggered mid-plane cover for one choice of
+/// Shell 1 edge counts `edge_counts`.
+fn build_general_box_cover(
+    half: [f64; 3],
+    tau: f64,
+    face_radius: f64,
+    corner_inset: f64,
+    edge_lengths: [f64; 3],
+    edge_counts: [usize; 3],
+) -> Option<Centers> {
+    use std::f64::consts::SQRT_2;
+
+    let [a, b, c] = half;
+    let mut centers = Vec::new();
+
+    // Shell 1: 8 corners and up to 12 edge rows along the 45-degree bisectors.
+    push_box_corners(
+        &mut centers,
+        a - corner_inset,
+        b - corner_inset,
+        c - corner_inset,
+    );
+    let mut strip_widths = [2.0 * corner_inset; 3];
+    for axis in 0..3 {
+        if edge_counts[axis] == 0 {
+            continue;
+        }
+        let j = (axis + 1) % 3;
+        let k = (axis + 2) % 3;
+        let half_step = edge_lengths[axis] / (2.0 * edge_counts[axis] as f64);
+        let bisector_depth = (tau + (2.0 * tau * tau - half_step * half_step).max(0.0).sqrt())
+            .min(half[j])
+            .min(half[k]);
+        let face_reach = (2.0 * tau * bisector_depth + tau * tau - half_step * half_step)
+            .max(0.0)
+            .sqrt();
+        strip_widths[axis] = bisector_depth + face_reach;
+        push_box_edge_rows(
+            &mut centers,
+            axis,
+            half,
+            edge_lengths[axis],
+            edge_counts[axis],
+            bisector_depth,
+        );
+    }
+
+    // Exact guaranteed face insets after Shell 1: on face k (axes i, j), every point with
+    // u_i <= inset_i or u_j <= inset_j is covered.
+    let corner_span = 2.0 * corner_inset;
+    let safe_inset = |along: f64, across: f64| {
+        if along >= corner_span {
+            across
+        } else {
+            across.min(corner_span)
+        }
+    };
+    let z_inset_x = safe_inset(strip_widths[0], strip_widths[1]);
+    let z_inset_y = safe_inset(strip_widths[1], strip_widths[0]);
+    let y_inset_x = safe_inset(strip_widths[0], strip_widths[2]);
+    let y_inset_z = safe_inset(strip_widths[2], strip_widths[0]);
+    let x_inset_y = safe_inset(strip_widths[1], strip_widths[2]);
+    let x_inset_z = safe_inset(strip_widths[2], strip_widths[1]);
+
+    // Fast path F1: Shell 1 already covers all four side faces, leaving only the z = +-c core.
+    let x_sides_done = x_inset_z >= c || x_inset_y >= b;
+    let y_sides_done = y_inset_z >= c || y_inset_x >= a;
+    if x_sides_done && y_sides_done {
+        let rem_a = (a - z_inset_x).max(0.0);
+        let rem_b = (b - z_inset_y).max(0.0);
+        if rem_a <= 0.0 || rem_b <= 0.0 {
+            return Some(centers);
+        }
+        if let Some(sheet) = cover_rect_2d_within(rem_a, rem_b, face_radius, a - c, b - c) {
+            centers.extend(sheet.into_iter().map(|(x, y)| (x, y, 0.0, None)));
+            return Some(centers);
+        }
+    }
+
+    // Fast path F3: x-ends are done and y-sides have a narrow remaining strip; test closing both
+    // y = +-b and z = +-c together with 1 or 2 shared staggered rows on z = 0.
+    let y_strip = (c - y_inset_z).max(0.0);
+    let mut best_tail: Option<Centers> = None;
+    if x_sides_done && y_strip > 0.0 && y_strip <= face_radius / SQRT_2 {
+        let z_rem_a = (a - z_inset_x).max(0.0);
+        let y_rem_a = (a - y_inset_x).max(0.0);
+        let z_rem_b = (b - z_inset_y).max(0.0);
+        let shared_a = z_rem_a.max(y_rem_a);
+        if shared_a > 0.0 {
+            best_tail =
+                try_shared_midplane_rows(half, tau, face_radius, shared_a, z_rem_b, y_strip);
+        }
+    }
+
+    // General path: concentric slanted medial shells m = 2.. until u >= c - face_radius/sqrt(2).
+    // From 2*tau*(u + delta) + tau^2 = 2*delta^2, v_1 = sqrt(tau*u + 3/4*tau^2) and each shell
+    // advances delta by +tau while covering [u, u + 2*delta] on all six faces.
+    let mut general_tail = Vec::new();
+    let mut inset = strip_widths[0].min(strip_widths[1]).min(strip_widths[2]);
+    let base_v = (tau * inset + 0.75 * tau * tau).sqrt();
+    let mut shell = 2usize;
+    let stop_inset = c - face_radius / SQRT_2;
+    while inset < stop_inset {
+        let delta = base_v + (shell as f64 - 1.5) * tau;
+        let bisector_depth = inset + delta;
+        let next_inset = inset + 2.0 * delta;
+        push_box_corners(
+            &mut general_tail,
+            a - bisector_depth,
+            b - bisector_depth,
+            c - bisector_depth,
+        );
+        for axis in 0..3 {
+            let length = (2.0 * half[axis] - 2.0 * next_inset).max(0.0);
+            if length > 0.0 {
+                let count = (length / (2.0 * delta)).ceil() as usize;
+                push_box_edge_rows(&mut general_tail, axis, half, length, count, bisector_depth);
+            }
+        }
+        inset = next_inset;
+        shell += 1;
+    }
+
+    // Final z = 0 closure (Cases F1, F2, F4).
+    if inset >= c {
+        let rem_a = (a - inset).max(0.0);
+        let rem_b = (b - inset).max(0.0);
+        if rem_a > 0.0 && rem_b > 0.0 {
+            let sheet = cover_rect_2d_within(rem_a, rem_b, face_radius, a - c, b - c)?;
+            general_tail.extend(sheet.into_iter().map(|(x, y)| (x, y, 0.0, None)));
+        }
+    } else {
+        let remaining_z = c - inset;
+        let max_radius = c + tau;
+        // Case F2: a single central sphere closes all 6 faces (exact for cubes).
+        let rem_a = a - inset;
+        let rem_b = b - inset;
+        if rem_a * rem_a + rem_b * rem_b <= face_radius * face_radius
+            && a * a + rem_b * rem_b + remaining_z * remaining_z <= max_radius * max_radius
+            && b * b + rem_a * rem_a + remaining_z * remaining_z <= max_radius * max_radius
+        {
+            general_tail.push((0.0, 0.0, 0.0, None));
+        } else {
+            // Case F4: 4 merged corners + 4 merged z = 0 border rows + central staggered sheet.
+            let inner_inset = 2.0 * c - inset;
+            for sx in [-1.0, 1.0] {
+                for sy in [-1.0, 1.0] {
+                    general_tail.push((sx * (a - c), sy * (b - c), 0.0, None));
+                }
+            }
+            let merged_half_step = (face_radius * face_radius - remaining_z * remaining_z)
+                .max(0.0)
+                .sqrt();
+            let lx = (2.0 * a - 2.0 * inner_inset).max(0.0);
+            let ly = (2.0 * b - 2.0 * inner_inset).max(0.0);
+            if lx > 0.0 {
+                let nx = (lx / (2.0 * merged_half_step)).ceil() as usize;
+                let step = lx / nx as f64;
+                for sign in [-1.0, 1.0] {
+                    for k in 0..nx {
+                        let x = -0.5 * lx + (k as f64 + 0.5) * step;
+                        general_tail.push((x, sign * (b - c), 0.0, None));
+                    }
+                }
+            }
+            if ly > 0.0 {
+                let ny = (ly / (2.0 * merged_half_step)).ceil() as usize;
+                let step = ly / ny as f64;
+                for sign in [-1.0, 1.0] {
+                    for k in 0..ny {
+                        let y = -0.5 * ly + (k as f64 + 0.5) * step;
+                        general_tail.push((sign * (a - c), y, 0.0, None));
+                    }
+                }
+            }
+            let core_a = (a - inner_inset).max(0.0);
+            let core_b = (b - inner_inset).max(0.0);
+            if core_a > 0.0 && core_b > 0.0 {
+                let sheet = cover_rect_2d_within(core_a, core_b, face_radius, a - c, b - c)?;
+                general_tail.extend(sheet.into_iter().map(|(x, y)| (x, y, 0.0, None)));
+            }
+        }
+    }
+
+    match best_tail {
+        Some(tail) if tail.len() < general_tail.len() => centers.extend(tail),
+        _ => centers.extend(general_tail),
+    }
+    Some(centers)
+}
+
+/// Fast path F3: closes both the remaining `y = +-b` strips (`|x| <= span_a, |z| <= y_strip`) and
+/// the `z = +-c` core (`|x| <= span_a, |y| <= z_rem_b`) with 1 centered row or 2 staggered rows on
+/// `z = 0`, solving the optimal row offset `y_row` in closed form.
+fn try_shared_midplane_rows(
+    half: [f64; 3],
+    tau: f64,
+    face_radius: f64,
+    span_a: f64,
+    z_rem_b: f64,
+    y_strip: f64,
+) -> Option<Centers> {
+    let [a, b, c] = half;
+    let max_x = a - c;
+    let max_y = b - c;
+    let end_inset = (span_a - max_x).max(0.0);
+    let r2 = face_radius * face_radius;
+    if end_inset >= face_radius {
+        return None;
+    }
+    let end_chord = (r2 - end_inset * end_inset).sqrt();
+    let max_radius = c + tau;
+    let side_budget = max_radius * max_radius - y_strip * y_strip;
+    if side_budget <= 0.0 {
+        return None;
+    }
+
+    let mut best: Option<Centers> = None;
+
+    // Option 1: a single row on y = 0, z = 0 if it reaches both y = +-b and z = +-c.
+    if z_rem_b < face_radius && b * b < side_budget {
+        let half_reach = (r2 - z_rem_b * z_rem_b).min(side_budget - b * b).sqrt();
+        if let Some(xs) = cover_segment_1d_within(span_a, half_reach, max_x) {
+            best = Some(xs.into_iter().map(|x| (x, 0.0, 0.0, None)).collect());
+        }
+    }
+
+    // Option 2: two staggered rows at y = +-y_row on z = 0.
+    // The three half-step limits are h1 (outer z-face strip), h2 (middle staggered strip +
+    // clamped end strip), and h3 (side face y = +-b). Since min(h1, h3) is non-decreasing and h2
+    // is non-increasing, the maximum occurs at a kink or the exact crossing h1 = h2 or h3 = h2.
+    let mut candidate_ys = vec![
+        0.0,
+        max_y,
+        z_rem_b.clamp(0.0, max_y),
+        (0.5 * end_chord).clamp(0.0, max_y),
+        ((z_rem_b + end_chord) / 3.0).clamp(0.0, max_y),
+    ];
+    // Crossing h3(y)^2 = h2(y)^2 expands to:
+    // 3*y^2 + (2*b - 4*end_chord)*y + (c^2 - y_strip^2 - b^2 + end_chord^2) = 0.
+    let linear = 2.0 * b - 4.0 * end_chord;
+    let constant = c * c - y_strip * y_strip - b * b + end_chord * end_chord;
+    let discriminant = linear * linear - 12.0 * constant;
+    if discriminant >= 0.0 {
+        let root = discriminant.sqrt();
+        candidate_ys.push(((-linear + root) / 6.0).clamp(0.0, max_y));
+        candidate_ys.push(((-linear - root) / 6.0).clamp(0.0, max_y));
+    }
+
+    for y_row in candidate_ys {
+        let outer_z = (z_rem_b - y_row).max(0.0);
+        if outer_z >= face_radius {
+            continue;
+        }
+        let h1_sq = r2 - outer_z * outer_z;
+        let middle_gap = (2.0 * y_row - end_chord).max(0.0);
+        if middle_gap >= face_radius {
+            continue;
+        }
+        let h2_sq = r2 - middle_gap * middle_gap;
+        let side_y = b - y_row;
+        let h3_sq = side_budget - side_y * side_y;
+        if h3_sq <= 0.0 {
+            continue;
+        }
+        let half_reach = h1_sq.min(h2_sq).min(h3_sq).sqrt();
+        if half_reach <= 0.0 {
+            continue;
+        }
+        let count = (span_a / half_reach).ceil().max(1.0) as usize;
+        let actual_half = span_a / count as f64;
+        // Even-row centers sit at -span_a + (2*k + 1)*actual_half; they stay inside [-max_x, max_x]
+        // iff actual_half >= end_inset.
+        if actual_half < end_inset {
+            continue;
+        }
+        let total = 2 * count + 1;
+        if best
+            .as_ref()
+            .is_some_and(|existing| existing.len() <= total)
+        {
+            continue;
+        }
+        let mut pts = Vec::with_capacity(total);
+        for k in 0..count {
+            let x = -span_a + (2 * k + 1) as f64 * actual_half;
+            pts.push((x, y_row, 0.0, None));
+        }
+        for k in 0..=count {
+            let x = (-span_a + (2 * k) as f64 * actual_half).clamp(-max_x, max_x);
+            pts.push((x, -y_row, 0.0, None));
+        }
+        best = Some(pts);
+    }
+    best
+}
+
+/// Fewest 1D centers inside `[-max_coord, max_coord]` whose intervals of half-width `half_reach`
+/// cover `[-extent, extent]`.
+fn cover_segment_1d_within(extent: f64, half_reach: f64, max_coord: f64) -> Option<Vec<f64>> {
+    let inset = (extent - max_coord).max(0.0);
+    if half_reach <= 0.0 || inset > half_reach {
+        return None;
+    }
+    if extent <= half_reach {
+        return Some(vec![0.0]);
+    }
+    let unconstrained = (extent / half_reach).ceil() as usize;
+    let actual_half = extent / unconstrained as f64;
+    if actual_half >= inset {
+        let coords = (0..unconstrained)
+            .map(|k| -extent + (2 * k + 1) as f64 * actual_half)
+            .collect();
+        return Some(coords);
+    }
+    // Pin the two outer centers at +-max_coord and divide [-max_coord, max_coord] evenly.
+    let intervals = (max_coord / half_reach).ceil().max(1.0) as usize;
+    let count = intervals + 1;
+    let step = 2.0 * max_coord / intervals as f64;
+    let coords = (0..count).map(|k| -max_coord + k as f64 * step).collect();
+    Some(coords)
+}
+
+/// 2D disk cover of `[-a, a] x [-b, b]` with disk radius `radius` and every center constrained to
+/// `[-max_x, max_x] x [-max_y, max_y]`, taking the fewest disks among 1 disk, rectangular grids
+/// (with pinned outer rows/columns when constrained), and staggered grids in both orientations.
+fn cover_rect_2d_within(
+    a: f64,
+    b: f64,
+    radius: f64,
+    max_x: f64,
+    max_y: f64,
+) -> Option<Vec<(f64, f64)>> {
+    let r2 = radius * radius;
+    if a * a + b * b <= r2 {
+        return Some(vec![(0.0, 0.0)]);
+    }
+    let mut best: Option<Vec<(f64, f64)>> = None;
+    for swapped in [false, true] {
+        let (ra, rb, mx, my) = if swapped {
+            (b, a, max_y, max_x)
+        } else {
+            (a, b, max_x, max_y)
+        };
+        let ex = (ra - mx).max(0.0);
+        let ey = (rb - my).max(0.0);
+        if ex * ex + ey * ey > r2 {
+            continue;
+        }
+        let place = |x: f64, y: f64| if swapped { (y, x) } else { (x, y) };
+
+        let rows_min = (rb / radius).floor() as usize + 1;
+        let mut rows_max = ((2.0 * rb / radius).ceil() as usize + 3).max(rows_min);
+        let max_by = (r2 - ex * ex).max(0.0).sqrt();
+        if my > 0.0 && max_by > 0.0 {
+            let pinned_rows = (my / max_by).ceil() as usize + 1;
+            rows_max = rows_max.max(pinned_rows);
+        }
+
+        let end_chord = (r2 - ex * ex).max(0.0).sqrt();
+        for rows in rows_min..=rows_max {
+            // Rectangular grid with outer rows pinned to +-my if needed.
+            let (ys, half_y) = if rows == 1 {
+                (vec![0.0], rb)
+            } else if rb / rows as f64 >= ey {
+                let half_y = rb / rows as f64;
+                let ys = (0..rows)
+                    .map(|j| -rb + (2 * j + 1) as f64 * half_y)
+                    .collect();
+                (ys, half_y)
+            } else {
+                let half_y = ey.max(my / (rows - 1) as f64);
+                let step = 2.0 * my / (rows - 1) as f64;
+                let ys = (0..rows).map(|j| -my + j as f64 * step).collect();
+                (ys, half_y)
+            };
+            if half_y < radius {
+                let half_x = (r2 - half_y * half_y).sqrt();
+                if let Some(xs) = cover_segment_1d_within(ra, half_x, mx) {
+                    let total = rows * xs.len();
+                    if best.as_ref().is_none_or(|existing| total < existing.len()) {
+                        let mut pts = Vec::with_capacity(total);
+                        for &y in &ys {
+                            for &x in &xs {
+                                pts.push(place(x, y));
+                            }
+                        }
+                        best = Some(pts);
+                    }
+                }
+            }
+
+            // Staggered (hexagonal-style) grid for rows >= 2.
+            // Setting outer margin q >= (2*rb - (rows - 1)*end_chord) / (rows + 1) guarantees
+            // 2*d_in - end_chord <= q <= sqrt(r^2 - h_act^2), which simultaneously covers the
+            // outer strips, interior staggered triangles, and clamped odd-row end strips.
+            if rows >= 2 && end_chord > 0.0 {
+                let q = ((2.0 * rb - (rows - 1) as f64 * end_chord) / (rows + 1) as f64)
+                    .max(ey)
+                    .max(0.0);
+                if q < radius && q < rb {
+                    let half_in = (rb - q) / (rows - 1) as f64;
+                    let half_x = (r2 - q * q).sqrt();
+                    if half_x > 0.0 {
+                        let count = (ra / half_x).ceil().max(1.0) as usize;
+                        let actual_half = ra / count as f64;
+                        if actual_half >= ex {
+                            let total = rows * count + rows / 2;
+                            if best.as_ref().is_none_or(|existing| total < existing.len()) {
+                                let mut pts = Vec::with_capacity(total);
+                                for j in 0..rows {
+                                    let y = -rb + q + 2.0 * j as f64 * half_in;
+                                    if j % 2 == 0 {
+                                        for k in 0..count {
+                                            let x = -ra + (2 * k + 1) as f64 * actual_half;
+                                            pts.push(place(x, y));
+                                        }
+                                    } else {
+                                        for k in 0..=count {
+                                            let x =
+                                                (-ra + (2 * k) as f64 * actual_half).clamp(-mx, mx);
+                                            pts.push(place(x, y));
+                                        }
+                                    }
+                                }
+                                best = Some(pts);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2043,5 +2762,71 @@ mod tests {
             });
             assert!(its_own, "pick {pick} reaches no sample the others miss");
         }
+    }
+
+    /// The medial box cover on random boxes, 0.5 mm to 15 cm along each axis in any order, for
+    /// tolerances of 0.5 to 10 mm: every point of a grid a quarter tolerance apart through each box
+    /// lies inside a sphere, and no sphere reaches past the box farther than the tolerance. Boxes
+    /// whose grid would take more than 400,000 points are left out.
+    #[test]
+    fn medial_box_covers_hold_random_boxes() {
+        let mut state: u64 = 12345;
+        let mut uniform = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let (smallest, largest) = (0.0005f64.ln(), 0.15f64.ln());
+        let (mut tried, mut failed) = (0, vec![]);
+        for _ in 0..400 {
+            let tolerance = 0.0005 + uniform() * 0.0095;
+            let mut h = [0.0f64; 3];
+            for extent in &mut h {
+                *extent = (smallest + uniform() * (largest - smallest)).exp();
+            }
+            let step = tolerance / 4.0;
+            let points: f64 = h.iter().map(|x| 2.0 * x / step).product();
+            if points > 4e5 {
+                continue;
+            }
+            tried += 1;
+            let half = Vec3::new(h[0] as f32, h[1] as f32, h[2] as f32);
+            let Some(spheres) = box_cover(half, tolerance as f32) else {
+                failed.push((half, tolerance, "no cover".to_string()));
+                continue;
+            };
+            let h = [half.x, half.y, half.z].map(f64::from);
+            let depth = |s: &[f32; 4]| {
+                (0..3)
+                    .map(|k| h[k] - f64::from(s[k]).abs())
+                    .fold(f64::INFINITY, f64::min)
+            };
+            let past = spheres
+                .iter()
+                .map(|s| f64::from(s[3]) - depth(s))
+                .fold(f64::NEG_INFINITY, f64::max);
+            let counts = h.map(|x| (2.0 * x / step).ceil() as usize + 1);
+            let at =
+                |k: usize, i: usize| -h[k] + 2.0 * h[k] * i as f64 / (counts[k] - 1).max(1) as f64;
+            let mut gap = f64::NEG_INFINITY;
+            for i in 0..counts[0] {
+                for j in 0..counts[1] {
+                    for k in 0..counts[2] {
+                        let p = [at(0, i), at(1, j), at(2, k)];
+                        let outside = |s: &[f32; 4]| {
+                            let d2: f64 = (0..3).map(|a| (p[a] - f64::from(s[a])).powi(2)).sum();
+                            d2.sqrt() - f64::from(s[3])
+                        };
+                        gap = gap.max(spheres.iter().map(outside).fold(f64::INFINITY, f64::min));
+                    }
+                }
+            }
+            if gap > 0.0 || past > tolerance + 1e-9 {
+                failed.push((half, tolerance, format!("{gap:e} outside, {past:e} past")));
+            }
+        }
+        assert!(tried > 100, "{tried} boxes tried");
+        assert!(failed.is_empty(), "{failed:?}");
     }
 }
