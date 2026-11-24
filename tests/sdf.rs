@@ -5646,6 +5646,20 @@ fn occupied_corner_field_bounds_the_full_cubes_at_seams_and_past_its_faces() {
             .map(|b| b.distance(p).value)
             .fold(f32::INFINITY, f32::min)
     };
+    // Six fine intervals from each of two faces, beside the edge between them.
+    let left = blocks[0].pose().position;
+    let edge = map
+        .occupied()
+        .into_iter()
+        .filter(|p| p.x < 0.0)
+        .reduce(Vec3::min)
+        .unwrap();
+    let gap_point = Vec3::new(edge.x - 2.0 * voxel, edge.y - 2.0 * voxel, left.z);
+    let slack = exact(gap_point) - field.distance(gap_point).value;
+    assert!(
+        (0.0..0.00012).contains(&slack),
+        "slack beside a straight edge: {slack}"
+    );
     let mut closest_gain = 0.0f32;
     for x in -24..=24 {
         for y in -23..=23 {
