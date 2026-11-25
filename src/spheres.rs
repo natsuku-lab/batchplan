@@ -447,8 +447,16 @@ impl LinkFit {
     /// and the samples they leave: without a limit, those no candidate reaches.
     fn greedy(&self, overhang: f32, limit: usize) -> (Vec<usize>, Vec<usize>) {
         let words = self.samples.len().div_ceil(64);
-        // Samples in columns along z, so each candidate tests only those within its reach.
-        let columns = Columns::new(&self.samples);
+        // Samples in columns along z, so each candidate tests only those within its reach: as
+        // wide as the median candidate reaches, so a candidate's window spans a few each way.
+        let mut spans: Vec<f32> = self.candidates.iter().map(|c| c.1 + overhang).collect();
+        let middle = spans.len() / 2;
+        let width = if spans.is_empty() {
+            0.0
+        } else {
+            *spans.select_nth_unstable_by(middle, f32::total_cmp).1
+        };
+        let columns = Columns::new(&self.samples, width);
         let reached = |&(c, r): &(Vec3, f32)| {
             let mut bits = vec![0u64; words];
             // Padded past rounding, so the window keeps every sample `reaches` accepts: a sample
@@ -2541,9 +2549,6 @@ fn cover_rect_2d_within(
     best
 }
 
-/// How many columns [`Columns`] lays along the longer of x and y.
-const COLUMNS: usize = 32;
-
 /// Points bucketed into square columns over x and y, each sorted along z: the points within a
 /// box about a center are those of the columns it spans, within its z range in each.
 struct Columns {
@@ -2559,19 +2564,21 @@ struct Columns {
 }
 
 impl Columns {
-    /// [`COLUMNS`] columns along the longer of the points' bounds over x and y.
-    fn new(points: &[Vec3]) -> Self {
+    /// Columns `width` wide over the points' bounds, or wider where that would make more columns
+    /// than points, and no more along x or y than points.
+    fn new(points: &[Vec3], width: f32) -> Self {
         let (lo, hi) = points
             .iter()
             .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(a, b), &p| {
                 (a.min(p), b.max(p))
             });
         let size = (hi - lo).max(Vec3::splat(f32::MIN_POSITIVE));
-        let width = size.x.max(size.y) / COLUMNS as f32;
-        let counts = [
-            ((size.x / width) as usize + 1).min(COLUMNS),
-            ((size.y / width) as usize + 1).min(COLUMNS),
-        ];
+        let n = points.len().max(1);
+        let width = width
+            .max((size.x * size.y / n as f32).sqrt())
+            .max(f32::MIN_POSITIVE);
+        let along = |extent: f32| ((extent / width) as usize).saturating_add(1).min(n);
+        let counts = [along(size.x), along(size.y)];
         let column = |p: Vec3| {
             let at = |v: f32, n: usize| ((v / width) as usize).min(n - 1);
             at(p.x - lo.x, counts[0]) * counts[1] + at(p.y - lo.y, counts[1])
@@ -2619,14 +2626,15 @@ impl Columns {
     }
 }
 
-/// How many cells [`SphereCells`] lays along each axis of its spheres' bounds.
-const SPHERE_CELLS: usize = 16;
-
 /// Spheres bucketed by the cells of a grid their boxes, grown by a margin, overlap: the spheres
-/// that may hold a point within that margin past their radius are those of the point's cell.
+/// that may hold a point within that margin past their radius are those of the point's cell. As
+/// many cells along each axis of their bounds as there are spheres along it were they spread
+/// evenly, about one cell per sphere: building it costs about what testing every sphere once would.
 struct SphereCells {
     origin: Vec3,
     width: Vec3,
+    /// Cells along each axis.
+    cells: usize,
     /// Per cell, where its spheres start in `members`, and one past the last cell's end.
     starts: Vec<usize>,
     /// The spheres' indices, cell by cell, each cell's in increasing order.
@@ -2643,16 +2651,16 @@ impl SphereCells {
             .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(a, b), (l, h)| {
                 (a.min(l), b.max(h))
             });
-        let width = ((hi - lo) / SPHERE_CELLS as f32).max(Vec3::splat(f32::MIN_POSITIVE));
+        let cells = ((spheres.len() as f32).cbrt().ceil() as usize).max(1);
+        let width = ((hi - lo) / cells as f32).max(Vec3::splat(f32::MIN_POSITIVE));
         let cell = |p: Vec3| {
             let at = ((p - lo) / width)
                 .floor()
-                .clamp(Vec3::ZERO, Vec3::splat((SPHERE_CELLS - 1) as f32));
+                .clamp(Vec3::ZERO, Vec3::splat((cells - 1) as f32));
             at.as_uvec3()
         };
-        let index =
-            |c: UVec3| (c.x as usize * SPHERE_CELLS + c.y as usize) * SPHERE_CELLS + c.z as usize;
-        let mut lists = vec![vec![]; SPHERE_CELLS * SPHERE_CELLS * SPHERE_CELLS];
+        let index = |c: UVec3| (c.x as usize * cells + c.y as usize) * cells + c.z as usize;
+        let mut lists = vec![vec![]; cells * cells * cells];
         for (j, sphere) in spheres.iter().enumerate() {
             let (l, h) = reach(sphere);
             let (l, h) = (cell(l), cell(h));
@@ -2674,6 +2682,7 @@ impl SphereCells {
         Self {
             origin: lo,
             width,
+            cells,
             starts,
             members,
         }
@@ -2682,12 +2691,12 @@ impl SphereCells {
     /// The spheres whose grown boxes may hold `p`; none where it lies outside them all.
     fn at(&self, p: Vec3) -> &[usize] {
         let at = (p - self.origin) / self.width;
-        let n = SPHERE_CELLS as f32;
+        let n = self.cells as f32;
         if !(at.cmpge(Vec3::ZERO).all() && at.cmplt(Vec3::splat(n)).all()) {
             return &[];
         }
         let c = at.as_uvec3();
-        let k = (c.x as usize * SPHERE_CELLS + c.y as usize) * SPHERE_CELLS + c.z as usize;
+        let k = (c.x as usize * self.cells + c.y as usize) * self.cells + c.z as usize;
         &self.members[self.starts[k]..self.starts[k + 1]]
     }
 }
