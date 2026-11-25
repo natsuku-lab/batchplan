@@ -339,7 +339,10 @@ the plane of the window around it, where that window is one plane. Readings are 
 the depth jumps, where two surfaces step, and where they meet in a concave crease, as things
 that touch or stand on one another do (LCCP's convexity rule); they are kept together across
 convex edges and curved surfaces. A stretch of surface that hides nothing and lies inside what
-rises around it is that thing's floor, as a tray's or a ramekin's.
+rises around it is that thing's floor, as a tray's or a ramekin's. Where what it stands in front
+of is a reading of no part, or of a sliver less than a window that went to the parts beside it,
+as the bottom of a gap between a floor's boards or a step a stereo camera's noise reads in a
+drawer's floor, it hides no surface (`src/segment.rs`, `Parts::hides`).
 
 What lies on no plane, as a box's side seen edge on, a rim or a handle's post, is told apart by
 jumps alone, and is a part of its own where it holds a window: where some reading's whole window
@@ -1300,10 +1303,13 @@ the run.
     (`plans/perception/open-box/clear/`), and again in this rule's first form, the cabinet then
     covered what rested inside its wall and was no longer solid (solid cabinets 30 to 28 and
     open ones 6 to 4 on `repro4-fix`): the wall now stays where it was on that side.
-  - **The overhang rule is held on exact depth alone.** Through the tests' D435 and D405, the
-    lidless box with a board over its far end is no box open at the top (the trays' rows of
-    `tests/truth.rs` say why), before the rule and after alike, and no rendered stereo scene of
-    ours moves with it.
+  - **The overhang and floor rules are held on exact depth alone.** Through the tests' D435 and
+    D405, the lidless box with a board over its far end and the tray with a gap in its floor are
+    no boxes open at the top (the trays' rows of `tests/truth.rs` say why), before these rules
+    and after alike, and no rendered stereo scene of ours moves with them. Camera depth moves in
+    one recording: on libero-spatial-4's alternate layout, the sim's stereo model on the trial's
+    recorded depth, the drawer is a box open at the top only where a floor's noise steps no
+    longer count as what it hides (`plans/perception/neon-part-b/`).
   - **A step, a ledge and a post are held by rendered scenes with one mask over the thing**:
     from above their parts meet in no crease a camera reads, and without the mask each is a
     thing that stands on the next.

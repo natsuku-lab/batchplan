@@ -119,11 +119,14 @@ pub(crate) struct Parts {
     /// that add up to less than one window cannot be told from noise.
     pub(crate) share: Vec<f32>,
     /// Per part, how much of its border it is the nearer side of, in window widths: what it
-    /// hides of the surfaces behind it.
+    /// hides of the surfaces behind it. Where what lies behind is a reading of no part, or of a
+    /// sliver less than a window that went to the parts beside it, it hides no surface of a
+    /// thing: as the bottom of a gap between a floor's boards, or a step a stereo camera's noise
+    /// reads in a floor.
     pub(crate) hides: Vec<f32>,
     /// Each place along a border where one reading hides the other, across a jump or a step:
     /// the reading in front, then the one behind. What `hides` is the sum of, reading by
-    /// reading.
+    /// reading, where what lies behind is a part's.
     pub(crate) hidden: Vec<(usize, usize)>,
     /// Per two parts that meet in a crease, the lower numbered first: how long the crease is,
     /// in window widths. Where one is of readings on a known shape and the other of readings on
@@ -398,9 +401,13 @@ pub(crate) fn parts(seen: &Seen, masks: &[u32], threads: usize) -> Parts {
         cut.get(&(part, mask)).copied().unwrap_or(part)
     };
     let mut hides = vec![0.0; count];
-    for (&side, hidden) in &sides.hides {
+    for (&(side, behind), hidden) in &sides.hides {
         let part = now(&mut first, side);
-        if part != NONE {
+        let behind = match behind.0 {
+            NONE => NONE,
+            _ => now(&mut first, behind),
+        };
+        if part != NONE && behind != NONE {
             hides[part as usize] += hidden;
         }
     }
@@ -976,8 +983,9 @@ type Side = (u32, u32);
 struct Borders {
     /// Per two parts with a border that no jump lies in, the lower numbered first.
     meetings: HashMap<(u32, u32), Meeting>,
-    /// Per side, how much of its part's border it is the nearer side of, in window widths.
-    hides: BTreeMap<Side, f32>,
+    /// Per side, and the side of what lies behind it, how much of its part's border it is the
+    /// nearer side of, in window widths.
+    hides: BTreeMap<(Side, Side), f32>,
     /// Per two sides of different parts that meet in a crease, the lower first: how long the
     /// crease is, in window widths. With it, how long they meet as one surface where one is of
     /// readings on a known shape and the other of readings on none.
@@ -1015,7 +1023,7 @@ fn borders(
 ) -> Borders {
     let seen = walker.seen;
     let side = |i: usize| (of[i], masks.get(i).copied().unwrap_or(0));
-    let mut hides: BTreeMap<Side, f32> = BTreeMap::new();
+    let mut hides: BTreeMap<(Side, Side), f32> = BTreeMap::new();
     let mut creases: BTreeMap<(Side, Side), f32> = BTreeMap::new();
     let mut touches: BTreeMap<(Side, Side), f32> = BTreeMap::new();
     let mut meetings: HashMap<(u32, u32), Meeting> = HashMap::new();
@@ -1092,8 +1100,9 @@ fn borders(
                 }
             }
             if let Some(front) = front.filter(|&front| of[front] != NONE) {
-                *hides.entry(side(front)).or_default() += 1.0 / width(front);
-                hidden.push((front, if front == i { j } else { i }));
+                let back = if front == i { j } else { i };
+                *hides.entry((side(front), side(back))).or_default() += 1.0 / width(front);
+                hidden.push((front, back));
             }
         }
     }

@@ -5289,6 +5289,35 @@ fn a_plate_on_a_trays_floor_moves_no_wall() {
     }
 }
 
+#[test]
+fn a_tray_whose_floor_hides_a_gap_in_itself_is_open_at_the_top() {
+    // The thin tray with a gap 4 mm wide, 8 cm long and 7 mm deep across the middle of its floor,
+    // as between two boards, from 40 degrees: along the gap the floor stands in front of the
+    // gap's bottom, a sliver less than a window that goes to the floor beside it. What lies behind
+    // the floor there is no surface of its own, and the floor hides nothing: it is the tray's,
+    // and the tray one solid box open at the top. Counted as hiding something, the floor was no
+    // floor and the tray two objects.
+    let mut things = thin_tray();
+    let floor = things.remove(0);
+    let gap = block(
+        Vec3::new(0.5, 0.0, 0.01),
+        Vec3::new(0.002, 0.04, 0.007),
+        [150, 110, 60],
+    );
+    things.insert(0, without(floor, gap));
+    let frame = frame_from(things, eye_above(40.0));
+    let scene = seen(&[&frame], &Scene::default());
+    let room = Room {
+        floor: Vec3::new(0.5, 0.0, 0.01),
+        half: Vec2::splat(0.11),
+        yaw: 0.0,
+    };
+    let tolerance = slack(&frame, room.floor);
+    let what = "a tray with a gap in its floor";
+    assert_open(&scene, &frame, 1, &room, &[], tolerance, what);
+    assert_eq!(scene.objects.len(), 1, "{what}: {:?}", scene.objects);
+}
+
 /// The scene of the thin tray from the tests' camera, where it is a solid box open at the top,
 /// and that object.
 fn open_tray() -> (Scene, Object) {
