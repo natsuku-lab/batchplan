@@ -5198,6 +5198,42 @@ fn a_block_under_a_board_over_a_lidless_box_keeps_the_box_open() {
 }
 
 #[test]
+fn a_panel_under_a_board_over_a_lidless_box_is_held_by_the_wall() {
+    // The board of `board`, 6 cm deep, over the lidless box, and under it a panel 4 mm through
+    // across the box, standing on its floor 3 cm in from the far wall and 2.5 cm tall, as the back
+    // of a drawer stands under a cabinet's top. The view sees the panel under the board's edge,
+    // an object of its own that rests on the box, and a wall drawn in to the board's edge holds
+    // all of it that stands over the floor: it kept the room under the board, the board's
+    // readings in it. From 30, 40 and 50 degrees the room ends at the board's edge and holds none
+    // of the board's readings, and the box is a solid box open at the top.
+    for degrees in [30.0, 40.0, 50.0] {
+        let (mut things, room) = open_box();
+        things.push(board(0.06));
+        things.push(block(
+            Vec3::new(0.422, 0.0, 0.0225),
+            Vec3::new(0.002, 0.1, 0.0125),
+            [30, 30, 200],
+        ));
+        let frame = frame_from(things, eye_above(degrees));
+        let scene = seen(&[&frame], &Scene::default());
+        let open = Room {
+            floor: room.floor + Vec3::X * 0.03,
+            half: Vec2::new(room.half.x - 0.03, room.half.y),
+            yaw: 0.0,
+        };
+        let what = format!("a panel under the board, from {degrees} degrees");
+        let shown = (frame.shows.iter())
+            .filter(|&&shows| shows == Some(7))
+            .count();
+        assert!(shown > 100, "{what}: {shown} readings of the panel in view");
+        let tolerance = slack(&frame, open.floor);
+        let (object, _) = assert_open(&scene, &frame, 1, &open, &[], tolerance, &what);
+        let (in_it, _) = in_its_room(&scene, object, &frame, 6);
+        assert_eq!(in_it, 0, "{what}: {:?}", scene.objects);
+    }
+}
+
+#[test]
 fn a_bar_across_a_lidless_box_moves_no_wall() {
     // The lidless box with a bar 2 cm wide and 1 cm through across its middle from wall to wall,
     // flush with the walls' tops, and a block 4 by 4 by 3 cm on its floor in the near half, from
