@@ -1035,14 +1035,15 @@ fn next_fit(
 const SPLINE_MARGIN: f32 = 0.002;
 
 /// What a spline keeps away from its ends, each ramped to nothing over `ramp` toward `ends`: `world`
-/// from the world, and `SPLINE_MARGIN` between the robot's links. A path the shortcuts pulled
-/// against the robot itself, which they keep nothing from, is repaired as one against the world
-/// is. Searched splines are checked against it on the device's CPU threads (`Lanes`), optimized
-/// seeds by `Device::evaluate` (`validate`), on the CPU or the GPU.
-fn spline_keep(world: f32, ramp: f32, ends: Vec<Vec<f32>>) -> Keep {
+/// from the world, and `apart` between the robot's links (`SPLINE_MARGIN`, or none in the last
+/// round, for a path the shortcuts pulled against the robot itself, which they keep nothing from,
+/// or a moving start's curve, whose first spans follow the motion). Searched splines are checked
+/// against it on the device's CPU threads (`Lanes`), optimized seeds by `Device::evaluate`
+/// (`validate`), on the CPU or the GPU.
+fn spline_keep(world: f32, apart: f32, ramp: f32, ends: Vec<Vec<f32>>) -> Keep {
     Keep {
         clearance: world,
-        apart: SPLINE_MARGIN,
+        apart,
         ramp,
         ends,
     }
@@ -1266,16 +1267,19 @@ impl Search for Planning<'_> {
                     let ends = vec![short[..n].to_vec(), short[short.len() - n..].to_vec()];
                     let ramp = self.o.shortcut.clearance_ramp;
                     // The margin from the world never exceeds what the shortcuts kept, or no
-                    // spline could follow them.
+                    // spline could follow them; between links, kept in every round but the last,
+                    // which is the one the splines kept before.
                     let clearance = self.o.shortcut.clearance;
-                    let rounds: &[f32] = if clearance > SPLINE_MARGIN {
+                    let world: &[f32] = if clearance > SPLINE_MARGIN {
                         &[clearance, SPLINE_MARGIN]
                     } else {
                         &[clearance]
                     };
+                    let last = world[world.len() - 1];
+                    let rounds = world.iter().map(|&w| (w, SPLINE_MARGIN));
                     let keeps = rounds
-                        .iter()
-                        .map(|&clearance| Arc::new(spline_keep(clearance, ramp, ends.clone())))
+                        .chain([(last, 0.0)])
+                        .map(|(w, apart)| Arc::new(spline_keep(w, apart, ramp, ends.clone())))
                         .collect();
                     let mut fit = Fitting {
                         paths: [smooth, short],
@@ -1595,7 +1599,7 @@ fn validate(
     }
     let item = |i: usize| &dense[from[i] * n..from[i + 1] * n];
     let margin = o.shortcut.clearance.min(SPLINE_MARGIN);
-    let rule = spline_keep(margin, o.shortcut.clearance_ramp, vec![]);
+    let rule = spline_keep(margin, SPLINE_MARGIN, o.shortcut.clearance_ramp, vec![]);
     // Clearances exact up to what it keeps: past that, a link's bounding sphere's gap stands in.
     let gated = CollisionWeights {
         margin: rule.clearance,
