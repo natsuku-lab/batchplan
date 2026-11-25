@@ -496,6 +496,15 @@ fn held_shapes_keep_within_a_limit_on_overhang() {
     };
     let farthest = few.iter().map(past).fold(f32::NEG_INFINITY, f32::max);
     assert!(!few.is_empty() && farthest <= limit + 1e-6, "{farthest}");
+    // Held to nothing past it, no spheres along the axis can keep it: fitted, they are inside it.
+    let inside = held_round(
+        &robot,
+        capsule,
+        with(64, Some(0.0)),
+        /* with_a_ball */ false,
+    );
+    let farthest = inside.iter().map(past).fold(f32::NEG_INFINITY, f32::max);
+    assert!(!inside.is_empty() && farthest <= 1e-6, "{farthest}");
     let plate = |center, rotation| Obstacle::Cylinder {
         center,
         rotation,

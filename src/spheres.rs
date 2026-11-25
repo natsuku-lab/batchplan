@@ -1077,8 +1077,9 @@ pub(crate) fn cover_primitives(shapes: &[Obstacle], o: &SphereOptions) -> Option
 const HAIR: f32 = 1.0 + 1e-6;
 
 /// Spheres along a capsule's axis (z) that cover it: the fewest that reach no more than
-/// `tolerance` past it, `None` where more than `budget` would. Evenly spaced from end to end,
-/// each wide enough to reach the capsule's side halfway to the next.
+/// `tolerance` past it, `None` where more than `budget` would or none can (a tolerance within the
+/// [`HAIR`] of the radius). Evenly spaced from end to end, each wide enough to reach the capsule's
+/// side halfway to the next.
 fn capsule_cover(
     radius: f32,
     half_length: f32,
@@ -1094,7 +1095,15 @@ fn capsule_cover(
         1 => half_length + radius,
         _ => radius.hypot(half_gap(count)) * HAIR,
     };
-    let count = (1..=budget).find(|&count| covering(count) - radius <= tolerance)?;
+    // The widest half gap within the tolerance, `hypot(radius, gap) * HAIR = radius + tolerance`
+    // worked in f64, sets the count past which none is worth trying: its own, and one more for
+    // what `f32` rounds.
+    let (r, t) = (f64::from(radius), f64::from(tolerance));
+    let reach = (r + t) / f64::from(HAIR);
+    let widest = (reach * reach - r * r).sqrt();
+    (widest > 0.0).then_some(())?;
+    let most = (f64::from(half_length) / widest).ceil() as usize + 2;
+    let count = (1..=budget.min(most)).find(|&count| covering(count) - radius <= tolerance)?;
     if count == 1 {
         return Some(vec![[0.0, 0.0, 0.0, covering(1)]]);
     }
