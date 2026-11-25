@@ -61,6 +61,9 @@
 //!   one with a part of the other, however their planes agree: a thing that rises from a table
 //!   without a crease stays a thing. Where they meet as one surface is kept with their creases
 //!   ([`Parts::meets`]), for a floor to be told by.
+//! - A reading on no shape of a set too few to be a surface of its own, as one read just past
+//!   what may read on a shape among readings on it, goes to a surface of readings on the shape
+//!   too, where its own surface lies on the surface's plane ([`grow`]).
 //! - Across what may read on a shape the planes tell no step, nor does one reading on a shape
 //!   ([`borders`]).
 //!
@@ -102,6 +105,10 @@ const WINDOW: f32 = 7.348_469 / CREASE;
 /// pixels: anywhere in the pixel alike (1 / sqrt(12)). On a surface that leans, it reads as
 /// depth noise.
 const LATERAL: f32 = 0.288_675;
+
+/// The fewest readings a plane is taken over: three fix one, and a fourth says whether they lie
+/// on it. Fewer readings on no shape, together, are no surface of their own.
+const LEAST: usize = 4;
 
 /// The neighbors a pixel is linked to going forward: east, south, southeast and southwest. The
 /// other four are these from the neighbor's side.
@@ -199,6 +206,7 @@ pub(crate) fn parts(seen: &Seen, masks: &[u32], threads: usize) -> Parts {
         &mut of,
         &mut surface,
         /* on its plane */ true,
+        &[],
     );
     // Slivers: what is left, told apart by jumps alone.
     let open_slivers = flood(&walker, &mut of, seeds, &open, None);
@@ -258,6 +266,7 @@ pub(crate) fn parts(seen: &Seen, masks: &[u32], threads: usize) -> Parts {
         })
         .collect();
     let mut sizes = vec![0.0; all as usize];
+    let mut counts = vec![0; all as usize];
     // Per set of slivers, the first part of readings on no shape found beside it, and whether
     // another is. A set of seeds that holds one of such readings holds them alone, and is named
     // by it.
@@ -267,6 +276,7 @@ pub(crate) fn parts(seen: &Seen, masks: &[u32], threads: usize) -> Parts {
             continue;
         }
         sizes[whole as usize] += share[i];
+        counts[whole as usize] += 1;
         if whole >= seeds {
             let by = walker.neighbors(i).map(|j| wholes[j]);
             for other in by.filter(|&other| other < open_seeds) {
@@ -320,11 +330,18 @@ pub(crate) fn parts(seen: &Seen, masks: &[u32], threads: usize) -> Parts {
         let found = (-reach..=reach).any(|dy| (-reach..=reach).any(|dx| at(x + dx, y + dy)));
         near[whole as usize] += usize::from(found);
     }
-    for (part, &whole) in of.iter_mut().zip(&wholes) {
+    // Per reading, whether it is of a set of readings on no shape that goes to the parts beside
+    // it and is too few to be a surface of its own ([`LEAST`]): one read just past what may read
+    // on a known shape among readings on it, which a surface of readings on the shape takes too
+    // where the speck lies on its plane.
+    let mut specks = vec![false; pixels];
+    for ((part, &whole), speck) in of.iter_mut().zip(&wholes).zip(&mut specks) {
         if *part != NONE {
             let edge = alongside(whole) && 2 * near[whole as usize] > readings[whole as usize];
             let kept = sizes[whole as usize] >= 1.0 && (holds[whole as usize] || !edge);
-            *part = if whole >= seeds && !kept { NONE } else { whole };
+            let dropped = whole >= seeds && !kept;
+            *speck = dropped && whole < open_slivers && counts[whole as usize] < LEAST;
+            *part = if dropped { NONE } else { whole };
         }
     }
     grow(
@@ -333,6 +350,7 @@ pub(crate) fn parts(seen: &Seen, masks: &[u32], threads: usize) -> Parts {
         &mut of,
         &mut surface,
         /* on its plane */ false,
+        &specks,
     );
     // A wall's outside and the inside it stands in front of are one part too, where they are
     // round about one axis and end in one rim, both of readings on no shape. Which reading hides
@@ -752,7 +770,7 @@ impl Planes {
             // Readings on one line, or too few, lie on no one plane: on a line, the determinant
             // is what rounding leaves of its terms, under half of a double's digits of them.
             let spans = determinant > f64::EPSILON.sqrt() * n * mxx.max(1.0) * myy.max(1.0);
-            if n < 4.0 || !spans {
+            if n < LEAST as f64 || !spans {
                 return None;
             }
             let inverse = cofactors.map(|cofactor| cofactor / determinant);
@@ -889,14 +907,17 @@ impl Pass {
 /// its own surface and the two meet at the crease. `surface` says, per pixel, the reading whose
 /// plane it joined (itself to begin with). With `on_plane`, a reading joins only a plane it
 /// lies on, within three deviations of the plane and of one reading; the rest stay in no part.
-/// A reading on no known shape joins no surface of readings on one, and a reading on a shape
-/// joins a surface of readings on none only where it lies nearer its plane than over the shape.
+/// A reading on no known shape joins no surface of readings on one but where it is one of
+/// `specks` (per pixel; empty for none) and its own surface lies on the plane, and a reading on a
+/// shape joins a surface of readings on none only where it lies nearer its plane than over the
+/// shape.
 fn grow(
     walker: &Walker<'_>,
     planes: &Planes,
     of: &mut [u32],
     surface: &mut [usize],
     on_plane: bool,
+    specks: &[bool],
 ) {
     let seen = walker.seen;
     // An offer of a plane to a reading in 64 bits: how far off the reading lies from the plane in
@@ -921,13 +942,20 @@ fn grow(
         if key(off, plane) >= nearest[j] {
             return;
         }
-        // A surface of readings on a known shape takes none that lies on no shape. One of
-        // readings on none takes a reading on a shape only where it lies nearer the plane than
-        // it lies over the shape, its distance from the shape taken as along its ray: the shape
-        // is there beside it, whether or not a part of it is.
+        // A surface of readings on a known shape takes none that lies on no shape, so that a
+        // thing rising from the shape stays a thing, but a speck where the speck's own surface,
+        // its plane or the reading itself where it has none, lies on the surface's plane: one
+        // read just past what may read on the shape, among readings on it. A surface without a
+        // plane says nothing of where a reading beside it lies. One of readings on none takes a
+        // reading on a shape only where it lies nearer the plane than it lies over the shape, its
+        // distance from the shape taken as along its ray: the shape is there beside it, whether or
+        // not a part of it is.
         let over = seen.off[j].max(0.0) * seen.inverse[j].powi(2);
         let apart = match (seen.kinds[j] == Kind::Open, seen.kinds[plane] == Kind::Open) {
-            (true, to_open) => !to_open,
+            (true, to_open) => {
+                let speck = specks.get(j).copied().unwrap_or(false);
+                !to_open && (!speck || !planes.has[plane] || planes.passes(plane, j).clear())
+            }
             (false, to_open) => to_open && off >= over,
         };
         if apart {

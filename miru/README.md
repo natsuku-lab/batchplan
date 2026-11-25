@@ -358,18 +358,22 @@ whose edge, are parts of their own where they fill a window, as is a stretch of 
 known shape, which is the shape's or a thing's as a whole.
 
 What lies on a shape the look knows is decided for a whole stretch of surface, not reading by
-reading. Readings within three deviations of a known shape and readings on none are told apart
-alike but never into one part. A part is the shape's where more than half of its readings lie on
-known shapes and it stands in front of none of the shape: a surface cannot be in front of itself.
-Of two readings on a shape's surface the noise does not say which is in front, so what such a
-part stands in front of is what reads inside the shape: a board whose top reads on a mount known
-to reach a centimetre over the table, where only the table is, stands in front of the table
-around it, which reads inside the mount. A part that is the shape's goes to an object only where
-more than half of it lies inside that object's fitted shape, so a plate keeps its floor a few
-millimetres over the table, and a thing takes the readings at its foot that lie nearer its own
-plane than they lie over the shape. The tolerances are derived from `View::noise`, the camera's
-own account of its depth error by depth; the one number taken from the literature is LCCP's 10
-degrees.
+reading. Readings within three deviations of a known shape and readings on none are told apart alike
+but never into one part, but for a reading on none of a set of fewer than the four readings a plane
+is taken over, too few to be a surface of its own, which the readings on a shape beside it take too
+where its own surface, its plane or the reading itself, lies on their plane within three deviations
+of the difference: a plate's floor that reads just within the table's three deviations has a reading
+or two read just past them, and those are the floor's. A part is the shape's where more than half of
+its readings lie on known shapes and it stands in front of none of the shape: a surface cannot be in
+front of itself, and all its readings show the shape (`Label::Known`). Of two readings on a shape's
+surface the noise does not say which is in front, so what such a part stands in front of is what
+reads inside the shape: a board whose top reads on a mount known to reach a centimetre over the
+table, where only the table is, stands in front of the table around it, which reads inside the
+mount. A part that is the shape's goes to an object only where more than half of it lies inside that
+object's fitted shape, so a plate keeps its floor a few millimetres over the table, and a thing
+takes the readings at its foot that lie nearer its own plane than they lie over the shape. The
+tolerances are derived from `View::noise`, the camera's own account of its depth error by depth; the
+one number taken from the literature is LCCP's 10 degrees.
 
 What nothing under it holds up is held up by what it touches. An object rests on what its
 lowest reading lies on or in, the nearest straight under it of the known shapes and of the

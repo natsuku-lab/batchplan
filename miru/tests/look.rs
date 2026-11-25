@@ -1,14 +1,14 @@
-//! `look` on scenes whose objects are known: what stands apart comes out as one object each,
-//! with its shape, whether that shape stands for it, its colour and what it stands on; what
-//! touches or stands on another is told from it; the robot, the known shapes and what lies
-//! outside the corners are no object's, and what of a thing reads on a known shape is the
-//! thing's; an object keeps its id while it stays; what a look cannot see stays as the scene
-//! before had it, and what it sees through is gone; and what a look cannot work with is refused
-//! by name. A round hollow thing is one object, its outside with the inside behind its rim, and
-//! what stands in it, on it or by it is not. A thing that nothing under it holds up, as a
-//! handle, is one object with what it touches, and a thing that stands on something, or whose
-//! foot the look cannot see, is not; where the look cannot see under a thing, it stands on the
-//! lower thing it touches.
+//! `look` on scenes whose objects are known: what stands apart comes out as one object each, with
+//! its shape, whether that shape stands for it, its colour and what it stands on; what touches or
+//! stands on another is told from it; the robot, the known shapes and what lies outside the corners
+//! are no object's, and what of a thing reads on a known shape is the thing's; a reading just past
+//! what reads on a known shape, among readings on it, is theirs, and one farther off is not; an
+//! object keeps its id while it stays; what a look cannot see stays as the scene before had it, and
+//! what it sees through is gone; and what a look cannot work with is refused by name. A round
+//! hollow thing is one object, its outside with the inside behind its rim, and what stands in it,
+//! on it or by it is not. A thing that nothing under it holds up, as a handle, is one object with
+//! what it touches, and a thing that stands on something, or whose foot the look cannot see, is
+//! not; where the look cannot see under a thing, it stands on the lower thing it touches.
 //! Where a view has masks, those of a model that sees what the renderer does, they join what
 //! the depth shows no connection between and divide what it shows as one surface.
 
@@ -2882,6 +2882,277 @@ fn a_plate_keeps_the_floor_that_reads_on_the_table() {
         "{known} of the table's {all} pixels are its own"
     );
     assert_eq!(scene.objects[0].on, Some(Support::Known(0)));
+}
+
+/// The deviation of the noise `frame`'s camera states at the depth pixel `i` reads (meters).
+fn deviation_at(frame: &Frame, i: usize) -> f32 {
+    let (z, noise) = (frame.depth[i], frame.noise);
+    noise.constant + (noise.linear + noise.quadratic * z) * z
+}
+
+/// `frame` with pixel `i`'s reading moved along its ray to `height` over the table.
+fn read_at(mut frame: Frame, i: usize, height: f32) -> Frame {
+    let k = frame.intrinsics;
+    let (u, v) = ((i % frame.width) as f32, (i / frame.width) as f32);
+    let ray = frame.camera.rotation * Vec3::new((u - k.cx) / k.fx, (v - k.cy) / k.fy, 1.0);
+    frame.depth[i] = (height - frame.camera.position.z) / ray.z;
+    frame
+}
+
+/// The pixel of `frame` that shows thing `thing` nearest the camera of those whose every
+/// neighbour within six columns and rows shows it too: a window's width inside it and more.
+fn nearest_inside(frame: &Frame, thing: usize) -> usize {
+    let (width, height) = (
+        frame.width as isize,
+        (frame.depth.len() / frame.width) as isize,
+    );
+    let shows = |x: isize, y: isize| {
+        let inside = x >= 0 && y >= 0 && x < width && y < height;
+        inside && frame.shows[(y * width + x) as usize] == Some(thing)
+    };
+    let around = |i: usize| {
+        let (x, y) = ((i % frame.width) as isize, (i / frame.width) as isize);
+        (-6..=6).all(|dy| (-6..=6).all(|dx| shows(x + dx, y + dy)))
+    };
+    let inside = (0..frame.depth.len()).filter(|&i| around(i));
+    inside
+        .min_by(|&a, &b| frame.depth[a].total_cmp(&frame.depth[b]))
+        .expect("the thing is wider than a window")
+}
+
+/// The pixel of `frame` whose ray passes nearest `point`.
+fn pixel_of(frame: &Frame, point: Vec3) -> usize {
+    let k = frame.intrinsics;
+    let c = frame.camera.rotation.inverse() * (point - frame.camera.position);
+    let (u, v) = (k.fx * c.x / c.z + k.cx, k.fy * c.y / c.z + k.cy);
+    v.round() as usize * frame.width + u.round() as usize
+}
+
+/// What a camera 0.9 m from the table's middle and 45 degrees over it reads of the table with
+/// `things(top)` on it, exactly, stating a real camera's noise ([`REAL`]), where thing `flat`
+/// is a flat thing whose top is `top` over the table: as high as three deviations of that noise
+/// at its nearest reading, less 3%. Every reading of it reads on the table, the nearest just so,
+/// as the simulator's depth reads a plate's floor 7.2 mm over the table in LIBERO's
+/// `libero-spatial-9`, where three deviations of the table camera's noise are 7.3 mm. Its top
+/// is said too.
+fn just_on_the_table(things: impl Fn(f32) -> Vec<Thing>, flat: usize) -> (Frame, f32) {
+    let reach = |frame: &Frame| {
+        let shown = (0..frame.depth.len()).filter(|&i| frame.shows[i] == Some(flat));
+        let reach = shown.map(|i| 3.0 * deviation_at(frame, i));
+        reach.min_by(f32::total_cmp).expect("the thing is in view")
+    };
+    let top = 0.97 * reach(&exactly_at(things(0.006), 0.9, 45.0));
+    let frame = exactly_at(things(top), 0.9, 45.0);
+    let (on, all) = (low(&frame, flat), pixels(&frame, flat));
+    assert!(
+        all > 500 && on == all,
+        "{on} of the flat thing's {all} pixels read on the table"
+    );
+    (frame, top)
+}
+
+/// A plate as [`plate`] is, standing at `foot`, whose floor's top is `top` over its foot.
+fn plate_with_floor_at(foot: Vec3, top: f32) -> Vec<Thing> {
+    let floor = can(
+        foot + 0.5 * top * Vec3::Z,
+        0.0775,
+        0.5 * top,
+        [230, 230, 230],
+    );
+    vec![rim(foot), floor]
+}
+
+#[test]
+fn a_reading_of_a_plates_floor_a_little_past_the_tables_reach_is_the_plates() {
+    // A plate's floor reads on the table, just: all but one of its readings lie within three
+    // deviations of the noise over the table, and that one a little past them, as a render's
+    // rounding moves a reading. Alone, it cannot be told from noise, and it lies on the plane of
+    // the floor around it: it is the floor's, which is the plate's.
+    let (frame, top) = just_on_the_table(|top| plate_with_floor_at(MIDDLE, top), 2);
+    let past = nearest_inside(&frame, 2);
+    let height = 1.02 * 3.0 * deviation_at(&frame, past);
+    assert!(
+        height - top < deviation_at(&frame, past),
+        "the reading lies {} mm over the floor",
+        1000.0 * (height - top)
+    );
+    let frame = read_at(frame, past, height);
+    assert!(
+        !on_the_table(&frame, past),
+        "the reading is past the table's reach"
+    );
+    let scene = seen(&[&frame], &Scene::default());
+    assert_eq!(scene.objects.len(), 1, "{:?}", scene.objects);
+    assert_eq!(scene.labels[0][past], Label::Object(0));
+    let (all, own) = labelled(&scene, &frame, 2, Label::Object(0));
+    assert_eq!(
+        own, all,
+        "{own} of the floor's {all} pixels are the plate's"
+    );
+}
+
+#[test]
+fn a_reading_of_a_mat_a_little_past_the_tables_reach_is_the_tables() {
+    // As a plate's floor without its rim: a thin mat, every reading of it on the table but one a
+    // little past it, on the mat's plane. The mat is the table's, and so is that reading.
+    let mat = |top: f32| {
+        vec![can(
+            MIDDLE + 0.5 * top * Vec3::Z,
+            0.0775,
+            0.5 * top,
+            [230; 3],
+        )]
+    };
+    let (frame, _) = just_on_the_table(mat, 1);
+    let past = nearest_inside(&frame, 1);
+    let height = 1.02 * 3.0 * deviation_at(&frame, past);
+    let frame = read_at(frame, past, height);
+    assert!(
+        !on_the_table(&frame, past),
+        "the reading is past the table's reach"
+    );
+    let scene = seen(&[&frame], &Scene::default());
+    assert!(scene.objects.is_empty(), "{:?}", scene.objects);
+    assert_eq!(scene.labels[0][past], Label::Known(0));
+}
+
+#[test]
+fn a_bump_on_a_plates_floor_narrower_than_a_window_is_not_the_plates() {
+    // Two readings of the floor, one over the other, read five deviations of the noise over it:
+    // too few for a plane of their own, and on no plane of the floor's. They are not the
+    // plate's.
+    let (frame, top) = just_on_the_table(|top| plate_with_floor_at(MIDDLE, top), 2);
+    let middle = pixel_of(&frame, MIDDLE + top * Vec3::Z);
+    let bump = [middle, middle + frame.width];
+    let mut frame = frame;
+    for &i in &bump {
+        assert_eq!(frame.shows[i], Some(2), "the bump is on the floor");
+        let height = top + 5.0 * deviation_at(&frame, i);
+        frame = read_at(frame, i, height);
+    }
+    let scene = seen(&[&frame], &Scene::default());
+    let (plate, _) = object_of(&scene, &frame, 1);
+    let labels: Vec<Label> = bump.iter().map(|&i| scene.labels[0][i]).collect();
+    assert!(
+        labels.iter().all(|&label| label != Label::Object(plate)),
+        "the bump's labels {labels:?}"
+    );
+}
+
+/// How many of the pixels of `frame` that show thing `thing` read off the table, past the reach
+/// of what reads on it, and how many of those `scene` labels `label`.
+fn off_the_table(scene: &Scene, frame: &Frame, thing: usize, label: Label) -> (usize, usize) {
+    let off = (0..frame.shows.len())
+        .filter(|&i| frame.shows[i] == Some(thing) && frame.depth[i] > 0.0)
+        .filter(|&i| !on_the_table(frame, i));
+    off.fold((0, 0), |(all, so), i| {
+        (all + 1, so + usize::from(scene.labels[0][i] == label))
+    })
+}
+
+#[test]
+fn a_disc_on_a_plates_floor_that_reads_on_the_table_is_not_the_plates() {
+    // A disc 2 cm across and 6.8 mm thick lies on a plate's floor that reads on the table, just:
+    // its top reads past the table's reach and fills a window's plane of its own, a surface of
+    // its own, not the floor's however near its plane. It is not the plate's.
+    let disc = |top: f32| {
+        can(
+            MIDDLE + (top + 0.0034) * Vec3::Z,
+            0.01,
+            0.0034,
+            [200, 30, 30],
+        )
+    };
+    let things = |top: f32| {
+        let mut things = plate_with_floor_at(MIDDLE, top);
+        things.push(disc(top));
+        things
+    };
+    let (frame, _) = just_on_the_table(things, 2);
+    let scene = seen(&[&frame], &Scene::default());
+    let (plate, _) = object_of(&scene, &frame, 1);
+    let (off, plates) = off_the_table(&scene, &frame, 3, Label::Object(plate));
+    assert!(off > 10, "{off} of the disc's readings read off the table");
+    assert_eq!(
+        plates, 0,
+        "{plates} of the disc's {off} readings off the table are the plate's"
+    );
+}
+
+#[test]
+fn a_block_a_little_taller_than_the_tables_reach_is_not_the_tables() {
+    // A block 2 cm square and 6.9 mm tall on the table, read from 0.9 m stating a real camera's
+    // noise: its top reads past the table's reach and has a plane of its own. It is not the
+    // table's.
+    let block = block(
+        MIDDLE + Vec3::new(0.0, 0.0, 0.00345),
+        Vec3::new(0.01, 0.01, 0.00345),
+        [200, 30, 30],
+    );
+    let frame = exactly_at(vec![block], 0.9, 45.0);
+    let scene = seen(&[&frame], &Scene::default());
+    let (off, tables) = off_the_table(&scene, &frame, 1, Label::Known(0));
+    assert!(off > 10, "{off} of the block's readings read off the table");
+    assert_eq!(
+        tables, 0,
+        "{tables} of the block's {off} readings off the table are the table's"
+    );
+}
+
+#[test]
+fn a_crumb_on_a_known_posts_side_is_not_the_posts() {
+    // A post 2 cm across is known, as a cell's fixture is, and two readings of its side read
+    // five deviations of the noise nearer the camera. The post is narrower than a window, and
+    // its side has no plane: the crumb lies on no plane of the post's, and is not the post's.
+    let post = || can(Vec3::new(0.5, 0.0, 0.1), 0.01, 0.1, [90, 90, 90]);
+    let mut frame = exactly_at(vec![post()], 0.78, 40.0);
+    let middle = pixel_of(&frame, Vec3::new(0.51, 0.0, 0.1));
+    let crumb = [middle, middle + frame.width];
+    for i in crumb {
+        assert_eq!(frame.shows[i], Some(1), "the crumb is on the post's side");
+        frame.depth[i] -= 5.0 * deviation_at(&frame, i);
+    }
+    let known = [known(&table()), known(&post())];
+    let views = [frame.view()];
+    let look = Look {
+        views: &views,
+        known: &known,
+    };
+    let scene = looked(&look, &Scene::default(), &LookOptions::default());
+    let (all, theirs) = labelled(&scene, &frame, 1, Label::Known(1));
+    assert!(
+        theirs > all / 2,
+        "{theirs} of the post's {all} pixels are its own"
+    );
+    let labels = crumb.map(|i| scene.labels[0][i]);
+    assert!(
+        labels.iter().all(|&label| label != Label::Known(1)),
+        "the crumb's labels {labels:?}"
+    );
+}
+
+#[test]
+fn a_pencil_on_a_plates_floor_that_reads_on_the_table_is_not_the_plates() {
+    // A pencil 8 mm through and 10 cm long lies across the plate's floor, which reads on the
+    // table just. It is narrower than a window, and a thing of its own.
+    let pencil = |top: f32| {
+        let middle = MIDDLE + Vec3::new(0.0, 0.0, top + 0.004);
+        let lying = can(middle, 0.004, 0.05, [30, 30, 200]);
+        turned(lying, middle, Quat::from_rotation_x(FRAC_PI_2))
+    };
+    let things = |top: f32| {
+        let mut things = plate_with_floor_at(MIDDLE, top);
+        things.push(pencil(top));
+        things
+    };
+    let (frame, _) = just_on_the_table(things, 2);
+    let scene = seen(&[&frame], &Scene::default());
+    let (plate, _) = object_of(&scene, &frame, 1);
+    let (most, held) = most_of(&scene, &frame, 3);
+    assert!(
+        matches!(most, Some(Label::Object(pencil)) if pencil != plate),
+        "the pencil's labels {held:?}"
+    );
 }
 
 #[test]

@@ -264,7 +264,10 @@ fn checked(
     for (lies, first) in lies.iter().zip(&first) {
         for mask in masks::joins(lies) {
             // With the first of them that is no known shape's alone: such a part joins none.
-            if let Some(object) = mask.iter().find(|&&part| !sets.theirs[first + part]) {
+            if let Some(object) = mask
+                .iter()
+                .find(|&&part| sets.theirs[first + part].is_none())
+            {
                 for part in &mask {
                     sets.join(first + object, first + part);
                 }
@@ -275,12 +278,12 @@ fn checked(
     let (floors, _) = told.gather(&mut sets, /* with floors */ true);
     // What each object says by itself, measured once; a known shape's part is no object's.
     let own: Vec<&Readings> = (floors.iter())
-        .filter(|readings| !sets.theirs[readings.set])
+        .filter(|readings| sets.theirs[readings.set].is_none())
         .collect();
     let mut measured = Measured::each(&own, previous, threads).into_iter();
     let said: Vec<Option<Measured>> = (floors.iter())
         .map(|readings| {
-            (!sets.theirs[readings.set])
+            (sets.theirs[readings.set].is_none())
                 .then(|| measured.next())
                 .flatten()
         })
@@ -673,9 +676,9 @@ impl<'a> Told<'a> {
 
     /// Each object's readings, in the order the views show the objects, each with the set its
     /// parts are; and per view and pixel what the pixel shows. A part that is a known shape's
-    /// ([`Sets::theirs`]) is no object's: its readings show what a reading in no part does, the
-    /// shape it lies on or nothing. With `floors`, such a part is an object of its own, for
-    /// [`hollows`] to make a floor of.
+    /// ([`Sets::theirs`]) is no object's: its readings show that shape, or the one they lie on,
+    /// and a reading in no part the shape it lies on or nothing. With `floors`, such a part is an
+    /// object of its own, for [`hollows`] to make a floor of.
     ///
     /// The bands are read on threads of their own, each into its own stretch of each object's
     /// readings, so that every object's are in the order the views and their rows show them.
@@ -686,7 +689,7 @@ impl<'a> Told<'a> {
         let mut index = vec![NO_OBJECT; sets.first.len()];
         let mut sets_of: Vec<usize> = vec![];
         for &part in &self.order {
-            if floors || !sets.theirs[part] {
+            if floors || sets.theirs[part].is_none() {
                 let set = sets.find(part);
                 if index[set] == NO_OBJECT {
                     index[set] = sets_of.len();
@@ -752,6 +755,7 @@ impl<'a> Told<'a> {
         // Per band, per object, the sum of its readings' colours there and how many had one.
         let mut colors = vec![vec![([0_u64; 3], 0_u64); count]; self.bands.len()];
         let work: Vec<_> = pieces.into_iter().zip(colors.iter_mut()).collect();
+        let theirs = &sets.theirs;
         threads::each_piece(
             self.threads,
             work,
@@ -762,16 +766,17 @@ impl<'a> Told<'a> {
                 let mut next = vec![0; count];
                 for (label, i) in labels.iter_mut().zip(band.pixels.clone()) {
                     let part = parts.of[i];
-                    let object = if part == NONE {
-                        NO_OBJECT
+                    let (object, alone) = if part == NONE {
+                        (NO_OBJECT, None)
                     } else {
-                        object_of[first + part as usize]
+                        let part = first + part as usize;
+                        (object_of[part], theirs[part])
                     };
                     *label = match (seen.kinds[i], object) {
                         (Kind::Nothing, _) => Label::Nothing,
                         (Kind::Robot, _) => Label::Robot,
                         (Kind::Known(shape), NO_OBJECT) => Label::Known(shape),
-                        (Kind::Open, NO_OBJECT) => Label::Nothing,
+                        (Kind::Open, NO_OBJECT) => alone.map_or(Label::Nothing, Label::Known),
                         (Kind::Known(_) | Kind::Open, object) => {
                             let (points, slack, share) = &mut stretches[object];
                             let at = next[object];
@@ -1085,8 +1090,8 @@ impl<'a> Told<'a> {
         hide
     }
 
-    /// Per part of every view, whether it is a known shape's alone: before any object takes it
-    /// for its own ([`Told::keep`]).
+    /// Per part of every view, the known shape it is alone, if it is one's: before any object
+    /// takes it for its own ([`Told::keep`]).
     ///
     /// What is a known shape's lies on it and stands in front of none of it: a surface cannot
     /// be in front of itself. So a part is a known shape's when more than half of its readings
@@ -1095,7 +1100,7 @@ impl<'a> Told<'a> {
     /// a reading on it may read. Of two readings on its surface, the noise does not say which
     /// is in front. A part with a window's worth of readings so deep inside known shapes is the
     /// shape's whatever it stands in front of: nothing else can be there.
-    fn known(&self) -> Vec<bool> {
+    fn known(&self) -> Vec<Option<usize>> {
         let shapes = self.look.known.len();
         let mut theirs = vec![];
         for (seen, parts) in self.seen.iter().zip(self.parts) {
@@ -1132,8 +1137,10 @@ impl<'a> Told<'a> {
             theirs.extend((0..parts.count).map(|part| {
                 // Of two shapes with as many, the first.
                 let most = (0..shapes).max_by_key(|&shape| (on[part][shape], Reverse(shape)));
-                2 * on[part].iter().sum::<usize>() > readings[part]
-                    && most.is_some_and(|most| before[part][most] < 1.0 || inside[part] >= 1.0)
+                most.filter(|&most| {
+                    2 * on[part].iter().sum::<usize>() > readings[part]
+                        && (before[part][most] < 1.0 || inside[part] >= 1.0)
+                })
             }));
         }
         theirs
@@ -1178,12 +1185,12 @@ impl<'a> Told<'a> {
                 .filter(|&(_, &within)| 2 * within > readings[part]);
             for (&object, _) in inside {
                 // Unless a view's masks say the two are not one thing.
-                sets.theirs[part] = false;
+                let shape = sets.theirs[part].take();
                 if sets.join(part, objects[object].set) {
                     kept = true;
                     break;
                 }
-                sets.theirs[part] = true;
+                sets.theirs[part] = shape;
             }
         }
         kept
@@ -2015,10 +2022,10 @@ struct Sets {
     /// Per set, at its first part: the masks its parts lie in, each as its view and its number.
     /// One a view at most.
     lies: Vec<Vec<(usize, u32)>>,
-    /// Per part, whether it is a known shape's alone ([`Told::known`]). Such a part is in no
-    /// set but its own, so that the table makes no one object of two things that each have
-    /// something to do with it.
-    theirs: Vec<bool>,
+    /// Per part, the known shape it is alone, where it is one's ([`Told::known`]). Such a part
+    /// is in no set but its own, so that the table makes no one object of two things that each
+    /// have something to do with it.
+    theirs: Vec<Option<usize>>,
     /// The joins asked of such parts: the part, and a part of the object it was to be one with.
     asked: Vec<(usize, usize)>,
 }
@@ -2026,8 +2033,8 @@ struct Sets {
 impl Sets {
     /// Every part a set of its own. `lies` has per view, per part, the mask it lies in or 0
     /// ([`masks::lies`]), the views' parts in the order they are numbered in, and `theirs`
-    /// whether each is a known shape's alone.
-    fn new(lies: &[Vec<u32>], theirs: Vec<bool>) -> Self {
+    /// the known shape each is alone, if it is one's.
+    fn new(lies: &[Vec<u32>], theirs: Vec<Option<usize>>) -> Self {
         let mut parts: Vec<Vec<(usize, u32)>> = vec![];
         for (view, lies) in lies.iter().enumerate() {
             let masked = |&mask: &u32| (mask != 0).then_some((view, mask));
@@ -2056,13 +2063,13 @@ impl Sets {
     /// Where one of the two is a known shape's alone, they stay two and the join is kept as
     /// asked ([`Told::keep`]); where both are, nothing is made of it.
     fn join(&mut self, a: usize, b: usize) -> bool {
-        match (self.theirs[a], self.theirs[b]) {
+        match (self.theirs[a].is_some(), self.theirs[b].is_some()) {
             (false, false) => {}
             (true, false) => self.asked.push((a, b)),
             (false, true) => self.asked.push((b, a)),
             (true, true) => return false,
         }
-        if self.theirs[a] || self.theirs[b] {
+        if self.theirs[a].is_some() || self.theirs[b].is_some() {
             return false;
         }
         let (a, b) = (self.find(a), self.find(b));
