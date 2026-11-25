@@ -3434,10 +3434,11 @@ impl Gripping for Pull {
 pub struct NearestPlace {
     /// The task's index among the alternatives.
     pub task: usize,
-    /// The task as [`place`] planned it, its start corrected within
-    /// [`PlanOptions::start_tolerance`].
+    /// The task as given, its start corrected within [`PlanOptions::start_tolerance`] as
+    /// [`place`] corrects it.
     pub problem: Place,
-    /// Its plan that sets the object down nearest the spot.
+    /// Its plan that sets the object down nearest the spot, its candidate numbered as the task's
+    /// poses are.
     pub plan: TaskPlan,
 }
 
@@ -3445,10 +3446,13 @@ pub struct NearestPlace {
 /// starts or holds, as each of several picks leaves it. Plans them in one batch, each as [`place`]
 /// does, and returns the alternative whose plan sets the object down nearest `near` in x and y
 /// (the support sets z): the earliest task among equally near ones. Distance is from each plan's
-/// [`TaskPlan::placed`], the expected landing. Each task keeps its own [`Place::enough`]; of a
-/// task's several plans, the nearest counts for it, the quickest among equally near ones. Where
-/// none gets through, each task's failure comes back, in task order (none for no tasks). A `near`
-/// that is not finite is an input error.
+/// [`TaskPlan::placed`], the expected landing. A task that says how many plans will do
+/// ([`Place::enough`]) tries its poses nearest `near` first, equally near ones in their order, as
+/// [`place`] tries them in their order: its plans are the nearest that get through. One that does
+/// not tries every pose. Of a task's several plans, the nearest counts for it, the quickest among
+/// equally near ones. Candidates are numbered as the caller's poses are, in the plan and in each
+/// failure. Where none gets through, each task's failure comes back, in task order (none for no
+/// tasks). A `near` that is not finite is an input error.
 // Compiled where it is called: this crate's own code stays as it was without it (`nm -n`).
 #[inline]
 pub fn place_nearest(
@@ -3462,18 +3466,46 @@ pub fn place_nearest(
         near.is_finite(),
         "the point to set the object down near must be finite, got {near}"
     );
+    // The squared distance in x and y from `near` of an object set down at `pose`.
+    let off = |pose: Pose| pose.position.truncate().distance_squared(near.truncate());
+    // Each task's poses as planned, by their indices among its own: nearest first where only some
+    // plans will do, else as given.
+    let orders = tasks.iter().map(|t| {
+        let mut order: Vec<usize> = (0..t.poses.len()).collect();
+        if t.enough.is_some() {
+            order.sort_by(|&a, &b| off(t.poses[a]).total_cmp(&off(t.poses[b])));
+        }
+        order
+    });
+    let orders: Vec<Vec<usize>> = orders.collect();
+    let nearest_first = tasks.iter().zip(&orders).map(|(t, order)| Place {
+        poses: order.iter().map(|&k| t.poses[k]).collect(),
+        // One per pose, or as given for `place` to refuse.
+        falls: match t.falls.len() == t.poses.len() {
+            true => order.iter().map(|&k| t.falls[k]).collect(),
+            false => t.falls.clone(),
+        },
+        ..t.clone()
+    });
+    let nearest_first: Vec<Place> = nearest_first.collect();
     let TaskResult {
         mut problems,
         outcomes,
-    } = place(device, worlds, tasks, o)?;
+    } = place(device, worlds, &nearest_first, o)?;
     // The nearest plan so far, its squared distance and its task; and the tasks' failures.
     let mut nearest: Option<(f32, usize, TaskPlan)> = None;
     let mut failures = vec![];
-    for (task, outcome) in outcomes.into_iter().enumerate() {
+    let each = outcomes.into_iter().enumerate().zip(&orders);
+    for ((task, outcome), order) in each {
         let plans = match outcome {
             Ok(plans) => plans,
             Err(failure) => {
-                failures.push(failure);
+                let mut stops: Vec<(usize, CandidateStop)> =
+                    order.iter().copied().zip(failure.candidates).collect();
+                stops.sort_by_key(|&(k, _)| k);
+                failures.push(TaskFailure {
+                    candidates: stops.into_iter().map(|(_, stop)| stop).collect(),
+                });
                 continue;
             }
         };
@@ -3482,20 +3514,24 @@ pub fn place_nearest(
                 .placed
                 .as_ref()
                 .expect("a place's plan says where it sets the object down");
-            let at = placed.pose().position.truncate();
-            let distance = at.distance_squared(near.truncate());
+            let distance = off(placed.pose());
             if nearest
                 .as_ref()
                 .is_none_or(|(least, _, _)| distance < *least)
             {
-                nearest = Some((distance, task, plan));
+                let candidate = order[plan.candidate];
+                nearest = Some((distance, task, TaskPlan { candidate, ..plan }));
             }
         }
     }
     Ok(match nearest {
         Some((_, task, plan)) => Ok(NearestPlace {
             task,
-            problem: problems.swap_remove(task),
+            problem: Place {
+                poses: tasks[task].poses.clone(),
+                falls: tasks[task].falls.clone(),
+                ..problems.swap_remove(task)
+            },
             plan,
         }),
         None => Err(failures),

@@ -823,13 +823,15 @@ impl NearestPlace {
         self.0.task
     }
 
-    /// The task as `place` planned it, its start corrected within `PlanOptions.start_tolerance`.
+    /// The task as given, its start corrected within `PlanOptions.start_tolerance` as `place`
+    /// corrects it.
     #[getter]
     fn problem<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.0.problem.to_py(py)
     }
 
-    /// Its plan that sets the object down nearest the spot.
+    /// Its plan that sets the object down nearest the spot, its candidate numbered as the task's
+    /// poses are.
     #[getter]
     fn plan(&self) -> TaskPlan {
         TaskPlan(self.0.plan.clone())
@@ -919,10 +921,13 @@ pub(crate) fn place(
 /// starts or holds, as each of several picks leaves it. Plans them in one batch, each as `place`
 /// does, and returns the alternative whose plan sets the object down nearest `near` in x and y (the
 /// support sets z), the earliest task among equally near ones, as a `NearestPlace`. Distance is
-/// from each plan's `placed`, the expected landing. Each task keeps its own `enough`; of a task's
-/// several plans, the nearest counts for it, the quickest among equally near ones. Where none gets
-/// through, a tuple of each task's `TaskFailure`, in task order (empty for no tasks). A `near` that
-/// is not finite raises `InputError`.
+/// from each plan's `placed`, the expected landing. A task with `enough` tries its poses nearest
+/// `near` first, equally near ones in their order, as `place` tries them in their order: its plans
+/// are the nearest that get through. One without tries every pose. Of a task's several plans, the
+/// nearest counts for it, the quickest among equally near ones. Candidates are numbered as the
+/// poses are given, in the plan and in each failure. Where none gets through, a tuple of each
+/// task's `TaskFailure`, in task order (empty for no tasks). A `near` that is not finite raises
+/// `InputError`.
 #[pyfunction]
 #[pyo3(signature = (device, worlds, places, near, options = None))]
 pub(crate) fn place_nearest<'py>(
