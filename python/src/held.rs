@@ -25,9 +25,9 @@ value_class! {
         /// object, as `Robot.relock` takes them: the fingers where they closed on it. Empty: as
         /// loaded.
         locked: HashMap<String, f32>,
-        /// How spheres cover it: within `tolerance` of its surface where `budget` spheres can
-        /// (5 mm and 64). A thin wide object, as a plate, takes more to stay within a few
-        /// millimeters of its sides.
+        /// How spheres cover it: they hold all of it and reach no more than `tolerance` (5 mm)
+        /// past it, however many spheres that takes, which `budget` does not cap. A smaller
+        /// tolerance fits closer, with more.
         spheres: batchplan::SphereOptions,
     }
     methods {
@@ -70,9 +70,9 @@ value_class! {
         shapes: Vec<batchplan::Obstacle>,
         /// Other links it may touch.
         touch_links: Vec<String>,
-        /// How spheres are fitted to the shapes; a held object rarely needs more than 8 to 16. A
-        /// single shape is fitted in its own frame, so where it sits on `link` does not change its
-        /// spheres.
+        /// How spheres cover the shapes: they hold all of them and reach no more than `tolerance`
+        /// past them, however many spheres that takes, which `budget` does not cap. A single shape
+        /// is fitted in its own frame, so where it sits on `link` does not change its spheres.
         spheres: batchplan::SphereOptions,
     }
     methods {

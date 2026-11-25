@@ -526,8 +526,10 @@ fn a_batch_of_worlds_gives_each_the_result_it_gives_alone() {
         .iter()
         .filter(|o| o.as_ref().is_err_and(turning));
     let stopped = stopped.count();
+    // 15 through and 49 stopped since a held bar takes its medial cover, which reaches the
+    // tolerance past it nearly everywhere (17 and 47 with the cells it took before).
     assert!(
-        through > 16 && stopped > 8,
+        through > 8 && stopped > 8,
         "{through} through, {stopped} stopped turning"
     );
     for (w, outcome) in all.outcomes.iter().enumerate() {

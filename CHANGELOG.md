@@ -232,17 +232,19 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 - **Breaking:** a limit on how far collision spheres reach past the geometry:
   `SphereOptions::max_overhang`, `Some(0.002)` for 2 mm and `Some(0.0)` for spheres inside it,
   whatever the budget. Spheres are chosen as before and each radius cut back to its center's depth
-  plus the limit, so the budget is kept and the surface it cannot cover within the limit is left
-  outside the spheres: `LinkQualification::gap`, new in `Robot::qualify`, is how far outside the
+  plus the limit, so a robot's budget is kept and the surface it cannot cover within the limit is
+  left outside the spheres: `LinkQualification::gap`, new in `Robot::qualify`, is how far outside the
   farthest of it lies, which is how deep an obstacle reaches into the link unseen. The geometry
   must be closed, with no shell facing inward: a link whose mesh has open edges, or such a shell
   (a cavity's among them), is refused with their count, and one too thin for a center inside it
   under a limit of zero by name. Shells that overlap or share a face are their union. Round
   shapes are measured as the fit sees them, on their meshes of 24 sides. A collision model given
   with the options is held to the limit too, a sphere past it refused by link and index with how
-  far it reaches. Held objects take their own (`AttachedObject::spheres`, `Held::spheres`): a
-  box, capsule, disc or rod is covered whole where the budget has a cover within the limit, and
-  fitted and held to it where not; a shape without thickness is refused at a limit of zero. `None`, the default, fits as before. A `SphereOptions` literal
+  far it reaches. Held objects take their own (`AttachedObject::spheres`, `Held::spheres`), as
+  many spheres as the smaller of their tolerance and the limit takes, whatever the budget: a box,
+  a cylinder or a capsule is covered whole by its tiles within it, but under a limit of zero,
+  which no tiles keep, and anything else is fitted and held to it; a shape without thickness is
+  refused at a limit of zero. `None`, the default, fits as before. A `SphereOptions` literal
   that lists every field needs the new one (`max_overhang: None`); in Python,
   `SphereOptions(max_overhang=0.002)`.
 
@@ -316,12 +318,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   (`Touch::held`) is not a contact, and one call takes items holding different objects.
 
 - **Breaking:** how spheres cover what a hand holds is the caller's to set: `Held::spheres`, a
-  `SphereOptions` (64 spheres within 5 mm by default, as before). A thin wide object, as a plate
-  14 cm across, is fitted to 8.6 mm past its side at the default, so that a neighbor a few
-  millimeters away reads as touching it; with `budget: 256` it is covered within 4.7 mm. One
-  call takes one object held with different options, each fitted on its own. A `Held` literal
-  needs the new field (`spheres: SphereOptions::default()`); a pick's `TaskPlan::held` carries the
-  default. In Python, `Held(..., spheres=SphereOptions(budget=256))`.
+  `SphereOptions` (within 5 mm by default, as many spheres as that takes). A smaller tolerance
+  fits closer to a neighbor a few millimeters away, with more spheres. One call takes one object
+  held with different options, each fitted on its own. A `Held` literal needs the new field
+  (`spheres: SphereOptions::default()`); a pick's `TaskPlan::held` carries the default. In
+  Python, `Held(..., spheres=SphereOptions(tolerance=0.002))`.
 
 - **Breaking:** grasps of what cameras see, whatever its shape:
   `grasps_on(&device, hand, &[Surface], &GraspOptions)`. A grasp closes on two patches of the
@@ -418,6 +419,59 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Changed
 
+- **Breaking:** what a robot holds is covered within its tolerance whatever its
+  `SphereOptions::budget`, which now caps the robot's own spheres only: `Robot::attach` gives an
+  object as many as its tolerance takes (`AttachedObject::spheres`, `Held::spheres`,
+  `TaskOptions::held_spheres`), so the tolerance is the knob. Its spheres also hold all of it, no
+  point of its surface outside them but for rounding, unless `max_overhang` holds them back. A
+  direct cover the budget gives within the tolerance holds it by construction and is the same to
+  the bit, unless its tiles take fewer spheres. Otherwise the object is fitted with as many
+  spheres as that takes, to a grid of its surfaces' points each held with a margin no smaller than
+  the farthest any point of the surface lies from one, within the tolerance less that margin, from
+  candidates the medial balls of its surface samples join (each sample's largest ball inside the
+  shape that touches it, centered on the medial axis), and picks others make redundant are
+  dropped; a direct cover within the tolerance is taken instead where it has no more spheres.
+  Boxes, cylinders, capsules and balls are not fitted but covered by their surfaces' tiles, in
+  milliseconds (a tenth of a second for a tray 40 cm across at 1 mm), within the smaller of the
+  tolerance and `max_overhang` where that is set.
+  A box's cover follows its medial axis (derived with Gemini 4 Neon): spheres at its corners on
+  the rays where three faces tie, rows along its edges on their bisectors spaced and set as deep
+  as covers the widest strip of both faces, shells inward along the same bisectors where it is
+  thick, and staggered rows on its middle plane for what is left and its inside, every sphere
+  reaching the tolerance past it with a margin left for rounding. A cylinder takes rings of
+  spheres along its medial structure: a ring at each rim on the bisector between the face and the
+  side, rings along the rest of the side from as deep as the faces allow (on the axis where near
+  enough), and rings of the faces from the middle height or below each; or, no thicker than 4.8
+  tolerances (24 mm at 5 mm), a layer at its middle height of rings from the rim in, whichever
+  takes fewer; each sphere through the corners of its sector's tiles, which holds it, inside as
+  well, by construction. At the default 5 mm and 64, a bowl 11.2 cm across and 5.1 cm deep goes
+  from 64 spheres reaching 9.1 mm past its side and leaving 1.2 mm of it outside them to 70 within
+  5 mm holding all of it (320 at 2 mm, where a fit took 616), a plate 14 cm across from 64
+  reaching 10.6 mm past its faces to a layer of 75 within 5 mm, a valve's wheel 20 cm across
+  (`examples/turns.rs`) from 64 reaching 15 mm to 144, and a can 6.6 cm across from 64 reaching
+  7.1 mm to 35 within 5 mm (`examples/held_spheres.rs`); goal 5's plate at 2.5 mm takes 264 where
+  a fit took 535. Of two covers that hold an object within the tolerance, the direct one the
+  budget gives and its tiles, the one of fewer spheres is taken, so a bigger budget never costs
+  more: this changes a cover the budget gave before only for one of fewer spheres with the same
+  guarantees, as the plate's at a budget of 256, its layer of rings of one width (145 spheres
+  within 4.7 mm), now its tiles' 75. Covering one costs up to tens of milliseconds where it cost a
+  few, once per object and device. A box or a capsule the budget cannot cover directly within the
+  tolerance is no longer covered past it. The blocks `examples/handover/` carries, which 42 to 64
+  spheres covered 9.0 to 10.6 mm past them, take 95 to 121 within 5 mm, where their long edges
+  alone need 68 to 80 and a fit took 144 to 208. So that fitting is paid once per object,
+  `datagen::handover` fits a carried object once for all its grasps, where it attached it at each,
+  and `datagen::reset_states` once per shape, where it attached it at each hold; and a device for
+  a robot holding an object of many spheres is made in time linear in them, where pairing its
+  spheres with the robot's took time quadratic in them.
+- Fitting a robot's spheres takes 7% to 23% less time, with the same fitted models: on one thread
+  on the M4 Pro, the stand at a budget of 512 263 ms where it took 339, the Panda at 1,200 266
+  where it took 315 ([runs](docs/benchmarks.md#fitting-collision-spheres)).
+- **Breaking:** a held object's cover now holds all of it and reaches its tolerance past it nearly
+  everywhere, where a cover of fewer spheres reached past it less in places and left some of it
+  outside: so more of a tight passage reads as a contact, and clearances and contacts measured to
+  it differ. Of `tests/turn.rs`'s 64 knobs, each with a post that
+  stops turns one way, 15 turn through where 17 did; `examples/turns.rs`'s counts are the same.
+
 - On the CPU, a robot mask (`DepthImage::robot_mask`) takes 11% to 23% less time on the Ryzen
   and up to 15% less on the M4 Pro, and fusing an image into a map up to 13% less on the Ryzen,
   however the crate is split into codegen units: the work each row and each reading takes is a
@@ -495,13 +549,15 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 - **Breaking:** a held capsule is covered by spheres along its axis, and a held cylinder that is thin or
   slender (a disc, a rod) by one layer of rings of spheres or one line of them, where that reaches
-  the tolerance within the budget: without fitting, in microseconds where a fit took 4 to 25 ms,
-  and with fewer spheres than their fit took (a 14 cm plate: 145 within 4.7 mm of it). Their spheres, and so clearances and contacts measured to them, differ from the fit's.
-  Stout cylinders, and discs the budget cannot bring within the tolerance (a plate at the default
-  64), are fitted as before.
+  the tolerance within the budget: without fitting, in microseconds where a fit took 4 to 25 ms.
+  Their spheres, and so clearances and contacts measured to them, differ from the fit's. Past the
+  budget, any cylinder takes its tiles' rings or layer and a capsule its line, as said above (a
+  14 cm plate: 75 within 5 mm at a budget of 64 or 256).
 
 ### Fixed
 
+- Two groups of one call that hold the same object fit its spheres once: the second waits for
+  the first and takes what it fitted, where both missed the device's kept spheres and fitted it.
 - Miru can preserve a measured container opening when a separate solid lies behind its observed
   inner wall. The exterior piece keeps its own collision geometry.
 

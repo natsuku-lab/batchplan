@@ -1,6 +1,7 @@
-//! How spheres cover what a hand holds, and what covering or fitting it costs: a plate, a can
-//! and a capsule held by the Panda, with the default 64 spheres and with 256 to spend. For each,
-//! how many spheres it takes and how far they reach past its side and past its ends.
+//! How spheres cover what a hand holds, and what covering or fitting it costs: a plate, a bowl, a
+//! can and a capsule held by the Panda, within the default 5 mm with the default 64 spheres and
+//! with 256 to spend, which do not cap them, and within 2 and 1 mm. For each, how many spheres it
+//! takes and how far they reach past its side and past its ends.
 //!
 //! cargo run --release --example held_spheres
 
@@ -34,11 +35,18 @@ fn main() -> Result<()> {
     };
     let shapes = [
         ("a plate 13.9 cm across, 18 mm thick", 0.0695, 0.009, false),
+        (
+            "a bowl 11.2 cm across, 5.1 cm deep",
+            0.05603,
+            0.02537,
+            false,
+        ),
         ("a can 6.6 cm across, 12 cm tall", 0.033, 0.06, false),
         ("a capsule 4 cm across, 14 cm long", 0.02, 0.05, true),
     ];
     for (name, radius, half, capsule) in shapes {
-        for budget in [64, 256] {
+        let options = [(64, 0.005), (256, 0.005), (64, 0.002), (64, 0.001)];
+        for (budget, tolerance) in options {
             let held = Held {
                 hand: 0,
                 object: round(radius, half, capsule),
@@ -46,6 +54,7 @@ fn main() -> Result<()> {
                 locked: Default::default(),
                 spheres: SphereOptions {
                     budget,
+                    tolerance,
                     ..Default::default()
                 },
             };
@@ -62,7 +71,8 @@ fn main() -> Result<()> {
                 ends = ends.max(c.z.abs() + s[3] - end);
             }
             println!(
-                "{name}, {budget} to spend: {} spheres in {took:.2} ms, {:.1} mm past its side, {:.1} mm past its ends",
+                "{name}, {budget} to spend, within {:.0} mm: {} spheres in {took:.2} ms, {:.1} mm past its side, {:.1} mm past its ends",
+                tolerance * 1e3,
                 spheres.len(),
                 side * 1e3,
                 ends * 1e3

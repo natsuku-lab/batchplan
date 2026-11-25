@@ -65,14 +65,18 @@ value_class! {
 value_class! {
     /// How spheres are fitted to a robot's links.
     SphereOptions(batchplan::SphereOptions) {
-        /// Spheres for the whole robot.
+        /// Spheres for the whole robot, at most. It caps the robot's own spheres only: an object
+        /// it holds (`AttachedObject.spheres`, `Held.spheres`) takes as many as its tolerance does.
         budget: usize,
         /// How far spheres may reach beyond the geometry (meters) before the fit spends more of
         /// the budget. When the budget cannot reach it, the fit uses the smallest overhang it can.
+        /// An object a robot holds always reaches it, however many spheres that takes, and is
+        /// held whole by its spheres unless `max_overhang` holds them back.
         tolerance: f32,
         /// The farthest any sphere may reach beyond the geometry (meters), whatever the budget;
         /// 0 keeps every sphere inside. It leaves surface outside the spheres where the budget
-        /// cannot cover it within that, and needs closed geometry. `None`: no limit.
+        /// cannot cover it within that (a held box, cylinder or capsule is covered whole), and
+        /// needs closed geometry. `None`: no limit.
         max_overhang: Option<f32>,
         /// Largest spacing of the interior grid that proposes sphere centers (meters). Small links
         /// use a finer grid.

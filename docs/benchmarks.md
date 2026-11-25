@@ -267,17 +267,24 @@ The table is read once for the 64 boxes. A flat bottom on a flat top is judged i
 
 ## Spheres for what a hand holds
 
-`examples/held_spheres.rs` holds three round shapes with the default 64 spheres to spend and with 256 (`Held::spheres`), within the default 5 mm, on the M4 Pro: how many spheres each takes, how far they reach past it, and how long covering or fitting it took.
+`examples/held_spheres.rs` holds four round shapes within the default 5 mm with the default 64 spheres to spend and with 256 (`Held::spheres`), and within 2 and 1 mm with 64, on the M4 Pro: how many spheres each takes, how far they reach past it, and how long covering it took (the median of three runs).
 
-| | To spend | Spheres | Past its side | Past its ends | Time |
+| | Within | Spheres | Past its side | Past its ends | Time |
 |---|---|---|---|---|---|
-| A plate 13.9 cm across, 18 mm thick | 64 | 64, fitted | 8.6 mm | 10.6 mm | 27 ms |
-| | 256 | 145, covered | 4.7 mm | 4.7 mm | 0.14 ms |
-| A can 6.6 cm across, 12 cm tall | 64 | 64, fitted | 7.1 mm | 6.7 mm | 8.4 ms |
-| | 256 | 90, fitted | 4.7 mm | 5.0 mm | 7.2 ms |
-| A capsule 4 cm across, 14 cm long | 64 or 256 | 5, covered | 3.6 mm | 3.6 mm | 0.02 ms |
+| A plate 13.9 cm across, 18 mm thick | 5 mm, 64 or 256 to spend | 75, its tiles' layer | 5.0 mm | 5.0 mm | 2.2 to 2.6 ms |
+| | 2 mm | 364, its tiles' rings | 2.0 mm | 2.0 mm | 8.7 ms |
+| | 1 mm | 1,017, its tiles' rings | 1.0 mm | 1.0 mm | 20 ms |
+| A bowl 11.2 cm across, 5.1 cm deep | 5 mm, 64 or 256 to spend | 70, its tiles' rings | 5.0 mm | 5.0 mm | 1.7 to 1.9 ms |
+| | 2 mm | 320 | 2.0 mm | 2.0 mm | 6.2 ms |
+| | 1 mm | 908 | 1.0 mm | 1.0 mm | 14 ms |
+| A can 6.6 cm across, 12 cm tall | 5 mm, 64 or 256 to spend | 35, its tiles' rings | 5.0 mm | 5.0 mm | 0.9 ms |
+| | 2 mm | 176 | 2.0 mm | 2.0 mm | 4.0 ms |
+| | 1 mm | 497 | 1.0 mm | 1.0 mm | 12 ms |
+| A capsule 4 cm across, 14 cm long | 5 mm, 64 or 256 to spend | 5, covered | 3.6 mm | 3.6 mm | 0.02 ms |
+| | 2 mm | 7 | 1.7 mm | 1.7 mm | 0.02 ms |
+| | 1 mm | 9 | 1.0 mm | 1.0 mm | 0.02 ms |
 
-Fitted, as stout shapes are, a thin wide one keeps reaching past its tolerance until it has a few hundred spheres; covered in one layer, the plate is within it at 145.
+The budget does not cap what a hand holds: each shape takes what its tolerance takes, the same with 64 to spend as with 256, and its spheres hold all of it. Nothing is fitted. The bowl and the can take rings along their medial structure, and the plate too within 2 and 1 mm; within 5 mm, the plate takes its tiles' layer, rings of the widths and sectors that take fewest spheres.
 
 ## Joining motions
 
@@ -490,6 +497,19 @@ cargo run --release --example fitting -- 14 panda 1200 10000 3
 # A dependent crate's default codegen-unit count:
 cargo run --release --config 'profile.release.package.batchplan.codegen-units=16' --example fitting -- 1 so101 700 0 3
 ```
+
+The greedy cover then finds a candidate's samples in columns as wide as the median candidate
+reaches, and growing the spheres to their samples finds a sample's spheres among about one cell
+per sphere. Against `b6ffaaa` on 2026-11-24, three alternating rounds on the M4 Pro with one
+caller thread, the machine's load 3.0 to 3.8, the same fixtures and checksums; the best and the
+second-best of the rounds' best times, in milliseconds:
+
+| Model / sphere budget | One unit before | One unit after | Sixteen before | Sixteen after |
+|---|---:|---:|---:|---:|
+| Stand / 512 | 339.4 / 344.1 | 262.5 / 263.3 | 353.4 / 354.1 | 272.3 / 278.8 |
+| Panda / 1,200 | 314.6 / 315.4 | 266.2 / 270.4 | 321.6 / 321.6 | 274.6 / 281.3 |
+| SO-101 / 700 | 126.6 / 127.4 | 116.8 / 117.8 | 130.4 / 131.1 | 120.9 / 124.2 |
+| UR5e / 1,200 | 219.5 / 220.1 | 193.7 / 194.7 | 225.6 / 225.7 | 198.6 / 204.9 |
 
 ## Reproducing
 
