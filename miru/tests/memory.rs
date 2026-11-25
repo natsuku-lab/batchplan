@@ -3979,11 +3979,7 @@ fn composed(
             .map(|(&pose, e)| (pose, open, GripSource::Bar, e));
         groups.push((grips.collect(), Some(1)));
     }
-    let loaded = GraspOptions {
-        opening: *TURN_GAPS.end(),
-        ..*options
-    };
-    let from_above: Vec<Pose> = (batchplan::grasps(&shape, &loaded).unwrap_or_default())
+    let from_above: Vec<Pose> = (batchplan::grasps(&shape, options).unwrap_or_default())
         .into_iter()
         .map(|grasp| placed.mul_pose(grasp))
         .filter(|pose| (pose.rotation * Vec3::Z).z < -std::f32::consts::FRAC_1_SQRT_2)
@@ -4348,6 +4344,60 @@ fn a_shelf_in_the_way_in_rules_the_grip_out() {
         found.push((*camera, outcome(&wrong)));
     }
     verdict("a_shelf_in_the_way_in_rules_the_grip_out", &found);
+}
+
+/// A box 86 x 77 x 30 mm seen from one side, its narrow width between the full opening of 7.5 cm,
+/// which the fingers are locked at, and the loaded width of 8 cm: no grip from above its fitted
+/// shape closes across more than the full opening.
+#[test]
+fn no_grip_from_above_closes_across_more_than_the_full_opening() {
+    let robot = panda();
+    let device = Device::cpu_threads(&robot, 2).unwrap();
+    let q = robot.default_q().to_vec();
+    let wide = block(
+        Vec3::new(0.5, 0.0, 0.015),
+        Vec3::new(0.043, 0.0385, 0.015),
+        [180, 30, 30],
+    );
+    let things = vec![table(), wide, arm(&robot, &q)];
+    let rendered = one_side(&things);
+    let options = turn_options(&robot);
+    let mut between = 0;
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seen = first_look(&device, &things, &rendered, (c, 7), &q, 0.0);
+        let scene = seen.kept.scene();
+        let id = id_of(scene, &rendered, 1).expect("the box is visible");
+        let object = scene.objects.iter().find(|object| object.id == id);
+        let shape = cover(&object.expect("the box").shape);
+        let Obstacle::Cuboid {
+            half_extents,
+            rotation,
+            ..
+        } = shape
+        else {
+            panic!("{camera}: fitted as a box: {shape:?}");
+        };
+        let narrow = 2.0 * half_extents.x.min(half_extents.y);
+        between += usize::from(options.opening < narrow && narrow <= *TURN_GAPS.end());
+        let turn =
+            seen.kept
+                .turn_grips(&device, id, 0, TURN_GAPS, TURN_CAPACITY, Vec3::Z, &options);
+        let turn = turn.unwrap().expect("the box is seen");
+        let grips = turn.groups.iter().flat_map(|group| &group.grips);
+        for grip in grips.filter(|grip| grip.source == GripSource::Shape) {
+            let closing = rotation.inverse() * (grip.pose.rotation * Vec3::Y);
+            let across = 2.0 * closing.abs().dot(half_extents);
+            assert!(
+                across <= grip.opening,
+                "{camera}: a grip from above closes across {across} m, the fingers {} m apart",
+                grip.opening
+            );
+        }
+    }
+    assert!(
+        between > 0,
+        "some camera must fit the box between the full opening and the loaded width"
+    );
 }
 
 /// An object no label names has no grips, and what is out of range is refused, naming the value.

@@ -71,10 +71,10 @@ impl Kept {
     ///
     /// 1. **Bar**: the poses [`Kept::bar_on_disk`] gives along `up`, in its order, fully open;
     ///    `enough: Some(1)`.
-    /// 2. **Shape, both sides**: `batchplan::grasps` of the object's fitted shape at the loaded
-    ///    width (`gaps.end()`), those whose z axis points within 45 degrees of `-up`, as the
-    ///    shape's approaches are its axes, 90 degrees apart; of these, those whose closure shows
-    ///    [`ClosureEvidence::BothSides`]. Fully open; `enough: None`.
+    /// 2. **Shape, both sides**: `batchplan::grasps` of the object's fitted shape with `options`,
+    ///    so closing across no more than fully open, those whose z axis points within 45 degrees
+    ///    of `-up`, as the shape's approaches are its axes, 90 degrees apart; of these, those
+    ///    whose closure shows [`ClosureEvidence::BothSides`]. Fully open; `enough: None`.
     /// 3. **The rest**: the grasps of the object's measured surface
     ///    (`batchplan::grasps_on_with_capacity` with `capacity`), ordered by the moment they
     ///    exert about the screw (`GraspOptions::order_for_turn`), those showing `BothSides` first,
@@ -165,12 +165,8 @@ impl Kept {
         let shape = scene.objects[index].shape.obstacle();
         let placed = shape.pose();
         let screw = Screw::about(bar.as_ref().map_or(placed.position, |bar| bar.center), up);
-        let loaded_options = GraspOptions {
-            opening: loaded,
-            ..*options
-        };
         // With its options checked, `grasps` refuses only a shape no grasp fits.
-        let shaped: Vec<Pose> = batchplan::grasps(&shape, &loaded_options)
+        let shaped: Vec<Pose> = batchplan::grasps(&shape, options)
             .unwrap_or_default()
             .into_iter()
             .map(|grasp| placed.mul_pose(grasp))
