@@ -1047,6 +1047,34 @@ fn through_three(a: Vec2, b: Vec2, c: Vec2) -> (Vec2, f32) {
     (a + offset, offset.length())
 }
 
+/// Whether a thing whose readings are `points`, each of which may lie its `slack` off a surface,
+/// lies across the room of `shape`, a box open at the top, inside its solids as thin as a wall:
+/// every reading in the solids by more than its slack, the readings reaching from one side of the
+/// room to the other along one of the box's axes and lying within one reach of one another along
+/// the other. A reach is a reading's slack and `window`, the widest window of the box's own
+/// readings, as far as those tell a gap or a thickness from none. No other shape has a room.
+pub(crate) fn across(shape: &Shape, points: &[Vec3], slack: &[f32], window: f32) -> bool {
+    let Shape::OpenBox {
+        center, rotation, ..
+    } = *shape
+    else {
+        return false;
+    };
+    let (lower, upper) = shape.room();
+    let depth = shape.distances();
+    let (mut low, mut high, mut reach) = (Vec2::INFINITY, Vec2::NEG_INFINITY, window);
+    for (&point, &slack) in points.iter().zip(slack) {
+        if depth(point) >= -slack {
+            return false;
+        }
+        let at = (rotation.inverse() * (point - center)).truncate();
+        (low, high, reach) = (low.min(at), high.max(at), reach.max(slack + window));
+    }
+    let spans = (low - reach).cmple(lower.truncate()) & (high + reach).cmpge(upper);
+    let thin = (high - low).cmple(Vec2::splat(reach));
+    (spans.x && thin.y) || (spans.y && thin.x)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
