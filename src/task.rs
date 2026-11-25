@@ -302,10 +302,8 @@ impl Place {
 pub struct TaskOptions {
     /// Collision spheres for the carried object created by a pick or a moving turn: holding all of
     /// it, within the tolerance of it, however many spheres that takes ([`Held::spheres`]). A
-    /// smaller tolerance fits closer to narrow walls; the budget does not cap them. The tolerance
-    /// is an upper bound: a task fits them no coarser than the finest distance grid in its own
-    /// worlds. The returned hold keeps the same options when passed to a place. Defaults to
-    /// [`SphereOptions::default`].
+    /// smaller tolerance fits closer to narrow walls; the budget does not cap them. The returned
+    /// hold keeps the same options when passed to a place. Defaults to [`SphereOptions::default`].
     pub held_spheres: SphereOptions,
     /// IK at each grasp or release.
     pub ik: IkOptions,
@@ -1018,10 +1016,7 @@ fn picked(
     if !departing.is_empty() {
         let mut alike: Vec<(Held, Vec<&mut Candidate>)> = vec![];
         for c in departing {
-            let t = &tasks[c.task];
-            let stated = held(t, worlds, c.index, o.held_spheres);
-            let in_its = step_worlds(worlds, &Steps::of_pick(t));
-            let holding = held::in_worlds(&stated, in_its).into_owned();
+            let holding = held(&tasks[c.task], worlds, c.index, o.held_spheres);
             match alike.iter_mut().find(|(h, _)| *h == holding) {
                 Some((_, group)) => group.push(c),
                 None => alike.push((holding, vec![c])),
@@ -1232,17 +1227,13 @@ fn placed(
     // A device holding each task's object, built in parallel; tasks holding theirs alike share one.
     // Every step below runs each holder's candidates as a batch of their own, as many holders
     // at a time as the device has threads (`Device::in_turns`).
-    let fitted: Vec<Cow<Held>> = tasks
-        .iter()
-        .map(|t| held::in_worlds(&t.held, step_worlds(worlds, &Steps::of_place(t))))
-        .collect();
     let mut helds: Vec<&Held> = vec![];
     let mut holder_of = vec![];
-    for held in &fitted {
-        let h = match helds.iter().position(|h| *h == held.as_ref()) {
+    for t in tasks {
+        let h = match helds.iter().position(|held| **held == t.held) {
             Some(h) => h,
             None => {
-                helds.push(held);
+                helds.push(&t.held);
                 helds.len() - 1
             }
         };
@@ -3192,7 +3183,6 @@ fn articulated(
                     grasp: t.grasps[c.index],
                     spheres: o.held_spheres,
                 };
-                let held = held::in_worlds(&held, step_worlds(worlds, &t.steps)).into_owned();
                 grips.push((held, vec![i]));
             }
         }
@@ -3434,10 +3424,4 @@ impl Gripping for Pull {
             ..self.clone()
         }
     }
-}
-
-/// The worlds a task's `steps` move through, which its held object's spheres are fitted for
-/// ([`held::in_worlds`]).
-pub(crate) fn step_worlds<'w>(worlds: &'w Worlds, steps: &Steps) -> [&'w World; 3] {
-    [steps.world, steps.transit_world, steps.depart_world].map(|w| &worlds[w as usize])
 }

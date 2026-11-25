@@ -371,10 +371,7 @@ pub fn solve_ik(
     o: &IkOptions,
 ) -> Result<IkResult> {
     check(device.robot(), worlds, problems, o)?;
-    let holds: Vec<_> = problems
-        .iter()
-        .map(|p| p.holding.as_ref().map(|h| (h, &worlds[p.world as usize])))
-        .collect();
+    let holds: Vec<Option<&Held>> = problems.iter().map(|p| p.holding.as_ref()).collect();
     let parts = held::by_hold(device, &holds, |on, items| {
         solved(on, worlds, &held::subset(problems, items), o)
     })?;

@@ -11,7 +11,7 @@ use crate::error::{Result, ensure_input, input};
 use crate::robot::{self, AttachedObject, Robot};
 use crate::spheres::SphereOptions;
 use crate::types::Pose;
-use crate::world::{Obstacle, World};
+use crate::world::Obstacle;
 
 /// An object a hand holds.
 #[derive(Clone, Debug, PartialEq)]
@@ -32,10 +32,7 @@ pub struct Held {
     /// How spheres cover it: they hold all of it, no point of its surface outside them but for
     /// rounding, and reach no more than `tolerance` (5 mm by default) past it, however many
     /// spheres that takes, which `budget` does not cap. A gap narrower than what its spheres reach
-    /// past it reads as a contact: a smaller tolerance fits closer, with more spheres. The
-    /// tolerance is an upper bound: a call holding it fits them no coarser than the finest distance
-    /// grid in the item's own world, whose voxel takes its place where smaller, and
-    /// [`Held::attachment`], which has no world, keeps it as stated. Its own
+    /// past it reads as a contact: a smaller tolerance fits closer, with more spheres. Its own
     /// `max_overhang` holds them, whatever the robot was loaded with, and then leaves some of it
     /// outside them, but for a box, a cylinder or a capsule, which their tiles hold whole within
     /// the smaller of the two.
@@ -158,38 +155,33 @@ pub(crate) fn held_link(hand: usize) -> String {
     format!("held by hand {hand}")
 }
 
-/// Runs `run` on each group of items that hold alike (`holds`: per item, what it holds and the
-/// world it is held in, whose distance grids make its spheres finer, [`in_worlds`]), with the
+/// Runs `run` on each group of items that hold alike (`holds`: per item, what it holds), with the
 /// items' indices in order: on `device` for those holding nothing, and on a device holding the
 /// object for the rest, every object fitted once. Groups run on the device's threads, as many at
 /// a time as it has (`Device::in_turns`); a call with one group runs it on the calling thread,
 /// and one with no items runs `run` once on `device` with none.
 pub(crate) fn by_hold<R: Send>(
     device: &Device,
-    holds: &[Option<(&Held, &World)>],
+    holds: &[Option<&Held>],
     run: impl Fn(&Device, &[usize]) -> Result<R> + Sync,
 ) -> Result<Vec<(Vec<usize>, R)>> {
     // Group 0 holds nothing; group k + 1 holds `distinct[k]`.
-    let mut distinct: Vec<Cow<Held>> = vec![];
+    let mut distinct: Vec<&Held> = vec![];
     let mut groups: Vec<Vec<usize>> = vec![vec![]];
     for (i, hold) in holds.iter().enumerate() {
         let group = match hold {
             None => 0,
-            Some((held, world)) => {
-                let held = in_worlds(held, [*world]);
-                match distinct.iter().position(|d| *d == held) {
-                    Some(k) => k + 1,
-                    None => {
-                        distinct.push(held);
-                        groups.push(vec![]);
-                        distinct.len()
-                    }
+            Some(held) => match distinct.iter().position(|d| d == held) {
+                Some(k) => k + 1,
+                None => {
+                    distinct.push(held);
+                    groups.push(vec![]);
+                    distinct.len()
                 }
-            }
+            },
         };
         groups[group].push(i);
     }
-    let distinct: Vec<&Held> = distinct.iter().map(|held| held.as_ref()).collect();
     let holders = holders(device, device.robot(), &distinct)?;
     let on = |group: usize| match group {
         0 => device,
@@ -349,37 +341,6 @@ impl Fitted {
     ) -> Result<Device> {
         device.with_robot(&held.holding(robot, &self.spheres[self.object_of[k]])?)
     }
-}
-
-/// `held` as a call holding it in `worlds` (an item's own, one or the few a task moves through)
-/// fits its object's spheres: no coarser than the finest distance grid there, its tolerance the
-/// smaller of the one it states and that grid's voxel, since a cover coarser than the field it is
-/// checked against reads gaps the field resolves as contacts. Itself, unchanged, where no grid
-/// there is finer than its tolerance.
-pub(crate) fn in_worlds<'a, 'w>(
-    held: &'a Held,
-    worlds: impl IntoIterator<Item = &'w World>,
-) -> Cow<'a, Held> {
-    let tolerance = tolerance_in(held.spheres.tolerance, worlds);
-    if tolerance == held.spheres.tolerance {
-        return Cow::Borrowed(held);
-    }
-    let mut finer = held.clone();
-    finer.spheres.tolerance = tolerance;
-    Cow::Owned(finer)
-}
-
-/// The tolerance a held object's spheres are fitted to in `worlds` ([`in_worlds`]): the smaller
-/// of `stated` and the finest voxel of any distance grid there.
-pub(crate) fn tolerance_in<'w>(stated: f32, worlds: impl IntoIterator<Item = &'w World>) -> f32 {
-    let grids = worlds
-        .into_iter()
-        .flat_map(|world| &world.obstacles)
-        .filter_map(|obstacle| match obstacle {
-            Obstacle::Sdf { grid, .. } => Some(grid.voxel()),
-            _ => None,
-        });
-    grids.fold(stated, f32::min)
 }
 
 #[cfg(test)]

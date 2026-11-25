@@ -173,10 +173,7 @@ pub fn follow(
     )?;
     let paths = corrected.as_ref();
     check(robot, worlds, paths, o)?;
-    let holds: Vec<_> = paths
-        .iter()
-        .map(|p| p.holding.as_ref().map(|h| (h, &worlds[p.world as usize])))
-        .collect();
+    let holds: Vec<Option<&Held>> = paths.iter().map(|p| p.holding.as_ref()).collect();
     let parts = held::by_hold(device, &holds, |on, items| {
         followed(on, worlds, &held::subset(paths, items), o)
     })?;
