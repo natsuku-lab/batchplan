@@ -720,6 +720,7 @@ impl<'call> Connect<'call> {
                 let ends = std::iter::once(&p.start).chain(&p.goals).cloned().collect();
                 Arc::new(Keep {
                     clearance: o.clearance,
+                    apart: 0.0,
                     ramp: o.clearance_ramp,
                     ends,
                 })

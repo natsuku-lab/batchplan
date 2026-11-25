@@ -199,6 +199,7 @@ impl<'call> Simplify<'call> {
         let keep = (o.clearance > 0.0).then(|| {
             Arc::new(Keep {
                 clearance: o.clearance,
+                apart: 0.0,
                 ramp: o.clearance_ramp,
                 ends,
             })

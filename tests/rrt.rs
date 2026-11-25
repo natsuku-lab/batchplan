@@ -837,3 +837,102 @@ fn a_path_no_spline_follows_is_searched_again() {
     let result = batchplan::plan(&cpu, &worlds, &[problem], &PlanOptions::default()).unwrap();
     assert!(result.best(0).is_some(), "no path");
 }
+
+/// A spline's samples as the planner checks them (`spline::checked`): each span of the uniform
+/// cubic B-spline `cp` (`[points, n]`) at `per_span` evenly spaced points, or at more where its
+/// Bezier polygon says it moves farther, so neighbours lie at most `spacing` apart, then its end.
+fn checked_samples(cp: &[f32], n: usize, per_span: usize, spacing: f32) -> Vec<f32> {
+    let points = cp.len() / n;
+    let gap = |a: usize, b: usize| {
+        (0..n)
+            .map(|j| (cp[b * n + j] - cp[a * n + j]).powi(2))
+            .sum::<f32>()
+            .sqrt()
+    };
+    let mut out = vec![];
+    for span in 0..points - 3 {
+        let speed = (0.5 * gap(span, span + 2))
+            .max(gap(span + 1, span + 2))
+            .max(0.5 * gap(span + 1, span + 3));
+        let count = per_span.max((speed / spacing).ceil() as usize);
+        for s in 0..count {
+            let u = s as f32 / count as f32;
+            let (u2, u3, v) = (u * u, u * u * u, 1.0 - u);
+            let w = [
+                v * v * v / 6.0,
+                (3.0 * u3 - 6.0 * u2 + 4.0) / 6.0,
+                (-3.0 * u3 + 3.0 * u2 + 3.0 * u + 1.0) / 6.0,
+                u3 / 6.0,
+            ];
+            for j in 0..n {
+                out.push((0..4).map(|i| w[i] * cp[(span + i) * n + j]).sum::<f32>());
+            }
+        }
+    }
+    out.extend_from_slice(&cp[cp.len() - n..]);
+    out
+}
+
+/// Optimized seeds that pass validation keep 2 mm between the robot's links at every sample they
+/// are checked at, ramped to nothing over `shortcut.clearance_ramp` toward their ends, as searched
+/// splines keep it: the UR5e's far reaches, 48 of them with eight seeds each, on every device. Some
+/// come within a centimetre, so the margin is what decides them.
+#[test]
+fn optimized_seeds_keep_their_links_apart() {
+    let robot = Robot::load(common::asset(UR5E), &RobotOptions::default()).unwrap();
+    let cpu = Device::cpu(&robot).unwrap();
+    let n = robot.dof();
+    let (scene, problems) = common::far_reaches(&robot, &cpu, 48, false);
+    let o = PlanOptions {
+        seeds: 8,
+        ..PlanOptions::default()
+    };
+    let (margin, ramp) = (0.002, o.shortcut.clearance_ramp);
+    let exact = CollisionWeights {
+        self_margin: 1.0,
+        ..CollisionWeights::NONE
+    };
+    let distance = |a: &[f32], b: &[f32]| length(&[a, b].concat(), n);
+    for d in devices(&robot) {
+        let worlds = d.upload(&scene).unwrap();
+        let result = batchplan::plan(&d, &worlds, &problems, &o).unwrap();
+        let (mut seeds, mut nearest) = (0, f32::INFINITY);
+        let optimized =
+            (0..result.paths.len()).filter(|&i| i % result.seeds > 0 && result.valid[i]);
+        for item in optimized {
+            let samples = checked_samples(
+                &result.paths[item],
+                n,
+                o.validate_substeps,
+                o.shortcut.resolution,
+            );
+            let m = samples.len() / n;
+            let world = result.problems[item / result.seeds].world;
+            let e = d
+                .evaluate(&worlds, &vec![world; m], &samples, &exact)
+                .unwrap();
+            let ends = [&samples[..n], &samples[(m - 1) * n..]];
+            for (i, q) in samples.chunks(n).enumerate() {
+                let from_ends = distance(q, ends[0]).min(distance(q, ends[1]));
+                let past = e.self_clearance[i] - margin * (from_ends / ramp).min(1.0);
+                assert!(
+                    past > -1e-6,
+                    "{}: seed {item} sample {i}: links {} m apart",
+                    d.name(),
+                    e.self_clearance[i]
+                );
+                nearest = nearest.min(e.self_clearance[i]);
+            }
+            seeds += 1;
+        }
+        eprintln!(
+            "{}: {seeds} valid optimized seeds, links {nearest} m apart at least",
+            d.name()
+        );
+        assert!(
+            seeds > 20 && nearest < 0.01,
+            "{}: {seeds} seeds, {nearest} m",
+            d.name()
+        );
+    }
+}
