@@ -60,6 +60,7 @@ a_knob_is_turned_by_its_bar_first | D435 | no bar over the disk resolves | the o
 a_knob_is_turned_by_its_bar_first | D435+D405 | no bar over the disk resolves | as through the D435
 a_box_seen_from_one_side_is_turned_from_above_its_middle | D435+D405 | no grip from above its middle in 1 groups | the box is fitted 14 x 6 cm and not solid, and a reading not the box's, 15 mm past its unseen side and 2 cm over the table, lies in both closing sweeps from above its fitted middle
 a_post_in_the_closing_gap_rules_the_grip_out | D435+D405 | no grip from above its middle | as in `a_box_seen_from_one_side_is_turned_from_above_its_middle`, without the post
+a_shelf_in_the_way_in_rules_the_grip_out | D435+D405 | no grip from above its middle | as in `a_box_seen_from_one_side_is_turned_from_above_its_middle`, without the shelf
 ";
 
 /// The complaint listed for `test` through `camera`, if one is.
@@ -4192,6 +4193,15 @@ fn a_box_seen_from_one_side_is_turned_from_above_its_middle() {
     );
 }
 
+/// The poses of `turn`'s grips from above the fitted shape, in every group.
+fn shape_grips(turn: &TurnGrips) -> Vec<Pose> {
+    let grips = turn.groups.iter().flat_map(|g| &g.grips);
+    grips
+        .filter(|g| g.source == GripSource::Shape)
+        .map(|g| g.pose)
+        .collect()
+}
+
 /// A post fixed beside the box, between its long side and where the open finger stands over it:
 /// the fingers closing from above the box's middle would sweep into it, so those grips are in no
 /// group, while without it they are the second group.
@@ -4214,13 +4224,6 @@ fn a_post_in_the_closing_gap_rules_the_grip_out() {
     let bare = vec![table(), a_control(), arm(&robot, &q)];
     let guarded = vec![table(), a_control(), post, arm(&robot, &q)];
     let options = turn_options(&robot);
-    let shape_grips = |turn: &TurnGrips| -> Vec<Pose> {
-        let grips = turn.groups.iter().flat_map(|g| &g.grips);
-        grips
-            .filter(|g| g.source == GripSource::Shape)
-            .map(|g| g.pose)
-            .collect()
-    };
     let mut found = vec![];
     for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
         let rendered = one_side(&bare);
@@ -4274,6 +4277,77 @@ fn a_post_in_the_closing_gap_rules_the_grip_out() {
         found.push((*camera, outcome(&wrong)));
     }
     verdict("a_post_in_the_closing_gap_rules_the_grip_out", &found);
+}
+
+/// A shelf 6 cm square and 6 mm thick, 17.5 cm over the box: clear of the open hand over the
+/// box's middle and of its fingers' sweeps, but in the hand's straight way in from above. The
+/// grips from above the box's middle, which close on both its sides without the shelf, come in
+/// through it, so they are in no group.
+#[test]
+fn a_shelf_in_the_way_in_rules_the_grip_out() {
+    use ClosureEvidence::{BothSides, Obstructed};
+
+    let robot = panda();
+    let device = Device::cpu_threads(&robot, 2).unwrap();
+    let q = robot.default_q().to_vec();
+    let shelf = block(
+        Vec3::new(0.5, 0.0, 0.175),
+        Vec3::new(0.03, 0.03, 0.003),
+        [30, 180, 30],
+    );
+    let bare = vec![table(), a_control(), arm(&robot, &q)];
+    let sheltered = vec![table(), a_control(), shelf, arm(&robot, &q)];
+    let options = turn_options(&robot);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let rendered = one_side(&bare);
+        let seen = first_look(&device, &bare, &rendered, (c, 7), &q, 0.0);
+        let id = id_of(seen.kept.scene(), &rendered, 1).expect("the box is visible");
+        let turn =
+            seen.kept
+                .turn_grips(&device, id, 0, TURN_GAPS, TURN_CAPACITY, Vec3::Z, &options);
+        let centred = shape_grips(&turn.unwrap().expect("the box is seen"));
+        let rendered = one_side(&sheltered);
+        let seen = first_look(&device, &sheltered, &rendered, (c, 7), &q, 0.0);
+        let kept = &seen.kept;
+        assert!(
+            holder(kept.scene(), &rendered, 2).is_some(),
+            "{camera}: the shelf is seen"
+        );
+        let id = id_of(kept.scene(), &rendered, 1).expect("the box is visible under the shelf");
+        let evidence = |options: &GraspOptions| {
+            let found = kept.observed_closures(&device, id, 0, TURN_GAPS, &centred, options);
+            found.unwrap().expect("the box is seen")
+        };
+        let through = evidence(&options);
+        assert!(
+            through.iter().all(|e| *e == Obstructed),
+            "{camera}: the hand comes in through the shelf: {through:?}"
+        );
+        let no_way_in = GraspOptions {
+            approach: 0.0,
+            ..options
+        };
+        let closing = evidence(&no_way_in);
+        assert!(
+            closing.iter().all(|e| *e == BothSides),
+            "{camera}: the shelf is clear of the open hand and its fingers' sweeps: {closing:?}"
+        );
+        let turn = kept.turn_grips(&device, id, 0, TURN_GAPS, TURN_CAPACITY, Vec3::Z, &options);
+        let kept_grips = shape_grips(&turn.unwrap().expect("the box is seen"));
+        assert!(
+            centred.iter().all(|pose| kept_grips
+                .iter()
+                .all(|kept| kept.position.distance(pose.position) > 0.005)),
+            "{camera}: a grip through the shelf is in a group: {kept_grips:?}"
+        );
+        let mut wrong = vec![];
+        if centred.is_empty() {
+            wrong.push("no grip from above its middle".to_string());
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("a_shelf_in_the_way_in_rules_the_grip_out", &found);
 }
 
 /// An object no label names has no grips, and what is out of range is refused, naming the value.
