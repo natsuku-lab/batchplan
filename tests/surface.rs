@@ -13,8 +13,8 @@ use std::f32::consts::TAU;
 use batchplan::glam::{Mat3, Quat, Vec2, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{
-    DepthImage, Device, Error, Grasp, GraspOptions, Intrinsics, Obstacle, Pose, Screw, Surface,
-    grasps_on,
+    DepthImage, Device, Error, Grasp, GraspOptions, HandSphere, Intrinsics, Obstacle, Pose, Screw,
+    Surface, grasps_on,
 };
 
 /// Points 2 mm apart: a fingertip's patch of 5 mm holds a few dozen.
@@ -1437,6 +1437,214 @@ fn a_leaning_wall_seen_from_one_side_is_closed_on_level_within_its_friction_cone
     // The grasps along the normal are those found without the level ones, in their order.
     let slippery = grasps(&seen, &with_friction(0.3));
     assert!(!slippery.is_empty() && !slippery.iter().any(|g| level(&g)));
+}
+
+/// Points on the whole of the bowl of `wall`, inside and out, its rim's round top and its bottom,
+/// about a millimeter apart: what a finger could meet of it, seen or not.
+fn bowl_points(wall: f32) -> Vec<Vec3> {
+    let half = wall / 2.0;
+    let mut profile = vec![];
+    for (a, b) in bowl_profile(wall) {
+        let along = (b - a).normalize();
+        let steps = ((b - a).length() / 1e-3).ceil() as usize;
+        for k in 0..=steps {
+            let at = a + (b - a) * (k as f32 / steps as f32);
+            profile.extend([at + along.perp() * half, at - along.perp() * half]);
+        }
+    }
+    let [(edge, rim), _] = bowl_profile(wall);
+    let up = (rim - edge).normalize();
+    for k in 0..=8 {
+        let angle = k as f32 / 8.0 * TAU / 2.0;
+        profile.push(rim + (up.perp() * angle.cos() + up * angle.sin()) * half);
+    }
+    let mut points = vec![];
+    for at in profile {
+        let around = ((TAU * at.x / 1e-3).ceil() as usize).max(1);
+        for k in 0..around {
+            let angle = k as f32 / around as f32 * TAU;
+            points.push(Vec3::new(at.x * angle.cos(), at.x * angle.sin(), at.y));
+        }
+    }
+    points
+}
+
+/// How far past its own patch, along its closing line, the most of `points` a finger of `hand`
+/// comes within its spheres, each `inset` less wide, of as the fingers close from `g`'s opening
+/// onto the patches: 0 for nothing past them, a finger meeting first what it closes on.
+fn met_past_the_patches(
+    g: &Grasp,
+    hand: &[HandSphere],
+    gap: f32,
+    points: &[Vec3],
+    inset: f32,
+) -> f32 {
+    let closing = g.pose.rotation * Vec3::Y;
+    let width = g.width();
+    let mut most = 0.0f32;
+    for sphere in hand.iter().filter(|sphere| sphere.side != 0.0) {
+        let center = g.pose.position + g.pose.rotation * sphere.center;
+        let at = |opening: f32| center - closing * (sphere.side * (gap - opening) / 2.0);
+        let (a, b) = (at(g.opening), at(width));
+        for &p in points {
+            let past = (p - g.pose.position).dot(closing).abs() - width / 2.0;
+            if past <= most {
+                continue;
+            }
+            let t = ((p - a).dot(b - a) / (b - a).length_squared().max(1e-12)).clamp(0.0, 1.0);
+            if p.distance(a + (b - a) * t) <= sphere.radius - inset {
+                most = past;
+            }
+        }
+    }
+    most
+}
+
+/// With `first_touch`, a grasp whose fingers meet the object before their patches comes after every
+/// one whose fingers meet it first there, and without it the same grasps come as before: closing
+/// level deep across the flared bowl's wall, seen from in front and over it as a robot's cameras
+/// see a bowl on a cabinet, the finger on the side the wall leans over meets the wall above its
+/// patch, a finger's length from the other contact, and the bowl turns in the hand as it is lifted
+/// (LIBERO's spatial task 9: the jaw read 8.7 mm at the close and 3.5 mm lifted, the bowl 15
+/// degrees over). Held to the bowl's true shape, its unseen outside too: within each lot, two seen
+/// sides and one, the grasps whose fingers meet the bowl more than two patches' radius past their
+/// own come after all whose fingers meet it no more than a surface's noise past, fingers that come
+/// in narrower swept from where they come in; and so of plates with a ledge beside one.
+#[test]
+fn grasps_whose_fingers_meet_the_object_before_their_patches_come_after_the_rest() {
+    let seen = bowl_seen(THIN, &[FRONT, ABOVE]);
+    let o = GraspOptions {
+        friction: 2.0,
+        first_touch: true,
+        ..with_shell(0.08)
+    };
+    let found = grasps(&seen, &o);
+    // Without it, the same grasps in the order they came before, which puts some that meet the
+    // bowl past their patches before some that meet it there.
+    let plain = grasps(
+        &seen,
+        &GraspOptions {
+            first_touch: false,
+            ..o
+        },
+    );
+    let sorted = |gs: &[Grasp]| {
+        let mut keys: Vec<_> = gs.iter().map(|g| format!("{g:?}")).collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(sorted(&found), sorted(&plain));
+    let default = GraspOptions {
+        friction: 2.0,
+        ..with_shell(0.08)
+    };
+    assert_eq!(plain, grasps(&seen, &default), "off unless asked for");
+    let robot = common::panda().unwrap();
+    let hand = robot.hand_spheres(0);
+    let bowl = bowl_points(THIN);
+    let lots = first_touch_order(&plain, &hand, o.opening, &bowl, 0.0);
+    assert!(
+        lots.iter().any(|(_, lot)| lot.out_of_order.is_some()),
+        "{lots:?}"
+    );
+    // Every grasp of two seen sides of this bowl closes onto its patches first; of one, level
+    // grasps across the leaning wall are among the late. Fingers that may come in narrower are
+    // swept from where they come in.
+    for narrow in [false, true] {
+        let o = GraspOptions { narrow, ..o };
+        let [(_, both), (_, one)] =
+            first_touch_order(&grasps(&seen, &o), &hand, o.opening, &bowl, 0.0);
+        assert!(both.clean > 0 && both.out_of_order.is_none(), "{both:?}");
+        let narrower = !narrow || (one.narrower_clean > 0 && one.narrower_late > 0);
+        assert!(
+            one.clean > 0 && one.late_level > 0 && one.out_of_order.is_none() && narrower,
+            "narrow {narrow}: {one:?}"
+        );
+    }
+    // Two plates seen whole and a ledge standing out 5 mm off one along half its length, as a lip
+    // over a patch: of these grasps of two seen sides, those whose finger meets the ledge come after
+    // those whose fingers meet the plates first. The patches stand in cells a patch wide: of the
+    // fingers that pass near the ledge's edges, only those farther than half a cell's diagonal
+    // in it or out of it are held to it.
+    let mut ledged = plates_of(0.02, 0.02);
+    let ledge = Vec3::new(0.0225, 0.01, 0.01);
+    face(
+        ledge,
+        Vec3::Z,
+        [Vec3::X, Vec3::Y],
+        [0.0075, 0.01],
+        &mut ledged,
+    );
+    the_object(&mut ledged);
+    let found = grasps(&ledged, &o);
+    let cell = o.contact * 3f32.sqrt() / 2.0;
+    let [(_, both), (_, one)] = first_touch_order(&found, &hand, o.opening, &ledged.points, cell);
+    assert!(
+        both.clean > 0 && both.late > 0 && both.out_of_order.is_none() && one.clean + one.late == 0,
+        "{both:?}"
+    );
+}
+
+/// Of one lot of grasps: how many meet what they close on no more than a surface's noise past
+/// their patches (`clean`), how many meet it more than two patches' radius past (`late`), how
+/// many level ones (`late_level`), of those less open than the hand, how many of each kind, and
+/// the first late grasp that comes before a clean one, with how far past each meets it
+/// (millimeters).
+#[derive(Debug)]
+struct Lot {
+    clean: usize,
+    late: usize,
+    late_level: usize,
+    narrower_clean: usize,
+    narrower_late: usize,
+    out_of_order: Option<(usize, f32, usize, f32)>,
+}
+
+/// `found`'s two lots, two seen sides and one, each as a [`Lot`] held to the true shape's `points`,
+/// what was not seen of it too: clean where the fingers' spheres, each `tolerance` wider, meet
+/// nothing past, late where they meet it each `tolerance` less wide.
+fn first_touch_order(
+    found: &[Grasp],
+    hand: &[HandSphere],
+    gap: f32,
+    points: &[Vec3],
+    tolerance: f32,
+) -> [(bool, Lot); 2] {
+    let (noise, late) = (0.0025, 2.0 * GraspOptions::default().contact);
+    let level = |g: &Grasp| (g.pose.rotation * Vec3::Y).z.abs() < 1e-4;
+    [false, true].map(|one_sided| {
+        let lot: Vec<&Grasp> = found.iter().filter(|g| g.one_sided == one_sided).collect();
+        let met = |inset: f32| -> Vec<f32> {
+            let met = |g: &&Grasp| met_past_the_patches(g, hand, gap, points, inset);
+            lot.iter().map(met).collect()
+        };
+        let (touched, into) = (met(-tolerance), met(tolerance));
+        let is_clean: Vec<bool> = touched.iter().map(|&past| past <= noise).collect();
+        let is_late: Vec<bool> = into.iter().map(|&past| past > late).collect();
+        let count = |keep: &dyn Fn(&Grasp, bool, bool) -> bool| {
+            let each = lot.iter().zip(is_clean.iter().zip(&is_late));
+            each.filter(|&(g, (&clean, &late))| keep(g, clean, late))
+                .count()
+        };
+        let last_clean = is_clean.iter().rposition(|&clean| clean);
+        let first_late = is_late.iter().position(|&late| late);
+        let out_of_order = match (first_late, last_clean) {
+            (Some(first), Some(clean)) if first < clean => {
+                Some((first, into[first] * 1e3, clean, touched[clean] * 1e3))
+            }
+            _ => None,
+        };
+        let narrower = |g: &Grasp| g.opening < gap;
+        let lot = Lot {
+            clean: count(&|_, clean, _| clean),
+            late: count(&|_, _, late| late),
+            late_level: count(&|g, _, late| level(g) && late),
+            narrower_clean: count(&|g, clean, _| narrower(g) && clean),
+            narrower_late: count(&|g, _, late| narrower(g) && late),
+            out_of_order,
+        };
+        (one_sided, lot)
+    })
 }
 
 #[test]
