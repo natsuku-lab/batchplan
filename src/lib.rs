@@ -103,9 +103,9 @@ pub use shortcut::ShortcutOptions;
 pub use spheres::{LinkQualification, Qualification, SphereGeometry, SphereOptions};
 pub use surface::{Grasp, Surface, grasps_on, grasps_on_with_capacity, prefer_measured_contacts};
 pub use task::{
-    CandidateStop, GraspOptions, Pick, PickBody, Place, Pull, TaskFailure, TaskOptions, TaskPlan,
-    TaskResult, TaskStep, Turn, grasps, pick, pick_with_preferred_grasps, place, place_poses, pull,
-    turn,
+    CandidateStop, GraspOptions, NearestPlace, Pick, PickBody, Place, Pull, TaskFailure,
+    TaskOptions, TaskPlan, TaskResult, TaskStep, Turn, grasps, pick, pick_with_preferred_grasps,
+    place, place_nearest, place_poses, pull, turn,
 };
 pub use timing::{HandSpeed, JointState, Near, Trajectory, time};
 pub use tool_path::{ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, follow};

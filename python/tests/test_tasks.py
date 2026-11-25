@@ -86,6 +86,16 @@ def test_a_picked_box_is_carried_and_set_down(tasks_robot):
         placed = bp.place(device, without, [place]).outcomes[0]
         assert isinstance(placed, tuple) and placed, f"{placed} on {device}"
         np.testing.assert_allclose(placed[0].placed.pose.position, spot.position, atol=2e-3)
+        nearest = bp.place_nearest(device, without, [place, place], spot.position)
+        assert isinstance(nearest, bp.NearestPlace) and nearest.task == 0, f"{nearest} on {device}"
+        assert nearest.plan.candidate == placed[0].candidate, "equally near: the quickest"
+        assert nearest.problem.held.grasp == plan.held.grasp
+        far = place.replace(poses=[bp.Pose((2.0, 0.0, HALF[2]))])
+        nowhere = bp.place_nearest(device, without, [far, far], spot.position)
+        assert isinstance(nowhere, tuple) and len(nowhere) == 2, nowhere
+        assert all(isinstance(f, bp.TaskFailure) for f in nowhere)
+        with pytest.raises(bp.InputError, match="finite"):
+            bp.place_nearest(device, without, [place], (math.nan, 0.0, 0.0))
         # It names no opening to let go at; with the loaded one named, its plan says so.
         assert placed[0].opening is None
         loaded = bp.place(device, without, [place.replace(open=[{}])]).outcomes[0]
