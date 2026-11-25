@@ -34,7 +34,8 @@ pub(crate) enum Wanted {
 /// Edges `[k, 2, dof]` (each its start then its end) in one world, checked `spacing` apart, or
 /// configurations `[k, dof]` (`wanted` is `None`), whose answer is how many from the first are
 /// collision-free, counted in groups of `LANES` (`k` when all are). With `keep`, edges and
-/// configurations must also keep a clearance from the world, and with `region`, its constraints.
+/// configurations must also keep a clearance from the world, configurations one between links too
+/// where it has one, and with `region`, its constraints.
 #[derive(Clone, Debug)]
 pub(crate) struct EdgeQuery {
     pub(crate) world: u32,

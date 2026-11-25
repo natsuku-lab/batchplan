@@ -66,7 +66,8 @@ fn configurations(t: &Trajectory) -> impl Iterator<Item = &[f32]> {
     t.control_points.chunks(t.dof)
 }
 
-/// The robot holding `held` collides nowhere along `t`, sampled at `rate` (Hz).
+/// Whether the robot holding `held` collides nowhere along `t`, sampled at `rate` (Hz), and how
+/// near its links come to each other there at least (exact to a centimetre).
 fn clear_holding(
     robot: &Robot,
     worlds: &Worlds,
@@ -74,16 +75,22 @@ fn clear_holding(
     held: &Held,
     t: &Trajectory,
     rate: f32,
-) -> bool {
+) -> (bool, f32) {
     let holding = robot.attach(&held.attachment(robot).unwrap()).unwrap();
     let device = Device::cpu(&holding).unwrap();
     let uploaded = device.upload(&[worlds[world as usize].clone()]).unwrap();
     let q = t.sample(rate).unwrap().positions;
     let items = vec![0; q.len() / robot.dof()];
-    let e = device
-        .evaluate(&uploaded, &items, &q, &CollisionWeights::NONE)
-        .unwrap();
-    (0..items.len()).all(|i| e.collision_free(i))
+    let exact = CollisionWeights {
+        self_margin: 0.01,
+        ..CollisionWeights::NONE
+    };
+    let e = device.evaluate(&uploaded, &items, &q, &exact).unwrap();
+    let apart = e
+        .self_clearance
+        .iter()
+        .fold(f32::INFINITY, |m, &c| m.min(c));
+    ((0..items.len()).all(|i| e.collision_free(i)), apart)
 }
 
 #[test]
@@ -131,7 +138,7 @@ fn a_held_bar_is_passed_to_the_other_arm_each_hand_holding_the_other_still() {
             assert_eq!(configurations(meet).next().unwrap(), &start[..], "{name}");
             assert_eq!(configurations(meet).last().unwrap(), plan.begin(), "{name}");
             assert!(
-                clear_holding(&robot, &worlds, 1, &held, meet, 100.0),
+                clear_holding(&robot, &worlds, 1, &held, meet, 100.0).0,
                 "{name}"
             );
             // Moving in, the giver holds the bar at the meeting and keeps still to the bit.
@@ -539,7 +546,8 @@ fn as_many_holds_as_fill_a_stack_at_once_are_passed_in_one_call() {
 /// A transit that cuts a corner past the bar the giving hand holds clears it between the states
 /// the planner checks it at, not only at them: checked at 1 kHz, where those states lie up to a
 /// thirty-second of a radian apart. With a bar 20 cm long whose spheres reach 8 mm past it, a
-/// CPU's transit passed 77 um into it where splines kept nothing between the robot's links.
+/// CPU's transit passed 77 µm into it where splines kept nothing between the robot's links. The
+/// transits come within 3 mm of the bar, so their margin between links is what keeps them clear.
 #[test]
 fn transits_clear_the_held_bar_between_the_states_checked() {
     let robot = common::two_pandas().unwrap();
@@ -560,9 +568,15 @@ fn transits_clear_the_held_bar_between_the_states_checked() {
         .remove(0)
         .expect("the bar changes hands");
     assert!(plans.len() > 10, "{} plans", plans.len());
+    let mut nearest = f32::INFINITY;
     for plan in &plans {
         let meet = plan.transit.as_ref().unwrap();
-        let clear = clear_holding(&robot, &worlds, 1, &held, meet, 1000.0);
+        let (clear, apart) = clear_holding(&robot, &worlds, 1, &held, meet, 1000.0);
         assert!(clear, "candidate {}", plan.candidate);
+        nearest = nearest.min(apart);
     }
+    assert!(
+        nearest < 0.003,
+        "the transits keep their links {nearest} m apart"
+    );
 }

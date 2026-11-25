@@ -1030,23 +1030,33 @@ fn next_fit(
 
 /// Clearance every spline keeps from the world away from its ends, so it cannot graze an obstacle
 /// between the samples it is checked at; at most the shortcuts' clearance. Splines keep it between
-/// the robot's links too, for the same reason ([`spline_keep`]): a curve cutting a corner past a
+/// the robot's links too, for the same reason ([`spline_keeps`]): a curve cutting a corner past a
 /// link, or past what a hand holds, would pass into it between its samples.
 const SPLINE_MARGIN: f32 = 0.002;
 
-/// What a spline keeps away from its ends, each ramped to nothing over `ramp` toward `ends`: `world`
-/// from the world, and `apart` between the robot's links (`SPLINE_MARGIN`, or none in the last
-/// round, for a path the shortcuts pulled against the robot itself, which they keep nothing from,
-/// or a moving start's curve, whose first spans follow the motion). Searched splines are checked
-/// against it on the device's CPU threads (`Lanes`), optimized seeds by `Device::evaluate`
-/// (`validate`), on the CPU or the GPU.
-fn spline_keep(world: f32, apart: f32, ramp: f32, ends: Vec<Vec<f32>>) -> Keep {
-    Keep {
-        clearance: world,
+/// What a searched spline keeps away from `ends`, round by round, each clearance ramped to nothing
+/// over `o.clearance_ramp` toward them: from the world, the shortcuts' clearance, then
+/// `SPLINE_MARGIN` where that is less (never more than the shortcuts kept, or no spline could
+/// follow them), each keeping `SPLINE_MARGIN` between the robot's links; then a last round that
+/// keeps the last world margin and nothing between links, as splines kept before, for a path the
+/// shortcuts pulled against the robot itself, which they keep nothing from, or a moving start's
+/// curve, whose first spans follow the motion. Such a spline can still dip micrometres into the
+/// robot, or what it holds, between its samples. Optimized seeds are held to the last round that
+/// keeps links apart (`validate`), and have no round without it. Searched splines are checked on
+/// the device's CPU threads (`Lanes`), optimized seeds by `Device::evaluate`, on the CPU or GPU.
+fn spline_keeps(o: &ShortcutOptions, ends: &[Vec<f32>]) -> Vec<Keep> {
+    let keep = |clearance, apart| Keep {
+        clearance,
         apart,
-        ramp,
-        ends,
+        ramp: o.clearance_ramp,
+        ends: ends.to_vec(),
+    };
+    let mut keeps = vec![keep(o.clearance, SPLINE_MARGIN)];
+    if o.clearance > SPLINE_MARGIN {
+        keeps.push(keep(SPLINE_MARGIN, SPLINE_MARGIN));
     }
+    keeps.push(keep(o.clearance.min(SPLINE_MARGIN), 0.0));
+    keeps
 }
 
 /// Maximum waypoints pinned per path before the next path is tried.
@@ -1064,18 +1074,18 @@ const START_KNOTS: [f32; 3] = [1.0, 1.5, 2.25];
 /// Splines along the simplified path, then along the shortcut one. Each starts spread along its
 /// path by arc length (smooth, cutting corners); where a check fails, the waypoint nearest the
 /// failure is pinned, so the spline passes through it, stopping there, and the spline checked
-/// again. Both paths are tried keeping the shortcuts' clearance, then again keeping
-/// `SPLINE_MARGIN`. A valid spline's stops are then replaced by blends where the spline stays
-/// valid, each stop's widest first (`BLENDS` of them), as OpenRAVE's smoother takes a path that
-/// stops at its waypoints and removes the stops, and as TOTG passes corners within a deviation,
-/// which it does not check. Each check after the first starts at the first span a change reaches.
+/// again. Both paths are tried in each of the rounds `spline_keeps` gives: the shortcuts' clearance
+/// from the world, then `SPLINE_MARGIN`, each keeping links `SPLINE_MARGIN` apart, then that last
+/// world margin keeping nothing between links. A valid spline's stops are then replaced by blends
+/// where the spline stays valid, each stop's widest first (`BLENDS` of them), as OpenRAVE's
+/// smoother takes a path that stops at its waypoints and removes the stops, and as TOTG passes
+/// corners within a deviation, which it does not check. Each check after the first starts at the first span a change reaches.
 /// Where no spline is valid and neither is its repair, the splines get twice the control points
 /// and all of it runs again (`grow`), as FITPACK adds knots until its fit holds, while fewer are
 /// free than the longer path has waypoints, the density of TOPP-RA's spline through every waypoint.
 struct Fitting<'call> {
     paths: [Vec<f32>; 2],
-    /// What the splines keep from the world, round by round: the shortcuts' clearance, then
-    /// `SPLINE_MARGIN`.
+    /// What the splines keep from the world and between links, round by round (`spline_keeps`).
     keeps: Vec<Arc<Keep>>,
     round: usize,
     path: usize,
@@ -1265,21 +1275,9 @@ impl Search for Planning<'_> {
                     let (smooth, short, projector) = simplify.into_paths();
                     let (n, points) = (self.robot.dof(), self.o.control_points);
                     let ends = vec![short[..n].to_vec(), short[short.len() - n..].to_vec()];
-                    let ramp = self.o.shortcut.clearance_ramp;
-                    // The margin from the world never exceeds what the shortcuts kept, or no
-                    // spline could follow them; between links, kept in every round but the last,
-                    // which is the one the splines kept before.
-                    let clearance = self.o.shortcut.clearance;
-                    let world: &[f32] = if clearance > SPLINE_MARGIN {
-                        &[clearance, SPLINE_MARGIN]
-                    } else {
-                        &[clearance]
-                    };
-                    let last = world[world.len() - 1];
-                    let rounds = world.iter().map(|&w| (w, SPLINE_MARGIN));
-                    let keeps = rounds
-                        .chain([(last, 0.0)])
-                        .map(|(w, apart)| Arc::new(spline_keep(w, apart, ramp, ends.clone())))
+                    let keeps = spline_keeps(&self.o.shortcut, &ends)
+                        .into_iter()
+                        .map(Arc::new)
                         .collect();
                     let mut fit = Fitting {
                         paths: [smooth, short],
@@ -1598,8 +1596,9 @@ fn validate(
         from.push(dense.len() / n);
     }
     let item = |i: usize| &dense[from[i] * n..from[i + 1] * n];
-    let margin = o.shortcut.clearance.min(SPLINE_MARGIN);
-    let rule = spline_keep(margin, SPLINE_MARGIN, o.shortcut.clearance_ramp, vec![]);
+    // The last round that keeps links apart.
+    let rounds = spline_keeps(&o.shortcut, &[]);
+    let rule = rounds[rounds.len() - 2].clone();
     // Clearances exact up to what it keeps: past that, a link's bounding sphere's gap stands in.
     let gated = CollisionWeights {
         margin: rule.clearance,

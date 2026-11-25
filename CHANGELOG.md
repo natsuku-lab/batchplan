@@ -576,7 +576,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 - A planned path's spline keeps 2 mm between the robot's links away from its ends, ramped as its
   margin from the world is, where it kept none: a curve cutting a corner past what the other hand
   holds passed into it between the samples it was checked at. A handover's transit planned on a
-  Radeon passed 25 um into the bar the giver held, which `tests/handover.rs` found checking it at
+  Radeon passed 25 µm into the bar the giver held, which `tests/handover.rs` found checking it at
   100 Hz. Where no spline keeps it, as for a path the shortcuts pulled tight against the robot
   itself, the last round keeps nothing between links, as before.
 - Two groups of one call that hold the same object fit its spheres once: the second waits for
