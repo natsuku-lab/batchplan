@@ -433,20 +433,23 @@ and a step is open over its lower part, its riser the one wall.
 
 What stands on the floor shows that the floor runs under it, and no wall stands where it does
 (`src/look.rs`, `hold_what_stands`). A thing whose lowest reading lies in the box, on or over the
-floor's top and nearer it than the box's top, and that stands in front of the floor in a view
-along a window's width or more, widens the room over its outline from above, as far as the box:
-a bowl the near wall hid the floor beyond, and so stood in, is in the room. The room so widened
-is drawn in from under the box's own readings that overhang it, over the floor and inside the
-room by more than their slack (`src/fit.rs`, `clear_overhangs`): a cabinet's top over the back of
-a drawer pulled out of it is wall, not room, though the floor reads on under it. A wall moves in
-to them only where a window's worth of them reach it and span it from side to side, no gap
-between them wider than a window but one no view sees into, and only as far as their innermost
-window's worth: a bar or a handle across the room, with room seen on both sides of it, moves no
-wall, and neither does a plate on the floor whose near face the box took. Nor does a wall move
-where a thing that rests on the box would then lie inside it by more than its slack: the
-overhang stays in the room there. A box kept from the look before is drawn in the same way after
-this look's room is taken into it. A thing that rests on the box with its lowest reading inside
-its walls or floor by more than its slack, after that, stands where the box says nothing can:
+floor's top and nearer it than the box's top, and that stands in front of the floor in a view along
+a window's width or more, widens the room over its outline from above, as far as the box: a bowl the
+near wall hid the floor beyond, and so stood in, is in the room. The room so widened is drawn in
+from under the box's own readings that overhang it, over the floor and inside the room by more than
+their slack (`src/fit.rs`, `clear_overhangs`): a cabinet's top over the back of a drawer pulled out
+of it is wall, not room, though the floor reads on under it. A wall moves in to them only where a
+window's worth of them reach it and span it from side to side, no gap between them wider than a
+window but one no view sees into, and only as far as their innermost window's worth: a bar or a
+handle across the room, with room seen on both sides of it, moves no wall, and neither does a plate
+on the floor whose near face the box took. Nor does a wall move where a thing that rests on the box
+would then lie inside it by more than its slack: the overhang stays in the room there. But a thing
+all of whose readings over the floor lie in the wall, reaching across the room from side to side
+within their slack and the box's widest window, as the back of a drawer under the cabinet's top,
+closes off what lies behind it: the wall holds it as it holds the floor that reads on under it, and
+it keeps no room open and closes no box. A box kept from the look before is drawn in the same way
+after this look's room is taken into it. A thing that rests on the box with its lowest reading
+inside its walls or floor by more than its slack, after that, stands where the box says nothing can:
 the box covers it instead, and is not solid.
 
 A round hollow thing is put together again (`src/segment/round.rs`). A bowl's outside stands in
@@ -1297,12 +1300,15 @@ the run.
     8 mm inside a wall of its box; the box covers the cabinet until the drawer is seen as its
     own.
   - **A room can still hold its own thing's readings**: the cabinet's top over the drawer's
-    opening where the wall drawn in to it would put a thing resting on the cabinet in it, as in
-    `repro4-fix` r2 a piece of the drawer the bowl stands on, 11.9 mm inside it at looks 3 and 5
-    (up to 7,317 pixels in one box). Drawn in regardless, as was tried before
-    (`plans/perception/open-box/clear/`), and again in this rule's first form, the cabinet then
-    covered what rested inside its wall and was no longer solid (solid cabinets 30 to 28 and
-    open ones 6 to 4 on `repro4-fix`): the wall now stays where it was on that side.
+    opening where the wall drawn in to it would cut a thing resting on the cabinet, as in
+    `repro4-fix` r2 the drawer, an object of its own, whose walls stand both in the cabinet's
+    walls and in its room (up to 7,317 pixels in one box). Drawn in regardless, as was tried
+    before (`plans/perception/open-box/clear/`), and again in this rule's first form, the
+    cabinet then covered what rested inside its wall and was no longer solid (solid cabinets 30
+    to 28 and open ones 6 to 4 on `repro4-fix`): the wall stays where it was on that side. A
+    thing that would stand only in the wall, across the room, no longer stops it: the drawer's
+    back, read as an object of its own, kept the cabinet's top over the drawer as readings of no
+    object in a live run of spatial-4's other layout, and every grasp of the bowl was refused.
   - **The overhang and floor rules are held on exact depth alone.** Through the tests' D435 and
     D405, the lidless box with a board over its far end and the tray with a gap in its floor are
     no boxes open at the top (the trays' rows of `tests/truth.rs` say why), before these rules
