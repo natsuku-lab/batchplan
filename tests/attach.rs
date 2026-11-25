@@ -1441,3 +1441,129 @@ fn held_cuboids_cover_every_thickness_regime_and_boundary() {
         }
     }
 }
+
+/// Points about 1 mm apart over the surface of a capsule, a box or a cylinder about z at the origin:
+/// rings along a side, a disc's rows and columns, a hemisphere's rings, a face's rows and columns.
+fn surface_points(shape: &Obstacle) -> Vec<Vec3> {
+    use std::f32::consts::{FRAC_PI_2, TAU};
+    let step = 0.001;
+    let parts = |length: f32| (length / step).ceil().max(1.0) as usize;
+    let mut points = vec![];
+    let mut ring = |r: f32, z: f32| {
+        let around = parts(TAU * r);
+        let at = |i: usize| TAU * i as f32 / around as f32;
+        points.extend((0..around).map(|i| Vec3::new(r * at(i).cos(), r * at(i).sin(), z)));
+    };
+    let mut side = |r: f32, half: f32| {
+        let up = parts(2.0 * half);
+        for k in 0..=up {
+            ring(r, -half + 2.0 * half * k as f32 / up as f32);
+        }
+    };
+    match *shape {
+        Obstacle::Capsule {
+            radius,
+            half_length,
+            ..
+        } => {
+            side(radius, half_length);
+            let rings = parts(FRAC_PI_2 * radius);
+            for k in 1..=rings {
+                let polar = FRAC_PI_2 * k as f32 / rings as f32;
+                for end in [-1.0, 1.0] {
+                    ring(
+                        radius * polar.cos(),
+                        end * (half_length + radius * polar.sin()),
+                    );
+                }
+            }
+        }
+        Obstacle::Cylinder {
+            radius,
+            half_height,
+            ..
+        } => {
+            side(radius, half_height);
+            let n = parts(radius) as i32;
+            for i in -n..=n {
+                for j in -n..=n {
+                    let (x, y) = (i as f32 * step, j as f32 * step);
+                    if x.hypot(y) <= radius {
+                        points.extend([-1.0, 1.0].map(|end| Vec3::new(x, y, end * half_height)));
+                    }
+                }
+            }
+        }
+        Obstacle::Cuboid { half_extents, .. } => {
+            for (a, b, c) in [(0, 1, 2), (1, 2, 0), (2, 0, 1)] {
+                let (na, nb) = (parts(2.0 * half_extents[a]), parts(2.0 * half_extents[b]));
+                for i in 0..=na {
+                    for j in 0..=nb {
+                        for end in [-1.0, 1.0] {
+                            let mut p = Vec3::ZERO;
+                            p[a] = half_extents[a] * (2.0 * i as f32 / na as f32 - 1.0);
+                            p[b] = half_extents[b] * (2.0 * j as f32 / nb as f32 - 1.0);
+                            p[c] = end * half_extents[c];
+                            points.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        _ => unreachable!("a capsule, a cylinder or a box"),
+    }
+    points
+}
+
+/// Under a limit of zero, which no tiles' spheres keep, a held capsule, box and cylinder are fitted
+/// inside them, and leave no more of their surface outside than the fit within the budget did
+/// before (`b6ffaaa`): of points about 1 mm apart over it, at least as many within 1 mm of a
+/// sphere, and none farther outside than its farthest. Those are this test's on `b6ffaaa`: 35
+/// spheres in the capsule, 26.05% within 1 mm, 5.12 mm at most; 64 in the box, 29.65%, 7.45 mm; 64
+/// in the bowl, 15.42%, 9.76 mm.
+#[test]
+fn held_shapes_at_a_limit_of_zero_leave_no_more_outside_than_before() {
+    let robot = common::panda().unwrap();
+    let capsule: fn(Vec3, Quat) -> Obstacle = |center, rotation| Obstacle::Capsule {
+        center,
+        rotation,
+        radius: 0.02,
+        half_length: 0.05,
+    };
+    let boxed: fn(Vec3, Quat) -> Obstacle = |center, rotation| Obstacle::Cuboid {
+        center,
+        half_extents: Vec3::new(0.02, 0.035, 0.028),
+        rotation,
+    };
+    let bowl: fn(Vec3, Quat) -> Obstacle = |center, rotation| Obstacle::Cylinder {
+        center,
+        rotation,
+        radius: 0.05603,
+        half_height: 0.02537,
+    };
+    let inside = SphereOptions {
+        max_overhang: Some(0.0),
+        ..Default::default()
+    };
+    let cases = [
+        ("capsule", capsule, (0.2605, 0.00513)),
+        ("box", boxed, (0.2965, 0.00745)),
+        ("bowl", bowl, (0.1542, 0.00976)),
+    ];
+    for (name, shape, (share, farthest)) in cases {
+        let spheres = held_round(&robot, shape, inside, /* with_a_ball */ false);
+        let points = surface_points(&shape(Vec3::ZERO, Quat::IDENTITY));
+        let outside = |p: &Vec3| {
+            let to = |s: &[f32; 4]| p.distance(Vec3::new(s[0], s[1], s[2])) - s[3];
+            spheres.iter().map(to).fold(f32::INFINITY, f32::min)
+        };
+        let gaps: Vec<f32> = points.iter().map(outside).collect();
+        let near = gaps.iter().filter(|&&gap| gap <= 0.001).count() as f32 / gaps.len() as f32;
+        let most = gaps.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            near >= share && most <= farthest,
+            "{name}: {near} within 1 mm (before, {share}), {most} m outside at most \
+             (before, {farthest})"
+        );
+    }
+}
