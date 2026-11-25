@@ -1030,9 +1030,23 @@ fn next_fit(
 
 /// Clearance every spline keeps from the world away from its ends, so it cannot graze an obstacle
 /// between the samples it is checked at; at most the shortcuts' clearance. Splines keep it between
-/// the robot's links too, which the searches and the shortcuts keep none of: a curve cutting a
-/// corner past a link, or past what a hand holds, would pass into it between its samples.
+/// the robot's links too, for the same reason ([`spline_keep`]): a curve cutting a corner past a
+/// link, or past what a hand holds, would pass into it between its samples.
 const SPLINE_MARGIN: f32 = 0.002;
+
+/// What a spline keeps away from its ends, each ramped to nothing over `ramp` toward `ends`: `world`
+/// from the world, and `SPLINE_MARGIN` between the robot's links. A path the shortcuts pulled
+/// against the robot itself, which they keep nothing from, is repaired as one against the world
+/// is. Searched splines are checked against it on the device's CPU threads (`Lanes`), optimized
+/// seeds by `Device::evaluate` (`validate`), on the CPU or the GPU.
+fn spline_keep(world: f32, ramp: f32, ends: Vec<Vec<f32>>) -> Keep {
+    Keep {
+        clearance: world,
+        apart: SPLINE_MARGIN,
+        ramp,
+        ends,
+    }
+}
 
 /// Maximum waypoints pinned per path before the next path is tried.
 const MAX_PINS: usize = 6;
@@ -1252,25 +1266,16 @@ impl Search for Planning<'_> {
                     let ends = vec![short[..n].to_vec(), short[short.len() - n..].to_vec()];
                     let ramp = self.o.shortcut.clearance_ramp;
                     // The margin from the world never exceeds what the shortcuts kept, or no
-                    // spline could follow them. Between links, which they keep nothing between,
-                    // splines keep it all the same: a path they pulled against the robot itself is
-                    // repaired as one against the world is.
+                    // spline could follow them.
                     let clearance = self.o.shortcut.clearance;
-                    let rounds: &[(f32, f32)] = if clearance > SPLINE_MARGIN {
-                        &[(clearance, SPLINE_MARGIN), (SPLINE_MARGIN, SPLINE_MARGIN)]
+                    let rounds: &[f32] = if clearance > SPLINE_MARGIN {
+                        &[clearance, SPLINE_MARGIN]
                     } else {
-                        &[(clearance, SPLINE_MARGIN)]
+                        &[clearance]
                     };
                     let keeps = rounds
                         .iter()
-                        .map(|&(clearance, apart)| {
-                            Arc::new(Keep {
-                                clearance,
-                                apart,
-                                ramp,
-                                ends: ends.clone(),
-                            })
-                        })
+                        .map(|&clearance| Arc::new(spline_keep(clearance, ramp, ends.clone())))
                         .collect();
                     let mut fit = Fitting {
                         paths: [smooth, short],
@@ -1590,10 +1595,11 @@ fn validate(
     }
     let item = |i: usize| &dense[from[i] * n..from[i + 1] * n];
     let margin = o.shortcut.clearance.min(SPLINE_MARGIN);
-    // Clearances exact up to the margins: past them, a link's bounding sphere's gap stands in.
+    let rule = spline_keep(margin, o.shortcut.clearance_ramp, vec![]);
+    // Clearances exact up to what it keeps: past that, a link's bounding sphere's gap stands in.
     let gated = CollisionWeights {
-        margin,
-        self_margin: SPLINE_MARGIN,
+        margin: rule.clearance,
+        self_margin: rule.apart,
         ..CollisionWeights::NONE
     };
     let clear = device.evaluate(worlds, &dense_world, &dense, &gated)?;
@@ -1619,10 +1625,8 @@ fn validate(
             }
             let q = item(i);
             let keep = Keep {
-                clearance: margin,
-                apart: SPLINE_MARGIN,
-                ramp: o.shortcut.clearance_ramp,
                 ends: vec![q[..n].to_vec(), q[q.len() - n..].to_vec()],
+                ..rule.clone()
             };
             (from[i]..from[i + 1])
                 .map(|s| {

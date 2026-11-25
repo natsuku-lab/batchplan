@@ -73,7 +73,7 @@ What the test suite pins down, so you know what to rely on. Every new test was f
   - Planting ignored link-bound gating, a flipped sine, a dropped quartic term, a dropped self buffer, an ignored prismatic offset, a cylinder's missing corner, a flipped planar rotation for upright boxes, an obstacle's surrounding sphere of zero radius or a self-collision sphere of zero reach fails the test.
 - **Edge checks:**
   - On every device, 400 queries over random edges (how many edges from the first are free, or which is the first free one) get the same answers as checking every state one by one, and CPU and GPU answers are identical.
-  - An edge 5–10 mm from an obstacle is free, fails to keep a 1 cm clearance, and keeps it where its ends are near the path's ends. A state whose links come 2–8 mm apart is free, fails to keep them 1 cm apart as a spline's states do, and keeps it at a path's end; planting splines that keep nothing between links fails it.
+  - An edge 5–10 mm from an obstacle is free, fails to keep a 1 cm clearance, and keeps it where its ends are near the path's ends.
   - Planting a skipped pass of the rake, skipped self-collision, link bounds without their radius, an inverted answer, an ignored clearance or an ignored ramp fails a test.
 - **RRT-Connect and shortcutting:**
   - Every edge RRT-Connect returns is collision-free under a CPU check four times denser, on both devices. Paths start at the start and end at a goal, and only straight or bent lines (at most four waypoints) have edges longer than the range.
