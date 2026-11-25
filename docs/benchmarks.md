@@ -498,6 +498,19 @@ cargo run --release --example fitting -- 14 panda 1200 10000 3
 cargo run --release --config 'profile.release.package.batchplan.codegen-units=16' --example fitting -- 1 so101 700 0 3
 ```
 
+The greedy cover then finds a candidate's samples in columns as wide as the median candidate
+reaches, and growing the spheres to their samples finds a sample's spheres among about one cell
+per sphere. Against `b6ffaaa` on 2026-11-24, three alternating rounds on the M4 Pro with one
+caller thread, the machine's load 3.0 to 3.8, the same fixtures and checksums; the best and the
+second-best of the rounds' best times, in milliseconds:
+
+| Model / sphere budget | One unit before | One unit after | Sixteen before | Sixteen after |
+|---|---:|---:|---:|---:|
+| Stand / 512 | 339.4 / 344.1 | 262.5 / 263.3 | 353.4 / 354.1 | 272.3 / 278.8 |
+| Panda / 1,200 | 314.6 / 315.4 | 266.2 / 270.4 | 321.6 / 321.6 | 274.6 / 281.3 |
+| SO-101 / 700 | 126.6 / 127.4 | 116.8 / 117.8 | 130.4 / 131.1 | 120.9 / 124.2 |
+| UR5e / 1,200 | 219.5 / 220.1 | 193.7 / 194.7 | 225.6 / 225.7 | 198.6 / 204.9 |
+
 ## Reproducing
 
 This workspace builds batchplan as one codegen unit (`Cargo.toml`); measurements before [#55](https://github.com/natsuku-lab/batchplan/pull/55) used sixteen unless stated otherwise. A crate that depends on batchplan builds it with its own profile; to build it as here, add `[profile.release.package.batchplan]` with `codegen-units = 1` to that crate's `Cargo.toml`.

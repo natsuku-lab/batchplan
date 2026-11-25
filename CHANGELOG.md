@@ -463,6 +463,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   and `datagen::reset_states` once per shape, where it attached it at each hold; and a device for
   a robot holding an object of many spheres is made in time linear in them, where pairing its
   spheres with the robot's took time quadratic in them.
+- Fitting a robot's spheres takes 7% to 23% less time, with the same fitted models: on one thread
+  on the M4 Pro, the stand at a budget of 512 263 ms where it took 339, the Panda at 1,200 266
+  where it took 315 ([runs](docs/benchmarks.md#fitting-collision-spheres)).
 - **Breaking:** a held object's cover now holds all of it and reaches its tolerance past it nearly
   everywhere, where a cover of fewer spheres reached past it less in places and left some of it
   outside: so more of a tight passage reads as a contact, and clearances and contacts measured to
