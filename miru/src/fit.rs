@@ -20,6 +20,8 @@ pub(crate) struct Reading {
     pub(crate) share: f32,
     /// Whether it is of the floor of the object's hollow.
     pub(crate) floor: bool,
+    /// How far apart the readings of two neighbouring pixels lie across at its depth (meters).
+    pub(crate) spacing: f32,
 }
 
 /// An object's outline seen from above.
@@ -99,15 +101,36 @@ impl Fit {
         }
     }
 
-    /// Widens its room, where it has one, so that it holds what stands in it ([`widened`]).
-    pub(crate) fn widen(&mut self, standing: &[Shape]) {
+    /// Widens its room, where it has one, so that it holds what stands in it ([`widened`]), and
+    /// draws it in from under what its own `readings` show overhangs it, but where `rests_inside`
+    /// says that a thing resting on it would then rest inside the box's solids
+    /// ([`clear_overhangs`]).
+    pub(crate) fn widen(
+        &mut self,
+        standing: &[Shape],
+        readings: &[Reading],
+        rests_inside: &dyn Fn(&Shape) -> bool,
+    ) {
         if let (Some((lower, upper)), Outline::Square { center, half, yaw }) =
             (self.room, self.outline)
         {
             let frame = Quat::from_rotation_z(yaw);
-            let (low, high) = widen(center, half, frame, (lower.truncate(), upper), standing);
+            let room = widen(center, half, frame, (lower.truncate(), upper), standing);
+            let into = |point: Vec3| frame.inverse() * (point - center.extend(0.0));
+            let fit = *self;
+            let closes = |(low, high): (Vec2, Vec2)| {
+                let room = Some((low.extend(lower.z), high));
+                rests_inside(&Fit { room, ..fit }.shape())
+            };
+            let (low, high) = clear_overhangs(room, lower.z, self.top, readings, into, closes);
             self.room = Some((low.extend(lower.z), high));
         }
+    }
+
+    /// This fit, as another of the same readings stands, with the room of `widened`.
+    pub(crate) fn with_room_of(mut self, widened: &Fit) -> Fit {
+        self.room = widened.room;
+        self
     }
 
     /// Closes its room: a box that covers the thing.
@@ -336,9 +359,15 @@ pub(crate) fn opened(shape: &Shape, readings: &[Reading]) -> Option<Shape> {
 }
 
 /// `shape`, a box open at the top, its room widened so that it holds what stands in it ([`widen`]):
-/// `standing`, the shapes of the things that stand on its floor ([`stands_in`]). Any other shape
-/// as it is.
-pub(crate) fn widened(shape: &Shape, standing: &[Shape]) -> Shape {
+/// `standing`, the shapes of the things that stand on its floor ([`stands_in`]); and drawn in
+/// from under what its own `readings` show overhangs it, as [`Fit::widen`] draws it, but where
+/// that puts in a wall the lowest reading of a thing of `resting`. Any other shape as it is.
+pub(crate) fn widened(
+    shape: &Shape,
+    standing: &[Shape],
+    readings: &[Reading],
+    rests_inside: &dyn Fn(&Shape) -> bool,
+) -> Shape {
     let Shape::OpenBox {
         center,
         half_extents,
@@ -350,20 +379,30 @@ pub(crate) fn widened(shape: &Shape, standing: &[Shape]) -> Shape {
     };
     let (lower, upper) = shape.room();
     let room = (lower.truncate(), upper);
-    let (low, high) = widen(
+    let room = widen(
         center.truncate(),
         half_extents.truncate(),
         rotation,
         room,
         standing,
     );
-    Shape::OpenBox {
+    let into = |point: Vec3| rotation.inverse() * (point - center);
+    let open = |(low, high): (Vec2, Vec2)| Shape::OpenBox {
         center,
         half_extents,
         rotation,
         room_lower: low.extend(lower.z),
         room_upper: high,
-    }
+    };
+    let closes = |room: (Vec2, Vec2)| rests_inside(&open(room));
+    open(clear_overhangs(
+        room,
+        lower.z,
+        half_extents.z,
+        readings,
+        into,
+        closes,
+    ))
 }
 
 /// Whether a thing whose lowest reading is `lowest`, a reading that may lie `slack` off a surface,
@@ -532,6 +571,162 @@ fn room(center: Vec3, half: Vec2, rotation: Quat, readings: &[Reading]) -> Optio
         }
     }
     lower.cmplt(upper).all().then(|| (lower.extend(top), upper))
+}
+
+/// The room of a box open at the top between two corners, along x and y in the box's frame,
+/// drawn in from under the box's own readings that overhang it: of `readings`, those that `into`
+/// takes into that frame over the floor's top `floor` and inside the room by more than their
+/// slack, no higher than the box's top `top`, and of no floor. A top over the back of a drawer
+/// pulled out of a cabinet is wall, not room, though the floor reads on under it.
+///
+/// A wall moves in only to readings that reach it and span it. They reach it where each lies
+/// within its slack and a window's width ([`Reading::spacing`] over the square root of its share)
+/// of the wall or of one nearer it: a bar across the middle of the room reaches neither wall it
+/// runs along. They span it where, along it from one side of the room to the other,
+/// no gap wider than that lies between them, or between them and a side, with the floor read in
+/// it within the strip the wall would take: a handle arched over the room reaches the walls it
+/// stands on but leaves room seen on both sides; a gap no view sees into, as behind an arm, is
+/// none. The wall moves to the innermost window's worth of them ([`window`]), as [`room`] puts a
+/// face; fewer readings than add up to a window cannot be told from noise, and stay. Of the walls
+/// that can move, the one that takes the most of them per area of room it gives up moves first,
+/// until fewer than a window's worth are left in the room; a wall stops at a reading inside the
+/// room, so the room never closes. No wall moves where `rests_in_wall` says a thing that rests
+/// on the box would then rest in its solids: the room stays as it is on that side.
+fn clear_overhangs(
+    (mut lower, mut upper): (Vec2, Vec2),
+    floor: f32,
+    top: f32,
+    readings: &[Reading],
+    into: impl Fn(Vec3) -> Vec3,
+    rests_in_wall: impl Fn((Vec2, Vec2)) -> bool,
+) -> (Vec2, Vec2) {
+    let inside = |at: Vec2, slack: f32, (lower, upper): (Vec2, Vec2)| {
+        (at - lower).min(upper - at).min_element() > slack
+    };
+    // Each reading over the room: where it lies from above, its slack, its share and its window's
+    // width.
+    let mut over: Vec<(Vec2, f32, f32, f32)> = (readings.iter())
+        .filter(|r| !r.floor)
+        .filter_map(|r| {
+            let point = into(r.point);
+            let over = point.z > floor + r.slack
+                && point.z <= top
+                && inside(point.truncate(), r.slack, (lower, upper));
+            over.then(|| {
+                (
+                    point.truncate(),
+                    r.slack,
+                    r.share,
+                    r.spacing / r.share.sqrt(),
+                )
+            })
+        })
+        .collect();
+    // Where the floor reads, from above: what shows a gap beside an overhang to be room, and not
+    // hidden from the views.
+    let floor_at: Vec<Vec2> = match over.iter().map(|&(_, _, share, _)| share).sum::<f32>() < 1.0 {
+        true => vec![],
+        false => (readings.iter())
+            .filter(|r| r.floor)
+            .map(|r| into(r.point).truncate())
+            .collect(),
+    };
+    // The walls, each an axis and the side it stands on.
+    let walls = [(0, -1.0), (0, 1.0), (1, -1.0), (1, 1.0)];
+    loop {
+        over.retain(|&(at, slack, ..)| inside(at, slack, (lower, upper)));
+        if over.iter().map(|&(_, _, share, _)| share).sum::<f32>() < 1.0 {
+            return (lower, upper);
+        }
+        let span = upper - lower;
+        // The room the best wall leaves, and how much of the overhang it takes per area given up.
+        let mut best: Option<(f32, (Vec2, Vec2))> = None;
+        for &(axis, sign) in &walls {
+            // How far in from its side the wall stands; a reading lies `-sign * at[axis]` in.
+            let stands = if sign < 0.0 {
+                lower[axis]
+            } else {
+                -upper[axis]
+            };
+            let mut nearest: Vec<(f32, f32, f32, f32)> = (over.iter())
+                .map(|&(at, slack, share, width)| {
+                    (-sign * at[axis], at[1 - axis], slack + width, share)
+                })
+                .collect();
+            nearest.sort_by(|a, b| a.0.total_cmp(&b.0));
+            // Those that reach the wall: each within a window's width of the wall or of one
+            // nearer it.
+            let mut reach = stands;
+            let reached: Vec<(f32, f32, f32, f32)> = (nearest.into_iter())
+                .take_while(|&(inward, _, width, _)| {
+                    let near = inward - reach <= width;
+                    reach = reach.max(inward);
+                    near
+                })
+                .collect();
+            if reached.iter().map(|&(.., share)| share).sum::<f32>() < 1.0 {
+                continue;
+            }
+            let Some(to) = window(reached.iter().map(|&(inward, .., share)| (inward, share)))
+            else {
+                continue;
+            };
+            // That span it, along it from side to side: a gap between them, or between them and a
+            // side, where the floor reads within the strip the wall would take is room seen
+            // beside them; one the views do not see into, as behind an arm, is none.
+            {
+                let mut along: Vec<(f32, f32)> = reached
+                    .iter()
+                    .map(|&(_, along, width, _)| (along, width))
+                    .collect();
+                along.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let mut gaps = vec![];
+                let mut from = (lower[1 - axis], 0.0);
+                for &(at, width) in &along {
+                    if at - from.0 > width.max(from.1) {
+                        gaps.push((from.0, at));
+                    }
+                    from = (from.0.max(at), width);
+                }
+                if upper[1 - axis] - from.0 > from.1 {
+                    gaps.push((from.0, upper[1 - axis]));
+                }
+                let open = |&(low, high): &(f32, f32)| {
+                    (floor_at.iter()).any(|at| {
+                        let inward = -sign * at[axis] - stands;
+                        at[1 - axis] > low
+                            && at[1 - axis] < high
+                            && inward > 0.0
+                            && inward < to - stands
+                    })
+                };
+                if gaps.iter().any(open) {
+                    continue;
+                }
+            }
+            let mut room = (lower, upper);
+            match sign < 0.0 {
+                true => room.0[axis] = to,
+                false => room.1[axis] = -to,
+            }
+            if rests_in_wall(room) {
+                continue;
+            }
+            let given = (to - stands).min(span[axis]) * span[1 - axis];
+            let taken: f32 = (over.iter())
+                .filter(|&&(at, slack, ..)| !inside(at, slack, room))
+                .map(|&(_, _, share, _)| share)
+                .sum();
+            let rate = taken / given;
+            if best.is_none_or(|(most, _)| rate > most) {
+                best = Some((rate, room));
+            }
+        }
+        let Some((_, room)) = best else {
+            return (lower, upper);
+        };
+        (lower, upper) = room;
+    }
 }
 
 /// Whether a current inner wall separates every reading of another part from the room.

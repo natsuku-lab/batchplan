@@ -8,6 +8,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+- Miru draws the room of a box open at the top in from under the box's own readings that
+  overhang it, as a cabinet's top over the back of a drawer pulled out of it: a wall moves in to
+  them where they reach it and span it, and not where a thing resting on the box would then lie
+  in the wall.
 - Miru measures a raised bar over a circular face and checks fully open approach and finger
   closure against the measured points with `Kept::bar_on_disk`.
 - `Kept::observed_closures` runs on the device's threads and tests each reading only against

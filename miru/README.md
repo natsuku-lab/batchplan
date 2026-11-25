@@ -432,9 +432,19 @@ What stands on the floor shows that the floor runs under it, and no wall stands 
 (`src/look.rs`, `hold_what_stands`). A thing whose lowest reading lies in the box, on or over the
 floor's top and nearer it than the box's top, and that stands in front of the floor in a view
 along a window's width or more, widens the room over its outline from above, as far as the box:
-a bowl the near wall hid the floor beyond, and so stood in, is in the room. A thing that rests on
-the box with its lowest reading inside its walls or floor by more than its slack, after that,
-stands where the box says nothing can: the box covers it instead, and is not solid.
+a bowl the near wall hid the floor beyond, and so stood in, is in the room. The room so widened
+is drawn in from under the box's own readings that overhang it, over the floor and inside the
+room by more than their slack (`src/fit.rs`, `clear_overhangs`): a cabinet's top over the back of
+a drawer pulled out of it is wall, not room, though the floor reads on under it. A wall moves in
+to them only where a window's worth of them reach it and span it from side to side, no gap
+between them wider than a window but one no view sees into, and only as far as their innermost
+window's worth: a bar or a handle across the room, with room seen on both sides of it, moves no
+wall, and neither does a plate on the floor whose near face the box took. Nor does a wall move
+where a thing that rests on the box would then lie inside it by more than its slack: the
+overhang stays in the room there. A box kept from the look before is drawn in the same way after
+this look's room is taken into it. A thing that rests on the box with its lowest reading inside
+its walls or floor by more than its slack, after that, stands where the box says nothing can:
+the box covers it instead, and is not solid.
 
 A round hollow thing is put together again (`src/segment/round.rs`). A bowl's outside stands in
 front of its inside along the near rim, with a jump in depth between them and a rim too thin to
@@ -1242,16 +1252,23 @@ the run.
   by 11.6 cm. `--rooms`, 65ef83e to now, as boxes open at the top / those with their own thing's
   readings in the room (pixels) / solid objects with another thing's readings inside (pixels):
 
-  | set | 65ef83e | now |
-  |---|---|---|
-  | `rows4` | 0 / 0 (0) / 1 (1,979) | 15 / 7 (4,728) / 1 (1,979) |
-  | `rows4-stereo` | 0 / 0 (0) / 11 (94,830) | the same |
-  | `rows4-stereo-filtered` | 1 / 1 (3,109) / 6 (3,368) | 2 / 2 (3,123) / 6 (3,368) |
-  | `open4` | 10 / 10 (86,712) / 3 (52) | 13 / 10 (86,712) / 3 (52) |
-  | `hand-in-drawer` | 1 / 1 (7,408) / 12 (273,061) | 22 / 5 (7,575) / 1 (60) |
-  | `work-miru2` | 0 / 0 (0) / 0 (0) | 10 / 6 (3,960) / 0 (0) |
-  | `one1` | 0 / 0 (0) / 0 (0) | 1 / 1 (627) / 0 (0) |
-  | `repro4-fix`, `repro4-fix2`, `repro4-nolook` | 6, 8, 4 open | the same |
+  | set | 65ef83e | 03a1b1f | now |
+  |---|---|---|---|
+  | `rows4` | 0 / 0 (0) / 1 (1,979) | 15 / 7 (4,728) / 1 (1,979) | 15 / 7 (431) / 1 (1,979) |
+  | `rows4-stereo` | 0 / 0 (0) / 11 (94,830) | the same | the same |
+  | `rows4-stereo-filtered` | 1 / 1 (3,109) / 6 (3,368) | 2 / 2 (3,123) / 6 (3,368) | 2 / 2 (715) / 6 (3,368) |
+  | `work2` | | 10 / 5 (2,950) / 0 (0) | 10 / 5 (72) / 0 (0) |
+  | `open4` | 10 / 10 (86,712) / 3 (52) | 15 / 12 (87,704) / 4 (226) | 15 / 2 (1,475) / 4 (226) |
+  | `hand-in-drawer` | 1 / 1 (7,408) / 12 (273,061) | 22 / 5 (7,575) / 1 (60) | 22 / 4 (167) / 1 (60) |
+  | `work-miru2` | 0 / 0 (0) / 0 (0) | 10 / 6 (3,960) / 0 (0) | 10 / 6 (1,052) / 0 (0) |
+  | `one1` | 0 / 0 (0) / 0 (0) | 1 / 1 (627) / 0 (0) | the same |
+  | `repro4-fix` | 6 open | 6 / 6 (51,080) / 4 (26) | 6 / 2 (14,629) / 4 (26) |
+  | `repro4-fix2` | 8 open | 8 / 8 (5,370) / 0 (0) | 8 / 7 (4,809) / 0 (0) |
+  | `repro4-nolook` | 4 open | 4 / 4 (2,300) / 2 (110) | 4 / 0 (0) / 2 (110) |
+
+  From 03a1b1f to now, drawing a room in from under the box's own overhang moves no scorecard of
+  these eleven sets and no object between solid and not, or open at the top and not: it leaves
+  fewer of a box's own readings in its room.
 
   The scorecards of all ten sets are as they were, every id is kept (`--again`), and
   `rows4-stereo`'s digest is the same; `rows4`'s and `rows4-stereo-filtered`'s change by the
@@ -1260,7 +1277,7 @@ the run.
   `hand-in-drawer`, where the rule opens the drawer in most looks, 9% and 18% more: what a look
   with boxes open at the top costs, here and before. What it leaves:
   - **A wine rack's pieces open** (26 over the sets), and their rooms hold readings of the rack
-    that are other pieces' (the 4,728 pixels on `rows4`): the rack is still in pieces.
+    that are other pieces' (the 431 pixels on `rows4`): the rack is still in pieces.
   - **Slivers of a bowl open.** In `hand-in-drawer` ten pieces of the bowl on the cabinet's
     top, each about 1.4 by 0.8 by 0.8 cm and an object of its own, are boxes open at the top,
     and four hold 40 to 43 of the bowl's readings in their room; one in `open4`. On
@@ -1277,10 +1294,16 @@ the run.
     8 mm inside a wall of its box; the box covers the cabinet until the drawer is seen as its
     own.
   - **A room can still hold its own thing's readings**: the cabinet's top over the drawer's
-    opening (`open4`, `repro4`: up to 16,355 pixels in one box, at most 12 mm inside a face).
-    Drawing the room in to hold none of them was tried and set aside: under the top the floor
-    runs on, and what lies on it there then rested inside a wall, which closed the box
-    (`plans/perception/open-box/clear/`).
+    opening where the wall drawn in to it would put a thing resting on the cabinet in it, as in
+    `repro4-fix` r2 a piece of the drawer the bowl stands on, 11.9 mm inside it at looks 3 and 5
+    (up to 7,317 pixels in one box). Drawn in regardless, as was tried before
+    (`plans/perception/open-box/clear/`), and again in this rule's first form, the cabinet then
+    covered what rested inside its wall and was no longer solid (solid cabinets 30 to 28 and
+    open ones 6 to 4 on `repro4-fix`): the wall now stays where it was on that side.
+  - **The overhang rule is held on exact depth alone.** Through the tests' D435 and D405, the
+    lidless box with a board over its far end is no box open at the top (the trays' rows of
+    `tests/truth.rs` say why), before the rule and after alike, and no rendered stereo scene of
+    ours moves with it.
   - **A step, a ledge and a post are held by rendered scenes with one mask over the thing**:
     from above their parts meet in no crease a camera reads, and without the mask each is a
     thing that stands on the next.
