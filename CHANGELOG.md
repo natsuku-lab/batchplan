@@ -8,6 +8,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+- `GraspOptions::first_touch` (off by default): `grasps_on` puts the grasps whose fingers close
+  onto their patches before meeting any other part of what was seen of the object ahead of the
+  rest, within the two lots of two seen sides and one. A finger closing level deep across a wall
+  that leans over its patch meets the wall above it instead, and the object turns in the hand as
+  it is lifted: a LIBERO bowl picked so turned 15 degrees and touched the plate while still held.
+  **Breaking:** Rust literals that list every field of `GraspOptions` need `first_touch`.
 - Miru gives a reading on no known shape of a set of fewer than four readings, too few to be a
   surface of its own, to a known shape's surface beside it too, where the reading's own surface lies
   on that surface's plane within three deviations of the difference, and a part that is a known

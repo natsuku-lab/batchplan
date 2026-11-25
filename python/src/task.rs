@@ -65,6 +65,9 @@ value_class! {
         near: Option<Vec3>,
         /// An optional point for additional approaches whose fingers close on it.
         close_on: Option<Vec3>,
+        /// Whether the grasps of a surface whose fingers close onto their patches before they
+        /// meet any other part of the object come first, within each lot: false.
+        first_touch: bool,
     }
     methods {
         #[new]

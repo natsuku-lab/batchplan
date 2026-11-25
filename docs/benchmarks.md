@@ -246,6 +246,8 @@ The counts are the same on both devices of each machine and on every run, but at
 
 Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from 16 directions, 22 spheres swept 10 cm against the points near them. Checked against every point of the scene through one coarse grid, before the points near the object were kept in cells of their own and a check stopped at its first point in the way, the bowl took 211 ms and the box 314 ms on one thread, with the same grasps to the last bit.
 
+With `first_touch`, which sweeps each finger of each grasp over the object's patches, the example times the bowl, the box and the 64 bowls again (its lines `with first_touch`). On the Ryzen AI Max+ 395 on one thread (the example built with `Device::cpu_threads(&robot, 1)`), the quickest of six runs, the machine's load under 3: the 64 bowls take 2.65 s against 2.49 s without it (7 percent more), the bowl 41.2 ms against 38.9 (6 percent), the box 59.8 ms against 59.1 (1 percent). Without it the grasps and their order are main's.
+
 ## Rests on a surface
 
 `examples/surface_rests.rs` finds where a held object rests on what cameras see (`rests_on`), and where to let it go to fall into a basket and into a bowl it barely fits (`falls_into`), with the default options (spots 1 cm apart, 8 turns, cells 2 mm wide) but for the bowl's, which looks closer, on the M4 Pro's 14 threads, the quickest of five calls (of three for the 64 boxes) and of six runs, the machine's load between 4 and 15 from other work; on one thread, the quickest of three runs:

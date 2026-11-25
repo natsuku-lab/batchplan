@@ -124,6 +124,21 @@ fn main() -> Result<()> {
     let robot = common::panda()?;
     let device = Device::cpu(&robot)?;
     let o = GraspOptions::default();
+    let first = GraspOptions {
+        first_touch: true,
+        ..o
+    };
+    // The same surfaces' grasps, those whose fingers close onto their patches first.
+    let first_touch = |surfaces: &[Surface], rounds: usize| -> Result<()> {
+        let (ms, found) = quickest(rounds, || grasps_on(&device, 0, surfaces, &first));
+        let found: Vec<Grasp> = found?.into_iter().flatten().collect();
+        println!(
+            "  with first_touch: {} grasps in {ms:.1} ms (sum {:.6})",
+            found.len(),
+            sum(&found)
+        );
+        Ok(())
+    };
 
     let bowl = bowl();
     let (ms, found) = quickest(5, || grasps_on(&device, 0, std::slice::from_ref(&bowl), &o));
@@ -135,6 +150,7 @@ fn main() -> Result<()> {
         found.len(),
         sum(&found)
     );
+    first_touch(std::slice::from_ref(&bowl), 5)?;
 
     // A box 4 by 6 by 5 cm on a table, seen from either side.
     let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.01), Vec3::new(0.5, 0.5, 0.01));
@@ -192,6 +208,7 @@ fn main() -> Result<()> {
         found.len(),
         sum(&found)
     );
+    first_touch(std::slice::from_ref(&seen), 5)?;
 
     // LIBERO's bowl on the table, seen from 40 cm above by a wrist camera alone: its rim and its
     // inner wall, not its outer wall, which flares out of sight under the rim.
@@ -291,5 +308,6 @@ fn main() -> Result<()> {
         "64 bowls in one call: {grasps} grasps in {ms:.1} ms, {:.1} ms a bowl",
         ms / 64.0
     );
+    first_touch(&bowls, 3)?;
     Ok(())
 }

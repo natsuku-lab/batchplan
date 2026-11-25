@@ -1632,7 +1632,9 @@ pub struct GraspOptions {
     /// past the `opening` is one at it. A wall that leans is closed on level as well, where the
     /// level line through the patch is inside its friction cone (`friction`): the hand then comes
     /// straight down across a flared rim, where one closing along the wall's normal leans as the
-    /// wall does. A bowl's rim seen from above is grasped so, its outer wall
+    /// wall does; deeper down such a wall, the finger on the side it leans over meets it above the
+    /// patch ([`first_touch`](Self::first_touch) puts those grasps last). A bowl's rim seen from
+    /// above is grasped so, its outer wall
     /// hidden under it. Inside a solid no ray goes, so none of these grasps ends in one: a box seen
     /// from one side is closed on only across all of it, where the cameras saw past its far side.
     /// The space found lies past where the wall ends by what the rays leave unseen: under a bowl's
@@ -1658,11 +1660,13 @@ pub struct GraspOptions {
     pub narrow: bool,
     /// A point to grip a surface near, in its frame, for grasps of a surface: `None`, the pairs
     /// of patches spread over the object. With a point, within each of the tiers
-    /// [`grasps_on`](crate::grasps_on) orders its grasps by (from above before a turn to either
-    /// side, pairs that face each other within half a friction cone of square before the rest,
-    /// walls seen from one side after all of these), the pairs whose middles lie nearest the
-    /// point come first, the squarest first of two as near: where a caller was told to grip, as
-    /// on a knob's axis or at a handle's middle. It orders the grasps and finds no others.
+    /// [`grasps_on`](crate::grasps_on) orders its grasps by (walls seen from one side after
+    /// those seen from both, and within each, with [`first_touch`](Self::first_touch), fingers
+    /// that close onto their patches first before the rest, from above before a turn to either
+    /// side, and pairs that face each other within half a friction cone of square before the
+    /// rest), the pairs whose middles lie nearest the point come first, the squarest first of two
+    /// as near: where a caller was told to grip, as on a knob's axis or at a handle's middle. It
+    /// orders the grasps and finds no others.
     pub near: Option<Vec3>,
     /// A point to enclose between the pads in surface grasps. After the ordinary grasps,
     /// sample intermediate approaches around nearby contact pairs and append only those whose
@@ -1670,6 +1674,19 @@ pub struct GraspOptions {
     /// retaining the contact patches and the required overlap. Ordinary grasps come first,
     /// including ones that miss the point.
     pub close_on: Option<Vec3>,
+    /// Whether grasps of a surface ([`grasps_on`](crate::grasps_on)) whose fingers close onto
+    /// their patches before they meet any other part of what was seen of the object come first,
+    /// within the lot of two seen sides and again within the lot of one: false, the order is as
+    /// without it. A finger closing level deep across a wall that leans over its patch, as a
+    /// flared bowl's, meets the wall above the patch first, a finger's length from the other
+    /// contact, and the object turns in the hand as it is lifted: with this, such grasps come
+    /// after the rest, none left out. What a finger meets is the object's patches: the means of
+    /// its readings in cells a patch wide ([`contact`](Self::contact)) that hold three or more,
+    /// so that a reading or two off the surface by a stereo camera's noise is none. So a part of
+    /// the object no camera saw, or one seen with fewer readings than that in every such cell,
+    /// as a wall read sparser than every 3 mm or a lip that cells' sides split, is met
+    /// unnoticed. It costs a sweep of each finger of each grasp over the patches.
+    pub first_touch: bool,
 }
 
 impl Default for GraspOptions {
@@ -1689,6 +1706,7 @@ impl Default for GraspOptions {
             narrow: false,
             near: None,
             close_on: None,
+            first_touch: false,
         }
     }
 }

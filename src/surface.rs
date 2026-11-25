@@ -454,10 +454,15 @@ const RINGS: usize = 8;
 /// spread over the object, each the farthest from those before it, or with a point to grip near
 /// ([`GraspOptions::near`]) the nearest it first. With a
 /// [`shell`](GraspOptions::shell), grasps supported by views past a wall follow those with
-/// both sides seen. [`GraspOptions::close_on`] appends intermediate approaches that enclose the
-/// point after all ordinary grasps, again with two seen sides first. Finally it tries shallower
-/// insertions of those grasps that enclose the point, in parent grasp order. The surfaces run on
-/// the device's threads, and a surface's grasps are the same alone and among others.
+/// both sides seen. With [`first_touch`](GraspOptions::first_touch), within each of those two
+/// lots, the grasps whose fingers close onto their patches before they meet any other part of
+/// what was seen of the object come first, the rest after them in the same order: a finger that
+/// meets a wall leaning over its patch, or a lip above it, closes there instead, a finger's length
+/// from the other contact, and the object turns in the hand. [`GraspOptions::close_on`] appends
+/// intermediate approaches that enclose the point after all ordinary grasps, again with two seen
+/// sides first. Finally it tries shallower insertions of those grasps that enclose the point, in
+/// parent grasp order. The surfaces run on the device's threads, and a surface's grasps are the
+/// same alone and among others.
 pub fn grasps_on(
     device: &Device,
     hand: usize,
@@ -628,6 +633,9 @@ fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
     let lower = middles.clone().fold(Vec3::INFINITY, Vec3::min) - extent;
     let upper = middles.fold(Vec3::NEG_INFINITY, Vec3::max) + extent;
     let near = Near::new(s, lower, upper);
+    let touch = o
+        .first_touch
+        .then(|| FirstTouch::new(s, o, hand, lower, upper));
     // Whether the hand at `pose`, open, and the straight way in to it along its z axis, are
     // clear of what was seen and over the floor: each sphere swept back the approach, as GPD
     // takes a hand's fingers to reach back without end, so that a sheet of points between two
@@ -700,11 +708,15 @@ fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
             .par_iter()
             .map(|p| proposals(p, one_sided, o.turns))
             .collect();
+        let start = grasps.len();
         for turn in 0..o.turns {
             let at_turn = each
                 .iter()
                 .flat_map(|by_turn| by_turn[turn].iter().copied());
             grasps.extend(at_turn);
+        }
+        if let Some(touch) = &touch {
+            touch.order(open, &mut grasps[start..]);
         }
     }
     if let Some(point) = o.close_on {
@@ -1807,6 +1819,228 @@ impl Grasp {
         let pushed = 2.0 * closing.dot(along.cross(middle - screw.point)).abs();
         held + (pushed - o.friction * (near - far).abs()).abs()
     }
+}
+
+/// What the fingers of a hand are swept against for [`GraspOptions::first_touch`]: the object's
+/// patches, kept to be found in a box over their own bounds, a few cells, and the hand's fingers.
+struct FirstTouch {
+    patches: Near,
+    fingers: Vec<Finger>,
+}
+
+impl FirstTouch {
+    /// The patches of the object `s` shows: in each cell a patch wide ([`GraspOptions::contact`])
+    /// that holds enough of its points for a patch ([`SUPPORT`]), their mean. What a finger meets
+    /// is a patch, as what it presses on is: a reading or two off the surface by a stereo
+    /// camera's noise make none. Over all the hand may reach (`lower` to `upper`) where there are
+    /// none.
+    #[inline(never)]
+    fn new(s: &Surface, o: &GraspOptions, hand: &[HandSphere], lower: Vec3, upper: Vec3) -> Self {
+        let cells = Cells::new(&s.points, o.contact, |i| s.object.is_empty() || s.object[i]);
+        let enough = cells.order.iter().map(|key| &cells.of[key]);
+        let patches = enough.filter(|cell| cell.len() >= SUPPORT);
+        let patches =
+            patches.map(|cell| cell.iter().map(|&i| s.points[i]).sum::<Vec3>() / cell.len() as f32);
+        let points: Vec<Vec3> = patches.collect();
+        let low = points.iter().copied().fold(Vec3::INFINITY, Vec3::min);
+        let high = points.iter().copied().fold(Vec3::NEG_INFINITY, Vec3::max) + HAND_CELLS;
+        let patches = Surface {
+            normals: vec![Vec3::ZERO; points.len()],
+            points,
+            object: vec![],
+            seen_from: vec![],
+        };
+        let fingers = [-1.0, 1.0]
+            .iter()
+            .filter_map(|&side| Finger::of(hand, side));
+        Self {
+            patches: match low.cmple(high).all() {
+                true => Near::new(&patches, low, high),
+                false => Near::new(&patches, lower, upper),
+            },
+            fingers: fingers.collect(),
+        }
+    }
+
+    /// `grasps`, those whose fingers close onto their patches first ([`closes_onto`]) ahead of
+    /// the rest, each in the order they came.
+    #[inline(never)]
+    fn order(&self, open: OpenHand<'_>, grasps: &mut [Grasp]) {
+        let onto: Vec<bool> = grasps
+            .par_iter()
+            .map(|g| {
+                closes_onto(
+                    &self.patches,
+                    open,
+                    &self.fingers,
+                    &g.pose,
+                    g.width(),
+                    g.opening,
+                )
+            })
+            .collect();
+        let lot = grasps.to_vec();
+        let first = lot.iter().zip(&onto).filter(|&(_, &onto)| onto);
+        let rest = lot.iter().zip(&onto).filter(|&(_, &onto)| !onto);
+        for (slot, (g, _)) in grasps.iter_mut().zip(first.chain(rest)) {
+            *slot = *g;
+        }
+    }
+}
+
+/// One finger of a hand: its side ([`HandSphere::side`]), its spheres, and the box around them
+/// in the hand's frame, each sphere grown by twice [`ROUNDING`]: what it sweeps as it closes is
+/// that box drawn out along the closing line, a slab far thinner than a ball around the finger.
+struct Finger {
+    side: f32,
+    spheres: Vec<HandSphere>,
+    lower: Vec3,
+    upper: Vec3,
+}
+
+impl Finger {
+    /// The finger of `hand` on `side`. None where no sphere stands on that side, as a hand's
+    /// fixed jaw.
+    fn of(hand: &[HandSphere], side: f32) -> Option<Self> {
+        let spheres: Vec<HandSphere> = hand.iter().filter(|s| s.side == side).copied().collect();
+        let grown = |s: &HandSphere| Vec3::splat(s.radius + 2.0 * ROUNDING);
+        let lower = spheres
+            .iter()
+            .map(|s| s.center - grown(s))
+            .reduce(Vec3::min)?;
+        let upper = spheres
+            .iter()
+            .map(|s| s.center + grown(s))
+            .reduce(Vec3::max)?;
+        Some(Self {
+            side,
+            spheres,
+            lower,
+            upper,
+        })
+    }
+}
+
+/// How far a patch may lie from a sphere's surface, by the hand's frame, and still be put to
+/// the sphere as the world has it (meters): far over what turning a point within a meter rounds
+/// to, far under any surface's size.
+const ROUNDING: f32 = 1e-5;
+
+/// Whether each finger of a hand at `pose`, its fingers `opening` apart, closes onto the patches
+/// `width` apart before it meets any other part of the object: each finger's spheres slid along
+/// the closing line from there to where the finger stands at its patch meet none of the object's
+/// `patches` ([`FirstTouch::new`]) farther from the middle than the patches and a surface's noise
+/// ([`THINNEST`]). These are what a finger meets first, as GPD's antipodal test takes the
+/// outermost points along the closing axis. A part of the object that stands out past a patch,
+/// as a wall leaning over it, is what the finger closes on instead: closing level across a
+/// leaning wall, the finger on the side it leans over meets it a finger's length from the other,
+/// and the object turns in the hand until the wall lies flat on the fingers. Only the patches
+/// in the box a finger's spheres sweep are put to them, each in the hand's frame, where a sphere
+/// slides along one axis; one within [`ROUNDING`] of a sphere's surface is put to it as the world
+/// has it.
+fn closes_onto(
+    patches: &Near,
+    open: OpenHand<'_>,
+    fingers: &[Finger],
+    pose: &Pose,
+    width: f32,
+    opening: f32,
+) -> bool {
+    let closing = pose.rotation * Vec3::Y;
+    let (across, toward) = (pose.rotation * Vec3::X, pose.rotation * Vec3::Z);
+    let outside = width / 2.0 + THINNEST;
+    let (from, to) = ((open.gap - opening) / 2.0, (open.gap - width) / 2.0);
+    fingers.iter().all(|finger| {
+        let at = |center: Vec3, gap: f32| {
+            let slid = closing * (finger.side * (open.gap - gap) / 2.0);
+            pose.position + pose.rotation * center - slid
+        };
+        // As the world has it: the segment a sphere's middle slides along, and the patch's
+        // distance from it.
+        let in_world = |sphere: &HandSphere, patch: Vec3| {
+            let (a, b) = (at(sphere.center, opening), at(sphere.center, width));
+            let t = (patch - a).dot(b - a) / (b - a).length_squared().max(f32::MIN_POSITIVE);
+            patch.distance(a + (b - a) * t.clamp(0.0, 1.0)) <= sphere.radius
+        };
+        let (slid_from, slid_to) = (finger.side * from, finger.side * to);
+        let (least, most) = (slid_from.min(slid_to), slid_from.max(slid_to));
+        let mut lower = finger.lower - Vec3::Y * most;
+        let mut upper = finger.upper - Vec3::Y * least;
+        // None within the patches' band counts: the box starts past it where it reaches no
+        // farther across it.
+        if lower.y >= -outside {
+            lower.y = lower.y.max(outside);
+        }
+        if upper.y <= outside {
+            upper.y = upper.y.min(-outside);
+        }
+        if lower.y > upper.y {
+            return true;
+        }
+        let meets = |patch: Vec3| {
+            let off = patch - pose.position;
+            let y = off.dot(closing);
+            if y.abs() <= outside || y < lower.y || y > upper.y {
+                return false;
+            }
+            let (x, z) = (off.dot(across), off.dot(toward));
+            if x < lower.x || x > upper.x || z < lower.z || z > upper.z {
+                return false;
+            }
+            finger.spheres.iter().any(|sphere| {
+                let c = sphere.center;
+                let dy = y - y.clamp(c.y - most, c.y - least);
+                let gap = (x - c.x).powi(2) + dy * dy + (z - c.z).powi(2);
+                if gap > (sphere.radius + ROUNDING).powi(2) {
+                    return false;
+                }
+                let inside = (sphere.radius - ROUNDING).max(0.0);
+                gap <= inside * inside || in_world(sphere, patch)
+            })
+        };
+        let axes = [across, closing, toward];
+        !in_box(patches, pose.position, axes, (lower, upper), meets)
+    })
+}
+
+/// Whether `hit` holds for any of `near`'s points in the box from `bounds.0` to `bounds.1` along
+/// `axes` from `origin`: the points of every cell the box reaches into, as a cell lies past it
+/// along one of its axes by no more than the cell's own half width along it.
+fn in_box(
+    near: &Near,
+    origin: Vec3,
+    axes: [Vec3; 3],
+    bounds: (Vec3, Vec3),
+    hit: impl Fn(Vec3) -> bool,
+) -> bool {
+    let (middle, half) = ((bounds.0 + bounds.1) / 2.0, (bounds.1 - bounds.0) / 2.0);
+    let center = origin + axes[0] * middle.x + axes[1] * middle.y + axes[2] * middle.z;
+    let extent = axes[0].abs() * half.x + axes[1].abs() * half.y + axes[2].abs() * half.z;
+    let (lower, upper) = (near.along(center - extent), near.along(center + extent));
+    let cell = Vec3::splat(near.size / 2.0);
+    let reach = half + Vec3::from(axes.map(|axis| axis.abs().dot(cell)));
+    for z in lower[2]..=upper[2] {
+        for y in lower[1]..=upper[1] {
+            for x in lower[0]..=upper[0] {
+                let at = (z * near.cells[1] + y) * near.cells[0] + x;
+                let (start, end) = (near.starts[at] as usize, near.starts[at + 1] as usize);
+                if start == end {
+                    continue;
+                }
+                let middle =
+                    near.lower + (Vec3::new(x as f32, y as f32, z as f32) + 0.5) * near.size;
+                let off = middle - center;
+                let along = Vec3::from(axes.map(|axis| off.dot(axis)));
+                if along.abs().cmpgt(reach).any() {
+                    continue;
+                }
+                if near.points[start..end].iter().any(|&point| hit(point)) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
