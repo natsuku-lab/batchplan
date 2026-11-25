@@ -21,6 +21,7 @@
 //! 5. Each object that lies where one of the scene before did keeps its id ([`continues`]).
 //! 6. What no view could see of the scene before stays as that scene had it ([`shown`]).
 
+use std::cell::OnceCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
@@ -2175,7 +2176,8 @@ fn same(seen: &[Seen], parts: &[Parts], first: &[usize], sets: &mut Sets, thread
 /// own hides none of the floor before it. Then a thing that rests on the box with its lowest
 /// reading inside the box's solids by more than its slack stands where the box says nothing can:
 /// the box does not stand for the thing, as one inflated by stray readings over what stands beside
-/// it, and covers it instead.
+/// it, and covers it instead; unless the thing lies across the room in the solids as thin as a
+/// wall, as the back of a drawer under a cabinet's top does, which they hold.
 fn hold_what_stands(
     objects: &[Readings],
     fits: &mut [Fit],
@@ -2213,12 +2215,22 @@ fn hold_what_stands(
             .collect();
         let own = floored.binary_search_by_key(&k, |(i, _)| *i);
         let own = own.map_or(&[][..], |i| &floored[i].1);
+        // The widest window of the box's own readings, made where a thing rests inside the box.
+        let window = OnceCell::new();
+        let widest = || {
+            let widths = own.iter().map(|r| r.spacing / r.share.sqrt());
+            *window.get_or_init(|| widths.fold(0.0, f32::max))
+        };
         // Whether thing `j` rests on the box and inside its solids, `shape`, by more than its
-        // slack, and the box's readings show no wall of its own that parts it from the room.
+        // slack, and does not lie across the room in them as thin as a wall, as the back of a
+        // drawer under a cabinet's top does (`fit::across`); and the box's readings show no wall
+        // of its own that parts it from the room.
         let inside = |shape: &Shape, j: usize| {
+            let (points, slack) = (&objects[j].points, &objects[j].slack);
             j != k
                 && stood[j].1 == Some(Support::Object(k))
                 && shape.distance(lowest[j].0) < -lowest[j].1
+                && !fit::across(shape, points, slack, widest())
         };
         let behind = |shape: &Shape, j: usize| {
             fit::behind_wall(shape, own, &objects[j].points, &objects[j].slack)

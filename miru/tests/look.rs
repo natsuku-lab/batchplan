@@ -5198,6 +5198,229 @@ fn a_block_under_a_board_over_a_lidless_box_keeps_the_box_open() {
 }
 
 #[test]
+fn a_panel_under_a_board_over_a_lidless_box_is_held_by_the_wall() {
+    // The board of `board`, 6 cm deep, over the lidless box, and under it a panel 4 mm through
+    // across the box, standing on its floor 3 cm in from the far wall and 2.5 cm tall, as the back
+    // of a drawer stands under a cabinet's top. The view sees the panel under the board's edge,
+    // an object of its own that rests on the box, and a wall drawn in to the board's edge holds
+    // all of it that stands over the floor: it kept the room under the board, the board's
+    // readings in it. From 30, 40 and 50 degrees the room ends at the board's edge and holds none
+    // of the board's readings, and the box is a solid box open at the top.
+    for degrees in [30.0, 40.0, 50.0] {
+        let (mut things, room) = open_box();
+        things.push(board(0.06));
+        things.push(block(
+            Vec3::new(0.422, 0.0, 0.0225),
+            Vec3::new(0.002, 0.1, 0.0125),
+            [30, 30, 200],
+        ));
+        let frame = frame_from(things, eye_above(degrees));
+        let scene = seen(&[&frame], &Scene::default());
+        let open = Room {
+            floor: room.floor + Vec3::X * 0.03,
+            half: Vec2::new(room.half.x - 0.03, room.half.y),
+            yaw: 0.0,
+        };
+        let what = format!("a panel under the board, from {degrees} degrees");
+        let shown = (frame.shows.iter())
+            .filter(|&&shows| shows == Some(7))
+            .count();
+        assert!(shown > 100, "{what}: {shown} readings of the panel in view");
+        let tolerance = slack(&frame, open.floor);
+        let (object, _) = assert_open(&scene, &frame, 1, &open, &[], tolerance, &what);
+        let (in_it, _) = in_its_room(&scene, object, &frame, 6);
+        assert_eq!(in_it, 0, "{what}: {:?}", scene.objects);
+    }
+}
+
+/// How many of thing `thing`'s readings in `frame` lie in the solids of `scene` by more than their
+/// slack, of how many it shows.
+fn held_in_solids(scene: &Scene, frame: &Frame, thing: usize) -> (usize, usize) {
+    let shown: Vec<usize> = (0..frame.shows.len())
+        .filter(|&i| frame.shows[i] == Some(thing))
+        .collect();
+    let held = (shown.iter()).filter(|&&i| {
+        let point = reading(frame, i);
+        depth_in_solids(scene, point) > slack(frame, point)
+    });
+    (held.count(), shown.len())
+}
+
+#[test]
+fn a_block_across_a_lidless_box_under_a_board_keeps_its_room() {
+    // The board of `board`, 6 cm deep, over the lidless box, and under it a block 4 by 20 by 2 cm
+    // across the box, from 1 to 5 cm in from the far wall: it reaches across the room as a
+    // drawer's back does, but is no panel. From 30 and 40 degrees, which see the block's top and
+    // face under the board, the box is a solid box open at the top and none of the block's
+    // readings lies in its solids by more than its slack. From 50 degrees the view sees about
+    // 1.4 cm of it under the board, as thin as a panel: the README's "Where it stands".
+    for degrees in [30.0, 40.0] {
+        let (mut things, _) = open_box();
+        things.push(board(0.06));
+        things.push(block(
+            Vec3::new(0.42, 0.0, 0.02),
+            Vec3::new(0.02, 0.1, 0.01),
+            [30, 30, 200],
+        ));
+        let frame = frame_from(things, eye_above(degrees));
+        let scene = seen(&[&frame], &Scene::default());
+        let what = format!("a block across the box under the board, from {degrees} degrees");
+        let (object, _) = object_of(&scene, &frame, 1);
+        let shape = &scene.objects[object];
+        assert!(
+            shape.solid && matches!(shape.shape, Shape::OpenBox { .. }),
+            "{what}: {shape:?}"
+        );
+        let (held, of) = held_in_solids(&scene, &frame, 7);
+        assert!(of > 100, "{what}: {of} readings of the block in view");
+        assert_eq!(held, 0, "{what}: {:?}", scene.objects);
+    }
+}
+
+#[test]
+#[ignore = "a thing of which the views see too little to tell it from a panel is held: README"]
+fn a_rod_across_a_lidless_box_under_a_board_keeps_its_room() {
+    // The board of `board`, 6 cm deep, over the lidless box, and under it a rod 2 cm through and
+    // 20 cm long across the box, 2.5 cm in from the far wall; and the block of
+    // `a_block_across_a_lidless_box_under_a_board_keeps_its_room` from 50 degrees. Neither is a
+    // panel, but the views see each only as thin as one. None of its readings should lie in the
+    // box's solids by more than its slack.
+    let rod = || {
+        let middle = Vec3::new(0.425, 0.0, 0.02);
+        turned(
+            can(middle, 0.01, 0.1, [30, 30, 200]),
+            middle,
+            Quat::from_rotation_x(FRAC_PI_2),
+        )
+    };
+    let wide = || {
+        block(
+            Vec3::new(0.42, 0.0, 0.02),
+            Vec3::new(0.02, 0.1, 0.01),
+            [30, 30, 200],
+        )
+    };
+    let cases: [(&str, &dyn Fn() -> Thing, f32); 4] = [
+        ("a rod", &rod, 30.0),
+        ("a rod", &rod, 40.0),
+        ("a rod", &rod, 50.0),
+        ("a block", &wide, 50.0),
+    ];
+    for (name, thing, degrees) in cases {
+        let (mut things, _) = open_box();
+        things.extend([board(0.06), thing()]);
+        let frame = frame_from(things, eye_above(degrees));
+        let scene = seen(&[&frame], &Scene::default());
+        let (held, of) = held_in_solids(&scene, &frame, 7);
+        assert_eq!(
+            held, 0,
+            "{name} under the board, from {degrees} degrees, {of} in view"
+        );
+    }
+}
+
+#[test]
+fn a_block_across_a_lidless_box_behind_its_near_wall_is_not_held_by_the_wall() {
+    // The lidless box with no board, and a block 4 by 20 by 5 cm across it on its floor, right
+    // behind the near (+x) wall: it reaches across the room but is no panel, and no overhang
+    // hides it. From 30, 40 and 50 degrees none of its readings lies in a solid by more than its
+    // slack: the box covers it rather than standing for it with the block in its near wall.
+    for degrees in [30.0, 40.0, 50.0] {
+        let (mut things, _) = open_box();
+        things.push(block(
+            Vec3::new(0.59, 0.0, 0.035),
+            Vec3::new(0.02, 0.1, 0.025),
+            [30, 30, 200],
+        ));
+        let frame = frame_from(things, eye_above(degrees));
+        let scene = seen(&[&frame], &Scene::default());
+        let (held, of) = held_in_solids(&scene, &frame, 6);
+        let what = format!("a block behind the near wall, from {degrees} degrees, {of} in view");
+        assert!(of > 100, "{what}");
+        assert_eq!(held, 0, "{what}: {:?}", scene.objects);
+    }
+}
+
+#[test]
+fn a_panel_with_an_arm_into_the_room_under_a_board_keeps_its_room() {
+    // The board of `board`, 6 cm deep, over the lidless box, and under it one thing: a panel 4 mm
+    // through across the box, 3 cm in from the far wall and 2.5 cm tall, with an arm 1 cm wide of
+    // the panel's height that runs from it 10 cm into the room. It stands across the room under
+    // the board and in the room too: a wall drawn in to the board's edge would cut the arm. From
+    // 30, 40 and 50 degrees none of its readings lies in the box's solids by more than its slack.
+    let panel_with_arm = || {
+        let boxes = [
+            (Vec3::new(0.422, 0.0, 0.0225), Vec3::new(0.002, 0.1, 0.0125)),
+            (
+                Vec3::new(0.474, 0.0, 0.0225),
+                Vec3::new(0.05, 0.005, 0.0125),
+            ),
+        ];
+        let distance = move |p: Vec3| {
+            let to = |(center, half): (Vec3, Vec3)| {
+                let past = (p - center).abs() - half;
+                past.max(Vec3::ZERO).length() + past.max_element().min(0.0)
+            };
+            to(boxes[0]).min(to(boxes[1]))
+        };
+        Thing {
+            distance: Box::new(distance),
+            color: [30, 30, 200],
+            solid: None,
+        }
+    };
+    for degrees in [30.0, 40.0, 50.0] {
+        let (mut things, _) = open_box();
+        things.extend([board(0.06), panel_with_arm()]);
+        let frame = frame_from(things, eye_above(degrees));
+        let scene = seen(&[&frame], &Scene::default());
+        let (held, of) = held_in_solids(&scene, &frame, 7);
+        let what = format!("a panel with an arm under the board, from {degrees} degrees");
+        assert!(of > 100, "{what}: {of} readings in view");
+        assert_eq!(held, 0, "{what}: {:?}", scene.objects);
+    }
+}
+
+#[test]
+#[ignore = "a panel at an overhang's edge with an arm into the room has readings in the solids: README"]
+fn a_panel_at_a_boards_edge_with_an_arm_into_the_room_keeps_its_room() {
+    // The board of `board`, 6 cm deep, over the lidless box, and under its edge one thing: a panel
+    // 4 mm through across the box, 5 cm in from the far wall and 2.5 cm tall, with an arm 1 cm
+    // wide, raised 5 mm off the floor, that runs from it 10 cm into the room. A wall drawn in to
+    // the board's edge would hold the panel and the arm's first few millimetres, which read as thin
+    // as a wall across the room, and cut the rest of the arm. From 30, 40 and 50 degrees none of
+    // the thing's readings lies in the box's solids by more than its slack.
+    let panel_with_arm = || {
+        let boxes = [
+            (Vec3::new(0.442, 0.0, 0.0225), Vec3::new(0.002, 0.1, 0.0125)),
+            (Vec3::new(0.494, 0.0, 0.025), Vec3::new(0.05, 0.005, 0.01)),
+        ];
+        let distance = move |p: Vec3| {
+            let to = |(center, half): (Vec3, Vec3)| {
+                let past = (p - center).abs() - half;
+                past.max(Vec3::ZERO).length() + past.max_element().min(0.0)
+            };
+            to(boxes[0]).min(to(boxes[1]))
+        };
+        Thing {
+            distance: Box::new(distance),
+            color: [30, 30, 200],
+            solid: None,
+        }
+    };
+    for degrees in [30.0, 40.0, 50.0] {
+        let (mut things, _) = open_box();
+        things.extend([board(0.06), panel_with_arm()]);
+        let frame = frame_from(things, eye_above(degrees));
+        let scene = seen(&[&frame], &Scene::default());
+        let (held, of) = held_in_solids(&scene, &frame, 7);
+        let what = format!("a panel at the board's edge with an arm, from {degrees} degrees");
+        assert!(of > 100, "{what}: {of} readings in view");
+        assert_eq!(held, 0, "{what}: {:?}", scene.objects);
+    }
+}
+
+#[test]
 fn a_bar_across_a_lidless_box_moves_no_wall() {
     // The lidless box with a bar 2 cm wide and 1 cm through across its middle from wall to wall,
     // flush with the walls' tops, and a block 4 by 4 by 3 cm on its floor in the near half, from

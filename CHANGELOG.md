@@ -8,12 +8,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
-- Miru draws the room of a box open at the top in from under the box's own readings that
-  overhang it, as a cabinet's top over the back of a drawer pulled out of it: a wall moves in to
-  them where they reach it and span it, and not where a thing resting on the box would then lie
-  in the wall. A floor no longer counts as hiding a reading of no part, or a sliver that went to
-  the parts beside it, so a gap between its boards, or a step a stereo camera's noise reads in
-  it, leaves it a hollow's floor.
+- Miru draws the room of a box open at the top in from under the box's own readings that overhang
+  it, as a cabinet's top over the back of a drawer pulled out of it: a wall moves in to them where
+  they reach it and span it, and not where a thing resting on the box would then lie in the wall. A
+  thing that lies across the room in the wall as thin as a wall, as the back of a drawer under the
+  cabinet's top, no longer keeps the room under the overhang or closes the box: the wall holds it. A
+  floor no longer counts as hiding a reading of no part, or a sliver that went to the parts beside
+  it, so a gap between its boards, or a step a stereo camera's noise reads in it, leaves it a
+  hollow's floor.
 - Miru measures a raised bar over a circular face and checks fully open approach and finger
   closure against the measured points with `Kept::bar_on_disk`.
 - `Kept::observed_closures` runs on the device's threads and tests each reading only against
