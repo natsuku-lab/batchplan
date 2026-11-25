@@ -365,14 +365,15 @@ where its own surface, its plane or the reading itself, lies on their plane with
 of the difference: a plate's floor that reads just within the table's three deviations has a reading
 or two read just past them, and those are the floor's. A part is the shape's where more than half of
 its readings lie on known shapes and it stands in front of none of the shape: a surface cannot be in
-front of itself. Of two readings on a shape's surface the noise does not say which is in front, so
-what such a part stands in front of is what reads inside the shape: a board whose top reads on a
-mount known to reach a centimetre over the table, where only the table is, stands in front of the
-table around it, which reads inside the mount. A part that is the shape's goes to an object only
-where more than half of it lies inside that object's fitted shape, so a plate keeps its floor a few
-millimetres over the table, and a thing takes the readings at its foot that lie nearer its own plane
-than they lie over the shape. The tolerances are derived from `View::noise`, the camera's own
-account of its depth error by depth; the one number taken from the literature is LCCP's 10 degrees.
+front of itself, and all its readings show the shape (`Label::Known`). Of two readings on a shape's
+surface the noise does not say which is in front, so what such a part stands in front of is what
+reads inside the shape: a board whose top reads on a mount known to reach a centimetre over the
+table, where only the table is, stands in front of the table around it, which reads inside the
+mount. A part that is the shape's goes to an object only where more than half of it lies inside that
+object's fitted shape, so a plate keeps its floor a few millimetres over the table, and a thing
+takes the readings at its foot that lie nearer its own plane than they lie over the shape. The
+tolerances are derived from `View::noise`, the camera's own account of its depth error by depth; the
+one number taken from the literature is LCCP's 10 degrees.
 
 What nothing under it holds up is held up by what it touches. An object rests on what its
 lowest reading lies on or in, the nearest straight under it of the known shapes and of the

@@ -2992,6 +2992,31 @@ fn a_reading_of_a_plates_floor_a_little_past_the_tables_reach_is_the_plates() {
 }
 
 #[test]
+fn a_reading_of_a_mat_a_little_past_the_tables_reach_is_the_tables() {
+    // As a plate's floor without its rim: a thin mat, every reading of it on the table but one a
+    // little past it, on the mat's plane. The mat is the table's, and so is that reading.
+    let mat = |top: f32| {
+        vec![can(
+            MIDDLE + 0.5 * top * Vec3::Z,
+            0.0775,
+            0.5 * top,
+            [230; 3],
+        )]
+    };
+    let (frame, _) = just_on_the_table(mat, 1);
+    let past = nearest_inside(&frame, 1);
+    let height = 1.02 * 3.0 * deviation_at(&frame, past);
+    let frame = read_at(frame, past, height);
+    assert!(
+        !on_the_table(&frame, past),
+        "the reading is past the table's reach"
+    );
+    let scene = seen(&[&frame], &Scene::default());
+    assert!(scene.objects.is_empty(), "{:?}", scene.objects);
+    assert_eq!(scene.labels[0][past], Label::Known(0));
+}
+
+#[test]
 fn a_bump_on_a_plates_floor_narrower_than_a_window_is_not_the_plates() {
     // Two readings of the floor, one over the other, read five deviations of the noise over it:
     // too few for a plane of their own, and on no plane of the floor's. They are not the

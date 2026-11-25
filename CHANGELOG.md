@@ -10,8 +10,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 - Miru gives a reading on no known shape of a set of fewer than four readings, too few to be a
   surface of its own, to a known shape's surface beside it too, where the reading's own surface lies
-  on that surface's plane within three deviations of the difference. A plate's floor that reads just
-  within what may read on the table no longer has a reading or two read just past it labelled
+  on that surface's plane within three deviations of the difference, and a part that is a known
+  shape's labels such readings as the shape (`Label::Known`). A plate's floor that reads just within
+  what may read on the table no longer has a reading or two read just past it labelled
   `Label::Nothing`, which a caller building a surface to set things down on took for something
   standing on the floor.
 - Miru draws the room of a box open at the top in from under the box's own readings that overhang
