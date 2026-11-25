@@ -1029,7 +1029,9 @@ fn next_fit(
 }
 
 /// Clearance every spline keeps from the world away from its ends, so it cannot graze an obstacle
-/// between the samples it is checked at; at most the shortcuts' clearance.
+/// between the samples it is checked at; at most the shortcuts' clearance. Splines keep it between
+/// the robot's links too, which the searches and the shortcuts keep none of: a curve cutting a
+/// corner past a link, or past what a hand holds, would pass into it between its samples.
 const SPLINE_MARGIN: f32 = 0.002;
 
 /// Maximum waypoints pinned per path before the next path is tried.
@@ -1249,19 +1251,22 @@ impl Search for Planning<'_> {
                     let (n, points) = (self.robot.dof(), self.o.control_points);
                     let ends = vec![short[..n].to_vec(), short[short.len() - n..].to_vec()];
                     let ramp = self.o.shortcut.clearance_ramp;
-                    // The margin never exceeds what the shortcuts kept, or no spline could follow
-                    // them.
+                    // The margin from the world never exceeds what the shortcuts kept, or no
+                    // spline could follow them. Between links, which they keep nothing between,
+                    // splines keep it all the same: a path they pulled against the robot itself is
+                    // repaired as one against the world is.
                     let clearance = self.o.shortcut.clearance;
-                    let rounds: &[f32] = if clearance > SPLINE_MARGIN {
-                        &[clearance, SPLINE_MARGIN]
+                    let rounds: &[(f32, f32)] = if clearance > SPLINE_MARGIN {
+                        &[(clearance, SPLINE_MARGIN), (SPLINE_MARGIN, SPLINE_MARGIN)]
                     } else {
-                        &[clearance]
+                        &[(clearance, SPLINE_MARGIN)]
                     };
                     let keeps = rounds
                         .iter()
-                        .map(|&clearance| {
+                        .map(|&(clearance, apart)| {
                             Arc::new(Keep {
                                 clearance,
+                                apart,
                                 ramp,
                                 ends: ends.clone(),
                             })
@@ -1561,8 +1566,9 @@ fn optimize(
 /// The smallest clearance along each path past what it must keep, at the samples searched splines
 /// are checked at (`spline::checked`): from the world, the least margin searched splines keep
 /// (`shortcut.clearance`, at most `SPLINE_MARGIN`), ramped from the curve's ends as the shortcuts
-/// ramp theirs; from itself, none. NaN where a sample breaks the path's constraints
-/// (`item_bounds`). And each path's length at those samples, as searched splines' are measured.
+/// ramp theirs; between its links, `SPLINE_MARGIN`, ramped alike. NaN where a sample breaks the
+/// path's constraints (`item_bounds`). And each path's length at those samples, as searched
+/// splines' are measured.
 fn validate(
     device: &Device,
     worlds: &Worlds,
@@ -1584,9 +1590,10 @@ fn validate(
     }
     let item = |i: usize| &dense[from[i] * n..from[i + 1] * n];
     let margin = o.shortcut.clearance.min(SPLINE_MARGIN);
-    // Clearances exact up to the margin: past it, a link's bounding sphere's gap stands in.
+    // Clearances exact up to the margins: past them, a link's bounding sphere's gap stands in.
     let gated = CollisionWeights {
         margin,
+        self_margin: SPLINE_MARGIN,
         ..CollisionWeights::NONE
     };
     let clear = device.evaluate(worlds, &dense_world, &dense, &gated)?;
@@ -1613,13 +1620,15 @@ fn validate(
             let q = item(i);
             let keep = Keep {
                 clearance: margin,
+                apart: SPLINE_MARGIN,
                 ramp: o.shortcut.clearance_ramp,
                 ends: vec![q[..n].to_vec(), q[q.len() - n..].to_vec()],
             };
             (from[i]..from[i + 1])
                 .map(|s| {
-                    let world = clear.world_clearance[s] - keep.margin(&dense[s * n..(s + 1) * n]);
-                    world.min(clear.self_clearance[s])
+                    let q = &dense[s * n..(s + 1) * n];
+                    let world = clear.world_clearance[s] - keep.margin(q);
+                    world.min(clear.self_clearance[s] - keep.apart_margin(q))
                 })
                 // NaN marks the path invalid rather than vanishing in a minimum.
                 .fold(f32::INFINITY, |m, c| {
@@ -2154,6 +2163,7 @@ mod tests {
         let o = PlanOptions::default();
         let keep = Arc::new(Keep {
             clearance: 0.0,
+            apart: 0.0,
             ramp: 1.0,
             ends: vec![],
         });

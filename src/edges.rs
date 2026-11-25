@@ -45,24 +45,37 @@ pub(crate) struct EdgeQuery {
     pub(crate) region: Option<Arc<Region>>,
 }
 
-/// A clearance from the world that states keep, shrinking to zero toward a path's ends: a state
-/// `d` from the nearest end (joint-space distance) keeps `clearance * min(1, d / ramp)`. Paths
-/// start and end where they must, often in contact, such as at a grasp.
+/// A clearance from the world that states keep, and one between the robot's links, each shrinking
+/// to zero toward a path's ends: a state `d` from the nearest end (joint-space distance) keeps
+/// `clearance * min(1, d / ramp)`. Paths start and end where they must, often in contact, such as
+/// at a grasp. The clearance between links is kept by queries of states (`wanted` `None`), as a
+/// spline's are; the searches' and shortcuts' keep none.
 #[derive(Clone, Debug)]
 pub(crate) struct Keep {
     pub(crate) clearance: f32,
+    pub(crate) apart: f32,
     pub(crate) ramp: f32,
     pub(crate) ends: Vec<Vec<f32>>,
 }
 
 impl Keep {
     pub(crate) fn margin(&self, q: &[f32]) -> f32 {
+        self.clearance * self.share(q)
+    }
+
+    /// The clearance between links `q` keeps.
+    pub(crate) fn apart_margin(&self, q: &[f32]) -> f32 {
+        self.apart * self.share(q)
+    }
+
+    /// How much of the clearances `q` keeps, by how far it is from the nearest end.
+    fn share(&self, q: &[f32]) -> f32 {
         let nearest = self
             .ends
             .iter()
             .map(|end| rrt::distance(q, end))
             .fold(f32::INFINITY, f32::min);
-        self.clearance * (nearest / self.ramp).min(1.0)
+        (nearest / self.ramp).min(1.0)
     }
 
     /// Whether every state of the edge from `a` to `b` is beyond the ramp from every end, so keeps
@@ -325,16 +338,28 @@ fn answered<S: Simd, const GRIDS: bool>(
         }
         None => {
             let mut answer = query.edges.len() / n;
+            // Links kept apart in a copy of its own, so the checks that keep none are as they were.
+            let apart = query.keep.as_ref().is_some_and(|keep| keep.apart > 0.0);
             for (group, q) in query.edges.chunks(LANES * n).enumerate() {
-                let mut margin = [0.0; LANES];
+                let (mut margin, mut between) = ([0.0; LANES], [0.0; LANES]);
                 if let Some(keep) = &query.keep {
                     for (m, c) in margin.iter_mut().zip(q.chunks(n)) {
                         *m = keep.margin(c);
                     }
+                    if apart {
+                        for (m, c) in between.iter_mut().zip(q.chunks(n)) {
+                            *m = keep.apart_margin(c);
+                        }
+                    }
                 }
                 let region = query.region.as_deref();
-                let lanes_scratch = &mut scratch.lanes;
-                if !lanes.keeps_with::<S, GRIDS>(simd, world, q, margin, region, lanes_scratch) {
+                let s = &mut scratch.lanes;
+                let keeps = if apart {
+                    lanes.keeps_with::<S, GRIDS, true>(simd, world, q, margin, between, region, s)
+                } else {
+                    lanes.keeps_with::<S, GRIDS, false>(simd, world, q, margin, between, region, s)
+                };
+                if !keeps {
                     answer = group * LANES;
                     break;
                 }
@@ -373,7 +398,16 @@ fn edge_free<S: Simd, const GRIDS: bool>(
             }
         }
         let region = query.region.as_deref();
-        if !lanes.keeps_with::<S, GRIDS>(simd, world, &s.states, margin, region, &mut s.lanes) {
+        let (states, apart) = (&s.states, [0.0; LANES]);
+        if !lanes.keeps_with::<S, GRIDS, false>(
+            simd,
+            world,
+            states,
+            margin,
+            apart,
+            region,
+            &mut s.lanes,
+        ) {
             return false;
         }
     }
@@ -576,6 +610,7 @@ mod tests {
         let keep = |ends: Vec<Vec<f32>>| {
             Some(Arc::new(Keep {
                 clearance: 0.01,
+                apart: 0.0,
                 ramp: 0.5,
                 ends,
             }))
@@ -612,6 +647,74 @@ mod tests {
                 asker.answers,
                 [1, 0, 1],
                 "{}: free, too close, near an end",
+                device.name()
+            );
+        }
+    }
+
+    /// States checked at once keep their links apart by the query's clearance between them away
+    /// from the path's ends, as splines ask, and not near an end; without it, a state whose links
+    /// come within it but do not touch is free.
+    #[test]
+    fn states_keep_their_links_apart_away_from_the_ends() {
+        let robot = panda();
+        let n = robot.dof();
+        let apart = 0.01;
+        let world = World::default();
+        let cpu = Device::cpu(&robot).unwrap();
+        let worlds = cpu.upload(std::slice::from_ref(&world)).unwrap();
+        // Self clearance exact up to more than the clearance asked for.
+        let exact = device::CollisionWeights {
+            self_margin: 1.0,
+            ..device::CollisionWeights::NONE
+        };
+        let mut rng = Rng::new(3);
+        let near = (0..10_000)
+            .map(|_| {
+                let q: Vec<f32> = (0..n)
+                    .map(|j| rng.range(robot.lower[j], robot.upper[j]))
+                    .collect();
+                let e = cpu.evaluate(&worlds, &[0], &q, &exact).unwrap();
+                (q, e.self_clearance[0])
+            })
+            .find(|(_, clearance)| (0.2 * apart..0.8 * apart).contains(clearance));
+        let (q, clearance) = near.expect("a configuration whose links come within the clearance");
+        let far: Vec<f32> = q.iter().map(|v| v + 2.0).collect();
+        let keep = |apart: f32, ends: Vec<Vec<f32>>| {
+            Some(Arc::new(Keep {
+                clearance: 0.0,
+                apart,
+                ramp: 0.5,
+                ends,
+            }))
+        };
+        let query = |keep| EdgeQuery {
+            world: 0,
+            edges: q.clone(),
+            wanted: None,
+            spacing: 0.0,
+            keep,
+            region: None,
+        };
+        let queries = vec![
+            query(None),
+            query(keep(0.0, vec![far.clone()])),
+            query(keep(apart, vec![far.clone()])),
+            query(keep(apart, vec![q.clone(), far])),
+        ];
+        for device in devices(&robot) {
+            let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
+            let mut asker = Asker {
+                queries: queries.clone(),
+                answers: vec![],
+            };
+            device
+                .search(&worlds, &mut [&mut asker as &mut dyn Search], None)
+                .unwrap();
+            assert_eq!(
+                asker.answers,
+                [1, 1, 0, 1],
+                "{}: links {clearance} m apart: free, free, too close, at an end",
                 device.name()
             );
         }

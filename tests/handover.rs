@@ -66,12 +66,19 @@ fn configurations(t: &Trajectory) -> impl Iterator<Item = &[f32]> {
     t.control_points.chunks(t.dof)
 }
 
-/// The robot holding `held` collides nowhere along `t`, sampled at 100 Hz.
-fn clear_holding(robot: &Robot, worlds: &Worlds, world: u32, held: &Held, t: &Trajectory) -> bool {
+/// The robot holding `held` collides nowhere along `t`, sampled at `rate` (Hz).
+fn clear_holding(
+    robot: &Robot,
+    worlds: &Worlds,
+    world: u32,
+    held: &Held,
+    t: &Trajectory,
+    rate: f32,
+) -> bool {
     let holding = robot.attach(&held.attachment(robot).unwrap()).unwrap();
     let device = Device::cpu(&holding).unwrap();
     let uploaded = device.upload(&[worlds[world as usize].clone()]).unwrap();
-    let q = t.sample(100.0).unwrap().positions;
+    let q = t.sample(rate).unwrap().positions;
     let items = vec![0; q.len() / robot.dof()];
     let e = device
         .evaluate(&uploaded, &items, &q, &CollisionWeights::NONE)
@@ -123,7 +130,10 @@ fn a_held_bar_is_passed_to_the_other_arm_each_hand_holding_the_other_still() {
             let meet = plan.transit.as_ref().unwrap();
             assert_eq!(configurations(meet).next().unwrap(), &start[..], "{name}");
             assert_eq!(configurations(meet).last().unwrap(), plan.begin(), "{name}");
-            assert!(clear_holding(&robot, &worlds, 1, &held, meet), "{name}");
+            assert!(
+                clear_holding(&robot, &worlds, 1, &held, meet, 100.0),
+                "{name}"
+            );
             // Moving in, the giver holds the bar at the meeting and keeps still to the bit.
             let take_start = configurations(&plan.approach).next().unwrap();
             for q in configurations(&plan.approach) {
@@ -523,5 +533,36 @@ fn as_many_holds_as_fill_a_stack_at_once_are_passed_in_one_call() {
             (Err(among), Err(alone)) => assert_eq!(among, alone, "way {k}"),
             (among, alone) => panic!("way {k}: {among:?} among the rest, {alone:?} alone"),
         }
+    }
+}
+
+/// A transit that cuts a corner past the bar the giving hand holds clears it between the states
+/// the planner checks it at, not only at them: checked at 1 kHz, where those states lie up to a
+/// thirty-second of a radian apart. With a bar 20 cm long whose spheres reach 8 mm past it, a
+/// CPU's transit passed 77 um into it where splines kept nothing between the robot's links.
+#[test]
+fn transits_clear_the_held_bar_between_the_states_checked() {
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let (worlds, start, held) = picked(&device, Vec3::new(0.1, 0.02, 0.02));
+    let spheres = SphereOptions {
+        budget: 48,
+        tolerance: 0.008,
+        ..Default::default()
+    };
+    let held = Held { spheres, ..held };
+    let task = Handover::new(&robot, 1, start, held.clone(), 1);
+    let tasks = std::slice::from_ref(&task);
+    let result = batchplan::handover(&device, &worlds, tasks, &TaskOptions::default());
+    let plans = result
+        .unwrap()
+        .outcomes
+        .remove(0)
+        .expect("the bar changes hands");
+    assert!(plans.len() > 10, "{} plans", plans.len());
+    for plan in &plans {
+        let meet = plan.transit.as_ref().unwrap();
+        let clear = clear_holding(&robot, &worlds, 1, &held, meet, 1000.0);
+        assert!(clear, "candidate {}", plan.candidate);
     }
 }

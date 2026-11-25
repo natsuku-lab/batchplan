@@ -700,31 +700,51 @@ impl Lanes {
     /// likeliest, each first through its bounding sphere.
     #[cfg(test)]
     #[inline(always)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the arguments of `keeps_with`, which it dispatches"
+    )]
     pub(crate) fn keeps<S: Simd>(
         &self,
         simd: S,
         world: &CpuWorld,
         q: &[f32],
         margin: [f32; LANES],
+        apart: [f32; LANES],
         region: Option<&Region>,
         s: &mut LaneScratch,
     ) -> bool {
-        if world.grids {
-            self.keeps_with::<S, true>(simd, world, q, margin, region, s)
-        } else {
-            self.keeps_with::<S, false>(simd, world, q, margin, region, s)
+        match (world.grids, apart.iter().any(|&a| a > 0.0)) {
+            (true, true) => {
+                self.keeps_with::<S, true, true>(simd, world, q, margin, apart, region, s)
+            }
+            (true, false) => {
+                self.keeps_with::<S, true, false>(simd, world, q, margin, apart, region, s)
+            }
+            (false, true) => {
+                self.keeps_with::<S, false, true>(simd, world, q, margin, apart, region, s)
+            }
+            (false, false) => {
+                self.keeps_with::<S, false, false>(simd, world, q, margin, apart, region, s)
+            }
         }
     }
 
     /// `keeps`, ruling distance grids out by their boxes with `GRIDS`; without it, the code
-    /// worlds without grids have always run (`cpu::collision_with`).
+    /// worlds without grids have always run (`cpu::collision_with`). With `APART`, pairs of links
+    /// must also keep `apart[lane]` between their spheres, self-collision buffers included.
     #[inline(always)]
-    pub(crate) fn keeps_with<S: Simd, const GRIDS: bool>(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "inlined into the searches' loops, which hold each of them"
+    )]
+    pub(crate) fn keeps_with<S: Simd, const GRIDS: bool, const APART: bool>(
         &self,
         simd: S,
         world: &CpuWorld,
         q: &[f32],
         margin: [f32; LANES],
+        apart: [f32; LANES],
         region: Option<&Region>,
         s: &mut LaneScratch,
     ) -> bool {
@@ -771,6 +791,7 @@ impl Lanes {
                 }
             }
         }
+        let apart = F::simd_from(simd, apart);
         for ((a, b, _), (tight, groups)) in self.pairs.iter().zip(&self.pair_groups) {
             let (ba, bb) = (self.bounds[*a], self.bounds[*b]);
             let (ca, cb) = (
@@ -778,12 +799,14 @@ impl Lanes {
                 self.bound_center(simd, *b, s),
             );
             let reach = ba[3] + bb[3];
-            if !ca
-                .sub(cb)
-                .length_squared()
-                .simd_lt(F::splat(simd, reach * reach))
-                .any_true()
-            {
+            let gap = ca.sub(cb).length_squared();
+            let near = if APART {
+                let reach = apart + reach;
+                gap.simd_lt(reach * reach)
+            } else {
+                gap.simd_lt(F::splat(simd, reach * reach))
+            };
+            if !near.any_true() {
                 continue;
             }
             self.place(simd, *a, s);
@@ -794,18 +817,26 @@ impl Lanes {
                 // Out of reach of the tighter link's bounding sphere, out of reach of its spheres;
                 // a hair wide, so it never rules out what the exact test would not.
                 let near = (self.self_radius[*i] + radius) * 1.0001 + 1e-6;
-                if !ci
-                    .sub(bound)
-                    .length_squared()
-                    .simd_lt(F::splat(simd, near * near))
-                    .any_true()
-                {
+                let gap = ci.sub(bound).length_squared();
+                let reached = if APART {
+                    let near = apart + near;
+                    gap.simd_lt(near * near)
+                } else {
+                    gap.simd_lt(F::splat(simd, near * near))
+                };
+                if !reached.any_true() {
                     continue;
                 }
                 for &j in js {
                     let r = self.self_radius[*i] + self.self_radius[j];
-                    let d = ci.sub(V3::load(simd, &s.centers[j]));
-                    if d.length_squared().simd_lt(F::splat(simd, r * r)).any_true() {
+                    let d = ci.sub(V3::load(simd, &s.centers[j])).length_squared();
+                    let hit = if APART {
+                        let r = apart + r;
+                        d.simd_lt(r * r)
+                    } else {
+                        d.simd_lt(F::splat(simd, r * r))
+                    };
+                    if hit.any_true() {
                         return false;
                     }
                 }
@@ -1256,10 +1287,10 @@ mod tests {
             }
         }
         // `keeps`, at the best level and the baseline, agrees with the clearances away from the
-        // boundary: the world kept at a margin, no self-collision. A wide margin keeps the twin
-        // from letting a link's bounding sphere stand in for its spheres, which `keeps`
-        // always checks.
-        let margin = 0.01;
+        // boundary: the world kept at a margin, no self-collision, and with `apart`, links kept
+        // that far apart, as splines keep them. A wide margin keeps the twin from letting a link's
+        // bounding sphere stand in for its spheres, which `keeps` always checks.
+        let (margin, apart) = (0.01, 0.01);
         let exact = CollisionWeights {
             margin: 10.0,
             self_margin: 10.0,
@@ -1270,27 +1301,36 @@ mod tests {
             let mut lanes = Lanes::new(robot);
             lanes.level = level;
             let mut scratch = lanes.scratch();
-            let (mut kept, mut not) = (0, 0);
+            let (mut kept, mut not, mut near) = (0, 0, 0);
             for i in 0..items {
                 let (w, sc) = (scalar.world_clearance[i], scalar.self_clearance[i]);
-                if (w - margin).abs() < 1e-4 || sc.abs() < 1e-4 {
+                if (w - margin).abs() < 1e-4 || sc.abs() < 1e-4 || (sc - apart).abs() < 1e-4 {
                     continue;
                 }
                 let (world, q) = (&prepared[item_world[i] as usize], &q[i * n..(i + 1) * n]);
-                let keeps = fearless_simd::dispatch!(level, simd => {
-                    lanes.keeps(simd, world, q, [margin; LANES], None, &mut scratch)
+                let (keeps, apart_kept) = fearless_simd::dispatch!(level, simd => {
+                    let margin = [margin; LANES];
+                    let (none, both) = ([0.0; LANES], [apart; LANES]);
+                    let none = lanes.keeps(simd, world, q, margin, none, None, &mut scratch);
+                    let both = lanes.keeps(simd, world, q, margin, both, None, &mut scratch);
+                    (none, both)
                 });
                 assert_eq!(
-                    keeps,
-                    w > margin && sc > 0.0,
-                    "{}: item {i} keeps {keeps}: {w}, self {sc}",
+                    (keeps, apart_kept),
+                    (w > margin && sc > 0.0, w > margin && sc > apart),
+                    "{}: item {i} keeps {keeps}, apart {apart_kept}: {w}, self {sc}",
                     robot.name()
                 );
-                if keeps { kept += 1 } else { not += 1 }
+                if keeps {
+                    kept += 1
+                } else {
+                    not += 1
+                }
+                near += usize::from(keeps && !apart_kept);
             }
             assert!(
-                !arm || (kept > 50 && not > 50),
-                "{}: {kept} kept, {not} not",
+                !arm || (kept > 50 && not > 50 && near > 10),
+                "{}: {kept} kept, {not} not, {near} only with links that close",
                 robot.name()
             );
         }
@@ -1405,9 +1445,10 @@ mod tests {
                 // Self-collision fails both.
                 let (free, keeps) = fearless_simd::dispatch!(level, simd => {
                     let world = &prepared[0];
-                    let free = lanes.keeps(simd, world, &q, [0.0; LANES], None, &mut scratch);
-                    let keeps =
-                        lanes.keeps(simd, world, &q, [0.0; LANES], Some(&region), &mut scratch);
+                    let none = [0.0; LANES];
+                    let free = lanes.keeps(simd, world, &q, none, none, None, &mut scratch);
+                    let region = Some(&region);
+                    let keeps = lanes.keeps(simd, world, &q, none, none, region, &mut scratch);
                     (free, keeps)
                 });
                 if !free {

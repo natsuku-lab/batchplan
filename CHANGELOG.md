@@ -573,6 +573,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Fixed
 
+- A planned path's spline keeps 2 mm between the robot's links away from its ends, ramped as its
+  margin from the world is, where it kept none: a curve cutting a corner past what the other hand
+  holds passed into it between the samples it was checked at. A handover's transit planned on a
+  Radeon passed 25 um into the bar the giver held, which `tests/handover.rs` found checking it at
+  100 Hz. A path the shortcuts pulled tight against the robot itself is repaired as one against
+  the world is.
 - Two groups of one call that hold the same object fit its spheres once: the second waits for
   the first and takes what it fitted, where both missed the device's kept spheres and fitted it.
 - `place` refuses worlds uploaded to another device with no tasks too, as `pick` does, rather
