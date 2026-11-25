@@ -1037,6 +1037,7 @@ impl<'a> Told<'a> {
                     slack: SIGMAS * seen.sigma(i),
                     share: parts.share[i],
                     floor: floors[part],
+                    spacing: seen.spacing(i),
                 };
                 readings[slot].push((reading, part));
             }
@@ -2210,34 +2211,31 @@ fn hold_what_stands(
             })
             .map(|j| shape(fits, kept, j))
             .collect();
+        let own = floored.binary_search_by_key(&k, |(i, _)| *i);
+        let own = own.map_or(&[][..], |i| &floored[i].1);
+        // Whether thing `j` rests on the box and inside its solids, `shape`, by more than its
+        // slack, and the box's readings show no wall of its own that parts it from the room.
+        let inside = |shape: &Shape, j: usize| {
+            j != k
+                && stood[j].1 == Some(Support::Object(k))
+                && shape.distance(lowest[j].0) < -lowest[j].1
+        };
+        let behind = |shape: &Shape, j: usize| {
+            fit::behind_wall(shape, own, &objects[j].points, &objects[j].slack)
+        };
+        let rests_inside =
+            |shape: &Shape| (0..objects.len()).any(|j| inside(shape, j) && !behind(shape, j));
         match &mut kept[k] {
-            Some(shape) => *shape = fit::widened(shape, &standing),
-            None => fits[k].widen(&standing),
+            Some(shape) => *shape = fit::widened(shape, &standing, own, &rests_inside),
+            None => fits[k].widen(&standing, own, &rests_inside),
         }
         // As it stands: down to what holds it up.
-        let widened = kept[k].unwrap_or_else(|| {
-            let mut fit = stood[k].0;
-            fit.widen(&standing);
-            fit.shape()
-        });
+        let widened = kept[k].unwrap_or_else(|| stood[k].0.with_room_of(&fits[k]).shape());
         let rests_inside = (0..objects.len()).any(|j| {
-            if j == k
-                || stood[j].1 != Some(Support::Object(k))
-                || widened.distance(lowest[j].0) >= -lowest[j].1
-            {
+            if !inside(&widened, j) {
                 return false;
             }
-            if floored
-                .binary_search_by_key(&k, |(i, _)| *i)
-                .is_ok_and(|i| {
-                    fit::behind_wall(
-                        &widened,
-                        &floored[i].1,
-                        &objects[j].points,
-                        &objects[j].slack,
-                    )
-                })
-            {
+            if behind(&widened, j) {
                 separated.push((k, j, widened));
                 return false;
             }

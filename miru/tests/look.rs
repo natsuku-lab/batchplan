@@ -16,6 +16,7 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::f32::consts::FRAC_PI_2;
 
 use batchplan::{Error, Obstacle};
 use common::{
@@ -5022,6 +5023,299 @@ fn a_lidless_box_is_open_at_the_top_where_its_walls_and_its_floor_are() {
             .count();
         assert_eq!(inside, 0, "{what}: {:?}", scene.objects);
     }
+}
+
+/// Whether `point` lies in the room of `shape`, a box open at the top, by more than `slack`: over
+/// its floor's top and inside its walls by that much, and no higher than its top.
+fn in_room(shape: &Shape, point: Vec3, slack: f32) -> bool {
+    let Shape::OpenBox {
+        center,
+        half_extents,
+        rotation,
+        room_lower,
+        room_upper,
+    } = *shape
+    else {
+        return false;
+    };
+    let own = rotation.inverse() * (point - center);
+    let across = (own.truncate() - room_lower.truncate()).min(room_upper - own.truncate());
+    across.min_element() > slack && own.z > room_lower.z + slack && own.z <= half_extents.z
+}
+
+/// The lidless box of [`lidless`] the overhang tests stand things in, 22 cm square inside, its
+/// walls 1 cm through and 6.5 cm tall, at the table's middle; and its room.
+fn open_box() -> (Vec<Thing>, Room) {
+    lidless(
+        Vec3::new(0.5, 0.0, 0.0),
+        Vec2::new(0.11, 0.11),
+        0.065,
+        0.01,
+        0.0,
+    )
+}
+
+/// A board 1 cm through across the far (-x) end of [`open_box`], flush with its walls' tops and
+/// reaching `deep` into its room, as a cabinet's top stands over the back of a drawer pulled out
+/// of it.
+fn board(deep: f32) -> Thing {
+    let (from, to) = (-0.12, -0.11 + deep);
+    block(
+        Vec3::new(0.5 + 0.5 * (from + to), 0.0, 0.06),
+        Vec3::new(0.5 * (to - from), 0.12, 0.005),
+        [150, 110, 60],
+    )
+}
+
+/// How many readings of thing `thing` in `frame` lie in the room of `scene`'s object `object` by
+/// more than their slack, of how many there are.
+fn in_its_room(scene: &Scene, object: usize, frame: &Frame, thing: usize) -> (usize, usize) {
+    let shape = scene.objects[object].shape;
+    // Of the thing's pixels, those that are not the robot's.
+    let robot = |i: usize| frame.robot.get(i).copied().unwrap_or(false);
+    let shown: Vec<usize> = (0..frame.shows.len())
+        .filter(|&i| frame.shows[i] == Some(thing) && !robot(i))
+        .collect();
+    let in_it = (shown.iter()).filter(|&&i| {
+        let point = reading(frame, i);
+        in_room(&shape, point, slack(frame, point))
+    });
+    (in_it.count(), shown.len())
+}
+
+/// The least and the most x the room of `shape`, a box open at the top, spans.
+fn room_along_x(shape: &Shape) -> (f32, f32) {
+    let Shape::OpenBox {
+        center,
+        rotation,
+        room_lower,
+        room_upper,
+        ..
+    } = *shape
+    else {
+        panic!("not open at the top: {shape:?}");
+    };
+    let corners =
+        [room_lower.truncate(), room_upper].map(|corner| center + rotation * corner.extend(0.0));
+    (
+        corners[0].x.min(corners[1].x),
+        corners[0].x.max(corners[1].x),
+    )
+}
+
+#[test]
+fn a_board_across_one_end_of_a_lidless_box_is_wall_and_not_room() {
+    // The board of `board` over the lidless box. The view reads the floor on under the board,
+    // and the room the box keeps free reached under it, the board's readings in it: the board was
+    // no obstacle of the box's. From 30, 40 and 50 degrees with the board 6 cm deep, and from 40
+    // with it 4 cm deep, the room ends at the board's edge, and none of the board's readings lies
+    // in it by more than its slack.
+    for (degrees, deep) in [(30.0, 0.06), (40.0, 0.06), (50.0, 0.06), (40.0, 0.04)] {
+        let (mut things, room) = open_box();
+        things.push(board(deep));
+        let frame = frame_from(things, eye_above(degrees));
+        let scene = seen(&[&frame], &Scene::default());
+        // The room past the board's edge, which the view sees into.
+        let open = Room {
+            floor: room.floor + Vec3::X * 0.5 * deep,
+            half: Vec2::new(room.half.x - 0.5 * deep, room.half.y),
+            yaw: 0.0,
+        };
+        let what = format!("a board {deep} m deep, from {degrees} degrees");
+        let tolerance = slack(&frame, open.floor);
+        let (object, _) = assert_open(&scene, &frame, 1, &open, &[], tolerance, &what);
+        let (in_it, _) = in_its_room(&scene, object, &frame, 6);
+        assert_eq!(in_it, 0, "{what}: {:?}", scene.objects[object]);
+    }
+}
+
+#[test]
+fn a_board_over_a_lidless_box_stays_wall_when_an_arm_hides_half_of_it() {
+    // The board of `board`, 6 cm deep, over the lidless box, looked at again from where the box
+    // was first seen, an arm now hiding half of it from the view. The box is the shape the look
+    // before made, its room as wide as that look's and this one's together, and this look's room
+    // reaches under the board where the arm hides the board's half: the board's readings stood in
+    // the room again. From 30, 40 and 50 degrees, with the arm over either half, the room still
+    // ends at the board's edge and holds none of the board's readings: a stretch of the board
+    // that no view sees opens no room beside the rest.
+    for degrees in [30.0, 40.0, 50.0] {
+        let (mut things, room) = open_box();
+        things.push(board(0.06));
+        let first = frame_from(things, eye_above(degrees));
+        let before = seen(&[&first], &Scene::default());
+        for (from, to) in [(0.0, 0.2), (-0.2, 0.0)] {
+            // The table, the box's five boards, the board over it and the arm, thing 7.
+            let mut things = vec![table()];
+            things.extend(open_box().0);
+            things.extend([board(0.06), arm(from, to)]);
+            let mut frame = Frame::of(&things, looking(eye_above(degrees), MIDDLE));
+            frame.robot = frame.shows.iter().map(|shows| *shows == Some(7)).collect();
+            let after = seen(&[&frame], &before);
+            let open = Room {
+                floor: room.floor + Vec3::X * 0.03,
+                half: Vec2::new(room.half.x - 0.03, room.half.y),
+                yaw: 0.0,
+            };
+            let what = format!("the arm over {from}..{to} m, from {degrees} degrees");
+            let tolerance = slack(&frame, open.floor);
+            let (object, _) = assert_open(&after, &frame, 1, &open, &[], tolerance, &what);
+            let (in_it, of) = in_its_room(&after, object, &frame, 6);
+            assert!(of > 100, "{what}: {of} readings of the board in view");
+            assert_eq!(in_it, 0, "{what}: {:?}", after.objects[object]);
+        }
+    }
+}
+
+#[test]
+fn a_block_under_a_board_over_a_lidless_box_keeps_the_box_open() {
+    // The board of `board`, 6 cm deep, over the lidless box, and a block 4 by 6 by 2 cm on the
+    // box's floor under the board's edge, its front 2 cm under the board. A room drawn in to the
+    // board's edge puts the block's lowest reading in the box's wall, and the box then covers the
+    // block instead of holding it, not solid. From 30, 40 and 50 degrees the box stays a solid box
+    // open at the top, and no reading of the block lies in its solids by more than its slack.
+    for degrees in [30.0, 40.0, 50.0] {
+        let (mut things, room) = open_box();
+        things.push(board(0.06));
+        things.push(block(
+            Vec3::new(0.42, 0.0, 0.02),
+            Vec3::new(0.02, 0.03, 0.01),
+            [30, 30, 200],
+        ));
+        let frame = frame_from(things, eye_above(degrees));
+        let scene = seen(&[&frame], &Scene::default());
+        let what = format!("a block under the board, from {degrees} degrees");
+        let tolerance = slack(&frame, room.floor);
+        assert_open(&scene, &frame, 1, &room, &[], tolerance, &what);
+        let inside = (0..frame.shows.len())
+            .filter(|&i| frame.shows[i] == Some(7))
+            .filter(|&i| {
+                let point = reading(&frame, i);
+                depth_in_solids(&scene, point) > slack(&frame, point)
+            })
+            .count();
+        assert_eq!(inside, 0, "{what}: {:?}", scene.objects);
+    }
+}
+
+#[test]
+fn a_bar_across_a_lidless_box_moves_no_wall() {
+    // The lidless box with a bar 2 cm wide and 1 cm through across its middle from wall to wall,
+    // flush with the walls' tops, and a block 4 by 4 by 3 cm on its floor in the near half, from
+    // 50 degrees. The bar's readings over the room are the box's own, and the far wall moved in
+    // to them, giving up the room the view sees beyond the bar. The far wall's face stays where
+    // it is, the room holds the room beside the bar, and no reading of the block lies in the
+    // box's solids.
+    let (mut things, room) = open_box();
+    things.push(block(
+        Vec3::new(0.5, 0.0, 0.06),
+        Vec3::new(0.01, 0.12, 0.005),
+        [150, 110, 60],
+    ));
+    things.push(block(
+        Vec3::new(0.56, 0.0, 0.025),
+        Vec3::new(0.02, 0.02, 0.015),
+        [30, 30, 200],
+    ));
+    let frame = frame_from(things, eye_above(50.0));
+    let scene = seen(&[&frame], &Scene::default());
+    let what = "a bar across the box";
+    let tolerance = slack(&frame, room.floor);
+    assert_open(&scene, &frame, 1, &room, &[Vec3::NEG_X], tolerance, what);
+    let inside = (0..frame.shows.len())
+        .filter(|&i| frame.shows[i] == Some(7))
+        .filter(|&i| {
+            let point = reading(&frame, i);
+            depth_in_solids(&scene, point) > slack(&frame, point)
+        })
+        .count();
+    assert_eq!(inside, 0, "{what}: {:?}", scene.objects);
+}
+
+#[test]
+fn a_handle_arched_over_a_lidless_box_moves_no_wall() {
+    // The lidless box with a handle 1 cm through and 1 cm thick arched over it from the middle of
+    // one side wall's top to the other's, 6 cm over them, as a basket's. The handle reaches the
+    // walls it stands on, and those moved in along it, giving up the room the view sees on both
+    // sides of it. From 40 and 50 degrees the room holds the room on both sides of the handle.
+    // A ring about x through the middle whose top is 6 cm over the walls' 6.5 cm tops and which
+    // meets them at their middles, 11.5 cm to each side, cut off at their tops.
+    let radius = 0.1402;
+    let middle = Vec3::new(0.5, 0.0, 0.065 + 0.06 - radius);
+    for degrees in [40.0, 50.0] {
+        let (mut things, room) = open_box();
+        let ring = ring(middle, radius - 0.005, radius + 0.005, 0.01, [150, 110, 60]);
+        let arch = turned(ring, middle, Quat::from_rotation_x(FRAC_PI_2));
+        let under = block(
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::new(0.3, 0.3, 0.065),
+            [0, 0, 0],
+        );
+        things.push(without(arch, under));
+        let frame = frame_from(things, eye_above(degrees));
+        let scene = seen(&[&frame], &Scene::default());
+        let what = format!("a handle over the box, from {degrees} degrees");
+        let tolerance = slack(&frame, room.floor);
+        let (object, _) = assert_open(&scene, &frame, 1, &room, &[], tolerance, &what);
+        let (from, to) = room_along_x(&scene.objects[object].shape);
+        assert!(
+            from < 0.49 - tolerance && to > 0.51 + tolerance,
+            "{what}: the room spans {from} to {to} along x"
+        );
+    }
+}
+
+#[test]
+fn a_plate_on_a_trays_floor_moves_no_wall() {
+    // The thin tray with a plate 5 mm thick on its floor, 8 cm square at x 0.46 to 0.54 or 10 cm
+    // square at 0.40 to 0.50, from 40 and 50 degrees. The bottom of the plate's near face reads as
+    // the tray's own, over its floor, and the near wall moved in to it, giving up the room the
+    // view sees between the plate and the wall. The room reaches past the plate's near face.
+    for (from, to) in [(0.46, 0.54), (0.40, 0.50)] {
+        for degrees in [40.0, 50.0] {
+            let mut things = thin_tray();
+            things.push(block(
+                Vec3::new(0.5 * (from + to), 0.0, 0.0125),
+                Vec3::new(0.5 * (to - from), 0.5 * (to - from), 0.0025),
+                [30, 30, 200],
+            ));
+            let frame = frame_from(things, eye_above(degrees));
+            let scene = seen(&[&frame], &Scene::default());
+            let (object, _) = object_of(&scene, &frame, 1);
+            let what = format!("a plate at {from}..{to} m, from {degrees} degrees");
+            let (_, near) = room_along_x(&scene.objects[object].shape);
+            let tolerance = slack(&frame, Vec3::new(to, 0.0, 0.01));
+            assert!(near > to + tolerance, "{what}: the room ends at {near}");
+        }
+    }
+}
+
+#[test]
+fn a_tray_whose_floor_hides_a_gap_in_itself_is_open_at_the_top() {
+    // The thin tray with a gap 4 mm wide, 8 cm long and 7 mm deep across the middle of its floor,
+    // as between two boards, from 40 degrees: along the gap the floor stands in front of the
+    // gap's bottom, a sliver less than a window that goes to the floor beside it. What lies behind
+    // the floor there is no surface of its own, and the floor hides nothing: it is the tray's,
+    // and the tray one solid box open at the top. Counted as hiding something, the floor was no
+    // floor and the tray two objects.
+    let mut things = thin_tray();
+    let floor = things.remove(0);
+    let gap = block(
+        Vec3::new(0.5, 0.0, 0.01),
+        Vec3::new(0.002, 0.04, 0.007),
+        [150, 110, 60],
+    );
+    things.insert(0, without(floor, gap));
+    let frame = frame_from(things, eye_above(40.0));
+    let scene = seen(&[&frame], &Scene::default());
+    let room = Room {
+        floor: Vec3::new(0.5, 0.0, 0.01),
+        half: Vec2::splat(0.11),
+        yaw: 0.0,
+    };
+    let tolerance = slack(&frame, room.floor);
+    let what = "a tray with a gap in its floor";
+    assert_open(&scene, &frame, 1, &room, &[], tolerance, what);
+    assert_eq!(scene.objects.len(), 1, "{what}: {:?}", scene.objects);
 }
 
 /// The scene of the thin tray from the tests' camera, where it is a solid box open at the top,
