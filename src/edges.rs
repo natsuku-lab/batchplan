@@ -338,26 +338,26 @@ fn answered<S: Simd, const GRIDS: bool>(
         }
         None => {
             let mut answer = query.edges.len() / n;
-            // Links kept apart in a copy of its own, so the checks that keep none are as they were.
+            // Links kept apart out of line (`keeps_apart`), so the checks that keep none are as
+            // they were.
             let apart = query.keep.as_ref().is_some_and(|keep| keep.apart > 0.0);
             for (group, q) in query.edges.chunks(LANES * n).enumerate() {
-                let (mut margin, mut between) = ([0.0; LANES], [0.0; LANES]);
+                let mut margin = [0.0; LANES];
                 if let Some(keep) = &query.keep {
                     for (m, c) in margin.iter_mut().zip(q.chunks(n)) {
                         *m = keep.margin(c);
                     }
-                    if apart {
-                        for (m, c) in between.iter_mut().zip(q.chunks(n)) {
-                            *m = keep.apart_margin(c);
-                        }
-                    }
                 }
                 let region = query.region.as_deref();
                 let s = &mut scratch.lanes;
-                let keeps = if apart {
-                    lanes.keeps_with::<S, GRIDS, true>(simd, world, q, margin, between, region, s)
-                } else {
-                    lanes.keeps_with::<S, GRIDS, false>(simd, world, q, margin, between, region, s)
+                let keeps = match &query.keep {
+                    Some(keep) if apart => {
+                        keeps_apart::<S, GRIDS>(simd, lanes, world, q, margin, keep, region, s)
+                    }
+                    _ => {
+                        let none = [0.0; LANES];
+                        lanes.keeps_with::<S, GRIDS, false>(simd, world, q, margin, none, region, s)
+                    }
                 };
                 if !keeps {
                     answer = group * LANES;
@@ -441,6 +441,36 @@ pub(crate) fn state(a: &[f32], b: &[f32], m: usize, total: usize, out: &mut [f32
     for ((o, x), y) in out.iter_mut().zip(a).zip(b) {
         *o = x + (y - x) * t;
     }
+}
+
+/// `Lanes::keeps_with` keeping `keep`'s clearance between links too, as a spline's states do: out
+/// of the searches' loop, which it would grow by half inlined there, and entered at the search's
+/// SIMD level again (`vectorize`), so it runs at that level.
+#[inline(never)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the arguments of `keeps_with`, which it calls, and the keep it reads"
+)]
+fn keeps_apart<S: Simd, const GRIDS: bool>(
+    simd: S,
+    lanes: &Lanes,
+    world: &CpuWorld,
+    q: &[f32],
+    margin: [f32; LANES],
+    keep: &Keep,
+    region: Option<&Region>,
+    s: &mut LaneScratch,
+) -> bool {
+    simd.vectorize(
+        #[inline(always)]
+        || {
+            let mut apart = [0.0; LANES];
+            for (m, c) in apart.iter_mut().zip(q.chunks(lanes.dof())) {
+                *m = keep.apart_margin(c);
+            }
+            lanes.keeps_with::<S, GRIDS, true>(simd, world, q, margin, apart, region, s)
+        },
+    )
 }
 
 #[cfg(test)]
