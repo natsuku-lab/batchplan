@@ -443,14 +443,16 @@ window's worth of them reach it and span it from side to side, no gap between th
 window but one no view sees into, and only as far as their innermost window's worth: a bar or a
 handle across the room, with room seen on both sides of it, moves no wall, and neither does a plate
 on the floor whose near face the box took. Nor does a wall move where a thing that rests on the box
-would then lie inside it by more than its slack: the overhang stays in the room there. But a thing
-all of whose readings over the floor lie in the wall, reaching across the room from side to side
-within their slack and the box's widest window, as the back of a drawer under the cabinet's top,
-closes off what lies behind it: the wall holds it as it holds the floor that reads on under it, and
-it keeps no room open and closes no box. A box kept from the look before is drawn in the same way
-after this look's room is taken into it. A thing that rests on the box with its lowest reading
-inside its walls or floor by more than its slack, after that, stands where the box says nothing can:
-the box covers it instead, and is not solid.
+would then lie inside it by more than its slack: the overhang stays in the room there. A box kept
+from the look before is drawn in the same way after this look's room is taken into it. A thing that
+rests on the box with its lowest reading inside its walls or floor by more than its slack, after
+that, stands where the box says nothing can: the box covers it instead, and is not solid. Neither
+stops a thing that lies across the room in the solids as thin as a wall: every reading of it in them
+by more than its slack, reaching from one side of the room to the other along one of the box's axes
+and lying within one reach of one another along the other, a reach being a reading's slack and the
+box's widest window. So reads the back of a drawer under the cabinet's top when the look makes it an
+object of its own; the wall holds it as it holds the floor that reads on under the top. So also
+reads a thing of which the views see too little to tell it from a panel ("Where it stands").
 
 A round hollow thing is put together again (`src/segment/round.rs`). A bowl's outside stands in
 front of its inside along the near rim, with a jump in depth between them and a rim too thin to
@@ -1306,9 +1308,23 @@ the run.
     before (`plans/perception/open-box/clear/`), and again in this rule's first form, the
     cabinet then covered what rested inside its wall and was no longer solid (solid cabinets 30
     to 28 and open ones 6 to 4 on `repro4-fix`): the wall stays where it was on that side. A
-    thing that would stand only in the wall, across the room, no longer stops it: the drawer's
-    back, read as an object of its own, kept the cabinet's top over the drawer as readings of no
-    object in a live run of spatial-4's other layout, and every grasp of the bowl was refused.
+    thing that lies across the room in the wall as thin as a wall no longer stops it: the
+    drawer's back, read as an object of its own, kept the cabinet's top over the drawer as
+    readings of no object in a live run of spatial-4's other layout, and every grasp of the bowl
+    was refused.
+  - **A thing the views see too little of to tell it from a panel is held by the wall.** Under
+    the tests' board over the lidless box, a rod 2 cm through and 20 cm long across the room
+    (from 30, 40 and 50 degrees) and a block 4 by 20 by 2 cm across it (from 50 degrees, where
+    about 1.4 cm of it shows under the board) read as thin as a wall: the wall drawn in to the
+    board's edge holds 504 to 590 of the rod's pixels and 672 of the block's, about 20 mm deep
+    (`a_rod_across_a_lidless_box_under_a_board_keeps_its_room`, ignored). A panel reaching up to
+    the overhang's underside would tell them apart, but spatial-4's drawer back does not show
+    that: its readings end 17 mm under the cabinet's top.
+  - **A panel at an overhang's edge with an arm into the room has readings in the solids.** A
+    panel across the room under the edge of the tests' board, with an arm raised 5 mm off the
+    floor running 10 cm from it into the room, ends with readings in the box's solids by more
+    than their slack, before the drawer's back was held as after
+    (`a_panel_at_a_boards_edge_with_an_arm_into_the_room_keeps_its_room`, ignored).
   - **The overhang and floor rules are held on exact depth alone.** Through the tests' D435 and
     D405, the lidless box with a board over its far end and the tray with a gap in its floor are
     no boxes open at the top (the trays' rows of `tests/truth.rs` say why), before these rules
