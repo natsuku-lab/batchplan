@@ -1120,6 +1120,7 @@ pub fn place(
     tasks: &[Place],
     o: &TaskOptions,
 ) -> Result<TaskResult<Place>> {
+    device.check_worlds(worlds)?;
     let robot = device.robot();
     let corrected = robot.correct_starts(
         tasks,

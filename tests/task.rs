@@ -3296,3 +3296,21 @@ fn a_spot_that_is_not_finite_or_a_malformed_alternative_is_an_input_error() {
         }
     }
 }
+
+#[test]
+fn a_place_checks_which_device_prepared_its_worlds_with_no_tasks_too() {
+    let robot = panda();
+    let device = Device::cpu(&robot).unwrap();
+    let other = Device::cpu(&robot).unwrap();
+    let worlds = other.upload(&[place_scene()]).unwrap();
+    let o = TaskOptions::default();
+    let placed = batchplan::place(&device, &worlds, &[], &o).map(drop);
+    let nearest = batchplan::place_nearest(&device, &worlds, &[], OPEN, &o).map(drop);
+    for result in [placed, nearest] {
+        let error = result.unwrap_err();
+        assert!(
+            matches!(error, Error::Input(_)) && error.to_string().contains("different device"),
+            "{error}"
+        );
+    }
+}
