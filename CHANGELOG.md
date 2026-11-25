@@ -10,6 +10,13 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 - Miru measures a raised bar over a circular face and checks fully open approach and finger
   closure against the measured points with `Kept::bar_on_disk`.
+- `Kept::observed_closures` runs on the device's threads and tests each reading only against
+  the hand spheres that can reach it, with the same results.
+- Miru proposes grips to turn a control by in `Kept::turn_grips`, in groups to plan in order:
+  the bar's over a measured disk; grips from above the fitted shape, along the turn's axis and
+  within the full opening, that close on both sides; then the measured surface's grasps, those
+  closing on both sides first, and the shape's grips whose closure lacks the control on a side.
+  Each grip carries its closure evidence, and the result the screw to turn about.
 
 ### Added
 

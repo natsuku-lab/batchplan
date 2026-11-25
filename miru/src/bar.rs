@@ -3,9 +3,10 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
-use batchplan::{Device, GraspOptions, HandSphere, Pose, Surface};
+use batchplan::{Device, GraspOptions, Pose, Robot, Surface};
 use glam::{DMat3, DVec3, Mat3, Quat, Vec2, Vec3};
 
+use crate::closure::Sweep;
 use crate::error::{Result, ensure_input};
 use crate::fit;
 use crate::memory::Kept;
@@ -411,48 +412,58 @@ impl Kept {
         let Some(surface) = self.surface(device, id)? else {
             return Ok(None);
         };
-        let Some(mut bar) = BarOnDisk::measure(&surface, outward, options.depth, resolution)?
-        else {
-            return Ok(None);
-        };
-        let spheres = robot.hand_spheres(hand);
-        if bar.width + 2.0 * resolution > options.opening
-            || options.depth + robot.tip(hand) < options.overlap
-        {
-            return Ok(None);
-        }
-        bar.grasps.retain(|&pose| {
-            hand_fits(
-                &surface,
-                pose,
-                bar.center,
-                outward,
-                &spheres,
-                closed..=loaded,
-                options,
-                resolution,
-            )
-        });
-        Ok((!bar.grasps.is_empty()).then_some(bar))
+        measured(
+            robot,
+            &surface,
+            resolution,
+            outward,
+            hand,
+            closed..=loaded,
+            options,
+        )
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the swept hand uses the measured pose, disk and calibrated hand together"
-)]
+/// [`Kept::bar_on_disk`] on the target's surface as [`Kept::surface`] gives it, at the look's
+/// resolution for it ([`Kept::bar_resolution`]), its inputs checked.
+pub(crate) fn measured(
+    robot: &Robot,
+    surface: &Surface,
+    resolution: f32,
+    outward: Vec3,
+    hand: usize,
+    gaps: RangeInclusive<f32>,
+    options: &GraspOptions,
+) -> Result<Option<BarOnDisk>> {
+    let Some(mut bar) = BarOnDisk::measure(surface, outward, options.depth, resolution)? else {
+        return Ok(None);
+    };
+    if bar.width + 2.0 * resolution > options.opening
+        || options.depth + robot.tip(hand) < options.overlap
+    {
+        return Ok(None);
+    }
+    let spheres = robot.hand_spheres(hand);
+    let sweep = Sweep::new(&spheres, &gaps, options.approach);
+    bar.grasps.retain(|&pose| {
+        hand_fits(
+            surface, pose, bar.center, outward, &sweep, options, resolution,
+        )
+    });
+    Ok((!bar.grasps.is_empty()).then_some(bar))
+}
+
 fn hand_fits(
     surface: &Surface,
     pose: Pose,
     disk: Vec3,
     outward: Vec3,
-    hand: &[HandSphere],
-    gaps: RangeInclusive<f32>,
+    sweep: &Sweep<'_>,
     options: &GraspOptions,
     resolution: f32,
 ) -> bool {
     let depth_limit = (pose.position - disk).dot(outward) - resolution;
-    crate::closure::inspect(surface, pose, hand, gaps, options, depth_limit)
+    crate::closure::inspect(surface, pose, sweep, options, depth_limit)
         == crate::ClosureEvidence::BothSides
 }
 
@@ -521,8 +532,7 @@ mod tests {
                 Pose::IDENTITY,
                 Vec3::Z * 0.020,
                 Vec3::NEG_Z,
-                &hand,
-                travel,
+                &Sweep::new(&hand, &travel, options.approach),
                 &options,
                 0.00015,
             )
