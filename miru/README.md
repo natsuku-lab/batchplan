@@ -324,7 +324,8 @@ slanted panel, gives none. The last is the grasps of the measured surface
 (`grasps_on_with_capacity` with the hand's capacity), ordered by their moment about the screw,
 those showing `BothSides` first, each at its own opening, and then the remaining shape grips
 whose evidence is `Incomplete`. An empty group is left out. Fully open is
-`GraspOptions::opening`, the width a surface grasp gives the hand as loaded. The evidence is the
+`GraspOptions::opening`, the width a surface grasp gives the hand as loaded. The poses are in the
+observation frame, and `Turn::grasps` takes them in the turned obstacle's. The evidence is the
 latest endpoints' alone: it says nothing of hidden material, of contact normals or of whether
 the control turns about that line. Plan each motion against the current world and guard it in
 execution.
@@ -927,6 +928,19 @@ the run.
   plans carry, or where it stood, and no obstacle holds it: the nearest to its middle is 9.0 cm off
   on exact depth and through the D435 with the D405, 3.4 cm through the D435
   (`what_stood_on_a_picked_thing_is_in_a_memory` in `tests/memory.rs`).
+- **Grips to turn a control are fewer through a stereo camera.** On exact depth the knob's bar
+  over its dial resolves and its grips come first; on exact depth and through the D435 a box seen
+  from one side has two grips from above its middle that close on both its sides. Through the
+  D435 and through the D435 with the D405 near, no bar over the dial resolves: the outline of the
+  dial's top in the readings fits no circle within their resolution
+  (`a_knob_is_turned_by_its_bar_first` in `tests/memory.rs`). Through the D435 with the D405
+  near, the box from one side has no grip from above its middle: it is fitted 14 by 6 cm and not
+  solid, and a reading not the box's, 15 mm past its unseen side and 2 cm over the table, lies in
+  both closing sweeps from above its fitted middle
+  (`a_box_seen_from_one_side_is_turned_from_above_its_middle`). So there the scenes that rule
+  those grips out, by a post in their closing sweep and by a shelf in their way in, have none to
+  rule out (`a_post_in_the_closing_gap_rules_the_grip_out`,
+  `a_shelf_in_the_way_in_rules_the_grip_out`).
 - **What a look through `observe` costs.** On `rows4`, at the median of its 20 looks, 237 ms
   against the 72 ms of the look inside it on one of an M4 Pro's threads and 56 against 34 ms on its
   14; on `hand-in-drawer`, 280 against 116 ms and 82 against 60 ms; a `world` after it 6.0 to
