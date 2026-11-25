@@ -1,7 +1,6 @@
 //! Grips to turn a control by, proposed from three sources and ranked by what the retained
 //! endpoints show of each closure.
 
-use std::f32::consts::FRAC_1_SQRT_2;
 use std::ops::RangeInclusive;
 
 use batchplan::{Device, GraspOptions, Pose, Screw};
@@ -12,6 +11,14 @@ use crate::closure::ClosureEvidence;
 use crate::error::{Result, ensure_input};
 use crate::memory::Kept;
 use crate::scene::Label;
+
+/// How nearly a grip from above the fitted shape comes in along the line it turns about, as the
+/// least cosine of the angle between its z axis and `-up`: 0.99, about 8 degrees, the bound
+/// batchplan-orchestrator's turn took its grips from above a shape by, which these groups replace.
+/// The shape's grasps come in along its own axes, so where its vertical is off `up`, as for a
+/// control on a slanted panel, whose shape is fitted upright, or for a box let go tilted, every grip
+/// from above it is off that line by as much: neither along it nor alike about it.
+const ALONG: f32 = 0.99;
 
 /// Where a grip was proposed from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,9 +79,10 @@ impl Kept {
     /// 1. **Bar**: the poses [`Kept::bar_on_disk`] gives along `up`, in its order, fully open;
     ///    `enough: Some(1)`.
     /// 2. **Shape, both sides**: `batchplan::grasps` of the object's fitted shape with `options`,
-    ///    so closing across no more than fully open, those whose z axis points within 45 degrees
-    ///    of `-up`, as the shape's approaches are its axes, 90 degrees apart; of these, those
-    ///    whose closure shows [`ClosureEvidence::BothSides`]. Fully open; `enough: None`.
+    ///    so closing across no more than fully open, those whose z axis points along `-up` to
+    ///    within about 8 degrees: none where the shape's vertical is off `up` by more, as for a
+    ///    control on a slanted panel, whose shape is fitted upright. Of these, those whose closure
+    ///    shows [`ClosureEvidence::BothSides`]. Fully open; `enough: None`.
     /// 3. **The rest**: the grasps of the object's measured surface
     ///    (`batchplan::grasps_on_with_capacity` with `capacity`), ordered by the moment they
     ///    exert about the screw (`GraspOptions::order_for_turn`), those showing `BothSides` first,
@@ -170,7 +178,7 @@ impl Kept {
             .unwrap_or_default()
             .into_iter()
             .map(|grasp| placed.mul_pose(grasp))
-            .filter(|pose| (pose.rotation * Vec3::Z).dot(up) < -FRAC_1_SQRT_2)
+            .filter(|pose| (pose.rotation * Vec3::Z).dot(up) < -ALONG)
             .collect();
         let found = batchplan::grasps_on_with_capacity(
             device,

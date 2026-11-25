@@ -3982,7 +3982,7 @@ fn composed(
     let from_above: Vec<Pose> = (batchplan::grasps(&shape, options).unwrap_or_default())
         .into_iter()
         .map(|grasp| placed.mul_pose(grasp))
-        .filter(|pose| (pose.rotation * Vec3::Z).z < -std::f32::consts::FRAC_1_SQRT_2)
+        .filter(|pose| (pose.rotation * Vec3::Z).z < -0.99)
         .collect();
     let shaped: Vec<Grip> = (from_above.iter().zip(evidence(&from_above)))
         .map(|(&pose, e)| (pose, open, GripSource::Shape, e))
@@ -4397,6 +4397,81 @@ fn no_grip_from_above_closes_across_more_than_the_full_opening() {
     assert!(
         between > 0,
         "some camera must fit the box between the full opening and the loaded width"
+    );
+}
+
+/// A control 86 x 24 x 40 mm standing on a known panel slanted 20 degrees toward the cameras,
+/// turned about the panel's normal. Its shape is fitted upright, so the grips from above it come
+/// straight down, 20 degrees off the line it turns about: none of those is proposed.
+#[test]
+fn no_grip_from_above_is_off_the_axis_by_a_slant() {
+    let robot = panda();
+    let device = Device::cpu_threads(&robot, 2).unwrap();
+    let q = robot.default_q().to_vec();
+    let slant = Quat::from_rotation_x(20f32.to_radians());
+    let normal = slant * Vec3::Z;
+    let (panel_middle, panel_half) = (Vec3::new(0.5, 0.0, 0.10), Vec3::new(0.15, 0.10, 0.02));
+    let control_half = Vec3::new(0.043, 0.012, 0.02);
+    let middle = panel_middle + normal * (panel_half.z + control_half.z);
+    let things = vec![
+        table(),
+        common::turned(
+            block(panel_middle, panel_half, [200; 3]),
+            panel_middle,
+            slant,
+        ),
+        common::turned(block(middle, control_half, [180, 30, 30]), middle, slant),
+        arm(&robot, &q),
+    ];
+    let rendered = [0.35, -0.35]
+        .map(|x| Frame::of(&things, looking(middle + Vec3::new(x, -0.3, 0.25), middle)));
+    let panel = Obstacle::Cuboid {
+        center: panel_middle,
+        half_extents: panel_half,
+        rotation: slant,
+    };
+    let fixed = Memory::try_new(
+        &device,
+        vec![known(&table()), panel],
+        &MemoryOptions::default(),
+    )
+    .unwrap();
+    let options = turn_options(&robot);
+    let mut straight_down = 0;
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let (frames, bands) = read(&rendered, c, 7);
+        let locked = HashMap::new();
+        let stance = Stance {
+            q: &q,
+            locked: &locked,
+            padding: padding(&rendered, &frames, things.len() - 1),
+        };
+        let seen = observe(&device, &cameras(&frames, bands, 0.0), &stance, &fixed).unwrap();
+        let scene = seen.kept.scene();
+        let id = id_of(scene, &rendered, 2).expect("the control is visible");
+        let object = scene.objects.iter().find(|object| object.id == id);
+        let shape = cover(&object.expect("the control").shape);
+        let placed = shape.pose();
+        let from_shape = batchplan::grasps(&shape, &options).unwrap_or_default();
+        straight_down += (from_shape.iter())
+            .filter(|grasp| (placed.mul_pose(**grasp).rotation * Vec3::Z).z < -0.999)
+            .count();
+        let turn = seen
+            .kept
+            .turn_grips(&device, id, 0, TURN_GAPS, TURN_CAPACITY, normal, &options);
+        let turn = turn.unwrap().expect("the control is seen");
+        for pose in shape_grips(&turn) {
+            let along = -(pose.rotation * Vec3::Z).dot(normal);
+            assert!(
+                along > 0.99,
+                "{camera}: a grip from above {:.1} degrees off the axis",
+                along.acos().to_degrees()
+            );
+        }
+    }
+    assert!(
+        straight_down > 0,
+        "the control's fitted shape must have grips straight down, off the axis by the slant"
     );
 }
 
