@@ -58,8 +58,9 @@ pub struct SphereOptions {
     /// budget. When the budget cannot reach it, the fit uses the smallest overhang it can. An
     /// object a robot holds always reaches it, however many spheres that takes, and its spheres
     /// hold all of it, but for rounding, unless `max_overhang` holds them back (a box's, a
-    /// cylinder's and a capsule's still hold all of it, within the smaller of the two): for it,
-    /// the tolerance is the knob.
+    /// cylinder's and a capsule's still hold all of it, within the smaller of the two, but under a
+    /// limit of zero, which no tiles' spheres keep, and which holds them inside it as any shape's):
+    /// for it, the tolerance is the knob.
     pub tolerance: f32,
     /// The farthest any sphere may reach beyond the geometry (meters), whatever the budget: each
     /// sphere's radius is at most how deep its center lies inside plus this
@@ -1571,7 +1572,7 @@ pub(crate) fn within(
 /// ([`box_cover`]), a cylinder's rings along its medial structure ([`cylinder_tiles`]) or a thin
 /// one's layer ([`cylinder_layer`]), whichever takes fewer, a capsule's line of spheres, a ball
 /// itself. Each holds its shape by construction. `None` where a shape has none: a distance grid,
-/// or a cylinder the search finds no rings for.
+/// a cylinder the search finds no rings for, or any shape but a ball under a limit of zero.
 pub(crate) fn cover_tiles(shapes: &[Obstacle], o: &SphereOptions) -> Option<Vec<[f32; 4]>> {
     let tolerance = o.tolerance.min(o.max_overhang.unwrap_or(f32::INFINITY));
     let mut spheres = vec![];
