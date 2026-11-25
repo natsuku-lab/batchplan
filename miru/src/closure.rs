@@ -192,8 +192,13 @@ impl<'a> Sweep<'a> {
             |(lo, hi), (low, high)| (lo.min(*low), hi.max(*high)),
         );
         // As many cells as spheres: a reading then meets about as many spheres as one sphere's
-        // box covers cells, rather than every sphere of the hand. A box of no volume is one cell.
-        let cell = ((hi - lo).element_product() / hand.len().max(1) as f32).cbrt();
+        // box covers cells, rather than every sphere of the hand. And along no axis more than one
+        // past their count, so that a box drawn out along one axis, as by a long approach, holds
+        // at most the cube of that in cells. A box of no volume is one cell.
+        let count = hand.len().max(1) as f32;
+        let cell = ((hi - lo).element_product() / count)
+            .cbrt()
+            .max((hi - lo).max_element() / count);
         let cell = if cell.is_finite() && cell > 0.0 {
             cell
         } else {

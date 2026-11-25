@@ -3869,6 +3869,45 @@ fn proposed_jaw_closures_distinguish_target_foreign_and_missing_readings() {
     }
 }
 
+/// An approach longer than the scene gives what one 10 m long does, however long: 1e10 m, 1e30 m
+/// or the largest a float holds. Over the box, the hand turned down closes on it and the hand
+/// turned up comes in through it from below, which a 10 cm approach does not reach.
+#[test]
+fn a_far_approach_gives_what_one_past_every_reading_gives() {
+    let robot = panda();
+    let device = Device::cpu_threads(&robot, 2).unwrap();
+    let q = robot.default_q().to_vec();
+    let things = vec![table(), a_control(), arm(&robot, &q)];
+    let rendered = one_side(&things);
+    let seen = first_look(&device, &things, &rendered, (0, 7), &q, 0.0);
+    let id = id_of(seen.kept.scene(), &rendered, 1).expect("the box is visible");
+    let down = Quat::from_rotation_x(std::f32::consts::PI);
+    let poses = [
+        Pose::new(Vec3::new(0.5, 0.0, 0.025), down),
+        Pose::new(Vec3::new(0.5, 0.0, 0.5), Quat::IDENTITY),
+    ];
+    let evidence = |approach| {
+        let options = GraspOptions {
+            approach,
+            ..Default::default()
+        };
+        let found = seen
+            .kept
+            .observed_closures(&device, id, 0, TURN_GAPS, &poses, &options);
+        found.unwrap().expect("the box is seen")
+    };
+    let past = evidence(10.0);
+    assert_eq!(
+        past,
+        [ClosureEvidence::BothSides, ClosureEvidence::Obstructed],
+        "the far approach reaches the box from below"
+    );
+    assert_ne!(evidence(0.1), past, "a short approach does not");
+    for approach in [1e30, 1e10, f32::MAX] {
+        assert_eq!(evidence(approach), past, "approach {approach}");
+    }
+}
+
 /// The calibrated widths and the graspable width the turn tests state for the Panda's hand: its
 /// pads 8 cm apart as loaded, closing to nothing, and a hand said to grasp up to 7.5 cm, so that
 /// the loaded width and the full opening (`GraspOptions::opening`) differ.
