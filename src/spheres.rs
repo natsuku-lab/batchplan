@@ -57,8 +57,9 @@ pub struct SphereOptions {
     /// How far spheres may reach beyond the geometry (meters) before the fit spends more of the
     /// budget. When the budget cannot reach it, the fit uses the smallest overhang it can. An
     /// object a robot holds always reaches it, however many spheres that takes, and its spheres
-    /// hold all of it, but for rounding, unless `max_overhang` holds them back: for it, the
-    /// tolerance is the knob.
+    /// hold all of it, but for rounding, unless `max_overhang` holds them back (a box's, a
+    /// cylinder's and a capsule's still hold all of it, within the smaller of the two): for it,
+    /// the tolerance is the knob.
     pub tolerance: f32,
     /// The farthest any sphere may reach beyond the geometry (meters), whatever the budget: each
     /// sphere's radius is at most how deep its center lies inside plus this
@@ -851,9 +852,9 @@ pub(crate) struct Fitted {
 /// as many spheres as the tolerances take, at most one per sample. With `surface` (a held
 /// object's, whose budget is that), one link's spheres contain those points of its surface in
 /// place of random samples, its candidates take in its samples' medial balls ([`LinkFit::new`]),
-/// and one cover reaches them within the tolerance, with no scale to search for. With `parallel`, the work runs
-/// on the current rayon pool; without, on the calling thread alone, without registering it with
-/// any pool.
+/// and one cover reaches them within the tolerance, with no scale to search for. With
+/// `parallel`, the work runs on the current rayon pool; without, on the calling thread alone,
+/// without registering it with any pool.
 pub(crate) fn fit(
     links: &[Vec<TriMesh>],
     tolerances: &[f32],
@@ -1557,10 +1558,11 @@ pub(crate) fn within(
 }
 
 /// Spheres for an attached object's `shapes` (in its link's frame) by their surfaces' tiles, as
-/// many as the tolerance takes, or the smaller of it and `o.max_overhang`: a thin cylinder's layer
-/// ([`cylinder_layer`]), a capsule's line of spheres, a ball itself. Each holds its shape by
-/// construction, a sphere through the corners of each tile. `None` where a shape has none: a box
-/// or a stout cylinder, which the fit covers, or a distance grid.
+/// many as the tolerance takes, or the smaller of it and `o.max_overhang`: a box's medial cover
+/// ([`box_cover`]), a cylinder's rings along its medial structure ([`cylinder_tiles`]) or a thin
+/// one's layer ([`cylinder_layer`]), whichever takes fewer, a capsule's line of spheres, a ball
+/// itself. Each holds its shape by construction. `None` where a shape has none: a distance grid,
+/// or a cylinder the search finds no rings for.
 pub(crate) fn cover_tiles(shapes: &[Obstacle], o: &SphereOptions) -> Option<Vec<[f32; 4]>> {
     let tolerance = o.tolerance.min(o.max_overhang.unwrap_or(f32::INFINITY));
     let mut spheres = vec![];
@@ -1580,11 +1582,17 @@ pub(crate) fn cover_tiles(shapes: &[Obstacle], o: &SphereOptions) -> Option<Vec<
                 rotation,
                 radius,
                 half_height,
-            } => (
-                center,
-                rotation,
-                cylinder_layer(radius, half_height, tolerance)?,
-            ),
+            } => {
+                // A thin one's layer, or its rings along its medial structure: the fewer.
+                let layer = cylinder_layer(radius, half_height, tolerance);
+                let tiles = cylinder_tiles(radius, half_height, tolerance);
+                let fewer = match (layer, tiles) {
+                    (Some(layer), Some(tiles)) if tiles.len() < layer.len() => tiles,
+                    (Some(layer), _) => layer,
+                    (None, tiles) => tiles?,
+                };
+                (center, rotation, fewer)
+            }
             Obstacle::Capsule {
                 center,
                 rotation,
@@ -1880,8 +1888,9 @@ type Centers = Vec<(f64, f64, f64, Option<f64>)>;
 /// All layout runs in `f64` for a tolerance shrunk by four times [`ROUNDING`] of the box's size,
 /// and each emitted `f32` sphere takes the largest radius that still keeps `radius - depth <=
 /// tolerance` in `f32`, absorbing casting and rotation rounding so enclosure holds strictly in
-/// `f32`. Returns `None` only when `half_extents` is negative or non-finite, or `tolerance` does
-/// not exceed the rounding slack.
+/// `f32`. Returns `None` when `half_extents` is negative or non-finite, `tolerance` does not
+/// exceed the rounding slack, or no layout it tries covers the box, which no box it was tried on
+/// met (`medial_box_covers_hold_random_boxes`).
 fn box_cover(half_extents: Vec3, tolerance: f32) -> Option<Vec<[f32; 4]>> {
     use std::f64::consts::SQRT_2;
 
@@ -2733,6 +2742,237 @@ impl SphereCells {
     }
 }
 
+/// Where a cylinder's ring of spheres puts their centers' height, given how far from the axis.
+#[derive(Clone, Copy)]
+enum Height {
+    /// At this height.
+    At(f32),
+    /// On the bisector between the top face and the side, as deep below each.
+    Rim,
+    /// Below the top face as deep as the side allows, no deeper than the middle height.
+    Under,
+}
+
+/// One ring of spheres about a cylinder's z axis, each on its sector's middle line: `around`
+/// sectors, each holding the corners of its tiles (`corners`, as distance from the axis and
+/// height, each at both edges of the sector). Its spheres' distance from the axis and height, their
+/// radius, and how far they reach past the cylinder at least, over where along the middle line
+/// they sit. A sphere centered on the sector's middle line, on the axis side of it, holds the
+/// sector's tiles (rings' sectors on the faces, patches of the side) where it holds their corners:
+/// their farthest point from it is one.
+fn cylinder_ring(
+    corners: &[(f32, f32)],
+    around: u32,
+    height: Height,
+    radius: f32,
+    half_height: f32,
+) -> (f32, f32, f32, f32) {
+    let h = half_height;
+    let cos = (PI / around as f32).cos();
+    let center_z = |at: f32| match height {
+        Height::At(z) => z,
+        Height::Rim => (h - (radius - at)).max(0.0),
+        Height::Under => h - (radius - at).min(h),
+    };
+    let farthest = |at: f32| {
+        let z = center_z(at);
+        let to = |&(r, y): &(f32, f32)| r * r + at * at - 2.0 * r * at * cos + (y - z) * (y - z);
+        corners.iter().map(to).fold(0.0, f32::max).sqrt()
+    };
+    let past = |at: f32| farthest(at) - (radius - at).min(h - center_z(at).abs());
+    let at = if around == 1 {
+        0.0
+    } else {
+        let (mut low, mut high) = (0.0f32, radius);
+        for _ in 0..48 {
+            let (a, b) = (low + (high - low) / 3.0, high - (high - low) / 3.0);
+            if past(a) <= past(b) {
+                high = b;
+            } else {
+                low = a;
+            }
+        }
+        0.5 * (low + high)
+    };
+    (at, center_z(at), farthest(at), past(at))
+}
+
+/// The fewest sectors a cylinder's ring takes for its spheres to reach no more than `tolerance`
+/// past it, of up to one per quarter tolerance of its outer edge: more never reach farther.
+fn cylinder_sectors(
+    corners: &[(f32, f32)],
+    height: Height,
+    radius: f32,
+    half_height: f32,
+    tolerance: f32,
+) -> Option<u32> {
+    let outer = corners.iter().map(|c| c.0).fold(0.0, f32::max);
+    let most = ((TAU * outer / (0.25 * tolerance)).ceil() as u32).max(1);
+    let reaches = |n: u32| cylinder_ring(corners, n, height, radius, half_height).3 <= tolerance;
+    if !reaches(most) {
+        return None;
+    }
+    let (mut low, mut high) = (1, most);
+    while low < high {
+        let mid = (low + high) / 2;
+        if reaches(mid) {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    Some(low)
+}
+
+/// Spheres that hold a cylinder about its z axis, inside and out, and reach no more than
+/// `tolerance` past it, `None` where the search finds none: rings of spheres along its medial
+/// structure, each through the corners of its sector's tiles ([`cylinder_ring`]). A ring at each
+/// rim, its centers on the bisector between the face and the side, holds a band `e_r` wide of the
+/// face and one `e_z` high of the side; rings along the rest of the side hold even parts of it from
+/// as deep as the faces allow, on the axis where it is near enough; and rings of the faces inside
+/// the rim bands, in even widths, hold both faces from the middle height or each from below it,
+/// whichever takes fewer. Bands are tried in steps of half a tolerance from one to three, and at
+/// the half height and radius; parts and ring widths in steps of half a tolerance up to what a
+/// sphere at the cylinder's medial depth reaches; the fewest spheres are taken.
+fn cylinder_tiles(radius: f32, half_height: f32, tolerance: f32) -> Option<Vec<[f32; 4]>> {
+    (tolerance > 0.0 && radius > 0.0 && half_height > 0.0).then_some(())?;
+    // Laid out for the tolerance less what rounding moves a point of the cylinder's size, which
+    // every radius takes back: so every point lies inside a sphere by that much.
+    let slack = ROUNDING * (radius.max(half_height) + tolerance);
+    let (r, h, t) = (radius, half_height, tolerance - slack);
+    (t > 0.0).then_some(())?;
+    let bands = |extent: f32| {
+        let mut bands: Vec<f32> = (2..=6)
+            .map(|k| k as f32 * 0.5 * t)
+            .chain([extent])
+            .filter(|&e| e <= extent)
+            .collect();
+        bands.dedup();
+        bands
+    };
+    // A sphere's widest footprint on a face, from the cylinder's deepest point.
+    let deepest = r.min(h);
+    let widest = 2.0 * (2.0 * deepest * t + t * t).sqrt();
+    let widths = ((widest / (0.5 * t)).ceil() as usize).max(1);
+    // One rim's ring: (sectors, corners).
+    let rim = |e_r: f32, e_z: f32| {
+        let corners = vec![(r - e_r, h), (r, h), (r, h - e_z)];
+        Some((cylinder_sectors(&corners, Height::Rim, r, h, t)?, corners))
+    };
+    // The side between the rim bands in `parts` even parts: per part, (sectors, corners, height,
+    // whether the ring is the one above it turned upside down).
+    type Rings = Vec<(u32, Vec<(f32, f32)>, Height, bool)>;
+    let side = |e_z: f32, parts: usize| -> Option<Rings> {
+        let span = 2.0 * (h - e_z) / parts as f32;
+        (0..parts)
+            .map(|j| {
+                let low = -(h - e_z) + span * j as f32;
+                let corners = vec![(r, low), (r, low + span)];
+                let height = Height::At(low + 0.5 * span);
+                Some((
+                    cylinder_sectors(&corners, height, r, h, t)?,
+                    corners,
+                    height,
+                    false,
+                ))
+            })
+            .collect()
+    };
+    // The faces inside the rim bands in rings `width` wide from the outside in: per ring, the
+    // fewer of one ring holding both faces from the middle height and one under each face.
+    let faces = |e_r: f32, width: f32| -> Option<Rings> {
+        let mut rings = vec![];
+        let mut outer = r - e_r;
+        while outer > 0.0 {
+            let inner = (outer - width).max(0.0);
+            let both = vec![(inner, h), (outer, h), (inner, -h), (outer, -h)];
+            let one = vec![(inner, h), (outer, h)];
+            let merged = cylinder_sectors(&both, Height::At(0.0), r, h, t);
+            let apart = cylinder_sectors(&one, Height::Under, r, h, t);
+            match (merged, apart) {
+                (_, Some(a)) if merged.is_none_or(|m| 2 * a < m) => {
+                    rings.push((a, one.clone(), Height::Under, false));
+                    rings.push((a, one, Height::Under, true));
+                }
+                (Some(m), _) => rings.push((m, both, Height::At(0.0), false)),
+                _ => return None,
+            }
+            outer = inner;
+        }
+        Some(rings)
+    };
+    let count = |rings: &Rings| rings.iter().map(|ring| ring.0 as usize).sum::<usize>();
+    let fewest = |options: Vec<Rings>| options.into_iter().min_by_key(count);
+    // Per band, the fewest rings of the side and of the faces it leaves.
+    // A part of the side no taller than a sphere at the medial depth reaches along it: from the
+    // fewest such parts to three times as many, past which the rings only grow in number.
+    let sides: Vec<(f32, Rings)> = bands(h)
+        .into_iter()
+        .filter_map(|e_z| {
+            if e_z >= h {
+                return Some((e_z, vec![]));
+            }
+            let fewest_parts = ((2.0 * (h - e_z) / widest).ceil() as usize).max(1);
+            let options = (fewest_parts..=3 * fewest_parts).filter_map(|parts| side(e_z, parts));
+            Some((e_z, fewest(options.collect())?))
+        })
+        .collect();
+    let faces: Vec<(f32, Rings)> = bands(r)
+        .into_iter()
+        .filter_map(|e_r| {
+            let options = (1..=widths).filter_map(|k| faces(e_r, k as f32 * 0.5 * t));
+            Some((e_r, fewest(options.collect())?))
+        })
+        .collect();
+    let mut best: Option<(usize, Rings)> = None;
+    for (e_z, side) in &sides {
+        for (e_r, faces) in &faces {
+            let Some((sectors, corners)) = rim(*e_r, *e_z) else {
+                continue;
+            };
+            let total = 2 * sectors as usize + count(side) + count(faces);
+            if best.as_ref().is_none_or(|b| total < b.0) {
+                let mut rings = vec![
+                    (sectors, corners.clone(), Height::Rim, false),
+                    (sectors, corners, Height::Rim, true),
+                ];
+                rings.extend(side.iter().cloned());
+                rings.extend(faces.iter().cloned());
+                best = Some((total, rings));
+            }
+        }
+    }
+    let (_, rings) = best?;
+    let mut spheres = vec![];
+    for (around, corners, height, below) in rings {
+        let (at, z, _, _) = cylinder_ring(&corners, around, height, r, h);
+        // A ring below the middle height is the one above it turned upside down.
+        let flip = if below { -1.0 } else { 1.0 };
+        let (z, corners): (f32, Vec<(f32, f32)>) = (
+            flip * z,
+            corners.iter().map(|&(x, y)| (x, flip * y)).collect(),
+        );
+        let half = PI / around as f32;
+        for k in 0..around {
+            let middle = TAU * (k as f32 + 0.5) / around as f32;
+            let center = Vec3::new(at * middle.cos(), at * middle.sin(), z);
+            // Through the tiles' corners as placed, widened by the slack.
+            let mut farthest = 0.0f32;
+            for &(x, y) in &corners {
+                for side in [-1.0, 1.0] {
+                    let angle = middle + side * half;
+                    let corner = Vec3::new(x * angle.cos(), x * angle.sin(), y);
+                    farthest = farthest.max(corner.distance(center));
+                }
+            }
+            let depth = (r - at).min(h - z.abs());
+            (farthest - depth <= t * HAIR).then_some(())?;
+            spheres.push([center.x, center.y, center.z, farthest + slack]);
+        }
+    }
+    Some(spheres)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3021,6 +3261,79 @@ mod tests {
             }
         }
         assert!(tried > 100, "{tried} boxes tried");
+        assert!(failed.is_empty(), "{failed:?}");
+    }
+
+    /// The rings along a cylinder's medial structure on random cylinders, of radius 1 mm to 15 cm
+    /// and half height 0.5 mm to 15 cm, for tolerances of 0.5 to 10 mm: every point of a grid a
+    /// quarter tolerance apart through each cylinder and around its side lies inside a sphere, and
+    /// no sphere reaches past the cylinder farther than the tolerance. Cylinders whose grid would
+    /// take more than 400,000 points are left out.
+    #[test]
+    fn cylinder_rings_hold_random_cylinders() {
+        let mut state: u64 = 2027;
+        let mut uniform = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut log_uniform = |lo: f64, hi: f64| (lo.ln() + uniform() * (hi.ln() - lo.ln())).exp();
+        let (mut tried, mut failed) = (0, vec![]);
+        for _ in 0..400 {
+            let tolerance = log_uniform(0.0005, 0.01) as f32;
+            let (r, h) = (
+                log_uniform(0.001, 0.15) as f32,
+                log_uniform(0.0005, 0.15) as f32,
+            );
+            let step = 0.25 * tolerance;
+            let across = (2.0 * r / step).ceil() as usize + 1;
+            let up = (2.0 * h / step).ceil() as usize + 1;
+            if across * across * up > 400_000 {
+                continue;
+            }
+            tried += 1;
+            let Some(spheres) = cylinder_tiles(r, h, tolerance) else {
+                failed.push((r, h, tolerance, "no cover".to_string()));
+                continue;
+            };
+            let ball = |s: &[f32; 4]| (Vec3::new(s[0], s[1], s[2]), s[3]);
+            let balls: Vec<(Vec3, f32)> = spheres.iter().map(ball).collect();
+            let cells = SphereCells::new(&balls, 0.0);
+            let outside = |p: Vec3| {
+                let to = |&j: &usize| p.distance(balls[j].0) - balls[j].1;
+                cells.at(p).iter().map(to).fold(f32::INFINITY, f32::min)
+            };
+            let at = |n: usize, i: usize, extent: f32| {
+                -extent + 2.0 * extent * i as f32 / (n - 1) as f32
+            };
+            let mut gap = f32::NEG_INFINITY;
+            for i in 0..across {
+                for j in 0..across {
+                    let (x, y) = (at(across, i, r), at(across, j, r));
+                    if x.hypot(y) > r {
+                        continue;
+                    }
+                    for k in 0..up {
+                        gap = gap.max(outside(Vec3::new(x, y, at(up, k, h))));
+                    }
+                }
+            }
+            let around = (TAU * r / step).ceil() as usize;
+            for i in 0..around {
+                let angle = TAU * i as f32 / around as f32;
+                for k in 0..up {
+                    let p = Vec3::new(r * angle.cos(), r * angle.sin(), at(up, k, h));
+                    gap = gap.max(outside(p));
+                }
+            }
+            let past = |s: &[f32; 4]| s[3] - (r - s[0].hypot(s[1])).min(h - s[2].abs());
+            let past = spheres.iter().map(past).fold(f32::NEG_INFINITY, f32::max);
+            if gap > 0.0 || past > tolerance * (1.0 + 1e-5) {
+                failed.push((r, h, tolerance, format!("{gap:e} outside, {past:e} past")));
+            }
+        }
+        assert!(tried > 100, "{tried} cylinders tried");
         assert!(failed.is_empty(), "{failed:?}");
     }
 }

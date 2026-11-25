@@ -880,16 +880,14 @@ const MEDIAL_BOXES: [(&str, Vec3); 7] = [
 ];
 
 /// A held object's spheres hold all of it and reach no farther past it than the tolerance, on the
-/// shapes that test that hardest: a bowl, fitted; a slab 2 mm thick, where a sphere crosses its
-/// faces steeply; a sheet 0.08 mm thick, too thin for a center inside it to reach its faces; a bar
-/// 12 mm square and 60 cm long, fitted for a budget of 8; a cylinder whose
-/// mesh of 24 sides lies farther inside it than the tolerance left past a margin; a mug, a
-/// cylinder with a box through its side, fitted as one; a plate and a wheel's rim, which a layer
-/// of rings covers past the budget; and the boxes a medial cover takes past it, at 5 and 1 mm.
-/// Points of each surface at random, its
-/// corners, its edges and rims, and its rims at the middles of the 24 sectors each lie inside a
-/// sphere, and every sphere's radius and its center's signed distance to the shapes sum to no more
-/// than the tolerance.
+/// shapes that test that hardest: a bowl and two plates at 5 and 1 mm, held by rings along their
+/// medial structure; a slab 2 mm thick, where a sphere crosses its faces steeply; a sheet 0.08 mm
+/// thick, too thin for a center inside it to reach its faces; a bar 12 mm square and 60 cm long
+/// at a budget of 8; a disc 1 cm thick at 0.4 mm; a mug, a cylinder with a box through its side; a
+/// wheel's rim, which a layer of rings covers; and the boxes a medial cover takes, at 5 and 1 mm.
+/// Points of each surface at random, its corners, its edges and rims, and its rims at the middles
+/// of 24 sectors each lie inside a sphere, and every sphere's radius and its center's signed
+/// distance to the shapes sum to no more than the tolerance.
 #[test]
 fn a_held_objects_spheres_hold_all_of_it() {
     use std::f32::consts::TAU;
@@ -913,6 +911,11 @@ fn a_held_objects_spheres_hold_all_of_it() {
             options(64, 0.005),
         ),
         (
+            "a bowl at 1 mm",
+            vec![cylinder(0.05603, 0.02537)],
+            options(64, 0.001),
+        ),
+        (
             "a slab",
             vec![cuboid(Vec3::new(0.1, 0.1, 0.001))],
             options(64, 0.005),
@@ -930,6 +933,21 @@ fn a_held_objects_spheres_hold_all_of_it() {
         ("a disc", vec![cylinder(0.03, 0.005)], options(64, 0.0004)),
         ("a mug", mug, options(64, 0.005)),
         ("a plate", vec![cylinder(0.0695, 0.009)], options(64, 0.005)),
+        (
+            "a plate at 1 mm",
+            vec![cylinder(0.0695, 0.009)],
+            options(64, 0.001),
+        ),
+        (
+            "goal 5's plate",
+            vec![cylinder(0.06860558, 0.009563851)],
+            options(64, 0.005),
+        ),
+        (
+            "goal 5's plate at 1 mm",
+            vec![cylinder(0.06860558, 0.009563851)],
+            options(64, 0.001),
+        ),
         (
             "a wheel's rim",
             vec![cylinder(0.1, 0.01)],

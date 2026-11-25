@@ -37,8 +37,8 @@ pub struct Held {
     /// grid in the item's own world, whose voxel takes its place where smaller, and
     /// [`Held::attachment`], which has no world, keeps it as stated. Its own
     /// `max_overhang` holds them, whatever the robot was loaded with, and then leaves some of it
-    /// outside them, but for a box, a thin cylinder or a capsule, which their tiles hold whole
-    /// within the smaller of the two.
+    /// outside them, but for a box, a cylinder or a capsule, which their tiles hold whole within
+    /// the smaller of the two.
     pub spheres: SphereOptions,
 }
 

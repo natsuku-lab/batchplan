@@ -435,33 +435,41 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   candidates the medial balls of its surface samples join (each sample's largest ball inside the
   shape that touches it, centered on the medial axis), and picks others make redundant are
   dropped; a direct cover within the tolerance is taken instead where it has no more spheres.
-  Boxes, cylinders no thicker than 4.8 tolerances (24 mm at 5 mm), capsules and balls are not
-  fitted but covered by their surfaces' tiles, in under a millisecond, within the smaller of the
-  tolerance and `max_overhang` where that is set. A box's cover follows its medial axis (derived
-  with Gemini 4 Neon): spheres at its corners on the rays where three faces tie, rows along its
-  edges on their bisectors spaced and set as deep as covers the widest strip of both faces, shells
-  inward along the same bisectors where it is thick, and staggered rows on its middle plane for
-  what is left and its inside, every sphere reaching the tolerance past it with a margin left for
-  rounding; a thin cylinder is a layer at its middle height of rings from the rim in, each as wide
-  and in as few sectors as takes fewest spheres for its area, each sphere through the corners of
-  its sector's tiles, which holds it by construction. At the default 5 mm and 64, a bowl 11.2 cm
-  across and 5.1 cm deep goes from 64 spheres reaching 9.1 mm past its side and leaving 1.2 mm of
-  it outside them to 98 within 5 mm holding all of it, a plate 14 cm across from 64 reaching 10.6
-  mm past its faces to a layer of 75 within 5 mm, a valve's wheel 20 cm across
+  Boxes, cylinders, capsules and balls are not fitted but covered by their surfaces' tiles, in
+  milliseconds at most, within the smaller of the tolerance and `max_overhang` where that is set.
+  A box's cover follows its medial axis (derived with Gemini 4 Neon): spheres at its corners on
+  the rays where three faces tie, rows along its edges on their bisectors spaced and set as deep
+  as covers the widest strip of both faces, shells inward along the same bisectors where it is
+  thick, and staggered rows on its middle plane for what is left and its inside, every sphere
+  reaching the tolerance past it with a margin left for rounding. A cylinder takes rings of
+  spheres along its medial structure: a ring at each rim on the bisector between the face and the
+  side, rings along the rest of the side from as deep as the faces allow (on the axis where near
+  enough), and rings of the faces from the middle height or below each; or, no thicker than 4.8
+  tolerances (24 mm at 5 mm), a layer at its middle height of rings from the rim in, whichever
+  takes fewer; each sphere through the corners of its sector's tiles, which holds it, inside as
+  well, by construction. At the default 5 mm and 64, a bowl 11.2 cm across and 5.1 cm deep goes
+  from 64 spheres reaching 9.1 mm past its side and leaving 1.2 mm of it outside them to 70 within
+  5 mm holding all of it (332 at 2 mm, where a fit took 616), a plate 14 cm across from 64
+  reaching 10.6 mm past its faces to a layer of 75 within 5 mm, a valve's wheel 20 cm across
   (`examples/turns.rs`) from 64 reaching 15 mm to 144, and a can 6.6 cm across from 64 reaching
-  7.1 mm to 55 within 5 mm (`examples/held_spheres.rs`). Of two covers that hold an object within
-  the tolerance, the direct one the budget gives and its tiles, the one of fewer spheres is taken,
-  so a bigger budget never costs more: this changes a cover the budget gave before only for one of
-  fewer spheres with the same guarantees, as the plate's at a budget of 256, its layer of rings of
-  one width (145 spheres within 4.7 mm), now its tiles' 75. Fitting one costs tens of milliseconds
-  where it cost a few, once per object and device. A box or a capsule the budget cannot cover
-  directly within the tolerance is no longer covered past it. The blocks `examples/handover/`
-  carries, which 42 to 64 spheres covered 9.0 to 10.6 mm past them, take 95 to 121 within 5 mm,
-  where their long edges alone need 68 to 80 and a fit took 144 to 208. So that fitting is paid
-  once per object, `datagen::handover` fits a carried object once for all its grasps, where it
-  attached it at each, and `datagen::reset_states` once per shape, where it attached it at each
-  hold; and a device for a robot holding an object of many spheres is made in time linear in them,
-  where pairing its spheres with the robot's took time quadratic in them.
+  7.1 mm to 37 within 5 mm (`examples/held_spheres.rs`); goal 5's plate at 2.5 mm takes 268 where
+  a fit took 535. Of two covers that hold an object within the tolerance, the direct one the
+  budget gives and its tiles, the one of fewer spheres is taken, so a bigger budget never costs
+  more: this changes a cover the budget gave before only for one of fewer spheres with the same
+  guarantees, as the plate's at a budget of 256, its layer of rings of one width (145 spheres
+  within 4.7 mm), now its tiles' 75. Covering one costs up to tens of milliseconds where it cost a
+  few, once per object and device. A box or a capsule the budget cannot cover directly within the
+  tolerance is no longer covered past it. The blocks `examples/handover/` carries, which 42 to 64
+  spheres covered 9.0 to 10.6 mm past them, take 95 to 121 within 5 mm, where their long edges
+  alone need 68 to 80 and a fit took 144 to 208. So that fitting is paid once per object,
+  `datagen::handover` fits a carried object once for all its grasps, where it attached it at each,
+  and `datagen::reset_states` once per shape, where it attached it at each hold; and a device for
+  a robot holding an object of many spheres is made in time linear in them, where pairing its
+  spheres with the robot's took time quadratic in them.
+- A held object's cover now holds all of it and reaches its tolerance past it nearly everywhere,
+  where a cover of fewer spheres reached past it less in places and left some of it outside: so
+  more of a tight passage reads as a contact. Of `tests/turn.rs`'s 64 knobs, each with a post that
+  stops turns one way, 15 turn through where 17 did; `examples/turns.rs`'s counts are the same.
 
 - On the CPU, a robot mask (`DepthImage::robot_mask`) takes 11% to 23% less time on the Ryzen
   and up to 15% less on the M4 Pro, and fusing an image into a map up to 13% less on the Ryzen,
