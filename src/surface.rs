@@ -515,6 +515,11 @@ pub fn grasps_on_with_capacity(
         "grasp capacity {capacity} m must be positive and at most the loaded gap {} m",
         o.opening
     );
+    ensure_input!(
+        o.clearance >= 0.0 && o.clearance.is_finite(),
+        "the hand's clearance must be finite and at least 0, got {} m",
+        o.clearance
+    );
     if let Some(floor) = o.floor {
         ensure_input!(floor.is_finite(), "the floor must be finite, got {floor}");
     }
@@ -625,7 +630,8 @@ fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
         .map(|sphere| sphere.center.length() + sphere.radius)
         .fold(0.0, f32::max)
         + o.approach
-        + reach;
+        + reach
+        + o.clearance;
     if o.narrow {
         // What stands around is sought as far out as the fingers could come in.
         extent += open.gap / 2.0;
@@ -654,10 +660,15 @@ fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
         hand.iter().all(|sphere| {
             let center = pose.position + pose.rotation * sphere.center;
             let from = center - toward * o.approach;
-            !near.any(from, center, sphere.radius, |point, object| {
-                let across = (point - pose.position).dot(closing).abs();
-                !(sphere.finger && object && across <= width / 2.0 + THINNEST)
-            })
+            !near.any(
+                from,
+                center,
+                sphere.radius + o.clearance,
+                |point, object| {
+                    let across = (point - pose.position).dot(closing).abs();
+                    !(sphere.finger && object && across <= width / 2.0 + THINNEST)
+                },
+            )
         })
     };
     // A pair's grasps, by turn: from above first, where the line is not upright, then a turn to
@@ -953,7 +964,7 @@ fn narrowed(
     for sphere in hand.iter().filter(|sphere| sphere.side == 0.0) {
         let (from, center) = swept(sphere);
         let other = |point, object| !closed_on(sphere, point, object);
-        if near.any(from, center, sphere.radius, other) {
+        if near.any(from, center, sphere.radius + o.clearance, other) {
             return None;
         }
     }
@@ -972,7 +983,8 @@ fn narrowed(
                 break;
             }
             let (from, center) = swept(sphere);
-            let reached = sphere.radius * sphere.radius;
+            let grown = sphere.radius + o.clearance;
+            let reached = grown * grown;
             // A finger nears the other against the side it stands on.
             let (least, far) = (first as f32 * step, last as f32 * step);
             let moves = if sphere.side > 0.0 {
@@ -981,7 +993,7 @@ fn narrowed(
                 (least, far)
             };
             let slides = (closing, moves);
-            near.until(from, center, sphere.radius, slides, |off, point, object| {
+            near.until(from, center, grown, slides, |off, point, object| {
                 if closed_on(sphere, point, object) {
                     return false;
                 }
