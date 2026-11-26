@@ -28,27 +28,25 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   clear the drawer. `Kept::enclosing` names the boxes that hold an object in with no way out
   measured, as a cabinet a far look read as one box holds a bowl in its drawer, for a caller to
   look closer before it lifts.
-- `GraspOptions::clearance` (0 by default): how far the hand's spheres stay from what they do not
-  close on, on their way in to a grasp of a surface and at it. `grasps_on` draws the hand back to
-  where it has that much room, while `overlap` of its fingers stays on the patches, or leaves the
+- `SurfaceGraspOptions::clearance` (0 by default): how far the hand's spheres stay from what they do
+  not close on, on their way in to a grasp of a surface and at it. `grasps_on` draws the hand back
+  to where it has that much room, while `overlap` of its fingers stays on the patches, or leaves the
   grasp out. A hand the points alone find clear, a millimeter from a drawer's front behind the
-  handle it grips, is one a planner whose distance grids err toward collision refuses at its
-  reach: with 2.5 mm, and 5 mm of `overlap`, four recorded pulls of a drawer's handle that had no
-  grasp get through go from none of 24 to 93 grasps planned to 5 to 18, the first tried on three
-  of them. **Breaking:** Rust literals that list every field of `GraspOptions` need `clearance`.
-- With `GraspOptions::narrow`, `grasps_on` no longer has the fingers come in nearer their patches
-  than a surface's noise, 2.5 mm to each finger: of the sixteenths of the opening, the narrowest is
-  the first that leaves it, where it was the first as wide as the patches. A hand that came in
-  4.9 mm open on a bowl's 2.5 mm wall, turned 44 degrees about its closing line, put a finger on
-  the rim before it closed and pushed the bowl 2 cm; at 9.9 mm it closes on the wall and lifts it.
-  A grasp clear only nearer than that is drawn back or left out.
-- `GraspOptions::first_touch` (off by default): `grasps_on` puts the grasps whose fingers close
-  onto their patches before meeting any other part of what was seen of the object ahead of the
-  rest, within each turn of the two lots of two seen sides and one, so from above still comes
-  before a turn to either side. A finger closing level deep across a wall
-  that leans over its patch meets the wall above it instead, and the object turns in the hand as
-  it is lifted: a LIBERO bowl picked so turned 15 degrees and touched the plate while still held.
-  **Breaking:** Rust literals that list every field of `GraspOptions` need `first_touch`.
+  handle it grips, is one a planner whose distance grids err toward collision refuses at its reach:
+  with 2.5 mm, and 5 mm of `overlap`, four recorded pulls of a drawer's handle that had no grasp get
+  through go from none of 24 to 93 grasps planned to 5 to 18, the first tried on three of them.
+- With `SurfaceGraspOptions::narrow`, `grasps_on` no longer has the fingers come in nearer their
+  patches than a surface's noise, 2.5 mm to each finger: of the sixteenths of the opening, the
+  narrowest is the first that leaves it, where it was the first as wide as the patches. A hand that
+  came in 4.9 mm open on a bowl's 2.5 mm wall, turned 44 degrees about its closing line, put a
+  finger on the rim before it closed and pushed the bowl 2 cm; at 9.9 mm it closes on the wall and
+  lifts it. A grasp clear only nearer than that is drawn back or left out.
+- `SurfaceGraspOptions::first_touch` (off by default): `grasps_on` puts the grasps whose fingers
+  close onto their patches before meeting any other part of what was seen of the object ahead of the
+  rest, within each turn of the two lots of two seen sides and one, so from above still comes before
+  a turn to either side. A finger closing level deep across a wall that leans over its patch meets
+  the wall above it instead, and the object turns in the hand as it is lifted: a LIBERO bowl picked
+  so turned 15 degrees and touched the plate while still held.
 - Miru gives a reading on no known shape of a set of fewer than four readings, too few to be a
   surface of its own, to a known shape's surface beside it too, where the reading's own surface lies
   on that surface's plane within three deviations of the difference, and a part that is a known
@@ -94,8 +92,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   current observation with `Kept::observed_closures`.
 
 - Surface grasps can try additional approach angles and shallower insertions on contact pairs
-  near a measured point. Set `GraspOptions::close_on` to append them after the ordinary grasps. **Breaking:** Rust literals
-  that specify every field of `GraspOptions` need `close_on: None` for the previous behavior.
+  near a measured point. Set `SurfaceGraspOptions::close_on` to append them after the ordinary
+  grasps.
 
 - `Kept::extractions` reports the straight lift that clears a measured open container at the
   object's observed attitude and a caller-specified margin. It recognizes flush contact when the
@@ -108,11 +106,26 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   (`capacity`, `None` for the loaded gap) and the pads' `friction` (0.5), checked against the
   model's stroke and joint locks. `grasps_on` and `Grasp::closes_on` take the `Gripper`: contact
   pairs fit within its capacity, and `narrow`, which needs jaws that slide (`Gripper::sliding`),
-  comes in at `Gripper::openings` (the loaded gap, then 15/16 to 1/16 of the capacity).
+  comes in at `Gripper::openings` (the loaded gap, then 15/16 to 1/16 of the capacity);
+  `SurfaceGraspOptions::order_for_turn` and `Grasp::moment` take it for the pads' friction.
+  `grasps` takes it too: a shape's grasps close across at most its capacity, their open fingers
+  stand its loaded gap apart over a floor, and they reach its `Gripper::tip` past the frame.
   `Gripper::locked_at` and `opening_of` turn meters into finger joint values and back, linear
   between the closed and loaded joints, for any hand. Miru's `Kept::bar_on_disk`,
   `observed_closures`, `turn_grips` and `Observed::grip_worlds` take it in place of the hand, its
-  gaps, capacity and opening; a turn's fully open grips stand at its loaded gap. In Python, `Robot.gripper`, `GripperCalibration` and `Gripper`.
+  gaps, capacity and opening; a turn's fully open grips stand at its loaded gap. In Python,
+  `Robot.gripper`, `GripperCalibration` and `Gripper`.
+- **Breaking:** `GraspOptions` is two structs, each field with the default it had:
+  `ShapeGraspOptions` (`depth`, `turns`, `tip`, `floor`, `overlap`, `along`) for
+  `grasps(&object, &gripper, &ShapeGraspOptions)`, which takes the gripper, and
+  `SurfaceGraspOptions` for `grasps_on`, `SurfaceGraspOptions::order_for_turn` and
+  `Grasp::moment`. `opening` and `friction` are gone: the widths and the friction are the gripper's,
+  so a shape's grasps close across at most `Gripper::capacity` and over a floor keep their open
+  fingers, `Gripper::opening` apart, above it. `ShapeGraspOptions::tip` is `None` by default, the
+  gripper's (`Gripper::tip`, what `Robot::tip` gave for its hand), where `tip` was 0: a literal that
+  sets `floor` and relied on a tip of 0 sets `tip: Some(0.0)`. In Python,
+  `grasps(object, gripper, options=None)` takes a `ShapeGraspOptions`, `GraspOptions` is gone, and
+  `Gripper.tip` is new.
 
 - `miru::Observed::grip_worlds` prepares a kept observation for grasp planning. Project one
   candidate at a time to split the material between its finger pads from the collision world.
@@ -159,19 +172,19 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   a radian, with `Screw::about(point, direction)`: `carry(pose, angle)` carries a pose about it,
   and `path(pose, angle, precision)` gives the waypoints a tool path follows along its arc, as few
   as keep the straight moves between them within `precision` of it, by the chord's sag.
-- `Grasp::moment(&screw, &options)`: the moment about a line that a grasp's fingertips can give
-  for each newton each presses with, by friction, where they press on their patches, a soft
+- `Grasp::moment(&screw, &gripper, &options)`: the moment about a line that a grasp's fingertips can
+  give for each newton each presses with, by friction, where they press on their patches, a soft
   fingertip's twist and the hand pushing along the closing line, the way round that gives less:
   grips for a turn ordered by what it asks of them.
 - **Breaking:** `TaskStep` has `Turn` and then `Pull` between `Reach` and `Approach`, the order
   the steps are checked in, so `Approach`, `Depart` and `Transit` are each two later, as numbers
   (`as isize`: 2, 3 and 4 become 4, 5 and 6) and in the derived order: the steps that were there
   keep their order among themselves, and `Turn` and `Pull` sort between `Reach` and `Approach`.
-- **Breaking:** in Python, `TaskStep`'s values from `Approach` on are one more than they were.
-- **Breaking:** `GraspOptions::near`, a point to grip a surface near: `grasps_on` gives, within
-  each of the tiers it orders them by, the grasps nearest it first instead of spread over the
-  object. `None`, the default, leaves every grasp as it was. A `GraspOptions` written out in full
-  needs the field.
+- **Breaking:** in Python, `TaskStep` has Rust's numbers and order: `Turn` is 2 and `Pull` 3, and
+  `Approach`, `Depart` and `Transit` are 4, 5 and 6 where 0.11 had 2, 3 and 4.
+- `SurfaceGraspOptions::near`, a point to grip a surface near: `grasps_on` gives, within each of
+  the tiers it orders them by, the grasps nearest it first instead of spread over the object.
+  `None`, the default, leaves every grasp as it was.
 
 - `miru`, a crate of its own in the repository (`miru/`, not published to crates.io): what depth
   cameras show, as objects. One call, `miru::look(&device, &look, &previous, &options)`, takes
@@ -405,41 +418,38 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   (`spheres: SphereOptions::default()`); a pick's `TaskPlan::held` carries the default. In
   Python, `Held(..., spheres=SphereOptions(tolerance=0.002))`.
 
-- **Breaking:** grasps of what cameras see, whatever its shape:
-  `grasps_on(&device, &gripper, &[Surface], &GraspOptions)`. A grasp closes on two patches of the
-  object's surface that were both seen (or, with a `shell`, on one and the space seen past its
-  wall), face away from each other within the opening, and have
-  the line between them inside both friction cones (the gripper's friction, 0.5, and `contact`,
-  the patch's radius, 5 mm), so a bowl's wall, a handle and a box's sides are found alike. The
-  robot's own hand, with its fingers as locked, and its straight way in (`GraspOptions::approach`,
-  10 cm) are kept clear of every point, the object's and the rest; `floor` holds the frame and
-  the open fingertips over a height, and a hand that is not clear is drawn back while `overlap`
-  of the fingers stays on the patches. Each `Grasp` gives the hand's `pose` and its two `contacts`, the first few from
-  above and spread over the object. `Surface::from_depth` reads a depth image (the object's
-  pixels marked, the robot masked out, normals toward the camera), `Surface::from_points` a
-  cloud seen from one place, and `Surface::join` adds a view. Surfaces of one call run in parallel
-  on the device's threads. A `GraspOptions` literal needs the new fields (`friction: 0.5`,
-  `contact: 0.005`, `approach: 0.1`); in Python, `GraspOptions(friction=..., contact=...,
-  approach=...)` (the surfaces and `grasps_on` are not bound there yet).
+- Grasps of what cameras see, whatever its shape: `grasps_on(&device, &gripper, &[Surface],
+  &SurfaceGraspOptions)`. A grasp closes on two patches of the object's surface that were both seen
+  (or, with a `shell`, on one and the space seen past its wall), face away from each other within
+  the opening, and have the line between them inside both friction cones (the gripper's friction,
+  0.5, and `contact`, the patch's radius, 5 mm), so a bowl's wall, a handle and a box's sides are
+  found alike. The robot's own hand, with its fingers as locked, and its straight way in
+  (`SurfaceGraspOptions::approach`, 10 cm) are kept clear of every point, the object's and the rest;
+  `floor` holds the frame and the open fingertips over a height, and a hand that is not clear is
+  drawn back while `overlap` of the fingers stays on the patches. Each `Grasp` gives the hand's
+  `pose` and its two `contacts`, the first few from above and spread over the object.
+  `Surface::from_depth` reads a depth image (the object's pixels marked, the robot masked out,
+  normals toward the camera), `Surface::from_points` a cloud seen from one place, and
+  `Surface::join` adds a view. Surfaces of one call run in parallel on the device's threads. Python
+  binds neither the surfaces nor `grasps_on` yet.
 
-- **Breaking:** grasps of a wall seen from one side only, as a bowl's rim seen from above, its outer
-  wall hidden under the rim: `GraspOptions::shell`, the thickest such wall a grasp may close across
-  (by default `Some(f32::INFINITY)`, a wall as thick as the gripper grasps; `None` turns it off). From
-  a patch whose other side no camera saw, the line in along its normal meets, within that thickness,
-  space every ray around it went past on its way to something farther: the second contact goes
-  there, so `width()` is the most the wall can be, never past the gripper's capacity, and the `Grasp` says so
-  (`one_sided`). Inside a solid no ray goes, so a box seen from one side is closed on only across
-  all of it, and a patch whose other side was seen keeps to the seen pair. A wall that leans is
-  closed on level too, where the level line through the patch is inside its friction cone, so a hand
-  comes straight down across a flared rim where one closing along the wall's normal leans with it.
-  These grasps follow every grasp of two patches seen (1.5 cm suits a bowl's rim: LIBERO's, its wall
-  3 mm thick, seen from 40 cm above, is grasped 5.5 to 11.5 mm wide at its rim). The evidence is
-  where each point was seen from, `Surface::seen_from`, which `from_depth` and `from_points` record
-  and `join` carries (infinite where a joined surface did not say). The points seen from exactly one
-  place make one view, so looks joined from one place are one view, and a cloud fused from several
-  views must not be given one place, or must be grasped with `shell: None`. A `GraspOptions` literal
-  needs `shell`, and a `Surface` literal `seen_from: vec![]` (or `..Default::default()`); in Python,
-  `GraspOptions(shell=0.015)`.
+- Grasps of a wall seen from one side only, as a bowl's rim seen from above, its outer wall hidden
+  under the rim: `SurfaceGraspOptions::shell`, the thickest such wall a grasp may close
+  across (by default `Some(f32::INFINITY)`, a wall as thick as the gripper grasps; `None` turns it
+  off). From a patch whose other side no camera saw, the line in along its normal meets, within that
+  thickness, space every ray around it went past on its way to something farther: the second contact
+  goes there, so `width()` is the most the wall can be, never past the gripper's capacity, and the
+  `Grasp` says so (`one_sided`). Inside a solid no ray goes, so a box seen from one side is closed
+  on only across all of it, and a patch whose other side was seen keeps to the seen pair. A wall
+  that leans is closed on level too, where the level line through the patch is inside its friction
+  cone, so a hand comes straight down across a flared rim where one closing along the wall's normal
+  leans with it. These grasps follow every grasp of two patches seen (1.5 cm suits a bowl's rim:
+  LIBERO's, its wall 3 mm thick, seen from 40 cm above, is grasped 5.5 to 11.5 mm wide at its rim).
+  The evidence is where each point was seen from, `Surface::seen_from`, which `from_depth` and
+  `from_points` record and `join` carries (infinite where a joined surface did not say). The points
+  seen from exactly one place make one view, so looks joined from one place are one view, and a
+  cloud fused from several views must not be given one place, or must be grasped with `shell: None`.
+  A `Surface` literal needs `seen_from: vec![]` (or `..Default::default()`).
 
 - **Breaking:** a place says how far its hand may open where it lets go: `Place::open`, finger
   values as `Held::locked` names them, in the order preferred (empty by default, which changes
@@ -470,8 +480,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   stops after the first few. A pick none gets through has tried every one and says where each
   stopped. A `Pick` literal needs `enough: None`; in Python, `Pick(..., enough=1)`.
 
-- **Breaking:** grasps whose fingers come in narrower than they open, where something stands
-  near: `GraspOptions::narrow` (false by default, which changes nothing). Open fingers beside a
+- Grasps whose fingers come in narrower than they open, where something stands near:
+  `SurfaceGraspOptions::narrow` (false by default, which changes nothing). Open fingers beside a
   wall or a neighbor are in it, though the grasp needs a fraction of the opening. With `narrow`,
   `grasps_on` takes each finger of a gripper whose jaws slide along the hand's y axis and checks
   every grasp at the gripper's openings; each `Grasp` comes back with the `opening` that keeps its fingers
@@ -484,8 +494,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   from a wall twice as tall is grasped all round so (698 grasps where the open fingers find
   654), in 10.7 ms where the open hand's check takes 8.9: a grasp that is found is checked
   across each finger's whole slide, so a hand of many spheres pays more. Without `narrow` every grasp's `opening` is
-  the gripper's. A `GraspOptions` literal needs `narrow: false`; in Python,
-  `GraspOptions(narrow=True)`.
+  the gripper's.
 
 - **Breaking:** a `Follower` can hold an object: `FollowerOptions::holding` takes the `Held` the
   trajectory was planned holding. The rest of the motion, and any stop, is checked with the object
@@ -622,13 +631,13 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   number, with which it never slowed.
 
 - **Breaking:** a pick's grasps each say where the fingers are: `Pick::locked` is a
-  `Vec<HashMap<String, f32>>`, the locked joints' values per grasp (empty: every grasp as loaded,
-  as before), where it was one map for the task. One pick then takes grasps that come in at
-  different openings, as `grasps_on` gives them with `GraspOptions::narrow`, and plans by any:
-  `pick` groups a call's grasps by those values, a relocked robot for each group, and each plan's
-  `candidate` numbers the pick's grasps and its `held` starts with its grasp's values. A pick
-  that set `locked: narrow` sets `locked: vec![narrow; grasps.len()]`; in Python,
-  `Pick(..., locked=[narrow] * len(grasps))`.
+  `Vec<HashMap<String, f32>>`, the locked joints' values per grasp (empty: every grasp as loaded, as
+  before), where it was one map for the task. One pick then takes grasps that come in at different
+  openings, as `grasps_on` gives them with `SurfaceGraspOptions::narrow`, and plans by any: `pick`
+  groups a call's grasps by those values, a relocked robot for each group, and each plan's
+  `candidate` numbers the pick's grasps and its `held` starts with its grasp's values. A pick that
+  set `locked: narrow` sets `locked: vec![narrow; grasps.len()]`; in Python, `Pick(...,
+  locked=[narrow] * len(grasps))`.
 
 - **Breaking:** a held capsule is covered by spheres along its axis, and a held cylinder that is thin or
   slender (a disc, a rod) by one layer of rings of spheres or one line of them, where that reaches
