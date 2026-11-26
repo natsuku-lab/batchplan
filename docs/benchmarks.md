@@ -200,7 +200,7 @@ The failed pick has every grasp blocked or out of reach. Grasp IK dominates pick
 
 ## Turning things about a line
 
-`examples/turns.rs` turns things with the Panda (`turn`): a knob, a bar 9 × 2.5 cm standing 3 cm proud of a dial 9 cm across on a box, its grips found on what two 640×480 depth images see (`grasps_on`, `narrow`, the floor at the dial's top) and ordered by their moment about its axis (`Grasp::moment`), turned a quarter turn about the axis; a cap 4 cm across unscrewed half a turn up a thread of 5 mm a turn; a lever 15 cm long swung 60 degrees about its hinge; a wheel 20 cm across turned 45 degrees by its rim, these three by the grips `grasps` proposes; and 64 such knobs at random places and turns, each in a world of its own, in one call. Times are the quickest of five calls, the least of six runs of the one-unit build: on the M4 Pro with its 14 threads, the CPU device at a load of 1.9 to 9.2 and its GPU (Metal) at 4.0 to 9.8; and on the Ryzen AI Max+ 395 with its 32 threads, the CPU device at 1.13 to 16.53 and its Radeon 8060S (RADV) at 15.62 to 21.14, most of it the runs' own threads. "First plan" is the call with `enough: Some(1)`, which tries the grips in their order 32 at a time; the cap's, the lever's and the wheel's times are every grip's and the first plan's.
+`examples/turns.rs` turns things with the Panda (`turn`): a knob, a bar 9 × 2.5 cm standing 3 cm proud of a dial 9 cm across on a box, its grips found on what two 640×480 depth images see (`grasps_on`, `narrow`, the floor at the dial's top) and ordered by their moment about its axis (`Grasp::moment`), turned a quarter turn about the axis; a cap 4 cm across unscrewed half a turn up a thread of 5 mm a turn; a lever 15 cm long swung 60 degrees about its hinge; a wheel 20 cm across turned 45 degrees by its rim, these three by the grips `grasps` proposes; and 64 such knobs at random places and turns, each in a world of its own, in one call. Times are the quickest of five calls in the one-unit build: on the M4 Pro with its 14 threads, the least of twelve runs in two sessions on 2026-11-26 (one on battery, one on the charger, which agreed), the CPU device at a load of 1.8 to 9.6 and its GPU (Metal) at 3.3 to 11.0; and on the Ryzen AI Max+ 395 with its 32 threads, the least of six runs, the CPU device at 1.13 to 16.53 and its Radeon 8060S (RADV) at 15.62 to 21.14, most of it the runs' own threads. "First plan" is the call with `enough: Some(1)`, which tries the grips in their order 32 at a time; the cap's, the lever's and the wheel's times are every grip's and the first plan's.
 
 | | Grips | Through | Where the rest stop |
 |---|---|---|---|
@@ -212,8 +212,8 @@ The failed pick has every grasp blocked or out of reach. Grasp IK dominates pick
 
 | Device | Knob, every grip | Knob, first plan | Cap | Lever | Wheel | 64 knobs, first plans |
 |---|---|---|---|---|---|---|
-| M4 Pro, 14 threads | 407 ms | 15.5 ms | 11.3 / 11.2 ms | 5.7 / 5.6 ms | 5.8 / 5.8 ms | 832 ms |
-| M4 Pro's GPU | 420 ms | 18.4 ms | 13.7 / 13.7 ms | 7.4 / 7.2 ms | 7.7 / 7.7 ms | 814 ms |
+| M4 Pro, 14 threads | 402 ms | 15.4 ms | 11.3 / 11.2 ms | 5.7 / 5.5 ms | 5.8 / 5.8 ms | 831 ms |
+| M4 Pro's GPU | 413 ms | 18.4 ms | 13.7 / 13.7 ms | 7.4 / 7.2 ms | 7.7 / 7.7 ms | 814 ms |
 | Ryzen AI Max+ 395, 32 threads | 349 ms | 14.1 ms | 12.0 / 10.9 ms | 6.1 / 5.9 ms | 6.3 / 6.0 ms | 765 ms |
 | Radeon 8060S | 322 ms | 15.9 ms | 13.4 / 13.1 ms | 7.3 / 7.2 ms | 7.4 / 7.2 ms | 711 ms |
 
@@ -221,15 +221,15 @@ The counts are the same on both devices of each machine and on every run, but at
 
 ## Grasps of a surface
 
-`examples/surface_grasps.rs` finds the grasps of what cameras see (`grasps_on`) for the Panda's hand of 22 spheres, open 8 cm, with `first_touch: false` (and with it where a cell says so), on the M4 Pro's 14 threads, the quickest of five calls (of three for the 64 bowls), the least of six runs of the one-unit build, at a load of 7.0 to 10.1:
+`examples/surface_grasps.rs` finds the grasps of what cameras see (`grasps_on`) for the Panda's hand of 22 spheres, open 8 cm, with `first_touch: false` (and with it where a cell says so), on the M4 Pro's 14 threads, the quickest of five calls (of three for the 64 bowls), the least of twelve runs of the one-unit build in two sessions on 2026-11-26 (one on battery, one on the charger, which agreed), at a load of 2.9 to 11.6:
 
 | | Points | Grasps | Time |
 |---|---|---|---|
-| A bowl 11 cm across with a wall 8 mm thick, as points 2 mm apart with their normals | 9,201 | 1,980, all across its wall | 6.4 ms, and as long with `first_touch` within the runs' spread |
-| A box on a table in two 640×480 depth images | 593,920, 12,492 of them the box's | 686 | 2.7 ms to read both images, 14.1 ms to grasp; 15.1 ms with `first_touch` |
+| A bowl 11 cm across with a wall 8 mm thick, as points 2 mm apart with their normals | 9,201 | 1,980, all across its wall | 6.2 ms, and as long with `first_touch` within the runs' spread |
+| A box on a table in two 640×480 depth images | 593,920, 12,492 of them the box's | 686 | 2.7 ms to read both images, 14.1 ms to grasp; 14.8 ms with `first_touch` |
 | LIBERO's bowl, its wall 3 mm thick and flared, seen from 40 cm above in one 640×480 depth image (focal length 313 pixels), its outer wall nowhere | 307,200, 6,728 of them the bowl's | none without a shell (`shell: None`); with a `shell` of 1.5 cm 1,132, 5.5 to 14.5 mm wide (5.5 to 11.5 mm at its rim) | 6.8 ms with the shell |
 | That bowl 4 cm from a wall twice as tall, seen the same way | 307,200 | 654 with the shell; 698 where the fingers may come in narrower (`narrow`), every one narrower, down to 1.5 cm beside the wall | 6.3 ms with the shell, 8.2 ms with both |
-| 64 such bowls in one call | 588,864 | 126,720 | 208 ms, 3.2 ms a bowl; 217 ms with `first_touch` |
+| 64 such bowls in one call | 588,864 | 126,720 | 207 ms, 3.2 ms a bowl; 217 ms with `first_touch` |
 
 Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from 16 directions, 22 spheres swept 10 cm against the points near them.
 
@@ -237,39 +237,39 @@ Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from
 
 ## Rests on a surface
 
-`examples/surface_rests.rs` finds where a held object rests on what cameras see (`rests_on`), and where to let it go to fall into a basket and into a bowl it barely fits (`falls_into`), with the default options (spots 1 cm apart, 8 turns, cells 2 mm wide, looking closer), on the M4 Pro's 14 threads, the quickest of five calls (of three for the 64 boxes), the least of six runs of the one-unit build, at a load of 6.4 to 9.8; on one thread, the least of three runs, at 1.6 to 8.2:
+`examples/surface_rests.rs` finds where a held object rests on what cameras see (`rests_on`), and where to let it go to fall into a basket and into a bowl it barely fits (`falls_into`), with the default options (spots 1 cm apart, 8 turns, cells 2 mm wide, looking closer), on the M4 Pro's 14 threads, the quickest of five calls (of three for the 64 boxes), the least of twelve runs of the one-unit build in two sessions on 2026-11-26 (one on battery, one on the charger, which agreed), at a load of 4.8 to 10.9; on one thread, the least of six runs in the same sessions, at 1.6 to 10.0:
 
 | | Points | Rests | Time | On one thread |
 |---|---|---|---|---|
-| A box 4 by 6 by 5 cm on a table 60 cm square among three blocks, in two 640×480 depth images | 392,708, 359,217 of them the table's | 23,616 | 54.2 ms | 509 ms |
-| A can in a basket 20 cm square, seen from above | 99,225 | 1,952, on its floor | 2.3 ms | 11.2 ms |
+| A box 4 by 6 by 5 cm on a table 60 cm square among three blocks, in two 640×480 depth images | 392,708, 359,217 of them the table's | 23,616 | 54.2 ms | 507 ms |
+| A can in a basket 20 cm square, seen from above | 99,225 | 1,952, on its floor | 2.3 ms | 10.9 ms |
 | That can let go over that basket to fall in (`falls_into`) | 99,225 | 1,152 places to let go at | 1.2 ms | 1.3 ms |
-| A box of cream cheese 8.3 by 4.2 by 1.9 cm let go over a bowl 11.2 cm across that it barely fits (`falls_into` with `look_closer`) | 2,821 | none at the spots; 52 places looking closer, the first over the bowl's axis | 0.3 ms | 1.1 ms |
-| A tray 12 by 6 cm across two bars 2 cm thick, 8 cm apart | 9,362 | 822 | 17.1 ms | 163 ms |
-| A can 6.6 cm across laid along those bars, rolling in between them | 9,362 | 60, both ways round for each centimeter along them | 5.6 ms | 51.6 ms |
-| A bottle 16 cm long laid flat on a rack sloping 30° against the lip at its foot, spots 2 mm apart at the one turn that lies flat | 10,117 | 150, all against the lip | 44.1 ms | 451 ms |
+| A box of cream cheese 8.3 by 4.2 by 1.9 cm let go over a bowl 11.2 cm across that it barely fits (`falls_into` with `look_closer`) | 2,821 | none at the spots; 52 places looking closer, the first over the bowl's axis | 0.3 ms | 1.0 ms |
+| A tray 12 by 6 cm across two bars 2 cm thick, 8 cm apart | 9,362 | 822 | 16.9 ms | 163 ms |
+| A can 6.6 cm across laid along those bars, rolling in between them | 9,362 | 60, both ways round for each centimeter along them | 5.6 ms | 51.4 ms |
+| A bottle 16 cm long laid flat on a rack sloping 30° against the lip at its foot, spots 2 mm apart at the one turn that lies flat | 10,117 | 150, all against the lip | 44.1 ms | 450 ms |
 | A wine bottle 4.3 cm across stood upright on that rack against the bare lip | 10,117 | none; `rest_failures` says why (`Unheld`) in 0.5 ms, 1.3 ms on one thread | 0.5 ms | 1.3 ms |
 | That bottle against the lip with a top 1 cm wide | 11,023 | 224, all against the lip | 0.6 ms | 2.1 ms |
-| 64 boxes of as many heights on that table in one call | 392,708 | 1,511,244 | 3.11 s, 48.6 ms a box | 32.7 s |
+| 64 boxes of as many heights on that table in one call | 392,708 | 1,511,244 | 3.10 s, 48.4 ms a box | 32.5 s |
 
 The table is read once for the 64 boxes. A flat bottom on a flat top is judged in closed form; the tray and the bottle touch two stretches of support that push different ways, which takes a balance of forces per pose and most of their time. The default options [look closer](placing.md#rests-on-what-cameras-see) (`look_closer`), with no `near` given, only where the spots find nothing, and of the scenes in the table only the bowl does: each other has rests or falls, but for the bare lip, where the bottle nowhere nearly rests. Over the bowl the spots find no fall, so it looks closer about the spot where the box lands the deepest under the rim. `scripts/validate_rests.py` lets go of up to 250 rests of each scene in MuJoCo, on the support as a height field: all stay on the table, in the basket and between the bars, 249 of 250 trays across the bars, 148 of 150 bottles laid on the rack, the others at the very end of the support, and 224 of 224 upright bottles against the lip with a top. It lets go of falls too, each for as long as its middle takes to drop to the lowest of the support and then a rest's second, and a fall stays in where its middle then lies under the rim, over the support, moving and turning no more in a second than a rest may in all: 250 of the 250 it tries of the can's 1,152 over the basket, and 52 of 52 of the box over the bowl. Rests come at every turn; those of a turn that sets the shape down as an earlier one does are copied from it, not found again. A can or capsule on its side that is not held where it is set down is rolled to where it lies lowest, eleven more set-downs for that spot and a second reading of its contacts, so one laid where it has no rest anywhere, as on a flat top, costs the most.
 
 ## Perception
 
-`examples/perception.rs` times each call for a 640×480 image that shows the arm: a tabletop seen from across the table, and from a camera on the Panda's palm that looks along its fingers. The mask is padded 4 cm, for the Panda's 61 spheres and for a Panda fitted with 573. Each cell is the camera over the table, then the one on the hand. Each figure is the median the example prints of 21 calls (9 for a surface, a grid, a fuse and the map's calls), the least of six runs of the one-unit build: on the M4 Pro, `perception --cpu 14` at a load of 9.0 to 11.5 and its GPU at 8.6 to 10.7; on the Ryzen AI Max+ 395, `perception --cpu 32` at 1.12 to 3.95 and its Radeon at 3.63 to 4.3.
+`examples/perception.rs` times each call for a 640×480 image that shows the arm: a tabletop seen from across the table, and from a camera on the Panda's palm that looks along its fingers. The mask is padded 4 cm, for the Panda's 61 spheres and for a Panda fitted with 573. Each cell is the camera over the table, then the one on the hand. Each figure is the median the example prints of 21 calls (9 for a surface, a grid, a fuse and the map's calls), in the one-unit build: on the M4 Pro the least of twelve runs in two sessions on 2026-11-26 (one on battery, one on the charger, which agreed), `perception --cpu 14` at a load of 6.0 to 12.4 and its GPU at 5.8 to 11.8; on the Ryzen AI Max+ 395 the least of six runs, `perception --cpu 32` at 1.12 to 3.95 and its Radeon at 3.63 to 4.3.
 
 The filter, the masks, the points and a surface are read on the host (the `--cpu` runs):
 
 | | M4 Pro (14 threads) | Ryzen AI Max+ 395 (32 threads) |
 |---|---|---|
 | The image without the readings between two surfaces (`filtered`) | 0.73 ms, 0.73 ms | 0.93 ms, 0.93 ms |
-| Which readings are the robot's (`robot_mask`), 61 spheres | 0.06 ms, 0.33 ms | 0.07 ms, 0.28 ms |
-| The same, 573 spheres | 0.19 ms, 0.84 ms | 0.17 ms, 0.77 ms |
-| The scene's three shapes left out too (`with_shapes`) | 0.22 ms, 0.27 ms | 0.22 ms, 0.28 ms |
-| Which of the scene's three shapes each reading off the robot lies on (`sdf::on_shapes`) | 0.31 ms, 0.33 ms | 0.33 ms, 0.40 ms |
+| Which readings are the robot's (`robot_mask`), 61 spheres | 0.06 ms, 0.32 ms | 0.07 ms, 0.28 ms |
+| The same, 573 spheres | 0.17 ms, 0.83 ms | 0.17 ms, 0.77 ms |
+| The scene's three shapes left out too (`with_shapes`) | 0.21 ms, 0.27 ms | 0.22 ms, 0.28 ms |
+| Which of the scene's three shapes each reading off the robot lies on (`sdf::on_shapes`) | 0.31 ms, 0.32 ms | 0.33 ms, 0.40 ms |
 | A band of a pixel behind the robot's mask alone, 61 spheres (`with_band`) | 0.16 ms, 0.18 ms | 0.20 ms, 0.21 ms |
 | The same behind the robot and the three shapes, which flag every reading of this scene already | 0.12 ms, 0.14 ms | 0.21 ms, 0.22 ms |
-| The image's points (`points`) | 0.66 ms, 0.71 ms | 1.74 ms, 1.90 ms |
+| The image's points (`points`) | 0.65 ms, 0.71 ms | 1.74 ms, 1.90 ms |
 | A surface with the table's normals (`Surface::from_depth`; 148,461 and 208,100 normals) | 2.7 ms, 3.5 ms | 2.9 ms, 2.7 ms |
 
 Fusing and grids run on the device:
@@ -277,17 +277,17 @@ Fusing and grids run on the device:
 | | M4 Pro (CPU, 14 threads) | M4 Pro (GPU) | Ryzen AI Max+ 395 (CPU, 32 threads) | Radeon 8060S (GPU) |
 |---|---|---|---|---|
 | Fusing the image into a 1.8M-voxel map, no mask | 1.5 ms, 1.3 ms | 1.0 ms, 1.0 ms | 3.1 ms, 2.4 ms | 0.6 ms, 0.6 ms |
-| With a mask of 61 spheres | 1.9 ms, 1.6 ms | 1.3 ms, 1.3 ms | 3.4 ms, 2.8 ms | 0.8 ms, 0.9 ms |
-| With a mask of 573 spheres | 2.1 ms, 1.8 ms | 1.5 ms, 1.6 ms | 3.7 ms, 2.8 ms | 1.1 ms, 1.1 ms |
+| With a mask of 61 spheres | 1.9 ms, 1.5 ms | 1.3 ms, 1.3 ms | 3.4 ms, 2.8 ms | 0.8 ms, 0.9 ms |
+| With a mask of 573 spheres | 2.1 ms, 1.8 ms | 1.5 ms, 1.5 ms | 3.7 ms, 2.8 ms | 1.1 ms, 1.1 ms |
 | With the robot's mask and the scene's three shapes left out | 1.3 ms, 0.9 ms | 1.7 ms, 1.7 ms | 2.3 ms, 1.2 ms | 0.8 ms, 0.9 ms |
-| Fusing the image into a 13.4M-voxel map (2.9 m by 2.9 m by 1.55 m), no mask | 2.1 ms, 1.4 ms | 4.0 ms, 3.9 ms | 4.9 ms, 3.0 ms | 8.0 ms, 7.5 ms |
+| Fusing the image into a 13.4M-voxel map (2.9 m by 2.9 m by 1.55 m), no mask | 2.1 ms, 1.4 ms | 4.0 ms, 3.8 ms | 4.9 ms, 3.0 ms | 8.0 ms, 7.5 ms |
 | With a mask of 61 spheres | 2.8 ms, 1.8 ms | 4.5 ms, 4.5 ms | 6.0 ms, 3.3 ms | 9.9 ms, 9.2 ms |
-| A 1 cm grid of the image, no mask (3.1M and 2.1M points) | 12.5 ms, 8.7 ms | 5.2 ms, 4.0 ms | 19.8 ms, 11.9 ms | 6.7 ms, 5.3 ms |
-| With a mask of 61 spheres (2.3M and 1.6M points) | 9.9 ms, 7.7 ms | 4.6 ms, 3.9 ms | 14.5 ms, 10.8 ms | 5.4 ms, 4.9 ms |
-| With a mask of 573 spheres | 10.2 ms, 7.8 ms | 4.9 ms, 4.0 ms | 14.6 ms, 10.8 ms | 6.1 ms, 5.0 ms |
-| The 1.8M-voxel map's grid (`grid`), what no image observed free (`Occlusion::Free`) | 5.6 ms, 5.6 ms | 3.2 ms, 3.1 ms | 7.1 ms, 6.8 ms | 3.8 ms, 4.1 ms |
-| The same with the robot's shadow free (`OccupiedExceptRobotShadow`) | 6.9 ms, 6.6 ms | 3.3 ms, 3.3 ms | 7.9 ms, 7.7 ms | 4.7 ms, 4.6 ms |
-| The same with what no image observed solid within 5 cm of an occupied voxel (`Band(0.05)`) | 11.6 ms, 11.6 ms | 6.0 ms, 6.2 ms | 15.8 ms, 15.1 ms | 9.1 ms, 9.0 ms |
+| A 1 cm grid of the image, no mask (3.1M and 2.1M points) | 12.1 ms, 8.7 ms | 5.2 ms, 4.0 ms | 19.8 ms, 11.9 ms | 6.7 ms, 5.3 ms |
+| With a mask of 61 spheres (2.3M and 1.6M points) | 9.9 ms, 7.4 ms | 4.6 ms, 3.8 ms | 14.5 ms, 10.8 ms | 5.4 ms, 4.9 ms |
+| With a mask of 573 spheres | 10.1 ms, 7.6 ms | 4.7 ms, 4.0 ms | 14.6 ms, 10.8 ms | 6.1 ms, 5.0 ms |
+| The 1.8M-voxel map's grid (`grid`), what no image observed free (`Occlusion::Free`) | 5.4 ms, 5.5 ms | 3.2 ms, 3.0 ms | 7.1 ms, 6.8 ms | 3.8 ms, 4.1 ms |
+| The same with the robot's shadow free (`OccupiedExceptRobotShadow`) | 6.8 ms, 6.5 ms | 3.3 ms, 3.1 ms | 7.9 ms, 7.7 ms | 4.7 ms, 4.6 ms |
+| The same with what no image observed solid within 5 cm of an occupied voxel (`Band(0.05)`) | 11.3 ms, 11.5 ms | 6.0 ms, 6.0 ms | 15.8 ms, 15.1 ms | 9.1 ms, 9.0 ms |
 
 The map's own calls run on the calling thread, and a part's grid on the device. For the 1.8M-voxel map on the M4 Pro, from the same runs on either device:
 
@@ -300,11 +300,11 @@ The map's own calls run on the calling thread, and a part's grid on the device. 
 
 ## Spheres for what a hand holds
 
-`examples/held_spheres.rs` holds four round shapes within the default 5 mm with the default 64 spheres to spend and with 256 (`Held::spheres`), and within 2 and 1 mm with 64, on the M4 Pro: how many spheres each takes, how far they reach past it, and how long covering it took (one call, the least of six runs of the one-unit build, at a load of 8.0 to 9.9).
+`examples/held_spheres.rs` holds four round shapes within the default 5 mm with the default 64 spheres to spend and with 256 (`Held::spheres`), and within 2 and 1 mm with 64, on the M4 Pro: how many spheres each takes, how far they reach past it, and how long covering it took (one call, the least of twelve runs of the one-unit build in two sessions on 2026-11-26, one on battery and one on the charger, which agreed, at a load of 5.3 to 10.8).
 
 | | Within | Spheres | Past its side | Past its ends | Time |
 |---|---|---|---|---|---|
-| A plate 13.9 cm across, 18 mm thick | 5 mm, 64 or 256 to spend | 75, its tiles' layer | 5.0 mm | 5.0 mm | 2.6 to 3.0 ms |
+| A plate 13.9 cm across, 18 mm thick | 5 mm, 64 or 256 to spend | 75, its tiles' layer | 5.0 mm | 5.0 mm | 2.5 to 3.0 ms |
 | | 2 mm | 364, its tiles' rings | 2.0 mm | 2.0 mm | 9.9 ms |
 | | 1 mm | 1,017, its tiles' rings | 1.0 mm | 1.0 mm | 21 ms |
 | A bowl 11.2 cm across, 5.1 cm deep | 5 mm, 64 or 256 to spend | 70, its tiles' rings | 5.0 mm | 5.0 mm | 1.8 to 2.0 ms |
