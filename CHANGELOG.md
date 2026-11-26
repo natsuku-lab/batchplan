@@ -36,8 +36,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   hand and its straight way in clear of every point. Each `Grasp` gives the hand's `pose`, its two
   `contacts` and its `opening`. `examples/surface_grasps.rs` shows it; Python binds neither
   surfaces nor `grasps_on` yet. `SurfaceGraspOptions`:
-  - `approach` (10 cm), `floor`, `overlap` (1 cm) and `contact` (5 mm): the straight way in, a
-    height the hand stays over, how much of the fingers stays on the patches, a patch's radius.
+  - `turns` (8), `approach` (10 cm), `floor`, `overlap` (1 cm) and `contact` (5 mm): the directions
+    each pair of patches is grasped from, the straight way in, a height the hand stays over, how
+    much of the fingers stays on the patches, a patch's radius.
   - `shell` (by default `Some(f32::INFINITY)`, a wall as thick as the gripper grasps; `None` turns
     it off): a wall seen from one side only, as a bowl's rim from above, is closed on across it to
     where the cameras saw past it, and the grasp is `one_sided`. A cloud fused from several views
@@ -188,16 +189,16 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   gripper's `tip`, where it was 0: a literal that sets `floor` and relied on a tip of 0 sets
   `tip: Some(0.0)`. In Python, `grasps(object, gripper, options=None)` takes a
   `ShapeGraspOptions`, and `GraspOptions` is gone.
-- **Breaking:** what a robot holds (`Robot::attach`, `Held`) is covered within its `tolerance`
-  (5 mm by default) whatever the budget, which caps the robot's own spheres only, and its spheres
-  hold all of it. So more of
-  a tight passage reads as a contact, and clearances and contacts measured to a held object
-  differ. A box, a cylinder, a capsule or a ball is covered directly, without fitting; any other
-  shape is fitted, once per object and device. The caller sets the cover: `Held::spheres`, and
-  `TaskOptions::held_spheres` for what a pick or a moving turn carries, which the pick's
-  `TaskPlan::held` hands to the place; a smaller tolerance fits closer, with more spheres. In
-  Python, `Held(..., spheres=SphereOptions(tolerance=0.002))`. `examples/held_spheres.rs` gives
-  the counts ([runs](docs/benchmarks.md#spheres-for-what-a-hand-holds)).
+- **Breaking:** what a robot holds (`Robot::attach`, `Held`) is covered within its `tolerance` (5 mm
+  by default) whatever the budget, which caps the robot's own spheres only, and its spheres hold all
+  of it. So more of a tight passage reads as a contact, and clearances and contacts measured to a
+  held object differ. A box, a cylinder, a capsule or a ball is covered directly where its tiles
+  reach the tolerance; any other shape is fitted, once per object and device. The caller sets the
+  cover: `Held::spheres`, and `TaskOptions::held_spheres` for what a pick or a moving turn carries,
+  which the pick's `TaskPlan::held` hands to the place; a smaller tolerance fits closer, with more
+  spheres. In Python, `Held(..., spheres=SphereOptions(tolerance=0.002))`.
+  `examples/held_spheres.rs` gives the counts
+  ([runs](docs/benchmarks.md#spheres-for-what-a-hand-holds)).
 - **Breaking:** a robot mask judges each reading by where its point lies:
   `image.robot_mask(&robot, &q, padding, &holding)` flags a reading whose point is inside a
   collision sphere grown by the padding, and `RobotMask::on_robot`, a flag per pixel, replaces
@@ -258,14 +259,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   plans with more than one candidate for each, could overflow the stack of one of the device's
   threads and abort the process. `place`, `pick`, `handover` and problems with a `holding` now
   keep no more holds in hand than the device has threads.
-- A mesh of more than one closed shell is inside where its surface winds around a point, for
-  distance grids (`SdfGrid::from_mesh`, and scene meshes `World::load` reads), sphere fitting and
-  `Robot::qualify`: a table's top no longer reads free above the end of a leg that runs up into
-  it, a shell facing the other way no longer reads hollow, and a fit no longer puts spheres
+- **Breaking:** a mesh of more than one closed shell is inside where its surface winds around a
+  point, for distance grids (`SdfGrid::from_mesh`, and scene meshes `World::load` reads), sphere
+  fitting and `Robot::qualify`: a table's top no longer reads free above the end of a leg that runs
+  up into it, a shell facing the other way no longer reads hollow, and a fit no longer puts spheres
   outside the link around a shell facing inward. Shells that overlap are their union, and a shell
   apart from the others is solid whichever way it faces. Grids of a single shell are bit for bit
-  what they were, and every robot in this repository is fitted as before; a robot with such a
-  mesh is fitted differently, and clearances and contacts measured to it differ.
+  what they were, and every robot in this repository is fitted as before; a robot with such a mesh
+  is fitted differently, and clearances and contacts measured to it differ.
 
 ## [0.11.0] - 2026-11-14
 

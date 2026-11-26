@@ -6,8 +6,6 @@ What the test suite pins down, so you know what to rely on.
 
 ## Devices agree
 
-Tests: `tests/gpu.rs`, `tests/device.rs`.
-
 - **Clearances:** over 20,000 configurations, GPU and CPU clearances agree to 3e-7 m, and gradients to 3e-4 relative.
 - **IK:** GPU and CPU IK agree on all 4,096 seeds. On each, an IK step moves a seed by more than 1e-6 rad or leaves it exactly at rest.
 - **Plans:** every GPU plan reported valid is re-checked on the CPU at 4× denser interpolation, and none penetrates.
@@ -17,8 +15,6 @@ Tests: `tests/gpu.rs`, `tests/device.rs`.
 
 ## Collision
 
-Tests: `tests/cpu.rs`, `tests/touch.rs`, `tests/meshes.rs`, `tests/gpu.rs`, `tests/device.rs`; the SIMD lanes' in `src/lanes.rs`.
-
 - **Obstacle distances:** every obstacle kind returns unit gradients that match finite differences, stepping back along the gradient lands on the surface, and cylinder and capsule distances match closed forms. The GPU agrees with the CPU for each kind. Collision gradients match finite differences.
 - **SIMD lanes:** lanes checking eight configurations at a time give the same world and self clearances as the scalar twin of the GPU kernels, to 2e-5 m, over 3,000 random configurations against every obstacle kind, on the Panda (fingers locked or sliding), the Panda holding a box, MuJoCo Menagerie's 2F-85 (quartic mimic joints) and the UR5e. Runs of worlds cross the groups of eight. Their yes-or-no check (`keeps`) of a 1 cm margin, and of links kept 1 cm apart as splines keep them, agrees with the scalar twin's exact clearances away from the boundary, at the CPU's best SIMD level and at the baseline.
 - **Allowed contacts:** on every device, a bar through the open fingers collides until the world lets the hand touch it; letting one finger touch it leaves the other colliding, and links the world does not name still collide. IK solves a grasp inside an object, and a plan reaches it, only with the touch, and `MeshModel` skips the same pairs. A held box rests on a table only on the holder's device, where the world may name it. Unknown links and obstacle indices are input errors on every device and in `MeshModel`. The lanes match the scalar twin on worlds with touches, and the GPU matches the CPU with touch sets that span several words. Worlds uploaded for the robot without the objects it holds give the robot holding them the same clearances as worlds uploaded for it. Removing an obstacle takes its touches with it and renumbers the rest.
@@ -27,8 +23,6 @@ Tests: `tests/cpu.rs`, `tests/touch.rs`, `tests/meshes.rs`, `tests/gpu.rs`, `tes
 
 ## Distance grids
 
-Tests: `tests/sdf.rs`.
-
 - **Gradients:** gradients match finite differences inside the grid and beyond its box, away from cell faces; so do collision gradients through a grid.
 - **Devices:** the GPU agrees with the CPU to 3e-7 m (Metal and RADV), including two grids in one world, one of them shared with another world and stored after a grid with an odd number of points.
 - **Mesh and point grids:** mesh grids never read farther than the true distance and at most a voxel diagonal nearer, outside the solid and inside a single shell; inside a solid of several shells they read solid, as deep as the nearest face. Point grids never read beyond their solid voxels. Open and non-manifold meshes are refused.
@@ -36,8 +30,6 @@ Tests: `tests/sdf.rs`.
 - **Ruled out by its box:** a grid is ruled out by its box for a link far from it. Over 6,000 configurations around a grid whose ball is larger than its box and a solid one turned by a quaternion that is not unit, clearances and costs match checking every sphere, on every device, and the least value on a grid's faces is found on every face.
 
 ## Planning
-
-Tests: `tests/rrt.rs`, `tests/device.rs`, `tests/gpu.rs`, `tests/hands.rs`.
 
 - **Trajectory optimization:** the first L-BFGS step has no history, so it is steepest descent. Its direction, scaled to its largest entry, matches finite differences of the smoothness cost and of the full cost (smoothness plus collision sampled along the spline) on every device. On reaches whose straight line a ball blocks, GPU and CPU step directions agree to 5e-5 at the first step and to 4e-4 at the fourth, and both devices lower the full trajectory cost alike. The two-loop recursion equals an explicitly built BFGS inverse Hessian, and a line search that finds nothing cheaper resets the history.
 - **Optimization seeds:** with no steps taken, a problem's first two seeds are its searched spline and the straight line to its goal. A problem searched to its straight line is not optimized, and a budget spent while searching starts no optimization. Plans without seeds do not depend on the optimization's weights.
@@ -52,8 +44,6 @@ Tests: `tests/rrt.rs`, `tests/device.rs`, `tests/gpu.rs`, `tests/hands.rs`.
 
 ## Constraints
 
-Tests: `tests/constraints.rs`, `tests/join.rs`, `tests/live.rs`.
-
 - **Kept along the path:** a gripper carried upright past a pillar, within 5°, keeps the bound at 1 kHz along every valid path, searched or optimized, and is collision-free, on the CPU and the GPU. A hand kept in a box, its tilt and its twist bounded, keeps all three. An arm carries upright while the other arm's joints keep their values bit for bit. Every timed constrained path passes `Trajectory::check`, and a spline fitted through a path that starts at a joint's limit keeps its control points within the joint's range.
 - **Relative to another hand:** two arms carry a tray level over a block, the right hand pinned in the left hand's frame: every path keeps the right hand within 2 mm and 0.02 rad of its place at 1 kHz and the left within 5° of straight down. The carries average within 1.14 times the unconstrained paths' length. A goal 1.5 mm off its place plans; one 4 mm off is an input error.
 - **Seeds and splines:** optimized seeds that break their constraints are invalid, and every seed still valid keeps them. Splines of 10 control points too short to follow a 1° bound are repaired within it, and every reach under 4 rad plans with 10. With 7 control points, one free, every two-arm tray carry plans with more, keeping its bounds at 1 kHz and collision-free, while its optimized seeds keep 7. A problem whose spline grew is optimized even within 2% of its straight line.
@@ -63,8 +53,6 @@ Tests: `tests/constraints.rs`, `tests/join.rs`, `tests/live.rs`.
 - **Inside:** the lanes judge constraints exactly as the scalar test does on states that keep and break each kind of bound, in the world and relative to another hand, at the best SIMD level and the baseline. Each projection row changes at the rate the Jacobians of both hands give, and the optimizer's cost at the rate of its gradient. The GPU's optimization steps match the CPU's on constrained problems within 1e-3 of their largest entry at the first step and 1e-2 at the second, and the two-arm carries within 1e-2 at the fourth. On a hand pinned in the other's frame, a spline fitted through waypoints whose edges leave the bounds keeps them at every free control point's knot, and a shortcut's walk keeps them at every hop's middle.
 
 ## Trajectories and timing
-
-Tests: `tests/trajectory.rs`, `tests/live.rs`, `tests/device.rs`.
 
 - **Limits:** planned trajectories stay within velocity, acceleration and jerk limits along their whole length, reach the binding limit, and start and end exactly at rest. Retiming keeps the endpoints. The analytic velocity and acceleration match finite differences. A trajectory starts and ends at its first and last control points, exactly.
 - **`at` and `check`:** `at` makes no allocations. `check` refuses a NaN, running too fast, a jerk spike, a moving start, leaving a joint range and the wrong joint count. It measures a joint's range on the curve itself, span by span, so a moving start's first control point, which lies behind the start, does not count.
@@ -76,8 +64,6 @@ Tests: `tests/trajectory.rs`, `tests/live.rs`, `tests/device.rs`.
 
 ## Why requests fail
 
-Tests: `tests/failures.rs`, `tests/device.rs`, `tests/held.rs`.
-
 - **Contacts:** `Device::contacts` lists what 2,000 random Panda configurations come within 5 cm of, on every device: its nearest world and self contacts equal `evaluate`'s exact clearances, nearest first, and both devices list the same. A table the world lets every link touch, and a table under the base, which no joint moves, name no contact. A configuration that is not finite is an input error to `evaluate` and to `contacts`. `contacts_holding` lists, for configurations holding nothing, a cube and a bar in one call, what a device built by attaching each object lists, in the items' order, nothing where the world lets the held object rest, and what `contacts` lists where nothing is held. Holds that are not one per item, a hold the robot cannot take and a configuration that is not finite are input errors naming their item.
 - **Plans:** on every device, a plan whose start is boxed around the hand fails as `StartCollides`, and one whose goal is, as `GoalCollides`, each naming `panda_hand` in the box; a free reach has no failure. A search that may not sample fails as `NoPath` and nothing else, no time at all as `OutOfTime`, and a slowed Panda moving too fast toward a ball to brake as `NoSpline`.
 - **IK:** `ik::failures` calls a pose 2 m away `Unreachable` and a pose boxed around the hand `Collides`, naming the hand. It solves again without the push away from obstacles before calling a target out of reach: among 200 targets with balls in the hand's way, more than five are reached only that way.
@@ -85,16 +71,12 @@ Tests: `tests/failures.rs`, `tests/device.rs`, `tests/held.rs`.
 
 ## Tool paths
 
-Tests: `tests/tool_path.rs`.
-
 - **Precision:** on every device, a 10 cm straight move stays within 1 mm and 0.01 rad of the line, and ends at its pose. A turn in place keeps the hand where it is. An L-shaped path keeps its precision through the corner at 5 mm steps and at 5 cm ones. CPU and GPU devices return the same motions.
 - **Stops:** a slab across the way stops the motion between a tenth and three fifths of the way down, as a `Collision`, and what it returns keeps clear of the slab. A pose out of reach stops it as `Unreachable` after a straight stretch. A move across the UR5e's wrist singularity stops short of it with 300 IK iterations and passes it with 1,000, the hand on the line throughout. An approach that ends around a bar succeeds only where the hand may touch it.
 - **Limits:** from 400 starts near the Panda's joint limits, every motion keeps the limits along its whole spline. In 200 random pours (up to a radian of turn over half a millimetre to six), the motions stop on the way in at most one in fifty and keep the precision. A start past the limits, malformed paths and malformed options are input errors.
 - **Screws (`Screw::path`):** a frame 10 cm from an upright line, carried a quarter turn, ends where trigonometry puts it; every waypoint keeps its distance from the line and its height, and the straight moves between them sag from the circle by at most the precision. With a pitch, each waypoint is as far along the line as its share of the turn. A Panda's hand following the waypoints 10 cm from a hinge keeps within 1 mm of the arc on every device. A screw that is not finite or not unit, an angle that is not finite, a precision not above 0, and a turn that would take more waypoints than can be held are input errors that name the values.
 
 ## Tasks
-
-Tests: `tests/task.rs`, `tests/turn.rs`, `tests/held.rs`, `tests/handover.rs`.
 
 - **Picks:** on every device, a post where a finger of either grasp from above closing along the box goes stops both, and the third gets through alone: its motions joined and within the limits, its approach ending at the grasp and its departure lifted by `lift`. Without the post all three come back, quickest first; each alone moves exactly alike. A box as wide as the fingers open is picked only because they may touch it, and a grasp set deeper than the fingers reach below the palm is refused.
 - **Where a task stops:** each step is shown stopping a task, with its reason: a slab where the palm would be stops every grasp at `Reach` as colliding, a box beyond reach at `Reach` as out of reach, a block over the box the moves in (a move in shortened by `min_fraction` gets through), a lid just over the box and a table that is not its support the lifts, and a start inside a box `Start`. The message counts each. The contacts name each obstacle as the task's world numbers it, and a place backing off from a box it holds names the box after the world's obstacles.
@@ -115,8 +97,6 @@ Tests: `tests/task.rs`, `tests/turn.rs`, `tests/held.rs`, `tests/handover.rs`.
 
 ## Grasps
 
-Tests: `tests/surface.rs`, `tests/task.rs`, `tests/robot.rs`.
-
 - **Grasps of shapes:** grasps of a box, ball, cylinder and capsule lie `depth` inside the surface, face into it and close on no more than the gripper's capacity; a distance grid has none. Over a floor, the open fingers of a gripper that grasps less than it opens stand its loaded gap apart, the lower finger kept over the floor at that spread. `place_poses` turns a box onto itself 2 or 4 ways and a round object `turns`. Malformed tasks and options, starts past the limits, rotations that are not unit and a place on a device that already holds the object are input errors.
 - **Over a floor:** of a 2.5 cm cube with a floor and fingertips 12 mm past the frame, the four grasps from above hold it as deep as keeps the fingertips at the floor and the eight from the sides close level at the full depth; none closes upright, whose lower open finger would be in the table, and none comes from below. A floor over the cube leaves none and says so, and a box wider than the opening says how wide. A Panda picks a cube narrower than twice its fingertips' reach only with grasps kept off the table. A bar over a plate, as a drawer's handle, is gripped tilted about it, held as far out as keeps the lower open finger over the floor, and every such grasp picks it on each device.
 - **The gripper (`Robot::gripper`):** the Panda's jaws slide where the calibrated stroke moves both fingers' spheres half the change in gap each, and not with one finger closed, past a stop, with a revolving mimic, a skewed axis or a torso lock that moves. A capacity past the loaded gap, a hand the robot lacks and a pad friction that is not finite and positive are refused. Openings turn into finger joints and back between the closed and the loaded gap, exact at both ends, for the Panda relocked as a TIAGo's hand and for a hinged jaw as the SO-101's, which does not slide and whose narrowing is refused by name. `grasps_on` takes the widths and the friction from the gripper, whatever the options say.
@@ -130,8 +110,6 @@ Tests: `tests/surface.rs`, `tests/task.rs`, `tests/robot.rs`.
 
 ## Rests and falls
 
-Tests: `tests/rest.rs`.
-
 - **Rests (`rests_on`):** on supports whose rests are known, rests stand where the rule says and nowhere else. A box rests on a table at each of the eight turns, clear of what is not the support, and hangs past an edge only as far as its weight stays over what it stands on with the tipping asked for; a post too narrow holds nothing. A basket holds a can inside its walls, and on its rim only where two walls meet. A can laid along two bars rolls in between and rests touching both, and one laid across a slope rolls down to a lip and rests against it. A tile on a slope rests short of the friction's angle less the tipping and not past it, with exact normals, noisy ones and a board read by a rendered camera. A ball rests on a rim under it and on three posts, and rolls off half a rim and off a table.
 - **Balance:** every rest on the racks holds by a balance of forces and torques written apart from the library's. The closed form for one flat face agrees with the general balance, and a flat bottom on a top measured in strips tips as far as on one face. The first rests are the steadiest and spread over the support. `place` sets down what was found on a rendered scene.
 - **Seen from above (`seen_from_above_holds`, on by default):** a support seen only from below holds nothing up. A board with a lip read at a slant by a camera above it, noisy enough that some of its fitted normals face down, holds the box in far more places with the option on and where it was seen from known than with the option off or without where it was seen from.
@@ -143,8 +121,6 @@ Tests: `tests/rest.rs`.
 - **In MuJoCo:** `scripts/validate_rests.py` lets go of each rest of `examples/surface_rests.rs` in MuJoCo, on the support as a height field: 250 of 250 tried on the table, 250 of 250 in the basket, 60 of 60 cans between the bars, 148 of 150 on the rack and 224 of 224 upright bottles against the lip with a top stay; those on the rack that move lie at the very end of the support. Of the 822 trays across the bars, 249 of 250 tried stay.
 
 ## Perception
-
-Tests: `tests/sdf.rs`.
 
 - **Grids from depth:** on every device, depth images from an 8×8 time-of-flight array and from a 640×480 camera both reproduce the table under them, follow each occlusion rule (below the table: solid, free, or solid within a band and free past it), and leave unobserved space free. The GPU builds exactly the CPU's grids from point clouds and maps under every occlusion rule, and classifies a 640×480 image's voxels and fuses it into a map with at most 0.05% of voxels differing. A depth that is zero, negative or not finite is no reading, and a surface reads the same on one thread and on many.
 - **Maps:** a fused map keeps the table, holds a ball seen through twice and clears it the third time, leaves space never observed to the rule given, and takes no hits from readings beyond its edge.
@@ -160,8 +136,6 @@ Tests: `tests/sdf.rs`.
 - **What a fuse visits:** a fuse on the CPU visits only the voxels it can change: a row's span holds every voxel whose middle projects into the image, for cameras inside, beside and outside a map, images from one pixel to 640×480, focal lengths from a fifth of their width to three times it, and a map 10 km from the origin whose voxels are finer than a float's spacing there. Every voxel more than a voxel outside the view keeps its state unless the mask frees it, and voxels holding a reading whose middles project past the image's edge take their hits.
 
 ## Robots
-
-Tests: `tests/robot.rs`, `tests/attach.rs`, `tests/touch.rs`, `tests/mjcf.rs`, `tests/usd.rs`, `tests/cpu.rs`.
 
 - **Kinematics:** URDF forward kinematics matches Franka's published DH parameters to 1e-5. The 2F-85's link poses match an independent composition of its URDF with mimic joints applied; its collision gradient matches finite differences, and the GPU agrees with the CPU. Mimic limits intersect into the leader's range and velocity.
 - **Loading:** collision-model files round-trip, SRDF pairs stop being checked, and `package://` paths resolve. A binary STL whose header starts with "solid", as CAD exporters write it, loads as its ASCII twin does. The UR5e, SO-101 and Panda (with fitted spheres) each plan 12 of 12 tabletop motions on the CPU and the GPU. A Panda with fitted spheres, whose base spheres reach into the table it stands on, is collision-free on it and plans on every device, while a pin through its elbow still collides.
@@ -179,15 +153,11 @@ Tests: `tests/robot.rs`, `tests/attach.rs`, `tests/touch.rs`, `tests/mjcf.rs`, `
 
 ## Demonstrations and export
 
-Tests: `tests/pick_place.rs`, `tests/export.rs`.
-
 - **Pick-and-place:** on each device, 6 of 6 tabletop tasks succeed. The gripper closes once, across the box's narrower side, and moves gradually. The box is held at the grasp point without slipping and set down within 3 mm of the place pose. The arm never touches the scene, the lifted box clears it, and velocities agree with positions. A ledge just over the box's far end stops its lift, a ledge over where its far end goes stops the lowering, and a low slab where it would stand stops the release, each at its step through `pick` and `place`. Boxes the wrist cannot set down as asked are set down turned half way round, each episode's goal and box where its own task says. Over 64 tasks, the joints travel under 13.5 rad in the median episode.
 - **Handovers:** on each device, at least 6 of 8 handovers between two Pandas succeed, the giver reaching past a post. Each gripper closes once and opens once, giver then taker. The block rides without slipping in the giver's hand and then the taker's, and ends within 3 mm of its place. The right arm waits until the left has the block, the left waits once the block is set down, and no arm touches the scene or the other. Exported, two hands lay the state out arm by arm, each arm's gripper named after it; `meta/batchplan.json` describes the parts and hands, and `gripper.npy` holds both grippers.
 - **Exporters:** the `.npy` export round-trips trajectories, padding, labels, grippers, carried poses and tasks, and the LeRobot export writes consistent v3.0 metadata. A 1,500-episode export with 1 MB files spreads frames and episode metadata over several files; each episode row names its own file and the file holding its frames, and the statistics match the frames. Tasks are indexed per frame, the gripper is the last state dimension, and a carried box moves in the environment state frame by frame. Exports write each grid once, and LeRobot's environment state describes a grid by its box. Both refuse to overwrite an existing dataset.
 
 ## Embedding
-
-Tests: `tests/threads.rs`, `tests/allocations.rs`, `tests/budget.rs`, `tests/gpu.rs`.
 
 - **Threads:** a one-thread CPU device starts exactly one thread and no others while it plans. With rayon's global pool kept busy for a second, the GPU device plans at once, on threads of its own.
 - **Allocations:** `plan`, `rrt::connect` and `shortcut::shortcut` build each search on the thread that runs it: per problem, the calling thread allocates 3, 4 and 1 times, for the results' copies of the problems.
