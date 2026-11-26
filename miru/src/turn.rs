@@ -1,9 +1,7 @@
 //! Grips to turn a control by, proposed from three sources and ranked by what the retained
 //! endpoints show of each closure.
 
-use std::ops::RangeInclusive;
-
-use batchplan::{Device, GraspOptions, Pose, Screw};
+use batchplan::{Device, GraspOptions, Gripper, Pose, Screw};
 use glam::Vec3;
 
 use crate::bar;
@@ -26,8 +24,7 @@ const ALONG: f32 = 0.99;
 pub enum GripSource {
     /// Across a raised bar over a measured disk ([`Kept::bar_on_disk`]).
     Bar,
-    /// A grasp of the object's measured surface ([`Kept::surface`],
-    /// `batchplan::grasps_on_with_capacity`).
+    /// A grasp of the object's measured surface ([`Kept::surface`], `batchplan::grasps_on`).
     Surface,
     /// A grasp from above of the object's fitted shape (`batchplan::grasps`).
     Shape,
@@ -39,8 +36,8 @@ pub enum GripSource {
 pub struct TurnGrip {
     /// The hand's IK frame, in the observation's frame.
     pub pose: Pose,
-    /// The aperture the hand is locked at as it approaches (meters): `GraspOptions::opening`
-    /// for the hand as loaded, fully open, or a surface grasp's own `Grasp::opening`.
+    /// The aperture the hand is locked at as it approaches (meters): the gripper's loaded gap,
+    /// fully open, or a surface grasp's own `Grasp::opening`.
     pub opening: f32,
     /// What proposed it.
     pub source: GripSource,
@@ -74,64 +71,50 @@ pub struct TurnGrips {
 
 impl Kept {
     /// Proposes hand poses to turn object `id` about the axis along `up`, the control's outward
-    /// unit normal, with hand `hand` of `device`'s robot, in groups to plan in order:
+    /// unit normal, with `gripper`, a hand of `device`'s robot, in groups to plan in order:
     ///
     /// 1. **Bar**: the poses [`Kept::bar_on_disk`] gives along `up`, in its order, fully open;
     ///    `enough: Some(1)`.
-    /// 2. **Shape, both sides**: `batchplan::grasps` of the object's fitted shape with `options`,
-    ///    so closing across no more than fully open, those whose z axis points along `-up` to
-    ///    within about 8 degrees: none where the shape's vertical is off `up` by more, as for a
-    ///    control on a slanted panel, whose shape is fitted upright. Of these, those whose closure
-    ///    shows [`ClosureEvidence::BothSides`]. Fully open; `enough: None`.
-    /// 3. **The rest**: the grasps of the object's measured surface
-    ///    (`batchplan::grasps_on_with_capacity` with `capacity`), ordered by the moment they
-    ///    exert about the screw (`GraspOptions::order_for_turn`), those showing `BothSides` first,
-    ///    each at its own opening; then the grasps of group 2's shape whose closure is
+    /// 2. **Shape, both sides**: `batchplan::grasps` of the object's fitted shape with `options`
+    ///    opening at the capacity, so closing across no more, those whose z axis points along
+    ///    `-up` to within about 8 degrees: none where the shape's vertical is off `up` by more, as
+    ///    for a control on a slanted panel, whose shape is fitted upright. Of these, those whose
+    ///    closure shows [`ClosureEvidence::BothSides`]. Fully open; `enough: None`.
+    /// 3. **The rest**: the grasps of the object's measured surface (`batchplan::grasps_on` with
+    ///    `gripper`), ordered by the moment they exert about the screw with the gripper's friction
+    ///    (`GraspOptions::order_for_turn`), those showing `BothSides` first, each at its own
+    ///    opening; then the grasps of group 2's shape whose closure is
     ///    [`ClosureEvidence::Incomplete`], fully open. `enough: Some(1)`.
     ///
-    /// Fully open is `options.opening`, the width a surface grasp gives for the hand as loaded.
-    /// Every proposal's evidence is [`Kept::observed_closures`]'s at that pose, with these gaps
-    /// and options: what the latest endpoints show of an open approach and a symmetric closure,
-    /// nothing of hidden material, contact normals or whether the control turns about the axis.
-    /// `gaps` are the calibrated closed and loaded widths, as for [`Kept::bar_on_disk`]; `options`
-    /// is what those calls take, its `depth` the insertion below a bar's crest and in the
-    /// shape's grasps, which grasps of the surface do not read. Plan every motion against the
-    /// current world and guard it in execution: a grip here is a proposal.
+    /// Fully open is the gripper's loaded gap; what a grasp closes across is at most its capacity.
+    /// `options.opening` and `options.friction` are not read. Every proposal's evidence is
+    /// [`Kept::observed_closures`]'s at that pose, with this gripper and these options: what the
+    /// latest endpoints show of an open approach and a symmetric closure, nothing of hidden
+    /// material, contact normals or whether the control turns about the axis. `options` is what
+    /// those calls take, its `depth` the insertion below a bar's crest and in the shape's grasps,
+    /// which grasps of the surface do not read. Plan every motion against the current world and
+    /// guard it in execution: a grip here is a proposal.
     ///
-    /// None where no label of the look names the object. Out-of-range input is an
-    /// `Error::Input` naming the value.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the object, the calibrated hand and the turn's axis, as the calls it composes take them"
-    )]
+    /// None where no label of the look names the object. Out-of-range input, a gripper whose jaws
+    /// do not slide among it, is an `Error::Input` naming the value.
     pub fn turn_grips(
         &self,
         device: &Device,
         id: u32,
-        hand: usize,
-        gaps: RangeInclusive<f32>,
-        capacity: f32,
+        gripper: &Gripper,
         up: Vec3,
         options: &GraspOptions,
     ) -> Result<Option<TurnGrips>> {
-        let robot = device.robot();
+        let (robot, hand) = (device.robot(), gripper.hand());
         ensure_input!(
             hand < robot.hands(),
             "invalid hand {hand} for {} hands",
             robot.hands()
         );
-        let (closed, loaded) = (*gaps.start(), *gaps.end());
         ensure_input!(
-            closed >= 0.0 && closed < loaded && loaded.is_finite(),
-            "invalid closed and loaded widths {closed} and {loaded}"
-        );
-        ensure_input!(
-            capacity.is_finite()
-                && capacity > 0.0
-                && capacity <= options.opening
-                && options.opening <= loaded,
-            "invalid capacity {capacity} for an opening of {} and a loaded width of {loaded}",
-            options.opening
+            gripper.sliding(),
+            "hand {hand}'s gripper does not slide (Gripper::sliding): the closure is checked \
+             with each jaw sliding along the hand's y axis"
         );
         ensure_input!(up.is_normalized(), "invalid up direction {up:?}");
         ensure_input!(
@@ -165,36 +148,36 @@ impl Kept {
             return Ok(None);
         };
         let bar = match self.bar_resolution(label) {
-            Some(resolution) => {
-                bar::measured(robot, &surface, resolution, up, hand, gaps.clone(), options)?
-            }
+            Some(resolution) => bar::measured(robot, &surface, resolution, up, gripper, options)?,
             None => None,
         };
         let shape = scene.objects[index].shape.obstacle();
         let placed = shape.pose();
         let screw = Screw::about(bar.as_ref().map_or(placed.position, |bar| bar.center), up);
+        let open = gripper.opening();
+        let within_capacity = GraspOptions {
+            opening: gripper.capacity(),
+            ..*options
+        };
         // With its options checked, `grasps` refuses only a shape no grasp fits.
-        let shaped: Vec<Pose> = batchplan::grasps(&shape, options)
+        let shaped: Vec<Pose> = batchplan::grasps(&shape, &within_capacity)
             .unwrap_or_default()
             .into_iter()
             .map(|grasp| placed.mul_pose(grasp))
             .filter(|pose| (pose.rotation * Vec3::Z).dot(up) < -ALONG)
             .collect();
-        let found = batchplan::grasps_on_with_capacity(
-            device,
-            hand,
-            std::slice::from_ref(&surface),
-            options,
-            capacity,
-        )?;
+        let found = batchplan::grasps_on(device, gripper, std::slice::from_ref(&surface), options)?;
         let mut seen = found.into_iter().next().unwrap_or_default();
-        options.order_for_turn(&mut seen, Some(screw));
+        let pads = GraspOptions {
+            friction: gripper.friction(),
+            ..*options
+        };
+        pads.order_for_turn(&mut seen, Some(screw));
         let bars = bar.map(|bar| bar.grasps).unwrap_or_default();
         let poses: Vec<Pose> = (bars.iter().chain(&shaped).copied())
             .chain(seen.iter().map(|grasp| grasp.pose))
             .collect();
-        let spheres = robot.hand_spheres(hand);
-        let evidence = self.closures(device, label, &spheres, gaps, &poses, options)?;
+        let evidence = self.closures(device, label, gripper, &poses, options)?;
         let (bar_evidence, evidence) = evidence.split_at(bars.len());
         let (shape_evidence, seen_evidence) = evidence.split_at(shaped.len());
         let grip = |pose, opening, source, evidence| TurnGrip {
@@ -203,7 +186,6 @@ impl Kept {
             source,
             evidence,
         };
-        let open = options.opening;
         let opposed = (bars.iter().zip(bar_evidence))
             .map(|(&pose, &evidence)| grip(pose, open, GripSource::Bar, evidence))
             .collect();

@@ -1,9 +1,8 @@
 //! A raised bar over a measured circular face.
 
 use std::collections::HashMap;
-use std::ops::RangeInclusive;
 
-use batchplan::{Device, GraspOptions, Pose, Robot, Surface};
+use batchplan::{Device, GraspOptions, Gripper, Pose, Robot, Surface};
 use glam::{DMat3, DVec3, Mat3, Quat, Vec2, Vec3};
 
 use crate::closure::Sweep;
@@ -348,39 +347,32 @@ fn circle(points: &[Vec2], resolution: f32) -> Option<(Vec2, f32)> {
 
 impl Kept {
     /// Measures a bar over a disk and checks its proposed poses against this look's depth.
-    /// Supply the calibrated closed through loaded gaps qualified by `Robot::parallel_jaw_opening`.
-    /// `options.opening` limits the graspable width. `depth` places the IK frame below the crest,
-    /// `overlap` bounds fingertip insertion, and `approach` and `floor` bound the approach.
-    /// The returned poses use the fully open hand. Both closing sweeps must encounter target
-    /// readings above the disk and clear other measured material. Plan every motion against the
-    /// current world. A circular face supplies a centre hypothesis for a centred control.
-    /// Stationary bars on circular faces have exactly the same appearance.
+    /// `gripper` is the hand, from `Robot::gripper` for `device`'s robot: it closes from its
+    /// loaded gap to its closed one, its jaws sliding (a gripper whose jaws do not is an
+    /// `Error::Input`), and its capacity limits the graspable width. `depth` places
+    /// the IK frame below the crest, `overlap` bounds fingertip insertion, and `approach` and
+    /// `floor` bound the approach. The returned poses use the fully open hand. Both closing
+    /// sweeps must encounter target readings above the disk and clear other measured material.
+    /// Plan every motion against the current world. A circular face supplies a centre hypothesis
+    /// for a centred control. Stationary bars on circular faces have exactly the same appearance.
     pub fn bar_on_disk(
         &self,
         device: &Device,
         id: u32,
         outward: Vec3,
-        hand: usize,
-        gaps: RangeInclusive<f32>,
+        gripper: &Gripper,
         options: &GraspOptions,
     ) -> Result<Option<BarOnDisk>> {
-        let (closed, loaded) = gaps.into_inner();
-        let robot = device.robot();
+        let (robot, hand) = (device.robot(), gripper.hand());
         ensure_input!(
             hand < robot.hands(),
             "invalid hand {hand} for {} hands",
             robot.hands()
         );
         ensure_input!(
-            closed.is_finite()
-                && closed >= 0.0
-                && closed < loaded
-                && loaded.is_finite()
-                && options.opening.is_finite()
-                && options.opening > 0.0
-                && loaded >= options.opening,
-            "invalid capacity {} or jaw gaps {closed} through {loaded}",
-            options.opening
+            gripper.sliding(),
+            "hand {hand}'s gripper does not slide (Gripper::sliding): the closure is checked \
+             with each jaw sliding along the hand's y axis"
         );
         ensure_input!(
             outward.is_normalized() && options.depth.is_finite() && options.depth > 0.0,
@@ -412,15 +404,7 @@ impl Kept {
         let Some(surface) = self.surface(device, id)? else {
             return Ok(None);
         };
-        measured(
-            robot,
-            &surface,
-            resolution,
-            outward,
-            hand,
-            closed..=loaded,
-            options,
-        )
+        measured(robot, &surface, resolution, outward, gripper, options)
     }
 }
 
@@ -431,20 +415,18 @@ pub(crate) fn measured(
     surface: &Surface,
     resolution: f32,
     outward: Vec3,
-    hand: usize,
-    gaps: RangeInclusive<f32>,
+    gripper: &Gripper,
     options: &GraspOptions,
 ) -> Result<Option<BarOnDisk>> {
     let Some(mut bar) = BarOnDisk::measure(surface, outward, options.depth, resolution)? else {
         return Ok(None);
     };
-    if bar.width + 2.0 * resolution > options.opening
-        || options.depth + robot.tip(hand) < options.overlap
+    if bar.width + 2.0 * resolution > gripper.capacity()
+        || options.depth + robot.tip(gripper.hand()) < options.overlap
     {
         return Ok(None);
     }
-    let spheres = robot.hand_spheres(hand);
-    let sweep = Sweep::new(&spheres, &gaps, options.approach);
+    let sweep = Sweep::new(gripper, options.approach);
     bar.grasps.retain(|&pose| {
         hand_fits(
             surface, pose, bar.center, outward, &sweep, options, resolution,
@@ -469,7 +451,7 @@ fn hand_fits(
 
 #[cfg(test)]
 mod tests {
-    use batchplan::{CollisionModel, Robot, RobotOptions};
+    use batchplan::{CollisionModel, GripperCalibration, Robot, RobotOptions};
 
     use super::*;
 
@@ -506,17 +488,20 @@ mod tests {
             },
         )
         .unwrap();
-        let locks = ["l", "r"]
+        let locks: HashMap<String, f32> = ["l", "r"]
             .into_iter()
             .map(|n| (n.to_string(), closed / 2.))
             .collect();
-        assert_eq!(
-            robot
-                .parallel_jaw_opening(0, loaded, 0.016, closed, &locks)
-                .unwrap(),
-            Some(loaded)
-        );
-        let hand = robot.hand_spheres(0);
+        // The hand closing to `closed_gap`.
+        let gripper = |closed_gap| {
+            let calibration = GripperCalibration {
+                capacity: Some(0.016),
+                ..GripperCalibration::new(loaded, closed_gap, locks.clone())
+            };
+            robot.gripper(0, &calibration).unwrap()
+        };
+        let measured = gripper(closed);
+        assert!(measured.sliding() && measured.opening() == loaded);
         let s = Surface {
             points: vec![Vec3::new(0., -0.0006, 0.), Vec3::new(0., 0.0006, 0.)],
             object: vec![true, true],
@@ -527,18 +512,18 @@ mod tests {
             approach: 0.020,
             ..Default::default()
         };
-        let check = |travel| {
+        let check = |gripper| {
             hand_fits(
                 &s,
                 Pose::IDENTITY,
                 Vec3::Z * 0.020,
                 Vec3::NEG_Z,
-                &Sweep::new(&hand, &travel, options.approach),
+                &Sweep::new(&gripper, options.approach),
                 &options,
                 0.00015,
             )
         };
-        assert!(check(0.0..=loaded));
-        assert!(!check(closed..=loaded));
+        assert!(check(gripper(0.0)));
+        assert!(!check(measured));
     }
 }
