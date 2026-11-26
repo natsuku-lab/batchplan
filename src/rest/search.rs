@@ -97,20 +97,19 @@ pub struct RestOptions {
     /// `atan(friction)` (27°) less `tipping` holds the object only against a stop below it.
     pub friction: f32,
     /// Whether a rest narrower than the spots are apart is looked for closer about one place a
-    /// turn: off by default. Where the object nearly rests (as set down and not rolled, its
-    /// contacts carry its weight upright and not with the weight tipped by `tipping`), a rest may
-    /// lie within a spacing that the spots are too far apart to meet, as an upright bottle's
-    /// against the lip at the foot of a sloping rack, which stands in a strip a few millimeters
-    /// deep. With it, of the spots where the object nearly rests at a turn, the one nearest where
-    /// the problem would have it ([`RestProblem::near`]), or without that the middle of the
-    /// support, has the spots a cell (`touching`) apart within `spacing` of it tried too: with
-    /// `near` at every turn, and without it only where no spot rests at any turn. Ask for it where
-    /// such a rest is wanted near a point, or where the spots find nothing else.
+    /// turn: true; `false` tries the spots alone. Where the object nearly rests (as set down and
+    /// not rolled, its contacts carry its weight upright and not with the weight tipped by
+    /// `tipping`), a rest may lie within a spacing that the spots are too far apart to meet, as an
+    /// upright bottle's against the lip at the foot of a sloping rack, which stands in a strip a
+    /// few millimeters deep. With it, of the spots where the object nearly rests at a turn, the one
+    /// nearest where the problem would have it ([`RestProblem::near`]), or without that the middle
+    /// of the support, has the spots a cell (`touching`) apart within `spacing` of it tried too:
+    /// with `near` at every turn, and without it only where no spot rests at any turn.
     ///
-    /// A search that finds rests and is given no `near` costs what it did; otherwise each turn
-    /// tries at most as many spots more as `near` adds. One place is looked at, not every place:
-    /// such a strip is found near that spot and not along its length, so a caller that wants it
-    /// elsewhere points there. Rests found there come in the order the others do.
+    /// A search that finds rests and is given no `near` costs what it does without it; otherwise
+    /// each turn tries at most as many spots more as `near` adds. One place is looked at, not every
+    /// place: such a strip is found near that spot and not along its length, so a caller that wants
+    /// it elsewhere points there. Rests found there come in the order the others do.
     ///
     /// [`falls_into`](crate::falls_into) looks closer too, for a container the object barely
     /// fits, which holds it in only nearer one place than the spots lie apart: about `near` at
@@ -118,15 +117,15 @@ pub struct RestOptions {
     /// point of a hollow for the object.
     pub look_closer: bool,
     /// Whether a support point whose normal faces down holds the object up where it was seen
-    /// from above ([`Surface::seen_from`] higher than it): off by default, and such a point is an
+    /// from above ([`Surface::seen_from`] higher than it): true. With `false`, such a point is an
     /// underside, which holds nothing up and blocks, wherever it was seen from. The normals of a
     /// top read with noise at a slant, fitted over a few millimeters, can face down in places,
     /// whose points then block rests on that top; a camera above a point sees no underside
     /// there, so with this a point seen from above is the top of what is there whatever its
-    /// normal says. Ask for it for a support measured by a camera above it whose noise tilts its
-    /// fitted normals past level. What it gives up is a face of the support that leans out over
-    /// empty space, seen from above with what is over it out of view: it is taken as a top at its
-    /// own height. [`falls_into`](crate::falls_into) reads the support so too.
+    /// normal says. What it gives up is a face of the support that leans out over empty space,
+    /// seen from above with what is over it out of view: it is taken as a top at its own height,
+    /// so turn it off for a support with such a face. [`falls_into`](crate::falls_into) reads the
+    /// support so too.
     pub seen_from_above_holds: bool,
 }
 
@@ -139,8 +138,8 @@ impl Default for RestOptions {
             clearance: 0.01,
             tipping: 5f32.to_radians(),
             friction: 0.5,
-            look_closer: false,
-            seen_from_above_holds: false,
+            look_closer: true,
+            seen_from_above_holds: true,
         }
     }
 }
@@ -1269,10 +1268,7 @@ mod tests {
     /// does.
     #[test]
     fn a_search_that_finds_rests_sets_nothing_closer() {
-        let o = RestOptions {
-            look_closer: true,
-            ..RestOptions::default()
-        };
+        let o = RestOptions::default();
         let tall = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.1));
         let kinds = searched(tall, &table(0.0), &o);
         assert!(kinds.iter().any(|(_, rests, _)| *rests));
@@ -1284,10 +1280,7 @@ mod tests {
     /// set closer for it is at most one spot's disc a kind of turn, whatever the noise.
     #[test]
     fn where_nothing_rests_one_disc_a_turn_is_set_closer() {
-        let o = RestOptions {
-            look_closer: true,
-            ..RestOptions::default()
-        };
+        let o = RestOptions::default();
         let slender = Obstacle::cylinder(Vec3::ZERO, 0.01, 0.12);
         let kinds = searched(slender, &table(0.001), &o);
         // The lattice points within a spacing of a grid's spot, which lies half a spacing from the
