@@ -1695,11 +1695,6 @@ fn grasps_whose_fingers_meet_the_object_before_their_patches_come_after_the_rest
         keys
     };
     assert_eq!(sorted(&found), sorted(&plain));
-    assert_eq!(
-        plain,
-        grasps_by(&seen, &rubber, &with_shell(0.08)),
-        "off unless asked for"
-    );
     let robot = common::panda().unwrap();
     let hand = robot.hand_spheres(0);
     let bowl = bowl_points(THIN);
@@ -1754,6 +1749,26 @@ fn grasps_whose_fingers_meet_the_object_before_their_patches_come_after_the_rest
         both.clean > 0 && both.late > 0 && both.out_of_order.is_none() && one.clean + one.late == 0,
         "{both:?}"
     );
+}
+
+/// By default the grasps of a surface come in the order `first_touch` gives: of the flared bowl
+/// seen from in front and over it, whose grasps it orders otherwise than `first_touch: false`
+/// does, the default's are its.
+#[test]
+fn by_default_grasps_whose_fingers_meet_their_patches_first_come_first() {
+    let seen = bowl_seen(THIN, &[FRONT, ABOVE]);
+    let rubber = pressing(2.0);
+    let o = with_shell(0.08);
+    let ordered = |first_touch| {
+        let o = SurfaceGraspOptions { first_touch, ..o };
+        grasps_by(&seen, &rubber, &o)
+    };
+    let (first, without) = (
+        ordered(/* first_touch */ true),
+        ordered(/* first_touch */ false),
+    );
+    assert_ne!(first, without, "the bowl's grasps come in two orders");
+    assert_eq!(grasps_by(&seen, &rubber, &o), first, "on by default");
 }
 
 /// Of one lot of grasps: how many meet what they close on no more than a surface's noise past

@@ -127,11 +127,13 @@ fn main() -> Result<()> {
     // The Panda's pads 8 cm apart as its fingers are held open, touching closed.
     let calibration = GripperCalibration::new(0.08, 0.0, common::panda_closed());
     let gripper = robot.gripper(0, &calibration)?;
-    let o = SurfaceGraspOptions::default();
-    let first = SurfaceGraspOptions {
-        first_touch: true,
-        ..o
+    // Without the first-touch sweep, for the rows to compare with: those that read `with
+    // first_touch` take the default, which sweeps.
+    let o = SurfaceGraspOptions {
+        first_touch: false,
+        ..SurfaceGraspOptions::default()
     };
+    let first = SurfaceGraspOptions::default();
     // The same surfaces' grasps, those whose fingers close onto their patches first.
     let first_touch = |surfaces: &[Surface], rounds: usize| -> Result<()> {
         let (ms, found) = quickest(rounds, || {

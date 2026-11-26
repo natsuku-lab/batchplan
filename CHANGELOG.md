@@ -41,12 +41,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   came in 4.9 mm open on a bowl's 2.5 mm wall, turned 44 degrees about its closing line, put a
   finger on the rim before it closed and pushed the bowl 2 cm; at 9.9 mm it closes on the wall and
   lifts it. A grasp clear only nearer than that is drawn back or left out.
-- `SurfaceGraspOptions::first_touch` (off by default): `grasps_on` puts the grasps whose fingers
-  close onto their patches before meeting any other part of what was seen of the object ahead of the
-  rest, within each turn of the two lots of two seen sides and one, so from above still comes before
-  a turn to either side. A finger closing level deep across a wall that leans over its patch meets
-  the wall above it instead, and the object turns in the hand as it is lifted: a LIBERO bowl picked
-  so turned 15 degrees and touched the plate while still held.
+- `SurfaceGraspOptions::first_touch` (on by default; `false` keeps the order without it):
+  `grasps_on` puts the grasps whose fingers close onto their patches before meeting any other part
+  of what was seen of the object ahead of the rest, within each turn of the two lots of two seen
+  sides and one, so from above still comes before a turn to either side. It adds and removes no
+  grasp, and costs a sweep of each finger over the object's patches. A finger closing level deep
+  across a wall that leans over its patch meets the wall above it instead, and the object turns in
+  the hand as it is lifted: a LIBERO bowl picked so turned 15 degrees and touched the plate while
+  still held.
 - Miru gives a reading on no known shape of a set of fewer than four readings, too few to be a
   surface of its own, to a known shape's surface beside it too, where the reading's own surface lies
   on that surface's plane within three deviations of the difference, and a part that is a known

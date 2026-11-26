@@ -424,7 +424,7 @@ pub struct SurfaceGraspOptions {
     /// friction): the hand then comes straight down across a flared rim, where one closing along
     /// the wall's normal leans as the wall does; deeper down such a wall, the finger on the side it
     /// leans over meets it above the patch ([`first_touch`](Self::first_touch) puts those grasps
-    /// last). A bowl's rim seen from above is grasped so, its outer wall
+    /// after the rest of their turn). A bowl's rim seen from above is grasped so, its outer wall
     /// hidden under it. Inside a solid no ray goes, so none of these grasps ends in one: a box seen
     /// from one side is closed on only across all of it, where the cameras saw past its far side.
     /// The space found lies past where the wall ends by what the rays leave unseen: under a bowl's
@@ -482,16 +482,16 @@ pub struct SurfaceGraspOptions {
     /// Whether grasps of a surface ([`grasps_on`](crate::grasps_on)) whose fingers close onto
     /// their patches before they meet any other part of what was seen of the object come first,
     /// within each turn of the lot of two seen sides and of the lot of one, so from above still
-    /// comes before a turn to either side: false, the order is as without it. A finger closing
-    /// level deep across a wall that leans over its patch, as a flared bowl's, meets the wall above
-    /// the patch first, a finger's length from the other contact, and the object turns in the hand
-    /// as it is lifted: with this, such grasps come after the rest, none left out. What a finger
-    /// meets is the object's patches: the means of its readings in cells a patch wide
-    /// ([`contact`](Self::contact)) that hold three or more, so that a reading or two off the
-    /// surface by a stereo camera's noise is none. So a part of the object no camera saw, or one
-    /// seen with fewer readings than that in every such cell, as a wall read sparser than every
-    /// 3 mm or a lip that cells' sides split, is met unnoticed. It costs a sweep of each finger of
-    /// each grasp over the patches.
+    /// comes before a turn to either side: true. `false` gives the order without it, each turn's
+    /// grasps as they came, and saves the sweep. A finger closing level deep across a wall that
+    /// leans over its patch, as a flared bowl's, meets the wall above the patch first, a finger's
+    /// length from the other contact, and the object turns in the hand as it is lifted: with this,
+    /// such grasps come after the rest, none left out. What a finger meets is the object's
+    /// patches: the means of its readings in cells a patch wide ([`contact`](Self::contact)) that
+    /// hold three or more, so that a reading or two off the surface by a stereo camera's noise is
+    /// none. So a part of the object no camera saw, or one seen with fewer readings than that in
+    /// every such cell, as a wall read sparser than every 3 mm or a lip that cells' sides split,
+    /// is met unnoticed. It costs a sweep of each finger of each grasp over the patches.
     pub first_touch: bool,
 }
 
@@ -2224,7 +2224,7 @@ impl Default for SurfaceGraspOptions {
             near: None,
             close_on: None,
             clearance: 0.0,
-            first_touch: false,
+            first_touch: true,
         }
     }
 }
