@@ -147,10 +147,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   for each newton each presses with, by friction, where they press on their patches, a soft
   fingertip's twist and the hand pushing along the closing line, the way round that gives less:
   grips for a turn ordered by what it asks of them.
-- **Breaking:** `TaskStep` has `Turn` between `Reach` and `Approach`, the order the steps are
-  checked in, so `Approach`, `Depart` and `Transit` are each one later, as numbers (`as isize`:
-  2, 3 and 4 become 3, 4 and 5) and in the derived order: the steps that were there keep their
-  order among themselves, and `Turn` sorts between `Reach` and `Approach`.
+- **Breaking:** `TaskStep` has `Turn` and then `Pull` between `Reach` and `Approach`, the order
+  the steps are checked in, so `Approach`, `Depart` and `Transit` are each two later, as numbers
+  (`as isize`: 2, 3 and 4 become 4, 5 and 6) and in the derived order: the steps that were there
+  keep their order among themselves, and `Turn` and `Pull` sort between `Reach` and `Approach`.
 - **Breaking:** in Python, `TaskStep`'s values from `Approach` on are one more than they were.
 - **Breaking:** `GraspOptions::near`, a point to grip a surface near: `grasps_on` gives, within
   each of the tiers it orders them by, the grasps nearest it first instead of spread over the
@@ -279,6 +279,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   into it, solid where a reading landed or nothing saw past, with nothing around it. A part
   takes no images. `map.counts()` gives the voxels occupied, free and never observed
   (`MapCounts`), of a part those inside its region.
+
+- `OccupancyMap::occupy`, `from_shape`, `refined`, `take_readings` and `take_surfaces`: a map's
+  voxels near a shape marked occupied, a map of a primitive, a map refined into smaller voxels
+  from the same views, and the occupied voxels of chosen readings or depth pixels separated into
+  a part of their own.
 
 - Each pixel's reading as a point: `DepthImage::points(robot_mask)`, row by row, `None` where a
   pixel has no reading or reads the robot. Pixel `i` is column `i % width` of row `i / width`, its
