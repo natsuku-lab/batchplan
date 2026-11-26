@@ -233,7 +233,7 @@ The counts are the same on both devices of each machine and on every run, but at
 
 ## Grasps of a surface
 
-`examples/surface_grasps.rs` finds the grasps of what cameras see (`grasps_on`) for the Panda's hand of 22 spheres, open 8 cm, on the M4 Pro's 14 threads, the quickest of five calls (of three for the 64 bowls), and of six runs on a machine building beside them:
+`examples/surface_grasps.rs` finds the grasps of what cameras see (`grasps_on`) for the Panda's hand of 22 spheres, open 8 cm, with `first_touch: false`, on the M4 Pro's 14 threads, the quickest of five calls (of three for the 64 bowls), and of six runs on a machine building beside them:
 
 | | Points | Grasps | Time |
 |---|---|---|---|
@@ -245,7 +245,7 @@ The counts are the same on both devices of each machine and on every run, but at
 
 Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from 16 directions, 22 spheres swept 10 cm against the points near them.
 
-With `first_touch`, which sweeps each finger of each grasp over the object's patches, the example times the bowl, the box and the 64 bowls again (its lines `with first_touch`). On the Ryzen AI Max+ 395 on one thread (the example built with `Device::cpu_threads(&robot, 1)`), the quickest of six runs, the machine's load between 4 and 15: the 64 bowls take 2.67 s against 2.51 s without it (6 percent more), the bowl 41.7 ms against 39.2 (6 percent), the box 71.8 ms against 71.5 (under 1 percent).
+`first_touch`, on by default, sweeps each finger of each grasp over the object's patches; the example times the bowl, the box and the 64 bowls with it (its lines `with first_touch`) and with it turned off for the comparison. On the Ryzen AI Max+ 395 on one thread (the example built with `Device::cpu_threads(&robot, 1)`), the quickest of six runs, the machine's load between 4 and 15: the 64 bowls take 2.67 s with it against 2.51 s without (6 percent more), the bowl 41.7 ms against 39.2 (6 percent), the box 71.8 ms against 71.5 (under 1 percent).
 
 ## Rests on a surface
 
