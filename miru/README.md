@@ -298,7 +298,8 @@ unresolved wall can still prevent a grip.
 
 For a request to turn a centred control, `Kept::bar_on_disk` can measure a narrow raised bar
 over a circular face. Depth rays must reach behind its outer edge over more than half the circumference. Give it the outward unit normal, the hand's gripper
-(`Robot::gripper`: its calibrated closed and loaded gaps and its capacity), and the grasp options. The requested depth places the IK
+(`Robot::gripper`: its calibrated closed and loaded gaps and its capacity), the insertion depth
+and the surface grasp options. The requested depth places the IK
 frame below the crest. The measurement uses the median of the target readings' larger pixel
 width or depth deviation as its spatial resolution. Each returned pose passed the open approach,
 floor, capacity and symmetric closing-sweep checks on the measured points. Use the fully open

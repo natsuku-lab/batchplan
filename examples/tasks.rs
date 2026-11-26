@@ -7,6 +7,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::time::Instant;
 
@@ -14,8 +15,8 @@ use anyhow::Result;
 use batchplan::glam::{Quat, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{
-    Device, GraspOptions, Obstacle, Pick, Place, Pose, TaskFailure, TaskOptions, TaskPlan,
-    TaskResult, TaskStep, World,
+    Device, GripperCalibration, Obstacle, Pick, Place, Pose, ShapeGraspOptions, TaskFailure,
+    TaskOptions, TaskPlan, TaskResult, TaskStep, World,
 };
 
 /// Calls of each size timed, and the best of so many runs kept.
@@ -102,6 +103,8 @@ fn main() -> Result<()> {
         .map_or(Ok(64), |a| a.parse())?
         .max(BATCHES[BATCHES.len() - 1]);
     let robot = common::panda()?;
+    // The Panda's pads 8 cm apart as its fingers are held open; closed, they touch.
+    let hand = robot.gripper(0, &GripperCalibration::new(0.08, 0.0, HashMap::new()))?;
     let mut rng = Rng::new(7);
     let (worlds, spots): (Vec<World>, Vec<Pose>) = (0..count).map(|_| scene(&mut rng)).unzip();
     let o = TaskOptions::default();
@@ -119,7 +122,8 @@ fn main() -> Result<()> {
             .map(|(w, world)| {
                 let grasps = batchplan::grasps(
                     &world.obstacles[1].placed(Pose::IDENTITY),
-                    &GraspOptions::default(),
+                    &hand,
+                    &ShapeGraspOptions::default(),
                 )?;
                 Ok(Pick {
                     support: vec![0],

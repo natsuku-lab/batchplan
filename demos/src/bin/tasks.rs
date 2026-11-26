@@ -8,6 +8,7 @@
 //!   cargo run --release --bin tasks -- 36 --gpu          # 36 scenes, planned on the GPU
 //!   cargo run --release --bin tasks -- 16 --save tasks.rrd  # writes a recording instead
 
+use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::time::Instant;
 
@@ -15,7 +16,8 @@ use anyhow::Result;
 use batchplan::glam::{Quat, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{
-    GraspOptions, Obstacle, Pick, Place, Pose, Robot, TaskOptions, TaskPlan, Trajectory, World,
+    GripperCalibration, Obstacle, Pick, Place, Pose, Robot, ShapeGraspOptions, TaskOptions,
+    TaskPlan, Trajectory, World,
 };
 use batchplan_demos::{Args, OPEN, RobotMeshes};
 
@@ -156,6 +158,8 @@ fn main() -> Result<()> {
     let args = Args::parse()?;
     let count = args.count.unwrap_or(16);
     let robot = batchplan_demos::panda()?;
+    // The Panda's pads 8 cm apart as its fingers are held open; closed, they touch.
+    let hand = robot.gripper(0, &GripperCalibration::new(0.08, 0.0, HashMap::new()))?;
     let device = args.device(&robot, /* default_gpu */ false)?;
     let mut rng = Rng::new(11);
     let (worlds, spots): (Vec<World>, Vec<Pose>) = (0..count).map(|i| scene(i, &mut rng)).unzip();
@@ -174,7 +178,7 @@ fn main() -> Result<()> {
                     w as u32,
                     robot.default_q(),
                     BOX,
-                    batchplan::grasps(&object, &GraspOptions::default())?,
+                    batchplan::grasps(&object, &hand, &ShapeGraspOptions::default())?,
                 )
             })
         })

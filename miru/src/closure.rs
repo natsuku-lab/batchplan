@@ -1,6 +1,6 @@
 //! What a parallel hand approaching open and closing would intercept in a retained observation.
 
-use batchplan::{Device, GraspOptions, Gripper, HandSphere, Pose, Surface};
+use batchplan::{Device, Gripper, HandSphere, Pose, Surface, SurfaceGraspOptions};
 use glam::{Mat3, Vec3};
 
 use crate::error::{Result, ensure_input};
@@ -39,7 +39,7 @@ impl Kept {
         id: u32,
         gripper: &Gripper,
         poses: &[Pose],
-        options: &GraspOptions,
+        options: &SurfaceGraspOptions,
     ) -> Result<Option<Vec<ClosureEvidence>>> {
         let (robot, hand) = (device.robot(), gripper.hand());
         ensure_input!(
@@ -90,7 +90,7 @@ impl Kept {
         label: Label,
         gripper: &Gripper,
         poses: &[Pose],
-        options: &GraspOptions,
+        options: &SurfaceGraspOptions,
     ) -> Result<Vec<ClosureEvidence>> {
         let sweep = Sweep::new(gripper, options.approach);
         let (lo, hi) = (sweep.lo, sweep.hi);
@@ -260,7 +260,7 @@ pub(crate) fn inspect(
     surface: &Surface,
     pose: Pose,
     sweep: &Sweep<'_>,
-    options: &GraspOptions,
+    options: &SurfaceGraspOptions,
     depth_limit: f32,
 ) -> ClosureEvidence {
     let (hand, stroke) = (sweep.hand, sweep.stroke);

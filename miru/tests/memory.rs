@@ -12,8 +12,9 @@ mod common;
 use std::collections::HashMap;
 
 use batchplan::{
-    DepthFilter, DepthImage, Device, GraspOptions, Gripper, GripperCalibration, Held, IkOptions,
-    IkProblem, Obstacle, Pose, Robot, RobotMask, Screw, SphereOptions, Weighing, World,
+    DepthFilter, DepthImage, Device, Gripper, GripperCalibration, Held, IkOptions, IkProblem,
+    Obstacle, Pose, Robot, RobotMask, Screw, ShapeGraspOptions, SphereOptions, SurfaceGraspOptions,
+    Weighing, World,
 };
 use common::{
     CAMERAS, EYE, Frame, MIDDLE, NEAR, Stereo, Thing, arm, block, bowl, can, devices, known,
@@ -2525,7 +2526,7 @@ fn a_grasp_of_the_rim_separates_its_own_readings() {
             .surface(&device, id)
             .unwrap()
             .expect("the bowl's surface");
-        let options = batchplan::GraspOptions {
+        let options = batchplan::SurfaceGraspOptions {
             turns: 1,
             shell: Some(0.015),
             ..Default::default()
@@ -2579,7 +2580,7 @@ fn a_grasp_of_the_rim_separates_its_own_readings() {
         assert!(
             g.contacts
                 .iter()
-                .any(|p| part.distance(*p).value <= GraspOptions::default().contact),
+                .any(|p| part.distance(*p).value <= SurfaceGraspOptions::default().contact),
             "{camera}: its contact is on the selected patch"
         );
         let opposite = MIDDLE
@@ -2711,7 +2712,7 @@ fn the_split_world_reaches_a_grip_and_lifts_only_attributable_material() {
             .surface(&device, id)
             .unwrap()
             .expect("the box's surface");
-        let options = GraspOptions {
+        let options = SurfaceGraspOptions {
             turns: 1,
             ..Default::default()
         };
@@ -3118,7 +3119,7 @@ fn gripping_the_knob_leaves_the_panel_and_dial_in_collision() {
         let seen = first_look(&device, &things, &rendered, (c, 10 * c as u64), q, 0.0);
         let id = id_of(seen.kept.scene(), &rendered, 3).expect("the bar is visible");
         let surface = seen.kept.surface(&device, id).unwrap().unwrap();
-        let options = GraspOptions {
+        let options = SurfaceGraspOptions {
             turns: 8,
             shell: Some(0.015),
             ..Default::default()
@@ -3187,7 +3188,7 @@ fn a_supported_can_refuses_the_entire_pick_before_planning_candidates() {
     let base = id_of(seen.kept.scene(), &render, 1).expect("the lower box");
     let can = id_of(seen.kept.scene(), &render, 2).expect("the upper can");
     assert_ne!(base, can);
-    let options = GraspOptions {
+    let options = SurfaceGraspOptions {
         turns: 1,
         shell: Some(0.015),
         ..Default::default()
@@ -3200,7 +3201,7 @@ fn a_supported_can_refuses_the_entire_pick_before_planning_candidates() {
     let empty = first_look(&device, &things, &bare_render, (0, 0), q, 0.0);
     let box_id = id_of(empty.kept.scene(), &bare_render, 1).expect("the bare box");
     let surface = empty.kept.surface(&device, box_id).unwrap().unwrap();
-    let options = GraspOptions {
+    let options = SurfaceGraspOptions {
         turns: 1,
         ..options
     };
@@ -3478,7 +3479,7 @@ fn a_foreign_projective_hit_on_the_opposite_rim_stays_in_the_lift_world() {
     .unwrap();
     assert_eq!(seen.kept.scene().labels[2][4], Label::Known(1));
     let id = id_of(seen.kept.scene(), &views, 1).expect("the bowl is seen");
-    let options = GraspOptions {
+    let options = SurfaceGraspOptions {
         turns: 1,
         shell: Some(0.015),
         ..Default::default()
@@ -3624,7 +3625,7 @@ fn a_grip_resolves_its_support_without_copying_the_block_or_losing_a_foreign_hit
         };
         let bowl = &scene.objects[parent];
         assert!(target.solid && !bowl.solid);
-        let options = GraspOptions {
+        let options = SurfaceGraspOptions {
             turns: 1,
             ..Default::default()
         };
@@ -3721,7 +3722,7 @@ fn proposed_jaw_closures_distinguish_target_foreign_and_missing_readings() {
         Pose::new(at + Vec3::X * 0.10, down),
         Pose::new(at - Vec3::Z * middle.z, down),
     ];
-    let options = GraspOptions {
+    let options = SurfaceGraspOptions {
         approach: 0.06,
         ..Default::default()
     };
@@ -3786,7 +3787,7 @@ fn a_far_approach_gives_what_one_past_every_reading_gives() {
         Pose::new(Vec3::new(0.5, 0.0, 0.5), Quat::IDENTITY),
     ];
     let evidence = |approach| {
-        let options = GraspOptions {
+        let options = SurfaceGraspOptions {
             approach,
             ..Default::default()
         };
@@ -3825,17 +3826,20 @@ fn turn_gripper(robot: &Robot) -> Gripper {
 /// The options the turn tests ask grips with, as batchplan-orchestrator asks a turn's: the hand
 /// frame 5 mm below a crest, one direction about each closing line, fingers that may come in
 /// narrower and walls closed across from one side.
-fn turn_options(robot: &Robot) -> GraspOptions {
-    GraspOptions {
-        opening: TURN_CAPACITY,
+fn turn_options() -> (ShapeGraspOptions, SurfaceGraspOptions) {
+    let shape = ShapeGraspOptions {
         depth: 0.005,
-        tip: robot.tip(0),
+        turns: 1,
+        ..Default::default()
+    };
+    let surface = SurfaceGraspOptions {
         turns: 1,
         approach: 0.06,
         shell: Some(TURN_CAPACITY),
         narrow: true,
         ..Default::default()
-    }
+    };
+    (shape, surface)
 }
 
 /// One grip as the turn tests compare them: its pose, opening, source and evidence.
@@ -3863,18 +3867,19 @@ fn composed(
     kept: &Kept,
     device: &Device,
     id: u32,
-    options: &GraspOptions,
+    (shape_options, surface_options): (&ShapeGraspOptions, &SurfaceGraspOptions),
 ) -> (Vec3, Vec<Group>, bool) {
     use ClosureEvidence::{BothSides, Incomplete};
     let gripper = turn_gripper(device.robot());
     let evidence = |poses: &[Pose]| {
-        let found = kept.observed_closures(device, id, &gripper, poses, options);
+        let found = kept.observed_closures(device, id, &gripper, poses, surface_options);
         found.unwrap().expect("the object is seen")
     };
     let object = (kept.scene().objects.iter()).find(|o| o.id == id);
     let shape = cover(&object.expect("the object").shape);
     let placed = shape.pose();
-    let bar = kept.bar_on_disk(device, id, Vec3::Z, &gripper, options);
+    let depth = shape_options.depth;
+    let bar = kept.bar_on_disk(device, id, Vec3::Z, &gripper, depth, surface_options);
     let bar = bar.unwrap();
     let screw = Screw::about(
         bar.as_ref().map_or(placed.position, |bar| bar.center),
@@ -3887,11 +3892,8 @@ fn composed(
             .map(|(&pose, e)| (pose, open, GripSource::Bar, e));
         groups.push((grips.collect(), Some(1)));
     }
-    let within_capacity = GraspOptions {
-        opening: gripper.capacity(),
-        ..*options
-    };
-    let from_above: Vec<Pose> = (batchplan::grasps(&shape, &within_capacity).unwrap_or_default())
+    let from_above: Vec<Pose> = (batchplan::grasps(&shape, &gripper, shape_options))
+        .unwrap_or_default()
         .into_iter()
         .map(|grasp| placed.mul_pose(grasp))
         .filter(|pose| (pose.rotation * Vec3::Z).z < -0.99)
@@ -3911,13 +3913,9 @@ fn composed(
         .surface(device, id)
         .unwrap()
         .expect("the object is seen");
-    let found = batchplan::grasps_on(device, &gripper, &[surface], options);
+    let found = batchplan::grasps_on(device, &gripper, &[surface], surface_options);
     let mut seen = found.unwrap().remove(0);
-    let pads = GraspOptions {
-        friction: gripper.friction(),
-        ..*options
-    };
-    pads.order_for_turn(&mut seen, Some(screw));
+    surface_options.order_for_turn(&gripper, &mut seen, Some(screw));
     let poses: Vec<Pose> = seen.iter().map(|grasp| grasp.pose).collect();
     let surfaces: Vec<Grip> = (seen.iter().zip(evidence(&poses)))
         .map(|(grasp, e)| (grasp.pose, grasp.opening, GripSource::Surface, e))
@@ -3973,7 +3971,7 @@ fn a_knob_is_turned_by_its_bar_first() {
             looking(Vec3::new(MIDDLE.x + side, -0.04, 0.25), bar),
         )
     });
-    let options = turn_options(&robot);
+    let (shape_options, surface_options) = turn_options();
     let gripper = turn_gripper(&robot);
     assert_ne!(
         gripper.capacity(),
@@ -3985,18 +3983,31 @@ fn a_knob_is_turned_by_its_bar_first() {
     for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
         let seen = first_look(&device, &things, &rendered, (c, 7), &q, 0.0);
         let id = id_of(seen.kept.scene(), &rendered, 3).expect("the bar is visible");
-        let turn = seen
-            .kept
-            .turn_grips(&device, id, &gripper, Vec3::Z, &options);
+        let turn = seen.kept.turn_grips(
+            &device,
+            id,
+            &gripper,
+            Vec3::Z,
+            &shape_options,
+            &surface_options,
+        );
         let turn = turn.unwrap().expect("the bar is seen");
-        let (point, groups, reordered) = composed(&seen.kept, &device, id, &options);
+        let (point, groups, reordered) =
+            composed(&seen.kept, &device, id, (&shape_options, &surface_options));
         assert_eq!(turn.screw, Screw::about(point, Vec3::Z), "{camera}");
         assert_eq!(grips_of(&turn), groups, "{camera}");
         moved |= reordered;
         let mut wrong = vec![];
         match seen
             .kept
-            .bar_on_disk(&device, id, Vec3::Z, &gripper, &options)
+            .bar_on_disk(
+                &device,
+                id,
+                Vec3::Z,
+                &gripper,
+                shape_options.depth,
+                &surface_options,
+            )
             .unwrap()
         {
             Some(disk) => {
@@ -4045,23 +4056,29 @@ fn a_box_seen_from_one_side_is_turned_from_above_its_middle() {
     let q = robot.default_q().to_vec();
     let things = vec![table(), a_control(), arm(&robot, &q)];
     let rendered = one_side(&things);
-    let options = turn_options(&robot);
+    let (shape_options, surface_options) = turn_options();
     let mut found = vec![];
     for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
         let seen = first_look(&device, &things, &rendered, (c, 7), &q, 0.0);
         let id = id_of(seen.kept.scene(), &rendered, 1).expect("the box is visible");
         let surface = seen.kept.surface(&device, id).unwrap().unwrap();
-        let grasps = batchplan::grasps_on(&device, &gripper, &[surface], &options);
+        let grasps = batchplan::grasps_on(&device, &gripper, &[surface], &surface_options);
         let grasps = grasps.unwrap().remove(0);
         assert!(
             !grasps.is_empty() && grasps.iter().all(|grasp| grasp.one_sided),
             "{camera}: the box is seen from one side"
         );
-        let turn = seen
-            .kept
-            .turn_grips(&device, id, &gripper, Vec3::Z, &options);
+        let turn = seen.kept.turn_grips(
+            &device,
+            id,
+            &gripper,
+            Vec3::Z,
+            &shape_options,
+            &surface_options,
+        );
         let turn = turn.unwrap().expect("the box is seen");
-        let (point, groups, _) = composed(&seen.kept, &device, id, &options);
+        let (point, groups, _) =
+            composed(&seen.kept, &device, id, (&shape_options, &surface_options));
         assert_eq!(turn.screw, Screw::about(point, Vec3::Z), "{camera}");
         assert_eq!(grips_of(&turn), groups, "{camera}");
         let last = turn.groups.last().expect("the surface's grasps");
@@ -4137,15 +4154,20 @@ fn a_post_in_the_closing_gap_rules_the_grip_out() {
     .unwrap();
     let bare = vec![table(), a_control(), arm(&robot, &q)];
     let guarded = vec![table(), a_control(), post, arm(&robot, &q)];
-    let options = turn_options(&robot);
+    let (shape_options, surface_options) = turn_options();
     let mut found = vec![];
     for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
         let rendered = one_side(&bare);
         let seen = first_look(&device, &bare, &rendered, (c, 7), &q, 0.0);
         let id = id_of(seen.kept.scene(), &rendered, 1).expect("the box is visible");
-        let turn = seen
-            .kept
-            .turn_grips(&device, id, &gripper, Vec3::Z, &options);
+        let turn = seen.kept.turn_grips(
+            &device,
+            id,
+            &gripper,
+            Vec3::Z,
+            &shape_options,
+            &surface_options,
+        );
         let centred = shape_grips(&turn.unwrap().expect("the box is seen"));
         let rendered = one_side(&guarded);
         let (frames, bands) = read(&rendered, c, 7);
@@ -4166,16 +4188,23 @@ fn a_post_in_the_closing_gap_rules_the_grip_out() {
             "{camera}: the post is seen"
         );
         let id = id_of(kept.scene(), &rendered, 1).expect("the box is visible beside the post");
-        let turn = kept.turn_grips(&device, id, &gripper, Vec3::Z, &options);
+        let turn = kept.turn_grips(
+            &device,
+            id,
+            &gripper,
+            Vec3::Z,
+            &shape_options,
+            &surface_options,
+        );
         let turn = turn.unwrap().expect("the box is seen");
-        let (point, groups, _) = composed(kept, &device, id, &options);
+        let (point, groups, _) = composed(kept, &device, id, (&shape_options, &surface_options));
         assert_eq!(turn.screw, Screw::about(point, Vec3::Z), "{camera}");
         assert_eq!(grips_of(&turn), groups, "{camera}");
         let mut wrong = vec![];
         if centred.is_empty() {
             wrong.push("no grip from above its middle".to_string());
         }
-        let ruled_out = kept.observed_closures(&device, id, &gripper, &centred, &options);
+        let ruled_out = kept.observed_closures(&device, id, &gripper, &centred, &surface_options);
         let ruled_out = ruled_out.unwrap().expect("the box is seen");
         assert!(
             ruled_out.iter().all(|e| *e == ClosureEvidence::Obstructed),
@@ -4212,15 +4241,20 @@ fn a_shelf_in_the_way_in_rules_the_grip_out() {
     );
     let bare = vec![table(), a_control(), arm(&robot, &q)];
     let sheltered = vec![table(), a_control(), shelf, arm(&robot, &q)];
-    let options = turn_options(&robot);
+    let (shape_options, surface_options) = turn_options();
     let mut found = vec![];
     for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
         let rendered = one_side(&bare);
         let seen = first_look(&device, &bare, &rendered, (c, 7), &q, 0.0);
         let id = id_of(seen.kept.scene(), &rendered, 1).expect("the box is visible");
-        let turn = seen
-            .kept
-            .turn_grips(&device, id, &gripper, Vec3::Z, &options);
+        let turn = seen.kept.turn_grips(
+            &device,
+            id,
+            &gripper,
+            Vec3::Z,
+            &shape_options,
+            &surface_options,
+        );
         let centred = shape_grips(&turn.unwrap().expect("the box is seen"));
         let rendered = one_side(&sheltered);
         let seen = first_look(&device, &sheltered, &rendered, (c, 7), &q, 0.0);
@@ -4230,25 +4264,32 @@ fn a_shelf_in_the_way_in_rules_the_grip_out() {
             "{camera}: the shelf is seen"
         );
         let id = id_of(kept.scene(), &rendered, 1).expect("the box is visible under the shelf");
-        let evidence = |options: &GraspOptions| {
+        let evidence = |options: &SurfaceGraspOptions| {
             let found = kept.observed_closures(&device, id, &gripper, &centred, options);
             found.unwrap().expect("the box is seen")
         };
-        let through = evidence(&options);
+        let through = evidence(&surface_options);
         assert!(
             through.iter().all(|e| *e == Obstructed),
             "{camera}: the hand comes in through the shelf: {through:?}"
         );
-        let no_way_in = GraspOptions {
+        let no_way_in = SurfaceGraspOptions {
             approach: 0.0,
-            ..options
+            ..surface_options
         };
         let closing = evidence(&no_way_in);
         assert!(
             closing.iter().all(|e| *e == BothSides),
             "{camera}: the shelf is clear of the open hand and its fingers' sweeps: {closing:?}"
         );
-        let turn = kept.turn_grips(&device, id, &gripper, Vec3::Z, &options);
+        let turn = kept.turn_grips(
+            &device,
+            id,
+            &gripper,
+            Vec3::Z,
+            &shape_options,
+            &surface_options,
+        );
         let kept_grips = shape_grips(&turn.unwrap().expect("the box is seen"));
         assert!(
             centred.iter().all(|pose| kept_grips
@@ -4267,8 +4308,8 @@ fn a_shelf_in_the_way_in_rules_the_grip_out() {
 
 /// Two boxes seen from one side: one 86 x 77 x 30 mm, its narrow width between the capacity of
 /// 7.5 cm and the loaded width of 8 cm, and the control, 86 x 24 x 30 mm. No grip from above
-/// either fitted shape closes across more than the capacity, and each comes in fully open, the
-/// fingers locked at the loaded width at which every check of the hand had them.
+/// either fitted shape closes across more than the capacity, and each grip's opening is the
+/// loaded width: fully open.
 #[test]
 fn grips_from_above_open_as_loaded_and_close_across_no_more_than_the_capacity() {
     let robot = panda();
@@ -4280,7 +4321,7 @@ fn grips_from_above_open_as_loaded_and_close_across_no_more_than_the_capacity() 
         Vec3::new(0.043, 0.0385, 0.015),
         [180, 30, 30],
     );
-    let options = turn_options(&robot);
+    let (shape_options, surface_options) = turn_options();
     let (mut between, mut shaped) = (0, 0);
     for thing in [wide, a_control()] {
         let things = vec![table(), thing, arm(&robot, &q)];
@@ -4301,9 +4342,14 @@ fn grips_from_above_open_as_loaded_and_close_across_no_more_than_the_capacity() 
             };
             let narrow = 2.0 * half_extents.x.min(half_extents.y);
             between += usize::from(gripper.capacity() < narrow && narrow <= gripper.opening());
-            let turn = seen
-                .kept
-                .turn_grips(&device, id, &gripper, Vec3::Z, &options);
+            let turn = seen.kept.turn_grips(
+                &device,
+                id,
+                &gripper,
+                Vec3::Z,
+                &shape_options,
+                &surface_options,
+            );
             let turn = turn.unwrap().expect("the box is seen");
             let grips = turn.groups.iter().flat_map(|group| &group.grips);
             for grip in grips.filter(|grip| grip.source == GripSource::Shape) {
@@ -4363,7 +4409,7 @@ fn no_grip_from_above_is_off_the_axis_by_a_slant() {
         &MemoryOptions::default(),
     )
     .unwrap();
-    let options = turn_options(&robot);
+    let (shape_options, surface_options) = turn_options();
     let mut straight_down = 0;
     for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
         let (frames, bands) = read(&rendered, c, 7);
@@ -4379,13 +4425,18 @@ fn no_grip_from_above_is_off_the_axis_by_a_slant() {
         let object = scene.objects.iter().find(|object| object.id == id);
         let shape = cover(&object.expect("the control").shape);
         let placed = shape.pose();
-        let from_shape = batchplan::grasps(&shape, &options).unwrap_or_default();
+        let from_shape = batchplan::grasps(&shape, &gripper, &shape_options).unwrap_or_default();
         straight_down += (from_shape.iter())
             .filter(|grasp| (placed.mul_pose(**grasp).rotation * Vec3::Z).z < -0.999)
             .count();
-        let turn = seen
-            .kept
-            .turn_grips(&device, id, &gripper, normal, &options);
+        let turn = seen.kept.turn_grips(
+            &device,
+            id,
+            &gripper,
+            normal,
+            &shape_options,
+            &surface_options,
+        );
         let turn = turn.unwrap().expect("the control is seen");
         for pose in shape_grips(&turn) {
             let along = -(pose.rotation * Vec3::Z).dot(normal);
@@ -4402,10 +4453,76 @@ fn no_grip_from_above_is_off_the_axis_by_a_slant() {
     );
 }
 
+/// The knob's bar with a floor in both kinds of grasps: the shape's 2 mm under where its grips from
+/// above put the fingertips, the surface's 2 mm over it, so that those grips' open hands cross the
+/// surface's floor. Every grip `turn_grips` gives whose closure is not obstructed keeps the open
+/// hand over that floor; with the surface's floor off, some grip from above would not.
+#[test]
+fn turn_grips_keep_the_open_hand_over_the_floor() {
+    let robot = panda();
+    let device = Device::cpu_threads(&robot, 2).unwrap();
+    let q = robot.default_q().to_vec();
+    let things = a_knob(&robot, &q);
+    let bar = MIDDLE + Vec3::Z * 0.089;
+    let rendered = [-0.27, 0.27].map(|side| {
+        Frame::of(
+            &things,
+            looking(Vec3::new(MIDDLE.x + side, -0.04, 0.25), bar),
+        )
+    });
+    let gripper = turn_gripper(&robot);
+    let (shape_options, surface_options) = turn_options();
+    let tips = bar.z + 0.019 - shape_options.depth - gripper.tip();
+    let floor = tips + 0.002;
+    let shape_options = ShapeGraspOptions {
+        floor: Some(tips - 0.002),
+        ..shape_options
+    };
+    let floored = SurfaceGraspOptions {
+        floor: Some(floor),
+        ..surface_options
+    };
+    let over = |pose: &Pose| {
+        let lowest =
+            |s: &batchplan::HandSphere| (pose.position + pose.rotation * s.center).z - s.radius;
+        gripper.spheres().iter().all(|s| lowest(s) >= floor - 1e-5)
+    };
+    let (mut kept, mut crossing) = (0, 0);
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seen = first_look(&device, &things, &rendered, (c, 7), &q, 0.0);
+        let id = id_of(seen.kept.scene(), &rendered, 3).expect("the bar is visible");
+        let grips = |o: &SurfaceGraspOptions| {
+            let turn = seen
+                .kept
+                .turn_grips(&device, id, &gripper, Vec3::Z, &shape_options, o);
+            let turn = turn.unwrap().expect("the bar is seen");
+            let each = turn.groups.into_iter().flat_map(|group| group.grips);
+            each.collect::<Vec<_>>()
+        };
+        for grip in grips(&floored) {
+            if grip.evidence != ClosureEvidence::Obstructed {
+                assert!(
+                    over(&grip.pose),
+                    "{camera}: under the floor at {floor}: {grip:?}"
+                );
+                kept += 1;
+            }
+        }
+        let unfloored = grips(&surface_options);
+        let from_above = |g: &&miru::TurnGrip| g.source == GripSource::Shape && !over(&g.pose);
+        crossing += unfloored.iter().filter(from_above).count();
+    }
+    assert!(
+        kept > 0 && crossing > 0,
+        "{kept} grips kept over the floor, {crossing} from above across it without it"
+    );
+}
+
 /// An object no label names has no grips, and what is out of range is refused, naming the value,
 /// before the look is read, so for an object it does not show as well: by `turn_grips` and by the
-/// calls it is made of, `bar_on_disk` and `observed_closures`. A gripper of a hand the device's
-/// robot lacks is refused, and one whose jaws do not slide.
+/// calls it is made of, `bar_on_disk` and `observed_closures`, options of the shape's grasps and of
+/// the surface's alike. A gripper of a hand the device's robot lacks is refused, and one whose jaws
+/// do not slide.
 #[test]
 fn turn_grips_need_the_object_seen_and_input_in_range() {
     let robot = panda();
@@ -4415,18 +4532,32 @@ fn turn_grips_need_the_object_seen_and_input_in_range() {
     let rendered = one_side(&things);
     let seen = first_look(&device, &things, &rendered, (0, 7), &q, 0.0);
     let id = id_of(seen.kept.scene(), &rendered, 1).expect("the box is visible");
-    let options = turn_options(&robot);
+    let (shape_options, surface_options) = turn_options();
     let gripper = turn_gripper(&robot);
     let kept = &seen.kept;
     assert!(
-        kept.turn_grips(&device, id, &gripper, Vec3::Z, &options)
-            .unwrap()
-            .is_some()
+        kept.turn_grips(
+            &device,
+            id,
+            &gripper,
+            Vec3::Z,
+            &shape_options,
+            &surface_options
+        )
+        .unwrap()
+        .is_some()
     );
     assert!(
-        kept.turn_grips(&device, u32::MAX, &gripper, Vec3::Z, &options)
-            .unwrap()
-            .is_none()
+        kept.turn_grips(
+            &device,
+            u32::MAX,
+            &gripper,
+            Vec3::Z,
+            &shape_options,
+            &surface_options
+        )
+        .unwrap()
+        .is_none()
     );
     // What a calibration contradicts, `Robot::gripper` refuses (batchplan's `tests/robot.rs`).
     // The same hand, but hand 1 of a Panda with another at its fourth link: one whose jaws slide,
@@ -4439,9 +4570,21 @@ fn turn_grips_need_the_object_seen_and_input_in_range() {
         .gripper(0, &GripperCalibration::new(0.08, 0.0, HashMap::new()))
         .expect("the hand as a gripper whose fingers stay");
     assert!(elsewhere.sliding() && !still.sliding());
-    let stray = GraspOptions {
+    let stray = SurfaceGraspOptions {
         approach: -0.5,
-        ..options
+        ..surface_options
+    };
+    let unturned = SurfaceGraspOptions {
+        turns: 0,
+        ..surface_options
+    };
+    let pointless = SurfaceGraspOptions {
+        contact: f32::NAN,
+        ..surface_options
+    };
+    let unturned_shape = ShapeGraspOptions {
+        turns: 0,
+        ..shape_options
     };
     let (up, off) = (Vec3::Z, Vec3::new(0.0, 0.0, 0.5));
     let down = Quat::from_rotation_x(std::f32::consts::PI);
@@ -4449,28 +4592,49 @@ fn turn_grips_need_the_object_seen_and_input_in_range() {
     let lost = [Pose::new(Vec3::NAN, down)];
     // Refused before the look is read: for an object it does not show as well.
     for id in [id, u32::MAX] {
-        let turn = |g: &Gripper, up: Vec3, o: &GraspOptions| {
-            kept.turn_grips(&device, id, g, up, o).map(|_| ())
+        let turn = |g: &Gripper, up: Vec3, o: &SurfaceGraspOptions| {
+            kept.turn_grips(&device, id, g, up, &shape_options, o)
+                .map(|_| ())
         };
-        let bar = |g: &Gripper, out: Vec3, o: &GraspOptions| {
-            kept.bar_on_disk(&device, id, out, g, o).map(|_| ())
+        let shaped = |o: &ShapeGraspOptions| {
+            kept.turn_grips(&device, id, &gripper, up, o, &surface_options)
+                .map(|_| ())
         };
-        let closures = |g: &Gripper, poses: &[Pose], o: &GraspOptions| {
+        let bar = |g: &Gripper, out: Vec3, o: &SurfaceGraspOptions| {
+            kept.bar_on_disk(&device, id, out, g, shape_options.depth, o)
+                .map(|_| ())
+        };
+        let closures = |g: &Gripper, poses: &[Pose], o: &SurfaceGraspOptions| {
             kept.observed_closures(&device, id, g, poses, o).map(|_| ())
         };
         let refused = [
-            ("turn", turn(&elsewhere, up, &options), "hand 1"),
-            ("turn", turn(&still, up, &options), "slide"),
+            ("turn", turn(&elsewhere, up, &surface_options), "hand 1"),
+            ("turn", turn(&still, up, &surface_options), "slide"),
             ("turn", turn(&gripper, up, &stray), "-0.5"),
-            ("turn", turn(&gripper, off, &options), "0.5"),
-            ("bar", bar(&elsewhere, up, &options), "hand 1"),
-            ("bar", bar(&still, up, &options), "slide"),
+            ("turn", turn(&gripper, up, &unturned), "turns 0, contact"),
+            ("turn", turn(&gripper, up, &pointless), "contact NaN"),
+            ("turn", shaped(&unturned_shape), "turns 0, tip"),
+            ("turn", turn(&gripper, off, &surface_options), "0.5"),
+            ("bar", bar(&elsewhere, up, &surface_options), "hand 1"),
+            ("bar", bar(&still, up, &surface_options), "slide"),
             ("bar", bar(&gripper, up, &stray), "-0.5"),
-            ("bar", bar(&gripper, off, &options), "0.5"),
-            ("closures", closures(&elsewhere, &poses, &options), "hand 1"),
-            ("closures", closures(&still, &poses, &options), "slide"),
+            ("bar", bar(&gripper, off, &surface_options), "0.5"),
+            (
+                "closures",
+                closures(&elsewhere, &poses, &surface_options),
+                "hand 1",
+            ),
+            (
+                "closures",
+                closures(&still, &poses, &surface_options),
+                "slide",
+            ),
             ("closures", closures(&gripper, &poses, &stray), "-0.5"),
-            ("closures", closures(&gripper, &lost, &options), "NaN"),
+            (
+                "closures",
+                closures(&gripper, &lost, &surface_options),
+                "NaN",
+            ),
         ];
         for (call, result, value) in refused {
             let message = result.expect_err("out of range").to_string();

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use batchplan::{Device, GraspOptions, Gripper, Pose, Robot, Surface};
+use batchplan::{Device, Gripper, Pose, Surface, SurfaceGraspOptions};
 use glam::{DMat3, DVec3, Mat3, Quat, Vec2, Vec3};
 
 use crate::closure::Sweep;
@@ -349,9 +349,9 @@ impl Kept {
     /// Measures a bar over a disk and checks its proposed poses against this look's depth.
     /// `gripper` is the hand, from `Robot::gripper` for `device`'s robot: it closes from its
     /// loaded gap to its closed one, its jaws sliding (a gripper whose jaws do not is an
-    /// `Error::Input`), and its capacity limits the graspable width. `depth` places
-    /// the IK frame below the crest, `overlap` bounds fingertip insertion, and `approach` and
-    /// `floor` bound the approach. The returned poses use the fully open hand. Both closing
+    /// `Error::Input`), and its capacity limits the graspable width. `depth` places the IK frame
+    /// below the crest; the options' `overlap` bounds fingertip insertion, and their `approach`
+    /// and `floor` bound the approach. The returned poses use the fully open hand. Both closing
     /// sweeps must encounter target readings above the disk and clear other measured material.
     /// Plan every motion against the current world. A circular face supplies a centre hypothesis
     /// for a centred control. Stationary bars on circular faces have exactly the same appearance.
@@ -361,7 +361,8 @@ impl Kept {
         id: u32,
         outward: Vec3,
         gripper: &Gripper,
-        options: &GraspOptions,
+        depth: f32,
+        options: &SurfaceGraspOptions,
     ) -> Result<Option<BarOnDisk>> {
         let (robot, hand) = (device.robot(), gripper.hand());
         ensure_input!(
@@ -375,9 +376,8 @@ impl Kept {
              with each jaw sliding along the hand's y axis"
         );
         ensure_input!(
-            outward.is_normalized() && options.depth.is_finite() && options.depth > 0.0,
-            "invalid outward direction {outward:?} or insertion {}",
-            options.depth
+            outward.is_normalized() && depth.is_finite() && depth > 0.0,
+            "invalid outward direction {outward:?} or insertion {depth}"
         );
         ensure_input!(
             options.overlap.is_finite()
@@ -404,25 +404,24 @@ impl Kept {
         let Some(surface) = self.surface(device, id)? else {
             return Ok(None);
         };
-        measured(robot, &surface, resolution, outward, gripper, options)
+        measured(&surface, resolution, outward, gripper, depth, options)
     }
 }
 
 /// [`Kept::bar_on_disk`] on the target's surface as [`Kept::surface`] gives it, at the look's
 /// resolution for it ([`Kept::bar_resolution`]), its inputs checked.
 pub(crate) fn measured(
-    robot: &Robot,
     surface: &Surface,
     resolution: f32,
     outward: Vec3,
     gripper: &Gripper,
-    options: &GraspOptions,
+    depth: f32,
+    options: &SurfaceGraspOptions,
 ) -> Result<Option<BarOnDisk>> {
-    let Some(mut bar) = BarOnDisk::measure(surface, outward, options.depth, resolution)? else {
+    let Some(mut bar) = BarOnDisk::measure(surface, outward, depth, resolution)? else {
         return Ok(None);
     };
-    if bar.width + 2.0 * resolution > gripper.capacity()
-        || options.depth + robot.tip(gripper.hand()) < options.overlap
+    if bar.width + 2.0 * resolution > gripper.capacity() || depth + gripper.tip() < options.overlap
     {
         return Ok(None);
     }
@@ -441,7 +440,7 @@ fn hand_fits(
     disk: Vec3,
     outward: Vec3,
     sweep: &Sweep<'_>,
-    options: &GraspOptions,
+    options: &SurfaceGraspOptions,
     resolution: f32,
 ) -> bool {
     let depth_limit = (pose.position - disk).dot(outward) - resolution;
@@ -507,8 +506,7 @@ mod tests {
             object: vec![true, true],
             ..Surface::default()
         };
-        let options = GraspOptions {
-            opening: 0.016,
+        let options = SurfaceGraspOptions {
             approach: 0.020,
             ..Default::default()
         };

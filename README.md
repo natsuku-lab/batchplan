@@ -110,10 +110,12 @@ fn main() -> Result<(), Error> {
 ### Pick up a box
 
 ```rust,no_run
+use std::collections::HashMap;
+
 use batchplan::glam::{Quat, Vec3};
 use batchplan::{
-    CollisionModel, Device, Error, GraspOptions, Obstacle, Pick, Pose, Robot, RobotOptions,
-    TaskOptions, World,
+    CollisionModel, Device, Error, GripperCalibration, Obstacle, Pick, Pose, Robot, RobotOptions,
+    ShapeGraspOptions, TaskOptions, World,
 };
 
 fn main() -> Result<(), Error> {
@@ -138,8 +140,10 @@ fn main() -> Result<(), Error> {
         .into();
     let worlds = device.upload(&worlds)?;
 
-    // Pick it up in every scene at once, by any grasp that fits the fingers, off the table.
-    let grasps = batchplan::grasps(&block, &GraspOptions::default())?;
+    // Pick it up in every scene at once, by any grasp that fits the fingers, off the table. The
+    // pads stand 8 cm apart as loaded, and touch closed.
+    let hand = robot.gripper(0, &GripperCalibration::new(0.08, 0.0, HashMap::new()))?;
+    let grasps = batchplan::grasps(&block, &hand, &ShapeGraspOptions::default())?;
     let picks: Vec<Pick> = (0..3)
         .map(|world| Pick {
             support: vec![0],

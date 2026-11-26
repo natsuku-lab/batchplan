@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 import batchplan as bp
-from conftest import ASSETS, devices, ur5e
+from conftest import ASSETS, devices, gripper_of, ur5e
 
 DOWN = (1.0, 0.0, 0.0, 0.0)  # half a turn about x: the tool pointing down
 TABLE = bp.Obstacle.cuboid((0.0, 0.0, -0.02), (1.0, 1.0, 0.02))
@@ -564,7 +564,7 @@ def picks(robot, device, _worlds, problems):
     """`pick`, of a box in front of the robot from each reach's start."""
     box = bp.Obstacle.cuboid((0.45, 0.2, 0.03), (0.02, 0.03, 0.03))
     worlds = device.upload([bp.World([box])])
-    grasps = bp.grasps(box, bp.GraspOptions(tip=robot.tip(0)))
+    grasps = bp.grasps(box, gripper_of(robot), bp.ShapeGraspOptions(tip=robot.tip(0)))
     tasks = [bp.Pick(0, robot.default_q, 0, grasps) for _ in problems]
     return lambda: bp.pick(device, worlds, tasks)
 
@@ -572,7 +572,8 @@ def picks(robot, device, _worlds, problems):
 def places(robot, device, _worlds, problems):
     """`place`, of a box held from above, from each reach's start."""
     box = bp.Obstacle.cuboid((0.0, 0.0, 0.0), (0.02, 0.03, 0.03))
-    held = bp.Held(0, box, bp.grasps(box, bp.GraspOptions(tip=robot.tip(0)))[0])
+    grasp = bp.grasps(box, gripper_of(robot), bp.ShapeGraspOptions(tip=robot.tip(0)))[0]
+    held = bp.Held(0, box, grasp)
     worlds = device.upload([bp.World()])
     poses = bp.place_poses(box, bp.Pose((0.45, 0.0, 0.03)), 4)
     tasks = [bp.Place(0, robot.default_q, held, poses) for _ in problems]

@@ -331,7 +331,7 @@ fn a_hinged_jaw_converts_widths_but_does_not_slide() {
         normals: vec![Vec3::NEG_Y, Vec3::Y],
         ..Default::default()
     };
-    let narrow = batchplan::GraspOptions {
+    let narrow = batchplan::SurfaceGraspOptions {
         narrow: true,
         ..Default::default()
     };
@@ -340,7 +340,7 @@ fn a_hinged_jaw_converts_widths_but_does_not_slide() {
         Err(Error::Input(message)) => assert!(message.contains("slide"), "{message}"),
         other => panic!("narrowing a hinged jaw: {other:?}"),
     }
-    let open = batchplan::GraspOptions::default();
+    let open = batchplan::SurfaceGraspOptions::default();
     assert!(batchplan::grasps_on(&device, &gripper, surfaces, &open).is_ok());
 }
 

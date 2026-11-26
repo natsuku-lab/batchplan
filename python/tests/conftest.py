@@ -34,6 +34,11 @@ def tasks_panda() -> bp.Robot:
     return bp.Robot.load(ASSETS / "franka/franka_panda.urdf", options)
 
 
+def gripper_of(robot: bp.Robot) -> bp.Gripper:
+    """Hand 0 of `robot` as a gripper whose pads stand 8 cm apart, for grasps of a shape."""
+    return robot.gripper(0, bp.GripperCalibration(0.08, 0.0, {}))
+
+
 def devices(robot: bp.Robot) -> list[bp.Device]:
     """The CPU, and a GPU when one exists.
 

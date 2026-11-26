@@ -11,8 +11,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
 use batchplan::{
-    DepthFilter, DepthImage, Device, GraspOptions, Held, IkOptions, Intrinsics, Obstacle,
-    Occlusion, OccupancyMap, Pose, Robot, RobotMask, SdfOptions, Surface, Weighing, World,
+    DepthFilter, DepthImage, Device, Held, IkOptions, Intrinsics, Obstacle, Occlusion,
+    OccupancyMap, Pose, Robot, RobotMask, SdfOptions, Surface, SurfaceGraspOptions, Weighing,
+    World,
 };
 use glam::Vec3;
 
@@ -875,7 +876,7 @@ impl Kept {
     /// (`grasps_on`, `rests_on`), as the README's "With batchplan" takes them in step 6: each
     /// camera's filtered depth, a point for each reading off the robot, those the look's labels
     /// give the object flagged as its, each with the normal of a fingertip's patch about it
-    /// (`GraspOptions::default().contact`), the views joined (`Surface::from_depth`,
+    /// (`SurfaceGraspOptions::default().contact`), the views joined (`Surface::from_depth`,
     /// `Surface::join`). On `device`'s threads. None where no label of the look names the object:
     /// an id the look has not, or one it kept unseen.
     pub fn surface(&self, device: &Device, id: u32) -> Result<Option<Surface>> {
@@ -892,7 +893,7 @@ impl Kept {
         {
             return Ok(None);
         }
-        let radius = GraspOptions::default().contact;
+        let radius = SurfaceGraspOptions::default().contact;
         let mut joined: Option<Surface> = None;
         for (view, labels) in self.views.iter().zip(&self.scene.labels) {
             let flags: Vec<bool> = labels.iter().map(|named| *named == label).collect();

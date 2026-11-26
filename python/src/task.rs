@@ -11,24 +11,23 @@ use crate::device::{Device, Worlds};
 use crate::error::OrRaise;
 use crate::field::{self, Field, tuple_field, value_class};
 use crate::held::Held;
-use crate::robot::Robot;
+use crate::robot::{Gripper, Robot};
 use crate::timing::Trajectory;
 use crate::world::{Obstacle, Pose, World};
 
 value_class! {
-    /// Grasps `grasps` proposes for a parallel gripper.
-    GraspOptions(batchplan::GraspOptions) {
-        /// The widest the fingers open (meters): 8 cm. Grasps of a surface take their gripper's
-        /// (`Gripper.opening`).
-        opening: f32,
+    /// How `grasps` proposes grasps of a box, ball, cylinder or capsule for a parallel gripper,
+    /// which gives the widths: a grasp closes across at most its capacity, and the open fingers
+    /// stand its loaded gap apart.
+    ShapeGraspOptions(batchplan::ShapeGraspOptions) {
         /// How far in from the object's surface the IK frame holds it (meters): 2 cm. Above a
         /// `floor`, a grasp from above may hold it less deep, its frame even outside the object.
         depth: f32,
         /// Grasps spread around a round object's axis: 8.
         turns: usize,
-        /// How far the fingers reach past the IK frame along its z axis (meters), as `Robot.tip`
-        /// measures it: 0.
-        tip: f32,
+        /// How far the fingers reach past the IK frame along its z axis (meters): `None`, the
+        /// gripper's (`Gripper.tip`, as `Robot.tip` measures it).
+        tip: Option<f32>,
         /// A height the hand's frame and its open fingers stay above, in the frame the object is
         /// placed in (meters): the top of the table it stands on, and room to spare. A grasp from
         /// above that would take them lower holds the object less deep, and one that leaves less
@@ -44,34 +43,6 @@ value_class! {
         /// 0, each grasp comes once toward each end; a hand that will pass the object to another
         /// (`handover`) holds it toward one end, as 0.75.
         along: f32,
-        /// The friction between a fingertip and what it presses on: 0.5. Grasps of a surface take
-        /// their gripper's (`GripperCalibration.friction`).
-        friction: f32,
-        /// The radius of the patch a fingertip presses on, for grasps of a surface (meters): 5 mm.
-        contact: f32,
-        /// How far the hand comes in straight along its z axis to a grasp of a surface, a way
-        /// that must be clear of what was seen (meters): 10 cm.
-        approach: f32,
-        /// The thickest wall seen from one side only that a grasp of a surface may close across,
-        /// where the cameras saw past it (meters), and never more than its gripper's capacity:
-        /// `math.inf`, a wall as thick as the gripper grasps. `None` turns it off, every grasp
-        /// closing on two patches seen.
-        shell: Option<f32>,
-        /// Whether the fingers may come in to a grasp of a surface less open than its gripper's
-        /// `opening`, each grasp at the opening that keeps them farthest from what is not the
-        /// object's: false.
-        narrow: bool,
-        /// A point to grip a surface near, in the surface's frame: `None`, the grasps spread over
-        /// the object. With a point, within each of their tiers, the pairs nearest it first.
-        near: Option<Vec3>,
-        /// An optional point for additional approaches whose fingers close on it.
-        close_on: Option<Vec3>,
-        /// How far the hand's spheres stay from what they do not close on, on the way in to a
-        /// grasp of a surface and at it (meters): 0.
-        clearance: f32,
-        /// Whether the grasps of a surface whose fingers close onto their patches before they
-        /// meet any other part of the object come first, within each lot: false.
-        first_touch: bool,
     }
     methods {
         #[new]
@@ -490,7 +461,7 @@ tuple_field!(
 
 /// A task's steps, in the order they are checked.
 #[pyclass(module = "batchplan", frozen, eq, eq_int, ord, hash)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd)]
 pub(crate) enum TaskStep {
     /// The start, checked for collision.
     Start,
@@ -499,19 +470,13 @@ pub(crate) enum TaskStep {
     /// A turn's turn, from a configuration at the grasp: checked before the straight moves.
     Turn,
     /// A pull's straight draw from the grasp.
-    Pull = 6,
+    Pull,
     /// The straight move in, to there.
-    Approach = 3,
+    Approach,
     /// The straight move away: lifting the object, or backing off from it.
     Depart,
     /// The planned path from the start to where the move in begins.
     Transit,
-}
-
-impl PartialOrd for TaskStep {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.rust().cmp(&other.rust()))
-    }
 }
 
 impl TaskStep {
@@ -1044,19 +1009,20 @@ pub(crate) fn handover_poses<'py>(
     PyTuple::new(py, poses.into_iter().map(Pose))
 }
 
-/// Grasps of a box, ball, cylinder or capsule in its frame, for `Pick.grasps`: the hand facing
-/// each side and closing across what fits between its fingers. With a `floor`, the object's pose
-/// places it: pass a world's obstacle as it stands. Raises `InputError` saying why where no grasp
-/// fits.
+/// Grasps of a box, ball, cylinder or capsule in its frame, for `Pick.grasps`, by `gripper`: the
+/// hand facing each side and closing across what the gripper grasps. With a `floor`, the object's
+/// pose places it: pass a world's obstacle as it stands. Raises `InputError` saying why where no
+/// grasp fits.
 #[pyfunction]
-#[pyo3(signature = (object, options = None))]
+#[pyo3(signature = (object, gripper, options = None))]
 pub(crate) fn grasps<'py>(
     py: Python<'py>,
     object: &Obstacle,
-    options: Option<&GraspOptions>,
+    gripper: &Gripper,
+    options: Option<&ShapeGraspOptions>,
 ) -> PyResult<Bound<'py, PyTuple>> {
     let options = options.map(|o| o.0).unwrap_or_default();
-    let found = batchplan::grasps(&object.0, &options).or_raise()?;
+    let found = batchplan::grasps(&object.0, &gripper.0, &options).or_raise()?;
     PyTuple::new(py, found.into_iter().map(Pose))
 }
 
@@ -1075,7 +1041,7 @@ pub(crate) fn place_poses<'py>(
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<GraspOptions>()?;
+    m.add_class::<ShapeGraspOptions>()?;
     m.add_class::<TaskOptions>()?;
     m.add_class::<Pick>()?;
     m.add_class::<PickBody>()?;

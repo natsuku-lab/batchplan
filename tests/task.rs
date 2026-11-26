@@ -5,13 +5,16 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
+use std::collections::HashMap;
 use std::f32::consts::PI;
+use std::sync::LazyLock;
 
 use batchplan::rng::Rng;
 use batchplan::{
-    CandidateStop, Contact, Device, Error, GraspOptions, GripperCalibration, HandConstraint, Held,
-    IkOptions, IkProblem, Obstacle, Pick, Place, Pose, Robot, RobotOptions, SdfGrid, Surface,
-    TaskFailure, TaskOptions, TaskPlan, TaskStep, ToolPathStop, Touch, Trajectory, World, Worlds,
+    CandidateStop, CollisionModel, Contact, Device, Error, Gripper, GripperCalibration,
+    HandConstraint, Held, IkOptions, IkProblem, Obstacle, Pick, Place, Pose, Robot, RobotOptions,
+    SdfGrid, ShapeGraspOptions, Surface, SurfaceGraspOptions, TaskFailure, TaskOptions, TaskPlan,
+    TaskStep, ToolPathStop, Touch, Trajectory, World, Worlds,
 };
 use glam::{Mat3, Quat, Vec3};
 
@@ -390,7 +393,8 @@ fn a_task_none_of_whose_grasps_gets_through_says_where_and_why_each_stopped() {
     // Every grasp of the box: those from its sides stop at the grasp, those from above lifting.
     let all = batchplan::grasps(
         &Obstacle::cuboid(Vec3::ZERO, HALF),
-        &GraspOptions::default(),
+        hand(),
+        &ShapeGraspOptions::default(),
     )
     .unwrap();
     let f = pick_in(&device, scene(vec![lid]), pick_from(&robot, all), &o).unwrap_err();
@@ -1155,7 +1159,7 @@ fn ik_takes_the_solution_nearest_the_start() {
 
 #[test]
 fn grasps_fit_between_the_fingers_and_face_into_the_object() {
-    let o = GraspOptions::default();
+    let o = ShapeGraspOptions::default();
     let shapes = [
         (Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.03, 0.1)), 16),
         (Obstacle::sphere(Vec3::ZERO, 0.03), 24),
@@ -1166,7 +1170,7 @@ fn grasps_fit_between_the_fingers_and_face_into_the_object() {
         (Obstacle::capsule(Vec3::ZERO, 0.025, 0.01), 48),
     ];
     for (shape, count) in shapes {
-        let grasps = batchplan::grasps(&shape, &o).unwrap();
+        let grasps = batchplan::grasps(&shape, hand(), &o).unwrap();
         assert_eq!(grasps.len(), count, "{shape:?}");
         for g in grasps {
             let (y, z) = (g.rotation * Vec3::Y, g.rotation * Vec3::Z);
@@ -1187,27 +1191,48 @@ fn grasps_fit_between_the_fingers_and_face_into_the_object() {
             };
             let across = width(y) + width(-y);
             assert!(
-                across <= o.opening + 1e-3,
+                across <= hand().capacity() + 1e-3,
                 "{shape:?}: {across} across at {g:?}"
             );
         }
     }
     let grid = SdfGrid::try_new([2, 2, 2], 0.1, Vec3::ZERO, &[1.0; 8]).unwrap();
     let grid = Obstacle::from_grid(grid);
-    assert!(matches!(batchplan::grasps(&grid, &o), Err(Error::Input(_))));
+    assert!(matches!(
+        batchplan::grasps(&grid, hand(), &o),
+        Err(Error::Input(_))
+    ));
     // Refused as a grid however it is placed, without its values in the message.
     let skewed = grid.placed(Pose::new(Vec3::ZERO, Quat::from_xyzw(0.0, 0.0, 0.0, 2.0)));
-    let err = batchplan::grasps(&skewed, &o).unwrap_err().to_string();
+    let err = batchplan::grasps(&skewed, hand(), &o)
+        .unwrap_err()
+        .to_string();
     assert_eq!(err, "a distance grid has no grasps");
 }
 
-/// The lowest of a grasp's frame and its open fingertips, `o.tip` past the frame and
-/// `o.opening` apart, with `object` placed as it stands.
-fn lowest(object: &Obstacle, grasp: &Pose, o: &GraspOptions) -> f32 {
+/// The Panda's hand as `common::panda` holds it, its pads 8 cm apart, for grasps of a shape, which
+/// need no fingers that slide.
+fn hand() -> &'static Gripper {
+    static HAND: LazyLock<Gripper> = LazyLock::new(|| {
+        let calibration = GripperCalibration::new(0.08, 0.0, HashMap::new());
+        common::panda().unwrap().gripper(0, &calibration).unwrap()
+    });
+    &HAND
+}
+
+/// How far `o`'s fingertips reach past the frame: its `tip`, or the hand's.
+fn reach(o: &ShapeGraspOptions) -> f32 {
+    o.tip.unwrap_or_else(|| hand().tip())
+}
+
+/// The lowest of a grasp's frame and its open fingertips, [`reach`] past the frame and the hand's
+/// loaded gap apart, with `object` placed as it stands.
+fn lowest(object: &Obstacle, grasp: &Pose, o: &ShapeGraspOptions) -> f32 {
     let at = object.pose().mul_pose(*grasp);
     let (out, closing) = (at.rotation * Vec3::Z, at.rotation * Vec3::Y);
+    let open = hand().opening();
     let fingers =
-        [1.0, -1.0].map(|side| at.position + out * o.tip + closing * side * o.opening / 2.0);
+        [1.0, -1.0].map(|side| at.position + out * reach(o) + closing * side * open / 2.0);
     fingers.iter().map(|p| p.z).fold(at.position.z, f32::min)
 }
 
@@ -1215,12 +1240,12 @@ fn lowest(object: &Obstacle, grasp: &Pose, o: &GraspOptions) -> f32 {
 fn grasps_keep_the_hand_above_the_floor_or_say_why_there_are_none() {
     // A 2.5 cm cube on a table whose top is at z = 0, fingertips 12 mm past the frame.
     let cube = Obstacle::cuboid(Vec3::new(0.4, 0.0, 0.0125), Vec3::splat(0.0125));
-    let o = GraspOptions {
-        tip: 0.012,
+    let o = ShapeGraspOptions {
+        tip: Some(0.012),
         floor: Some(0.002),
-        ..GraspOptions::default()
+        ..ShapeGraspOptions::default()
     };
-    let grasps = batchplan::grasps(&cube, &o).unwrap();
+    let grasps = batchplan::grasps(&cube, hand(), &o).unwrap();
     let at = cube.pose();
     let height = |g: &Pose, reach: f32| {
         at.mul_pose(*g).position.z + (at.rotation * g.rotation * Vec3::Z).z * reach
@@ -1234,7 +1259,7 @@ fn grasps_keep_the_hand_above_the_floor_or_say_why_there_are_none() {
     assert!(
         from_above
             .iter()
-            .all(|g| (height(g, o.tip) - 0.002).abs() < 1e-5)
+            .all(|g| (height(g, reach(&o)) - 0.002).abs() < 1e-5)
     );
     let from_sides: Vec<&Pose> = grasps.iter().filter(|g| down(g).abs() < 0.5).collect();
     assert_eq!(from_sides.len(), 8);
@@ -1248,12 +1273,14 @@ fn grasps_keep_the_hand_above_the_floor_or_say_why_there_are_none() {
     );
     assert_eq!(grasps.len(), 12, "none from below");
     // With no floor, every face's grasps at the full depth, the fingertips in the table.
-    let anywhere = batchplan::grasps(&cube, &GraspOptions { floor: None, ..o }).unwrap();
+    let anywhere =
+        batchplan::grasps(&cube, hand(), &ShapeGraspOptions { floor: None, ..o }).unwrap();
     assert_eq!(anywhere.len(), 24);
     // A floor over the cube leaves none, and says why; so does a box too wide every way.
     let err = batchplan::grasps(
         &cube,
-        &GraspOptions {
+        hand(),
+        &ShapeGraspOptions {
             floor: Some(0.03),
             ..o
         },
@@ -1264,11 +1291,139 @@ fn grasps_keep_the_hand_above_the_floor_or_say_why_there_are_none() {
         "{err}"
     );
     let wide = Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.05));
-    let err = batchplan::grasps(&wide, &GraspOptions::default()).unwrap_err();
+    let err = batchplan::grasps(&wide, hand(), &ShapeGraspOptions::default()).unwrap_err();
     assert!(
         err.to_string().contains("10.0 cm across") && err.to_string().contains("8.0 cm"),
         "{err}"
     );
+}
+
+/// A gripper whose pads stand 8 cm apart as loaded and that grasps 6 cm.
+fn grasping_six_cm() -> Gripper {
+    let calibration = GripperCalibration {
+        capacity: Some(0.06),
+        ..GripperCalibration::new(0.08, 0.0, HashMap::new())
+    };
+    common::panda().unwrap().gripper(0, &calibration).unwrap()
+}
+
+#[test]
+fn a_shapes_grasps_close_across_no_more_than_the_gripper_grasps() {
+    // A 7 x 4 x 4 cm box, one side between the 6 cm capacity and the 8 cm loaded gap: closed
+    // across its 4 cm sides alone.
+    let object = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.035, 0.02, 0.02));
+    let o = ShapeGraspOptions::default();
+    let across = |g: &Pose| (g.rotation * Vec3::Y).x.abs();
+    let open = batchplan::grasps(&object, hand(), &o).unwrap();
+    assert!(
+        open.iter().any(|g| across(g) > 0.99),
+        "8 cm closes across its 7 cm"
+    );
+    let within = batchplan::grasps(&object, &grasping_six_cm(), &o).unwrap();
+    assert!(
+        !within.is_empty() && within.iter().all(|g| across(g) < 0.01),
+        "{within:?}"
+    );
+}
+
+#[test]
+fn what_the_gripper_grasps_and_how_far_it_opens_are_what_a_refusal_names() {
+    // The gripper grasps 6 cm and opens 8: a ball 7 cm across fits no grasp, and the message
+    // names what it grasps; the 2.5 cm cube under a floor over its top has no grasp the floor
+    // allows, and the message names how far apart the open fingers stand.
+    let gripper = grasping_six_cm();
+    let ball = Obstacle::sphere(Vec3::ZERO, 0.035);
+    let err = batchplan::grasps(&ball, &gripper, &ShapeGraspOptions::default()).unwrap_err();
+    assert!(
+        err.to_string().contains("7.0 cm across") && err.to_string().contains("grasps 6.0 cm"),
+        "{err}"
+    );
+    let cube = Obstacle::cuboid(Vec3::new(0.4, 0.0, 0.0125), Vec3::splat(0.0125));
+    let o = ShapeGraspOptions {
+        tip: Some(0.012),
+        floor: Some(0.03),
+        ..ShapeGraspOptions::default()
+    };
+    let err = batchplan::grasps(&cube, &gripper, &o).unwrap_err();
+    assert!(err.to_string().contains("8.0 cm apart"), "{err}");
+}
+
+#[test]
+fn a_hand_without_spheres_has_no_reach_for_a_floor_to_keep() {
+    // Loaded without collision spheres, the hand reaches nowhere past its frame: over a floor, a
+    // shape's grasps refuse the gripper's tip, naming it and why, and take the options' own; with
+    // no floor, no tip is read.
+    let options = RobotOptions {
+        collision_model: Some(CollisionModel::default()),
+        ..common::panda_options()
+    };
+    let robot = Robot::load(common::asset("franka/franka_panda.urdf"), &options).unwrap();
+    let calibration = GripperCalibration::new(0.08, 0.0, HashMap::new());
+    let bare = robot.gripper(0, &calibration).unwrap();
+    assert_eq!(bare.tip(), f32::NEG_INFINITY);
+    let cube = Obstacle::cuboid(Vec3::new(0.4, 0.0, 0.0125), Vec3::splat(0.0125));
+    let floored = ShapeGraspOptions {
+        floor: Some(0.002),
+        ..ShapeGraspOptions::default()
+    };
+    match batchplan::grasps(&cube, &bare, &floored) {
+        Err(Error::Input(message)) => {
+            assert!(
+                message.contains("-inf m") && message.contains("no spheres"),
+                "{message}"
+            )
+        }
+        other => panic!("a hand without spheres keeps no floor: {other:?}"),
+    }
+    let given = ShapeGraspOptions {
+        tip: Some(0.012),
+        ..floored
+    };
+    assert!(!batchplan::grasps(&cube, &bare, &given).unwrap().is_empty());
+    let anywhere = batchplan::grasps(&cube, &bare, &ShapeGraspOptions::default()).unwrap();
+    assert_eq!(
+        anywhere,
+        batchplan::grasps(&cube, hand(), &ShapeGraspOptions::default()).unwrap()
+    );
+}
+
+/// The open fingers stand the gripper's loaded gap apart, wider than what it grasps: over a floor,
+/// a box tilted 20 degrees about its long side, grasped from above across its 4 cm, is held as
+/// deep as keeps the lower open fingertip, half the 8 cm loaded gap out along the tilted closing
+/// line, at the floor, where half its 6 cm capacity would leave it 3.4 mm over it.
+#[test]
+fn over_a_floor_the_open_fingers_stand_the_loaded_gap_apart() {
+    let gripper = grasping_six_cm();
+    let tilted = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.05, 0.02, 0.02)).placed(Pose::new(
+        Vec3::new(0.4, 0.0, 0.05),
+        Quat::from_rotation_x(20f32.to_radians()),
+    ));
+    let (tip, floor) = (0.01, 0.03);
+    let o = ShapeGraspOptions {
+        tip: Some(tip),
+        floor: Some(floor),
+        ..ShapeGraspOptions::default()
+    };
+    let found = batchplan::grasps(&tilted, &gripper, &o).unwrap();
+    // The lowest of a grasp's frame and its open fingertips, the fingers `apart`.
+    let lowest = |g: &Pose, apart: f32| {
+        let at = tilted.pose().mul_pose(*g);
+        let (out, closing) = (at.rotation * Vec3::Z, at.rotation * Vec3::Y);
+        let tips = [1.0, -1.0].map(|side| at.position + out * tip + closing * side * apart / 2.0);
+        tips.iter().map(|p| p.z).fold(at.position.z, f32::min)
+    };
+    let open = gripper.opening();
+    assert!(
+        found.iter().all(|g| lowest(g, open) >= floor - 1e-5),
+        "{found:?}"
+    );
+    let at_the_floor = found.iter().filter(|g| {
+        let down = (tilted.pose().rotation * g.rotation * Vec3::Z).z;
+        down < -0.5
+            && (lowest(g, open) - floor).abs() < 1e-5
+            && lowest(g, gripper.capacity()) > floor + 1e-3
+    });
+    assert!(at_the_floor.count() > 0, "{found:?}");
 }
 
 /// An 8.8 x 4.8 cm package `height` tall, standing at `x, y` on a table whose top is at z = 0.
@@ -1283,14 +1438,14 @@ fn a_flat_box_is_grasped_from_above_by_as_much_of_the_fingers_as_reaches_in() {
     // the package's top the frame would put them 6.5 mm below the floor, and above it they reach
     // 13.5 mm in.
     let object = package(0.4, 0.0, 0.0185);
-    let o = GraspOptions {
-        tip: 0.02,
+    let o = ShapeGraspOptions {
+        tip: Some(0.02),
         floor: Some(0.005),
-        ..GraspOptions::default()
+        ..ShapeGraspOptions::default()
     };
     let top = 0.0185;
-    assert!(top - o.tip < 0.005 && top - 0.005 > o.overlap);
-    let grasps = batchplan::grasps(&object, &o).unwrap();
+    assert!(top - reach(&o) < 0.005 && top - 0.005 > o.overlap);
+    let grasps = batchplan::grasps(&object, hand(), &o).unwrap();
     let at = object.pose();
     let height = |g: &Pose, reach: f32| {
         at.mul_pose(*g).position.z + (at.rotation * g.rotation * Vec3::Z).z * reach
@@ -1303,33 +1458,33 @@ fn a_flat_box_is_grasped_from_above_by_as_much_of_the_fingers_as_reaches_in() {
     assert!(
         from_above
             .iter()
-            .all(|g| (height(g, o.tip) - 0.005).abs() < 1e-5 && height(g, 0.0) > top)
+            .all(|g| (height(g, reach(&o)) - 0.005).abs() < 1e-5 && height(g, 0.0) > top)
     );
     assert_eq!(grasps.len(), 6, "4 from the sides, closing level");
     // Asked to hold more of the fingers than reach in, none from above.
-    let deeper = GraspOptions {
+    let deeper = ShapeGraspOptions {
         overlap: top - 0.005 + 1e-3,
         ..o
     };
-    let grasps = batchplan::grasps(&object, &deeper).unwrap();
+    let grasps = batchplan::grasps(&object, hand(), &deeper).unwrap();
     assert!(grasps.iter().all(|g| down(g) > -0.5), "{grasps:?}");
     assert_eq!(grasps.len(), 4);
     // An overlap and an opening must be positive and finite, and the object one that can be
-    // checked.
-    let wrong = [-0.01, 0.0, f32::NAN, f32::INFINITY].map(|bad| [(bad, 0.08), (0.01, bad)]);
-    for (overlap, opening) in wrong.concat() {
-        let bad = GraspOptions {
-            overlap,
-            opening,
-            ..o
-        };
+    // checked: the overlap the options', the opening the gripper's, which refuses it.
+    for bad in [-0.01, 0.0, f32::NAN, f32::INFINITY] {
+        let wrong = ShapeGraspOptions { overlap: bad, ..o };
         assert!(matches!(
-            batchplan::grasps(&object, &bad),
+            batchplan::grasps(&object, hand(), &wrong),
+            Err(Error::Input(_))
+        ));
+        let calibration = GripperCalibration::new(bad, 0.0, HashMap::new());
+        assert!(matches!(
+            common::panda().unwrap().gripper(0, &calibration),
             Err(Error::Input(_))
         ));
     }
     let inside_out = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, -0.02, 0.02));
-    let err = batchplan::grasps(&inside_out, &o).unwrap_err();
+    let err = batchplan::grasps(&inside_out, hand(), &o).unwrap_err();
     assert!(
         matches!(err, Error::Input(_)) && err.to_string().contains("object to grasp"),
         "{err}"
@@ -1349,20 +1504,21 @@ fn every_grasp_from_above_over_a_floor_keeps_the_overlap_in_the_object() {
     // of the 1 cm overlap, whether the floor holds the grasp less deep (5 mm) or not (2 mm).
     let flat = package(0.4, 0.0, 0.008);
     for floor in [0.002, 0.005] {
-        let o = GraspOptions {
+        let o = ShapeGraspOptions {
+            tip: Some(0.0),
             floor: Some(floor),
-            ..GraspOptions::default()
+            ..ShapeGraspOptions::default()
         };
         // Over the high floor the side grasps' frames, at its middle, are below the floor too.
-        let grasps = batchplan::grasps(&flat, &o).unwrap_or_default();
+        let grasps = batchplan::grasps(&flat, hand(), &o).unwrap_or_default();
         assert!(from_above(&grasps).is_empty(), "floor {floor}: {grasps:?}");
         // With a 2.5 mm overlap: from above at the full depth over the low floor, the middle, and
         // over the high one 3 mm in, the fingertips at the floor.
-        let shallow = GraspOptions {
+        let shallow = ShapeGraspOptions {
             overlap: 0.0025,
             ..o
         };
-        let grasps = from_above(&batchplan::grasps(&flat, &shallow).unwrap());
+        let grasps = from_above(&batchplan::grasps(&flat, hand(), &shallow).unwrap());
         let depth = if floor < 0.004 { 0.004 } else { 0.003 };
         assert_eq!(grasps.len(), 2, "floor {floor}");
         assert!(
@@ -1374,16 +1530,17 @@ fn every_grasp_from_above_over_a_floor_keeps_the_overlap_in_the_object() {
     }
     // Fingertips 2 mm short of the frame, a 2.4 cm package and a floor at 13 mm: the frame stops
     // at the floor, 11 mm in, and the fingers reach only 9 mm in.
-    let o = GraspOptions {
-        tip: -0.002,
+    let o = ShapeGraspOptions {
+        tip: Some(-0.002),
         floor: Some(0.013),
-        ..GraspOptions::default()
+        ..ShapeGraspOptions::default()
     };
-    let grasps = batchplan::grasps(&package(0.4, 0.0, 0.024), &o).unwrap_or_default();
+    let grasps = batchplan::grasps(&package(0.4, 0.0, 0.024), hand(), &o).unwrap_or_default();
     assert!(from_above(&grasps).is_empty(), "{grasps:?}");
     let grasps = batchplan::grasps(
         &package(0.4, 0.0, 0.024),
-        &GraspOptions {
+        hand(),
+        &ShapeGraspOptions {
             overlap: 0.009,
             ..o
         },
@@ -1396,12 +1553,12 @@ fn every_grasp_from_above_over_a_floor_keeps_the_overlap_in_the_object() {
         Vec3::new(0.4, 0.0, 0.00925),
         Quat::from_rotation_y(-5e-7),
     ));
-    let o = GraspOptions {
-        tip: 0.0124,
+    let o = ShapeGraspOptions {
+        tip: Some(0.0124),
         floor: Some(0.01),
-        ..GraspOptions::default()
+        ..ShapeGraspOptions::default()
     };
-    let grasps = batchplan::grasps(&tilted, &o).unwrap_or_default();
+    let grasps = batchplan::grasps(&tilted, hand(), &o).unwrap_or_default();
     let at = tilted.pose();
     let far = grasps
         .iter()
@@ -1415,10 +1572,10 @@ fn a_flat_package_on_a_table_is_picked_from_above_by_its_top() {
     let robot = common::panda().unwrap();
     let (tip, floor, top) = (robot.tip(0), 0.005, 0.016);
     let object = package(0.45, 0.1, top);
-    let o = GraspOptions {
-        tip,
+    let o = ShapeGraspOptions {
+        tip: Some(tip),
         floor: Some(floor),
-        ..GraspOptions::default()
+        ..ShapeGraspOptions::default()
     };
     // Lower than the fingertips reach past the frame and the floor, but taller than the floor and
     // the overlap.
@@ -1426,7 +1583,7 @@ fn a_flat_package_on_a_table_is_picked_from_above_by_its_top() {
         top < tip + floor && top - floor > o.overlap,
         "the fingertips reach {tip} m past the frame"
     );
-    let (from_above, from_sides): (Vec<Pose>, Vec<Pose>) = batchplan::grasps(&object, &o)
+    let (from_above, from_sides): (Vec<Pose>, Vec<Pose>) = batchplan::grasps(&object, hand(), &o)
         .unwrap()
         .into_iter()
         .partition(|g| (g.rotation * Vec3::Z).z < -0.5);
@@ -1471,6 +1628,29 @@ fn a_flat_package_on_a_table_is_picked_from_above_by_its_top() {
 }
 
 #[test]
+fn a_shapes_grasps_reach_the_grippers_tip_where_their_options_name_none() {
+    // The flat package above, lower than the Panda's fingertips reach past the frame and the
+    // floor: how far they reach moves its grasps from above.
+    let robot = common::panda().unwrap();
+    assert_eq!(hand().tip(), robot.tip(0));
+    let object = package(0.45, 0.1, 0.016);
+    let grasps = |tip: Option<f32>| {
+        let o = ShapeGraspOptions {
+            tip,
+            floor: Some(0.005),
+            ..ShapeGraspOptions::default()
+        };
+        batchplan::grasps(&object, hand(), &o).unwrap()
+    };
+    assert_eq!(grasps(None), grasps(Some(robot.tip(0))));
+    assert_ne!(
+        grasps(None),
+        grasps(Some(0.0)),
+        "the reach moves the grasps"
+    );
+}
+
+#[test]
 fn a_bar_over_a_plate_is_gripped_tilted_with_the_open_fingers_kept_off_the_plate() {
     // A bar 1 cm in radius lying along y, its top 3.7 cm over the plate, as a drawer's handle out
     // of its front. Tilted about the bar, an open finger swings down toward the plate.
@@ -1479,13 +1659,13 @@ fn a_bar_over_a_plate_is_gripped_tilted_with_the_open_fingers_kept_off_the_plate
     let middle = Vec3::new(0.5, 0.1, 0.027);
     let bar = Obstacle::cylinder(middle, 0.01, 0.06)
         .placed(Pose::new(middle, Quat::from_rotation_x(PI / 2.0)));
-    let o = GraspOptions {
-        tip,
+    let o = ShapeGraspOptions {
+        tip: Some(tip),
         floor: Some(floor),
         turns: 16,
-        ..GraspOptions::default()
+        ..ShapeGraspOptions::default()
     };
-    let grasps = batchplan::grasps(&bar, &o).unwrap();
+    let grasps = batchplan::grasps(&bar, hand(), &o).unwrap();
     assert!(grasps.iter().all(|g| lowest(&bar, g, &o) >= floor - 1e-5));
     let down = |g: &Pose| (bar.pose().rotation * g.rotation * Vec3::Z).z;
     let tilted: Vec<Pose> = grasps
@@ -1542,7 +1722,7 @@ fn a_small_cube_on_a_table_is_picked_with_the_fingertips_kept_off_the_table() {
             .remove(0)
     };
     let from_above = |g: &Pose| (g.rotation * Vec3::Z).z < -0.5;
-    let deep = batchplan::grasps(&cube, &GraspOptions::default()).unwrap();
+    let deep = batchplan::grasps(&cube, hand(), &ShapeGraspOptions::default()).unwrap();
     let deep: Vec<Pose> = deep.into_iter().filter(from_above).collect();
     let failure = pick(deep).unwrap_err();
     let on_table = |c: &CandidateStop| {
@@ -1557,12 +1737,12 @@ fn a_small_cube_on_a_table_is_picked_with_the_fingertips_kept_off_the_table() {
         })
     };
     assert!(failure.candidates.iter().all(on_table), "{failure}");
-    let o = GraspOptions {
-        tip,
+    let o = ShapeGraspOptions {
+        tip: Some(tip),
         floor: Some(floor),
-        ..GraspOptions::default()
+        ..ShapeGraspOptions::default()
     };
-    let kept = batchplan::grasps(&cube, &o).unwrap();
+    let kept = batchplan::grasps(&cube, hand(), &o).unwrap();
     let kept: Vec<Pose> = kept.into_iter().filter(from_above).collect();
     assert!(pick(kept).is_ok());
 }
@@ -2342,8 +2522,8 @@ fn seen(at: Vec3, half: Vec3, object: bool, s: &mut Surface) {
     }
 }
 
-/// Grasps whose fingers come in narrower (`GraspOptions::narrow`) are picked by them: a box too
-/// long to close along stands 3 cm from a wall as tall as it, which the open fingers closing
+/// Grasps whose fingers come in narrower (`SurfaceGraspOptions::narrow`) are picked by them: a box
+/// too long to close along stands 3 cm from a wall as tall as it, which the open fingers closing
 /// across it would be in, so seen as it is it has no grasp. With fingers that may come in
 /// narrower it has, each with its opening, a surface's noise wider than the box to each finger,
 /// and one pick whose grasps lock the fingers there
@@ -2365,11 +2545,11 @@ fn grasps_whose_fingers_come_in_narrower_are_picked_beside_a_wall() {
     let mut surface = Surface::default();
     seen(at, half, /* object */ true, &mut surface);
     seen(wall_at, wall_half, /* object */ false, &mut surface);
-    let open = GraspOptions {
+    let open = SurfaceGraspOptions {
         floor: Some(0.005),
         ..Default::default()
     };
-    let narrow = GraspOptions {
+    let narrow = SurfaceGraspOptions {
         narrow: true,
         ..open
     };
@@ -2377,7 +2557,7 @@ fn grasps_whose_fingers_come_in_narrower_are_picked_beside_a_wall() {
     let gripper = robot.gripper(0, &calibration).unwrap();
     for device in common::devices(&robot) {
         let name = device.name();
-        let on = |o: &GraspOptions| {
+        let on = |o: &SurfaceGraspOptions| {
             let found = batchplan::grasps_on(&device, &gripper, std::slice::from_ref(&surface), o);
             found.unwrap().remove(0)
         };
@@ -2999,8 +3179,13 @@ fn completed_picks_can_prefer_tightly_measured_contacts() {
     );
     let calibration = GripperCalibration::new(0.08, 0.0, std::collections::HashMap::new());
     let gripper = robot.gripper(0, &calibration).unwrap();
-    let mut found =
-        batchplan::grasps_on(&device, &gripper, &[surface], &GraspOptions::default()).unwrap();
+    let mut found = batchplan::grasps_on(
+        &device,
+        &gripper,
+        &[surface],
+        &SurfaceGraspOptions::default(),
+    )
+    .unwrap();
     let observed = found[0].pop().expect("the box has opposed measured faces");
     assert!(!observed.one_sided);
 

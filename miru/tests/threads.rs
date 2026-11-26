@@ -8,7 +8,7 @@ mod common;
 
 use std::collections::HashMap;
 
-use batchplan::{Device, GraspOptions, Intrinsics, Pose};
+use batchplan::{Device, Intrinsics, Pose, SurfaceGraspOptions};
 use common::{Frame, block, device_of, known, looking, panda, panda_gripper, table};
 use glam::{Quat, Vec3};
 use miru::{Camera, Look, LookOptions, Memory, MemoryOptions, Scene, Stance, observe};
@@ -108,7 +108,7 @@ fn a_look_on_a_one_thread_device_works_on_its_one_thread() {
         object.id,
         &gripper,
         &poses,
-        &GraspOptions::default(),
+        &SurfaceGraspOptions::default(),
     );
     let closures = closures.expect("sound poses").expect("the box is seen");
     assert_eq!(closures.len(), poses.len());

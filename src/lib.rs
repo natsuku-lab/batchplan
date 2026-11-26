@@ -103,9 +103,9 @@ pub use sdf::{
 };
 pub use shortcut::ShortcutOptions;
 pub use spheres::{LinkQualification, Qualification, SphereOptions};
-pub use surface::{Grasp, Surface, grasps_on, prefer_measured_contacts};
+pub use surface::{Grasp, Surface, SurfaceGraspOptions, grasps_on, prefer_measured_contacts};
 pub use task::{
-    CandidateStop, GraspOptions, NearestPlace, Pick, PickBody, Place, Pull, TaskFailure,
+    CandidateStop, NearestPlace, Pick, PickBody, Place, Pull, ShapeGraspOptions, TaskFailure,
     TaskOptions, TaskPlan, TaskResult, TaskStep, Turn, grasps, pick, pick_with_preferred_grasps,
     place, place_nearest, place_poses, pull, turn,
 };
