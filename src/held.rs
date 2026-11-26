@@ -264,18 +264,18 @@ impl Fits {
     /// The spheres kept for `object` fitted by `options`, now the most recently used.
     #[cfg(test)]
     fn get(&self, object: &Obstacle, options: &SphereOptions) -> Option<Arc<[[f32; 4]]>> {
-        let kept = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let kept = self.0.lock().expect("no test panics holding the list");
         let known = kept.iter().any(|(o, f, _)| o == object && f == options);
         drop(kept);
         let slot = known.then(|| self.slot(object, options))?;
-        slot.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        slot.lock().expect("no fit panicked").clone()
     }
 
     /// Keeps `spheres` for `object` fitted by `options`.
     #[cfg(test)]
     fn keep(&self, object: Obstacle, options: SphereOptions, spheres: Arc<[[f32; 4]]>) {
         let slot = self.slot(&object, &options);
-        *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(spheres);
+        *slot.lock().expect("no fit panicked") = Some(spheres);
     }
 
     /// `object`'s spheres in its own frame, fitted by `options`: as kept, or fitted and kept.
@@ -285,6 +285,7 @@ impl Fits {
         options: &SphereOptions,
     ) -> Result<Arc<[[f32; 4]]>> {
         let slot = self.slot(object, options);
+        // A fit that panicked left its slot empty, as it found it: the next call fits again.
         let mut kept = slot.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(spheres) = &*kept {
             return Ok(spheres.clone());

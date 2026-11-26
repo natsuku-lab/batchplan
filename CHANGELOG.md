@@ -218,6 +218,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   (`RobotOptions::collision_model`): a budget of zero, or a tolerance or voxel size that is not
   positive, is an `Error::Input` from `Robot::load`, `from_urdf` and `assemble`, where a given
   model ignored them and a fit gave an `Error::Load`.
+- **Breaking:** `Clearance` (what `MeshModel::clearance` returns) is `#[non_exhaustive]`, as the
+  other results are: a pattern that names both its fields ends in `..`, and callers no longer
+  build one.
 - **Breaking:** `TaskStep` has `Turn` and then `Pull` between `Reach` and `Approach`, the order
   the steps are checked in. The steps that were there keep their order among themselves, and as
   numbers (`as isize`, and in Python) `Approach`, `Depart` and `Transit` are 4, 5 and 6 where they

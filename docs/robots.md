@@ -147,7 +147,7 @@ Spheres only approximate the links. `MeshModel::try_new(&robot)` loads each link
 
 ```rust,no_run
 use batchplan::glam::Vec3;
-use batchplan::{Clearance, Error, MeshModel, Obstacle, Robot, RobotOptions, World};
+use batchplan::{Error, MeshModel, Obstacle, Robot, RobotOptions, World};
 
 fn main() -> Result<(), Error> {
     let robot = Robot::load(
@@ -158,11 +158,11 @@ fn main() -> Result<(), Error> {
     let wall = Obstacle::cuboid(Vec3::new(1.0, 0.0, 0.4), Vec3::new(0.02, 0.5, 0.4));
     let worlds = vec![World::new(vec![wall])];
     let q = robot.default_q().to_vec(); // one configuration; pass a trajectory's samples to check it all
-    let Clearance {
-        world,
-        self_collision,
-    } = meshes.clearance(&worlds, &[0], &q)?[0];
-    println!("{world:.3} m from the wall, {self_collision:.3} m between links");
+    let clear = meshes.clearance(&worlds, &[0], &q)?[0];
+    println!(
+        "{:.3} m from the wall, {:.3} m between links",
+        clear.world, clear.self_collision
+    );
     Ok(())
 }
 ```

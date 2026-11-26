@@ -547,7 +547,7 @@ mod tests {
         rayon::spawn_broadcast(move |_| {
             let held = held
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                .expect("no thread panics while it holds the receiver");
             let _ = held.recv_timeout(Duration::from_secs(30));
         });
         let (done, finished) = mpsc::channel();
