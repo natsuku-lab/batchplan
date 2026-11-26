@@ -233,6 +233,7 @@ fn spheres_never_read_farther_than_the_meshes() {
         Clearance {
             world,
             self_collision,
+            ..
         },
     ) in on_meshes.into_iter().enumerate()
     {
@@ -296,6 +297,7 @@ fn held_objects_and_real_robots_are_checked_as_meshes() {
     let Clearance {
         world: free,
         self_collision,
+        ..
     } = meshes.clearance(&[World::default()], &[0], &q).unwrap()[0];
     assert!(
         free == 1e30 && self_collision > 0.0,

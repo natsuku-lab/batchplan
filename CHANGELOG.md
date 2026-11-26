@@ -8,733 +8,268 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
-- Miru, the perception crate, is published on crates.io as `batchplan-miru`, with batchplan's
-  version and in its release; its library is still `miru`, so a dependent writes
-  `miru = { package = "batchplan-miru", version = "0.12" }` and keeps `use miru::..`. In the
-  workspace, its commands take `-p batchplan-miru`.
-- **Breaking:** `SphereGeometry` and `SphereOptions::geometry` are gone, in Python too: spheres
-  are fitted to the links' collision geometry, the default before. A `SphereOptions` literal that
-  names `geometry` drops it. The loaders no longer read visual geometry, so a URDF whose visual
-  meshes cannot be found (in a package that neither `RobotOptions::package_dirs` nor the
-  directories above the file hold, or at a relative path in a URDF given as text) now loads.
-- The `benchmark` example's `--save` and `--check` modes, `scripts/compare_planners.py` and
-  `scripts/cpp_planners.cc` are gone: they were the earlier comparison with other planners, which
-  `scripts/run_suite.sh` replaced and the docs stopped running in 0.11.0.
-- Miru's look joins a hollow's floor to the walls around it where a second view shows of the
-  floor only a strip too narrow for a plane: that strip's last rows before a wall stand clear of
-  the wall's plane as all of the floor does, and were counted as the floor hiding the wall, which
-  left the floor an object of its own and the box around it closed. A drawer pulled out, seen
-  from over it and from across the room, stayed a closed box on some looks, and a bowl in it had
-  no way out measured and no grasp its walls allowed.
-- Miru's `Kept::extractions` gives an opening where the object's middle stands over it, where it
-  asked for the whole of its measured footprint inside: a bowl set back down against a drawer's
-  back read 2 mm past the opening's edge, had no way out measured, and was lifted too short to
-  clear the drawer. `Kept::enclosing` names the boxes that hold an object in with no way out
-  measured, as a cabinet a far look read as one box holds a bowl in its drawer, for a caller to
-  look closer before it lifts.
-- `SurfaceGraspOptions::clearance` (0 by default): how far the hand's spheres stay from what they do
-  not close on, on their way in to a grasp of a surface and at it. `grasps_on` draws the hand back
-  to where it has that much room, while `overlap` of its fingers stays on the patches, or leaves the
-  grasp out. A hand the points alone find clear, a millimeter from a drawer's front behind the
-  handle it grips, is one a planner whose distance grids err toward collision refuses at its reach:
-  with 2.5 mm, and 5 mm of `overlap`, four recorded pulls of a drawer's handle that had no grasp get
-  through go from none of 24 to 93 grasps planned to 5 to 18, the first tried on three of them.
-- With `SurfaceGraspOptions::narrow`, `grasps_on` no longer has the fingers come in nearer their
-  patches than a surface's noise, 2.5 mm to each finger: of the sixteenths of the opening, the
-  narrowest is the first that leaves it, where it was the first as wide as the patches. A hand that
-  came in 4.9 mm open on a bowl's 2.5 mm wall, turned 44 degrees about its closing line, put a
-  finger on the rim before it closed and pushed the bowl 2 cm; at 9.9 mm it closes on the wall and
-  lifts it. A grasp clear only nearer than that is drawn back or left out.
-- `SurfaceGraspOptions::first_touch` (on by default; `false` keeps the order without it):
-  `grasps_on` puts the grasps whose fingers close onto their patches before meeting any other part
-  of what was seen of the object ahead of the rest, within each turn of the two lots of two seen
-  sides and one, so from above still comes before a turn to either side. It adds and removes no
-  grasp, and costs a sweep of each finger over the object's patches. A finger closing level deep
-  across a wall that leans over its patch meets the wall above it instead, and the object turns in
-  the hand as it is lifted: a LIBERO bowl picked so turned 15 degrees and touched the plate while
-  still held.
-- Miru gives a reading on no known shape of a set of fewer than four readings, too few to be a
-  surface of its own, to a known shape's surface beside it too, where the reading's own surface lies
-  on that surface's plane within three deviations of the difference, and a part that is a known
-  shape's labels such readings as the shape (`Label::Known`). A plate's floor that reads just within
-  what may read on the table no longer has a reading or two read just past it labelled
-  `Label::Nothing`, which a caller building a surface to set things down on took for something
-  standing on the floor.
-- Miru draws the room of a box open at the top in from under the box's own readings that overhang
-  it, as a cabinet's top over the back of a drawer pulled out of it: a wall moves in to them where
-  they reach it and span it, and not where a thing resting on the box would then lie in the wall. A
-  thing that lies across the room in the wall as thin as a wall, as the back of a drawer under the
-  cabinet's top, no longer keeps the room under the overhang or closes the box: the wall holds it. A
-  floor no longer counts as hiding a reading of no part, or a sliver that went to the parts beside
-  it, so a gap between its boards, or a step a stereo camera's noise reads in it, leaves it a
-  hollow's floor.
-- Miru measures a raised bar over a circular face and checks fully open approach and finger
-  closure against the measured points with `Kept::bar_on_disk`.
-- `Kept::observed_closures` runs on the device's threads and tests each reading only against
-  the hand spheres that can reach it, with the same results.
-- Miru proposes grips to turn a control by in `Kept::turn_grips`, in groups to plan in order:
-  the bar's over a measured disk; grips from above the fitted shape, along the turn's axis and
-  within the gripper's capacity, that close on both sides; then the measured surface's grasps, those
-  closing on both sides first, and the shape's grips whose closure lacks the control on a side.
-  Each grip carries its closure evidence, and the result the screw to turn about.
-
 ### Added
 
-- **Breaking:** a task's candidates carry their own data. A pick's, a turn's and a pull's grasps are
-  `Hold`s: the hand's `pose` in the object's frame, the fingers' `locked` values and a `cost`. A
-  place's are `Release`s in `Place::releases`, which takes the place of `Place::poses`: the object's
-  `pose`, how far it `drop`s from there to where it lands, and a `cost`. A `Pose` is either at cost
-  0, the fingers as loaded and the object set down there (`From<Pose>`), and `Pick::new`,
-  `Turn::new`, `Pull::new` and `Place::new` take any of them, so a list of poses passes as before,
-  but for one whose type was inferred from the call (a `.collect()` into it, or an empty `vec![]`):
-  name it (`Vec<Pose>`) or pass the iterator itself. `Hold::new(pose, opening, &gripper)` holds a
-  grasp of a surface at its opening, the fingers as loaded at the loaded gap. A `Pick`, `Turn` or
-  `Pull` literal that set `grasps: poses` sets `grasps:
-  poses.into_iter().map(Hold::from).collect()`, one that set 0.11's `locked: map` gives each hold
-  `locked: map.clone()`, and a `Place` literal's `poses` become `releases`. In Python, `Hold(pose,
-  locked=..., cost=...)`, `Hold.at_opening(pose, opening, gripper)` and `Release(pose, drop=..., cost=...)`, items of `Pick.grasps` and
-  `Place.releases` a pose or one of them; `Pick.grasps` gives `Hold`s back (`.pose`), and
-  `Place.poses` is `Place.releases`.
-
-- A candidate's `cost`, 0 by default, is what the caller holds against it, in any unit: a task's
-  plans come least cost first, the quickest among equals (`TaskPlan::cost`), and the order the
-  candidates are given in is still the order they are tried. All costs 0 give the order as
-  before, to the bit. `Grasp::unseen_span()` is the width of a one-sided grasp of a surface, 0
-  where both contacts were seen: as each hold's cost, the plans of a pick come those closing on
-  two seen patches first, then the tightest one-sided ones. A cost that is not finite is an input
-  error naming the candidate.
-
-- A release can drop: `Release::drop`, how far the object falls once let go, in meters along
-  world −z. Departure checks the volume swept as it falls and the plan gives the expected
-  landing (`TaskPlan::placed`, `TaskPlan::falling`).
-
-- Miru reports what a supplied fully open approach and parallel jaw closure intercept in the
-  current observation with `Kept::observed_closures`.
-
-- Surface grasps can try additional approach angles and shallower insertions on contact pairs
-  near a measured point. Set `SurfaceGraspOptions::close_on` to append them after the ordinary
-  grasps.
-
-- `Kept::extractions` reports the straight lift that clears a measured open container at the
-  object's observed attitude and a caller-specified margin. It recognizes flush contact when the
-  fitted heights of a body and its measured support differ by a single precision step, or the
-  freshly fitted body stood on a measured upright container floor.
-
-- A hand as a parallel-jaw gripper, built once: `Robot::gripper(hand, &GripperCalibration)` from
+- **Breaking:** a task's candidates carry their own data and a cost. A pick's, a turn's and a
+  pull's grasps are `Hold`s: the hand's `pose` in the object's frame, the fingers' `locked` values
+  and a `cost`. `Hold::locked` replaces `Pick::locked`, so one pick takes grasps at different
+  openings, and `Hold::new(pose, opening, &gripper)` holds a grasp of a surface at its opening. A
+  place's poses are `Release`s in `Place::releases`, which replaces `Place::poses`: the object's
+  `pose`, how far it `drop`s once let go (the move away is checked through the fall,
+  `TaskPlan::falling`, and `TaskPlan::placed` is where it lands) and a `cost`. A task's plans come
+  least cost first (`TaskPlan::cost`); the candidates are still tried in their order, and all
+  costs 0 give the plans as before. `Grasp::unseen_span()` as a hold's cost puts grasps closing on
+  two seen patches first. A `Pose` converts into either (cost 0, the fingers as loaded, no drop),
+  and `Pick::new`, `Turn::new`, `Pull::new` and `Place::new` take any of them, so a list of poses
+  passes as before, but for one whose type was inferred from the call (a `.collect()` into it, or
+  an empty `vec![]`): name it `Vec<Pose>`. A `Pick` literal sets `grasps:
+  poses.into_iter().map(Hold::from).collect()` and gives each hold the `locked` map it set; a
+  `Place` literal's `poses` become `releases`. In Python, `Hold(pose, locked=..., cost=...)`,
+  `Hold.at_opening(pose, opening, gripper)` and `Release(pose, drop=..., cost=...)`;
+  `Pick.grasps` gives `Hold`s, `Pick.locked` is gone, and `Place.poses` is `Place.releases`.
+- Grasps of what cameras see, whatever its shape: `grasps_on(&device, &gripper, &[Surface],
+  &SurfaceGraspOptions)`. A `Surface` holds the points cameras saw, their normals, which are the
+  object's and where each was seen from: `Surface::from_depth(&device, &image, &object,
+  robot_mask, radius)` reads a depth image, `Surface::from_points` a cloud seen from one place,
+  and `Surface::join` adds a view. A grasp closes on two seen patches that face away from each
+  other within the gripper's capacity, the line between them inside both friction cones, with the
+  hand and its straight way in clear of every point. Each `Grasp` gives the hand's `pose`, its two
+  `contacts` and its `opening`. `examples/surface_grasps.rs` shows it; Python binds neither
+  surfaces nor `grasps_on` yet. `SurfaceGraspOptions`:
+  - `turns` (8), `approach` (10 cm), `floor`, `overlap` (1 cm) and `contact` (5 mm): the directions
+    each pair of patches is grasped from, the straight way in, a height the hand stays over, how
+    much of the fingers stays on the patches, a patch's radius.
+  - `shell` (by default `Some(f32::INFINITY)`, a wall as thick as the gripper grasps; `None` turns
+    it off): a wall seen from one side only, as a bowl's rim from above, is closed on across it to
+    where the cameras saw past it, and the grasp is `one_sided`. A cloud fused from several views
+    and given one place is grasped with `None`.
+  - `first_touch` (on by default): grasps whose fingers close onto their patches before meeting
+    any other part of the object come first. It adds and removes no grasp.
+  - `narrow` (off by default): for a gripper whose jaws slide (`Gripper::sliding`), fingers come
+    in narrower than they open where a wall or a neighbor stands near, at one of
+    `Gripper::openings`, and no nearer their patches than 2.5 mm each.
+  - `clearance` (0 by default): how far the hand's spheres stay from what they do not close on.
+  - `near`: a point to grip near, the grasps nearest it first.
+  - `close_on`: more approach angles and shallower insertions whose fingers close on a point,
+    after the ordinary grasps.
+  - `SurfaceGraspOptions::order_for_turn` and `Grasp::moment(&screw, &gripper, &options)`: grips
+    for a turn, ordered by the moment their fingertips can give about its line.
+  - `Grasp::closes_on(&gripper, at, radius)`: whether a ball lies between the fingers as they
+    close.
+  - `Robot::hand_spheres(hand)` (`HandSphere`): the hand's spheres in its IK frame, what
+    `grasps_on` keeps clear. In Python, `Robot.hand_spheres`.
+- Where a held object rests on what cameras see: `rests_on(&device, &[RestProblem], &[Surface],
+  &RestOptions)`. A problem names the object, how it is turned as it is set down (`rotation`) and
+  a surface whose `object` points are the support; each `Rest` gives the object's `pose`, the
+  `support` it touches and how far it can be `tipping`. The object comes straight down, not tipped
+  or slid into place; a can laid on its side rolls into a cradle or down to a lip.
+  `Release::from(&rest)` carries a rest to a place. `examples/surface_rests.rs` shows it, and
+  `scripts/validate_rests.py` lets each rest go in MuJoCo. Also:
+  - `RestOptions`: `spacing` (1 cm), `turns` (8), `friction` (0.5), `tipping` (5°), `clearance`
+    (1 cm) and `touching` (2 mm), and two that find more, both on by default: `look_closer`, for a
+    rest narrower than the spots, and `seen_from_above_holds`, for a top whose normals were read at
+    a slant.
+  - `RestProblem::near`: a point to look closer around, the rests and falls nearest it first
+    (`Rest::cost`, `Fall::cost`).
+  - `falls_into(&device, &[RestProblem], &[Surface], &RestOptions)`: where to let an object go for
+    it to fall into a container and stay. Each `Fall` gives the `pose` to let go at, how far it
+    drops to where it lands (`drop`), how deep under the rim (`sunk`) and a `cost`;
+    `Release::from(&fall)` carries it to a place. A tray, a plate or a table has none.
+  - `rest_failures(&device, &problems, &surfaces, &rests, &options)`: why a problem has no rest
+    (`RestFailure`: `Blocked`, `Tips`, `Unheld`, `Unsupported`), and what is in its way
+    (`Blocking`).
+- A hand as a parallel-jaw gripper, built once: `Robot::gripper(hand, &GripperCalibration)`, from
   the loaded and closed pad gaps and the finger joints at the closed command
-  (`GripperCalibration::new(loaded_gap, closed_gap, closed)`), the widest width it grasps
-  (`capacity`, `None` for the loaded gap) and the pads' `friction` (0.5), checked against the
-  model's stroke and joint locks. `grasps_on` and `Grasp::closes_on` take the `Gripper`: contact
-  pairs fit within its capacity, and `narrow`, which needs jaws that slide (`Gripper::sliding`),
-  comes in at `Gripper::openings` (the loaded gap, then 15/16 to 1/16 of the capacity);
-  `SurfaceGraspOptions::order_for_turn` and `Grasp::moment` take it for the pads' friction.
-  `grasps` takes it too: a shape's grasps close across at most its capacity, their open fingers
-  stand its loaded gap apart over a floor, and they reach its `Gripper::tip` past the frame.
-  `Gripper::locked_at` and `opening_of` turn meters into finger joint values and back, linear
-  between the closed and loaded joints, for any hand. Miru's `Kept::bar_on_disk`,
-  `observed_closures`, `turn_grips` and `Observed::grip_worlds` take it in place of the hand, its
-  gaps, capacity and opening; a turn's fully open grips stand at its loaded gap. In Python,
-  `Robot.gripper`, `GripperCalibration` and `Gripper`.
-- **Breaking:** `GraspOptions` is two structs, each field with the default it had:
-  `ShapeGraspOptions` (`depth`, `turns`, `tip`, `floor`, `overlap`, `along`) for
-  `grasps(&object, &gripper, &ShapeGraspOptions)`, which takes the gripper, and
-  `SurfaceGraspOptions` for `grasps_on`, `SurfaceGraspOptions::order_for_turn` and
-  `Grasp::moment`. `opening` and `friction` are gone: the widths and the friction are the gripper's,
-  so a shape's grasps close across at most `Gripper::capacity` and over a floor keep their open
-  fingers, `Gripper::opening` apart, above it. `ShapeGraspOptions::tip` is `None` by default, the
-  gripper's (`Gripper::tip`, what `Robot::tip` gave for its hand), where `tip` was 0: a literal that
-  sets `floor` and relied on a tip of 0 sets `tip: Some(0.0)`. In Python,
-  `grasps(object, gripper, options=None)` takes a `ShapeGraspOptions`, `GraspOptions` is gone, and
-  `Gripper.tip` is new.
-
-- `miru::Observed::grip_worlds` prepares a kept observation for grasp planning. Project one
-  candidate at a time to split the material between its finger pads from the collision world.
-  A whole-body pick retains the object's ID and the collision geometry left behind.
-  `Grasp::closes_on` tests a ball against the closing region at the chosen opening.
-  `GripWorlds::with_reach_bound` can reject kinematically impossible targets before projection.
-  `Robot::hand_reach` exposes the same geometric check to Rust and Python callers.
-  `Kept::labels_at` reports the labels supported by filtered depth at a measured 3D point.
-
-- A pick can grasp one obstacle and lift the body it belongs to. `PickBody` describes the carried
-  shape and the other obstacles that move with it. `Pick::lift_world` builds the departure world
-  for execution. **Breaking:** Rust literals that list every field of `Pick` need `body: None`
-  when the contact obstacle is the whole object.
-
-- Picks and moving turns accept the collision sphere fit for the object they carry through
-  `TaskOptions::held_spheres`. A pick returns the same fit for the following place.
-  **Breaking:** Rust literals that list every field of `TaskOptions` need `held_spheres`.
-
-- `Pull` and `pull` plan a straight draw by a handle in Rust and Python. The hand keeps its
-  orientation and moves a signed distance along a world direction. Each plan gives the draw
-  between its approach and departure, and a stopped draw reports the planned distance in meters.
-  A stationary distance grid may be the contact obstacle of a pull or a turn.
-
+  (`GripperCalibration::new(loaded_gap, closed_gap, closed)`), the widest it grasps
+  (`capacity`, the loaded gap by default) and the pads' `friction` (0.5), checked against the
+  model's stroke and joint locks. `grasps_on`, `grasps` and miru's grip calls take it.
+  `Gripper::locked_at` and `opening_of` turn a gap into finger joint values and back, `openings`
+  lists the openings `narrow` tries, and `tip` is how far its spheres reach past the hand's frame.
+  In Python, `Robot.gripper`, `GripperCalibration` and `Gripper`.
 - Turning a thing about a line in one call: `turn(&device, &worlds, &[Turn], &TaskOptions)`, a
   knob, a cap, a lever or a valve's wheel, composed of IK, `follow` and `plan` as `pick` is.
-  `Turn::new(world, start, object, grasps, angle)` turns `object` by `angle` about its `screw`
-  (none: about the hand's own z axis, in place); each grasp is a candidate, and between the move
-  in and the move away the hand follows the grasp carried about the line, holding the object as a
-  pick's lift does, so what the object sweeps is checked against everything but what it turns on
-  (`Turn::support`). Where the world holds the part that turns and what it turns in as one
-  obstacle, `Turn::stays` leaves the obstacle where it is, the fingers alone free to touch it,
-  and nothing checks the part's sweep. Every configuration IK finds at a grasp is followed through
-  the turn and the nearest the start that makes it is kept: a grasp is not lost where the
-  configuration nearest the start runs into a joint limit partway and another makes the turn. A
-  plan has its `turn` between `approach` and `depart`, and `placed` is the object where the turn
-  leaves it. A candidate that makes no turn stops at the new `TaskStep::Turn`, checked
-  after the reach, with how far it turned (`CandidateStop::turned`). Of the example's knob's
-  972 grips (`examples/turns.rs`), 799 make a quarter turn from the configuration nearest the
-  start and 834 from some configuration at the grip on the M4 Pro (797 and 836 on the Ryzen); it
-  takes 457 ms by all of them on the M4 Pro's CPU device and 18.5 ms to its first plan, and
-  390 ms and 16 ms on the Ryzen's (`docs/benchmarks.md`). Python binds `Turn`, `turn` and
-  `Screw`.
+  `Turn::new(world, start, object, grasps, angle)` turns the object by `angle` about its `screw`
+  (none: about the hand's own z axis). The hand holds the object through the turn, and what it
+  sweeps is checked against everything but `Turn::support`. With `Turn::stays`, for a world that
+  holds the part and what it turns in as one obstacle, the obstacle stays where it is and only the
+  fingers may touch it. A plan has its `turn` between `approach` and
+  `depart`, and a candidate that makes no turn stops at `TaskStep::Turn` with how far it turned
+  (`CandidateStop::turned`). `examples/turns.rs` turns a knob, a cap, a lever and a wheel. In
+  Python, `Turn` and `turn`.
 - `Screw { point, direction, pitch }`, a line and how far a thing carried about it moves along it
-  a radian, with `Screw::about(point, direction)`: `carry(pose, angle)` carries a pose about it,
-  and `path(pose, angle, precision)` gives the waypoints a tool path follows along its arc, as few
-  as keep the straight moves between them within `precision` of it, by the chord's sag.
-- `Grasp::moment(&screw, &gripper, &options)`: the moment about a line that a grasp's fingertips can
-  give for each newton each presses with, by friction, where they press on their patches, a soft
-  fingertip's twist and the hand pushing along the closing line, the way round that gives less:
-  grips for a turn ordered by what it asks of them.
-- **Breaking:** `TaskStep` has `Turn` and then `Pull` between `Reach` and `Approach`, the order
-  the steps are checked in, so `Approach`, `Depart` and `Transit` are each two later, as numbers
-  (`as isize`: 2, 3 and 4 become 4, 5 and 6) and in the derived order: the steps that were there
-  keep their order among themselves, and `Turn` and `Pull` sort between `Reach` and `Approach`.
-- **Breaking:** in Python, `TaskStep` has Rust's numbers and order: `Turn` is 2 and `Pull` 3, and
-  `Approach`, `Depart` and `Transit` are 4, 5 and 6 where 0.11 had 2, 3 and 4.
-- `SurfaceGraspOptions::near`, a point to grip a surface near: `grasps_on` gives, within each of
-  the tiers it orders them by, the grasps nearest it first instead of spread over the object.
-  `None`, the default, leaves every grasp as it was.
-
-- `miru`, a crate of its own in the repository (`miru/`, published as `batchplan-miru`): what depth
-  cameras show, as objects. One call, `miru::look(&device, &look, &previous, &options)`, takes
-  every camera's `DepthImage` with its colour, its noise, the robot's mask and a mask model's
-  numbers where there are any, and the obstacles the world is known to hold, and gives a scene:
-  which pixels are one thing, a box, an upright cylinder or a box open at the top for each, what
-  it stands on, and the same id for an object from one look to the next. An object's solids come
-  back as obstacles, and its labels say the rest: an object the look saw is named by some
-  pixel's `Label::Object`, one kept from the scene before that no view could see by none, and
-  the pixels that name it are its flags for `Surface::from_depth`. It is built on the library,
-  which does not depend on it, and a look runs on the device's threads, the scene the same
-  whatever their number: of two 640×480 views among a cell's 17 fixtures, 41 ms at the median
-  on the M4 Pro's 14 threads and 77 on one (`cargo run --release -p batchplan-miru --example score --
-  <set> --again --digest --threads <n>` on a set of recorded looks, the best of three rounds).
-  `miru/README.md` has what it tells apart and where it stands, and `miru/tests/truth.rs` holds
-  it to scenes built from known things, read through the simulator's exact depth and two stereo
-  cameras modelled from their datasheets.
-- `miru::observe(&device, &cameras, &stance, &memory)`: a look through the library and `miru`
-  as one call. Each `Camera` states its frame as read, its noise, the pixels it reads beside a
-  jump in depth and what its pose is off by; the `Stance` the robot's joints, its locked joints and
-  how far past its spheres its readings lie. The depth is filtered, the robot and what its hands
-  hold masked, the look taken after the `Memory`, and what no shape holds fused into the memory's
-  map, the map's mask padded past what its grid grows toward collision. `Memory::after(&[Act])`
-  says once what the robot did (picked, let go, lost, pushed), the map's share kept until
-  it is next read, so memories after different acts share one map. `Memory::world(&device, &Step)`
-  gives the world to plan a step against, every obstacle named (`Of`): the fixtures, each object's
-  solids or the room it takes up, its part of the map where the step goes into it, and one grid of
-  what nothing explains. `Kept` holds a look's scene, filtered depth and masks, and
-  `Kept::surface` an object's readings for grasps and rests. On the M4 Pro a look through it
-  takes 237 ms at the median of a recorded set's 20 looks against the 72 of the look inside it on
-  one thread, and 56 against 34 ms on 14 (`score <set> --observe` on `rows4`).
-- `Robot::hand_spheres(hand)`: a hand's collision spheres in its IK frame at the default
-  configuration, the fingers as the locked joints hold them and any object it holds with them
-  (`HandSphere`: center, radius, whether its link is one of `Robot::finger_links`, which takes
-  in a held object where the fingers are found rather than named, and which side such a link
-  stands to). Placed by a pose of the frame they are the hand there, what `grasps_on` holds a
-  grasp's hand against. In Python, `Robot.hand_spheres` and `HandSphere`.
-- `Pose::is_unit()`: whether a pose is finite with a unit rotation (to 1e-3): a pose every call
-  that takes one accepts. In Python, `Pose.is_unit`.
-- `sdf::on_shapes(&device, &shapes, &points, &reach)` says which of a world's shapes each point
-  lies on: per point, the shape nearest it and the distance to its surface, where that is no
-  more than the point's reach, and none for a point marked with a negative reach. A camera's
-  readings are held so against the shapes a cell is known to hold, each reading reaching as far
-  as its camera's noise allows at its depth. The points are taken a run at a time on the device's
-  threads, each shape's rotation turned into its matrix once and a shape measured only against
-  the runs that come within reach of its box. `miru` holds every reading of a look against its
-  known shapes with it: asking each shape's distance at each reading took a look of two 640×480
-  views among 17 fixtures 1.8 times as long on one thread of the M4 Pro and 1.2 times on its 14,
-  the scenes the same to the bit.
-- `Device::install(op)` runs `op` on the device's threads, so that rayon's parallel loops inside
-  it run there and not on the global pool: how a crate built on the library, as `miru` is, keeps
-  its work on the threads the device was given.
-- A band behind what a mask flags: `mask.with_band(&device, &image, margin, pixels)` flags a
-  reading that lies behind a thing the mask holds (a sphere of the robot, a held object, a
-  shape), beside a flagged reading of that thing within `pixels` pixels along rows, columns and
-  diagonals: the thing's surface where that reading reads it lies nearer the camera than the
-  reading by more than `margin` at its depth (`margin` as `with_shapes` takes it), and the
-  reading's ray, carried on past it, does not enter the thing. A depth camera reads the pixels
-  beside a depth jump toward the other surface, one for a sensor that samples each pixel's
-  disparity a fraction of a pixel off and up to half the window for a stereo block matcher;
-  behind the arm's or a shape's outline, those readings lie farther than the padding or the
-  margin from it and the filter keeps the ones near either surface, so they were obstacles in
-  mid-air where fingers go. `pixels` is that fact of the camera. A reading whose ray goes on
-  into a thing is in front of it and never that thing's: a table given as a shape takes nothing
-  of what stands on it, at any band and from any view, and a surface level with a flagged one
-  keeps its readings within the margin, whatever the noise of the flagged ones. Given up: an
-  outline read too near stays a reading, and the honest readings just behind each flagged
-  outline are taken with the rest. A band of one pixel behind the Panda's mask
-  (`examples/perception.rs`, the camera across the table) takes 0.17 ms for a 640×480 image on
-  the M4 Pro's 14 threads and 0.23 on the Ryzen's 32.
-
-- How much one image counts in a fused map: `map.with_weighing(Weighing)`. `Weighing::Evidence`,
-  the default and the weighing until now, suits a stream of frames: a reading adds 0.85 to a
-  voxel's log-odds and a ray through it takes 0.4, so it takes three images to fill a voxel seen
-  empty often and nine to empty one seen full often. Under `Weighing::Latest` each image decides
-  what it sees: a voxel it reads a surface in, or that holds one of its readings, is as surely
-  occupied as a map holds anything, and one its rays pass through as surely free; what it does
-  not see keeps what earlier images said, but for the space a mask's robot and shapes fill,
-  which is as surely free wherever it is. For a caller that looks once every few seconds; one
-  stray reading is an obstacle until a look sees through it.
-
-- Where a fused map is occupied: `map.occupied()`, the middles of the voxels `counts` counts as
-  occupied, in the map's frame and in the order of its voxels, and of a part none it leaves out.
-  Where never-observed space is taken for free, none means there is no grid to make, and
-  otherwise a part around them is a grid of what is there.
-  `part`'s documentation now says that a part's points cover its region and padding whatever the
-  map covers, and that one past a grid's size limits is an input error.
-
-- `mask.with_shapes(&device, &image, &shapes, margin)`: the mask with shapes the caller holds left out
-  as the robot is, as a cell's fixtures and objects measured as shapes, which the world holds
-  as obstacles of their own. A reading within the margin of a shape is not fused and what only
-  it hides is shadow; the space the shape fills is free in the map; what a shape does not
-  cover stays a reading. So each thing has one memory, a shape or the map's voxels, and a plan
-  is checked against both. The perception page says where a perception library meets
-  batchplan, with an example of one look through both. A shape costs by what the camera may see
-  of it and by the rows of voxels it spans: it is tested only in the pixels its box, grown by
-  the margin and cut to the camera's view, projects to, so a floor or a wall around the cell
-  costs by what is seen of it and one behind the camera nothing, and its space in a map is
-  marked a run of voxels a row. With the scene's three shapes (`examples/perception.rs`, the
-  camera across the table) a 640×480 image takes 0.26 ms on the M4 Pro's 14 threads and 0.23 on
-  the Ryzen's 32, and the frame fused into a map of 1.8M voxels with them and the Panda's mask
-  1.3 ms on the M4 Pro's CPU, 1.5 on its GPU, 2.8 on the Ryzen and 1.0 on the Radeon 8060S.
-
-- `image.filtered(&DepthFilter)`: a depth image's depths without the readings that lie between
-  two surfaces, which a depth camera gives where a pixel covers both a near surface and what is
-  behind it, and which a grid or a map would hold as points in mid-air. A reading goes where,
-  along a row, a column or a diagonal through its pixel, one side is nearer by more than one
-  surface can step, or has no reading, and the other side farther, or has none. What one surface
-  can step comes from how far it may be turned to the rays (`steepest`, 80 degrees) and from the
-  camera's `noise` (`deviations`, 4 of them). Surfaces keep their outlines, but for a reading
-  with a step on one side and no reading straight across; depth without noise loses those and
-  surfaces seen that edge-on, and nothing else.
-
-- What a caller knows of a fused map, said in the map's frame with any `Obstacle` as the shape:
-  `map.free(&shape, margin)` marks the voxels within the margin free, as seen through once (where
-  an object stood before the robot carried it away, or a shape the world holds as an obstacle
-  of its own, on a copy of the map), and `map.clear(&shape, margin)` marks them never observed
-  (where something was moved). `map.part(&region, padding)` is the map inside one region, as a
-  map of its own that reaches the padding past the region, every voxel outside left out:
-  `part(&object, padding)?.grid(&device, Occlusion::Occupied)` is one object as the cameras saw
-  into it, solid where a reading landed or nothing saw past, with nothing around it. A part
-  takes no images. `map.counts()` gives the voxels occupied, free and never observed
-  (`MapCounts`), of a part those inside its region.
-
-- `OccupancyMap::occupy`, `from_shape`, `refined`, `take_readings` and `take_surfaces`: a map's
-  voxels near a shape marked occupied, a map of a primitive, a map refined into smaller voxels
-  from the same views, and the occupied voxels of chosen readings or depth pixels separated into
-  a part of their own.
-
-- Each pixel's reading as a point: `DepthImage::points(robot_mask)`, row by row, `None` where a
-  pixel has no reading or reads the robot. Pixel `i` is column `i % width` of row `i / width`, its
-  centre at those whole coordinates, as grids, maps and surfaces read it.
-
-- `examples/perception.rs` times each depth call for a 640×480 image: the robot's mask, the
-  image's points, a surface, a grid, a frame fused into a map and the map's grid, for a camera
-  over a table and one the hand carries.
-
-- **Breaking:** a limit on how far collision spheres reach past the geometry:
-  `SphereOptions::max_overhang`, `Some(0.002)` for 2 mm and `Some(0.0)` for spheres inside it,
-  whatever the budget. Spheres are chosen as before and each radius cut back to its center's depth
-  plus the limit, so a robot's budget is kept and the surface it cannot cover within the limit is
-  left outside the spheres: `LinkQualification::gap`, new in `Robot::qualify`, is how far outside the
-  farthest of it lies, which is how deep an obstacle reaches into the link unseen. The geometry
-  must be closed, with no shell facing inward: a link whose mesh has open edges, or such a shell
-  (a cavity's among them), is refused with their count, and one too thin for a center inside it
-  under a limit of zero by name. Shells that overlap or share a face are their union. Round
-  shapes are measured as the fit sees them, on their meshes of 24 sides. A collision model given
-  with the options is held to the limit too, a sphere past it refused by link and index with how
-  far it reaches. Held objects take their own (`AttachedObject::spheres`, `Held::spheres`), as
-  many spheres as the smaller of their tolerance and the limit takes, whatever the budget: a box,
-  a cylinder or a capsule is covered whole by its tiles within it, but under a limit of zero,
-  which no tiles keep, and anything else is fitted and held to it; a shape without thickness is
-  refused at a limit of zero. `None`, the default, fits as before. A `SphereOptions` literal
-  that lists every field needs the new one (`max_overhang: None`); in Python,
-  `SphereOptions(max_overhang=0.002)`.
-
-- Where to let a held object go for it to fall into a container and stay:
-  `falls_into(&device, &[RestProblem], &[Surface], &RestOptions)`, with the same problems,
-  surfaces and options as `rests_on`. Each `Fall` gives a `pose` to let go at, its bottom at
-  least `clearance` over the rim of a hollow of what was seen that the object lands in deeper
-  than its middle is over its bottom, how far it drops from there to where it lands as it is
-  (`drop`), and how deep under the rim (`sunk`): `Release::from(&fall)` carries both pose and
-  drop to a place. The drop is more than the clearance and `sunk` together for an object turned
-  askew, whose shape grows by the clearance along its own axes (a box tilted 20 degrees over a pen
-  4 cm deep drops 5.28 cm where those give 5), and beside something higher than the rim (13 cm
-  where they give 9). The
-  object lands as it is, and the clearance is kept where it is let go, over the rim and clear of
-  all around it there: a box of cream cheese 8.3 by 4.2 cm goes through the opening of LIBERO's
-  bowl, 11.2 cm across, and grown by the clearance would not, and it falls in. As first merged,
-  `falls_into` landed the object grown by the clearance. An object standing or lying level keeps
-  every place it had then, at the same pose and as deep or deeper, and gains those within the
-  clearance of a wall or of something already inside: a can over the example's basket has 1,152
-  where it had 800, and over two scans of a harness's basket 320 and 248 where it had 160 and
-  104. Turned askew over a narrow support, a place that only the grown object's lower corner,
-  hanging under the support, held in is no longer given. Whether it could leave is asked of it
-  worn down by half the spots' diagonal, so a gap it fits through holds nothing in. A basket, a
-  bin or an open drawer has falls; a tray, a plate or a table, a container whose floor (or a wall
-  sloping in under the object) was not seen that deep, and an object thinner than that wearing
-  leaves a cell of, have none. With `RestOptions::look_closer` it looks closer as `rests_on`
-  does, for a container the object barely fits, which holds it in only nearer one place than the
-  spots lie apart: the spots a cell apart within the spacing of `near` are tried at every turn,
-  and without it, only where no spot holds the object in at any turn, those of the spot where it
-  lands the deepest under a hollow's rim. Over two recorded looks into that bowl it finds 2
-  places in one, 6.5 mm from the bowl's axis, and in the other, where the spots alone find none,
-  52 by looking closer, within 4 mm of it.
-
-- Where a held object rests on what cameras see: `rests_on(&device, &[RestProblem], &[Surface],
-  &RestOptions)`. A problem names the object, how it is turned as it is set down (`rotation`:
-  upright, on its side, flat on a slope) and a surface whose `object` points are the support. The
-  object comes straight down over spots `spacing` (1 cm) apart at `turns` (8) turns about the
-  vertical, and a `Rest` comes back where what it then touches holds it, with `friction` (0.5) at
-  the contacts and its weight tipped `tipping` (5°) any way, clear of every other point by
-  `clearance` (1 cm): the object's `pose` (`Release::from(&rest)` for a place), the `support` it
-  touches and how far it can be `tipping`, at each of the turns, so a box comes at its half turn and
-  a bottle laid down comes end for end too. It rests as it is set down, not tipped or slid into
-  place: a slope needs the rotation that lies flat on it. `RestProblem::near` names a point to look
-  closer around, a cell of the support apart, for a rest the spots are too far apart to find, as the
-  middle of a dished plate under a wide flat bottom; with it the rests, and `falls_into`'s falls,
-  come nearest it first in x and y, those as near in their order, each costing that distance
-  (`Rest::cost`, `Fall::cost`), which a release takes. A support point whose normal faces down holds
-  nothing up, but where a camera above it saw it (`seen_from_above_holds`). A can or a capsule laid
-  on its side rolls, within half the spacing and `touching`, into the cradle between two bars or a
-  rack's groove or down to a lip, and has no rest on a flat support. Many problems run in one call,
-  each surface read once. `examples/surface_rests.rs` times it, and `scripts/validate_rests.py` lets
-  go of each rest in MuJoCo. Two options, both on by default (`false` turns either off), find more.
-  With `RestOptions::look_closer`, of the spots where the object nearly rests (held, tipping too
-  easily) at a turn, the one nearest `near`, or without it the middle of the support, has the spots
-  a cell apart within the spacing tried too, with `near` at every turn and without it only where no
-  spot rests at any turn: an upright bottle against the lip at the foot of a sloping rack, which
-  stands only in a strip a few millimeters deep, is found near that spot, and a search that finds
-  rests with no `near` costs what it does without. With `RestOptions::seen_from_above_holds`, a
-  support point whose normal faces down holds where the camera that saw it was above it
-  (`Surface::seen_from`), so the noisy normals of a top read at a slant do not block rests on it; a
-  face that leans out over empty space, seen from above, is then taken as a top.
-
-- Why a held object has no rest: `rest_failures(&device, &problems, &surfaces, &rests, &o)`
-  gives, per problem `rests_on` found no rest for, how near the search came (`RestFailure`):
-  `Blocked`, a rest but for a point in its way; `Tips`, held but tipping by less than `tipping`,
-  and by how much; `Unheld`, touching the support and not held, and the way the support pushes it;
-  `Unsupported`, nothing of the support under it anywhere. Where it is not held or tips, what would
-  be in its way there even if it held comes too (`Blocking`, the support's own underside or a
-  reading left unflagged), as a rack's lip measured as another object than the rack's top. It
-  searches those problems again as `rests_on` did with the same options and judges each place of
-  the furthest stage once more where that is `Tips` or `Blocked`: one to two more searches of
-  them.
-
-- What a configuration touches while it holds an object:
-  `device.contacts_holding(&worlds, &item_world, &q, within, &holding)`, with a `Held` or `None`
-  per item, on the device that holds nothing, as a problem's `holding` takes it. What the held
-  object comes near is listed under its link (`"held by hand 0"`), what the worlds let it touch
-  (`Touch::held`) is not a contact, and one call takes items holding different objects.
-
-- **Breaking:** how spheres cover what a hand holds is the caller's to set: `Held::spheres`, a
-  `SphereOptions` (within 5 mm by default, as many spheres as that takes). A smaller tolerance
-  fits closer to a neighbor a few millimeters away, with more spheres. One call takes one object
-  held with different options, each fitted on its own. A `Held` literal needs the new field
-  (`spheres: SphereOptions::default()`); a pick's `TaskPlan::held` carries the default. In
-  Python, `Held(..., spheres=SphereOptions(tolerance=0.002))`.
-
-- Grasps of what cameras see, whatever its shape: `grasps_on(&device, &gripper, &[Surface],
-  &SurfaceGraspOptions)`. A grasp closes on two patches of the object's surface that were both seen
-  (or, with a `shell`, on one and the space seen past its wall), face away from each other within
-  the opening, and have the line between them inside both friction cones (the gripper's friction,
-  0.5, and `contact`, the patch's radius, 5 mm), so a bowl's wall, a handle and a box's sides are
-  found alike. The robot's own hand, with its fingers as locked, and its straight way in
-  (`SurfaceGraspOptions::approach`, 10 cm) are kept clear of every point, the object's and the rest;
-  `floor` holds the frame and the open fingertips over a height, and a hand that is not clear is
-  drawn back while `overlap` of the fingers stays on the patches. Each `Grasp` gives the hand's
-  `pose` and its two `contacts`, the first few from above and spread over the object.
-  `Surface::from_depth` reads a depth image (the object's pixels marked, the robot masked out,
-  normals toward the camera), `Surface::from_points` a cloud seen from one place, and
-  `Surface::join` adds a view. Surfaces of one call run in parallel on the device's threads. Python
-  binds neither the surfaces nor `grasps_on` yet.
-
-- Grasps of a wall seen from one side only, as a bowl's rim seen from above, its outer wall hidden
-  under the rim: `SurfaceGraspOptions::shell`, the thickest such wall a grasp may close
-  across (by default `Some(f32::INFINITY)`, a wall as thick as the gripper grasps; `None` turns it
-  off). From a patch whose other side no camera saw, the line in along its normal meets, within that
-  thickness, space every ray around it went past on its way to something farther: the second contact
-  goes there, so `width()` is the most the wall can be, never past the gripper's capacity, and the
-  `Grasp` says so (`one_sided`). Inside a solid no ray goes, so a box seen from one side is closed
-  on only across all of it, and a patch whose other side was seen keeps to the seen pair. A wall
-  that leans is closed on level too, where the level line through the patch is inside its friction
-  cone, so a hand comes straight down across a flared rim where one closing along the wall's normal
-  leans with it. These grasps follow every grasp of two patches seen (1.5 cm suits a bowl's rim:
-  LIBERO's, its wall 3 mm thick, seen from 40 cm above, is grasped 5.5 to 11.5 mm wide at its rim).
-  The evidence is where each point was seen from, `Surface::seen_from`, which `from_depth` and
-  `from_points` record and `join` carries (infinite where a joined surface did not say). The points
-  seen from exactly one place make one view, so looks joined from one place are one view, and a
-  cloud fused from several views must not be given one place, or must be grasped with `shell: None`.
-  A `Surface` literal needs `seen_from: vec![]` (or `..Default::default()`).
-
-- **Breaking:** a place says how far its hand may open where it lets go: `Place::open`, finger
-  values as `Held::locked` names them, in the order preferred (empty by default, which changes
-  nothing: the hand opens to where the robot was loaded with them, and a spot the open fingers do
-  not fit is refused at its release). With openings named, where the hand lets go is solved with
-  the fingers where they hold the object, each pose lets go at the first opening with which the
-  hand is clear there and on its move away, and the plan says which (`TaskPlan::opening`): a hand
-  can set an object down where it has no room to open all the way. The openings share the
-  place's IK, move in and transit; each one tried costs a move away.
-  `Gripper::openings()` gives the openings a grasp with `narrow` may come in at, widest first, and
-  `Gripper::locked_at` their finger values, to offer a place the same. A `Place` literal needs
-  `open: vec![]`; in Python, `Place(..., open=[{...}, ...])`, `TaskPlan.opening` and
-  `Gripper.openings`.
-
-- **Breaking:** a place says how many plans will do: `Place::enough` (`None` by default: every
-  release is tried, as before). With a count, the releases are tried in their order, 32 and then
-  twice as many each time, until that many have got through, and the plans are the first that
-  many in the releases' order, as trying every release gives them: a place given every spot of a table plans
-  the first that will do without the IK and the motions of the rest. A place none gets through
-  has tried every pose and says where each stopped. A `Place` literal needs `enough: None`; in
-  Python, `Place(..., enough=1)`.
-
-- **Breaking:** a pick says how many plans will do: `Pick::enough` (`None` by default: every
-  grasp is tried, as before). With a count, the grasps are tried in their order, 32 and then
-  twice as many each time, until that many have got through, and the plans are the first that
-  many in the grasps' order, as trying every grasp gives them. A pick's time is the IK of its
-  grasps, so one given the hundreds `grasps_on` finds and asked for the first that gets through
-  stops after the first few. A pick none gets through has tried every one and says where each
-  stopped. A `Pick` literal needs `enough: None`; in Python, `Pick(..., enough=1)`.
-
-- Grasps whose fingers come in narrower than they open, where something stands near:
-  `SurfaceGraspOptions::narrow` (false by default, which changes nothing). Open fingers beside a
-  wall or a neighbor are in it, though the grasp needs a fraction of the opening. With `narrow`,
-  `grasps_on` takes each finger of a gripper whose jaws slide along the hand's y axis and checks
-  every grasp at the gripper's openings; each `Grasp` comes back with the `opening` that keeps its fingers
-  farthest from what is not the object's, the floor included, which with something within the
-  fingers' travel is the narrowest the hand is clear at: a planner lets the fingers touch what
-  they grasp and nothing else. Of openings as far from all that it takes the one with the most
-  room from the object's other sides, then the widest, so a box with nothing near keeps the
-  gripper's opening. A grasp the open hand has stays where it is; where the open hand is clear at no
-  depth, the hand comes in as deep as it is clear narrower. LIBERO's bowl 4 cm
-  from a wall twice as tall is grasped all round so (698 grasps where the open fingers find
-  654), in 10.7 ms where the open hand's check takes 8.9: a grasp that is found is checked
-  across each finger's whole slide, so a hand of many spheres pays more. Without `narrow` every grasp's `opening` is
-  the gripper's.
-
-- **Breaking:** a `Follower` can hold an object: `FollowerOptions::holding` takes the `Held` the
-  trajectory was planned holding. The rest of the motion, and any stop, is checked with the object
-  in the hand, contacts naming it (`"held by hand 0"`), and replans and re-anchors carry it. The
-  follower's robot and the devices its ticks are given are those that do not hold it, as for a
-  problem's `holding`, so one device plans and follows a carry; the first tick on a device builds
-  the one that holds it, and later ticks on that device reuse it. `None`, the default, is as before. A `FollowerOptions` literal needs
-  the new field (`holding: None`).
-
-- Options a host can check where they are set, before a request uses them: `IkOptions::check()`,
-  `PlanOptions::check()` (its search, shortcuts and goal IK included), `RrtOptions::check()`,
-  `ShortcutOptions::check()`, `ToolPathOptions::check()` and `JoinOptions::check()` return the
-  `Error::Input` their call returns for those options. In Python, `options.check()` raises it.
+  per radian, with `Screw::about(point, direction)`: `carry(pose, angle)` carries a pose about it,
+  and `path(pose, angle, precision)` gives a tool path's waypoints along the arc. In Python,
+  `Screw`.
+- A straight draw by a handle: `pull(&device, &worlds, &[Pull], &TaskOptions)`. The hand keeps its
+  orientation and moves a signed `distance` along `direction`; a plan has its `pull` between
+  `approach` and `depart`, and a candidate stopped partway says how far it drew
+  (`CandidateStop::pulled`, at `TaskStep::Pull`). A distance grid that stays where it is may be
+  what a pull or a turn grips. In Python, `Pull` and `pull`.
+- A pick can grasp one obstacle and lift the body it belongs to: `Pick::body`, a `PickBody` with
+  the body's shape and the obstacles that leave with it, and `Pick::lift_world` builds the world
+  to execute the lift in, the hold attached. In Python, `PickBody` and `Pick.lift_world`.
+- A task stops at as many plans as will do: `Pick::enough`, `Place::enough`, `Turn::enough` and
+  `Pull::enough` (`None` by default: every candidate is tried). With a count, the candidates are
+  tried in their order a few at a time until that many get through: the plans are those trying
+  every one gives, without the IK and motions of the rest, so a pick given the hundreds of grasps
+  `grasps_on` finds stops after the first few. In Python, `Pick(..., enough=1)` and the same for
+  the others.
+- A place can let go as wide as it has room to: `Place::open`, finger values in the order
+  preferred (empty by default: the hand opens to where it was loaded). Each release lets go at the
+  first opening with which the hand is clear there and on its way out, and the plan names it
+  (`TaskPlan::opening`). `Gripper::openings` with `Gripper::locked_at` offers the openings `narrow`
+  grasps come in at. In Python, `Place(..., open=[...])` and `TaskPlan.opening`.
+- A `Follower` can hold an object: `FollowerOptions::holding`, the `Held` the trajectory was
+  planned holding. Its checks, stops, replans and re-anchors carry it, and contacts name it
+  (`"held by hand 0"`). Its robot and the devices its ticks are given are those that do not hold
+  it, as for a problem's `holding`.
+- What configurations touch while they hold objects:
+  `device.contacts_holding(&worlds, &item_world, &q, within, &holding)`, a `Held` or `None` per
+  item, the held object's contacts listed under its link.
+- Depth images and fused maps:
+  - `image.filtered(&DepthFilter)`: the depths without the readings between two surfaces, which a
+    grid or a map would hold as points in mid-air.
+  - `image.points(robot_mask)`: each pixel's reading as a point.
+  - `mask.with_shapes(&device, &image, &shapes, margin)`: shapes the world holds as obstacles of
+    their own, left out of grids and maps as the robot is.
+  - `mask.with_band(&device, &image, margin, pixels)`: also the readings a camera gives just behind
+    an outline the mask flags, within `pixels` pixels of it.
+  - `sdf::on_shapes(&device, &shapes, &points, &reach)` (`OnShape`): which of a world's shapes
+    each point lies on, within its reach.
+  - `map.with_weighing(Weighing::Latest)`: each image decides what it sees, for a caller that
+    looks once every few seconds. `Weighing::Evidence`, the default, weighs as before.
+  - `map.free`, `clear` and `occupy`: a shape's voxels marked free, never observed or occupied.
+    `map.part(&region, padding)` is the map inside one region, as a map of its own;
+    `map.counts()` (`MapCounts`) and `map.occupied()` say what a map holds.
+  - `OccupancyMap::from_shape`, `refined`, `take_readings` and `take_surfaces`: a map of a
+    primitive, a map refined into smaller voxels from the same views, and the voxels of chosen
+    readings or pixels in a part of their own.
+  - `examples/perception.rs` times each depth call for a 640×480 image.
+- `batchplan-miru`, an optional crate published with batchplan's version and in its release: what
+  depth cameras show, as objects. Its library is `miru`, so a dependent writes
+  `miru = { package = "batchplan-miru", version = "0.12" }`. `miru::look` says which pixels are
+  one thing, the shape of each and what it stands on, with the same id from one look to the next;
+  `miru::observe` is a look through the library in one call, with a `Memory` told what the robot
+  did (`Memory::after`) that gives the world each step plans against (`Memory::world`); and
+  `Kept::surface`, `Observed::grip_worlds`, `Kept::turn_grips` and `Kept::extractions` give what
+  grasps, turns and lifts out of containers need. batchplan does not depend on it.
+  `miru/docs/status.md` says where it stands.
+- A limit on how far collision spheres reach past the geometry, whatever the budget:
+  `SphereOptions::max_overhang` (`Some(0.0)` keeps every sphere inside; `None`, the default, fits
+  as before). `LinkQualification::gap`, new in `Robot::qualify`, is how far the farthest surface
+  outside the spheres lies from them: how deep an obstacle reaches into the link unseen. Under a
+  limit the geometry must be closed: a link with open edges or a shell facing inward is refused
+  with their count, and a collision model given with the options is held to the limit too. In
+  Python, `SphereOptions(max_overhang=0.002)`.
+- `Robot::hand_reach(hand)` (`HandReach`): an outer bound on the poses a hand reaches;
+  `HandReach::excludes(target, &options)` rules a pose out before any IK. In Python,
+  `Robot.hand_reach` and `HandReach.excludes`.
+- `Pose::is_unit()`: whether a pose is finite with a unit rotation, as every call that takes one
+  accepts. In Python, `Pose.is_unit`.
+- `Device::install(op)` runs `op` on the device's threads, so a crate built on the library keeps
+  its parallel loops there, as miru does.
+- Options a host can check where they are set: `IkOptions::check()`, `PlanOptions::check()`,
+  `RrtOptions::check()`, `ShortcutOptions::check()`, `ToolPathOptions::check()`,
+  `JoinOptions::check()` and `TaskOptions::check()` return the `Error::Input` their call returns
+  for them. In Python, `options.check()` raises it.
 
 ### Changed
 
-- **Breaking:** what a robot holds is covered within its tolerance whatever its
-  `SphereOptions::budget`, which now caps the robot's own spheres only: `Robot::attach` gives an
-  object as many as its tolerance takes (`AttachedObject::spheres`, `Held::spheres`,
-  `TaskOptions::held_spheres`), so the tolerance is the knob. Its spheres also hold all of it, no
-  point of its surface outside them but for rounding, unless `max_overhang` holds them back. A
-  direct cover the budget gives within the tolerance holds it by construction and is the same to
-  the bit, unless its tiles take fewer spheres. Otherwise the object is fitted with as many
-  spheres as that takes, to a grid of its surfaces' points each held with a margin no smaller than
-  the farthest any point of the surface lies from one, within the tolerance less that margin, from
-  candidates the medial balls of its surface samples join (each sample's largest ball inside the
-  shape that touches it, centered on the medial axis), and picks others make redundant are
-  dropped; a direct cover within the tolerance is taken instead where it has no more spheres.
-  Boxes, cylinders, capsules and balls are not fitted but covered by their surfaces' tiles, in
-  milliseconds (a tenth of a second for a tray 40 cm across at 1 mm), within the smaller of the
-  tolerance and `max_overhang` where that is set.
-  A box's cover follows its medial axis (derived with Gemini 4 Neon): spheres at its corners on
-  the rays where three faces tie, rows along its edges on their bisectors spaced and set as deep
-  as covers the widest strip of both faces, shells inward along the same bisectors where it is
-  thick, and staggered rows on its middle plane for what is left and its inside, every sphere
-  reaching the tolerance past it with a margin left for rounding. A cylinder takes rings of
-  spheres along its medial structure: a ring at each rim on the bisector between the face and the
-  side, rings along the rest of the side from as deep as the faces allow (on the axis where near
-  enough), and rings of the faces from the middle height or below each; or, no thicker than 4.8
-  tolerances (24 mm at 5 mm), a layer at its middle height of rings from the rim in, whichever
-  takes fewer; each sphere through the corners of its sector's tiles, which holds it, inside as
-  well, by construction. At the default 5 mm and 64, a bowl 11.2 cm across and 5.1 cm deep goes
-  from 64 spheres reaching 9.1 mm past its side and leaving 1.2 mm of it outside them to 70 within
-  5 mm holding all of it (320 at 2 mm, where a fit took 616), a plate 14 cm across from 64
-  reaching 10.6 mm past its faces to a layer of 75 within 5 mm, a valve's wheel 20 cm across
-  (`examples/turns.rs`) from 64 reaching 15 mm to 144, and a can 6.6 cm across from 64 reaching
-  7.1 mm to 35 within 5 mm (`examples/held_spheres.rs`); goal 5's plate at 2.5 mm takes 264 where
-  a fit took 535. Of two covers that hold an object within the tolerance, the direct one the
-  budget gives and its tiles, the one of fewer spheres is taken, so a bigger budget never costs
-  more: this changes a cover the budget gave before only for one of fewer spheres with the same
-  guarantees, as the plate's at a budget of 256, its layer of rings of one width (145 spheres
-  within 4.7 mm), now its tiles' 75. Covering one costs up to tens of milliseconds where it cost a
-  few, once per object and device. A box or a capsule the budget cannot cover directly within the
-  tolerance is no longer covered past it. The blocks `examples/handover/` carries, which 42 to 64
-  spheres covered 9.0 to 10.6 mm past them, take 95 to 121 within 5 mm, where their long edges
-  alone need 68 to 80 and a fit took 144 to 208. So that fitting is paid once per object,
-  `datagen::handover` fits a carried object once for all its grasps, where it attached it at each,
-  and `datagen::reset_states` once per shape, where it attached it at each hold; and a device for
-  a robot holding an object of many spheres is made in time linear in them, where pairing its
-  spheres with the robot's took time quadratic in them.
-- Fitting a robot's spheres takes 7% to 23% less time, with the same fitted models: on one thread
-  on the M4 Pro, the stand at a budget of 512 263 ms where it took 339, the Panda at 1,200 266
-  where it took 315 ([runs](docs/benchmarks.md#fitting-collision-spheres)).
-- **Breaking:** a held object's cover now holds all of it and reaches its tolerance past it nearly
-  everywhere, where a cover of fewer spheres reached past it less in places and left some of it
-  outside: so more of a tight passage reads as a contact, and clearances and contacts measured to
-  it differ. Of `tests/turn.rs`'s 64 knobs, each with a post that
-  stops turns one way, 15 turn through where 17 did; `examples/turns.rs`'s counts are the same.
-
-- On the CPU, a robot mask (`DepthImage::robot_mask`) takes 11% to 23% less time on the Ryzen
-  and up to 15% less on the M4 Pro, and fusing an image into a map up to 13% less on the Ryzen,
-  however the crate is split into codegen units: the work each row and each reading takes is a
-  function whose inlining the code decides (`examples/perception.rs` on one thread, alternated
-  with the code before).
-
+- **Breaking:** a literal that lists every field needs the new ones: `Pick` `body: None` and
+  `enough: None`; `Place` `open: vec![]` and `enough: None`; `Held`
+  `spheres: SphereOptions::default()`; `TaskOptions` `held_spheres: SphereOptions::default()`;
+  `FollowerOptions` `holding: None`; `SphereOptions` `max_overhang: None`. Options literals that
+  end in `..Default::default()` are unaffected.
+- **Breaking:** `GraspOptions` is two structs, each field with the default it had:
+  `ShapeGraspOptions` (`depth`, `turns`, `tip`, `floor`, `overlap`, `along`) for
+  `grasps(&object, &gripper, &ShapeGraspOptions)`, which takes the gripper, and
+  `SurfaceGraspOptions` for `grasps_on`. `opening` and `friction` are gone: they are the
+  gripper's, so a shape's grasps close across at most `Gripper::capacity` and over a floor keep
+  their open fingers `Gripper::opening` apart. `ShapeGraspOptions::tip` is `None` by default, the
+  gripper's `tip`, where it was 0: a literal that sets `floor` and relied on a tip of 0 sets
+  `tip: Some(0.0)`. In Python, `grasps(object, gripper, options=None)` takes a
+  `ShapeGraspOptions`, and `GraspOptions` is gone.
+- **Breaking:** what a robot holds (`Robot::attach`, `Held`) is covered within its `tolerance` (5 mm
+  by default) whatever the budget, which caps the robot's own spheres only, and its spheres hold all
+  of it. So more of a tight passage reads as a contact, and clearances and contacts measured to a
+  held object differ. A box, a cylinder, a capsule or a ball is covered directly where its tiles
+  reach the tolerance; any other shape is fitted, once per object and device. The caller sets the
+  cover: `Held::spheres`, and `TaskOptions::held_spheres` for what a pick or a moving turn carries,
+  which the pick's `TaskPlan::held` hands to the place; a smaller tolerance fits closer, with more
+  spheres. In Python, `Held(..., spheres=SphereOptions(tolerance=0.002))`.
+  `examples/held_spheres.rs` gives the counts
+  ([runs](docs/benchmarks.md#spheres-for-what-a-hand-holds)).
 - **Breaking:** a robot mask judges each reading by where its point lies:
-  `image.robot_mask(&robot, &q, padding, &holding)` marks a reading the robot's where its point
-  is inside a collision sphere grown by the padding, and `RobotMask::on_robot`, a flag per pixel,
-  replaces `RobotMask::depth`. Before, every reading at or behind where its ray entered a grown
-  sphere was the robot's, so a camera the hand carries, which stands inside or beside the hand's
-  grown spheres, lost all it saw: a camera on the Panda's palm, inside a sphere grown by the 4 cm
-  a mask is padded with, lost its whole image. Now it keeps every reading past the hand, and a
-  camera across the table keeps the surfaces seen just past the arm's outline. A sensor's stray readings there, farther than the padding behind the arm, are obstacles
-  where they were dropped. `holding` names what the hands hold (`&[]` for nothing), a `Held` each
-  as a problem's `holding` takes one: its readings are left out and the space it fills is free, as
-  the robot's, without attaching it. In Python the mask was not bound.
-
-- **Breaking:** `Surface::from_depth(&device, &image, &object, robot_mask, radius)` takes the
-  device and reads the image's rows on its threads; the surface is the same to the bit. On the M4
-  Pro's 14 threads a 640×480 image of a tabletop with the table's 148,461 normals takes 2.7 ms
-  where 28, and on the Ryzen's 32 threads 3.4 ms where 34 (`examples/perception.rs`).
-
-- Fusing a frame or building a grid with a robot mask costs by the robot's volume, not by its
-  spheres times the grid's points: which points the robot fills is found once, sphere by sphere
-  over the points near each, for both devices, and which points those are is the same to the bit
-  on the CPU. A
-  640×480 frame fused into a map of 1.8M voxels with the mask of a Panda fitted with 573 spheres
-  (`examples/perception.rs`, runs alternated with the release before): 2.2 ms where 49 on the M4
-  Pro's CPU and 1.6 where 11.2 on its GPU, 5.4 ms where 41 on the Ryzen's 32 threads and 1.2 where
-  3.0 on the Radeon 8060S. With the Panda's 61 spheres: 1.9 ms where 6.3, 1.4 where 2.5, 5.2 where
-  8.8 and 0.9 where 1.4. Calls without a mask take what they took, with the same results to the
-  bit.
-
-- A frame fused into a map on the CPU device costs by what its camera sees, not by the map's
-  size: a row of the map at a time, the fuse visits the voxels the image may see, and past them
-  only those holding one of its readings and those a mask frees, with the same map to the byte.
-  A 640×480 frame of a tabletop fused into a map of 13.4M voxels (2.9 m by 2.9 m by 1.55 m at
-  1 cm) takes 2.4 ms on the M4 Pro's 14 threads from a camera across the table, 1.4 times what a
-  map of 1.8M voxels it sees nearly all of takes, and 1.6 ms from one on the Panda's hand, which
-  sees less of it; with the Panda's mask, 3.1 and 1.9 ms. On the Ryzen AI Max+ 395's 32 threads
-  it takes 5.2 and 3.1 ms, and 6.5 and 3.5 with the mask (`examples/perception.rs`, the quickest
-  median of eight runs, at a load of 3.5 to 7.5 on the M4 Pro and 2 to 10 on the Ryzen). The
-  GPU's fuse is as it was: it sends the map to the device and back, so a frame fused into that
-  map takes 8.3 to 9.7 ms on the Radeon 8060S and 4.7 to 6.5 on the M4 Pro's GPU, and a map that
-  large now fuses quicker on a CPU device; any device fuses a map.
-
-- **Breaking:** a robot's `SphereOptions` are checked whether its spheres are fitted or given
-  (`RobotOptions::collision_model`), before anything is read: a budget of zero, or a tolerance or
-  voxel size that is not positive, is an `Error::Input` from `Robot::load`, `from_urdf` and
-  `assemble`. With a collision model they were not read and the robot loaded; without one, `load`
-  and `assemble` returned an `Error::Load`.
-
+  `image.robot_mask(&robot, &q, padding, &holding)` flags a reading whose point is inside a
+  collision sphere grown by the padding, and `RobotMask::on_robot`, a flag per pixel, replaces
+  `RobotMask::depth`. A camera the hand carries keeps every reading past the hand, where it lost
+  its whole image, and a camera across the table keeps the surfaces just past the arm's outline;
+  a sensor's stray readings there, farther than the padding behind the arm, are obstacles, which
+  `with_band` takes out. `holding` names what the hands hold (`&[]` for nothing): its readings are
+  left out and the space it fills is free, without attaching it.
 - **Breaking:** options a call cannot use are input errors where the call ran before: IK
-  tolerances that are zero, negative or not a number, which no seed meets, so every problem came
-  back unsolved; collision weights that are not finite, margins that are not numbers, and
-  infinite margins with a weight on them, each of which makes the cost not a number (an infinite
-  margin without a weight still asks for exact clearances at any distance); a plan's acceleration
+  tolerances that are zero, negative or not a number; collision weights that are not finite,
+  margins that are not numbers, and infinite margins with a weight on them; a plan's acceleration
   and velocity weights that are not finite; an infinite `initial_step`; and seeds, control points
-  or samples per span past what 32 bits count, alone or as a batch's problems times their seeds
-  (a plan's pose goals at the sixteen times their `goal_ik` seeds its IK may come to try): a
-  trillion IK seeds ended the process when it allocated for them. `Device::evaluate` refuses
-  such weights and margins too, where it returned costs that were not numbers, `ik::failures`
-  the options `solve_ik` refuses, and `servo` a `slow_within` or `halt_within` that is not a
-  number, with which it never slowed.
+  or samples per span past what 32 bits count, alone or as a batch's problems times their seeds.
+  `Device::evaluate` refuses such weights and margins too, `ik::failures` the options `solve_ik`
+  refuses, and `servo` a `slow_within` or `halt_within` that is not a number. A robot's
+  `SphereOptions` are checked whether its spheres are fitted or given
+  (`RobotOptions::collision_model`): a budget of zero, or a tolerance or voxel size that is not
+  positive, is an `Error::Input` from `Robot::load`, `from_urdf` and `assemble`, where a given
+  model ignored them and a fit gave an `Error::Load`.
+- **Breaking:** `Clearance` (what `MeshModel::clearance` returns) is `#[non_exhaustive]`, as the
+  other results are: a pattern that names both its fields ends in `..`, and callers no longer
+  build one.
+- **Breaking:** `TaskStep` has `Turn` and then `Pull` between `Reach` and `Approach`, the order
+  the steps are checked in. The steps that were there keep their order among themselves, and as
+  numbers (`as isize`, and in Python) `Approach`, `Depart` and `Transit` are 4, 5 and 6 where they
+  were 2, 3 and 4.
+- Faster:
+  - Fitting a robot's spheres takes 7% to 23% less time, with the same fitted models
+    ([runs](docs/benchmarks.md#fitting-collision-spheres)).
+  - Fusing a frame or building a grid with a robot mask costs by the robot's volume, not by its
+    spheres times the grid's points.
+  - A frame fused into a map on the CPU device costs by what its camera sees, not by the map's
+    size, with the same map to the byte.
+  - `datagen::handover` fits a carried object once for all its grasps and `datagen::reset_states`
+    once per shape, and a device for a robot holding an object of many spheres is made in time
+    linear in them.
+  - Two groups of one call that hold the same object fit its spheres once, where both fitted it.
 
-- **Breaking:** a pick's grasps each say where the fingers are: `Hold::locked`, the locked joints'
-  values per grasp (empty: as loaded, as before), where `Pick::locked` was one map for the task,
-  and is gone. One pick then takes grasps that come in at different openings, as `grasps_on`
-  gives them with `SurfaceGraspOptions::narrow`, and plans by any: `pick` groups a call's grasps
-  by those values, a relocked robot for each group, and each plan's `candidate` numbers the
-  pick's grasps and its `held` starts with its grasp's values. A pick that set `locked: narrow`
-  gives each hold `locked: narrow.clone()`; in Python, `Pick(..., [Hold(g, locked=narrow) for g
-  in grasps])`.
+### Removed
 
-- **Breaking:** a held capsule is covered by spheres along its axis, and a held cylinder that is thin or
-  slender (a disc, a rod) by one layer of rings of spheres or one line of them, where that reaches
-  the tolerance within the budget: without fitting, in microseconds where a fit took 4 to 25 ms.
-  Their spheres, and so clearances and contacts measured to them, differ from the fit's. Past the
-  budget, any cylinder takes its tiles' rings or layer and a capsule its line, as said above (a
-  14 cm plate: 75 within 5 mm at a budget of 64 or 256).
+- **Breaking:** `SphereGeometry` and `SphereOptions::geometry`, in Python too: spheres are fitted
+  to the links' collision geometry, the default before. A `SphereOptions` literal that names
+  `geometry` drops it. The loaders no longer read visual geometry, so a URDF whose visual meshes
+  cannot be found (in a package that neither `RobotOptions::package_dirs` nor the directories
+  above the file hold, or at a relative path in a URDF given as text) now loads.
+- The `benchmark` example's `--save` and `--check` modes, `scripts/compare_planners.py` and
+  `scripts/cpp_planners.cc`: the earlier comparison with other planners, which
+  `scripts/run_suite.sh` replaced and the docs stopped running in 0.11.0.
 
 ### Fixed
 
 - A planned path's spline keeps 2 mm between the robot's links away from its ends, ramped as its
   margin from the world is, where it kept none: a curve cutting a corner past what the other hand
-  holds passed into it between the samples it was checked at. A handover's transit planned on a
-  Radeon passed 25 µm into the bar the giver held, which `tests/handover.rs` found checking it at
-  100 Hz. Where no spline keeps it, as for a path the shortcuts pulled tight against the robot
-  itself, the last round keeps nothing between links, as before.
-- Two groups of one call that hold the same object fit its spheres once: the second waits for
-  the first and takes what it fitted, where both missed the device's kept spheres and fitted it.
+  held passed into it between the samples it was checked at.
 - `place` refuses worlds uploaded to another device with no tasks too, as `pick` does, rather
   than returning no outcomes.
-- Miru can preserve a measured container opening when a separate solid lies behind its observed
-  inner wall. The exterior piece keeps its own collision geometry.
-
-- Miru resolves a hollow support near a measured grip on a solid target. A hand can approach
-  through an observed gap while the support walls and unseen material remain collision-checked.
-
-- Measured grasps of hollow objects now attribute the area of a depth pixel as well as its
-  endpoint. A voxel also hit by another surface stays in the collision world during lift.
-
-- Miru can separate a bowl wall from an adjacent drawer edge in a depth view where both were
-  assigned to one surface. It checks the visible rim and follows the measured wall, including
-  projecting lips and spouts.
-
-- A plan with a `time_budget` longer than the clock counts (`Duration::MAX`) panicked on adding
-  it to the time; it now has no deadline. A plan whose search had `RrtOptions::max_iterations`
-  of `usize::MAX` found nothing where it had to search again without its clearance: the samples
-  its first search drew, added to the limit, wrapped.
-
+- A plan with a `time_budget` of `Duration::MAX` has no deadline, where it panicked, and a search
+  with `RrtOptions::max_iterations` of `usize::MAX` that searches again without its clearance
+  finds what it finds, where its count wrapped and it found nothing.
 - A call that held objects in several hundred ways at once, as a `place` after each of a pick's
-  plans, with more than one candidate for each, could overflow the stack of one of the device's
-  threads and abort the process: on an M4 Pro, 609 holds of a box with two poses each did so in
-  most runs, and 1,500 in every one. What runs for each hold waits for work it hands the device's
-  threads, and a thread that waits took up another hold's on top of its own, as deep as there
-  were holds. `place`, `pick` (its lift, and its grasps' finger values), `handover` and problems
-  with a `holding` now keep no more in hand than the device has threads. On the M4 Pro's CPU a
-  `place` of up to 4 holds takes what it did, and one of 16, 64 or 609 is 5 to 11% quicker.
-
-- **Breaking:** spheres fitted to a link mesh of more than one closed shell, and how
-  `Robot::qualify` measures spheres against one. The side of the nearest face decided inside
-  from outside: in a shell
-  beside a face of another that is buried in it, a center read as outside, so the fit had no
-  candidates there and `qualify` gave a sphere there its distance to that face as overhang; and
-  around a shell that faces inward, the fit put spheres outside the link, 13 cm past a box with
-  an inward cube beside it. Inside a closed mesh is now where its surface winds around the
-  point, as for distance grids: shells that overlap are their union, and a shell the grid's
-  points fall inside is solid whichever way it faces (one that faces inward and is thinner than
-  the grid still gets spheres on its outside). Meshes with open edges, and every robot in this repository, are fitted
-  as before, sphere for sphere. A robot with such a mesh is fitted differently, and clearances
-  and contacts measured to its spheres differ: the reBot's arm, where 41 of a link's grid points
-  read the other way, keeps its sphere count and how far they reach, and the handover and join
-  benchmarks on it give the results they did.
-
-- Distance grids of meshes with more than one closed shell (`SdfGrid::from_mesh`, and scene
-  meshes `World::load` reads). The side of the nearest face decided inside from outside, which is
-  right for one shell only: where a table's leg ran up into its top, the top read free above the
-  leg's end; a shell facing the other way than the rest read hollow, with solid around it. A
-  point is now inside where the surface winds around it: shells that face the same way are their
-  union where they overlap, a shell apart from the others is solid whichever way it faces, a
-  shell facing in inside one facing out is a cavity as before, and a shell that crosses itself is
-  solid wherever it encloses space. Where two shells that face opposite ways overlap, the overlap
-  reads free. Grids of a single shell that does not cross itself are bit for bit what they were.
+  plans with more than one candidate for each, could overflow the stack of one of the device's
+  threads and abort the process. `place`, `pick`, `handover` and problems with a `holding` now
+  keep no more holds in hand than the device has threads.
+- **Breaking:** a mesh of more than one closed shell is inside where its surface winds around a
+  point, for distance grids (`SdfGrid::from_mesh`, and scene meshes `World::load` reads), sphere
+  fitting and `Robot::qualify`: a table's top no longer reads free above the end of a leg that runs
+  up into it, a shell facing the other way no longer reads hollow, and a fit no longer puts spheres
+  outside the link around a shell facing inward. Shells that overlap are their union, and a shell
+  apart from the others is solid whichever way it faces. Grids of a single shell are bit for bit
+  what they were, and every robot in this repository is fitted as before; a robot with such a mesh
+  is fitted differently, and clearances and contacts measured to it differ.
 
 ## [0.11.0] - 2026-11-14
 
@@ -885,13 +420,13 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   on an M4 Pro and 30% less on a Ryzen AI Max+ 395; the Panda with a 1,200-sphere budget takes
   4% and 11% less, respectively.
   These isolate fitting from self-collision analysis. The
-  [benchmark guide](docs/benchmarks.md#fitting-collision-spheres) gives the runs and
+  [benchmark guide](https://github.com/natsuku-lab/batchplan/blob/v0.11.0/docs/benchmarks.md#fitting-collision-spheres) gives the runs and
   `examples/fitting.rs` reproduces the fixtures.
 - Faster CPU collision checks, contact queries, IK, planning, tasks, depth-grid construction and
   occupancy updates, with results the same to the bit. In six alternating runs, the best CPU
   times for 1,000 IK targets among clutter fell 9% on a Ryzen AI Max+ 395 and 4% on an M4 Pro;
   256 plans with four optimized seeds took 22% and 6% less time, respectively. The
-  [benchmark guide](docs/benchmarks.md#how-the-speed-came) gives the times, lower quartiles and
+  [benchmark guide](https://github.com/natsuku-lab/batchplan/blob/v0.11.0/docs/benchmarks.md#how-the-speed-came) gives the times, lower quartiles and
   build configurations. This workspace builds batchplan as one
   codegen unit (`[profile.release.package.batchplan] codegen-units = 1`), so a change measured here
   no longer moves with how rustc splits the crate; a crate that depends on batchplan can do the same.
@@ -906,7 +441,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   sphere pairs that cannot add to the cost: a sphere past the margin from another link's
   bounding sphere is not checked against that link's spheres. Results are the same to the bit.
   A robot fitted with many spheres gains most: a `place` of four holds on a Panda of 512 spheres
-  takes 11 ms on an M4 Pro where it took 18 ([Benchmarks](docs/benchmarks.md#how-the-speed-came)).
+  takes 11 ms on an M4 Pro where it took 18 ([Benchmarks](https://github.com/natsuku-lab/batchplan/blob/v0.11.0/docs/benchmarks.md#how-the-speed-came)).
 - **Breaking:** IK screens its seeds. Every seed takes `IkOptions::screening` steps (8 by
   default), then only `IkOptions::kept` of each problem's (4) take the rest of `iterations`: those
   not yet at their targets, the nearest first, then seeds that have arrived. Where the steps push
@@ -948,7 +483,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   (`examples/latency.rs`). `world_clearance` for a link past the margin from a grid is a bound
   from below, as it is for other obstacles. Uploads without a grid run the code they ran: the
   rule is in kernels, and in copies of the CPU's checks, that only worlds uploaded with a grid
-  run ([Benchmarks](docs/benchmarks.md#how-the-speed-came)).
+  run ([Benchmarks](https://github.com/natsuku-lab/batchplan/blob/v0.11.0/docs/benchmarks.md#how-the-speed-came)).
 - A GPU device is made sooner: its kernels' pipelines compile each on a thread of its own. With
   the driver's shader cache empty, `Device::gpu` takes 1.4 s on an M4 Pro where it took 2.6,
   though it now builds the kernels of uploads with grids as well, `Device::warmup` 0.7 s where
@@ -975,7 +510,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   Pro make optimized plans 4–7% slower and IK for hands that share joints 13–20%. Three kinds of
   call are slower than before: IK with the push for a robot of several hundred spheres (4–5%),
   plans to goals past an obstacle (5%) and `evaluate` (1.5–4%)
-  ([Benchmarks](docs/benchmarks.md#how-the-speed-came)). A GPU's results move in their last
+  ([Benchmarks](https://github.com/natsuku-lab/batchplan/blob/v0.11.0/docs/benchmarks.md#how-the-speed-came)). A GPU's results move in their last
   places, IK's and trajectory optimization's alike: a seed in thousands arrives or does not.
 - Trajectories are sooner: time-optimal timing uses the full velocity and acceleration limits,
   and where its smoothed time map overshoots a limit, slows the profile there instead of

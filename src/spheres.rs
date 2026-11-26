@@ -57,16 +57,11 @@ pub struct SphereOptions {
     /// ([`LinkQualification::overhang`]), so `Some(0.0)` keeps every sphere inside. Spheres are
     /// chosen as without it and then held to it, which leaves surface outside them wherever
     /// `tolerance`, as the budget scales it, is the larger:
-    /// [`Robot::qualify`](crate::Robot::qualify) reports how deep as each link's `gap`. The
-    /// geometry must be closed, every edge shared by as many triangles one way as the other, with
-    /// no shell facing inward, and a collision model given with the options is held to it as a
-    /// fitted one is. A center's depth is its distance to the nearest face of a mesh that winds
-    /// around it, a face buried in another shell among them, so it is never more than the true
-    /// depth. Depths are measured in the geometry as the fit sees it, a round shape as its mesh of
-    /// 24 sides, which lies inside it by up to 0.9% of a cylinder's radius and 1.7% of a ball's or
-    /// a capsule's; a held shape covered without fitting is held to the shape itself, so `qualify`
-    /// reads that much more for it. `None`: spheres cover the surface and reach as far past it as
-    /// the budget makes them.
+    /// [`Robot::qualify`](crate::Robot::qualify) reports how deep as each link's
+    /// [`gap`](LinkQualification::gap). The geometry must be closed, every edge shared by as many
+    /// triangles one way as the other, with no shell facing inward, and a collision model given
+    /// with the options is held to it as a fitted one is. `None`: spheres cover the surface and
+    /// reach as far past it as the budget makes them.
     pub max_overhang: Option<f32>,
     /// Largest spacing of the interior grid that proposes sphere centers (meters). Small links
     /// use a finer grid.

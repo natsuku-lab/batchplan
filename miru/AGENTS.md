@@ -1,18 +1,19 @@
 # Agent instructions
 
 miru is a Rust library that says what depth cameras show, as objects: a crate of batchplan's
-repository, built on batchplan. Read `README.md` first: what it is, its one call, and where it
-stands. The repository's `CLAUDE.md` holds the rules both crates keep (style, working rules, the
-lints); this file holds miru's own.
+repository, built on batchplan. Read `README.md` first: what it is and how to add it. The crate's
+rustdoc front page lists its calls, and `docs/status.md` says where it stands. The repository's
+`CLAUDE.md` holds the rules both crates keep (style, working rules, the lints); this file holds
+miru's own.
 
 ## Commands
 
 Run from the repository's root.
 
 ```bash
-cargo test -p batchplan-miru                           # unit tests, tests/look.rs on rendered scenes, the scorer's own rules, the README's and lib.rs's code
+cargo test -p batchplan-miru                           # unit tests, tests/look.rs on rendered scenes, the scorer's own rules, the code in the README, docs/grips.md and lib.rs
 scripts/check.sh                                       # the repository's lints, miru's among them: run before every push
-cargo run --release -p batchplan-miru --example score -- <set> [--recorded | --masks truth|one [--border <pixels>]] [--again] [--noise <factor>] [--shares] [--offsets] [--twin <set>] [--rooms] [--threads <n>] [--images <dir>] [--digest] [run ...]   # score recorded looks against the simulator's truth (--recorded: their executor's; --masks truth: miru's with the truth as its masks; --masks one: each truth object from a look of its own whose masks are its pixels alone, as a model prompted for one thing gives, refused with --again, --offsets, --shares, --twin, --rooms and --images; --border: every mask's border moved out by that many pixels, or in where negative, as a model's masks are never exact; --again: each look's frames a second time; --noise: every view's stated noise multiplied by the factor; --shares: per kind, how much of it is an object's, a known shape's or no one's; --offsets: per kind, the median distance from above of a matched object's middle from the truth's, and how many matched ones are solid; --twin: the same scenes on other depth, each object matched in both held against itself, per kind: how much its half sizes exceed the twin's, and how many are round and solid where the twin is; --rooms: per kind, how many of a thing's own readings lie in the room of its object's solid box open at the top, and how many of another thing's inside a solid object's solids, by more than three deviations of their camera's noise, and the ten objects that hold the most of each; --threads: how many threads a look may use, the machine's by default)
+cargo run --release -p batchplan-miru --example score -- <set> [--recorded | --masks truth|one [--border <pixels>]] [--again] [--noise <factor>] [--shares] [--offsets] [--twin <set>] [--rooms] [--threads <n>] [--images <dir>] [--digest] [run ...]   # score recorded looks against the simulator's truth; every flag is in the header of examples/score.rs
 cargo test --release -p batchplan-miru --test truth -- --nocapture   # the truth table: scenes built from known things, read through three cameras (the simulator's exact depth, an Intel RealSense D435, a D405, the two through batchplan's filter), a row per scene, camera and thing with what `look` made of it against what it is; what holds is asserted, what does not is a gap listed in the file
 cargo test --release -p batchplan-miru --features gpu --test batchplan   # the fit with batchplan: a look's output through the library's own calls, on the CPU and the GPU
 cargo run --release -p batchplan-miru --example score -- <set> --again --digest [--masks truth] [--threads <n>]   # one hash over every scene the set's looks give, the second looks' too, and nothing else: a change meant to leave the results alone, as one for speed, prints the same digest before and after, on both sets, with and without masks, on 1, 2 and the default threads
@@ -92,9 +93,9 @@ The repository's (`CLAUDE.md`, Working rules), and:
   designing anything. The two together show in a glance what a table of sizes hides: which
   surfaces the camera actually saw, and which of them the look gave to which object. An agent
   can open both with its file reader; so can the user.
-- **Numbers come from named runs.** The README's table names its sets and command; rerun it
+- **Numbers come from named runs.** `docs/status.md` names each table's sets and command; rerun it
   when a change moves a number.
-- **A gap is written down with its run**, in the README's "Where it stands", not worked around
-  with a rule.
+- **A gap is one entry in `docs/status.md` with the run that shows it**, not worked around with a
+  rule. A change that moves it rewrites that entry and deletes what no longer holds.
 - **An A/B for speed runs over both kinds of set**, exact depth and a camera's, and prints the
   same digest before and after.

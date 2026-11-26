@@ -277,7 +277,7 @@ fn reaching_over_a_tray(robot: &Robot, q: &[f32]) -> Vec<Thing> {
     things
 }
 
-/// The README's "With batchplan", steps 1 to 4, written out for `frames` after `previous`: each
+/// `observe`'s steps 1 to 4, written out for `frames` after `previous`: each
 /// frame filtered at its noise, the robot masked at `q` and `padding`, and a look with the corners
 /// as far as the robot reaches. The scene, and each frame's filtered depth and mask.
 fn by_steps(
@@ -335,10 +335,10 @@ fn by_steps(
 }
 
 /// On the scene of `tests/batchplan.rs`, through each camera and on each device, `observe` gives
-/// the scene the README's steps give, and keeps the depth they filter and the mask they make; the
-/// scene is the same on every device.
+/// the scene its steps give written out, and keeps the depth they filter and the mask they make;
+/// the scene is the same on every device.
 #[test]
-fn a_look_is_the_readmes_steps_in_one_call() {
+fn observe_gives_its_steps_written_out() {
     let robot = panda();
     let things = reaching_over_a_tray(&robot, &OVER_THE_CAN);
     let rendered = render(&things);
@@ -389,7 +389,7 @@ fn a_look_is_the_readmes_steps_in_one_call() {
         );
         found.push((*camera, outcome(&wrong)));
     }
-    verdict("a_look_is_the_readmes_steps_in_one_call", &found);
+    verdict("observe_gives_its_steps_written_out", &found);
 }
 
 /// A camera stated with no noise is refused, naming it: its flat surfaces would be filtered away
@@ -1419,12 +1419,12 @@ fn a_plate_let_go_on_a_box_is_seen_there() {
     verdict("a_plate_let_go_on_a_box_is_seen_there", &found);
 }
 
-/// On the scene of `tests/batchplan.rs`, each object's surface from a kept look is the README's
-/// step 6 written out: each view's filtered depth with the object's labels as flags and the
-/// robot's mask, a 5 mm patch, the views joined. It has a point per reading off the robot, view by
-/// view and row by row, flagged where the look labels the reading the object's; and on exact depth
-/// each flagged point lies within three deviations of the view's noise of its thing. An id the look
-/// has not has no surface.
+/// On the scene of `tests/batchplan.rs`, each object's surface from a kept look is `Kept::surface`
+/// written out: each view's filtered depth with the object's labels as flags and the robot's mask,
+/// a 5 mm patch, the views joined. It has a point per reading off the robot, view by view and row
+/// by row, flagged where the look labels the reading the object's; and on exact depth each flagged
+/// point lies within three deviations of the view's noise of its thing. An id the look has not has
+/// no surface.
 #[test]
 fn a_kept_look_gives_an_objects_surface() {
     let robot = panda();
@@ -1505,7 +1505,7 @@ fn a_kept_look_gives_an_objects_surface() {
                 || surface.object != by_hand.object
                 || surface.seen_from != by_hand.seen_from
             {
-                wrong.push(format!("things {part:?}: not the README's surface"));
+                wrong.push(format!("things {part:?}: not the surface written out"));
             }
         }
         let unknown = kept

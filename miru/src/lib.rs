@@ -23,6 +23,23 @@
 //!   device has: each piece of a look's work is one thread's alone, and the results are taken in
 //!   the pieces' order.
 //!
+//! | Call | What it gives |
+//! |---|---|
+//! | [`look`] | The objects of views and known shapes, and what each pixel shows. |
+//! | [`observe`] | A look through batchplan: depth filtered, robot masked, the rest fused. |
+//! | [`Memory::after`] | The memory after acts: a pick, a let-go, a push, a loss ([`Act`]). |
+//! | [`Memory::world`] | The world to plan a [`Step`] against, each obstacle named ([`Of`]). |
+//! | [`Kept::surface`] | An object's readings, for `grasps_on`, `rests_on` and `falls_into`. |
+//! | [`Kept::labels_at`] | Which object a measured point lies on, by camera. |
+//! | [`Observed::grip_worlds`] | Worlds where the fingers may touch a measured part. |
+//! | [`GripWorlds::plan`] | Plans ordered grasps on those worlds, least cost first. |
+//! | [`Observed::picked`] | The memory after a pick planned on such a world. |
+//! | [`Kept::turn_grips`] | Grips to turn a control, in groups to plan in order. |
+//! | [`Kept::bar_on_disk`] | A raised bar over a round face, and poses that grip it. |
+//! | [`Kept::observed_closures`] | What a hand closing at given poses meets in the readings. |
+//! | [`Kept::extractions`] | Straight lifts out of an opening the look measured. |
+//! | [`Kept::enclosing`] | What holds an object in where the look measured no opening. |
+//!
 //! ```
 //! use batchplan::glam::{Quat, Vec3};
 //! use batchplan::{DepthImage, Device, Intrinsics, Obstacle, Pose};
@@ -76,6 +93,11 @@
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 struct Readme;
+
+/// Compiles the code in `docs/grips.md`.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/grips.md")]
+struct Grips;
 
 mod bar;
 mod closure;

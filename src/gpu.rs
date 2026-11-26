@@ -58,7 +58,7 @@ fn lanes_for(configurations: usize) -> u32 {
 /// a batch size that grows with the robot's collision work: the crossover was about 26
 /// configurations per sphere on a Radeon 8060S at 128 spheres and 32–40 at 507, and 34 to past 32
 /// on an M4 Pro, so robots with many spheres keep their lanes past 4,096 configurations
-/// (docs/benchmarks.md#how-the-speed-came).
+/// (0.11.0's benchmarks page, "How the speed came").
 const IK_SHARED_PER_SPHERE: usize = 25;
 
 /// Lanes per configuration for IK that pushes away from obstacles, on `configurations` of a robot
@@ -269,12 +269,12 @@ fn write_out(lines: &[&str], count: &dyn Fn(&str) -> Option<usize>, out: &mut St
     }
 }
 
-/// Spheres on a link of the robot's own, and sphere pairs of a pair of them, from which their
-/// loops take two rounds at a time: naga counts a loop's rounds, and a link of many spheres has
-/// many. No robot measured is slower from these counts than with one round at a time; from 16
-/// and 64, cuRobo's Panda, whose hand has 18 spheres and 72 pairs with each of four links, ran
-/// 1% slower, and from 24 and 64 a UR5e 1% (docs/benchmarks.md#how-the-speed-came). What a
-/// robot holds is left out whatever its size, so that holding another object builds no kernels.
+/// Spheres on a link of the robot's own, and sphere pairs of a pair of them, from which their loops
+/// take two rounds at a time: naga counts a loop's rounds, and a link of many spheres has many. No
+/// robot measured is slower from these counts than with one round at a time; from 16 and 64,
+/// cuRobo's Panda, whose hand has 18 spheres and 72 pairs with each of four links, ran 1% slower,
+/// and from 24 and 64 a UR5e 1% (0.11.0's benchmarks page, "How the speed came"). What a robot
+/// holds is left out whatever its size, so that holding another object builds no kernels.
 const PAIRED_SPHERES: u32 = 24;
 const PAIRED_PAIRS: u32 = 128;
 

@@ -385,7 +385,7 @@ fn a_thing_whose_mask_runs_two_pixels_past_its_border_leaves_the_box_under_it_it
 }
 
 #[test]
-#[ignore = "a rim goes with a wide unmasked neighbour in its part: README"]
+#[ignore = "a rim goes with a wide unmasked neighbour in its part: docs/status.md"]
 fn a_box_on_a_wider_box_keeps_its_rim_where_its_mask_stops_short() {
     // A box on a wider one, their fronts flush: one surface to the depth. Its mask a pixel or two
     // short of its border leaves the rim along the lower box in no mask, one side with the
@@ -3402,7 +3402,7 @@ fn the_table_between_and_around_things_is_the_tables() {
 }
 
 #[test]
-#[ignore = "the table inside a ring reads as a plate's thin floor does: README"]
+#[ignore = "the table inside a ring reads as a plate's thin floor does: docs/status.md"]
 fn a_ring_leaves_the_table_inside_it_the_tables() {
     // The plate's rim alone, with the table showing inside it. Within the camera's noise it
     // reads as the plate does, whose floor is its own: nothing says the floor is not there.
@@ -4434,7 +4434,7 @@ fn a_box_across_a_narrower_slab_stands_on_it_where_the_slab_reads_over_its_foot(
     // The box across the slab on noisy depth, as a real camera states it: the slab's highest
     // reading lies over the box's lowest, within that reading's tolerance, and the slab holds
     // the box up all the same. On the draws where it does; on most others the box's lowest
-    // reading lies farther under the slab's top, and it stands on the table (README).
+    // reading lies farther under the slab's top, and it stands on the table (`docs/status.md`).
     let things = || {
         vec![
             cuboid(
@@ -4563,7 +4563,8 @@ fn a_plate_on_a_known_wall_that_touches_a_box_at_an_edge_is_not_the_boxs() {
     // beside it touches its side along an edge, under a window's width of border. A sliver of
     // the plate's front hangs and is one with its top, which rests on the wall by its own lowest
     // reading, not the sliver's; and the plate touches the box along too little to be held up
-    // by it. (A plate 1 cm thick touches the box along a window and is the box's: README.)
+    // by it. (A plate 1 cm thick touches the box along a window and is the box's:
+    // `docs/status.md`.)
     let wall = || {
         cuboid(
             Vec3::new(0.3, -0.3, 0.0),
@@ -5044,7 +5045,7 @@ fn a_round_hollow_in_a_square_block_is_no_box_open_at_the_top() {
 }
 
 #[test]
-#[ignore = "a round hollow seen in part, its turn within the noise, is open at the top: README"]
+#[ignore = "a round hollow seen in part, its turn within the noise, is open at the top: docs/status.md"]
 fn a_round_hollow_in_a_square_block_seen_from_50_degrees_is_no_box_open_at_the_top() {
     // From 50 degrees, stating a real camera's 2.8 mm at 1 m, the floor seen in part is square
     // and the wall's turn lies within its readings' slack: the block comes out open at the top,
@@ -5062,7 +5063,7 @@ fn a_round_hollow_in_a_square_block_seen_from_50_degrees_is_no_box_open_at_the_t
 }
 
 #[test]
-#[ignore = "a thick-walled bowl from 50 degrees on noisy depth opens at the top: README"]
+#[ignore = "a thick-walled bowl from 50 degrees on noisy depth opens at the top: docs/status.md"]
 fn a_thick_walled_bowl_seen_on_noisy_depth_is_no_box_open_at_the_top() {
     // From 50 degrees, on depth as noisy as a real camera's (seeds 1 and 3), the bowl's floor
     // seen in part is square from above and its inner face flat within the noise: it comes out a
@@ -5524,7 +5525,7 @@ fn a_block_across_a_lidless_box_under_a_board_keeps_its_room() {
     // drawer's back does, but is no panel. From 30 and 40 degrees, which see the block's top and
     // face under the board, the box is a solid box open at the top and none of the block's
     // readings lies in its solids by more than its slack. From 50 degrees the view sees about
-    // 1.4 cm of it under the board, as thin as a panel: the README's "Where it stands".
+    // 1.4 cm of it under the board, as thin as a panel (`docs/status.md`).
     for degrees in [30.0, 40.0] {
         let (mut things, _) = open_box();
         things.push(board(0.06));
@@ -5549,7 +5550,7 @@ fn a_block_across_a_lidless_box_under_a_board_keeps_its_room() {
 }
 
 #[test]
-#[ignore = "a thing of which the views see too little to tell it from a panel is held: README"]
+#[ignore = "a thing of which the views see too little to tell it from a panel is held: docs/status.md"]
 fn a_rod_across_a_lidless_box_under_a_board_keeps_its_room() {
     // The board of `board`, 6 cm deep, over the lidless box, and under it a rod 2 cm through and
     // 20 cm long across the box, 2.5 cm in from the far wall; and the block of
@@ -5653,7 +5654,7 @@ fn a_panel_with_an_arm_into_the_room_under_a_board_keeps_its_room() {
 }
 
 #[test]
-#[ignore = "a panel at an overhang's edge with an arm into the room has readings in the solids: README"]
+#[ignore = "a panel at an overhang's edge with an arm into the room has readings in the solids: docs/status.md"]
 fn a_panel_at_a_boards_edge_with_an_arm_into_the_room_keeps_its_room() {
     // The board of `board`, 6 cm deep, over the lidless box, and under its edge one thing: a panel
     // 4 mm through across the box, 5 cm in from the far wall and 2.5 cm tall, with an arm 1 cm
@@ -6008,7 +6009,7 @@ fn a_thing_set_down_in_what_a_trays_box_claims_is_not_the_trays() {
 fn what_comes_back_as_one_thing_stands_on_nothing_of_its_own() {
     // The block behind the tray's near wall again, now with an arm beside it that reaches over
     // the tray too: the arm may hide what joins the two, the block lies in the wall the tray's
-    // box claims, and the look takes it for a piece of the tray (README, "Where it stands"). The
+    // box claims, and the look takes it for a piece of the tray (`docs/status.md`). The
     // block stood on the tray's floor: as one thing with the tray it stands on nothing of its
     // own, which `seen` asks of every scene, and the tray rests on the table.
     let (before, was) = open_tray();

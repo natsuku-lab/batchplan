@@ -13,9 +13,9 @@ repository = "https://github.com/natsuku-lab/batchplan"
 readme = "README.md"
 keywords = ["robotics", "perception", "depth-camera", "segmentation", "point-cloud"]
 categories = ["science::robotics", "computer-vision"]
-# The library and the README, its page on crates.io. The tests and the scorer read the
-# repository's robots and recorded looks, which the package does not hold.
-include = ["/src/", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
+# The library, its README and pages, whose code the doctests compile, and the licences. The tests
+# and the scorer read the repository's robots and recorded looks, which the package does not hold.
+include = ["/src/", "/README.md", "/docs/", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
 [lib]
 name = "miru"

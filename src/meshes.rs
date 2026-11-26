@@ -52,6 +52,7 @@ impl fmt::Debug for MeshModel {
 /// A configuration's clearances in meters: zero where meshes touch or overlap, `1e30` where
 /// there is nothing to measure.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Clearance {
     /// From the links' meshes to the world's obstacles.
     pub world: f32,

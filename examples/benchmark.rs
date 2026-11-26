@@ -308,6 +308,7 @@ fn score(
                 |&Clearance {
                      world,
                      self_collision,
+                     ..
                  }| world > 0.0 && self_collision > 0.0,
             ));
         }

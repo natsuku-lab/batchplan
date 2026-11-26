@@ -24,7 +24,7 @@
 
 **batchplan is a Rust library for batched, collision-aware robot motion planning.** Solve IK, find paths, and generate trajectories within robot limits across many scenes in one call. Planning runs on the CPU, with optional [wgpu](https://wgpu.rs) acceleration for IK and trajectory optimization.
 
-Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-lab/batchplan-ros), or to generate [LeRobot training datasets](docs/training-data.md).
+Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-lab/batchplan-ros), or to generate [LeRobot training datasets](docs/training-data.md). Perception that turns depth into objects is a separate, optional crate: [batchplan-miru](miru/README.md).
 
 - **Plan:** batched IK, RRT-Connect on SIMD collision checks, and B-spline paths, optionally optimized with L-BFGS, timed optimally within velocity, acceleration, jerk and hand speed limits. Paths can keep a cup upright or a tray level between two hands, follow straight lines, pick and place, turn a knob, a cap or a lever, join without stopping, and start while the robot moves.
 - **Live motion:** follow a trajectory as the world changes, replan or stop in time, and servo the hand toward a moving target.
@@ -216,7 +216,8 @@ From here, the [guides](#where-to-find-things) go further: planning around [what
 |---|---|
 | [AGENTS.md](AGENTS.md) | For coding agents using batchplan: conventions, the lifecycle, which call fits a task, qualifying a robot, reading results, and diagnosing a failed request in order. |
 | [API](docs/api.md) | Every type and function, by task, with the guide for each. |
-| [Planning](docs/planning.md) | IK, searching and smoothing paths, keeping clear of obstacles, optional trajectory optimization, goals a turn away, moving the hand in straight lines, picking up and setting down, turning a thing about an axis, joining motions, timing, replanning mid-motion, live motion and servoing, and the options worth knowing. |
+| [Planning](docs/planning.md) | IK, searching and smoothing paths, keeping clear of obstacles, optional trajectory optimization, goals a turn away, moving the hand in straight lines, picking up and setting down, joining motions, timing, replanning mid-motion, live motion and servoing, and the options worth knowing. |
+| [Grasps](docs/grasps.md), [placing](docs/placing.md), [turning](docs/turning.md) | Grasps of what cameras see and the gripper they take; where to set a thing down on what cameras see, or let it go into a container; turning a thing about an axis and drawing a handle. |
 | [Robots](docs/robots.md) | URDF, MJCF and OpenUSD; joint types, mimic joints and closed loops; several arms as one robot; collision spheres; holding objects; checking against meshes. |
 | [Worlds and perception](docs/perception.md) | Obstacles, allowed contacts, scenes, distance grids, depth images, masking the robot, and fused occupancy maps. |
 | [Training data](docs/training-data.md) | Reaches with recoveries, pick-and-place, handovers between two arms, reset states, and exporting to NumPy or LeRobot. |
@@ -264,17 +265,17 @@ Lengths and durations are relative to batchplan's, on the problems both solve va
 
 ### Batches and the GPU
 
-Planning runs on CPU threads on either device; IK and trajectory optimization also run on the GPU. Each call here solves IK and plans a batch of tabletop grasps, end to end, in solved problems per second (measured before the last change to the GPU's kernels, which makes its IK quicker again):
+Planning runs on CPU threads on either device; IK and trajectory optimization also run on the GPU. Each call here solves IK and plans a batch of tabletop grasps, end to end, in solved problems per second, the best of each machine's runs ([how it was measured](docs/benchmarks.md#gpu-and-cpu-throughput)):
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU (14 cores) | Radeon 8060S GPU | Ryzen AI Max+ 395 CPU (16 cores) |
 |---|---|---|---|---|
-| 1 | 83 | **2,583** | 292 | **3,145** |
-| 8 | 1,263 | **4,602** | 1,959 | **6,617** |
-| 64 | 3,796 | **7,140** | 8,289 | **11,755** |
-| 512 | **14,676** | 10,135 | **33,196** | 14,588 |
-| 4,096 | **20,622** | 10,441 | **37,740** | 14,422 |
+| 1 | 127 | **2,869** | 665 | **4,050** |
+| 8 | 982 | **6,802** | 4,597 | **8,482** |
+| 64 | 3,964 | **11,188** | **19,620** | 17,422 |
+| 512 | **16,857** | 14,479 | **56,602** | 19,800 |
+| 4,096 | **24,864** | 15,324 | **76,956** | 19,988 |
 
-A GPU call costs 3.4 ms on the Radeon (12 ms on the M4 Pro), so one problem at a time runs 11–31 times faster on the CPU; from a few hundred problems per call the GPU overtakes it, and at 4,096 it solves 2–2.6 times as many.
+A GPU call costs 1.5 ms on the Radeon (8 ms on the M4 Pro), so one problem at a time runs 6–23 times faster on the CPU; the GPU overtakes it at 64 problems per call on the Radeon and at 512 on the M4 Pro, and at 4,096 it solves 1.6–3.9 times as many.
 
 ### When another library fits better
 
@@ -318,7 +319,7 @@ A GPU call costs 3.4 ms on the Radeon (12 ms on the M4 Pro), so one problem at a
 - **Payloads.** A held object collides as part of the robot, but has no mass: timing keeps the joints' limits whatever the robot carries.
 - **Joints.** Each closed loop must have exactly one actuated joint. Ball and floating joints are expanded into Euler angles, which lose a direction of motion where the middle angle reaches ±90°.
 - **Timing.** Jerk is kept within its limit by smoothing the time-optimal profile, slowing it where the smoothed map overshoots and stretching what remains, which costs time where a path turns sharply at speed: a wide blend through a sharp turn gains little over stopping ([joining motions](docs/benchmarks.md#joining-motions)). `Trajectory::check` samples each trajectory at a fixed density, so it can miss a short jerk overshoot between its samples.
-- **Small batches on a GPU.** A GPU call costs milliseconds however small the batch (4 on a Radeon 8060S), so below a few hundred problems per call the CPU is faster ([Batches and the GPU](#batches-and-the-gpu)). Planning itself runs on CPU threads on either device.
+- **Small batches on a GPU.** A GPU call costs milliseconds however small the batch, so below a few hundred problems per call the CPU is faster ([Batches and the GPU](#batches-and-the-gpu)). Planning itself runs on CPU threads on either device.
 - **Generated pick-and-place and handovers.** `datagen`'s episodes grasp upright boxes from above and have no recoveries; `pick` and `place` themselves take other shapes and grasps. Camera videos come from replaying the episodes in MuJoCo, kinematically: no physics checks the grasps.
 - **Maturity.** batchplan is before 1.0, and its interface may change between minor versions ([changelog](CHANGELOG.md)). It is tested on AMD (Vulkan) and Apple (Metal) GPUs; on NVIDIA, only earlier versions ran (on a T4).
 

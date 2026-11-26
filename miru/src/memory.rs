@@ -1,5 +1,5 @@
-//! One look through batchplan and miru together, as the README's "With batchplan" takes it step
-//! by step, and what carries from one look to the next ([`Memory`]).
+//! One look through batchplan and miru together ([`observe`]), and what carries from one look to
+//! the next ([`Memory`]).
 //!
 //! Each thing has one memory: a shape, or batchplan's map of what the cameras read
 //! ([`OccupancyMap`]), never both. [`observe`] is a look: each camera's depth filtered, the robot
@@ -873,12 +873,11 @@ impl Kept {
     }
 
     /// Object `id`'s readings over the look's views as one surface, for its grasps and rests
-    /// (`grasps_on`, `rests_on`), as the README's "With batchplan" takes them in step 6: each
-    /// camera's filtered depth, a point for each reading off the robot, those the look's labels
-    /// give the object flagged as its, each with the normal of a fingertip's patch about it
-    /// (`SurfaceGraspOptions::default().contact`), the views joined (`Surface::from_depth`,
-    /// `Surface::join`). On `device`'s threads. None where no label of the look names the object:
-    /// an id the look has not, or one it kept unseen.
+    /// (`grasps_on`, `rests_on`): each camera's filtered depth, a point for each reading off the
+    /// robot, those the look's labels give the object flagged as its, each with the normal of a
+    /// fingertip's patch about it (`SurfaceGraspOptions::default().contact`), the views joined
+    /// (`Surface::from_depth`, `Surface::join`). On `device`'s threads. None where no label of the
+    /// look names the object: an id the look has not, or one it kept unseen.
     pub fn surface(&self, device: &Device, id: u32) -> Result<Option<Surface>> {
         let Some(object) = self.scene.objects.iter().position(|object| object.id == id) else {
             return Ok(None);
@@ -908,8 +907,7 @@ impl Kept {
     }
 }
 
-/// One look, after `memory`, through batchplan and [`look`](crate::look()) as the README's "With
-/// batchplan" takes it, camera by camera:
+/// One look, after `memory`, through batchplan and [`look`](crate::look()), camera by camera:
 ///
 /// 1. The depth is filtered at the camera's noise (`DepthImage::filtered`, batchplan's
 ///    `DepthFilter` otherwise).

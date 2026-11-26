@@ -93,9 +93,7 @@ impl From<&Fall> for crate::Release {
 /// than the spots lie apart, as a bowl a box barely fits, is looked at closer as rests are: the
 /// spots a cell (`touching`) apart within the spacing of the problem's `near` are tried at
 /// every turn, or without it those of the spot of a hollow where the object lands the deepest
-/// under the rim, its lowest point, only where no spot holds it in at any turn: a search that
-/// finds falls tries no spot more than without the option, and keeps for the look it does not
-/// take each spot's rim and whether it holds the object in, at each kind of turn. Falls found
+/// under the rim, its lowest point, only where no spot holds it in at any turn. Falls found
 /// there come after the spots' of their turn.
 ///
 /// A problem's `object`, `surface` and `rotation` are read as [`rests_on`](super::rests_on) reads

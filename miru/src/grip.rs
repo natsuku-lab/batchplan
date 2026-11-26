@@ -409,6 +409,8 @@ impl GripWorlds<'_> {
     /// attributable occupied cell there or more than one solid supplies the contact. The
     /// scene has no touch permissions. Keep its indices and the chosen opening together when
     /// planning or reporting collisions. Drop an unsuccessful result before projecting the next.
+    /// A region whose grid is past batchplan's grid size, as a very large solid's can be, is an
+    /// input error.
     pub fn project(&self, g: &Grasp) -> Result<Option<Gripped>> {
         self.project_in(g, &mut None)
     }

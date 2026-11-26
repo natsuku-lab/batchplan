@@ -537,8 +537,8 @@ pub struct Object {
     /// open at the top, whose room is what the looks saw of the hollow; false where the shape only
     /// names the room the thing takes up, as a bowl's or a basket's does, much of what shows of it
     /// lying inside. On depth as noisy as a stereo camera's most boxes read not solid, their faces
-    /// lying at their outermost readings (README). An object that was not solid in the scene
-    /// before stays so, unless it is measured open at the top: a look that cannot see into a
+    /// lying at their outermost readings (`docs/status.md`). An object that was not solid in the
+    /// scene before stays so, unless it is measured open at the top: a look that cannot see into a
     /// thing does not make it solid. The shape of one that is not solid still covers it, and is
     /// the least to keep away from; what reaches into it, or stands in it, needs what the depth
     /// itself shows there.
