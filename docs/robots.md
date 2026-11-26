@@ -78,7 +78,7 @@ A hand's fingers, `robot.finger_links(hand)`, are the links with spheres below i
 
 Planning checks the robot as a few dozen spheres against obstacles, which are exact primitives or distance grids. Spheres are what make thousands of configurations per millisecond possible on a GPU, as in cuRobo and VAMP.
 
-- **Fitted spheres.** Without a collision model, spheres are fitted to each link's collision geometry (or its visual geometry, with `SphereOptions::geometry`) by cuRobo's voxel method:
+- **Fitted spheres.** Without a collision model, spheres are fitted to each link's collision geometry by cuRobo's voxel method:
   1. Interior grid points become candidate spheres that touch the surface.
   2. A greedy cover picks the candidates that reach the most surface samples, each within the link's overhang beyond its radius. Samples no candidate reaches, on parts too thin for the grid, get candidates of their own: the largest sphere inside the geometry along the sample's inward normal that reaches it.
   3. A search finds one scale for the whole robot: the smallest at which the cover fits the budget (64 spheres by default) with every link's overhang its tolerance times that scale. `SphereOptions::tolerance` is every link's, unless `RobotOptions::sphere_tolerances` gives a link its own: on the SO-101 at 256 spheres, its links reach 8.9–12.0 mm past their geometry, and with its jaws held to 2 mm they reach 5.4–5.5 mm and the rest of the arm 11.7–13.6 mm (`links_given_a_tighter_tolerance_get_spheres_that_reach_less_far` fits both).

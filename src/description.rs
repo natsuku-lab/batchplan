@@ -43,7 +43,6 @@ pub(crate) struct LoopClosure {
 pub(crate) struct LinkDesc {
     pub(crate) name: String,
     pub(crate) collision: Vec<Shape>,
-    pub(crate) visual: Vec<Shape>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

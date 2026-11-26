@@ -14,7 +14,7 @@ use crate::description::{
     self, Curve, Geometry, JointDesc, JointType, LinkDesc, RobotDescription, Shape, TriMesh,
 };
 use crate::error::{self, Error, ensure_input, input};
-use crate::spheres::{self, Qualification, SphereGeometry, SphereOptions};
+use crate::spheres::{self, Qualification, SphereOptions};
 use crate::types::Pose;
 use crate::world::{self, Obstacle};
 
@@ -132,8 +132,8 @@ pub(crate) struct Link {
     pub(crate) joint: JointKind,
     /// The links at or above this one with a moving joint, root first.
     pub(crate) chain: Vec<usize>,
-    /// The link's collision geometry in its frame (the visual geometry where spheres are fitted
-    /// to that); mesh files are read only when something needs the meshes.
+    /// The link's collision geometry in its frame; mesh files are read only when something needs
+    /// the meshes.
     pub(crate) shapes: Vec<Shape>,
 }
 
@@ -610,10 +610,7 @@ impl Robot {
         let mut robot = kinematics(desc, o)?;
         for link in &mut robot.links {
             if let Some(l) = desc.links.iter().find(|l| l.name == link.name) {
-                link.shapes = match o.spheres.geometry {
-                    SphereGeometry::Collision => l.collision.clone(),
-                    SphereGeometry::Visual => l.visual.clone(),
-                };
+                link.shapes.clone_from(&l.collision);
             }
         }
         let mut model = match &o.collision_model {

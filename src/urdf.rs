@@ -52,7 +52,6 @@ pub(crate) fn from_text(
                         .map(|c| (&c.origin, &c.geometry))
                         .collect(),
                 )?,
-                visual: shapes(l.visual.iter().map(|v| (&v.origin, &v.geometry)).collect())?,
             })
         })
         .collect::<Result<_>>()?;

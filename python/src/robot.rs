@@ -10,32 +10,6 @@ use crate::error::{InputError, OrRaise};
 use crate::field::{self, Field, tuple_field, value_class};
 use crate::world::Pose;
 
-/// Which link geometry spheres are fitted to.
-#[pyclass(module = "batchplan", frozen, eq, eq_int, hash)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum SphereGeometry {
-    /// The links' collision geometry.
-    Collision,
-    /// Their visual geometry, for descriptions whose collision geometry is coarse or missing.
-    Visual,
-}
-
-impl Field for batchplan::SphereGeometry {
-    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let mirror = match self {
-            batchplan::SphereGeometry::Collision => SphereGeometry::Collision,
-            batchplan::SphereGeometry::Visual => SphereGeometry::Visual,
-        };
-        Ok(Bound::new(py, mirror)?.into_any())
-    }
-    fn from_py(value: &Bound<'_, PyAny>) -> PyResult<Self> {
-        Ok(match *value.cast::<SphereGeometry>()?.get() {
-            SphereGeometry::Collision => batchplan::SphereGeometry::Collision,
-            SphereGeometry::Visual => batchplan::SphereGeometry::Visual,
-        })
-    }
-}
-
 value_class! {
     /// Limits replacing a joint's own: its description's, or the defaults in `RobotOptions` where
     /// the description gives none. Each is optional, as in MoveIt's `joint_limits.yaml`.
@@ -81,8 +55,6 @@ value_class! {
         /// Largest spacing of the interior grid that proposes sphere centers (meters). Small links
         /// use a finer grid.
         voxel_size: f32,
-        /// The geometry the spheres cover.
-        geometry: batchplan::SphereGeometry,
         /// Random configurations used to find link pairs that never collide.
         self_collision_samples: usize,
         /// Seed of the fit's random choices and those configurations.

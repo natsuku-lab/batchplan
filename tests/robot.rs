@@ -151,6 +151,22 @@ fn jaw_axes_and_coupled_limits_are_checked_even_far_from_the_origin() {
     assert_eq!(check(&limited, 0.0), None, "the coupled rack hits its stop");
 }
 
+/// Nothing reads what a link looks like, so a visual mesh that is not there keeps no robot from
+/// loading.
+#[test]
+fn a_robot_loads_without_a_visual_mesh_it_names() {
+    let urdf = include_str!("../assets/franka/franka_panda.urdf").replace(
+        "</robot>",
+        r#"<link name="badge"><visual><geometry>
+             <mesh filename="package://nowhere/badge.stl"/></geometry></visual></link>
+           <joint name="badge_joint" type="fixed"><parent link="panda_link0"/>
+             <child link="badge"/></joint></robot>"#,
+    );
+    let urdf = urdf.replace("meshes/", &common::asset("franka/meshes/"));
+    let robot = Robot::from_urdf(&urdf, &common::panda_options()).expect("no visual mesh is read");
+    assert_eq!(robot.dof(), common::panda().unwrap().dof());
+}
+
 /// A rotating mimic can return to its initial orientation at closure even though it sweeps a
 /// sphere sideways in between. The two endpoint sphere sets alone cannot establish a slide.
 #[test]

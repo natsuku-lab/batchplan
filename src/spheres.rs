@@ -37,16 +37,6 @@ use crate::robot::Robot;
 use crate::winding::{Crossings, Surface};
 use crate::world::{self, Obstacle};
 
-/// Which link geometry spheres are fitted to.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SphereGeometry {
-    /// The links' collision geometry.
-    #[default]
-    Collision,
-    /// Their visual geometry, for descriptions whose collision geometry is coarse or missing.
-    Visual,
-}
-
 /// How spheres are fitted to a robot's links.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SphereOptions {
@@ -81,8 +71,6 @@ pub struct SphereOptions {
     /// Largest spacing of the interior grid that proposes sphere centers (meters). Small links
     /// use a finer grid.
     pub voxel_size: f32,
-    /// The geometry the spheres cover.
-    pub geometry: SphereGeometry,
     /// Random configurations used to find link pairs that never collide.
     pub self_collision_samples: usize,
     /// Seed of the fit's random choices and those configurations.
@@ -116,7 +104,6 @@ impl Default for SphereOptions {
             tolerance: 0.005,
             max_overhang: None,
             voxel_size: 0.01,
-            geometry: SphereGeometry::Collision,
             self_collision_samples: 10_000,
             rng_seed: 1,
         }

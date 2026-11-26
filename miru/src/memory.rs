@@ -117,11 +117,6 @@ pub enum Act {
     /// not solid the map held it: the room it took up is never seen, where it stood and where it
     /// stands.
     Pushed { id: u32, by: Vec3 },
-    /// Something of object `id` was drawn out by `by`, as a drawer out of a cabinet: the object
-    /// stays as it was until a look measures it afresh. Where it is not solid the map held it: the
-    /// room it takes up is never seen, where it stood and moved by `by` (batchplan's
-    /// `docs/perception.md`: "a pull or a push of something the map holds").
-    Drew { id: u32, by: Vec3 },
 }
 
 /// What carries from one look to the next: the objects and the ids given, what each hand holds,
@@ -417,22 +412,6 @@ impl Memory {
                         }
                     }
                     object.shape = shape;
-                }
-            }
-            Act::Drew { id, by } => {
-                ensure_input!(
-                    by.is_finite(),
-                    "act {k} draws object {id} by {by}, which is no distance"
-                );
-                let object = &self.scene.objects[self.index(k, *id)?];
-                if !object.solid {
-                    let pose = object.shape.pose();
-                    let drawn = object
-                        .shape
-                        .placed(Pose::new(pose.position + *by, pose.rotation));
-                    for shape in [object.shape.obstacle(), drawn.obstacle()] {
-                        self.marks.push(Mark { shape, free: false });
-                    }
                 }
             }
         }

@@ -25,7 +25,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<world::Obstacle>()?;
     m.add_class::<world::Touch>()?;
     m.add_class::<world::World>()?;
-    m.add_class::<robot::SphereGeometry>()?;
     m.add_class::<robot::JointLimits>()?;
     m.add_class::<robot::SphereOptions>()?;
     m.add_class::<robot::CollisionModel>()?;

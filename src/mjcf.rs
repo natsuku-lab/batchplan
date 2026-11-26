@@ -517,18 +517,14 @@ impl Builder<'_> {
             ));
         }
         for g in body.children("geom") {
-            if let Some((collision, shape)) = self.geom(g, &class)? {
+            if let Some((true, shape)) = self.geom(g, &class)? {
                 let desc = self
                     .links
                     .iter_mut()
                     .rev()
                     .find(|l| l.name == name)
                     .expect("added above");
-                if collision {
-                    desc.collision.push(shape)
-                } else {
-                    desc.visual.push(shape)
-                }
+                desc.collision.push(shape);
             }
         }
         for child in body.children("body") {
