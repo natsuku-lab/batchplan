@@ -399,7 +399,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 - **Breaking:** grasps of what cameras see, whatever its shape:
   `grasps_on(&device, hand, &[Surface], &GraspOptions)`. A grasp closes on two patches of the
-  object's surface that were both seen, face away from each other within the opening, and have
+  object's surface that were both seen (or, with a `shell`, on one and the space seen past its
+  wall), face away from each other within the opening, and have
   the line between them inside both friction cones (`GraspOptions::friction`, 0.5, and `contact`,
   the patch's radius, 5 mm), so a bowl's wall, a handle and a box's sides are found alike. The
   robot's own hand, with its fingers as locked, and its straight way in (`GraspOptions::approach`,

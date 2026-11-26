@@ -1228,7 +1228,7 @@ fn a_depth_image_gives_the_surfaces_it_sees_with_normals_toward_the_camera() {
 }
 
 #[test]
-fn what_two_cameras_see_between_them_is_grasped_and_what_one_sees_alone_is_not() {
+fn without_a_shell_what_two_cameras_see_between_them_is_grasped_and_what_one_sees_alone_is_not() {
     let o = without_shell();
     let (near, far) = (Vec3::new(0.35, 0.0, 0.35), Vec3::new(-0.35, 0.0, 0.35));
     // One camera sees one side and the top: without a shell, nothing to close on.

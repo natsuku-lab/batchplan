@@ -4,9 +4,9 @@
 //! A grasp closes on two patches of surface that face away from each other, no farther apart than
 //! the fingers open, with the line between them inside both friction cones: the condition under
 //! which two fingers that press with friction hold an object against any push (Nguyen's
-//! force closure for two soft fingers). Both patches must have been seen: a surface with nothing
-//! seen behind it gives no grasp, since where its other side lies is a guess. A thin wall, a
-//! handle and a box's faces are found alike, with no shape assumed.
+//! force closure for two soft fingers). Without a shell both patches must have been seen: a
+//! surface with nothing seen behind it gives no grasp, since where its other side lies is a guess.
+//! A thin wall, a handle and a box's faces are found alike, with no shape assumed.
 //!
 //! A wall seen from one side only is closed on where the cameras saw past it
 //! ([`GraspOptions::shell`]): a ray that reached something farther crossed empty space, so where
