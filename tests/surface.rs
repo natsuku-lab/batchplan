@@ -634,7 +634,9 @@ fn measured_grasps_use_the_loaded_gap_and_only_commandable_openings() {
     for invalid in [0.0, -0.01, loaded + 0.001, f32::NAN] {
         assert!(matches!(search(&wide, invalid), Err(Error::Input(_))));
     }
-    let mut s = plates_of(0.045, 0.005);
+    // Plates a surface's noise to each finger narrower than the passage's opening, the nearest
+    // the fingers may come in.
+    let mut s = plates_of(0.039, 0.005);
     let free = search(&s, capacity).unwrap();
     assert!(!free.is_empty() && free.iter().all(|g| g.opening == loaded));
     // This reading is outside half the capacity but inside the loaded finger gap.
@@ -704,9 +706,11 @@ fn measured_grasps_use_the_loaded_gap_and_only_commandable_openings() {
 /// the Panda relocked there is clear at, way in included, the one farthest from any at which it
 /// would be in what is not the object's, as far past open as the fingers close; of those as far,
 /// the one with the most room, as many steps from the first it would be in anything at farther
-/// apart as from the first nearer, the patches at the last; and of those the widest. So between
-/// walls in the open fingers' way, or just past them, the fingers come in on the plates; beside
-/// a ledge of the object itself they stand midway between it and the plate; what is not the
+/// apart as from the first nearer, the last a surface's noise off each patch (2.5 mm), the nearest
+/// a finger may come in: one nearer may be on its patch's wall before it closes. And of those the
+/// widest. So between walls in the open fingers' way, or just past them, the fingers come in
+/// that far off the plates; beside a ledge of the object itself they stand midway between it and
+/// there; what is not the
 /// object's past one open finger is found though the object's own walls fill every opening past
 /// the other; and with nothing within their travel they come in open, every grasp as without
 /// the option.
@@ -743,7 +747,8 @@ fn fingers_that_may_come_in_narrower_keep_farthest_from_what_stands_around() {
         s
     };
     let step = o.opening / 16.0;
-    let most = ((o.opening - 0.02) / step).round() as i32;
+    let nearest = 0.02 + 2.0 * 0.0025;
+    let most = ((o.opening - nearest) / step).round() as i32;
     let hands: Vec<Vec<(Vec3, f32)>> = (-most..=most)
         .map(|k| hand_open(o.opening - k as f32 * step))
         .collect();
@@ -789,12 +794,13 @@ fn fingers_that_may_come_in_narrower_keep_farthest_from_what_stands_around() {
         let opening = down.expect("a grasp from above").opening;
         (found, opening)
     };
-    // In the open fingers' way, and 4 mm past them: on the plates, 2 cm apart.
+    // In the open fingers' way, and 4 mm past them: a surface's noise off the plates, which are
+    // 2 cm apart.
     for walls in [[0.045, -0.045], [0.04, -0.06], [0.065, -0.065]] {
         let in_the_way = grasps(&between(&walls, &[]), &o).is_empty();
         assert_eq!(in_the_way, walls[0] < 0.06);
         let (_, opening) = from_above(&walls, &[]);
-        assert!((opening - 0.02).abs() < 1e-6, "{walls:?}: {opening}");
+        assert!((opening - nearest).abs() < 1e-6, "{walls:?}: {opening}");
     }
     // Farther than the fingers could reach: as without the option.
     let far = [0.11, -0.11];
@@ -806,14 +812,14 @@ fn fingers_that_may_come_in_narrower_keep_farthest_from_what_stands_around() {
     assert!((opening - 0.035).abs() < 1e-6, "{opening}");
     // The object's own walls all the way past one open finger, and a wall of something else
     // 4 mm past the other: what is not the object's is found though the object's fill every
-    // opening past open, and the fingers come in on the plates, whichever finger is on which
-    // side.
+    // opening past open, and the fingers come in as near the plates as they may, whichever finger
+    // is on which side.
     let (found, _) = from_above(&[-0.065], &[0.062, 0.075, 0.088]);
     let down = found
         .iter()
         .filter(|g| (g.pose.rotation * Vec3::Z).z < -0.99);
     let openings: Vec<f32> = down.map(|g| g.opening).collect();
-    assert!(openings.len() >= 2 && openings.iter().all(|w| (w - 0.02).abs() < 1e-6));
+    assert!(openings.len() >= 2 && openings.iter().all(|w| (w - nearest).abs() < 1e-6));
 }
 
 /// A grasp the open hand has stays where it is with fingers that may come in narrower: a stud
@@ -900,16 +906,16 @@ fn fingers_that_come_in_narrower_stay_over_the_floor() {
         let (closing, toward) = (g.pose.rotation * Vec3::Y, g.pose.rotation * Vec3::Z);
         let tips = (g.pose.position + toward * tip).z - closing.z.abs() * g.opening / 2.0;
         assert!(tips >= -0.03 - 1e-6, "{g:?}");
-        assert!((g.opening - 0.04).abs() < 1e-6, "{g:?}");
+        assert!((g.opening - 0.045).abs() < 1e-6, "{g:?}");
     }
-    // A floor only fingers no wider than the plates clear leaves those grasps, and one under
-    // the plates none.
+    // A floor only fingers a surface's noise off the plates clear leaves those grasps, and one
+    // nearer the plates none: the fingers come in no nearer.
     let just = |floor: f32| GraspOptions {
         floor: Some(floor),
         ..narrow
     };
-    assert_eq!(grasps(&upright, &just(-0.021)).len(), found.len());
-    assert!(grasps(&upright, &just(-0.019)).is_empty());
+    assert_eq!(grasps(&upright, &just(-0.023)).len(), found.len());
+    assert!(grasps(&upright, &just(-0.022)).is_empty());
 }
 
 #[test]
@@ -1506,10 +1512,13 @@ fn met_past_the_patches(
 /// see a bowl on a cabinet, the finger on the side the wall leans over meets the wall above its
 /// patch, a finger's length from the other contact, and the bowl turns in the hand as it is lifted
 /// (LIBERO's spatial task 9: the jaw read 8.7 mm at the close and 3.5 mm lifted, the bowl 15
-/// degrees over). Held to the bowl's true shape, its unseen outside too: within each lot, two seen
-/// sides and one, the grasps whose fingers meet the bowl more than two patches' radius past their
-/// own come after all whose fingers meet it no more than a surface's noise past, fingers that come
-/// in narrower swept from where they come in; and so of plates with a ledge beside one.
+/// degrees over). Held to the bowl's true shape, its unseen outside too: within each turn of each
+/// lot, two seen sides and one, the grasps whose fingers meet the bowl more than two patches'
+/// radius past their own come after all whose fingers meet it no more than a surface's noise past,
+/// fingers that come in narrower swept from where they come in; and so of plates with a ledge
+/// beside one. From above still comes before a turn to either side: a hand turned 44 degrees about
+/// its closing line that closed cleanly on a bowl's rim came before every late grasp from above,
+/// and closed on nothing.
 #[test]
 fn grasps_whose_fingers_meet_the_object_before_their_patches_come_after_the_rest() {
     let seen = bowl_seen(THIN, &[FRONT, ABOVE]);
@@ -1547,6 +1556,16 @@ fn grasps_whose_fingers_meet_the_object_before_their_patches_come_after_the_rest
         lots.iter().any(|(_, lot)| lot.out_of_order.is_some()),
         "{lots:?}"
     );
+    // A late grasp comes before a clean one of a later turn too, which stays where it is: grasp
+    // for grasp, each lot's turns are those that came there without it.
+    assert!(
+        lots.iter().any(|(_, lot)| lot.late_before_a_later_turn),
+        "{lots:?}"
+    );
+    let turns = |found: &[Grasp]| {
+        first_touch_order(found, &hand, o.opening, &bowl, 0.0).map(|(_, lot)| lot.steps)
+    };
+    assert_eq!(turns(&found), turns(&plain), "from above before a turn");
     // Every grasp of two seen sides of this bowl closes onto its patches first; of one, level
     // grasps across the leaning wall are among the late. Fingers that may come in narrower are
     // swept from where they come in.
@@ -1587,9 +1606,10 @@ fn grasps_whose_fingers_meet_the_object_before_their_patches_come_after_the_rest
 
 /// Of one lot of grasps: how many meet what they close on no more than a surface's noise past
 /// their patches (`clean`), how many meet it more than two patches' radius past (`late`), how
-/// many level ones (`late_level`), of those less open than the hand, how many of each kind, and
-/// the first late grasp that comes before a clean one, with how far past each meets it
-/// (millimeters).
+/// many level ones (`late_level`), of those less open than the hand, how many of each kind, the
+/// first late grasp that comes before a clean one of its own turn, with how far past each meets
+/// it (millimeters), whether a late grasp comes before a clean one of a later turn, and how many
+/// steps round its closing line each grasp's hand is turned from above (`steps`).
 #[derive(Debug)]
 struct Lot {
     clean: usize,
@@ -1598,6 +1618,19 @@ struct Lot {
     narrower_clean: usize,
     narrower_late: usize,
     out_of_order: Option<(usize, f32, usize, f32)>,
+    late_before_a_later_turn: bool,
+    steps: Vec<usize>,
+}
+
+/// How many steps round its closing line, of the default `turns` to a round, `g`'s hand is turned
+/// from above, to either side: 0 from above, and where the line is upright.
+fn steps_from_above(g: &Grasp) -> usize {
+    let (closing, toward) = (g.pose.rotation * Vec3::Y, g.pose.rotation * Vec3::Z);
+    let above = Vec3::NEG_Z.reject_from_normalized(closing).try_normalize();
+    let step = TAU / GraspOptions::default().turns as f32;
+    above.map_or(0, |above| {
+        (toward.angle_between(above) / step).round() as usize
+    })
 }
 
 /// `found`'s two lots, two seen sides and one, each as a [`Lot`] held to the true shape's `points`,
@@ -1626,14 +1659,29 @@ fn first_touch_order(
             each.filter(|&(g, (&clean, &late))| keep(g, clean, late))
                 .count()
         };
-        let last_clean = is_clean.iter().rposition(|&clean| clean);
-        let first_late = is_late.iter().position(|&late| late);
-        let out_of_order = match (first_late, last_clean) {
-            (Some(first), Some(clean)) if first < clean => {
-                Some((first, into[first] * 1e3, clean, touched[clean] * 1e3))
-            }
-            _ => None,
+        // A lot comes turn by turn: from above, then a step to one side, a step to the other, two
+        // steps to one side, and so on. So a run of grasps as many steps from above is one turn,
+        // or the two to either side one after the other, parted somewhere.
+        let steps: Vec<usize> = lot.iter().map(|g| steps_from_above(g)).collect();
+        let disordered = |from: usize, to: usize| {
+            let first = (from..to).find(|&i| is_late[i])?;
+            let clean = (from..to).rfind(|&i| is_clean[i])?;
+            (first < clean).then(|| (first, into[first] * 1e3, clean, touched[clean] * 1e3))
         };
+        let mut out_of_order = None;
+        let mut from = 0;
+        while from < lot.len() {
+            let next = (from..lot.len()).find(|&i| steps[i] != steps[from]);
+            let to = next.unwrap_or(lot.len());
+            let one_turn = steps[from] == 0 || 2 * steps[from] == GraspOptions::default().turns;
+            let mut parts = if one_turn { to..=to } else { from..=to };
+            if !parts.any(|at| disordered(from, at).is_none() && disordered(at, to).is_none()) {
+                out_of_order = out_of_order.or_else(|| disordered(from, to));
+            }
+            from = to;
+        }
+        let late_before_a_later_turn = (0..lot.len())
+            .any(|i| is_late[i] && (i..lot.len()).any(|j| is_clean[j] && steps[j] > steps[i]));
         let narrower = |g: &Grasp| g.opening < gap;
         let lot = Lot {
             clean: count(&|_, clean, _| clean),
@@ -1642,6 +1690,8 @@ fn first_touch_order(
             narrower_clean: count(&|g, clean, _| narrower(g) && clean),
             narrower_late: count(&|g, _, late| narrower(g) && late),
             out_of_order,
+            late_before_a_later_turn,
+            steps,
         };
         (one_sided, lot)
     })
