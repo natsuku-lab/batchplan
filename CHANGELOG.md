@@ -360,13 +360,13 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   or a capsule laid on its side rolls, within half the spacing and `touching`, into the cradle
   between two bars or a rack's groove or down to a lip, and has no rest on a flat support. Many
   problems run in one call, each surface read once. `examples/surface_rests.rs` times it, and
-  `scripts/validate_rests.py` lets go of each rest in MuJoCo. Two options, both off by default,
-  find more. With `RestOptions::look_closer`, of the spots where the object nearly rests (held,
-  tipping too easily) at a turn, the one nearest `near`, or without it the middle of the support,
-  has the spots a cell apart within the spacing tried too, with `near` at every turn and without
-  it only where no spot rests at any turn: an upright bottle against the lip at the foot of a
-  sloping rack, which stands only in a strip a few millimeters deep, is found near that spot, and
-  a search that finds rests with no `near` costs what it does without. With
+  `scripts/validate_rests.py` lets go of each rest in MuJoCo. Two options, both on by default
+  (`false` turns either off), find more. With `RestOptions::look_closer`, of the spots where the
+  object nearly rests (held, tipping too easily) at a turn, the one nearest `near`, or without it
+  the middle of the support, has the spots a cell apart within the spacing tried too, with `near` at
+  every turn and without it only where no spot rests at any turn: an upright bottle against the lip
+  at the foot of a sloping rack, which stands only in a strip a few millimeters deep, is found near
+  that spot, and a search that finds rests with no `near` costs what it does without. With
   `RestOptions::seen_from_above_holds`, a support point whose normal faces down holds where the
   camera that saw it was above it (`Surface::seen_from`), so the noisy normals of a top read at a
   slant do not block rests on it; a face that leans out over empty space, seen from above, is then

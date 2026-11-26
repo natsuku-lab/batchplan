@@ -382,14 +382,14 @@ fn main() -> Result<()> {
     let cheese = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.0415, 0.021, 0.0095));
     let over = [RestProblem::new(cheese.clone(), 0)];
     let dishes = std::slice::from_ref(&dish);
-    let spots_alone = batchplan::falls_into(&device, &over, dishes, &o)?
-        .remove(0)
-        .len();
-    let closer = RestOptions {
-        look_closer: true,
+    let spots = RestOptions {
+        look_closer: false,
         ..o
     };
-    let (ms, falls) = quickest(5, || batchplan::falls_into(&device, &over, dishes, &closer));
+    let spots_alone = batchplan::falls_into(&device, &over, dishes, &spots)?
+        .remove(0)
+        .len();
+    let (ms, falls) = quickest(5, || batchplan::falls_into(&device, &over, dishes, &o));
     let falls = falls?.remove(0);
     let from_axis = |f: &Fall| f.pose.position.truncate().distance(middle.truncate()) * 1e3;
     println!(
@@ -407,7 +407,7 @@ fn main() -> Result<()> {
             &cheese,
             &rows,
             rim,
-            &closer,
+            &o,
         )?;
     }
 
