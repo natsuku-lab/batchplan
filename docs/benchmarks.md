@@ -138,24 +138,24 @@ Every device solves the same 484 of 512 targets and plans all 484.
 
 | Machine | IK seeds/s, GPU / CPU (64 per target, 4 of them past the first 8 steps) | Planning, problems/s | End to end, GPU | End to end, CPU |
 |---|---|---|---|---|
-| Ryzen AI Max+ 395 and Radeon 8060S | 4,207,000–4,520,000 / 1,291,000–1,422,000 | 331,000–379,000 | **53,313–56,602 problems/s** | 18,043–19,800 problems/s (32 threads) |
-| M4 Pro | 704,000–1,244,000 / 908,000–1,050,000 | 166,000–221,000 | 9,797–16,857 problems/s | 12,598–14,479 problems/s (14 threads) |
+| Ryzen AI Max+ 395 and Radeon 8060S | 4,520,000 / 1,422,000 | 379,000 | **56,602 problems/s** | 19,800 problems/s (32 threads) |
+| M4 Pro | 1,244,000 / 1,050,000 | 221,000 | **16,857 problems/s** | 14,479 problems/s (14 threads) |
 
-Each range covers the runs of one session on 2026-11-26 with the default build: five on the Ryzen, back to back with other 32-thread runs (load 17 to 25), and ten on the M4 Pro (load under 3). GPU warm-up and display activity affect these times, the M4 Pro's GPU most: its runs spread over the CPU's, so neither is ahead at 512.
+Each figure is the best of the runs on 2026-11-26 with the default build: five on the Ryzen, back to back with other 32-thread runs (load 17 to 25), and ten on the M4 Pro in two sessions (load under 3). GPU warm-up and display activity affect these times, the M4 Pro's GPU most: at 512 its runs gave 9,797 to 16,857 problems/s end to end.
 
 Uploading the 512 worlds, which the example times first, takes 0.1 ms on the M4 Pro's CPU and 0.2 ms on its GPU: preparing each obstacle for the CPU's checks and, on the GPU, one buffer write. A distance grid adds its values, uploaded once however many worlds share it.
 
-By batch size, end to end, in solved problems per second (the medians of the same sessions' runs):
+By batch size, end to end, in solved problems per second (the best of the same runs):
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU | Radeon 8060S | Ryzen CPU |
 |---|---|---|---|---|
-| 1 | 115 | **2,379** | 658 | **3,584** |
-| 8 | 844 | **6,449** | 4,458 | **8,292** |
-| 64 | 3,160 | **10,502** | 16,470 | 16,560 |
-| 512 | 13,469 | 13,774 | **54,553** | 18,813 |
-| 4,096 | **23,365** | 15,109 | **74,008** | 19,542 |
+| 1 | 127 | **2,869** | 665 | **4,050** |
+| 8 | 982 | **6,802** | 4,597 | **8,482** |
+| 64 | 3,964 | **11,188** | **19,620** | 17,422 |
+| 512 | **16,857** | 14,479 | **56,602** | 19,800 |
+| 4,096 | **24,864** | 15,324 | **76,956** | 19,988 |
 
-For this workload the CPU is faster at small batches; the Radeon draws level with its CPU at 64 problems per call and the M4 Pro's GPU with its own at 512.
+For this workload the CPU is faster at small batches; the Radeon overtakes its CPU at 64 problems per call and the M4 Pro's GPU its own at 512.
 
 ## Tool paths
 
