@@ -1675,6 +1675,18 @@ pub struct GraspOptions {
     /// retaining the contact patches and the required overlap. Ordinary grasps come first,
     /// including ones that miss the point.
     pub close_on: Option<Vec3>,
+    /// How far the hand's spheres stay from what they do not close on, on their way in to a grasp
+    /// of a surface and at it (meters): 0, a hand is clear that touches nothing. The points say
+    /// where a surface is to within their noise, and a planner knows what stands around less
+    /// finely still, its distance grids erring toward collision: a hand the points alone find
+    /// clear, a millimeter from a drawer's front behind the handle it grips, is one the planner
+    /// refuses. With a clearance the hand is drawn back to where it has that much room, while
+    /// `overlap` of its fingers stays on the patches, or its grasp is left out; 2.5 mm, a
+    /// surface's noise, suits a world of grids a few millimeters fine. What the fingers close on
+    /// is exempt, as it is at 0, and fingers that may come in narrower
+    /// ([`narrow`](Self::narrow)) keep it too. MoveIt Grasps pads the hand on its approach
+    /// likewise.
+    pub clearance: f32,
     /// Whether grasps of a surface ([`grasps_on`](crate::grasps_on)) whose fingers close onto
     /// their patches before they meet any other part of what was seen of the object come first,
     /// within each turn of the lot of two seen sides and of the lot of one, so from above still
@@ -1707,6 +1719,7 @@ impl Default for GraspOptions {
             narrow: false,
             near: None,
             close_on: None,
+            clearance: 0.0,
             first_touch: false,
         }
     }

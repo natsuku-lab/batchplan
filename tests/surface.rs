@@ -876,6 +876,69 @@ fn fingers_that_may_come_in_narrower_leave_the_open_hands_grasps_where_they_are(
     assert!(deep.into_iter().all(|g| g.opening < o.opening - 0.02));
 }
 
+/// With a `clearance` the hand keeps that far from what it does not close on, its way in included:
+/// plates grasped from above with something else's face a millimeter under where the open
+/// fingertips come down, as a drawer's front behind the handle a hand grips. The points alone
+/// find the hand clear at full depth, where a planner whose grids err toward collision refuses
+/// it; with 2.5 mm of clearance the hand from above is drawn back to where it has that, and no
+/// grasp comes nearer on its way in, with the fingers open or come in narrower.
+#[test]
+fn a_hand_keeps_its_clearance_from_what_it_does_not_close_on() {
+    let tip = common::panda().unwrap().tip(0);
+    let mut s = plates_of(0.02, 0.005);
+    the_object(&mut s);
+    face(
+        Vec3::Z * -(tip + 0.001),
+        Vec3::Z,
+        [Vec3::X, Vec3::Y],
+        [0.08, 0.08],
+        &mut s,
+    );
+    s.object.resize(s.points.len(), false);
+    let clearance = 0.0025;
+    let grown = |opening: f32| -> Vec<(Vec3, f32)> {
+        let hand = hand_open(opening);
+        let wider = hand
+            .iter()
+            .map(|&(at, radius)| (at, radius + clearance - 1e-4));
+        wider.collect()
+    };
+    // How low the hand from above comes: its frame's height in the lowest of those grasps.
+    let from_above = |g: &&Grasp| (g.pose.rotation * Vec3::Z).z < -0.99;
+    let lowest = |found: &[Grasp]| {
+        let down = found.iter().filter(from_above).map(|g| g.pose.position.z);
+        down.fold(f32::INFINITY, f32::min)
+    };
+    for narrow in [false, true] {
+        let o = GraspOptions {
+            narrow,
+            ..Default::default()
+        };
+        let near = grasps(&s, &o);
+        let kept = grasps(&s, &GraspOptions { clearance, ..o });
+        let roomy = |g: &Grasp| clear_at(&grown(g.opening), g, &s, o.approach, false);
+        // Without it some grasp from above comes nearer than that.
+        assert!(
+            near.iter().filter(from_above).any(|g| !roomy(g)),
+            "narrow {narrow}"
+        );
+        // With it none does, and the hand from above is drawn back, its grasps kept.
+        assert!(kept.iter().all(roomy), "narrow {narrow}");
+        let (low, back) = (lowest(&near), lowest(&kept));
+        assert!(
+            back.is_finite() && back > low + 1e-4,
+            "narrow {narrow}: {low} {back}"
+        );
+    }
+    // Clearance is a distance: none below 0.
+    let o = GraspOptions {
+        clearance: -0.001,
+        ..Default::default()
+    };
+    let refused = grasps_on(&device(), 0, std::slice::from_ref(&s), &o);
+    assert!(matches!(refused, Err(Error::Input(_))));
+}
+
 /// Narrower fingers stand higher where the hand closes upright: over a floor the open fingers
 /// would be under, a grasp comes in with its fingers as far over it as they can be, on the plates.
 #[test]
