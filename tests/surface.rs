@@ -1228,10 +1228,10 @@ fn a_depth_image_gives_the_surfaces_it_sees_with_normals_toward_the_camera() {
 }
 
 #[test]
-fn what_two_cameras_see_between_them_is_grasped_and_what_one_sees_alone_is_not() {
-    let o = GraspOptions::default();
+fn without_a_shell_what_two_cameras_see_between_them_is_grasped_and_what_one_sees_alone_is_not() {
+    let o = without_shell();
     let (near, far) = (Vec3::new(0.35, 0.0, 0.35), Vec3::new(-0.35, 0.0, 0.35));
-    // One camera sees one side and the top: nothing to close on.
+    // One camera sees one side and the top: without a shell, nothing to close on.
     let one = box_on_a_table(near);
     assert!(grasps(&one, &o).is_empty());
     // With the other's view of the far side, the box is grasped across the 4 cm between them,
@@ -1383,6 +1383,13 @@ fn with_shell(shell: f32) -> GraspOptions {
     }
 }
 
+fn without_shell() -> GraspOptions {
+    GraspOptions {
+        shell: None,
+        ..Default::default()
+    }
+}
+
 #[test]
 fn a_rim_seen_from_above_is_grasped_across_its_wall_with_a_shell() {
     let seen = bowl_seen(THIN, &[ABOVE]);
@@ -1401,7 +1408,7 @@ fn a_rim_seen_from_above_is_grasped_across_its_wall_with_a_shell() {
         "{inner} inside, {outer} outside"
     );
     assert!(seen.seen_from.iter().all(|&from| from == ABOVE));
-    assert!(grasps(&seen, &GraspOptions::default()).is_empty());
+    assert!(grasps(&seen, &without_shell()).is_empty());
     let o = with_shell(0.015);
     let found = grasps(&seen, &o);
     let hand = hand();
@@ -1799,9 +1806,11 @@ fn nothing_is_assumed_behind_a_solid_or_a_wall_thicker_than_the_shell() {
         }
     }
     assert!(far_side > whole.len(), "{far_side}");
-    // A wall is never taken thicker than the fingers open: a shell past it is one at it.
+    // A wall is never taken thicker than the fingers open: a shell past it is one at it, an
+    // infinite one too.
     let past = grasps(&front, &with_shell(0.2));
     assert_eq!(past, grasps(&front, &with_shell(o.opening)));
+    assert_eq!(past, grasps(&front, &with_shell(f32::INFINITY)));
     assert!(
         found.iter().any(|g| g.width() > o.opening - 1e-3),
         "some reach the opening"
@@ -1815,6 +1824,41 @@ fn nothing_is_assumed_behind_a_solid_or_a_wall_thicker_than_the_shell() {
     // And the thin wall's other side shows only past where the rim hides it: no grasp within
     // 4 mm.
     assert!(grasps(&bowl_seen(THIN, &[ABOVE]), &with_shell(0.004)).is_empty());
+}
+
+/// By default a wall seen from one side is closed on as thick as the fingers open, however wide
+/// that is: the rim seen from above and the box seen from in front, which have no grasp with the
+/// shell turned off, have those of a shell at the opening, and at an opening of 10 cm more than
+/// those of a shell of 8 cm.
+#[test]
+fn by_default_a_wall_seen_from_one_side_is_closed_on_as_thick_as_the_fingers_open() {
+    let rim = bowl_seen(THIN, &[ABOVE]);
+    let front = box_on_a_table(Vec3::new(0.35, 0.0, 0.35));
+    for opening in [0.08, 0.1] {
+        let o = GraspOptions {
+            opening,
+            ..Default::default()
+        };
+        for seen in [&rim, &front] {
+            assert!(grasps(seen, &GraspOptions { shell: None, ..o }).is_empty());
+            let found = grasps(seen, &o);
+            assert!(found.iter().any(|g| g.one_sided), "{opening} m");
+            let at_the_opening = GraspOptions {
+                shell: Some(opening),
+                ..o
+            };
+            assert_eq!(found, grasps(seen, &at_the_opening), "{opening} m");
+        }
+    }
+    let wide = GraspOptions {
+        opening: 0.1,
+        ..Default::default()
+    };
+    let eight = GraspOptions {
+        shell: Some(0.08),
+        ..wide
+    };
+    assert!(grasps(&front, &wide).len() > grasps(&front, &eight).len());
 }
 
 #[test]
@@ -1925,7 +1969,7 @@ fn walls_seen_from_one_side_come_after_those_seen_from_both_and_change_nothing_e
     // From in front and over it, the near wall is seen from both sides, the far wall's outside
     // not at all.
     let both = bowl_seen(THIN, &[FRONT, ABOVE]);
-    let without = grasps(&both, &GraspOptions::default());
+    let without = grasps(&both, &without_shell());
     let with = grasps(&both, &with_shell(0.015));
     assert!(!without.is_empty() && with.len() > without.len());
     assert_eq!(with[..without.len()], without[..]);
@@ -1936,7 +1980,7 @@ fn walls_seen_from_one_side_come_after_those_seen_from_both_and_change_nothing_e
     // adds nothing: only between them, where too little of the outside was seen to press on.
     let turned = |k: usize| Quat::from_rotation_z(k as f32 * TAU / 4.0) * FRONT;
     let around = bowl_seen(THIN, &[turned(0), turned(1), turned(2), turned(3)]);
-    let without = grasps(&around, &GraspOptions::default());
+    let without = grasps(&around, &without_shell());
     let with = grasps(&around, &with_shell(0.015));
     assert!(!without.is_empty() && with.len() > without.len());
     assert_eq!(with[..without.len()], without[..]);
@@ -2355,7 +2399,7 @@ fn malformed_surfaces_and_options_are_input_errors() {
         with_shell(0.0),
         with_shell(-0.01),
         with_shell(f32::NAN),
-        with_shell(f32::INFINITY),
+        with_shell(f32::NEG_INFINITY),
     ] {
         assert!(refused(&good, 0, &bad), "{bad:?}");
     }

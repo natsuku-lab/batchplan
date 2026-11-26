@@ -1624,19 +1624,21 @@ pub struct GraspOptions {
     /// must be clear of what was seen (meters): 10 cm, a pick's `approach`.
     pub approach: f32,
     /// The thickest wall seen from one side only that a grasp of a surface may close across
-    /// (meters): `None`, every grasp closes on two patches seen. With a thickness, a patch whose
-    /// other side no camera saw is closed on where the cameras saw past the wall: where the line in
-    /// along its normal first meets space every ray around it crossed on its way to something
-    /// farther ([`Surface::seen_from`](crate::Surface::seen_from)), within this thickness, with
-    /// nothing of the object seen facing along the line before it. The wall has ended there: the
-    /// second contact is put there, the other side taken parallel to the side seen, so the width is
-    /// the most the wall can be, and a wall is never taken thicker than the fingers open: a shell
-    /// past the `opening` is one at it. A wall that leans is closed on level as well, where the
-    /// level line through the patch is inside its friction cone (`friction`): the hand then comes
-    /// straight down across a flared rim, where one closing along the wall's normal leans as the
-    /// wall does; deeper down such a wall, the finger on the side it leans over meets it above the
-    /// patch ([`first_touch`](Self::first_touch) puts those grasps last). A bowl's rim seen from
-    /// above is grasped so, its outer wall
+    /// (meters): `Some(f32::INFINITY)`, a wall as thick as the fingers open. `None` turns it off,
+    /// every grasp closing on two patches seen, as a cloud fused from several views and given one
+    /// place needs ([`Surface::from_points`](crate::Surface::from_points)). With a thickness, a
+    /// patch whose other side no camera saw is closed on where the cameras saw past the wall: where
+    /// the line in along its normal first meets space every ray around it crossed on its way to
+    /// something farther ([`Surface::seen_from`](crate::Surface::seen_from)), within this
+    /// thickness, with nothing of the object seen facing along the line before it. The wall has
+    /// ended there: the second contact is put there, the other side taken parallel to the side
+    /// seen, so the width is the most the wall can be, and a wall is never taken thicker than the
+    /// fingers open: a shell past the `opening` is one at it. A wall that leans is closed on level
+    /// as well, where the level line through the patch is inside its friction cone (`friction`):
+    /// the hand then comes straight down across a flared rim, where one closing along the wall's
+    /// normal leans as the wall does; deeper down such a wall, the finger on the side it leans over
+    /// meets it above the patch ([`first_touch`](Self::first_touch) puts those grasps last). A
+    /// bowl's rim seen from above is grasped so, its outer wall
     /// hidden under it. Inside a solid no ray goes, so none of these grasps ends in one: a box seen
     /// from one side is closed on only across all of it, where the cameras saw past its far side.
     /// The space found lies past where the wall ends by what the rays leave unseen: under a bowl's
@@ -1718,7 +1720,7 @@ impl Default for GraspOptions {
             friction: 0.5,
             contact: 0.005,
             approach: 0.1,
-            shell: None,
+            shell: Some(f32::INFINITY),
             narrow: false,
             near: None,
             close_on: None,

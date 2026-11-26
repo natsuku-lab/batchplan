@@ -4,9 +4,9 @@
 //! A grasp closes on two patches of surface that face away from each other, no farther apart than
 //! the fingers open, with the line between them inside both friction cones: the condition under
 //! which two fingers that press with friction hold an object against any push (Nguyen's
-//! force closure for two soft fingers). Both patches must have been seen: a surface with nothing
-//! seen behind it gives no grasp, since where its other side lies is a guess. A thin wall, a
-//! handle and a box's faces are found alike, with no shape assumed.
+//! force closure for two soft fingers). Without a shell both patches must have been seen: a
+//! surface with nothing seen behind it gives no grasp, since where its other side lies is a guess.
+//! A thin wall, a handle and a box's faces are found alike, with no shape assumed.
 //!
 //! A wall seen from one side only is closed on where the cameras saw past it
 //! ([`GraspOptions::shell`]): a ray that reached something farther crossed empty space, so where
@@ -153,7 +153,7 @@ impl Surface {
     /// `seen_from`, or none where they are too few or lie on one line. `seen_from` is taken as
     /// where one camera saw every point from, the space between it and each point empty, which
     /// [`GraspOptions::shell`] closes on: a cloud fused from several views and given one place
-    /// would read as one camera's view, and must not be grasped with a shell.
+    /// would read as one camera's view, and must be grasped with `shell: None`.
     pub fn from_points(points: &[Vec3], seen_from: Vec3, radius: f32) -> Result<Self> {
         if let Some(k) = points.iter().position(|p| !p.is_finite()) {
             return Err(input!("point {k} is not finite, got {}", points[k]));
@@ -530,8 +530,8 @@ pub fn grasps_on_with_capacity(
     }
     if let Some(shell) = o.shell {
         ensure_input!(
-            shell > 0.0 && shell.is_finite(),
-            "a shell must be a finite positive thickness, got {shell} m"
+            shell > 0.0,
+            "a shell must be a positive thickness, infinite for as thick as the fingers open, got {shell} m"
         );
     }
     if let Some(near) = o.near {

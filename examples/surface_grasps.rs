@@ -249,7 +249,8 @@ fn main() -> Result<()> {
         Surface::from_depth(&device, &image, &object, None, 0.005)
     };
     let seen = from_above(&|p| table.distance(p).value)?;
-    let without = batchplan::grasps_on(&device, 0, std::slice::from_ref(&seen), &o)?.remove(0);
+    let none = GraspOptions { shell: None, ..o };
+    let without = batchplan::grasps_on(&device, 0, std::slice::from_ref(&seen), &none)?.remove(0);
     let shell = GraspOptions {
         shell: Some(0.015),
         ..o

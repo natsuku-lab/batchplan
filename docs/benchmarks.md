@@ -239,14 +239,14 @@ The counts are the same on both devices of each machine and on every run, but at
 | | Points | Grasps | Time |
 |---|---|---|---|
 | A bowl 11 cm across with a wall 8 mm thick, as points 2 mm apart with their normals | 9,201 | 1,980, all across its wall | 5.4 ms |
-| A box on a table in two 640×480 depth images | 593,920, 12,492 of them the box's | 686 | 2.8 ms to read both images, 9.5 ms to grasp |
-| LIBERO's bowl, its wall 3 mm thick and flared, seen from 40 cm above in one 640×480 depth image (focal length 313 pixels), its outer wall nowhere | 307,200, 6,728 of them the bowl's | none; with a `shell` of 1.5 cm 1,132, 5.5 to 14.5 mm wide (5.5 to 11.5 mm at its rim) | 9.2 ms with the shell |
+| A box on a table in two 640×480 depth images | 593,920, 12,492 of them the box's | 686 | 2.8 ms to read both images, 9.5 ms to grasp with `shell: None` |
+| LIBERO's bowl, its wall 3 mm thick and flared, seen from 40 cm above in one 640×480 depth image (focal length 313 pixels), its outer wall nowhere | 307,200, 6,728 of them the bowl's | none without a shell (`shell: None`); with a `shell` of 1.5 cm 1,132, 5.5 to 14.5 mm wide (5.5 to 11.5 mm at its rim) | 9.2 ms with the shell |
 | That bowl 4 cm from a wall twice as tall, seen the same way | 307,200 | 654 with the shell; 698 where the fingers may come in narrower (`narrow`), every one narrower, down to 1.5 cm beside the wall | 8.9 ms with the shell, 10.7 ms with both |
 | 64 such bowls in one call | 588,864 | 126,720 | 226 ms, 3.5 ms a bowl |
 
 Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from 16 directions, 22 spheres swept 10 cm against the points near them. Checked against every point of the scene through one coarse grid, before the points near the object were kept in cells of their own and a check stopped at its first point in the way, the bowl took 211 ms and the box 314 ms on one thread, with the same grasps to the last bit.
 
-With `first_touch`, which sweeps each finger of each grasp over the object's patches, the example times the bowl, the box and the 64 bowls again (its lines `with first_touch`). On the Ryzen AI Max+ 395 on one thread (the example built with `Device::cpu_threads(&robot, 1)`), the quickest of six runs, the machine's load under 3: the 64 bowls take 2.65 s against 2.49 s without it (7 percent more), the bowl 41.2 ms against 38.9 (6 percent), the box 59.8 ms against 59.1 (1 percent). Without it the grasps and their order are main's.
+With `first_touch`, which sweeps each finger of each grasp over the object's patches, the example times the bowl, the box and the 64 bowls again (its lines `with first_touch`). On the Ryzen AI Max+ 395 on one thread (the example built with `Device::cpu_threads(&robot, 1)`), the quickest of six runs, the machine's load between 4 and 15: the 64 bowls take 2.67 s against 2.51 s without it (6 percent more), the bowl 41.7 ms against 39.2 (6 percent), the box 71.8 ms against 71.5 (under 1 percent). Without it the grasps and their order are main's.
 
 ## Rests on a surface
 
