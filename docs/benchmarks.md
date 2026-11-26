@@ -138,24 +138,24 @@ Every device solves the same 484 of 512 targets and plans all 484.
 
 | Machine | IK seeds/s, GPU / CPU (64 per target, 4 of them past the first 8 steps) | Planning, problems/s | End to end, GPU | End to end, CPU |
 |---|---|---|---|---|
-| Ryzen AI Max+ 395 and Radeon 8060S | 2,240,000–2,630,000 / 1,027,000–1,061,000 | 263,000–362,000 | **29,857–35,078 problems/s** | 14,341–14,981 problems/s (32 threads) |
-| M4 Pro | 939,000–1,564,000 / 609,000–833,000 | 148,000–156,000 | **12,679–20,032 problems/s** | 8,485–11,408 problems/s (14 threads) |
+| Ryzen AI Max+ 395 and Radeon 8060S | 4,207,000–4,520,000 / 1,291,000–1,422,000 | 331,000–379,000 | **53,313–56,602 problems/s** | 18,043–19,800 problems/s (32 threads) |
+| M4 Pro | 704,000–1,244,000 / 908,000–1,050,000 | 166,000–221,000 | 9,797–16,857 problems/s | 12,598–14,479 problems/s (14 threads) |
 
-Each range covers three runs started with load under 6, at [#34](https://github.com/natsuku-lab/batchplan/pull/34). GPU warm-up and display activity affect these times; the first call after idling can be up to 30% slower.
+Each range covers the runs of one session on 2026-11-26 with the default build: five on the Ryzen, back to back with other 32-thread runs (load 17 to 25), and ten on the M4 Pro (load under 3). GPU warm-up and display activity affect these times, the M4 Pro's GPU most: its runs spread over the CPU's, so neither is ahead at 512.
 
 Uploading the 512 worlds, which the example times first, takes 0.1 ms on the M4 Pro's CPU and 0.2 ms on its GPU: preparing each obstacle for the CPU's checks and, on the GPU, one buffer write. A distance grid adds its values, uploaded once however many worlds share it.
 
-By batch size, end to end, in solved problems per second (medians of three runs in the same sessions, at [#34](https://github.com/natsuku-lab/batchplan/pull/34)):
+By batch size, end to end, in solved problems per second (the medians of the same sessions' runs):
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU | Radeon 8060S | Ryzen CPU |
 |---|---|---|---|---|
-| 1 | 83 | **2,583** | 292 | **3,145** |
-| 8 | 1,263 | **4,602** | 1,959 | **6,617** |
-| 64 | 3,796 | **7,140** | 8,289 | **11,755** |
-| 512 | **14,676** | 10,135 | **33,196** | 14,588 |
-| 4,096 | **20,622** | 10,441 | **37,740** | 14,422 |
+| 1 | 115 | **2,379** | 658 | **3,584** |
+| 8 | 844 | **6,449** | 4,458 | **8,292** |
+| 64 | 3,160 | **10,502** | 16,470 | 16,560 |
+| 512 | 13,469 | 13,774 | **54,553** | 18,813 |
+| 4,096 | **23,365** | 15,109 | **74,008** | 19,542 |
 
-For this workload the CPU is faster at small batches; the GPU overtakes it between 64 and 512 problems.
+For this workload the CPU is faster at small batches; the Radeon draws level with its CPU at 64 problems per call and the M4 Pro's GPU with its own at 512.
 
 ## Tool paths
 
@@ -225,7 +225,7 @@ The counts are the same on both devices of each machine and on every run, but at
 
 | | Points | Grasps | Time |
 |---|---|---|---|
-| A bowl 11 cm across with a wall 8 mm thick, as points 2 mm apart with their normals | 9,201 | 1,980, all across its wall | 6.4 ms; 5.8 ms with `first_touch` |
+| A bowl 11 cm across with a wall 8 mm thick, as points 2 mm apart with their normals | 9,201 | 1,980, all across its wall | 6.4 ms, and as long with `first_touch` within the runs' spread |
 | A box on a table in two 640×480 depth images | 593,920, 12,492 of them the box's | 686 | 2.7 ms to read both images, 14.1 ms to grasp; 15.1 ms with `first_touch` |
 | LIBERO's bowl, its wall 3 mm thick and flared, seen from 40 cm above in one 640×480 depth image (focal length 313 pixels), its outer wall nowhere | 307,200, 6,728 of them the bowl's | none without a shell (`shell: None`); with a `shell` of 1.5 cm 1,132, 5.5 to 14.5 mm wide (5.5 to 11.5 mm at its rim) | 6.8 ms with the shell |
 | That bowl 4 cm from a wall twice as tall, seen the same way | 307,200 | 654 with the shell; 698 where the fingers may come in narrower (`narrow`), every one narrower, down to 1.5 cm beside the wall | 6.3 ms with the shell, 8.2 ms with both |

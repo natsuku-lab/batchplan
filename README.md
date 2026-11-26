@@ -269,13 +269,13 @@ Planning runs on CPU threads on either device; IK and trajectory optimization al
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU (14 cores) | Radeon 8060S GPU | Ryzen AI Max+ 395 CPU (16 cores) |
 |---|---|---|---|---|
-| 1 | 83 | **2,583** | 292 | **3,145** |
-| 8 | 1,263 | **4,602** | 1,959 | **6,617** |
-| 64 | 3,796 | **7,140** | 8,289 | **11,755** |
-| 512 | **14,676** | 10,135 | **33,196** | 14,588 |
-| 4,096 | **20,622** | 10,441 | **37,740** | 14,422 |
+| 1 | 115 | **2,379** | 658 | **3,584** |
+| 8 | 844 | **6,449** | 4,458 | **8,292** |
+| 64 | 3,160 | **10,502** | 16,470 | 16,560 |
+| 512 | 13,469 | 13,774 | **54,553** | 18,813 |
+| 4,096 | **23,365** | 15,109 | **74,008** | 19,542 |
 
-A GPU call costs 3.4 ms on the Radeon (12 ms on the M4 Pro), so one problem at a time runs 11–31 times faster on the CPU; from a few hundred problems per call the GPU overtakes it, and at 4,096 it solves 2–2.6 times as many.
+A GPU call costs 1.5 ms on the Radeon (9 ms on the M4 Pro), so one problem at a time runs 5–21 times faster on the CPU; the GPU draws level at 64 problems per call on the Radeon and at 512 on the M4 Pro, and at 4,096 it solves 1.5–3.8 times as many.
 
 ### When another library fits better
 
