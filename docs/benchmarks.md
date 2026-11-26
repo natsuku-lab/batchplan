@@ -1,7 +1,8 @@
 # Benchmarks
 
-Measured results for planner comparisons, CPU/GPU scaling, motion timing and manipulation.
-These are snapshots at the revisions named below, rather than measurements of the latest release.
+Measured results for planner comparisons, CPU/GPU scaling, motion timing, manipulation and
+perception. These are snapshots at the revisions named below, rather than measurements of the
+latest release.
 
 The main machines are an Apple M4 Pro (14 CPU cores, 20-core GPU, Metal) and an AMD Ryzen AI
 Max+ 395 (16 cores, 32 threads, Radeon 8060S, Vulkan/RADV, Ubuntu 26.04). Load, warm-up and
@@ -109,18 +110,6 @@ On the exact scenes, 16 cores: from the start and goal to a timed trajectory wit
 - **The clearance.** batchplan keeps 1.5 cm while searching and 1 cm while shortcutting, and 86.6% of its paths clear the meshes. Without it (matched), 67.6% do, and RoboPlan's longer paths, checked at the same resolution, are valid slightly more often (89.1% against 88.4%) and clear the meshes more often (71.4% against 67.6%).
 - **Tails.** p99 counts every query, failures included. The 5 s figures are queries that ran into the limit.
 
-### Before and after optimization
-
-The suite first ran on the 1,818 held-out problems at a237326, and that baseline was frozen. The changes under [How the speed came](#how-the-speed-came) were then made against it on the tuning problems, and batchplan was measured again on the held-out ones. Paths are 0.2% shorter and durations the same. Six fewer of the 27,270 answers are valid (24,780 against 24,786): searches of a few problems at the edge of solvability ran out of samples in 15 queries that found a path before, and found one in 9 that did not:
-
-| batchplan, held-out problems, 16 cores | a237326 | ef619b1 |
-|---|---|---|
-| Paths: time per query (median / p99), paired | 0.12 / 3.6 ms | 0.11 / 1.9 ms, 0.78× |
-| Paths: valid/s | 30,867 | 37,560 |
-| Paths, one core: p99 | 6.8 ms | 1.9 ms |
-| Trajectories: time per query (median / p99), paired | 1.06 / 4.4 ms | 0.52 / 2.3 ms, 0.50× |
-| Trajectories: valid/s | 9,018 | 16,147 |
-
 ## The 2,600 problems on every device
 
 `examples/benchmark.rs` runs every set in two modes:
@@ -157,7 +146,7 @@ Each range covers three runs started with load under 6, at [#34](https://github.
 
 Uploading the 512 worlds, which the example times first, takes 0.1 ms on the M4 Pro's CPU and 0.2 ms on its GPU: preparing each obstacle for the CPU's checks and, on the GPU, one buffer write. A distance grid adds its values, uploaded once however many worlds share it.
 
-By batch size, end to end, in solved problems per second (medians of three runs in the same sessions):
+By batch size, end to end, in solved problems per second (medians of three runs in the same sessions, at [#34](https://github.com/natsuku-lab/batchplan/pull/34)):
 
 | Problems per call | M4 Pro GPU | M4 Pro CPU | Radeon 8060S | Ryzen CPU |
 |---|---|---|---|---|
@@ -167,7 +156,7 @@ By batch size, end to end, in solved problems per second (medians of three runs 
 | 512 | **14,676** | 10,135 | **33,196** | 14,588 |
 | 4,096 | **20,622** | 10,441 | **37,740** | 14,422 |
 
-For this workload the CPU is faster at small batches; the GPU overtakes it between 64 and 512 problems. These measurements predate the later kernel improvements, so they describe scaling at that revision, not current single-call latency.
+For this workload the CPU is faster at small batches; the GPU overtakes it between 64 and 512 problems.
 
 ## Tool paths
 
@@ -265,6 +254,63 @@ Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from
 | 64 boxes of as many heights on that table in one call | 392,708 | 1,511,244 | 3.3 s, 52 ms a box | 35 s |
 
 The table is read once for the 64 boxes. A flat bottom on a flat top is judged in closed form; the tray and the bottle touch two stretches of support that push different ways, which takes a balance of forces per pose and most of their time. The default options [look closer](placing.md#rests-on-what-cameras-see) (`look_closer`), with no `near` given, only where the spots find nothing, and of the scenes in the table only the bowl does: each other has rests or falls, but for the bare lip, where the bottle nowhere nearly rests. Over the bowl the spots find no fall, so it looks closer about the spot where the box lands the deepest under the rim. `scripts/validate_rests.py` lets go of up to 250 rests of each scene in MuJoCo, on the support as a height field: all stay on the table, in the basket and between the bars, 249 of 250 trays across the bars, 148 of 150 bottles laid on the rack, the others at the very end of the support, and 224 of 224 upright bottles against the lip with a top. It lets go of falls too, each for as long as its middle takes to drop to the lowest of the support and then a rest's second, and a fall stays in where its middle then lies under the rim, over the support, moving and turning no more in a second than a rest may in all: 250 of the 250 it tries of the can's 1,152 over the basket, and 52 of 52 of the box over the bowl. Rests come at every turn; those of a turn that sets the shape down as an earlier one does are copied from it, not found again. A can or capsule on its side that is not held where it is set down is rolled to where it lies lowest, eleven more set-downs for that spot and a second reading of its contacts, so one laid where it has no rest anywhere, as on a flat top, costs the most.
+
+## Perception
+
+`examples/perception.rs` times each call for a 640×480 image that shows the arm: a tabletop seen from across the table, and from a camera on the Panda's palm that looks along its fingers. The mask is padded 4 cm, for the Panda's 61 spheres and for a Panda fitted with 573. Each cell is the camera over the table, then the one on the hand. Each figure is the quickest median of several runs on machines doing other work beside them; on the M4 Pro each run follows a pause, as its first ten seconds of work run quicker than the rest:
+- most rows: twenty runs on the M4 Pro, at a load of 3 to 10 on its 14 cores; eight on the Ryzen and its Radeon, at 10 to 32 on its 32 threads;
+- the four rows of the M4 Pro's CPU fusing: ten runs, at 13 to 14;
+- the two rows of the 13.4M-voxel map: eight on each device, at 3.5 to 7.5 on the M4 Pro and 2 to 10 on the Radeon;
+- the fuse with the scene's three shapes left out: eight on each device, at 4.5 to 7.6 on the M4 Pro and 8 to 15.5 on the Radeon;
+- those shapes' readings told apart: eight, at 7 to 81 on the M4 Pro and 4.7 to 14 on the Ryzen;
+- the band's two rows: eight, at 4.7 to 9.0 on the M4 Pro and 3.5 to 12.2 on the Ryzen;
+- at [#93](https://github.com/natsuku-lab/batchplan/pull/93), the two robot-mask rows on the M4 Pro: twenty runs of `perception --cpu 14`, each after a ten-second pause, at 3.7 to 11.0; and on the Ryzen, its mask rows and all six of its CPU fuse rows: eight runs of `perception --cpu 32`, at 7.3 to 13.2.
+
+The filter, the masks, the points and a surface are read on the host:
+
+| | M4 Pro (14 threads) | Ryzen AI Max+ 395 (32 threads) |
+|---|---|---|
+| The image without the readings between two surfaces (`filtered`) | 0.73 ms, 0.73 ms | 0.98 ms, 0.99 ms |
+| Which readings are the robot's (`robot_mask`), 61 spheres | 0.07 ms, 0.36 ms | 0.06 ms, 0.28 ms |
+| The same, 573 spheres | 0.18 ms, 0.88 ms | 0.19 ms, 0.80 ms |
+| The scene's three shapes left out too (`with_shapes`) | 0.26 ms, 0.31 ms | 0.23 ms, 0.27 ms |
+| Which of the scene's three shapes each reading off the robot lies on (`sdf::on_shapes`) | 0.27 ms, 0.32 ms | 0.48 ms, 0.50 ms |
+| A band of a pixel behind the robot's mask alone, 61 spheres (`with_band`) | 0.17 ms, 0.20 ms | 0.23 ms, 0.24 ms |
+| The same behind the robot and the three shapes, which flag every reading of this scene already | 0.17 ms, 0.18 ms | 0.22 ms, 0.23 ms |
+| The image's points (`points`) | 0.66 ms, 0.71 ms | 1.77 ms, 1.97 ms |
+| A surface with the table's normals (`Surface::from_depth`; 148,461 and 208,100 normals) | 3.0 ms, 3.8 ms | 3.4 ms, 3.4 ms |
+
+Fusing and grids run on the device:
+
+| | M4 Pro (CPU, 14 threads) | M4 Pro (GPU) | Ryzen AI Max+ 395 (CPU, 32 threads) | Radeon 8060S (GPU) |
+|---|---|---|---|---|
+| Fusing the image into a 1.8M-voxel map, no mask | 1.6 ms, 1.5 ms | 1.2 ms, 1.2 ms | 3.4 ms, 2.7 ms | 0.8 ms, 0.9 ms |
+| With a mask of 61 spheres | 2.0 ms, 1.7 ms | 1.6 ms, 1.6 ms | 4.3 ms, 3.0 ms | 1.1 ms, 1.4 ms |
+| With a mask of 573 spheres | 2.3 ms, 1.8 ms | 1.7 ms, 1.9 ms | 4.4 ms, 3.2 ms | 1.6 ms, 1.6 ms |
+| With the robot's mask and the scene's three shapes left out | 1.3 ms, 0.9 ms | 1.5 ms, 1.6 ms | 2.6 ms, 1.3 ms | 1.0 ms, 1.2 ms |
+| Fusing the image into a 13.4M-voxel map (2.9 m by 2.9 m by 1.55 m), no mask | 2.4 ms, 1.6 ms | 4.7 ms, 6.5 ms | 5.4 ms, 3.3 ms | 8.4 ms, 8.3 ms |
+| With a mask of 61 spheres | 3.1 ms, 1.9 ms | 5.6 ms, 5.7 ms | 6.4 ms, 3.5 ms | 9.5 ms, 9.7 ms |
+| A 1 cm grid of the image, no mask (3.1M and 2.1M points) | 14.1 ms, 10.1 ms | 6.4 ms, 5.4 ms | 21 ms, 14.0 ms | 7.4 ms, 5.7 ms |
+| With a mask of 61 spheres (2.3M and 1.6M points) | 11.7 ms, 8.7 ms | 6.0 ms, 5.1 ms | 16.6 ms, 12.6 ms | 6.1 ms, 5.6 ms |
+| With a mask of 573 spheres | 11.5 ms, 8.8 ms | 6.0 ms, 5.4 ms | 16.4 ms, 12.7 ms | 6.4 ms, 5.1 ms |
+
+The map's own calls run on the calling thread, and a part's grid on the device. For the 1.8M-voxel map on the M4 Pro, at a load of 15 on its 14 cores (24 for `occupied`):
+
+| | Time |
+|---|---|
+| The part in a box of the scene (`part`) | 0.1 ms |
+| That part's grid of 94,000 points, on either device | 1.3 to 2.0 ms |
+| A copy of the map with a shape marked free, then cleared (`free`, `clear`) | 1.7 ms |
+| Where the map is occupied, 11,000 to 18,000 voxels (`occupied`) | 0.5 ms |
+
+Median build times for a 640×480 image of a table seen from 1 m, at 05a5fcf:
+
+| Machine | 1 cm grid (0.96M points) | 5 mm grid (7.5M) | Fusing one frame (1.8M-point map) | That map's grid |
+|---|---|---|---|---|
+| Radeon 8060S (GPU) | 1.9 ms | 10.6 ms | 0.6 ms | 2.5 ms |
+| Ryzen AI Max+ 395 (CPU, 32 threads) | 9.1 ms | 48 ms | 4.8 ms | 6.2 ms |
+| M4 Pro (GPU) | 3.6 ms | 14.8 ms | 1.5 ms | 4.4 ms |
+| M4 Pro (CPU, 14 threads) | 6.4 ms | 36 ms | 2.2 ms | 6.9 ms |
 
 ## Spheres for what a hand holds
 
@@ -396,99 +442,26 @@ Without clearance, paths pull taut against the spheres: they are the shortest, b
 
 Spheres fitted to the meshes (`--spheres fitted`) cover them completely, but their 3 cm overhang puts most of these tight scenes' starts or goals in collision: 40% of the problems have free ends on them.
 
-## How the speed came
+## Fitting collision spheres
 
-Selected A/B measurements explain the main performance changes. The
-[architecture guide](architecture.md) owns implementation details; the
-[changelog](../CHANGELOG.md) records release history. Improvements from separate experiments
-are not additive.
+`examples/fitting.rs` times fitting a robot's spheres to the fixtures it names: each invocation
+warms up with one load, qualifies that model outside timing, and times three more loads. It
+prints the collision model's checksum, sphere counts and measured overhangs beside the times.
+The runs below set `self_collision_samples` to zero, leaving out the self-collision pair
+analysis.
 
-### CPU planning and collision checks
+The greedy cover finds a candidate's samples in columns as wide as the median candidate reaches,
+and growing the spheres to their samples finds a sample's spheres among about one cell per
+sphere. With those, against `b6ffaaa` without them, in three alternating rounds on the M4 Pro
+with one caller thread, at a load of 3.0 to 3.8, with the same checksums; the best and the
+second-best of the rounds' best times, in milliseconds:
 
-The frozen-baseline comparison [above](#before-and-after-optimization) measures the combined
-search and timing improvements. Searches use SIMD checks, reuse per-thread buffers and let idle
-threads help long searches; their results are independent of helper scheduling.
-
-The CPU changes in [#55](https://github.com/natsuku-lab/batchplan/pull/55) avoid heavy grid code
-in primitive checks and keep hot call boundaries stable. `examples/latency.rs` and
-`examples/tasks.rs` compared `5d1fffb` with `64a3868` in six alternating rounds on the Ryzen's
-32 threads. Times below are best / lower quartile in milliseconds. The baseline used sixteen
-codegen units; the changed build used one. Background load varied; one-thread controls also
-covered smaller calls. Results were bit-identical.
-
-| | Before, best / lower quartile | After, best / lower quartile |
-|---|---|---|
-| IK, 1,000 targets among clutter | 69.83 / 77.54 | 63.44 / 63.51 |
-| A UR5e, 1,000 targets among clutter | 97.34 / 111.63 | 88.43 / 88.84 |
-| 1,000 targets, a grid among the clutter | 81.68 / 92.29 | 77.81 / 78.36 |
-| `evaluate`, 16,384 configurations | 2.007 / 2.579 | 1.865 / 1.935 |
-| 256 plans, 4 optimized seeds | 389.17 / 469.62 | 303.38 / 307.77 |
-| 256 plans past a ball | 557.03 / 625.79 | 522.55 / 527.50 |
-| 64 picks | 160.3 / 183.5 | 156.9 / 162.2 |
-
-The M4 Pro's best/lower-quartile reductions were 4.1/4.0% for IK among clutter,
-5.7/6.5% for `evaluate`, 6.1/6.3% for optimized plans and 3.1/3.3% for 64 picks.
-Plans past a ball took 0.9/2.0% longer on all 14 threads; one-thread controls were faster.
-Dependent builds using sixteen codegen units were checked too; their Ryzen optimized-plan
-times were 253.86/313.21 ms, so build profiles must be matched when comparing results.
-
-Earlier [#45](https://github.com/natsuku-lab/batchplan/pull/45) skipped self-collision sphere
-pairs that cannot contribute to IK or optimization cost. On an M4 Pro, a place with four holds
-and eight release poses on a 512-sphere Panda took 10.8–11.1 ms instead of 17.7–18.7 ms
-(medians of fifteen calls, three alternating rounds, load 10), with identical costs and gradients.
-
-### GPU latency and grids
-
-[#36](https://github.com/natsuku-lab/batchplan/pull/36) writes out short kernel loops and
-shares per-configuration IK work while retaining naga's safety checks. `examples/latency.rs`
-on the M4 Pro, four alternating rounds started with load under 5, median milliseconds:
-
-| Targets per call | No spheres | Spheres, no push | Spheres and the push | Two hands that share joints, the push |
-|---|---|---|---|---|
-| 1 | 1.14 → 0.34 | 1.23 → 0.39 | 2.03 → 0.92 | 4.31 → 3.59 |
-| 10 | 1.13 → 0.34 | 1.24 → 0.40 | 2.89 → 1.81 | 5.73 → 4.74 |
-| 100 | 1.41 → 0.61 | 1.70 → 0.85 | 5.59 → 4.38 | 8.91 → 7.65 |
-| 1,000 | 3.83 → 1.72 | 5.93 → 2.98 | 30.0 → 22.1 | 52.0 → 42.2 |
-
-In that experiment, optimized plans improved from 93.8 to 83.1 ms for a batch of 256.
-Regressions were also measured: collision-heavy IK for a 399-sphere Panda took 4–5% longer,
-plans past a ball about 5% longer, and `evaluate` 1.5–4% longer. GPU numerical results can
-change in their last places. These are workload-specific gains, not a uniform speedup.
-
-[#38](https://github.com/natsuku-lab/batchplan/pull/38) skips grid lookups for distant links.
-For 1,000 Panda IK targets among clutter on the M4 Pro, a grid 2 m behind the arm changed GPU
-latency from 35.7 to 28.8 ms and CPU latency from 107 to 67 ms (four GPU and twelve CPU
-alternating rounds, `examples/latency.rs`). A grid filling the scene gains little from that test.
-
-Compiling pipelines concurrently reduced cold GPU device creation from 2.6 to 1.4 s on the M4
-Pro (three alternating runs with the driver cache emptied). Separate grid kernels increased
-resident device memory from 35–37 to 66–88 MB, and memory per held shape from about 9 to 20 MB.
-
-### Fitting collision spheres
-
-Dense surface samples check the selected spheres four at a time, using SIMD with the scalar
-test's addition order and inclusive boundary. The fitted models are unchanged: the sampling,
-greedy selection, refinement order and final inflation are the same. This speeds up fitting
-without loosening its coverage or overhang bounds.
-
-Four alternating rounds against `30ca805` on 2026-11-14, with one caller thread and one codegen
-unit, using the fixtures in `examples/fitting.rs`. Each invocation warms up with one load,
-qualifies that model outside timing, and times three more loads. The table gives the best and
-lower quartile of the rounds' best times, in milliseconds. Both machines had other work running;
-the comparison uses builds run beside each other, not earlier idle measurements.
-
-| Model / sphere budget | M4 Pro before | M4 Pro after | Ryzen AI Max+ 395 before | Ryzen after |
+| Model / sphere budget | One unit before | One unit after | Sixteen before | Sixteen after |
 |---|---:|---:|---:|---:|
-| Stand / 512 | 430.33 / 440.53 | 346.96 / 349.90 | 481.38 / 484.20 | 338.90 / 339.00 |
-| Panda / 1,200 | 338.16 / 341.92 | 325.08 / 332.63 | 378.39 / 379.23 | 338.14 / 341.19 |
-| SO-101 / 700 | 141.43 / 142.48 | 131.43 / 132.78 | 152.17 / 153.99 | 127.74 / 127.80 |
-| UR5e / 1,200 | 254.71 / 258.37 | 225.78 / 233.74 | 272.70 / 273.48 | 221.81 / 221.81 |
-
-These runs set `self_collision_samples` to zero to isolate fitting from self-collision pair
-analysis. Runs with its default 10,000 samples, with smaller and larger sphere budgets, with
-fourteen or thirty-two caller threads, and with sixteen codegen units also compare the complete
-collision-model checksums before and after. The example prints those checksums, sphere counts
-and measured overhangs alongside times.
+| Stand / 512 | 339.4 / 344.1 | 262.5 / 263.3 | 353.4 / 354.1 | 272.3 / 278.8 |
+| Panda / 1,200 | 314.6 / 315.4 | 266.2 / 270.4 | 321.6 / 321.6 | 274.6 / 281.3 |
+| SO-101 / 700 | 126.6 / 127.4 | 116.8 / 117.8 | 130.4 / 131.1 | 120.9 / 124.2 |
+| UR5e / 1,200 | 219.5 / 220.1 | 193.7 / 194.7 | 225.6 / 225.7 | 198.6 / 204.9 |
 
 ```bash
 cargo run --release --example fitting -- 1 stand 512 0 3
@@ -498,19 +471,6 @@ cargo run --release --example fitting -- 14 panda 1200 10000 3
 # A dependent crate's default codegen-unit count:
 cargo run --release --config 'profile.release.package.batchplan.codegen-units=16' --example fitting -- 1 so101 700 0 3
 ```
-
-The greedy cover then finds a candidate's samples in columns as wide as the median candidate
-reaches, and growing the spheres to their samples finds a sample's spheres among about one cell
-per sphere. Against `b6ffaaa` on 2026-11-24, three alternating rounds on the M4 Pro with one
-caller thread, the machine's load 3.0 to 3.8, the same fixtures and checksums; the best and the
-second-best of the rounds' best times, in milliseconds:
-
-| Model / sphere budget | One unit before | One unit after | Sixteen before | Sixteen after |
-|---|---:|---:|---:|---:|
-| Stand / 512 | 339.4 / 344.1 | 262.5 / 263.3 | 353.4 / 354.1 | 272.3 / 278.8 |
-| Panda / 1,200 | 314.6 / 315.4 | 266.2 / 270.4 | 321.6 / 321.6 | 274.6 / 281.3 |
-| SO-101 / 700 | 126.6 / 127.4 | 116.8 / 117.8 | 130.4 / 131.1 | 120.9 / 124.2 |
-| UR5e / 1,200 | 219.5 / 220.1 | 193.7 / 194.7 | 225.6 / 225.7 | 198.6 / 204.9 |
 
 ## Reproducing
 
@@ -523,6 +483,9 @@ cargo run --release --example bench -- 512
 # Tool paths, and picks and places on random tabletops
 cargo run --release --example tool_paths
 cargo run --release --example tasks -- 64
+
+# What each depth call costs for a 640×480 image, over a table and from the hand
+cargo run --release --example perception             # -- --cpu [threads] on the CPU device
 
 # Turning a knob, a cap, a lever and a wheel, and 64 knobs in one call
 cargo run --release --example turns            # -- --gpu on the GPU

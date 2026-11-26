@@ -416,13 +416,13 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   on an M4 Pro and 30% less on a Ryzen AI Max+ 395; the Panda with a 1,200-sphere budget takes
   4% and 11% less, respectively.
   These isolate fitting from self-collision analysis. The
-  [benchmark guide](docs/benchmarks.md#fitting-collision-spheres) gives the runs and
+  [benchmark guide](https://github.com/natsuku-lab/batchplan/blob/v0.11.0/docs/benchmarks.md#fitting-collision-spheres) gives the runs and
   `examples/fitting.rs` reproduces the fixtures.
 - Faster CPU collision checks, contact queries, IK, planning, tasks, depth-grid construction and
   occupancy updates, with results the same to the bit. In six alternating runs, the best CPU
   times for 1,000 IK targets among clutter fell 9% on a Ryzen AI Max+ 395 and 4% on an M4 Pro;
   256 plans with four optimized seeds took 22% and 6% less time, respectively. The
-  [benchmark guide](docs/benchmarks.md#how-the-speed-came) gives the times, lower quartiles and
+  [benchmark guide](https://github.com/natsuku-lab/batchplan/blob/v0.11.0/docs/benchmarks.md#how-the-speed-came) gives the times, lower quartiles and
   build configurations. This workspace builds batchplan as one
   codegen unit (`[profile.release.package.batchplan] codegen-units = 1`), so a change measured here
   no longer moves with how rustc splits the crate; a crate that depends on batchplan can do the same.
@@ -437,7 +437,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   sphere pairs that cannot add to the cost: a sphere past the margin from another link's
   bounding sphere is not checked against that link's spheres. Results are the same to the bit.
   A robot fitted with many spheres gains most: a `place` of four holds on a Panda of 512 spheres
-  takes 11 ms on an M4 Pro where it took 18 ([Benchmarks](docs/benchmarks.md#how-the-speed-came)).
+  takes 11 ms on an M4 Pro where it took 18 ([Benchmarks](https://github.com/natsuku-lab/batchplan/blob/v0.11.0/docs/benchmarks.md#how-the-speed-came)).
 - **Breaking:** IK screens its seeds. Every seed takes `IkOptions::screening` steps (8 by
   default), then only `IkOptions::kept` of each problem's (4) take the rest of `iterations`: those
   not yet at their targets, the nearest first, then seeds that have arrived. Where the steps push
@@ -479,7 +479,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   (`examples/latency.rs`). `world_clearance` for a link past the margin from a grid is a bound
   from below, as it is for other obstacles. Uploads without a grid run the code they ran: the
   rule is in kernels, and in copies of the CPU's checks, that only worlds uploaded with a grid
-  run ([Benchmarks](docs/benchmarks.md#how-the-speed-came)).
+  run ([Benchmarks](https://github.com/natsuku-lab/batchplan/blob/v0.11.0/docs/benchmarks.md#how-the-speed-came)).
 - A GPU device is made sooner: its kernels' pipelines compile each on a thread of its own. With
   the driver's shader cache empty, `Device::gpu` takes 1.4 s on an M4 Pro where it took 2.6,
   though it now builds the kernels of uploads with grids as well, `Device::warmup` 0.7 s where
@@ -506,7 +506,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   Pro make optimized plans 4–7% slower and IK for hands that share joints 13–20%. Three kinds of
   call are slower than before: IK with the push for a robot of several hundred spheres (4–5%),
   plans to goals past an obstacle (5%) and `evaluate` (1.5–4%)
-  ([Benchmarks](docs/benchmarks.md#how-the-speed-came)). A GPU's results move in their last
+  ([Benchmarks](https://github.com/natsuku-lab/batchplan/blob/v0.11.0/docs/benchmarks.md#how-the-speed-came)). A GPU's results move in their last
   places, IK's and trajectory optimization's alike: a seed in thousands arrives or does not.
 - Trajectories are sooner: time-optimal timing uses the full velocity and acceleration limits,
   and where its smoothed time map overshoots a limit, slows the profile there instead of

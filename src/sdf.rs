@@ -611,41 +611,22 @@ impl RobotMask {
         Ok(self)
     }
 
-    /// The mask with the readings flagged that lie behind a thing it holds, beside that thing's
-    /// flagged readings. A reading at depth `z` the mask does not flag is taken where a flagged
-    /// reading within `pixels` pixels of it, along rows, columns and diagonals (the larger of the
-    /// two offsets at most `pixels`), is of a thing whose surface where it reads it is nearer the
-    /// camera than `z - (margin[0] + margin[1] * z + margin[2] * z * z)`, and the reading's own
-    /// ray, carried on past it, does not enter that thing. It is then that thing's, with all
-    /// that follows for a flagged reading. A flagged reading is of a sphere of the robot or of an
-    /// object it holds where its point lies within the padding of it, as
-    /// [`DepthImage::robot_mask`] tests, and of a shape where it lies within the margin at its
-    /// depth of it, as [`with_shapes`](Self::with_shapes) tests with the `margin` given here; a
-    /// flag a caller sets on a reading of none of them takes nothing. `image` is the image the
-    /// mask was made of. Its rows are read on the device's threads: first, in a pass along the
-    /// columns and one along each row, the least depth of a flagged reading within the band less
-    /// as much as its thing may lie nearer, which is all most readings need; then, for a reading
-    /// that the least leaves open, the flagged readings of the band and their things.
+    /// The mask with the readings flagged that a camera gives just behind a flagged thing's
+    /// outline: a sphere of the robot, an object it holds, or a shape. A reading at depth `z` the
+    /// mask does not flag is taken where a flagged reading within `pixels` pixels of it, along
+    /// rows, columns and diagonals, is of a thing whose surface there is nearer the camera than
+    /// `z - (margin[0] + margin[1] * z + margin[2] * z * z)`, and the reading's own ray, carried on
+    /// past it, does not enter that thing. It is then that thing's, as a flagged reading is. A
+    /// flagged reading is of a sphere or a held object within the padding, as
+    /// [`DepthImage::robot_mask`] tests, or of a shape within `margin`, as
+    /// [`with_shapes`](Self::with_shapes) tests; a flag a caller sets on a reading of none of them
+    /// takes nothing. `image` is the image the mask was made of.
     ///
-    /// `pixels` is a fact of the camera: how many pixels beside a depth jump it reads toward the
-    /// other surface. A sensor that samples each pixel's disparity a fraction of a pixel off
-    /// reads one; a stereo block matcher, half its window. Those readings lie behind the thing in
-    /// front, farther than the padding or the margin from it: its own outline read too deep, on
-    /// a ray that missed it or has passed through it, and the pixel behind it read toward it,
-    /// and they would be obstacles in mid-air beside it, where fingers go. A reading whose ray
-    /// goes on into a thing lies in front of it, and that thing never takes it: a table given as
-    /// a shape takes no reading of what stands on it, at any band and from any view, however far
-    /// its own readings a few rows below lie nearer. A reading level with a flagged surface is
-    /// measured against the thing's surface, not against the flagged readings and their noise,
-    /// and is kept within the margin of it. Given up: an outline read too near, in front of the
-    /// thing by more than the margin, stays a reading, and the honest readings just behind each
-    /// flagged outline, `pixels` wide, are taken with the rest, as of an object no shape
-    /// explains that stands within the band behind another's outline. Zero pixels changes
-    /// nothing.
-    ///
-    /// Called after [`with_shapes`](Self::with_shapes), it grows the shapes' flags as well as the
-    /// robot's; called before, the robot's alone. The space the mask frees in a grid or a map is
-    /// what it was.
+    /// `pixels` is the camera's: 1 for a sensor that samples disparity a fraction of a pixel off,
+    /// half the window for a stereo block matcher; 0 changes nothing. A reading in front of a
+    /// thing, as of what stands on a table given as a shape, is never taken. Called after
+    /// [`with_shapes`](Self::with_shapes), it grows the shapes' flags as well as the robot's. The
+    /// space the mask frees in a grid or a map is what it was.
     pub fn with_band(
         mut self,
         device: &Device,

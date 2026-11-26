@@ -44,4 +44,4 @@ Speed here is found by measuring and kept by proving no class got slower. CLAUDE
 - `#[inline(never)]` on a cost two loops share: the loop that needs it lost 2.5-3.7%. A const-generic copy cost neither.
 - A grid's lookup inlined into the loop over a link's spheres: slower among grids.
 
-The changes that were kept, with their numbers: `docs/benchmarks.md#how-the-speed-came`.
+The changes that were kept, with their numbers, up to 0.11.0: https://github.com/natsuku-lab/batchplan/blob/v0.11.0/docs/benchmarks.md#how-the-speed-came.
