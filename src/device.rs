@@ -25,7 +25,7 @@ use crate::cpu::{CpuBackend, CpuWorlds};
 use crate::edges::Search;
 #[cfg(feature = "gpu")]
 use crate::gpu::GpuBackend;
-use crate::ik::IkOptions;
+use crate::ik::{IkOptions, IkProblem};
 use crate::robot::Robot;
 use crate::sdf::{DepthImage, Layout, Occupancy, RobotMask, Weighing};
 use crate::trajopt::PlanOptions;
@@ -340,9 +340,9 @@ impl Device {
         let target = (0..robot.hands())
             .map(|h| Some(robot.ee_pose(q, h)))
             .collect();
-        let problem = crate::IkProblem {
+        let problem = IkProblem {
             targets: target,
-            ..crate::IkProblem::new(0, Pose::IDENTITY)
+            ..IkProblem::new(0, Pose::IDENTITY)
         };
         let ik = IkOptions {
             seeds: 1,
@@ -377,8 +377,8 @@ impl Device {
 
     /// Collision cost, its gradient and clearances for each configuration in `q` (`[items, dof]`)
     /// against `worlds[item_world[item]]`. Errors if `q` does not hold `dof` finite values per
-    /// item, an item names a world outside `worlds`, `worlds` were uploaded to another device, or the
-    /// weights make the cost not a number (a weight not finite, a margin not a number, or an
+    /// item, an item names a world outside `worlds`, `worlds` were uploaded to another device, or
+    /// the weights make the cost not a number (a weight not finite, a margin not a number, or an
     /// infinite margin with a weight on it).
     pub fn evaluate(
         &self,
@@ -640,7 +640,11 @@ impl Device {
             paths.positions.len(),
             paths.points * paths.dof,
         )?;
-        debug_assert_eq!(item_region.len(), item_world.len());
+        debug_assert_eq!(
+            item_region.len(),
+            item_world.len(),
+            "callers give each item a region"
+        );
         self.backend
             .trajopt(worlds, item_world, item_region, paths, o, deadline)
     }
@@ -705,8 +709,8 @@ pub(crate) fn fits_batch(problems: usize, each: usize) -> bool {
     items.is_some_and(|items| u32::try_from(items).is_ok())
 }
 
-/// That every value of the configurations `q` (`[items, dof]`) is finite: a NaN compares as clear of
-/// everything.
+/// That every value of the configurations `q` (`[items, dof]`) is finite: a NaN compares as clear
+/// of everything.
 fn finite(q: &[f32], dof: usize) -> Result<()> {
     if let Some(i) = q.iter().position(|v| !v.is_finite()) {
         return Err(input!(

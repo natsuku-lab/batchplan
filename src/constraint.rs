@@ -274,7 +274,8 @@ impl Region {
         for (k, l) in self.limits.iter().enumerate() {
             // The cost's rate per unit of each hand's linear and angular velocity.
             let (mut hand, mut frame) = ([Vec3::ZERO; 2], [Vec3::ZERO; 2]);
-            for r in s.rows.iter().filter(|r| r.limit == k) {
+            let limit_rows = s.rows.iter().filter(|r| r.limit == k);
+            for r in limit_rows {
                 let g = 2.0 * w * r.residual;
                 hand = [hand[0] + g * r.linear, hand[1] + g * r.angular];
                 frame = [frame[0] + g * r.frame[0], frame[1] + g * r.frame[1]];

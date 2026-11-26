@@ -128,9 +128,9 @@ impl Held {
     }
 }
 
-/// That `locked` (a task's or a hold's `locked`) names joints `robot` was loaded with locked and can
-/// take per task, at values it can: none carries a hand, whose IK, plans and constraints the call
-/// solves on the robot as loaded. An `Error::Input` naming `what` holds them where not.
+/// That `locked` (a task's or a hold's `locked`) names joints `robot` was loaded with locked and
+/// can take per task, at values it can: none carries a hand, whose IK, plans and constraints the
+/// call solves on the robot as loaded. An `Error::Input` naming `what` holds them where not.
 pub(crate) fn check_locked(robot: &Robot, locked: &HashMap<String, f32>, what: &str) -> Result<()> {
     if locked.is_empty() {
         return Ok(());
@@ -226,9 +226,9 @@ pub(crate) fn holders(device: &Device, robot: &Robot, helds: &[&Held]) -> Result
 const KEPT: usize = 64;
 
 /// Spheres fitted to held objects, in their own frames, kept by the devices that share hardware:
-/// fitting a cylinder or a capsule takes milliseconds, and every call holding it would fit it again.
-/// The least recently used goes first past [`KEPT`]. Calls that fit one object alike at once, as
-/// two groups of one call do, wait for the first: it is fitted once.
+/// fitting a cylinder or a capsule takes milliseconds, and every call holding it would fit it
+/// again. The least recently used goes first past [`KEPT`]. Calls that fit one object alike at
+/// once, as two groups of one call do, wait for the first: it is fitted once.
 #[derive(Default)]
 pub(crate) struct Fits(Mutex<VecDeque<Fit>>);
 

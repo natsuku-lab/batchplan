@@ -35,7 +35,7 @@ fn main() -> Result<()> {
 
     let args = Args::parse()?;
     let robot = batchplan_demos::panda()?;
-    let device = args.device(&robot, true)?;
+    let device = args.device(&robot, /* default_gpu */ true)?;
     let mut rng = Rng::new(args.count.unwrap_or(4) as u64);
     let mut truth = batchplan_demos::tabletop(&mut rng);
     truth

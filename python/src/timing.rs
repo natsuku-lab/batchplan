@@ -1,7 +1,6 @@
 //! Timing paths into trajectories.
 
 use numpy::{PyArray1, PyArrayMethods};
-use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
@@ -331,6 +330,7 @@ pub(crate) fn time<'py>(
     speed_scale: f32,
     hand_speeds: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyTuple>> {
+    use pyo3::IntoPyObjectExt;
     let paths = paths.try_iter()?.map(|path| field::floats(&path?));
     let paths: Vec<Vec<f32>> = paths.collect::<PyResult<_>>()?;
     let slices: Vec<&[f32]> = paths.iter().map(Vec::as_slice).collect();

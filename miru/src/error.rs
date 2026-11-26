@@ -13,4 +13,12 @@ macro_rules! ensure_input {
     };
 }
 
+/// `Error::Input` with a formatted message.
+macro_rules! input {
+    ($($message:tt)+) => {
+        ::batchplan::Error::Input(format!($($message)+))
+    };
+}
+
 pub(crate) use ensure_input;
+pub(crate) use input;

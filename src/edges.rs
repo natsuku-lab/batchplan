@@ -425,8 +425,8 @@ pub(crate) fn passes(a: &[f32], b: &[f32], spacing: f32) -> usize {
 /// unbounded time and memory.
 pub(crate) const MIN_SPACING: f32 = 1e-4;
 
-/// An `Error::Input` unless `resolution`, a spacing of collision checks that `what` names, is finite
-/// and at least `MIN_SPACING`.
+/// An `Error::Input` unless `resolution`, a spacing of collision checks that `what` names, is
+/// finite and at least `MIN_SPACING`.
 pub(crate) fn check_resolution(what: &str, resolution: f32) -> Result<()> {
     ensure_input!(
         (MIN_SPACING..f32::INFINITY).contains(&resolution),

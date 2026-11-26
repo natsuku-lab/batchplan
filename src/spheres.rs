@@ -66,16 +66,17 @@ pub struct SphereOptions {
     /// sphere's radius is at most how deep its center lies inside plus this
     /// ([`LinkQualification::overhang`]), so `Some(0.0)` keeps every sphere inside. Spheres are
     /// chosen as without it and then held to it, which leaves surface outside them wherever
-    /// `tolerance`, as the budget scales it, is the larger: [`Robot::qualify`](crate::Robot::qualify)
-    /// reports how deep as each link's `gap`. The geometry must be closed, every edge shared by
-    /// as many triangles one way as the other, with no shell facing inward, and a collision model
-    /// given with the options is held to it as a fitted one is. A center's depth is its distance to the nearest face of a
-    /// mesh that winds around it, a face buried in another shell among them, so it is never more
-    /// than the true depth. Depths are measured in the geometry as the fit sees it, a round shape
-    /// as its mesh of 24 sides, which lies inside it by up to 0.9% of a cylinder's radius and 1.7%
-    /// of a ball's or a capsule's; a held shape covered without fitting is held to the shape
-    /// itself, so `qualify` reads that much more for it. `None`: spheres cover the surface and
-    /// reach as far past it as the budget makes them.
+    /// `tolerance`, as the budget scales it, is the larger:
+    /// [`Robot::qualify`](crate::Robot::qualify) reports how deep as each link's `gap`. The
+    /// geometry must be closed, every edge shared by as many triangles one way as the other, with
+    /// no shell facing inward, and a collision model given with the options is held to it as a
+    /// fitted one is. A center's depth is its distance to the nearest face of a mesh that winds
+    /// around it, a face buried in another shell among them, so it is never more than the true
+    /// depth. Depths are measured in the geometry as the fit sees it, a round shape as its mesh of
+    /// 24 sides, which lies inside it by up to 0.9% of a cylinder's radius and 1.7% of a ball's or
+    /// a capsule's; a held shape covered without fitting is held to the shape itself, so `qualify`
+    /// reads that much more for it. `None`: spheres cover the surface and reach as far past it as
+    /// the budget makes them.
     pub max_overhang: Option<f32>,
     /// Largest spacing of the interior grid that proposes sphere centers (meters). Small links
     /// use a finer grid.
@@ -198,8 +199,8 @@ fn vertex_normals(meshes: &[TriMesh]) -> Vec<(Vec3, Vec3)> {
     out
 }
 
-/// Whether the sphere `(c, r)` reaches `p` within `overhang` beyond its radius: the scalar reference
-/// for the cover, its refinement and the samples' own candidates.
+/// Whether the sphere `(c, r)` reaches `p` within `overhang` beyond its radius: the scalar
+/// reference for the cover, its refinement and the samples' own candidates.
 #[inline]
 fn reaches(p: Vec3, (c, r): (Vec3, f32), overhang: f32) -> bool {
     (p - c).length_squared() <= (r + overhang) * (r + overhang)
@@ -246,7 +247,7 @@ fn inscribed(solids: &[Solid], p: Vec3) -> Option<(Vec3, f32)> {
     solids
         .iter()
         .filter_map(|s| {
-            let proj = s.mesh.project_local_point(p, false);
+            let proj = s.mesh.project_local_point(p, /* solid */ false);
             proj.is_inside.then(|| (p - proj.point).length())
         })
         .reduce(f32::max)
@@ -358,7 +359,7 @@ impl LinkFit {
                     if !inside {
                         return None;
                     }
-                    let proj = s.mesh.project_local_point(p, false);
+                    let proj = s.mesh.project_local_point(p, /* solid */ false);
                     (s.closed || proj.is_inside).then(|| (p - proj.point).length())
                 };
                 let radii = solids.iter().zip(&mut wound).filter_map(radius);
@@ -727,9 +728,9 @@ impl LinkFit {
     }
 }
 
-/// How well a robot's collision spheres fit its geometry ([`Robot::qualify`](crate::Robot::qualify)):
-/// a robot that loads may still have spheres unfit to plan with, such as fingers inside spheres too
-/// large to grasp small objects.
+/// How well a robot's collision spheres fit its geometry
+/// ([`Robot::qualify`](crate::Robot::qualify)): a robot that loads may still have spheres unfit to
+/// plan with, such as fingers inside spheres too large to grasp small objects.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Qualification {
@@ -872,7 +873,11 @@ pub(crate) fn fit(
     surface: Option<&[(Vec3, Vec3)]>,
 ) -> Fitted {
     debug_assert!(o.check().is_ok(), "callers check the options");
-    debug_assert_eq!(links.len(), tolerances.len());
+    debug_assert_eq!(
+        links.len(),
+        tolerances.len(),
+        "callers give each link a tolerance"
+    );
     debug_assert!(
         surface.is_none() || links.len() == 1,
         "a surface is one link's"
@@ -1205,7 +1210,8 @@ fn cylinder_cover(
     // A layer reaches at least `(sqrt(2) - 1)` of the half height past the cylinder: at its rim, a
     // sphere through a corner of the side reaches past the side or the faces by that.
     let layers = (std::f32::consts::SQRT_2 - 1.0) * half_height <= tolerance;
-    for rings in (2..).take_while(|_| layers) {
+    let ring_counts = (2..).take_while(|_| layers);
+    for rings in ring_counts {
         let mut any = false;
         for fine in [1.0, 1.5, 2.0, 3.0] {
             let (overhang, layer) = layer(rings, fine);
@@ -1311,8 +1317,8 @@ pub(crate) fn ignore_pairs(
             .iter()
             .map(|&(a, b)| {
                 let (sa, sb) = (
-                    solids[a].as_ref().expect("filtered"),
-                    solids[b].as_ref().expect("filtered"),
+                    solids[a].as_ref().expect("paired links have solids"),
+                    solids[b].as_ref().expect("paired links have solids"),
                 );
                 query::intersection_test(&pose(a), sa, &pose(b), sb)
                     .is_ok_and(|hit| hit.intersecting)
@@ -1457,7 +1463,7 @@ impl<'a> Depths<'a> {
 
         let (mut deepest, mut nearest) = (None::<f32>, f32::INFINITY);
         for (s, surface) in self.solids.iter().zip(&self.surfaces) {
-            let proj = s.mesh.project_local_point(p, false);
+            let proj = s.mesh.project_local_point(p, /* solid */ false);
             let to_surface = (p - proj.point).length();
             let wound = |surface: &Surface| surface.number(p) != 0;
             if surface.as_ref().map_or(proj.is_inside, wound) {

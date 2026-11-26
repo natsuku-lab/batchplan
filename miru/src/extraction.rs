@@ -191,7 +191,8 @@ fn lift_out(container: &Shape, body: &Shape, margin: f32, support: Floor) -> Opt
     let roundoff = 32.0 * f64::EPSILON * (position.abs() + half).max_element();
     let lip = f64::from(half_extents.z);
     // A measured support and its body store their heights separately in f32. At floor contact
-    // allow one representable step across the box height, independent of its distance from the origin.
+    // allow one representable step across the box height, independent of its distance from the
+    // origin.
     let floor_step = if support != Floor::Other && top.z > f64::from(floor.z) {
         2.0 * f64::from(half_extents.z - half_extents.z.next_down())
     } else {

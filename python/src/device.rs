@@ -1,6 +1,5 @@
 //! Devices, the worlds uploaded to them, and the contacts they report.
 
-use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyIndexError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -56,6 +55,7 @@ pub(crate) enum Contact {
 
 impl Field for batchplan::Contact {
     fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        use pyo3::IntoPyObjectExt;
         let mirror = match self {
             batchplan::Contact::World {
                 link,

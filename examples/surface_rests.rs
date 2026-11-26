@@ -23,7 +23,6 @@ use std::time::Instant;
 use anyhow::Result;
 use batchplan::{
     DepthImage, Device, Fall, Intrinsics, Obstacle, Pose, Rest, RestOptions, RestProblem, Surface,
-    falls_into, rest_failures, rests_on,
 };
 use glam::{Mat3, Quat, Vec2, Vec3};
 use rayon::prelude::*;
@@ -272,7 +271,7 @@ fn main() -> Result<()> {
             ..RestProblem::new(object, 0)
         }];
         let surfaces = std::slice::from_ref(s);
-        let (ms, found) = quickest(5, || rests_on(&device, &problems, surfaces, o));
+        let (ms, found) = quickest(5, || batchplan::rests_on(&device, &problems, surfaces, o));
         let found = found?.remove(0);
         if let Some(dir) = &dump {
             let rows: Vec<[f32; 8]> = found.iter().map(rest_row).collect();
@@ -354,7 +353,7 @@ fn main() -> Result<()> {
     // Where to let that can go over the basket for it to fall in and stay.
     let into = [RestProblem::new(can.clone(), 0)];
     let basket_seen = std::slice::from_ref(&inside);
-    let (ms, falls) = quickest(5, || falls_into(&device, &into, basket_seen, &o));
+    let (ms, falls) = quickest(5, || batchplan::falls_into(&device, &into, basket_seen, &o));
     let falls = falls?.remove(0);
     let first = falls.first().map(|f| f.pose.position);
     println!(
@@ -383,12 +382,14 @@ fn main() -> Result<()> {
     let cheese = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.0415, 0.021, 0.0095));
     let over = [RestProblem::new(cheese.clone(), 0)];
     let dishes = std::slice::from_ref(&dish);
-    let spots_alone = falls_into(&device, &over, dishes, &o)?.remove(0).len();
+    let spots_alone = batchplan::falls_into(&device, &over, dishes, &o)?
+        .remove(0)
+        .len();
     let closer = RestOptions {
         look_closer: true,
         ..o
     };
-    let (ms, falls) = quickest(5, || falls_into(&device, &over, dishes, &closer));
+    let (ms, falls) = quickest(5, || batchplan::falls_into(&device, &over, dishes, &closer));
     let falls = falls?.remove(0);
     let from_axis = |f: &Fall| f.pose.position.truncate().distance(middle.truncate()) * 1e3;
     println!(
@@ -477,7 +478,7 @@ fn main() -> Result<()> {
     let upright = [RestProblem::new(wine.clone(), 0)];
     let racks = std::slice::from_ref(&rack);
     let (ms, why) = quickest(5, || {
-        rest_failures(&device, &upright, racks, std::slice::from_ref(&bare), &o)
+        batchplan::rest_failures(&device, &upright, racks, std::slice::from_ref(&bare), &o)
     });
     println!("  why none, in {ms:.1} ms: {:?}", why?[0]);
     let mut topped = rack.clone();
@@ -505,7 +506,7 @@ fn main() -> Result<()> {
         })
         .collect();
     let table = std::slice::from_ref(&clutter);
-    let (ms, found) = quickest(3, || rests_on(&device, &boxes, table, &o));
+    let (ms, found) = quickest(3, || batchplan::rests_on(&device, &boxes, table, &o));
     let rests: usize = found?.iter().map(Vec::len).sum();
     println!(
         "64 boxes on that table in one call: {rests} rests in {ms:.1} ms, {:.1} ms a box",

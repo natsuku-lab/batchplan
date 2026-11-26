@@ -4,8 +4,8 @@
 //! small boxes. One `datagen::handover` call plans every episode: the giver picks the block up,
 //! both arms move at once to where they meet, the taker grasps its end, the giver lets go and
 //! returns home while the taker carries the block to the place pose and sets it down. Every step
-//! runs for every scene in one batch: planned paths, and straight moves in and away. The viewer shows every scene at once and the first
-//! episode's joints and grippers over time.
+//! runs for every scene in one batch: planned paths, and straight moves in and away. The viewer
+//! shows every scene at once and the first episode's joints and grippers over time.
 //!
 //!   ../scripts/fetch_rebot.sh ../data/rebot
 //!   cargo run --release --bin handover                            # 16 scenes, in the viewer
@@ -42,7 +42,7 @@ fn main() -> Result<()> {
     let count = args.count.unwrap_or(16);
     let robot = rebot::two_rebots(Path::new(REBOT))?;
     // Small batches plan sooner on the CPU, which pays no per-call GPU cost.
-    let device = args.device(&robot, false)?;
+    let device = args.device(&robot, /* default_gpu */ false)?;
     let mut rng = Rng::new(5);
     let (worlds, tasks): (Vec<World>, Vec<Handover>) = (0..count)
         .map(|i| {

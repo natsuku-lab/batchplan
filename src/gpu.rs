@@ -1068,7 +1068,16 @@ impl KernelSets {
                 .flat_map(move |lanes| ["traj_costs", "traj_samples"].map(move |e| (set, e, lanes)))
         });
         let pipelines = together(each.map(|(set, entry, lanes)| {
-            move || pipeline(device, &set.layout, &set.module, entry, lanes, true)
+            move || {
+                pipeline(
+                    device,
+                    &set.layout,
+                    &set.module,
+                    entry,
+                    lanes,
+                    /* constrained */ true,
+                )
+            }
         }));
         let pipelines: std::result::Result<Vec<_>, _> = pipelines.into_iter().collect();
         let mut pipelines = pipelines
@@ -1372,7 +1381,11 @@ fn build_kernels(
     }
     let built = together(each.map(|(entry, lanes)| {
         let (pl_main, module) = (&pl_main, &module);
-        move || pipeline(device, pl_main, module, entry, lanes, false)
+        move || {
+            pipeline(
+                device, pl_main, module, entry, lanes, /* constrained */ false,
+            )
+        }
     }));
     let built: std::result::Result<Vec<_>, _> = built.into_iter().collect();
     let mut built = built.map_err(cannot)?.into_iter();

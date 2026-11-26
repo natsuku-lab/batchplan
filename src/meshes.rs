@@ -269,8 +269,8 @@ impl MeshModel {
             .collect();
         let self_collision = nearest(self_pairs, &|a, b, best| {
             let (ma, mb) = (
-                self.links[a].as_ref().expect("paired"),
-                self.links[b].as_ref().expect("paired"),
+                self.links[a].as_ref().expect("paired links have meshes"),
+                self.links[b].as_ref().expect("paired links have meshes"),
             );
             if apart(&pose(a), &ma.hull, &pose(b), &mb.hull) >= best {
                 return best;

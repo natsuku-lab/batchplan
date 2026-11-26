@@ -78,7 +78,8 @@ impl Noise {
         self.constant + (self.linear + self.quadratic * depth) * depth
     }
 
-    /// Noise at a usable depth. The look also represents readings and their spread in inverse depth.
+    /// Noise at a usable depth. The look also represents readings and their spread in inverse
+    /// depth.
     pub(crate) fn at_reading(&self, depth: f32) -> Option<f32> {
         let sigma = self.at(depth);
         let spread = sigma / (depth * depth);
@@ -117,10 +118,11 @@ pub struct View<'a> {
     /// where the larger lies in another: otherwise they are the fringe of a mask, which a model
     /// never draws exact to the pixel, and go with the larger. What the view shows mostly in one
     /// mask is one object, whatever the depth shows between its parts. What it shows mostly in
-    /// two masks is two objects, whatever another view shows of them. The robot's readings and those outside the look's
-    /// corners stay what they are whatever a mask says, and what reads as a known shape is a
-    /// mask's thing only where it lies inside that thing, as a plate's floor does: the table
-    /// that a loose mask takes in stays the table's. Empty for a view without a model.
+    /// two masks is two objects, whatever another view shows of them. The robot's readings and
+    /// those outside the look's corners stay what they are whatever a mask says, and what reads as
+    /// a known shape is a mask's thing only where it lies inside that thing, as a plate's floor
+    /// does: the table that a loose mask takes in stays the table's. Empty for a view without a
+    /// model.
     pub masks: &'a [u32],
 }
 
