@@ -13,11 +13,6 @@
 //!     [--meshes]                   (also check successful plans against the Panda's meshes)
 //!     [--spheres curobo|vamp|fitted] (the Panda's collision spheres: cuRobo's hand-tuned
 //!                                    ones, VAMP's, or fitted to the meshes)
-//!     [--save paths.json]          (write the planned paths, as `scripts/compare_planners.py`
-//!                                    does; with one device, and --latency covering every problem)
-//! cargo run --release --example benchmark -- [data_dir] [--spheres S] --check <paths.json>
-//!     [--check ...]
-//!     judges planners' paths (`scripts/compare_planners.py`, `--save`) by one check
 //!
 //! For every set and device it reports two modes:
 //! - **plan**: plan from the start to the set's first IK solution (planning only);
@@ -208,8 +203,6 @@ struct Args {
     plan: PlanOptions,
     meshes: bool,
     spheres: String,
-    save: Option<PathBuf>,
-    check: Vec<PathBuf>,
 }
 
 fn args() -> Result<Args> {
@@ -220,8 +213,6 @@ fn args() -> Result<Args> {
         plan: PlanOptions::default(),
         meshes: false,
         spheres: "curobo".into(),
-        save: None,
-        check: vec![],
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -255,10 +246,6 @@ fn args() -> Result<Args> {
             }
             "--meshes" => a.meshes = true,
             "--spheres" => a.spheres = it.next().context("--spheres curobo|vamp|fitted")?,
-            "--save" => a.save = Some(PathBuf::from(it.next().context("--save paths.json")?)),
-            "--check" => a
-                .check
-                .push(PathBuf::from(it.next().context("--check paths.json")?)),
             s if s.starts_with("--") => bail!("unknown flag {s}"),
             s => a.data = PathBuf::from(s),
         }
@@ -412,19 +399,6 @@ fn main() -> Result<()> {
     }
     let robot = Robot::load(&urdf, &options)?;
     let cpu = Device::cpu(&robot)?;
-    if !args.check.is_empty() {
-        let mut sets = vec![];
-        for f in ["mb_set.yaml", "mpinets_set.yaml"] {
-            sets.extend(load(&args.data.join(f))?);
-        }
-        return check(
-            &args.check,
-            &robot,
-            &cpu,
-            &MeshModel::try_new(&robot)?,
-            &sets,
-        );
-    }
     let meshes = args
         .meshes
         .then(|| MeshModel::try_new(&robot))
@@ -436,11 +410,6 @@ fn main() -> Result<()> {
     if args.device != "gpu" {
         devices.push(Device::cpu(&robot)?);
     }
-    ensure!(
-        args.save.is_none() || devices.len() == 1,
-        "--save needs --device cpu or gpu"
-    );
-    let mut saved = serde_json::Map::new();
     let files = ["mb_set.yaml", "mpinets_set.yaml"];
     let mut sets = vec![];
     for f in files {
@@ -525,7 +494,6 @@ fn main() -> Result<()> {
             total_free += free_ends;
 
             let mut latency = vec![];
-            let timed_alone = plan_latency.len();
             for i in 0..args.latency.min(problems.len()) {
                 let t = Instant::now();
                 ik_and_plan(
@@ -542,31 +510,6 @@ fn main() -> Result<()> {
                 let t = Instant::now();
                 batchplan::plan(device, &device.upload(&scene[i..i + 1])?, &one, &args.plan)?;
                 plan_latency.push(t.elapsed().as_secs_f64() * 1e3);
-            }
-            if args.save.is_some() {
-                ensure!(
-                    args.latency >= problems.len(),
-                    "--save times every problem alone: pass --latency {}",
-                    problems.len()
-                );
-                let attempts = (0..problems.len())
-                    .map(|i| {
-                        let path = planned
-                            .best(i)
-                            .map(|solution| dense_path(&robot, solution))
-                            .transpose()?;
-                        let seconds = plan_latency[timed_alone + i] * 1e-3;
-                        Ok(serde_json::json!({
-                            "solved": path.is_some(),
-                            "seconds": seconds,
-                            "path": path,
-                        }))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                saved.insert(
-                    name.clone(),
-                    serde_json::json!({ "wall_seconds": plan_only.seconds, "problems": attempts }),
-                );
             }
             plan_seconds += plan_only.seconds;
             plan_meshes += plan_only.on_meshes;
@@ -641,221 +584,6 @@ fn main() -> Result<()> {
                 "all",
                 100.0 * total_meshes as f64 / total as f64
             );
-        }
-    }
-    if let Some(path) = &args.save {
-        let machine = devices[0].name();
-        let planners = serde_json::json!({ "batchplan": saved });
-        std::fs::write(
-            path,
-            serde_json::json!({ "machine": machine, "planners": planners }).to_string(),
-        )?;
-    }
-    Ok(())
-}
-
-/// A planned path as waypoints: its timed trajectory sampled as densely as `score` checks it.
-fn dense_path(robot: &Robot, solution: &[f32]) -> Result<Vec<Vec<f32>>> {
-    let trajectory = Trajectory::try_new(robot, solution, 1.0)?;
-    let dense = trajectory
-        .sample(JUDGE_PER_SPAN as f32 / trajectory.knot_interval)?
-        .positions;
-    Ok(dense.chunks(robot.dof()).map(<[f32]>::to_vec).collect())
-}
-
-#[derive(Deserialize)]
-struct Comparison {
-    machine: String,
-    planners: BTreeMap<String, BTreeMap<String, SetAttempts>>,
-}
-
-#[derive(Deserialize)]
-struct SetAttempts {
-    wall_seconds: f64,
-    problems: Vec<Attempt>,
-}
-
-#[derive(Deserialize)]
-struct Attempt {
-    solved: bool,
-    seconds: f64,
-    path: Option<Vec<Vec<f32>>>,
-}
-
-/// One path as the judge found it.
-struct Verdict {
-    length: f32,
-    /// It solves its problem on the loaded spheres.
-    on_spheres: bool,
-    /// It solves its problem clear of the meshes.
-    on_meshes: bool,
-}
-
-/// Judges planners' paths (`scripts/compare_planners.py` or `--save`, start to each set's first IK
-/// goal) by one check: the hand within 1 cm of the goal, the joints within their limits, and no
-/// collision along the path, sampled at most 0.005 rad apart, on the loaded spheres and on the
-/// Panda's meshes. Path lengths are compared again over the problems every planner solves on the
-/// spheres, and over those every planner solves clear of the meshes.
-fn check(
-    paths: &[PathBuf],
-    robot: &Robot,
-    cpu: &Device,
-    meshes: &MeshModel,
-    sets: &[(String, Vec<Problem>)],
-) -> Result<()> {
-    let mut planners = BTreeMap::new();
-    for path in paths {
-        let comparison: Comparison = serde_json::from_str(&std::fs::read_to_string(path)?)?;
-        println!("paths from {} ({})", path.display(), comparison.machine);
-        for (planner, by_set) in comparison.planners {
-            // A planner already loaded (batchplan on another device, say) is named after its file.
-            let name = match path.file_stem() {
-                Some(stem) if planners.contains_key(&planner) => {
-                    format!("{planner} ({})", stem.to_string_lossy())
-                }
-                _ => planner,
-            };
-            ensure!(!planners.contains_key(&name), "{name} appears twice");
-            planners.insert(name, by_set);
-        }
-    }
-    println!(
-        "{:<10} {:>5} {:>9} {:>11} {:>10} {:>14} {:>11} {:>8}",
-        "planner", "n", "claimed", "spheres ok", "meshes ok", "median ms", "problems/s", "length"
-    );
-    let n = robot.dof();
-    // Per planner and problem, how its path was judged.
-    let mut judged = BTreeMap::new();
-    for (planner, by_set) in &planners {
-        let (mut total, mut claimed, mut on_spheres, mut on_meshes, mut wall) = (0, 0, 0, 0, 0.0);
-        let mut per_set = vec![];
-        let (mut seconds, mut lengths, mut verdicts) = (vec![], vec![], vec![]);
-        for (name, problems) in sets {
-            let attempts = by_set
-                .get(name)
-                .with_context(|| format!("{planner} has no results for {name}"))?;
-            ensure!(
-                attempts.problems.len() == problems.len(),
-                "{planner} {name}: {} results",
-                attempts.problems.len()
-            );
-            let scene: Vec<World> = problems.iter().map(Problem::world).collect();
-            let worlds = cpu.upload(&scene)?;
-            wall += attempts.wall_seconds;
-            total += problems.len();
-            let before = (claimed, on_spheres, on_meshes);
-            for (i, (problem, attempt)) in problems.iter().zip(&attempts.problems).enumerate() {
-                seconds.push(attempt.seconds * 1e3);
-                let Some(waypoints) = attempt.path.as_ref().filter(|_| attempt.solved) else {
-                    verdicts.push(None);
-                    continue;
-                };
-                claimed += 1;
-                let mut dense: Vec<f32> = waypoints[0].clone();
-                for pair in waypoints.windows(2) {
-                    let step = pair[0]
-                        .iter()
-                        .zip(&pair[1])
-                        .map(|(a, b)| (b - a).abs())
-                        .fold(0.0, f32::max);
-                    let k = (step / 0.005).ceil().max(1.0) as usize;
-                    for s in 1..=k {
-                        let t = s as f32 / k as f32;
-                        dense.extend(pair[0].iter().zip(&pair[1]).map(|(a, b)| a + (b - a) * t));
-                    }
-                }
-                let items = dense.len() / n;
-                let goal = problem.hand_goal();
-                let hand = robot
-                    .link_pose(&dense[(items - 1) * n..], "panda_hand")
-                    .expect("panda_hand");
-                let reached = (hand.position - goal.position).length() < 0.01;
-                let within = dense.chunks(n).all(|q| {
-                    q.iter()
-                        .enumerate()
-                        .all(|(j, &v)| v >= robot.lower()[j] - 1e-4 && v <= robot.upper()[j] + 1e-4)
-                });
-                let eval = cpu.evaluate(
-                    &worlds,
-                    &vec![i as u32; items],
-                    &dense,
-                    &CollisionWeights::NONE,
-                )?;
-                let solved = reached && within && (0..items).all(|k| eval.collision_free(k));
-                on_spheres += usize::from(solved);
-                let length: f32 = waypoints
-                    .windows(2)
-                    .map(|w| {
-                        w[0].iter()
-                            .zip(&w[1])
-                            .map(|(a, b)| (b - a).powi(2))
-                            .sum::<f32>()
-                            .sqrt()
-                    })
-                    .sum();
-                lengths.push(length);
-                let clear = meshes.clearance(&scene, &vec![i as u32; items], &dense)?;
-                let clear = reached
-                    && within
-                    && clear.iter().all(
-                        |&Clearance {
-                             world: w,
-                             self_collision: s,
-                         }| w > 0.0 && s > 0.0,
-                    );
-                on_meshes += usize::from(clear);
-                verdicts.push(Some(Verdict {
-                    length,
-                    on_spheres: solved,
-                    on_meshes: clear,
-                }));
-            }
-            per_set.push((
-                name,
-                problems.len(),
-                claimed - before.0,
-                on_spheres - before.1,
-                on_meshes - before.2,
-            ));
-        }
-        for (name, n, c, s, m) in per_set {
-            println!("  {name:<28} {n:>5} {c:>9} {s:>11} {m:>10}");
-        }
-        let pct = |k: usize| format!("{:.1}%", 100.0 * k as f64 / total as f64);
-        println!(
-            "{:<10} {:>5} {:>9} {:>11} {:>10} {:>14.2} {:>11.1} {:>8.2}",
-            planner,
-            total,
-            pct(claimed),
-            pct(on_spheres),
-            pct(on_meshes),
-            percentile(&mut seconds, 0.5),
-            total as f64 / wall,
-            median(&lengths)
-        );
-        judged.insert(planner, verdicts);
-    }
-    let problems = sets.iter().map(|(_, p)| p.len()).sum::<usize>();
-    for meshes in [false, true] {
-        let passes = |v: &Verdict| if meshes { v.on_meshes } else { v.on_spheres };
-        let common: Vec<usize> = (0..problems)
-            .filter(|&i| judged.values().all(|v| v[i].as_ref().is_some_and(passes)))
-            .collect();
-        let judge = if meshes {
-            "clear of the meshes"
-        } else {
-            "on the spheres"
-        };
-        println!(
-            "median length over the {} problems every planner solves {judge}:",
-            common.len()
-        );
-        for (planner, verdicts) in &judged {
-            let lengths: Vec<f32> = common
-                .iter()
-                .map(|&i| verdicts[i].as_ref().expect("common").length)
-                .collect();
-            println!("  {planner:<10} {:.3}", median(&lengths));
         }
     }
     Ok(())

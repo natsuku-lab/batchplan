@@ -8,6 +8,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+- The `benchmark` example's `--save` and `--check` modes, `scripts/compare_planners.py` and
+  `scripts/cpp_planners.cc` are gone: they were the earlier comparison with other planners, which
+  `scripts/run_suite.sh` replaced and the docs stopped running in 0.11.0.
 - Miru's look joins a hollow's floor to the walls around it where a second view shows of the
   floor only a strip too narrow for a plane: that strip's last rows before a wall stand clear of
   the wall's plane as all of the floor does, and were counted as the floor hiding the wall, which
