@@ -309,17 +309,6 @@ fn plan_solves_every_problem_rrt_connect_reaches() {
                 d.name()
             );
         }
-        let stops: usize = result
-            .solved()
-            .map(|s| {
-                let cp: Vec<&[f32]> = s.solution.chunks(n).collect();
-                (1..cp.len() - 1)
-                    .filter(|&t| cp[t - 1] == cp[t] && cp[t] == cp[t + 1])
-                    .count()
-                    - 2
-            })
-            .sum();
-        eprintln!("MEASURE {}: stops {stops}", d.name());
         // Every plan, timed and sampled 4x denser than validation, under the CPU model.
         let (mut q, mut item_world) = (vec![], vec![]);
         for s in result.solved() {
