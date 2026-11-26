@@ -187,7 +187,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   how far past its spheres its readings lie. The depth is filtered, the robot and what its hands
   hold masked, the look taken after the `Memory`, and what no shape holds fused into the memory's
   map, the map's mask padded past what its grid grows toward collision. `Memory::after(&[Act])`
-  says once what the robot did (picked, let go, lost, pushed, drew), the map's share kept until
+  says once what the robot did (picked, let go, lost, pushed), the map's share kept until
   it is next read, so memories after different acts share one map. `Memory::world(&device, &Step)`
   gives the world to plan a step against, every obstacle named (`Of`): the fixtures, each object's
   solids or the room it takes up, its part of the map where the step goes into it, and one grid of
