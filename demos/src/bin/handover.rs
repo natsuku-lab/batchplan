@@ -42,7 +42,7 @@ fn main() -> Result<()> {
     let count = args.count.unwrap_or(16);
     let robot = rebot::two_rebots(Path::new(REBOT))?;
     // Small batches plan sooner on the CPU, which pays no per-call GPU cost.
-    let device = args.device(&robot, false)?;
+    let device = args.device(&robot, /* default_gpu */ false)?;
     let mut rng = Rng::new(5);
     let (worlds, tasks): (Vec<World>, Vec<Handover>) = (0..count)
         .map(|i| {

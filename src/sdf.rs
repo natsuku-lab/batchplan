@@ -1721,7 +1721,7 @@ impl SdfGrid {
             let points = (row as u32 * dims.x..).zip(crossings.numbers(row, &xs));
             for (d, (n, winding)) in distances.iter_mut().zip(points) {
                 let p = point(dims, origin, o.voxel, n);
-                let proj = solid.project_local_point(p, false);
+                let proj = solid.project_local_point(p, /* solid */ false);
                 let nearest = (p - proj.point).length();
                 *d = if winding == 0 { nearest } else { -nearest };
             }

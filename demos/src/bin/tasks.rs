@@ -156,7 +156,7 @@ fn main() -> Result<()> {
     let args = Args::parse()?;
     let count = args.count.unwrap_or(16);
     let robot = batchplan_demos::panda()?;
-    let device = args.device(&robot, false)?;
+    let device = args.device(&robot, /* default_gpu */ false)?;
     let mut rng = Rng::new(11);
     let (worlds, spots): (Vec<World>, Vec<Pose>) = (0..count).map(|i| scene(i, &mut rng)).unzip();
     let o = TaskOptions::default();

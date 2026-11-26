@@ -51,7 +51,7 @@ fn main() -> Result<()> {
     let count = args.count.unwrap_or(4);
     let robot = batchplan_demos::panda()?;
     // Replanning is a few problems at a time, where the CPU answers soonest.
-    let device = args.device(&robot, false)?;
+    let device = args.device(&robot, /* default_gpu */ false)?;
     let mut rng = Rng::new(
         std::env::var("SEED")
             .ok()

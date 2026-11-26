@@ -1135,7 +1135,7 @@ fn borders(
                             meeting.one += length;
                         } else if over.over < 0.0 && under.over < 0.0 {
                             meeting.crease += length;
-                            meet(true);
+                            meet(/* across */ true);
                         } else if told {
                             front = Some(if over.over > 0.0 { j } else { i });
                             by_sliver = planes.has[own] != planes.has[other];

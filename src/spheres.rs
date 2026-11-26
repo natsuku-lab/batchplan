@@ -246,7 +246,7 @@ fn inscribed(solids: &[Solid], p: Vec3) -> Option<(Vec3, f32)> {
     solids
         .iter()
         .filter_map(|s| {
-            let proj = s.mesh.project_local_point(p, false);
+            let proj = s.mesh.project_local_point(p, /* solid */ false);
             proj.is_inside.then(|| (p - proj.point).length())
         })
         .reduce(f32::max)
@@ -358,7 +358,7 @@ impl LinkFit {
                     if !inside {
                         return None;
                     }
-                    let proj = s.mesh.project_local_point(p, false);
+                    let proj = s.mesh.project_local_point(p, /* solid */ false);
                     (s.closed || proj.is_inside).then(|| (p - proj.point).length())
                 };
                 let radii = solids.iter().zip(&mut wound).filter_map(radius);
@@ -1461,7 +1461,7 @@ impl<'a> Depths<'a> {
 
         let (mut deepest, mut nearest) = (None::<f32>, f32::INFINITY);
         for (s, surface) in self.solids.iter().zip(&self.surfaces) {
-            let proj = s.mesh.project_local_point(p, false);
+            let proj = s.mesh.project_local_point(p, /* solid */ false);
             let to_surface = (p - proj.point).length();
             let wound = |surface: &Surface| surface.number(p) != 0;
             if surface.as_ref().map_or(proj.is_inside, wound) {
