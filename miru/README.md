@@ -10,8 +10,8 @@ view is batchplan's `DepthImage` with what a look needs besides, the shapes the 
 hold are its `Obstacle`s, an object's solids come back as obstacles, and a look runs on a
 `Device`'s threads. Nothing in it knows a robot, a hand, a camera model or a table: the robot is
 a mask per pixel, and a look reads nothing of its device's robot (`observe`, the look through
-batchplan, reads it to mask it). It is not published to crates.io; a program takes it from the
-repository with batchplan, at one revision.
+batchplan, reads it to mask it). It is published as `batchplan-miru`, with batchplan's version: a
+program adds `miru = { package = "batchplan-miru", version = "0.12" }` and writes `use miru::..`.
 
 ```rust,no_run
 use batchplan::glam::{Quat, Vec3};
@@ -926,7 +926,7 @@ the run.
   bowls and seven of boxes and what stands on, against or before them; none is on holed depth, which
   the recorded stereo set and the truth table's two stereo readings (next) are the checks of.
 - **The truth table holds the look to scenes built from known things, read through three
-  cameras** (`cargo test --release -p miru --test truth -- --nocapture`): the simulator's exact
+  cameras** (`cargo test --release -p batchplan-miru --test truth -- --nocapture`): the simulator's exact
   depth, an Intel RealSense D435 by its datasheet, and the D435 with a D405 near, the two stereo
   ones through batchplan's filter (`DepthImage::filtered`), as a caller's depth comes to a look.
   Fourteen scenes, a row per scene, camera and thing: how many objects the thing came out as, and
@@ -971,7 +971,7 @@ the run.
 - **What a look through `observe` costs.** On `rows4`, at the median of its 20 looks, 237 ms
   against the 72 ms of the look inside it on one of an M4 Pro's threads and 56 against 34 ms on its
   14; on `hand-in-drawer`, 280 against 116 ms and 82 against 60 ms; a `world` after it 6.0 to
-  6.1 ms on either (`cargo run --release -p miru --example score -- <set> --observe --threads <n>`,
+  6.1 ms on either (`cargo run --release -p batchplan-miru --example score -- <set> --observe --threads <n>`,
   which prints it per look and at the median: the median of three runs, at a load of 5 to 9). Over
   `look` alone it does batchplan's part: the filter, the two masks, the shapes and the band, and
   fusing the map, for the LIBERO Panda 23.9M voxels on the CPU device; and it clones that map, so
@@ -1424,7 +1424,7 @@ the run.
 - **Time**: a look of two 640 by 480 views among a cell's 17 fixtures takes 41 ms at the median
   on `rows4` and 42 ms on `rows4-stereo-filtered` on an M4 Pro's 14 threads, 48 and 56 ms on two,
   and 77 and 93 ms on one; a later look with open boxes in it (`hand-in-drawer`) 58, 71 and
-  115 ms (`cargo run --release -p miru --example score -- <set> --again --digest --threads <n>`:
+  115 ms (`cargo run --release -p batchplan-miru --example score -- <set> --again --digest --threads <n>`:
   the median look of the best of three rounds, alternated with the same looks through miru's
   own repository's code at dd15ef3, which took 50 and 55, 76 and 78, and 119 and 127 ms, and 90,
   116 and 168 on the later looks, at a load of 8 to 14 from other work). The scenes are the same
@@ -1449,5 +1449,5 @@ the run.
 ## Working on it
 
 `AGENTS.md` has miru's design rules, and the repository's `CLAUDE.md` the style and the working
-rules. From the repository's root, `scripts/check.sh` runs every lint and `cargo test -p miru` the
+rules. From the repository's root, `scripts/check.sh` runs every lint and `cargo test -p batchplan-miru` the
 tests, which render their own scenes.

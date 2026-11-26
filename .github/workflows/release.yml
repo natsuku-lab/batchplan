@@ -1,7 +1,8 @@
 name: Release
 
-# Version tags publish to crates.io and PyPI after the Python distributions pass their tests.
-# Pull requests and manual runs build the distributions without publishing.
+# Version tags publish batchplan and then batchplan-miru to crates.io, and the Python package to
+# PyPI, after the Python distributions pass their tests. Pull requests and manual runs build the
+# distributions without publishing.
 on:
   push:
     tags: ['v*']
@@ -11,6 +12,7 @@ on:
       - 'python/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'miru/Cargo.toml'
   workflow_dispatch:
 
 permissions:
@@ -53,7 +55,17 @@ jobs:
           def manifest(path):
               return tomllib.loads(pathlib.Path(path).read_text())
 
-          version = manifest('Cargo.toml')['package']['version']
+          root = manifest('Cargo.toml')
+          version = root['workspace']['package']['version']
+          for path in ('Cargo.toml', 'miru/Cargo.toml'):
+              assert manifest(path)['package']['version'] == {'workspace': True}, \
+                  f'{path} must take the workspace version'
+          assert manifest('miru/Cargo.toml')['package']['name'] == 'batchplan-miru', \
+              'The perception crate must be published as batchplan-miru'
+          assert root['workspace']['dependencies']['batchplan']['version'] == version, \
+              "batchplan-miru's requirement on batchplan must name the release version"
+          assert manifest('miru/Cargo.toml')['dependencies']['batchplan'] == {'workspace': True}, \
+              'batchplan-miru must take batchplan from the workspace'
           assert manifest('python/Cargo.toml')['package']['version'] == version, \
               'Rust and Python crate versions must match'
           assert manifest('python/pyproject.toml')['project']['name'] == 'batches', \
@@ -77,7 +89,9 @@ jobs:
         with:
           tool: cargo-semver-checks@0.51.0
       # Against the latest release on crates.io at or below this version, pre-releases skipped.
-      - run: cargo semver-checks
+      # batchplan alone: batchplan-miru has no release on crates.io to compare against until its
+      # first, so the check would fail on it; add it once a release of it is out.
+      - run: cargo semver-checks --package batchplan
 
   wheels:
     needs: versions
@@ -165,9 +179,41 @@ jobs:
       - uses: actions/checkout@v7
       - name: Check that the tag names the crate's version
         run: test "$GITHUB_REF_NAME" = "v$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "batchplan") | .version')"
+      # Both crates are packaged and built before either is uploaded: an upload cannot be undone.
+      - run: cargo package --package batchplan --package batchplan-miru
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
-      - run: cargo publish
+      - run: cargo publish --package batchplan
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  # The perception crate, after batchplan, whose new version it requires: a job of its own, so that
+  # if it fails it is rerun alone, batchplan's publish being done.
+  publish-miru:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: publish
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check that the tag names the crate's version
+        run: test "$GITHUB_REF_NAME" = "v$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "batchplan-miru") | .version')"
+      # `cargo publish` waits for batchplan to appear in the index, but may time out first; this
+      # reads the index until it is there, for ten minutes at most.
+      - name: Wait for batchplan's version on the index
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for _ in $(seq 60); do
+            curl -sf --max-time 20 https://index.crates.io/ba/tc/batchplan | grep -F "\"vers\":\"$version\"" > /dev/null && exit 0
+            sleep 10
+          done
+          echo "batchplan $version is not on the index"; exit 1
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish --package batchplan-miru
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 

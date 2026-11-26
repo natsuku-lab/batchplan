@@ -2,7 +2,7 @@
 //! `miru::look` makes of every thing held against what the scene was built from. For the table:
 //!
 //! ```text
-//! cargo test --release -p miru --test truth -- --nocapture
+//! cargo test --release -p batchplan-miru --test truth -- --nocapture
 //! ```
 //!
 //! **The cameras** stand where a robot's do, the same two for every scene: the tests' `EYE`, 78 cm

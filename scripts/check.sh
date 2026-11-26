@@ -19,9 +19,9 @@ cargo clippy --all-targets
 cargo clippy --all-targets --features lerobot,usd
 cargo clippy --all-targets --no-default-features
 cargo doc --no-deps --features lerobot,usd
-cargo clippy -p miru --all-targets
-cargo clippy -p miru --all-targets --features gpu
-cargo doc --no-deps -p miru
+cargo clippy -p batchplan-miru --all-targets
+cargo clippy -p batchplan-miru --all-targets --features gpu
+cargo doc --no-deps -p batchplan-miru
 (cd demos && CARGO_TARGET_DIR="$CARGO_TARGET_DIR/demos" cargo clippy --release --all-targets)
 (cd python && CARGO_TARGET_DIR="$CARGO_TARGET_DIR/python" cargo clippy --all-targets)
 (cd python && uv run --only-group dev ruff check . && uv run --only-group dev ruff format --check .)

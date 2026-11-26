@@ -235,6 +235,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "batchplan-miru"
+version = "0.12.0-beta.1"
+dependencies = [
+ "batchplan",
+ "glam",
+ "libc",
+ "png",
+ "rayon",
+ "serde_json",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -968,18 +980,6 @@ checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
 dependencies = [
  "adler2",
  "simd-adler32",
-]
-
-[[package]]
-name = "miru"
-version = "0.1.0"
-dependencies = [
- "batchplan",
- "glam",
- "libc",
- "png",
- "rayon",
- "serde_json",
 ]
 
 [[package]]

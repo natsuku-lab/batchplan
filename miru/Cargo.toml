@@ -1,15 +1,27 @@
 # What depth cameras show, as objects: a crate of its own, so the library never depends on it. It
 # takes batchplan's depth images, poses and obstacles, and a look runs on a batchplan device.
+# Published as `batchplan-miru` (the name `miru` was taken), with batchplan's version and in the
+# same release; its library is still `miru`.
 [package]
-name = "miru"
-version = "0.1.0"
+name = "batchplan-miru"
+version.workspace = true
 edition = "2024"
 rust-version = "1.90"
-description = "What depth cameras show, as objects: which pixels are one thing, which object is which from look to look, its shape and what it rests on"
-publish = false
+description = "Perception for batchplan: what depth cameras show, as objects. Which pixels are one thing, which object is which from look to look, its shape and what it rests on"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/natsuku-lab/batchplan"
+readme = "README.md"
+keywords = ["robotics", "perception", "depth-camera", "segmentation", "point-cloud"]
+categories = ["science::robotics", "computer-vision"]
+# The library and the README, its page on crates.io. The tests and the scorer read the
+# repository's robots and recorded looks, which the package does not hold.
+include = ["/src/", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
+
+[lib]
+name = "miru"
 
 [dependencies]
-batchplan = { path = "..", default-features = false }
+batchplan = { workspace = true }
 glam = { workspace = true }
 rayon = "1"
 
