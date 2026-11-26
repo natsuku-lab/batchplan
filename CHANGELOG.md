@@ -356,9 +356,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   comes end for end too. It rests as it is set down, not tipped or slid into place: a slope needs
   the rotation that lies flat on it. `RestProblem::near` names a point to look closer around, a cell
   of the support apart, for a rest the spots are too far apart to find, as the middle of a dished
-  plate under a wide flat bottom. A support point whose normal faces down holds nothing up. A can
-  or a capsule laid on its side rolls, within half the spacing and `touching`, into the cradle
-  between two bars or a rack's groove or down to a lip, and has no rest on a flat support. Many
+  plate under a wide flat bottom. A support point whose normal faces down holds nothing up, but
+  where a camera above it saw it (`seen_from_above_holds`). A can or a capsule laid on its side
+  rolls, within half the spacing and `touching`, into the cradle between two bars or a rack's
+  groove or down to a lip, and has no rest on a flat support. Many
   problems run in one call, each surface read once. `examples/surface_rests.rs` times it, and
   `scripts/validate_rests.py` lets go of each rest in MuJoCo. Two options, both on by default
   (`false` turns either off), find more. With `RestOptions::look_closer`, of the spots where the
