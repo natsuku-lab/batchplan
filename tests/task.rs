@@ -2359,8 +2359,8 @@ fn seen(at: Vec3, half: Vec3, object: bool, s: &mut Surface) {
 /// Grasps whose fingers come in narrower (`GraspOptions::narrow`) are picked by them: a box too
 /// long to close along stands 3 cm from a wall as tall as it, which the open fingers closing
 /// across it would be in, so seen as it is it has no grasp. With fingers that may come in
-/// narrower it has, each with its opening, the box's width, and one pick whose grasps lock the
-/// fingers there
+/// narrower it has, each with its opening, a surface's noise wider than the box to each finger,
+/// and one pick whose grasps lock the fingers there
 /// (`Pick::locked`) plans by them on every device; the same grasps with the fingers as loaded
 /// stop at the wall.
 #[test]
@@ -2399,9 +2399,10 @@ fn grasps_whose_fingers_come_in_narrower_are_picked_beside_a_wall() {
         );
         let found = on(&narrow);
         assert!(!found.is_empty(), "{name}");
-        // As far from the wall as they can stand: on the box.
+        // As far from the wall as they can stand: a surface's noise off the box, each finger.
         for g in &found {
-            assert!((g.opening - 2.0 * half.x).abs() < 1e-6, "{name}: {g:?}");
+            let nearest = 2.0 * half.x + 2.0 * 0.0025;
+            assert!((g.opening - nearest).abs() < 1e-6, "{name}: {g:?}");
         }
         let fingers = |opening: f32| -> std::collections::HashMap<String, f32> {
             ["panda_finger_joint1", "panda_finger_joint2"]

@@ -1645,7 +1645,8 @@ pub struct GraspOptions {
     /// Whether the fingers may come in to a grasp of a surface less open than `opening`: false,
     /// every grasp is checked with the fingers as the robot's locked joints hold them. With it,
     /// each finger is taken to slide along the hand's y axis, and a grasp comes in at the
-    /// opening ([`Grasp::opening`](crate::Grasp::opening)), of sixteenths of `opening`, that
+    /// opening ([`Grasp::opening`](crate::Grasp::opening)), of sixteenths of `opening` that
+    /// leave each finger 2.5 mm, a surface's noise, clear of the patch it closes on, that
     /// keeps its fingers farthest from what is not the object's, the floor included: with
     /// something within their own travel of the open fingers, the narrowest the hand is clear
     /// at, since a planner lets the fingers touch what they grasp and nothing else, and knows
@@ -1661,9 +1662,9 @@ pub struct GraspOptions {
     /// A point to grip a surface near, in its frame, for grasps of a surface: `None`, the pairs
     /// of patches spread over the object. With a point, within each of the tiers
     /// [`grasps_on`](crate::grasps_on) orders its grasps by (walls seen from one side after
-    /// those seen from both, and within each, with [`first_touch`](Self::first_touch), fingers
-    /// that close onto their patches first before the rest, from above before a turn to either
-    /// side, and pairs that face each other within half a friction cone of square before the
+    /// those seen from both, and within each, from above before a turn to either side, with
+    /// [`first_touch`](Self::first_touch) fingers that close onto their patches first before the
+    /// rest, and pairs that face each other within half a friction cone of square before the
     /// rest), the pairs whose middles lie nearest the point come first, the squarest first of two
     /// as near: where a caller was told to grip, as on a knob's axis or at a handle's middle. It
     /// orders the grasps and finds no others.
@@ -1676,8 +1677,8 @@ pub struct GraspOptions {
     pub close_on: Option<Vec3>,
     /// Whether grasps of a surface ([`grasps_on`](crate::grasps_on)) whose fingers close onto
     /// their patches before they meet any other part of what was seen of the object come first,
-    /// within the lot of two seen sides and again within the lot of one: false, the order is as
-    /// without it. A finger closing level deep across a wall that leans over its patch, as a
+    /// within each turn of the lot of two seen sides and of the lot of one, so from above still
+    /// comes before a turn to either side: false, the order is as without it. A finger closing level deep across a wall that leans over its patch, as a
     /// flared bowl's, meets the wall above the patch first, a finger's length from the other
     /// contact, and the object turns in the hand as it is lifted: with this, such grasps come
     /// after the rest, none left out. What a finger meets is the object's patches: the means of

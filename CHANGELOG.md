@@ -8,9 +8,16 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+- With `GraspOptions::narrow`, `grasps_on` no longer has the fingers come in nearer their patches
+  than a surface's noise, 2.5 mm to each finger: of the sixteenths of the opening, the narrowest is
+  the first that leaves it, where it was the first as wide as the patches. A hand that came in
+  4.9 mm open on a bowl's 2.5 mm wall, turned 44 degrees about its closing line, put a finger on
+  the rim before it closed and pushed the bowl 2 cm; at 9.9 mm it closes on the wall and lifts it.
+  A grasp clear only nearer than that is drawn back or left out.
 - `GraspOptions::first_touch` (off by default): `grasps_on` puts the grasps whose fingers close
   onto their patches before meeting any other part of what was seen of the object ahead of the
-  rest, within the two lots of two seen sides and one. A finger closing level deep across a wall
+  rest, within each turn of the two lots of two seen sides and one, so from above still comes
+  before a turn to either side. A finger closing level deep across a wall
   that leans over its patch meets the wall above it instead, and the object turns in the hand as
   it is lifted: a LIBERO bowl picked so turned 15 degrees and touched the plate while still held.
   **Breaking:** Rust literals that list every field of `GraspOptions` need `first_touch`.

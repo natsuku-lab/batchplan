@@ -454,9 +454,10 @@ const RINGS: usize = 8;
 /// spread over the object, each the farthest from those before it, or with a point to grip near
 /// ([`GraspOptions::near`]) the nearest it first. With a
 /// [`shell`](GraspOptions::shell), grasps supported by views past a wall follow those with
-/// both sides seen. With [`first_touch`](GraspOptions::first_touch), within each of those two
-/// lots, the grasps whose fingers close onto their patches before they meet any other part of
-/// what was seen of the object come first, the rest after them in the same order: a finger that
+/// both sides seen. With [`first_touch`](GraspOptions::first_touch), within each turn of each
+/// of those two lots, the grasps whose fingers close onto their patches before they meet any
+/// other part of what was seen of the object come first, the rest after them in the same order,
+/// so that from above still comes before a turn to either side: a finger that
 /// meets a wall leaning over its patch, or a lip above it, closes there instead, a finger's length
 /// from the other contact, and the object turns in the hand. [`GraspOptions::close_on`] appends
 /// intermediate approaches that enclose the point after all ordinary grasps, again with two seen
@@ -697,7 +698,10 @@ fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
         by_turn.collect::<Vec<_>>()
     };
     // Every pair from above, then every pair a turn on: the pairs being spread over the object,
-    // so are the first few grasps. Those of walls seen from one side after the rest, alike.
+    // so are the first few grasps. Those of walls seen from one side after the rest, alike. The
+    // fingers that close onto their patches first come first within a turn, never ahead of a turn
+    // before theirs: a hand turned to the side that closes cleanly is no better than one from
+    // above.
     let proposals = |pair: &Pair, one_sided: bool, turns: usize| match o.narrow {
         true => narrowly(pair, one_sided, &near, open, reach, o, turns),
         false => full(pair, one_sided, turns),
@@ -708,15 +712,15 @@ fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
             .par_iter()
             .map(|p| proposals(p, one_sided, o.turns))
             .collect();
-        let start = grasps.len();
         for turn in 0..o.turns {
+            let start = grasps.len();
             let at_turn = each
                 .iter()
                 .flat_map(|by_turn| by_turn[turn].iter().copied());
             grasps.extend(at_turn);
-        }
-        if let Some(touch) = &touch {
-            touch.order(open, &mut grasps[start..]);
+            if let Some(touch) = &touch {
+                touch.order(open, &mut grasps[start..]);
+            }
         }
     }
     if let Some(point) = o.close_on {
@@ -880,13 +884,15 @@ fn narrowly(
 }
 
 /// The opening the hand comes in with at `pose`, closing on patches `width` apart, where its
-/// fingers may come in narrower ([`GraspOptions::narrow`]), if it is clear at one. Each finger's
+/// fingers may come in narrower ([`GraspOptions::narrow`]), if it is clear at one: none that
+/// brings a finger nearer its patch than a surface's noise ([`THINNEST`]). Each finger's
 /// spheres are taken to slide along the closing line, and the opening is the one farthest from
 /// any at which they would be in what is not the object's, were they to open as far past open as
 /// they close: a planner lets the fingers touch what they grasp and nothing else, and knows what
 /// stands around less finely than the points do. Of the openings as far, the one with the most
 /// room, as far from the nearest the hand is in anything at farther apart as from the nearest
-/// nearer, the patches at the last; and of those, the widest, so the whole opening with nothing
+/// nearer, a surface's noise off the patches at the last; and of those, the widest, so the whole
+/// opening with nothing
 /// near. With it, whether the open hand is clear there; and unless `whole`, only that is looked
 /// for, the opening the whole one. `reach` is how far the hand reaches past its frame.
 fn narrowed(
@@ -907,8 +913,10 @@ fn narrowed(
         let origin = if k > 0 { o.opening } else { open.gap };
         origin - 2.0 * k as f32 * step
     };
+    // No nearer its patch than a surface's noise, each finger: one that comes in nearer may be on
+    // the patch's wall before it closes, and pushes what it was to grasp.
     let most = match whole {
-        true => last_opening(o.opening, width, step),
+        true => last_opening(o.opening, width + 2.0 * THINNEST, step),
         false => 0,
     };
     // The openings from `first` to `last`, as bits: one for each count of steps the fingers
