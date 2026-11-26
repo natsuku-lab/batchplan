@@ -9,7 +9,7 @@ mod common;
 use std::collections::HashMap;
 
 use batchplan::{Device, GraspOptions, Intrinsics, Pose};
-use common::{Frame, block, device_of, known, looking, panda, table};
+use common::{Frame, block, device_of, known, looking, panda, panda_gripper, table};
 use glam::{Quat, Vec3};
 use miru::{Camera, Look, LookOptions, Memory, MemoryOptions, Scene, Stance, observe};
 
@@ -102,11 +102,11 @@ fn a_look_on_a_one_thread_device_works_on_its_one_thread() {
     };
     let down = Quat::from_rotation_x(std::f32::consts::PI);
     let poses = [0.055, 0.2].map(|z| Pose::new(Vec3::new(0.5, 0.0, z), down));
+    let gripper = panda_gripper(&robot);
     let closures = kept.observed_closures(
         &device,
         object.id,
-        0,
-        0.0..=0.08,
+        &gripper,
         &poses,
         &GraspOptions::default(),
     );

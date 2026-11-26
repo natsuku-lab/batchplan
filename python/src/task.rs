@@ -18,7 +18,8 @@ use crate::world::{Obstacle, Pose, World};
 value_class! {
     /// Grasps `grasps` proposes for a parallel gripper.
     GraspOptions(batchplan::GraspOptions) {
-        /// The widest the fingers open (meters): 8 cm.
+        /// The widest the fingers open (meters): 8 cm. Grasps of a surface take their gripper's
+        /// (`Gripper.opening`).
         opening: f32,
         /// How far in from the object's surface the IK frame holds it (meters): 2 cm. Above a
         /// `floor`, a grasp from above may hold it less deep, its frame even outside the object.
@@ -43,9 +44,8 @@ value_class! {
         /// 0, each grasp comes once toward each end; a hand that will pass the object to another
         /// (`handover`) holds it toward one end, as 0.75.
         along: f32,
-        /// The friction between a fingertip and what it presses on, for grasps of a surface:
-        /// 0.5. The line a grasp closes along lies within `atan(friction)` of the normal of each
-        /// patch it presses on.
+        /// The friction between a fingertip and what it presses on: 0.5. Grasps of a surface take
+        /// their gripper's (`GripperCalibration.friction`).
         friction: f32,
         /// The radius of the patch a fingertip presses on, for grasps of a surface (meters): 5 mm.
         contact: f32,
@@ -53,13 +53,13 @@ value_class! {
         /// that must be clear of what was seen (meters): 10 cm.
         approach: f32,
         /// The thickest wall seen from one side only that a grasp of a surface may close across,
-        /// where the cameras saw past it (meters), and never more than `opening`: `math.inf`, a
-        /// wall as thick as the fingers open. `None` turns it off, every grasp closing on two
-        /// patches seen.
+        /// where the cameras saw past it (meters), and never more than its gripper's capacity:
+        /// `math.inf`, a wall as thick as the gripper grasps. `None` turns it off, every grasp
+        /// closing on two patches seen.
         shell: Option<f32>,
-        /// Whether the fingers may come in to a grasp of a surface less open than `opening`,
-        /// each grasp at the opening that keeps them farthest from what is not the object's:
-        /// false.
+        /// Whether the fingers may come in to a grasp of a surface less open than its gripper's
+        /// `opening`, each grasp at the opening that keeps them farthest from what is not the
+        /// object's: false.
         narrow: bool,
         /// A point to grip a surface near, in the surface's frame: `None`, the grasps spread over
         /// the object. With a point, within each of their tiers, the pairs nearest it first.
@@ -78,15 +78,6 @@ value_class! {
         #[pyo3(signature = (**changes))]
         fn new(changes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
             Ok(Self(Self::changed(Default::default(), changes)?))
-        }
-
-        /// The openings a grasp may come in at where `narrow` lets it (meters), widest first:
-        /// `opening` and each sixteenth of it less. A place may let go at the same
-        /// (`Place.open`), each as the fingers' joint values.
-        #[getter]
-        fn openings<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-            let openings = self.0.openings().into_iter().map(field::shortest);
-            PyTuple::new(py, openings)
         }
     }
 }

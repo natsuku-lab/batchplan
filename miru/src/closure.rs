@@ -1,8 +1,6 @@
 //! What a parallel hand approaching open and closing would intercept in a retained observation.
 
-use std::ops::RangeInclusive;
-
-use batchplan::{Device, GraspOptions, HandSphere, Pose, Surface};
+use batchplan::{Device, GraspOptions, Gripper, HandSphere, Pose, Surface};
 use glam::{Mat3, Vec3};
 
 use crate::error::{Result, ensure_input};
@@ -26,9 +24,10 @@ pub enum ClosureEvidence {
 
 impl Kept {
     /// Inspects fully open, straight approaches and symmetric closures at supplied hand poses.
-    /// All poses are in the observation frame, in input order. Supply the calibrated closed and
-    /// loaded widths of a hand qualified by `Robot::parallel_jaw_opening`. The loaded robot's
-    /// hand spheres describe the open pose. Only `approach` and `floor` are used from `options`.
+    /// All poses are in the observation frame, in input order. `gripper` is the hand, from
+    /// `Robot::gripper` for `device`'s robot: its spheres describe the open pose, and it closes
+    /// from its loaded gap to its closed one, its jaws sliding: a gripper whose jaws do not is an
+    /// `Error::Input`. Only `approach` and `floor` are used from `options`.
     /// On `device`'s threads, each pose's evidence the same on any number of them. No visible
     /// reading for `id` gives `None`.
     ///
@@ -38,21 +37,20 @@ impl Kept {
         &self,
         device: &Device,
         id: u32,
-        hand: usize,
-        gaps: RangeInclusive<f32>,
+        gripper: &Gripper,
         poses: &[Pose],
         options: &GraspOptions,
     ) -> Result<Option<Vec<ClosureEvidence>>> {
-        let robot = device.robot();
+        let (robot, hand) = (device.robot(), gripper.hand());
         ensure_input!(
             hand < robot.hands(),
             "invalid hand {hand} for {} hands",
             robot.hands()
         );
-        let (closed, loaded) = (*gaps.start(), *gaps.end());
         ensure_input!(
-            closed >= 0.0 && closed < loaded && loaded.is_finite(),
-            "invalid closed and loaded widths {closed} and {loaded}"
+            gripper.sliding(),
+            "hand {hand}'s gripper does not slide (Gripper::sliding): the closure is checked \
+             with each jaw sliding along the hand's y axis"
         );
         ensure_input!(
             options.approach.is_finite()
@@ -79,10 +77,7 @@ impl Kept {
         if poses.is_empty() {
             return Ok(Some(Vec::new()));
         }
-        let spheres = robot.hand_spheres(hand);
-        Ok(Some(
-            self.closures(device, label, &spheres, gaps, poses, options)?,
-        ))
+        Ok(Some(self.closures(device, label, gripper, poses, options)?))
     }
 
     /// [`inspect`] at each of `poses`, against the retained endpoints off the robot, those `label`
@@ -93,12 +88,11 @@ impl Kept {
         &self,
         device: &Device,
         label: Label,
-        hand: &[HandSphere],
-        gaps: RangeInclusive<f32>,
+        gripper: &Gripper,
         poses: &[Pose],
         options: &GraspOptions,
     ) -> Result<Vec<ClosureEvidence>> {
-        let sweep = Sweep::new(hand, &gaps, options.approach);
+        let sweep = Sweep::new(gripper, options.approach);
         let (lo, hi) = (sweep.lo, sweep.hi);
         let (mid, half) = ((lo + hi) * 0.5, (hi - lo) * 0.5);
         let mut low = Vec3::splat(f32::INFINITY);
@@ -183,9 +177,10 @@ pub(crate) struct Sweep<'a> {
 }
 
 impl<'a> Sweep<'a> {
-    /// `hand` closing between `gaps` after coming in open along `approach` (meters).
-    pub(crate) fn new(hand: &'a [HandSphere], gaps: &RangeInclusive<f32>, approach: f32) -> Self {
-        let stroke = gaps.end() - gaps.start();
+    /// `gripper`'s hand closing from its loaded gap to its closed one after coming in open along
+    /// `approach` (meters).
+    pub(crate) fn new(gripper: &'a Gripper, approach: f32) -> Self {
+        let (hand, stroke) = (gripper.spheres(), gripper.opening() - gripper.closed_gap());
         let boxes: Vec<(Vec3, Vec3)> = hand.iter().map(|s| reach(s, stroke, approach)).collect();
         let (lo, hi) = boxes.iter().fold(
             (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),

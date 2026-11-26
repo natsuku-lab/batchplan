@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use batchplan::{
-    CollisionModel, DepthImage, Device, Intrinsics, Obstacle, Pose, Robot, RobotOptions, SdfGrid,
+    CollisionModel, DepthImage, Device, Gripper, GripperCalibration, Intrinsics, Obstacle, Pose,
+    Robot, RobotOptions, SdfGrid,
 };
 use glam::{Mat3, Quat, Vec2, Vec3};
 use miru::{Noise, Shape, View};
@@ -73,6 +74,11 @@ pub fn device() -> &'static Device {
 /// The Franka Panda as the library's examples load it (`examples/common/mod.rs`): its fingers
 /// held open, a tool frame below the hand, and the collision spheres converted from cuRobo.
 pub fn panda() -> Robot {
+    panda_with_hands(&["ee_link"])
+}
+
+/// [`panda`] with a hand at each of `ee_links`.
+pub fn panda_with_hands(ee_links: &[&str]) -> Robot {
     let asset = |path: &str| format!("{}/../assets/franka/{path}", env!("CARGO_MANIFEST_DIR"));
     let fingers = [
         ("panda_finger_joint1".to_string(), 0.04),
@@ -80,13 +86,26 @@ pub fn panda() -> Robot {
     ];
     let spheres = CollisionModel::load(asset("panda_collision.json")).expect("the Panda's spheres");
     let options = RobotOptions {
-        ee_links: vec!["ee_link".into()],
+        ee_links: ee_links.iter().map(|link| link.to_string()).collect(),
         lock_joints: HashMap::from(fingers),
         default_q: Some(vec![0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]),
         collision_model: Some(spheres),
         ..Default::default()
     };
     Robot::load(asset("franka_panda.urdf"), &options).expect("the Panda")
+}
+
+/// The Panda's finger joints closed, the pads touching: what `GripperCalibration::closed` takes
+/// for the hand of [`panda`].
+pub fn panda_closed() -> HashMap<String, f32> {
+    let closed = ["panda_finger_joint1", "panda_finger_joint2"].map(|j| (j.to_string(), 0.0));
+    HashMap::from(closed)
+}
+
+/// The hand of [`panda`] as a gripper: its pads 8 cm apart as loaded, closing to nothing.
+pub fn panda_gripper(robot: &Robot) -> Gripper {
+    let calibration = GripperCalibration::new(0.08, 0.0, panda_closed());
+    robot.gripper(0, &calibration).expect("the Panda's hand")
 }
 
 /// The devices a look runs on here: the CPU's of one thread and of all of them, and the GPU's

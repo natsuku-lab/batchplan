@@ -1572,14 +1572,15 @@ pub fn place_poses(object: &Obstacle, pose: Pose, turns: usize) -> Vec<Pose> {
 /// How grasps are proposed for a parallel gripper whose IK frame lies between its fingertips, its
 /// z axis pointing out of the hand and its y axis along the fingers' closing direction (as the
 /// examples' Panda `ee_link`): by [`grasps`], for a box, ball, cylinder or capsule, and by
-/// [`grasps_on`](crate::grasps_on), for what cameras see of any shape. Both read `opening`,
-/// `turns`, `floor` and `overlap`; `depth`, `tip` and `along` are for `grasps` alone, whose
-/// hand is the options' own, and `friction`, `contact`, `approach` and `near` for `grasps_on`
-/// alone, whose hand is the robot's. [`Grasp::moment`](crate::Grasp::moment) reads `friction`
-/// and `contact`.
+/// [`grasps_on`](crate::grasps_on), for what cameras see of any shape. Both read `turns`,
+/// `floor` and `overlap`; `opening`, `depth`, `tip` and `along` are for `grasps` alone, whose
+/// hand is the options' own, and `contact`, `approach` and `near` for `grasps_on` alone, whose
+/// hand is the robot's, its widths and friction a [`Gripper`](crate::Gripper)'s.
+/// [`Grasp::moment`](crate::Grasp::moment) reads `friction` and `contact`.
 #[derive(Clone, Copy, Debug)]
 pub struct GraspOptions {
-    /// The widest the fingers open (meters): 8 cm.
+    /// The widest the fingers open (meters): 8 cm. Read by [`grasps`];
+    /// [`grasps_on`](crate::grasps_on) takes it from its [`Gripper`](crate::Gripper).
     pub opening: f32,
     /// How far in from the object's surface the IK frame holds it (meters): 2 cm. Above a `floor`,
     /// a grasp from above may hold it less deep, its frame even outside the object.
@@ -1592,7 +1593,7 @@ pub struct GraspOptions {
     pub tip: f32,
     /// A height the hand's frame and its open fingers stay above, in the frame the object is
     /// placed in (meters): the top of the table it stands on, and room to spare, for the fingers'
-    /// thickness too. The fingers are taken `opening` apart and reaching `tip` past the frame, so
+    /// thickness too. The fingers are taken open and reaching `tip` past the frame, so
     /// one sits lower where the closing direction is not level. A grasp from above that would take
     /// them lower holds the object less deep, its frame above the object if need be, and one that
     /// leaves less than `overlap` of the fingers in it is left out, as are grasps from below and
@@ -1611,10 +1612,10 @@ pub struct GraspOptions {
     /// the hand that takes it. A ball's grasps, and a round object's from its ends or closing along
     /// its axis, stay in the middle; those closing around its side slide along the axis.
     pub along: f32,
-    /// The friction between a fingertip and what it presses on, for grasps of a surface
-    /// ([`grasps_on`](crate::grasps_on)): 0.5, as Dex-Net samples grasps with. The line a grasp
-    /// closes along lies within the friction cone of each patch it presses on, `atan(friction)`
-    /// from the patch's normal; less asks for patches that face each other more squarely.
+    /// The friction between a fingertip and what it presses on: 0.5. Read by
+    /// [`Grasp::moment`](crate::Grasp::moment) and [`order_for_turn`](Self::order_for_turn);
+    /// [`grasps_on`](crate::grasps_on) takes it from its [`Gripper`](crate::Gripper)
+    /// ([`GripperCalibration::friction`](crate::GripperCalibration::friction)).
     pub friction: f32,
     /// The radius of the patch a fingertip presses on, for grasps of a surface (meters): 5 mm.
     /// A patch is the mean of the points within it, and surfaces nearer each other than this
@@ -1624,7 +1625,7 @@ pub struct GraspOptions {
     /// must be clear of what was seen (meters): 10 cm, a pick's `approach`.
     pub approach: f32,
     /// The thickest wall seen from one side only that a grasp of a surface may close across
-    /// (meters): `Some(f32::INFINITY)`, a wall as thick as the fingers open. `None` turns it off,
+    /// (meters): `Some(f32::INFINITY)`, a wall as thick as the gripper grasps. `None` turns it off,
     /// every grasp closing on two patches seen, as a cloud fused from several views and given one
     /// place needs ([`Surface::from_points`](crate::Surface::from_points)). With a thickness, a
     /// patch whose other side no camera saw is closed on where the cameras saw past the wall: where
@@ -1633,12 +1634,12 @@ pub struct GraspOptions {
     /// thickness, with nothing of the object seen facing along the line before it. The wall has
     /// ended there: the second contact is put there, the other side taken parallel to the side
     /// seen, so the width is the most the wall can be, and a wall is never taken thicker than the
-    /// fingers open: a shell past the `opening` is one at it. A wall that leans is closed on level
-    /// as well, where the level line through the patch is inside its friction cone (`friction`):
-    /// the hand then comes straight down across a flared rim, where one closing along the wall's
-    /// normal leans as the wall does; deeper down such a wall, the finger on the side it leans over
-    /// meets it above the patch ([`first_touch`](Self::first_touch) puts those grasps last). A
-    /// bowl's rim seen from above is grasped so, its outer wall
+    /// gripper grasps: a shell past its capacity is one at it. A wall that leans is closed on level
+    /// as well, where the level line through the patch is inside its friction cone (the gripper's
+    /// friction): the hand then comes straight down across a flared rim, where one closing along
+    /// the wall's normal leans as the wall does; deeper down such a wall, the finger on the side it
+    /// leans over meets it above the patch ([`first_touch`](Self::first_touch) puts those grasps
+    /// last). A bowl's rim seen from above is grasped so, its outer wall
     /// hidden under it. Inside a solid no ray goes, so none of these grasps ends in one: a box seen
     /// from one side is closed on only across all of it, where the cameras saw past its far side.
     /// The space found lies past where the wall ends by what the rays leave unseen: under a bowl's
@@ -1646,18 +1647,20 @@ pub struct GraspOptions {
     /// rim, so 1.5 cm suits. Grasps of two patches seen come first among the ordinary grasps
     /// and again among the intermediate angles. Shallower insertions follow their parent order.
     pub shell: Option<f32>,
-    /// Whether the fingers may come in to a grasp of a surface less open than `opening`: false,
-    /// every grasp is checked with the fingers as the robot's locked joints hold them. With it,
-    /// each finger is taken to slide along the hand's y axis, and a grasp comes in at the
-    /// opening ([`Grasp::opening`](crate::Grasp::opening)), of sixteenths of `opening` that
-    /// leave each finger 2.5 mm, a surface's noise, clear of the patch it closes on, that
-    /// keeps its fingers farthest from what is not the object's, the floor included: with
-    /// something within their own travel of the open fingers, the narrowest the hand is clear
-    /// at, since a planner lets the fingers touch what they grasp and nothing else, and knows
-    /// what stands around less finely than the points do. Of openings as far from all that, it
-    /// takes the one with the most room from the object's other sides, then the widest: a
-    /// finger inside a bowl stands midway between its walls, and a box with nothing near is
-    /// grasped at the whole `opening`. A rim beside a wall the open fingers would be in is
+    /// Whether the fingers may come in to a grasp of a surface less open than the gripper's
+    /// [`opening`](crate::Gripper::opening): false, every grasp is checked with the fingers as the
+    /// robot's locked joints hold them. With it, for a gripper whose jaws slide
+    /// ([`Gripper::sliding`](crate::Gripper::sliding)), each finger is taken to slide along the
+    /// hand's y axis, and a grasp comes in at the opening
+    /// ([`Grasp::opening`](crate::Grasp::opening)), of
+    /// [`Gripper::openings`](crate::Gripper::openings) those that leave each finger 2.5 mm, a
+    /// surface's noise, clear of the patch it closes on, that keeps its fingers farthest from what
+    /// is not the object's, the floor included: with something within their own travel of the open
+    /// fingers, the narrowest the hand is clear at, since a planner lets the fingers touch what
+    /// they grasp and nothing else, and knows what stands around less finely than the points do.
+    /// Of openings as far from all that, it takes the one with the most room from the object's
+    /// other sides, then the widest: a finger inside a bowl stands midway between its walls, and a
+    /// box with nothing near is grasped open. A rim beside a wall the open fingers would be in is
     /// grasped so. A grasp the open hand has stays where it is, drawn back as the open hand
     /// is; where the open hand is clear at no depth, the hand comes in as deep as it is clear
     /// narrower. Lock the fingers there for the pick ([`Pick::locked`]); a call's grasps share at

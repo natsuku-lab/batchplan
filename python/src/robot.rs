@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyTuple};
 
 use crate::error::{InputError, OrRaise};
 use crate::field::{self, Field, tuple_field, value_class};
@@ -276,6 +276,137 @@ value_class! {
     }
 }
 
+value_class! {
+    /// What a caller measures of a parallel-jaw hand, once, for `Robot.gripper`.
+    GripperCalibration(batchplan::GripperCalibration) {
+        /// How far apart the pads stand as the robot's locked joints hold the fingers (meters).
+        loaded_gap: f32,
+        /// How far apart the pads stand with the finger joints at `closed` (meters).
+        closed_gap: f32,
+        /// The widest thing the hand grasps (meters), at most `loaded_gap`: `None`, the loaded gap.
+        capacity: Option<f32>,
+        /// The finger joints at the closed command, by name, each a joint the robot was loaded
+        /// with locked; none where no finger moves.
+        closed: HashMap<String, f32>,
+        /// The friction between a pad and what it presses on: 0.5, as Dex-Net samples grasps with.
+        friction: f32,
+    }
+    methods {
+        #[new]
+        #[pyo3(signature = (loaded_gap, closed_gap, closed, capacity = None, friction = 0.5))]
+        fn new(
+            loaded_gap: f32,
+            closed_gap: f32,
+            closed: &Bound<'_, PyAny>,
+            capacity: Option<f32>,
+            friction: f32,
+        ) -> PyResult<Self> {
+            let closed = HashMap::<String, f32>::from_py(closed)?;
+            Ok(Self(batchplan::GripperCalibration {
+                capacity,
+                friction,
+                ..batchplan::GripperCalibration::new(loaded_gap, closed_gap, closed)
+            }))
+        }
+
+        fn __eq__(&self, other: &Self) -> bool {
+            self.0 == other.0
+        }
+    }
+}
+
+/// One hand of a robot as a parallel-jaw gripper, from `Robot.gripper`.
+#[pyclass(module = "batchplan", frozen)]
+pub(crate) struct Gripper(pub(crate) batchplan::Gripper);
+
+#[pymethods]
+impl Gripper {
+    /// The robot's hand it is.
+    #[getter]
+    fn hand(&self) -> usize {
+        self.0.hand()
+    }
+
+    /// How far apart the pads stand as the robot's locked joints hold the fingers (meters).
+    #[getter]
+    fn opening(&self) -> f64 {
+        field::shortest(self.0.opening())
+    }
+
+    /// How far apart the pads stand at the closed command (meters).
+    #[getter]
+    fn closed_gap(&self) -> f64 {
+        field::shortest(self.0.closed_gap())
+    }
+
+    /// The widest thing the hand grasps (meters).
+    #[getter]
+    fn capacity(&self) -> f64 {
+        field::shortest(self.0.capacity())
+    }
+
+    /// The openings a grasp of a surface may come in at where it may come in narrower (meters),
+    /// widest first: the loaded gap, then 15/16 of the capacity and each sixteenth of it less. A
+    /// place may let go at the same (`Place.open`), each as the finger joints' values
+    /// (`locked_at`).
+    #[getter]
+    fn openings<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let openings = self.0.openings().into_iter().map(field::shortest);
+        PyTuple::new(py, openings)
+    }
+
+    /// The friction between a pad and what it presses on.
+    #[getter]
+    fn friction(&self) -> f64 {
+        field::shortest(self.0.friction())
+    }
+
+    /// Whether the hand's joints, jaws and spheres move as opposed jaws sliding along its y axis
+    /// between the closed and loaded gaps.
+    #[getter]
+    fn sliding(&self) -> bool {
+        self.0.sliding()
+    }
+
+    /// The hand's collision spheres in its IK frame, as `Robot.hand_spheres` gave them when the
+    /// gripper was built.
+    #[getter]
+    fn spheres<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let spheres = self.0.spheres().iter().copied();
+        let spheres: Vec<Bound<'py, HandSphere>> = spheres
+            .map(|sphere| Bound::new(py, HandSphere(sphere)))
+            .collect::<PyResult<_>>()?;
+        Ok(PyTuple::new(py, spheres)?.into_any())
+    }
+
+    /// The finger joints' values at which the pads stand `opening` apart (meters), as
+    /// `Pick.locked`, `Place.open` and `Robot.relock` take them: each joint the calibration
+    /// closes, between its closed value at the closed gap and its loaded value at the loaded gap,
+    /// in proportion. An opening outside the two gaps is taken at the nearer.
+    fn locked_at<'py>(&self, py: Python<'py>, opening: f32) -> PyResult<Bound<'py, PyAny>> {
+        self.0.locked_at(opening).to_py(py)
+    }
+
+    /// How far apart the pads stand (meters) with the finger joints at `locked`, as `locked_at`
+    /// relates them. A joint `locked` does not name stands as loaded.
+    fn opening_of(&self, locked: &Bound<'_, PyAny>) -> PyResult<f64> {
+        let locked = HashMap::<String, f32>::from_py(locked)?;
+        Ok(field::shortest(self.0.opening_of(&locked)))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Gripper(hand={}, opening={}, closed_gap={}, capacity={}, friction={}, sliding={})",
+            self.0.hand(),
+            self.0.opening(),
+            self.0.closed_gap(),
+            self.0.capacity(),
+            self.0.friction(),
+            if self.0.sliding() { "True" } else { "False" }
+        )
+    }
+}
+
 /// An outer bound on the poses of one hand.
 #[pyclass(module = "batchplan", frozen)]
 pub(crate) struct HandReach(batchplan::HandReach);
@@ -488,20 +619,11 @@ impl Robot {
         Ok(field::shortest(self.0.tip(hand)))
     }
 
-    /// The calibrated loaded gap for measured grasps, or None if the hand does not model
-    /// opposed sliding jaws over the commanded stroke.
-    fn parallel_jaw_opening(
-        &self,
-        hand: usize,
-        loaded_gap: f32,
-        capacity: f32,
-        closed_gap: f32,
-        closed: &Bound<'_, PyAny>,
-    ) -> PyResult<Option<f32>> {
-        let closed = HashMap::<String, f32>::from_py(closed)?;
-        self.0
-            .parallel_jaw_opening(hand, loaded_gap, capacity, closed_gap, &closed)
-            .or_raise()
+    /// Hand `hand` as a parallel-jaw gripper with the widths, finger joints and friction a
+    /// caller measured of it, for every call that grasps with it. A calibration that contradicts
+    /// itself or the model raises `InputError`; `Gripper.sliding` says whether its jaws slide.
+    fn gripper(&self, hand: usize, calibration: &GripperCalibration) -> PyResult<Gripper> {
+        self.0.gripper(hand, &calibration.0).or_raise().map(Gripper)
     }
 
     /// Hand `hand`'s collision spheres at the default configuration, in its IK frame: its palm's

@@ -216,29 +216,27 @@ identify an ambiguous point. A pixel supplied with its originating view already 
 `kept.scene().labels`.
 
 For a complete pick, pull or turn, prepare the current observation once and pass the ordered
-grasps to `GripWorlds::plan`. The cell supplies its own finger-joint calibration, mounted
-touches and motion options. For example, a straight draw can require that the fingers close
+grasps to `GripWorlds::plan`. The cell supplies its hand's `Gripper` (`Robot::gripper`, its
+finger-joint calibration), mounted touches and motion options. For example, a straight draw can require that the fingers close
 on the point selected in a depth image:
 
 ```rust,no_run
-use std::collections::HashMap;
-use batchplan::{Device, Grasp, Touch, TaskOptions};
+use batchplan::{Device, Grasp, Gripper, Touch, TaskOptions};
 use glam::Vec3;
 use miru::{GripOutcome, GripSearch, GripTarget, Observed, Step};
 
 fn draw(
-    seen: &Observed, device: &Device, hand: usize, id: u32, loaded_opening: f32,
+    seen: &Observed, device: &Device, gripper: &Gripper, id: u32,
     q: &[f32], grasps: &[Grasp], point: Vec3, outward: Vec3, distance: f32,
-    mounted: &[Touch], finger_locks: impl Fn(f32) -> HashMap<String, f32>,
-    should_stop: impl FnMut() -> bool,
+    mounted: &[Touch], should_stop: impl FnMut() -> bool,
 ) -> Result<GripOutcome, batchplan::Error> {
     let step = Step { at: &[q], ..Step::default() };
-    let prepared = seen.grip_worlds(device, &step, hand, id, loaded_opening)?;
+    let prepared = seen.grip_worlds(device, &step, gripper, id)?;
     let search = GripSearch { target: Some(GripTarget::Point(point)), ..GripSearch::default() };
     prepared.plan(grasps, &search, &TaskOptions::default(), should_stop, |c| {
         c.touches.extend_from_slice(mounted);
         let mut task = c.pull(q, outward, distance);
-        task.locked = vec![finger_locks(c.candidate.opening)];
+        task.locked = vec![gripper.locked_at(c.candidate.opening)];
         task
     })
 }
@@ -299,8 +297,8 @@ the drawer and supplies the axis of a turn or pull independently. An overlapping
 unresolved wall can still prevent a grip.
 
 For a request to turn a centred control, `Kept::bar_on_disk` can measure a narrow raised bar
-over a circular face. Depth rays must reach behind its outer edge over more than half the circumference. Give it the outward unit normal, the hand and its calibrated closed and loaded
-gaps (`Robot::parallel_jaw_opening`), and the grasp options. The requested depth places the IK
+over a circular face. Depth rays must reach behind its outer edge over more than half the circumference. Give it the outward unit normal, the hand's gripper
+(`Robot::gripper`: its calibrated closed and loaded gaps and its capacity), and the grasp options. The requested depth places the IK
 frame below the crest. The measurement uses the median of the target readings' larger pixel
 width or depth deviation as its spatial resolution. Each returned pose passed the open approach,
 floor, capacity and symmetric closing-sweep checks on the measured points. Use the fully open
@@ -310,7 +308,7 @@ the same. An unresolved disk or bar, or a hand with no admissible pose, gives no
 
 For hand poses supplied by a caller, `Kept::observed_closures` checks a fully open straight
 approach and both fingers' closing sweeps against the retained depth endpoints. Pass poses in the
-observation frame and the same qualified closed and loaded widths used for the hand. Results
+observation frame and the hand's gripper. Results
 correspond to the input order. `BothSides` means each finger swept through a target reading
 on its own side. A foreign endpoint in either closing sweep gives `Obstructed`. Missing target
 evidence on one side gives `Incomplete`, and an unseen target gives `None`. A hidden obstruction
@@ -322,14 +320,14 @@ with the closure evidence `observed_closures` gives at its pose, and the screw t
 through the measured disk's centre where `bar_on_disk` resolves, else through the middle of the
 object's fitted shape, along the outward normal given as `up`. The first group is the bar's
 poses, fully open, to try in order. The second is the grips from above the fitted shape, along
-`-up` to within about 8 degrees, that close across no more than fully open and whose closures
+`-up` to within about 8 degrees, that close across no more than the capacity and whose closures
 show `BothSides`: fully open, and alike, so plan them with `Turn::enough` `None` and take the
 quickest. A shape whose vertical is off `up` by more, as the upright shape of a control on a
 slanted panel, gives none. The last is the grasps of the measured surface
-(`grasps_on_with_capacity` with the hand's capacity), ordered by their moment about the screw,
+(`grasps_on` with the hand's gripper), ordered by their moment about the screw,
 those showing `BothSides` first, each at its own opening, and then the remaining shape grips
 whose evidence is `Incomplete`. An empty group is left out. Fully open is
-`GraspOptions::opening`, the width a surface grasp gives the hand as loaded. The poses are in the
+the gripper's loaded gap; what a grasp closes across is at most its capacity. The poses are in the
 observation frame, and `Turn::grasps` takes them in the turned obstacle's. The evidence is the
 latest endpoints' alone: it says nothing of hidden material, of contact normals or of whether
 the control turns about that line. Plan each motion against the current world and guard it in

@@ -70,7 +70,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   the hand spheres that can reach it, with the same results.
 - Miru proposes grips to turn a control by in `Kept::turn_grips`, in groups to plan in order:
   the bar's over a measured disk; grips from above the fitted shape, along the turn's axis and
-  within the full opening, that close on both sides; then the measured surface's grasps, those
+  within the gripper's capacity, that close on both sides; then the measured surface's grasps, those
   closing on both sides first, and the shape's grips whose closure lacks the control on a side.
   Each grip carries its closure evidence, and the result the screw to turn about.
 
@@ -102,9 +102,17 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   fitted heights of a body and its measured support differ by a single precision step, or the
   freshly fitted body stood on a measured upright container floor.
 
-- `grasps_on_with_capacity` accepts a maximum graspable width separate from the loaded pad gap.
-  It checks the fully open hand and, for symmetric sliding jaws, commandable partial openings.
-  `Robot::parallel_jaw_opening` checks this model against the calibrated stroke and joint locks.
+- A hand as a parallel-jaw gripper, built once: `Robot::gripper(hand, &GripperCalibration)` from
+  the loaded and closed pad gaps and the finger joints at the closed command
+  (`GripperCalibration::new(loaded_gap, closed_gap, closed)`), the widest width it grasps
+  (`capacity`, `None` for the loaded gap) and the pads' `friction` (0.5), checked against the
+  model's stroke and joint locks. `grasps_on` and `Grasp::closes_on` take the `Gripper`: contact
+  pairs fit within its capacity, and `narrow`, which needs jaws that slide (`Gripper::sliding`),
+  comes in at `Gripper::openings` (the loaded gap, then 15/16 to 1/16 of the capacity).
+  `Gripper::locked_at` and `opening_of` turn meters into finger joint values and back, linear
+  between the closed and loaded joints, for any hand. Miru's `Kept::bar_on_disk`,
+  `observed_closures`, `turn_grips` and `Observed::grip_worlds` take it in place of the hand, its
+  gaps, capacity and opening; a turn's fully open grips stand at its loaded gap. In Python, `Robot.gripper`, `GripperCalibration` and `Gripper`.
 
 - `miru::Observed::grip_worlds` prepares a kept observation for grasp planning. Project one
   candidate at a time to split the material between its finger pads from the collision world.
@@ -398,10 +406,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   Python, `Held(..., spheres=SphereOptions(tolerance=0.002))`.
 
 - **Breaking:** grasps of what cameras see, whatever its shape:
-  `grasps_on(&device, hand, &[Surface], &GraspOptions)`. A grasp closes on two patches of the
+  `grasps_on(&device, &gripper, &[Surface], &GraspOptions)`. A grasp closes on two patches of the
   object's surface that were both seen (or, with a `shell`, on one and the space seen past its
   wall), face away from each other within the opening, and have
-  the line between them inside both friction cones (`GraspOptions::friction`, 0.5, and `contact`,
+  the line between them inside both friction cones (the gripper's friction, 0.5, and `contact`,
   the patch's radius, 5 mm), so a bowl's wall, a handle and a box's sides are found alike. The
   robot's own hand, with its fingers as locked, and its straight way in (`GraspOptions::approach`,
   10 cm) are kept clear of every point, the object's and the rest; `floor` holds the frame and
@@ -416,10 +424,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 - **Breaking:** grasps of a wall seen from one side only, as a bowl's rim seen from above, its outer
   wall hidden under the rim: `GraspOptions::shell`, the thickest such wall a grasp may close across
-  (by default `Some(f32::INFINITY)`, a wall as thick as the fingers open; `None` turns it off). From
+  (by default `Some(f32::INFINITY)`, a wall as thick as the gripper grasps; `None` turns it off). From
   a patch whose other side no camera saw, the line in along its normal meets, within that thickness,
   space every ray around it went past on its way to something farther: the second contact goes
-  there, so `width()` is the most the wall can be, never past the `opening`, and the `Grasp` says so
+  there, so `width()` is the most the wall can be, never past the gripper's capacity, and the `Grasp` says so
   (`one_sided`). Inside a solid no ray goes, so a box seen from one side is closed on only across
   all of it, and a patch whose other side was seen keeps to the seen pair. A wall that leans is
   closed on level too, where the level line through the patch is inside its friction cone, so a hand
@@ -441,9 +449,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   hand is clear there and on its move away, and the plan says which (`TaskPlan::opening`): a hand
   can set an object down where it has no room to open all the way. The openings share the
   place's IK, move in and transit; each one tried costs a move away.
-  `GraspOptions::openings()` gives the openings a grasp with `narrow` may come in at, widest
-  first, to offer a place the same. A `Place` literal needs `open: vec![]`; in Python,
-  `Place(..., open=[{...}, ...])`, `TaskPlan.opening` and `GraspOptions.openings`.
+  `Gripper::openings()` gives the openings a grasp with `narrow` may come in at, widest first, and
+  `Gripper::locked_at` their finger values, to offer a place the same. A `Place` literal needs
+  `open: vec![]`; in Python, `Place(..., open=[{...}, ...])`, `TaskPlan.opening` and
+  `Gripper.openings`.
 
 - **Breaking:** a place says how many plans will do: `Place::enough` (`None` by default: every
   pose is tried, as before). With a count, the poses are tried in their order, 32 and then twice
@@ -464,18 +473,18 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 - **Breaking:** grasps whose fingers come in narrower than they open, where something stands
   near: `GraspOptions::narrow` (false by default, which changes nothing). Open fingers beside a
   wall or a neighbor are in it, though the grasp needs a fraction of the opening. With `narrow`,
-  `grasps_on` takes each finger to slide along the hand's y axis and checks every grasp at
-  sixteenths of `opening`; each `Grasp` comes back with the `opening` that keeps its fingers
+  `grasps_on` takes each finger of a gripper whose jaws slide along the hand's y axis and checks
+  every grasp at the gripper's openings; each `Grasp` comes back with the `opening` that keeps its fingers
   farthest from what is not the object's, the floor included, which with something within the
   fingers' travel is the narrowest the hand is clear at: a planner lets the fingers touch what
   they grasp and nothing else. Of openings as far from all that it takes the one with the most
-  room from the object's other sides, then the widest, so a box with nothing near keeps
-  `GraspOptions::opening`. A grasp the open hand has stays where it is; where the open hand is clear at no
+  room from the object's other sides, then the widest, so a box with nothing near keeps the
+  gripper's opening. A grasp the open hand has stays where it is; where the open hand is clear at no
   depth, the hand comes in as deep as it is clear narrower. LIBERO's bowl 4 cm
   from a wall twice as tall is grasped all round so (698 grasps where the open fingers find
   654), in 10.7 ms where the open hand's check takes 8.9: a grasp that is found is checked
   across each finger's whole slide, so a hand of many spheres pays more. Without `narrow` every grasp's `opening` is
-  the options'. A `GraspOptions` literal needs `narrow: false`; in Python,
+  the gripper's. A `GraspOptions` literal needs `narrow: false`; in Python,
   `GraspOptions(narrow=True)`.
 
 - **Breaking:** a `Follower` can hold an object: `FollowerOptions::holding` takes the `Held` the

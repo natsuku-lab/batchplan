@@ -43,6 +43,7 @@ use rayon::prelude::*;
 
 use crate::device::Device;
 use crate::error::{Result, ensure_input, input};
+use crate::gripper::Gripper;
 use crate::robot::HandSphere;
 use crate::sdf::{DepthImage, RobotMask};
 use crate::task::{GraspOptions, TaskPlan};
@@ -270,7 +271,7 @@ pub struct Grasp {
     /// Whether one of the two contacts was not seen ([`GraspOptions::shell`]): it is where the
     /// cameras saw past the wall, so the wall ends at or before it.
     pub one_sided: bool,
-    /// How far apart the fingers come in to it (meters): [`GraspOptions::opening`], or less where
+    /// How far apart the fingers come in to it (meters): [`Gripper::opening`], or less where
     /// they may come in narrower ([`GraspOptions::narrow`]) and that keeps them farther from
     /// what stands around.
     pub opening: f32,
@@ -287,9 +288,15 @@ impl Grasp {
     /// Whether a ball in the surface's frame lies wholly in the gap this grasp closes, along
     /// its y axis. The ball's projection must fit inside the silhouette of a finger sphere on
     /// either side, and clear every sphere of the hand at the opening the grasp chose. Pass
-    /// the same hand spheres and `GraspOptions::opening` that `grasps_on` used.
+    /// the gripper `grasps_on` found it with.
     #[must_use]
-    pub fn closes_on(
+    pub fn closes_on(&self, gripper: &Gripper, at: Vec3, radius: f32) -> bool {
+        self.closes_on_spheres(gripper.spheres(), gripper.opening(), at, radius)
+    }
+
+    /// [`closes_on`](Self::closes_on) for a hand of spheres `hand` whose pads stand
+    /// `loaded_opening` apart as loaded.
+    fn closes_on_spheres(
         &self,
         hand: &[HandSphere],
         loaded_opening: f32,
@@ -356,6 +363,18 @@ fn last_opening(capacity: f32, width: f32, step: f32) -> i32 {
     (((capacity - width) / 2.0 / step + 1e-3) as i32).clamp(0, OPENINGS - 1)
 }
 
+/// The openings a hand whose pads stand `gap` apart as loaded and that grasps up to `capacity`
+/// comes in at where it may come in narrower, widest first, as [`narrowed`] steps them: `gap`,
+/// then 15/16 of `capacity` and each sixteenth of it less, to 1/16.
+pub(crate) fn openings(gap: f32, capacity: f32) -> Vec<f32> {
+    let step = capacity / (2 * OPENINGS) as f32;
+    let at = |k: i32| {
+        let origin = if k > 0 { capacity } else { gap };
+        origin - 2.0 * k as f32 * step
+    };
+    (0..OPENINGS).map(at).collect()
+}
+
 /// Orders the completed plans of one surface pick by the evidence for where its jaws will close.
 /// Plans with two measured contacts come first. For a wall seen from one side, a shorter span
 /// to observed free space leaves less room for the unseen contact. Equal ranks keep their order.
@@ -405,16 +424,6 @@ impl GraspOptions {
         };
         grasps.sort_by(|a, b| moment(b).total_cmp(&moment(a)));
     }
-
-    /// The openings a grasp may come in at where [`narrow`](GraspOptions::narrow) lets it
-    /// (meters), widest first: `opening` and each sixteenth of it less. A place may let go at
-    /// the same ([`Place::open`](crate::Place::open)), each as the fingers' joint values.
-    #[must_use]
-    pub fn openings(&self) -> Vec<f32> {
-        let step = self.opening / (2 * OPENINGS) as f32;
-        let openings = (0..OPENINGS).map(|k| self.opening - 2.0 * k as f32 * step);
-        openings.collect()
-    }
 }
 
 /// The cells the points near the hand are kept in (meters): a few to a sphere.
@@ -445,13 +454,17 @@ const SAMPLES: usize = 4096;
 /// would be apart spread evenly: past it, a ray lies too far from the rest to tell their spacing.
 const RINGS: usize = 8;
 
-/// Grasps on each of `surfaces` for hand `hand` of `device`'s robot, as its locked joints hold
-/// its fingers: each pair of patches the hand can close on is grasped from `turns` directions
-/// around its closing line, each both ways round, wherever the hand and its straight way in
-/// (`approach`) are clear of every point and over the `floor`, drawn back by up to what leaves
-/// `overlap` of the fingers on the patches. Where the fingers may come in narrower
-/// ([`GraspOptions::narrow`]), a grasp is one the hand is clear at with them at some opening, and
-/// says which ([`Grasp::opening`]).
+/// Grasps on each of `surfaces` for `gripper`, one of the hands of `device`'s robot, its fingers
+/// as the gripper's spheres hold them: each pair of patches the hand can close on, no farther
+/// apart than the gripper's capacity, is grasped from `turns` directions around its closing line,
+/// each both ways round, wherever the hand and its straight way in (`approach`) are clear of every
+/// point and over the `floor`, drawn back by up to what leaves `overlap` of the fingers on the
+/// patches. Where the fingers may come in narrower ([`GraspOptions::narrow`], for a gripper whose
+/// jaws slide), a grasp is one the hand is clear at with them at some opening of
+/// [`Gripper::openings`], and says which ([`Grasp::opening`]). The widths and the pads' friction
+/// are the gripper's, and so are the spheres a grasp is checked with, as the gripper was built:
+/// build it from the robot the device runs, after any [`attach`](crate::Robot::attach) or
+/// [`relock`](crate::Robot::relock).
 ///
 /// They come in an order whose first few are worth trying first: every pair from above (where
 /// its line is not upright), then every pair a turn to either side, and so on round; and within
@@ -471,54 +484,29 @@ const RINGS: usize = 8;
 /// same alone and among others.
 pub fn grasps_on(
     device: &Device,
-    hand: usize,
+    gripper: &Gripper,
     surfaces: &[Surface],
     o: &GraspOptions,
 ) -> Result<Vec<Vec<Grasp>>> {
-    grasps_on_with_capacity(device, hand, surfaces, o, o.opening)
-}
-
-/// As [`grasps_on`], for a hand whose maximum graspable width (`capacity`, meters) may be
-/// smaller than the gap between its pads as loaded ([`GraspOptions::opening`]). Contact pairs
-/// fit within the capacity. With [`GraspOptions::narrow`], the preshapes are the loaded gap
-/// and 15/16 through 1/16 of the capacity. Each moving finger slides half the change in gap
-/// along the closing line. Use the chosen [`Grasp::opening`] to obtain the commanded locks.
-/// [`Robot::parallel_jaw_opening`](crate::Robot::parallel_jaw_opening) checks the model and
-/// gives the calibrated loaded gap to use here and in closing-region projection. With narrowing
-/// disabled, the loaded hand geometry is used directly.
-pub fn grasps_on_with_capacity(
-    device: &Device,
-    hand: usize,
-    surfaces: &[Surface],
-    o: &GraspOptions,
-    capacity: f32,
-) -> Result<Vec<Vec<Grasp>>> {
-    let hands = device.robot().hands();
+    let (hand, hands) = (gripper.hand(), device.robot().hands());
     ensure_input!(hand < hands, "hand {hand} of {hands}");
     ensure_input!(
-        o.opening > 0.0
-            && o.opening.is_finite()
-            && o.turns > 0
-            && o.friction > 0.0
-            && o.friction.is_finite()
+        o.turns > 0
             && o.contact > 0.0
             && o.contact.is_finite()
             && o.approach >= 0.0
             && o.approach.is_finite()
             && o.overlap > 0.0
             && o.overlap.is_finite(),
-        "grasps need a finite positive opening, a turn, a finite positive friction, contact and overlap, and a finite approach of at least 0, got {} m, {}, {}, {} m, {} m and {} m",
-        o.opening,
+        "grasps need a turn, a finite positive contact and overlap, and a finite approach of at least 0, got {}, {} m, {} m and {} m",
         o.turns,
-        o.friction,
         o.contact,
         o.overlap,
         o.approach
     );
     ensure_input!(
-        capacity > 0.0 && capacity <= o.opening,
-        "grasp capacity {capacity} m must be positive and at most the loaded gap {} m",
-        o.opening
+        !o.narrow || gripper.sliding(),
+        "narrowing needs jaws that slide (Gripper::sliding), and hand {hand}'s do not as its gripper was calibrated"
     );
     ensure_input!(
         o.clearance >= 0.0 && o.clearance.is_finite(),
@@ -531,7 +519,7 @@ pub fn grasps_on_with_capacity(
     if let Some(shell) = o.shell {
         ensure_input!(
             shell > 0.0,
-            "a shell must be a positive thickness, infinite for as thick as the fingers open, got {shell} m"
+            "a shell must be a positive thickness, infinite for as thick as the gripper grasps, got {shell} m"
         );
     }
     if let Some(near) = o.near {
@@ -572,10 +560,11 @@ pub fn grasps_on_with_capacity(
         }
     }
     // The fingers first: they are the likeliest to be in the way.
-    let mut hand = device.robot().hand_spheres(hand);
+    let mut hand = gripper.spheres().to_vec();
     hand.sort_by_key(|sphere| !sphere.finger);
-    let partial = (capacity < o.opening && o.narrow).then(|| {
-        let inset = (o.opening - capacity) * 0.5;
+    let (gap, capacity) = (gripper.opening(), gripper.capacity());
+    let partial = (capacity < gap && o.narrow).then(|| {
+        let inset = (gap - capacity) * 0.5;
         hand.iter()
             .map(|sphere| HandSphere {
                 center: sphere.center - Vec3::Y * (sphere.side * inset),
@@ -586,10 +575,11 @@ pub fn grasps_on_with_capacity(
     let open = OpenHand {
         spheres: &hand,
         at_capacity: partial.as_deref(),
-        gap: o.opening,
+        gap,
     };
     let options = GraspOptions {
         opening: capacity,
+        friction: gripper.friction(),
         ..*o
     };
     let each = || surfaces.par_iter().map(|s| on(s, open, &options)).collect();
@@ -778,7 +768,7 @@ fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
                     let offset = turn.div_ceil(2);
                     if offset % every != 0 {
                         for g in gs {
-                            if g.closes_on(hand, open.gap, point, 0.0) {
+                            if g.closes_on_spheres(hand, open.gap, point, 0.0) {
                                 extra.push((offset as f64 / turns as f64, turn % 2 == 0, g));
                             }
                         }
@@ -802,7 +792,7 @@ fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
         let finger_reach = fingertip(-1.0).min(fingertip(1.0));
         let shallower = |g: &Grasp| {
             let mut extra = Vec::new();
-            if !g.closes_on(hand, open.gap, point, 0.0) {
+            if !g.closes_on_spheres(hand, open.gap, point, 0.0) {
                 return extra;
             }
             let toward = g.pose.rotation * Vec3::Z;
@@ -822,7 +812,7 @@ fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
                         opening,
                         ..*g
                     };
-                    if next.closes_on(hand, open.gap, point, 0.0) {
+                    if next.closes_on_spheres(hand, open.gap, point, 0.0) {
                         extra.push(next);
                     }
                 }

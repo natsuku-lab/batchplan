@@ -38,6 +38,13 @@ pub fn panda() -> Result<Robot, batchplan::Error> {
     Robot::load(asset("franka/franka_panda.urdf"), &panda_options())
 }
 
+/// The Panda's finger joints closed, the pads touching: with the fingers held open 8 cm apart
+/// (`panda_options`), what `GripperCalibration::closed` takes for its hand.
+pub fn panda_closed() -> HashMap<String, f32> {
+    let closed = ["panda_finger_joint1", "panda_finger_joint2"].map(|j| (j.to_string(), 0.0));
+    HashMap::from(closed)
+}
+
 /// A CPU device for `robot`, and a GPU device when there is an adapter. Without one, tests skip
 /// the GPU unless `BATCHPLAN_REQUIRE_GPU` is set.
 pub fn devices(robot: &Robot) -> Vec<Device> {

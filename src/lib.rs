@@ -40,6 +40,7 @@ mod edges;
 pub mod error;
 #[cfg(feature = "gpu")]
 mod gpu;
+mod gripper;
 mod handover;
 mod held;
 pub mod ik;
@@ -77,6 +78,7 @@ pub mod world;
 pub use constraint::HandConstraint;
 pub use device::{CollisionWeights, Contact, Device, Evaluation, Worlds};
 pub use error::Error;
+pub use gripper::{Gripper, GripperCalibration};
 pub use handover::{Handover, handover, handover_grasps, handover_poses};
 pub use held::Held;
 pub use ik::{IkFailure, IkOptions, IkProblem, IkResult, solve_ik};
@@ -101,7 +103,7 @@ pub use sdf::{
 };
 pub use shortcut::ShortcutOptions;
 pub use spheres::{LinkQualification, Qualification, SphereOptions};
-pub use surface::{Grasp, Surface, grasps_on, grasps_on_with_capacity, prefer_measured_contacts};
+pub use surface::{Grasp, Surface, grasps_on, prefer_measured_contacts};
 pub use task::{
     CandidateStop, GraspOptions, NearestPlace, Pick, PickBody, Place, Pull, TaskFailure,
     TaskOptions, TaskPlan, TaskResult, TaskStep, Turn, grasps, pick, pick_with_preferred_grasps,

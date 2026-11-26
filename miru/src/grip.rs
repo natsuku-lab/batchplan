@@ -2,7 +2,7 @@
 use std::sync::Weak;
 
 use batchplan::{
-    DepthImage, Device, Grasp, GraspOptions, HandReach, HandSphere, Held, IkOptions, Obstacle,
+    DepthImage, Device, Grasp, GraspOptions, Gripper, HandReach, Held, IkOptions, Obstacle,
     Occlusion, OccupancyMap, PickBody, Pose, RobotMask, SdfOptions,
 };
 use glam::Vec3;
@@ -50,12 +50,10 @@ struct Pickup {
 pub struct GripWorlds<'a> {
     observed: &'a Observed,
     pub(crate) device: &'a Device,
-    pub(crate) hand_index: usize,
+    pub(crate) gripper: &'a Gripper,
     pub(crate) blocked: Option<SupportedObjects>,
     pub(crate) reach: Option<HandReach>,
-    loaded_opening: f32,
     support: Option<SupportRoom>,
-    hand: Vec<HandSphere>,
     id: u32,
     index: usize,
     base: Planned,
@@ -92,20 +90,16 @@ struct Attributed {
 
 impl Observed {
     /// Prepares the step's world and the current look's labelled readings once for all grasps
-    /// of `id`. Give the same hand and robot opening used by `grasps_on`. An absent object,
-    /// occupied hand or memory from another look or after an act gives an input error.
+    /// of `id`. Give the gripper used by `grasps_on`. An absent object, occupied hand or memory
+    /// from another look or after an act gives an input error.
     pub fn grip_worlds<'a>(
         &'a self,
         device: &'a Device,
         step: &Step<'_>,
-        hand: usize,
+        gripper: &'a Gripper,
         id: u32,
-        loaded_opening: f32,
     ) -> Result<GripWorlds<'a>> {
-        ensure_input!(
-            loaded_opening.is_finite() && loaded_opening > 0.0,
-            "grip opening must be finite and positive, got {loaded_opening}"
-        );
+        let hand = gripper.hand();
         let memory = &self.memory;
         ensure_input!(
             memory.current(&self.kept.map),
@@ -148,8 +142,6 @@ impl Observed {
                 i += 1;
             }
         }
-        let hand_index = hand;
-        let hand = device.robot().hand_spheres(hand);
         let (mut mine, mut other) = (vec![], vec![]);
         let mut fixtures = vec![Vec::new(); memory.known.len()];
         let mut unassigned = vec![];
@@ -284,12 +276,10 @@ impl Observed {
         Ok(GripWorlds {
             observed: self,
             device,
-            hand_index,
+            gripper,
             blocked,
             reach: None,
-            loaded_opening,
             support,
-            hand,
             id,
             index,
             base: scene,
@@ -311,7 +301,7 @@ impl GripWorlds<'_> {
     /// a bound use the ordinary search.
     #[must_use]
     pub fn with_reach_bound(mut self) -> Self {
-        self.reach = self.device.robot().hand_reach(self.hand_index);
+        self.reach = self.device.robot().hand_reach(self.gripper.hand());
         self
     }
 
@@ -321,15 +311,15 @@ impl GripWorlds<'_> {
             g.pose.is_unit()
                 && g.contacts.iter().all(|p| p.is_finite())
                 && g.opening > 0.0
-                && g.opening <= self.loaded_opening,
+                && g.opening <= self.gripper.opening(),
             "grasp of object {id} needs finite contacts, a rigid pose and an opening within {} m, got {g:?}",
-            self.loaded_opening
+            self.gripper.opening()
         );
         Ok(())
     }
 
     pub(crate) fn closes_on(&self, grasp: &Grasp, point: Vec3) -> bool {
-        grasp.closes_on(&self.hand, self.loaded_opening, point, 0.0)
+        grasp.closes_on(self.gripper, point, 0.0)
     }
 
     /// A hollow support stays collision geometry throughout the grip. Near the closing patches
@@ -352,7 +342,8 @@ impl GripWorlds<'_> {
         let voxel = memory.map.voxel;
         let budget = 2.0 * self.device.robot().reach() / self.divisions as f32;
         let span = self
-            .loaded_opening
+            .gripper
+            .opening()
             .min((budget - 4.0 * voxel) / 3.0)
             .max(voxel);
         let center = (at / span).round() * span;
@@ -428,7 +419,7 @@ impl GripWorlds<'_> {
     ) -> Result<Option<Gripped>> {
         let id = self.id;
         self.validate(g)?;
-        let hand = &self.hand;
+        let hand = self.gripper.spheres();
         if self.mine.is_empty()
             || !hand.iter().any(|s| s.side < 0.0)
             || !hand.iter().any(|s| s.side > 0.0)
@@ -500,7 +491,7 @@ impl GripWorlds<'_> {
             } else {
                 source.clone()
             };
-            let closes = |p, r| g.closes_on(hand, self.loaded_opening, p, r);
+            let closes = |p, r| g.closes_on(self.gripper, p, r);
             if object.solid {
                 if let Some(part) =
                     local.take_readings(&self.mine, &self.other, memory.padding, closes)?
@@ -572,7 +563,7 @@ impl GripWorlds<'_> {
             .collect();
         let pickup = Pickup {
             source: self.observed.kept.map.clone(),
-            hand: self.hand_index,
+            hand: self.gripper.hand(),
             id,
             shape: cover.clone(),
             grasp: cover.pose().inverse().mul_pose(part_pose.mul_pose(grasp)),

@@ -411,7 +411,7 @@ impl GripWorlds<'_> {
                     touches: &mut touches,
                     split: &split,
                     world,
-                    hand: self.hand_index,
+                    hand: self.gripper.hand(),
                 };
                 let task = configure(&mut c);
                 ensure_input!(
@@ -450,7 +450,7 @@ impl GripWorlds<'_> {
                             let mut contact = grip.scene.clone();
                             contact.world.touch.push(Touch::new(
                                 grip.part,
-                                self.device.robot().finger_links(self.hand_index),
+                                self.device.robot().finger_links(self.gripper.hand()),
                             ));
                             let lift = task.lift(&grip)?;
                             result.plans.push(GripPlan {
