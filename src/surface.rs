@@ -35,6 +35,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::TAU;
+use std::ops::Range;
 
 use glam::{Mat3, Quat, Vec2, Vec3};
 use parry3d::utils::SymmetricEigen3;
@@ -418,6 +419,10 @@ impl GraspOptions {
 
 /// The cells the points near the hand are kept in (meters): a few to a sphere.
 const HAND_CELLS: f32 = 0.01;
+
+/// The fewest of a surface's points a thread is handed at a time: finding the cells of fewer
+/// takes less than the tens of microseconds handing them over does.
+const HANDED: usize = 4096;
 
 /// The most pairs of patches that are put in an order that spreads them over the object.
 const SPREAD: usize = 1024;
@@ -1398,12 +1403,14 @@ impl Near {
         };
         // Counted per cell, then placed: each cell's points end up together.
         let within = |p: Vec3| p.cmpge(lower).all() && p.cmplt(upper).all();
-        let inside: Vec<usize> = (0..s.points.len())
+        let each = (0..s.points.len())
+            .into_par_iter()
+            .with_min_len(HANDED)
             .filter(|&i| within(s.points[i]))
-            .collect();
-        for &i in &inside {
-            let cell = near.cell(s.points[i]);
-            near.starts[cell + 1] += 1;
+            .map(|i| (i as u32, near.cell(s.points[i]) as u32));
+        let inside: Vec<(u32, u32)> = each.collect();
+        for &(_, cell) in &inside {
+            near.starts[cell as usize + 1] += 1;
         }
         for cell in 1..near.starts.len() {
             near.starts[cell] += near.starts[cell - 1];
@@ -1411,8 +1418,8 @@ impl Near {
         let mut next = near.starts.clone();
         near.points = vec![Vec3::ZERO; inside.len()];
         near.object = vec![true; inside.len()];
-        for &i in &inside {
-            let cell = near.cell(s.points[i]);
+        for &(i, cell) in &inside {
+            let (i, cell) = (i as usize, cell as usize);
             let at = next[cell] as usize;
             next[cell] += 1;
             near.points[at] = s.points[i];
@@ -1576,25 +1583,37 @@ impl Free {
         if s.seen_from.len() != s.points.len() || !(lower.is_finite() && upper.is_finite()) {
             return free;
         }
-        // The points by where they were seen from, in the order those places first come.
+        // The points by where they were seen from, in the order those places first come: one
+        // camera's points come together, so each place holds the runs of points that are its.
         let mut index = HashMap::new();
-        let mut places: Vec<(Vec3, Vec<usize>)> = vec![];
+        let mut places: Vec<(Vec3, Vec<Range<usize>>)> = vec![];
+        let mut run: Option<([u32; 3], usize)> = None;
         for (i, &from) in s.seen_from.iter().enumerate() {
+            let key = from.to_array().map(f32::to_bits);
+            if let Some((before, place)) = run
+                && before == key
+            {
+                let runs = &mut places[place].1;
+                let last = runs.len() - 1;
+                runs[last].end = i + 1;
+                continue;
+            }
+            run = None;
             if !from.is_finite() {
                 continue;
             }
-            let place = *index
-                .entry(from.to_array().map(f32::to_bits))
-                .or_insert_with(|| {
-                    places.push((from, vec![]));
-                    places.len() - 1
-                });
-            places[place].1.push(i);
+            let place = *index.entry(key).or_insert_with(|| {
+                places.push((from, vec![]));
+                places.len() - 1
+            });
+            places[place].1.push(i..i + 1);
+            run = Some((key, place));
         }
-        let views = places.into_iter().filter_map(|(origin, seen)| {
-            View::new(origin, seen.iter().map(|&i| s.points[i]), lower, upper)
+        let views = places.par_iter().filter_map(|(origin, runs)| {
+            let seen = runs.iter().flat_map(|run| &s.points[run.clone()]);
+            View::new(*origin, seen.copied(), lower, upper)
         });
-        free.views.extend(views);
+        free.views = views.collect();
         free
     }
 
@@ -1694,15 +1713,36 @@ fn rays(readings: &[(Vec2, f32)], low: Vec2, span: Vec2) -> Vec<Vec2> {
     if fine.is_nan() || fine <= 0.0 {
         return readings.iter().map(|&(d, _)| d).collect();
     }
-    let keys: Vec<u64> = readings
+    let keys: Vec<[u32; 2]> = readings
         .iter()
         .map(|&(d, _)| {
-            let at = ((d - low) / fine).floor().max(Vec2::ZERO).as_uvec2();
-            (u64::from(at.y) << 32) | u64::from(at.x)
+            // A reading over the span falls in one of 65,537 cells along each axis.
+            let at = ((d - low) / fine).floor();
+            at.clamp(Vec2::ZERO, Vec2::splat(65536.0))
+                .as_uvec2()
+                .to_array()
         })
         .collect();
+    // The readings by cell, those of one cell in the order they came: counted and placed by x,
+    // then by y, each time keeping the order of those that share one.
     let mut by_key: Vec<u32> = (0..readings.len() as u32).collect();
-    by_key.sort_unstable_by_key(|&k| (keys[k as usize], k));
+    for axis in 0..2 {
+        let cells = keys.iter().map(|key| key[axis] as usize + 1).max();
+        let mut starts = vec![0u32; cells.unwrap_or(0) + 1];
+        for key in &keys {
+            starts[key[axis] as usize + 1] += 1;
+        }
+        for cell in 1..starts.len() {
+            starts[cell] += starts[cell - 1];
+        }
+        let mut placed = vec![0u32; by_key.len()];
+        for &k in &by_key {
+            let next = &mut starts[keys[k as usize][axis] as usize];
+            placed[*next as usize] = k;
+            *next += 1;
+        }
+        by_key = placed;
+    }
     let mut first = vec![false; readings.len()];
     for (at, &k) in by_key.iter().enumerate() {
         first[k as usize] = at == 0 || keys[by_key[at - 1] as usize] != keys[k as usize];
@@ -2129,5 +2169,49 @@ mod tests {
             }
         }
         assert!(inside > 1000 && past == 24);
+    }
+
+    #[test]
+    fn a_place_whose_points_come_in_runs_apart_is_one_view_of_them_all() {
+        // A floor read from two places. Each place's view is the same whether its points come
+        // together or in runs with the other's between them, or with points of no known place,
+        // which lie over the floor where they would be the nearest reading.
+        let floor = |shift: f32| {
+            let cells = (0..40 * 40).map(move |k| ((k % 40) as f32, (k / 40) as f32));
+            cells.map(move |(x, y)| Vec3::new(x * 0.0025 - 0.05 + shift, y * 0.0025 - 0.05, 0.0))
+        };
+        let (first, second) = (Vec3::new(0.0, 0.0, 0.5), Vec3::new(0.3, 0.0, 0.5));
+        let (a, b): (Vec<_>, Vec<_>) = (floor(0.0).collect(), floor(0.001).collect());
+        let unknown = [Vec3::new(0.0, 0.0, 0.04); 5];
+        let surface = |runs: &[(&[Vec3], Vec3)]| {
+            let mut s = Surface::default();
+            for &(points, from) in runs {
+                s.points.extend(points);
+                s.seen_from.extend(vec![from; points.len()]);
+            }
+            s.normals = vec![Vec3::Z; s.points.len()];
+            s
+        };
+        let together = surface(&[(&a, first), (&b, second)]);
+        let apart = surface(&[
+            (&a[..400], first),
+            (&unknown, Vec3::INFINITY),
+            (&a[400..700], first),
+            (&b[..300], second),
+            (&a[700..], first),
+            (&unknown, Vec3::NAN),
+            (&b[300..], second),
+        ]);
+        let (lower, upper) = (Vec3::new(-0.03, -0.03, 0.0), Vec3::new(0.03, 0.03, 0.05));
+        let [together, apart] = [together, apart].map(|s| Free::new(&s, lower, upper));
+        assert_eq!(together.views.len(), 2);
+        assert_eq!(apart.views.len(), 2);
+        for (one, other) in together.views.iter().zip(&apart.views) {
+            let read = one.nearest.iter().filter(|range| range.is_finite());
+            assert!(read.count() > 100, "{:?} cells", one.cells);
+            assert_eq!(one.origin, other.origin);
+            assert_eq!((one.cells, one.cell), (other.cells, other.cell));
+            assert_eq!(one.nearest, other.nearest);
+        }
     }
 }
