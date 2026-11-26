@@ -220,11 +220,6 @@ grasps to `GripWorlds::plan`. The cell supplies its own finger-joint calibration
 touches and motion options. For example, a straight draw can require that the fingers close
 on the point selected in a depth image:
 
-Call `with_reach_bound()` on the prepared source to check the arm's geometric reach before
-projecting candidate worlds. A certified rejection reports `GripStop::OutsideReach` with the
-original candidate index. Other candidates proceed in their supplied order. Arms with prismatic
-or relockable joints along the hand's chain use the ordinary search.
-
 ```rust,no_run
 use std::collections::HashMap;
 use batchplan::{Device, Grasp, Touch, TaskOptions};
@@ -248,6 +243,11 @@ fn draw(
     })
 }
 ```
+
+Call `with_reach_bound()` on the prepared source to check the arm's geometric reach before
+projecting candidate worlds. A certified rejection reports `GripStop::OutsideReach` with the
+original candidate index. Other candidates proceed in their supplied order. Arms with prismatic
+or relockable joints along the hand's chain use the ordinary search.
 
 The search keeps `batch` candidate worlds in flight plus the requested winners. The first
 `enough` feasible candidates in input order are returned quickest first, with their original

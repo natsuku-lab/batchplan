@@ -13,16 +13,6 @@ use glam::{Quat, Vec3};
 
 const UR5E: &str = "ur5e/ur_description/urdf/ur5e.urdf";
 
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 fn searches(problems: &[PlanProblem]) -> Vec<RrtProblem> {
     problems
         .iter()
@@ -86,7 +76,7 @@ fn rrt_paths_are_collision_free_under_a_denser_check() {
     let (scene, problems) = common::far_reaches(&robot, &cpu, 12, true);
     let on_cpu = cpu.upload(&scene).unwrap();
     let o = RrtOptions::default();
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let found = rrt::connect(&d, &d.upload(&scene).unwrap(), &searches(&problems), &o).unwrap();
         let mut paths = vec![];
         for (p, path) in problems.iter().zip(&found.paths) {
@@ -294,7 +284,7 @@ fn plan_solves_every_problem_rrt_connect_reaches() {
     let (scene, problems) = common::far_reaches(&robot, &cpu, 24, false);
     let on_cpu = cpu.upload(&scene).unwrap();
     let mut solved = vec![];
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let result = batchplan::plan(&d, &worlds, &problems, &PlanOptions::default()).unwrap();
         let reachable =
@@ -319,17 +309,6 @@ fn plan_solves_every_problem_rrt_connect_reaches() {
                 d.name()
             );
         }
-        let stops: usize = result
-            .solved()
-            .map(|s| {
-                let cp: Vec<&[f32]> = s.solution.chunks(n).collect();
-                (1..cp.len() - 1)
-                    .filter(|&t| cp[t - 1] == cp[t] && cp[t] == cp[t + 1])
-                    .count()
-                    - 2
-            })
-            .sum();
-        eprintln!("MEASURE {}: stops {stops}", d.name());
         // Every plan, timed and sampled 4x denser than validation, under the CPU model.
         let (mut q, mut item_world) = (vec![], vec![]);
         for s in result.solved() {
@@ -469,7 +448,7 @@ fn continuous_joints_turn_the_short_way_unless_it_is_blocked() {
         half_extents: Vec3::new(0.1, 0.01, 0.25),
         rotation: Quat::IDENTITY,
     }]);
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&[World::default(), wall.clone()]).unwrap();
         let open = batchplan::plan(
             &d,
@@ -562,7 +541,7 @@ fn ur5e_reaches_a_goal_a_turn_away_the_other_way_round() {
         half_extents: Vec3::new(0.05, 0.3, 0.6),
         rotation: Quat::IDENTITY,
     }]);
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(std::slice::from_ref(&wall)).unwrap();
         let problem = PlanProblem::new(0, start.clone(), goal.clone());
         let result = batchplan::plan(&d, &worlds, &[problem], &PlanOptions::default()).unwrap();
@@ -893,7 +872,7 @@ fn optimized_seeds_keep_their_links_apart() {
         ..CollisionWeights::NONE
     };
     let distance = |a: &[f32], b: &[f32]| length(&[a, b].concat(), n);
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let result = batchplan::plan(&d, &worlds, &problems, &o).unwrap();
         let (mut seeds, mut nearest) = (0, f32::INFINITY);

@@ -16,8 +16,8 @@ use crate::scene::Label;
 /// least cosine of the angle between its z axis and `-up`: 0.99, about 8 degrees, the bound
 /// batchplan-orchestrator's turn took its grips from above a shape by, which these groups replace.
 /// The shape's grasps come in along its own axes, so where its vertical is off `up`, as for a
-/// control on a slanted panel, whose shape is fitted upright, or for a box let go tilted, every grip
-/// from above it is off that line by as much: neither along it nor alike about it.
+/// control on a slanted panel, whose shape is fitted upright, or for a box let go tilted, every
+/// grip from above it is off that line by as much: neither along it nor alike about it.
 const ALONG: f32 = 0.99;
 
 /// Where a grip was proposed from.

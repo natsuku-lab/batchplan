@@ -123,7 +123,7 @@ impl Defaults {
     fn resolve(&self, el: &Element, inherited: &str) -> Result<Vec<(String, String)>> {
         let class = el.attr("class").unwrap_or(inherited);
         let mut chain = vec![class.to_string()];
-        while let Some(p) = self.parent.get(chain.last().expect("non-empty")) {
+        while let Some(p) = self.parent.get(chain.last().expect("starts with a class")) {
             chain.push(p.clone());
         }
         ensure!(

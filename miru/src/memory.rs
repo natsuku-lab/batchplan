@@ -16,7 +16,7 @@ use batchplan::{
 };
 use glam::Vec3;
 
-use crate::error::{Result, ensure_input};
+use crate::error::{Result, ensure_input, input};
 use crate::look::{self, Look, LookOptions, Noise, View};
 use crate::scene::{Label, Object, Scene, Shape, Support};
 use crate::view::SIGMAS;
@@ -312,10 +312,10 @@ impl Memory {
                     self.hands.len()
                 );
                 if let Some(holding) = &self.hands[hand] {
-                    return Err(batchplan::Error::Input(format!(
+                    return Err(input!(
                         "act {k} picks object {id} into hand {hand}, which holds object {} already",
                         holding.id
-                    )));
+                    ));
                 }
                 let index = self
                     .scene
@@ -333,15 +333,16 @@ impl Memory {
                         }
                         Some(object)
                     }
-                    // A hold a restart brings back: no id given since may be its.
+                    // A hold a restart brings back: an id at or past `next_id`, which the memory
+                    // never gave, and the ids it gives next follow it.
                     None => {
                         let next = id.checked_add(1).filter(|_| *id >= self.scene.next_id);
                         let Some(next) = next else {
-                            return Err(batchplan::Error::Input(format!(
+                            return Err(input!(
                                 "act {k} picks object {id}, which the memory does not hold and \
                                  which is under its next id, {}, or the last a `u32` has",
                                 self.scene.next_id
-                            )));
+                            ));
                         };
                         self.scene.next_id = next;
                         None
@@ -441,11 +442,7 @@ impl Memory {
     /// Where object `id` is among the objects, for act `k`.
     fn index(&self, k: usize, id: u32) -> Result<usize> {
         let index = self.scene.objects.iter().position(|object| object.id == id);
-        index.ok_or_else(|| {
-            batchplan::Error::Input(format!(
-                "act {k} names object {id}, which the memory does not hold"
-            ))
-        })
+        index.ok_or_else(|| input!("act {k} names object {id}, which the memory does not hold"))
     }
 
     /// What the hand that holds `id` holds, which no hand holds after this, for act `k`.
@@ -453,11 +450,7 @@ impl Memory {
         let holds = |holding: &Option<Holding>| holding.as_ref().is_some_and(|h| h.id == id);
         let hand = self.hands.iter().position(holds);
         let holding = hand.and_then(|hand| self.hands[hand].take());
-        holding.ok_or_else(|| {
-            batchplan::Error::Input(format!(
-                "act {k} lets go of object {id}, which no hand holds"
-            ))
-        })
+        holding.ok_or_else(|| input!("act {k} lets go of object {id}, which no hand holds"))
     }
 
     /// The object `holding` took, for act `k`, which lets go of it; for a hold the memory never saw
@@ -486,10 +479,10 @@ impl Memory {
                 half_height,
             },
             ref other => {
-                return Err(batchplan::Error::Input(format!(
+                return Err(input!(
                     "act {k} lets go of object {id}, which the memory never saw and whose held \
                      shape is no box or cylinder, so no object can be made of it: {other:?}"
-                )));
+                ));
             }
         };
         Ok(Object {
@@ -655,7 +648,8 @@ impl Memory {
     /// them and its thing attached to its hand.
     fn holding<'a>(&self, robot: &'a Robot) -> Result<Cow<'a, Robot>> {
         let mut holding = Cow::Borrowed(robot);
-        for held in self.hands.iter().flatten().map(|holding| &holding.held) {
+        let holds = self.hands.iter().flatten().map(|holding| &holding.held);
+        for held in holds {
             if !held.locked.is_empty() {
                 holding = Cow::Owned(holding.relock(&held.locked)?);
             }

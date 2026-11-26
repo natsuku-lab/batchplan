@@ -15,20 +15,6 @@ use batchplan::{
 };
 use glam::{Quat, Vec3};
 
-fn panda() -> Robot {
-    common::panda().unwrap()
-}
-
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 fn follow(device: &Device, world: World, paths: &[ToolPath]) -> ToolPathResult {
     let worlds = device.upload(&[world]).unwrap();
     batchplan::follow(device, &worlds, paths, &ToolPathOptions::default()).unwrap()
@@ -64,11 +50,11 @@ fn off_segment(p: Vec3, a: Vec3, b: Vec3) -> f32 {
 
 #[test]
 fn a_straight_line_is_followed_within_its_precision() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let start = robot.ee_pose(robot.default_q(), 0);
     let end = Pose::new(start.position - Vec3::new(0.0, 0.0, 0.1), start.rotation);
     let o = ToolPathOptions::default();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let result = follow(&device, World::default(), &[path(&robot, vec![end])]);
         assert_eq!(result.fraction[0], 1.0, "{name}: {:?}", result.stopped[0]);
@@ -91,7 +77,7 @@ fn a_straight_line_is_followed_within_its_precision() {
 
 #[test]
 fn a_hand_speed_cap_moves_the_hand_at_that_speed() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let start = robot.ee_pose(robot.default_q(), 0);
     let end = Pose::new(start.position - Vec3::new(0.0, 0.0, 0.1), start.rotation);
     let cpu = Device::cpu(&robot).unwrap();
@@ -114,7 +100,7 @@ fn a_hand_speed_cap_moves_the_hand_at_that_speed() {
 
 #[test]
 fn an_obstacle_stops_the_motion_where_it_collides() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let q = robot.default_q();
     let start = robot.ee_pose(q, 0);
     let end = Pose::new(start.position - Vec3::new(0.0, 0.0, 0.2), start.rotation);
@@ -124,7 +110,7 @@ fn an_obstacle_stops_the_motion_where_it_collides() {
         Vec3::new(0.15, 0.15, 0.01),
     );
     let world = World::new(vec![slab]);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let result = follow(&device, world.clone(), &[path(&robot, vec![end])]);
         let fraction = result.fraction[0];
@@ -167,10 +153,10 @@ fn an_obstacle_stops_the_motion_where_it_collides() {
 
 #[test]
 fn poses_out_of_reach_stop_the_motion_before_them() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let start = robot.ee_pose(robot.default_q(), 0);
     let far = Pose::new(start.position + Vec3::new(1.5, 0.0, 0.0), start.rotation);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let result = follow(&device, World::default(), &[path(&robot, vec![far])]);
         let fraction = result.fraction[0];
@@ -199,10 +185,10 @@ fn poses_out_of_reach_stop_the_motion_before_them() {
 
 #[test]
 fn a_turn_in_place_keeps_the_hand_where_it_is() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let start = robot.ee_pose(robot.default_q(), 0);
     let turned = Pose::new(start.position, start.rotation * Quat::from_rotation_z(1.2));
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let result = follow(&device, World::default(), &[path(&robot, vec![turned])]);
         assert_eq!(result.fraction[0], 1.0, "{name}: {:?}", result.stopped[0]);
@@ -220,7 +206,7 @@ fn a_turn_in_place_keeps_the_hand_where_it_is() {
 
 #[test]
 fn sharp_turns_keep_the_precision_at_any_step() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let start = robot.ee_pose(robot.default_q(), 0);
     let corner = Pose::new(start.position - Vec3::new(0.0, 0.0, 0.06), start.rotation);
     let end = Pose::new(corner.position + Vec3::new(0.0, 0.08, 0.0), start.rotation);
@@ -232,7 +218,7 @@ fn sharp_turns_keep_the_precision_at_any_step() {
         ..ToolPathOptions::default()
     };
     for o in [ToolPathOptions::default(), coarse] {
-        for device in devices(&robot) {
+        for device in common::devices(&robot) {
             let name = format!("{}, {} m steps", device.name(), o.step);
             let worlds = device.upload(&[World::default()]).unwrap();
             let tool_path = path(&robot, vec![corner, end]);
@@ -275,7 +261,7 @@ fn the_motion_through_a_singularity_stays_on_the_line() {
     let mut mirrored = start.clone();
     mirrored[4] = -0.3;
     let (from, to) = (robot.ee_pose(&start, 0), robot.ee_pose(&mirrored, 0));
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[World::default()]).unwrap();
         let tool_path = ToolPath {
@@ -325,7 +311,7 @@ fn the_motion_through_a_singularity_stays_on_the_line() {
 
 #[test]
 fn the_hand_moves_into_a_grasp_only_where_it_may_touch() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let q = robot.default_q();
     let start = robot.ee_pose(q, 0);
     // The approach: 8 cm along the tool's own z, ending around a bar through the open fingers.
@@ -335,7 +321,7 @@ fn the_hand_moves_into_a_grasp_only_where_it_may_touch() {
         touch: vec![Touch::new(0, robot.hand_links(0))],
         ..World::new(vec![bar.clone()])
     };
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let blocked = follow(
             &device,
@@ -354,7 +340,7 @@ fn the_hand_moves_into_a_grasp_only_where_it_may_touch() {
 
 #[test]
 fn every_device_follows_paths_alike() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let start = robot.ee_pose(robot.default_q(), 0);
     let paths: Vec<ToolPath> = (0..6)
         .map(|k| {
@@ -366,7 +352,7 @@ fn every_device_follows_paths_alike() {
             )
         })
         .collect();
-    let results: Vec<ToolPathResult> = devices(&robot)
+    let results: Vec<ToolPathResult> = common::devices(&robot)
         .iter()
         .map(|d| follow(d, World::default(), &paths))
         .collect();
@@ -380,7 +366,7 @@ fn every_device_follows_paths_alike() {
 
 #[test]
 fn paths_that_do_not_move_the_hand_are_covered() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let start = robot.ee_pose(robot.default_q(), 0);
     let device = Device::cpu(&robot).unwrap();
     let result = follow(&device, World::default(), &[path(&robot, vec![start])]);
@@ -393,7 +379,7 @@ fn paths_that_do_not_move_the_hand_are_covered() {
 fn motions_keep_the_joint_limits() {
     // Starts near the joints' limits and moves in every direction: joints run into their limits
     // and stay there while the others carry on.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let device = Device::cpu(&robot).unwrap();
     let mut rng = Rng::new(9);
@@ -436,7 +422,7 @@ fn motions_keep_the_joint_limits() {
 fn turning_while_moving_a_little_keeps_the_precision_without_stopping() {
     // Pours: up to a radian of turn about any axis while the hand moves half a millimetre to six,
     // from configurations around the default.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let o = ToolPathOptions::default();
     let device = Device::cpu(&robot).unwrap();
@@ -497,7 +483,7 @@ fn turning_while_moving_a_little_keeps_the_precision_without_stopping() {
 /// stops there.
 #[test]
 fn held_joints_stay_where_they_start() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     // The base turned to a value a solve would round, unlike `default_q`'s 0.
     let mut at = robot.default_q().to_vec();
@@ -519,7 +505,7 @@ fn held_joints_stay_where_they_start() {
         });
         turns.fold(0.0, f32::max)
     };
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         // Free, the base turns for a move across.
         let free = follow(&device, World::default(), &[along(vec![])]);
@@ -553,7 +539,7 @@ fn held_joints_stay_where_they_start() {
 
 #[test]
 fn malformed_paths_are_input_errors() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let start = robot.ee_pose(robot.default_q(), 0);
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::default()]).unwrap();
@@ -771,7 +757,7 @@ fn a_screw_with_a_pitch_advances_along_its_line_as_it_turns() {
 fn a_hand_follows_a_screws_waypoints_within_the_precision_of_its_arc() {
     // An upright hinge 10 cm beside the hand: the hand swings a quarter turn about it, as round a
     // lever's. Half the precision is the waypoints' sag, half how far `follow` strays from them.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let start = robot.ee_pose(robot.default_q(), 0);
     let hinge = start.position + Vec3::new(0.1, 0.0, 0.0);
     let screw = Screw::about(hinge, Vec3::Z);
@@ -782,7 +768,7 @@ fn a_hand_follows_a_screws_waypoints_within_the_precision_of_its_arc() {
     };
     let waypoints = screw.path(start, FRAC_PI_2, precision / 2.0).unwrap();
     let end = screw.carry(start, FRAC_PI_2);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[World::default()]).unwrap();
         let swing = path(&robot, waypoints.clone());

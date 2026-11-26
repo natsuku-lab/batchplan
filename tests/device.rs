@@ -15,27 +15,13 @@ use batchplan::{
 };
 use glam::{Quat, Vec3};
 
-fn panda() -> Robot {
-    common::panda().unwrap()
-}
-
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 /// A rotation a thousandth off a unit quaternion is accepted, and turns its obstacle as the unit
 /// one does: nothing is stretched. Each kind of obstacle that turns, long enough for a stretch of
 /// 0.4% to move its end by millimetres, measures the same from the same points and gives every
 /// configuration the same clearance and cost, on every device.
 #[test]
 fn an_obstacle_turned_by_a_rotation_not_quite_unit_is_not_stretched() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let turn = Quat::from_rotation_z(3.0) * Quat::from_rotation_x(0.4);
     let grid = {
@@ -79,7 +65,7 @@ fn an_obstacle_turned_by_a_rotation_not_quite_unit_is_not_stretched() {
             margin: 0.05,
             ..CollisionWeights::default()
         };
-        for device in devices(&robot) {
+        for device in common::devices(&robot) {
             let name = device.name();
             let worlds = device.upload(&[unit.clone(), scaled.clone()]).unwrap();
             let of = |world: u32| {
@@ -132,7 +118,7 @@ fn a_relocked_robot_collides_where_one_loaded_there_does() {
         margin: 0.02,
         self_margin: 0.01,
     };
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
         let unturned = device.evaluate(&worlds, &[0], &q, &w).unwrap();
         assert!(unturned.collision_free(0), "{device:?}: clear before");
@@ -164,14 +150,14 @@ fn a_relocked_robot_collides_where_one_loaded_there_does() {
 
 #[test]
 fn malformed_batches_are_errors_on_every_device() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let q = robot.default_q().to_vec();
     let scene = vec![World::new(vec![Obstacle::sphere(
         Vec3::new(2.0, 0.0, 0.0),
         0.1,
     )])];
     let none = CollisionWeights::NONE;
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let name = d.name();
         let worlds = d.upload(&scene).unwrap();
         let elsewhere = Device::cpu(&robot).unwrap().upload(&scene).unwrap();
@@ -278,7 +264,7 @@ fn malformed_batches_are_errors_on_every_device() {
 /// returns for those options, on every device, and passes what the calls run with.
 #[test]
 fn options_are_checked_as_their_calls_check_them() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let q = robot.default_q().to_vec();
     let (ik, plans) = (IkOptions::default(), PlanOptions::default());
     let (paths, joins) = (ToolPathOptions::default(), JoinOptions::default());
@@ -366,7 +352,7 @@ fn options_are_checked_as_their_calls_check_them() {
         };
         assert_eq!(checked, called, "{name}: the check and the call disagree");
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let name = d.name();
         let worlds = d.upload(&[World::default()]).unwrap();
         for o in &bad_ik {
@@ -442,7 +428,7 @@ fn options_are_checked_as_their_calls_check_them() {
 /// `goal_ik`'s. Each is a batch with one problem and not with two.
 #[test]
 fn a_batch_past_what_32_bits_count_is_refused_before_it_is_allocated() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let q = robot.default_q().to_vec();
     let refused = |name: &str, what: &str, err: Error| {
         assert!(
@@ -450,7 +436,7 @@ fn a_batch_past_what_32_bits_count_is_refused_before_it_is_allocated() {
             "{name}: {err}"
         );
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let name = d.name();
         let worlds = d.upload(&[World::default()]).unwrap();
         let half = IkOptions {
@@ -493,7 +479,7 @@ fn a_batch_past_what_32_bits_count_is_refused_before_it_is_allocated() {
 
 #[test]
 fn clearances_are_exact_up_to_the_margins() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let (n, items) = (robot.dof(), 4000);
     let mut rng = Rng::new(5);
     let q: Vec<f32> = (0..items * n)
@@ -514,7 +500,7 @@ fn clearances_are_exact_up_to_the_margins() {
         self_margin: 10.0,
         ..CollisionWeights::NONE
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let exact = d.evaluate(&worlds, &item_world, &q, &everything).unwrap();
         let gated = d.evaluate(&worlds, &item_world, &q, &near).unwrap();
@@ -548,7 +534,7 @@ fn clearances_are_exact_up_to_the_margins() {
 
 #[test]
 fn contacts_measure_a_rotated_grid_as_clearance_does() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let mut rng = Rng::new(17);
     let q: Vec<f32> = (0..128 * robot.dof())
         .map(|i| {
@@ -598,7 +584,7 @@ fn contacts_measure_a_rotated_grid_as_clearance_does() {
             > 100,
         "the grid's rotation must change the distances being checked"
     );
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(&scenes).unwrap();
         for (world, expected) in expected.iter().enumerate() {
             let found = device
@@ -625,7 +611,7 @@ fn contacts_measure_a_rotated_grid_as_clearance_does() {
 
 #[test]
 fn contacts_name_what_each_clearance_measures() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let (n, items) = (robot.dof(), 2000);
     let mut rng = Rng::new(6);
     let q: Vec<f32> = (0..items * n)
@@ -652,7 +638,7 @@ fn contacts_name_what_each_clearance_measures() {
     let cpu = Device::cpu(&robot).unwrap();
     let cpu_worlds = cpu.upload(&scenes).unwrap();
     let mut listed = None;
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scenes).unwrap();
         let contacts = d.contacts(&worlds, &item_world, &q, within).unwrap();
         let on_mount = vec![2; items];
@@ -727,7 +713,7 @@ fn contacts_name_what_each_clearance_measures() {
 
 #[test]
 fn warming_up_builds_what_first_calls_would_and_changes_no_result() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let (scene, problems) = common::blocked_reaches(&robot);
     let problems = &problems[..4];
     let o = PlanOptions {
@@ -744,8 +730,8 @@ fn warming_up_builds_what_first_calls_would_and_changes_no_result() {
         let ik = batchplan::solve_ik(d, &worlds, &goals, &IkOptions::default()).unwrap();
         (plans.paths, plans.valid, ik.q)
     };
-    let mut fresh = devices(&robot);
-    for (cold, warm) in fresh.drain(..).zip(devices(&robot)) {
+    let mut fresh = common::devices(&robot);
+    for (cold, warm) in fresh.drain(..).zip(common::devices(&robot)) {
         warm.warmup().unwrap();
         warm.with_robot(&robot).unwrap().warmup().unwrap();
         assert_eq!(run(&cold), run(&warm), "{}", warm.name());
@@ -754,7 +740,7 @@ fn warming_up_builds_what_first_calls_would_and_changes_no_result() {
 
 #[test]
 fn ik_reports_the_clearances_evaluate_finds() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let scene = [common::tabletop(&mut Rng::new(4))];
     let mut rng = Rng::new(9);
     let problems: Vec<IkProblem> = (0..48)
@@ -764,7 +750,7 @@ fn ik_reports_the_clearances_evaluate_finds() {
         collision_step: 0.0,
         ..IkOptions::default()
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         // With the push and without it, which finds the clearances once at the end; a few
         // problems after a call that pushed, whose buffers a GPU uses again, and many.
@@ -801,7 +787,7 @@ fn ik_reports_the_clearances_evaluate_finds() {
 fn evaluation_does_not_depend_on_the_batch() {
     // Small batches split each configuration's collision work across several GPU invocations,
     // large ones give it one; the results must agree.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let mut rng = Rng::new(13);
     let q: Vec<f32> = (0..40_000 * n)
@@ -815,7 +801,7 @@ fn evaluation_does_not_depend_on_the_batch() {
         self_margin: 0.02,
     };
     let few = 64;
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let alone = d
             .evaluate(&worlds, &vec![0; few], &q[..few * n], &w)
@@ -858,14 +844,14 @@ fn evaluation_does_not_depend_on_the_batch() {
 /// stays exactly there (and the CPU skips its remaining steps).
 #[test]
 fn ik_steps_move_a_seed_or_leave_it_at_rest() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let scene = [common::tabletop(&mut Rng::new(4))];
     let mut rng = Rng::new(9);
     let problems: Vec<IkProblem> = (0..8)
         .map(|_| IkProblem::new(0, common::grasp_target(&scene[0], &mut rng)))
         .collect();
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         // Every seed takes every step: none is left behind after a screening.
         let after = |iterations: u32| {
@@ -953,7 +939,7 @@ fn ik_without_the_push_refines_the_seeds_nearest_by_error_alone() {
 /// call that pushed, whose clearances are still in them, and on a device that has solved nothing.
 #[test]
 fn ik_without_the_push_reads_nothing_of_the_call_before() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let scene = [common::tabletop(&mut Rng::new(4))];
     let mut rng = Rng::new(9);
     let problems: Vec<IkProblem> = (0..16)
@@ -963,7 +949,10 @@ fn ik_without_the_push_reads_nothing_of_the_call_before() {
         collision_step: 0.0,
         ..IkOptions::default()
     };
-    for (used, fresh) in devices(&robot).into_iter().zip(devices(&robot)) {
+    for (used, fresh) in common::devices(&robot)
+        .into_iter()
+        .zip(common::devices(&robot))
+    {
         let solve = |d: &Device, o: &IkOptions| {
             let worlds = d.upload(&scene).unwrap();
             batchplan::solve_ik(d, &worlds, &problems, o).unwrap()
@@ -981,7 +970,7 @@ fn ik_without_the_push_reads_nothing_of_the_call_before() {
 /// Solves grasps on cluttered tabletops with `o` on every device and checks which seeds went on
 /// past the screening.
 fn refines_the_nearest(o: IkOptions) {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let mut rng = Rng::new(4);
     let scene: Vec<World> = (0..48).map(|_| common::tabletop(&mut rng)).collect();
@@ -992,7 +981,7 @@ fn refines_the_nearest(o: IkOptions) {
         .collect();
     assert!(o.screening > 0 && o.screening < o.iterations && o.kept < o.seeds);
     let pushes = o.collision_step > 0.0;
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let solve = |o: &IkOptions| batchplan::solve_ik(&d, &worlds, &problems, o).unwrap();
         let every = |iterations: u32| IkOptions {
@@ -1076,7 +1065,7 @@ fn refines_the_nearest(o: IkOptions) {
 /// A problem's IK solves alike alone and in a batch: each problem draws its random seeds alike.
 #[test]
 fn ik_does_not_depend_on_the_batch() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let scene = [common::tabletop(&mut Rng::new(4))];
     let mut rng = Rng::new(9);
@@ -1084,7 +1073,7 @@ fn ik_does_not_depend_on_the_batch() {
         .map(|_| IkProblem::new(0, common::grasp_target(&scene[0], &mut rng)))
         .collect();
     let o = IkOptions::default();
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let batch = batchplan::solve_ik(&d, &worlds, &problems, &o).unwrap();
         for (i, p) in problems.iter().enumerate() {
@@ -1117,14 +1106,14 @@ fn ik_does_not_depend_on_the_batch() {
 /// problem bends its seeds through random via points alike.
 #[test]
 fn plans_do_not_depend_on_the_batch() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let (scene, problems) = common::blocked_reaches(&robot);
     let o = PlanOptions {
         seeds: 6,
         ..Default::default()
     };
     let reversed: Vec<PlanProblem> = problems.iter().rev().cloned().collect();
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let a = batchplan::plan(&d, &worlds, &problems, &o).unwrap();
         let b = batchplan::plan(&d, &worlds, &reversed, &o).unwrap();
@@ -1152,13 +1141,13 @@ fn plans_do_not_depend_on_the_batch() {
 
 #[test]
 fn obstacle_free_worlds_work_on_every_device() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let start = robot.default_q().to_vec();
     let mut elsewhere = start.clone();
     elsewhere[0] += 0.8;
     elsewhere[3] += 0.4;
     let target = robot.ee_pose(&elsewhere, 0);
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let name = d.name();
         let worlds = d.upload(&[World::default()]).unwrap();
         let e = d
@@ -1196,7 +1185,7 @@ fn obstacle_free_worlds_work_on_every_device() {
 #[test]
 fn results_keep_the_worlds_of_their_problems() {
     // Two targets in world 1 and one in world 0: problem index != world index.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let mut rng = Rng::new(21);
     let scene: Vec<World> = (0..2).map(|_| common::tabletop(&mut rng)).collect();
     let goals: Vec<IkProblem> = [1u32, 1, 0]
@@ -1205,7 +1194,7 @@ fn results_keep_the_worlds_of_their_problems() {
         .collect();
     let cpu = Device::cpu(&robot).unwrap();
     let on_cpu = cpu.upload(&scene).unwrap();
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let ik = batchplan::solve_ik(&d, &worlds, &goals, &IkOptions::default()).unwrap();
         assert_eq!(ik.problems.len(), goals.len());
@@ -1252,7 +1241,7 @@ fn trajopt_smoothness_gradient_matches_its_cost() {
     // Collision off: the trajectory cost is pure smoothness,
     //   J = acceleration_weight * sum |q[t+1] - 2 q[t] + q[t-1]|^2 + velocity_weight * sum |q[t+1] - q[t]|^2,
     // whose gradient sets the direction of the first L-BFGS step (see tests/gpu.rs).
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let mut goal = robot.default_q().to_vec();
     goal[0] += 1.0;
@@ -1287,7 +1276,7 @@ fn trajopt_smoothness_gradient_matches_its_cost() {
         }
         c
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let seed = batchplan::plan(&d, &worlds, &problems, &PlanOptions { iterations: 0, ..o })
             .unwrap()
@@ -1353,7 +1342,7 @@ fn basis(u: f64) -> [f64; 4] {
 fn trajopt_collision_gradient_matches_its_cost() {
     // The full trajectory cost: smoothness on the control points plus the collision cost at
     // `samples_per_span` points of every span, at u = (s + 0.5) / samples_per_span.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let mut goal = robot.default_q().to_vec();
     goal[0] += 1.2;
@@ -1412,7 +1401,7 @@ fn trajopt_collision_gradient_matches_its_cost() {
     };
     let cpu = Device::cpu(&robot).unwrap();
     let on_cpu = cpu.upload(&scene).unwrap();
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let seed = batchplan::plan(&d, &worlds, &problems, &PlanOptions { iterations: 0, ..o })
             .unwrap()
@@ -1505,9 +1494,9 @@ fn trajopt_collision_gradient_matches_its_cost() {
 
 #[test]
 fn planning_without_a_budget_gives_the_same_result_every_run() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let (scene, problems) = common::reaches(&robot);
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let a = batchplan::plan(&d, &worlds, &problems, &PlanOptions::default()).unwrap();
         let b = batchplan::plan(&d, &worlds, &problems, &PlanOptions::default()).unwrap();
@@ -1518,7 +1507,7 @@ fn planning_without_a_budget_gives_the_same_result_every_run() {
 
 #[test]
 fn plans_from_a_moving_start_continue_its_motion() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let (scene, problems) = common::reaches(&robot);
     let motion = StartMotion {
@@ -1538,7 +1527,7 @@ fn plans_from_a_moving_start_continue_its_motion() {
         velocity: motion.velocity.clone(),
         acceleration: motion.acceleration.clone(),
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let result = batchplan::plan(&d, &worlds, &moving, &PlanOptions::default()).unwrap();
         let solved: Vec<_> = result.solved().collect();
@@ -1572,7 +1561,7 @@ fn plans_from_a_moving_start_continue_its_motion() {
 fn reaches_replan_mid_motion_at_full_speed() {
     // Partway through full-speed reaches, replanned to the same goals: the old motions' remainders
     // show that paths exist.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let (scene, problems) = common::reaches(&robot);
     let cpu = Device::cpu(&robot).unwrap();
@@ -1603,7 +1592,7 @@ fn reaches_replan_mid_motion_at_full_speed() {
         states.push(state.clone());
     }
     assert!(moving.len() >= 8, "only {} reaches move fast", moving.len());
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let result = batchplan::plan(&d, &worlds, &moving, &PlanOptions::default()).unwrap();
         let solved: Vec<_> = result.solved().collect();
@@ -1668,7 +1657,7 @@ fn a_robot_mounted_on_a_table_is_not_in_collision_with_it() {
     };
     let pinned = World::new(vec![table, pin]);
     let goal = vec![0.5, -0.8, 0.0, -2.2, 0.0, 1.6, 0.8];
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&[mounted.clone(), pinned.clone()]).unwrap();
         let q: Vec<f32> = robot
             .default_q()
@@ -1698,7 +1687,7 @@ fn a_robot_mounted_on_a_table_is_not_in_collision_with_it() {
 
 #[test]
 fn seeded_ik_stays_on_the_branch_it_starts_from() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     // A configuration far from the default one, and a target 2 cm above its IK frame.
     let here = vec![1.2, 0.3, -0.8, -1.6, 0.9, 2.0, -0.4];
     let far: f32 = here
@@ -1717,7 +1706,7 @@ fn seeded_ik_stays_on_the_branch_it_starts_from() {
         seeds: 1,
         ..IkOptions::default()
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&[World::default()]).unwrap();
         let seeded = IkProblem {
             world: 0,
@@ -1758,7 +1747,7 @@ fn seeded_ik_stays_on_the_branch_it_starts_from() {
 /// steps taken, seeds 0 and 1 are those.
 #[test]
 fn optimization_seeds_start_with_the_searched_path_and_the_straight_line() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let (scene, problems) = common::blocked_reaches(&robot);
     let o = PlanOptions {
@@ -1767,7 +1756,7 @@ fn optimization_seeds_start_with_the_searched_path_and_the_straight_line() {
         ..Default::default()
     };
     let (points, per_path) = (o.control_points, o.control_points * n);
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let result = batchplan::plan(&d, &d.upload(&scene).unwrap(), &problems, &o).unwrap();
         let mut seeded = 0;
         for (pi, p) in problems.iter().enumerate() {
@@ -1841,7 +1830,7 @@ fn reaches_under_a_slab(robot: &Robot) -> (World, Vec<PlanProblem>) {
 /// moving start is, not its first control point).
 #[test]
 fn unmoved_optimized_seeds_are_valid_where_their_searched_splines_are() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let (slab, under) = reaches_under_a_slab(&robot);
     let start = robot.default_q().to_vec();
@@ -1914,7 +1903,7 @@ fn unmoved_optimized_seeds_are_valid_where_their_searched_splines_are() {
             &unmoved,
         ),
     ];
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         for (case, world, problems, o) in cases {
             let worlds = d.upload(std::slice::from_ref(world)).unwrap();
             let result = batchplan::plan(&d, &worlds, problems, o).unwrap();
@@ -1985,7 +1974,7 @@ fn checked_samples(cp: &[f32], n: usize, per_span: usize, spacing: f32) -> Vec<f
 #[test]
 fn optimized_seeds_are_valid_where_they_keep_the_spline_margin() {
     const MARGIN: f32 = 0.002;
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let (slab, under) = reaches_under_a_slab(&robot);
     let o = PlanOptions {
@@ -2000,7 +1989,7 @@ fn optimized_seeds_are_valid_where_they_keep_the_spline_margin() {
         margin: 0.01,
         ..CollisionWeights::NONE
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(std::slice::from_ref(&slab)).unwrap();
         let result = batchplan::plan(&d, &worlds, &under, &o).unwrap();
         let (mut kept, mut short) = (0, 0);
@@ -2044,7 +2033,7 @@ fn optimized_seeds_are_valid_where_they_keep_the_spline_margin() {
 /// A problem searched to its straight line is not optimized: no seed could be shorter.
 #[test]
 fn problems_searched_straight_are_not_optimized() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let (_, reaches) = common::reaches(&robot);
     let scene = vec![World::default()];
     let problems: Vec<PlanProblem> = reaches
@@ -2056,7 +2045,7 @@ fn problems_searched_straight_are_not_optimized() {
         seeds: 4,
         ..Default::default()
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let result = batchplan::plan(&d, &d.upload(&scene).unwrap(), &problems, &o).unwrap();
         for pi in 0..problems.len() {
             assert!(
@@ -2076,7 +2065,7 @@ fn problems_searched_straight_are_not_optimized() {
 /// A budget spent while searching leaves optimization unstarted.
 #[test]
 fn a_spent_budget_starts_no_optimization() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let (_, reaches) = common::reaches(&robot);
     let scene = vec![World::default()];
     let problems: Vec<PlanProblem> = reaches
@@ -2089,7 +2078,7 @@ fn a_spent_budget_starts_no_optimization() {
         time_budget: Some(Duration::ZERO),
         ..Default::default()
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let result = batchplan::plan(&d, &d.upload(&scene).unwrap(), &problems, &o).unwrap();
         assert!(
             result.valid.iter().all(|&v| !v),
@@ -2103,7 +2092,7 @@ fn a_spent_budget_starts_no_optimization() {
 /// optimization's.
 #[test]
 fn plans_without_seeds_ignore_the_optimization_weights() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let (scene, problems) = common::reaches(&robot);
     let cpu = Device::cpu(&robot).unwrap();

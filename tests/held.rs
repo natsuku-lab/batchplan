@@ -14,16 +14,6 @@ use batchplan::{
 };
 use glam::{Quat, Vec3};
 
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 const SLAB: usize = 0;
 const HELD: &str = "held by hand 0";
 
@@ -139,7 +129,7 @@ fn held_at_slab(contacts: &[Contact]) -> bool {
 fn each_plan_holds_its_own_object() {
     let s = Scene::new();
     let o = PlanOptions::default();
-    for device in devices(&s.robot) {
+    for device in common::devices(&s.robot) {
         let name = device.name();
         let worlds = device.upload(std::slice::from_ref(&s.world)).unwrap();
         for (holds, cube) in batches() {
@@ -193,7 +183,7 @@ fn each_plan_holds_its_own_object() {
 fn each_ik_problem_holds_its_own_object() {
     let s = Scene::new();
     let o = IkOptions::default();
-    for device in devices(&s.robot) {
+    for device in common::devices(&s.robot) {
         let name = device.name();
         let worlds = device.upload(std::slice::from_ref(&s.world)).unwrap();
         for (holds, cube) in batches() {
@@ -259,7 +249,7 @@ fn each_ik_problem_holds_its_own_object() {
 fn each_tool_path_holds_its_own_object() {
     let s = Scene::new();
     let o = ToolPathOptions::default();
-    for device in devices(&s.robot) {
+    for device in common::devices(&s.robot) {
         let name = device.name();
         let worlds = device.upload(std::slice::from_ref(&s.world)).unwrap();
         for (holds, cube) in batches() {
@@ -325,7 +315,7 @@ fn each_plan_holds_its_own_object_through_optimization() {
         })
         .collect();
     let s = Scene::new();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&scene).unwrap();
         let all = batchplan::plan(&device, &worlds, &problems, &o).unwrap();
@@ -370,7 +360,7 @@ fn a_world_lets_what_a_hand_comes_to_hold_touch_an_obstacle() {
         touch: vec![Touch::held(SLAB, 0)],
         ..s.world.clone()
     };
-    for device in devices(&s.robot) {
+    for device in common::devices(&s.robot) {
         let name = device.name();
         // World 0 as it was, world 1 with the cube free to rest on the slab.
         let worlds = device.upload(&[s.world.clone(), resting.clone()]).unwrap();
@@ -650,7 +640,7 @@ fn a_hold_checks_the_fingers_where_they_closed() {
         holding: Some(holding),
     };
     let o = ToolPathOptions::default();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device
             .upload(&[World::new(vec![Obstacle::sphere(ball, 0.006)])])
@@ -775,7 +765,7 @@ fn a_held_plate_passes_a_neighbor_a_few_millimeters_away_with_finer_spheres() {
     // Within the 5 mm the default asks for, which leave room for where IK puts the hand (to 1 mm
     // and 0.01 rad).
     let fine = SphereOptions::default();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
         let reach = IkProblem {
@@ -831,7 +821,7 @@ fn contacts_are_listed_for_what_each_configuration_holds() {
         touch: vec![Touch::held(SLAB, 0)],
         ..s.world.clone()
     };
-    for device in devices(&s.robot) {
+    for device in common::devices(&s.robot) {
         let name = device.name();
         let worlds = device.upload(&[s.world.clone(), resting.clone()]).unwrap();
         // At the ready pose the hand is clear of the slab and a cube held there is in it.

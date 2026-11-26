@@ -469,8 +469,9 @@ fn hand_fits(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use batchplan::{CollisionModel, Robot, RobotOptions};
+
+    use super::*;
 
     #[test]
     fn stops_at_the_measured_closed_gap() {

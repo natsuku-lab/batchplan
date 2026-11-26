@@ -2,12 +2,12 @@
 use std::collections::HashMap;
 
 use batchplan::{
-    CandidateStop, Device, Grasp, Pick, Pull, Screw, TaskOptions, TaskPlan, TaskResult, TaskStep,
-    Touch, Turn, Worlds,
+    CandidateStop, Device, Grasp, Pick, Pose, Pull, Screw, TaskOptions, TaskPlan, TaskResult,
+    TaskStep, Touch, Turn, Worlds,
 };
 use glam::Vec3;
 
-use crate::error::{Result, ensure_input};
+use crate::error::{Result, ensure_input, input};
 use crate::{GripWorlds, Gripped, Of, Planned};
 
 /// A measured point the fingers should close on, or a caller-specified neighborhood.
@@ -71,7 +71,8 @@ pub struct GripCandidate<'a> {
     pub candidate: &'a Grasp,
     /// The owner of each obstacle in the projection, in world order.
     pub of: &'a [Of],
-    /// Existing cell permissions, such as for a mounted robot, go here.
+    /// The projected world's touches, which `configure` may add the cell's own to, such as a
+    /// mounted robot's base on its table.
     pub touches: &'a mut Vec<Touch>,
     split: &'a Gripped,
     world: u32,
@@ -161,7 +162,7 @@ pub enum GripStop {
     /// the IK tolerances. No world was projected for this candidate.
     OutsideReach {
         /// Requested hand pose in the look's frame.
-        at: batchplan::Pose,
+        at: Pose,
     },
     /// The look could not isolate a contact part.
     NoPart,
@@ -397,10 +398,10 @@ impl GripWorlds<'_> {
                     continue;
                 };
                 let world = u32::try_from(batch.len()).map_err(|_| {
-                    batchplan::Error::Input(format!(
+                    input!(
                         "a grip search has too many worlds in a batch: {}",
                         batch.len()
-                    ))
+                    )
                 })?;
                 let mut touches = std::mem::take(&mut split.scene.world.touch);
                 let mut c = GripCandidate {

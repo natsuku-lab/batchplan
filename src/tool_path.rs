@@ -75,8 +75,8 @@ impl Default for ToolPathOptions {
     }
 }
 
-/// The finest `step` and `rotation_step` [`follow`] takes (meters and radians): 10 µm, a tenth of an
-/// arm's repeatability. A step near zero would split a path into unbounded poses.
+/// The finest `step` and `rotation_step` [`follow`] takes (meters and radians): 10 µm, a tenth of
+/// an arm's repeatability. A step near zero would split a path into unbounded poses.
 const MIN_STEP: f32 = 1e-5;
 
 /// What [`follow`] did with each path.
@@ -586,8 +586,8 @@ impl<'a> Follow<'a> {
     }
 
     /// The spline through every configuration (`control`), resting at the pinned ones, held to the
-    /// path's precision and the joint limits: a span that strays or leaves them pins the nearer free
-    /// configuration it runs between, and the fit is redone.
+    /// path's precision and the joint limits: a span that strays or leaves them pins the nearer
+    /// free configuration it runs between, and the fit is redone.
     fn fit(&mut self) {
         let n = self.n;
         if self.reached.len() == 2 {

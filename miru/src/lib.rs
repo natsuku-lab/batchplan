@@ -30,7 +30,8 @@
 //!
 //! # let urdf = r#"<robot name="none"><link name="base"/><link name="tip"/>
 //! #     <joint name="joint" type="revolute"><parent link="base"/><child link="tip"/>
-//! #     <axis xyz="0 0 1"/><limit lower="-1" upper="1" velocity="1" effort="1"/></joint></robot>"#;
+//! #     <axis xyz="0 0 1"/><limit lower="-1" upper="1" velocity="1" effort="1"/>
+//! #     </joint></robot>"#;
 //! # let robot = batchplan::Robot::from_urdf(urdf, &batchplan::RobotOptions::default())?;
 //! // The device the robot's motions are planned on: a look runs on its threads.
 //! let device = Device::cpu(&robot)?;
@@ -41,7 +42,10 @@
 //!         depth: &depth,
 //!         width: 64,
 //!         intrinsics: Intrinsics { fx: 60.0, fy: 60.0, cx: 31.5, cy: 23.5 },
-//!         camera: Pose::new(Vec3::new(0.5, 0.0, 1.0), Quat::from_rotation_x(std::f32::consts::PI)),
+//!         camera: Pose::new(
+//!             Vec3::new(0.5, 0.0, 1.0),
+//!             Quat::from_rotation_x(std::f32::consts::PI),
+//!         ),
 //!     },
 //!     color: &[],
 //!     // A stereo camera's, from its datasheet: 640 pixels' focal length, 5 cm between its

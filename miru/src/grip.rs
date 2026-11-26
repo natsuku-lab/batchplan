@@ -2,12 +2,12 @@
 use std::sync::Weak;
 
 use batchplan::{
-    DepthImage, Device, Grasp, GraspOptions, HandSphere, Held, IkOptions, Obstacle, Occlusion,
-    OccupancyMap, PickBody, Pose, RobotMask, SdfOptions,
+    DepthImage, Device, Grasp, GraspOptions, HandReach, HandSphere, Held, IkOptions, Obstacle,
+    Occlusion, OccupancyMap, PickBody, Pose, RobotMask, SdfOptions,
 };
 use glam::Vec3;
 
-use crate::error::{Result, ensure_input};
+use crate::error::{Result, ensure_input, input};
 use crate::grip_plan::SupportedObjects;
 use crate::memory::{Map, Memory, Observed, Of, Planned, Step};
 use crate::scene::{Label, Support};
@@ -52,7 +52,7 @@ pub struct GripWorlds<'a> {
     pub(crate) device: &'a Device,
     pub(crate) hand_index: usize,
     pub(crate) blocked: Option<SupportedObjects>,
-    pub(crate) reach: Option<batchplan::HandReach>,
+    pub(crate) reach: Option<HandReach>,
     loaded_opening: f32,
     support: Option<SupportRoom>,
     hand: Vec<HandSphere>,
@@ -127,9 +127,7 @@ impl Observed {
         );
         let index = memory.objects().iter().position(|o| o.id == id);
         let Some(index) = index else {
-            return Err(batchplan::Error::Input(format!(
-                "the grip names absent object {id}"
-            )));
+            return Err(input!("the grip names absent object {id}"));
         };
         let mut into = step.into.to_vec();
         into.push(id);
@@ -307,10 +305,10 @@ impl Observed {
 }
 
 impl GripWorlds<'_> {
-    /// Check the hand's kinematic outer bound before projecting each candidate for [`Self::plan`].
-    /// A certified failure keeps its original index. Shared options are validated up front. The
-    /// task factory is called only for projected candidates. Chains without a bound use the
-    /// ordinary search.
+    /// The same worlds, checking the hand's kinematic outer bound before projecting each candidate
+    /// for [`Self::plan`]. A certified failure keeps its original index. Shared options are
+    /// validated up front. The task factory is called only for projected candidates. Chains without
+    /// a bound use the ordinary search.
     #[must_use]
     pub fn with_reach_bound(mut self) -> Self {
         self.reach = self.device.robot().hand_reach(self.hand_index);

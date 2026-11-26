@@ -292,7 +292,10 @@ impl Column {
                 Arc::new(Int64Array::from(v.clone())),
             ),
             (Data::F32(v), w) => {
-                let item = Arc::new(Field::new_list_field(DataType::Float32, true));
+                let item = Arc::new(Field::new_list_field(
+                    DataType::Float32,
+                    /* nullable */ true,
+                ));
                 let array = FixedSizeListArray::new(
                     item.clone(),
                     w as i32,
@@ -736,7 +739,7 @@ fn episodes_batch(
     }
     let fields: Vec<Field> = columns
         .iter()
-        .map(|(n, a)| Field::new(n, a.data_type().clone(), true))
+        .map(|(n, a)| Field::new(n, a.data_type().clone(), /* nullable */ true))
         .collect();
     Ok(RecordBatch::try_new(
         Arc::new(Schema::new(fields)),

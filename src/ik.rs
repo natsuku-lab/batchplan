@@ -31,7 +31,8 @@ pub struct IkOptions {
     /// Where the steps push away from collisions (`collision_step` above 0, for a robot with
     /// collision spheres), collision-free seeds go before the others, and a seed in collision
     /// has not arrived; elsewhere whether a seed collides after the screening says little
-    /// about where it ends, and they go by their errors alone. The others are returned as the screening left them.
+    /// about where it ends, and they go by their errors alone. The others are returned as the
+    /// screening left them.
     pub kept: usize,
     /// Damped-least-squares damping (lambda).
     pub damping: f32,
@@ -348,8 +349,8 @@ pub fn failures(
     Ok(out)
 }
 
-/// The seed of `problem` with the most clearance among those within `o`'s tolerances, collision-free
-/// or not.
+/// The seed of `problem` with the most clearance among those within `o`'s tolerances,
+/// collision-free or not.
 fn reaching(result: &IkResult, problem: usize, o: &IkOptions) -> Option<usize> {
     let clearance = |k: usize| result.world_clearance[k].min(result.self_clearance[k]);
     (problem * result.seeds..(problem + 1) * result.seeds)

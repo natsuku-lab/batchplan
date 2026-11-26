@@ -190,16 +190,6 @@ fn a_revolving_finger_mimic_cannot_qualify_as_a_slide() {
     );
 }
 
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 fn random_q(robot: &Robot, rng: &mut Rng) -> Vec<f32> {
     (0..robot.dof())
         .map(|j| rng.range(robot.lower()[j], robot.upper()[j]))
@@ -572,7 +562,7 @@ fn mimic_gripper_evaluates_the_same_on_every_device() {
         margin: 0.02,
         self_margin: 0.01,
     };
-    let devices = devices(&robot);
+    let devices = common::devices(&robot);
     let reference = devices[0]
         .evaluate(&devices[0].upload(&scene).unwrap(), &item_world, &q, &w)
         .unwrap();
@@ -1230,7 +1220,7 @@ fn every_test_arm_loads_spherizes_and_plans() {
                 problems.push(PlanProblem::new(world, robot.default_q(), goal));
             }
         }
-        for d in devices(&robot) {
+        for d in common::devices(&robot) {
             let result = batchplan::plan(
                 &d,
                 &d.upload(&scene).unwrap(),
@@ -1268,7 +1258,7 @@ fn devices_agree(robot: &Robot, scene: &[World]) -> Vec<Device> {
         margin: 0.05,
         self_margin: 0.02,
     };
-    let devices = devices(robot);
+    let devices = common::devices(robot);
     let reference = devices[0]
         .evaluate(&devices[0].upload(scene).unwrap(), &item_world, &q, &w)
         .unwrap();

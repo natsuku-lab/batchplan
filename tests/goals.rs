@@ -13,20 +13,6 @@ use batchplan::{
     Pose, Robot, RobotOptions, World,
 };
 
-fn panda() -> Robot {
-    common::panda().unwrap()
-}
-
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 /// The hand pointing down, `position` in front of the robot.
 fn down(position: Vec3) -> Pose {
     Pose::new(position, Quat::from_rotation_x(std::f32::consts::PI))
@@ -52,14 +38,14 @@ const TARGETS: [Vec3; 5] = [
 
 #[test]
 fn a_pose_goal_ends_with_the_hand_at_the_pose_on_every_device() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let start = robot.default_q().to_vec();
     let problems: Vec<PlanProblem> = TARGETS
         .iter()
         .map(|&p| PlanProblem::new(0, start.clone(), down(p)))
         .collect();
     let mut first = None;
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(&[World::default()]).unwrap();
         let result = batchplan::plan(&device, &worlds, &problems, &PlanOptions::default()).unwrap();
         for (i, &target) in TARGETS.iter().enumerate() {
@@ -114,7 +100,7 @@ fn apart(a: &[f32], b: &[f32]) -> f32 {
 #[test]
 fn a_pose_goal_ends_at_the_solution_nearest_the_start() {
     // The start is not the robot's default configuration, which unseeded IK starts from.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::default()]).unwrap();
     let mut start = robot.default_q().to_vec();
@@ -143,7 +129,7 @@ fn a_pose_goal_ends_at_the_solution_nearest_the_start() {
 #[test]
 fn sixteen_times_the_seeds_solve_what_four_times_miss() {
     // One seed of ten iterations, then four, then sixteen: only the last reaches this pose.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::default()]).unwrap();
     let start = robot.default_q().to_vec();
@@ -242,7 +228,7 @@ fn a_pose_goal_ends_at_the_nearest_turn_of_its_solutions() {
 fn pose_goals_keep_what_the_hand_holds() {
     // IK that leaves the held rod out reaches this pose where the rod hits the arm; plan's IK
     // holds it and finds a pose that keeps it clear.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::default()]).unwrap();
     let start = robot.default_q().to_vec();
@@ -279,7 +265,7 @@ fn pose_goals_keep_what_the_hand_holds() {
 #[test]
 fn goal_ik_rounds_stop_once_the_time_budget_passes() {
     // With no time at all, the first round runs and the pose out of reach is not solved again.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::default()]).unwrap();
     let far = PlanProblem::new(0, robot.default_q(), down(Vec3::new(2.0, 0.0, 0.3)));
@@ -295,7 +281,7 @@ fn goal_ik_rounds_stop_once_the_time_budget_passes() {
 
 #[test]
 fn pose_goals_out_of_reach_or_inside_an_obstacle_say_so() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let inside = TARGETS[0];
     let worlds = device
@@ -328,7 +314,7 @@ fn pose_goals_out_of_reach_or_inside_an_obstacle_say_so() {
 
 #[test]
 fn pose_goals_keep_held_joints_and_constraints() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::default()]).unwrap();
     let start = robot.default_q().to_vec();
@@ -365,7 +351,7 @@ fn pose_goals_keep_held_joints_and_constraints() {
 
 #[test]
 fn malformed_pose_goals_are_input_errors() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::default()]).unwrap();
     let start = robot.default_q().to_vec();

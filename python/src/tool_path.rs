@@ -1,6 +1,5 @@
 //! Moving a hand along a path of poses.
 
-use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
@@ -125,6 +124,7 @@ impl ToolPathStop {
 
 impl Field for batchplan::ToolPathStop {
     fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        use pyo3::IntoPyObjectExt;
         let mirror = match self {
             batchplan::ToolPathStop::Unreachable { at } => ToolPathStop::Unreachable {
                 at: at.to_py(py)?.unbind(),

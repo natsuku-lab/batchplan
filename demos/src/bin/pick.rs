@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     let count = args.count.unwrap_or(16);
     let robot = batchplan_demos::panda()?;
     // Small batches plan sooner on the CPU, which pays no per-call GPU cost.
-    let device = args.device(&robot, false)?;
+    let device = args.device(&robot, /* default_gpu */ false)?;
     let mut rng = Rng::new(3);
     let (worlds, tasks): (Vec<World>, Vec<PickPlace>) = (0..count)
         .map(|i| pick_place_scene(i as u32, &mut rng))

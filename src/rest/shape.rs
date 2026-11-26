@@ -367,11 +367,11 @@ impl Turned {
         }
     }
 
-    /// What of the flat `piece` meets a plane it is set on, where the plane lies the unit `toward` (in the
-    /// shape's frame) from it: the whole piece where it stays within `near` of the plane from
-    /// `lower` to `upper`, the corners of the part of it that is near the plane; else the edge,
-    /// the line or the point of it that reaches farthest toward the plane. A piece that stands
-    /// `beside` the one that faces the plane meets it along an edge at most.
+    /// What of the flat `piece` meets a plane it is set on, where the plane lies the unit `toward`
+    /// (in the shape's frame) from it: the whole piece where it stays within `near` of the plane
+    /// from `lower` to `upper`, the corners of the part of it that is near the plane; else the
+    /// edge, the line or the point of it that reaches farthest toward the plane. A piece that
+    /// stands `beside` the one that faces the plane meets it along an edge at most.
     #[inline(never)]
     pub(super) fn meets(
         &self,

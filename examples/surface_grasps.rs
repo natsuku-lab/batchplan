@@ -13,9 +13,7 @@ use std::f32::consts::TAU;
 use std::time::Instant;
 
 use anyhow::Result;
-use batchplan::{
-    DepthImage, Device, Grasp, GraspOptions, Intrinsics, Obstacle, Pose, Surface, grasps_on,
-};
+use batchplan::{DepthImage, Device, Grasp, GraspOptions, Intrinsics, Obstacle, Pose, Surface};
 use glam::{Mat3, Quat, Vec2, Vec3};
 use rayon::prelude::*;
 
@@ -130,7 +128,9 @@ fn main() -> Result<()> {
     };
     // The same surfaces' grasps, those whose fingers close onto their patches first.
     let first_touch = |surfaces: &[Surface], rounds: usize| -> Result<()> {
-        let (ms, found) = quickest(rounds, || grasps_on(&device, 0, surfaces, &first));
+        let (ms, found) = quickest(rounds, || {
+            batchplan::grasps_on(&device, 0, surfaces, &first)
+        });
         let found: Vec<Grasp> = found?.into_iter().flatten().collect();
         println!(
             "  with first_touch: {} grasps in {ms:.1} ms (sum {:.6})",
@@ -141,7 +141,9 @@ fn main() -> Result<()> {
     };
 
     let bowl = bowl();
-    let (ms, found) = quickest(5, || grasps_on(&device, 0, std::slice::from_ref(&bowl), &o));
+    let (ms, found) = quickest(5, || {
+        batchplan::grasps_on(&device, 0, std::slice::from_ref(&bowl), &o)
+    });
     let found = found?.remove(0);
     let wall = found.iter().filter(|g| g.width() < 0.01).count();
     println!(
@@ -199,7 +201,9 @@ fn main() -> Result<()> {
         reading += ms;
         seen.join(surface?);
     }
-    let (ms, found) = quickest(5, || grasps_on(&device, 0, std::slice::from_ref(&seen), &o));
+    let (ms, found) = quickest(5, || {
+        batchplan::grasps_on(&device, 0, std::slice::from_ref(&seen), &o)
+    });
     let found = found?.remove(0);
     let object = seen.object.iter().filter(|&&o| o).count();
     println!(
@@ -245,13 +249,13 @@ fn main() -> Result<()> {
         Surface::from_depth(&device, &image, &object, None, 0.005)
     };
     let seen = from_above(&|p| table.distance(p).value)?;
-    let without = grasps_on(&device, 0, std::slice::from_ref(&seen), &o)?.remove(0);
+    let without = batchplan::grasps_on(&device, 0, std::slice::from_ref(&seen), &o)?.remove(0);
     let shell = GraspOptions {
         shell: Some(0.015),
         ..o
     };
     let (ms, found) = quickest(5, || {
-        grasps_on(&device, 0, std::slice::from_ref(&seen), &shell)
+        batchplan::grasps_on(&device, 0, std::slice::from_ref(&seen), &shell)
     });
     let found = found?.remove(0);
     // How wide they are, and those that press on the inner wall within 5 mm of the rim.
@@ -277,7 +281,7 @@ fn main() -> Result<()> {
     let cabinet = Obstacle::cuboid(Vec3::new(0.105, 0.0, 0.05), Vec3::new(0.01, 0.15, 0.05));
     let seen = from_above(&|p| table.distance(p).value.min(cabinet.distance(p).value))?;
     let (open_ms, open) = quickest(5, || {
-        grasps_on(&device, 0, std::slice::from_ref(&seen), &shell)
+        batchplan::grasps_on(&device, 0, std::slice::from_ref(&seen), &shell)
     });
     let open = open?.remove(0);
     let narrow = GraspOptions {
@@ -285,7 +289,7 @@ fn main() -> Result<()> {
         ..shell
     };
     let (ms, found) = quickest(5, || {
-        grasps_on(&device, 0, std::slice::from_ref(&seen), &narrow)
+        batchplan::grasps_on(&device, 0, std::slice::from_ref(&seen), &narrow)
     });
     let found = found?.remove(0);
     let narrower = found.iter().filter(|g| g.opening < o.opening).count();
@@ -302,7 +306,7 @@ fn main() -> Result<()> {
     );
 
     let bowls = vec![bowl; 64];
-    let (ms, found) = quickest(3, || grasps_on(&device, 0, &bowls, &o));
+    let (ms, found) = quickest(3, || batchplan::grasps_on(&device, 0, &bowls, &o));
     let grasps: usize = found?.iter().map(Vec::len).sum();
     println!(
         "64 bowls in one call: {grasps} grasps in {ms:.1} ms, {:.1} ms a bowl",

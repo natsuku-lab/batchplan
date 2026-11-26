@@ -14,16 +14,6 @@ use batchplan::{
 };
 use glam::{Quat, Vec2, Vec3};
 
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 /// A table with its top at z = 0, and a bar of half sizes `half` lying on it along y, 20 cm in
 /// front of the left Panda's hand at its ready pose.
 fn table_and_bar(robot: &Robot, half: Vec3) -> (Obstacle, Obstacle) {
@@ -98,7 +88,7 @@ fn a_held_bar_is_passed_to_the_other_arm_each_hand_holding_the_other_still() {
     let robot = common::two_pandas().unwrap();
     let half = Vec3::new(0.12, 0.02, 0.02);
     let (giving, taking) = (robot.hand_joints(0), robot.hand_joints(1));
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let (worlds, start, held) = picked(&device, half);
         // Held with spheres of the caller's choosing, which the taker's hold keeps.
