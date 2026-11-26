@@ -9,16 +9,17 @@
 //! A thin wall, a handle and a box's faces are found alike, with no shape assumed.
 //!
 //! A wall seen from one side only is closed on where the cameras saw past it
-//! ([`GraspOptions::shell`]): a ray that reached something farther crossed empty space, so where
-//! the line in from a patch meets space every ray around it went past ([`Free`]), the wall has
-//! ended, and its other side lies between. Inside a solid no ray goes, so none is assumed there.
+//! ([`SurfaceGraspOptions::shell`]): a ray that reached something farther crossed empty space, so
+//! where the line in from a patch meets space every ray around it went past ([`Free`]), the wall
+//! has ended, and its other side lies between. Inside a solid no ray goes, so none is assumed
+//! there.
 //!
 //! From each seed point the search goes in along the normal, through every surface that faces the
 //! other way within the opening: a cup seen from outside gives its wall, grasped with one finger
 //! inside, and its whole width, grasped around it. Patches are a fingertip's size
-//! ([`GraspOptions::contact`]), each the mean of the points in it, so noise in single points and
-//! their normals averages out. Where two patches lean toward each other, as a wedge's faces, the
-//! line is the one that splits the angle between their normals.
+//! ([`SurfaceGraspOptions::contact`]), each the mean of the points in it, so noise in single points
+//! and their normals averages out. Where two patches lean toward each other, as a wedge's faces,
+//! the line is the one that splits the angle between their normals.
 //!
 //! The hand is the robot's own: its collision spheres at each grasp and along the straight way
 //! in to it lie clear of every point, the object's and the rest, except that its fingers may be
@@ -26,7 +27,7 @@
 //! the hand is checked against are those near the object, kept cell by cell ([`Near`]), and a
 //! check stops at the first point in the way.
 //!
-//! Fingers that may come in narrower ([`GraspOptions::narrow`]) are taken to slide along the
+//! Fingers that may come in narrower ([`SurfaceGraspOptions::narrow`]) are taken to slide along the
 //! closing line, as a parallel gripper's do. A finger's sphere is in a point over one stretch of
 //! that slide, so a pass over the points near the slide marks every opening the sphere is in
 //! something at, and stops once none is left: a grasp that is refused costs about what the open
@@ -46,7 +47,7 @@ use crate::error::{Result, ensure_input, input};
 use crate::gripper::Gripper;
 use crate::robot::HandSphere;
 use crate::sdf::{DepthImage, RobotMask};
-use crate::task::{GraspOptions, TaskPlan};
+use crate::task::TaskPlan;
 use crate::types::{Pose, Screw};
 
 /// Points on the surfaces seen and the normals out of them, in one frame: what [`grasps_on`]
@@ -64,9 +65,9 @@ pub struct Surface {
     /// alone, and nothing else may lie between the fingers. Empty: every point does.
     pub object: Vec<bool>,
     /// Per point, where it was seen from (the camera's position): the ray from there to the point
-    /// crossed empty space, which tells [`GraspOptions::shell`] where a wall seen from one side
-    /// has ended. The points seen from exactly one place make one view, of the nearest reading in
-    /// each direction; a view needs at least nine readings over the object and what lies around
+    /// crossed empty space, which tells [`SurfaceGraspOptions::shell`] where a wall seen from one
+    /// side has ended. The points seen from exactly one place make one view, of the nearest reading
+    /// in each direction; a view needs at least nine readings over the object and what lies around
     /// it, so a cloud from a moving sensor, each point with a place of its own, shows nothing and
     /// gives no grasp of one side. Not finite where it is not known (as `join` leaves it,
     /// infinite); empty: not known for any point.
@@ -149,12 +150,12 @@ impl Surface {
         Ok(surface)
     }
 
-    /// The surface `points` lie on, all of them the object's, as seen from `seen_from`: each
-    /// with the normal of the plane through the points within `radius` of it (meters), toward
+    /// The surface `points` lie on, all of them the object's, as seen from `seen_from`: each with
+    /// the normal of the plane through the points within `radius` of it (meters), toward
     /// `seen_from`, or none where they are too few or lie on one line. `seen_from` is taken as
     /// where one camera saw every point from, the space between it and each point empty, which
-    /// [`GraspOptions::shell`] closes on: a cloud fused from several views and given one place
-    /// would read as one camera's view, and must be grasped with `shell: None`.
+    /// [`SurfaceGraspOptions::shell`] closes on: a cloud fused from several views and given one
+    /// place would read as one camera's view, and must be grasped with `shell: None`.
     pub fn from_points(points: &[Vec3], seen_from: Vec3, radius: f32) -> Result<Self> {
         if let Some(k) = points.iter().position(|p| !p.is_finite()) {
             return Err(input!("point {k} is not finite, got {}", points[k]));
@@ -261,18 +262,18 @@ fn plane(near: impl Iterator<Item = Vec3>, at: Vec3, toward: Vec3) -> Option<Vec
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Grasp {
-    /// The hand's IK frame in the surface's frame, as [`GraspOptions`] has it: between the
+    /// The hand's IK frame in the surface's frame, as [`SurfaceGraspOptions`] has it: between the
     /// fingertips, its z axis out of the hand and its y axis along the closing direction.
     pub pose: Pose,
     /// Where the fingers press, in the surface's frame: the first on the side the frame's y axis
     /// points from. On the frame's y axis, or ahead of it along its z axis where the hand is
     /// drawn back to stay clear.
     pub contacts: [Vec3; 2],
-    /// Whether one of the two contacts was not seen ([`GraspOptions::shell`]): it is where the
-    /// cameras saw past the wall, so the wall ends at or before it.
+    /// Whether one of the two contacts was not seen ([`SurfaceGraspOptions::shell`]): it is where
+    /// the cameras saw past the wall, so the wall ends at or before it.
     pub one_sided: bool,
     /// How far apart the fingers come in to it (meters): [`Gripper::opening`], or less where
-    /// they may come in narrower ([`GraspOptions::narrow`]) and that keeps them farther from
+    /// they may come in narrower ([`SurfaceGraspOptions::narrow`]) and that keeps them farther from
     /// what stands around.
     pub opening: f32,
 }
@@ -348,9 +349,9 @@ const THINNEST: f32 = 0.0025;
 /// How far a hand that is not clear is drawn back at a time (meters).
 const BACK: f32 = 0.002;
 
-/// How many openings fingers that may come in narrower ([`GraspOptions::narrow`]) are tried at,
-/// evenly from as far as they open to closed: few enough that a call's grasps share them, and
-/// 5 mm apart for a hand that opens 8 cm, a quarter of a fingertip's patch to each finger.
+/// How many openings fingers that may come in narrower ([`SurfaceGraspOptions::narrow`]) are tried
+/// at, evenly from as far as they open to closed: few enough that a call's grasps share them, and 5
+/// mm apart for a hand that opens 8 cm, a quarter of a fingertip's patch to each finger.
 const OPENINGS: i32 = 16;
 
 /// The smallest contact or preshape whose width a measured hand must be able to reach.
@@ -411,16 +412,128 @@ pub fn prefer_measured_contacts(plans: &mut [TaskPlan], grasps: &[Grasp]) -> Res
     Ok(())
 }
 
-impl GraspOptions {
+/// How [`grasps_on`] proposes grasps of what cameras see for a parallel gripper whose IK frame
+/// lies between its fingertips, its z axis pointing out of the hand and its y axis along the
+/// fingers' closing direction. The gripper gives the widths, the pads' friction and the hand's
+/// spheres.
+#[derive(Clone, Copy, Debug)]
+pub struct SurfaceGraspOptions {
+    /// The directions each pair of patches is grasped from around the line between them: 8.
+    pub turns: usize,
+    /// A height the hand's frame and its open fingers stay above, in the surface's frame
+    /// (meters): the top of the table the object stands on, and room to spare. The fingers are
+    /// taken at the opening each grasp comes in with, reaching as far past the frame as the
+    /// hand's spheres do, so one sits lower where the closing direction is not level; a grasp
+    /// that would take them lower is drawn back, and left out where that leaves less than
+    /// `overlap` of the fingers on the patches. `None` for no floor.
+    pub floor: Option<f32>,
+    /// The least of the fingers that stays on the patches they close on where the hand is drawn
+    /// back to stay clear (meters): 1 cm.
+    pub overlap: f32,
+    /// The radius of the patch a fingertip presses on, for grasps of a surface (meters): 5 mm.
+    /// A patch is the mean of the points within it, and surfaces nearer each other than this
+    /// along a closing line count as one.
+    pub contact: f32,
+    /// How far the hand comes in straight along its z axis to a grasp of a surface, a way that
+    /// must be clear of what was seen (meters): 10 cm, a pick's `approach`.
+    pub approach: f32,
+    /// The thickest wall seen from one side only that a grasp of a surface may close across
+    /// (meters): `Some(f32::INFINITY)`, a wall as thick as the gripper grasps. `None` turns it off,
+    /// every grasp closing on two patches seen, as a cloud fused from several views and given one
+    /// place needs ([`Surface::from_points`](crate::Surface::from_points)). With a thickness, a
+    /// patch whose other side no camera saw is closed on where the cameras saw past the wall: where
+    /// the line in along its normal first meets space every ray around it crossed on its way to
+    /// something farther ([`Surface::seen_from`](crate::Surface::seen_from)), within this
+    /// thickness, with nothing of the object seen facing along the line before it. The wall has
+    /// ended there: the second contact is put there, the other side taken parallel to the side
+    /// seen, so the width is the most the wall can be, and a wall is never taken thicker than the
+    /// gripper grasps: a shell past its capacity is one at it. A wall that leans is closed on level
+    /// as well, where the level line through the patch is inside its friction cone (the gripper's
+    /// friction): the hand then comes straight down across a flared rim, where one closing along
+    /// the wall's normal leans as the wall does; deeper down such a wall, the finger on the side it
+    /// leans over meets it above the patch ([`first_touch`](Self::first_touch) puts those grasps
+    /// last). A bowl's rim seen from above is grasped so, its outer wall
+    /// hidden under it. Inside a solid no ray goes, so none of these grasps ends in one: a box seen
+    /// from one side is closed on only across all of it, where the cameras saw past its far side.
+    /// The space found lies past where the wall ends by what the rays leave unseen: under a bowl's
+    /// flared wall seen from above, 5.5 to 11.5 mm behind the inner side of a 3 mm wall near its
+    /// rim, so 1.5 cm suits. Grasps of two patches seen come first among the ordinary grasps
+    /// and again among the intermediate angles. Shallower insertions follow their parent order.
+    pub shell: Option<f32>,
+    /// Whether the fingers may come in to a grasp of a surface less open than the gripper's
+    /// [`opening`](crate::Gripper::opening): false, every grasp is checked with the fingers as the
+    /// robot's locked joints hold them. With it, for a gripper whose jaws slide
+    /// ([`Gripper::sliding`](crate::Gripper::sliding)), each finger is taken to slide along the
+    /// hand's y axis, and a grasp comes in at the opening
+    /// ([`Grasp::opening`](crate::Grasp::opening)), of
+    /// [`Gripper::openings`](crate::Gripper::openings) those that leave each finger 2.5 mm, a
+    /// surface's noise, clear of the patch it closes on, that keeps its fingers farthest from what
+    /// is not the object's, the floor included: with something within their own travel of the open
+    /// fingers, the narrowest the hand is clear at, since a planner lets the fingers touch what
+    /// they grasp and nothing else, and knows what stands around less finely than the points do. Of
+    /// openings as far from all that, it takes the one with the most room from the object's other
+    /// sides, then the widest: a finger inside a bowl stands midway between its walls, and a box
+    /// with nothing near is grasped open. A rim beside a wall the open fingers would be in is
+    /// grasped so. A grasp the open hand has stays where it is, drawn back as the open hand is;
+    /// where the open hand is clear at no depth, the hand comes in as deep as it is clear narrower.
+    /// Lock the fingers there for the pick ([`Pick::locked`](crate::Pick::locked)); a call's grasps
+    /// share at most sixteen openings.
+    pub narrow: bool,
+    /// A point to grip a surface near, in its frame, for grasps of a surface: `None`, the pairs
+    /// of patches spread over the object. With a point, within each of the tiers
+    /// [`grasps_on`](crate::grasps_on) orders its grasps by (walls seen from one side after
+    /// those seen from both, and within each, from above before a turn to either side, with
+    /// [`first_touch`](Self::first_touch) fingers that close onto their patches first before the
+    /// rest, and pairs that face each other within half a friction cone of square before the
+    /// rest), the pairs whose middles lie nearest the point come first, the squarest first of two
+    /// as near: where a caller was told to grip, as on a knob's axis or at a handle's middle. It
+    /// orders the grasps and finds no others.
+    pub near: Option<Vec3>,
+    /// A point to enclose between the pads in surface grasps. After the ordinary grasps come
+    /// intermediate approaches sampled around nearby contact pairs, only those whose fingers close
+    /// on this point, and last shallower insertions of point-enclosing grasps, which keep the
+    /// contact patches and the required overlap. Ordinary grasps come first, including ones that
+    /// miss the point.
+    pub close_on: Option<Vec3>,
+    /// How far the hand's spheres stay from what they do not close on, on their way in to a grasp
+    /// of a surface and at it (meters): 0, a hand is clear that touches nothing. The points say
+    /// where a surface is to within their noise, and a planner knows what stands around less
+    /// finely still, its distance grids erring toward collision: a hand the points alone find
+    /// clear, a millimeter from a drawer's front behind the handle it grips, is one the planner
+    /// refuses. With a clearance the hand is drawn back to where it has that much room, while
+    /// `overlap` of its fingers stays on the patches, or its grasp is left out; 2.5 mm, a
+    /// surface's noise, suits a world of grids a few millimeters fine. What the fingers close on
+    /// is exempt, as it is at 0, and fingers that may come in narrower
+    /// ([`narrow`](Self::narrow)) keep it too. MoveIt Grasps pads the hand on its approach
+    /// likewise.
+    pub clearance: f32,
+    /// Whether grasps of a surface ([`grasps_on`](crate::grasps_on)) whose fingers close onto
+    /// their patches before they meet any other part of what was seen of the object come first,
+    /// within each turn of the lot of two seen sides and of the lot of one, so from above still
+    /// comes before a turn to either side: false, the order is as without it. A finger closing
+    /// level deep across a wall that leans over its patch, as a flared bowl's, meets the wall above
+    /// the patch first, a finger's length from the other contact, and the object turns in the hand
+    /// as it is lifted: with this, such grasps come after the rest, none left out. What a finger
+    /// meets is the object's patches: the means of its readings in cells a patch wide
+    /// ([`contact`](Self::contact)) that hold three or more, so that a reading or two off the
+    /// surface by a stereo camera's noise is none. So a part of the object no camera saw, or one
+    /// seen with fewer readings than that in every such cell, as a wall read sparser than every
+    /// 3 mm or a lip that cells' sides split, is met unnoticed. It costs a sweep of each finger of
+    /// each grasp over the patches.
+    pub first_touch: bool,
+}
+
+impl SurfaceGraspOptions {
     /// Orders measured grasps by the moment their finger contacts can exert about this turn's
-    /// axis, greatest first. Equal moments retain the input order. Give the measured screw in
+    /// axis, greatest first, with `gripper`'s friction and these options' `contact`
+    /// ([`Grasp::moment`]). Equal moments retain the input order. Give the measured screw in
     /// the grasps' frame, or `None` to turn each hand about its own z axis.
-    pub fn order_for_turn(&self, grasps: &mut [Grasp], screw: Option<Screw>) {
+    pub fn order_for_turn(&self, gripper: &Gripper, grasps: &mut [Grasp], screw: Option<Screw>) {
         let moment = |g: &Grasp| {
             let axis = screw.unwrap_or_else(|| {
                 Screw::about(g.pose.position, g.pose.rigid().rotation * Vec3::Z)
             });
-            g.moment(&axis, self)
+            g.moment(&axis, gripper, self)
         };
         grasps.sort_by(|a, b| moment(b).total_cmp(&moment(a)));
     }
@@ -454,30 +567,30 @@ const SAMPLES: usize = 4096;
 /// would be apart spread evenly: past it, a ray lies too far from the rest to tell their spacing.
 const RINGS: usize = 8;
 
-/// Grasps on each of `surfaces` for `gripper`, one of the hands of `device`'s robot, its fingers
-/// as the gripper's spheres hold them: each pair of patches the hand can close on, no farther
-/// apart than the gripper's capacity, is grasped from `turns` directions around its closing line,
-/// each both ways round, wherever the hand and its straight way in (`approach`) are clear of every
-/// point and over the `floor`, drawn back by up to what leaves `overlap` of the fingers on the
-/// patches. Where the fingers may come in narrower ([`GraspOptions::narrow`], for a gripper whose
+/// Grasps on each of `surfaces` for `gripper`, one of the hands of `device`'s robot, its fingers as
+/// the gripper's spheres hold them: each pair of patches the hand can close on, no farther apart
+/// than the gripper's capacity, is grasped from `turns` directions around its closing line, each
+/// both ways round, wherever the hand and its straight way in (`approach`) are clear of every point
+/// and over the `floor`, drawn back by up to what leaves `overlap` of the fingers on the patches.
+/// Where the fingers may come in narrower ([`SurfaceGraspOptions::narrow`], for a gripper whose
 /// jaws slide), a grasp is one the hand is clear at with them at some opening of
 /// [`Gripper::openings`], and says which ([`Grasp::opening`]). The widths and the pads' friction
 /// are the gripper's, and so are the spheres a grasp is checked with, as the gripper was built:
 /// build it from the robot the device runs, after any [`attach`](crate::Robot::attach) or
 /// [`relock`](crate::Robot::relock).
 ///
-/// They come in an order whose first few are worth trying first: every pair from above (where
-/// its line is not upright), then every pair a turn to either side, and so on round; and within
-/// a turn, the pairs that face each other within half a friction cone of square before the rest,
-/// spread over the object, each the farthest from those before it, or with a point to grip near
-/// ([`GraspOptions::near`]) the nearest it first. With a
-/// [`shell`](GraspOptions::shell), grasps supported by views past a wall follow those with
-/// both sides seen. With [`first_touch`](GraspOptions::first_touch), within each turn of each
-/// of those two lots, the grasps whose fingers close onto their patches before they meet any
-/// other part of what was seen of the object come first, the rest after them in the same order,
-/// so that from above still comes before a turn to either side: a finger that
-/// meets a wall leaning over its patch, or a lip above it, closes there instead, a finger's length
-/// from the other contact, and the object turns in the hand. [`GraspOptions::close_on`] appends
+/// They come in an order whose first few are worth trying first: every pair from above (where its
+/// line is not upright), then every pair a turn to either side, and so on round; and within a turn,
+/// the pairs that face each other within half a friction cone of square before the rest, spread
+/// over the object, each the farthest from those before it, or with a point to grip near
+/// ([`SurfaceGraspOptions::near`]) the nearest it first. With a
+/// [`shell`](SurfaceGraspOptions::shell), grasps supported by views past a wall follow those with
+/// both sides seen. With [`first_touch`](SurfaceGraspOptions::first_touch), within each turn of
+/// each of those two lots, the grasps whose fingers close onto their patches before they meet any
+/// other part of what was seen of the object come first, the rest after them in the same order, so
+/// that from above still comes before a turn to either side: a finger that meets a wall leaning
+/// over its patch, or a lip above it, closes there instead, a finger's length from the other
+/// contact, and the object turns in the hand. [`SurfaceGraspOptions::close_on`] appends
 /// intermediate approaches that enclose the point after all ordinary grasps, again with two seen
 /// sides first. Finally it tries shallower insertions of those grasps that enclose the point, in
 /// parent grasp order. The surfaces run on the device's threads, and a surface's grasps are the
@@ -486,7 +599,7 @@ pub fn grasps_on(
     device: &Device,
     gripper: &Gripper,
     surfaces: &[Surface],
-    o: &GraspOptions,
+    o: &SurfaceGraspOptions,
 ) -> Result<Vec<Vec<Grasp>>> {
     let (hand, hands) = (gripper.hand(), device.robot().hands());
     ensure_input!(hand < hands, "hand {hand} of {hands}");
@@ -577,10 +690,20 @@ pub fn grasps_on(
         at_capacity: partial.as_deref(),
         gap,
     };
-    let options = GraspOptions {
+    let options = SearchOptions {
         opening: capacity,
+        turns: o.turns,
+        floor: o.floor,
+        overlap: o.overlap,
         friction: gripper.friction(),
-        ..*o
+        contact: o.contact,
+        approach: o.approach,
+        shell: o.shell,
+        narrow: o.narrow,
+        near: o.near,
+        close_on: o.close_on,
+        clearance: o.clearance,
+        first_touch: o.first_touch,
     };
     let each = || surfaces.par_iter().map(|s| on(s, open, &options)).collect();
     Ok(device.install(each))
@@ -607,8 +730,28 @@ struct OpenHand<'a> {
     gap: f32,
 }
 
+/// What the search reads of the gripper and the options, built once by [`grasps_on`]: each
+/// field as [`SurfaceGraspOptions`] has it, and `opening`, the widest pair closed on, the gripper's
+/// capacity, and `friction`, its pads'.
+#[derive(Clone, Copy)]
+struct SearchOptions {
+    opening: f32,
+    turns: usize,
+    floor: Option<f32>,
+    overlap: f32,
+    friction: f32,
+    contact: f32,
+    approach: f32,
+    shell: Option<f32>,
+    narrow: bool,
+    near: Option<Vec3>,
+    close_on: Option<Vec3>,
+    clearance: f32,
+    first_touch: bool,
+}
+
 /// One surface's grasps for a hand of spheres `hand`.
-fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
+fn on(s: &Surface, open: OpenHand<'_>, o: &SearchOptions) -> Vec<Grasp> {
     let hand = open.spheres;
     let (pairs, one_sided) = pairs(s, o);
     if pairs.is_empty() && one_sided.is_empty() {
@@ -827,9 +970,9 @@ fn on(s: &Surface, open: OpenHand<'_>, o: &GraspOptions) -> Vec<Grasp> {
 }
 
 /// A pair's grasps by turn, as [`on`] takes them, where the fingers may come in narrower
-/// ([`GraspOptions::narrow`]): where the open hand is clear, as deep as it is, so that a grasp
-/// it has stays where it is; where it is clear at no depth, as deep as the hand is clear at some
-/// opening. Each with the opening it comes in with there.
+/// ([`SurfaceGraspOptions::narrow`]): where the open hand is clear, as deep as it is, so that a
+/// grasp it has stays where it is; where it is clear at no depth, as deep as the hand is clear at
+/// some opening. Each with the opening it comes in with there.
 #[inline(never)]
 fn narrowly(
     pair: &Pair,
@@ -837,7 +980,7 @@ fn narrowly(
     near: &Near,
     open: OpenHand<'_>,
     reach: f32,
-    o: &GraspOptions,
+    o: &SearchOptions,
     turns: usize,
 ) -> Vec<Vec<Grasp>> {
     let down = Vec3::NEG_Z.reject_from_normalized(pair.line);
@@ -890,7 +1033,7 @@ fn narrowly(
 }
 
 /// The opening the hand comes in with at `pose`, closing on patches `width` apart, where its
-/// fingers may come in narrower ([`GraspOptions::narrow`]), if it is clear at one: none that
+/// fingers may come in narrower ([`SurfaceGraspOptions::narrow`]), if it is clear at one: none that
 /// brings a finger nearer its patch than a surface's noise ([`THINNEST`]). Each finger's
 /// spheres are taken to slide along the closing line, and the opening is the one farthest from
 /// any at which they would be in what is not the object's, were they to open as far past open as
@@ -907,7 +1050,7 @@ fn narrowed(
     pose: &Pose,
     width: f32,
     reach: f32,
-    o: &GraspOptions,
+    o: &SearchOptions,
     whole: bool,
 ) -> Option<(f32, bool)> {
     let hand = open.spheres;
@@ -1095,9 +1238,9 @@ fn spread(pairs: Vec<Pair>, cone: f32, near: Option<Vec3>) -> Vec<Pair> {
 }
 
 /// The pairs of patches of the object's surfaces a hand can close on, those that face each other
-/// most squarely first; and with a [`shell`](GraspOptions::shell), those of walls seen from one
-/// side, apart.
-fn pairs(s: &Surface, o: &GraspOptions) -> (Vec<Pair>, Vec<Pair>) {
+/// most squarely first; and with a [`shell`](SurfaceGraspOptions::shell), those of walls seen from
+/// one side, apart.
+fn pairs(s: &Surface, o: &SearchOptions) -> (Vec<Pair>, Vec<Pair>) {
     let object = |i: usize| s.object.is_empty() || s.object[i];
     // The object's points, and what else lies among them: only that can be between two of its
     // patches.
@@ -1829,8 +1972,8 @@ impl Grasp {
     /// The moment about `screw`'s line that the grasp's two fingertips can give what they hold,
     /// for each newton each presses with (meters): what turning it about the line asks of the
     /// grip, to order grips for a [`turn`](crate::turn()) by, the most first. It reads the
-    /// options' `friction` and `contact`; the screw's direction must be unit, as
-    /// [`Screw::path`] checks, or the moment is no number.
+    /// gripper's [`friction`](Gripper::friction) and the options' `contact`; the screw's direction
+    /// must be unit, as [`Screw::path`] checks, or the moment is no number.
     ///
     /// A force `F` at a contact `c` gives `F · (ŝ × (c − q))` about the line through `q` along
     /// `ŝ`, and each fingertip presses along the closing line `n`. Friction lets it push across
@@ -1848,9 +1991,11 @@ impl Grasp {
     /// line that gives less. The patch's term puts the press at its edge and the twist's spreads
     /// it evenly: they are separate bounds, exact together where the line is square to `n`, where
     /// the twist gives nothing. A bar 2.5 cm wide gripped across it on its axis gives 2.25 cm at
-    /// the default options, half of it friction; 3 cm along the bar from its axis, 8.25 cm.
+    /// a friction of 0.5 and the default options, half of it friction; 3 cm along the bar from its
+    /// axis, 8.25 cm.
     #[must_use]
-    pub fn moment(&self, screw: &Screw, o: &GraspOptions) -> f32 {
+    pub fn moment(&self, screw: &Screw, gripper: &Gripper, o: &SurfaceGraspOptions) -> f32 {
+        let friction = gripper.friction();
         let along = screw.direction.normalize();
         let [first, second] = self.contacts;
         let closing = (second - first)
@@ -1862,30 +2007,31 @@ impl Grasp {
             (arm - closing * arm.dot(closing)).length()
         };
         let (near, far) = (lever(first), lever(second));
-        let twist = 2.0 / 3.0 * o.friction * o.contact;
+        let twist = 2.0 / 3.0 * friction * o.contact;
         let patches = o.contact * closing.cross(along).length() + twist * closing.dot(along).abs();
-        let held = o.friction * (near + far) + 2.0 * patches;
+        let held = friction * (near + far) + 2.0 * patches;
         let middle = (first + second) / 2.0;
         let pushed = 2.0 * closing.dot(along.cross(middle - screw.point)).abs();
-        held + (pushed - o.friction * (near - far).abs()).abs()
+        held + (pushed - friction * (near - far).abs()).abs()
     }
 }
 
-/// What the fingers of a hand are swept against for [`GraspOptions::first_touch`]: the object's
-/// patches, kept to be found in a box over their own bounds, a few cells, and the hand's fingers.
+/// What the fingers of a hand are swept against for [`SurfaceGraspOptions::first_touch`]: the
+/// object's patches, kept to be found in a box over their own bounds, a few cells, and the hand's
+/// fingers.
 struct FirstTouch {
     patches: Near,
     fingers: Vec<Finger>,
 }
 
 impl FirstTouch {
-    /// The patches of the object `s` shows: in each cell a patch wide ([`GraspOptions::contact`])
-    /// that holds enough of its points for a patch ([`SUPPORT`]), their mean. What a finger meets
-    /// is a patch, as what it presses on is: a reading or two off the surface by a stereo
-    /// camera's noise make none. Over all the hand may reach (`lower` to `upper`) where there are
-    /// none.
+    /// The patches of the object `s` shows: in each cell a patch wide
+    /// ([`SurfaceGraspOptions::contact`]) that holds enough of its points for a patch
+    /// ([`SUPPORT`]), their mean. What a finger meets is a patch, as what it presses on is: a
+    /// reading or two off the surface by a stereo camera's noise make none. Over all the hand may
+    /// reach (`lower` to `upper`) where there are none.
     #[inline(never)]
-    fn new(s: &Surface, o: &GraspOptions, hand: &[HandSphere], lower: Vec3, upper: Vec3) -> Self {
+    fn new(s: &Surface, o: &SearchOptions, hand: &[HandSphere], lower: Vec3, upper: Vec3) -> Self {
         let cells = Cells::new(&s.points, o.contact, |i| s.object.is_empty() || s.object[i]);
         let enough = cells.order.iter().map(|key| &cells.of[key]);
         let patches = enough.filter(|cell| cell.len() >= SUPPORT);
@@ -2091,6 +2237,24 @@ fn in_box(
         }
     }
     false
+}
+
+impl Default for SurfaceGraspOptions {
+    fn default() -> Self {
+        Self {
+            turns: 8,
+            floor: None,
+            overlap: 0.01,
+            contact: 0.005,
+            approach: 0.1,
+            shell: Some(f32::INFINITY),
+            narrow: false,
+            near: None,
+            close_on: None,
+            clearance: 0.0,
+            first_touch: false,
+        }
+    }
 }
 
 #[cfg(test)]

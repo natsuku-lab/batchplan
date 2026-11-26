@@ -22,9 +22,9 @@ use std::time::Instant;
 use anyhow::Result;
 use batchplan::rng::Rng;
 use batchplan::{
-    DepthImage, Device, GraspOptions, GripperCalibration, Held, IkProblem, Intrinsics, Obstacle,
-    Pose, Robot, Screw, Surface, TaskFailure, TaskOptions, TaskPlan, TaskResult, TaskStep,
-    ToolPath, ToolPathOptions, Touch, Turn, World, Worlds,
+    DepthImage, Device, Gripper, GripperCalibration, Held, IkProblem, Intrinsics, Obstacle, Pose,
+    Robot, Screw, ShapeGraspOptions, Surface, SurfaceGraspOptions, TaskFailure, TaskOptions,
+    TaskPlan, TaskResult, TaskStep, ToolPath, ToolPathOptions, Touch, Turn, World, Worlds,
 };
 use glam::{Mat3, Quat, Vec2, Vec3};
 use rayon::prelude::*;
@@ -145,10 +145,10 @@ fn knob(device: &Device, at: Vec2, yaw: f32) -> Result<Thing> {
         [1.0, -1.0].map(|side| look_at(middle + across * side * 0.3 + Vec3::Z * 0.3, middle));
     let seen = seen_bar(device, &scene, &bar, cameras)?;
     // The fingers come in as narrow as keeps them off the dial, above its top.
-    let o = GraspOptions {
+    let o = SurfaceGraspOptions {
         narrow: true,
         floor: Some(0.11),
-        ..GraspOptions::default()
+        ..SurfaceGraspOptions::default()
     };
     let screw = Screw::about(at.extend(0.11), Vec3::Z);
     // The Panda's pads 8 cm apart as its fingers are held open, touching closed.
@@ -156,7 +156,7 @@ fn knob(device: &Device, at: Vec2, yaw: f32) -> Result<Thing> {
     let gripper = device.robot().gripper(0, &calibration)?;
     let mut found =
         batchplan::grasps_on(device, &gripper, std::slice::from_ref(&seen), &o)?.remove(0);
-    o.order_for_turn(&mut found, Some(screw));
+    o.order_for_turn(&gripper, &mut found, Some(screw));
     let to_bar = bar.pose().inverse();
     let fingers = |opening: f32| {
         let each = ["panda_finger_joint1", "panda_finger_joint2"];
@@ -173,18 +173,23 @@ fn knob(device: &Device, at: Vec2, yaw: f32) -> Result<Thing> {
     })
 }
 
+/// The Panda's hand of `robot` for grasps of a shape, its pads 8 cm apart: they need no fingers
+/// that slide.
+fn shape_hand(robot: &Robot) -> Result<Gripper> {
+    Ok(robot.gripper(0, &GripperCalibration::new(0.08, 0.0, HashMap::new()))?)
+}
+
 /// A cap 4 cm across and 2.5 cm tall on a bottle 7 cm across and 15 cm tall, its thread 5 mm a
 /// turn, unscrewed half a turn: anticlockwise from above, up 2.5 mm.
 fn cap(robot: &Robot) -> Result<Thing> {
     let bottle = Obstacle::cylinder(Vec3::new(0.45, 0.2, 0.075), 0.035, 0.075);
     let cap = Obstacle::cylinder(Vec3::new(0.45, 0.2, 0.1625), 0.02, 0.0125);
-    let o = GraspOptions {
+    let o = ShapeGraspOptions {
         floor: Some(0.15),
-        tip: robot.tip(0),
-        ..GraspOptions::default()
+        ..ShapeGraspOptions::default()
     };
     Ok(Thing {
-        grips: batchplan::grasps(&cap, &o)?,
+        grips: batchplan::grasps(&cap, &shape_hand(robot)?, &o)?,
         locked: vec![],
         world: World::new(vec![table(), bottle, cap]),
         object: 2,
@@ -207,12 +212,9 @@ fn lever(robot: &Robot) -> Result<Thing> {
         hinge + Vec3::new(0.06, 0.0, 0.0075),
         Vec3::new(0.075, 0.01, 0.0075),
     );
-    let o = GraspOptions {
-        tip: robot.tip(0),
-        ..GraspOptions::default()
-    };
+    let o = ShapeGraspOptions::default();
     Ok(Thing {
-        grips: batchplan::grasps(&arm, &o)?,
+        grips: batchplan::grasps(&arm, &shape_hand(robot)?, &o)?,
         locked: vec![],
         world: World::new(vec![table(), post, arm]),
         object: 2,
@@ -227,12 +229,9 @@ fn lever(robot: &Robot) -> Result<Thing> {
 fn wheel(robot: &Robot) -> Result<Thing> {
     let pipe = Obstacle::cylinder(Vec3::new(0.5, 0.15, 0.12), 0.02, 0.12);
     let rim = Obstacle::cylinder(Vec3::new(0.5, 0.15, 0.25), 0.1, 0.01);
-    let o = GraspOptions {
-        tip: robot.tip(0),
-        ..GraspOptions::default()
-    };
+    let o = ShapeGraspOptions::default();
     Ok(Thing {
-        grips: batchplan::grasps(&rim, &o)?,
+        grips: batchplan::grasps(&rim, &shape_hand(robot)?, &o)?,
         locked: vec![],
         world: World::new(vec![table(), pipe, rim]),
         object: 2,
@@ -472,7 +471,7 @@ fn fixtures(device: &Device) -> Result<()> {
     let cameras = [-1.0, 1.0]
         .map(|side| look_at(middle + Vec3::new(-0.24, side * 0.08, side * 0.15), middle));
     let surface = seen_bar(device, &scene, &bar, cameras)?;
-    let options = GraspOptions {
+    let options = SurfaceGraspOptions {
         near: Some(middle),
         approach: 0.05,
         ..Default::default()

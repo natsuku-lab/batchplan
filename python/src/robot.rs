@@ -361,6 +361,14 @@ impl Gripper {
         field::shortest(self.0.friction())
     }
 
+    /// How far the hand's spheres reach past its IK frame along the frame's z axis (meters), as
+    /// `Robot.tip` measured it when the gripper was built: a shape's grasps' where their options
+    /// name no `tip`.
+    #[getter]
+    fn tip(&self) -> f64 {
+        field::shortest(self.0.tip())
+    }
+
     /// Whether the hand's joints, jaws and spheres move as opposed jaws sliding along its y axis
     /// between the closed and loaded gaps.
     #[getter]
@@ -613,7 +621,7 @@ impl Robot {
 
     /// How far hand `hand`'s spheres reach past its IK frame along the frame's z axis at the
     /// default configuration (meters): how much deeper than a grasp the fingertips go, for
-    /// `GraspOptions.tip`. Negative where every sphere stays short of the frame.
+    /// `ShapeGraspOptions.tip`. Negative where every sphere stays short of the frame.
     fn tip(&self, hand: usize) -> PyResult<f64> {
         self.check_hand(hand)?;
         Ok(field::shortest(self.0.tip(hand)))

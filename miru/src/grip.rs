@@ -2,8 +2,8 @@
 use std::sync::Weak;
 
 use batchplan::{
-    DepthImage, Device, Grasp, GraspOptions, Gripper, HandReach, Held, IkOptions, Obstacle,
-    Occlusion, OccupancyMap, PickBody, Pose, RobotMask, SdfOptions,
+    DepthImage, Device, Grasp, Gripper, HandReach, Held, IkOptions, Obstacle, Occlusion,
+    OccupancyMap, PickBody, Pose, RobotMask, SdfOptions, SurfaceGraspOptions,
 };
 use glam::Vec3;
 
@@ -192,7 +192,8 @@ impl Observed {
         let voxel = memory.map.voxel;
         // Resolve a fingertip patch: at this spacing the maximum growth of a grid built from
         // depth (two voxel diagonals) is at most the radius used for its surface normals.
-        let divisions = (2.0 * 3f32.sqrt() * voxel / GraspOptions::default().contact).ceil() as u32;
+        let divisions =
+            (2.0 * 3f32.sqrt() * voxel / SurfaceGraspOptions::default().contact).ceil() as u32;
         let fine = SdfOptions {
             voxel: voxel / divisions as f32,
             padding: memory.padding,

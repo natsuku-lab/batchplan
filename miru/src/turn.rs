@@ -1,7 +1,7 @@
 //! Grips to turn a control by, proposed from three sources and ranked by what the retained
 //! endpoints show of each closure.
 
-use batchplan::{Device, GraspOptions, Gripper, Pose, Screw};
+use batchplan::{Device, Gripper, Pose, Screw, ShapeGraspOptions, SurfaceGraspOptions};
 use glam::Vec3;
 
 use crate::bar;
@@ -75,25 +75,26 @@ impl Kept {
     ///
     /// 1. **Bar**: the poses [`Kept::bar_on_disk`] gives along `up`, in its order, fully open;
     ///    `enough: Some(1)`.
-    /// 2. **Shape, both sides**: `batchplan::grasps` of the object's fitted shape with `options`
-    ///    opening at the capacity, so closing across no more, those whose z axis points along
-    ///    `-up` to within about 8 degrees: none where the shape's vertical is off `up` by more, as
-    ///    for a control on a slanted panel, whose shape is fitted upright. Of these, those whose
-    ///    closure shows [`ClosureEvidence::BothSides`]. Fully open; `enough: None`.
+    /// 2. **Shape, both sides**: `batchplan::grasps` of the object's fitted shape with `gripper`
+    ///    and `shape_options`, so closing across no more than the gripper's capacity, those whose
+    ///    z axis points along `-up` to within about 8 degrees: none where the shape's vertical is
+    ///    off `up` by more, as for a control on a slanted panel, whose shape is fitted upright. Of
+    ///    these, those whose closure shows [`ClosureEvidence::BothSides`]. Fully open;
+    ///    `enough: None`.
     /// 3. **The rest**: the grasps of the object's measured surface (`batchplan::grasps_on` with
-    ///    `gripper`), ordered by the moment they exert about the screw with the gripper's friction
-    ///    (`GraspOptions::order_for_turn`), those showing `BothSides` first, each at its own
+    ///    `gripper` and `surface_options`), ordered by the moment they exert about the screw
+    ///    (`SurfaceGraspOptions::order_for_turn`), those showing `BothSides` first, each at its own
     ///    opening; then the grasps of group 2's shape whose closure is
     ///    [`ClosureEvidence::Incomplete`], fully open. `enough: Some(1)`.
     ///
     /// Fully open is the gripper's loaded gap; what a grasp closes across is at most its capacity.
-    /// `options.opening` and `options.friction` are not read. Every proposal's evidence is
-    /// [`Kept::observed_closures`]'s at that pose, with this gripper and these options: what the
-    /// latest endpoints show of an open approach and a symmetric closure, nothing of hidden
-    /// material, contact normals or whether the control turns about the axis. `options` is what
-    /// those calls take, its `depth` the insertion below a bar's crest and in the shape's grasps,
-    /// which grasps of the surface do not read. Plan every motion against the current world and
-    /// guard it in execution: a grip here is a proposal.
+    /// Every proposal's evidence is [`Kept::observed_closures`]'s at that pose, with this gripper:
+    /// what the latest endpoints show of an open approach and a symmetric closure, nothing of
+    /// hidden material, contact normals or whether the control turns about the axis. The surface
+    /// options' `floor` and `approach` serve the bar and every proposal's evidence, their `overlap`
+    /// the bar and `grasps_on`, and the shape options' `depth` is also the bar's insertion below
+    /// its crest. Plan every motion against the current world and guard it in execution: a grip
+    /// here is a proposal.
     ///
     /// None where no label of the look names the object. Out-of-range input, a gripper whose jaws
     /// do not slide among it, is an `Error::Input` naming the value.
@@ -103,7 +104,8 @@ impl Kept {
         id: u32,
         gripper: &Gripper,
         up: Vec3,
-        options: &GraspOptions,
+        shape_options: &ShapeGraspOptions,
+        surface_options: &SurfaceGraspOptions,
     ) -> Result<Option<TurnGrips>> {
         let (robot, hand) = (device.robot(), gripper.hand());
         ensure_input!(
@@ -118,26 +120,42 @@ impl Kept {
         );
         ensure_input!(up.is_normalized(), "invalid up direction {up:?}");
         ensure_input!(
-            options.depth.is_finite()
-                && options.depth > 0.0
-                && options.overlap.is_finite()
-                && options.overlap > 0.0
-                && options.approach.is_finite()
-                && options.approach >= 0.0
-                && options.floor.is_none_or(f32::is_finite),
-            "invalid insertion {}, overlap {}, approach {} or floor {:?}",
-            options.depth,
-            options.overlap,
-            options.approach,
-            options.floor
+            shape_options.depth.is_finite()
+                && shape_options.depth > 0.0
+                && shape_options.overlap.is_finite()
+                && shape_options.overlap > 0.0
+                && shape_options.floor.is_none_or(f32::is_finite),
+            "invalid insertion {}, overlap {} or floor {:?} of the shape's grasps",
+            shape_options.depth,
+            shape_options.overlap,
+            shape_options.floor
         );
         // What `batchplan::grasps` refuses besides a shape no grasp fits.
         ensure_input!(
-            options.turns > 0 && options.tip.is_finite() && (0.0..1.0).contains(&options.along),
-            "invalid turns {}, tip {} or along {}",
-            options.turns,
-            options.tip,
-            options.along
+            shape_options.turns > 0
+                && shape_options.tip.is_none_or(f32::is_finite)
+                && (0.0..1.0).contains(&shape_options.along),
+            "invalid turns {}, tip {:?} or along {} of the shape's grasps",
+            shape_options.turns,
+            shape_options.tip,
+            shape_options.along
+        );
+        ensure_input!(
+            surface_options.turns > 0
+                && surface_options.contact.is_finite()
+                && surface_options.contact > 0.0
+                && surface_options.overlap.is_finite()
+                && surface_options.overlap > 0.0
+                && surface_options.approach.is_finite()
+                && surface_options.approach >= 0.0
+                && surface_options.floor.is_none_or(f32::is_finite),
+            "invalid turns {}, contact {}, overlap {}, approach {} or floor {:?} of the surface's \
+             grasps",
+            surface_options.turns,
+            surface_options.contact,
+            surface_options.overlap,
+            surface_options.approach,
+            surface_options.floor
         );
         let scene = self.scene();
         let Some(index) = scene.objects.iter().position(|object| object.id == id) else {
@@ -148,38 +166,42 @@ impl Kept {
             return Ok(None);
         };
         let bar = match self.bar_resolution(label) {
-            Some(resolution) => bar::measured(robot, &surface, resolution, up, gripper, options)?,
+            Some(resolution) => bar::measured(
+                &surface,
+                resolution,
+                up,
+                gripper,
+                shape_options.depth,
+                surface_options,
+            )?,
             None => None,
         };
         let shape = scene.objects[index].shape.obstacle();
         let placed = shape.pose();
         let screw = Screw::about(bar.as_ref().map_or(placed.position, |bar| bar.center), up);
         let open = gripper.opening();
-        let within_capacity = GraspOptions {
-            opening: gripper.capacity(),
-            ..*options
-        };
         // With its options checked, `grasps` refuses only a shape no grasp fits.
-        let shaped: Vec<Pose> = batchplan::grasps(&shape, &within_capacity)
+        let from_shape: Vec<Pose> = batchplan::grasps(&shape, gripper, shape_options)
             .unwrap_or_default()
             .into_iter()
             .map(|grasp| placed.mul_pose(grasp))
             .filter(|pose| (pose.rotation * Vec3::Z).dot(up) < -ALONG)
             .collect();
-        let found = batchplan::grasps_on(device, gripper, std::slice::from_ref(&surface), options)?;
+        let found = batchplan::grasps_on(
+            device,
+            gripper,
+            std::slice::from_ref(&surface),
+            surface_options,
+        )?;
         let mut seen = found.into_iter().next().unwrap_or_default();
-        let pads = GraspOptions {
-            friction: gripper.friction(),
-            ..*options
-        };
-        pads.order_for_turn(&mut seen, Some(screw));
+        surface_options.order_for_turn(gripper, &mut seen, Some(screw));
         let bars = bar.map(|bar| bar.grasps).unwrap_or_default();
-        let poses: Vec<Pose> = (bars.iter().chain(&shaped).copied())
+        let poses: Vec<Pose> = (bars.iter().chain(&from_shape).copied())
             .chain(seen.iter().map(|grasp| grasp.pose))
             .collect();
-        let evidence = self.closures(device, label, gripper, &poses, options)?;
+        let evidence = self.closures(device, label, gripper, &poses, surface_options)?;
         let (bar_evidence, evidence) = evidence.split_at(bars.len());
-        let (shape_evidence, seen_evidence) = evidence.split_at(shaped.len());
+        let (shape_evidence, seen_evidence) = evidence.split_at(from_shape.len());
         let grip = |pose, opening, source, evidence| TurnGrip {
             pose,
             opening,
@@ -189,7 +211,7 @@ impl Kept {
         let opposed = (bars.iter().zip(bar_evidence))
             .map(|(&pose, &evidence)| grip(pose, open, GripSource::Bar, evidence))
             .collect();
-        let shapes = shaped
+        let shapes = from_shape
             .iter()
             .zip(shape_evidence)
             .map(|(&pose, &evidence)| grip(pose, open, GripSource::Shape, evidence));

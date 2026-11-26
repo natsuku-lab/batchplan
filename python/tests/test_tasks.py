@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 import batchplan as bp
-from conftest import ASSETS, devices
+from conftest import ASSETS, devices, gripper_of
 
 TABLE, BOX = 0, 1
 HALF = (0.02, 0.03, 0.03)
@@ -20,14 +20,14 @@ def scene(*more: bp.Obstacle) -> bp.World:
 
 
 def box_grasps(robot: bp.Robot) -> list[bp.Pose]:
-    options = bp.GraspOptions(tip=robot.tip(0), floor=0.005)
-    return bp.grasps(scene().obstacles[BOX], options)
+    options = bp.ShapeGraspOptions(tip=robot.tip(0), floor=0.005)
+    return bp.grasps(scene().obstacles[BOX], gripper_of(robot), options)
 
 
-def test_grasps_and_place_poses_follow_their_options():
-    box = scene().obstacles[BOX]
-    floored = bp.grasps(box, bp.GraspOptions(floor=0.005))
-    assert 0 < len(floored) < len(bp.grasps(box)), "a floor leaves out grasps from below"
+def test_grasps_and_place_poses_follow_their_options(tasks_robot):
+    box, gripper = scene().obstacles[BOX], gripper_of(tasks_robot)
+    floored = bp.grasps(box, gripper, bp.ShapeGraspOptions(tip=0.0, floor=0.005))
+    assert 0 < len(floored) < len(bp.grasps(box, gripper)), "a floor leaves out grasps from below"
     can = bp.Obstacle.cylinder((0.0, 0.0, 0.05), 0.03, 0.05)
     assert len(bp.place_poses(can, bp.Pose((0.4, 0.0, 0.05)), 6)) == 6
 
@@ -120,7 +120,8 @@ def test_a_task_no_grasp_gets_through_says_where_each_stopped(tasks_robot):
     device = bp.Device.cpu(tasks_robot)
     far = bp.Obstacle.cuboid((2.0, 0.0, HALF[2]), HALF)
     worlds = device.upload([bp.World([scene().obstacles[TABLE], far])])
-    grasps = bp.grasps(far, bp.GraspOptions(tip=tasks_robot.tip(0), floor=0.005))
+    options = bp.ShapeGraspOptions(tip=tasks_robot.tip(0), floor=0.005)
+    grasps = bp.grasps(far, gripper_of(tasks_robot), options)
     failure = bp.pick(device, worlds, [bp.Pick(0, tasks_robot.default_q, 1, grasps)]).outcomes[0]
     assert isinstance(failure, bp.TaskFailure)
     assert failure.step == bp.TaskStep.Reach
@@ -248,9 +249,9 @@ def test_a_transit_that_breaks_its_constraints_stops_there(tasks_robot):
 
 def test_a_handover_is_bound_with_its_defaults(tasks_robot):
     bar = bp.Obstacle.cuboid((0.0, 0.0, 0.0), (0.12, 0.02, 0.02))
-    middle = bp.grasps(bar)
-    ends = bp.grasps(bar, bp.GraspOptions(along=0.75))
-    assert bp.GraspOptions(along=0.75).along == 0.75 and len(ends) == 2 * len(middle)
+    middle = bp.grasps(bar, gripper_of(tasks_robot))
+    ends = bp.grasps(bar, gripper_of(tasks_robot), bp.ShapeGraspOptions(along=0.75))
+    assert bp.ShapeGraspOptions(along=0.75).along == 0.75 and len(ends) == 2 * len(middle)
     # From a side, toward the +x end; the taker holds the -x end.
     toward_end = max(ends, key=lambda g: g.position[0])
     held = bp.Held(0, bar, toward_end)
@@ -289,7 +290,7 @@ def test_a_bar_is_handed_from_one_arm_to_the_other():
     table = bp.Obstacle.cuboid((0.3, 0.0, -0.02), (0.6, 0.9, 0.02))
     bar = bp.Obstacle.cuboid((hand[0] + 0.2, hand[1], 0.02), (0.02, 0.12, 0.02))
     worlds = device.upload([bp.World([table, bar]), bp.World([table])])
-    grasps = bp.grasps(bar, bp.GraspOptions(along=0.75))
+    grasps = bp.grasps(bar, gripper_of(robot), bp.ShapeGraspOptions(along=0.75))
     picked = bp.pick(device, worlds, [bp.Pick(0, q, 1, grasps, support=[0])])
     plan = picked.outcomes[0][0]
     task = bp.Handover(robot, 1, plan.end, plan.held, 1)
@@ -336,7 +337,7 @@ def test_holds_and_picks_say_where_the_fingers_are(tasks_robot):
     narrow = {"panda_finger_joint1": 0.01, "panda_finger_joint2": 0.01}
     held = bp.Held(0, box, bp.Pose((0.0, 0.0, 0.0)), locked=narrow)
     assert held.locked == narrow and bp.Held(0, box, bp.Pose((0.0, 0.0, 0.0))).locked == {}
-    grasps = bp.grasps(box)
+    grasps = bp.grasps(box, gripper_of(tasks_robot))
     pick = bp.Pick(0, tasks_robot.default_q, 1, grasps, locked=[narrow] * len(grasps))
     assert pick.locked == (narrow,) * len(grasps)
     assert bp.Pick(0, tasks_robot.default_q, 1, grasps).locked == ()
@@ -346,10 +347,10 @@ def test_holds_and_picks_say_where_the_fingers_are(tasks_robot):
     opening = bp.Place(0, tasks_robot.default_q, held, place.poses, open=[{}, narrow])
     assert opening.open == ({}, narrow)
     assert bp.Pick(0, tasks_robot.default_q, 1, grasps, enough=2).enough == 2
-    assert bp.GraspOptions(narrow=True).narrow and not bp.GraspOptions().narrow
     closed = {"panda_finger_joint1": 0.0, "panda_finger_joint2": 0.0}
-    openings = tasks_robot.gripper(0, bp.GripperCalibration(0.08, 0.0, closed)).openings
-    assert len(openings) == 16 and openings[0] == 0.08
+    gripper = tasks_robot.gripper(0, bp.GripperCalibration(0.08, 0.0, closed))
+    openings = gripper.openings
+    assert len(openings) == 16 and openings[0] == 0.08 and gripper.tip == tasks_robot.tip(0)
     assert openings[1:] == pytest.approx([0.08 * (16 - k) / 16 for k in range(1, 16)])
     device = bp.Device.cpu(tasks_robot)
     worlds = device.upload([bp.World([box])])
@@ -415,9 +416,6 @@ def test_a_knob_is_turned_in_place_and_a_screw_carries_a_pose(tasks_robot):
     )
     with pytest.raises(bp.InputError, match="unit"):
         bp.Screw((0.0, 0.0, 0.0), (0.0, 0.0, 2.0)).path(frame, 1.0, 1e-3)
-    near = bp.GraspOptions(near=(0.1, 0.0, 0.0))
-    np.testing.assert_allclose(near.near, (0.1, 0.0, 0.0))
-    assert bp.GraspOptions().near is None
 
 
 def test_a_drawer_is_drawn_along_the_signed_world_direction(tasks_robot):
@@ -434,6 +432,8 @@ def test_a_drawer_is_drawn_along_the_signed_world_direction(tasks_robot):
         tasks_robot.ee_pose(plan.pull.end).position, (0.42, 0.05, 0.02), atol=1e-3
     )
     assert bp.TaskStep.Reach < bp.TaskStep.Pull < bp.TaskStep.Approach
+    steps = ["Start", "Reach", "Turn", "Pull", "Approach", "Depart", "Transit"]
+    assert [int(getattr(bp.TaskStep, s)) for s in steps] == list(range(7)), "Rust's numbers"
     for changes, message in [
         ({"distance": 0.0}, "distance"),
         ({"direction": (0, 2, 0)}, "direction"),

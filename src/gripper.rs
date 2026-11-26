@@ -43,8 +43,10 @@ impl GripperCalibration {
 }
 
 /// One hand of a robot as a parallel-jaw gripper, from [`Robot::gripper`](crate::Robot::gripper):
-/// built once, taken by every call that grasps with it ([`grasps_on`](crate::grasps_on),
-/// [`Grasp::closes_on`](crate::Grasp::closes_on)).
+/// built once, taken by every call that grasps with it ([`grasps`](crate::grasps),
+/// [`grasps_on`](crate::grasps_on), [`Grasp::closes_on`](crate::Grasp::closes_on),
+/// [`SurfaceGraspOptions::order_for_turn`](crate::SurfaceGraspOptions::order_for_turn),
+/// [`Grasp::moment`](crate::Grasp::moment)).
 #[derive(Clone, Debug)]
 pub struct Gripper {
     pub(crate) hand: usize,
@@ -55,6 +57,7 @@ pub struct Gripper {
     pub(crate) friction: f32,
     pub(crate) sliding: bool,
     pub(crate) spheres: Vec<HandSphere>,
+    pub(crate) tip: f32,
     /// Each joint the calibration closes, by name: its value closed and as loaded. Sorted, so
     /// that what is read of several joints does not depend on a map's order.
     pub(crate) joints: Vec<(String, [f32; 2])>,
@@ -88,10 +91,10 @@ impl Gripper {
     }
 
     /// The openings a grasp of a surface may come in at where
-    /// [`GraspOptions::narrow`](crate::GraspOptions::narrow) lets it (meters), widest first: the
-    /// loaded gap, then 15/16 of the capacity and each sixteenth of it less, to 1/16. A place may
-    /// let go at the same ([`Place::open`](crate::Place::open)), each as the finger joints'
-    /// values ([`locked_at`](Self::locked_at)).
+    /// [`SurfaceGraspOptions::narrow`](crate::SurfaceGraspOptions::narrow) lets it (meters), widest
+    /// first: the loaded gap, then 15/16 of the capacity and each sixteenth of it less, to 1/16. A
+    /// place may let go at the same ([`Place::open`](crate::Place::open)), each as the finger
+    /// joints' values ([`locked_at`](Self::locked_at)).
     #[must_use]
     pub fn openings(&self) -> Vec<f32> {
         crate::surface::openings(self.opening, self.capacity)
@@ -104,7 +107,8 @@ impl Gripper {
     }
 
     /// Whether the hand's joints, jaws and spheres move as opposed jaws sliding along its y axis
-    /// between the closed and loaded gaps, as [`GraspOptions::narrow`](crate::GraspOptions::narrow)
+    /// between the closed and loaded gaps, as
+    /// [`SurfaceGraspOptions::narrow`](crate::SurfaceGraspOptions::narrow)
     /// takes them to ([`Robot::gripper`](crate::Robot::gripper) says what is checked).
     #[must_use]
     pub fn sliding(&self) -> bool {
@@ -117,6 +121,15 @@ impl Gripper {
     #[must_use]
     pub fn spheres(&self) -> &[HandSphere] {
         &self.spheres
+    }
+
+    /// How far the hand's spheres reach past its IK frame along the frame's z axis (meters), as
+    /// [`Robot::tip`](crate::Robot::tip) measured it when the gripper was built: how far a shape's
+    /// grasps take the fingertips past the frame where their options name no `tip`
+    /// ([`ShapeGraspOptions::tip`](crate::ShapeGraspOptions::tip)).
+    #[must_use]
+    pub fn tip(&self) -> f32 {
+        self.tip
     }
 
     /// The finger joints' values at which the pads stand `opening` apart (meters), as

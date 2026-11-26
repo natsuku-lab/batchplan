@@ -76,7 +76,8 @@ table = bp.Obstacle.cuboid((0.4, 0.0, -0.02), (0.7, 0.8, 0.02))
 box = bp.Obstacle.cuboid((0.45, 0.2, 0.03), (0.02, 0.03, 0.03))
 worlds = device.upload([bp.World([table, box])])
 
-grasps = bp.grasps(box, bp.GraspOptions(tip=robot.tip(0), floor=0.005))
+hand = robot.gripper(0, bp.GripperCalibration(0.08, 0.0, {}))  # pads 8 cm apart; closed, touching
+grasps = bp.grasps(box, hand, bp.ShapeGraspOptions(floor=0.005))
 outcome = bp.pick(device, worlds, [bp.Pick(0, robot.default_q, 1, grasps, support=[0])]).outcomes[0]
 if isinstance(outcome, bp.TaskFailure):
     print(outcome)  # where each grasp stopped, and why
@@ -109,4 +110,4 @@ Every call lets go of the interpreter while it works, so other Python threads ru
 
 ## What it binds
 
-Robots (`Robot.load`, `from_urdf`, `assemble` from `Part`s, `attach`, `detach`, `relock`, forward kinematics and spheres, a hand as a `Gripper` from a `GripperCalibration` with `gripper`; `CollisionModel` with `load`, `save`, `to_json`, `from_json` and `assemble`), obstacles and worlds (`World.without`, `always_touching`), devices, IK, planning with hand constraints, timing, tool paths (`follow`), whole tasks (`pick`, `place`, `place_nearest`, `handover`, `turn` with `Screw`, `pull`, `grasps`, `place_poses`, `handover_poses`, `handover_grasps`) and held objects (`Held`, per problem as `holding`). Not yet: grasps of a surface (`grasps_on`, `Surface`; `GraspOptions` has their `friction`, `contact`, `approach`, `shell`, `narrow`, `near`, `clearance` and `first_touch`, which nothing bound reads; nor `Grasp.moment`), rests on one and falls into one (`rests_on`, `falls_into`), training data (`datagen`, the NumPy and LeRobot exports), live motion (`Follower`, `servo`), joining motions (`join`), distance grids and perception, `World.load`, `MeshModel`, `Robot.qualify`, `Robot.breach`, `Device.evaluate` and `Device.contacts`. OpenUSD files need the library's `usd` feature, which these builds leave out.
+Robots (`Robot.load`, `from_urdf`, `assemble` from `Part`s, `attach`, `detach`, `relock`, forward kinematics and spheres, a hand as a `Gripper` from a `GripperCalibration` with `gripper`; `CollisionModel` with `load`, `save`, `to_json`, `from_json` and `assemble`), obstacles and worlds (`World.without`, `always_touching`), devices, IK, planning with hand constraints, timing, tool paths (`follow`), whole tasks (`pick`, `place`, `place_nearest`, `handover`, `turn` with `Screw`, `pull`, `grasps`, `place_poses`, `handover_poses`, `handover_grasps`) and held objects (`Held`, per problem as `holding`). Not yet: grasps of a surface (`grasps_on`, `Surface`, their options and `Grasp.moment`), rests on one and falls into one (`rests_on`, `falls_into`), training data (`datagen`, the NumPy and LeRobot exports), live motion (`Follower`, `servo`), joining motions (`join`), distance grids and perception, `World.load`, `MeshModel`, `Robot.qualify`, `Robot.breach`, `Device.evaluate` and `Device.contacts`. OpenUSD files need the library's `usd` feature, which these builds leave out.

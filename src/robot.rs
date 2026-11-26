@@ -1366,8 +1366,8 @@ impl Robot {
 
     /// How far hand `hand`'s spheres reach past its IK frame along the frame's z axis at the
     /// default configuration (meters): how much deeper than a grasp the fingertips go, for
-    /// [`GraspOptions::tip`](crate::GraspOptions::tip). Negative where every sphere stays short of
-    /// the frame.
+    /// [`ShapeGraspOptions::tip`](crate::ShapeGraspOptions::tip). Negative where every sphere stays
+    /// short of the frame.
     #[must_use]
     pub fn tip(&self, hand: usize) -> f32 {
         self.hand_spheres(hand)
@@ -1427,12 +1427,12 @@ impl Robot {
     /// [`attach`](Robot::attach) or [`relock`](Robot::relock).
     ///
     /// Whether its jaws slide ([`Gripper::sliding`]), as fingers that come in narrower
-    /// ([`GraspOptions::narrow`](crate::GraspOptions::narrow)) need: the driving joints and their
-    /// limits (including mimics), both jaws, and the hand spheres move as opposed jaws, each half
-    /// the change in gap along the hand's y axis, over the stroke from the loaded joints to
-    /// `closed`, and the closed gap is no wider than the smallest contact or preshape generated.
-    /// That describes their modeled motion over this stroke; physical contact depends on the
-    /// observed object and the gripper. Where the loaded gap and capacity differ by one
+    /// ([`SurfaceGraspOptions::narrow`](crate::SurfaceGraspOptions::narrow)) need: the driving
+    /// joints and their limits (including mimics), both jaws, and the hand spheres move as opposed
+    /// jaws, each half the change in gap along the hand's y axis, over the stroke from the loaded
+    /// joints to `closed`, and the closed gap is no wider than the smallest contact or preshape
+    /// generated. That describes their modeled motion over this stroke; physical contact depends on
+    /// the observed object and the gripper. Where the loaded gap and capacity differ by one
     /// floating-point step, the gripper's [`opening`](Gripper::opening) is the capacity, so
     /// generation, projection and commands share its exact representation. A calibration that
     /// contradicts itself or the model (a capacity past the loaded gap or not past the closed one,
@@ -1489,6 +1489,7 @@ impl Robot {
             friction,
             sliding: self.slides(hand, loaded_gap, capacity, closed_gap, closed),
             spheres: self.hand_spheres(hand),
+            tip: self.tip(hand),
             joints,
         })
     }

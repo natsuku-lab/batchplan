@@ -1,8 +1,8 @@
 //! Grasps of what cameras see, and what finding them costs. A bowl too wide to span, as points on
 //! its surfaces, is grasped across its wall; a box on a table, as two 640x480 depth images, is
 //! grasped across the sides the two cameras see between them; a flared bowl seen from above alone
-//! across its rim, where the camera saw past it (`GraspOptions::shell`), and beside a wall the
-//! open fingers would be in (`GraspOptions::narrow`); then 64 bowls in one call.
+//! across its rim, where the camera saw past it (`SurfaceGraspOptions::shell`), and beside a wall
+//! the open fingers would be in (`SurfaceGraspOptions::narrow`); then 64 bowls in one call.
 //!
 //! cargo run --release --example surface_grasps
 
@@ -14,8 +14,8 @@ use std::time::Instant;
 
 use anyhow::Result;
 use batchplan::{
-    DepthImage, Device, Grasp, GraspOptions, GripperCalibration, Intrinsics, Obstacle, Pose,
-    Surface,
+    DepthImage, Device, Grasp, GripperCalibration, Intrinsics, Obstacle, Pose, Surface,
+    SurfaceGraspOptions,
 };
 use glam::{Mat3, Quat, Vec2, Vec3};
 use rayon::prelude::*;
@@ -127,8 +127,8 @@ fn main() -> Result<()> {
     // The Panda's pads 8 cm apart as its fingers are held open, touching closed.
     let calibration = GripperCalibration::new(0.08, 0.0, common::panda_closed());
     let gripper = robot.gripper(0, &calibration)?;
-    let o = GraspOptions::default();
-    let first = GraspOptions {
+    let o = SurfaceGraspOptions::default();
+    let first = SurfaceGraspOptions {
         first_touch: true,
         ..o
     };
@@ -255,10 +255,10 @@ fn main() -> Result<()> {
         Surface::from_depth(&device, &image, &object, None, 0.005)
     };
     let seen = from_above(&|p| table.distance(p).value)?;
-    let none = GraspOptions { shell: None, ..o };
+    let none = SurfaceGraspOptions { shell: None, ..o };
     let without =
         batchplan::grasps_on(&device, &gripper, std::slice::from_ref(&seen), &none)?.remove(0);
-    let shell = GraspOptions {
+    let shell = SurfaceGraspOptions {
         shell: Some(0.015),
         ..o
     };
@@ -292,7 +292,7 @@ fn main() -> Result<()> {
         batchplan::grasps_on(&device, &gripper, std::slice::from_ref(&seen), &shell)
     });
     let open = open?.remove(0);
-    let narrow = GraspOptions {
+    let narrow = SurfaceGraspOptions {
         narrow: true,
         ..shell
     };

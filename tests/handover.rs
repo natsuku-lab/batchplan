@@ -6,13 +6,25 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
+use std::collections::HashMap;
 use std::f32::consts::FRAC_PI_2;
+use std::sync::LazyLock;
 
 use batchplan::{
-    CollisionWeights, Contact, Device, Error, GraspOptions, Handover, Held, Obstacle, Pick, Pose,
-    Robot, SphereOptions, TaskOptions, TaskPlan, TaskStep, Trajectory, World, Worlds,
+    CollisionWeights, Contact, Device, Error, Gripper, GripperCalibration, Handover, Held,
+    Obstacle, Pick, Pose, Robot, ShapeGraspOptions, SphereOptions, TaskOptions, TaskPlan, TaskStep,
+    Trajectory, World, Worlds,
 };
 use glam::{Quat, Vec2, Vec3};
+
+/// A Panda's hand, its pads 8 cm apart, for grasps of a shape, which need no fingers that slide.
+fn hand() -> &'static Gripper {
+    static HAND: LazyLock<Gripper> = LazyLock::new(|| {
+        let calibration = GripperCalibration::new(0.08, 0.0, HashMap::new());
+        common::panda().unwrap().gripper(0, &calibration).unwrap()
+    });
+    &HAND
+}
 
 /// A table with its top at z = 0, and a bar of half sizes `half` lying on it along y, 20 cm in
 /// front of the left Panda's hand at its ready pose.
@@ -38,11 +50,11 @@ fn picked(device: &Device, half: Vec3) -> (Worlds, Vec<f32>, Held) {
             World::new(vec![table]),
         ])
         .unwrap();
-    let toward_ends = GraspOptions {
+    let toward_ends = ShapeGraspOptions {
         along: 0.75,
-        ..GraspOptions::default()
+        ..ShapeGraspOptions::default()
     };
-    let grasps = batchplan::grasps(&bar, &toward_ends).unwrap();
+    let grasps = batchplan::grasps(&bar, hand(), &toward_ends).unwrap();
     let pick = Pick {
         support: vec![0],
         ..Pick::new(0, robot.default_q(), 1, grasps)
@@ -243,13 +255,13 @@ fn malformed_handovers_are_input_errors() {
             other => panic!("{what}: {other:?}"),
         }
     }
-    let bad = GraspOptions {
+    let bad = ShapeGraspOptions {
         along: 1.0,
-        ..GraspOptions::default()
+        ..ShapeGraspOptions::default()
     };
     let bar = Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.12, 0.02, 0.02));
     assert!(matches!(
-        batchplan::grasps(&bar, &bad),
+        batchplan::grasps(&bar, hand(), &bad),
         Err(Error::Input(_))
     ));
 }
@@ -260,12 +272,12 @@ fn malformed_handovers_are_input_errors() {
 fn grasps_toward_the_ends_slide_along_the_side_the_fingers_close_on() {
     let half = Vec3::new(0.12, 0.02, 0.03);
     let bar = Obstacle::cuboid(Vec3::ZERO, half);
-    let middle = batchplan::grasps(&bar, &GraspOptions::default()).unwrap();
-    let ends = GraspOptions {
+    let middle = batchplan::grasps(&bar, hand(), &ShapeGraspOptions::default()).unwrap();
+    let ends = ShapeGraspOptions {
         along: 0.75,
-        ..GraspOptions::default()
+        ..ShapeGraspOptions::default()
     };
-    let ends = batchplan::grasps(&bar, &ends).unwrap();
+    let ends = batchplan::grasps(&bar, hand(), &ends).unwrap();
     assert_eq!(ends.len(), 2 * middle.len());
     for (k, centered) in middle.iter().enumerate() {
         let pair = &ends[2 * k..2 * k + 2];
@@ -412,12 +424,12 @@ fn round_objects_are_grasped_toward_their_ends_above_the_floor() {
         half_height: 0.1,
         rotation: Quat::IDENTITY,
     };
-    let middle = batchplan::grasps(&can, &GraspOptions::default()).unwrap();
-    let ends = GraspOptions {
+    let middle = batchplan::grasps(&can, hand(), &ShapeGraspOptions::default()).unwrap();
+    let ends = ShapeGraspOptions {
         along: 0.75,
-        ..GraspOptions::default()
+        ..ShapeGraspOptions::default()
     };
-    let ends = batchplan::grasps(&can, &ends).unwrap();
+    let ends = batchplan::grasps(&can, hand(), &ends).unwrap();
     assert!(ends.len() > middle.len());
     // From the side (the hand's approach level) and slid along the axis.
     let level = |g: &&Pose| (g.rotation * Vec3::Z).z.abs() < 1e-3;
@@ -434,12 +446,13 @@ fn round_objects_are_grasped_toward_their_ends_above_the_floor() {
             "3/4 along: {g:?}"
         );
     }
-    let floor = GraspOptions {
+    let floor = ShapeGraspOptions {
         along: 0.97,
+        tip: Some(0.0),
         floor: Some(0.005),
-        ..GraspOptions::default()
+        ..ShapeGraspOptions::default()
     };
-    for g in batchplan::grasps(&can, &floor).unwrap() {
+    for g in batchplan::grasps(&can, hand(), &floor).unwrap() {
         let frame = can.pose().mul_pose(g).position;
         assert!(frame.z >= 0.005 - 1e-5, "above the floor: {frame}");
     }

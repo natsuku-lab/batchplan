@@ -93,7 +93,7 @@ pub struct RestOptions {
     /// and a slope holds an object only this far short of the friction's angle.
     pub tipping: f32,
     /// The friction between the object and what it rests on: 0.5, as
-    /// [`GraspOptions::friction`](crate::GraspOptions::friction). A slope steeper than
+    /// [`GripperCalibration::friction`](crate::GripperCalibration::friction). A slope steeper than
     /// `atan(friction)` (27°) less `tipping` holds the object only against a stop below it.
     pub friction: f32,
     /// Whether a rest narrower than the spots are apart is looked for closer about one place a
