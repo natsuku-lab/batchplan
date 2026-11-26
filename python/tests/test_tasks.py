@@ -304,6 +304,33 @@ def test_a_bar_is_handed_from_one_arm_to_the_other():
     assert first.held.hand == 1 and first.held.grasp == grasp
 
 
+def test_a_gripper_turns_widths_into_finger_joints_and_back(tasks_robot):
+    closed = {"panda_finger_joint1": 0.0, "panda_finger_joint2": 0.0}
+    fixed = bp.GripperCalibration(0.08, 0.0, {})
+    assert (fixed.loaded_gap, fixed.closed_gap, fixed.friction) == (0.08, 0.0, 0.5)
+    assert fixed.capacity is None and fixed.closed == {}
+    calibration = bp.GripperCalibration(0.08, 0.0, closed, capacity=0.06)
+    assert calibration.friction == 0.5
+    assert bp.GripperCalibration(0.08, 0.0, closed, friction=2.0).friction == 2.0
+    gripper = tasks_robot.gripper(0, calibration)
+    assert gripper.hand == 0 and gripper.sliding
+    assert (gripper.opening, gripper.capacity, gripper.closed_gap) == (0.08, 0.06, 0.0)
+    assert gripper.openings[0] == 0.08 and gripper.openings[1] == pytest.approx(0.06 * 15 / 16)
+    assert len(gripper.spheres) == len(tasks_robot.hand_spheres(0))
+    # Between closed and as loaded, each finger at half the opening; past either, the nearer.
+    assert gripper.locked_at(0.08) == {name: 0.04 for name in closed}
+    assert gripper.locked_at(0.0) == closed and gripper.locked_at(0.1) == gripper.locked_at(0.08)
+    half = gripper.locked_at(0.03)
+    assert half == pytest.approx({name: 0.015 for name in closed})
+    assert gripper.opening_of(half) == pytest.approx(0.03) and gripper.opening_of({}) == 0.08
+    # Fingers the calibration does not close neither move nor slide.
+    still = tasks_robot.gripper(0, fixed)
+    assert not still.sliding and still.locked_at(0.03) == {}
+    for wrong in [calibration.replace(capacity=0.09), calibration.replace(closed={"x": 0.0})]:
+        with pytest.raises(bp.InputError):
+            tasks_robot.gripper(0, wrong)
+
+
 def test_holds_and_picks_say_where_the_fingers_are(tasks_robot):
     box = bp.Obstacle.cuboid((0.0, 0.0, 0.0), (0.02, 0.03, 0.03))
     narrow = {"panda_finger_joint1": 0.01, "panda_finger_joint2": 0.01}
@@ -320,7 +347,8 @@ def test_holds_and_picks_say_where_the_fingers_are(tasks_robot):
     assert opening.open == ({}, narrow)
     assert bp.Pick(0, tasks_robot.default_q, 1, grasps, enough=2).enough == 2
     assert bp.GraspOptions(narrow=True).narrow and not bp.GraspOptions().narrow
-    openings = bp.GraspOptions(opening=0.08).openings
+    closed = {"panda_finger_joint1": 0.0, "panda_finger_joint2": 0.0}
+    openings = tasks_robot.gripper(0, bp.GripperCalibration(0.08, 0.0, closed)).openings
     assert len(openings) == 16 and openings[0] == 0.08
     assert openings[1:] == pytest.approx([0.08 * (16 - k) / 16 for k in range(1, 16)])
     device = bp.Device.cpu(tasks_robot)
