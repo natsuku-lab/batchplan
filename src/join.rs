@@ -28,9 +28,8 @@ use crate::edges::{self, Deferred, EdgeQuery, Search};
 use crate::error::{Result, ensure_input};
 use crate::held::{self, Held};
 use crate::robot::Robot;
-use crate::rrt;
-use crate::spline;
 use crate::timing::Trajectory;
+use crate::{rrt, spline};
 
 /// Motions to run one after another in one world, each path starting where the one before ends.
 #[derive(Clone, Debug)]
