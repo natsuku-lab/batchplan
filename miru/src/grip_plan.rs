@@ -7,7 +7,7 @@ use batchplan::{
 };
 use glam::Vec3;
 
-use crate::error::{Result, ensure_input};
+use crate::error::{Result, ensure_input, input};
 use crate::{GripWorlds, Gripped, Of, Planned};
 
 /// A measured point the fingers should close on, or a caller-specified neighborhood.
@@ -398,10 +398,10 @@ impl GripWorlds<'_> {
                     continue;
                 };
                 let world = u32::try_from(batch.len()).map_err(|_| {
-                    batchplan::Error::Input(format!(
+                    input!(
                         "a grip search has too many worlds in a batch: {}",
                         batch.len()
-                    ))
+                    )
                 })?;
                 let mut touches = std::mem::take(&mut split.scene.world.touch);
                 let mut c = GripCandidate {

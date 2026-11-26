@@ -7,7 +7,7 @@ use batchplan::{
 };
 use glam::Vec3;
 
-use crate::error::{Result, ensure_input};
+use crate::error::{Result, ensure_input, input};
 use crate::grip_plan::SupportedObjects;
 use crate::memory::{Map, Memory, Observed, Of, Planned, Step};
 use crate::scene::{Label, Support};
@@ -127,9 +127,7 @@ impl Observed {
         );
         let index = memory.objects().iter().position(|o| o.id == id);
         let Some(index) = index else {
-            return Err(batchplan::Error::Input(format!(
-                "the grip names absent object {id}"
-            )));
+            return Err(input!("the grip names absent object {id}"));
         };
         let mut into = step.into.to_vec();
         into.push(id);
