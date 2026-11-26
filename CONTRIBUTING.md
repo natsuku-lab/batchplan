@@ -98,20 +98,27 @@ batch of changes rather than for each one.
   that `main` has moved past with breaking changes goes on a branch from that release's last tag
   (`0.9.x` from `v0.9.0`). Changes reach the branch by pull request, so CI runs on them, and their
   changelog lines go to `main` too.
+- **Two crates, one tag.** batchplan and the perception crate in `miru/` carry one version and
+  ship together under one tag. The perception crate's package is `batchplan-miru`, as `miru` was
+  taken on crates.io, and its library is still `miru`: code writes `use miru::..`. A dependent
+  names it `miru = { package = "batchplan-miru", version = "0.12" }`.
 - **Cutting one.**
-  1. Set `version` in `Cargo.toml` and `python/Cargo.toml` (the Python package's). The next build
-     of each crate updates `Cargo.lock`, `demos/Cargo.lock` and `python/Cargo.lock`, and
-     `scripts/check.sh` builds all three.
+  1. Set `version` under `[workspace.package]` in `Cargo.toml`, which both crates take, the
+     `batchplan` requirement under `[workspace.dependencies]` to the same, and `version` in
+     `python/Cargo.toml` (the Python package's). The next build of each crate updates
+     `Cargo.lock`, `demos/Cargo.lock` and `python/Cargo.lock`, and `scripts/check.sh` builds all
+     three.
   2. For a release, not a beta, move the lines under `## [Unreleased]` to a new
      `## [0.10.0] - date`, and point the compare links at the end of the file at it.
   3. Open a pull request with the version changes, commit message `batchplan 0.10.0`, and merge
      it into `main` after the required checks pass. Wait for core CI on the merged commit too.
   4. `git tag -a v0.10.0 -m "batchplan 0.10.0" && git push origin v0.10.0`. The release workflow
      requires the tagged commit to be on `main` with a successful core CI push run on that exact
-     commit, checks that the tag names both crates' versions and that `cargo semver-checks` passes. It
+     commit, checks that the tag names the crates' version and that `cargo semver-checks` passes. It
      builds and tests Python wheels for Linux (x86-64 and ARM64), macOS (Intel and Apple Silicon)
      and Windows (x86-64), and builds and tests the source distribution. Once these pass, it
-     publishes the Rust crate to crates.io, then the Python package to PyPI as `batches`.
+     publishes batchplan to crates.io, then `batchplan-miru` once batchplan's version is on the
+     index, and the Python package to PyPI as `batches`.
      Rust's `0.10.0-beta.1` becomes Python's `0.10.0b1`; the import remains `batchplan`.
      Both registries use trusted publishing through `.github/workflows/release.yml` in the
      `release` environment, restricted to `v*` tags. No upload token is stored in GitHub.

@@ -8,6 +8,10 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+- Miru, the perception crate, is published on crates.io as `batchplan-miru`, with batchplan's
+  version and in its release; its library is still `miru`, so a dependent writes
+  `miru = { package = "batchplan-miru", version = "0.12" }` and keeps `use miru::..`. In the
+  workspace, its commands take `-p batchplan-miru`.
 - **Breaking:** `SphereGeometry` and `SphereOptions::geometry` are gone, in Python too: spheres
   are fitted to the links' collision geometry, the default before. A `SphereOptions` literal that
   names `geometry` drops it. The loaders no longer read visual geometry, so a URDF whose visual
@@ -202,7 +206,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   the tiers it orders them by, the grasps nearest it first instead of spread over the object.
   `None`, the default, leaves every grasp as it was.
 
-- `miru`, a crate of its own in the repository (`miru/`, not published to crates.io): what depth
+- `miru`, a crate of its own in the repository (`miru/`, published as `batchplan-miru`): what depth
   cameras show, as objects. One call, `miru::look(&device, &look, &previous, &options)`, takes
   every camera's `DepthImage` with its colour, its noise, the robot's mask and a mask model's
   numbers where there are any, and the obstacles the world is known to hold, and gives a scene:
@@ -213,7 +217,7 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   the pixels that name it are its flags for `Surface::from_depth`. It is built on the library,
   which does not depend on it, and a look runs on the device's threads, the scene the same
   whatever their number: of two 640×480 views among a cell's 17 fixtures, 41 ms at the median
-  on the M4 Pro's 14 threads and 77 on one (`cargo run --release -p miru --example score --
+  on the M4 Pro's 14 threads and 77 on one (`cargo run --release -p batchplan-miru --example score --
   <set> --again --digest --threads <n>` on a set of recorded looks, the best of three rounds).
   `miru/README.md` has what it tells apart and where it stands, and `miru/tests/truth.rs` holds
   it to scenes built from known things, read through the simulator's exact depth and two stereo

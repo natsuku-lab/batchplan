@@ -28,9 +28,9 @@ jobs:
       - run: cargo clippy --all-targets --no-default-features
       - run: cargo doc --no-deps --features lerobot,usd
       # `miru`, the workspace's other crate: what depth cameras show, as objects.
-      - run: cargo clippy -p miru --all-targets
-      - run: cargo clippy -p miru --all-targets --features gpu
-      - run: cargo doc --no-deps -p miru
+      - run: cargo clippy -p batchplan-miru --all-targets
+      - run: cargo clippy -p batchplan-miru --all-targets --features gpu
+      - run: cargo doc --no-deps -p batchplan-miru
 
   # The Rerun demos, a crate of their own.
   demos:
@@ -86,7 +86,7 @@ jobs:
           BATCHPLAN_REQUIRE_GPU: 1
       - run: cargo test --release --no-default-features --no-fail-fast
         if: ${{ !cancelled() }}
-      - run: cargo test --release -p miru --features gpu --no-fail-fast
+      - run: cargo test --release -p batchplan-miru --features gpu --no-fail-fast
         if: ${{ !cancelled() }}
         env:
           BATCHPLAN_REQUIRE_GPU: 1

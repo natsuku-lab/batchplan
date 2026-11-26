@@ -29,7 +29,7 @@ second to measuring what it does.
    `miru/src` is covered by a claim or named as carrying none.
 4. **Truth, through three cameras.** Make two worktrees of your own (`git worktree add`), the
    change and its base, and in each run the truth table:
-   `cargo test --release -p miru --test truth -- --nocapture`. It builds scenes from known
+   `cargo test --release -p batchplan-miru --test truth -- --nocapture`. It builds scenes from known
    things (`miru/tests/common`), reads each through the three cameras below, and prints per
    scene, camera and thing what `look` made of it against what it is.
    - Every row the change claims to move has moved as claimed, on every camera.
@@ -44,7 +44,7 @@ second to measuring what it does.
    Done when each claim of step 3 has its rows from all three cameras, base and change.
 5. **Fit with batchplan.** miru stands on batchplan's public interface and batchplan never on
    miru. In the change's worktree:
-   - `BATCHPLAN_REQUIRE_GPU=1 cargo test --release -p miru --features gpu --test batchplan`
+   - `BATCHPLAN_REQUIRE_GPU=1 cargo test --release -p batchplan-miru --features gpu --test batchplan`
      passes (without the variable and the feature where the machine has no GPU, and say so): a
      look's fixtures and solids
      upload as a `World`, `RobotMask::with_shapes` takes them, its labels are the flags
@@ -55,9 +55,11 @@ second to measuring what it does.
      point, a mask): search batchplan's interface before accepting new arithmetic of that kind.
      What miru needs that batchplan lacks is a batchplan primitive first.
    - Nothing of batchplan names miru: `git grep -n miru -- src tests examples` shows nothing,
-     and in `Cargo.toml` only the workspace's `members` line and the comments beside it do.
+     and in `Cargo.toml` only the workspace's `members` line, the `[workspace.package]` and
+     `[workspace.dependencies]` entries that give `batchplan-miru` its version and requirement, and
+     the comments beside them do.
    - A scene is the same on one thread and on many, and on a GPU device where there is one
-     (`cargo test --release -p miru`, the thread tests among them).
+     (`cargo test --release -p batchplan-miru`, the thread tests among them).
    Done when each of the five is run or read and its result is in your notes.
 6. **Check.** Apply every check below to every hunk. Settle questions by running things: one
    test, a scratch scene, the scorer. Plant bugs only in your own worktrees.
@@ -111,7 +113,7 @@ never from a switch. The table is how that rule is checked.
 
 Where the machine has sets of looks recorded from a simulator with their truth (folders the
 author names; `miru/examples/common/mod.rs` has the layout), they are a second witness, never a
-replacement for step 4: `cargo run --release -p miru --example score -- <set>` for the
+replacement for step 4: `cargo run --release -p batchplan-miru --example score -- <set>` for the
 scorecard at base and change, `--twin <set>` to hold the same scenes on other depth against
 each other, `--again --digest` where no scene should move. Say which sets you ran and at which
 commits.
