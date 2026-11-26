@@ -1799,7 +1799,8 @@ fn nothing_is_assumed_behind_a_solid_or_a_wall_thicker_than_the_shell() {
         }
     }
     assert!(far_side > whole.len(), "{far_side}");
-    // A wall is never taken thicker than the fingers open: a shell past it is one at it.
+    // A wall is never taken thicker than the fingers open: a shell past it is one at it, an
+    // infinite one too.
     let past = grasps(&front, &with_shell(0.2));
     assert_eq!(past, grasps(&front, &with_shell(o.opening)));
     assert!(
@@ -1809,6 +1810,7 @@ fn nothing_is_assumed_behind_a_solid_or_a_wall_thicker_than_the_shell() {
     // A wall 2 cm thick seen from above: thicker than a shell of 1.5 cm, not than one of 3.
     let thick = bowl_seen(0.02, &[ABOVE]);
     assert!(grasps(&thick, &with_shell(0.015)).is_empty());
+    assert_eq!(past, grasps(&front, &with_shell(f32::INFINITY)));
     let across = grasps(&thick, &with_shell(0.03));
     assert!(!across.is_empty());
     assert!(across.iter().all(|g| g.width() > 0.02), "across the wall");
@@ -2355,7 +2357,7 @@ fn malformed_surfaces_and_options_are_input_errors() {
         with_shell(0.0),
         with_shell(-0.01),
         with_shell(f32::NAN),
-        with_shell(f32::INFINITY),
+        with_shell(f32::NEG_INFINITY),
     ] {
         assert!(refused(&good, 0, &bad), "{bad:?}");
     }

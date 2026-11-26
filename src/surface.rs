@@ -530,8 +530,8 @@ pub fn grasps_on_with_capacity(
     }
     if let Some(shell) = o.shell {
         ensure_input!(
-            shell > 0.0 && shell.is_finite(),
-            "a shell must be a finite positive thickness, got {shell} m"
+            shell > 0.0,
+            "a shell must be a positive thickness, infinite for as thick as the fingers open, got {shell} m"
         );
     }
     if let Some(near) = o.near {
