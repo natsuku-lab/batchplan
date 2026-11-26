@@ -8,6 +8,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+- Miru's look joins a hollow's floor to the walls around it where a second view shows of the
+  floor only a strip too narrow for a plane: that strip's last rows before a wall stand clear of
+  the wall's plane as all of the floor does, and were counted as the floor hiding the wall, which
+  left the floor an object of its own and the box around it closed. A drawer pulled out, seen
+  from over it and from across the room, stayed a closed box on some looks, and a bowl in it had
+  no way out measured and no grasp its walls allowed.
 - Miru's `Kept::extractions` gives an opening where the object's middle stands over it, where it
   asked for the whole of its measured footprint inside: a bowl set back down against a drawer's
   back read 2 mm past the opening's edge, had no way out measured, and was lifted too short to

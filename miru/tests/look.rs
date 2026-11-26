@@ -5881,6 +5881,30 @@ fn a_tray_seen_again_in_pieces_is_no_solid_box() {
 }
 
 #[test]
+fn a_tray_seen_from_above_and_from_low_over_its_near_wall_is_open_at_the_top() {
+    // The thin tray from over its middle, and in the same look from 14 to 17.5 degrees above the
+    // table, from before it and from either side of that: the low view shows of the floor a
+    // strip past the near wall, too narrow for a plane of its own, whose last rows before the
+    // far wall stand clear of that wall's plane as all of the floor does. They hide none of it:
+    // the floor is the tray's, which is one object, open at the top.
+    let above = frame_from(thin_tray(), Vec3::new(0.5, -0.001, 0.45));
+    for (degrees, turn) in [(14.0f32, 0.8f32), (15.5, 0.4), (16.5, 0.0), (17.5, 0.0)] {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let eye = MIDDLE + 0.78 * Vec3::new(cos * turn.cos(), cos * turn.sin(), sin);
+        let low = frame_from(thin_tray(), eye);
+        let scene = seen(&[&above, &low], &Scene::default());
+        assert!(
+            matches!(
+                scene.objects.as_slice(),
+                [object] if matches!(object.shape, Shape::OpenBox { .. })
+            ),
+            "{degrees} degrees, turned {turn}: {:?}",
+            scene.objects
+        );
+    }
+}
+
+#[test]
 fn a_tray_keeps_its_id_and_its_room_with_an_arm_over_its_middle() {
     // An arm comes between the camera and the tray's middle: its two ends show as things apart,
     // each in the walls and the floor the tray had, and the arm hides what joined them. Nothing

@@ -131,6 +131,11 @@ pub(crate) struct Parts {
     /// thing: as the bottom of a gap between a floor's boards, or a step a stereo camera's noise
     /// reads in a floor.
     pub(crate) hides: Vec<f32>,
+    /// Per part and a part behind it: how much of what it hides of that one a reading with no
+    /// plane told, across no jump, by standing clear of the other's plane. Such a reading cannot
+    /// tell a step from a crease: the last rows of a floor before a wall stand clear of the
+    /// wall's plane as a pencil along its foot does.
+    pub(crate) unsure: BTreeMap<(u32, u32), f32>,
     /// Each place along a border where one reading hides the other, across a jump or a step:
     /// the reading in front, then the one behind. What `hides` is the sum of, reading by
     /// reading, where what lies behind is a part's.
@@ -429,6 +434,13 @@ pub(crate) fn parts(seen: &Seen, masks: &[u32], threads: usize) -> Parts {
             hides[part as usize] += hidden;
         }
     }
+    let mut unsure: BTreeMap<(u32, u32), f32> = BTreeMap::new();
+    for (&(side, behind), hidden) in &sides.unsure {
+        let (part, behind) = (now(&mut first, side), now(&mut first, behind));
+        if part != NONE && behind != NONE {
+            *unsure.entry((part, behind)).or_default() += hidden;
+        }
+    }
     let mut meets: BTreeMap<(u32, u32), f32> = BTreeMap::new();
     for (&(a, b), crease) in &sides.creases {
         let (a, b) = (now(&mut first, a), now(&mut first, b));
@@ -449,6 +461,7 @@ pub(crate) fn parts(seen: &Seen, masks: &[u32], threads: usize) -> Parts {
         normals: planes.normals(seen, threads),
         share,
         hides,
+        unsure,
         hidden: sides.hidden,
         meets,
         touches,
@@ -1014,6 +1027,9 @@ struct Borders {
     /// Per side, and the side of what lies behind it, how much of its part's border it is the
     /// nearer side of, in window widths.
     hides: BTreeMap<(Side, Side), f32>,
+    /// Of `hides`, what a reading with no plane told across no jump, held against the plane of
+    /// the reading beside it.
+    unsure: BTreeMap<(Side, Side), f32>,
     /// Per two sides of different parts that meet in a crease, the lower first: how long the
     /// crease is, in window widths. With it, how long they meet as one surface where one is of
     /// readings on a known shape and the other of readings on none.
@@ -1052,6 +1068,7 @@ fn borders(
     let seen = walker.seen;
     let side = |i: usize| (of[i], masks.get(i).copied().unwrap_or(0));
     let mut hides: BTreeMap<(Side, Side), f32> = BTreeMap::new();
+    let mut unsure: BTreeMap<(Side, Side), f32> = BTreeMap::new();
     let mut creases: BTreeMap<(Side, Side), f32> = BTreeMap::new();
     let mut touches: BTreeMap<(Side, Side), f32> = BTreeMap::new();
     let mut meetings: HashMap<(u32, u32), Meeting> = HashMap::new();
@@ -1067,8 +1084,9 @@ fn borders(
             if a == b || !reads(i) || !reads(j) {
                 continue;
             }
-            // The reading in front, where one is.
+            // The reading in front, where one is, and whether a reading with no plane told it.
             let mut front = None;
+            let mut by_sliver = false;
             if walker.next(i, bit, /* forward */ true).is_none() {
                 // A jump: the reading with the larger inverse depth is in front.
                 front = Some(if seen.inverse[i] > seen.inverse[j] {
@@ -1120,6 +1138,7 @@ fn borders(
                             meet(true);
                         } else if told {
                             front = Some(if over.over > 0.0 { j } else { i });
+                            by_sliver = planes.has[own] != planes.has[other];
                         }
                     } else if agree(over) && agree(under) {
                         meeting.one += length;
@@ -1130,6 +1149,9 @@ fn borders(
             if let Some(front) = front.filter(|&front| of[front] != NONE) {
                 let back = if front == i { j } else { i };
                 *hides.entry((side(front), side(back))).or_default() += 1.0 / width(front);
+                if by_sliver {
+                    *unsure.entry((side(front), side(back))).or_default() += 1.0 / width(front);
+                }
                 hidden.push((front, back));
             }
         }
@@ -1137,6 +1159,7 @@ fn borders(
     Borders {
         meetings,
         hides,
+        unsure,
         creases,
         touches,
         hidden,

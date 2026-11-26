@@ -1204,6 +1204,12 @@ impl<'a> Told<'a> {
 /// it meets in a crease, is the bottom of that object's hollow: a bowl's or a basket's floor,
 /// which its walls rise around. What stands on such a floor hides part of it and stays apart.
 ///
+/// What a reading with no plane told it hides of those walls, across no jump, does not count
+/// ([`Parts::unsure`]): a floor stands in front of none of its walls, and a view that shows so
+/// little of it that it has no plane there reads its last rows before a wall as standing clear
+/// of the wall's plane, which they do as all of the floor does, in the crease another view
+/// shows.
+///
 /// `objects` are those the sets give with the known shapes' parts, and `said` what each says by
 /// itself, nothing for a known shape's part. Says per part whether it is of a floor so joined.
 fn hollows(
@@ -1221,10 +1227,15 @@ fn hollows(
     // Per object, how much it hides; per two objects, how long a crease they meet in.
     let mut hides = vec![0.0; objects.len()];
     let mut meets: BTreeMap<(usize, usize), f32> = BTreeMap::new();
+    // Per two objects, how much of what the first hides of the second no plane of its own told.
+    let mut unsure: BTreeMap<(usize, usize), f32> = BTreeMap::new();
     for (parts, &first) in told.parts.iter().zip(told.first) {
         let mut object = |part: u32| of[&sets.find(first + part as usize)];
         for (part, hidden) in parts.hides.iter().enumerate() {
             hides[object(part as u32)] += hidden;
+        }
+        for (&(front, behind), &hidden) in &parts.unsure {
+            *unsure.entry((object(front), object(behind))).or_default() += hidden;
         }
         for (&(a, b), &length) in &parts.meets {
             let (a, b) = (object(a), object(b));
@@ -1238,15 +1249,19 @@ fn hollows(
         .map(|said| Some(said.as_ref()?.fit.shape()))
         .collect();
     for (floor, readings) in objects.iter().enumerate() {
-        if hides[floor] >= 1.0 {
+        let mut told_unsure = unsure.range((floor, 0)..=(floor, usize::MAX));
+        if hides[floor] >= 1.0 && told_unsure.next().is_none() {
             continue;
         }
-        // The objects it meets in a window's width of crease or more, and lies inside.
+        // The objects it meets in a window's width of crease or more, lies inside, and hides
+        // nothing of but what no plane of its own told; nor anything of another.
         let around = meets.iter().filter_map(|(&(a, b), &length)| {
             let other = if a == floor { b } else { a };
             let meets = (a == floor || b == floor) && length >= 1.0;
             let inside = |shape: &Shape| readings.within(shape).is_some();
-            (meets && shapes[other].as_ref().is_some_and(inside)).then_some((length, other))
+            let hidden = hides[floor] - unsure.get(&(floor, other)).copied().unwrap_or(0.0);
+            (meets && hidden < 1.0 && shapes[other].as_ref().is_some_and(inside))
+                .then_some((length, other))
         });
         // The one it meets longest; of two as long, the first.
         let walls = around.max_by(|x, y| x.0.total_cmp(&y.0).then(y.1.cmp(&x.1)));
