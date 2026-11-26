@@ -19,7 +19,6 @@ all = { level = "warn", priority = -1 }
 wildcard_imports = "warn"
 enum_glob_use = "warn"
 needless_for_each = "warn"
-undocumented_unsafe_blocks = "warn"
 format_push_string = "warn"
 redundant_clone = "warn"
 ref_option = "warn"

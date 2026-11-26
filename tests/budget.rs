@@ -16,16 +16,6 @@ const UR5E: &str = "ur5e/ur_description/urdf/ur5e.urdf";
 /// Held by each test, so they run one at a time.
 static ALONE: Mutex<()> = Mutex::new(());
 
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 /// A budget longer than the clock counts is no deadline: a plan to a pose, with an optimized
 /// seed, so that its goal IK, its search and its optimization all read the deadline, ends as it
 /// does without a budget. Added to the time unchecked, `Duration::MAX` panicked.
@@ -47,7 +37,7 @@ fn a_budget_longer_than_the_clock_counts_is_no_deadline() {
         ..PlanOptions::default()
     };
     patient.check().expect("any budget");
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&[batchplan::World::default()]).unwrap();
         let planned = batchplan::plan(&d, &worlds, std::slice::from_ref(&reach), &patient).unwrap();
         assert_eq!(
@@ -74,7 +64,7 @@ fn the_search_keeps_the_time_budget() {
         },
         ..Default::default()
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let timed = |o: &PlanOptions| {
             let t = Instant::now();
@@ -115,7 +105,7 @@ fn a_tiny_time_budget_returns_after_at_most_one_more_chunk() {
         iterations: 160,
         ..Default::default()
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let timed = |o: &PlanOptions| {
             let t = Instant::now();

@@ -22,7 +22,6 @@ scripts/check.sh                                                # every lint CI 
 git tag -a v0.10.0 -m "batchplan 0.10.0" && git push origin v0.10.0   # a release or a beta (v0.10.0-beta.1), cut as CONTRIBUTING.md#releases says; release.yml runs cargo semver-checks and publishes to crates.io
 cargo run --release --example bench -- 512                      # GPU vs CPU throughput; BENCH_LLVMPIPE=1 adds the WGSL kernels on Mesa's CPU Vulkan driver
 scripts/fetch_benchmark.sh && cargo run --release --example benchmark   # MotionBenchMaker + MπNets (2,600 Panda problems), GPU and CPU
-cargo run --release --example benchmark -- --spheres vamp --check <paths.json>...   # the earlier comparison's judge (`--save` writes batchplan's; scripts/compare_planners.py and scripts/cpp_planners.cc the others')
 scripts/run_suite.sh data/bench/final final && scripts/report_suite.sh data/bench/final   # the comparison with other planners on one spherized Panda and one judge (docs/benchmarks.md#reproducing; `compare mesh` adds the mesh check)
 scripts/fetch_rebot.sh && cargo run --release --example handover -- 512 [--cpu]   # two reBot arms handing blocks over: the bimanual benchmark
 cargo run --release --features lerobot --example handover -- 16 --lerobot data/handover && .venv/bin/python scripts/replay_mujoco.py data/handover data/handover_video   # + MuJoCo camera videos

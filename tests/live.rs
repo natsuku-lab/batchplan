@@ -66,16 +66,6 @@ fn names(contacts: &[Contact], obstacle: usize) -> bool {
     !contacts.is_empty() && contacts.iter().all(named)
 }
 
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 fn clear(device: &Device, worlds: &Worlds, q: &[f32]) -> bool {
     let e = device
         .evaluate(worlds, &[0], q, &CollisionWeights::NONE)
@@ -179,7 +169,7 @@ fn replans_around_a_box(lead: f32) {
 fn with_no_time_to_replan_the_robot_stops_before_the_box() {
     let robot = common::panda().unwrap();
     // The checks run on the device, and what they found is named on its CPU threads.
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let first = sweep(&robot, &device);
         let duration = first.duration();
         // A replan would take longer than the motion has left.
@@ -589,7 +579,7 @@ fn a_pending_replan_that_collides_is_dropped_for_a_stop() {
 #[test]
 fn a_stop_that_runs_into_another_box_names_it() {
     let robot = common::panda().unwrap();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let first = sweep(&robot, &device);
         let duration = first.duration();
         let o = FollowerOptions {
@@ -623,7 +613,7 @@ fn a_stop_that_runs_into_another_box_names_it() {
 #[test]
 fn a_motion_too_near_its_end_to_stop_names_what_it_collides_with() {
     let robot = common::panda().unwrap();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         // At full speed, 0.2 s from the end of the path, with a box over the hand at the goal:
         // the path ends sooner than any stop would, so it runs to its end, into the box.
         let first = sweep_at(&robot, &device, 1.0);
@@ -683,7 +673,7 @@ fn a_graze_is_named_on_every_device() {
         }
     }
     assert!(touch.is_finite() && touch > 0.01, "{touch}");
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let mut stopped = 0;
         for step in -50..50 {
             let radius = touch + step as f32 * 1e-8;
@@ -710,7 +700,7 @@ fn a_graze_is_named_on_every_device() {
 #[test]
 fn a_stop_that_cannot_end_short_of_a_box_reports_the_collision() {
     let robot = common::panda().unwrap();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         // At full speed, with a box 0.2 s ahead: too close to stop for.
         let first = sweep_at(&robot, &device, 1.0);
@@ -891,7 +881,7 @@ fn clear_along(device: &Device, worlds: &Worlds, trajectory: &Trajectory) -> boo
 #[test]
 fn a_follower_stops_for_what_the_object_it_holds_would_hit() {
     let robot = common::panda().unwrap();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let (carry, boxed) = carry(&robot, &device, 0.6);
         let duration = carry.duration();
@@ -952,7 +942,7 @@ fn a_follower_stops_for_what_the_object_it_holds_would_hit() {
 #[test]
 fn replans_carry_what_the_follower_holds() {
     let robot = common::panda().unwrap();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let (carry, boxed) = carry(&robot, &device, 0.6);
         let duration = carry.duration();
@@ -1002,7 +992,7 @@ fn replans_carry_what_the_follower_holds() {
 #[test]
 fn a_robot_held_far_back_is_followed_from_where_it_is_with_what_it_holds() {
     let robot = common::panda().unwrap();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let (carry, boxed) = carry(&robot, &device, 0.6);
         let duration = carry.duration();
@@ -1046,7 +1036,7 @@ fn a_robot_held_far_back_is_followed_from_where_it_is_with_what_it_holds() {
 #[test]
 fn a_stop_that_takes_the_held_object_into_a_box_reports_the_collision() {
     let robot = common::panda().unwrap();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let carry = carry_at(&robot, &device, 1.0);
         let duration = carry.duration();
@@ -1084,7 +1074,7 @@ fn a_stop_that_takes_the_held_object_into_a_box_reports_the_collision() {
 #[test]
 fn a_follower_holding_an_object_checks_the_robot_of_each_ticks_device() {
     let robot = common::panda().unwrap();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let carry = carry_at(&robot, &device, 0.5);
         let duration = carry.duration();

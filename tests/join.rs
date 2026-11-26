@@ -15,20 +15,6 @@ use batchplan::{
 };
 use glam::{Quat, Vec3};
 
-fn panda() -> Robot {
-    common::panda().unwrap()
-}
-
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 /// The radius the tests join at: 5 cm.
 const BLEND: f32 = 0.05;
 
@@ -95,9 +81,9 @@ fn duration(robot: &Robot, paths: &[Vec<f32>]) -> f32 {
 
 #[test]
 fn joined_motions_turn_within_the_blend_and_finish_sooner() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let precision = ToolPathOptions::default().precision;
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[World::default()]).unwrap();
         let (paths, [start, corner, end]) = self::corner(&device, &worlds, 0.1, 0.1);
@@ -144,9 +130,9 @@ fn joined_motions_turn_within_the_blend_and_finish_sooner() {
 /// after the other.
 #[test]
 fn a_joined_motion_arrives_under_a_cap_that_holds_near_its_end() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let cap = 0.05;
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[World::default()]).unwrap();
         // A way of 15 cm, then 6 cm more round a corner to the grasp.
@@ -213,7 +199,7 @@ fn a_joined_motion_arrives_under_a_cap_that_holds_near_its_end() {
 
 #[test]
 fn a_zero_blend_stops_at_every_join() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::default()]).unwrap();
     let (paths, _) = corner(&device, &worlds, 0.1, 0.1);
@@ -226,7 +212,7 @@ fn a_zero_blend_stops_at_every_join() {
 fn turning_back_never_finishes_later_than_stopping() {
     // Out and straight back, and motions that turn by 116 and 153 degrees in joint space: blends
     // through such turns can be slower than stopping, and are kept only where they are not.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::default()]).unwrap();
     let out = vec![0.6, -0.8, 0.2, -2.2, 0.1, 1.7, 0.5];
@@ -264,7 +250,7 @@ fn turning_back_never_finishes_later_than_stopping() {
 
 #[test]
 fn planned_motions_join_within_the_limits_alike_on_every_device() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     // A sweep across the front, each motion carrying on roughly where the last was going.
     let stops_at = [
@@ -278,7 +264,7 @@ fn planned_motions_join_within_the_limits_alike_on_every_device() {
         .map(|w| PlanProblem::new(0, w[0].clone(), w[1].clone()))
         .collect();
     let mut first: Option<JoinResult> = None;
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[World::default()]).unwrap();
         let plans = batchplan::plan(&device, &worlds, &problems, &PlanOptions::default()).unwrap();
@@ -327,7 +313,7 @@ fn planned_motions_join_within_the_limits_alike_on_every_device() {
 
 #[test]
 fn malformed_sequences_are_input_errors() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::default()]).unwrap();
@@ -507,7 +493,7 @@ fn planned(device: &Device, worlds: &Worlds, stops: &[Vec<f32>]) -> Vec<Vec<f32>
 #[test]
 fn a_kept_stop_ends_one_stretch_at_rest_and_starts_the_next() {
     // A sweep that blends, then a motion of one span, which leaves no room for a blend.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::default()]).unwrap();
@@ -554,7 +540,7 @@ fn a_kept_stop_ends_one_stretch_at_rest_and_starts_the_next() {
 fn each_join_turns_within_its_own_radius() {
     // The sweep of three motions, joined at radii that differ per join, as each item of a Pilz
     // sequence gives its own.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::default()]).unwrap();
     let paths = planned(
@@ -605,7 +591,7 @@ fn each_join_turns_within_its_own_radius() {
 fn a_stop_separates_the_joins_either_side_of_it() {
     // Random planned motions joined at radii [r, 0, r] join as the two sequences either side of
     // the stop, joined alone: how one side is split to time it never depends on the other.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::default()]).unwrap();
@@ -673,7 +659,7 @@ fn a_stop_separates_the_joins_either_side_of_it() {
 /// motions that keep the cone stray past it only where they are wide.
 #[test]
 fn blends_keep_the_sequence_constraints() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let down = common::upright(0.0);
     let upright = HandConstraint {
         tilt: 2f32.to_radians(),
@@ -687,7 +673,7 @@ fn blends_keep_the_sequence_constraints() {
     let (start, goals) = common::upright_reaches(&cpu, &reaching, 24, &mut Rng::new(4)).unwrap();
     let mut stops = vec![start];
     stops.extend(goals.into_iter().take(19));
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(std::slice::from_ref(&scene)).unwrap();
         let problems: Vec<PlanProblem> = stops
             .windows(2)
@@ -736,7 +722,7 @@ fn blends_keep_the_sequence_constraints() {
 
 #[test]
 fn a_blend_is_checked_with_what_the_hand_holds() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     // A ball carried 6 cm past the hand's frame through a turn of 60 degrees, and one standing
     // inside the turn at its height: the motions pass it, the hand passes over it, and the blend
@@ -755,7 +741,7 @@ fn a_blend_is_checked_with_what_the_hand_holds() {
     let corner = ready.position + first * 0.25;
     let inward = (second - first).normalize();
     let standing = Obstacle::sphere(corner + down * 0.06 + inward * 0.055, 0.02);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device
             .upload(&[World::new(vec![standing.clone()])])

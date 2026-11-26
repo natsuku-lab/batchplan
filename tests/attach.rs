@@ -12,16 +12,6 @@ use batchplan::{
 };
 use glam::{Mat3, Quat, Vec2, Vec3};
 
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 /// A box held between the Panda's open fingers, wide enough to press into them.
 fn held_box(touch_links: &[&str]) -> AttachedObject {
     AttachedObject {
@@ -207,7 +197,7 @@ fn devices_for_an_attached_robot_plan_in_worlds_already_uploaded() {
         .collect();
     let checker = Device::cpu(&held).unwrap();
     let on_checker = checker.upload(&scene).unwrap();
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let holding = d.with_robot(&held).unwrap();
         let ik = batchplan::solve_ik(&holding, &worlds, &goals, &IkOptions::default()).unwrap();

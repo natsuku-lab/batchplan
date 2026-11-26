@@ -14,16 +14,6 @@ use batchplan::{
 };
 use glam::{Quat, Vec3};
 
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 /// A path's configurations at 1 kHz once timed, far denser than the planner checks it; the
 /// trajectory must pass `Trajectory::check`, within every joint range and limit.
 fn samples(robot: &Robot, path: &[f32]) -> Vec<Vec<f32>> {
@@ -64,7 +54,7 @@ fn a_gripper_carried_past_a_pillar_stays_upright() {
     let robot = common::panda().unwrap();
     let bound = 5f32.to_radians();
     let down = common::upright(0.0);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(&[common::pillar_scene()]).unwrap();
         let (start, goals) =
             common::upright_reaches(&device, &worlds, 16, &mut Rng::new(5)).unwrap();
@@ -459,7 +449,7 @@ fn off_its_place(robot: &Robot, q: &[f32], relative: Pose) -> (f32, f32, f32) {
 fn two_hands_carry_a_tray_level_between_them() {
     let robot = common::two_pandas().unwrap();
     let bound = 5f32.to_radians();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(&[common::tray_scene()]).unwrap();
         let common::TrayCarries {
             start,
@@ -774,7 +764,7 @@ fn constrained_plans_do_not_depend_on_the_batch_or_device() {
         ..PlanOptions::default()
     };
     let mut runs = vec![];
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(&[common::pillar_scene()]).unwrap();
         let batch = batchplan::plan(&device, &worlds, &problems, &o).unwrap();
         let alone: Vec<Option<Vec<f32>>> = problems

@@ -1,9 +1,12 @@
 //! Opt-in correction of measured starts at joint limits, before the usual planning checks.
 
+#[path = "../examples/common/mod.rs"]
+mod common;
+
 use std::collections::HashMap;
 
 use batchplan::{
-    Device, Error, HandConstraint, Handover, Held, Obstacle, Pick, Place, PlanFailure, PlanOptions,
+    Error, HandConstraint, Handover, Held, Obstacle, Pick, Place, PlanFailure, PlanOptions,
     PlanProblem, Pose, Robot, RobotOptions, StartMotion, TaskOptions, TaskStep, ToolPath,
     ToolPathOptions, ToolPathStop, World,
 };
@@ -52,16 +55,6 @@ fn start(robot: &Robot) -> Vec<f32> {
     q[joint(robot, "slide")] = 0.2;
     q[joint(robot, "spin")] = 7.0;
     q
-}
-
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
 }
 
 fn input<T>(result: Result<T, Error>) -> String {
@@ -123,7 +116,7 @@ fn corrected_batches_match_explicit_starts_and_keep_continuous_and_held_joints()
     let mut explicit = problems.clone();
     explicit[0].start[hinge] = 1.0;
     explicit[1].start[slide] = -1.0;
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(&[World::default()]).unwrap();
         assert!(
             input(batchplan::plan(
@@ -203,7 +196,7 @@ fn correction_rejects_large_nonfinite_and_malformed_starts_and_never_repairs_goa
     let robot = robot();
     let q = start(&robot);
     let (hinge, spin) = (joint(&robot, "hinge"), joint(&robot, "spin"));
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(&[World::default()]).unwrap();
         for (index, value, name) in [
             (hinge, 1.002, "hinge"),
@@ -254,7 +247,7 @@ fn exact_tolerance_limits_are_inclusive_and_held_goals_are_not_repaired() {
     let hinge = joint(&robot, "hinge");
     let q = start(&robot);
     let exact = 0.125;
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(&[World::default()]).unwrap();
         let o = PlanOptions {
             start_tolerance: exact,
@@ -321,7 +314,7 @@ fn correction_preserves_a_moving_starts_velocity_and_acceleration() {
     };
     let mut explicit = problem.clone();
     explicit.start = corrected;
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(&[World::default()]).unwrap();
         let result =
             batchplan::plan(&device, &worlds, std::slice::from_ref(&problem), &options()).unwrap();
@@ -355,7 +348,7 @@ fn corrected_starts_still_undergo_collision_and_constraint_checks() {
         center: pose.position,
         radius: 0.1,
     };
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device
             .upload(&[World::new(vec![obstacle.clone()]), World::default()])
             .unwrap();
@@ -428,7 +421,7 @@ fn every_task_corrects_its_start_and_preserves_the_start_collision_failure() {
         plan: options(),
         ..TaskOptions::default()
     };
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let barrier = Obstacle::Sphere {
             center: pose.position,
             radius: 0.1,
