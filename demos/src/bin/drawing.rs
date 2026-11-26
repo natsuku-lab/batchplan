@@ -21,9 +21,9 @@ use batchplan::{
 };
 use batchplan_demos::ASSETS;
 
-/// A 12 cm pen on the flange, its tip the IK frame. Its collision cylinder is 12 mm thick and starts
-/// 3 cm off the flange: fitted to the whole pen, or to a thicker one, its spheres come within a
-/// millimetre of the wrist's, and the arm stops for self-collision as it draws.
+/// A 12 cm pen on the flange, its tip the IK frame. Its collision cylinder is 12 mm thick and
+/// starts 3 cm off the flange: fitted to the whole pen, or to a thicker one, its spheres come
+/// within a millimetre of the wrist's, and the arm stops for self-collision as it draws.
 const PEN: &str = r#"  <link name="pen">
     <visual><origin xyz="0 0 0.06"/><geometry><cylinder radius="0.006" length="0.12"/></geometry></visual>
     <collision><origin xyz="0 0 0.075"/><geometry><cylinder radius="0.006" length="0.09"/></geometry></collision>

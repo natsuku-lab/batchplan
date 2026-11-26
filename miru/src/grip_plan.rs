@@ -71,7 +71,8 @@ pub struct GripCandidate<'a> {
     pub candidate: &'a Grasp,
     /// The owner of each obstacle in the projection, in world order.
     pub of: &'a [Of],
-    /// Existing cell permissions, such as for a mounted robot, go here.
+    /// The projected world's touches, which `configure` may add the cell's own to, such as a
+    /// mounted robot's base on its table.
     pub touches: &'a mut Vec<Touch>,
     split: &'a Gripped,
     world: u32,

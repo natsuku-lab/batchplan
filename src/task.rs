@@ -1,19 +1,20 @@
 //! Whole tasks in one call: a hand picking up an object ([`pick`]), setting down the one it holds
-//! ([`place`]) or turning one about a line ([`turn`]). Each is three motions from rest to rest: a
-//! planned path from the start to where the hand begins to move in, a straight move in (to the
-//! grasp, or down to where the object goes), and a straight move away (lifting the object, or
-//! backing off from it). The gripper closes or opens between the second and the third; a turn's
-//! hand closes, turns the object, and opens between them. Every motion is checked with the fingers
-//! where the robot was loaded with them, so open them first, unless the task says otherwise: a
-//! pick's or a turn's grasps may keep them narrower ([`Pick::locked`], [`Turn::locked`]), a hold
-//! says where they closed ([`Held::locked`]), and a place may name how far they open where it
+//! ([`place`]), turning one about a line ([`turn`]) or drawing one along a line ([`pull`]). Each is
+//! three motions from rest to rest: a planned path from the start to where the hand begins to move
+//! in, a straight move in (to the grasp, or down to where the object goes), and a straight move
+//! away (lifting the object, or backing off from it). The gripper closes or opens between the
+//! second and the third; a turn's hand closes, turns the object, and opens between them, and a
+//! pull's draws it along its line. Every motion is checked with the fingers where the robot was
+//! loaded with them, so open them first, unless the task says otherwise: a pick's, a turn's or a
+//! pull's grasps may keep them narrower ([`Pick::locked`], [`Turn::locked`], [`Pull::locked`]), a
+//! hold says where they closed ([`Held::locked`]), and a place may name how far they open where it
 //! lets go ([`Place::open`]).
 //!
 //! A task's candidates, its grasps or the poses it may set the object at, run with every other
 //! task's, step by step, each step a batch for those whose fingers and held object are alike: IK
 //! at each grasp or release, the moves in (run backward from there, so they end exactly there),
-//! the moves away, then planned paths for those still going. Every candidate that passes every step comes back, quickest first. When none does,
-//! each candidate's step and reason come back instead.
+//! the moves away, then planned paths for those still going. Every candidate that passes every step
+//! comes back, quickest first. When none does, each candidate's step and reason come back instead.
 //!
 //! A task may leave its transit out (`transit: false`) and give the two straight moves alone: a
 //! program of many tasks solves all their moves in one call, plans the ways between them in one
@@ -394,8 +395,8 @@ pub struct TaskPlan {
     /// The planned path from the start to where the move in begins; none for a task that leaves
     /// its transit out.
     pub transit: Option<Trajectory>,
-    /// The straight move in. The gripper closes (pick, turn, pull) or opens (place) at its end; in a
-    /// handover the taker's closes, then the giver's opens.
+    /// The straight move in. The gripper closes (pick, turn, pull) or opens (place) at its end; in
+    /// a handover the taker's closes, then the giver's opens.
     pub approach: Trajectory,
     /// After a [`turn`], the hand turning the object, the fingers closed on it, from where the
     /// move in ends to where the move away starts. Open the gripper after it. None for the rest.
@@ -565,7 +566,8 @@ impl fmt::Display for TaskFailure {
     }
 }
 
-/// What [`pick`], [`place`], [`handover`](crate::handover()), [`turn`] or [`pull`] did with each task.
+/// What [`pick`], [`place`], [`handover`](crate::handover()), [`turn`] or [`pull`] did with each
+/// task.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct TaskResult<T> {
@@ -688,8 +690,8 @@ fn checked_picks<'a>(
 }
 
 /// Each task's plans by its grasps, as [`Pick::enough`] and [`Pick::locked`] say how a pick's are
-/// tried, `each` ([`picked`] or [`articulated`]) running checked tasks with some of their grasps that
-/// keep the robot's locked joints as its device's robot has them.
+/// tried, `each` ([`picked`] or [`articulated`]) running checked tasks with some of their grasps
+/// that keep the robot's locked joints as its device's robot has them.
 fn by_grasps<T: Gripping>(
     device: &Device,
     worlds: &Worlds,
@@ -1656,8 +1658,8 @@ pub struct GraspOptions {
     /// grasped at the whole `opening`. A rim beside a wall the open fingers would be in is
     /// grasped so. A grasp the open hand has stays where it is, drawn back as the open hand
     /// is; where the open hand is clear at no depth, the hand comes in as deep as it is clear
-    /// narrower. Lock the fingers there
-    /// for the pick ([`Pick::locked`]); a call's grasps share at most sixteen openings.
+    /// narrower. Lock the fingers there for the pick ([`Pick::locked`]); a call's grasps share at
+    /// most sixteen openings.
     pub narrow: bool,
     /// A point to grip a surface near, in its frame, for grasps of a surface: `None`, the pairs
     /// of patches spread over the object. With a point, within each of the tiers
@@ -1669,11 +1671,11 @@ pub struct GraspOptions {
     /// as near: where a caller was told to grip, as on a knob's axis or at a handle's middle. It
     /// orders the grasps and finds no others.
     pub near: Option<Vec3>,
-    /// A point to enclose between the pads in surface grasps. After the ordinary grasps,
-    /// sample intermediate approaches around nearby contact pairs and append only those whose
-    /// fingers close on this point. Finally try shallower insertions of point-enclosing grasps,
-    /// retaining the contact patches and the required overlap. Ordinary grasps come first,
-    /// including ones that miss the point.
+    /// A point to enclose between the pads in surface grasps. After the ordinary grasps come
+    /// intermediate approaches sampled around nearby contact pairs, only those whose fingers close
+    /// on this point, and last shallower insertions of point-enclosing grasps, which keep the
+    /// contact patches and the required overlap. Ordinary grasps come first, including ones that
+    /// miss the point.
     pub close_on: Option<Vec3>,
     /// How far the hand's spheres stay from what they do not close on, on their way in to a grasp
     /// of a surface and at it (meters): 0, a hand is clear that touches nothing. The points say
@@ -1690,15 +1692,16 @@ pub struct GraspOptions {
     /// Whether grasps of a surface ([`grasps_on`](crate::grasps_on)) whose fingers close onto
     /// their patches before they meet any other part of what was seen of the object come first,
     /// within each turn of the lot of two seen sides and of the lot of one, so from above still
-    /// comes before a turn to either side: false, the order is as without it. A finger closing level deep across a wall that leans over its patch, as a
-    /// flared bowl's, meets the wall above the patch first, a finger's length from the other
-    /// contact, and the object turns in the hand as it is lifted: with this, such grasps come
-    /// after the rest, none left out. What a finger meets is the object's patches: the means of
-    /// its readings in cells a patch wide ([`contact`](Self::contact)) that hold three or more,
-    /// so that a reading or two off the surface by a stereo camera's noise is none. So a part of
-    /// the object no camera saw, or one seen with fewer readings than that in every such cell,
-    /// as a wall read sparser than every 3 mm or a lip that cells' sides split, is met
-    /// unnoticed. It costs a sweep of each finger of each grasp over the patches.
+    /// comes before a turn to either side: false, the order is as without it. A finger closing
+    /// level deep across a wall that leans over its patch, as a flared bowl's, meets the wall above
+    /// the patch first, a finger's length from the other contact, and the object turns in the hand
+    /// as it is lifted: with this, such grasps come after the rest, none left out. What a finger
+    /// meets is the object's patches: the means of its readings in cells a patch wide
+    /// ([`contact`](Self::contact)) that hold three or more, so that a reading or two off the
+    /// surface by a stereo camera's noise is none. So a part of the object no camera saw, or one
+    /// seen with fewer readings than that in every such cell, as a wall read sparser than every
+    /// 3 mm or a lip that cells' sides split, is met unnoticed. It costs a sweep of each finger of
+    /// each grasp over the patches.
     pub first_touch: bool,
 }
 
@@ -2266,8 +2269,8 @@ pub(crate) enum Leg {
 }
 
 /// Each candidate's straight move from its grasp or release, in the world of `worlds` that
-/// `worlds_of` gives it: kept if it covers all of it, or at least `o.min_fraction` where an obstacle
-/// stops it.
+/// `worlds_of` gives it: kept if it covers all of it, or at least `o.min_fraction` where an
+/// obstacle stops it.
 pub(crate) fn straight(
     device: &Device,
     worlds: &Worlds,
@@ -2730,7 +2733,8 @@ pub struct Turn {
     pub transit: bool,
     /// The hand that turns it.
     pub hand: usize,
-    /// The object: an obstacle of the world, by index. A distance grid may only be gripped where it `stays`.
+    /// The object: an obstacle of the world, by index. A distance grid may only be gripped where it
+    /// `stays`.
     pub object: usize,
     /// Poses of the hand's IK frame that grip the object, in the object's frame (its center and
     /// rotation), as [`Pick::grasps`]; any one will do.
@@ -2805,17 +2809,17 @@ impl Turn {
 
 /// Turns each task's object by its angle about its screw, trying each of its grasps. IK solves at
 /// the grasp, where the fingers ([`Robot::finger_links`], or the hand's links if it has none
-/// and the target is a primitive) may touch the object, and the turn is followed from every configuration it finds
-/// there, nearest the start first. The hand's IK frame is carried about the screw
-/// ([`Screw::path`]) and kept within the tool path's precision of its true arc: half of it for
-/// how far the straight moves between the screw's waypoints sag from the arc, half for how far
-/// the hand strays from them. A grasp gets through where some configuration at it makes the
-/// whole turn within the joints' ranges and clear of the world, then the moves in and away: the
-/// nearest such is its plan's. So a grasp is not lost where the configuration nearest the start
-/// runs into a joint limit halfway and another at the same grasp makes the turn; where none
-/// does, its stop says how far the one that turned farthest got ([`CandidateStop::turned`]).
-/// [`TaskOptions::min_fraction`] holds for the moves in and away; the turn is made whole or not
-/// at all.
+/// and the target is a primitive) may touch the object, and the turn is followed from every
+/// configuration it finds there, nearest the start first. The hand's IK frame is carried about the
+/// screw ([`Screw::path`]) and kept within the tool path's precision of its true arc: half of it
+/// for how far the straight moves between the screw's waypoints sag from the arc, half for how far
+/// the hand strays from them. A grasp gets through where some configuration at it makes the whole
+/// turn within the joints' ranges and clear of the world, then the moves in and away: the nearest
+/// such is its plan's. So a grasp is not lost where the configuration nearest the start runs into a
+/// joint limit halfway and another at the same grasp makes the turn; where none does, its stop says
+/// how far the one that turned farthest got ([`CandidateStop::turned`]).
+/// [`TaskOptions::min_fraction`] holds for the moves in and away; the turn is made whole or not at
+/// all.
 ///
 /// The hand holds the object through the turn, as a pick's lift holds what it picked up: the
 /// object is part of the robot there, and its world is the task's without it, so what the

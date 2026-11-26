@@ -333,7 +333,8 @@ impl Memory {
                         }
                         Some(object)
                     }
-                    // A hold a restart brings back: no id given since may be its.
+                    // A hold a restart brings back: an id at or past `next_id`, which the memory
+                    // never gave, and the ids it gives next follow it.
                     None => {
                         let next = id.checked_add(1).filter(|_| *id >= self.scene.next_id);
                         let Some(next) = next else {

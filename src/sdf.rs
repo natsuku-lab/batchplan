@@ -2997,8 +2997,8 @@ impl OccupancyMap {
         self.mark(shape, margin, |l| l.max(HIT))
     }
 
-    /// A map of an analytic primitive as solid voxels, including every voxel its surface intersects.
-    /// The rest of the map, out to the given padding, is free.
+    /// A map of an analytic primitive as solid voxels, including every voxel its surface
+    /// intersects. The rest of the map, out to the given padding, is free.
     pub fn from_shape(shape: &Obstacle, o: &SdfOptions) -> Result<Self> {
         ensure_input!(
             !matches!(shape, Obstacle::Sdf { .. }),
@@ -3155,9 +3155,9 @@ impl OccupancyMap {
     /// endpoint and cells whose centres project to it at the measured depth. A cell stays if
     /// its enclosing box in any camera frame overlaps an unselected pixel at that pixel's depth.
     /// This includes mixed cells at pixel boundaries even when the map was fused on another
-    /// device. Unknown cells, occupied children inherited from an unresolved parent, and cells without a
-    /// selected hit stay. Supply all views of interest.
-    /// `selected` takes the view index and row-major pixel index.
+    /// device. Unknown cells, occupied children inherited from an unresolved parent, and cells
+    /// without a selected hit stay. Supply all views of interest. `selected` takes the view index
+    /// and row-major pixel index.
     pub fn take_surfaces(
         &mut self,
         device: &Device,

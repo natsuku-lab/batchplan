@@ -66,16 +66,17 @@ pub struct SphereOptions {
     /// sphere's radius is at most how deep its center lies inside plus this
     /// ([`LinkQualification::overhang`]), so `Some(0.0)` keeps every sphere inside. Spheres are
     /// chosen as without it and then held to it, which leaves surface outside them wherever
-    /// `tolerance`, as the budget scales it, is the larger: [`Robot::qualify`](crate::Robot::qualify)
-    /// reports how deep as each link's `gap`. The geometry must be closed, every edge shared by
-    /// as many triangles one way as the other, with no shell facing inward, and a collision model
-    /// given with the options is held to it as a fitted one is. A center's depth is its distance to the nearest face of a
-    /// mesh that winds around it, a face buried in another shell among them, so it is never more
-    /// than the true depth. Depths are measured in the geometry as the fit sees it, a round shape
-    /// as its mesh of 24 sides, which lies inside it by up to 0.9% of a cylinder's radius and 1.7%
-    /// of a ball's or a capsule's; a held shape covered without fitting is held to the shape
-    /// itself, so `qualify` reads that much more for it. `None`: spheres cover the surface and
-    /// reach as far past it as the budget makes them.
+    /// `tolerance`, as the budget scales it, is the larger:
+    /// [`Robot::qualify`](crate::Robot::qualify) reports how deep as each link's `gap`. The
+    /// geometry must be closed, every edge shared by as many triangles one way as the other, with
+    /// no shell facing inward, and a collision model given with the options is held to it as a
+    /// fitted one is. A center's depth is its distance to the nearest face of a mesh that winds
+    /// around it, a face buried in another shell among them, so it is never more than the true
+    /// depth. Depths are measured in the geometry as the fit sees it, a round shape as its mesh of
+    /// 24 sides, which lies inside it by up to 0.9% of a cylinder's radius and 1.7% of a ball's or
+    /// a capsule's; a held shape covered without fitting is held to the shape itself, so `qualify`
+    /// reads that much more for it. `None`: spheres cover the surface and reach as far past it as
+    /// the budget makes them.
     pub max_overhang: Option<f32>,
     /// Largest spacing of the interior grid that proposes sphere centers (meters). Small links
     /// use a finer grid.
@@ -198,8 +199,8 @@ fn vertex_normals(meshes: &[TriMesh]) -> Vec<(Vec3, Vec3)> {
     out
 }
 
-/// Whether the sphere `(c, r)` reaches `p` within `overhang` beyond its radius: the scalar reference
-/// for the cover, its refinement and the samples' own candidates.
+/// Whether the sphere `(c, r)` reaches `p` within `overhang` beyond its radius: the scalar
+/// reference for the cover, its refinement and the samples' own candidates.
 #[inline]
 fn reaches(p: Vec3, (c, r): (Vec3, f32), overhang: f32) -> bool {
     (p - c).length_squared() <= (r + overhang) * (r + overhang)
@@ -727,9 +728,9 @@ impl LinkFit {
     }
 }
 
-/// How well a robot's collision spheres fit its geometry ([`Robot::qualify`](crate::Robot::qualify)):
-/// a robot that loads may still have spheres unfit to plan with, such as fingers inside spheres too
-/// large to grasp small objects.
+/// How well a robot's collision spheres fit its geometry
+/// ([`Robot::qualify`](crate::Robot::qualify)): a robot that loads may still have spheres unfit to
+/// plan with, such as fingers inside spheres too large to grasp small objects.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Qualification {

@@ -377,8 +377,8 @@ impl Device {
 
     /// Collision cost, its gradient and clearances for each configuration in `q` (`[items, dof]`)
     /// against `worlds[item_world[item]]`. Errors if `q` does not hold `dof` finite values per
-    /// item, an item names a world outside `worlds`, `worlds` were uploaded to another device, or the
-    /// weights make the cost not a number (a weight not finite, a margin not a number, or an
+    /// item, an item names a world outside `worlds`, `worlds` were uploaded to another device, or
+    /// the weights make the cost not a number (a weight not finite, a margin not a number, or an
     /// infinite margin with a weight on it).
     pub fn evaluate(
         &self,
@@ -709,8 +709,8 @@ pub(crate) fn fits_batch(problems: usize, each: usize) -> bool {
     items.is_some_and(|items| u32::try_from(items).is_ok())
 }
 
-/// That every value of the configurations `q` (`[items, dof]`) is finite: a NaN compares as clear of
-/// everything.
+/// That every value of the configurations `q` (`[items, dof]`) is finite: a NaN compares as clear
+/// of everything.
 fn finite(q: &[f32], dof: usize) -> Result<()> {
     if let Some(i) = q.iter().position(|v| !v.is_finite()) {
         return Err(input!(

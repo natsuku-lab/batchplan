@@ -507,7 +507,8 @@ impl Obstacle {
                 radius,
                 half_length: half,
             } => pose(center, rotation) && size(radius) && size(half),
-            // A grid is checked when it is made (`SdfGrid::checked`), and nothing changes one after.
+            // A grid is checked when it is made (`SdfGrid::checked`), and nothing changes one
+            // after.
             Obstacle::Sdf {
                 center, rotation, ..
             } => pose(center, rotation),

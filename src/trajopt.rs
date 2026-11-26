@@ -829,8 +829,8 @@ enum Phase<'call> {
 }
 
 /// A stuck spline under repair: optimized a round at a time, its held joints put back and checked
-/// after each round, keeping the splines' last clearance (`keep`), and after the last round without.
-/// It keeps the fit it repairs, to grow if the repair fails.
+/// after each round, keeping the splines' last clearance (`keep`), and after the last round
+/// without. It keeps the fit it repairs, to grow if the repair fails.
 struct Repair<'call> {
     fit: Box<Fitting<'call>>,
     spline: Vec<f32>,
@@ -1079,10 +1079,11 @@ const START_KNOTS: [f32; 3] = [1.0, 1.5, 2.25];
 /// world margin keeping nothing between links. A valid spline's stops are then replaced by blends
 /// where the spline stays valid, each stop's widest first (`BLENDS` of them), as OpenRAVE's
 /// smoother takes a path that stops at its waypoints and removes the stops, and as TOTG passes
-/// corners within a deviation, which it does not check. Each check after the first starts at the first span a change reaches.
-/// Where no spline is valid and neither is its repair, the splines get twice the control points
-/// and all of it runs again (`grow`), as FITPACK adds knots until its fit holds, while fewer are
-/// free than the longer path has waypoints, the density of TOPP-RA's spline through every waypoint.
+/// corners within a deviation, which it does not check. Each check after the first starts at the
+/// first span a change reaches. Where no spline is valid and neither is its repair, the splines get
+/// twice the control points and all of it runs again (`grow`), as FITPACK adds knots until its fit
+/// holds, while fewer are free than the longer path has waypoints, the density of TOPP-RA's spline
+/// through every waypoint.
 struct Fitting<'call> {
     paths: [Vec<f32>; 2],
     /// What the splines keep from the world and between links, round by round (`spline_keeps`).
@@ -1486,8 +1487,8 @@ const OPTIMIZE_SLACK: f32 = 0.02;
 
 /// Trajectory optimization of `o.seeds` seeds per problem into seeds 1 onward: the searched
 /// spline where there is one, straight lines to the goal and its equivalents, and bends through
-/// random via points. Problems whose searched spline is within `OPTIMIZE_SLACK` of straight keep it,
-/// unless it grew: they were optimized before it could.
+/// random via points. Problems whose searched spline is within `OPTIMIZE_SLACK` of straight keep
+/// it, unless it grew: they were optimized before it could.
 fn optimize(
     device: &Device,
     worlds: &Worlds,

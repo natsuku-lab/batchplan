@@ -307,10 +307,10 @@ impl Observed {
 }
 
 impl GripWorlds<'_> {
-    /// Check the hand's kinematic outer bound before projecting each candidate for [`Self::plan`].
-    /// A certified failure keeps its original index. Shared options are validated up front. The
-    /// task factory is called only for projected candidates. Chains without a bound use the
-    /// ordinary search.
+    /// The same worlds, checking the hand's kinematic outer bound before projecting each candidate
+    /// for [`Self::plan`]. A certified failure keeps its original index. Shared options are
+    /// validated up front. The task factory is called only for projected candidates. Chains without
+    /// a bound use the ordinary search.
     #[must_use]
     pub fn with_reach_bound(mut self) -> Self {
         self.reach = self.device.robot().hand_reach(self.hand_index);

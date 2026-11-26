@@ -345,8 +345,8 @@ pub struct RobotOptions {
     /// Scales every joint's velocity limit, its description's or `max_velocity`, in (0, 1], as
     /// MoveIt's velocity scaling factor does. Plans, timings and checks all keep within the scaled
     /// limits, so a robot slowed here replans mid-motion at its own pace. To slow every motion by
-    /// `s`, as `Trajectory::try_new`'s speed scale does, scale velocity by `s`, acceleration by `s²`
-    /// and jerk by `s³`.
+    /// `s`, as `Trajectory::try_new`'s speed scale does, scale velocity by `s`, acceleration by
+    /// `s²` and jerk by `s³`.
     pub velocity_scale: f32,
     /// Scales every joint's acceleration limit, in (0, 1].
     pub acceleration_scale: f32,
@@ -1652,8 +1652,8 @@ impl Robot {
 
     /// Why configuration `q` breaks `constraints`, if it does: the constraint, the bound and by how
     /// much, in words. Bounds below IK's precision count as [`crate::plan`] counts them, so this is
-    /// the constraint test a plan's start and goals must pass. An `Error::Input` for constraints the
-    /// robot can't keep, as `plan` refuses them, or a `q` without one finite value per joint.
+    /// the constraint test a plan's start and goals must pass. An `Error::Input` for constraints
+    /// the robot can't keep, as `plan` refuses them, or a `q` without one finite value per joint.
     pub fn breach(
         &self,
         constraints: &[HandConstraint],
