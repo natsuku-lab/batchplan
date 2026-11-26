@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionModel, CollisionWeights, Device, Error, JointLimits, Obstacle, Part, PlanOptions,
-    PlanProblem, Pose, Robot, RobotOptions, SphereOptions, Trajectory, World,
+    CollisionModel, CollisionWeights, Device, Error, GripperCalibration, JointLimits, Obstacle,
+    Part, PlanOptions, PlanProblem, Pose, Robot, RobotOptions, SphereOptions, Trajectory, World,
 };
 use glam::{DMat3, DVec3, Mat3, Quat, Vec3};
 use mesh_loader::Loader;
@@ -34,6 +34,23 @@ fn load(path: &str) -> Robot {
     Robot::load(common::asset(path), &RobotOptions::default()).unwrap()
 }
 
+/// Hand 0 of `robot` as a gripper with these widths and closed joints: its opening where its jaws
+/// slide, `None` where they do not.
+fn sliding_opening(
+    robot: &Robot,
+    loaded_gap: f32,
+    capacity: f32,
+    closed_gap: f32,
+    closed: &HashMap<String, f32>,
+) -> Option<f32> {
+    let calibration = GripperCalibration {
+        capacity: Some(capacity),
+        ..GripperCalibration::new(loaded_gap, closed_gap, closed.clone())
+    };
+    let gripper = robot.gripper(0, &calibration).unwrap();
+    gripper.sliding().then_some(gripper.opening())
+}
+
 #[test]
 fn parallel_jaw_motion_matches_the_calibrated_stroke_on_both_sides() {
     let panda = common::panda().unwrap();
@@ -41,35 +58,52 @@ fn parallel_jaw_motion_matches_the_calibrated_stroke_on_both_sides() {
         ("panda_finger_joint1".into(), 0.0),
         ("panda_finger_joint2".into(), 0.0),
     ]);
-    let gap = |loaded, capacity, locks| {
-        panda
-            .parallel_jaw_opening(0, loaded, capacity, 0.0, locks)
-            .unwrap()
-    };
+    let gap = |loaded, capacity, locks| sliding_opening(&panda, loaded, capacity, 0.0, locks);
     assert_eq!(gap(0.080, 0.060, &closed), Some(0.080));
     assert_eq!(gap(0.080f32.next_down(), 0.080, &closed), Some(0.080));
     assert_eq!(gap(0.060, 0.060, &closed), None);
     let two_mm = closed.keys().map(|name| (name.clone(), 0.001)).collect();
     assert_eq!(
-        panda
-            .parallel_jaw_opening(0, 0.080, 0.016, 0.002, &two_mm)
-            .unwrap(),
+        sliding_opening(&panda, 0.080, 0.016, 0.002, &two_mm),
         Some(0.080)
     );
     let past_stop = closed.keys().map(|name| (name.clone(), -0.01)).collect();
     assert_eq!(gap(0.100, 0.060, &past_stop), None);
     let one = HashMap::from([("panda_finger_joint1".into(), 0.0)]);
     assert_eq!(gap(0.080, 0.060, &one), None);
-    assert!(
-        panda
-            .parallel_jaw_opening(1, 0.080, 0.060, 0.0, &closed)
-            .is_err()
-    );
-    assert!(
-        panda
-            .parallel_jaw_opening(0, 0.080, 0.081, 0.0, &closed)
-            .is_err()
-    );
+    let calibration = |capacity, friction| GripperCalibration {
+        capacity: Some(capacity),
+        friction,
+        ..GripperCalibration::new(0.08, 0.0, closed.clone())
+    };
+    assert!(panda.gripper(1, &calibration(0.060, 0.5)).is_err());
+    assert!(panda.gripper(0, &calibration(0.081, 0.5)).is_err());
+    // A capacity no wider than the closed gap, below it or where it and the closed gap are one
+    // step under the loaded gap, which the opening then snaps to.
+    let below = GripperCalibration {
+        capacity: Some(0.01),
+        ..GripperCalibration::new(0.08, 0.02, closed.clone())
+    };
+    let step = 0.08f32.next_down();
+    let at_closed = GripperCalibration {
+        capacity: Some(step),
+        ..GripperCalibration::new(0.08, step, closed.clone())
+    };
+    for (wrong, value) in [(below, "0.01"), (at_closed, "0.07999999")] {
+        match panda.gripper(0, &wrong) {
+            Err(Error::Input(message)) => assert!(message.contains(value), "{message}"),
+            other => panic!("{wrong:?}: {other:?}"),
+        }
+    }
+    for friction in [0.0, -0.5, f32::NAN, f32::INFINITY] {
+        assert!(
+            matches!(
+                panda.gripper(0, &calibration(0.060, friction)),
+                Err(Error::Input(_))
+            ),
+            "friction {friction}"
+        );
+    }
 }
 
 #[test]
@@ -82,26 +116,19 @@ fn an_unchanged_torso_lock_does_not_change_jaw_qualification() {
         ("panda_finger_joint1".into(), 0.0),
         ("panda_finger_joint2".into(), 0.0),
     ]);
-    let opening = |locks| {
-        robot
-            .parallel_jaw_opening(0, 0.080, 0.060, 0.0, locks)
-            .unwrap()
-    };
+    let opening = |locks: &HashMap<String, f32>| sliding_opening(&robot, 0.080, 0.060, 0.0, locks);
     assert_eq!(opening(&closed), Some(0.080));
     closed.insert("panda_joint1".into(), 0.0);
-    assert_eq!(
-        robot
-            .parallel_jaw_opening(0, 0.080, 0.060, 0.0, &closed)
-            .unwrap(),
-        Some(0.080)
+    assert_eq!(opening(&closed), Some(0.080));
+    // A joint closed where it was loaded stays as loaded at every opening.
+    let calibration = GripperCalibration::new(0.08, 0.0, closed.clone());
+    let locked = robot.gripper(0, &calibration).unwrap().locked_at(0.04);
+    assert!(
+        locked.len() == 2 && !locked.contains_key("panda_joint1"),
+        "{locked:?}"
     );
     closed.insert("panda_joint1".into(), 0.2);
-    assert_eq!(
-        robot
-            .parallel_jaw_opening(0, 0.080, 0.060, 0.0, &closed)
-            .unwrap(),
-        None
-    );
+    assert_eq!(opening(&closed), None);
 }
 
 #[test]
@@ -132,10 +159,8 @@ fn jaw_axes_and_coupled_limits_are_checked_even_far_from_the_origin() {
             collision_model: Some(model.clone()),
             ..Default::default()
         };
-        Robot::from_urdf(text, &options)
-            .unwrap()
-            .parallel_jaw_opening(0, 0.08, 0.06, 0.0, &closed)
-            .unwrap()
+        let robot = Robot::from_urdf(text, &options).unwrap();
+        sliding_opening(&robot, 0.08, 0.06, 0.0, &closed)
     };
     let skew = urdf
         .replace("0 1 0", "0.01 1 0")
@@ -198,12 +223,125 @@ fn a_revolving_finger_mimic_cannot_qualify_as_a_slide() {
             .zip(shut.hand_spheres(0))
             .all(|(a, b)| { (a.center - Vec3::Y * a.side * 0.040).distance(b.center) < 1e-6 })
     );
+    assert_eq!(sliding_opening(&robot, 0.080, 0.080, 0.0, &closed), None);
+}
+
+/// Openings turn into the finger joints and back between the closed and the loaded gap, not the
+/// capacity, where the two differ: the Panda relocked 6.15 cm open and grasping up to 5 cm, as a
+/// TIAGo's hand, each finger standing at half the opening, the ends exact.
+#[test]
+fn openings_convert_between_the_closed_and_loaded_gaps() {
+    let (loaded, capacity) = (0.0615, 0.05);
+    let fingers = |at: f32| -> HashMap<String, f32> {
+        let each = ["panda_finger_joint1", "panda_finger_joint2"];
+        each.map(|joint| (joint.to_string(), at)).into()
+    };
+    let robot = common::panda()
+        .unwrap()
+        .relock(&fingers(loaded / 2.0))
+        .unwrap();
+    let calibration = GripperCalibration {
+        capacity: Some(capacity),
+        ..GripperCalibration::new(loaded, 0.0, fingers(0.0))
+    };
+    let gripper = robot.gripper(0, &calibration).unwrap();
+    assert!(gripper.sliding());
     assert_eq!(
-        robot
-            .parallel_jaw_opening(0, 0.080, 0.080, 0.0, &closed)
-            .unwrap(),
-        None
+        (gripper.opening(), gripper.capacity(), gripper.closed_gap()),
+        (loaded, capacity, 0.0)
     );
+    assert_eq!(gripper.locked_at(loaded), fingers(loaded / 2.0));
+    assert_eq!(gripper.locked_at(0.0), fingers(0.0));
+    assert_eq!(gripper.opening_of(&fingers(loaded / 2.0)), loaded);
+    assert_eq!(gripper.opening_of(&fingers(0.0)), 0.0);
+    let openings = gripper.openings();
+    assert_eq!((openings.len(), openings[0]), (16, loaded));
+    for (k, &opening) in openings.iter().enumerate().skip(1) {
+        let sixteenths = capacity * (16 - k) as f32 / 16.0;
+        assert!((opening - sixteenths).abs() < 1e-7, "{k}: {opening}");
+    }
+    for &opening in &openings {
+        let locked = gripper.locked_at(opening);
+        assert!(
+            locked.len() == 2 && locked.values().all(|q| (q - opening / 2.0).abs() < 1e-7),
+            "{opening}: {locked:?}"
+        );
+        assert!((gripper.opening_of(&locked) - opening).abs() < 1e-7);
+    }
+    // Past either gap, the nearer; a joint not named stands as loaded.
+    assert_eq!(gripper.locked_at(0.1), fingers(loaded / 2.0));
+    assert_eq!(gripper.locked_at(-0.01), fingers(0.0));
+    assert_eq!(gripper.opening_of(&fingers(0.05)), loaded);
+    let one = HashMap::from([("panda_finger_joint1".to_string(), 0.0)]);
+    assert_eq!(gripper.opening_of(&one), loaded / 2.0);
+    assert_eq!(gripper.opening_of(&HashMap::new()), loaded);
+}
+
+/// A hand whose one jaw turns on a hinge and whose other is part of the palm, as the SO-101's:
+/// its gripper turns widths into the hinge's angle and back, between closed at the closed gap and
+/// as loaded at the loaded gap, but its jaws do not slide, so fingers that come in narrower are
+/// refused, saying why, and the hand as loaded is not.
+#[test]
+fn a_hinged_jaw_converts_widths_but_does_not_slide() {
+    let urdf = r#"<robot name="hinge">
+      <link name="base"/><link name="palm"/><link name="jaw"/>
+      <joint name="arm" type="revolute"><parent link="base"/><child link="palm"/>
+        <axis xyz="0 0 1"/><limit effort="1" velocity="1" lower="-3" upper="3"/></joint>
+      <joint name="hinge" type="revolute"><parent link="palm"/><child link="jaw"/>
+        <origin xyz="0 0.0235 0"/><axis xyz="1 0 0"/>
+        <limit effort="1" velocity="1" lower="-0.2" upper="1.7"/></joint></robot>"#;
+    let mut model = CollisionModel::default();
+    model
+        .spheres
+        .insert("palm".into(), vec![[0.0, -0.03, 0.0, 0.005]]);
+    model
+        .spheres
+        .insert("jaw".into(), vec![[0.0, 0.005, 0.0, 0.005]]);
+    let options = RobotOptions {
+        ee_links: vec!["palm".into()],
+        finger_links: HashMap::from([("palm".into(), vec!["jaw".into()])]),
+        lock_joints: HashMap::from([("hinge".into(), 0.6)]),
+        default_q: Some(vec![0.0]),
+        collision_model: Some(model),
+        ..Default::default()
+    };
+    let robot = Robot::from_urdf(urdf, &options).unwrap();
+    let (loaded, capacity) = (0.047, 0.04);
+    let calibration = GripperCalibration {
+        capacity: Some(capacity),
+        ..GripperCalibration::new(loaded, 0.0, HashMap::from([("hinge".into(), -0.1)]))
+    };
+    let gripper = robot.gripper(0, &calibration).unwrap();
+    assert!(!gripper.sliding());
+    let angle = |opening: f32| gripper.locked_at(opening)["hinge"];
+    assert_eq!((angle(loaded), angle(0.0)), (0.6, -0.1));
+    let at_capacity = -0.1 + 0.7 * capacity / loaded;
+    assert!(
+        (angle(capacity) - at_capacity).abs() < 1e-6,
+        "{}",
+        angle(capacity)
+    );
+    for opening in [0.0, 0.01, capacity, loaded] {
+        let back = gripper.opening_of(&gripper.locked_at(opening));
+        assert!((back - opening).abs() < 1e-6, "{opening}: {back}");
+    }
+    let device = Device::cpu(&robot).unwrap();
+    let surface = batchplan::Surface {
+        points: vec![Vec3::new(0.0, -0.01, 0.0), Vec3::new(0.0, 0.01, 0.0)],
+        normals: vec![Vec3::NEG_Y, Vec3::Y],
+        ..Default::default()
+    };
+    let narrow = batchplan::GraspOptions {
+        narrow: true,
+        ..Default::default()
+    };
+    let surfaces = std::slice::from_ref(&surface);
+    match batchplan::grasps_on(&device, &gripper, surfaces, &narrow) {
+        Err(Error::Input(message)) => assert!(message.contains("slide"), "{message}"),
+        other => panic!("narrowing a hinged jaw: {other:?}"),
+    }
+    let open = batchplan::GraspOptions::default();
+    assert!(batchplan::grasps_on(&device, &gripper, surfaces, &open).is_ok());
 }
 
 fn random_q(robot: &Robot, rng: &mut Rng) -> Vec<f32> {

@@ -9,9 +9,9 @@ use std::f32::consts::PI;
 
 use batchplan::rng::Rng;
 use batchplan::{
-    CandidateStop, Contact, Device, Error, GraspOptions, HandConstraint, Held, IkOptions,
-    IkProblem, Obstacle, Pick, Place, Pose, Robot, RobotOptions, SdfGrid, Surface, TaskFailure,
-    TaskOptions, TaskPlan, TaskStep, ToolPathStop, Touch, Trajectory, World, Worlds,
+    CandidateStop, Contact, Device, Error, GraspOptions, GripperCalibration, HandConstraint, Held,
+    IkOptions, IkProblem, Obstacle, Pick, Place, Pose, Robot, RobotOptions, SdfGrid, Surface,
+    TaskFailure, TaskOptions, TaskPlan, TaskStep, ToolPathStop, Touch, Trajectory, World, Worlds,
 };
 use glam::{Mat3, Quat, Vec3};
 
@@ -2373,10 +2373,12 @@ fn grasps_whose_fingers_come_in_narrower_are_picked_beside_a_wall() {
         narrow: true,
         ..open
     };
+    let calibration = GripperCalibration::new(0.08, 0.0, common::panda_closed());
+    let gripper = robot.gripper(0, &calibration).unwrap();
     for device in common::devices(&robot) {
         let name = device.name();
         let on = |o: &GraspOptions| {
-            let found = batchplan::grasps_on(&device, 0, std::slice::from_ref(&surface), o);
+            let found = batchplan::grasps_on(&device, &gripper, std::slice::from_ref(&surface), o);
             found.unwrap().remove(0)
         };
         assert!(
@@ -2995,7 +2997,10 @@ fn completed_picks_can_prefer_tightly_measured_contacts() {
         true,
         &mut surface,
     );
-    let mut found = batchplan::grasps_on(&device, 0, &[surface], &GraspOptions::default()).unwrap();
+    let calibration = GripperCalibration::new(0.08, 0.0, std::collections::HashMap::new());
+    let gripper = robot.gripper(0, &calibration).unwrap();
+    let mut found =
+        batchplan::grasps_on(&device, &gripper, &[surface], &GraspOptions::default()).unwrap();
     let observed = found[0].pop().expect("the box has opposed measured faces");
     assert!(!observed.one_sided);
 

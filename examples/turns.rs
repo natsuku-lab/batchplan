@@ -22,9 +22,9 @@ use std::time::Instant;
 use anyhow::Result;
 use batchplan::rng::Rng;
 use batchplan::{
-    DepthImage, Device, GraspOptions, Held, IkProblem, Intrinsics, Obstacle, Pose, Robot, Screw,
-    Surface, TaskFailure, TaskOptions, TaskPlan, TaskResult, TaskStep, ToolPath, ToolPathOptions,
-    Touch, Turn, World, Worlds,
+    DepthImage, Device, GraspOptions, GripperCalibration, Held, IkProblem, Intrinsics, Obstacle,
+    Pose, Robot, Screw, Surface, TaskFailure, TaskOptions, TaskPlan, TaskResult, TaskStep,
+    ToolPath, ToolPathOptions, Touch, Turn, World, Worlds,
 };
 use glam::{Mat3, Quat, Vec2, Vec3};
 use rayon::prelude::*;
@@ -151,7 +151,11 @@ fn knob(device: &Device, at: Vec2, yaw: f32) -> Result<Thing> {
         ..GraspOptions::default()
     };
     let screw = Screw::about(at.extend(0.11), Vec3::Z);
-    let mut found = batchplan::grasps_on(device, 0, std::slice::from_ref(&seen), &o)?.remove(0);
+    // The Panda's pads 8 cm apart as its fingers are held open, touching closed.
+    let calibration = GripperCalibration::new(0.08, 0.0, common::panda_closed());
+    let gripper = device.robot().gripper(0, &calibration)?;
+    let mut found =
+        batchplan::grasps_on(device, &gripper, std::slice::from_ref(&seen), &o)?.remove(0);
     o.order_for_turn(&mut found, Some(screw));
     let to_bar = bar.pose().inverse();
     let fingers = |opening: f32| {
@@ -473,7 +477,10 @@ fn fixtures(device: &Device) -> Result<()> {
         approach: 0.05,
         ..Default::default()
     };
-    let found = batchplan::grasps_on(device, 0, &[surface], &options)?.remove(0);
+    // The Panda's pads 8 cm apart as its fingers are held open, touching closed.
+    let calibration = GripperCalibration::new(0.08, 0.0, common::panda_closed());
+    let gripper = device.robot().gripper(0, &calibration)?;
+    let found = batchplan::grasps_on(device, &gripper, &[surface], &options)?.remove(0);
     let grasped: Vec<Pose> = found
         .iter()
         .map(|g| bar.pose().inverse().mul_pose(g.pose))

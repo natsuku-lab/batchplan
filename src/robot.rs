@@ -14,6 +14,7 @@ use crate::description::{
     self, Curve, Geometry, JointDesc, JointType, LinkDesc, RobotDescription, Shape, TriMesh,
 };
 use crate::error::{self, Error, ensure_input, input};
+use crate::gripper::{Gripper, GripperCalibration};
 use crate::spheres::{self, Qualification, SphereOptions};
 use crate::types::Pose;
 use crate::world::{self, Obstacle};
@@ -1418,27 +1419,33 @@ impl Robot {
         })
     }
 
-    /// The loaded gap for measured grasps when this hand models opposed sliding jaws. Use it for
-    /// grasp generation and [`Grasp::closes_on`](crate::Grasp::closes_on). Check once at the loaded
-    /// opening and the calibrated joint locks for the closed gap, in meters. Intermediate joint
-    /// commands must interpolate linearly between these locks. The gaps describe the pad
-    /// calibration supplied by the caller.
+    /// Hand `hand` as a parallel-jaw gripper ([`Gripper`]) with the widths, finger joints and
+    /// friction a caller measured of it, for every call that grasps with it. Build it once; joint
+    /// commands between closed and loaded interpolate linearly between the calibration's closed
+    /// joints and the robot's locked ones ([`Gripper::locked_at`]). Its grasps are checked with the
+    /// hand's spheres as they are now, so build it from the robot the device runs, after any
+    /// [`attach`](Robot::attach) or [`relock`](Robot::relock).
     ///
-    /// Checks the driving joints and their limits (including mimics), both jaws, and the hand
-    /// spheres. A positive result describes their modeled motion over this stroke. Physical contact
-    /// depends on the observed object and the gripper. Returns `None` for unsupported motion,
-    /// including a closed gap above the smallest contact width or preshape generated. If the
-    /// computed loaded gap and capacity differ by one floating-point step, returns the capacity
-    /// so generation, projection and commands share its exact representation.
-    /// Invalid calibration inputs or joint locks return an error.
-    pub fn parallel_jaw_opening(
-        &self,
-        hand: usize,
-        loaded_gap: f32,
-        capacity: f32,
-        closed_gap: f32,
-        closed: &HashMap<String, f32>,
-    ) -> error::Result<Option<f32>> {
+    /// Whether its jaws slide ([`Gripper::sliding`]), as fingers that come in narrower
+    /// ([`GraspOptions::narrow`](crate::GraspOptions::narrow)) need: the driving joints and their
+    /// limits (including mimics), both jaws, and the hand spheres move as opposed jaws, each half
+    /// the change in gap along the hand's y axis, over the stroke from the loaded joints to
+    /// `closed`, and the closed gap is no wider than the smallest contact or preshape generated.
+    /// That describes their modeled motion over this stroke; physical contact depends on the
+    /// observed object and the gripper. Where the loaded gap and capacity differ by one
+    /// floating-point step, the gripper's [`opening`](Gripper::opening) is the capacity, so
+    /// generation, projection and commands share its exact representation. A calibration that
+    /// contradicts itself or the model (a capacity past the loaded gap or not past the closed one,
+    /// a joint the robot was not loaded with locked) is an `Error::Input`.
+    pub fn gripper(&self, hand: usize, calibration: &GripperCalibration) -> error::Result<Gripper> {
+        let GripperCalibration {
+            loaded_gap,
+            closed_gap,
+            capacity,
+            ref closed,
+            friction,
+        } = *calibration;
+        let capacity = capacity.unwrap_or(loaded_gap);
         ensure_input!(hand < self.hands(), "hand {hand} of {}", self.hands());
         ensure_input!(
             loaded_gap.is_finite() && loaded_gap > closed_gap && closed_gap >= 0.0,
@@ -1457,9 +1464,47 @@ impl Robot {
             capacity <= gap,
             "grasp capacity {capacity} m exceeds the loaded gap {gap} m"
         );
+        ensure_input!(
+            capacity > closed_gap,
+            "grasp capacity {capacity} m must exceed the closed gap {closed_gap} m"
+        );
+        ensure_input!(
+            friction > 0.0 && friction.is_finite(),
+            "expected a finite positive pad friction, got {friction}"
+        );
         self.check_locks(closed)?;
+        let mut joints: Vec<(String, [f32; 2])> = closed
+            .iter()
+            .filter_map(|(name, &value)| {
+                let held = self.locked.iter().find(|l| l.joint == *name)?;
+                (value != held.value).then(|| (name.clone(), [value, held.value]))
+            })
+            .collect();
+        joints.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(Gripper {
+            hand,
+            opening: gap,
+            closed_gap,
+            capacity,
+            friction,
+            sliding: self.slides(hand, loaded_gap, capacity, closed_gap, closed),
+            spheres: self.hand_spheres(hand),
+            joints,
+        })
+    }
+
+    /// Whether hand `hand`'s jaws slide between `closed_gap` at the locks `closed` and
+    /// `loaded_gap` as loaded, as [`Robot::gripper`] says.
+    fn slides(
+        &self,
+        hand: usize,
+        loaded_gap: f32,
+        capacity: f32,
+        closed_gap: f32,
+        closed: &HashMap<String, f32>,
+    ) -> bool {
         if closed_gap > crate::surface::smallest_gap(capacity) {
-            return Ok(None);
+            return false;
         }
         let frame = &self.links[self.ee_links[hand]];
         let links = self.hand_links(hand);
@@ -1468,7 +1513,7 @@ impl Robot {
                 && links.contains(&link.name.as_str())
                 && link.chain != frame.chain
         }) {
-            return Ok(None);
+            return false;
         }
         // With only affine translations, agreement at both ends holds throughout the stroke.
         // A lock that carries the IK frame would also change the pose commanded to the arm.
@@ -1492,13 +1537,13 @@ impl Robot {
             let [lo, hi] = link.limits;
             let within = |q| (lo..=hi).contains(&link.curve.value(q));
             if !link.curve.is_linear() || !within(link.value) || !within(end) {
-                return Ok(None);
+                return false;
             }
             if !moving_hand.contains(&link.link) {
                 continue;
             }
             if !link.prismatic || ancestors(self.ee_links[hand]).any(|i| i == link.link) {
-                return Ok(None);
+                return false;
             }
             let stroke = (end - link.value) * link.curve.0[1];
             displacement[link.link] = into_hand * (fk.rot[link.link] * link.axis) * stroke;
@@ -1511,22 +1556,21 @@ impl Robot {
         }
         let open = self.hand_spheres_by_link(hand, &fk);
         if !open.iter().any(|(_, s)| s.side < 0.0) || !open.iter().any(|(_, s)| s.side > 0.0) {
-            return Ok(None);
+            return false;
         }
         // Compare displacement vectors directly. Subtracting world positions can lose a jaw's
         // entire transverse motion on a robot whose base is far from the origin.
         let travel = (loaded_gap - closed_gap) * 0.5;
-        let matches = open.iter().all(|(link, sphere)| {
+        open.iter().all(|(link, sphere)| {
             let expected = Vec3::NEG_Y * (sphere.side * travel);
             expected.distance(displacement[*link]) <= travel * 1e-4
-        });
-        Ok(matches.then_some(gap))
+        })
     }
 
     /// Hand `hand`'s collision spheres at the default configuration, in its IK frame: its palm's
     /// and its fingers', as the locked joints hold them, and those of any object it holds
     /// ([`Robot::hand_links`]). Placed by a pose of the frame, they are the hand there, whatever
-    /// the arm does: what [`grasps_on`](crate::grasps_on) holds a grasp's hand against.
+    /// the arm does: what a [`Gripper`]'s grasps hold the hand against ([`Gripper::spheres`]).
     #[must_use]
     pub fn hand_spheres(&self, hand: usize) -> Vec<HandSphere> {
         self.hand_spheres_by_link(hand, &self.fk(&self.default_q))

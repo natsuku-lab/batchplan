@@ -13,8 +13,8 @@ use std::f32::consts::TAU;
 use batchplan::glam::{Mat3, Quat, Vec2, Vec3};
 use batchplan::rng::Rng;
 use batchplan::{
-    DepthImage, Device, Error, Grasp, GraspOptions, HandSphere, Intrinsics, Obstacle, Pose, Screw,
-    Surface, grasps_on,
+    DepthImage, Device, Error, Grasp, GraspOptions, Gripper, GripperCalibration, HandSphere,
+    Intrinsics, Obstacle, Pose, Robot, Screw, Surface, grasps_on,
 };
 
 /// Points 2 mm apart: a fingertip's patch of 5 mm holds a few dozen.
@@ -92,10 +92,30 @@ fn tube_surface(outer: f32, inner: f32, half_height: f32) -> Surface {
     s
 }
 
+/// The Panda's hand with the widths and friction `o` names: its pads `o.opening` apart as loaded,
+/// closing to nothing, and pressing with `o.friction`.
+fn calibration(o: &GraspOptions) -> GripperCalibration {
+    GripperCalibration {
+        friction: o.friction,
+        ..GripperCalibration::new(o.opening, 0.0, common::panda_closed())
+    }
+}
+
+/// Hand 0 of `device`'s robot, a Panda, as [`calibration`] has it for `o`.
+fn gripper(device: &Device, o: &GraspOptions) -> Gripper {
+    device.robot().gripper(0, &calibration(o)).unwrap()
+}
+
 fn grasps(surface: &Surface, o: &GraspOptions) -> Vec<Grasp> {
-    grasps_on(&device(), 0, std::slice::from_ref(surface), o)
-        .unwrap()
-        .remove(0)
+    let device = device();
+    grasps_on(
+        &device,
+        &gripper(&device, o),
+        std::slice::from_ref(surface),
+        o,
+    )
+    .unwrap()
+    .remove(0)
 }
 
 /// The grasp's closing line and the two points it closes on.
@@ -117,22 +137,38 @@ fn closes_on(g: &Grasp) -> (Vec3, [Vec3; 2]) {
 #[test]
 fn the_closing_region_requires_two_pads_and_a_clear_gap_for_the_whole_ball() {
     let device = device();
-    let hand = device.robot().hand_spheres(0);
-    let g = grasps(&plates_of(0.04, 0.005), &GraspOptions::default())[0];
+    let o = GraspOptions::default();
+    let open = gripper(&device, &o);
+    let hand = open.spheres();
+    let g = grasps(&plates_of(0.04, 0.005), &o)[0];
     let to_world = |p| g.pose.position + g.pose.rotation * p;
     let radius = 0.001;
     let at = hand
         .iter()
         .filter(|s| s.side < 0.0)
         .map(|s| Vec3::new(s.center.x, 0.0, s.center.z))
-        .find(|p| g.closes_on(&hand, GraspOptions::default().opening, to_world(*p), radius))
+        .find(|p| g.closes_on(&open, to_world(*p), radius))
         .expect("both finger silhouettes contain a ball at least 2 mm wide");
     let p = to_world(at);
-    for side in [-1.0, 1.0] {
-        let one: Vec<_> = hand.iter().copied().filter(|s| s.side != side).collect();
+    // The Panda with spheres of its own: `change` given its collision model.
+    let panda_with = |change: &dyn Fn(&mut batchplan::CollisionModel)| {
+        let mut options = common::panda_options();
+        change(
+            options
+                .collision_model
+                .as_mut()
+                .expect("the Panda's spheres"),
+        );
+        let robot = Robot::load(common::asset("franka/franka_panda.urdf"), &options).unwrap();
+        robot.gripper(0, &calibration(&o)).unwrap()
+    };
+    for finger in ["panda_leftfinger", "panda_rightfinger"] {
+        let one = panda_with(&|model| {
+            model.spheres.remove(finger);
+        });
         assert!(
-            !g.closes_on(&one, GraspOptions::default().opening, p, radius),
-            "the pad on {side} is missing"
+            !g.closes_on(&one, p, radius),
+            "the pad of {finger} is missing"
         );
     }
     let largest = hand
@@ -142,17 +178,29 @@ fn the_closing_region_requires_two_pads_and_a_clear_gap_for_the_whole_ball() {
         .fold(0.0, f32::max);
     assert!(largest < g.opening * 0.5);
     assert!(
-        !g.closes_on(&hand, GraspOptions::default().opening, p, largest + radius),
+        !g.closes_on(&open, p, largest + radius),
         "the ball extends past the pads"
     );
-    let mut blocked = hand;
-    let palm = blocked
-        .iter_mut()
+    // A sphere of the palm's at `at`, placed in the palm link's frame.
+    let robot = device.robot();
+    let q = robot.default_q();
+    let palm = robot.link_pose(q, "panda_hand").expect("the Panda's palm");
+    let in_palm = palm.inverse().mul_pose(robot.ee_pose(q, 0));
+    let center = in_palm.position + in_palm.rotation * at;
+    let palm_radius = hand
+        .iter()
         .find(|s| s.side == 0.0)
-        .expect("the hand has a palm");
-    palm.center = at;
+        .expect("the hand has a palm")
+        .radius;
+    let blocked = panda_with(&|model| {
+        let spheres = model
+            .spheres
+            .get_mut("panda_hand")
+            .expect("the palm's spheres");
+        spheres.push([center.x, center.y, center.z, palm_radius]);
+    });
     assert!(
-        !g.closes_on(&blocked, GraspOptions::default().opening, p, radius),
+        !g.closes_on(&blocked, p, radius),
         "the palm occupies the closing gap"
     );
 }
@@ -294,7 +342,9 @@ fn a_cup_is_grasped_around_it_and_across_its_wall_by_a_hand_that_fits_inside() {
     let narrow = robot.relock(&HashMap::from(fingers)).unwrap();
     let device = Device::cpu(&narrow).unwrap();
     let o = GraspOptions { opening: 0.03, ..o };
-    let found = grasps_on(&device, 0, &[cup], &o).unwrap().remove(0);
+    let found = grasps_on(&device, &gripper(&device, &o), &[cup], &o)
+        .unwrap()
+        .remove(0);
     assert!(width(&found, outer - inner), "across its wall, open 3 cm");
     assert!(!width(&found, 2.0 * outer));
 }
@@ -456,6 +506,43 @@ fn faces_hold_where_the_line_between_them_is_inside_both_friction_cones() {
     }
     // Faces that lean past the cone hold at no friction a fingertip has here.
     assert!(grasps(&wedge(35f32.to_radians()), &GraspOptions::default()).is_empty());
+}
+
+/// Grasps of a surface take the hand's widths and its pads' friction from the gripper, not the
+/// options: options that name others change nothing, and a gripper that names others changes what
+/// holds. The wedge whose faces lean 20 degrees holds in a cone of atan(0.5) and not of atan(0.3),
+/// and plates 6.4 cm apart fit fingers 8 cm apart but neither 3 cm nor a capacity of 6 cm.
+#[test]
+fn grasps_of_a_surface_take_widths_and_friction_from_the_gripper() {
+    let device = device();
+    let o = GraspOptions::default();
+    let hand = gripper(&device, &o);
+    let (wedge, plates) = (wedge(20f32.to_radians()), plates_of(0.064, 0.005));
+    let on = |gripper: &Gripper, s: &Surface, o: &GraspOptions| {
+        let found = grasps_on(&device, gripper, std::slice::from_ref(s), o);
+        found.unwrap().remove(0)
+    };
+    let elsewhere = GraspOptions {
+        opening: 0.03,
+        friction: 0.3,
+        ..o
+    };
+    for s in [&wedge, &plates] {
+        let found = on(&hand, s, &o);
+        assert!(!found.is_empty());
+        assert_eq!(on(&hand, s, &elsewhere), found);
+    }
+    let rough = GripperCalibration {
+        friction: 0.3,
+        ..calibration(&o)
+    };
+    let small = GripperCalibration {
+        capacity: Some(0.06),
+        ..calibration(&o)
+    };
+    let build = |c: GripperCalibration| device.robot().gripper(0, &c).unwrap();
+    assert!(on(&build(rough), &wedge, &o).is_empty());
+    assert!(on(&build(small), &plates, &o).is_empty());
 }
 
 #[test]
@@ -621,8 +708,16 @@ fn measured_grasps_use_the_loaded_gap_and_only_commandable_openings() {
         narrow: true,
         ..GraspOptions::default()
     };
+    let at_capacity = |capacity| {
+        let calibration = GripperCalibration {
+            capacity: Some(capacity),
+            ..calibration(&options)
+        };
+        device.robot().gripper(0, &calibration)
+    };
     let search = |s: &Surface, capacity| {
-        batchplan::grasps_on_with_capacity(&device, 0, std::slice::from_ref(s), &options, capacity)
+        let gripper = at_capacity(capacity)?;
+        grasps_on(&device, &gripper, std::slice::from_ref(s), &options)
             .map(|mut sets| sets.remove(0))
     };
     let wide = plates_of(0.064, 0.005);
@@ -647,14 +742,15 @@ fn measured_grasps_use_the_loaded_gap_and_only_commandable_openings() {
             close_on,
             ..options
         };
-        batchplan::grasps_on_with_capacity(&device, 0, std::slice::from_ref(&s), &options, capacity)
+        let gripper = at_capacity(capacity).unwrap();
+        grasps_on(&device, &gripper, std::slice::from_ref(&s), &options)
             .unwrap()
             .remove(0)
     };
     let coarse = angles(None);
     let refined = angles(Some(point));
     assert!(refined.starts_with(&coarse));
-    let hand = device.robot().hand_spheres(0);
+    let hand = at_capacity(capacity).unwrap();
     let added = &refined[coarse.len()..];
     assert!(
         added.iter().any(|g| {
@@ -663,7 +759,7 @@ fn measured_grasps_use_the_loaded_gap_and_only_commandable_openings() {
         }),
         "the loaded jaws admit a reading beyond half the graspable width"
     );
-    assert!(added.iter().all(|g| g.closes_on(&hand, loaded, point, 0.0)));
+    assert!(added.iter().all(|g| g.closes_on(&hand, point, 0.0)));
     the_object(&mut s);
     for sign in [-1.0, 1.0] {
         face(
@@ -696,9 +792,10 @@ fn measured_grasps_use_the_loaded_gap_and_only_commandable_openings() {
             false
         ));
     }
+    // A capacity left out is the loaded gap.
     assert_eq!(
         search(&s, loaded).unwrap(),
-        grasps_on(&device, 0, &[s], &options).unwrap()[0]
+        grasps_on(&device, &gripper(&device, &options), &[s], &options).unwrap()[0]
     );
 }
 
@@ -723,7 +820,7 @@ fn fingers_that_may_come_in_narrower_keep_farthest_from_what_stands_around() {
     assert!(!open.is_empty() && open.iter().all(|g| g.opening == o.opening));
     assert_eq!(grasps(&alone, &narrow), open);
     // The openings they may come in at, widest first: the whole one and each sixteenth less.
-    let openings = narrow.openings();
+    let openings = gripper(&device(), &o).openings();
     assert_eq!((openings.len(), openings[0]), (16, o.opening));
     let sixteenth = |pair: &[f32]| (pair[0] - pair[1] - o.opening / 16.0).abs() < 1e-6;
     assert!(openings.windows(2).all(sixteenth), "{openings:?}");
@@ -935,7 +1032,8 @@ fn a_hand_keeps_its_clearance_from_what_it_does_not_close_on() {
         clearance: -0.001,
         ..Default::default()
     };
-    let refused = grasps_on(&device(), 0, std::slice::from_ref(&s), &o);
+    let device = device();
+    let refused = grasps_on(&device, &gripper(&device, &o), std::slice::from_ref(&s), &o);
     assert!(matches!(refused, Err(Error::Input(_))));
 }
 
@@ -2203,8 +2301,9 @@ fn joined_surfaces_keep_which_points_are_the_objects() {
     let mut joined = Surface::default();
     joined.join(partly);
     assert_eq!(joined.object.len(), 1);
+    let (device, o) = (device(), GraspOptions::default());
     assert!(matches!(
-        grasps_on(&device(), 0, &[joined], &GraspOptions::default()),
+        grasps_on(&device, &gripper(&device, &o), &[joined], &o),
         Err(Error::Input(_))
     ));
     marked.join(plates(0.03));
@@ -2243,10 +2342,11 @@ fn grasps_do_not_depend_on_the_threads_the_batch_or_the_device() {
         plates(0.04),
     ];
     let one = Device::cpu_threads(&robot, 1).unwrap();
+    let hand = gripper(&one, &o);
     let alone: Vec<Vec<Grasp>> = surfaces
         .iter()
         .map(|s| {
-            grasps_on(&one, 0, std::slice::from_ref(s), &o)
+            grasps_on(&one, &hand, std::slice::from_ref(s), &o)
                 .unwrap()
                 .remove(0)
         })
@@ -2259,7 +2359,7 @@ fn grasps_do_not_depend_on_the_threads_the_batch_or_the_device() {
         Err(e) => panic!("no GPU: {e}"),
     }
     for device in &devices {
-        let together = grasps_on(device, 0, &surfaces, &o).unwrap();
+        let together = grasps_on(device, &hand, &surfaces, &o).unwrap();
         assert_eq!(together, alone, "{}", device.name());
     }
     // Walls seen from one side too.
@@ -2273,14 +2373,14 @@ fn grasps_do_not_depend_on_the_threads_the_batch_or_the_device() {
     let alone: Vec<Vec<Grasp>> = surfaces
         .iter()
         .map(|s| {
-            grasps_on(&devices[0], 0, std::slice::from_ref(s), &o)
+            grasps_on(&devices[0], &hand, std::slice::from_ref(s), &o)
                 .unwrap()
                 .remove(0)
         })
         .collect();
     assert!(alone[0].len() > 100 && alone[2].len() > 100);
     for device in &devices {
-        let together = grasps_on(device, 0, &surfaces, &o).unwrap();
+        let together = grasps_on(device, &hand, &surfaces, &o).unwrap();
         assert_eq!(together, alone, "{}", device.name());
     }
     // And fingers that come in narrower, as some of these do.
@@ -2288,14 +2388,14 @@ fn grasps_do_not_depend_on_the_threads_the_batch_or_the_device() {
     let alone: Vec<Vec<Grasp>> = surfaces
         .iter()
         .map(|s| {
-            grasps_on(&devices[0], 0, std::slice::from_ref(s), &o)
+            grasps_on(&devices[0], &hand, std::slice::from_ref(s), &o)
                 .unwrap()
                 .remove(0)
         })
         .collect();
     assert!(alone.iter().flatten().any(|g| g.opening < o.opening));
     for device in &devices {
-        let together = grasps_on(device, 0, &surfaces, &o).unwrap();
+        let together = grasps_on(device, &hand, &surfaces, &o).unwrap();
         assert_eq!(together, alone, "{}", device.name());
     }
 }
@@ -2342,8 +2442,9 @@ fn malformed_surfaces_and_options_are_input_errors() {
     let good = box_surface(Vec3::splat(0.02), &[]);
     let o = GraspOptions::default();
     let refused = |s: &Surface, hand: usize, o: &GraspOptions| {
+        let gripper = device.robot().gripper(hand, &calibration(o));
         matches!(
-            grasps_on(&device, hand, std::slice::from_ref(s), o),
+            gripper.and_then(|g| grasps_on(&device, &g, std::slice::from_ref(s), o)),
             Err(Error::Input(_))
         )
     };
@@ -2404,7 +2505,11 @@ fn malformed_surfaces_and_options_are_input_errors() {
         assert!(refused(&good, 0, &bad), "{bad:?}");
     }
     // No surfaces, and a surface without points, give no grasps.
-    assert!(grasps_on(&device, 0, &[], &o).unwrap().is_empty());
+    assert!(
+        grasps_on(&device, &gripper(&device, &o), &[], &o)
+            .unwrap()
+            .is_empty()
+    );
     assert!(grasps(&Surface::default(), &o).is_empty());
 }
 
@@ -2591,7 +2696,9 @@ fn a_grasps_moment_about_a_line_is_what_friction_its_patches_and_a_push_give() {
 #[test]
 fn the_grasp_closing_region_uses_a_rigid_frame() {
     let robot = common::panda().unwrap();
-    let hand = robot.hand_spheres(0);
+    let hand = robot
+        .gripper(0, &calibration(&GraspOptions::default()))
+        .unwrap();
     let mut surface = Surface::default();
     for side in [-1.0, 1.0] {
         face(
@@ -2609,15 +2716,15 @@ fn the_grasp_closing_region_uses_a_rigid_frame() {
     // A ball grazing the side of a Panda pad at the open grasp.
     let local = Vec3::new(-0.00909, -0.03838, 0.00606);
     let point = grasp.pose.position + grasp.pose.rotation * local;
-    assert!(!grasp.closes_on(&hand, GraspOptions::default().opening, point, 0.0008));
-    assert!(!rounded.closes_on(&hand, GraspOptions::default().opening, point, 0.0008));
+    assert!(!grasp.closes_on(&hand, point, 0.0008));
+    assert!(!rounded.closes_on(&hand, point, 0.0008));
 
     let mut wider = grasp;
     wider.opening += 0.01;
     let between = (grasp.contacts[0] + grasp.contacts[1]) * 0.5;
-    assert!(grasp.closes_on(&hand, GraspOptions::default().opening, between, 0.0));
+    assert!(grasp.closes_on(&hand, between, 0.0));
     assert!(
-        !wider.closes_on(&hand, GraspOptions::default().opening, between, 0.0),
+        !wider.closes_on(&hand, between, 0.0),
         "the loaded hand cannot open to this width"
     );
 }
@@ -2626,10 +2733,10 @@ fn the_grasp_closing_region_uses_a_rigid_frame() {
 fn refining_approaches_for_a_point_keeps_the_original_grasps_and_closes_on_the_point() {
     let device = device();
     let surface = box_surface(Vec3::new(0.08, 0.01, 0.05), &[]);
-    let hand = device.robot().hand_spheres(0);
+    let hand = gripper(&device, &GraspOptions::default());
     let at = Vec3::new(0.051, 0.01, 0.049);
     let get = |o: &GraspOptions| {
-        grasps_on(&device, 0, std::slice::from_ref(&surface), o)
+        grasps_on(&device, &hand, std::slice::from_ref(&surface), o)
             .unwrap()
             .remove(0)
     };
@@ -2657,11 +2764,7 @@ fn refining_approaches_for_a_point_keeps_the_original_grasps_and_closes_on_the_p
             !added.is_empty(),
             "intermediate rolls cover the named point"
         );
-        assert!(
-            added
-                .iter()
-                .all(|g| g.closes_on(&hand, options.opening, at, 0.0))
-        );
+        assert!(added.iter().all(|g| g.closes_on(&hand, at, 0.0)));
         assert!(
             added.iter().all(|g| !original.contains(g)),
             "coarse rolls are not tried twice"
@@ -2687,7 +2790,7 @@ fn refining_approaches_for_a_point_keeps_the_original_grasps_and_closes_on_the_p
         ..Default::default()
     };
     assert!(matches!(
-        grasps_on(&device, 0, &[surface], &invalid),
+        grasps_on(&device, &hand, &[surface], &invalid),
         Err(Error::Input(_))
     ));
 }
@@ -2715,9 +2818,14 @@ fn insertion_overlap_comes_from_both_fingers() {
             robot.tip(0) > short + 0.04,
             "the extension reaches past the ordinary fingertips"
         );
-        let grasps = grasps_on(&device, 0, std::slice::from_ref(&surface), &options)
-            .unwrap()
-            .remove(0);
+        let grasps = grasps_on(
+            &device,
+            &gripper(&device, &options),
+            std::slice::from_ref(&surface),
+            &options,
+        )
+        .unwrap()
+        .remove(0);
         let mut alternatives = 0;
         for (i, g) in grasps.iter().enumerate() {
             if grasps[..i].iter().any(|before| {
