@@ -415,21 +415,21 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 - **Breaking:** grasps of a wall seen from one side only, as a bowl's rim seen from above, its outer
   wall hidden under the rim: `GraspOptions::shell`, the thickest such wall a grasp may close across
-  (`None` by default, which changes nothing). From a patch whose other side no camera saw, the line
-  in along its normal meets, within that thickness, space every ray around it went past on its way
-  to something farther: the second contact goes there, so `width()` is the most the wall can be,
-  never past the `opening`, and the `Grasp` says so (`one_sided`). Inside a solid no ray goes, so a
-  box seen from one side is closed on only across all of it, and a patch whose other side was seen
-  keeps to the seen pair. A wall that leans is closed on level too, where the level line through the
-  patch is inside its friction cone, so a hand comes straight down across a flared rim where one
-  closing along the wall's normal leans with it. These grasps follow every grasp of two patches
-  seen (1.5 cm suits a bowl's
-  rim: LIBERO's, its wall 3 mm thick, seen from 40 cm above, is grasped 5.5 to 11.5 mm wide at its
-  rim). The evidence is where each point was seen from, `Surface::seen_from`, which `from_depth` and
-  `from_points` record and `join` carries (infinite where a joined surface did not say). The points
-  seen from exactly one place make one view, so looks joined from one place are one view, and a
-  cloud fused from several views must not be given one place. A `GraspOptions` literal needs
-  `shell: None`, and a `Surface` literal `seen_from: vec![]` (or `..Default::default()`); in Python,
+  (by default `Some(f32::INFINITY)`, a wall as thick as the fingers open; `None` turns it off). From
+  a patch whose other side no camera saw, the line in along its normal meets, within that thickness,
+  space every ray around it went past on its way to something farther: the second contact goes
+  there, so `width()` is the most the wall can be, never past the `opening`, and the `Grasp` says so
+  (`one_sided`). Inside a solid no ray goes, so a box seen from one side is closed on only across
+  all of it, and a patch whose other side was seen keeps to the seen pair. A wall that leans is
+  closed on level too, where the level line through the patch is inside its friction cone, so a hand
+  comes straight down across a flared rim where one closing along the wall's normal leans with it.
+  These grasps follow every grasp of two patches seen (1.5 cm suits a bowl's rim: LIBERO's, its wall
+  3 mm thick, seen from 40 cm above, is grasped 5.5 to 11.5 mm wide at its rim). The evidence is
+  where each point was seen from, `Surface::seen_from`, which `from_depth` and `from_points` record
+  and `join` carries (infinite where a joined surface did not say). The points seen from exactly one
+  place make one view, so looks joined from one place are one view, and a cloud fused from several
+  views must not be given one place, or must be grasped with `shell: None`. A `GraspOptions` literal
+  needs `shell`, and a `Surface` literal `seen_from: vec![]` (or `..Default::default()`); in Python,
   `GraspOptions(shell=0.015)`.
 
 - **Breaking:** a place says how far its hand may open where it lets go: `Place::open`, finger

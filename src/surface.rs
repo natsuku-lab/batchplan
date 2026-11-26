@@ -153,7 +153,7 @@ impl Surface {
     /// `seen_from`, or none where they are too few or lie on one line. `seen_from` is taken as
     /// where one camera saw every point from, the space between it and each point empty, which
     /// [`GraspOptions::shell`] closes on: a cloud fused from several views and given one place
-    /// would read as one camera's view, and must not be grasped with a shell.
+    /// would read as one camera's view, and must be grasped with `shell: None`.
     pub fn from_points(points: &[Vec3], seen_from: Vec3, radius: f32) -> Result<Self> {
         if let Some(k) = points.iter().position(|p| !p.is_finite()) {
             return Err(input!("point {k} is not finite, got {}", points[k]));

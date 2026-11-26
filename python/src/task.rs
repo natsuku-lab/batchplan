@@ -53,8 +53,9 @@ value_class! {
         /// that must be clear of what was seen (meters): 10 cm.
         approach: f32,
         /// The thickest wall seen from one side only that a grasp of a surface may close across,
-        /// where the cameras saw past it (meters), and never more than `opening`: `None`, every
-        /// grasp closes on two patches seen.
+        /// where the cameras saw past it (meters), and never more than `opening`: `math.inf`, a
+        /// wall as thick as the fingers open. `None` turns it off, every grasp closing on two
+        /// patches seen.
         shell: Option<f32>,
         /// Whether the fingers may come in to a grasp of a surface less open than `opening`,
         /// each grasp at the opening that keeps them farthest from what is not the object's:
