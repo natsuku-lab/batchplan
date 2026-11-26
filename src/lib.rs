@@ -130,6 +130,8 @@ mod guides {
     pub struct Devices;
     #[doc = include_str!("../docs/perception.md")]
     pub struct Perception;
+    #[doc = include_str!("../docs/placing.md")]
+    pub struct Placing;
     #[doc = include_str!("../docs/planning.md")]
     pub struct Planning;
     #[doc = include_str!("../docs/robots.md")]
@@ -137,4 +139,6 @@ mod guides {
     #[cfg(feature = "lerobot")]
     #[doc = include_str!("../docs/training-data.md")]
     pub struct TrainingData;
+    #[doc = include_str!("../docs/turning.md")]
+    pub struct Turning;
 }

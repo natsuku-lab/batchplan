@@ -9,6 +9,9 @@ The [README](../README.md) is the front door: what batchplan is, how to install 
 | [`../AGENTS.md`](../AGENTS.md) | For coding agents using batchplan: conventions, the lifecycle, which call fits a task, qualifying a robot, reading results, diagnosing a failed request in order, and footguns. |
 | [`api.md`](api.md) | Every type and function a program uses, by task, with the guide for each. |
 | [`planning.md`](planning.md) | IK, searching and smoothing paths with SIMD collision checks, keeping clear of obstacles, optional trajectory optimization, goals a turn away, constraints on the hand along the path, moving the hand along a path, picking up and setting down, turning a thing about an axis, time-optimal timing, replanning from a moving state, live motion and servoing, and the options worth knowing. |
+| [`grasps.md`](grasps.md) | The gripper and its finger openings; grasps of any shape from what cameras see: walls seen from one side, fingers that come in narrower, room for a planner, closing on a point, and the order grasps come in. |
+| [`placing.md`](placing.md) | Releases; where a held object rests on what cameras see, and why it has no rest; where to let it go to fall into a container; the place nearest a spot. |
+| [`turning.md`](turning.md) | Turning a knob, a cap, a lever or a door about an axis, and drawing a drawer by its handle along a line. |
 | [`robots.md`](robots.md) | Loading URDF, MJCF and OpenUSD; joint types, mimic joints and closed loops; fitted collision spheres and collision-model files; holding objects; checking plans against meshes. |
 | [`perception.md`](perception.md) | Obstacles and scenes; distance grids from meshes, point clouds and depth images; masking the robot out of a camera's view; fusing frames into an occupancy map; building grids on the GPU. |
 | [`../miru/README.md`](../miru/README.md) | `batchplan-miru`, an optional crate built on the library: what depth cameras show, as objects. |
