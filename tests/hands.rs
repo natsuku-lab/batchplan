@@ -14,16 +14,6 @@ use glam::{Quat, Vec3};
 
 const UR5E: &str = "ur5e/ur_description/urdf/ur5e.urdf";
 
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 /// Two UR5e arms a metre apart, facing the same way.
 fn two_arms() -> Robot {
     let part = |prefix: &str, y: f32| Part {
@@ -111,7 +101,7 @@ fn ik_reaches_both_hands_targets_at_once() {
         })
         .collect();
     let o = IkOptions::default();
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let ik = batchplan::solve_ik(&d, &worlds, &problems, &o).unwrap();
         let solved: Vec<_> = ik.solved().collect();
@@ -173,7 +163,7 @@ fn the_collision_push_keeps_both_hands_at_their_targets() {
         iterations: 1,
         ..Default::default()
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let ik = batchplan::solve_ik(&d, &worlds, std::slice::from_ref(&problem), &o).unwrap();
         let stepped = &ik.q;
@@ -225,7 +215,7 @@ fn the_collision_push_keeps_both_hands_at_their_targets() {
         hold: vec![],
         holding: None,
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let ik = batchplan::solve_ik(&d, &worlds, std::slice::from_ref(&problem), &o).unwrap();
         for h in 0..2 {
@@ -272,7 +262,7 @@ fn ik_holds_the_joints_a_problem_names() {
             .collect();
         let o = IkOptions::default();
         let n = robot.dof();
-        for d in devices(&robot) {
+        for d in common::devices(&robot) {
             let worlds = d.upload(&scene).unwrap();
             let ik = batchplan::solve_ik(&d, &worlds, &problems, &o).unwrap();
             let solved = ik.solved().count();
@@ -343,7 +333,7 @@ fn ik_solves_hands_that_share_joints_together() {
         })
         .collect();
     let o = IkOptions::default();
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let ik = batchplan::solve_ik(&d, &worlds, &problems, &o).unwrap();
         let solved: Vec<_> = ik.solved().collect();
@@ -392,7 +382,7 @@ fn a_hand_without_a_target_holds_its_arm() {
             holding: None,
         })
         .collect();
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let ik = batchplan::solve_ik(&d, &worlds, &problems, &IkOptions::default()).unwrap();
         assert!(
@@ -548,7 +538,7 @@ fn plans_hold_an_arm_still() {
     let n = robot.dof();
     let (wall, problems) = over_the_wall(&robot, &cpu);
     let scene = [wall];
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let o = PlanOptions {
             seeds: 2,

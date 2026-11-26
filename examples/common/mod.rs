@@ -38,6 +38,18 @@ pub fn panda() -> Result<Robot, batchplan::Error> {
     Robot::load(asset("franka/franka_panda.urdf"), &panda_options())
 }
 
+/// A CPU device for `robot`, and a GPU device when there is an adapter. Without one, tests skip
+/// the GPU unless `BATCHPLAN_REQUIRE_GPU` is set.
+pub fn devices(robot: &Robot) -> Vec<Device> {
+    let mut devices = vec![Device::cpu(robot).unwrap()];
+    match Device::gpu(robot) {
+        Ok(gpu) => devices.push(gpu),
+        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
+        Err(e) => panic!("no GPU: {e}"),
+    }
+    devices
+}
+
 /// Two Pandas 70 cm apart along y, facing +x, as `left_` and `right_` parts: hands 0 and 1, each
 /// at its ready pose with its fingers held open.
 pub fn two_pandas() -> Result<Robot, batchplan::Error> {

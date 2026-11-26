@@ -10,20 +10,6 @@ use batchplan::{
 };
 use glam::Vec3;
 
-fn panda() -> Robot {
-    common::panda().unwrap()
-}
-
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 /// A bar between the open fingers at `q`, as a grasp holds it: through both finger pads.
 fn grasped(robot: &Robot, q: &[f32]) -> Obstacle {
     let tool = robot.ee_pose(q, 0);
@@ -47,7 +33,7 @@ fn world_clearance(device: &Device, world: &World, q: &[f32]) -> f32 {
 
 #[test]
 fn hand_links_are_the_hand_and_its_fingers() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let mut links = robot.hand_links(0);
     links.sort_unstable();
     assert_eq!(
@@ -63,14 +49,14 @@ fn hand_links_are_the_hand_and_its_fingers() {
 
 #[test]
 fn links_touch_only_the_obstacles_the_world_lets_them() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let q = robot.default_q().to_vec();
     let bar = grasped(&robot, &q);
     let hand = robot.hand_links(0);
     // An obstacle around the forearm, which no hand link reaches.
     let forearm = robot.link_pose(&q, "panda_link5").unwrap().position;
     let around_forearm = Obstacle::sphere(forearm, 0.08);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let clearance = |world: &World| world_clearance(&device, world, &q);
         assert!(
@@ -99,7 +85,7 @@ fn links_touch_only_the_obstacles_the_world_lets_them() {
 
 #[test]
 fn ik_grasps_inside_an_object_only_where_the_hand_may_touch_it() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let q = robot.default_q().to_vec();
     let bar = grasped(&robot, &q);
     let o = IkOptions {
@@ -107,7 +93,7 @@ fn ik_grasps_inside_an_object_only_where_the_hand_may_touch_it() {
         ..Default::default()
     };
     let target = robot.ee_pose(&q, 0);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let solved = |world: World| {
             let worlds = device.upload(&[world]).unwrap();
@@ -131,13 +117,13 @@ fn ik_grasps_inside_an_object_only_where_the_hand_may_touch_it() {
 
 #[test]
 fn plans_reach_into_an_object_only_where_the_hand_may_touch_it() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let goal = robot.default_q().to_vec();
     let mut start = goal.clone();
     start[0] += 0.8;
     let bar = grasped(&robot, &goal);
     let o = PlanOptions::default();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let planned = |world: &World| {
             let worlds = device.upload(std::slice::from_ref(world)).unwrap();
@@ -162,7 +148,7 @@ fn plans_reach_into_an_object_only_where_the_hand_may_touch_it() {
 
 #[test]
 fn mesh_checks_skip_what_the_world_lets_touch() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let q = robot.default_q().to_vec();
     let model = MeshModel::try_new(&robot).unwrap();
     let bar = grasped(&robot, &q);
@@ -177,13 +163,13 @@ fn mesh_checks_skip_what_the_world_lets_touch() {
 
 #[test]
 fn touches_name_links_and_obstacles_that_exist() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let q = robot.default_q().to_vec();
     let bar = grasped(&robot, &q);
     let model = MeshModel::try_new(&robot).unwrap();
     let unknown = touching(vec![bar.clone()], 0, &["no_such_link"]);
     let past_the_end = touching(vec![bar], 1, &["panda_hand"]);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         for (world, says) in [
             (&unknown, "no_such_link"),
@@ -205,7 +191,7 @@ fn touches_name_links_and_obstacles_that_exist() {
 
 #[test]
 fn a_held_object_may_touch_what_the_world_lets_it() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let q = robot.default_q().to_vec();
     // A box hanging below the fingertips, and a small table its bottom sinks into, out of the
     // arm's reach.
@@ -227,7 +213,7 @@ fn a_held_object_may_touch_what_the_world_lets_it() {
         bottom - Vec3::new(0.0, 0.0, 0.05 - 0.01),
         Vec3::new(0.06, 0.06, 0.05),
     );
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let holder = device.with_robot(&held).unwrap();
         let clearance = |world: &World| world_clearance(&holder, world, &q);
@@ -313,7 +299,7 @@ fn links_that_touch_their_table_in_every_configuration_are_found() {
         touch: touches,
         ..world.clone()
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&[world.clone(), mounted.clone()]).unwrap();
         let o = PlanOptions::default();
         let bare = batchplan::plan(&d, &worlds, std::slice::from_ref(&problem), &o).unwrap();

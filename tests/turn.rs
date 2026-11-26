@@ -17,20 +17,6 @@ use batchplan::{
 };
 use glam::{Mat3, Quat, Vec2, Vec3};
 
-fn panda() -> Robot {
-    common::panda().unwrap()
-}
-
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 const TABLE: usize = 0;
 const KNOB: usize = 1;
 /// A knob's bar: 9 cm long, 2.5 cm wide, 3 cm tall.
@@ -113,12 +99,12 @@ fn check_joined(robot: &Robot, plan: &TaskPlan, at: Pose, name: &str) -> Traject
 
 #[test]
 fn a_knob_turned_in_place_ends_with_the_hand_and_the_knob_turned_about_the_hands_axis() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let precision = o.tool_path.precision;
     let bar = knob(Vec2::new(0.5, 0.05), 0.3);
     let world = World::new(vec![table(), bar.clone()]);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let grasps = vec![from_above(1.0), from_above(-1.0)];
         let task = on_table(&robot, grasps.clone(), FRAC_PI_2);
@@ -193,7 +179,7 @@ fn lever_grasp() -> Pose {
 fn a_lever_turned_about_its_hinge_follows_the_arc() {
     // A lever on a post, its hinge upright through the post: an arm 15 cm long and 2 cm wide,
     // gripped from above 10 cm from the hinge and swung 60 degrees.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions {
         tool_speed: 0.03,
         ..TaskOptions::default()
@@ -202,7 +188,7 @@ fn a_lever_turned_about_its_hinge_follows_the_arc() {
     let (post, arm, screw) = lever();
     let hinge = screw.point;
     let world = World::new(vec![table(), post, arm.clone()]);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let grasps = vec![lever_grasp()];
         let at = arm.pose().mul_pose(grasps[0]);
@@ -254,7 +240,7 @@ fn a_lever_turned_about_its_hinge_follows_the_arc() {
 fn a_cap_with_a_pitch_rises_as_it_turns() {
     // A cap 4 cm across on a bottle, its thread 5 mm a turn: unscrewed half a turn, anticlockwise
     // from above, it rises 2.5 mm.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let bottle = Obstacle::cylinder(Vec3::new(0.45, 0.2, 0.075), 0.035, 0.075);
     let cap = Obstacle::cylinder(Vec3::new(0.45, 0.2, 0.1625), 0.02, 0.0125);
@@ -274,7 +260,7 @@ fn a_cap_with_a_pitch_rises_as_it_turns() {
         )
     });
     let grasps: Vec<Pose> = turns.collect();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let task = Turn {
             screw: Some(screw),
@@ -346,7 +332,7 @@ fn a_long_turn_the_nearest_configuration_cannot_make_is_made_by_another() {
     // 170 degrees about the hand's axis: from the configuration nearest the start, the last joint
     // runs into its limit a quarter of the way round; another configuration at the same grasp,
     // its wrist the other way over, has the room.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let angle = 170f32.to_radians();
     let bar = knob(Vec2::new(0.5, 0.05), 1.3);
@@ -371,7 +357,7 @@ fn a_long_turn_the_nearest_configuration_cannot_make_is_made_by_another() {
         touch: vec![Touch::held(TABLE, 0)],
         ..World::new(vec![table()])
     };
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let mut touching = world.clone();
         touching
@@ -432,7 +418,7 @@ fn a_long_turn_the_nearest_configuration_cannot_make_is_made_by_another() {
     // A post beside the knob, where the fingers come to two thirds of the way round: no
     // configuration gets past it.
     world.obstacles.push(post_at(&bar, 2.0 / 3.0 * angle));
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let failure = turn_in(&device, world.clone(), task.clone(), &o).unwrap_err();
         assert_eq!(failure.step(), TaskStep::Turn, "{}", device.name());
     }
@@ -454,13 +440,13 @@ fn post_at(bar: &Obstacle, angle: f32) -> Obstacle {
 #[test]
 fn a_turn_into_an_obstacle_stops_at_the_turn_and_says_how_far_it_got() {
     // A post where the fingers come to halfway round a quarter turn.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let bar = knob(Vec2::new(0.5, 0.05), 0.3);
     let post = post_at(&bar, FRAC_PI_2 / 2.0);
     let world = World::new(vec![table(), bar, post]);
     let grasps = vec![from_above(1.0), from_above(-1.0)];
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let task = on_table(&robot, grasps.clone(), FRAC_PI_2);
         let failure = turn_in(&device, world.clone(), task, &o).unwrap_err();
@@ -495,7 +481,7 @@ fn a_turn_into_an_obstacle_stops_at_the_turn_and_says_how_far_it_got() {
 fn a_batch_of_worlds_gives_each_the_result_it_gives_alone() {
     // 64 knobs at random places and turns, a quarter turn each, by either grasp from above, and
     // beside each a post where a finger comes to some way round, which stops the turns one way.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let o = TaskOptions::default();
     let mut rng = Rng::new(3);
@@ -556,7 +542,7 @@ fn a_batch_of_worlds_gives_each_the_result_it_gives_alone() {
 
 #[test]
 fn malformed_turns_are_input_errors() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let grid = SdfGrid::try_new([4, 4, 4], 0.01, Vec3::new(0.3, 0.3, 0.0), &[0.01; 64]).unwrap();
     let world = World::new(vec![table(), knob(Vec2::new(0.5, 0.0), 0.0), grid.into()]);
@@ -678,7 +664,7 @@ fn what_a_turned_lever_sweeps_is_checked_against_all_but_its_support() {
     // The lever swung 60 degrees past a post 8 mm square reaching 1 cm over the arm's underside,
     // 12.8 cm out from the hinge at 30 degrees: halfway round, the arm is in the post, where the
     // hand and the arm of the robot are not.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let (mount, arm, screw) = lever();
     let hinge = screw.point;
@@ -691,7 +677,7 @@ fn what_a_turned_lever_sweeps_is_checked_against_all_but_its_support() {
         support: vec![1],
         ..Turn::new(0, robot.default_q(), 2, vec![lever_grasp()], FRAC_PI_3)
     };
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let failure = turn_in(&device, world.clone(), task.clone(), &o).unwrap_err();
         assert_eq!(failure.step(), TaskStep::Turn, "{name}: {failure}");
@@ -717,7 +703,7 @@ fn what_a_turned_lever_sweeps_is_checked_against_all_but_its_support() {
 #[test]
 fn a_cap_turns_on_its_bottle_only_where_the_bottle_is_its_support() {
     // The cap sits on the bottle all the way round as it turns: what it turns on must be named.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let bottle = Obstacle::cylinder(Vec3::new(0.45, 0.2, 0.075), 0.035, 0.075);
     let cap = Obstacle::cylinder(Vec3::new(0.45, 0.2, 0.1625), 0.02, 0.0125);
@@ -731,7 +717,7 @@ fn a_cap_turns_on_its_bottle_only_where_the_bottle_is_its_support() {
         screw: Some(Screw::about(Vec3::new(0.45, 0.2, 0.15), Vec3::Z)),
         ..Turn::new(0, robot.default_q(), 2, turns.collect(), FRAC_PI_2)
     };
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let failure = turn_in(&device, world.clone(), task.clone(), &o).unwrap_err();
         assert_eq!(failure.step(), TaskStep::Turn, "{name}: {failure}");
@@ -759,7 +745,7 @@ fn an_obstacle_that_stays_is_turned_in_by_the_fingers_and_its_sweep_is_not_check
     // turn in place, and a post beside its foot where its end comes halfway round. Turned whole,
     // the bar meets the post; staying, as a knob a camera could not tell from its panel, the
     // fingers turn at its top and nothing checks the bar's sweep.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let half = Vec3::new(0.045, 0.0125, 0.15);
     let yaw = 0.3;
@@ -783,7 +769,7 @@ fn an_obstacle_that_stays_is_turned_in_by_the_fingers_and_its_sweep_is_not_check
             FRAC_PI_2,
         )
     };
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let failure = turn_in(&device, world.clone(), task.clone(), &o).unwrap_err();
         assert_eq!(failure.step(), TaskStep::Turn, "{name}: {failure}");
@@ -808,13 +794,13 @@ fn an_obstacle_that_stays_is_turned_in_by_the_fingers_and_its_sweep_is_not_check
 fn a_turn_stops_at_as_many_plans_as_will_do_in_its_grasps_order() {
     // 36 grasps 2 m off, out of reach, then the knob's two from above: one plan will do, and it
     // is the first of the two, found among the second lot of grasps tried.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let world = World::new(vec![table(), knob(Vec2::new(0.5, 0.05), 0.3)]);
     let far = Pose::new(Vec3::new(2.0, 0.0, 0.0), from_above(1.0).rotation);
     let mut grasps = vec![far; 36];
     grasps.extend([from_above(1.0), from_above(-1.0)]);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let every = turn_in(
             &device,
@@ -847,7 +833,7 @@ fn a_turn_keeps_the_fingers_as_narrow_as_it_says() {
     // A round knob 2.5 cm across and 3 cm tall, and a post 5 cm from its axis where an open
     // finger comes down: gripped with the fingers open, the grasp is in the post; with them 3 cm
     // apart it turns, the fingers passing inside the post.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let round = Obstacle::cylinder(Vec3::new(0.5, 0.05, 0.015), 0.0125, 0.015);
     let post = Obstacle::cuboid(Vec3::new(0.5, 0.1, 0.02), Vec3::new(0.004, 0.004, 0.02));
@@ -870,7 +856,7 @@ fn a_turn_keeps_the_fingers_as_narrow_as_it_says() {
     .into_iter()
     .map(|(j, v)| (j.to_string(), v))
     .collect();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let failure = turn_in(&device, world.clone(), open.clone(), &o).unwrap_err();
         assert_eq!(failure.step(), TaskStep::Reach, "{name}: {failure}");
@@ -889,7 +875,7 @@ fn a_turn_keeps_the_fingers_as_narrow_as_it_says() {
 fn each_grasp_turns_the_object_about_its_own_line() {
     // The knob gripped from above 2 cm either side of its middle and turned a quarter turn in
     // place: each grasp turns it about its own z axis, and each plan leaves it where its turn does.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let bar = knob(Vec2::new(0.5, 0.05), 0.3);
     let world = World::new(vec![table(), bar.clone()]);
@@ -897,7 +883,7 @@ fn each_grasp_turns_the_object_about_its_own_line() {
         grasp(-Vec3::Z, Vec3::Y, BAR, 0.01, Vec3::X * 0.02),
         grasp(-Vec3::Z, Vec3::Y, BAR, 0.01, Vec3::X * -0.02),
     ];
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let plans = turn_in(
             &device,
@@ -937,7 +923,7 @@ fn the_move_away_leaves_the_object_where_the_turn_left_it() {
     // (0.45, 0.25) and reaching along -x, gripped at its free edge and swung 60 degrees. The hand
     // retraces its move in, in the door's frame; the arm comes back where the door stood before
     // the turn, so a move away checked against the door unturned would meet it.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let hinge = Vec3::new(0.45, 0.25, 0.0);
     let door = Obstacle::cuboid(
@@ -956,7 +942,7 @@ fn the_move_away_leaves_the_object_where_the_turn_left_it() {
     };
     let mut stood = world.clone();
     stood.touch.push(Touch::new(1, robot.finger_links(0)));
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let plans = turn_in(&device, world.clone(), task.clone(), &o).unwrap();
         let samples = plans[0].depart.sample(250.0).unwrap();
@@ -979,7 +965,7 @@ fn the_move_away_leaves_the_object_where_the_turn_left_it() {
 fn a_grasp_a_little_off_unit_is_turned_in_place() {
     // A grasp's rotation scaled by 1.0008, within the tolerance every task allows: the hand's own
     // axis there is a line of unit direction, and the knob turns.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let world = World::new(vec![table(), knob(Vec2::new(0.5, 0.05), 0.3)]);
     let grip = from_above(1.0);
@@ -1000,7 +986,7 @@ fn a_grasp_a_little_off_unit_is_turned_in_place() {
 /// above with open fingers, through a different world in the same batch.
 #[test]
 fn drawer_draws_are_signed_world_translations_and_stops_report_meters() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let handle = knob(Vec2::new(0.50, 0.05), 0.42);
     let clear = World::new(vec![table(), handle.clone()]);
     let direction = Vec3::NEG_X;
@@ -1023,7 +1009,7 @@ fn drawer_draws_are_signed_world_translations_and_stops_report_meters() {
         )
     });
     let o = TaskOptions::default();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[clear.clone(), blocked.clone()]).unwrap();
         let result = batchplan::pull(&device, &worlds, &tasks, &o).unwrap();
@@ -1084,7 +1070,7 @@ fn drawer_draws_are_signed_world_translations_and_stops_report_meters() {
 
 #[test]
 fn a_placed_grid_is_a_contact_target_for_a_fixed_fixture() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     // One occupied grid cell at the center of a handle with a rotated local frame.
     let pose = Pose::new(Vec3::new(0.51, 0.07, 0.14), Quat::from_rotation_z(0.55));
     let cell = SdfGrid::try_new([3; 3], 0.01, -Vec3::splat(0.01), &[0.0; 27]).unwrap();
@@ -1126,7 +1112,7 @@ fn a_placed_grid_is_a_contact_target_for_a_fixed_fixture() {
 
 #[test]
 fn pulls_reject_bad_directions_and_distances_before_searching() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[World::new(vec![table()])]).unwrap();
     for (direction, distance, message) in [
@@ -1168,7 +1154,7 @@ fn pulls_reject_bad_directions_and_distances_before_searching() {
 
 #[test]
 fn a_hand_without_finger_links_cannot_touch_the_contact_grid() {
-    let reference = panda();
+    let reference = common::panda().unwrap();
     let robot = Robot::load(
         common::asset("franka/franka_panda.urdf"),
         &batchplan::RobotOptions {
@@ -1218,7 +1204,7 @@ fn a_hand_without_finger_links_cannot_touch_the_contact_grid() {
 
 #[test]
 fn a_draw_without_a_transit_checks_which_device_prepared_its_worlds() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let other = Device::cpu(&robot).unwrap();
     let world = World::new(vec![table(), knob(Vec2::new(0.5, 0.05), 0.3)]);

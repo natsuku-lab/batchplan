@@ -15,20 +15,6 @@ use batchplan::{
 };
 use glam::{Mat3, Quat, Vec3};
 
-fn panda() -> Robot {
-    common::panda().unwrap()
-}
-
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 const TABLE: usize = 0;
 const BOX: usize = 1;
 const HALF: Vec3 = Vec3::new(0.02, 0.03, 0.03);
@@ -144,10 +130,10 @@ fn pick_in(
 
 #[test]
 fn the_quickest_grasp_that_gets_through_wins() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let start = robot.default_q().to_vec();
     let o = TaskOptions::default();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         // The post is where a finger of either grasp closing along x goes; the one closing along
         // y gets through, alone.
@@ -259,9 +245,9 @@ fn capped(near: bool) -> TaskOptions {
 /// With `tool_speed_near`, the straight moves are capped near the grasp alone.
 #[test]
 fn the_straight_moves_can_be_capped_near_the_grasp_alone() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let task = pick_from(&robot, vec![top_across()]);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let pick = |near| {
             let plans = pick_in(&device, scene(vec![]), task.clone(), &capped(near)).unwrap();
             plans.into_iter().next().expect("the grasp gets through")
@@ -324,7 +310,7 @@ fn on_two_arms_the_cap_holds_near_the_hand_that_moves() {
 
 #[test]
 fn a_task_none_of_whose_grasps_gets_through_says_where_and_why_each_stopped() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let o = TaskOptions::default();
     let tops = || pick_from(&robot, vec![top(), top_reversed(), top_across()]);
@@ -424,7 +410,7 @@ fn a_task_none_of_whose_grasps_gets_through_says_where_and_why_each_stopped() {
 
 #[test]
 fn a_held_object_sits_in_the_hand_as_its_grasp_holds_it() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let object = Pose::new(Vec3::new(0.4, 0.1, 0.2), Quat::from_rotation_z(0.7));
     // From above, and from two sides: grasps that are not their own inverse.
     for grasp in [top(), grasp(Vec3::X, Vec3::Y), grasp(-Vec3::Y, Vec3::Z)] {
@@ -456,7 +442,7 @@ fn a_held_object_sits_in_the_hand_as_its_grasp_holds_it() {
 
 #[test]
 fn the_fingers_may_touch_what_they_grasp_and_the_palm_may_not() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let o = TaskOptions::default();
     // A box as wide as the fingers open, which they touch closing across it.
@@ -479,8 +465,8 @@ fn the_fingers_may_touch_what_they_grasp_and_the_palm_may_not() {
 
 #[test]
 fn a_picked_box_is_set_down_where_there_is_room() {
-    let robot = panda();
-    for device in devices(&robot) {
+    let robot = common::panda().unwrap();
+    for device in common::devices(&robot) {
         let name = device.name();
         let o = TaskOptions::default();
         // Another box stands where the first pose would set it down.
@@ -572,13 +558,13 @@ fn most_tilt(robot: &Robot, t: &Trajectory) -> f32 {
 /// start stops at the transit too.
 #[test]
 fn a_place_carries_the_box_upright() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let bound = 5f32.to_radians();
     let upright = HandConstraint {
         tilt: bound,
         ..HandConstraint::new(0, Pose::new(Vec3::ZERO, Quat::from_rotation_x(PI)))
     };
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let o = TaskOptions::default();
         let wall = Obstacle::cuboid(Vec3::new(0.45, 0.0, 0.15), Vec3::new(0.15, 0.01, 0.15));
@@ -672,7 +658,7 @@ fn a_place_carries_the_box_upright() {
 #[test]
 fn every_grasp_that_picks_the_box_up_can_be_tried_for_the_place() {
     // The quickest pick and place together: one place task per grasp that got through, batched.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let o = TaskOptions::default();
     let world = scene(vec![]);
@@ -888,7 +874,7 @@ fn a_hand_without_fingers_touches_what_it_grasps_with_the_whole_hand() {
 
 #[test]
 fn a_support_listed_after_the_object_is_renumbered_with_it() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     // The box first, the table after it.
     let world = World::new(vec![
@@ -906,7 +892,7 @@ fn a_support_listed_after_the_object_is_renumbered_with_it() {
 fn the_fingers_may_touch_what_they_let_go_of() {
     // A box as wide as the fingers open, picked and set down 20 cm along: backing off, the
     // fingers slide along it.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let o = TaskOptions::default();
     let wide = Vec3::new(HALF.x, 0.04, HALF.z);
@@ -940,7 +926,7 @@ fn the_fingers_may_touch_what_they_let_go_of() {
 /// them: backing off from a box held 5 cm deep, the palm still touches it.
 #[test]
 fn a_place_names_the_object_it_sets_down_after_its_worlds_obstacles() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let world = World::new(vec![scene(vec![]).obstacles[TABLE].clone()]);
     let tall = Vec3::new(HALF.x, HALF.y, 0.06);
@@ -977,14 +963,14 @@ fn a_place_names_the_object_it_sets_down_after_its_worlds_obstacles() {
 /// collision enclosure account for the selected drop, including candidates in later waves.
 #[test]
 fn placing_above_a_rest_returns_its_landing_and_the_checked_fall() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let rest = Pose::new(Vec3::new(0.45, -0.2, HALF.z), Quat::IDENTITY);
     let taken = Pose::new(Vec3::new(0.3, -0.25, HALF.z), Quat::IDENTITY);
     let before = scene(vec![Obstacle::cuboid(taken.position, Vec3::splat(0.03))]);
     let mut after = before.clone();
     after.remove(BOX).unwrap();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(&[before.clone(), after.clone()]).unwrap();
         let picked =
             batchplan::pick(&device, &worlds, &[pick_from(&robot, vec![top()])], &o).unwrap();
@@ -1036,7 +1022,7 @@ fn placing_above_a_rest_returns_its_landing_and_the_checked_fall() {
 /// into.
 #[test]
 fn a_held_object_collides_where_its_grasp_holds_it() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let o = TaskOptions::default();
     let half = Vec3::new(0.02, 0.02, 0.15);
@@ -1100,7 +1086,7 @@ fn ik_takes_the_solution_nearest_the_start() {
     // With one candidate, a task's IK is the same batch as solving its pose alone. From starts
     // around the ready pose, the first whose first successful seed is not the nearest: the task
     // keeps the nearest.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let n = robot.dof();
     let device = Device::cpu(&robot).unwrap();
     let o = TaskOptions::default();
@@ -1426,7 +1412,7 @@ fn every_grasp_from_above_over_a_floor_keeps_the_overlap_in_the_object() {
 
 #[test]
 fn a_flat_package_on_a_table_is_picked_from_above_by_its_top() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let (tip, floor, top) = (robot.tip(0), 0.005, 0.016);
     let object = package(0.45, 0.1, top);
     let o = GraspOptions {
@@ -1456,7 +1442,7 @@ fn a_flat_package_on_a_table_is_picked_from_above_by_its_top() {
         })
     };
     let world = World::new(vec![scene(vec![]).obstacles[TABLE].clone(), object]);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
         let pick = |grasps: &[Pose]| {
@@ -1488,7 +1474,7 @@ fn a_flat_package_on_a_table_is_picked_from_above_by_its_top() {
 fn a_bar_over_a_plate_is_gripped_tilted_with_the_open_fingers_kept_off_the_plate() {
     // A bar 1 cm in radius lying along y, its top 3.7 cm over the plate, as a drawer's handle out
     // of its front. Tilted about the bar, an open finger swings down toward the plate.
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let (tip, floor) = (robot.tip(0), 0.005);
     let middle = Vec3::new(0.5, 0.1, 0.027);
     let bar = Obstacle::cylinder(middle, 0.01, 0.06)
@@ -1515,7 +1501,7 @@ fn a_bar_over_a_plate_is_gripped_tilted_with_the_open_fingers_kept_off_the_plate
             .all(|g| (lowest(&bar, g, &o) - floor).abs() < 1e-5)
     );
     let world = World::new(vec![scene(vec![]).obstacles[TABLE].clone(), bar]);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
         let task = Pick {
             support: vec![TABLE],
@@ -1532,7 +1518,7 @@ fn a_bar_over_a_plate_is_gripped_tilted_with_the_open_fingers_kept_off_the_plate
 
 #[test]
 fn a_small_cube_on_a_table_is_picked_with_the_fingertips_kept_off_the_table() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let (tip, floor) = (robot.tip(0), 0.002);
     // Narrower than the fingers reach past the frame, so a grasp at its middle puts them in the
@@ -1656,10 +1642,10 @@ const PAST_THE_BALL: u32 = 2;
 
 #[test]
 fn each_step_runs_in_the_world_its_task_names() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let home = Pose::new(Vec3::new(0.45, 0.2, HALF.z), Quat::IDENTITY);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         // A finger of the grasp comes down on the post, which only the loose world lets it touch,
         // and a finger of the start is in the ball, which only the strict world keeps it from.
@@ -1806,7 +1792,7 @@ fn each_step_runs_in_the_world_its_task_names() {
 
 #[test]
 fn a_task_without_its_transit_gives_its_moves_alone() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let n = robot.dof();
     // The moves of `alone`, a task without its transit, are those of `whole`, the same task
@@ -1836,7 +1822,7 @@ fn a_task_without_its_transit_gives_its_moves_alone() {
         let quickest_first = alone.windows(2).all(|w| w[0].duration() <= w[1].duration());
         assert!(quickest_first, "{name}");
     };
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let whole = pick_from(&robot, vec![top(), top_reversed(), top_across()]);
         let alone = Pick {
@@ -1886,7 +1872,7 @@ fn a_task_without_its_transit_gives_its_moves_alone() {
 
 #[test]
 fn malformed_tasks_are_input_errors() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device
         .upload(&[scene(vec![]), scene(vec![post()])])
@@ -2030,7 +2016,7 @@ fn malformed_tasks_are_input_errors() {
 /// grasp alone does, its plans numbered as its grasps are.
 #[test]
 fn a_pick_keeps_the_fingers_as_narrow_as_it_says() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let narrow: std::collections::HashMap<String, f32> = [
         ("panda_finger_joint1".to_string(), 0.01),
         ("panda_finger_joint2".to_string(), 0.01),
@@ -2150,7 +2136,7 @@ fn a_pick_keeps_the_fingers_as_narrow_as_it_says() {
 /// and no plans is not enough.
 #[test]
 fn a_pick_stops_at_as_many_plans_as_will_do_in_its_grasps_order() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     // Beside the post, the grasps closing along x stop and those closing along y get through.
     let through = [5, 40, 41, 90];
@@ -2159,7 +2145,7 @@ fn a_pick_stops_at_as_many_plans_as_will_do_in_its_grasps_order() {
         false => top(),
     });
     let every = pick_from(&robot, grasps.collect());
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[scene(vec![post()])]).unwrap();
         let plans_of = |task: &Pick| {
@@ -2231,11 +2217,11 @@ fn a_pick_stops_at_as_many_plans_as_will_do_in_its_grasps_order() {
 
 #[test]
 fn a_failed_pick_tries_its_remaining_grasps_without_displacing_a_preferred_plan() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let options = TaskOptions::default();
     let stopped = top();
     let clear = top_across();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(&[scene(vec![post()])]).unwrap();
         let tasks = [
             pick_from(&robot, vec![clear, clear]),
@@ -2365,7 +2351,7 @@ fn seen(at: Vec3, half: Vec3, object: bool, s: &mut Surface) {
 /// stop at the wall.
 #[test]
 fn grasps_whose_fingers_come_in_narrower_are_picked_beside_a_wall() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let half = Vec3::new(0.02, 0.07, 0.03);
     let at = Vec3::new(0.45, 0.2, half.z);
     let wall_half = Vec3::new(0.005, 0.09, half.z);
@@ -2387,7 +2373,7 @@ fn grasps_whose_fingers_come_in_narrower_are_picked_beside_a_wall() {
         narrow: true,
         ..open
     };
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let on = |o: &GraspOptions| {
             let found = batchplan::grasps_on(&device, 0, std::slice::from_ref(&surface), o);
@@ -2465,7 +2451,7 @@ fn grasps_whose_fingers_come_in_narrower_are_picked_beside_a_wall() {
 /// all, each as it is alone.
 #[test]
 fn as_many_holds_as_fill_a_stack_at_once_are_placed_in_one_call() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let mut after = scene(vec![]);
     let object = after.remove(BOX).unwrap().placed(Pose::IDENTITY);
@@ -2517,7 +2503,7 @@ fn as_many_holds_as_fill_a_stack_at_once_are_placed_in_one_call() {
 /// thousand openings, two grasps at each, are picked by in one call, the last as it is alone.
 #[test]
 fn as_many_finger_openings_as_fill_a_stack_at_once_are_picked_by_in_one_call() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let worlds = device.upload(&[scene(vec![])]).unwrap();
     let o = TaskOptions::default();
@@ -2559,7 +2545,7 @@ fn as_many_finger_openings_as_fill_a_stack_at_once_are_picked_by_in_one_call() {
 /// place in the list.
 #[test]
 fn a_place_lets_go_as_wide_as_it_has_room_to() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let fingers = |at: f32| -> std::collections::HashMap<String, f32> {
         [
             ("panda_finger_joint1".to_string(), at),
@@ -2589,7 +2575,7 @@ fn a_place_lets_go_as_wide_as_it_has_room_to() {
     let the_block = taken.obstacles.len() - 1;
     let o = TaskOptions::default();
     let open = vec![fingers(0.04), fingers(0.03), fingers(0.02), fingers(0.01)];
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let scenes = [
             before.clone(),
             after.clone(),
@@ -2754,7 +2740,7 @@ fn a_place_lets_go_as_wide_as_it_has_room_to() {
 /// a count; and no plans is not enough.
 #[test]
 fn a_place_stops_at_as_many_plans_as_will_do_in_its_poses_order() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let free = Pose::new(Vec3::new(0.45, -0.2, HALF.z), Quat::IDENTITY);
     let taken = Pose::new(Vec3::new(0.3, -0.25, HALF.z), Quat::IDENTITY);
@@ -2767,7 +2753,7 @@ fn a_place_stops_at_as_many_plans_as_will_do_in_its_poses_order() {
         false => taken,
     });
     let poses: Vec<Pose> = poses.collect();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[before.clone(), after.clone()]).unwrap();
         let picked = batchplan::pick(&device, &worlds, &[pick_from(&robot, vec![top()])], &o);
@@ -2841,7 +2827,7 @@ fn a_place_stops_at_as_many_plans_as_will_do_in_its_poses_order() {
 
 #[test]
 fn gripping_one_part_lifts_the_whole_body_and_keeps_its_neighbors() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let body = scene(vec![]).obstacles[BOX].clone();
     let center = body.pose().position;
@@ -2916,7 +2902,7 @@ fn gripping_one_part_lifts_the_whole_body_and_keeps_its_neighbors() {
 
 #[test]
 fn a_pick_can_fit_its_carried_cylinder_beside_a_wall() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu_threads(&robot, 4).unwrap();
     let center = Vec3::new(0.45, 0.2, 0.023);
     let radius = 0.056;
@@ -2959,7 +2945,7 @@ fn a_pick_can_fit_its_carried_cylinder_beside_a_wall() {
 
 #[test]
 fn the_release_sweep_stops_a_palm_below_the_falling_object() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let held = Held {
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, HALF),
@@ -2972,7 +2958,7 @@ fn the_release_sweep_stops_a_palm_below_the_falling_object() {
         transit: false,
         ..Place::new(0, robot.default_q(), held, vec![release])
     };
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(&[World::default()]).unwrap();
         let plan = |task: &Place| {
             batchplan::place(
@@ -2999,7 +2985,7 @@ fn the_release_sweep_stops_a_palm_below_the_falling_object() {
 
 #[test]
 fn completed_picks_can_prefer_tightly_measured_contacts() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu_threads(&robot, 1).unwrap();
     let world = scene(vec![]);
     let mut surface = Surface::default();
@@ -3097,13 +3083,13 @@ fn off(plan: &TaskPlan, near: Vec3) -> f32 {
 
 #[test]
 fn of_several_holds_the_one_that_sets_the_box_down_nearest_the_spot_wins() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let poses = vec![
         Pose::new(BESIDE, Quat::IDENTITY),
         Pose::new(OPEN, Quat::IDENTITY),
     ];
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[scene(vec![]), place_scene()]).unwrap();
         // Closing along x, then along y: the first's finger meets the post beside the first pose.
@@ -3139,10 +3125,10 @@ fn of_several_holds_the_one_that_sets_the_box_down_nearest_the_spot_wins() {
 
 #[test]
 fn equally_near_alternatives_keep_the_earlier_task_and_its_quicker_plan() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let near = OPEN + Vec3::new(0.03, 0.04, 0.0);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[scene(vec![]), place_scene()]).unwrap();
         let tasks = holds(&device, &worlds, &robot, &[top_across(), top()])
@@ -3173,10 +3159,10 @@ fn equally_near_alternatives_keep_the_earlier_task_and_its_quicker_plan() {
 
 #[test]
 fn an_alternative_that_gets_nowhere_is_passed_over_and_where_none_gets_anywhere_each_says_why() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let far = Pose::new(Vec3::new(2.0, 0.0, HALF.z), Quat::IDENTITY);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[scene(vec![]), place_scene()]).unwrap();
         let from = holds(&device, &worlds, &robot, &[top(), top_across()]);
@@ -3231,7 +3217,7 @@ fn an_alternative_that_gets_nowhere_is_passed_over_and_where_none_gets_anywhere_
 
 #[test]
 fn the_spot_is_measured_in_x_and_y_from_where_the_box_lands() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     // Far under the spot: a z the poses' heights would rank the other way round.
     let near = OPEN - Vec3::Z * 0.4;
@@ -3239,7 +3225,7 @@ fn the_spot_is_measured_in_x_and_y_from_where_the_box_lands() {
     // A fall moves the landing down alone: in x and y it is where the hand lets go.
     let high = Pose::new(OPEN + Vec3::new(-0.03, 0.0, 0.1), Quat::IDENTITY);
     let low = Pose::new(OPEN + Vec3::X * 0.05, Quat::IDENTITY);
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[scene(vec![]), place_scene()]).unwrap();
         let task = Place {
@@ -3268,7 +3254,7 @@ fn the_spot_is_measured_in_x_and_y_from_where_the_box_lands() {
 
 #[test]
 fn a_spot_that_is_not_finite_or_a_malformed_alternative_is_an_input_error() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let held = Held {
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, HALF),
@@ -3286,7 +3272,7 @@ fn a_spot_that_is_not_finite_or_a_malformed_alternative_is_an_input_error() {
         )
     };
     let o = TaskOptions::default();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let worlds = device.upload(&[place_scene()]).unwrap();
         let tasks = [task.clone(), task.clone()];
         for near in [
@@ -3317,9 +3303,9 @@ fn a_spot_that_is_not_finite_or_a_malformed_alternative_is_an_input_error() {
 
 #[test]
 fn a_task_that_wants_one_plan_tries_its_poses_nearest_the_spot_first() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[scene(vec![]), place_scene()]).unwrap();
         // Closing along y, the box goes down beside the post, and let go of 2 cm over the table in
@@ -3363,7 +3349,7 @@ fn a_task_that_wants_one_plan_tries_its_poses_nearest_the_spot_first() {
 
 #[test]
 fn the_nearest_in_x_and_y_wins_over_the_nearest_in_x_alone() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     // 3 cm off the spot along x, and 5 cm off it along y.
     let poses = vec![
@@ -3373,7 +3359,7 @@ fn the_nearest_in_x_and_y_wins_over_the_nearest_in_x_alone() {
     let both = |pose: &Pose| pose.position.truncate().distance(OPEN.truncate());
     let along_x = |pose: &Pose| (pose.position.x - OPEN.x).abs();
     assert!(both(&poses[0]) < both(&poses[1]) && along_x(&poses[1]) < along_x(&poses[0]));
-    for device in devices(&robot) {
+    for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[scene(vec![]), place_scene()]).unwrap();
         let every = Place {
@@ -3396,7 +3382,7 @@ fn the_nearest_in_x_and_y_wins_over_the_nearest_in_x_alone() {
 
 #[test]
 fn a_place_checks_which_device_prepared_its_worlds_with_no_tasks_too() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let device = Device::cpu(&robot).unwrap();
     let other = Device::cpu(&robot).unwrap();
     let worlds = other.upload(&[place_scene()]).unwrap();

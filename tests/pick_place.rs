@@ -10,20 +10,9 @@ use std::ops::Range;
 use batchplan::datagen::{self, Handover, Origin, PickPlace, PickPlaceOptions, RecoveryOptions};
 use batchplan::rng::Rng;
 use batchplan::{
-    CollisionWeights, Device, Obstacle, Pick, Place, Pose, Robot, TaskOptions, TaskStep, Touch,
-    World,
+    CollisionWeights, Device, Obstacle, Pick, Place, Pose, TaskOptions, TaskStep, Touch, World,
 };
 use glam::{Mat3, Quat, Vec3};
-
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
 
 /// A table with its top at z = 0, a tall box beside the path, and a 4 x 6 x 6 cm box to move;
 /// the box last, its target across the table.
@@ -85,7 +74,7 @@ fn boxes_are_picked_up_carried_and_set_down_where_asked() {
     let robot = common::panda().unwrap();
     let n = robot.dof();
     let (worlds, tasks) = scenes(6);
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let demos =
             datagen::pick_and_place(&d, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
         assert!(
@@ -348,7 +337,7 @@ fn a_box_is_neither_lifted_nor_lowered_into_a_ledge_nor_set_down_into_a_slab() {
             support: vec![0],
         })
         .collect();
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let demos =
             datagen::pick_and_place(&d, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
         let done: Vec<u32> = demos.iter().map(|demo| demo.world).collect();
@@ -689,7 +678,7 @@ fn blocks_are_handed_from_one_hand_to_the_other() {
     let n = robot.dof();
     let (left, right) = (robot.hand_joints(0), robot.hand_joints(1));
     let (worlds, tasks) = handovers(8);
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let demos = datagen::handover(&d, &worlds, &tasks, &PickPlaceOptions::default()).unwrap();
         eprintln!("{}: {} of {} handovers", d.name(), demos.len(), tasks.len());
         assert!(
@@ -913,7 +902,7 @@ fn reset_states_carry_the_block_in_the_hand_holding_it() {
         phase: (0.0, 1.0),
         ..Default::default()
     };
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let states = datagen::reset_states(&d, &worlds, &demos, &options).unwrap();
         let (mut in_hand, mut loose, mut moved) = ([0; 2], 0, 0);
         for s in &states {

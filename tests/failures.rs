@@ -14,20 +14,6 @@ use batchplan::{
 };
 use glam::Vec3;
 
-fn panda() -> Robot {
-    common::panda().unwrap()
-}
-
-fn devices(robot: &Robot) -> Vec<Device> {
-    let mut devices = vec![Device::cpu(robot).unwrap()];
-    match Device::gpu(robot) {
-        Ok(gpu) => devices.push(gpu),
-        Err(e) if std::env::var("BATCHPLAN_REQUIRE_GPU").is_err() => eprintln!("skipping GPU: {e}"),
-        Err(e) => panic!("no GPU: {e}"),
-    }
-    devices
-}
-
 /// A box around the hand at configuration `q`.
 fn around_hand(robot: &Robot, q: &[f32]) -> Obstacle {
     Obstacle::cuboid(robot.ee_pose(q, 0).position, Vec3::splat(0.05))
@@ -43,7 +29,7 @@ fn hand_in(contacts: &[Contact], obstacle: usize) -> bool {
 
 #[test]
 fn plans_say_which_end_collides_and_with_what() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let start = robot.default_q().to_vec();
     let mut goal = start.clone();
     goal[0] += 1.2;
@@ -58,7 +44,7 @@ fn plans_say_which_end_collides_and_with_what() {
         PlanProblem::new(2, start, goal),
     ];
     let mut failures = None;
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let result = batchplan::plan(&d, &worlds, &problems, &PlanOptions::default()).unwrap();
         let name = d.name();
@@ -83,7 +69,7 @@ fn plans_say_which_end_collides_and_with_what() {
 
 #[test]
 fn plans_say_whether_the_search_the_spline_or_the_time_ran_out() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let (scene, problems) = common::blocked_reaches(&robot);
     assert!(problems.len() > 20, "{} blocked reaches", problems.len());
     let device = Device::cpu(&robot).unwrap();
@@ -167,7 +153,7 @@ fn plans_say_whether_the_search_the_spline_or_the_time_ran_out() {
 
 #[test]
 fn ik_tells_a_pose_out_of_reach_from_one_reached_only_in_collision() {
-    let robot = panda();
+    let robot = common::panda().unwrap();
     let reachable = robot.ee_pose(robot.default_q(), 0);
     let far = Pose::new(Vec3::new(2.0, 0.0, 0.5), reachable.rotation);
     let mut rng = Rng::new(9);
@@ -190,7 +176,7 @@ fn ik_tells_a_pose_out_of_reach_from_one_reached_only_in_collision() {
         scene.push(World::new(vec![ball]));
     }
     let o = IkOptions::default();
-    for d in devices(&robot) {
+    for d in common::devices(&robot) {
         let worlds = d.upload(&scene).unwrap();
         let result = batchplan::solve_ik(&d, &worlds, &problems, &o).unwrap();
         let failures = batchplan::ik::failures(&d, &worlds, &result, &o).unwrap();
