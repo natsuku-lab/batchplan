@@ -2,7 +2,6 @@
 
 Measured results for planner comparisons, CPU/GPU scaling, motion timing and manipulation.
 These are snapshots at the revisions named below, rather than measurements of the latest release.
-No new benchmark runs accompany this documentation cleanup.
 
 The main machines are an Apple M4 Pro (14 CPU cores, 20-core GPU, Metal) and an AMD Ryzen AI
 Max+ 395 (16 cores, 32 threads, Radeon 8060S, Vulkan/RADV, Ubuntu 26.04). Load, warm-up and
@@ -244,9 +243,9 @@ The counts are the same on both devices of each machine and on every run, but at
 | That bowl 4 cm from a wall twice as tall, seen the same way | 307,200 | 654 with the shell; 698 where the fingers may come in narrower (`narrow`), every one narrower, down to 1.5 cm beside the wall | 8.9 ms with the shell, 10.7 ms with both |
 | 64 such bowls in one call | 588,864 | 126,720 | 226 ms, 3.5 ms a bowl |
 
-Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from 16 directions, 22 spheres swept 10 cm against the points near them. Checked against every point of the scene through one coarse grid, before the points near the object were kept in cells of their own and a check stopped at its first point in the way, the bowl took 211 ms and the box 314 ms on one thread, with the same grasps to the last bit.
+Nearly all of it is the hand's check: each of a bowl's 673 pairs of patches from 16 directions, 22 spheres swept 10 cm against the points near them.
 
-With `first_touch`, which sweeps each finger of each grasp over the object's patches, the example times the bowl, the box and the 64 bowls again (its lines `with first_touch`). On the Ryzen AI Max+ 395 on one thread (the example built with `Device::cpu_threads(&robot, 1)`), the quickest of six runs, the machine's load between 4 and 15: the 64 bowls take 2.67 s against 2.51 s without it (6 percent more), the bowl 41.7 ms against 39.2 (6 percent), the box 71.8 ms against 71.5 (under 1 percent). Without it the grasps and their order are main's.
+With `first_touch`, which sweeps each finger of each grasp over the object's patches, the example times the bowl, the box and the 64 bowls again (its lines `with first_touch`). On the Ryzen AI Max+ 395 on one thread (the example built with `Device::cpu_threads(&robot, 1)`), the quickest of six runs, the machine's load between 4 and 15: the 64 bowls take 2.67 s against 2.51 s without it (6 percent more), the bowl 41.7 ms against 39.2 (6 percent), the box 71.8 ms against 71.5 (under 1 percent).
 
 ## Rests on a surface
 

@@ -20,27 +20,7 @@ cargo build --release --lib --target aarch64-unknown-linux-gnu --no-default-feat
 cargo doc --no-deps --features lerobot,usd                      # keep at zero warnings
 scripts/check.sh                                                # every lint CI runs (rustfmt stable and nightly, clippy in each feature set, docs), on the library and demos/, warnings denied; run before every push
 git tag -a v0.10.0 -m "batchplan 0.10.0" && git push origin v0.10.0   # a release or a beta (v0.10.0-beta.1), cut as CONTRIBUTING.md#releases says; release.yml runs cargo semver-checks and publishes to crates.io
-cargo run --release --example bench -- 512                      # GPU vs CPU throughput; BENCH_LLVMPIPE=1 adds the WGSL kernels on Mesa's CPU Vulkan driver
-scripts/fetch_benchmark.sh && cargo run --release --example benchmark   # MotionBenchMaker + MπNets (2,600 Panda problems), GPU and CPU
-scripts/run_suite.sh data/bench/final final && scripts/report_suite.sh data/bench/final   # the comparison with other planners on one spherized Panda and one judge (docs/benchmarks.md#reproducing; `compare mesh` adds the mesh check)
-scripts/fetch_rebot.sh && cargo run --release --example handover -- 512 [--cpu]   # two reBot arms handing blocks over: the bimanual benchmark
-cargo run --release --features lerobot --example handover -- 16 --lerobot data/handover && .venv/bin/python scripts/replay_mujoco.py data/handover data/handover_video   # + MuJoCo camera videos
-cargo run --release --example handover -- 512 --resets data/resets   # a reset bank: the episodes and states perturbed from them, as .npy
-cargo run --release --example datagen -- data/demo 512 20       # .npy dataset: <out_dir> [worlds] [fps]
-cargo run --release --example tool_paths                        # straight moves and pours: one at a time on one thread, and 64 at once
-cargo run --release --example constraints [-- 64 5 --zone]      # the gripper kept upright past a pillar (solved, time, largest tilt, optimized, against unconstrained), and two arms carrying a tray level
-cargo run --release --example tasks -- 64                       # picks and places on random tabletops: how many get through, where the rest stop, per batch size
-cargo run --release --example turns [-- --gpu]                  # a knob, a cap, a lever and a wheel turned (`turn`), and 64 knobs in one call: grips, how many get through, where the rest stop, how long
-cargo run --release --example surface_grasps                   # grasps of what cameras see: a bowl as points, a box in two depth images, 64 bowls in one call, and what each costs
-cargo run --release --example surface_rests [-- threads] [--dump data/rests] && uv run --with mujoco --with numpy python scripts/validate_rests.py data/rests   # where a held object rests on what cameras see: a box on a table among others, a can in a basket and where to let it go to fall in, a tray across two bars and a can rolling in between them, a bottle against a rack's lip, 64 boxes in one call; then each rest let go in MuJoCo
-cargo run --release --example held_spheres                     # how spheres cover a held plate, can and capsule with 64 and 256 to spend: how many, how far past, how long
-cargo run --release --example join [-- so101]                  # pick-like motions joined without stopping (one reBot, or the SO-101): how much sooner, per blend radius
-cargo run --release --example latency [-- --cpu]                # one call's time by kind: IK by batch size without spheres, without the push, with it and for two hands that share joints, evaluate, optimized plans, then IK for a Panda of 399 spheres and a UR5e among clutter, plans past a ball, and the Panda's IK among clutter without a grid, with one apart and with one in reach
-cargo run --release --example timing                            # timing's cost and the trajectories' durations, by kind of path, on one thread
-cargo run --release --example so101_tracking -- data/so101_tracking && .venv-so101/bin/python scripts/so101_tracking.py data/so101_tracking   # the SO-101 on BAM's servo model (docs/benchmarks.md#tracking-on-the-so-101s-servos)
-cargo run --release --example depth [-- --cpu]                  # a distance grid from a rendered depth image, then plans around it
-cargo run --release --example perception [-- --cpu [threads]]   # what each depth call costs for a 640x480 image: the filter, the robot's mask, the points, a surface, a grid, a frame fused and the map's grid, from over a table and from the hand
-cargo run --release --example control_loop -- [seconds]         # a planner thread feeding a 50 Hz loop
+cargo run --release --example <name> [-- args]                  # each example's header says what it runs and takes (examples/); the benchmark commands are in docs/benchmarks.md#reproducing
 cargo run --release --features lerobot --example datagen -- --lerobot data/lerobot_demo 512 20   # --pick-place for pick-and-place, --file-mb N to split files sooner
 REMOTE=user@host SSH_OPTS='...' scripts/sync.sh '<command>'     # rsync to ~/batchplan on a GPU box and run there
 (cd demos && cargo clippy --release --all-targets && cargo run --release --bin handover -- 16 --save handover.rrd)   # Rerun demos: handover, pick, tasks, perception, replan (demos/README.md)
