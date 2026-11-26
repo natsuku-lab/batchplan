@@ -155,7 +155,12 @@ has them as a program; per camera:
    go to `Surface::from_depth(&device, &image, &flags, Some(&robot), radius)`, the views joined.
 
 For a pick out of an open container, `kept.extractions(id, margin)` gives each visible opening
-that contains the body's measured footprint. Its lift takes the body's lowest point above the
+the body's middle stands over, the body reaching below its lip: a footprint measured a hair past
+the opening's edge, as a bowl's set down against a drawer's back, is in the drawer all the same. Where a look shows no opening, `kept.enclosing(id, margin)` names
+the boxes that hold the body in without one: what it stands on, and what that stands on, where it
+is a box not solid or open at the top with the body's lowest point under its top. A bowl in a
+drawer seen from across the room is held in by the cabinet, which that look read as one box: look
+closer before lifting it, since a lift that does not clear the box ends inside it. Its lift takes the body's lowest point above the
 lip by the requested margin, along the opening axis. When the body stands on the container,
 floor contact within one single-precision step across the container height is accepted. For an
 upright opening, the look also keeps whether the freshly fitted body stood on the measured

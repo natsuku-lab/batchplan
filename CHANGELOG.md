@@ -8,6 +8,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+- Miru's `Kept::extractions` gives an opening where the object's middle stands over it, where it
+  asked for the whole of its measured footprint inside: a bowl set back down against a drawer's
+  back read 2 mm past the opening's edge, had no way out measured, and was lifted too short to
+  clear the drawer. `Kept::enclosing` names the boxes that hold an object in with no way out
+  measured, as a cabinet a far look read as one box holds a bowl in its drawer, for a caller to
+  look closer before it lifts.
 - `GraspOptions::clearance` (0 by default): how far the hand's spheres stay from what they do not
   close on, on their way in to a grasp of a surface and at it. `grasps_on` draws the hand back to
   where it has that much room, while `overlap` of its fingers stays on the patches, or leaves the
