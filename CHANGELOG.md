@@ -8,6 +8,11 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+- **Breaking:** `SphereGeometry` and `SphereOptions::geometry` are gone, in Python too: spheres
+  are fitted to the links' collision geometry, the default before. A `SphereOptions` literal that
+  names `geometry` drops it. The loaders no longer read visual geometry, so a URDF whose visual
+  meshes cannot be found (in a package that neither `RobotOptions::package_dirs` nor the
+  directories above the file hold, or at a relative path in a URDF given as text) now loads.
 - The `benchmark` example's `--save` and `--check` modes, `scripts/compare_planners.py` and
   `scripts/cpp_planners.cc` are gone: they were the earlier comparison with other planners, which
   `scripts/run_suite.sh` replaced and the docs stopped running in 0.11.0.

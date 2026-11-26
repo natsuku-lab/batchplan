@@ -100,7 +100,7 @@ pub use sdf::{
     SdfGrid, SdfOptions, Weighing,
 };
 pub use shortcut::ShortcutOptions;
-pub use spheres::{LinkQualification, Qualification, SphereGeometry, SphereOptions};
+pub use spheres::{LinkQualification, Qualification, SphereOptions};
 pub use surface::{Grasp, Surface, grasps_on, grasps_on_with_capacity, prefer_measured_contacts};
 pub use task::{
     CandidateStop, GraspOptions, NearestPlace, Pick, PickBody, Place, Pull, TaskFailure,

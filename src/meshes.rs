@@ -77,8 +77,8 @@ enum Placed {
 }
 
 impl MeshModel {
-    /// Loads the meshes of `robot`'s links: their collision geometry, or the visual geometry where
-    /// spheres were fitted to that. Links without geometry are not checked.
+    /// Loads the meshes of `robot`'s links: their collision geometry. Links without geometry are
+    /// not checked.
     pub fn try_new(robot: &Robot) -> Result<Self> {
         let links = robot
             .links

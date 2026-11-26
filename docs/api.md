@@ -18,7 +18,7 @@ Guide: [robots.md](robots.md).
 | `RobotOptions` | The base link, the hands (`ee_links`) and their fingers where they are part of the palm (`finger_links`), the default configuration, locked joints, joint limits and their scales, `package://` directories, an SRDF, OpenUSD variants, and the collision spheres, with tighter tolerances for some links (`sphere_tolerances`). |
 | `JointLimits` | One joint's position, velocity, acceleration and jerk limits, replacing its description's. |
 | `CollisionModel` | Collision spheres and self-collision settings by link: `load` and `save` a file, `to_json` and `from_json` the same text, `assemble` the model of an assembled robot. |
-| `SphereOptions`, `SphereGeometry` | How spheres are fitted when no collision model is given: the budget, the tolerance, and collision or visual geometry; and `max_overhang`, a limit on how far any sphere reaches past the geometry, which holds a given model too. |
+| `SphereOptions` | How spheres are fitted to the links' collision geometry when no collision model is given: the budget and the tolerance; and `max_overhang`, a limit on how far any sphere reaches past the geometry, which holds a given model too. |
 | `Robot::attach(&AttachedObject)`, `Robot::detach(name)` | The robot holding an object fixed to one of its links, or without it. |
 | `Robot::relock(&joints)` | The robot with joints it locked at load held at new values, as a torso that moved ([guide](robots.md#kinematics)). |
 | `dof`, `joint_names`, `lower`, `upper`, `continuous`, `default_q`, `max_velocity`, `max_acceleration`, `max_jerk` | The robot's joints and their limits. |
