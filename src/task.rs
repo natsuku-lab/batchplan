@@ -1897,7 +1897,8 @@ fn sides(
     for face in 0..3 {
         for sign in [1.0, -1.0] {
             let outward = Vec3::AXES[face] * sign;
-            for across in (0..3).filter(|&a| a != face && fits(2.0 * half[a])) {
+            let spanned = (0..3).filter(|&a| a != face && fits(2.0 * half[a]));
+            for across in spanned {
                 let along = 3 - face - across;
                 for turn in [1.0, -1.0] {
                     for shift in shifts(Vec3::AXES[along], half[along]) {
@@ -2333,7 +2334,8 @@ pub(crate) fn transit(
 ) -> Result<()> {
     let robot = device.robot();
     let n = robot.dof();
-    for c in live.iter_mut().filter(|c| !c.transits) {
+    let passing = live.iter_mut().filter(|c| !c.transits);
+    for c in passing {
         c.passed += 1;
     }
     let keeping: Vec<usize> = (0..live.len())
@@ -3378,7 +3380,8 @@ fn articulated(
         Ok(())
     };
     device.install(|| plans.par_iter_mut().try_for_each(timed))?;
-    for found in outcomes.iter_mut().filter_map(|o| o.as_mut().ok()) {
+    let succeeded = outcomes.iter_mut().filter_map(|o| o.as_mut().ok());
+    for found in succeeded {
         found.sort_by(|a, b| a.duration().total_cmp(&b.duration()));
     }
     Ok(outcomes)

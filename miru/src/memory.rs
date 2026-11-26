@@ -655,7 +655,8 @@ impl Memory {
     /// them and its thing attached to its hand.
     fn holding<'a>(&self, robot: &'a Robot) -> Result<Cow<'a, Robot>> {
         let mut holding = Cow::Borrowed(robot);
-        for held in self.hands.iter().flatten().map(|holding| &holding.held) {
+        let holds = self.hands.iter().flatten().map(|holding| &holding.held);
+        for held in holds {
             if !held.locked.is_empty() {
                 holding = Cow::Owned(holding.relock(&held.locked)?);
             }

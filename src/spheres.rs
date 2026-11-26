@@ -1209,7 +1209,8 @@ fn cylinder_cover(
     // A layer reaches at least `(sqrt(2) - 1)` of the half height past the cylinder: at its rim, a
     // sphere through a corner of the side reaches past the side or the faces by that.
     let layers = (std::f32::consts::SQRT_2 - 1.0) * half_height <= tolerance;
-    for rings in (2..).take_while(|_| layers) {
+    let ring_counts = (2..).take_while(|_| layers);
+    for rings in ring_counts {
         let mut any = false;
         for fine in [1.0, 1.5, 2.0, 3.0] {
             let (overhang, layer) = layer(rings, fine);

@@ -415,7 +415,8 @@ impl Shape {
                     let (a, b) = ((axis + 1) % 3, (axis + 2) % 3);
                     let (across, width) = cells(2.0 * half_extents[a]);
                     let (along, length) = cells(2.0 * half_extents[b]);
-                    for (i, j) in (0..across).flat_map(|i| (0..along).map(move |j| (i, j))) {
+                    let grid = (0..across).flat_map(|i| (0..along).map(move |j| (i, j)));
+                    for (i, j) in grid {
                         let mut own = Vec3::ZERO;
                         own[axis] = eye[axis].signum() * half_extents[axis];
                         own[a] = middle(i, width, half_extents[a]);
@@ -433,7 +434,8 @@ impl Shape {
                 let above = eye.z.abs() - half_height;
                 if above > 0.0 {
                     let (across, width) = cells(2.0 * radius);
-                    for (i, j) in (0..across).flat_map(|i| (0..across).map(move |j| (i, j))) {
+                    let grid = (0..across).flat_map(|i| (0..across).map(move |j| (i, j)));
+                    for (i, j) in grid {
                         let at = Vec2::new(middle(i, width, radius), middle(j, width, radius));
                         if at.length() <= radius {
                             let own = at.extend(eye.z.signum() * half_height);
@@ -448,7 +450,8 @@ impl Shape {
                     let turn = (i as f32 + 0.5) * std::f32::consts::TAU / around as f32;
                     let out = Vec2::from_angle(turn);
                     let above = out.dot(eye.truncate()) - radius;
-                    for j in (0..along).filter(|_| above > 0.0) {
+                    let facing = (0..along).filter(|_| above > 0.0);
+                    for j in facing {
                         let own = (radius * out).extend(middle(j, length, half_height));
                         patch(own, arc * length, above);
                     }
