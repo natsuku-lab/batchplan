@@ -12,7 +12,7 @@ use std::f32::consts::PI;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use batchplan::glam::Vec3;
 use batchplan::rng::Rng;
 use batchplan::{
@@ -60,6 +60,7 @@ fn shape(rng: &mut Rng) -> Vec<Vec3> {
 }
 
 fn main() -> Result<()> {
+    use anyhow::Context;
     let (mut out, mut arms, mut touch) = (None, 20, true);
     for arg in std::env::args().skip(1) {
         match arg.as_str() {

@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
@@ -400,6 +399,7 @@ impl PlanResult {
     /// Per problem: why it has no valid seed, or `None` where it has one.
     #[getter]
     fn failures<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        use pyo3::IntoPyObjectExt;
         self.failures.get(py, || {
             let failures = self.result.failures.iter().map(|f| match f {
                 Some(f) => PlanFailure::new(py, f)?.into_bound_py_any(py),

@@ -29,7 +29,7 @@ use crate::error::{Result, ensure_input};
 use crate::held::{self, Held};
 use crate::robot::Robot;
 use crate::rrt;
-use crate::spline::{self, basis};
+use crate::spline;
 use crate::timing::Trajectory;
 
 /// Motions to run one after another in one world, each path starting where the one before ends.
@@ -574,7 +574,7 @@ fn spacing(cp: &[f32], n: usize) -> f32 {
 /// The curve at knot `k`, the start of span `k - 1`: `(P[k-1] + 4 P[k] + P[k+1]) / 6`.
 fn knot_point(cp: &[f32], n: usize, k: usize) -> Vec<f32> {
     let mut q = vec![0.0; n];
-    spline::blend(cp, n, k - 1, basis(0.0), &mut q);
+    spline::blend(cp, n, k - 1, spline::basis(0.0), &mut q);
     q
 }
 
@@ -608,7 +608,13 @@ impl Search for Joining<'_> {
         );
         let row = samples.len();
         samples.resize(row + n, 0.0);
-        spline::blend(&self.candidate, n, end, basis(0.0), &mut samples[row..]);
+        spline::blend(
+            &self.candidate,
+            n,
+            end,
+            spline::basis(0.0),
+            &mut samples[row..],
+        );
         self.samples = samples.len() / n;
         Some(EdgeQuery {
             world: self.world,
@@ -693,7 +699,7 @@ mod tests {
         assert!(!joining.candidates.is_empty(), "the sweep blends");
         let curve = |cp: &[f32], span: usize, u: f32| {
             let mut q = vec![0.0; n];
-            spline::blend(cp, n, span, basis(u), &mut q);
+            spline::blend(cp, n, span, spline::basis(u), &mut q);
             q
         };
         for (b, _) in &joining.candidates {

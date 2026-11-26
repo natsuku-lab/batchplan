@@ -2,8 +2,8 @@
 use std::sync::Weak;
 
 use batchplan::{
-    DepthImage, Device, Grasp, GraspOptions, HandSphere, Held, IkOptions, Obstacle, Occlusion,
-    OccupancyMap, PickBody, Pose, RobotMask, SdfOptions,
+    DepthImage, Device, Grasp, GraspOptions, HandReach, HandSphere, Held, IkOptions, Obstacle,
+    Occlusion, OccupancyMap, PickBody, Pose, RobotMask, SdfOptions,
 };
 use glam::Vec3;
 
@@ -52,7 +52,7 @@ pub struct GripWorlds<'a> {
     pub(crate) device: &'a Device,
     pub(crate) hand_index: usize,
     pub(crate) blocked: Option<SupportedObjects>,
-    pub(crate) reach: Option<batchplan::HandReach>,
+    pub(crate) reach: Option<HandReach>,
     loaded_opening: f32,
     support: Option<SupportRoom>,
     hand: Vec<HandSphere>,

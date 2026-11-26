@@ -25,7 +25,7 @@ use crate::cpu::{CpuBackend, CpuWorlds};
 use crate::edges::Search;
 #[cfg(feature = "gpu")]
 use crate::gpu::GpuBackend;
-use crate::ik::IkOptions;
+use crate::ik::{IkOptions, IkProblem};
 use crate::robot::Robot;
 use crate::sdf::{DepthImage, Layout, Occupancy, RobotMask, Weighing};
 use crate::trajopt::PlanOptions;
@@ -340,9 +340,9 @@ impl Device {
         let target = (0..robot.hands())
             .map(|h| Some(robot.ee_pose(q, h)))
             .collect();
-        let problem = crate::IkProblem {
+        let problem = IkProblem {
             targets: target,
-            ..crate::IkProblem::new(0, Pose::IDENTITY)
+            ..IkProblem::new(0, Pose::IDENTITY)
         };
         let ik = IkOptions {
             seeds: 1,

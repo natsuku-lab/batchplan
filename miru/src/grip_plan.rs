@@ -2,8 +2,8 @@
 use std::collections::HashMap;
 
 use batchplan::{
-    CandidateStop, Device, Grasp, Pick, Pull, Screw, TaskOptions, TaskPlan, TaskResult, TaskStep,
-    Touch, Turn, Worlds,
+    CandidateStop, Device, Grasp, Pick, Pose, Pull, Screw, TaskOptions, TaskPlan, TaskResult,
+    TaskStep, Touch, Turn, Worlds,
 };
 use glam::Vec3;
 
@@ -161,7 +161,7 @@ pub enum GripStop {
     /// the IK tolerances. No world was projected for this candidate.
     OutsideReach {
         /// Requested hand pose in the look's frame.
-        at: batchplan::Pose,
+        at: Pose,
     },
     /// The look could not isolate a contact part.
     NoPart,
