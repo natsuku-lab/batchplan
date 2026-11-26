@@ -219,9 +219,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   whatever their number: of two 640×480 views among a cell's 17 fixtures, 41 ms at the median
   on the M4 Pro's 14 threads and 77 on one (`cargo run --release -p batchplan-miru --example score --
   <set> --again --digest --threads <n>` on a set of recorded looks, the best of three rounds).
-  `miru/README.md` has what it tells apart and where it stands, and `miru/tests/truth.rs` holds
-  it to scenes built from known things, read through the simulator's exact depth and two stereo
-  cameras modelled from their datasheets.
+  `miru/docs/status.md` has where it stands, and `miru/tests/truth.rs` holds it to scenes built
+  from known things, read through the simulator's exact depth and two stereo cameras modelled
+  from their datasheets.
 - `miru::observe(&device, &cameras, &stance, &memory)`: a look through the library and `miru`
   as one call. Each `Camera` states its frame as read, its noise, the pixels it reads beside a
   jump in depth and what its pose is off by; the `Stance` the robot's joints, its locked joints and

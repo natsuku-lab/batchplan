@@ -244,8 +244,8 @@ When the world represents a movable object in pieces, give `Pick::object` the in
 
 For measured grasps, `Grasp::closes_on` checks that an entire ball fits between the opposing
 pads at the selected opening and clears the hand. Pass the gripper `grasps_on` used. The
-[miru guide](../miru/README.md) shows how to project a candidate into its own
-world and retain the remaining obstacles after a successful lift.
+optional crate `batchplan-miru` projects a candidate into its own world and retains the remaining
+obstacles after a successful lift ([its grips page](../miru/docs/grips.md)).
 
 ```rust,no_run
 use std::collections::HashMap;
@@ -373,7 +373,7 @@ fn main() -> Result<(), Error> {
   contact pairs must fit within the capacity. With `narrow` enabled, a 70 mm loaded gap and
   60 mm capacity yield a 70 mm full command and partial widths of 56.25, 52.5, 48.75,
   45 mm and so on (`gripper.openings()`). Pass the same gripper to `Observed::grip_worlds` in
-  miru. Lock the joints at each candidate's opening (`gripper.locked_at(grasp.opening)`,
+  `batchplan-miru`. Lock the joints at each candidate's opening (`gripper.locked_at(grasp.opening)`,
   linear between the closed and loaded joints; `gripper.opening_of(&locked)` the other way).
   Narrowing assumes the finger spheres translate equally and oppositely along the closing line,
   as `gripper.sliding()` says the model's do; where they do not, `narrow` is refused, and a

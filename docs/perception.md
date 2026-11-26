@@ -204,7 +204,7 @@ The attribution describes those views; earlier observations in a fused map carry
 
 ## With a perception library
 
-batchplan reads depth; it does not say what things are. It cleans a camera's depths, says which readings are the robot's, keeps what the cameras saw of space and gives its distance field. A library that says what things are (which pixels are one thing, its shape, what it stands on, what is still there while hidden) meets batchplan at plain data, and batchplan depends on none. [`miru`](../miru/README.md), a crate of this repository, is one, built on batchplan: its one call takes the image, the robot's flags and the fixtures as batchplan has them, gives each object's solids as obstacles, and runs on the device's threads. The program below stands in for any:
+batchplan reads depth; it does not say what things are. It cleans a camera's depths, says which readings are the robot's, keeps what the cameras saw of space and gives its distance field. A library that says what things are (which pixels are one thing, its shape, what it stands on, what is still there while hidden) meets batchplan at plain data, and batchplan depends on none. The program below stands in for any:
 
 | | batchplan | The perception library |
 |---|---|---|
@@ -349,6 +349,10 @@ A thing passes from one memory to the other as the map weighs images ([`Weighing
 Never-observed space is taken two ways, by where it lies:
 - Around the scene it is free, as it is for a world of shapes alone: `map.grid(&device, Occlusion::Free)`, and none where `map.occupied()` gives no point. Where it gives a few, the grid of a `map.part` around them is all there is to make, however large the map.
 - Inside a region the map holds for one large object it is solid: `map.part(&region, padding)?.grid(&device, Occlusion::Occupied)`. The copy the first grid is made of has that region marked free as far as the part reaches, `free(&region, 0.5 * 3f32.sqrt() * voxel)`, so the object's matter is in one grid only.
+
+### An optional crate on this seam
+
+`batchplan-miru` is one perception library built on this seam; batchplan does not depend on it. It tells objects apart in depth, keeps one memory of them across looks, gives the world to plan each step against, and finds grips of what the cameras measured. [Its README](../miru/README.md) has the `Cargo.toml` line and an example.
 
 ## Building grids on the GPU
 

@@ -92,8 +92,8 @@ never from a switch. The table is how that rule is checked.
   no views, one view, a view with no readings, every pixel the robot's, masks that disagree
   with the depth, a scene before whose objects are gone, NaN and unbounded depths. A failure a
   caller can reach is an `Error::Input` that names the rejected value.
-- **Gaps.** A thing the change does not get right is written in the README's "Where it stands"
-  with its run, and is in the truth table as a known row. A rule added to hide a gap is a
+- **Gaps.** A thing the change does not get right is an entry in `miru/docs/status.md` with its run,
+  and is in the truth table as a known row. A rule added to hide a gap is a
   finding.
 - **Tests.** Every behaviour the change adds or fixes has a rendered scene in
   `miru/tests/look.rs` that fails with the bug planted. Ask for the plant, or plant it yourself.
@@ -105,8 +105,8 @@ never from a switch. The table is how that rule is checked.
   shows the scorer's digest unchanged on every recorded set it has, on one thread and on many,
   and an A/B with runs alternated against its base; a change for anything else shows it costs
   no class. A missing or one-sided measurement is a finding.
-- **Docs.** Every claim near the change matches the code, the README's numbers come from runs
-  it names, and `miru/AGENTS.md` gains only lasting rules.
+- **Docs.** Every claim near the change matches the code, `miru/docs/status.md`'s numbers come from
+  runs it names, and `miru/AGENTS.md` gains only lasting rules.
 - **Public repo.** Committed files carry no hostnames, usernames, emails or local paths.
 
 ## Recorded looks

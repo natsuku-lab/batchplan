@@ -24,7 +24,7 @@
 
 **batchplan is a Rust library for batched, collision-aware robot motion planning.** Solve IK, find paths, and generate trajectories within robot limits across many scenes in one call. Planning runs on the CPU, with optional [wgpu](https://wgpu.rs) acceleration for IK and trajectory optimization.
 
-Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-lab/batchplan-ros), or to generate [LeRobot training datasets](docs/training-data.md).
+Use it standalone, through its [ROS 2 integration](https://github.com/natsuku-lab/batchplan-ros), or to generate [LeRobot training datasets](docs/training-data.md). Perception that turns depth into objects is a separate, optional crate: [batchplan-miru](miru/README.md).
 
 - **Plan:** batched IK, RRT-Connect on SIMD collision checks, and B-spline paths, optionally optimized with L-BFGS, timed optimally within velocity, acceleration, jerk and hand speed limits. Paths can keep a cup upright or a tray level between two hands, follow straight lines, pick and place, turn a knob, a cap or a lever, join without stopping, and start while the robot moves.
 - **Live motion:** follow a trajectory as the world changes, replan or stop in time, and servo the hand toward a moving target.

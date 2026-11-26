@@ -11,7 +11,7 @@
 //! carries one over what it is about to take. Both read through the tests' pinhole, so that what
 //! differs between the cameras is their depth alone. A stereo camera's depth goes through
 //! batchplan's filter (`DepthImage::filtered`) before it becomes a view, at the noise the camera
-//! states and with every other option the library's default: the README makes that the first step
+//! states and with every other option the library's default: `observe` makes that the first step
 //! of a look with batchplan, for it drops most of what such a camera reads between a thing's edge
 //! and what lies behind it, which `look` would take for the thing, and it is how such depth reaches
 //! `look` in use. The default camera's exact depth reads nothing between two surfaces and is not
