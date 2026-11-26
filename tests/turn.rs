@@ -97,6 +97,56 @@ fn check_joined(robot: &Robot, plan: &TaskPlan, at: Pose, name: &str) -> Traject
     turn
 }
 
+/// A turn's plans come least cost first, the quickest among equals: of the knob's two grasps from
+/// above, given the quicker first and costing more, the later, slower one comes first, and alike
+/// in cost the quicker does.
+#[test]
+fn a_turns_plans_come_least_cost_first() {
+    let robot = common::panda().unwrap();
+    let o = TaskOptions::default();
+    let world = World::new(vec![table(), knob(Vec2::new(0.5, 0.05), 0.3)]);
+    for device in common::devices(&robot) {
+        let name = device.name();
+        let both = vec![from_above(1.0), from_above(-1.0)];
+        let free = turn_in(
+            &device,
+            world.clone(),
+            on_table(&robot, both.clone(), FRAC_PI_2),
+            &o,
+        );
+        let free = free.unwrap();
+        assert!(
+            free[0].duration() < free[1].duration(),
+            "{name}: one is quicker"
+        );
+        // The quicker first in the list, costing 1, the slower after it, costing 0.
+        let order = [free[0].candidate, free[1].candidate];
+        let costing = |costs: [f32; 2]| {
+            let holds = (order.iter().zip(costs)).map(|(&k, cost)| batchplan::Hold {
+                cost,
+                ..both[k].into()
+            });
+            Turn {
+                grasps: holds.collect(),
+                ..on_table(&robot, vec![], FRAC_PI_2)
+            }
+        };
+        let plans = turn_in(&device, world.clone(), costing([1.0, 0.0]), &o).unwrap();
+        let firsts = plans
+            .iter()
+            .map(|p| (p.candidate, p.cost))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            firsts,
+            [(1, 0.0), (0, 1.0)],
+            "{name}: the cheaper, later, slower first"
+        );
+        let alike = turn_in(&device, world.clone(), costing([2.0, 2.0]), &o).unwrap();
+        let firsts = alike.iter().map(|p| p.candidate).collect::<Vec<_>>();
+        assert_eq!(firsts, [0, 1], "{name}: alike in cost, the quicker first");
+    }
+}
+
 #[test]
 fn a_knob_turned_in_place_ends_with_the_hand_and_the_knob_turned_about_the_hands_axis() {
     let robot = common::panda().unwrap();
@@ -715,7 +765,7 @@ fn a_cap_turns_on_its_bottle_only_where_the_bottle_is_its_support() {
     });
     let task = Turn {
         screw: Some(Screw::about(Vec3::new(0.45, 0.2, 0.15), Vec3::Z)),
-        ..Turn::new(0, robot.default_q(), 2, turns.collect(), FRAC_PI_2)
+        ..Turn::new(0, robot.default_q(), 2, turns, FRAC_PI_2)
     };
     for device in common::devices(&robot) {
         let name = device.name();
@@ -861,7 +911,10 @@ fn a_turn_keeps_the_fingers_as_narrow_as_it_says() {
         let failure = turn_in(&device, world.clone(), open.clone(), &o).unwrap_err();
         assert_eq!(failure.step(), TaskStep::Reach, "{name}: {failure}");
         let locked = Turn {
-            locked: vec![narrow.clone()],
+            grasps: vec![batchplan::Hold {
+                locked: narrow.clone(),
+                ..open.grasps[0].clone()
+            }],
             ..open.clone()
         };
         assert!(

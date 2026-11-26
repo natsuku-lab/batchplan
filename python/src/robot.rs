@@ -388,7 +388,7 @@ impl Gripper {
     }
 
     /// The finger joints' values at which the pads stand `opening` apart (meters), as
-    /// `Pick.locked`, `Place.open` and `Robot.relock` take them: each joint the calibration
+    /// `Hold.locked`, `Place.open` and `Robot.relock` take them: each joint the calibration
     /// closes, between its closed value at the closed gap and its loaded value at the loaded gap,
     /// in proportion. An opening outside the two gaps is taken at the nearer.
     fn locked_at<'py>(&self, py: Python<'py>, opening: f32) -> PyResult<Bound<'py, PyAny>> {

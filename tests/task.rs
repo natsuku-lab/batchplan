@@ -12,9 +12,9 @@ use std::sync::LazyLock;
 use batchplan::rng::Rng;
 use batchplan::{
     CandidateStop, CollisionModel, Contact, Device, Error, Gripper, GripperCalibration,
-    HandConstraint, Held, IkOptions, IkProblem, Obstacle, Pick, Place, Pose, Robot, RobotOptions,
-    SdfGrid, ShapeGraspOptions, Surface, SurfaceGraspOptions, TaskFailure, TaskOptions, TaskPlan,
-    TaskStep, ToolPathStop, Touch, Trajectory, World, Worlds,
+    HandConstraint, Held, Hold, IkOptions, IkProblem, Obstacle, Pick, Place, Pose, Release, Robot,
+    RobotOptions, SdfGrid, ShapeGraspOptions, Surface, SurfaceGraspOptions, TaskFailure,
+    TaskOptions, TaskPlan, TaskStep, ToolPathStop, Touch, Trajectory, World, Worlds,
 };
 use glam::{Mat3, Quat, Vec3};
 
@@ -69,6 +69,22 @@ fn pick_from(robot: &Robot, grasps: Vec<Pose>) -> Pick {
         support: vec![TABLE],
         ..Pick::new(0, robot.default_q(), BOX, grasps)
     }
+}
+
+/// `holds`, each with the fingers where `locks` has them, one each.
+fn locked_at(holds: &[Hold], locks: impl IntoIterator<Item = HashMap<String, f32>>) -> Vec<Hold> {
+    let each = holds.iter().zip(locks);
+    each.map(|(h, locked)| Hold {
+        locked,
+        ..h.clone()
+    })
+    .collect()
+}
+
+/// `releases`, each dropping as far as `drops` has it, one each.
+fn dropping(releases: &[Release], drops: impl IntoIterator<Item = f32>) -> Vec<Release> {
+    let each = releases.iter().zip(drops);
+    each.map(|(r, drop)| Release { drop, ..*r }).collect()
 }
 
 /// The plan's motions keep the limits and join: transit from the start, approach from the
@@ -985,11 +1001,14 @@ fn placing_above_a_rest_returns_its_landing_and_the_checked_fall() {
         poses.push(release);
         let mut falls = vec![0.002; 40];
         falls.push(drop);
+        let releases = dropping(
+            &poses.into_iter().map(Release::from).collect::<Vec<_>>(),
+            falls,
+        );
         let task = Place {
             support: vec![TABLE],
             enough: Some(1),
-            falls,
-            ..Place::new(1, picked.end(), picked.held.clone().unwrap(), poses)
+            ..Place::new(1, picked.end(), picked.held.clone().unwrap(), releases)
         };
         let run = |t: &Place| batchplan::place(&device, &worlds, std::slice::from_ref(t), &o);
         let plan = run(&task).unwrap().outcomes.remove(0).unwrap().remove(0);
@@ -1001,17 +1020,17 @@ fn placing_above_a_rest_returns_its_landing_and_the_checked_fall() {
         let bottom = rest.position - Vec3::Z * HALF.z;
         assert!(swept.distance(top).value < 1e-6 && swept.distance(bottom).value < 1e-6);
         let on = Place {
-            falls: vec![],
+            releases: dropping(&task.releases, [0.0; 41]),
             ..task.clone()
         };
         let exact = run(&on).unwrap().outcomes.remove(0).unwrap().remove(0);
         assert!(exact.falling.is_none());
         assert_eq!(exact.placed.unwrap().pose(), release);
         assert_eq!(exact.approach.control_points, plan.approach.control_points);
-        for invalid in [vec![drop], vec![f32::NAN; 41], vec![-drop; 41]] {
+        for invalid in [f32::NAN, -drop] {
             assert!(matches!(
                 run(&Place {
-                    falls: invalid,
+                    releases: dropping(&task.releases, [invalid; 41]),
                     ..task.clone()
                 }),
                 Err(Error::Input(_))
@@ -2083,7 +2102,7 @@ fn malformed_tasks_are_input_errors() {
             ..good.clone()
         },
         Pick {
-            grasps: vec![unnormalized],
+            grasps: vec![unnormalized.into()],
             ..good.clone()
         },
         Pick {
@@ -2187,7 +2206,7 @@ fn malformed_tasks_are_input_errors() {
     assert!(matches!(result, Err(Error::Input(_))), "{result:?}");
 }
 
-/// A grasp may keep the fingers narrower than loaded (`Pick::locked`): beside a post 2 cm off the
+/// A grasp may keep the fingers narrower than loaded (`Hold::locked`): beside a post 2 cm off the
 /// box, the open fingers closing along x come down on it and the pick fails, while fingers opened
 /// 1 cm each, where they close on the box, pass between them. In one call with an open pick between
 /// two narrow ones, each narrow pick plans as it does alone on a device for the robot relocked so,
@@ -2207,7 +2226,7 @@ fn a_pick_keeps_the_fingers_as_narrow_as_it_says() {
     let o = TaskOptions::default();
     let open = pick_from(&robot, vec![top()]);
     let narrowed = Pick {
-        locked: vec![narrow.clone()],
+        grasps: locked_at(&open.grasps, [narrow.clone()]),
         ..open.clone()
     };
     let calls = [narrowed.clone(), open.clone(), narrowed.clone()];
@@ -2246,8 +2265,10 @@ fn a_pick_keeps_the_fingers_as_narrow_as_it_says() {
     }
     // The same grasp three times, the fingers narrow for the second alone: the one plan is its.
     let mixed = Pick {
-        grasps: vec![top(); 3],
-        locked: vec![Default::default(), narrow.clone(), Default::default()],
+        grasps: locked_at(
+            &vec![Hold::from(top()); 3],
+            [Default::default(), narrow.clone(), Default::default()],
+        ),
         ..open.clone()
     };
     let each = batchplan::pick(&device, &worlds, &[open.clone(), mixed.clone()], &o).unwrap();
@@ -2261,7 +2282,7 @@ fn a_pick_keeps_the_fingers_as_narrow_as_it_says() {
     }
     // With every grasp's fingers open, each stops where the open pick's one does, in order.
     let open_thrice = Pick {
-        locked: vec![Default::default(); 3],
+        grasps: vec![Hold::from(top()); 3],
         ..mixed.clone()
     };
     let stopped = batchplan::pick(&device, &worlds, &[open_thrice], &o).unwrap();
@@ -2281,16 +2302,11 @@ fn a_pick_keeps_the_fingers_as_narrow_as_it_says() {
         [alone(&open), alone(&narrowed), alone(&open)]
     );
     assert_ne!(all.candidates[0], all.candidates[1]);
-    let uneven = Pick {
-        locked: vec![narrow; 2],
-        ..mixed
-    };
-    match batchplan::pick(&device, &worlds, &[open.clone(), uneven], &o) {
-        Err(Error::Input(message)) => assert!(message.contains("task 1"), "{message}"),
-        other => panic!("locked joints for two grasps of three are refused: {other:?}"),
-    }
     let bad = Pick {
-        locked: vec![[("panda_joint1".to_string(), 0.0)].into()],
+        grasps: locked_at(
+            &narrowed.grasps,
+            [[("panda_joint1".to_string(), 0.0)].into()],
+        ),
         ..narrowed.clone()
     };
     match batchplan::pick(&device, &worlds, &[narrowed.clone(), open, bad], &o) {
@@ -2356,7 +2372,7 @@ fn a_pick_stops_at_as_many_plans_as_will_do_in_its_grasps_order() {
             }
         }
         let none = Pick {
-            grasps: vec![top(); 100],
+            grasps: vec![Hold::from(top()); 100],
             ..every.clone()
         };
         let stopped = plans_of(&none).unwrap_err();
@@ -2376,8 +2392,10 @@ fn a_pick_stops_at_as_many_plans_as_will_do_in_its_grasps_order() {
         ]
         .into();
         let mixed = Pick {
-            grasps: vec![top(); 3],
-            locked: vec![Default::default(), narrow, Default::default()],
+            grasps: locked_at(
+                &vec![Hold::from(top()); 3],
+                [Default::default(), narrow, Default::default()],
+            ),
             enough: Some(1),
             ..every.clone()
         };
@@ -2395,110 +2413,106 @@ fn a_pick_stops_at_as_many_plans_as_will_do_in_its_grasps_order() {
     }
 }
 
+/// A hold at the gripper's loaded gap, or wider, keeps the fingers as loaded, so that a pick of
+/// such holds runs as one of poses; narrower, it locks them where the gripper says.
 #[test]
-fn a_failed_pick_tries_its_remaining_grasps_without_displacing_a_preferred_plan() {
+fn a_hold_at_the_loaded_gap_keeps_the_fingers_as_loaded() {
     let robot = common::panda().unwrap();
-    let options = TaskOptions::default();
-    let stopped = top();
-    let clear = top_across();
-    for device in common::devices(&robot) {
-        let worlds = device.upload(&[scene(vec![post()])]).unwrap();
-        let tasks = [
-            pick_from(&robot, vec![clear, clear]),
-            pick_from(&robot, vec![stopped, clear]),
-            pick_from(&robot, vec![stopped, stopped]),
-        ];
-        let mut first = tasks.clone();
-        for task in &mut first {
-            task.grasps.truncate(1);
+    let calibration = GripperCalibration::new(0.08, 0.0, common::panda_closed());
+    let gripper = robot.gripper(0, &calibration).unwrap();
+    for open in [gripper.opening(), 0.09] {
+        assert_eq!(Hold::new(top(), open, &gripper), Hold::from(top()));
+    }
+    let narrow = Hold::new(top(), 0.02, &gripper);
+    assert_eq!((narrow.pose, narrow.cost), (top(), 0.0));
+    assert_eq!(narrow.locked, gripper.locked_at(0.02));
+    assert!(!narrow.locked.is_empty());
+}
+
+/// A pick's plans come least cost first, the quickest among equals, and a cost changes nothing of
+/// what is tried: of the hundred grasps of which the sixth, the 41st, the 42nd and the 91st get
+/// through, every cost alike gives the plans and their order that costs of 0 give, quickest first
+/// as before costs; the 91st costing least comes first, the rest quickest first; and with two
+/// that will do, they are the first two in the grasps' order to get through, the cheaper first,
+/// whatever a later grasp costs. A cost that is not finite is refused, naming the grasp.
+#[test]
+fn a_picks_plans_come_least_cost_first_and_the_quickest_among_equals() {
+    let robot = common::panda().unwrap();
+    let o = TaskOptions::default();
+    let through = [5, 40, 41, 90];
+    let grasps = (0..100).map(|k| match through.contains(&k) {
+        true => top_across(),
+        false => top(),
+    });
+    let every = pick_from(&robot, grasps.collect());
+    let costing = |cost: &dyn Fn(usize) -> f32| {
+        let each = every.grasps.iter().enumerate();
+        Pick {
+            grasps: each
+                .map(|(k, h)| Hold {
+                    cost: cost(k),
+                    ..h.clone()
+                })
+                .collect(),
+            ..every.clone()
         }
-        let mut expected = batchplan::pick(&device, &worlds, &first, &options)
-            .unwrap()
-            .outcomes;
-        assert!(
-            expected[1].is_err() && expected[2].is_err(),
-            "two picks must try their second grasp"
-        );
-        let mut found =
-            batchplan::pick_with_preferred_grasps(&device, &worlds, &tasks, &[1; 3], &options)
-                .unwrap();
-        let refused = found.outcomes.pop().unwrap().unwrap_err();
-        assert_eq!(
-            refused.candidates.len(),
-            2,
-            "both groups must report their stop"
-        );
-        assert_eq!(
-            refused.candidates[0],
-            expected[2].as_ref().unwrap_err().candidates[0]
-        );
-        let recovered = found.outcomes.pop().unwrap().unwrap();
-        assert_eq!(
-            recovered[0].candidate, 1,
-            "the fallback retains its original index"
-        );
-        let ordinary = expected.remove(0).unwrap();
-        let plans = found.outcomes.pop().unwrap().unwrap();
-        assert_eq!(
-            plans.len(),
-            1,
-            "a preferred success excludes supplemental candidates"
-        );
-        assert_eq!(
-            plans[0].approach.control_points,
-            ordinary[0].approach.control_points
-        );
-        assert_eq!(
-            plans[0].depart.control_points,
-            ordinary[0].depart.control_points
-        );
-        assert_eq!(
-            found.problems[1].grasps.len(),
-            2,
-            "the result carries the whole task"
-        );
-        let narrow = std::collections::HashMap::from([
-            ("panda_finger_joint1".to_owned(), 0.01),
-            ("panda_finger_joint2".to_owned(), 0.01),
-        ]);
-        let different_locks = Pick {
-            locked: vec![Default::default(), narrow.clone()],
-            enough: Some(4),
-            ..pick_from(&robot, vec![stopped, stopped])
+    };
+    let candidates = |plans: &[TaskPlan]| plans.iter().map(|p| p.candidate).collect::<Vec<_>>();
+    for device in common::devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(&[scene(vec![post()])]).unwrap();
+        let plans_of = |task: &Pick| {
+            let result = batchplan::pick(&device, &worlds, std::slice::from_ref(task), &o);
+            result.unwrap().outcomes.remove(0).unwrap()
         };
-        let result = batchplan::pick_with_preferred_grasps(
-            &device,
-            &worlds,
-            &[different_locks],
-            &[1],
-            &options,
-        )
-        .unwrap();
-        let held = result.outcomes[0].as_ref().unwrap()[0]
-            .held
-            .as_ref()
-            .unwrap();
-        assert_eq!(
-            held.locked, narrow,
-            "the supplemental pick retains its own preshape"
-        );
-        assert!(matches!(
-            batchplan::pick_with_preferred_grasps(&device, &worlds, &tasks, &[1], &options),
-            Err(Error::Input(_))
-        ));
-        assert!(matches!(
-            batchplan::pick_with_preferred_grasps(&device, &worlds, &tasks, &[1, 3, 1], &options),
-            Err(Error::Input(_))
-        ));
-        let mut bad = tasks[0].clone();
-        bad.grasps[1].position.x = f32::NAN;
+        let free = plans_of(&every);
+        let quickest_first = free.windows(2).all(|w| {
+            let (a, b) = (w[0].duration(), w[1].duration());
+            a < b || (a == b && w[0].candidate < w[1].candidate)
+        });
         assert!(
-            matches!(
-                batchplan::pick_with_preferred_grasps(&device, &worlds, &[bad], &[1], &options),
-                Err(Error::Input(_))
-            ),
-            "an unused fallback must still be validated"
+            quickest_first && free.iter().all(|p| p.cost == 0.0),
+            "{name}"
         );
+        let alike = plans_of(&costing(&|_| 2.5));
+        assert_eq!(candidates(&alike), candidates(&free), "{name}");
+        for (a, b) in alike.iter().zip(&free) {
+            assert_eq!(a.cost, 2.5, "{name}");
+            assert_eq!(
+                a.approach.control_points, b.approach.control_points,
+                "{name}"
+            );
+            assert_eq!(a.depart.control_points, b.depart.control_points, "{name}");
+        }
+        let last_first = plans_of(&costing(&|k| if k == 90 { 0.0 } else { 1.0 }));
+        let rest: Vec<usize> = candidates(&free).into_iter().filter(|&k| k != 90).collect();
+        assert_eq!(candidates(&last_first)[0], 90, "{name}");
+        assert_eq!(candidates(&last_first)[1..], rest[..], "{name}");
+        for (cost, wanted) in [(40, [40, 5]), (90, [5, 40])] {
+            let two = Pick {
+                enough: Some(2),
+                ..costing(&|k| if k == cost { 0.0 } else { 1.0 })
+            };
+            let found = plans_of(&two);
+            let mut first_two = candidates(&found);
+            if cost == 90 {
+                first_two.sort_unstable();
+            }
+            assert_eq!(
+                first_two, wanted,
+                "{name}: the 91st costing least is not tried first"
+            );
+        }
+        let unbounded = costing(&|k| if k == 3 { f32::NAN } else { 0.0 });
+        match batchplan::pick(&device, &worlds, &[every.clone(), unbounded], &o) {
+            Err(Error::Input(message)) => {
+                assert!(
+                    message.contains("task 1: grasp 3") && message.contains("NaN"),
+                    "{message}"
+                )
+            }
+            other => panic!("{name}: a cost that is not finite is refused: {other:?}"),
+        }
     }
 }
 
@@ -2527,7 +2541,7 @@ fn seen(at: Vec3, half: Vec3, object: bool, s: &mut Surface) {
 /// across it would be in, so seen as it is it has no grasp. With fingers that may come in
 /// narrower it has, each with its opening, a surface's noise wider than the box to each finger,
 /// and one pick whose grasps lock the fingers there
-/// (`Pick::locked`) plans by them on every device; the same grasps with the fingers as loaded
+/// (`Hold::locked`) plans by them on every device; the same grasps with the fingers as loaded
 /// stop at the wall.
 #[test]
 fn grasps_whose_fingers_come_in_narrower_are_picked_beside_a_wall() {
@@ -2579,15 +2593,14 @@ fn grasps_whose_fingers_come_in_narrower_are_picked_beside_a_wall() {
                 .collect()
         };
         let in_box = Pose::new(at, Quat::IDENTITY).inverse();
+        let holds = found.iter().map(|g| Hold {
+            pose: in_box.mul_pose(g.pose),
+            locked: fingers(g.opening),
+            cost: 0.0,
+        });
         let task = Pick {
             support: vec![TABLE],
-            locked: found.iter().map(|g| fingers(g.opening)).collect(),
-            ..Pick::new(
-                0,
-                robot.default_q(),
-                BOX,
-                found.iter().map(|g| in_box.mul_pose(g.pose)).collect(),
-            )
+            ..Pick::new(0, robot.default_q(), BOX, holds)
         };
         let worlds = device.upload(std::slice::from_ref(&world)).unwrap();
         let o = TaskOptions::default();
@@ -2598,12 +2611,12 @@ fn grasps_whose_fingers_come_in_narrower_are_picked_beside_a_wall() {
         for plan in plans {
             assert_eq!(
                 plan.held.as_ref().unwrap().locked,
-                task.locked[plan.candidate],
+                task.grasps[plan.candidate].locked,
                 "{name}: held as its grasp came in"
             );
         }
         let as_loaded = Pick {
-            locked: vec![],
+            grasps: task.grasps.iter().map(|h| Hold::from(h.pose)).collect(),
             ..task
         };
         let result = batchplan::pick(&device, &worlds, &[as_loaded], &o).unwrap();
@@ -2699,16 +2712,19 @@ fn as_many_finger_openings_as_fill_a_stack_at_once_are_picked_by_in_one_call() {
             .collect()
     };
     let every = Pick {
-        locked: (0..2 * WAYS).map(|grasp| fingers(grasp / 2)).collect(),
-        ..pick_from(&robot, vec![top(); 2 * WAYS])
+        grasps: locked_at(
+            &vec![Hold::from(top()); 2 * WAYS],
+            (0..2 * WAYS).map(|grasp| fingers(grasp / 2)),
+        ),
+        ..pick_from(&robot, vec![])
     };
     let picked = batchplan::pick(&device, &worlds, std::slice::from_ref(&every), &o).unwrap();
     let plans = picked.outcomes[0].as_ref().unwrap();
     assert_eq!(plans.len(), 2 * WAYS);
     let last = plans.iter().find(|plan| plan.candidate == 2 * WAYS - 1);
     let alone = Pick {
-        locked: vec![fingers(WAYS - 1)],
-        ..pick_from(&robot, vec![top()])
+        grasps: locked_at(&[Hold::from(top())], [fingers(WAYS - 1)]),
+        ..pick_from(&robot, vec![])
     };
     let alone = batchplan::pick(&device, &worlds, &[alone], &o).unwrap();
     let alone = &alone.outcomes[0].as_ref().unwrap()[0];
@@ -2766,8 +2782,8 @@ fn a_place_lets_go_as_wide_as_it_has_room_to() {
         ];
         let worlds = device.upload(&scenes).unwrap();
         let held = Pick {
-            locked: vec![fingers(0.01)],
-            ..pick_from(&robot, vec![top()])
+            grasps: locked_at(&[Hold::from(top())], [fingers(0.01)]),
+            ..pick_from(&robot, vec![])
         };
         let picked = batchplan::pick(&device, &worlds, &[held], &o).unwrap();
         let picked = &picked.outcomes[0].as_ref().unwrap()[0];
@@ -2841,7 +2857,7 @@ fn a_place_lets_go_as_wide_as_it_has_room_to() {
         // Each place backs off in its own world: after one set down in the open, one whose
         // hand is in a block where it backs off stops there, though the first's world is clear.
         let aside = Place {
-            poses: vec![Pose::new(spot - Vec3::X * 0.15, Quat::IDENTITY)],
+            releases: vec![Pose::new(spot - Vec3::X * 0.15, Quat::IDENTITY).into()],
             ..unnamed.clone()
         };
         let blocked = Place {
@@ -2982,7 +2998,7 @@ fn a_place_stops_at_as_many_plans_as_will_do_in_its_poses_order() {
         same(both[1].as_ref().unwrap(), &through, "ten, beside one");
 
         let none = Place {
-            poses: vec![taken; 100],
+            releases: vec![taken.into(); 100],
             ..every.clone()
         };
         let stopped = plans_of(std::slice::from_ref(&none)).outcomes.remove(0);
@@ -3155,7 +3171,7 @@ fn the_release_sweep_stops_a_palm_below_the_falling_object() {
         };
         assert!(plan(&task).is_ok(), "the palm is clear at release");
         let falling = Place {
-            falls: vec![0.1],
+            releases: dropping(&task.releases, [0.1]),
             ..task.clone()
         };
         let stopped = plan(&falling).expect_err("the drop passes through the palm");
@@ -3165,8 +3181,12 @@ fn the_release_sweep_stops_a_palm_below_the_falling_object() {
     }
 }
 
+/// Holds costing their grasps' unseen span (`Grasp::unseen_span`) pick those closing on two seen
+/// patches first, then those of the least span: of seven holds alike but for what their grasps
+/// saw, the four seen on both sides, then the two one-sided across 2.5 cm, then the one across
+/// 6.5 cm. A span that is not finite is refused as the hold's cost.
 #[test]
-fn completed_picks_can_prefer_tightly_measured_contacts() {
+fn completed_picks_prefer_tightly_measured_contacts_by_their_cost() {
     let robot = common::panda().unwrap();
     let device = Device::cpu_threads(&robot, 1).unwrap();
     let world = scene(vec![]);
@@ -3188,14 +3208,8 @@ fn completed_picks_can_prefer_tightly_measured_contacts() {
     .unwrap();
     let observed = found[0].pop().expect("the box has opposed measured faces");
     assert!(!observed.one_sided);
+    assert_eq!(observed.unseen_span(), 0.0);
 
-    let worlds = device.upload(&[world]).unwrap();
-    let pick = pick_from(&robot, vec![top_across()]);
-    let mut result = batchplan::pick(&device, &worlds, &[pick], &TaskOptions::default()).unwrap();
-    let plan = result.outcomes.pop().unwrap().unwrap().pop().unwrap();
-
-    // A sparse set of returned plans. The two grasps with both contacts measured and the two equal
-    // one-sided spans must keep their incoming order even though their indices are reversed.
     let mut grasps = [observed; 7];
     grasps[6].contacts = [Vec3::ZERO, Vec3::Y * 0.075];
     grasps[2].contacts = [Vec3::ZERO, Vec3::Y * 0.010];
@@ -3203,37 +3217,42 @@ fn completed_picks_can_prefer_tightly_measured_contacts() {
         grasps[index].one_sided = true;
         grasps[index].contacts = [Vec3::ZERO, Vec3::Y * width];
     }
-    let mut plans: Vec<_> = [0, 6, 5, 3, 2]
-        .map(|candidate| {
-            let mut p = plan.clone();
-            p.candidate = candidate;
-            p
-        })
-        .into();
-    let indices = |plans: &[TaskPlan]| plans.iter().map(|p| p.candidate).collect::<Vec<_>>();
-    let original = indices(&plans);
-    assert!(matches!(
-        batchplan::prefer_measured_contacts(&mut plans, &grasps[..6]),
-        Err(Error::Input(_))
-    ));
-    assert_eq!(indices(&plans), original);
+    let spans = [0.065, 0.0, 0.0, 0.025, 0.0, 0.025, 0.0];
+    for (g, span) in grasps.iter().zip(spans) {
+        assert!((g.unseen_span() - span).abs() < 1e-7, "{g:?}");
+    }
+    let worlds = device.upload(&[world]).unwrap();
+    let held = |grasps: &[batchplan::Grasp]| {
+        let each = grasps.iter().map(|g| Hold {
+            cost: g.unseen_span(),
+            ..Hold::from(top_across())
+        });
+        Pick {
+            grasps: each.collect(),
+            ..pick_from(&robot, vec![])
+        }
+    };
+    let o = TaskOptions::default();
+    let mut result = batchplan::pick(&device, &worlds, &[held(&grasps)], &o).unwrap();
+    let plans = result.outcomes.remove(0).unwrap();
+    let lot = |range: std::ops::Range<usize>| {
+        let mut lot: Vec<usize> = plans[range].iter().map(|p| p.candidate).collect();
+        lot.sort_unstable();
+        lot
+    };
+    assert_eq!(
+        (lot(0..4), lot(4..6), lot(6..7)),
+        (vec![1, 2, 4, 6], vec![3, 5], vec![0])
+    );
     let mut invalid = grasps;
     invalid[3].contacts[1].y = f32::NAN;
-    assert!(matches!(
-        batchplan::prefer_measured_contacts(&mut plans, &invalid),
-        Err(Error::Input(_))
-    ));
-    assert_eq!(indices(&plans), original);
-    batchplan::prefer_measured_contacts(&mut plans, &grasps).unwrap();
-    assert_eq!(indices(&plans), [6, 2, 5, 3, 0]);
-    batchplan::prefer_measured_contacts(&mut plans[4..], &grasps).unwrap();
-    assert_eq!(
-        plans[4].candidate, 0,
-        "the only feasible wide span remains available"
-    );
+    match batchplan::pick(&device, &worlds, &[held(&invalid)], &o) {
+        Err(Error::Input(message)) => assert!(message.contains("grasp 3"), "{message}"),
+        other => panic!("a span that is not finite is refused: {other:?}"),
+    }
 }
 
-/// Where the box is set down in the tests of `place_nearest`: beside a post, and in the open.
+/// Where the box is set down in the tests of releases' costs: beside a post, and in the open.
 const BESIDE: Vec3 = Vec3::new(0.45, -0.2, HALF.z);
 const OPEN: Vec3 = Vec3::new(0.5, -0.05, HALF.z);
 
@@ -3259,7 +3278,12 @@ fn holds(device: &Device, worlds: &Worlds, robot: &Robot, grasps: &[Pose]) -> Ve
         let plan = outcome.unwrap().remove(0);
         Place {
             support: vec![TABLE],
-            ..Place::new(1, plan.end(), plan.held.clone().unwrap(), vec![])
+            ..Place::new(
+                1,
+                plan.end(),
+                plan.held.clone().unwrap(),
+                Vec::<Release>::new(),
+            )
         }
     });
     each.collect()
@@ -3271,11 +3295,24 @@ fn off(plan: &TaskPlan, near: Vec3) -> f32 {
     at.truncate().distance(near.truncate())
 }
 
+/// `poses` as releases, each costing its distance in x and y from `near`.
+fn costing_from(near: Vec3, poses: &[Pose]) -> Vec<Release> {
+    let each = poses.iter().map(|&pose| Release {
+        cost: pose.position.truncate().distance(near.truncate()),
+        ..Release::from(pose)
+    });
+    each.collect()
+}
+
+/// Of places of the box from two holds, each releasing it beside the post or in the open, each
+/// release costing how far it is from the spot beside the post and one plan doing: the hold
+/// closing along x stops beside the post and gives the one in the open, the one closing along y
+/// sets it down beside the post, and the least of their first plans' costs is that one's.
 #[test]
-fn of_several_holds_the_one_that_sets_the_box_down_nearest_the_spot_wins() {
+fn of_several_holds_the_least_first_plan_cost_sets_the_box_down_nearest_the_spot() {
     let robot = common::panda().unwrap();
     let o = TaskOptions::default();
-    let poses = vec![
+    let poses = [
         Pose::new(BESIDE, Quat::IDENTITY),
         Pose::new(OPEN, Quat::IDENTITY),
     ];
@@ -3286,7 +3323,7 @@ fn of_several_holds_the_one_that_sets_the_box_down_nearest_the_spot_wins() {
         let tasks = holds(&device, &worlds, &robot, &[top(), top_across()])
             .into_iter()
             .map(|t| Place {
-                poses: poses.clone(),
+                releases: costing_from(BESIDE, &poses),
                 enough: Some(1),
                 ..t
             });
@@ -3295,26 +3332,19 @@ fn of_several_holds_the_one_that_sets_the_box_down_nearest_the_spot_wins() {
         let first = |t: usize| &each.outcomes[t].as_ref().unwrap()[0];
         assert_eq!((first(0).candidate, first(1).candidate), (1, 0), "{name}");
         assert!(
-            off(first(0), BESIDE) > off(first(1), BESIDE) + 0.1,
+            (first(0).cost - off(first(0), BESIDE)).abs() < 1e-6,
             "{name}"
         );
-
-        let chosen = batchplan::place_nearest(&device, &worlds, &tasks, BESIDE, &o).unwrap();
-        let chosen = chosen.unwrap();
-        assert_eq!((chosen.task, chosen.plan.candidate), (1, 0), "{name}");
-        assert_eq!(chosen.problem.held, tasks[1].held, "{name}");
-        assert_eq!(chosen.plan.placed, first(1).placed, "{name}");
-        if name.starts_with("cpu") {
-            assert_eq!(
-                chosen.plan.approach.control_points,
-                first(1).approach.control_points
-            );
-        }
+        assert_eq!(first(1).cost, 0.0, "{name}");
+        let least = (0..tasks.len()).min_by(|&a, &b| first(a).cost.total_cmp(&first(b).cost));
+        assert_eq!(least, Some(1), "{name}");
     }
 }
 
+/// Releases alike in cost come quickest first, not in their order: the box at the same spot both
+/// ways round, from either hold, each pair costing alike and given the slower first.
 #[test]
-fn equally_near_alternatives_keep_the_earlier_task_and_its_quicker_plan() {
+fn releases_alike_in_cost_come_quickest_first() {
     let robot = common::panda().unwrap();
     let o = TaskOptions::default();
     let near = OPEN + Vec3::new(0.03, 0.04, 0.0);
@@ -3323,250 +3353,93 @@ fn equally_near_alternatives_keep_the_earlier_task_and_its_quicker_plan() {
         let worlds = device.upload(&[scene(vec![]), place_scene()]).unwrap();
         let tasks = holds(&device, &worlds, &robot, &[top_across(), top()])
             .into_iter()
-            .map(|t| Place {
-                // The box at the same spot both ways round.
-                poses: batchplan::place_poses(&t.held.object, Pose::new(OPEN, Quat::IDENTITY), 1),
-                ..t
+            .map(|t| {
+                let both =
+                    batchplan::place_poses(&t.held.object, Pose::new(OPEN, Quat::IDENTITY), 1);
+                Place {
+                    releases: costing_from(near, &both),
+                    ..t
+                }
             });
         let tasks: Vec<Place> = tasks.collect();
         let each = batchplan::place(&device, &worlds, &tasks, &o).unwrap();
-        for outcome in &each.outcomes {
-            assert_eq!(outcome.as_ref().unwrap().len(), 2, "{name}: both ways");
-        }
-        let chosen = batchplan::place_nearest(&device, &worlds, &tasks, near, &o).unwrap();
-        let chosen = chosen.unwrap();
-        assert_eq!(chosen.task, 0, "{name}");
-        let quickest = &each.outcomes[0].as_ref().unwrap()[0];
-        assert_eq!(chosen.plan.candidate, quickest.candidate, "{name}");
-
-        let swapped = [tasks[1].clone(), tasks[0].clone()];
-        let chosen = batchplan::place_nearest(&device, &worlds, &swapped, near, &o).unwrap();
-        let chosen = chosen.unwrap();
-        assert_eq!(chosen.task, 0, "{name}");
-        assert_eq!(chosen.problem.held, tasks[1].held, "{name}");
-    }
-}
-
-#[test]
-fn an_alternative_that_gets_nowhere_is_passed_over_and_where_none_gets_anywhere_each_says_why() {
-    let robot = common::panda().unwrap();
-    let o = TaskOptions::default();
-    let far = Pose::new(Vec3::new(2.0, 0.0, HALF.z), Quat::IDENTITY);
-    for device in common::devices(&robot) {
-        let name = device.name();
-        let worlds = device.upload(&[scene(vec![]), place_scene()]).unwrap();
-        let from = holds(&device, &worlds, &robot, &[top(), top_across()]);
-        let at = |t: &Place, poses: Vec<Pose>| Place {
-            poses,
-            enough: Some(1),
-            ..t.clone()
-        };
-        let beside = vec![Pose::new(BESIDE, Quat::IDENTITY)];
-        // The hold closing along x sets the box down beside the post nowhere.
-        let tasks = [at(&from[0], beside.clone()), at(&from[1], beside)];
-        let each = batchplan::place(&device, &worlds, &tasks, &o).unwrap();
-        assert!(
-            each.outcomes[0].is_err() && each.outcomes[1].is_ok(),
-            "{name}"
-        );
-        let chosen = batchplan::place_nearest(&device, &worlds, &tasks, OPEN, &o).unwrap();
-        let chosen = chosen.unwrap();
-        assert_eq!((chosen.task, chosen.plan.candidate), (1, 0), "{name}");
-
-        // Out of reach: once, and twice.
-        let nowhere = [at(&from[1], vec![far]), at(&from[0], vec![far, far])];
-        let each = batchplan::place(&device, &worlds, &nowhere, &o).unwrap();
-        let failed = batchplan::place_nearest(&device, &worlds, &nowhere, OPEN, &o).unwrap();
-        let failed = failed.unwrap_err();
-        let lengths: Vec<usize> = failed.iter().map(|f| f.candidates.len()).collect();
-        assert_eq!(lengths, [1, 2], "{name}");
-        for (failure, outcome) in failed.iter().zip(&each.outcomes) {
-            assert_eq!(Some(failure), outcome.as_ref().err(), "{name}");
-        }
-        // Nearer the spot, beside the post, and out of reach: each stop keeps its pose's number.
-        let mixed = [at(&from[0], vec![far, Pose::new(BESIDE, Quat::IDENTITY)])];
-        let each = batchplan::place(&device, &worlds, &mixed, &o).unwrap();
-        let failed = batchplan::place_nearest(&device, &worlds, &mixed, OPEN, &o).unwrap();
-        let kinds = |failure: &TaskFailure| {
-            let unreachable =
-                |c: &CandidateStop| matches!(c.why, Some(ToolPathStop::Unreachable { .. }));
-            let kinds = failure.candidates.iter().map(|c| (c.step, unreachable(c)));
-            kinds.collect::<Vec<_>>()
-        };
-        let given = kinds(each.outcomes[0].as_ref().unwrap_err());
-        assert_ne!(given[0], given[1], "{name}: the poses stop alike");
-        assert_eq!(kinds(&failed.unwrap_err()[0]), given, "{name}");
-
-        let none = batchplan::place_nearest(&device, &worlds, &[], OPEN, &o).unwrap();
-        assert!(
-            none.unwrap_err().is_empty(),
-            "{name}: none given, none fails"
-        );
-    }
-}
-
-#[test]
-fn the_spot_is_measured_in_x_and_y_from_where_the_box_lands() {
-    let robot = common::panda().unwrap();
-    let o = TaskOptions::default();
-    // Far under the spot: a z the poses' heights would rank the other way round.
-    let near = OPEN - Vec3::Z * 0.4;
-    // Let go of 10 cm up and falling 4 cm, 3 cm from the spot; or set on the table 5 cm from it.
-    // A fall moves the landing down alone: in x and y it is where the hand lets go.
-    let high = Pose::new(OPEN + Vec3::new(-0.03, 0.0, 0.1), Quat::IDENTITY);
-    let low = Pose::new(OPEN + Vec3::X * 0.05, Quat::IDENTITY);
-    for device in common::devices(&robot) {
-        let name = device.name();
-        let worlds = device.upload(&[scene(vec![]), place_scene()]).unwrap();
-        let task = Place {
-            poses: vec![high, low],
-            falls: vec![0.04, 0.0],
-            ..holds(&device, &worlds, &robot, &[top_across()]).remove(0)
-        };
-        let task = std::slice::from_ref(&task);
-        let each = batchplan::place(&device, &worlds, task, &o).unwrap();
-        let plans = each.outcomes[0].as_ref().unwrap();
-        assert_eq!(plans.len(), 2, "{name}: both poses get through");
-        let by = |k: usize| plans.iter().find(|p| p.candidate == k).unwrap();
-        let landing = |k: usize| by(k).placed.as_ref().unwrap().pose().position;
-        assert!(landing(0).distance(high.position - Vec3::Z * 0.04) < 1e-6);
-        assert!(off(by(0), near) < off(by(1), near), "{name}");
-        assert!(
-            landing(1).distance(near) < landing(0).distance(near),
-            "{name}: in three dimensions, the low one is nearer"
-        );
-        let chosen = batchplan::place_nearest(&device, &worlds, task, near, &o).unwrap();
-        let chosen = chosen.unwrap();
-        assert_eq!((chosen.task, chosen.plan.candidate), (0, 0), "{name}");
-        assert_eq!(chosen.plan.placed, by(0).placed, "{name}");
-    }
-}
-
-#[test]
-fn a_spot_that_is_not_finite_or_a_malformed_alternative_is_an_input_error() {
-    let robot = common::panda().unwrap();
-    let held = Held {
-        hand: 0,
-        object: Obstacle::cuboid(Vec3::ZERO, HALF),
-        grasp: top(),
-        locked: Default::default(),
-        spheres: Default::default(),
-    };
-    let task = Place {
-        support: vec![TABLE],
-        ..Place::new(
-            0,
-            robot.default_q(),
-            held,
-            vec![Pose::new(OPEN, Quat::IDENTITY)],
-        )
-    };
-    let o = TaskOptions::default();
-    for device in common::devices(&robot) {
-        let worlds = device.upload(&[place_scene()]).unwrap();
-        let tasks = [task.clone(), task.clone()];
-        for near in [
-            Vec3::new(f32::NAN, 0.0, 0.0),
-            Vec3::new(0.5, f32::INFINITY, 0.0),
-            Vec3::new(0.5, 0.0, f32::NEG_INFINITY),
-        ] {
-            match batchplan::place_nearest(&device, &worlds, &tasks, near, &o) {
-                Err(Error::Input(message)) => {
-                    assert!(message.contains(&near.to_string()), "{message}")
-                }
-                other => panic!("a spot at {near} is refused: {other:?}"),
-            }
-        }
-        let malformed = [
-            task.clone(),
-            Place {
-                enough: Some(0),
-                ..task.clone()
-            },
-        ];
-        match batchplan::place_nearest(&device, &worlds, &malformed, OPEN, &o) {
-            Err(Error::Input(message)) => assert!(message.contains("task 1"), "{message}"),
-            other => panic!("no plans being enough is refused: {other:?}"),
-        }
-    }
-}
-
-#[test]
-fn a_task_that_wants_one_plan_tries_its_poses_nearest_the_spot_first() {
-    let robot = common::panda().unwrap();
-    let o = TaskOptions::default();
-    for device in common::devices(&robot) {
-        let name = device.name();
-        let worlds = device.upload(&[scene(vec![]), place_scene()]).unwrap();
-        // Closing along y, the box goes down beside the post, and let go of 2 cm over the table in
-        // the open.
-        let every = Place {
-            poses: vec![
-                Pose::new(BESIDE, Quat::IDENTITY),
-                Pose::new(OPEN + Vec3::Z * 0.02, Quat::IDENTITY),
-            ],
-            falls: vec![0.0, 0.02],
-            ..holds(&device, &worlds, &robot, &[top_across()]).remove(0)
-        };
-        let one = Place {
-            enough: Some(1),
-            ..every.clone()
-        };
-        let each = batchplan::place(&device, &worlds, std::slice::from_ref(&one), &o).unwrap();
-        let plans = each.outcomes[0].as_ref().unwrap();
-        assert_eq!(plans.len(), 1, "{name}");
-        assert!(
-            plans[0].candidate == 0 && off(&plans[0], OPEN) > 0.1,
-            "{name}: in the poses' order, the one beside the post"
-        );
-        for task in [every, one] {
-            let tasks = std::slice::from_ref(&task);
-            let chosen = batchplan::place_nearest(&device, &worlds, tasks, OPEN, &o).unwrap();
-            let chosen = chosen.unwrap();
-            assert_eq!(chosen.plan.candidate, 1, "{name}: numbered as given");
-            let landing = chosen.plan.placed.as_ref().unwrap().pose().position;
+        // Each task's releases again, the quicker of the two last.
+        let slower_first = tasks.iter().zip(&each.outcomes).map(|(t, outcome)| {
+            let plans = outcome.as_ref().unwrap();
+            assert_eq!(plans.len(), 2, "{name}: both ways");
             assert!(
-                landing.distance(OPEN) < 1e-3,
-                "{name}: on the table at the spot, {} m off",
-                landing.distance(OPEN)
+                plans[0].duration() < plans[1].duration(),
+                "{name}: one is quicker"
             );
-            assert!(chosen.plan.falling.is_some(), "{name}");
-            assert_eq!(chosen.problem.poses, task.poses, "{name}");
-            assert_eq!(chosen.problem.falls, task.falls, "{name}");
+            let order = [plans[1].candidate, plans[0].candidate];
+            Place {
+                releases: order.map(|k| t.releases[k]).to_vec(),
+                ..t.clone()
+            }
+        });
+        let slower_first: Vec<Place> = slower_first.collect();
+        let again = batchplan::place(&device, &worlds, &slower_first, &o).unwrap();
+        for outcome in &again.outcomes {
+            let plans = outcome.as_ref().unwrap();
+            assert_eq!(plans[0].cost, plans[1].cost, "{name}");
+            assert_eq!(
+                (plans[0].candidate, plans[1].candidate),
+                (1, 0),
+                "{name}: the later, quicker first"
+            );
         }
     }
 }
 
+/// A place that wants one plan tries its releases in their order, whatever they cost: given
+/// beside the post and then in the open, it gives the one beside the post; given nearest the open
+/// spot first, as `rests_on` gives them about a point, the one in the open, let go of 2 cm over
+/// the table and falling there, numbered as given.
 #[test]
-fn the_nearest_in_x_and_y_wins_over_the_nearest_in_x_alone() {
+fn a_place_that_wants_one_plan_tries_its_releases_in_their_order() {
     let robot = common::panda().unwrap();
     let o = TaskOptions::default();
-    // 3 cm off the spot along x, and 5 cm off it along y.
-    let poses = vec![
-        Pose::new(OPEN + Vec3::X * 0.03, Quat::IDENTITY),
-        Pose::new(OPEN + Vec3::Y * 0.05, Quat::IDENTITY),
-    ];
-    let both = |pose: &Pose| pose.position.truncate().distance(OPEN.truncate());
-    let along_x = |pose: &Pose| (pose.position.x - OPEN.x).abs();
-    assert!(both(&poses[0]) < both(&poses[1]) && along_x(&poses[1]) < along_x(&poses[0]));
+    let beside = Release::from(Pose::new(BESIDE, Quat::IDENTITY));
+    let open = Release {
+        drop: 0.02,
+        ..Release::from(Pose::new(OPEN + Vec3::Z * 0.02, Quat::IDENTITY))
+    };
     for device in common::devices(&robot) {
         let name = device.name();
         let worlds = device.upload(&[scene(vec![]), place_scene()]).unwrap();
-        let every = Place {
-            poses: poses.clone(),
-            ..holds(&device, &worlds, &robot, &[top_across()]).remove(0)
-        };
-        let each = batchplan::place(&device, &worlds, std::slice::from_ref(&every), &o).unwrap();
-        assert_eq!(each.outcomes[0].as_ref().unwrap().len(), 2, "{name}: both");
-        for enough in [None, Some(1)] {
+        // Closing along y, the box goes down beside the post, and in the open.
+        let from = holds(&device, &worlds, &robot, &[top_across()]).remove(0);
+        let first_of = |releases: Vec<Release>| {
             let task = Place {
-                enough,
-                ..every.clone()
+                releases,
+                enough: Some(1),
+                ..from.clone()
             };
-            let tasks = std::slice::from_ref(&task);
-            let chosen = batchplan::place_nearest(&device, &worlds, tasks, OPEN, &o).unwrap();
-            assert_eq!(chosen.unwrap().plan.candidate, 0, "{name}, {enough:?}");
-        }
+            let each = batchplan::place(&device, &worlds, std::slice::from_ref(&task), &o).unwrap();
+            let mut plans = each.outcomes.into_iter().next().unwrap().unwrap();
+            assert_eq!(plans.len(), 1, "{name}");
+            plans.remove(0)
+        };
+        let given = first_of(costing_from(OPEN, &[beside.pose, open.pose]));
+        assert!(
+            given.candidate == 0 && off(&given, OPEN) > 0.1,
+            "{name}: in the releases' order, the one beside the post"
+        );
+        let nearest = first_of(vec![
+            Release { cost: 0.0, ..open },
+            Release {
+                cost: off(&given, OPEN),
+                ..beside
+            },
+        ]);
+        assert_eq!(nearest.candidate, 0, "{name}: numbered as given");
+        let landing = nearest.placed.as_ref().unwrap().pose().position;
+        assert!(
+            landing.distance(OPEN) < 1e-3,
+            "{name}: on the table at the spot, {} m off",
+            landing.distance(OPEN)
+        );
+        assert!(nearest.falling.is_some(), "{name}");
     }
 }
 
@@ -3577,13 +3450,11 @@ fn a_place_checks_which_device_prepared_its_worlds_with_no_tasks_too() {
     let other = Device::cpu(&robot).unwrap();
     let worlds = other.upload(&[place_scene()]).unwrap();
     let o = TaskOptions::default();
-    let placed = batchplan::place(&device, &worlds, &[], &o).map(drop);
-    let nearest = batchplan::place_nearest(&device, &worlds, &[], OPEN, &o).map(drop);
-    for result in [placed, nearest] {
-        let error = result.unwrap_err();
-        assert!(
-            matches!(error, Error::Input(_)) && error.to_string().contains("different device"),
-            "{error}"
-        );
-    }
+    let error = batchplan::place(&device, &worlds, &[], &o)
+        .map(drop)
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::Input(_)) && error.to_string().contains("different device"),
+        "{error}"
+    );
 }

@@ -500,7 +500,7 @@ fn every_task_corrects_its_start_and_preserves_the_start_collision_failure() {
             transit: false,
             ..place.clone()
         };
-        alone_place.poses[0].position += Vec3::Z;
+        alone_place.releases[0].pose.position += Vec3::Z;
         let picked = batchplan::pick(&device, &worlds, &[alone_pick], &o).unwrap();
         let placed = batchplan::place(&device, &worlds, &[alone_place], &o).unwrap();
         assert_eq!(picked.problems[0].start, corrected);

@@ -235,9 +235,7 @@ fn draw(
     let search = GripSearch { target: Some(GripTarget::Point(point)), ..GripSearch::default() };
     prepared.plan(grasps, &search, &TaskOptions::default(), should_stop, |c| {
         c.touches.extend_from_slice(mounted);
-        let mut task = c.pull(q, outward, distance);
-        task.locked = vec![gripper.locked_at(c.candidate.opening)];
-        task
+        c.pull(q, outward, distance)
     })
 }
 ```
@@ -247,9 +245,11 @@ projecting candidate worlds. A certified rejection reports `GripStop::OutsideRea
 original candidate index. Other candidates proceed in their supplied order. Arms with prismatic
 or relockable joints along the hand's chain use the ordinary search.
 
-The search keeps `batch` candidate worlds in flight plus the requested winners. The first
-`enough` feasible candidates in input order are returned quickest first, with their original
-indices, finger openings and exact locked joint settings. `GripPlan::world(stage)` gives the collision world to follow each
+The search keeps `batch` candidate worlds in flight plus the requested winners. Each task the
+constructors give holds its grasp with the fingers at its opening (`batchplan::Hold::new`).
+The first `enough` feasible candidates in input order are returned least cost first, the quickest
+among equals, with their original indices, finger openings and exact locked joint settings
+(an empty map where the fingers are as loaded). `GripPlan::world(stage)` gives the collision world to follow each
 motion against, with its touch permissions and obstacle names. Failed motions carry their own
 obstacle names. When another object stands on a pick target, `GripPlans::blocked` names the
 target and the objects it supports once, before any candidate world is projected. The result counts actual batched solver calls. A cancellation yields `GripOutcome::Interrupted`, including any work completed.
@@ -329,7 +329,8 @@ slanted panel, gives none. The last is the grasps of the measured surface
 those showing `BothSides` first, each at its own opening, and then the remaining shape grips
 whose evidence is `Incomplete`. An empty group is left out. Fully open is
 the gripper's loaded gap; what a grasp closes across is at most its capacity. The poses are in the
-observation frame, and `Turn::grasps` takes them in the turned obstacle's. The evidence is the
+observation frame, and `Turn::grasps` takes them in the turned obstacle's, each a
+`batchplan::Hold::new(to_object.mul_pose(grip.pose), grip.opening, &gripper)`. The evidence is the
 latest endpoints' alone: it says nothing of hidden material, of contact normals or of whether
 the control turns about that line. Plan each motion against the current world and guard it in
 execution.

@@ -43,8 +43,11 @@ pub struct RestProblem {
     /// spots as cells lie within the spacing of the point, 77 at the defaults. With
     /// [`RestOptions::look_closer`] it also says which place where the object nearly rests is
     /// looked at closer at every turn: the one nearest it. None looks closer only where no spot
-    /// rests, about the middle of the support. [`falls_into`](crate::falls_into) reads it only
-    /// with `look_closer`, and looks closer about the point itself.
+    /// rests, about the middle of the support. [`falls_into`](crate::falls_into) looks closer,
+    /// with `look_closer`, about the point itself. With it the rests and falls come nearest it
+    /// first, in x and y, each costing that distance ([`Rest::cost`], [`Fall::cost`]).
+    ///
+    /// [`Fall::cost`]: crate::Fall::cost
     pub near: Option<Vec3>,
 }
 
@@ -148,9 +151,10 @@ impl Default for RestOptions {
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Rest {
-    /// The object's frame where it rests, in the surface's frame: one of [`Place::poses`].
+    /// The object's frame where it rests, in the surface's frame: where a place sets it down
+    /// ([`Release::from`]).
     ///
-    /// [`Place::poses`]: crate::Place::poses
+    /// [`Release::from`]: crate::Release
     pub pose: Pose,
     /// What it touches: the corners of the convex hull, seen from above, of the support's points
     /// that touch it, anticlockwise from above, each at its height.
@@ -161,6 +165,21 @@ pub struct Rest {
     /// edge of what that face touches and the friction's, and elsewhere it is found to half a
     /// degree, from below.
     pub tipping: f32,
+    /// How far it rests from the problem's [`near`](RestProblem::near), in x and y (meters), by
+    /// which the rests come nearest it first: 0 where the problem has none. A place's release
+    /// takes it as its cost.
+    pub cost: f32,
+}
+
+/// Setting the object down where it rests, at the rest's cost.
+impl From<&Rest> for crate::Release {
+    fn from(rest: &Rest) -> Self {
+        Self {
+            pose: rest.pose,
+            drop: 0.0,
+            cost: rest.cost,
+        }
+    }
 }
 
 /// The most spots one surface's support may spread over: past it, space them wider.
@@ -195,12 +214,14 @@ const SPREAD: usize = 1024;
 /// object's rest is checked: the hand that sets it down and its way there are
 /// [`place`](crate::place)'s to check, with what the object may touch as its `support`.
 ///
-/// They come at every turn, in an order whose first few are worth trying first: every spot at
-/// the first turn, then every spot at the next, and within a turn, the steadiest first and then
-/// each the farthest from those before it, so the first few spread over the support; past the
-/// first 1,024 of a turn, as their spots come. The problems run in parallel on the device's
-/// threads, each surface read once however many problems name it, and a
-/// problem's rests are the same alone and among others.
+/// They come at every turn, in an order whose first few are worth trying first: every spot at the
+/// first turn, then every spot at the next, and within a turn, the steadiest first and then each
+/// the farthest from those before it, so the first few spread over the support; past the first
+/// 1,024 of a turn, as their spots come. Where the problem says where it would have the object
+/// ([`RestProblem::near`]), they come nearest that first instead, in x and y, those as near in that
+/// order, each costing its distance ([`Rest::cost`]). The problems run in parallel on the device's
+/// threads, each surface read once however many problems name it, and a problem's rests are the
+/// same alone and among others.
 pub fn rests_on(
     device: &Device,
     problems: &[RestProblem],
@@ -496,6 +517,7 @@ impl Setting<'_> {
             pose: Pose::new(center, rotation),
             support: s.statics.support(&s.contacts),
             tipping,
+            cost: 0.0,
         };
         Outcome::Rests(rest, rolled)
     }
@@ -644,7 +666,38 @@ fn on(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Rest> {
         pose: Pose::new(r.pose.position, turn),
         ..r.clone()
     };
-    at_every_turn(found, &problem.turns, &problem.first, turned)
+    let mut rests = at_every_turn(found, &problem.turns, &problem.first, turned);
+    nearest_first(&mut rests, p.near, |r| r.pose.position, |r| &mut r.cost);
+    rests
+}
+
+/// Where `near` is given, `found` nearest it first in x and y, those as near in the order they
+/// came, each costing its distance (`cost`); else as they came, at the cost they have.
+pub(super) fn nearest_first<T>(
+    found: &mut [T],
+    near: Option<Vec3>,
+    at: impl Fn(&T) -> Vec3,
+    cost: impl Fn(&mut T) -> &mut f32,
+) {
+    if near.is_none() {
+        return;
+    }
+    let off = |t: &T| cost_from(near, at(t));
+    found.sort_by(|a, b| off(a).total_cmp(&off(b)));
+    for t in found {
+        let distance = off(t);
+        *cost(t) = distance;
+    }
+}
+
+/// How far `at` lies from `near` in x and y, as a rest or a fall there costs: 0 without a point.
+/// A distance past the largest finite number, as of a point that far off both ways, is held to
+/// it, so that every cost is finite.
+pub(super) fn cost_from(near: Option<Vec3>, at: Vec3) -> f32 {
+    near.map_or(0.0, |near| {
+        let d = at.truncate() - near.truncate();
+        d.x.hypot(d.y).min(f32::MAX)
+    })
 }
 
 /// The turns `o` gives of `rotation`, and for each the first that sets `shape` down as it does:
@@ -1124,6 +1177,7 @@ fn failure(
                 pose,
                 support,
                 tipping: s.tipping,
+                cost: cost_from(p.near, pose.position),
             },
             by: blocking.expect("a point in the way of what is blocked"),
         },
@@ -1181,6 +1235,7 @@ mod tests {
             pose: Pose::IDENTITY,
             support: vec![],
             tipping: 0.1,
+            cost: 0.0,
         };
         let each = rows.iter().flat_map(|row| row.chars());
         let outcomes = each

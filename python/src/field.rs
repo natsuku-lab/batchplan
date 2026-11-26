@@ -270,12 +270,13 @@ impl Field for [f32; 2] {
 
 /// Declares a frozen Python class around a batchplan value type: a getter per field (its doc the
 /// property's), `replace(**changes)`, a `repr` in constructor form, and the [`Field`] conversion
-/// that lets other classes hold it. Every field of the Rust struct is named, as a getter or under
+/// that lets other classes hold it, which with `or Other` also takes what `Other` takes and
+/// turns it into the value (`From`). Every field of the Rust struct is named, as a getter or under
 /// `hidden`, so a field added to it fails to build here until the class covers it.
 macro_rules! value_class {
     (
         $(#[$meta:meta])*
-        $name:ident($($inner:ident)::+) {
+        $name:ident($($inner:ident)::+) $(or $($other:ident)::+)? {
             $( $(#[$fmeta:meta])* $field:ident: $ty:ty ),* $(,)?
         }
         $( hidden { $( $hidden:ident ),* $(,)? } )?
@@ -352,7 +353,16 @@ macro_rules! value_class {
                 Ok(Bound::new(py, $name(self.clone()))?.into_any())
             }
             fn from_py(value: &Bound<'_, PyAny>) -> PyResult<Self> {
-                Ok(value.cast::<$name>()?.get().0.clone())
+                let not = match value.cast::<$name>() {
+                    Ok(value) => return Ok(value.get().0.clone()),
+                    Err(not) => not,
+                };
+                $(
+                    if let Ok(other) = <$($other)::+ as $crate::field::Field>::from_py(value) {
+                        return Ok(other.into());
+                    }
+                )?
+                Err(not.into())
             }
         }
     };

@@ -14,7 +14,7 @@ use crate::rng::Rng;
 use crate::robot::{self, AttachedObject, Robot};
 use crate::spheres::SphereOptions;
 use crate::spline;
-use crate::task::{self, Pick, Place, TaskOptions, TaskPlan, TaskResult};
+use crate::task::{self, Pick, Place, Release, TaskOptions, TaskPlan, TaskResult};
 use crate::timing::{HandSpeed, Near, Trajectory};
 use crate::tool_path::{self, ToolPath};
 use crate::trajopt::{self, PlanOptions, PlanProblem, PlanResult};
@@ -695,7 +695,7 @@ pub fn pick_and_place(
         .zip(placed)
         .filter_map(|((i, up), down)| {
             let (place, down) = down?;
-            let at = place.poses[down.candidate];
+            let at = place.releases[down.candidate].pose;
             Some((i, up, down, at))
         })
         .collect();
@@ -1063,7 +1063,7 @@ pub fn handover(
         .zip(placed)
         .filter_map(|(e, down)| {
             let (place, down) = down?;
-            let at = place.poses[down.candidate];
+            let at = place.releases[down.candidate].pose;
             Some((e, down, at))
         })
         .collect();
@@ -1346,10 +1346,10 @@ fn near_seeds(o: &TaskOptions) -> TaskOptions {
 /// A pick's grasps half a turn round about the hand's z axis: closing the other way round.
 fn turned_grasps(pick: &Pick) -> Option<Pick> {
     let turn = Quat::from_rotation_z(PI);
-    let grasps = pick
-        .grasps
-        .iter()
-        .map(|g| Pose::new(g.position, g.rotation * turn));
+    let grasps = pick.grasps.iter().map(|g| task::Hold {
+        pose: Pose::new(g.pose.position, g.pose.rotation * turn),
+        ..g.clone()
+    });
     Some(Pick {
         grasps: grasps.collect(),
         ..pick.clone()
@@ -1359,9 +1359,9 @@ fn turned_grasps(pick: &Pick) -> Option<Pick> {
 /// A place's pose turned onto itself (`place_poses`: half a turn for a box, quarter turns for a
 /// square footprint), if the object has such turns.
 fn turned_poses(place: &Place) -> Option<Place> {
-    let turns = task::place_poses(&place.held.object, place.poses[0], 1);
+    let turns = task::place_poses(&place.held.object, place.releases[0].pose, 1);
     (turns.len() > 1).then(|| Place {
-        poses: turns[1..].to_vec(),
+        releases: turns[1..].iter().map(|&pose| Release::from(pose)).collect(),
         ..place.clone()
     })
 }

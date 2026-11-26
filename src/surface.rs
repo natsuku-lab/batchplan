@@ -47,7 +47,6 @@ use crate::error::{Result, ensure_input, input};
 use crate::gripper::Gripper;
 use crate::robot::HandSphere;
 use crate::sdf::{DepthImage, RobotMask};
-use crate::task::TaskPlan;
 use crate::types::{Pose, Screw};
 
 /// Points on the surfaces seen and the normals out of them, in one frame: what [`grasps_on`]
@@ -286,6 +285,15 @@ impl Grasp {
         (self.contacts[1] - self.contacts[0]).length()
     }
 
+    /// How far it closes across what no camera saw (meters): its [`width`](Self::width) where it
+    /// is [`one_sided`](Self::one_sided), 0 where both contacts were seen. As a
+    /// [`Hold::cost`](crate::Hold::cost), a pick's plans come those closing on two seen patches
+    /// first, then those of the least unseen span.
+    #[must_use]
+    pub fn unseen_span(&self) -> f32 {
+        if self.one_sided { self.width() } else { 0.0 }
+    }
+
     /// Whether a ball in the surface's frame lies wholly in the gap this grasp closes, along
     /// its y axis. The ball's projection must fit inside the silhouette of a finger sphere on
     /// either side, and clear every sphere of the hand at the opening the grasp chose. Pass
@@ -376,42 +384,6 @@ pub(crate) fn openings(gap: f32, capacity: f32) -> Vec<f32> {
     (0..OPENINGS).map(at).collect()
 }
 
-/// Orders the completed plans of one surface pick by the evidence for where its jaws will close.
-/// Plans with two measured contacts come first. For a wall seen from one side, a shorter span
-/// to observed free space leaves less room for the unseen contact. Equal ranks keep their order.
-///
-/// Pass the original surface grasps in the order supplied to the pick. Only returned plans are
-/// reordered, so grasp indices, trajectories and holds stay together. Use this when any grip on
-/// the object will do. Keep the original order when proximity to a requested point takes priority.
-/// The span measures uncertainty in the contact location, not how far the object will slip.
-///
-/// An out-of-range candidate or a nonfinite one-sided width returns an error before reordering.
-pub fn prefer_measured_contacts(plans: &mut [TaskPlan], grasps: &[Grasp]) -> Result<()> {
-    for plan in plans.iter() {
-        let index = plan.candidate;
-        let grasp = grasps.get(index).ok_or_else(|| {
-            input!(
-                "pick candidate {index} has no corresponding surface grasp among {}",
-                grasps.len()
-            )
-        })?;
-        if grasp.one_sided {
-            let width = grasp.width();
-            ensure_input!(
-                width.is_finite(),
-                "grasp {index} has nonfinite contact span {width}"
-            );
-        }
-    }
-    let key = |plan: &TaskPlan| {
-        let grasp = &grasps[plan.candidate];
-        // Finite nonnegative widths have the same order as their bits.
-        grasp.one_sided.then(|| grasp.width().to_bits())
-    };
-    plans.sort_by_key(key);
-    Ok(())
-}
-
 /// How [`grasps_on`] proposes grasps of what cameras see for a parallel gripper whose IK frame
 /// lies between its fingertips, its z axis pointing out of the hand and its y axis along the
 /// fingers' closing direction. The gripper gives the widths, the pads' friction and the hand's
@@ -476,7 +448,7 @@ pub struct SurfaceGraspOptions {
     /// with nothing near is grasped open. A rim beside a wall the open fingers would be in is
     /// grasped so. A grasp the open hand has stays where it is, drawn back as the open hand is;
     /// where the open hand is clear at no depth, the hand comes in as deep as it is clear narrower.
-    /// Lock the fingers there for the pick ([`Pick::locked`](crate::Pick::locked)); a call's grasps
+    /// Lock the fingers there for the pick ([`Hold::new`](crate::Hold::new)); a call's grasps
     /// share at most sixteen openings.
     pub narrow: bool,
     /// A point to grip a surface near, in its frame, for grasps of a surface: `None`, the pairs

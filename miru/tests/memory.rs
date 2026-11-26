@@ -2826,6 +2826,11 @@ fn the_split_world_reaches_a_grip_and_lifts_only_attributable_material() {
         let winner = found.plans.pop().expect("a whole pick");
         assert_eq!(winner.plan.candidate, 1, "the earlier feasible input wins");
         assert_eq!(winner.grasp.opening, g.opening);
+        let hold = batchplan::Hold::new(Pose::IDENTITY, g.opening, &gripper);
+        assert_eq!(
+            winner.locked, hold.locked,
+            "held with the fingers at its opening"
+        );
         let transit = winner.world(batchplan::TaskStep::Transit);
         let contact = winner.world(batchplan::TaskStep::Approach);
         let depart = winner.world(batchplan::TaskStep::Depart);
@@ -2882,6 +2887,25 @@ fn the_split_world_reaches_a_grip_and_lifts_only_attributable_material() {
             "the first two successes sort by their durations"
         );
         assert!(first_two.plans[0].plan.duration() < first_two.plans[1].plan.duration());
+        // A candidate narrower than the loaded gap is held with the fingers at its opening.
+        let mut narrowed = *g;
+        narrowed.opening = gripper.openings()[1];
+        let mut held = vec![];
+        let planned = source.plan(
+            &[narrowed],
+            &search,
+            &opts,
+            || false,
+            |c| {
+                let pick = configure(c);
+                held.push(pick.grasps[0].clone());
+                pick
+            },
+        );
+        assert!(planned.is_ok(), "{planned:?}");
+        assert_eq!(held.len(), 1, "one candidate, one task");
+        assert_eq!(held[0].locked, gripper.locked_at(narrowed.opening));
+        assert!(!held[0].locked.is_empty() && held[0].cost == 0.0);
         // A fixed part uses one contact world from the approach through the departure.
         // The neighboring fixtures and their obstacle numbers persist in every phase.
         let fixed = miru::GripSearch::default();
@@ -2891,10 +2915,14 @@ fn the_split_world_reaches_a_grip_and_lifts_only_attributable_material() {
                 &fixed,
                 &opts,
                 || false,
-                |c| batchplan::Pull {
-                    transit: false,
-                    locked: vec![HashMap::from([("panda_finger_joint1".to_string(), 0.04)])],
-                    ..c.pull(q, Vec3::Z, 0.01)
+                |c| {
+                    let mut task = batchplan::Pull {
+                        transit: false,
+                        ..c.pull(q, Vec3::Z, 0.01)
+                    };
+                    task.grasps[0].locked =
+                        HashMap::from([("panda_finger_joint1".to_string(), 0.04)]);
+                    task
                 },
             )
             .unwrap()

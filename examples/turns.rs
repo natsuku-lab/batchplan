@@ -22,8 +22,8 @@ use std::time::Instant;
 use anyhow::Result;
 use batchplan::rng::Rng;
 use batchplan::{
-    DepthImage, Device, Gripper, GripperCalibration, Held, IkProblem, Intrinsics, Obstacle, Pose,
-    Robot, Screw, ShapeGraspOptions, Surface, SurfaceGraspOptions, TaskFailure, TaskOptions,
+    DepthImage, Device, Gripper, GripperCalibration, Held, Hold, IkProblem, Intrinsics, Obstacle,
+    Pose, Robot, Screw, ShapeGraspOptions, Surface, SurfaceGraspOptions, TaskFailure, TaskOptions,
     TaskPlan, TaskResult, TaskStep, ToolPath, ToolPathOptions, Touch, Turn, World, Worlds,
 };
 use glam::{Mat3, Quat, Vec2, Vec3};
@@ -68,14 +68,13 @@ fn table() -> Obstacle {
 }
 
 /// One thing to turn: its world, which obstacle it is and what it turns on, the grips to try in
-/// the order to try them (in its frame) and the fingers' joints at each, the line it turns about
+/// the order to try them (in its frame, with the fingers' joints at each), the line it turns about
 /// and how far.
 struct Thing {
     world: World,
     object: usize,
     support: Vec<usize>,
-    grips: Vec<Pose>,
-    locked: Vec<HashMap<String, f32>>,
+    grips: Vec<Hold>,
     screw: Screw,
     angle: f32,
 }
@@ -166,8 +165,14 @@ fn knob(device: &Device, at: Vec2, yaw: f32) -> Result<Thing> {
         world: World::new(scene.to_vec()),
         object: 3,
         support: vec![2],
-        grips: found.iter().map(|g| to_bar.mul_pose(g.pose)).collect(),
-        locked: found.iter().map(|g| fingers(g.opening)).collect(),
+        grips: found
+            .iter()
+            .map(|g| Hold {
+                pose: to_bar.mul_pose(g.pose),
+                locked: fingers(g.opening),
+                cost: 0.0,
+            })
+            .collect(),
         screw,
         angle: FRAC_PI_2,
     })
@@ -189,8 +194,10 @@ fn cap(robot: &Robot) -> Result<Thing> {
         ..ShapeGraspOptions::default()
     };
     Ok(Thing {
-        grips: batchplan::grasps(&cap, &shape_hand(robot)?, &o)?,
-        locked: vec![],
+        grips: batchplan::grasps(&cap, &shape_hand(robot)?, &o)?
+            .into_iter()
+            .map(Hold::from)
+            .collect(),
         world: World::new(vec![table(), bottle, cap]),
         object: 2,
         support: vec![1],
@@ -214,8 +221,10 @@ fn lever(robot: &Robot) -> Result<Thing> {
     );
     let o = ShapeGraspOptions::default();
     Ok(Thing {
-        grips: batchplan::grasps(&arm, &shape_hand(robot)?, &o)?,
-        locked: vec![],
+        grips: batchplan::grasps(&arm, &shape_hand(robot)?, &o)?
+            .into_iter()
+            .map(Hold::from)
+            .collect(),
         world: World::new(vec![table(), post, arm]),
         object: 2,
         support: vec![1],
@@ -231,8 +240,10 @@ fn wheel(robot: &Robot) -> Result<Thing> {
     let rim = Obstacle::cylinder(Vec3::new(0.5, 0.15, 0.25), 0.1, 0.01);
     let o = ShapeGraspOptions::default();
     Ok(Thing {
-        grips: batchplan::grasps(&rim, &shape_hand(robot)?, &o)?,
-        locked: vec![],
+        grips: batchplan::grasps(&rim, &shape_hand(robot)?, &o)?
+            .into_iter()
+            .map(Hold::from)
+            .collect(),
         world: World::new(vec![table(), pipe, rim]),
         object: 2,
         support: vec![1],
@@ -287,11 +298,7 @@ fn the_rest(result: &TaskResult<Turn>) -> Vec<Turn> {
             .filter(|g| !through.contains(g))
             .collect();
         Turn {
-            grasps: left.iter().map(|&g| t.grasps[g]).collect(),
-            locked: left
-                .iter()
-                .filter_map(|&g| t.locked.get(g).cloned())
-                .collect(),
+            grasps: left.iter().map(|&g| t.grasps[g].clone()).collect(),
             ..t.clone()
         }
     });
@@ -328,7 +335,7 @@ fn from_nearest(
     // The grips by where they lock the fingers, each lot on the robot relocked so.
     let mut lots: Vec<(HashMap<String, f32>, Vec<usize>)> = vec![];
     for g in 0..thing.grips.len() {
-        let locked = thing.locked.get(g).cloned().unwrap_or_default();
+        let locked = thing.grips[g].locked.clone();
         match lots.iter_mut().find(|(l, _)| *l == locked) {
             Some((_, grips)) => grips.push(g),
             None => lots.push((locked, vec![g])),
@@ -346,7 +353,7 @@ fn from_nearest(
         };
         let at: Vec<Pose> = grips
             .iter()
-            .map(|&g| placed.mul_pose(thing.grips[g]))
+            .map(|&g| placed.mul_pose(thing.grips[g].pose))
             .collect();
         let problems: Vec<IkProblem> = at
             .iter()
@@ -376,7 +383,7 @@ fn from_nearest(
             let held = Held {
                 hand: 0,
                 object: object.placed(Pose::IDENTITY),
-                grasp: thing.grips[g],
+                grasp: thing.grips[g].pose,
                 locked: HashMap::new(),
                 spheres: Default::default(),
             };
@@ -415,7 +422,6 @@ fn tasks_of(robot: &Robot, things: &[Thing], enough: Option<usize>) -> Vec<Turn>
     let each = things.iter().enumerate().map(|(w, t)| Turn {
         screw: Some(t.screw),
         support: t.support.clone(),
-        locked: t.locked.clone(),
         enough,
         ..Turn::new(
             w as u32,
@@ -540,7 +546,6 @@ fn main() -> Result<()> {
     let knob_a = knob(&device, Vec2::new(0.5, 0.0), 0.4)?;
     let mut warm = tasks_of(&robot, std::slice::from_ref(&knob_a), Some(1)).remove(0);
     warm.grasps.truncate(1);
-    warm.locked.truncate(1);
     batchplan::turn(
         &device,
         &device.upload(std::slice::from_ref(&knob_a.world))?,

@@ -39,13 +39,21 @@ def test_a_picked_box_is_carried_and_set_down(tasks_robot):
         outcome = bp.pick(device, worlds, [task]).outcomes[0]
         assert isinstance(outcome, tuple) and outcome, f"{outcome} on {device}"
         plan = outcome[0]
-        preferred = bp.pick_with_preferred_grasps(device, worlds, [task], [len(task.grasps)])
-        assert [p.candidate for p in preferred.outcomes[0]] == [p.candidate for p in outcome]
+        assert all(p.cost == 0.0 for p in outcome), "poses hold at cost 0"
+        # The slowest that gets through costing least comes first, the rest as they came.
+        assert len(outcome) > 1, outcome
+        cheap = outcome[-1].candidate
+        costed = task.replace(
+            grasps=[g.replace(cost=0.0 if k == cheap else 1.0) for k, g in enumerate(task.grasps)]
+        )
+        by_cost = bp.pick(device, worlds, [costed]).outcomes[0]
+        assert [p.candidate for p in by_cost] == [cheap] + [p.candidate for p in outcome[:-1]]
+        assert [p.cost for p in by_cost] == [0.0] + [1.0] * (len(outcome) - 1), by_cost
         for motion in (plan.transit, plan.approach, plan.depart):
             motion.check(tasks_robot)
         np.testing.assert_array_equal(plan.transit.start, tasks_robot.default_q)
         np.testing.assert_array_equal(plan.approach.start, plan.transit.end)
-        grasp = task.grasps[plan.candidate]
+        grasp = task.grasps[plan.candidate].pose
         at = scene().obstacles[BOX].pose.mul_pose(grasp)
         grasped = tasks_robot.ee_pose(plan.approach.end)
         np.testing.assert_allclose(grasped.position, at.position, atol=2e-3)
@@ -86,16 +94,14 @@ def test_a_picked_box_is_carried_and_set_down(tasks_robot):
         placed = bp.place(device, without, [place]).outcomes[0]
         assert isinstance(placed, tuple) and placed, f"{placed} on {device}"
         np.testing.assert_allclose(placed[0].placed.pose.position, spot.position, atol=2e-3)
-        nearest = bp.place_nearest(device, without, [place, place], spot.position)
-        assert isinstance(nearest, bp.NearestPlace) and nearest.task == 0, f"{nearest} on {device}"
-        assert nearest.plan.candidate == placed[0].candidate, "equally near: the quickest"
-        assert nearest.problem.held.grasp == plan.held.grasp
-        far = place.replace(poses=[bp.Pose((2.0, 0.0, HALF[2]))])
-        nowhere = bp.place_nearest(device, without, [far, far], spot.position)
-        assert isinstance(nowhere, tuple) and len(nowhere) == 2, nowhere
-        assert all(isinstance(f, bp.TaskFailure) for f in nowhere)
+        assert [r.drop for r in place.releases] == [0.0, 0.0], "poses set it down there"
+        costly = place.replace(releases=[bp.Release(p, cost=1.0) for p in poses])
+        costed = bp.place(device, without, [costly]).outcomes[0]
+        assert costed[0].cost == 1.0 and costed[0].falling is None, costed
+        far = place.replace(releases=[bp.Pose((2.0, 0.0, HALF[2]))])
+        assert isinstance(bp.place(device, without, [far]).outcomes[0], bp.TaskFailure)
         with pytest.raises(bp.InputError, match="finite"):
-            bp.place_nearest(device, without, [place], (math.nan, 0.0, 0.0))
+            bp.place(device, without, [place.replace(releases=[bp.Release(spot, cost=math.nan)])])
         # It names no opening to let go at; with the loaded one named, its plan says so.
         assert placed[0].opening is None
         loaded = bp.place(device, without, [place.replace(open=[{}])]).outcomes[0]
@@ -338,13 +344,21 @@ def test_holds_and_picks_say_where_the_fingers_are(tasks_robot):
     held = bp.Held(0, box, bp.Pose((0.0, 0.0, 0.0)), locked=narrow)
     assert held.locked == narrow and bp.Held(0, box, bp.Pose((0.0, 0.0, 0.0))).locked == {}
     grasps = bp.grasps(box, gripper_of(tasks_robot))
-    pick = bp.Pick(0, tasks_robot.default_q, 1, grasps, locked=[narrow] * len(grasps))
-    assert pick.locked == (narrow,) * len(grasps)
-    assert bp.Pick(0, tasks_robot.default_q, 1, grasps).locked == ()
+    loaded = tasks_robot.gripper(0, bp.GripperCalibration(0.08, 0.0, dict.fromkeys(narrow, 0.0)))
+    assert bp.Hold.at_opening(grasps[0], loaded.opening, loaded).locked == {}, "as loaded"
+    wider = bp.Hold.at_opening(grasps[0], 0.09, loaded)
+    assert wider.locked == {} and wider.pose == grasps[0] and wider.cost == 0.0
+    narrowed = bp.Hold.at_opening(grasps[0], 0.02, loaded)
+    assert narrowed.locked == loaded.locked_at(0.02) and narrowed.locked and narrowed.cost == 0.0
+    assert loaded.locked_at(loaded.opening), "written out, the loaded lock is not empty"
+    pick = bp.Pick(0, tasks_robot.default_q, 1, [bp.Hold(g, locked=narrow) for g in grasps])
+    assert all(h.locked == narrow and h.cost == 0.0 for h in pick.grasps)
+    assert [h.pose for h in pick.grasps] == list(grasps)
+    assert all(h.locked == {} for h in bp.Pick(0, tasks_robot.default_q, 1, grasps).grasps)
     assert bp.Pick(0, tasks_robot.default_q, 1, grasps).enough is None
     place = bp.Place(0, tasks_robot.default_q, held, [bp.Pose((0.4, 0.0, 0.03))])
     assert place.open == () and place.enough is None and place.replace(enough=1).enough == 1
-    opening = bp.Place(0, tasks_robot.default_q, held, place.poses, open=[{}, narrow])
+    opening = bp.Place(0, tasks_robot.default_q, held, place.releases, open=[{}, narrow])
     assert opening.open == ({}, narrow)
     assert bp.Pick(0, tasks_robot.default_q, 1, grasps, enough=2).enough == 2
     closed = {"panda_finger_joint1": 0.0, "panda_finger_joint2": 0.0}
@@ -358,7 +372,7 @@ def test_holds_and_picks_say_where_the_fingers_are(tasks_robot):
         bp.pick(
             device,
             worlds,
-            [bp.Pick(0, tasks_robot.default_q, 0, grasps, locked=[{"x": 0.0}] * len(grasps))],
+            [bp.Pick(0, tasks_robot.default_q, 0, [bp.Hold(g, locked={"x": 0.0}) for g in grasps])],
         )
 
 
