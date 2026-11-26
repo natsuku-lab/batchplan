@@ -872,7 +872,11 @@ pub(crate) fn fit(
     surface: Option<&[(Vec3, Vec3)]>,
 ) -> Fitted {
     debug_assert!(o.check().is_ok(), "callers check the options");
-    debug_assert_eq!(links.len(), tolerances.len());
+    debug_assert_eq!(
+        links.len(),
+        tolerances.len(),
+        "callers give each link a tolerance"
+    );
     debug_assert!(
         surface.is_none() || links.len() == 1,
         "a surface is one link's"
@@ -1311,8 +1315,8 @@ pub(crate) fn ignore_pairs(
             .iter()
             .map(|&(a, b)| {
                 let (sa, sb) = (
-                    solids[a].as_ref().expect("filtered"),
-                    solids[b].as_ref().expect("filtered"),
+                    solids[a].as_ref().expect("paired links have solids"),
+                    solids[b].as_ref().expect("paired links have solids"),
                 );
                 query::intersection_test(&pose(a), sa, &pose(b), sb)
                     .is_ok_and(|hit| hit.intersecting)

@@ -640,7 +640,11 @@ impl Device {
             paths.positions.len(),
             paths.points * paths.dof,
         )?;
-        debug_assert_eq!(item_region.len(), item_world.len());
+        debug_assert_eq!(
+            item_region.len(),
+            item_world.len(),
+            "callers give each item a region"
+        );
         self.backend
             .trajopt(worlds, item_world, item_region, paths, o, deadline)
     }
