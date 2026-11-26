@@ -19,6 +19,63 @@ use batchplan::{
 /// Points 2 mm apart, as a depth camera reads a surface under a meter.
 const SPACING: f32 = 0.002;
 
+/// Whether two rests are the same but for their cost.
+fn alike(a: &Rest, b: &Rest) -> bool {
+    a.pose == b.pose && a.support == b.support && a.tipping == b.tipping
+}
+
+/// Whether two falls are the same but for their cost.
+fn alike_falls(a: &Fall, b: &Fall) -> bool {
+    a.pose == b.pose && a.drop == b.drop && a.sunk == b.sunk
+}
+
+/// That `found`, for a problem with a point `near`, come nearest it first in x and y, each costing
+/// that distance, and, where `in_order`, those as near in the order `plain` has those of them it
+/// has: `plain` the problem's without the point, each at cost 0, found by the same search but for
+/// the order. `at` gives one's pose and cost, `same` whether two are the same but for their cost.
+fn nearest_first<T: std::fmt::Debug>(
+    found: &[T],
+    plain: &[T],
+    near: Vec3,
+    at: impl Fn(&T) -> (Pose, f32),
+    same: impl Fn(&T, &T) -> bool,
+    in_order: bool,
+) {
+    let off = |t: &T| {
+        let d = at(t).0.position.truncate() - near.truncate();
+        d.x.hypot(d.y)
+    };
+    assert!(
+        found.iter().all(|t| at(t).1 == off(t)),
+        "each costs its distance"
+    );
+    assert!(
+        plain.iter().all(|t| at(t).1 == 0.0),
+        "without a point, at cost 0"
+    );
+    assert!(
+        found.windows(2).all(|w| off(&w[0]) <= off(&w[1])),
+        "nearest first"
+    );
+    if !in_order {
+        return;
+    }
+    let rank = |t: &T| plain.iter().position(|p| same(p, t));
+    let mut ties = 0;
+    for w in found.windows(2).filter(|w| off(&w[0]) == off(&w[1])) {
+        if let (Some(a), Some(b)) = (rank(&w[0]), rank(&w[1])) {
+            assert!(
+                a < b,
+                "as near, in the order they came: {:?} and {:?}",
+                w[0],
+                w[1]
+            );
+            ties += 1;
+        }
+    }
+    assert!(ties > 0, "as near ones to keep in order");
+}
+
 /// A box 4 by 6 by 5 cm.
 const HALF: Vec3 = Vec3::new(0.02, 0.03, 0.025);
 
@@ -628,8 +685,12 @@ fn near_where_the_caller_would_have_it_the_spots_are_a_cell_apart() {
         .iter()
         .filter(|r| from_the_middle(r) < 0.003)
         .collect();
-    let mut turns: Vec<Quat> = middle.iter().map(|r| r.pose.rotation).collect();
-    turns.dedup();
+    let mut turns: Vec<Quat> = vec![];
+    for r in &middle {
+        if !turns.contains(&r.pose.rotation) {
+            turns.push(r.pose.rotation);
+        }
+    }
     assert_eq!(turns.len(), 8, "{} at {turns:?}", middle.len());
     for r in &middle {
         // As steady as the friction lets anything be, 26.6 degrees: on the ring all round.
@@ -644,8 +705,16 @@ fn near_where_the_caller_would_have_it_the_spots_are_a_cell_apart() {
         assert!(gaps.fold(0.0, f32::max) < FRAC_PI_2, "{r:?}");
     }
     for r in &plain {
-        assert!(found.contains(r), "lost: {r:?}");
+        assert!(found.iter().any(|f| alike(f, r)), "lost: {r:?}");
     }
+    nearest_first(
+        &found,
+        &plain,
+        near.near.unwrap(),
+        |r| (r.pose, r.cost),
+        alike,
+        false,
+    );
     // Near a point off the plate, as far off as may be, none of the point's own spots is over
     // it: nothing more is tried. Looking closer, what is looked at closer is about the one spot
     // where the bowl nearly rests nearest the point: every rest it had without, and those more
@@ -659,14 +728,36 @@ fn near_where_the_caller_would_have_it_the_spots_are_a_cell_apart() {
             near: Some(Vec3::new(far, 0.5, 0.0)),
             ..problem.clone()
         };
-        assert_eq!(rests(&off, &plate), plain, "{far}");
+        // The same rests as without it, but for their order and cost.
+        let own = rests(&off, &plate);
+        assert_eq!(own.len(), plain.len(), "{far}");
+        assert!(
+            plain.iter().all(|r| own.iter().any(|f| alike(f, r))),
+            "{far}"
+        );
+        nearest_first(
+            &own,
+            &plain,
+            off.near.unwrap(),
+            |r| (r.pose, r.cost),
+            alike,
+            true,
+        );
         let found = rests_with(&off, &plate, &closer);
         for r in &plain {
-            assert!(found.contains(r), "lost near {far}: {r:?}");
+            assert!(found.iter().any(|f| alike(f, r)), "lost near {far}: {r:?}");
+        }
+        // Each set down as a place's release, its pose and cost.
+        for r in own.iter().take(3) {
+            let release = batchplan::Release::from(r);
+            assert_eq!(
+                (release.pose, release.drop, release.cost),
+                (r.pose, 0.0, r.cost)
+            );
         }
         let more: Vec<Vec2> = found
             .iter()
-            .filter(|r| !plain.contains(r))
+            .filter(|r| !plain.iter().any(|p| alike(p, r)))
             .map(|r| r.pose.position.truncate())
             .collect();
         assert!(!more.is_empty(), "nothing looked at closer near {far}");
@@ -725,6 +816,19 @@ fn near_where_the_caller_would_have_it_the_spots_are_a_cell_apart() {
             "{own} to {farthest} m about {point}"
         );
     }
+    // A point as far off as may be both ways: each rest costs the largest finite distance, so a
+    // place takes them all.
+    let corner = RestProblem {
+        near: Some(Vec3::new(f32::MAX, f32::MAX, 0.0)),
+        ..problem
+    };
+    let cornered = rests(&corner, &plate);
+    assert_eq!(cornered.len(), plain.len());
+    assert!(
+        cornered.iter().all(|r| r.cost == f32::MAX),
+        "{:?}",
+        cornered.first()
+    );
     // More closer spots than a call takes, and more cells than a surface is read in, are
     // input errors that say which.
     let mut wide = Surface::default();
@@ -2574,8 +2678,17 @@ fn a_box_that_barely_fits_into_a_bowl_falls_in_where_it_is_looked_at_closer() {
         found.len()
     );
     for f in &found {
-        assert!(there.contains(f), "{f:?}");
+        assert!(there.iter().any(|t| alike_falls(t, f)), "{f:?}");
     }
+    let point = pointed.near.unwrap();
+    nearest_first(
+        &there,
+        &found,
+        point,
+        |f| (f.pose, f.cost),
+        alike_falls,
+        false,
+    );
     assert_eq!(first_at_each_turn(&there).len(), 8);
     assert!(there[0].pose.position.truncate().length() < 1e-5);
     // Spots 4 mm apart lie on the lattice of the cells, 2 mm from the axis, and some hold the
@@ -2647,13 +2760,63 @@ fn what_is_let_go_beside_what_stands_taller_than_the_rim_is_let_go_over_it() {
                 "{nearest} m from {what}: {f:?}"
             );
             assert!((f.sunk - 0.08).abs() < 1e-4, "{what}: {f:?}");
+            // It drops from there to the floor, 1 cm up, where its middle is 4 cm over that.
+            assert!(
+                (f.drop - (f.pose.position.z - 0.05)).abs() < 1e-6,
+                "{what}: {f:?}"
+            );
             if near_it(f.pose.position.truncate()) {
                 let over = f.pose.position.z - 0.04 - (0.13 + o.clearance);
                 assert!(over.abs() < 1e-4, "{what}: {f:?}");
+                // 13 cm, where the clearance and how far it sinks under the rim give 9.
+                assert!((f.drop - 0.13).abs() < 1e-4, "{what}: {f:?}");
+                assert!(f.drop > o.clearance + f.sunk + 0.03, "{what}: {f:?}");
                 beside += 1;
             }
         }
         assert!(beside > 0, "{} falls, none beside {what}", found.len());
+    }
+}
+
+#[test]
+fn a_box_let_go_turned_askew_drops_from_where_it_is_let_go_to_where_it_lands() {
+    // A pen whose walls stand 4 cm over its floor, 1 cm up, and the box tilted 20 degrees about x,
+    // at the one turn: let go with its lowest point the clearance over the rim, grown by the
+    // clearance along its own axes, it drops 4 cm and the clearance times sin 20 + cos 20 to the
+    // floor, 5.28 cm, where the clearance and how far it sinks under the rim give 5.
+    let o = RestOptions {
+        turns: 1,
+        ..Default::default()
+    };
+    let s = pen(0.04, 0.0);
+    let tilt = 20f32.to_radians();
+    let problem = RestProblem {
+        rotation: Quat::from_rotation_x(tilt),
+        ..RestProblem::new(a_box(), 0)
+    };
+    let found = falls_into(&device(), &[problem], std::slice::from_ref(&s), &o)
+        .unwrap()
+        .remove(0);
+    assert!(!found.is_empty());
+    let landed = 0.01 + HALF.y * tilt.sin() + HALF.z * tilt.cos();
+    let grown = o.clearance * (tilt.sin() + tilt.cos());
+    for f in &found {
+        // Under the rim the walls' readings make of it, 4 cm to within a fifth of a millimeter.
+        assert!((f.sunk - 0.04).abs() < 3e-4, "{f:?}");
+        // To where it lands on the floor, to within how its edge fits between the floor's points.
+        assert!(
+            (f.drop - (f.pose.position.z - landed)).abs() < 5e-4,
+            "{f:?}"
+        );
+        // At least the box grown askew under the rim: more beside a wall read higher than it.
+        assert!(f.drop >= f.sunk + grown - 1e-5, "{f:?}");
+        assert!((f.drop - 0.0528).abs() < 5e-4, "{f:?}");
+        assert!(f.drop > o.clearance + f.sunk + 0.0025, "{f:?}");
+        let release = batchplan::Release::from(f);
+        assert_eq!(
+            (release.pose, release.drop, release.cost),
+            (f.pose, f.drop, f.cost)
+        );
     }
 }
 
@@ -2898,15 +3061,20 @@ fn near_where_the_caller_points_the_bottle_is_found_against_the_lip() {
         std::slice::from_ref(&up_there),
         std::slice::from_ref(&turned),
     );
-    let own = rests_on(&device(), up_there, racks, &spots);
-    assert_eq!(own.unwrap().remove(0), plain);
+    let own = rests_on(&device(), up_there, racks, &spots)
+        .unwrap()
+        .remove(0);
+    let point = up_there[0].near.unwrap();
+    assert_eq!(own.len(), plain.len());
+    assert!(plain.iter().all(|r| own.iter().any(|f| alike(f, r))));
+    nearest_first(&own, &plain, point, |r| (r.pose, r.cost), alike, true);
     let found = rests_on(&device(), up_there, racks, &o).unwrap().remove(0);
     let below = found
         .iter()
         .filter(|r| (r.pose.position.x - x).abs() <= o.spacing + o.touching && !on_the_grid(r, &o));
     assert!(below.count() > 0, "nothing near {x}: {found:?}");
     for r in &plain {
-        assert!(found.contains(r), "lost: {r:?}");
+        assert!(found.iter().any(|f| alike(f, r)), "lost: {r:?}");
     }
 }
 
@@ -3184,6 +3352,19 @@ fn a_problem_without_rests_says_how_near_the_search_came() {
             "{rest:?}"
         );
         assert!((rest.pose.position.z - object_half_height(&object)).abs() < 1e-4);
+        // As `rests_on` would give it: at cost 0 without a point, and with one, its distance
+        // in x and y from it.
+        assert_eq!(rest.cost, 0.0);
+        let near = Vec3::new(0.3, 0.2, 0.5);
+        let pointed = RestProblem {
+            near: Some(near),
+            ..RestProblem::new(object.clone(), 0)
+        };
+        let Some(RestFailure::Blocked { rest, .. }) = failure(&pointed, &walled, &o) else {
+            panic!("not blocked near a point: {object:?}");
+        };
+        let off = rest.pose.position.truncate().distance(near.truncate());
+        assert!((rest.cost - off).abs() < 1e-6, "{rest:?}");
     }
 }
 

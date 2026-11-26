@@ -2,8 +2,8 @@
 use std::collections::HashMap;
 
 use batchplan::{
-    CandidateStop, Device, Grasp, Pick, Pose, Pull, Screw, TaskOptions, TaskPlan, TaskResult,
-    TaskStep, Touch, Turn, Worlds,
+    CandidateStop, Device, Grasp, Gripper, Hold, Pick, Pose, Pull, Screw, TaskOptions, TaskPlan,
+    TaskResult, TaskStep, Touch, Turn, Worlds,
 };
 use glam::Vec3;
 
@@ -76,17 +76,23 @@ pub struct GripCandidate<'a> {
     pub touches: &'a mut Vec<Touch>,
     split: &'a Gripped,
     world: u32,
-    hand: usize,
+    gripper: &'a Gripper,
 }
 
 impl GripCandidate<'_> {
+    /// The candidate's one hold: its projected pose with the fingers at its opening, as loaded
+    /// where that is the loaded gap ([`Hold::new`]), at cost 0.
+    fn hold(&self) -> Hold {
+        Hold::new(self.split.grasp, self.candidate.opening, self.gripper)
+    }
+
     /// A split pick in the candidate's world, with the whole movable body selected.
     #[must_use]
     pub fn pick(&self, start: &[f32]) -> Pick {
         Pick {
-            hand: self.hand,
+            hand: self.gripper.hand(),
             body: self.split.body.clone(),
-            ..Pick::new(self.world, start, self.split.part, vec![self.split.grasp])
+            ..Pick::new(self.world, start, self.split.part, [self.hold()])
         }
     }
 
@@ -95,16 +101,10 @@ impl GripCandidate<'_> {
     #[must_use]
     pub fn turn(&self, start: &[f32], screw: Option<Screw>, angle: f32) -> Turn {
         Turn {
-            hand: self.hand,
+            hand: self.gripper.hand(),
             stays: true,
             screw,
-            ..Turn::new(
-                self.world,
-                start,
-                self.split.part,
-                vec![self.split.grasp],
-                angle,
-            )
+            ..Turn::new(self.world, start, self.split.part, [self.hold()], angle)
         }
     }
 
@@ -112,12 +112,12 @@ impl GripCandidate<'_> {
     #[must_use]
     pub fn pull(&self, start: &[f32], direction: Vec3, distance: f32) -> Pull {
         Pull {
-            hand: self.hand,
+            hand: self.gripper.hand(),
             ..Pull::new(
                 self.world,
                 start,
                 self.split.part,
-                vec![self.split.grasp],
+                [self.hold()],
                 direction,
                 distance,
             )
@@ -133,7 +133,8 @@ pub struct GripPlan {
     pub grasp: Grasp,
     /// The trajectories. The candidate index is the original index in the supplied slice.
     pub plan: TaskPlan,
-    /// Exact locked joint values configured for this candidate, including asymmetric fingers.
+    /// Exact locked joint values configured for this candidate, including asymmetric fingers:
+    /// empty where the fingers are as loaded.
     pub locked: HashMap<String, f32>,
     /// Source for `Observed::picked` and the original collision world.
     pub grip: Gripped,
@@ -205,7 +206,7 @@ pub struct GripPlans {
     pub blocked: Option<SupportedObjects>,
     /// Actual calls to a batched motion solver, excluding projection-only batches.
     pub batches: usize,
-    /// In trajectory-duration order, ties in original input order.
+    /// Least cost first, the quickest among equals, ties in original input order.
     pub plans: Vec<GripPlan>,
     /// Eligible candidates that failed, in original order.
     pub failures: Vec<GripFailure>,
@@ -229,8 +230,8 @@ impl GripTask for Pull {}
 
 mod sealed {
     use super::{
-        Device, GripCandidate, Gripped, HashMap, Pick, Planned, Pull, Result, TaskOptions,
-        TaskResult, Turn, Worlds,
+        Device, GripCandidate, Gripped, Hold, Pick, Planned, Pull, Result, TaskOptions, TaskResult,
+        Turn, Worlds,
     };
 
     pub trait Task: Clone {
@@ -242,7 +243,7 @@ mod sealed {
             o: &TaskOptions,
         ) -> Result<TaskResult<Self>>;
         fn matches(&self, c: &GripCandidate<'_>) -> bool;
-        fn locks(&self) -> &[HashMap<String, f32>];
+        fn holds(&self) -> &[Hold];
         fn lift(&self, _split: &Gripped) -> Result<Option<Planned>> {
             Ok(None)
         }
@@ -253,14 +254,15 @@ mod sealed {
         fn run(d: &Device, w: &Worlds, t: &[Self], o: &TaskOptions) -> Result<TaskResult<Self>> {
             batchplan::pick(d, w, t, o)
         }
-        fn locks(&self) -> &[HashMap<String, f32>] {
-            &self.locked
+        fn holds(&self) -> &[Hold] {
+            &self.grasps
         }
         fn matches(&self, c: &GripCandidate<'_>) -> bool {
             self.world == c.world
-                && self.hand == c.hand
+                && self.hand == c.gripper.hand()
                 && self.object == c.split.part
-                && self.grasps == [c.split.grasp]
+                && self.grasps.len() == 1
+                && self.grasps[0].pose == c.split.grasp
                 && self.transit_world.is_none()
                 && self.depart_world.is_none()
                 && self.body == c.split.body
@@ -285,14 +287,15 @@ mod sealed {
         fn run(d: &Device, w: &Worlds, t: &[Self], o: &TaskOptions) -> Result<TaskResult<Self>> {
             batchplan::pull(d, w, t, o)
         }
-        fn locks(&self) -> &[HashMap<String, f32>] {
-            &self.locked
+        fn holds(&self) -> &[Hold] {
+            &self.grasps
         }
         fn matches(&self, c: &GripCandidate<'_>) -> bool {
             self.world == c.world
-                && self.hand == c.hand
+                && self.hand == c.gripper.hand()
                 && self.object == c.split.part
-                && self.grasps == [c.split.grasp]
+                && self.grasps.len() == 1
+                && self.grasps[0].pose == c.split.grasp
                 && self.transit_world.is_none()
         }
     }
@@ -300,14 +303,15 @@ mod sealed {
         fn run(d: &Device, w: &Worlds, t: &[Self], o: &TaskOptions) -> Result<TaskResult<Self>> {
             batchplan::turn(d, w, t, o)
         }
-        fn locks(&self) -> &[HashMap<String, f32>] {
-            &self.locked
+        fn holds(&self) -> &[Hold] {
+            &self.grasps
         }
         fn matches(&self, c: &GripCandidate<'_>) -> bool {
             self.world == c.world
-                && self.hand == c.hand
+                && self.hand == c.gripper.hand()
                 && self.object == c.split.part
-                && self.grasps == [c.split.grasp]
+                && self.grasps.len() == 1
+                && self.grasps[0].pose == c.split.grasp
                 && self.transit_world.is_none()
                 && self.stays
         }
@@ -316,15 +320,17 @@ mod sealed {
 
 impl GripWorlds<'_> {
     /// Tries an ordered slice on its per-grasp worlds. Configure one ordinary task with the
-    /// candidate's constructor, setting the cell's static touches, locked finger positions and
-    /// motion options. The constructor owns the single grasp, world, hand and contact geometry.
+    /// candidate's constructor, setting the cell's static touches and motion options, and the
+    /// hold's locked finger positions or cost where they are the caller's: the constructor holds
+    /// the grasp with the fingers at its opening ([`Hold::new`]). It owns the single grasp's
+    /// pose, the world, the hand and the contact geometry.
     /// All stages start from the projected world. A pick may additionally name measured support
     /// indices. Its returned departure world has these permissions confined to the held body.
     ///
-    /// The first `enough` candidates that succeed in input order are returned in increasing
-    /// duration order. Each batch is checked by the corresponding batched batchplan primitive;
-    /// IK on the GPU can round differently at different batch sizes. `should_stop` is polled
-    /// before projection, before planning a batch, and after batch completion. A pick that
+    /// The first `enough` candidates that succeed in input order are returned least cost first, the
+    /// quickest among equals. Each batch is checked by the corresponding batched batchplan
+    /// primitive; IK on the GPU can round differently at different batch sizes. `should_stop` is
+    /// polled before projection, before planning a batch, and after batch completion. A pick that
     /// would take another object with it checks candidate inputs and selection, records the
     /// supported IDs once in [`GripPlans::blocked`], and projects no candidate worlds.
     pub fn plan<T: GripTask>(
@@ -411,7 +417,7 @@ impl GripWorlds<'_> {
                     touches: &mut touches,
                     split: &split,
                     world,
-                    hand: self.gripper.hand(),
+                    gripper: self.gripper,
                 };
                 let task = configure(&mut c);
                 ensure_input!(
@@ -456,7 +462,7 @@ impl GripWorlds<'_> {
                             result.plans.push(GripPlan {
                                 grasp,
                                 plan,
-                                locked: task.locks().first().cloned().unwrap_or_default(),
+                                locked: task.holds()[0].locked.clone(),
                                 grip,
                                 contact,
                                 lift,
@@ -485,9 +491,13 @@ impl GripWorlds<'_> {
                 break false;
             }
         };
-        result
-            .plans
-            .sort_by(|a, b| a.plan.duration().total_cmp(&b.plan.duration()));
+        // Least cost first, the quickest among equals, as a task's plans come.
+        result.plans.sort_by(|a, b| {
+            let cost = a.plan.cost.partial_cmp(&b.plan.cost);
+            let quicker = || a.plan.duration().total_cmp(&b.plan.duration());
+            cost.expect("batchplan refuses a cost that is not finite")
+                .then_with(quicker)
+        });
         result.failures.sort_by_key(|f| f.candidate);
         Ok(if interrupted {
             GripOutcome::Interrupted(result)

@@ -108,8 +108,8 @@ pub fn handover(
             "task {i}: hand {} takes what it holds already",
             t.to
         );
-        task::check_poses(i, "meeting", &t.meetings)?;
-        task::check_poses(i, "grasp", &t.grasps)?;
+        task::check_poses(i, "meeting", t.meetings.iter())?;
+        task::check_poses(i, "grasp", t.grasps.iter())?;
         ensure_input!(
             t.approach.is_finite() && t.approach > 0.0 && t.retreat.is_finite() && t.retreat > 0.0,
             "task {i} needs a positive approach and retreat, got {} and {} m",
@@ -252,7 +252,7 @@ pub fn handover(
             object: t.held.object.clone(),
             grasp: t.grasps[c.index % t.grasps.len()],
         };
-        (Some(held), None)
+        (Some(held), None, 0.0)
     })?;
     Ok(TaskResult {
         problems: tasks.to_vec(),

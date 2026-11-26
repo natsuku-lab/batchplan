@@ -32,19 +32,40 @@ use crate::types::Pose;
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Fall {
-    /// The object's frame where it is let go, in the surface's frame: one of [`Place::poses`].
-    /// Its lowest point is at least [`RestOptions::clearance`] over the lowest of the hollow's
-    /// rim, and the object that far clear of all around it there: that far over the rim for a
-    /// shape that stands level, unless something nearer stands higher, and more for one turned
-    /// askew.
+    /// The object's frame where it is let go, in the surface's frame: where a place lets go of it
+    /// ([`Release::from`]). Its lowest point is at least [`RestOptions::clearance`] over the
+    /// lowest of the hollow's rim, and the object that far clear of all around it there: that far
+    /// over the rim for a shape that stands level, unless something nearer stands higher, and
+    /// more for one turned askew.
     ///
-    /// [`Place::poses`]: crate::Place::poses
+    /// [`Release::from`]: crate::Release
     pub pose: Pose,
+    /// How far it drops from `pose`, straight down, to where it lands as it is (meters): onto what
+    /// was seen under it, or where nothing was, as deep under the rim as anything was seen in the
+    /// hollow (`sunk`). A place's [`Release::drop`](crate::Release::drop): more than the
+    /// clearance and `sunk` together for a shape turned askew or let go over something that
+    /// stands higher than the rim.
+    pub drop: f32,
     /// How far under the lowest of the hollow's rim the object's bottom lands (meters): what it
     /// would have to be lifted by to leave, to within how it fits between what it lands on.
     /// Where nothing was seen under it there, as over a floor no camera saw, the most that was
     /// seen anywhere in the hollow.
     pub sunk: f32,
+    /// How far it is let go from the problem's [`near`](RestProblem::near), in x and y (meters),
+    /// by which the falls come nearest it first: 0 where the problem has none. A place's release
+    /// takes it as its cost.
+    pub cost: f32,
+}
+
+/// Letting the object go there to drop as it does, at the fall's cost.
+impl From<&Fall> for crate::Release {
+    fn from(fall: &Fall) -> Self {
+        Self {
+            pose: fall.pose,
+            drop: fall.drop,
+            cost: fall.cost,
+        }
+    }
 }
 
 /// For each of `problems`, in their order, poses to let go of its object at from which it falls
@@ -77,14 +98,16 @@ pub struct Fall {
 /// take each spot's rim and whether it holds the object in, at each kind of turn. Falls found
 /// there come after the spots' of their turn.
 ///
-/// A problem's `object`, `surface` and `rotation` are read as [`rests_on`](super::rests_on)
-/// reads them, its `near` only to look closer, and of the options `turns`, `spacing`,
-/// `touching`, `clearance`, `look_closer` and `seen_from_above_holds`; the problems and options
-/// are checked as `rests_on` checks them, `tipping` and `friction` too, though falls read
-/// neither. The falls come at every turn, and within a turn those with the most room around them
-/// first, and of those as roomy the nearest the middle of where it is held in, as the middle of
-/// a basket before its sides. The problems run in parallel on the device's threads, each
-/// surface read once, and a problem's falls are the same alone and among others.
+/// A problem's `object`, `surface` and `rotation` are read as [`rests_on`](super::rests_on) reads
+/// them, its `near` to look closer and to put the falls nearest it first, and of the options
+/// `turns`, `spacing`, `touching`, `clearance`, `look_closer` and `seen_from_above_holds`; the
+/// problems and options are checked as `rests_on` checks them, `tipping` and `friction` too, though
+/// falls read neither. The falls come at every turn, and within a turn those with the most room
+/// around them first, and of those as roomy the nearest the middle of where it is held in, as the
+/// middle of a basket before its sides; where the problem has a `near`, nearest it first instead,
+/// in x and y, those as near in that order, each costing its distance ([`Fall::cost`]). The
+/// problems run in parallel on the device's threads, each surface read once, and a problem's falls
+/// are the same alone and among others.
 pub fn falls_into(
     device: &Device,
     problems: &[RestProblem],
@@ -128,9 +151,13 @@ fn into(p: &RestProblem, seen: &Seen, o: &RestOptions) -> Vec<Fall> {
     }
     let turned = |fall: &Fall, turn: Quat| Fall {
         pose: Pose::new(fall.pose.position, turn),
+        drop: fall.drop,
         sunk: fall.sunk,
+        cost: fall.cost,
     };
-    search::at_every_turn(found, &turns, &first, turned)
+    let mut falls = search::at_every_turn(found, &turns, &first, turned);
+    search::nearest_first(&mut falls, p.near, |f| f.pose.position, |f| &mut f.cost);
+    falls
 }
 
 /// The falls of `shape`, `grown` by the clearance it keeps, turned by `turn`; and with
@@ -257,13 +284,25 @@ fn at_turn(
             .then(a.cmp(&b))
     });
     let grown = Turned::new(grown, turn);
-    let fall = |k: usize| Fall {
-        pose: let_go(&grown, spots.at(k, o.spacing), rim[k], field, turn),
-        sunk: if bottom[k].is_finite() {
+    let fall = |k: usize| {
+        let pose = let_go(&grown, spots.at(k, o.spacing), rim[k], field, turn);
+        let sunk = if bottom[k].is_finite() {
             sunk(k)
         } else {
             deepest[of[k] as usize]
-        },
+        };
+        // Where its bottom lands: on what was seen under it, or as deep as the hollow was seen.
+        let landed = if bottom[k].is_finite() {
+            bottom[k]
+        } else {
+            rim[k] - sunk
+        };
+        Fall {
+            pose,
+            drop: pose.position.z - (landed + object.depth),
+            sunk,
+            cost: 0.0,
+        }
     };
     // What a closer look reads of the turn: the rim where a hollow is, the spots that hold the
     // object in, and the spot of a hollow where it lands the deepest under the rim on something
@@ -397,19 +436,22 @@ impl Hollows {
             }
             let bottom = field.lands(&object, at) - object.depth;
             let sunk = self.rim[k] - bottom;
-            (bottom.is_finite() && sunk >= object.depth).then_some((at, k, sunk))
+            (bottom.is_finite() && sunk >= object.depth).then_some((at, k, sunk, bottom))
         };
         let nearer = search::nearer(about, spots, None, o);
-        let found: Vec<(Vec2, usize, f32)> = nearer.into_par_iter().filter_map(held).collect();
+        let found: Vec<(Vec2, usize, f32, f32)> = nearer.into_par_iter().filter_map(held).collect();
         let middle = found.iter().map(|f| f.0).sum::<Vec2>() / found.len() as f32;
         let mut order: Vec<usize> = (0..found.len()).collect();
         let from_middle = |i: usize| found[i].0.distance(middle);
         order.sort_by(|&a, &b| from_middle(a).total_cmp(&from_middle(b)).then(a.cmp(&b)));
         let fall = |i: usize| {
-            let (at, k, sunk) = found[i];
+            let (at, k, sunk, bottom) = found[i];
+            let pose = let_go(&grown, at, self.rim[k], field, turn);
             Fall {
-                pose: let_go(&grown, at, self.rim[k], field, turn),
+                pose,
+                drop: pose.position.z - (bottom + object.depth),
                 sunk,
+                cost: 0.0,
             }
         };
         order.into_iter().map(fall).collect()

@@ -74,19 +74,33 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
-- `place_nearest` plans one placement from several picks' starts and holds in one batch and
-  returns the one that sets the object down nearest a spot in x and y, or each one's failure.
-  A placement with `Place::enough` tries its poses nearest the spot first.
+- **Breaking:** a task's candidates carry their own data. A pick's, a turn's and a pull's grasps are
+  `Hold`s: the hand's `pose` in the object's frame, the fingers' `locked` values and a `cost`. A
+  place's are `Release`s in `Place::releases`, which takes the place of `Place::poses`: the object's
+  `pose`, how far it `drop`s from there to where it lands, and a `cost`. A `Pose` is either at cost
+  0, the fingers as loaded and the object set down there (`From<Pose>`), and `Pick::new`,
+  `Turn::new`, `Pull::new` and `Place::new` take any of them, so a list of poses passes as before,
+  but for one whose type was inferred from the call (a `.collect()` into it, or an empty `vec![]`):
+  name it (`Vec<Pose>`) or pass the iterator itself. `Hold::new(pose, opening, &gripper)` holds a
+  grasp of a surface at its opening, the fingers as loaded at the loaded gap. A `Pick`, `Turn` or
+  `Pull` literal that set `grasps: poses` sets `grasps:
+  poses.into_iter().map(Hold::from).collect()`, one that set 0.11's `locked: map` gives each hold
+  `locked: map.clone()`, and a `Place` literal's `poses` become `releases`. In Python, `Hold(pose,
+  locked=..., cost=...)`, `Hold.at_opening(pose, opening, gripper)` and `Release(pose, drop=..., cost=...)`, items of `Pick.grasps` and
+  `Place.releases` a pose or one of them; `Pick.grasps` gives `Hold`s back (`.pose`), and
+  `Place.poses` is `Place.releases`.
 
-- `prefer_measured_contacts` orders completed surface picks by evidence for the closing
-  contacts, retaining every checked alternative for placement.
+- A candidate's `cost`, 0 by default, is what the caller holds against it, in any unit: a task's
+  plans come least cost first, the quickest among equals (`TaskPlan::cost`), and the order the
+  candidates are given in is still the order they are tried. All costs 0 give the order as
+  before, to the bit. `Grasp::unseen_span()` is the width of a one-sided grasp of a surface, 0
+  where both contacts were seen: as each hold's cost, the plans of a pick come those closing on
+  two seen patches first, then the tightest one-sided ones. A cost that is not finite is an input
+  error naming the candidate.
 
-- `pick_with_preferred_grasps` accepts a preferred prefix per pick and batches supplemental
-  grasps for tasks whose preferred grasps all failed.
-
-- A placement can carry a predicted downward fall for each release pose. Departure checks the
-  volume swept during settling and reports the expected landing. **Breaking:** exhaustive
-  Rust `Place` literals need `falls: vec![]` for a placement in contact.
+- A release can drop: `Release::drop`, how far the object falls once let go, in meters along
+  world −z. Departure checks the volume swept as it falls and the plan gives the expected
+  landing (`TaskPlan::placed`, `TaskPlan::falling`).
 
 - Miru reports what a supplied fully open approach and parallel jaw closure intercept in the
   current observation with `Kept::observed_closures`.
@@ -343,9 +357,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 - Where to let a held object go for it to fall into a container and stay:
   `falls_into(&device, &[RestProblem], &[Surface], &RestOptions)`, with the same problems,
-  surfaces and options as `rests_on`. Each `Fall` gives a `pose` to let go at, for
-  `Place::poses`, its bottom at least `clearance` over the rim of a hollow of what was seen that
-  the object lands in deeper than its middle is over its bottom, and how deep (`sunk`). The
+  surfaces and options as `rests_on`. Each `Fall` gives a `pose` to let go at, its bottom at
+  least `clearance` over the rim of a hollow of what was seen that the object lands in deeper
+  than its middle is over its bottom, how far it drops from there to where it lands as it is
+  (`drop`), and how deep under the rim (`sunk`): `Release::from(&fall)` carries both pose and
+  drop to a place. The drop is more than the clearance and `sunk` together for an object turned
+  askew, whose shape grows by the clearance along its own axes (a box tilted 20 degrees over a pen
+  4 cm deep drops 5.28 cm where those give 5), and beside something higher than the rim (13 cm
+  where they give 9). The
   object lands as it is, and the clearance is kept where it is let go, over the rim and clear of
   all around it there: a box of cream cheese 8.3 by 4.2 cm goes through the opening of LIBERO's
   bowl, 11.2 cm across, and grown by the clearance would not, and it falls in. As first merged,
@@ -372,27 +391,28 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   object comes straight down over spots `spacing` (1 cm) apart at `turns` (8) turns about the
   vertical, and a `Rest` comes back where what it then touches holds it, with `friction` (0.5) at
   the contacts and its weight tipped `tipping` (5°) any way, clear of every other point by
-  `clearance` (1 cm): the object's `pose`, for `Place::poses`, the `support` it touches and how far
-  it can be `tipping`, at each of the turns, so a box comes at its half turn and a bottle laid down
-  comes end for end too. It rests as it is set down, not tipped or slid into place: a slope needs
-  the rotation that lies flat on it. `RestProblem::near` names a point to look closer around, a cell
-  of the support apart, for a rest the spots are too far apart to find, as the middle of a dished
-  plate under a wide flat bottom. A support point whose normal faces down holds nothing up, but
-  where a camera above it saw it (`seen_from_above_holds`). A can or a capsule laid on its side
-  rolls, within half the spacing and `touching`, into the cradle between two bars or a rack's
-  groove or down to a lip, and has no rest on a flat support. Many
-  problems run in one call, each surface read once. `examples/surface_rests.rs` times it, and
-  `scripts/validate_rests.py` lets go of each rest in MuJoCo. Two options, both on by default
-  (`false` turns either off), find more. With `RestOptions::look_closer`, of the spots where the
-  object nearly rests (held, tipping too easily) at a turn, the one nearest `near`, or without it
-  the middle of the support, has the spots a cell apart within the spacing tried too, with `near` at
-  every turn and without it only where no spot rests at any turn: an upright bottle against the lip
-  at the foot of a sloping rack, which stands only in a strip a few millimeters deep, is found near
-  that spot, and a search that finds rests with no `near` costs what it does without. With
-  `RestOptions::seen_from_above_holds`, a support point whose normal faces down holds where the
-  camera that saw it was above it (`Surface::seen_from`), so the noisy normals of a top read at a
-  slant do not block rests on it; a face that leans out over empty space, seen from above, is then
-  taken as a top.
+  `clearance` (1 cm): the object's `pose` (`Release::from(&rest)` for a place), the `support` it
+  touches and how far it can be `tipping`, at each of the turns, so a box comes at its half turn and
+  a bottle laid down comes end for end too. It rests as it is set down, not tipped or slid into
+  place: a slope needs the rotation that lies flat on it. `RestProblem::near` names a point to look
+  closer around, a cell of the support apart, for a rest the spots are too far apart to find, as the
+  middle of a dished plate under a wide flat bottom; with it the rests, and `falls_into`'s falls,
+  come nearest it first in x and y, those as near in their order, each costing that distance
+  (`Rest::cost`, `Fall::cost`), which a release takes. A support point whose normal faces down holds
+  nothing up, but where a camera above it saw it (`seen_from_above_holds`). A can or a capsule laid
+  on its side rolls, within half the spacing and `touching`, into the cradle between two bars or a
+  rack's groove or down to a lip, and has no rest on a flat support. Many problems run in one call,
+  each surface read once. `examples/surface_rests.rs` times it, and `scripts/validate_rests.py` lets
+  go of each rest in MuJoCo. Two options, both on by default (`false` turns either off), find more.
+  With `RestOptions::look_closer`, of the spots where the object nearly rests (held, tipping too
+  easily) at a turn, the one nearest `near`, or without it the middle of the support, has the spots
+  a cell apart within the spacing tried too, with `near` at every turn and without it only where no
+  spot rests at any turn: an upright bottle against the lip at the foot of a sloping rack, which
+  stands only in a strip a few millimeters deep, is found near that spot, and a search that finds
+  rests with no `near` costs what it does without. With `RestOptions::seen_from_above_holds`, a
+  support point whose normal faces down holds where the camera that saw it was above it
+  (`Surface::seen_from`), so the noisy normals of a top read at a slant do not block rests on it; a
+  face that leans out over empty space, seen from above, is then taken as a top.
 
 - Why a held object has no rest: `rest_failures(&device, &problems, &surfaces, &rests, &o)`
   gives, per problem `rests_on` found no rest for, how near the search came (`RestFailure`):
@@ -465,9 +485,9 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   `Gripper.openings`.
 
 - **Breaking:** a place says how many plans will do: `Place::enough` (`None` by default: every
-  pose is tried, as before). With a count, the poses are tried in their order, 32 and then twice
-  as many each time, until that many have got through, and the plans are the first that many in
-  the poses' order, as trying every pose gives them: a place given every spot of a table plans
+  release is tried, as before). With a count, the releases are tried in their order, 32 and then
+  twice as many each time, until that many have got through, and the plans are the first that
+  many in the releases' order, as trying every release gives them: a place given every spot of a table plans
   the first that will do without the IK and the motions of the rest. A place none gets through
   has tried every pose and says where each stopped. A `Place` literal needs `enough: None`; in
   Python, `Place(..., enough=1)`.
@@ -630,14 +650,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   the options `solve_ik` refuses, and `servo` a `slow_within` or `halt_within` that is not a
   number, with which it never slowed.
 
-- **Breaking:** a pick's grasps each say where the fingers are: `Pick::locked` is a
-  `Vec<HashMap<String, f32>>`, the locked joints' values per grasp (empty: every grasp as loaded, as
-  before), where it was one map for the task. One pick then takes grasps that come in at different
-  openings, as `grasps_on` gives them with `SurfaceGraspOptions::narrow`, and plans by any: `pick`
-  groups a call's grasps by those values, a relocked robot for each group, and each plan's
-  `candidate` numbers the pick's grasps and its `held` starts with its grasp's values. A pick that
-  set `locked: narrow` sets `locked: vec![narrow; grasps.len()]`; in Python, `Pick(...,
-  locked=[narrow] * len(grasps))`.
+- **Breaking:** a pick's grasps each say where the fingers are: `Hold::locked`, the locked joints'
+  values per grasp (empty: as loaded, as before), where `Pick::locked` was one map for the task,
+  and is gone. One pick then takes grasps that come in at different openings, as `grasps_on`
+  gives them with `SurfaceGraspOptions::narrow`, and plans by any: `pick` groups a call's grasps
+  by those values, a relocked robot for each group, and each plan's `candidate` numbers the
+  pick's grasps and its `held` starts with its grasp's values. A pick that set `locked: narrow`
+  gives each hold `locked: narrow.clone()`; in Python, `Pick(..., [Hold(g, locked=narrow) for g
+  in grasps])`.
 
 - **Breaking:** a held capsule is covered by spheres along its axis, and a held cylinder that is thin or
   slender (a disc, a rod) by one layer of rings of spheres or one line of them, where that reaches

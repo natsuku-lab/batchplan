@@ -6,15 +6,15 @@
 //! second and the third; a turn's hand closes, turns the object, and opens between them, and a
 //! pull's draws it along its line. Every motion is checked with the fingers where the robot was
 //! loaded with them, so open them first, unless the task says otherwise: a pick's, a turn's or a
-//! pull's grasps may keep them narrower ([`Pick::locked`], [`Turn::locked`], [`Pull::locked`]), a
-//! hold says where they closed ([`Held::locked`]), and a place may name how far they open where it
-//! lets go ([`Place::open`]).
+//! pull's grasps may keep them narrower ([`Hold::locked`]), a hold says where they closed
+//! ([`Held::locked`]), and a place may name how far they open where it lets go ([`Place::open`]).
 //!
 //! A task's candidates, its grasps or the poses it may set the object at, run with every other
 //! task's, step by step, each step a batch for those whose fingers and held object are alike: IK
 //! at each grasp or release, the moves in (run backward from there, so they end exactly there),
 //! the moves away, then planned paths for those still going. Every candidate that passes every step
-//! comes back, quickest first. When none does, each candidate's step and reason come back instead.
+//! comes back, least cost first ([`Hold::cost`], [`Release::cost`]) and the quickest among equals.
+//! When none does, each candidate's step and reason come back instead.
 //!
 //! A task may leave its transit out (`transit: false`) and give the two straight moves alone: a
 //! program of many tasks solves all their moves in one call, plans the ways between them in one
@@ -45,6 +45,80 @@ use crate::tool_path::{self, ToolPath, ToolPathOptions, ToolPathResult, ToolPath
 use crate::trajopt::{self, PlanOptions, PlanProblem};
 use crate::types::{Pose, Screw};
 use crate::world::{Obstacle, Touch, World};
+
+/// One way a hand may hold what it grips, as a pick, a turn or a pull tries it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hold {
+    /// The hand's IK frame, in the object's frame (its center and rotation).
+    pub pose: Pose,
+    /// Joints the robot was loaded with locked, at the values they keep through the task by this
+    /// hold, as [`Robot::relock`] takes them: the fingers opened only as far as the grasp has room
+    /// for, as a rim between walls lets them ([`Grasp::opening`](crate::Grasp::opening)). A joint
+    /// that carries a hand (a torso) is refused. A call's holds are grouped by these, a relocked
+    /// robot for each group, and each plan's [`TaskPlan::held`] starts with its hold's (overwrite
+    /// them with where the fingers closed). Empty: as loaded.
+    pub locked: HashMap<String, f32>,
+    /// What the caller holds against this hold, in any unit (0 by default): a task's plans come
+    /// least cost first, the quickest among equals. It does not change the order holds are tried
+    /// in, which is theirs as given. Finite.
+    pub cost: f32,
+}
+
+impl Hold {
+    /// The hand at `pose` with `gripper`'s pads `opening` apart (meters): as loaded where that is
+    /// the loaded gap or more, else the fingers locked there ([`Gripper::locked_at`]). Cost 0. For
+    /// a grasp of a surface, `Hold::new(to_object.mul_pose(grasp.pose), grasp.opening, &gripper)`,
+    /// `to_object` taking the surface's frame to the object's.
+    #[must_use]
+    pub fn new(pose: Pose, opening: f32, gripper: &Gripper) -> Self {
+        let locked = match opening >= gripper.opening() {
+            true => HashMap::new(),
+            false => gripper.locked_at(opening),
+        };
+        Self {
+            pose,
+            locked,
+            cost: 0.0,
+        }
+    }
+}
+
+/// The hand at the pose with the fingers as loaded, at cost 0.
+impl From<Pose> for Hold {
+    fn from(pose: Pose) -> Self {
+        Self {
+            pose,
+            locked: HashMap::new(),
+            cost: 0.0,
+        }
+    }
+}
+
+/// One place a hand may let go of what it holds, as a place tries it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Release {
+    /// The object's frame where the hand lets go of it.
+    pub pose: Pose,
+    /// How far the object drops once let go, in meters along world −z, to where it is expected
+    /// to rest at the same attitude: 0, it is set down there. Finite and not negative. The move
+    /// away is checked against an enclosure of the object through that drop
+    /// ([`TaskPlan::falling`]), and [`TaskPlan::placed`] is where it lands; the caller verifies
+    /// where it settled. [`falls_into`](crate::falls_into) gives the drop it found.
+    pub drop: f32,
+    /// What the caller holds against this release, as [`Hold::cost`]; finite.
+    pub cost: f32,
+}
+
+/// Setting the object down at the pose, at cost 0.
+impl From<Pose> for Release {
+    fn from(pose: Pose) -> Self {
+        Self {
+            pose,
+            drop: 0.0,
+            cost: 0.0,
+        }
+    }
+}
 
 /// The body lifted when the hand grasps one part of a larger object.
 #[derive(Clone, Debug, PartialEq)]
@@ -82,9 +156,10 @@ pub struct Pick {
     pub object: usize,
     /// What moves when `object` is only the contact part. None lifts that obstacle alone.
     pub body: Option<PickBody>,
-    /// Poses of the hand's IK frame that grasp the object, in the object's frame (its center and
-    /// rotation); any one will do. [`grasps`] proposes some for a box, ball, cylinder or capsule.
-    pub grasps: Vec<Pose>,
+    /// Ways of holding the object, each a pose of the hand's IK frame in the object's frame (its
+    /// center and rotation), the fingers' locks and a cost; any one will do. [`grasps`] proposes
+    /// poses for a box, ball, cylinder or capsule, [`Hold::new`] holds a grasp of a surface.
+    pub grasps: Vec<Hold>,
     /// How far back along its own z axis the hand begins to move in to a grasp (meters).
     pub approach: f32,
     /// Where the hand takes the object once it holds it, in the world's frame (meters).
@@ -95,22 +170,15 @@ pub struct Pick {
     /// takes path constraints. The start must keep them; a grasp whose move in begins where they
     /// break stops at the transit. A task without its transit has no use for them.
     pub constraints: Vec<HandConstraint>,
-    /// Per grasp, joints the robot was loaded with locked, at the values they keep through the
-    /// task by that grasp, as [`Robot::relock`] takes them: the fingers opened only as far as the
-    /// grasp has room for, as a rim between walls lets them
-    /// ([`Grasp::opening`](crate::Grasp::opening)). A joint that carries a hand (a torso) is
-    /// refused. A call's grasps are grouped by these, a relocked robot for each group, and each
-    /// plan's [`TaskPlan::held`] starts with its grasp's (overwrite them with where the fingers
-    /// closed). Empty: every grasp as loaded, as is a grasp whose own are empty.
-    pub locked: Vec<HashMap<String, f32>>,
     /// How many plans will do: `None`, every grasp is tried. With a count, the grasps are tried
     /// in their order, 32 of them and then twice as many each time, until that many have got
     /// through, and the task's plans are the first that many in the grasps' order to get
-    /// through, quickest first: those that trying every grasp gives, without the IK and the
-    /// motions of the grasps after them (on a GPU, whose IK rounds by the size of its batch,
-    /// to that rounding). Put the grasps worth having first, as
-    /// [`grasps_on`](crate::grasps_on) gives them. A task none gets through has tried every
-    /// one, and says where each stopped.
+    /// through, least cost first and the quickest among equals: those that trying every grasp
+    /// gives, without the IK and the motions of the grasps after them (on a GPU, whose IK rounds
+    /// by the size of its batch, to that rounding). Put the grasps worth having first, as
+    /// [`grasps_on`](crate::grasps_on) gives them, and set it to the plans you will use: a cost
+    /// orders what comes back, not what is tried. A task none gets through has tried every one,
+    /// and says where each stopped.
     pub enough: Option<usize>,
 }
 
@@ -184,10 +252,16 @@ impl Pick {
         Cow::Owned(parts)
     }
 
-    /// Hand 0 picks up `object` of world `world` from `start` by any of `grasps`, moving in 10 cm
-    /// along the hand's z axis and lifting the object 10 cm, off nothing it rests on.
+    /// Hand 0 picks up `object` of world `world` from `start` by any of `grasps` (holds, or poses
+    /// held with the fingers as loaded), moving in 10 cm along the hand's z axis and lifting the
+    /// object 10 cm, off nothing it rests on.
     #[must_use]
-    pub fn new(world: u32, start: impl Into<Vec<f32>>, object: usize, grasps: Vec<Pose>) -> Self {
+    pub fn new(
+        world: u32,
+        start: impl Into<Vec<f32>>,
+        object: usize,
+        grasps: impl IntoIterator<Item: Into<Hold>>,
+    ) -> Self {
         Self {
             world,
             transit_world: None,
@@ -197,12 +271,11 @@ impl Pick {
             hand: 0,
             object,
             body: None,
-            grasps,
+            grasps: grasps.into_iter().map(Into::into).collect(),
             approach: 0.1,
             lift: Vec3::Z * 0.1,
             support: vec![],
             constraints: vec![],
-            locked: vec![],
             enough: None,
         }
     }
@@ -233,16 +306,11 @@ pub struct Place {
     pub idle: Option<Vec<f32>>,
     /// What the hand holds, and how: a pick's [`TaskPlan::held`].
     pub held: Held,
-    /// Poses of the object's frame to set it down at; any one will do. [`place_poses`] gives an
-    /// object's symmetric turns at one spot, and [`rests_on`](crate::rests_on) the poses it
-    /// rests at on a support cameras see.
-    pub poses: Vec<Pose>,
-    /// Expected downward travel after release, in meters along world −z, one value per pose.
-    /// Empty sets down at the release itself. Supply a measured displacement to a resting
-    /// pose at the same attitude. Departure checks an enclosure of
-    /// the object throughout that translation. The returned placed pose is the expected rest;
-    /// the caller verifies where the object actually settled.
-    pub falls: Vec<f32>,
+    /// Where to let go of the object, each its pose, how far it drops from there and a cost; any
+    /// one will do. [`place_poses`] gives an object's symmetric turns at one spot,
+    /// [`rests_on`](crate::rests_on) where it rests on a support cameras see and
+    /// [`falls_into`](crate::falls_into) where to let it go to fall into a hollow of one.
+    pub releases: Vec<Release>,
     /// How the hand moves in to where it lets go, in the world's frame (meters).
     pub lower: Vec3,
     /// How far back along its own z axis the hand moves once it lets go (meters).
@@ -257,12 +325,13 @@ pub struct Place {
     /// before; a pose none clears stops at its departure, with what the last one tried met.
     /// Empty: the hand opens to where the robot was loaded with them.
     pub open: Vec<HashMap<String, f32>>,
-    /// How many plans will do: `None`, every pose is tried. With a count, the poses are tried in
-    /// their order, 32 of them and then twice as many each time, until that many have got
-    /// through, and the task's plans are the first that many in the poses' order to get through,
-    /// quickest first: those that trying every pose gives, without the IK and the motions of
-    /// the poses after them (on a GPU, whose IK rounds by the size of its batch, to that
-    /// rounding). Put the poses worth having first. A task none gets through has tried every
+    /// How many plans will do: `None`, every release is tried. With a count, the releases are
+    /// tried in their order, 32 of them and then twice as many each time, until that many have got
+    /// through, and the task's plans are the first that many in the releases' order to get
+    /// through, least cost first and the quickest among equals: those that trying every release
+    /// gives, without the IK and the motions of those after them (on a GPU, whose IK rounds by the
+    /// size of its batch, to that rounding). Put the releases worth having first, as `rests_on`
+    /// and `falls_into` give those nearest a point first. A task none gets through has tried every
     /// one, and says where each stopped.
     pub enough: Option<usize>,
     /// Obstacles the object is set on, by index: it may touch them as it arrives.
@@ -274,10 +343,16 @@ pub struct Place {
 }
 
 impl Place {
-    /// Sets `held` down from `start` at any of `poses` in world `world`, lowering it the last
-    /// 10 cm and backing off 10 cm along the hand's z axis, onto nothing.
+    /// Sets `held` down from `start` at any of `releases` (or poses, set down there) in world
+    /// `world`, lowering it the last 10 cm and backing off 10 cm along the hand's z axis, onto
+    /// nothing.
     #[must_use]
-    pub fn new(world: u32, start: impl Into<Vec<f32>>, held: Held, poses: Vec<Pose>) -> Self {
+    pub fn new(
+        world: u32,
+        start: impl Into<Vec<f32>>,
+        held: Held,
+        releases: impl IntoIterator<Item: Into<Release>>,
+    ) -> Self {
         Self {
             world,
             transit_world: None,
@@ -286,8 +361,7 @@ impl Place {
             transit: true,
             idle: None,
             held,
-            poses,
-            falls: vec![],
+            releases: releases.into_iter().map(Into::into).collect(),
             lower: Vec3::Z * -0.1,
             retreat: 0.1,
             open: vec![],
@@ -391,8 +465,10 @@ const STEPS: [TaskStep; 6] = [
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct TaskPlan {
-    /// The candidate: its index among the task's grasps or poses.
+    /// The candidate: its index among the task's grasps or releases.
     pub candidate: usize,
+    /// Its hold's or release's cost ([`Hold::cost`], [`Release::cost`]); 0 for a handover's.
+    pub cost: f32,
     /// The planned path from the start to where the move in begins; none for a task that leaves
     /// its transit out.
     pub transit: Option<Trajectory>,
@@ -574,8 +650,8 @@ impl fmt::Display for TaskFailure {
 pub struct TaskResult<T> {
     /// The tasks, in order.
     pub problems: Vec<T>,
-    /// Per task: the motions of every candidate that got through, quickest first, or where each
-    /// stopped.
+    /// Per task: the motions of every candidate that got through, least cost first and the
+    /// quickest among equals, or where each stopped.
     pub outcomes: Vec<std::result::Result<Vec<TaskPlan>, TaskFailure>>,
 }
 
@@ -592,83 +668,6 @@ pub fn pick(
 ) -> Result<TaskResult<Pick>> {
     let tasks = checked_picks(device, worlds, tasks, o)?;
     by_grasps(device, worlds, &tasks, o, picked)
-}
-
-/// Tries the first `preferred[i]` grasps of each pick as one ordinary batch. A task with any
-/// complete pick returns those plans. Only tasks with no complete preferred grasp try the
-/// remaining grasps, together in a second batch. Zero preferred grasps means to try the entire
-/// task in the ordinary batch.
-///
-/// Candidate indices and finger locks refer to the original task. When both groups stop, every
-/// grasp has a stop in its original order. [`Pick::enough`] applies within each group. A later
-/// placement has no bearing on which group a pick returns.
-pub fn pick_with_preferred_grasps(
-    device: &Device,
-    worlds: &Worlds,
-    tasks: &[Pick],
-    preferred: &[usize],
-    o: &TaskOptions,
-) -> Result<TaskResult<Pick>> {
-    ensure_input!(
-        preferred.len() == tasks.len(),
-        "{} preferred grasp counts for {} picks",
-        preferred.len(),
-        tasks.len()
-    );
-    let tasks = checked_picks(device, worlds, tasks, o)?;
-    for (i, (&count, task)) in preferred.iter().zip(tasks.iter()).enumerate() {
-        ensure_input!(
-            count <= task.grasps.len(),
-            "task {i} prefers {count} of {} grasps",
-            task.grasps.len()
-        );
-    }
-    let has_fallback = |i: usize| preferred[i] > 0 && preferred[i] < tasks[i].grasps.len();
-    if !(0..tasks.len()).any(has_fallback) {
-        return by_grasps(device, worlds, &tasks, o, picked);
-    }
-    let mut first = tasks.to_vec();
-    for (i, task) in first.iter_mut().enumerate() {
-        if has_fallback(i) {
-            task.grasps.truncate(preferred[i]);
-            task.locked.truncate(preferred[i]);
-        }
-    }
-    let mut result = by_grasps(device, worlds, &first, o, picked)?;
-    let mut indices = vec![];
-    let mut remaining = vec![];
-    for (i, outcome) in result.outcomes.iter().enumerate() {
-        if outcome.is_err() && has_fallback(i) {
-            let mut task = tasks[i].clone();
-            task.grasps.drain(..preferred[i]);
-            if !task.locked.is_empty() {
-                task.locked.drain(..preferred[i]);
-            }
-            indices.push(i);
-            remaining.push(task);
-        }
-    }
-    if !remaining.is_empty() {
-        let tried = by_grasps(device, worlds, &remaining, o, picked)?;
-        for (i, outcome) in indices.into_iter().zip(tried.outcomes) {
-            match outcome {
-                Ok(mut plans) => {
-                    for plan in &mut plans {
-                        plan.candidate += preferred[i];
-                    }
-                    result.outcomes[i] = Ok(plans);
-                }
-                Err(stopped) => {
-                    let first = result.outcomes[i]
-                        .as_mut()
-                        .expect_err("only failed picks try more grasps");
-                    first.candidates.extend(stopped.candidates);
-                }
-            }
-        }
-    }
-    result.problems = tasks.into_owned();
-    Ok(result)
 }
 
 /// Corrects measured starts and checks the full pick, including every candidate and finger lock.
@@ -690,7 +689,7 @@ fn checked_picks<'a>(
     Ok(corrected)
 }
 
-/// Each task's plans by its grasps, as [`Pick::enough`] and [`Pick::locked`] say how a pick's are
+/// Each task's plans by its grasps, as [`Pick::enough`] and [`Hold::locked`] say how a pick's are
 /// tried, `each` ([`picked`] or [`articulated`]) running checked tasks with some of their grasps
 /// that keep the robot's locked joints as its device's robot has them.
 fn by_grasps<T: Gripping>(
@@ -701,12 +700,11 @@ fn by_grasps<T: Gripping>(
     each: impl Fn(&Device, &Worlds, &[T], &TaskOptions) -> Result<TaskResult<T>> + Sync,
 ) -> Result<TaskResult<T>> {
     device.check_worlds(worlds)?;
-    let whole = |t: &T| t.plans_wanted().is_none() && t.locks().iter().all(HashMap::is_empty);
+    let whole = |t: &T| t.plans_wanted().is_none() && t.holds().iter().all(|h| h.locked.is_empty());
     if tasks.iter().all(whole) {
         return each(device, worlds, tasks, o);
     }
-    let as_loaded = HashMap::new();
-    let counts: Vec<usize> = tasks.iter().map(|t| t.gripped_by().len()).collect();
+    let counts: Vec<usize> = tasks.iter().map(|t| t.holds().len()).collect();
     let enough: Vec<Option<usize>> = tasks.iter().map(Gripping::plans_wanted).collect();
     let outcomes = in_waves(&counts, &enough, |next| {
         // A relocked robot for each set of locked joints' values, and for it each task with
@@ -715,7 +713,7 @@ fn by_grasps<T: Gripping>(
         let mut groups: Vec<Group<'_>> = vec![];
         for (i, t) in tasks.iter().enumerate() {
             for grasp in next[i].clone() {
-                let locked = t.locks().get(grasp).unwrap_or(&as_loaded);
+                let locked = &t.holds()[grasp].locked;
                 let k = groups.iter().position(|g| g.locked == locked);
                 let k = k.unwrap_or_else(|| {
                     groups.push(Group {
@@ -734,7 +732,7 @@ fn by_grasps<T: Gripping>(
             let mine: Vec<T> = group
                 .tasks
                 .iter()
-                .map(|(i, grasps)| tasks[*i].by(grasps, group.locked))
+                .map(|(i, grasps)| tasks[*i].by(grasps))
                 .collect();
             if group.locked.is_empty() {
                 each(device, worlds, &mine, o)
@@ -791,8 +789,8 @@ impl Wave {
 /// or, where only some plans will do (`enough`), [`FEW`] of them and then twice as many each
 /// time until that many have got through. `tried` plans the candidates it is given per task
 /// (none for a task that has enough) and says what they came to. A task's plans are the first
-/// that many in its candidates' order, quickest first; one without a plan has tried every
-/// candidate, and says where each stopped.
+/// that many in its candidates' order, least cost first and the quickest among equals
+/// ([`by_cost`]); one without a plan has tried every candidate, and says where each stopped.
 fn in_waves(
     counts: &[usize],
     enough: &[Option<usize>],
@@ -839,16 +837,24 @@ fn in_waves(
         }
         plans.sort_by_key(|plan| plan.candidate);
         plans.truncate(enough.unwrap_or(usize::MAX));
-        plans.sort_by(|a, b| a.duration().total_cmp(&b.duration()));
+        plans.sort_by(by_cost);
         Ok(plans)
     });
     Ok(outcomes.collect())
 }
 
 /// How many grasps a pick that wants only some plans ([`Pick::enough`]) tries first, and how
-/// many poses a place that does ([`Place::enough`]): enough that their IK is one batch worth
+/// many releases a place that does ([`Place::enough`]): enough that their IK is one batch worth
 /// sending, and twice as many each time after.
 const FEW: usize = 32;
+
+/// The order a task's plans come back in: least cost first, the quickest among equals, and of
+/// those as quick, in the order they came.
+fn by_cost(a: &TaskPlan, b: &TaskPlan) -> std::cmp::Ordering {
+    let cost = a.cost.partial_cmp(&b.cost);
+    cost.expect("costs are checked finite")
+        .then_with(|| a.duration().total_cmp(&b.duration()))
+}
 
 /// The candidates of a call's places that open their fingers alike where they let go, each with
 /// its world among those the hands back off in.
@@ -884,7 +890,7 @@ fn check_picks(robot: &Robot, worlds: &Worlds, tasks: &[Pick], o: &TaskOptions) 
         } else {
             check_object(world, i, t.object, "picked up")?;
         }
-        check_poses(i, "grasp", &t.grasps)?;
+        check_poses(i, "grasp", t.grasps.iter().map(|h| &h.pose))?;
         ensure_input!(
             t.approach.is_finite()
                 && t.approach > 0.0
@@ -914,8 +920,9 @@ fn check_object(world: &World, i: usize, object: usize, done: &str) -> Result<()
     Ok(())
 }
 
-/// That task `i` wants at least one plan and keeps locked joints the robot has at values it may
-/// take, per grasp: each set of values checked once among those in `checked`.
+/// That task `i` wants at least one plan and holds by grasps of finite cost that keep locked
+/// joints the robot has at values it may take: each set of values checked once among those in
+/// `checked`.
 fn check_tries<'a>(
     robot: &Robot,
     i: usize,
@@ -926,17 +933,24 @@ fn check_tries<'a>(
         t.plans_wanted() != Some(0),
         "task {i}: at least one plan must be enough, got 0"
     );
-    ensure_input!(
-        t.locks().is_empty() || t.locks().len() == t.gripped_by().len(),
-        "task {i}: locked joints' values for {} grasps of {}",
-        t.locks().len(),
-        t.gripped_by().len()
-    );
-    for (grasp, locked) in t.locks().iter().enumerate() {
-        if !checked.contains(&locked) {
-            held::check_locked(robot, locked, &format!("task {i}, grasp {grasp}"))?;
-            checked.push(locked);
+    check_costs(i, "grasp", t.holds().iter().map(|h| h.cost))?;
+    for (grasp, hold) in t.holds().iter().enumerate() {
+        if !checked.contains(&&hold.locked) {
+            held::check_locked(robot, &hold.locked, &format!("task {i}, grasp {grasp}"))?;
+            checked.push(&hold.locked);
         }
+    }
+    Ok(())
+}
+
+/// That each of task `i`'s candidates (its grasps or releases, called `what`) costs a finite
+/// amount.
+fn check_costs(i: usize, what: &str, costs: impl Iterator<Item = f32>) -> Result<()> {
+    let mut costs = costs.enumerate();
+    if let Some((k, cost)) = costs.find(|(_, cost)| !cost.is_finite()) {
+        return Err(input!(
+            "task {i}: {what} {k} must cost a finite amount, got {cost}"
+        ));
     }
     Ok(())
 }
@@ -954,8 +968,8 @@ fn picked(
         let object = worlds[task.world as usize].obstacles[task.object]
             .pose()
             .rigid();
-        for (index, &grasp) in task.grasps.iter().enumerate() {
-            let at = object.mul_pose(grasp.rigid());
+        for (index, hold) in task.grasps.iter().enumerate() {
+            let at = object.mul_pose(hold.pose.rigid());
             let poses = [
                 behind(at, task.approach),
                 at,
@@ -1095,10 +1109,9 @@ fn picked(
     )?;
 
     let outcomes = choose(device, tasks.len(), &candidates, o, |c| {
-        (
-            Some(held(&tasks[c.task], worlds, c.index, o.held_spheres)),
-            None,
-        )
+        let t = &tasks[c.task];
+        let held = held(t, worlds, c.index, o.held_spheres);
+        (Some(held), None, t.grasps[c.index].cost)
     })?;
     Ok(TaskResult {
         problems: tasks.to_vec(),
@@ -1106,17 +1119,17 @@ fn picked(
     })
 }
 
-/// Sets down each task's held object, trying each of its poses. IK solves where the hand lets go,
-/// holding the object, which may touch what it is set on there and on the move in, run backward
+/// Sets down each task's held object, trying each of its releases. IK solves where the hand lets
+/// go, holding the object, which may touch what it is set on there and on the move in, run backward
 /// from there. Run transit and approach holding the object, open the gripper, then follow the
 /// departure. The releasing fingers may touch the object. When a fall is specified, check the
-/// follower against the returned `falling` obstacle through departure. Verify the expected
-/// landing in `placed` after release. If the task specifies [`Place::open`], the solver keeps
-/// the fingers at the holding aperture until release, then backs off at the first clear opening
+/// follower against the returned `falling` obstacle through departure. Verify the expected landing
+/// in `placed` after release. If the task specifies [`Place::open`], the solver keeps the fingers
+/// at the holding aperture until release, then backs off at the first clear opening
 /// ([`TaskPlan::opening`]): open the gripper that far, and follow the departure on the robot
-/// relocked there. A task that says how many plans will do ([`Place::enough`]) tries its poses in
-/// their order until that many have got through. `device` is the robot's without the object; each
-/// task's `held` is attached to it here.
+/// relocked there. A task that says how many plans will do ([`Place::enough`]) tries its releases
+/// in their order until that many have got through. `device` is the robot's without the object;
+/// each task's `held` is attached to it here.
 pub fn place(
     device: &Device,
     worlds: &Worlds,
@@ -1161,13 +1174,15 @@ pub fn place(
             }
         }
         t.held.check(robot, worlds, &format!("task {i}"))?;
-        check_poses(i, "pose", &t.poses)?;
-        ensure_input!(
-            t.falls.is_empty()
-                || (t.falls.len() == t.poses.len()
-                    && t.falls.iter().all(|z| z.is_finite() && *z >= 0.0)),
-            "task {i} needs one finite nonnegative fall per release pose, or none"
-        );
+        check_poses(i, "release", t.releases.iter().map(|r| &r.pose))?;
+        let mut drops = t.releases.iter().enumerate();
+        if let Some((k, r)) = drops.find(|(_, r)| !(r.drop.is_finite() && r.drop >= 0.0)) {
+            return Err(input!(
+                "task {i}: release {k} needs a finite drop of at least 0, got {} m",
+                r.drop
+            ));
+        }
+        check_costs(i, "release", t.releases.iter().map(|r| r.cost))?;
         ensure_input!(
             t.lower.is_finite()
                 && t.lower != Vec3::ZERO
@@ -1192,18 +1207,13 @@ pub fn place(
     if tasks.iter().all(|t| t.enough.is_none()) {
         return placed(device, worlds, tasks, o);
     }
-    let counts: Vec<usize> = tasks.iter().map(|t| t.poses.len()).collect();
+    let counts: Vec<usize> = tasks.iter().map(|t| t.releases.len()).collect();
     let enough: Vec<Option<usize>> = tasks.iter().map(|t| t.enough).collect();
     let outcomes = in_waves(&counts, &enough, |next| {
-        // The tasks with poses to try, each with those alone.
+        // The tasks with releases to try, each with those alone.
         let going: Vec<usize> = (0..tasks.len()).filter(|&i| !next[i].is_empty()).collect();
         let some = going.iter().map(|&i| Place {
-            poses: tasks[i].poses[next[i].clone()].to_vec(),
-            falls: tasks[i]
-                .falls
-                .get(next[i].clone())
-                .unwrap_or_default()
-                .to_vec(),
+            releases: tasks[i].releases[next[i].clone()].to_vec(),
             ..tasks[i].clone()
         });
         let some: Vec<Place> = some.collect();
@@ -1220,7 +1230,7 @@ pub fn place(
     })
 }
 
-/// [`place`] for checked tasks, every pose of each.
+/// [`place`] for checked tasks, every release of each.
 fn placed(
     device: &Device,
     worlds: &Worlds,
@@ -1246,8 +1256,8 @@ fn placed(
     let holders = held::holders(device, robot, &helds)?;
     let mut candidates = vec![];
     for (t, task) in tasks.iter().enumerate() {
-        for (index, &pose) in task.poses.iter().enumerate() {
-            let at = pose.mul_pose(task.held.grasp);
+        for (index, release) in task.releases.iter().enumerate() {
+            let at = release.pose.mul_pose(task.held.grasp);
             let poses = [
                 Pose::new(at.position - task.lower, at.rotation),
                 at,
@@ -1429,9 +1439,9 @@ fn placed(
             .map(|c| {
                 let t = &tasks[c.task];
                 let mut w = worlds[Steps::of_place(t).depart_world as usize].clone();
-                let released = t.held.object.placed(t.poses[c.index]);
-                let fall = t.falls.get(c.index).copied().unwrap_or_default();
-                w.obstacles.push(released.falling(fall));
+                let release = t.releases[c.index];
+                let released = t.held.object.placed(release.pose);
+                w.obstacles.push(released.falling(release.drop));
                 let object = w.obstacles.len() - 1;
                 w.touch
                     .push(Touch::new(object, fingers(robot, t.held.hand)));
@@ -1520,20 +1530,18 @@ fn placed(
 
     let mut outcomes = choose(device, tasks.len(), &candidates, o, |c| {
         let t = &tasks[c.task];
-        let mut at = t.poses[c.index];
-        at.position.z -= t.falls.get(c.index).copied().unwrap_or_default();
-        (None, Some(t.held.object.placed(at)))
+        let release = t.releases[c.index];
+        let mut at = release.pose;
+        at.position.z -= release.drop;
+        (None, Some(t.held.object.placed(at)), release.cost)
     })?;
     for (task, outcome) in tasks.iter().zip(&mut outcomes) {
         if let Ok(plans) = outcome {
             for plan in plans {
-                if let Some(&fall) = task.falls.get(plan.candidate).filter(|&&z| z > 0.0) {
-                    plan.falling = Some(
-                        task.held
-                            .object
-                            .placed(task.poses[plan.candidate])
-                            .falling(fall),
-                    );
+                let release = task.releases[plan.candidate];
+                if release.drop > 0.0 {
+                    let released = task.held.object.placed(release.pose);
+                    plan.falling = Some(released.falling(release.drop));
                 }
             }
         }
@@ -1544,7 +1552,7 @@ fn placed(
     })
 }
 
-/// Poses that set `object` down at `pose` alike, for [`Place::poses`]: `pose` turned about the
+/// Poses that set `object` down at `pose` alike, for [`Place::releases`]: `pose` turned about the
 /// object's own z axis by its symmetries. A box gives 2, or 4 where its x and y sides match; a
 /// ball, cylinder or capsule `turns` (at least 1); a distance grid `pose` alone.
 #[must_use]
@@ -2276,14 +2284,15 @@ pub(crate) fn transit(
     Ok(())
 }
 
-/// Each task's candidates that passed every step, timed, quickest first, with what they leave
-/// held and placed; or where each candidate stopped.
+/// Each task's candidates that passed every step, timed, least cost first and the quickest among
+/// equals ([`by_cost`]), with what they leave held and placed and what each costs (`leaves`); or
+/// where each candidate stopped.
 pub(crate) fn choose(
     device: &Device,
     tasks: usize,
     candidates: &[Candidate],
     o: &TaskOptions,
-    leaves: impl Fn(&Candidate) -> (Option<Held>, Option<Obstacle>) + Sync,
+    leaves: impl Fn(&Candidate) -> (Option<Held>, Option<Obstacle>, f32) + Sync,
 ) -> Result<Vec<std::result::Result<Vec<TaskPlan>, TaskFailure>>> {
     let robot = device.robot();
     let complete: Vec<&Candidate> = candidates
@@ -2307,9 +2316,10 @@ pub(crate) fn choose(
         let n = robot.dof();
         // The move in ends at the grasp or release, and the move away starts there.
         let (in_end, away_start) = (&c.approach[c.approach.len() - n..], &c.depart[..n]);
-        let (held, placed) = leaves(c);
+        let (held, placed, cost) = leaves(c);
         Ok(TaskPlan {
             candidate: c.index,
+            cost,
             transit: match c.transits {
                 true => Some(Trajectory::try_new(robot, &c.transit, 1.0)?),
                 false => None,
@@ -2353,7 +2363,7 @@ pub(crate) fn choose(
                         .collect(),
                 });
             }
-            plans.sort_by(|a, b| a.duration().total_cmp(&b.duration()));
+            plans.sort_by(by_cost);
             Ok(plans)
         })
         .collect())
@@ -2381,16 +2391,16 @@ fn held(task: &Pick, worlds: &Worlds, index: usize, spheres: SphereOptions) -> H
     let (shape, grasp) = match &task.body {
         Some(body) => (
             &body.shape,
-            body.shape
-                .pose()
-                .rigid()
-                .inverse()
-                .mul_pose(part.pose().rigid().mul_pose(task.grasps[index].rigid())),
+            body.shape.pose().rigid().inverse().mul_pose(
+                part.pose()
+                    .rigid()
+                    .mul_pose(task.grasps[index].pose.rigid()),
+            ),
         ),
-        None => (part, task.grasps[index]),
+        None => (part, task.grasps[index].pose),
     };
     Held {
-        locked: task.locked.get(index).cloned().unwrap_or_default(),
+        locked: task.grasps[index].locked.clone(),
         hand: task.hand,
         object: shape.placed(Pose::IDENTITY),
         grasp,
@@ -2406,11 +2416,15 @@ pub(crate) fn behind(pose: Pose, distance: f32) -> Pose {
     )
 }
 
-/// That task `i` has `poses` (its grasps or poses, called `what`), each finite with a unit
+/// That task `i` has `poses` (its grasps' or releases', called `what`), each finite with a unit
 /// rotation.
-pub(crate) fn check_poses(i: usize, what: &str, poses: &[Pose]) -> Result<()> {
-    ensure_input!(!poses.is_empty(), "task {i} has no {what}s");
-    if let Some((k, p)) = poses.iter().enumerate().find(|(_, p)| !p.is_unit()) {
+pub(crate) fn check_poses<'a>(
+    i: usize,
+    what: &str,
+    poses: impl ExactSizeIterator<Item = &'a Pose>,
+) -> Result<()> {
+    ensure_input!(poses.len() > 0, "task {i} has no {what}s");
+    if let Some((k, p)) = poses.enumerate().find(|(_, p)| !p.is_unit()) {
         return Err(input!(
             "task {i}: {what} {k} must be finite with a unit rotation, got {p:?}"
         ));
@@ -2567,8 +2581,9 @@ pub struct Pull {
     /// Contact obstacle by index. Only fingers may touch it during the approach, draw and
     /// departure. It can be a distance grid, as the fixture stays in place.
     pub object: usize,
-    /// Candidate hand IK poses in the contact obstacle's frame ([`Obstacle::pose`]).
-    pub grasps: Vec<Pose>,
+    /// Ways of holding the contact obstacle, each a pose of the hand's IK frame in its frame
+    /// ([`Obstacle::pose`]), as [`Pick::grasps`].
+    pub grasps: Vec<Hold>,
     /// Distance back along the hand's z axis before the grasp and after release (meters).
     pub approach: f32,
     /// The line's unit direction in the world's frame, independent of the chosen grasp.
@@ -2577,8 +2592,6 @@ pub struct Pull {
     pub distance: f32,
     /// Constraints to keep along the transit, as a pick's.
     pub constraints: Vec<HandConstraint>,
-    /// Locked joints for each grasp, as [`Pick::locked`].
-    pub locked: Vec<HashMap<String, f32>>,
     /// How many plans will do, as [`Pick::enough`].
     pub enough: Option<usize>,
 }
@@ -2591,7 +2604,7 @@ impl Pull {
         world: u32,
         start: impl Into<Vec<f32>>,
         object: usize,
-        grasps: Vec<Pose>,
+        grasps: impl IntoIterator<Item: Into<Hold>>,
         direction: Vec3,
         distance: f32,
     ) -> Self {
@@ -2602,12 +2615,11 @@ impl Pull {
             transit: true,
             hand: 0,
             object,
-            grasps,
+            grasps: grasps.into_iter().map(Into::into).collect(),
             approach: 0.1,
             direction,
             distance,
             constraints: vec![],
-            locked: vec![],
             enough: None,
         }
     }
@@ -2635,9 +2647,9 @@ pub struct Turn {
     /// The object: an obstacle of the world, by index. A distance grid may only be gripped where it
     /// `stays`.
     pub object: usize,
-    /// Poses of the hand's IK frame that grip the object, in the object's frame (its center and
-    /// rotation), as [`Pick::grasps`]; any one will do.
-    pub grasps: Vec<Pose>,
+    /// Ways of holding the object, each a pose of the hand's IK frame in the object's frame (its
+    /// center and rotation), as [`Pick::grasps`]; any one will do.
+    pub grasps: Vec<Hold>,
     /// How far back along its own z axis the hand begins to move in to a grasp, and moves away to
     /// once it lets go (meters).
     pub approach: f32,
@@ -2663,11 +2675,6 @@ pub struct Turn {
     /// Where the hands must stay along the transit ([`HandConstraint`]), as a pick's. The start
     /// must keep them; a grasp whose move in begins where they break stops at the transit.
     pub constraints: Vec<HandConstraint>,
-    /// Per grasp, joints the robot was loaded with locked, at the values they keep through the
-    /// task by that grasp, as [`Pick::locked`]: the fingers opened only as far as the grasp has
-    /// room for ([`Grasp::opening`](crate::Grasp::opening)). A call's grasps are grouped by these,
-    /// a relocked robot for each group. Empty: every grasp as loaded.
-    pub locked: Vec<HashMap<String, f32>>,
     /// How many plans will do, as [`Pick::enough`]: `None`, every grasp is tried; with a count,
     /// the grasps are tried in their order, 32 and then twice as many each time, until that many
     /// have got through.
@@ -2683,7 +2690,7 @@ impl Turn {
         world: u32,
         start: impl Into<Vec<f32>>,
         object: usize,
-        grasps: Vec<Pose>,
+        grasps: impl IntoIterator<Item: Into<Hold>>,
         angle: f32,
     ) -> Self {
         Self {
@@ -2693,14 +2700,13 @@ impl Turn {
             transit: true,
             hand: 0,
             object,
-            grasps,
+            grasps: grasps.into_iter().map(Into::into).collect(),
             approach: 0.1,
             screw: None,
             angle,
             support: vec![],
             stays: false,
             constraints: vec![],
-            locked: vec![],
             enough: None,
         }
     }
@@ -2834,8 +2840,7 @@ struct Articulation<'a> {
     start: &'a [f32],
     hand: usize,
     object: usize,
-    grasps: &'a [Pose],
-    locked: &'a [HashMap<String, f32>],
+    grasps: &'a [Hold],
     support: &'a [usize],
     approach: f32,
     stays: bool,
@@ -2854,7 +2859,6 @@ impl Articulated for Turn {
             hand: self.hand,
             object: self.object,
             grasps: &self.grasps,
-            locked: &self.locked,
             support: &self.support,
             approach: self.approach,
             stays: self.stays,
@@ -2880,7 +2884,6 @@ impl Articulated for Pull {
             hand: self.hand,
             object: self.object,
             grasps: &self.grasps,
-            locked: &self.locked,
             support: &[],
             approach: self.approach,
             stays: true,
@@ -2914,7 +2917,7 @@ fn articulate<T: Articulated>(
         } else {
             check_object(world, i, t.object, "turned")?;
         }
-        check_poses(i, "grasp", t.grasps)?;
+        check_poses(i, "grasp", t.grasps.iter().map(|h| &h.pose))?;
         ensure_input!(
             t.approach.is_finite() && t.approach > 0.0,
             "task {i} needs a positive approach, got {} m",
@@ -2931,8 +2934,8 @@ fn articulate<T: Articulated>(
         check_support(i, world, t.support, Some(t.object))?;
         check_tries(robot, i, task, &mut checked)?;
         let object = world.obstacles[t.object].pose().rigid();
-        for (g, &grasp) in t.grasps.iter().enumerate() {
-            let at = object.mul_pose(grasp.rigid());
+        for (g, hold) in t.grasps.iter().enumerate() {
+            let at = object.mul_pose(hold.pose.rigid());
             match t.motion {
                 Motion::Turn { screw, angle } => {
                     Motion::screw(screw, at)
@@ -2998,8 +3001,8 @@ fn articulated(
     for (t, task) in tasks.iter().enumerate() {
         first.push(candidates.len());
         let object = &worlds[task.steps.world as usize].obstacles[task.object];
-        for (index, &grasp) in task.grasps.iter().enumerate() {
-            let at = object.pose().rigid().mul_pose(grasp.rigid());
+        for (index, hold) in task.grasps.iter().enumerate() {
+            let at = object.pose().rigid().mul_pose(hold.pose.rigid());
             let (end, path, left) = match task.motion {
                 Motion::Turn { screw, angle } => {
                     let screw = Motion::screw(screw, at);
@@ -3114,11 +3117,11 @@ fn articulated(
             _ => {
                 let t = &tasks[c.task];
                 let held = Held {
-                    locked: t.locked.get(c.index).cloned().unwrap_or_default(),
+                    locked: t.grasps[c.index].locked.clone(),
                     hand: t.hand,
                     object: worlds[t.steps.world as usize].obstacles[t.object]
                         .placed(Pose::IDENTITY),
-                    grasp: t.grasps[c.index],
+                    grasp: t.grasps[c.index].pose,
                     spheres: o.held_spheres,
                 };
                 grips.push((held, vec![i]));
@@ -3241,11 +3244,12 @@ fn articulated(
     )?;
 
     let mut outcomes = choose(device, tasks.len(), &candidates, o, |c| {
-        (None, (!pull).then(|| placed[id(c)].clone()))
+        let cost = tasks[c.task].grasps[c.index].cost;
+        (None, (!pull).then(|| placed[id(c)].clone()), cost)
     })?;
     // Each plan's turn, timed with the hand under the tool speed all along it, which the hand
-    // holds the object through, the plans then quickest first again; and how far each stop at the
-    // turn got.
+    // holds the object through, the plans then in their order again ([`by_cost`]); and how far
+    // each stop at the turn got.
     let mut plans: Vec<(usize, &mut TaskPlan)> = vec![];
     for (t, outcome) in outcomes.iter_mut().enumerate() {
         match outcome {
@@ -3285,193 +3289,67 @@ fn articulated(
     device.install(|| plans.par_iter_mut().try_for_each(timed))?;
     let succeeded = outcomes.iter_mut().filter_map(|o| o.as_mut().ok());
     for found in succeeded {
-        found.sort_by(|a, b| a.duration().total_cmp(&b.duration()));
+        found.sort_by(by_cost);
     }
     Ok(outcomes)
 }
 
 /// A task that grips its object by any of its grasps, each keeping the robot's locked joints at
-/// values of its own, tried as [`Pick::enough`] says: a pick or a turn.
+/// values of its own, tried as [`Pick::enough`] says: a pick, a turn or a pull.
 trait Gripping: Clone + Send + Sync {
-    fn gripped_by(&self) -> &[Pose];
-    fn locks(&self) -> &[HashMap<String, f32>];
+    fn holds(&self) -> &[Hold];
     fn plans_wanted(&self) -> Option<usize>;
-    /// The task by its grasps `grasps` alone, each keeping the locked joints at `locked`.
-    fn by(&self, grasps: &[usize], locked: &HashMap<String, f32>) -> Self;
+    /// The task by its grasps `grasps` alone.
+    fn by(&self, grasps: &[usize]) -> Self;
 }
 
 impl Gripping for Pick {
-    fn gripped_by(&self) -> &[Pose] {
+    fn holds(&self) -> &[Hold] {
         &self.grasps
-    }
-
-    fn locks(&self) -> &[HashMap<String, f32>] {
-        &self.locked
     }
 
     fn plans_wanted(&self) -> Option<usize> {
         self.enough
     }
 
-    fn by(&self, grasps: &[usize], locked: &HashMap<String, f32>) -> Self {
+    fn by(&self, grasps: &[usize]) -> Self {
         Pick {
-            grasps: grasps.iter().map(|&g| self.grasps[g]).collect(),
-            locked: vec![locked.clone(); grasps.len()],
+            grasps: grasps.iter().map(|&g| self.grasps[g].clone()).collect(),
             ..self.clone()
         }
     }
 }
 
 impl Gripping for Turn {
-    fn gripped_by(&self) -> &[Pose] {
+    fn holds(&self) -> &[Hold] {
         &self.grasps
-    }
-
-    fn locks(&self) -> &[HashMap<String, f32>] {
-        &self.locked
     }
 
     fn plans_wanted(&self) -> Option<usize> {
         self.enough
     }
 
-    fn by(&self, grasps: &[usize], locked: &HashMap<String, f32>) -> Self {
+    fn by(&self, grasps: &[usize]) -> Self {
         Turn {
-            grasps: grasps.iter().map(|&g| self.grasps[g]).collect(),
-            locked: vec![locked.clone(); grasps.len()],
+            grasps: grasps.iter().map(|&g| self.grasps[g].clone()).collect(),
             ..self.clone()
         }
     }
 }
-impl Gripping for Pull {
-    fn gripped_by(&self) -> &[Pose] {
-        &self.grasps
-    }
 
-    fn locks(&self) -> &[HashMap<String, f32>] {
-        &self.locked
+impl Gripping for Pull {
+    fn holds(&self) -> &[Hold] {
+        &self.grasps
     }
 
     fn plans_wanted(&self) -> Option<usize> {
         self.enough
     }
 
-    fn by(&self, grasps: &[usize], locked: &HashMap<String, f32>) -> Self {
+    fn by(&self, grasps: &[usize]) -> Self {
         Pull {
-            grasps: grasps.iter().map(|&g| self.grasps[g]).collect(),
-            locked: vec![locked.clone(); grasps.len()],
+            grasps: grasps.iter().map(|&g| self.grasps[g].clone()).collect(),
             ..self.clone()
         }
     }
-}
-
-/// What [`place_nearest`] chose: the alternative that sets the object down nearest the spot, and
-/// its plan that does.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct NearestPlace {
-    /// The task's index among the alternatives.
-    pub task: usize,
-    /// The task as given, its start corrected within [`PlanOptions::start_tolerance`] as
-    /// [`place`] corrects it.
-    pub problem: Place,
-    /// Its plan that sets the object down nearest the spot, its candidate numbered as the task's
-    /// poses are.
-    pub plan: TaskPlan,
-}
-
-/// Alternatives for one placement: the same object set down at the same poses from different
-/// starts or holds, as each of several picks leaves it. Plans them in one batch, each as [`place`]
-/// does, and returns the alternative whose plan sets the object down nearest `near` in x and y
-/// (the support sets z): the earliest task among equally near ones. Distance is from each plan's
-/// [`TaskPlan::placed`], the expected landing. A task that says how many plans will do
-/// ([`Place::enough`]) tries its poses nearest `near` first, equally near ones in their order, as
-/// [`place`] tries them in their order: its plans are the nearest that get through. One that does
-/// not tries every pose. Of a task's several plans, the nearest counts for it, the quickest among
-/// equally near ones. Candidates are numbered as the caller's poses are, in the plan and in each
-/// failure. Where none gets through, each task's failure comes back, in task order (none for no
-/// tasks). A `near` that is not finite is an input error.
-// Compiled where it is called: this crate's own code stays as it was without it (`nm -n`).
-#[inline]
-pub fn place_nearest(
-    device: &Device,
-    worlds: &Worlds,
-    tasks: &[Place],
-    near: Vec3,
-    o: &TaskOptions,
-) -> Result<std::result::Result<NearestPlace, Vec<TaskFailure>>> {
-    ensure_input!(
-        near.is_finite(),
-        "the point to set the object down near must be finite, got {near}"
-    );
-    // The squared distance in x and y from `near` of an object set down at `pose`.
-    let off = |pose: Pose| pose.position.truncate().distance_squared(near.truncate());
-    // Each task's poses as planned, by their indices among its own: nearest first where only some
-    // plans will do, else as given.
-    let orders = tasks.iter().map(|t| {
-        let mut order: Vec<usize> = (0..t.poses.len()).collect();
-        if t.enough.is_some() {
-            order.sort_by(|&a, &b| off(t.poses[a]).total_cmp(&off(t.poses[b])));
-        }
-        order
-    });
-    let orders: Vec<Vec<usize>> = orders.collect();
-    let nearest_first = tasks.iter().zip(&orders).map(|(t, order)| Place {
-        poses: order.iter().map(|&k| t.poses[k]).collect(),
-        // One per pose, or as given for `place` to refuse.
-        falls: match t.falls.len() == t.poses.len() {
-            true => order.iter().map(|&k| t.falls[k]).collect(),
-            false => t.falls.clone(),
-        },
-        ..t.clone()
-    });
-    let nearest_first: Vec<Place> = nearest_first.collect();
-    let TaskResult {
-        mut problems,
-        outcomes,
-    } = place(device, worlds, &nearest_first, o)?;
-    // The nearest plan so far, its squared distance and its task; and the tasks' failures.
-    let mut nearest: Option<(f32, usize, TaskPlan)> = None;
-    let mut failures = vec![];
-    let each = outcomes.into_iter().enumerate().zip(&orders);
-    for ((task, outcome), order) in each {
-        let plans = match outcome {
-            Ok(plans) => plans,
-            Err(failure) => {
-                let mut stops: Vec<(usize, CandidateStop)> =
-                    order.iter().copied().zip(failure.candidates).collect();
-                stops.sort_by_key(|&(k, _)| k);
-                failures.push(TaskFailure {
-                    candidates: stops.into_iter().map(|(_, stop)| stop).collect(),
-                });
-                continue;
-            }
-        };
-        for plan in plans {
-            let placed = plan
-                .placed
-                .as_ref()
-                .expect("a place's plan says where it sets the object down");
-            let distance = off(placed.pose());
-            if nearest
-                .as_ref()
-                .is_none_or(|(least, _, _)| distance < *least)
-            {
-                let candidate = order[plan.candidate];
-                nearest = Some((distance, task, TaskPlan { candidate, ..plan }));
-            }
-        }
-    }
-    Ok(match nearest {
-        Some((_, task, plan)) => Ok(NearestPlace {
-            task,
-            problem: Place {
-                poses: tasks[task].poses.clone(),
-                falls: tasks[task].falls.clone(),
-                ..problems.swap_remove(task)
-            },
-            plan,
-        }),
-        None => Err(failures),
-    })
 }

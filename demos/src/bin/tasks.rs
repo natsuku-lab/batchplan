@@ -240,7 +240,9 @@ fn main() -> Result<()> {
                     places[0].duration(),
                     places[0].candidate,
                     places.len(),
-                    placed.problems[placing_of[w].expect("placed")].poses.len()
+                    placed.problems[placing_of[w].expect("placed")]
+                        .releases
+                        .len()
                 )
             }
             (Ok(_), None) => unreachable!("every pick that got through was placed"),

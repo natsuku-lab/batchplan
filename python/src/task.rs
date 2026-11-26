@@ -110,6 +110,65 @@ value_class! {
 }
 
 value_class! {
+    /// One way a hand may hold what it grips, as a pick, a turn or a pull tries it. Where a task
+    /// takes holds, a `Pose` is one with the fingers as loaded, at cost 0.
+    Hold(batchplan::Hold) or batchplan::Pose {
+        /// The hand's IK frame, in the object's frame (its center and rotation).
+        pose: batchplan::Pose,
+        /// Joints the robot was loaded with locked, at the values they keep through the task by
+        /// this hold, as `Robot.relock` takes them (`Gripper.locked_at` gives the fingers'): the
+        /// fingers opened only as far as the grasp has room for. A call's holds are grouped by
+        /// these; each plan's `held` starts with its hold's. Empty: as loaded.
+        locked: HashMap<String, f32>,
+        /// What the caller holds against this hold, in any unit: 0. A task's plans come least cost
+        /// first, the quickest among equals; the holds are tried in their order as given.
+        cost: f32,
+    }
+    methods {
+        /// The hand at `pose`, the fingers as loaded, at cost 0, but for what `changes` names.
+        #[new]
+        #[pyo3(signature = (pose, **changes))]
+        fn new(pose: &Pose, changes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+            Ok(Self(Self::changed(batchplan::Hold::from(pose.0), changes)?))
+        }
+
+        /// The hand at `pose` with `gripper`'s pads `opening` apart (meters), at cost 0, as
+        /// Rust's `Hold::new`: the fingers as loaded where that is the loaded gap or more (an
+        /// empty `locked`, which keeps a pick of such holds as one of poses), else locked there
+        /// (`Gripper.locked_at`).
+        #[staticmethod]
+        fn at_opening(pose: &Pose, opening: f32, gripper: &Gripper) -> Self {
+            Self(batchplan::Hold::new(pose.0, opening, &gripper.0))
+        }
+    }
+}
+
+value_class! {
+    /// One place a hand may let go of what it holds, as a place tries it. Where a place takes
+    /// releases, a `Pose` is one that sets the object down there, at cost 0.
+    Release(batchplan::Release) or batchplan::Pose {
+        /// The object's frame where the hand lets go of it.
+        pose: batchplan::Pose,
+        /// How far the object drops once let go, in meters along world -z, to where it is
+        /// expected to rest at the same attitude: 0, set down there. The move away is checked
+        /// against the object through that drop (`TaskPlan.falling`).
+        drop: f32,
+        /// What the caller holds against this release, as `Hold.cost`: 0.
+        cost: f32,
+    }
+    methods {
+        /// The object set down at `pose`, at cost 0, but for what `changes` names.
+        #[new]
+        #[pyo3(signature = (pose, **changes))]
+        fn new(pose: &Pose, changes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+            Ok(Self(Self::changed(batchplan::Release::from(pose.0), changes)?))
+        }
+    }
+}
+
+tuple_field!(batchplan::Hold, batchplan::Release);
+
+value_class! {
     /// A hand picking up one obstacle of its world.
     Pick(batchplan::Pick) {
         /// The world's index in the batch: the one the hand grasps and moves in in, and every
@@ -133,10 +192,10 @@ value_class! {
         object: usize,
         /// The whole body carried when the fingers grasp a part of it.
         body: Option<batchplan::PickBody>,
-        /// Poses of the hand's IK frame that grasp the object, in the object's frame (its center
-        /// and rotation); any one will do. `grasps` proposes some for a box, ball, cylinder or
-        /// capsule.
-        grasps: Vec<batchplan::Pose>,
+        /// Ways of holding the object (`Hold`s, or poses held with the fingers as loaded), each
+        /// in the object's frame (its center and rotation); any one will do. `grasps` proposes
+        /// poses for a box, ball, cylinder or capsule.
+        grasps: Vec<batchplan::Hold>,
         /// How far back along its own z axis the hand begins to move in to a grasp (meters).
         approach: f32,
         /// Where the hand takes the object once it holds it, in the world's frame (meters).
@@ -147,14 +206,10 @@ value_class! {
         /// move in begins where they break stops at the transit. A task without its transit has
         /// no use for them.
         constraints: Vec<batchplan::HandConstraint>,
-        /// Per grasp, joints the robot was loaded with locked, at the values they keep through
-        /// the task by that grasp, as `Robot.relock` takes them: the fingers opened only as far
-        /// as the grasp has room for. A call's grasps are grouped by these; each plan's `held`
-        /// starts with its grasp's. Empty: every grasp as loaded.
-        locked: Vec<HashMap<String, f32>>,
         /// How many plans will do: `None`, every grasp is tried. With a count, the grasps are
         /// tried in their order, a few at a time, until that many have got through, and the
-        /// plans are the first that many in the grasps' order, quickest first.
+        /// plans are the first that many in the grasps' order, least cost first and the quickest
+        /// among equals.
         enough: Option<usize>,
     }
     methods {
@@ -178,7 +233,7 @@ value_class! {
                 world,
                 Vec::<f32>::from_py(start)?,
                 object,
-                Vec::from_py(grasps)?,
+                Vec::<batchplan::Hold>::from_py(grasps)?,
             );
             Ok(Self(Self::changed(pick, changes)?))
         }
@@ -211,25 +266,24 @@ value_class! {
         idle: Option<Vec<f32>>,
         /// What the hand holds, and how: a pick's `TaskPlan.held`.
         held: batchplan::Held,
-        /// Poses of the object's frame to set it down at; any one will do. `place_poses` gives an
-        /// object's symmetric turns at one spot.
-        poses: Vec<batchplan::Pose>,
-        /// Downward settling distance for each release, in meters. Empty places at release.
-        falls: Vec<f32>,
+        /// Where to let go of the object (`Release`s, or poses to set it down at); any one will
+        /// do. `place_poses` gives an object's symmetric turns at one spot.
+        releases: Vec<batchplan::Release>,
         /// How the hand moves in to where it lets go, in the world's frame (meters).
         lower: Vec3,
         /// How far back along its own z axis the hand moves once it lets go (meters).
         retreat: f32,
         /// Values the fingers may open to where the hand lets go, each as `Held.locked` names
-        /// them, in the order preferred: a pose lets go at the first with which the hand, where
+        /// them, in the order preferred: a release lets go at the first with which the hand, where
         /// it lets go and on its move away, is clear, and its plan says which
         /// (`TaskPlan.opening`). The release is then solved with the fingers where they hold the
         /// object, not where the robot was loaded with them. Joints an opening does not name are
         /// as loaded. Empty: the hand opens to where the robot was loaded with them.
         open: Vec<HashMap<String, f32>>,
-        /// How many plans will do: `None`, every pose is tried. With a count, the poses are tried
-        /// in their order, a few at a time, until that many have got through, and the plans are
-        /// the first that many in the poses' order, quickest first.
+        /// How many plans will do: `None`, every release is tried. With a count, the releases are
+        /// tried in their order, a few at a time, until that many have got through, and the plans
+        /// are the first that many in the releases' order, least cost first and the quickest
+        /// among equals.
         enough: Option<usize>,
         /// Obstacles the object is set on, by index: it may touch them as it arrives.
         support: Vec<usize>,
@@ -239,22 +293,22 @@ value_class! {
         constraints: Vec<batchplan::HandConstraint>,
     }
     methods {
-        /// Sets `held` down from `start` at any of `poses` in world `world`, lowering it the last
-        /// 10 cm and backing off 10 cm along the hand's z axis, onto nothing.
+        /// Sets `held` down from `start` at any of `releases` in world `world`, lowering it the
+        /// last 10 cm and backing off 10 cm along the hand's z axis, onto nothing.
         #[new]
-        #[pyo3(signature = (world, start, held, poses, **changes))]
+        #[pyo3(signature = (world, start, held, releases, **changes))]
         fn new(
             world: u32,
             start: &Bound<'_, PyAny>,
             held: &Held,
-            poses: &Bound<'_, PyAny>,
+            releases: &Bound<'_, PyAny>,
             changes: Option<&Bound<'_, PyDict>>,
         ) -> PyResult<Self> {
             let place = batchplan::Place::new(
                 world,
                 Vec::<f32>::from_py(start)?,
                 held.0.clone(),
-                Vec::from_py(poses)?,
+                Vec::<batchplan::Release>::from_py(releases)?,
             );
             Ok(Self(Self::changed(place, changes)?))
         }
@@ -331,9 +385,9 @@ value_class! {
         hand: usize,
         /// The contact obstacle by index. A distance grid can be gripped where it stays.
         object: usize,
-        /// Poses of the hand's IK frame that grip the object, in the object's frame, as
-        /// `Pick.grasps`; any one will do.
-        grasps: Vec<batchplan::Pose>,
+        /// Ways of holding the object (`Hold`s, or poses held with the fingers as loaded), each
+        /// in the object's frame, as `Pick.grasps`; any one will do.
+        grasps: Vec<batchplan::Hold>,
         /// How far back along its own z axis the hand begins to move in to a grasp, and moves
         /// away to once it lets go (meters).
         approach: f32,
@@ -356,9 +410,6 @@ value_class! {
         stays: bool,
         /// Where the hands must stay along the transit, as a pick's.
         constraints: Vec<batchplan::HandConstraint>,
-        /// Per grasp, joints the robot was loaded with locked, at the values they keep through
-        /// the task by that grasp, as `Pick.locked`. Empty: every grasp as loaded.
-        locked: Vec<HashMap<String, f32>>,
         /// How many plans will do, as `Pick.enough`: `None`, every grasp is tried.
         enough: Option<usize>,
     }
@@ -380,7 +431,7 @@ value_class! {
                 world,
                 Vec::<f32>::from_py(start)?,
                 object,
-                Vec::from_py(grasps)?,
+                Vec::<batchplan::Hold>::from_py(grasps)?,
                 angle,
             );
             Ok(Self(Self::changed(turn, changes)?))
@@ -407,9 +458,9 @@ value_class! {
         hand: usize,
         /// The contact obstacle's index in the world. A stationary distance grid may be contacted.
         object: usize,
-        /// Poses of the hand's IK frame that grip the object, in the object's frame, as
-        /// `Pick.grasps`; any one will do.
-        grasps: Vec<batchplan::Pose>,
+        /// Ways of holding the object (`Hold`s, or poses held with the fingers as loaded), each
+        /// in the object's frame, as `Pick.grasps`; any one will do.
+        grasps: Vec<batchplan::Hold>,
         /// How far back along its own z axis the hand begins to move in to a grasp, and moves
         /// away to once it lets go (meters).
         approach: f32,
@@ -419,9 +470,6 @@ value_class! {
         distance: f32,
         /// Where the hands must stay along the transit, as a pick's.
         constraints: Vec<batchplan::HandConstraint>,
-        /// Per grasp, joints the robot was loaded with locked, at the values they keep through
-        /// the task by that grasp, as `Pick.locked`. Empty: every grasp as loaded.
-        locked: Vec<HashMap<String, f32>>,
         /// How many plans will do, as `Pick.enough`: `None`, every grasp is tried.
         enough: Option<usize>,
     }
@@ -442,7 +490,7 @@ value_class! {
                 world,
                 Vec::<f32>::from_py(start)?,
                 object,
-                Vec::from_py(grasps)?,
+                Vec::<batchplan::Hold>::from_py(grasps)?,
                 Vec3::from_py(direction)?,
                 distance,
             );
@@ -518,10 +566,16 @@ pub(crate) struct TaskPlan(batchplan::TaskPlan);
 
 #[pymethods]
 impl TaskPlan {
-    /// The candidate: its index among the task's grasps or poses.
+    /// The candidate: its index among the task's grasps or releases.
     #[getter]
     fn candidate(&self) -> usize {
         self.0.candidate
+    }
+
+    /// Its hold's or release's cost (`Hold.cost`, `Release.cost`); 0 for a handover's.
+    #[getter]
+    fn cost(&self) -> f64 {
+        field::shortest(self.0.cost)
     }
 
     /// The planned path from the start to where the move in begins; `None` for a task that
@@ -710,8 +764,8 @@ impl TaskFailure {
 }
 
 /// What `pick`, `place`, `handover` or `turn` did with each task: per task, the motions of every
-/// candidate that got through, quickest first (a tuple of `TaskPlan`), or where each stopped (a
-/// `TaskFailure`).
+/// candidate that got through, least cost first and the quickest among equals (a tuple of
+/// `TaskPlan`), or where each stopped (a `TaskFailure`).
 #[pyclass(module = "batchplan", frozen)]
 pub(crate) struct TaskResult {
     problems: Py<PyAny>,
@@ -749,7 +803,8 @@ impl TaskResult {
         self.problems.clone_ref(py)
     }
 
-    /// Per task: a tuple of `TaskPlan`, quickest first, or a `TaskFailure`.
+    /// Per task: a tuple of `TaskPlan`, least cost first and the quickest among equals, or a
+    /// `TaskFailure`.
     #[getter]
     fn outcomes(&self, py: Python<'_>) -> Py<PyTuple> {
         self.outcomes.clone_ref(py)
@@ -770,41 +825,6 @@ impl TaskResult {
             outcomes.len(),
             outcomes.len() - failed
         ))
-    }
-}
-
-/// What `place_nearest` chose: the alternative that sets the object down nearest the spot, and its
-/// plan that does.
-#[pyclass(module = "batchplan", frozen)]
-pub(crate) struct NearestPlace(batchplan::NearestPlace);
-
-#[pymethods]
-impl NearestPlace {
-    /// The task's index among the alternatives.
-    #[getter]
-    fn task(&self) -> usize {
-        self.0.task
-    }
-
-    /// The task as given, its start corrected within `PlanOptions.start_tolerance` as `place`
-    /// corrects it.
-    #[getter]
-    fn problem<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        self.0.problem.to_py(py)
-    }
-
-    /// Its plan that sets the object down nearest the spot, its candidate numbered as the task's
-    /// poses are.
-    #[getter]
-    fn plan(&self) -> TaskPlan {
-        TaskPlan(self.0.plan.clone())
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "NearestPlace(task={}, candidate={})",
-            self.0.task, self.0.plan.candidate
-        )
     }
 }
 
@@ -829,40 +849,12 @@ pub(crate) fn pick(
     TaskResult::new(py, result)
 }
 
-/// Tries each pick's preferred prefix first. Only failed tasks try their remaining grasps.
-/// A zero count asks for an ordinary pick. Indices refer to the full input task.
-#[pyfunction]
-#[pyo3(signature = (device, worlds, picks, preferred, options = None))]
-pub(crate) fn pick_with_preferred_grasps(
-    py: Python<'_>,
-    device: &Device,
-    worlds: &Worlds,
-    picks: &Bound<'_, PyAny>,
-    preferred: Vec<usize>,
-    options: Option<&TaskOptions>,
-) -> PyResult<TaskResult> {
-    let picks = Vec::<batchplan::Pick>::from_py(picks)?;
-    let options = options.map(|o| o.0.clone()).unwrap_or_default();
-    let result = py
-        .detach(|| {
-            batchplan::pick_with_preferred_grasps(
-                &device.device,
-                &worlds.0,
-                &picks,
-                &preferred,
-                &options,
-            )
-        })
-        .or_raise()?;
-    TaskResult::new(py, result)
-}
-
-/// Sets down each task's held object, trying each of its poses. IK solves where the hand lets go,
-/// holding the object, which may touch what it is set on there and on the move in, run backward
+/// Sets down each task's held object, trying each of its releases. IK solves where the hand lets
+/// go, holding the object, which may touch what it is set on there and on the move in, run backward
 /// from there. Run transit and approach holding the object, open the gripper, then follow the
 /// departure. The releasing fingers may touch the object. When a fall is specified, check the
-/// follower against the returned `falling` obstacle through departure. Verify the expected
-/// landing in `placed` after release. Each task attaches its `held` to the robot on `device`.
+/// follower against the returned `falling` obstacle through departure. Verify the expected landing
+/// in `placed` after release. Each task attaches its `held` to the robot on `device`.
 #[pyfunction]
 #[pyo3(signature = (device, worlds, places, options = None))]
 pub(crate) fn place(
@@ -878,41 +870,6 @@ pub(crate) fn place(
         .detach(|| batchplan::place(&device.device, &worlds.0, &places, &options))
         .or_raise()?;
     TaskResult::new(py, result)
-}
-
-/// Alternatives for one placement: the same object set down at the same poses from different
-/// starts or holds, as each of several picks leaves it. Plans them in one batch, each as `place`
-/// does, and returns the alternative whose plan sets the object down nearest `near` in x and y (the
-/// support sets z), the earliest task among equally near ones, as a `NearestPlace`. Distance is
-/// from each plan's `placed`, the expected landing. A task with `enough` tries its poses nearest
-/// `near` first, equally near ones in their order, as `place` tries them in their order: its plans
-/// are the nearest that get through. One without tries every pose. Of a task's several plans, the
-/// nearest counts for it, the quickest among equally near ones. Candidates are numbered as the
-/// poses are given, in the plan and in each failure. Where none gets through, a tuple of each
-/// task's `TaskFailure`, in task order (empty for no tasks). A `near` that is not finite raises
-/// `InputError`.
-#[pyfunction]
-#[pyo3(signature = (device, worlds, places, near, options = None))]
-pub(crate) fn place_nearest<'py>(
-    py: Python<'py>,
-    device: &Device,
-    worlds: &Worlds,
-    places: &Bound<'_, PyAny>,
-    near: &Bound<'_, PyAny>,
-    options: Option<&TaskOptions>,
-) -> PyResult<Bound<'py, PyAny>> {
-    let places = Vec::<batchplan::Place>::from_py(places)?;
-    let near = Vec3::from_py(near)?;
-    let options = options.map(|o| o.0.clone()).unwrap_or_default();
-    let result = py
-        .detach(|| batchplan::place_nearest(&device.device, &worlds.0, &places, near, &options))
-        .or_raise()?;
-    match result {
-        Ok(nearest) => NearestPlace(nearest).into_bound_py_any(py),
-        Err(failures) => {
-            PyTuple::new(py, failures.into_iter().map(TaskFailure))?.into_bound_py_any(py)
-        }
-    }
 }
 
 /// Passes each task's held object to the hand that takes it, trying each meeting with each of the
@@ -1026,7 +983,7 @@ pub(crate) fn grasps<'py>(
     PyTuple::new(py, found.into_iter().map(Pose))
 }
 
-/// Poses that set `object` down at `pose` alike, for `Place.poses`: `pose` turned about the
+/// Poses that set `object` down at `pose` alike, for `Place.releases`: `pose` turned about the
 /// object's own z axis by its symmetries. A box gives 2, or 4 where its x and y sides match; a
 /// ball, cylinder or capsule `turns` (at least 1); a distance grid `pose` alone.
 #[pyfunction]
@@ -1043,6 +1000,8 @@ pub(crate) fn place_poses<'py>(
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ShapeGraspOptions>()?;
     m.add_class::<TaskOptions>()?;
+    m.add_class::<Hold>()?;
+    m.add_class::<Release>()?;
     m.add_class::<Pick>()?;
     m.add_class::<PickBody>()?;
     m.add_class::<Place>()?;
@@ -1054,11 +1013,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CandidateStop>()?;
     m.add_class::<TaskFailure>()?;
     m.add_class::<TaskResult>()?;
-    m.add_class::<NearestPlace>()?;
     m.add_function(wrap_pyfunction!(pick, m)?)?;
-    m.add_function(wrap_pyfunction!(pick_with_preferred_grasps, m)?)?;
     m.add_function(wrap_pyfunction!(place, m)?)?;
-    m.add_function(wrap_pyfunction!(place_nearest, m)?)?;
     m.add_function(wrap_pyfunction!(handover, m)?)?;
     m.add_function(wrap_pyfunction!(turn, m)?)?;
     m.add_function(wrap_pyfunction!(pull, m)?)?;
