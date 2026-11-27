@@ -2219,7 +2219,10 @@ fn latest_lets_a_look_decide_what_it_sees() {
                 locked: &locked,
                 padding: padding(&rendered, &frames, things.len() - 1),
             };
-            let o = MemoryOptions { weighing };
+            let o = MemoryOptions {
+                weighing,
+                ..MemoryOptions::default()
+            };
             let memory = Memory::try_new(&device, vec![known(&table())], &o).expect("a memory");
             let seen = observe(&device, &cameras(&frames, bands, 0.0), &stance, &memory);
             let seen = seen.expect("a look");
@@ -4671,5 +4674,149 @@ fn turn_grips_need_the_object_seen_and_input_in_range() {
                 "{call} {id}: {message} names {value}"
             );
         }
+    }
+}
+
+/// Readings outside the corners a memory was given are in no look and no map, and what lies
+/// inside is seen as without them: of two blocks either side of x = 0.5, a memory bounded there
+/// keeps the near one as the unbounded memory has it and plans through where the far one stands.
+#[test]
+fn what_lies_outside_a_memorys_corners_is_not_seen() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let (near, far) = (Vec3::new(0.35, -0.25, 0.03), Vec3::new(0.65, 0.25, 0.03));
+    let half = Vec3::new(0.04, 0.06, 0.03);
+    let things = vec![
+        table(),
+        block(near, half, [200, 30, 30]),
+        block(far, half, [30, 30, 200]),
+        arm(&robot, away),
+    ];
+    let rendered = render(&things);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let (frames, bands) = read(&rendered, c, 10 * c as u64);
+        let locked = HashMap::new();
+        let stance = Stance {
+            q: away,
+            locked: &locked,
+            padding: padding(&rendered, &frames, things.len() - 1),
+        };
+        let seen = |o: &MemoryOptions| {
+            let memory = Memory::try_new(&device, vec![known(&table())], o).expect("a memory");
+            let seen = observe(&device, &cameras(&frames, bands, 0.0), &stance, &memory);
+            seen.expect("a look").memory
+        };
+        let at = |memory: &Memory, at: Vec3| -> Vec<Shape> {
+            let objects = memory.objects().iter();
+            objects
+                .filter(|object| (object.shape.solids().iter()).any(|s| s.distance(at).value < 0.0))
+                .map(|object| object.shape)
+                .collect()
+        };
+        let whole = seen(&MemoryOptions::default());
+        let bounded = seen(&MemoryOptions {
+            upper_corner: Vec3::new(0.5, f32::INFINITY, f32::INFINITY),
+            ..MemoryOptions::default()
+        });
+        let planned = bounded.world(&device, &Step::default()).expect("a world");
+        let solid = (planned.world.obstacles.iter()).any(|o| o.distance(far).value < 0.0);
+        let mut wrong = vec![];
+        if at(&whole, near).len() != 1 || at(&whole, far).len() != 1 {
+            wrong.push(format!(
+                "the scene does not show both blocks: {:?}",
+                whole.objects()
+            ));
+        }
+        if at(&bounded, near) != at(&whole, near) {
+            wrong.push(format!(
+                "the near block is {:?} within the corners and {:?} without",
+                at(&bounded, near),
+                at(&whole, near)
+            ));
+        }
+        if !at(&bounded, far).is_empty() || bounded.objects().len() != 1 {
+            wrong.push(format!("past x = 0.5 it keeps {:?}", bounded.objects()));
+        }
+        if solid {
+            wrong.push(format!(
+                "its world stands where the far block does: {:?}",
+                planned.of
+            ));
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("what_lies_outside_a_memorys_corners_is_not_seen", &found);
+}
+
+/// A robot whose base travels reaches farther than a map of the default voxel size holds, and its
+/// memory is refused, naming the corners; with corners that bound it the memory is made. Corners
+/// that are no numbers, or that leave no room within the reach, are refused, naming them.
+#[test]
+fn a_robot_that_reaches_far_keeps_a_map_within_corners() {
+    let urdf = r#"<robot name="far">
+      <link name="base"/>
+      <joint name="slide" type="prismatic">
+        <parent link="base"/><child link="cart"/><axis xyz="1 0 0"/>
+        <limit lower="-1.5" upper="1.5" effort="1" velocity="1"/>
+      </joint>
+      <link name="cart">
+        <collision><geometry><box size="0.3 0.3 0.3"/></geometry></collision>
+      </link>
+      <joint name="swing" type="revolute">
+        <parent link="cart"/><child link="arm"/><origin xyz="0 0 0.3"/><axis xyz="0 1 0"/>
+        <limit lower="-1.5" upper="1.5" effort="1" velocity="1"/>
+      </joint>
+      <link name="arm">
+        <collision><origin xyz="0.4 0 0"/><geometry><box size="0.8 0.1 0.1"/></geometry></collision>
+      </link>
+      <joint name="tip" type="fixed">
+        <parent link="arm"/><child link="hand"/><origin xyz="0.8 0 0"/>
+      </joint>
+      <link name="hand"/>
+    </robot>"#;
+    let options = batchplan::RobotOptions {
+        ee_links: vec!["hand".to_string()],
+        ..Default::default()
+    };
+    let robot = Robot::from_urdf(urdf, &options).expect("a cart with an arm");
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let reach = robot.reach();
+    assert!(
+        reach > 2.1,
+        "the cart carries the arm {reach} m: past a map"
+    );
+    let made = |lower_corner: Vec3, upper_corner: Vec3| {
+        let o = MemoryOptions {
+            lower_corner,
+            upper_corner,
+            ..MemoryOptions::default()
+        };
+        Memory::try_new(&device, vec![], &o).map(|_| ())
+    };
+    let (none, all) = (Vec3::NEG_INFINITY, Vec3::INFINITY);
+    let Err(batchplan::Error::Input(whole)) = made(none, all) else {
+        panic!("its whole reach is too large a map");
+    };
+    assert!(whole.contains("corners"), "{whole} says what bounds it");
+    // The floor it stands on and as high as its arm swings: 1.3 m of the 4.5 m its reach spans.
+    let floor = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, -0.1);
+    let ceiling = Vec3::new(f32::INFINITY, f32::INFINITY, 1.2);
+    made(floor, ceiling).expect("a map from the floor to over the arm");
+    let refused = [
+        (Vec3::new(0.0, f32::NAN, 0.0), all, "NaN"),
+        (
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(1.0, 1.0, 0.5),
+            "no room",
+        ),
+        (Vec3::splat(3.0), all, "no room"),
+    ];
+    for (lower, upper, value) in refused {
+        let Err(batchplan::Error::Input(message)) = made(lower, upper) else {
+            panic!("corners {lower} and {upper} make a map");
+        };
+        assert!(message.contains(value), "{message} names {value}");
     }
 }
