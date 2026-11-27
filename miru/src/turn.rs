@@ -22,7 +22,7 @@ const ALONG: f32 = 0.99;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GripSource {
-    /// Across a raised bar over a measured disk ([`Kept::bar_on_disk`]).
+    /// Across a raised bar over a measured disk.
     Bar,
     /// A grasp of the object's measured surface ([`Kept::surface`], `batchplan::grasps_on`).
     Surface,
@@ -41,8 +41,7 @@ pub struct TurnGrip {
     pub opening: f32,
     /// What proposed it.
     pub source: GripSource,
-    /// What the retained endpoints show of its open approach and closure
-    /// ([`Kept::observed_closures`] at this pose).
+    /// What the retained endpoints show of its open approach and closure at this pose.
     pub evidence: ClosureEvidence,
 }
 
@@ -73,8 +72,8 @@ impl Kept {
     /// Proposes hand poses to turn object `id` about the axis along `up`, the control's outward
     /// unit normal, with `gripper`, a hand of `device`'s robot, in groups to plan in order:
     ///
-    /// 1. **Bar**: the poses [`Kept::bar_on_disk`] gives along `up`, in its order, fully open;
-    ///    `enough: Some(1)`.
+    /// 1. **Bar**: the poses across a raised bar over a round face, measured along `up`, in the
+    ///    order measured, fully open; `enough: Some(1)`.
     /// 2. **Shape, both sides**: `batchplan::grasps` of the object's fitted shape with `gripper`
     ///    and `shape_options`, so closing across no more than the gripper's capacity, those whose
     ///    z axis points along `-up` to within about 8 degrees: none where the shape's vertical is
@@ -88,13 +87,13 @@ impl Kept {
     ///    [`ClosureEvidence::Incomplete`], fully open. `enough: Some(1)`.
     ///
     /// Fully open is the gripper's loaded gap; what a grasp closes across is at most its capacity.
-    /// Every proposal's evidence is [`Kept::observed_closures`]'s at that pose, with this gripper:
-    /// what the latest endpoints show of an open approach and a symmetric closure, nothing of
-    /// hidden material, contact normals or whether the control turns about the axis. The surface
-    /// options' `floor` and `approach` serve the bar and every proposal's evidence, their `overlap`
-    /// the bar and `grasps_on`, and the shape options' `depth` is also the bar's insertion below
-    /// its crest. Plan every motion against the current world and guard it in execution: a grip
-    /// here is a proposal.
+    /// Every proposal's evidence is measured at that pose, with this gripper: what the latest
+    /// endpoints show of an open approach and a symmetric closure, nothing of hidden material,
+    /// contact normals or whether the control turns about the axis. The surface options' `floor`
+    /// and `approach` serve the bar and every proposal's evidence, their `overlap` the bar and
+    /// `grasps_on`, and the shape options' `depth` is also the bar's insertion below its crest.
+    /// Plan every motion against the current world and guard it in execution: a grip here is a
+    /// proposal.
     ///
     /// None where no label of the look names the object. Out-of-range input, a gripper whose jaws
     /// do not slide among it, is an `Error::Input` naming the value.

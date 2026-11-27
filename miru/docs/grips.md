@@ -56,7 +56,7 @@ fn draw(
 
 `kept.turn_grips(&device, id, &gripper, up, &shape_options, &surface_options)?` proposes grips to
 turn a control, `up` being its outward normal. It gives groups to plan in order with batchplan's
-`turn`, each with its `enough`: the bar over a round face where `Kept::bar_on_disk` finds one,
+`turn`, each with its `enough`: a raised bar over a round face where the readings show one,
 then grips from above the fitted shape, then grasps of the measured surface. It also gives the
 screw to turn about.
 
@@ -66,8 +66,7 @@ for the control (`planned.of[i] == Of::Object(id)`). A grip's pose is in the loo
 `to_object = planned.world.obstacles[i].pose().inverse()`, each grip is
 `Hold::new(to_object.mul_pose(grip.pose), grip.opening, &gripper)`.
 
-`kept.observed_closures(&device, id, &gripper, &poses, &options)?` says what a hand closing at
-poses of your own meets in the readings.
+Each grip carries what a hand closing there meets in the readings (`TurnGrip::evidence`).
 
 ## Out of a container
 

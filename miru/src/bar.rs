@@ -14,6 +14,10 @@ use crate::scene::Label;
 /// A narrow crest on the selected object over a circular outline in the surrounding readings.
 /// Its centre is the centre of the visible disk. Whether anything turns about it needs independent
 /// knowledge of the mechanism. The bar and the disk may even be one stationary part.
+///
+/// What a step of [`Kept::turn_grips`] measures: no part of the crate's interface, and public for
+/// the crate's tests alone.
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct BarOnDisk {
@@ -355,6 +359,10 @@ impl Kept {
     /// sweeps must encounter target readings above the disk and clear other measured material.
     /// Plan every motion against the current world. A circular face supplies a centre hypothesis
     /// for a centred control. Stationary bars on circular faces have exactly the same appearance.
+    ///
+    /// A step of [`Kept::turn_grips`]: no part of the crate's interface, and public for the
+    /// crate's tests alone.
+    #[doc(hidden)]
     pub fn bar_on_disk(
         &self,
         device: &Device,

@@ -57,11 +57,13 @@ These are settled with the user. Keep to them unless the user decides otherwise.
 - **One call, state in the result.** `look(&device, &Look, &previous, &options) -> Scene`. No
   handle of miru's, no run-time configuration, no plugins. What the next look needs is in the
   `Scene`.
-- **Geometry first.** Objects are told apart from depth, and a look without masks is whole
-  without a model. A mask model sits behind one seam, `View::masks`, and what crosses it is
-  data: its instance masks as a number per pixel, which divide and join what geometry made
-  (`src/masks.rs`). miru runs no model, links none and takes no callback, and a model is never
-  asked for coordinates; a caller whose model needs prompts looks twice.
+- **Masks are the seam.** Which pixels are one thing is the caller's to give where it has a
+  model: its instance masks cross one seam, `View::masks`, as a number per pixel
+  (`src/masks.rs`). A look without masks is still whole, told apart from depth by the frozen
+  tier (Tiers). miru runs no model, links none and takes no callback, and a model is never
+  asked for coordinates; a caller whose model needs prompts looks twice. A simulator's
+  segmentation is truth to score against and the scorer's stand-in for a perfect model
+  (`--masks truth`); the library and its callers never run on it.
 - **Every tolerance comes from the camera's noise.** No tuned constants: each constant in
   `src/segment.rs` and `src/view.rs` says what it is derived from (deviations of a named
   difference, a pixel's width) or cites its source (LCCP's 10 degrees). A new one needs the
@@ -70,9 +72,39 @@ These are settled with the user. Keep to them unless the user decides otherwise.
   and depth as a real camera reads it, or it does not land. What differs between them follows
   from `View::noise` and from which pixels have no reading, never from a switch.
 - **Ground truth stays outside.** Only `examples/` and `tests/` read a simulator's truth.
-- **Small interface.** Prefer deepening `look` to adding a public item. Internals are
-  `pub(crate)`; tests go through `look`, with unit tests only for internal seams whose answers
-  are known in closed form.
+- **Small interface.** Prefer deepening a lasting module (Tiers) to adding a public item.
+  Internals are `pub(crate)`; tests go through the public calls, with unit tests only for
+  internal seams whose answers are known in closed form.
+
+## Tiers
+
+miru measures, remembers and verifies. What a thing is, which one is meant and what to do next
+are a mask model's, a VLM's or the caller's to judge. The code is in three tiers by what it
+does, and a change keeps to the rule of the tier it touches.
+
+- **Lasting**: where a thing is, what covers it, what a hand holds, what is in the way, whether
+  an act did what was planned. `memory`, `grip`, `grip_plan`, `masks`, `threads` and `error`;
+  the types a look takes and gives (`View`, `Look`, `LookOptions` and `Noise` in `look`, `Scene`,
+  `Object`, `Label` and `Support` in `scene`); `view`'s readings. Work goes here. An answer the
+  readings cannot give comes back as that (`None`, an `Error`, a value of evidence), for the
+  caller to act on.
+- **Frozen**: the rules that tell things apart and fit shapes from depth. `segment`, `fit`, the
+  rest of `look` (its joins, attachments and hollows, `rejoin`, `continues`), the tolerance they
+  share (`view::SIGMAS`), and what they claim of a thing (`Shape`, its rooms, `Object::solid`).
+  Every look runs them, and a caller's masks divide and join what they made. A change here mends
+  a rule where a named run shows a caller reached a wrong answer, as a condition on the rule
+  that gave it. The tier gains no new kind of claim (a shape, a relation between things) and no
+  public item; what it gets wrong is an entry in `docs/status.md`.
+- **Leaving**: helpers shaped by one task each. `bar`, `closure`, `turn`, `extraction` and
+  `Kept::bar_resolution`. The frozen tier's rule holds here too. Each goes when its caller has
+  what replaces it: an upright axis with ordinary grasps for a turn, a straight lift checked
+  against the map for a lift out of a container. `Kept::bar_on_disk` and
+  `Kept::observed_closures` are steps of `Kept::turn_grips`, hidden from the docs and public for
+  the crate's tests alone.
+
+What replaces frozen code (which pixels are one thing from a caller's masks, which thing is
+which from look to look) is built beside it, in a module of its own, and measured against it on
+the recorded sets. The frozen code goes in the change that moves its last caller.
 
 ## Style
 
