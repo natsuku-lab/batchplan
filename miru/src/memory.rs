@@ -948,6 +948,58 @@ impl Kept {
         }
         Ok(joined)
     }
+
+    /// Every reading within `reach` of `at`, seen from above, over the look's views as one
+    /// surface, none of it flagged: all of it is the support, whatever objects the look made of
+    /// it. For a place into what stands at a point: a look gives a thing in pieces where a crease
+    /// runs between them, as a drawer pulled out of its cabinet, and then no one object's
+    /// readings ([`Kept::surface`]) hold the hollow. `falls_into` with the point as the problem's
+    /// `near` finds it in this surface, the falls nearest the point first, each costing how far
+    /// from the point it is.
+    ///
+    /// The reach takes in the whole rim of what is to hold the object: past the surface nothing
+    /// was seen, and a hollow open there holds nothing in. A fall's cost rules out only what lies
+    /// farther off than the container reaches: a neighbouring hollow nearer than its far side is
+    /// offered too, and the first fall is a neighbour's where the container holds the object
+    /// nowhere. Not for a rest on a thing: with nothing flagged, nothing is kept clear of, and
+    /// what stands beside the place is a place to rest on; `rests_on` takes an object's own
+    /// surface.
+    ///
+    /// Each camera's filtered depth, a point for each reading in reach off the robot and what
+    /// its hands hold, each with the normal of a fingertip's patch about it
+    /// (`SurfaceGraspOptions::default().contact`), the views joined. On `device`'s threads. None
+    /// where the look has no views; a point or a reach that is no number, or a reach that is not
+    /// positive, is an `Error::Input`.
+    pub fn surface_about(&self, device: &Device, at: Vec3, reach: f32) -> Result<Option<Surface>> {
+        ensure_input!(
+            at.is_finite() && reach.is_finite() && reach > 0.0,
+            "the readings about a point within a positive reach, got {at} and {reach}"
+        );
+        let radius = SurfaceGraspOptions::default().contact;
+        let mut joined: Option<Surface> = None;
+        for view in &self.views {
+            let image = view.image();
+            // The readings in reach flagged, so that only they are given a normal, then kept.
+            let near = |point: &Option<Vec3>| {
+                point.is_some_and(|point| (point - at).truncate().length() <= reach)
+            };
+            let in_reach: Vec<bool> = image.points(Some(&view.robot))?.iter().map(near).collect();
+            let mut surface =
+                Surface::from_depth(device, &image, &in_reach, Some(&view.robot), radius)?;
+            let kept = std::mem::take(&mut surface.object);
+            let mut keep = kept.iter().copied();
+            surface.points.retain(|_| keep.next().unwrap_or(false));
+            let mut keep = kept.iter().copied();
+            surface.normals.retain(|_| keep.next().unwrap_or(false));
+            let mut keep = kept.iter().copied();
+            surface.seen_from.retain(|_| keep.next().unwrap_or(false));
+            match &mut joined {
+                Some(joined) => joined.join(surface),
+                None => joined = Some(surface),
+            }
+        }
+        Ok(joined)
+    }
 }
 
 /// One look, after `memory`, through batchplan and [`look`](crate::look()), camera by camera:

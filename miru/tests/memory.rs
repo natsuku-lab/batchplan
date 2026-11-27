@@ -4820,3 +4820,169 @@ fn a_robot_that_reaches_far_keeps_a_map_within_corners() {
         assert!(message.contains(value), "{message} names {value}");
     }
 }
+
+/// A place into what stands at a point does not hang on which objects the look made of it: a box
+/// whose tall far wall a mask model's masks give to another thing than the rest comes out in two
+/// objects, as a cabinet and the drawer pulled out of it do, and the wall's object, which a
+/// caller that pulled it would name, stands beside the hollow: nothing is let go over its own
+/// readings. Every reading about the box's middle (`Kept::surface_about`) shows the hollow, and a
+/// block let go over it falls in. The surface holds the readings within its reach and none
+/// beyond, and flags none.
+#[test]
+fn a_fall_into_a_box_in_pieces_is_found_in_every_reading_about_it() {
+    let robot = panda();
+    let device = Device::cpu(&robot).expect("a CPU device");
+    // The open hand reaches into the box, so the arm reads within the surface's reach.
+    let reaching = &IN_BOWL;
+    let grey = [150, 150, 150];
+    let things = vec![
+        table(),
+        block(
+            Vec3::new(0.5, 0.0, 0.005),
+            Vec3::new(0.10, 0.10, 0.005),
+            grey,
+        ),
+        block(
+            Vec3::new(0.605, 0.0, 0.025),
+            Vec3::new(0.005, 0.11, 0.025),
+            grey,
+        ),
+        block(
+            Vec3::new(0.5, 0.105, 0.025),
+            Vec3::new(0.10, 0.005, 0.025),
+            grey,
+        ),
+        block(
+            Vec3::new(0.5, -0.105, 0.025),
+            Vec3::new(0.10, 0.005, 0.025),
+            grey,
+        ),
+        block(
+            Vec3::new(0.38, 0.0, 0.06),
+            Vec3::new(0.02, 0.11, 0.06),
+            grey,
+        ),
+        arm(&robot, reaching),
+    ];
+    let mut rendered = render(&things);
+    // The masks say the tall far wall is one thing and the rest of the box another.
+    for frame in &mut rendered {
+        let mask = |shows: &Option<usize>| match shows {
+            Some(5) => 1,
+            Some(1..=4) => 2,
+            _ => 0,
+        };
+        frame.masks = frame.shows.iter().map(mask).collect();
+    }
+    let (middle, reach) = (Vec3::new(0.5, 0.0, 0.05), 0.2);
+    let problem = batchplan::RestProblem {
+        near: Some(middle),
+        ..batchplan::RestProblem::new(Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.03, 0.03, 0.02)), 0)
+    };
+    let falls = |surface: &batchplan::Surface| {
+        let options = batchplan::RestOptions::default();
+        let problems = std::slice::from_ref(&problem);
+        let found =
+            batchplan::falls_into(&device, problems, std::slice::from_ref(surface), &options);
+        found.expect("falls").remove(0)
+    };
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seen = first_look(
+            &device,
+            &things,
+            &rendered,
+            (c, 10 * c as u64),
+            reaching,
+            0.0,
+        );
+        let scene = seen.kept.scene();
+        let mut wrong = vec![];
+        let about = seen.kept.surface_about(&device, middle, reach);
+        let about = about.expect("a sound point").expect("a look with views");
+        let outside = (about.points.iter())
+            .filter(|p| (**p - middle).truncate().length() > reach)
+            .count();
+        if outside > 0 || !about.object.is_empty() {
+            wrong.push(format!(
+                "{outside} readings beyond its reach, {} flags",
+                about.object.len()
+            ));
+        }
+        // The arm is within the reach, and none of its readings is in the surface: the surface
+        // holds what an object's surface holds there, flagged or not.
+        let on_arm: usize = (0..2)
+            .map(|view| {
+                let image = seen.kept.image(view).expect("a kept view");
+                let mask = seen.kept.robot(view).expect("a kept mask");
+                let points = image.points(None).expect("a sound image");
+                let within = |point: &Option<Vec3>| {
+                    point.is_some_and(|point| (point - middle).truncate().length() <= reach)
+                };
+                let robots = points.iter().zip(&mask.on_robot);
+                robots.filter(|(point, on)| **on && within(point)).count()
+            })
+            .sum();
+        if on_arm == 0 {
+            wrong.push("the arm reads nowhere within the reach".to_string());
+        }
+        let (floor, wall) = (holder(scene, &rendered, 1), holder(scene, &rendered, 5));
+        let Some(wall) = wall else {
+            found.push((
+                *camera,
+                Err("no object holds the box's far wall".to_string()),
+            ));
+            continue;
+        };
+        let id = scene.objects[wall].id;
+        let own = seen.kept.surface(&device, id).expect("a surface");
+        let own = own.expect("the far wall's object is in view");
+        let within = (own.points.iter())
+            .filter(|p| (**p - middle).truncate().length() <= reach)
+            .count();
+        if within != about.points.len() {
+            wrong.push(format!(
+                "{} readings about the point, {within} of the look's within its reach",
+                about.points.len()
+            ));
+        }
+        let into = falls(&about);
+        let over = (into.iter()).all(|fall| {
+            let at = fall.pose.position - middle;
+            at.x.abs() < 0.1 && at.y.abs() < 0.1
+        });
+        if into.is_empty() || !over {
+            wrong.push(format!(
+                "{} falls in every reading about it, all over its floor: {over}",
+                into.len()
+            ));
+        }
+        // What the test is of: the look gives the floor to another object than the far wall,
+        // and over the wall's own readings nothing is let go.
+        let alone = falls(&own).len();
+        if floor == Some(wall) || alone > 0 {
+            wrong.push(format!(
+                "the floor's object is the far wall's: {}, whose readings alone give {alone} falls",
+                floor == Some(wall)
+            ));
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict(
+        "a_fall_into_a_box_in_pieces_is_found_in_every_reading_about_it",
+        &found,
+    );
+    // A point or a reach that is no number, or no reach at all, is refused by name.
+    let seen = first_look(&device, &things, &rendered, (0, 0), reaching, 0.0);
+    for (at, reach, value) in [
+        (Vec3::new(f32::NAN, 0.0, 0.0), 0.2, "NaN"),
+        (middle, 0.0, "and 0"),
+        (middle, f32::INFINITY, "inf"),
+    ] {
+        let refused = seen.kept.surface_about(&device, at, reach);
+        let Err(batchplan::Error::Input(why)) = refused else {
+            panic!("a surface about {at} within {reach}");
+        };
+        assert!(why.contains(value), "{why} names {value}");
+    }
+}

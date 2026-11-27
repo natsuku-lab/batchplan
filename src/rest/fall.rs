@@ -85,6 +85,12 @@ impl From<&Fall> for crate::Release {
 /// [`RestOptions::touching`] of itself so worn, any way, has no falls: it could slip between the
 /// points seen of a solid wall. Space the spots nearer for it.
 ///
+/// The spots lie within the rectangle, seen from above, that bounds the support's points, and a
+/// hollow is found only where its rim lies inside it: a support that stands beside the hollow has
+/// no fall into it, as the body of a cabinet where the drawer pulled out of it is another
+/// object's. For a place into what stands at a point whatever objects were made of it, give every
+/// reading about it as the support, none flagged, and the point as the problem's `near`.
+///
 /// It lands as it is, and [`RestOptions::clearance`] is kept where it is let go: over the rim
 /// and over all it would land on there, so that the hand lets go of it clear of what is around.
 /// A box that goes through a bowl's opening, and grown by the clearance would not, falls in.
