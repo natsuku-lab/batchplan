@@ -1046,6 +1046,7 @@ impl<'a> Told<'a> {
                     share: parts.share[i],
                     floor: floors[part],
                     spacing: seen.spacing(i),
+                    from: seen.eye(),
                 };
                 readings[slot].push((reading, part));
             }

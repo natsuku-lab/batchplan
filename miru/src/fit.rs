@@ -22,6 +22,8 @@ pub(crate) struct Reading {
     pub(crate) floor: bool,
     /// How far apart the readings of two neighbouring pixels lie across at its depth (meters).
     pub(crate) spacing: f32,
+    /// Where the camera that read it stands.
+    pub(crate) from: Vec3,
 }
 
 /// An object's outline seen from above.
@@ -586,7 +588,13 @@ fn room(center: Vec3, half: Vec2, rotation: Quat, readings: &[Reading]) -> Optio
 /// no gap wider than that lies between them, or between them and a side, with the floor read in
 /// it within the strip the wall would take: a handle arched over the room reaches the walls it
 /// stands on but leaves room seen on both sides; a gap no view sees into, as behind an arm, is
-/// none. The wall moves to the innermost window's worth of them ([`window`]), as [`room`] puts a
+/// none. The floor reads in a strip where a ray came in there, at the height of the box's top
+/// and from a camera over it, to a reading of the box that lies under that height by more than
+/// its slack and not over the room: the floor, or a wall's inner face. Nothing stands where the
+/// ray passed, whatever it went on to land under, so the floor a view reads under an overhang,
+/// its rays in past the overhang's edge, opens no gap in it; and a reading over the room, which
+/// noise may put under the top, shows no room beside itself. A camera no higher than the top
+/// reads the floor where it lies.
 /// face; fewer readings than add up to a window cannot be told from noise, and stay. Of the walls
 /// that can move, the one that takes the most of them per area of room it gives up moves first,
 /// until fewer than a window's worth are left in the room; a wall stops at a reading inside the
@@ -603,32 +611,46 @@ fn clear_overhangs(
     let inside = |at: Vec2, slack: f32, (lower, upper): (Vec2, Vec2)| {
         (at - lower).min(upper - at).min_element() > slack
     };
+    // Whether a reading lies over the room as it is given: not the floor's, over the floor and
+    // no higher than the top, inside the room by more than its slack.
+    let room = (lower, upper);
+    let over_room = |r: &Reading| {
+        let point = into(r.point);
+        !r.floor
+            && point.z > floor + r.slack
+            && point.z <= top
+            && inside(point.truncate(), r.slack, room)
+    };
     // Each reading over the room: where it lies from above, its slack, its share and its window's
     // width.
     let mut over: Vec<(Vec2, f32, f32, f32)> = (readings.iter())
-        .filter(|r| !r.floor)
-        .filter_map(|r| {
-            let point = into(r.point);
-            let over = point.z > floor + r.slack
-                && point.z <= top
-                && inside(point.truncate(), r.slack, (lower, upper));
-            over.then(|| {
-                (
-                    point.truncate(),
-                    r.slack,
-                    r.share,
-                    r.spacing / r.share.sqrt(),
-                )
-            })
+        .filter(|r| over_room(r))
+        .map(|r| {
+            (
+                into(r.point).truncate(),
+                r.slack,
+                r.share,
+                r.spacing / r.share.sqrt(),
+            )
         })
         .collect();
-    // Where the floor reads, from above: what shows a gap beside an overhang to be room, and not
-    // hidden from the views.
+    // Where the rays to the box's readings under its top and not over its room came in at the
+    // top's height, from above: what shows a gap beside an overhang to be room, and not hidden
+    // from the views. A reading of the floor from under that height came in nowhere over the
+    // room, and counts where it lies.
     let floor_at: Vec<Vec2> = match over.iter().map(|&(_, _, share, _)| share).sum::<f32>() < 1.0 {
         true => vec![],
         false => (readings.iter())
-            .filter(|r| r.floor)
-            .map(|r| into(r.point).truncate())
+            .filter(|r| !over_room(r))
+            .filter_map(|r| {
+                let (eye, point) = (into(r.from), into(r.point));
+                let came_in = eye.z > top && point.z < top - r.slack;
+                match came_in {
+                    true => Some(eye.lerp(point, (eye.z - top) / (eye.z - point.z))),
+                    false => r.floor.then_some(point),
+                }
+            })
+            .map(Vec3::truncate)
             .collect(),
     };
     // The walls, each an axis and the side it stands on.
@@ -672,8 +694,8 @@ fn clear_overhangs(
                 continue;
             };
             // That span it, along it from side to side: a gap between them, or between them and a
-            // side, where the floor reads within the strip the wall would take is room seen
-            // beside them; one the views do not see into, as behind an arm, is none.
+            // side, where a ray came in within the strip the wall would take is room seen beside
+            // them; one the views do not see into, as behind an arm, is none.
             {
                 let mut along: Vec<(f32, f32)> = reached
                     .iter()

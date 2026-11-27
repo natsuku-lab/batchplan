@@ -5439,6 +5439,85 @@ fn a_board_over_a_lidless_box_stays_wall_when_an_arm_hides_half_of_it() {
 }
 
 #[test]
+fn a_board_over_a_lidless_box_stays_wall_where_its_top_is_hidden_and_the_floor_reads_under_it() {
+    // The board of `board`, 6 cm deep, over the lidless box, with a slab 2 cm over one half of it
+    // that hides that half's top from the view and the floor under it only as far as x 0.415: the view reads
+    // the floor on under the hidden half, its rays coming in past the board's edge. A floor read
+    // under the board showed the stretch beside the seen half to be open, and the room reached
+    // under the board again, the seen half's readings in it. From 30, 40 and 50 degrees, with the
+    // slab over either half, the room ends at the board's edge and holds none of the board's
+    // readings: a ray shows room where it comes in at the height of the box's top, not where it
+    // lands under what stands over the floor.
+    for degrees in [30.0_f32, 40.0, 50.0] {
+        let eye = eye_above(degrees);
+        // Where a ray from the eye to a point at `x`, `z` passes the slab's height.
+        let (top, over) = (0.065, 0.085);
+        let at_slab = |x: f32, z: f32| x + (over - z) * (eye.x - x) / (eye.z - z);
+        // The board's top spans x 0.38 to 0.45 and its front runs down to z 0.055: the rays to
+        // it pass the slab's height no farther out than the one to its front's lower edge, and
+        // those to the floor under it farther out the nearer the board's edge they land. The slab
+        // hides the board and the floor under it as far as x 0.415.
+        let hides_from = at_slab(0.38, top);
+        let to = at_slab(0.415, 0.01);
+        assert!(
+            to > at_slab(0.45, 0.055) && to < at_slab(0.44, 0.01),
+            "from {degrees} degrees a slab hides the board and not the floor under its edge"
+        );
+        for (from_y, to_y) in [(0.0, 0.2), (-0.2, 0.0)] {
+            let slab = block(
+                Vec3::new(
+                    0.5 * (hides_from - 0.01 + to),
+                    0.5 * (from_y + to_y),
+                    over + 0.002,
+                ),
+                Vec3::new(0.5 * (to - hides_from + 0.01), 0.5 * (to_y - from_y), 0.002),
+                [90, 90, 90],
+            );
+            // The table, the box's five boards, the board over it and the slab, thing 7.
+            let mut things = vec![table()];
+            let (the_box, room) = open_box();
+            things.extend(the_box);
+            things.extend([board(0.06), slab]);
+            let mut frame = Frame::of(&things, looking(eye, MIDDLE));
+            frame.robot = frame.shows.iter().map(|shows| *shows == Some(7)).collect();
+            let what = format!("a slab over y {from_y}..{to_y} m, from {degrees} degrees");
+            let hidden = |y: f32| y > from_y + 0.01 && y < to_y - 0.01;
+            let shown = |thing: usize, keep: &dyn Fn(Vec3) -> bool| {
+                let pixels = (0..frame.shows.len()).filter(|&i| frame.shows[i] == Some(thing));
+                pixels.filter(|&i| keep(reading(&frame, i))).count()
+            };
+            let board_hidden = shown(6, &|p| hidden(p.y));
+            let board_seen = shown(6, &|p| !hidden(p.y) && p.y.abs() < 0.1 && p.z > 0.06);
+            let floor_under: usize = (1..=5)
+                .map(|thing| shown(thing, &|p| hidden(p.y) && p.x < 0.445 && p.z < 0.02))
+                .sum();
+            assert_eq!(
+                board_hidden, 0,
+                "{what}: the slab hides that half of the board"
+            );
+            assert!(
+                board_seen > 100,
+                "{what}: {board_seen} readings of the board's other half"
+            );
+            assert!(
+                floor_under > 20,
+                "{what}: {floor_under} readings of the floor under it"
+            );
+            let scene = seen(&[&frame], &Scene::default());
+            let open = Room {
+                floor: room.floor + Vec3::X * 0.03,
+                half: Vec2::new(room.half.x - 0.03, room.half.y),
+                yaw: 0.0,
+            };
+            let tolerance = slack(&frame, open.floor);
+            let (object, _) = assert_open(&scene, &frame, 1, &open, &[], tolerance, &what);
+            let (in_it, _) = in_its_room(&scene, object, &frame, 6);
+            assert_eq!(in_it, 0, "{what}: {:?}", scene.objects[object]);
+        }
+    }
+}
+
+#[test]
 fn a_block_under_a_board_over_a_lidless_box_keeps_the_box_open() {
     // The board of `board`, 6 cm deep, over the lidless box, and a block 4 by 6 by 2 cm on the
     // box's floor under the board's edge, its front 2 cm under the board. A room drawn in to the
