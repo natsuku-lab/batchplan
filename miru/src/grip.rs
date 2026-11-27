@@ -338,15 +338,13 @@ impl GripWorlds<'_> {
         };
         let support = &memory.objects()[room.index];
         let cover = support.shape.obstacle();
-        // The fine tile, including the rounding to coarse cells, need never have more samples
-        // per axis than the robot's entire map. Large hands retain the coarse map farther out.
         let voxel = memory.map.voxel;
-        let budget = 2.0 * self.device.robot().reach() / self.divisions as f32;
-        let span = self
-            .gripper
-            .opening()
-            .min((budget - 4.0 * voxel) / 3.0)
-            .max(voxel);
+        let span = tile_span(
+            self.gripper.opening(),
+            memory.corners,
+            voxel,
+            self.divisions,
+        );
         let center = (at / span).round() * span;
         if cover.distance(at).value > span {
             return Ok(self.base.clone());
@@ -658,5 +656,61 @@ impl Pickup {
         pose.position
             .abs_diff_eq(self.grasp.position, scale * error)
             && (a.abs_diff_eq(b, error) || a.abs_diff_eq(-b, error))
+    }
+}
+
+/// How wide a tile of a support's map is refined about a grip (meters): the hand's `opening`,
+/// held to what leaves the refined tile, three spans and four voxels across with `divisions`
+/// samples a voxel, no more samples than the memory's whole map, which batchplan took. A cube of
+/// the map's volume has as many: its side is the map's own where the map spans the reach. Large
+/// hands retain the coarse map farther out.
+fn tile_span(opening: f32, corners: [Vec3; 2], voxel: f32, divisions: u32) -> f32 {
+    let [lower, upper] = corners;
+    let volume = (upper - lower).as_dvec3().element_product();
+    let budget = volume.cbrt() as f32 / divisions as f32;
+    opening.min((budget - 4.0 * voxel) / 3.0).max(voxel)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A refined tile has no more samples than the map it is cut from, whatever the map's
+    /// corners, and in a map that spans the reach it is as wide as the reach alone made it.
+    #[test]
+    fn a_refined_tile_has_no_more_samples_than_its_map() {
+        let (voxel, divisions) = (0.01, 7);
+        // The map of a robot whose base travels, from under its floor to over its arm, and the
+        // cube of a Panda's reach; a hand wide enough for the map to hold its tile back, and the
+        // Panda's.
+        let flat = [Vec3::new(-2.25, -2.25, -0.1), Vec3::new(2.25, 2.25, 1.2)];
+        let reach = 1.19_f32;
+        let cube = [Vec3::splat(-reach), Vec3::splat(reach)];
+        for (corners, opening) in [(flat, 0.25), (cube, 0.25), (flat, 0.08), (cube, 0.08)] {
+            let span = tile_span(opening, corners, voxel, divisions);
+            let across = f64::from((3.0 * span + 4.0 * voxel) / voxel) * f64::from(divisions);
+            let map = ((corners[1] - corners[0]) / voxel)
+                .as_dvec3()
+                .element_product();
+            assert!(
+                across.powi(3) <= map * (1.0 + 1e-5),
+                "a tile {across} samples across in a map of {map} voxels, the hand open {opening}"
+            );
+        }
+        assert!(
+            tile_span(0.25, flat, voxel, divisions) < 0.25,
+            "the flat map holds the wide hand's tile back"
+        );
+        let by_reach = |opening: f32| {
+            let budget = 2.0 * reach / divisions as f32;
+            opening.min((budget - 4.0 * voxel) / 3.0).max(voxel)
+        };
+        for opening in [0.08, 0.25] {
+            assert_eq!(
+                tile_span(opening, cube, voxel, divisions).to_bits(),
+                by_reach(opening).to_bits(),
+                "a map that spans the reach refines the tile it did, the hand open {opening}"
+            );
+        }
     }
 }

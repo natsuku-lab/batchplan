@@ -12,6 +12,12 @@
 - On a stereo camera's depth most boxes come out larger than its noise reaches, and few are
   solid: through the D435 an 80 by 120 mm box measures 131 by 157 mm, where the allowance is 24 mm
   ([the truth table](status.md#the-truth-table)).
+- The map is of 1 cm voxels as far as the robot reaches from its frame, within the corners
+  `MemoryOptions` gives it (`lower_corner`, `upper_corner`). A reach past about 2 m, as a robot's
+  whose base travels, is too large a map and is refused: give its memory the cell's workspace, or
+  a corner a few centimeters under its floor. Readings outside the corners are in no look and no
+  map, so no plan keeps clear of what only they show; the shapes a cell states are obstacles
+  wherever they lie.
 - What no view sees stays as the last look had it, until a view shows its place. What stood on a
   picked thing is in no memory until a look finds it.
 - Every tolerance comes from the noise the caller states for each camera, but for two: the 10

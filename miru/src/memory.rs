@@ -61,12 +61,33 @@ pub struct Stance<'a> {
 }
 
 /// How a [`Memory`] keeps what the cameras read.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct MemoryOptions {
     /// How much each look counts in the map: batchplan's default, `Weighing::Evidence`, or
     /// `Weighing::Latest` for a caller that looks now and then and acts on each look (batchplan's
     /// `docs/perception.md`, "Fused maps").
     pub weighing: Weighing,
+    /// The lower corner of a box that bounds the map, in the robot's frame (meters). The map holds
+    /// what lies within the robot's reach and within these corners, so a corner bounds the sides
+    /// it names and the reach the rest, and a cell's workspace as both corners lets a robot whose
+    /// base travels keep a map at all. A reading outside the box is no reading: put a corner past
+    /// a surface that matters by more than its readings lie off it (three of the camera's
+    /// deviations), as under the floor a robot stands on, which halves its map. Readings outside
+    /// are in no look and no map, so what only they show is in no world; the known shapes are
+    /// obstacles wherever they lie. Unbounded by default.
+    pub lower_corner: Vec3,
+    /// Its upper corner.
+    pub upper_corner: Vec3,
+}
+
+impl Default for MemoryOptions {
+    fn default() -> Self {
+        Self {
+            weighing: Weighing::default(),
+            lower_corner: Vec3::NEG_INFINITY,
+            upper_corner: Vec3::INFINITY,
+        }
+    }
 }
 
 /// What the robot did, said once, to the memory that holds the thing ([`Memory::after`]).
@@ -137,8 +158,9 @@ pub struct Memory {
     pub(crate) map: Arc<Map>,
     /// What the acts since the map was fused tell it, in order.
     marks: Vec<Mark>,
-    /// How far from the robot's frame it reaches (meters): the look's corners and the map's.
-    reach: f32,
+    /// The corners of the box the map holds, which are the look's too: the robot's reach from its
+    /// frame within the corners the options gave.
+    pub(crate) corners: [Vec3; 2],
     /// Whether an act followed the look that supplied the depth.
     acted: bool,
     /// How far past an object's room its part of the map reaches (meters), as far as a grid must
@@ -236,15 +258,36 @@ struct Unexplained {
 
 impl Memory {
     /// Nothing seen yet, in a cell whose fixtures are `known` (as [`Look::known`]), with a map of
-    /// everything as far as the device's robot reaches from its frame (`Robot::reach`) in voxels
-    /// of batchplan's default size (`SdfOptions::default().voxel`). A robot whose reach a map of
-    /// that size cannot hold is an `Error::Input`.
+    /// everything as far as the device's robot reaches from its frame (`Robot::reach`), within the
+    /// options' corners, in voxels of batchplan's default size (`SdfOptions::default().voxel`).
+    /// Corners that are no numbers or leave no room within the reach, and a box a map of that
+    /// voxel size cannot hold, as the whole reach of a robot whose base travels, are an
+    /// `Error::Input`: the options' corners bound such a robot's map.
     pub fn try_new(device: &Device, known: Vec<Obstacle>, o: &MemoryOptions) -> Result<Memory> {
         let robot = device.robot();
         let reach = robot.reach();
         let voxel = SdfOptions::default().voxel;
-        let corner = Vec3::splat(reach);
-        let fused = OccupancyMap::try_new(-corner, corner, voxel)?.with_weighing(o.weighing);
+        ensure_input!(
+            !o.lower_corner.is_nan() && !o.upper_corner.is_nan(),
+            "the map's corners must be numbers, got {} and {}",
+            o.lower_corner,
+            o.upper_corner
+        );
+        let lower = o.lower_corner.max(Vec3::splat(-reach));
+        let upper = o.upper_corner.min(Vec3::splat(reach));
+        ensure_input!(
+            lower.cmplt(upper).all(),
+            "the map's corners {} and {} leave no room within the robot's reach of {reach} m",
+            o.lower_corner,
+            o.upper_corner
+        );
+        let fused = OccupancyMap::try_new(lower, upper, voxel).map_err(|refused| {
+            input!(
+                "{refused}: the memory's map holds the robot's reach of {reach} m within \
+                 MemoryOptions' corners, so give corners that bound it"
+            )
+        })?;
+        let fused = fused.with_weighing(o.weighing);
         // A grid is exact where its box reaches past every surface by the collision margin and
         // the robot's largest sphere (batchplan's `docs/perception.md`, "Padding").
         let spheres = robot.spheres(robot.default_q());
@@ -256,7 +299,7 @@ impl Memory {
             hands: vec![None; robot.hands()],
             map: Arc::new(Map::new(fused, voxel)),
             marks: vec![],
-            reach,
+            corners: [lower, upper],
             acted: false,
             padding: IkOptions::default().collision.margin + largest,
         })
@@ -927,8 +970,8 @@ impl Kept {
 ///    The map's mask is padded past what a grid of it grows toward collision, 2√3 of its voxels,
 ///    where that is more than the stance's padding.
 ///
-/// It runs on `device`'s threads, and reads the device's robot: its joints, its spheres and how
-/// far it reaches. With no cameras it is a look that sees nothing: the memory as it was. A camera
+/// It runs on `device`'s threads, and reads the device's robot: its joints and its spheres. The
+/// look's corners are the memory's map's. With no cameras it is a look that sees nothing: the memory as it was. A camera
 /// stated with no noise, or one that is negative or no number, is an `Error::Input`, as are
 /// stances and frames batchplan's calls refuse.
 pub fn observe(
@@ -1006,10 +1049,10 @@ pub fn observe(
             masks: camera.masks,
         })
         .collect();
-    let corner = Vec3::splat(memory.reach);
+    let [lower_corner, upper_corner] = memory.corners;
     let options = LookOptions {
-        lower_corner: -corner,
-        upper_corner: corner,
+        lower_corner,
+        upper_corner,
     };
     let look = Look {
         views: &views,
