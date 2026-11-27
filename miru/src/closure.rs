@@ -33,6 +33,10 @@ impl Kept {
     ///
     /// This is a measurement of the latest endpoints. Continue checking the scene's obstacles,
     /// unknown space and the whole motion, including rotation and withdrawal, with the planner.
+    ///
+    /// A step of [`Kept::turn_grips`]: no part of the crate's interface, and public for the
+    /// crate's tests alone.
+    #[doc(hidden)]
     pub fn observed_closures(
         &self,
         device: &Device,

@@ -98,8 +98,11 @@ never from a switch. The table is how that rule is checked.
 - **Tests.** Every behaviour the change adds or fixes has a rendered scene in
   `miru/tests/look.rs` that fails with the bug planted. Ask for the plant, or plant it yourself.
   A test that reads a simulator's truth lives in `tests/` or `examples/`, never the library.
-- **Small interface.** A new public item earns its place; the change deepens `look` where it
-  can. Internals stay `pub(crate)`.
+- **Tiers.** `miru/AGENTS.md` says which code is lasting, frozen or leaving. In frozen or
+  leaving code, a new kind of claim or a new public item is a finding; so is a change there
+  without the run that shows the wrong answer it mends.
+- **Small interface.** A new public item earns its place; the change deepens a lasting module
+  where it can. Internals stay `pub(crate)`.
 - **Speed.** `.claude/skills/max-speed/SKILL.md` is the method. miru's classes are a first look
   and a later look, exact depth and a camera's, one thread and all of them. A change for speed
   shows the scorer's digest unchanged on every recorded set it has, on one thread and on many,

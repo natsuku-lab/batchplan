@@ -14,11 +14,10 @@
 //! - **State in the result.** A scene is passed to the next look, which keeps each object's id
 //!   while it stays where it was, and keeps what it cannot see as the scene had it. There is no
 //!   handle of miru's to keep and nothing to configure at run time.
-//! - **Geometry first.** Objects are told apart by where the depth jumps and where surfaces meet
-//!   in a concave crease, at the scale the cameras' noise allows. No model is needed and no
-//!   coordinates are ever asked of one. Where a caller has a mask model's instance masks, they
-//!   come in as a number per pixel ([`View::masks`]) and join or divide what the depth alone
-//!   cannot; miru runs no model.
+//! - **Masks in, where a caller has them.** A mask model's instance masks come in as a number per
+//!   pixel ([`View::masks`]) and join or divide what the depth alone cannot. Without them, objects
+//!   are told apart by where the depth jumps and where surfaces meet in a concave crease, at the
+//!   scale the cameras' noise allows. miru runs no model and never asks one for coordinates.
 //! - **The same on any machine's threads.** A scene does not depend on how many threads the
 //!   device has: each piece of a look's work is one thread's alone, and the results are taken in
 //!   the pieces' order.
@@ -36,8 +35,6 @@
 //! | [`GripWorlds::plan`] | Plans ordered grasps on those worlds, least cost first. |
 //! | [`Observed::picked`] | The memory after a pick planned on such a world. |
 //! | [`Kept::turn_grips`] | Grips to turn a control, in groups to plan in order. |
-//! | [`Kept::bar_on_disk`] | A raised bar over a round face, and poses that grip it. |
-//! | [`Kept::observed_closures`] | What a hand closing at given poses meets in the readings. |
 //! | [`Kept::extractions`] | Straight lifts out of an opening the look measured. |
 //! | [`Kept::enclosing`] | What holds an object in where the look measured no opening. |
 //!
@@ -100,6 +97,7 @@ struct Readme;
 #[doc = include_str!("../docs/grips.md")]
 struct Grips;
 
+// Which of these last, which are frozen and which are leaving: AGENTS.md, Tiers.
 mod bar;
 mod closure;
 mod error;
@@ -116,6 +114,7 @@ mod threads;
 mod turn;
 mod view;
 
+#[doc(hidden)]
 pub use bar::BarOnDisk;
 pub use closure::ClosureEvidence;
 pub use extraction::Extraction;
