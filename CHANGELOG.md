@@ -152,7 +152,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   `miru::observe` is a look through the library in one call, with a `Memory` told what the robot
   did (`Memory::after`) that gives the world each step plans against (`Memory::world`); and
   `Kept::surface`, `Observed::grip_worlds`, `Kept::turn_grips` and `Kept::extractions` give what
-  grasps, turns and lifts out of containers need. The memory's map reaches as far as the robot
+  grasps, turns and lifts out of containers need, and `Kept::surface_about` every reading about
+  a point, for a place into a thing the look gave in pieces. The memory's map reaches as far as the robot
   does, within `MemoryOptions::lower_corner` and `upper_corner`, which a robot whose base travels
   needs. batchplan does not depend on it. `miru/docs/status.md` says where it stands.
 - A limit on how far collision spheres reach past the geometry, whatever the budget:

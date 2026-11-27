@@ -2340,6 +2340,70 @@ fn falls(object: &Obstacle, surface: &Surface, o: &RestOptions) -> Vec<Fall> {
 }
 
 #[test]
+fn a_fall_is_looked_for_within_the_rectangle_about_the_support() {
+    // The pen of `what_is_let_go_over_a_pen_falls_in_and_stays`, its points given to more than
+    // one thing. With one wall alone the support, the rectangle about it holds no hollow, and
+    // nothing falls in. With two walls that meet at a corner, the rectangle about them holds the
+    // whole pen, and the can falls in over a floor that is none of the support's. With nothing
+    // flagged every point is the support: it falls in, nearest the point asked for first, each
+    // fall costing how far from that point it is.
+    let can = Obstacle::cylinder(Vec3::ZERO, 0.03, 0.04);
+    let o = RestOptions::default();
+    let whole = pen(0.08, 0.0);
+    let flagged = |support: &dyn Fn(Vec3) -> bool| Surface {
+        object: whole.points.iter().map(|p| support(*p)).collect(),
+        ..whole.clone()
+    };
+    let one_wall = flagged(&|p| p.x < -0.0999);
+    assert!(
+        one_wall.object.iter().any(|own| *own),
+        "the wall has points"
+    );
+    assert_eq!(
+        falls(&can, &one_wall, &o).len(),
+        0,
+        "one wall holds a hollow"
+    );
+    let corner = flagged(&|p| p.x < -0.0999 || p.y < -0.0799);
+    assert_eq!(
+        falls(&can, &corner, &o).len(),
+        14 * 10 * 8,
+        "two walls at a corner"
+    );
+    let unflagged = Surface {
+        object: vec![],
+        ..whole.clone()
+    };
+    let near = Vec3::new(0.04, -0.02, 0.0);
+    let problem = RestProblem {
+        near: Some(near),
+        ..RestProblem::new(can, 0)
+    };
+    let found = falls_into(&device(), &[problem], &[unflagged], &o);
+    let found = found.unwrap().remove(0);
+    assert!(
+        found.len() >= 14 * 10 * 8,
+        "{} falls with nothing flagged",
+        found.len()
+    );
+    let off = |f: &Fall| (f.pose.position - near).truncate().length();
+    assert!(
+        off(&found[0]) < o.spacing,
+        "the first lies {} m off",
+        off(&found[0])
+    );
+    for pair in found.windows(2) {
+        assert!(pair[0].cost <= pair[1].cost, "{pair:?}");
+    }
+    for f in &found {
+        assert!(
+            (f.cost - off(f)).abs() < 1e-5,
+            "{f:?} costs how far off it is"
+        );
+    }
+}
+
+#[test]
 fn what_is_let_go_over_a_pen_falls_in_and_stays() {
     // A can 6 cm across and 8 cm tall over a pen with walls 8 cm tall: it is let go where it
     // fits inside the walls, its bottom a centimeter over their tops, and lands on the floor 8 cm

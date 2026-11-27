@@ -4,6 +4,9 @@
   rack's slabs; a model's masks do ([masks](masks.md)).
 - Things that touch can read as one object, even on exact depth: two boxes side by side, or a
   plate on a box ([the truth table](status.md#the-truth-table)).
+- A large or jointed thing, as a cabinet with a drawer pulled out, can come out in several
+  objects ([status](status.md#gaps-on-the-recorded-sets)). A place into it asks of every reading
+  about a point (`Kept::surface_about`), not of one object's readings.
 - Shapes are boxes, upright cylinders and boxes open at the top. A thing whose shape only names
   the room it takes up, as a bowl, is not solid (`Object::solid`).
 - `Memory::world` gives a thing that is not solid as its room, one solid box or cylinder, unless
