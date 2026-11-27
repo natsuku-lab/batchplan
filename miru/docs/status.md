@@ -123,6 +123,10 @@ Each is a test of `tests/look.rs`, ignored until it passes:
 | `a_rod_across_a_lidless_box_under_a_board_keeps_its_room` | A thing the views see too little of to tell from a panel is held as one. |
 | `a_panel_at_a_boards_edge_with_an_arm_into_the_room_keeps_its_room` | A panel at an overhang's edge, with an arm into the room, has readings in the solids. |
 
+The room of a box drawn in from under what overhangs it (the tests of a board over a lidless
+box in `tests/look.rs`) is held on exact depth alone: as a D435 reads that scene from 0.8 m, the
+box under the board does not come out a box open at the top, and no room is measured to draw in.
+
 Tests that pass and record a gap in a comment:
 
 - `a_box_across_a_narrower_slab_stands_on_it_where_the_slab_reads_over_its_foot`: on noisy depth,
