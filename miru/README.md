@@ -29,8 +29,8 @@ miru is optional: batchplan plans without it and does not depend on it.
 
 ```toml
 [dependencies]
-batchplan = "0.12"
-miru = { package = "batchplan-miru", version = "0.12" }
+batchplan = "0.13"
+miru = { package = "batchplan-miru", version = "0.13" }
 ```
 
 The package is `batchplan-miru` because the name `miru` is taken on crates.io; the library is
