@@ -85,6 +85,7 @@ fn main() -> Result<(), Error> {
 | The hand along straight lines | `follow` | [tool paths](docs/planning.md#moving-the-hand-along-a-path) |
 | A hand kept upright, in a box or relative to another hand | `HandConstraint` on the problem | [constraints](docs/planning.md#constraints-along-the-path) |
 | A hand backing off, or working on, what another hand holds | `Held::touch_links` on the hold, as `robot.hand_links(hand).into_iter().map(String::from).collect()` | [holding objects](docs/robots.md#holding-objects) |
+| Setting what one hand holds on or into what another holds | `Place::onto`, the other hand's `Held`, on the device without either | [onto what another hand holds](docs/planning.md#onto-what-another-hand-holds) |
 | Two hands carrying one object | `Held::also` (a `Grip` per other hand), then `plan` with `holding` and one hand's goal pose, or `follow` with `holding` for a straight move | [holding objects](docs/robots.md#holding-objects) |
 | Two hands picking up and setting down one object | `Pick::also` (a `HandGrasps`, one grasp per grasp of the pick's), then `place` with the plan's `held` | [two hands](docs/planning.md#two-hands) |
 | Picking up and setting down | `robot.gripper` once per hand, then `grasps`, `pick`, `place` | [tasks](docs/planning.md#picking-up-and-setting-down) |

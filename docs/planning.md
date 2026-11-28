@@ -299,7 +299,7 @@ fn main() -> Result<(), Error> {
   5. A planned path from the start to where the move in begins.
 
   Every candidate that passes every step comes back, least cost first and the quickest among equals (`TaskPlan::candidate` says which, `TaskPlan::cost` what it costs; [costs and how many will do](#costs-and-how-many-will-do)). The straight moves keep the hand under `TaskOptions::tool_speed` (10 cm/s), all along or, with `tool_speed_near`, only within that distance of the grasp or release, the rest of each move as fast as the joints allow; and they must make `min_fraction` of their length (all of it): less lets an obstacle shorten a move in or away rather than rule the candidate out, while a move stopped short by anything else (out of reach, a jump) still rules it out.
-- **What may touch.** At the grasp and moving in, the fingers (`Robot::finger_links`, or the whole hand where it has no links with collision spheres below its palm) may touch the object; the palm may not, so a grasp set too deep fails. The held object may touch what it rests on as it leaves (`Pick::support`) and what it is set on as it arrives (`Place::support`). Backing off, the fingers may touch the object where it now stands. Everything else collides.
+- **What may touch.** At the grasp and moving in, the fingers (`Robot::finger_links`, or the whole hand where it has no links with collision spheres below its palm) may touch the object; the palm may not, so a grasp set too deep fails. The held object may touch what it rests on as it leaves (`Pick::support`) and what it is set on as it arrives (`Place::support`, or `Place::onto` for [what another hand holds](#onto-what-another-hand-holds)). Backing off, the fingers may touch the object where it now stands. Everything else collides.
 - **What the hand holds.** A pick's plan holds a `Held` (`TaskPlan::held`): the object in its own frame and the grasp. `place` takes it and attaches the object itself, to the device without it, and so do `plan`, `solve_ik` and `follow` for a problem's `holding` ([holding objects](robots.md#holding-objects)); `Held::attachment(&robot)` gives the `AttachedObject` for a device that holds it, on the robot relocked at `held.locked` first where the hold sets the fingers ([`Robot::attach`](robots.md)). A place's plan gives the object where it is expected to stand (`TaskPlan::placed`), to add to the world, and `TaskPlan::end` is where the next task starts. `World::remove` takes the object out of its world for the place, renumbering the touches.
 - **Proposals.** `grasps(&obstacle, &gripper, &ShapeGraspOptions)` proposes grasps for a box, ball, cylinder or capsule, in its frame: the hand facing each side, closing across what the gripper grasps (`Gripper::capacity`), `depth` (2 cm) in from the surface. They suit a parallel gripper whose IK frame lies between its fingertips, its z axis pointing out of the hand and its y axis along the closing direction, as the Panda's `ee_link`. Where no grasp fits, `grasps` says why: the object is wider than the gripper grasps every way, or a floor rules out every grasp. `place_poses(&obstacle, pose, turns)` gives an object's symmetric turns at one spot: 2 for a box (4 with a square footprint), `turns` for a round object.
 - **Near a support.** A small object on a table puts the fingertips in the table at the full depth. Give `ShapeGraspOptions::floor` the height they keep above, such as the table's top and a few millimeters, and pass the obstacle as it stands in the world; the fingers reach the gripper's `tip` past the frame (`Gripper::tip`, `robot.tip(hand)` when the gripper was built), or what `tip: Some(..)` says: grasps from above then hold the object as deep as keeps the fingertips over the floor, the frame above it where the object is flatter than the fingertips' reach and the floor's clearance, and grasps that come from below are left out. The floor holds the open fingers too, the gripper's loaded gap apart (`Gripper::opening`): tilted about a bar lying over a support, as a drawer's handle, one finger swings down, so the grasp holds the bar as far out as keeps it over the floor, and a grasp from the side that closes upright on an object standing on the table, its lower finger below the table's top, is left out. Leave room in the floor for the fingers' thickness. Every grasp from above keeps at least `overlap` of the fingers in the object (1 cm, as MoveIt Grasps' minimum depth for the Panda), so one whose top is less than that over the floor has no grasp from above, and with a `tip` under 1 cm grasps the floor alone would allow can be left out too.
@@ -404,6 +404,38 @@ fn together(
     let placed = batchplan::place(device, worlds, &[place], &o)?;
     println!("{} plans set it down", placed.outcomes[0].as_ref().map_or(0, Vec::len));
     Ok(())
+}
+```
+
+### Onto what another hand holds
+
+A place sets its object on or into what another hand holds with `Place::onto`, that hand's `Held`: a peg into a socket the other hand holds, a lid onto a held pot. The device is the robot's without either object, and the start has the other hand holding its own where it is to stay. MoveIt's place names a support surface and the objects the placed one may touch, attached to the robot or not; here the support is named by its hold.
+
+- **Where the object may touch it:** where the hand lets go and on the move in, and where it lies once let go, on the move away. Not on the transit, which goes around what the other hand holds, and not at the start.
+- **What stays still:** every joint that moves a hand that holds the support stays where the start has it through the whole place, whatever `idle` says of it. On a robot whose arms hang from one torso, the torso does not move, and the place is made with the joints the placing hand has to itself.
+- **Releases** are poses in the world's frame, as in any place: `support_pose = robot.ee_pose(&start, onto.hand).mul_pose(onto.grasp.inverse())` is where the support is.
+- **Afterwards** `TaskPlan::placed` is the object where it lies, against what the other hand still holds. A later call on a device that holds the support lets it touch that with `Touch::held(obstacle, onto.hand)` in the world that has the object.
+
+Input errors: the placing hand holding the support too, an object two hands hold, a support that is malformed as a hold, and worlds that let the placing hand's object touch obstacles by `Touch::held` (name those with `Place::support`, which carries). On a GPU three robots have kernels of their own, each built by the first call that needs it and kept: the robot holding the support, the robot holding both, and the robot holding both with the object let touch the support, which a place builds once a candidate gets past its start.
+
+```rust,no_run
+use batchplan::{Device, Error, Held, Place, Pose, TaskOptions, TaskPlan, Worlds};
+
+/// The plans that set what one hand holds (`peg`) at `at`, on what another holds (`socket`).
+fn onto_held(
+    device: &Device,
+    worlds: &Worlds,
+    start: &[f32],
+    peg: Held,
+    socket: Held,
+    at: Pose,
+) -> Result<Vec<TaskPlan>, Error> {
+    let place = Place {
+        onto: Some(socket),
+        ..Place::new(0, start, peg, [at])
+    };
+    let mut placed = batchplan::place(device, worlds, &[place], &TaskOptions::default())?;
+    Ok(placed.outcomes.remove(0).unwrap_or_default())
 }
 ```
 

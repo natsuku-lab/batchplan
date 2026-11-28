@@ -315,6 +315,12 @@ value_class! {
         enough: Option<usize>,
         /// Obstacles the object is set on, by index: it may touch them as it arrives.
         support: Vec<usize>,
+        /// What other hands hold that the object is set on or into: their `Held`, where `start`
+        /// has it, on a device without it too. The object may touch it where it arrives and
+        /// where it lies, not on the transit, and every joint that moves a hand that holds it
+        /// stays where `start` has it through the whole place. `None`: set on nothing a hand
+        /// holds.
+        onto: Option<batchplan::Held>,
         /// Where the hands must stay along the transit, as a cup carried upright. The start must
         /// keep them; a pose whose move in begins where they break stops at the transit. A task
         /// without its transit has no use for them.

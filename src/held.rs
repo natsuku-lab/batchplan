@@ -82,7 +82,7 @@ impl Held {
     }
 
     /// Every hand that holds it with its grasp, `hand` first.
-    fn hands(&self) -> impl Iterator<Item = (usize, Pose)> + Clone + '_ {
+    pub(crate) fn hands(&self) -> impl Iterator<Item = (usize, Pose)> + Clone + '_ {
         let also = self.also.iter().map(|grip| (grip.hand, grip.grasp));
         std::iter::once((self.hand, self.grasp)).chain(also)
     }

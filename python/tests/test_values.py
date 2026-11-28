@@ -144,6 +144,16 @@ def test_a_hold_names_the_other_hands_that_hold_it():
     assert touching.touch_links == ("right_panda_hand",)
 
 
+def test_a_place_names_what_its_object_is_set_on():
+    cube = bp.Obstacle.cuboid((0.0, 0.0, 0.0), (0.02, 0.02, 0.02))
+    held = bp.Held(1, cube, bp.Pose((0.0, 0.0, 0.0)))
+    other = bp.Held(0, cube, bp.Pose((0.0, 0.1, 0.0)))
+    release = bp.Pose((0.3, 0.0, 0.4))
+    assert bp.Place(0, [0.0] * 14, held, [release]).onto is None, "set on nothing a hand holds"
+    onto = bp.Place(0, [0.0] * 14, held, [release], onto=other).onto
+    assert onto.hand == 0 and onto.grasp == other.grasp, "the other hand's hold"
+
+
 def test_wrong_inputs_are_input_errors():
     with pytest.raises(bp.InputError, match="3 numbers"):
         bp.Obstacle.sphere((0.0, 0.0), 0.1)
