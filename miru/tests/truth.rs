@@ -8,7 +8,9 @@
 //! **The cameras** stand where a robot's do, the same two for every scene: the tests' `EYE`, 78 cm
 //! from the table's middle and 40 degrees over it, as a camera on a stand over a robot's table;
 //! and a nearer one, 40 cm off and 55 degrees over it, turned 30 degrees from the first, as a hand
-//! carries one over what it is about to take. Both read through the tests' pinhole, so that what
+//! carries one over what it is about to take. One scene moves the near camera: over the table
+//! beside a can, looking straight down, it sees the can by the side the far camera cannot see
+//! alone, as a hand's camera sees a thing it comes down beside. Both read through the tests' pinhole, so that what
 //! differs between the cameras is their depth alone. A stereo camera's depth goes through
 //! batchplan's filter (`DepthImage::filtered`) before it becomes a view, at the noise the camera
 //! states and with every other option the library's default: `observe` makes that the first step
@@ -54,7 +56,10 @@
 //! them. A plate 5 mm thick on a box is one object with the box through every camera, the box's
 //! shape as tall as the two, so a plate set down on a box reads gone at the next look while it
 //! stands there (`tests/memory.rs`); and two boxes touching are one object through every camera,
-//! so of a box set down against another one reads gone.
+//! so of a box set down against another one reads gone. A can whose side the near camera alone
+//! sees is one object on exact depth, that side joined to the can the far camera sees; through
+//! either stereo camera the readings the filter keeps between the can's edge and the table lie
+//! off the can's shape, and the side stays an object of its own, not solid.
 //!
 //! | Scene | Camera | Thing | Shows |
 //! |---|---|---|---|
@@ -113,18 +118,20 @@
 //! | two boxes touching | D435 | box 2 | the two boxes' object: 158 x 262 x 68 mm (+78 +142 +8; 24), 64 mm off (20), not solid |
 //! | two boxes touching | D435+D405 | box 1 | the two boxes' object: 158 x 289 x 68 mm (+78 +169 +8; 24), 83 mm off (20), not solid |
 //! | two boxes touching | D435+D405 | box 2 | the two boxes' object: 158 x 289 x 68 mm (+78 +169 +8; 24), 52 mm off (20), not solid |
+//! | a can seen by its side near | D435 | can | 3 objects, a box, 19 x 61 x 94 mm (-51 -9 -6; 23), 27 mm off (20), not solid, holds 0.62 (0.85) |
+//! | a can seen by its side near | D435+D405 | can | 3 objects, a box, 32 x 72 x 94 mm (-38 +2 -6; 23), 21 mm off (20), not solid, holds 0.67 (0.89) |
 
 #[allow(dead_code, reason = "each test file uses part of it")]
 mod common;
 
 use std::fmt::Write as _;
 
-use batchplan::DepthFilter;
+use batchplan::{DepthFilter, Pose};
 use common::{
     CAMERAS, EYE, Frame, MIDDLE, NEAR, Stereo, Thing, a_box, block, can, device, known, looking,
     sizes, standing_bowl, table, thin_tray, tray_with_block, turned,
 };
-use glam::{Quat, Vec3};
+use glam::{Mat3, Quat, Vec3};
 use miru::{Label, Look, LookOptions, Noise, Scene, Shape, Support};
 
 /// What a row says of a thing, each asserted unless it is a listed gap.
@@ -207,6 +214,8 @@ two boxes touching | D435 | box 1 | size middle solid
 two boxes touching | D435 | box 2 | size middle solid
 two boxes touching | D435+D405 | box 1 | size middle solid
 two boxes touching | D435+D405 | box 2 | size middle solid
+a can seen by its side near | D435 | can | objects kind size middle solid share
+a can seen by its side near | D435+D405 | can | objects kind size middle solid share
 ";
 
 /// The kind of a shape a look measures.
@@ -304,6 +313,8 @@ struct Case {
     things: Vec<Thing>,
     truths: Vec<Truth>,
     then: Option<(Vec<Thing>, Vec<Truth>)>,
+    /// Where the near camera stands, where it is not the table's `NEAR`.
+    near: Option<Pose>,
 }
 
 impl Case {
@@ -313,6 +324,7 @@ impl Case {
             things,
             truths,
             then: None,
+            near: None,
         }
     }
 }
@@ -451,6 +463,7 @@ fn cases() -> Vec<Case> {
         things,
         truths,
         then: Some((moved, after)),
+        near: None,
     });
     // The can on the box again, as it was.
     let (things, truths) = can_on_a_box();
@@ -459,6 +472,7 @@ fn cases() -> Vec<Case> {
         things,
         truths,
         then: Some(can_on_a_box()),
+        near: None,
     });
     // A plate 6 cm square and 5 mm thick on a box 14 cm square and 6 cm tall: a thing set down on
     // another (`Act::LetGo` in `tests/memory.rs`).
@@ -489,6 +503,19 @@ fn cases() -> Vec<Case> {
             a_box_truth("box 2", &[2], second, half),
         ],
     ));
+    // The upright can again, the near camera 15 cm from its middle toward -x, 31 cm over the
+    // table and looking straight down: it sees the can's -x side alone, which the far camera
+    // cannot see. Last, so that the scenes before draw the noise they did.
+    let at = Vec3::new(0.5, 0.0, 0.05);
+    let down = Quat::from_mat3(&Mat3::from_cols(Vec3::X, Vec3::NEG_Y, Vec3::NEG_Z));
+    cases.push(Case {
+        near: Some(Pose::new(Vec3::new(0.35, 0.0, 0.31), down)),
+        ..Case::once(
+            "a can seen by its side near",
+            vec![can(at, 0.035, 0.05, [30, 30, 200])],
+            vec![a_cylinder_truth("can", 1, at, 0.035, 0.05)],
+        )
+    });
     cases
 }
 
@@ -497,9 +524,13 @@ fn on_the_table(things: Vec<Thing>) -> Vec<Thing> {
     std::iter::once(table()).chain(things).collect()
 }
 
-/// The far view's frame and the near one's of `things`, as the renderer gives the truth.
-fn render(things: &[Thing]) -> [Frame; 2] {
-    [EYE, NEAR].map(|eye| Frame::of(things, looking(eye, MIDDLE)))
+/// The far view's frame and the near one's of `things`, as the renderer gives the truth: the near
+/// camera at `near`, or at `NEAR` looking at the table's middle.
+fn render(things: &[Thing], near: Option<Pose>) -> [Frame; 2] {
+    [
+        Frame::of(things, looking(EYE, MIDDLE)),
+        Frame::of(things, near.unwrap_or_else(|| looking(NEAR, MIDDLE))),
+    ]
 }
 
 /// `rendered` as `camera` reads it with the draws of `seed`, through batchplan's filter at the
@@ -852,10 +883,10 @@ fn what_a_look_makes_of_known_things_through_three_cameras() {
     println!("{}", header.trim_end());
     for (number, case) in cases().into_iter().enumerate() {
         let things = on_the_table(case.things);
-        let rendered = render(&things);
+        let rendered = render(&things, case.near);
         let then = (case.then).map(|(things, truths)| {
             let things = on_the_table(things);
-            (render(&things), things, truths)
+            (render(&things, case.near), things, truths)
         });
         for (c, (camera, far, near)) in CAMERAS.into_iter().enumerate() {
             let seed = |look: u64, view: u64| 100 * number as u64 + 10 * look + view;

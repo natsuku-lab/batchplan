@@ -39,15 +39,15 @@ them masked.
 
 | Set | Measured by | Matched | Merged | In pieces | Missed |
 |---|---|---|---|---|---|
-| `rows4` | miru | 91 | 0 | 49 | 0 |
-| | miru, the truth as masks | 135 | 0 | 5 | 0 |
+| `rows4` | miru | 92 | 0 | 48 | 0 |
+| | miru, the truth as masks | 136 | 0 | 4 | 0 |
 | | the executor | 92 | 22 | 26 | 0 |
 | `rows4-stereo` | miru | 70 | 14 | 55 | 1 |
 | | miru, the truth as masks | 134 | 0 | 6 | 0 |
 | | the executor | 58 | 34 | 48 | 0 |
 
-`--again` gives each look's frames a second time: on `rows4`, 226 of 226 objects keep their ids,
-and on `rows4-stereo` 226 of 226; none stays unseen.
+`--again` gives each look's frames a second time: on `rows4`, 224 of 224 objects keep their ids,
+and on `rows4-stereo` 225 of 225; none stays unseen.
 
 ## Masks off by a few pixels
 
@@ -57,8 +57,8 @@ prompted for one thing gives. Matched / merged / in pieces / missed:
 
 | Set | Masks | 3 px short | 1 px short | exact | 1 px over | 3 px over |
 |---|---|---|---|---|---|---|
-| `rows4` | the truth | 126 / 0 / 14 / 0 | 133 / 0 / 7 / 0 | 135 / 0 / 5 / 0 | 135 / 0 / 5 / 0 | 135 / 0 / 5 / 0 |
-| | one | 126 / 0 / 14 / 0 | 133 / 0 / 7 / 0 | 135 / 0 / 5 / 0 | 135 / 0 / 5 / 0 | 134 / 4 / 2 / 0 |
+| `rows4` | the truth | 127 / 0 / 13 / 0 | 134 / 0 / 6 / 0 | 136 / 0 / 4 / 0 | 136 / 0 / 4 / 0 | 136 / 0 / 4 / 0 |
+| | one | 127 / 0 / 13 / 0 | 134 / 0 / 6 / 0 | 136 / 0 / 4 / 0 | 136 / 0 / 4 / 0 | 135 / 4 / 1 / 0 |
 | `rows4-stereo` | the truth | 116 / 0 / 23 / 1 | 135 / 0 / 5 / 0 | 134 / 0 / 6 / 0 | 134 / 0 / 6 / 0 | 134 / 0 / 6 / 0 |
 | | one | 107 / 14 / 18 / 1 | 124 / 9 / 6 / 1 | 129 / 7 / 4 / 0 | 129 / 7 / 4 / 0 | 127 / 12 / 1 / 0 |
 
@@ -97,8 +97,10 @@ threads, for each set.
   looks), the rack (8 of 8), the basket (2 of 2) and the cabinet (10 of 18) are in pieces. With
   the truth as masks, none of them is (`score -- rows4`, with and without `--masks truth`).
 - **Two cameras' parts of one thing.** With the truth as masks, the cookie box is two objects in 4
-  of its 10 looks, where a bowl on it hides from each camera what the other sees; the tomato
-  sauce in 1 of 2, its two sides seen by the two cameras (`--masks truth`, both sets).
+  of its 10 looks, where a bowl on it hides from each camera what the other sees (`--masks truth`,
+  both sets). On `rows4-stereo` the tomato sauce is two in 1 of 2, its two sides seen by the two
+  cameras; on `rows4` it is one in both, the side the hand camera alone sees lying on the shape
+  the table camera's readings give.
 - **Stereo depth merges things that touch.** On `rows4-stereo`, 14 of the 140 merge: 6 bowls, 4
   cookie boxes, the cabinet twice, a ramekin and the rack (`score -- rows4-stereo`).
 - **Stereo depth moves shapes off and leaves few of them solid.** A shape's faces lie at its
@@ -107,7 +109,7 @@ threads, for each set.
   on `rows4-stereo` from 0.19 cm (cream cheese) to 12.3 cm (the one stove matched). Every matched
   cream cheese, cookie box and wine bottle is solid on `rows4`; on `rows4-stereo` one cream cheese
   of 10 is, and none of the others.
-- **Depth stated as more exact than the camera's does not help.** On `rows4`, 91 are matched at
+- **Depth stated as more exact than the camera's does not help.** On `rows4`, 92 are matched at
   the stated noise, and 80, 83 and 81 at 0.5, 0.25 and 0.1 of it (`--noise <factor>`).
 
 ## Gaps on rendered scenes
@@ -136,6 +138,21 @@ Tests that pass and record a gap in a comment:
   touches the box along a window is the box's.
 - `what_comes_back_as_one_thing_stands_on_nothing_of_its_own`: a block behind a tray's near wall,
   with an arm beside it, is taken for a piece of the tray.
+- `a_card_against_the_face_one_camera_alone_sees_is_the_bars_unless_masks_say_otherwise`: a face
+  one view alone sees is joined to the thing whose shape it lies on within the readings' noise
+  and a pixel's footprint there, so a card 5 mm thick flat against the bar's hidden face, the views
+  stating the recorded sets' noise, is taken for that face: one object, 45 mm across where the
+  bar is 40. Masks keep the two apart.
+
+A face one view alone sees joins only a thing whose shape stands for it: a block under a bowl's
+rim whose face lies on the bowl's cylinder stays apart
+(`a_block_under_a_bowls_rim_that_one_camera_alone_sees_is_not_the_bowls`), and a hollow thing's
+own face is not joined either: the outer face of a tray's wall that one view alone sees stays an
+object of its own (`a_trays_wall_that_one_camera_alone_sees_stays_apart`). Through either stereo
+camera, the readings the filter keeps between a can's edge and the table lie off the can's shape
+by more than that allowance, and the side of the can a near camera alone sees stays apart: the
+truth table's `a can seen by its side near`, three objects through the D435 and through the D435
+with the D405 near, one on exact depth.
 
 The truth table's tray is a box open at the top on exact depth and through the D435, there in four
 objects, and no box open at the top through the D435 with the D405 near.

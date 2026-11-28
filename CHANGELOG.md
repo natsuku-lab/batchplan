@@ -70,6 +70,17 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   - `plan` from a moving start times each spline it fits once, where its later rounds timed the
     same splines again, with the same paths.
 
+### Fixed
+
+- `miru::look` makes one object of a thing two cameras see different faces of, with no surface
+  in common, where the one camera's face lies on the shape the other's readings give: a bar seen
+  whole by a camera across the table and only by its far side by one beside it, cut by that
+  image's border, was two objects, the side a second one of no thickness on the bar's face. The
+  face joins within the readings' noise and a pixel's footprint, so a thing thinner than that
+  lying flat against it is taken for it without masks; a hollow thing's face (a bowl's, a
+  tray's) is not joined, nor one a stereo camera reads with stray readings along its edge
+  (`miru/docs/status.md`).
+
 ## [0.12.0] - 2026-11-27
 
 ### Added

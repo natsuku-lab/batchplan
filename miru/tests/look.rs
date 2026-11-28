@@ -8,7 +8,8 @@
 //! hollow thing is one object, its outside with the inside behind its rim, and what stands in it,
 //! on it or by it is not. A thing that nothing under it holds up, as a handle, is one object with
 //! what it touches, and a thing that stands on something, or whose foot the look cannot see, is
-//! not; where the look cannot see under a thing, it stands on the lower thing it touches.
+//! not; where the look cannot see under a thing, it stands on the lower thing it touches. A face
+//! of a thing that one view alone sees is the thing's, and not another's whose face it continues.
 //! Where a view has masks, those of a model that sees what the renderer does, they join what
 //! the depth shows no connection between and divide what it shows as one surface.
 
@@ -18,13 +19,13 @@ mod common;
 use std::collections::BTreeMap;
 use std::f32::consts::FRAC_PI_2;
 
-use batchplan::{Error, Obstacle};
+use batchplan::{Error, Obstacle, Pose};
 use common::{
     EYE, Frame, MIDDLE, Thing, a_box, ball, block, bowl, can, cup, device, device_of, known,
     known_as_grid, looking, ring, sizes, standing_bowl, table, thin_tray, tray_with_block, turned,
     without,
 };
-use glam::{Quat, Vec2, Vec3};
+use glam::{Mat3, Quat, Vec2, Vec3};
 use miru::{Label, Look, LookOptions, Noise, Object, Scene, Shape, Support};
 
 /// The frame the tests' camera reads of the table (thing 0) with `things` on it.
@@ -1499,6 +1500,289 @@ fn two_views_of_one_box_are_one_object() {
     // Seen from two sides, the box measures whole.
     let ([narrow, wide], ..) = sizes(&scene.objects[0].shape);
     assert!((narrow - 0.04).abs() < 0.004 && (wide - 0.06).abs() < 0.004);
+}
+
+/// A bar 4 cm square across and `from` to `to` along y, lying on the table with its -x face at
+/// x = 0.48.
+fn bar(from: f32, to: f32) -> Thing {
+    bar_at(0.0, from, to)
+}
+
+/// [`bar`] moved `dx` along x.
+fn bar_at(dx: f32, from: f32, to: f32) -> Thing {
+    block(
+        Vec3::new(0.5 + dx, 0.5 * (from + to), 0.02),
+        Vec3::new(0.02, 0.5 * (to - from), 0.02),
+        [200, 30, 30],
+    )
+}
+
+/// The tests' far camera, and a near one 25 cm over the table looking straight down, 11.5 cm
+/// from the bars' -x face toward -x: of a bar that reaches y = 0.1 it shows that face alone,
+/// from the bar's end down to the image's bottom edge, the face's top edge 4 pixels past the
+/// image's right edge and the bar's top with it. The far camera sees the bars' tops and their +x
+/// faces. So the two views show no surface in common.
+fn far_and_near(things: impl Fn() -> Vec<Thing>) -> (Frame, Frame) {
+    far_and_near_at(0.0, things)
+}
+
+/// [`far_and_near`] with the near camera moved `dx` along x, as a bar moved so is seen by it.
+fn far_and_near_at(dx: f32, things: impl Fn() -> Vec<Thing>) -> (Frame, Frame) {
+    let down = Quat::from_mat3(&Mat3::from_cols(Vec3::X, Vec3::NEG_Y, Vec3::NEG_Z));
+    let near = Pose::new(Vec3::new(0.365 + dx, 0.09, 0.25), down);
+    let scene: Vec<Thing> = std::iter::once(table()).chain(things()).collect();
+    (frame_of(things()), Frame::of(&scene, near))
+}
+
+/// Asserts that the near view shows thing `thing`, a bar moved `dx` along x, by its -x face
+/// alone, cut by the image's border, and the far view none of that face: the two views read no
+/// surface of it in common.
+fn shows_its_face_alone(far: &Frame, near: &Frame, thing: usize, dx: f32) {
+    let on_face = |frame: &Frame, i: usize| {
+        let point = reading(frame, i);
+        (point.x - 0.48 - dx).abs() < 0.001 && point.z < 0.039
+    };
+    let shown: Vec<usize> = (0..near.shows.len())
+        .filter(|&i| near.shows[i] == Some(thing))
+        .collect();
+    assert!(shown.len() > 1000, "{} pixels", shown.len());
+    assert!(
+        shown.iter().all(|&i| on_face(near, i)),
+        "the near view shows more than the face"
+    );
+    let border = |i: usize| i % common::WIDTH == common::WIDTH - 1 || i / common::WIDTH == 239;
+    assert!(
+        shown.iter().any(|&i| border(i)),
+        "the face is not cut by the border"
+    );
+    let far_on_face =
+        (0..far.shows.len()).filter(|&i| far.shows[i] == Some(thing) && on_face(far, i));
+    assert_eq!(far_on_face.count(), 0, "the far view shows the face");
+}
+
+/// Asserts that `shape` is a bar's of `length` along y with its middle at `at` ([`bar`]), each
+/// face within the allowance of `frame`, the view that sees the bar whole, at the bar's middle:
+/// three deviations of its noise and a pixel's width there.
+fn assert_bar(shape: &Shape, frame: &Frame, length: f32, at: Vec3) {
+    let face = slack(frame, at) + frame.camera.position.distance(at) / common::K.fx;
+    let ([across, along], middle, up) = sizes(shape);
+    let off = 2.0 * Vec3::new(across, along, up) - Vec3::new(0.04, length, 0.04);
+    assert!(
+        off.abs().max_element() <= 2.0 * face,
+        "{shape:?}: sizes off by {off}, past {face} a face"
+    );
+    let moved = middle - at;
+    assert!(
+        moved.abs().max_element() <= face,
+        "{shape:?}: its middle off by {moved}, past {face}"
+    );
+}
+
+#[test]
+fn a_face_of_a_bar_that_one_camera_alone_sees_is_the_bars() {
+    // The bar and the near camera move together along x in steps of half a millimetre, across
+    // more than the 4.3 mm the far camera's pixel spans on the bar's top: the far view's last
+    // reading on the top falls short of the face the near view sees by anything up to that.
+    for step in 0..=10 {
+        let dx = 0.0005 * step as f32;
+        let (far, near) = far_and_near_at(dx, || vec![bar_at(dx, -0.1, 0.1)]);
+        shows_its_face_alone(&far, &near, 1, dx);
+        let scene = seen(&[&far, &near], &Scene::default());
+        assert_eq!(scene.objects.len(), 1, "dx {dx}: {:?}", scene.objects);
+        for (view, frame) in [&far, &near].into_iter().enumerate() {
+            let (object, held) = object_in(&scene, view, frame, 1);
+            assert!(
+                object == 0 && held > 0.99,
+                "dx {dx}, view {view}: object {object} holds {held}"
+            );
+        }
+        let at = Vec3::new(0.5 + dx, 0.0, 0.02);
+        assert_bar(&scene.objects[0].shape, &far, 0.2, at);
+    }
+}
+
+#[test]
+fn a_bar_whose_face_one_camera_alone_saw_keeps_its_id() {
+    // The near camera alone, then the far one alone, then both: the face is an object of its own,
+    // then the bar is another beside it, unseen, and then the two are one, which is the bar.
+    let (far, near) = far_and_near(|| vec![bar(-0.1, 0.1)]);
+    let face = seen(&[&near], &Scene::default());
+    assert_eq!(face.objects.len(), 1, "{:?}", face.objects);
+    let then = seen(&[&far], &face);
+    assert_eq!(then.objects.len(), 2, "{:?}", then.objects);
+    let (rod, _) = object_of(&then, &far, 1);
+    let id = then.objects[rod].id;
+    let both = seen(&[&far, &near], &then);
+    assert_eq!(both.objects.len(), 1, "{:?}", both.objects);
+    assert_eq!(both.objects[0].id, id, "{:?}", both.objects);
+}
+
+#[test]
+fn a_card_against_the_face_one_camera_alone_sees_is_the_bars_unless_masks_say_otherwise() {
+    // A card 5 mm thick, 6 cm along the bar and 2 cm tall, standing flat against the -x face,
+    // which hides it from the far camera. The views state the recorded sets' noise: within it and
+    // a pixel's footprint, the card's face lies on the bar's shape. A gap: the card is taken for
+    // the bar's face and the bar comes out 45 mm across; masks of a model keep the two apart.
+    let card = || {
+        block(
+            Vec3::new(0.4775, 0.01, 0.02),
+            Vec3::new(0.0025, 0.03, 0.01),
+            [30, 200, 30],
+        )
+    };
+    let (mut far, mut near) = far_and_near(|| vec![bar(-0.1, 0.1), card()]);
+    assert_eq!(pixels(&far, 2), 0, "the far view shows the card");
+    assert!(pixels(&near, 2) > 500, "the near view shows the card");
+    (far.noise, near.noise) = (REAL, HAND);
+    let scene = seen(&[&far, &near], &Scene::default());
+    assert_eq!(scene.objects.len(), 1, "{:?}", scene.objects);
+    let ([across, ..], ..) = sizes(&scene.objects[0].shape);
+    assert!((2.0 * across - 0.045).abs() < 0.001, "{:?}", scene.objects);
+    let number = |thing: usize| thing as u32 + 1;
+    let (far, near) = (far.masked(number), near.masked(number));
+    let scene = seen(&[&far, &near], &Scene::default());
+    assert_eq!(scene.objects.len(), 2, "{:?}", scene.objects);
+    let (bar, _) = object_of(&scene, &far, 1);
+    let (card, held) = object_in(&scene, 1, &near, 2);
+    assert!(
+        card != bar && held > 0.99,
+        "object {card} holds {held} of the card"
+    );
+}
+
+#[test]
+fn a_trays_wall_that_one_camera_alone_sees_stays_apart() {
+    // The near camera looks straight down beside the tray's -x wall and sees its outer face alone,
+    // which the far camera cannot see. A gap: the tray's shape is no surface of the tray, whose
+    // readings lie inside it, so the face is not joined to it and stays an object of its own.
+    let down = Quat::from_mat3(&Mat3::from_cols(Vec3::X, Vec3::NEG_Y, Vec3::NEG_Z));
+    let near = Pose::new(Vec3::new(0.265, 0.09, 0.27), down);
+    let scene_things = std::iter::once(table())
+        .chain(thin_tray())
+        .collect::<Vec<_>>();
+    let (far, near) = (frame_of(thin_tray()), Frame::of(&scene_things, near));
+    let wall = (1..=5)
+        .max_by_key(|&thing| pixels(&near, thing))
+        .expect("the tray has walls");
+    assert!(pixels(&near, wall) > 1000 && pixels(&far, wall) > 100);
+    let shown: usize = (1..=5)
+        .filter(|&thing| thing != wall)
+        .map(|thing| pixels(&near, thing))
+        .sum();
+    assert_eq!(
+        shown, 0,
+        "the near view shows more of the tray than its wall"
+    );
+    let scene = seen(&[&far, &near], &Scene::default());
+    assert_eq!(scene.objects.len(), 2, "{:?}", scene.objects);
+    let (tray, _) = object_in(&scene, 0, &far, wall);
+    let (face, held) = object_in(&scene, 1, &near, wall);
+    assert!(
+        face != tray && held > 0.99,
+        "object {face} holds {held} of the wall's face"
+    );
+}
+
+#[test]
+fn a_block_under_a_bowls_rim_that_one_camera_alone_sees_is_not_the_bowls() {
+    // A block 3 cm tall whose -x face lies where the bowl's rim does, under the rim, away from the
+    // far camera: the near camera sees that face alone. It lies on the cylinder that covers the
+    // bowl, which is no surface of the bowl's: the bowl's readings lie inside it.
+    let bowl = || standing_bowl(MIDDLE);
+    let under = || {
+        block(
+            Vec3::new(0.448, 0.0, 0.0125),
+            Vec3::new(0.004, 0.01, 0.0125),
+            [30, 200, 30],
+        )
+    };
+    let down = Quat::from_mat3(&Mat3::from_cols(Vec3::X, Vec3::NEG_Y, Vec3::NEG_Z));
+    let near = Pose::new(Vec3::new(0.334, 0.0, 0.235), down);
+    let things = [table(), bowl(), under()];
+    let (far, near) = (frame_of(vec![bowl(), under()]), Frame::of(&things, near));
+    assert_eq!(pixels(&far, 2), 0, "the far view shows the block");
+    assert_eq!(pixels(&near, 1), 0, "the near view shows the bowl");
+    let scene = seen(&[&far, &near], &Scene::default());
+    assert_eq!(scene.objects.len(), 2, "{:?}", scene.objects);
+    let (bowl, held) = object_of(&scene, &far, 1);
+    assert!(held > 0.99, "the bowl's object holds {held} of it");
+    assert!(!scene.objects[bowl].solid, "{:?}", scene.objects[bowl]);
+    let (block, held) = object_in(&scene, 1, &near, 2);
+    assert!(
+        block != bowl && held > 0.99,
+        "object {block} holds {held} of the block"
+    );
+}
+
+#[test]
+fn a_face_of_another_bar_past_a_bars_end_is_the_others() {
+    // The same face of a bar the far camera sees from 3 cm past the end of another that it sees
+    // whole: the face lies on the plane of the other's face, beyond its end.
+    let (far, near) = far_and_near(|| vec![bar(-0.2, -0.03), bar(0.0, 0.1)]);
+    shows_its_face_alone(&far, &near, 2, 0.0);
+    assert_eq!(pixels(&near, 1), 0, "the near view shows the first bar");
+    let scene = seen(&[&far, &near], &Scene::default());
+    assert_eq!(scene.objects.len(), 2, "{:?}", scene.objects);
+    let (first, held) = object_of(&scene, &far, 1);
+    assert!(held > 0.99, "the first bar's object holds {held} of it");
+    let (second, held) = object_of(&scene, &far, 2);
+    assert!(
+        second != first && held > 0.99,
+        "the second bar's object holds {held} of it"
+    );
+    let (face, held) = object_in(&scene, 1, &near, 2);
+    assert!(
+        face == second && held > 0.99,
+        "object {face} holds {held} of the face"
+    );
+    assert_bar(
+        &scene.objects[first].shape,
+        &far,
+        0.17,
+        Vec3::new(0.5, -0.115, 0.02),
+    );
+    assert_bar(
+        &scene.objects[second].shape,
+        &far,
+        0.1,
+        Vec3::new(0.5, 0.05, 0.02),
+    );
+}
+
+#[test]
+fn a_lower_bar_against_the_face_one_camera_alone_sees_is_not_the_bars() {
+    // A bar 1.5 cm tall and 2 cm across lies against the -x face, which hides it from the far
+    // camera. The near one sees its top and its -x face, 2 cm off the bar's, and over it the
+    // bar's face.
+    let low = || {
+        block(
+            Vec3::new(0.47, 0.0, 0.0075),
+            Vec3::new(0.01, 0.1, 0.0075),
+            [30, 30, 200],
+        )
+    };
+    let (far, near) = far_and_near(|| vec![bar(-0.1, 0.1), low()]);
+    assert_eq!(pixels(&far, 2), 0, "the far view shows the lower bar");
+    let scene = seen(&[&far, &near], &Scene::default());
+    assert_eq!(scene.objects.len(), 2, "{:?}", scene.objects);
+    let (object, held) = object_of(&scene, &far, 1);
+    assert!(held > 0.99, "the bar's object holds {held} of it");
+    let (face, held) = object_in(&scene, 1, &near, 1);
+    assert!(
+        face == object && held > 0.9,
+        "object {face} holds {held} of the bar's face"
+    );
+    let (lower, held) = object_in(&scene, 1, &near, 2);
+    assert!(
+        lower != object && held > 0.9,
+        "object {lower} holds {held} of the lower bar"
+    );
+    assert_bar(
+        &scene.objects[object].shape,
+        &far,
+        0.2,
+        Vec3::new(0.5, 0.0, 0.02),
+    );
 }
 
 /// The noise of the recorded sets' hand camera: 14.2 mm at 1 m, as `REAL` is their table
