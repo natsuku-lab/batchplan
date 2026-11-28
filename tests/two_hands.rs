@@ -11,12 +11,12 @@ use std::path::PathBuf;
 
 use batchplan::live::{Follower, FollowerOptions};
 use batchplan::{
-    Device, Error, Goal, Grip, GripperCalibration, HandGrasps, Handover, Held, Hold, IkProblem,
-    JoinOptions, Obstacle, Pick, Place, PlanOptions, PlanProblem, Pose, Release, Robot, Sequence,
-    ShapeGraspOptions, TaskFailure, TaskOptions, TaskPlan, TaskStep, ToolPath, ToolPathOptions,
-    ToolPathStop, Trajectory, World, Worlds,
+    Contact, Device, Error, Goal, Grip, GripperCalibration, HandGrasps, Handover, Held, Hold,
+    IkProblem, JoinOptions, Obstacle, Pick, Place, PlanOptions, PlanProblem, Pose, Release, Robot,
+    Sequence, ShapeGraspOptions, TaskFailure, TaskOptions, TaskPlan, TaskStep, ToolPath,
+    ToolPathOptions, ToolPathStop, Trajectory, World, Worlds,
 };
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 /// A bar 32 cm long, 3 cm thick, held from above by the left hand 12 cm to one side of its
 /// middle and by the right hand 12 cm to the other, each closing across it, turned half a turn
@@ -29,6 +29,7 @@ fn bar() -> Held {
         )
     };
     Held {
+        carries: vec![],
         touch_links: vec![],
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.015, 0.16, 0.015)),
@@ -322,6 +323,7 @@ fn a_hold_another_hand_cannot_share_is_an_input_error() {
     ];
     // A device that holds something in a hand already cannot take a hold that hand shares.
     let cube = Held {
+        carries: vec![],
         touch_links: vec![],
         hand: 1,
         also: vec![],
@@ -1343,6 +1345,7 @@ fn bar_in_the_left() -> Held {
 /// A 4 cm cube the right hand holds from above, its fingers closing across the bar's length.
 fn cube_in_the_right() -> Held {
     Held {
+        carries: vec![],
         touch_links: vec![],
         hand: 1,
         object: Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.02)),
@@ -1762,6 +1765,403 @@ fn what_an_object_is_set_on_stays_where_it_is() {
             assert!(
                 met.unwrap().iter().any(|contacts| !contacts.is_empty()),
                 "{name}: the straight way is through the post"
+            );
+        }
+    }
+}
+
+/// The left hand at `pose` holding `held`, the right arm at the ready pose: the collision-free
+/// solution nearest the ready pose.
+fn left_holding(device: &Device, worlds: &Worlds, held: &Held, pose: Pose) -> Vec<f32> {
+    let robot = device.robot();
+    let problem = IkProblem {
+        seed: Some(robot.default_q().to_vec()),
+        hold: robot.hand_joints(1),
+        holding: Some(held.clone()),
+        targets: vec![Some(pose), None],
+        ..IkProblem::new(0, Pose::IDENTITY)
+    };
+    let solved = batchplan::solve_ik(device, worlds, &[problem], &common::fixture_ik()).unwrap();
+    let nearest = solved.nearest(0, robot.default_q());
+    nearest.expect("the left hand reaches").to_vec()
+}
+
+/// Whether the box that rides first on what `held` holds meets `post` anywhere along `t`, sampled
+/// at 1 kHz: on the shapes, at points 1 cm apart through the box, not on any spheres.
+fn rider_meets(robot: &Robot, held: &Held, post: &Obstacle, t: &Trajectory) -> bool {
+    let rider = &held.carries[0];
+    let Obstacle::Cuboid { half_extents, .. } = *rider else {
+        panic!("a box rides, not {rider:?}");
+    };
+    let steps = (2.0 * half_extents.max_element() / 0.01).ceil() as usize;
+    let along = |k: usize| k as f32 / steps as f32 * 2.0 - 1.0;
+    let grid = (0..=steps)
+        .flat_map(|i| (0..=steps).flat_map(move |j| (0..=steps).map(move |k| (i, j, k))));
+    let points: Vec<Vec3> = grid
+        .map(|(i, j, k)| half_extents * Vec3::new(along(i), along(j), along(k)))
+        .collect();
+    let timed = t.sample(1000.0).unwrap();
+    let mut states = timed.positions.chunks(timed.dof);
+    states.any(|q| {
+        let object = robot.ee_pose(q, held.hand).mul_pose(held.grasp.inverse());
+        let at = object.mul_pose(rider.pose());
+        let inside = |p: &Vec3| post.distance(at.position + at.rotation * *p).value < 0.0;
+        points.iter().any(inside)
+    })
+}
+
+/// The cube the right hand sets on the bar the left holds rides on it: the place's plan gives the
+/// bar's hold carrying the cube where the plan sets it down, in the bar's frame. From the plan's
+/// end, the left hand carries the bar 10 cm forward past a plate hung 15 mm over it, across the
+/// cube's way: planned holding that hold, the path, sampled at 1 kHz, is clear holding it, and the
+/// cube's own box keeps clear of the plate, where the same ends planned holding the bar alone take
+/// the cube's box through it.
+#[test]
+fn what_is_set_on_a_held_thing_rides_on_it() {
+    let robot = common::two_pandas().unwrap();
+    let o = TaskOptions::default();
+    let (bar, cube) = (bar_in_the_left(), cube_in_the_right());
+    let release = cube_on_the_bar();
+    let right = robot.hand_joints(1);
+    for device in common::devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(&[common::tray_scene()]).unwrap();
+        let above = common::tray(Vec3::new(0.35, -0.3, 0.6), 0.0);
+        let start = each_holding(&device, &worlds, above);
+        let place = Place {
+            onto: Some(bar.clone()),
+            ..Place::new(0, start.clone(), cube.clone(), [release])
+        };
+        let result = batchplan::place(&device, &worlds, &[place], &o).unwrap();
+        let plans = result.outcomes[0].as_ref();
+        let plans = plans.unwrap_or_else(|failure| panic!("{name}: {failure}"));
+        let plan = &plans[0];
+        assert!(plan.carried.is_empty(), "{name}: nothing rode on the cube");
+
+        // The cube in the bar's frame, where the plan sets it down.
+        let bar_at = robot.ee_pose(&start, 0).mul_pose(bar.grasp.inverse());
+        let placed = plan.placed.as_ref().expect("a place sets its object down");
+        let wanted = bar_at.inverse().mul_pose(placed.pose());
+        let on_its_end = Vec3::new(0.0, -0.10, 0.035);
+        assert!(
+            wanted.position.distance(on_its_end) < 2e-3,
+            "{name}: the cube lies on the bar's far end, at {}",
+            wanted.position
+        );
+        let carrying = plan.held.as_ref().expect("the place gives the bar's hold");
+        let bare = Held {
+            carries: vec![],
+            ..carrying.clone()
+        };
+        assert_eq!(bare, bar, "{name}: the bar's hold, but for what it carries");
+        let [rider] = &carrying.carries[..] else {
+            panic!("{name}: the bar carries {:?}", carrying.carries);
+        };
+        assert_eq!(rider.placed(Pose::IDENTITY), cube.object, "{name}");
+        let got = rider.pose();
+        assert!(
+            got.position.distance(wanted.position) < 1e-5
+                && got.rotation.dot(wanted.rotation).abs() > 1.0 - 1e-6,
+            "{name}: the cube rides at {got:?}, not {wanted:?}"
+        );
+
+        // A plate 15 mm over the bar, across the cube's way as the bar goes 10 cm forward.
+        let mut scene = common::tray_scene();
+        let plate = Obstacle::cuboid(Vec3::new(0.40, -0.10, 0.49), Vec3::new(0.005, 0.03, 0.01));
+        scene.obstacles.push(plate.clone());
+        let worlds = device.upload(&[scene]).unwrap();
+        let from = plan.end().to_vec();
+        let forward = common::tray(BAR_AT + Vec3::X * 0.1, 0.0).mul_pose(bar.grasp);
+        let goal = IkProblem {
+            seed: Some(from.clone()),
+            hold: right.clone(),
+            holding: Some(carrying.clone()),
+            targets: vec![Some(forward), None],
+            ..IkProblem::new(0, Pose::IDENTITY)
+        };
+        let solved = batchplan::solve_ik(&device, &worlds, &[goal], &common::fixture_ik()).unwrap();
+        let goal = solved
+            .nearest(0, &from)
+            .expect("the bar goes forward")
+            .to_vec();
+        let planned = |holding: &Held| {
+            let problem = PlanProblem {
+                hold: right.clone(),
+                holding: Some(holding.clone()),
+                ..PlanProblem::new(0, from.clone(), goal.clone())
+            };
+            let result = batchplan::plan(&device, &worlds, &[problem], &PlanOptions::default());
+            let result = result.unwrap();
+            let path = result.best(0);
+            let path = path.unwrap_or_else(|| panic!("{name}: {:?}", result.failures));
+            Trajectory::try_new(&robot, path, 1.0).unwrap()
+        };
+        let riding = planned(carrying);
+        assert_eq!(
+            colliding(&device, &worlds, carrying, &riding),
+            0,
+            "{name}: holding the bar and the cube, the path meets something"
+        );
+        assert!(
+            !rider_meets(&robot, carrying, &plate, &riding),
+            "{name}: the cube on the bar meets the plate"
+        );
+        let alone = planned(&bar);
+        assert!(
+            rider_meets(&robot, carrying, &plate, &alone),
+            "{name}: holding the bar alone, the path keeps the cube clear of the plate too"
+        );
+    }
+}
+
+/// The bar the left hand holds, the cube riding on its far end, set down on the block: the plan's
+/// `placed` is the bar where it lies, its `carried` the cube where it then stands on it, and the
+/// left hand backs off with its fingers clear of the cube, sampled at 1 kHz. A second rider where
+/// the left hand's palm stands as it lets go, which the hand may touch while it holds the bar,
+/// stops the move away: it stands in that world, the obstacle after the cube.
+#[test]
+fn what_rides_on_a_thing_set_down_is_set_down_with_it() {
+    let robot = common::two_pandas().unwrap();
+    let o = TaskOptions::default();
+    let cube = cube_in_the_right().object;
+    let on_its_end = cube.placed(common::tray(Vec3::new(0.0, -0.10, 0.035), 0.0));
+    let carrying = Held {
+        carries: vec![on_its_end.clone()],
+        ..bar_in_the_left()
+    };
+    let at_the_palm = Obstacle::cuboid(Vec3::new(0.0, 0.12, 0.07), Vec3::new(0.06, 0.015, 0.005));
+    let crowded = Held {
+        carries: vec![on_its_end, at_the_palm],
+        ..carrying.clone()
+    };
+    let lying = common::tray(ON_BLOCK, 0.0);
+    let above = common::tray(ON_BLOCK + Vec3::Z * 0.15, 0.0).mul_pose(carrying.grasp);
+    let fingers = robot.finger_links(0);
+    for device in common::devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(&[common::tray_scene()]).unwrap();
+        let start = left_holding(&device, &worlds, &crowded, above);
+        let set_down = |held: &Held| Place {
+            support: vec![0],
+            ..Place::new(0, start.clone(), held.clone(), [lying])
+        };
+        let tasks = [set_down(&carrying), set_down(&crowded)];
+        let result = batchplan::place(&device, &worlds, &tasks, &o).unwrap();
+        let plans = result.outcomes[0].as_ref();
+        let plans = plans.unwrap_or_else(|failure| panic!("{name}: {failure}"));
+        for plan in plans {
+            let bar = carrying.object.placed(lying);
+            assert_eq!(plan.placed.as_ref(), Some(&bar), "{name}: the bar alone");
+            let [stands] = &plan.carried[..] else {
+                panic!("{name}: carried {:?}", plan.carried);
+            };
+            let wanted = ON_BLOCK + Vec3::new(0.0, -0.10, 0.035);
+            assert!(
+                stands.pose().position.distance(wanted) < 1e-5,
+                "{name}: the cube stands at {}, not {wanted}",
+                stands.pose().position
+            );
+            assert_eq!(stands.placed(Pose::IDENTITY), cube, "{name}");
+            // The move away, the fingers touching the bar and nothing touching the cube.
+            let mut there = common::tray_scene();
+            there.obstacles.extend([bar, stands.clone()]);
+            there.touch = vec![batchplan::Touch::new(1, fingers.iter().copied())];
+            let there = device.upload(&[there]).unwrap();
+            let timed = plan.depart.sample(1000.0).unwrap();
+            let samples = timed.positions.len() / timed.dof;
+            let met = device.contacts(&there, &vec![0; samples], &timed.positions, 0.0);
+            assert!(
+                met.unwrap().iter().all(Vec::is_empty),
+                "{name}: the hand backs off into the cube"
+            );
+        }
+        let failure = result.outcomes[1].as_ref();
+        let failure = failure.expect_err("the palm meets what rides where it stands");
+        assert_eq!(failure.at(TaskStep::Depart), 1, "{name}: {failure}");
+        let against = (failure.candidates[0].contacts.iter())
+            .any(|contact| matches!(contact, Contact::World { obstacle: 3, .. }));
+        assert!(against, "{name}: {failure}");
+    }
+}
+
+/// An object that carries others is not set on what another hand holds: an input error naming
+/// how many it carries.
+#[test]
+fn what_carries_others_is_not_set_on_a_held_thing() {
+    let robot = common::two_pandas().unwrap();
+    let device = &common::devices(&robot)[0];
+    let worlds = device.upload(&[common::tray_scene()]).unwrap();
+    let start = each_holding(
+        device,
+        &worlds,
+        common::tray(Vec3::new(0.35, -0.3, 0.6), 0.0),
+    );
+    let pebble = Obstacle::sphere(Vec3::new(0.0, 0.0, 0.03), 0.01);
+    let carrying = Held {
+        carries: vec![pebble],
+        ..cube_in_the_right()
+    };
+    let place = Place {
+        onto: Some(bar_in_the_left()),
+        ..Place::new(0, start, carrying, [cube_on_the_bar()])
+    };
+    input(
+        batchplan::place(device, &worlds, &[place], &TaskOptions::default()),
+        "task 0: an object that carries 1 others (`carries`) cannot be set on what another hand \
+         holds (`onto`)",
+    );
+}
+
+/// The bar's pose where `q` has the left hand at its grasp of it.
+fn bar_where(robot: &Robot, q: &[f32]) -> Pose {
+    robot
+        .ee_pose(q, 0)
+        .mul_pose(bar_in_the_left().grasp.inverse())
+}
+
+/// A rod the right hand sets on the bar the left holds, a block riding on the bar already, may
+/// touch the bar but not the block: where the rod's end would cover the block, the place stops
+/// where the hand lets go, against the block, the obstacle after the world's own. Set beside the
+/// block, a shorter rod turned 0.6 rad about the vertical is taken, and the plan's hold of the bar
+/// carries both, the rod turned so in the bar's frame.
+#[test]
+fn what_rides_on_a_support_is_not_passed_through() {
+    let robot = common::two_pandas().unwrap();
+    let o = TaskOptions::default();
+    let block = Obstacle::cuboid(Vec3::new(0.0, -0.03, 0.032), Vec3::splat(0.01));
+    let bar = Held {
+        carries: vec![block.clone()],
+        ..bar_in_the_left()
+    };
+    let rod = |half_length: f32| Held {
+        object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.01, half_length, 0.01)),
+        ..cube_in_the_right()
+    };
+    let end = BAR_AT + Vec3::new(0.0, -0.10, 0.025);
+    let (through, beside) = (common::tray(end, 0.0), common::tray(end, 0.6));
+    for device in common::devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(&[common::tray_scene()]).unwrap();
+        let above = common::tray(Vec3::new(0.35, -0.3, 0.6), 0.0);
+        let start = each_holding(&device, &worlds, above);
+        let bar_at = bar_where(&robot, &start);
+        let block_at = bar_at.mul_pose(block.pose()).position;
+        let covering = rod(0.08).object.placed(through).distance(block_at).value;
+        assert!(
+            covering < 0.0,
+            "{name}: the rod's end covers the block: {covering}"
+        );
+        let onto = |rod: Held, at: Pose| Place {
+            onto: Some(bar.clone()),
+            ..Place::new(0, start.clone(), rod, [at])
+        };
+        let tasks = [onto(rod(0.08), through), onto(rod(0.04), beside)];
+        let result = batchplan::place(&device, &worlds, &tasks, &o).unwrap();
+        let failure = result.outcomes[0].as_ref();
+        let failure = failure.expect_err("the rod passes through the block");
+        assert_eq!(failure.at(TaskStep::Reach), 1, "{name}: {failure}");
+        let against = (failure.candidates[0].contacts.iter())
+            .any(|contact| matches!(contact, Contact::World { obstacle: 1, .. }));
+        assert!(against, "{name}: {failure}");
+
+        let plans = result.outcomes[1].as_ref();
+        let plans = plans.unwrap_or_else(|failure| panic!("{name}: beside the block, {failure}"));
+        for plan in plans {
+            let carrying = plan.held.as_ref().expect("the bar's hold");
+            let [first, second] = &carrying.carries[..] else {
+                panic!("{name}: the bar carries {:?}", carrying.carries);
+            };
+            assert_eq!(first, &block, "{name}: the block first, as it was");
+            let wanted = bar_at.inverse().mul_pose(beside);
+            let turn = second.pose().rotation;
+            assert!(
+                turn.dot(wanted.rotation).abs() > 1.0 - 1e-6
+                    && turn.angle_between(Quat::IDENTITY) > 0.5,
+                "{name}: the rod rides turned {turn}, not {}",
+                wanted.rotation
+            );
+        }
+    }
+}
+
+/// A capsule riding on the bar lies along the bar's x axis, turned so in the bar's frame. Held,
+/// its spheres lie along that axis: a ball at its end meets what the left hand holds, and one
+/// where the capsule would stand unturned does not. Set down on the block with the bar, it stands
+/// turned so (`TaskPlan::carried`).
+#[test]
+fn a_rider_turned_in_its_carriers_frame_rides_turned() {
+    let robot = common::two_pandas().unwrap();
+    let o = TaskOptions::default();
+    let lying = Pose::new(
+        Vec3::new(0.0, -0.10, 0.03),
+        Quat::from_rotation_y(FRAC_PI_2),
+    );
+    let capsule = Obstacle::capsule(Vec3::ZERO, 0.01, 0.05).placed(lying);
+    let carrying = Held {
+        carries: vec![capsule],
+        ..bar_in_the_left()
+    };
+    let on_block = common::tray(ON_BLOCK, 0.0);
+    let above = common::tray(ON_BLOCK + Vec3::Z * 0.15, 0.0).mul_pose(carrying.grasp);
+    for device in common::devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(&[common::tray_scene()]).unwrap();
+        let start = each_holding(
+            &device,
+            &worlds,
+            common::tray(Vec3::new(0.35, -0.3, 0.6), 0.0),
+        );
+        let bar_at = bar_where(&robot, &start);
+        // A ball by the capsule's end as it lies, and one where it would stand unturned.
+        let balls = [Vec3::new(0.055, -0.10, 0.03), Vec3::new(0.0, -0.10, 0.085)];
+        let probes: Vec<World> = (balls.iter())
+            .map(|&at| {
+                let mut world = common::tray_scene();
+                world.obstacles.push(Obstacle::sphere(
+                    bar_at.mul_pose(Pose::new(at, Quat::IDENTITY)).position,
+                    0.008,
+                ));
+                world
+            })
+            .collect();
+        let probes = device.upload(&probes).unwrap();
+        let q: Vec<f32> = [start.clone(), start.clone()].concat();
+        let holding = [Some(&carrying); 2];
+        let met = device
+            .contacts_holding(&probes, &[0, 1], &q, 0.0, &holding)
+            .unwrap();
+        let meets = |contacts: &[Contact]| {
+            (contacts.iter()).any(|contact| matches!(contact, Contact::World { obstacle: 1, .. }))
+        };
+        assert!(
+            meets(&met[0]),
+            "{name}: the capsule's end is clear of the ball: {:?}",
+            met[0]
+        );
+        assert!(
+            !meets(&met[1]),
+            "{name}: the capsule stands unturned: {:?}",
+            met[1]
+        );
+
+        let start = left_holding(&device, &worlds, &carrying, above);
+        let set_down = Place {
+            support: vec![0],
+            ..Place::new(0, start, carrying.clone(), [on_block])
+        };
+        let result = batchplan::place(&device, &worlds, &[set_down], &o).unwrap();
+        let plans = result.outcomes[0].as_ref();
+        let plans = plans.unwrap_or_else(|failure| panic!("{name}: {failure}"));
+        let wanted = on_block.mul_pose(lying);
+        for plan in plans {
+            let [stands] = &plan.carried[..] else {
+                panic!("{name}: carried {:?}", plan.carried);
+            };
+            let at = stands.pose();
+            assert!(
+                at.position.distance(wanted.position) < 1e-5
+                    && at.rotation.dot(wanted.rotation).abs() > 1.0 - 1e-6,
+                "{name}: the capsule stands at {at:?}, not {wanted:?}"
             );
         }
     }

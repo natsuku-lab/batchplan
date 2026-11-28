@@ -144,6 +144,17 @@ def test_a_hold_names_the_other_hands_that_hold_it():
     assert touching.touch_links == ("right_panda_hand",)
 
 
+def test_a_hold_names_what_rides_on_it():
+    bar = bp.Obstacle.cuboid((0.0, 0.0, 0.0), (0.015, 0.16, 0.015))
+    cube = bp.Obstacle.cuboid((0.0, -0.1, 0.035), (0.02, 0.02, 0.02))
+    held = bp.Held(0, bar, bp.Pose((0.0, 0.12, 0.0)))
+    assert held.carries == (), "nothing rides on it"
+    (rider,) = held.replace(carries=[cube]).carries
+    assert rider.pose == cube.pose, "a shape in the bar's frame"
+    riding = bp.Held(0, bar, held.grasp, carries=[cube]).carries
+    assert [rider.pose for rider in riding] == [cube.pose], "given to the constructor"
+
+
 def test_a_place_names_what_its_object_is_set_on():
     cube = bp.Obstacle.cuboid((0.0, 0.0, 0.0), (0.02, 0.02, 0.02))
     held = bp.Held(1, cube, bp.Pose((0.0, 0.0, 0.0)))

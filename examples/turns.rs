@@ -381,6 +381,7 @@ fn from_nearest(
                 found_at.push(found.len());
             }
             let held = Held {
+                carries: vec![],
                 touch_links: vec![],
                 also: vec![],
                 hand: 0,

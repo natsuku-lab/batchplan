@@ -151,6 +151,15 @@ Carrying it level is one more constraint, on `hand` (`tilt`). A hand that lets g
 
 **Other links that may touch it.** A hand that has let go still stands at the object, and a hold lets only the hands that hold it touch what is held. `Held::touch_links` names other links of the robot that may, by name, as MoveIt's touch links do: that hand backs off with its links there, `touch_links: robot.hand_links(hand).into_iter().map(String::from).collect()`, on the hold (a `follow` or a `plan` holding it so), and a hand that works on what another holds is let touch it the same way. An object set on what another hand holds is a place's ([`Place::onto`](planning.md#onto-what-another-hand-holds)). It allows the contact and nothing more: those links are kept nowhere. A name that is no link of the robot is an input error. On a GPU a hold's touch links give it kernels of its own, as hands that hold together do: warm up with that hold's own attachment.
 
+**What rides on it.** `Held::carries` lists what rides on the held object, set on or into it, as a lid on a pot a hand carries: each a shape placed in the object's frame. Every call that holds the object checks them with it, as shapes of its link (`Held::attachment` gives the object, then each in order): what may touch the object may touch them, the hands that hold it among them, and they touch it and one another freely. Each is covered by spheres of its own, fitted in its own frame by the hold's `spheres` and kept by the device as the object's are; attaching `Held::attachment` yourself fits the shapes together instead. The calls that make and end such holds:
+
+- **A place onto what another hand holds** gives that hold carrying the object it set there (`TaskPlan::held`), in the support's frame where the plan sets it down ([onto what another hand holds](planning.md#onto-what-another-hand-holds)). Hold that from then on.
+- **A place of a hold that carries** sets them down with it: the move away's world has each where it then stands, which no hand may touch, and `TaskPlan::carried` gives them in the world's frame, in order, to add to the world with `TaskPlan::placed`.
+- **A handover** passes them on in the taker's hold; at the meeting they stand on the object, and no hand may touch them.
+- **A robot mask** (`DepthImage::robot_mask`) leaves them out with the object.
+
+`rests_on` and `falls_into` take a shape, not a hold: give them `Held::object`, and a held thing that carries others is rested as itself. A shape that is a distance grid or malformed is an input error.
+
 ```rust,no_run
 use batchplan::glam::Vec3;
 use batchplan::{
@@ -173,6 +182,7 @@ fn carry(
         touch_links: vec![],
         locked: Default::default(),
         spheres: Default::default(),
+        carries: vec![],
     };
     // Hand 0's goal pose alone: hand 1 follows from its grasp, and the path keeps it there.
     let carry = PlanProblem {

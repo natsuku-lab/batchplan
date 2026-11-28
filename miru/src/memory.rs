@@ -93,6 +93,11 @@ impl Default for MemoryOptions {
 /// What the robot did, said once, to the memory that holds the thing ([`Memory::after`]).
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a pick's hold is kept unboxed for the callers that name it: acts are made a few at a \
+              time, so their size costs nothing"
+)]
 #[allow(
     missing_docs,
     reason = "each act's doc says what its fields are: an object's id, a hand's hold, a pose and a \
@@ -104,9 +109,20 @@ pub enum Act {
     /// not solid the map held it: the room it took up is free there, as far as a voxel reaches,
     /// and so is that of each thing that was not solid and left with it.
     ///
+    /// What stood on it leaves with it and is forgotten, but where it rode on it in a hand
+    /// ([`Under::Held`]) and the object was let go in the same [`Memory::after`], as a hold said
+    /// otherwise is: then each thing that rode on it at that let-go and stands on it still rides
+    /// on it again, under its id, in that order, and `held.carries` must be the let-go's hold's,
+    /// bit for bit, less those taken off since, as the hold a library call gave is. Any other
+    /// `held.carries`, as one that names riders of an object no let-go in these acts set down, is
+    /// refused. A rider ([`Memory::riders`]) can be picked: it leaves what carries it, whose hold
+    /// no longer names it.
+    ///
     /// An id no object has and that is not under [`Memory::next_id`], as a hold a restart brings
     /// back, is held all the same, and `next_id` rises past it; a let-go of it makes its object of
-    /// `Held::object`, a box or a cylinder. An id under `next_id` that no object has is refused,
+    /// `Held::object`, a box or a cylinder. What such a hold carries rides on it, each under the
+    /// next id in turn, an object of its shape, a box or a cylinder, at a finite pose with a unit
+    /// rotation, or the pick is refused. An id under `next_id` that no object has is refused,
     /// and so is `u32::MAX`, which no id may rise past.
     ///
     /// A hold by more hands than one (`Held::also`) is every one of those hands': none may hold a
@@ -130,8 +146,16 @@ pub enum Act {
     /// next look measures it afresh; on nothing where `on` is none. A known shape past those the
     /// memory knows, an id no object has and its own id are refused.
     ///
+    /// Set on what another hand holds ([`Under::Held`]), it rides on that instead: `at` is not
+    /// read, and the hold carries it as that variant says.
+    ///
+    /// What rode on it ([`Memory::riders`]) is set down with it: each among the objects again
+    /// under its id, its shape where `at` and its place in the object's frame
+    /// (`Held::carries`) put it, the place a place plan's `TaskPlan::carried` gives, standing on
+    /// it and unseen.
+    ///
     /// Where it is not solid the map holds it, and the room it takes up where it lies is never
-    /// seen, as a push leaves it, until a look reads it there.
+    /// seen, as a push leaves it, until a look reads it there; so for each thing that rode on it.
     LetGo {
         id: u32,
         at: Pose,
@@ -139,7 +163,8 @@ pub enum Act {
     },
     /// The hand that holds object `id` lost it where nothing knows: it dropped, slipped, or was
     /// let go in the air. It is in no hand and among no objects, and the next look finds it under
-    /// whatever id it gives.
+    /// whatever id it gives. What rode on it is lost with it. A rider's id ([`Memory::riders`])
+    /// is the rider lost alone: what carried it no longer names it.
     Lost { id: u32 },
     /// Object `id` and what stands on it, in turn, were pushed by `by`: their shapes move with
     /// them, unseen, and the next look keeps their ids where it finds them there. Where one was
@@ -178,12 +203,14 @@ pub struct Memory {
 }
 
 /// A hold, by one hand or by several (`Held::also`), and the object it was when it was taken:
-/// none for a hold the memory never saw as an object.
+/// none for a hold the memory never saw as an object. With what rides on it, each the object it
+/// was let go as, in the order of `held.carries`.
 #[derive(Clone, Debug)]
 struct Holding {
     id: u32,
     held: Held,
     object: Option<Object>,
+    riders: Vec<Object>,
 }
 
 /// What an act tells the map, kept until a look fuses it: the voxels within a voxel's reach of
@@ -334,13 +361,33 @@ impl Memory {
         Some((holding.id, &holding.held))
     }
 
+    /// The ids of what rides on what hand `hand` holds, in the order of its `Held::carries`: each
+    /// set on it by a let-go onto that hold ([`Under::Held`]). A rider is in no hand and among no
+    /// objects while it rides, and comes back among the objects under its id when what carries it
+    /// is set down ([`Act::LetGo`]). For a caller to tell that an id rides, as to refuse a pick of
+    /// it it does not plan. Empty where the hand holds nothing or nothing rides on it.
+    #[must_use]
+    pub fn riders(&self, hand: usize) -> Vec<u32> {
+        let holding = self.holder(hand);
+        let riders = holding.into_iter().flat_map(|holding| &holding.riders);
+        riders.map(|rider| rider.id).collect()
+    }
+
     /// The hold hand `hand` has a part in: kept under the hand its thing is fixed to.
     fn holder(&self, hand: usize) -> Option<&Holding> {
-        let holds = |holding: &&Holding| {
-            let also = &holding.held.also;
-            holding.held.hand == hand || also.iter().any(|grip| grip.hand == hand)
+        let at = self.holder_at(hand)?;
+        self.hands[at].as_ref()
+    }
+
+    /// Where among `hands` the hold hand `hand` has a part in is kept.
+    fn holder_at(&self, hand: usize) -> Option<usize> {
+        let holds = |holding: &Option<Holding>| {
+            holding.as_ref().is_some_and(|holding| {
+                let also = &holding.held.also;
+                holding.held.hand == hand || also.iter().any(|grip| grip.hand == hand)
+            })
         };
-        self.hands.iter().flatten().find(holds)
+        self.hands.iter().position(holds)
     }
 
     /// The memory after `acts`, in order ([`Act`]): the objects and the hands at once, the map's
@@ -348,19 +395,23 @@ impl Memory {
     /// copied: memories after different acts share it, and the parts made of it for the rooms
     /// objects take up. An id no object has (but a pick's of a hold the memory never saw, as
     /// [`Act::Picked`] says), a let-go or a loss of what no hand holds, a pick into a hand that
-    /// holds something already or that the robot has not, and a pose or a distance that is no
-    /// number are an `Error::Input` naming the act.
+    /// holds something already or that the robot has not, a pose or a distance that is no number,
+    /// a pick whose hold carries what the memory does not know rides on the object
+    /// ([`Act::Picked`]) and a let-go onto a hold that does not follow from the memory's
+    /// ([`Under::Held`]) are an `Error::Input` naming the act.
     pub fn after(&self, acts: &[Act]) -> Result<Memory> {
         let mut memory = self.clone();
         memory.acted |= !acts.is_empty();
+        let mut set_down = SetDown::new();
         for (k, act) in acts.iter().enumerate() {
-            memory.act(k, act)?;
+            memory.act(k, act, &mut set_down)?;
         }
         Ok(memory)
     }
 
-    /// The memory after act `k`, `act`.
-    fn act(&mut self, k: usize, act: &Act) -> Result<()> {
+    /// The memory after act `k`, `act`. `set_down` holds what carried others among the objects
+    /// let go so far in these acts: a pick of one in them carries those again.
+    fn act(&mut self, k: usize, act: &Act, set_down: &mut SetDown) -> Result<()> {
         match act {
             Act::Picked { id, held } => {
                 let hand = held.hand;
@@ -390,48 +441,62 @@ impl Memory {
                     .objects
                     .iter()
                     .position(|object| object.id == *id);
+                // What rode on it when it was let go in these acts, as a hold said otherwise.
+                let had = set_down.iter().position(|(was, _)| was == id);
+                let had = had.map(|at| set_down.swap_remove(at).1).unwrap_or_default();
+                // What rides on it from now on, and where the hold must say each rides.
+                let (mut riders, mut carried) = (vec![], vec![]);
                 let object = match index {
                     Some(index) => {
                         let object = self.scene.objects[index].clone();
-                        for taken in self.take(index) {
+                        let taken = self.take(index);
+                        for taken in &taken {
                             if !taken.solid {
                                 let shape = taken.shape.obstacle();
                                 self.marks.push(Mark { shape, free: true });
                             }
                         }
+                        // Those that stand on it still, as they rode.
+                        for (rider, rode) in had {
+                            if let Some(again) = taken.iter().find(|taken| taken.id == rider) {
+                                riders.push(again.clone());
+                                carried.push(rode);
+                            }
+                        }
                         Some(object)
                     }
-                    // A hold a restart brings back: an id at or past `next_id`, which the memory
-                    // never gave, and the ids it gives next follow it.
-                    None => {
-                        let next = id.checked_add(1).filter(|_| *id >= self.scene.next_id);
-                        let Some(next) = next else {
-                            return Err(input!(
-                                "act {k} picks object {id}, which the memory does not hold and \
-                                 which is under its next id, {}, or the last a `u32` has",
-                                self.scene.next_id
-                            ));
-                        };
-                        self.scene.next_id = next;
-                        None
-                    }
+                    // A rider picked off what carries it.
+                    None => match self.unride(*id) {
+                        Some(rider) => Some(rider),
+                        None => {
+                            self.restarted(k, *id)?;
+                            riders = self.restarted_riders(k, *id, held)?;
+                            carried.clone_from(&held.carries);
+                            None
+                        }
+                    },
                 };
+                ensure_input!(
+                    held.carries == carried,
+                    "act {k} picks object {id} carrying {} things (`carries`), where the memory \
+                     knows {} that ride on it: those that rode on it when these acts let it go, \
+                     less those taken off since, each where it rode, in order: {carried:?}",
+                    held.carries.len(),
+                    riders.len()
+                );
                 let held = held.clone();
                 self.hands[hand] = Some(Holding {
                     id: *id,
                     held,
                     object,
+                    riders,
                 });
             }
             Act::LetGo { id, at, on } => {
-                ensure_input!(
-                    at.is_unit(),
-                    "act {k} lets go of object {id} at {at:?}, which is no finite pose with a \
-                     unit rotation"
-                );
-                let support = match *on {
+                let support = match on {
                     None => None,
-                    Some(Under::Known(shape)) => {
+                    Some(Under::Held(held)) => return self.ride(k, *id, held),
+                    &Some(Under::Known(shape)) => {
                         ensure_input!(
                             shape < self.known.len(),
                             "act {k} lets go of object {id} on known shape {shape}, of the {} \
@@ -440,7 +505,7 @@ impl Memory {
                         );
                         Some(Support::Known(shape))
                     }
-                    Some(Under::Object(under)) => {
+                    &Some(Under::Object(under)) => {
                         ensure_input!(
                             under != *id,
                             "act {k} lets go of object {id} on object {under}, itself"
@@ -448,21 +513,40 @@ impl Memory {
                         Some(Support::Object(self.index(k, under)?))
                     }
                 };
-                let object = Self::object_of(k, self.release(k, *id)?)?;
-                let shape = object.shape.placed(*at);
-                // The map held a thing that is not solid where it lies now as what was there.
-                if !object.solid {
-                    let shape = shape.obstacle();
-                    self.marks.push(Mark { shape, free: false });
-                }
-                self.scene.objects.push(Object {
-                    shape,
+                ensure_input!(
+                    at.is_unit(),
+                    "act {k} lets go of object {id} at {at:?}, which is no finite pose with a \
+                     unit rotation"
+                );
+                let mut holding = self.release(k, *id)?;
+                let riders = std::mem::take(&mut holding.riders);
+                let carries = std::mem::take(&mut holding.held.carries);
+                let object = Self::object_of(k, holding)?;
+                let under = self.scene.objects.len();
+                self.lay(Object {
+                    shape: object.shape.placed(*at),
                     on: support,
                     ..object
                 });
+                if !riders.is_empty() {
+                    let rode = riders
+                        .iter()
+                        .map(|rider| rider.id)
+                        .zip(carries.iter().cloned());
+                    set_down.push((*id, rode.collect()));
+                }
+                for (rider, carried) in riders.into_iter().zip(carries) {
+                    self.lay(Object {
+                        shape: rider.shape.placed(at.mul_pose(carried.pose())),
+                        on: Some(Support::Object(under)),
+                        ..rider
+                    });
+                }
             }
             Act::Lost { id } => {
-                self.release(k, *id)?;
+                if self.unride(*id).is_none() {
+                    self.release(k, *id)?;
+                }
             }
             Act::Pushed { id, by } => {
                 ensure_input!(
@@ -491,6 +575,128 @@ impl Memory {
         Ok(())
     }
 
+    /// Takes `id`, which no object has, for act `k`'s pick, as a hold a restart brings back: an id
+    /// at or past `next_id`, which the memory never gave, and the ids it gives next follow it.
+    fn restarted(&mut self, k: usize, id: u32) -> Result<()> {
+        let next = id.checked_add(1).filter(|_| id >= self.scene.next_id);
+        let Some(next) = next else {
+            return Err(input!(
+                "act {k} picks object {id}, which the memory does not hold and which is under its \
+                 next id, {}, or the last a `u32` has",
+                self.scene.next_id
+            ));
+        };
+        self.scene.next_id = next;
+        Ok(())
+    }
+
+    /// What rides on what a restart brings back as `held`, the pick of object `id` for act `k`:
+    /// each of its `carries` under the next id, an object of its shape, a box or a cylinder.
+    fn restarted_riders(&mut self, k: usize, id: u32, held: &Held) -> Result<Vec<Object>> {
+        let mut riders = vec![];
+        for (r, carried) in held.carries.iter().enumerate() {
+            let at = carried.pose();
+            ensure_input!(
+                at.is_unit(),
+                "act {k} picks object {id} carrying shape {r} at {at:?}, which is no finite pose \
+                 with a unit rotation"
+            );
+            let rider = self.scene.next_id;
+            let Some(next) = rider.checked_add(1) else {
+                return Err(input!(
+                    "act {k} picks object {id} carrying shape {r}, for which no id is left past \
+                     {rider}, the last a `u32` has"
+                ));
+            };
+            self.scene.next_id = next;
+            riders.push(Self::made_of(k, rider, carried)?);
+        }
+        Ok(riders)
+    }
+
+    /// Puts `object`, let go where its shape says, among the objects: the map held a thing that is
+    /// not solid where it lies now as what was there.
+    fn lay(&mut self, object: Object) {
+        if !object.solid {
+            let shape = object.shape.obstacle();
+            self.marks.push(Mark { shape, free: false });
+        }
+        self.scene.objects.push(object);
+    }
+
+    /// Lets go of object `id`, for act `k`, on what hand `held.hand` holds, which holds it as
+    /// `held` from now on ([`Under::Held`]).
+    fn ride(&mut self, k: usize, id: u32, held: &Held) -> Result<()> {
+        let hand = held.hand;
+        let Some(at) = self.holder_at(hand) else {
+            return Err(input!(
+                "act {k} lets go of object {id} on what hand {hand} holds, which holds nothing"
+            ));
+        };
+        let carrier = self.hands[at].as_ref().expect("a hand found holding");
+        ensure_input!(
+            carrier.id != id,
+            "act {k} lets go of object {id} on what hand {hand} holds, which is object {id} itself"
+        );
+        let kept = &carrier.held;
+        let differs = [
+            ("hand", held.hand == kept.hand),
+            ("object", held.object == kept.object),
+            ("grasp", held.grasp == kept.grasp),
+            ("also", held.also == kept.also),
+            ("touch_links", held.touch_links == kept.touch_links),
+            ("locked", held.locked == kept.locked),
+            ("spheres", held.spheres == kept.spheres),
+        ];
+        if let Some((field, _)) = differs.iter().find(|(_, same)| !same) {
+            return Err(input!(
+                "act {k} lets go of object {id} on what hand {hand} holds, by a hold whose \
+                 `{field}` differs from the memory's hold of object {}: only `carries` may",
+                carrier.id
+            ));
+        }
+        let n = kept.carries.len();
+        if let Some(rides) = held.carries.get(n) {
+            let at = rides.pose();
+            ensure_input!(
+                at.is_unit(),
+                "act {k} lets go of object {id} on what hand {hand} holds, by a hold that carries \
+                 it at {at:?}, which is no finite pose with a unit rotation"
+            );
+        }
+        ensure_input!(
+            held.carries.len() == n + 1 && held.carries[..n] == kept.carries[..],
+            "act {k} lets go of object {id} on what hand {hand} holds, by a hold carrying {} \
+             things: it carries what the memory's hold of object {} carries, {n}, and then the \
+             object let go",
+            held.carries.len(),
+            carrier.id
+        );
+        let holding = self.release(k, id)?;
+        ensure_input!(
+            holding.riders.is_empty(),
+            "act {k} lets go of object {id}, which carries {} others, on what hand {hand} holds",
+            holding.riders.len()
+        );
+        let rider = Self::object_of(k, holding)?;
+        let carrier = self.hands[at].as_mut().expect("the carrier holds on");
+        carrier.riders.push(rider);
+        carrier.held = held.clone();
+        Ok(())
+    }
+
+    /// Takes the rider `id` off what carries it, which no longer names it: the object it was let
+    /// go as. None where nothing rides as `id`.
+    fn unride(&mut self, id: u32) -> Option<Object> {
+        for holding in self.hands.iter_mut().flatten() {
+            if let Some(at) = holding.riders.iter().position(|rider| rider.id == id) {
+                holding.held.carries.remove(at);
+                return Some(holding.riders.remove(at));
+            }
+        }
+        None
+    }
+
     /// Where object `id` is among the objects, for act `k`.
     fn index(&self, k: usize, id: u32) -> Result<usize> {
         let index = self.scene.objects.iter().position(|object| object.id == id);
@@ -508,13 +714,18 @@ impl Memory {
     /// The object `holding` took, for act `k`, which lets go of it; for a hold the memory never saw
     /// as an object, one made of its `Held::object`, solid, a box or a cylinder.
     fn object_of(k: usize, holding: Holding) -> Result<Object> {
-        let id = holding.id;
-        if let Some(object) = holding.object {
-            return Ok(object);
+        match holding.object {
+            Some(object) => Ok(object),
+            None => Self::made_of(k, holding.id, &holding.held.object),
         }
-        let pose = holding.held.object.pose();
+    }
+
+    /// Object `id`, which the memory never saw, made of `held`, for act `k`: solid, a box or a
+    /// cylinder.
+    fn made_of(k: usize, id: u32, held: &Obstacle) -> Result<Object> {
+        let pose = held.pose();
         let (center, rotation) = (pose.position, pose.rotation);
-        let shape = match holding.held.object {
+        let shape = match *held {
             Obstacle::Cuboid { half_extents, .. } => Shape::Cuboid {
                 center,
                 half_extents,
@@ -532,8 +743,8 @@ impl Memory {
             },
             ref other => {
                 return Err(input!(
-                    "act {k} lets go of object {id}, which the memory never saw and whose held \
-                     shape is no box or cylinder, so no object can be made of it: {other:?}"
+                    "act {k}: object {id}, which the memory never saw, is held as a shape that is \
+                     no box or cylinder, so no object can be made of it: {other:?}"
                 ));
             }
         };
@@ -1287,14 +1498,32 @@ pub(crate) fn voxel_reach(voxel: f32) -> f32 {
     0.5 * 3f32.sqrt() * voxel
 }
 
+/// Per object let go in one [`Memory::after`] that carried others, its id, and each of theirs with
+/// where it rode (`Held::carries`), in order.
+type SetDown = Vec<(u32, Vec<(u32, Obstacle)>)>;
+
 /// What a thing let go was set down on ([`Act::LetGo`]): a known shape, by its index among those
-/// [`Memory::try_new`] was given, or an object, by its id.
+/// [`Memory::try_new`] was given, an object, by its id, or what a hand holds.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Under {
     /// A known shape, by its index among the memory's.
     Known(usize),
     /// An object, by its id.
     Object(u32),
+    /// What hand `held.hand` holds, which holds it as `held` from now on: a place plan's
+    /// `TaskPlan::held` after a place onto it (`Place::onto`). The thing let go rides on it
+    /// ([`Memory::riders`]): in no hand and among no objects, and [`Memory::held`] gives `held`
+    /// for that hand, as given. Each look's mask leaves it out with what carries it. A let-go of
+    /// what carries it sets it down with that ([`Act::LetGo`]), a loss loses it with that
+    /// ([`Act::Lost`]), and a hold of that said otherwise, a let-go and a pick in one
+    /// [`Memory::after`], carries it again ([`Act::Picked`]); no other act names it, but a pick
+    /// or a loss of the rider itself, which takes it off.
+    ///
+    /// Refused, naming what was given: a hand that holds nothing, the hand that holds the thing
+    /// let go, a hold that differs from the memory's in more than `carries` (it names the field),
+    /// a `carries` that is not the memory's with the thing let go added last, at a finite pose
+    /// with a unit rotation, and a thing let go that carries others itself.
+    Held(Box<Held>),
 }
 
 impl Memory {

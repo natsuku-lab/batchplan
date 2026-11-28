@@ -660,7 +660,8 @@ impl TaskPlan {
         Trajectory(self.0.depart.clone())
     }
 
-    /// After a pick, what the hand holds; after a handover, what the taker holds.
+    /// After a pick, what the hand holds; after a handover, what the taker holds; after a place
+    /// onto what another hand holds (`Place.onto`), that hold carrying the object.
     #[getter]
     fn held(&self) -> Option<Held> {
         self.0.held.clone().map(Held)
@@ -672,6 +673,14 @@ impl TaskPlan {
     #[getter]
     fn placed(&self) -> Option<Obstacle> {
         self.0.placed.clone().map(Obstacle)
+    }
+
+    /// After a place of an object that carries others (`Held.carries`), each of them where it
+    /// then stands, in the world's frame and in `carries`' order; empty for every other plan.
+    #[getter]
+    fn carried<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let carried: Vec<Obstacle> = self.0.carried.iter().cloned().map(Obstacle).collect();
+        PyTuple::new(py, carried)
     }
 
     /// The released object's collision enclosure during departure for a place with a fall.

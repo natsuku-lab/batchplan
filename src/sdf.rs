@@ -413,14 +413,14 @@ impl DepthImage<'_> {
 
     /// Which of this image's readings are of `robot` at configuration `q`, or of what it holds:
     /// those whose points lie inside its collision spheres grown by `padding`, or within `padding`
-    /// of an object of `holding` where its hand holds it (the fingers as each `Held` locks them).
-    /// Pass it to [`SdfGrid::from_depth`] or [`OccupancyMap::integrate`]: readings of the robot
-    /// are then not obstacles, and the space it fills is free, so it is not an obstacle to itself
-    /// even where it hides space that counts as solid. A reading past the robot is the world's,
-    /// however near the robot its ray went: a camera the hand carries stands inside or beside the
-    /// hand's grown spheres and keeps what it sees. Grids from depth images grow toward collision
-    /// by about three voxels; pad by more, or the robot's surface reads as touching the space it
-    /// hides.
+    /// of an object of `holding` where its hand holds it (the fingers as each `Held` locks them),
+    /// or of what rides on one (`Held::carries`). Pass it to [`SdfGrid::from_depth`] or
+    /// [`OccupancyMap::integrate`]: readings of the robot are then not obstacles, and the space it
+    /// fills is free, so it is not an obstacle to itself even where it hides space that counts as
+    /// solid. A reading past the robot is the world's, however near the robot its ray went: a
+    /// camera the hand carries stands inside or beside the hand's grown spheres and keeps what it
+    /// sees. Grids from depth images grow toward collision by about three voxels; pad by more, or
+    /// the robot's surface reads as touching the space it hides.
     pub fn robot_mask(
         &self,
         robot: &Robot,
@@ -449,11 +449,11 @@ impl DepthImage<'_> {
             .iter()
             .map(|s| (fk.rot[s.link] * s.center + fk.pos[s.link]).extend(s.radius + padding))
             .collect();
-        let held = holding.iter().map(|held| {
+        let held = holding.iter().flat_map(|held| {
             let pose = robot
                 .ee_pose(q, held.hand)
                 .mul_pose(held.grasp.rigid().inverse());
-            held.object.placed(pose)
+            std::iter::once(held.object.placed(pose)).chain(held.carried_at(pose))
         });
         let mask = RobotMask {
             on_robot: vec![],

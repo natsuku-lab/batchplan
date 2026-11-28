@@ -59,6 +59,11 @@ value_class! {
         /// past it, however many spheres that takes, which `budget` does not cap. A smaller
         /// tolerance fits closer, with more.
         spheres: batchplan::SphereOptions,
+        /// What rides on the object, set on or into it: each a shape placed in the object's
+        /// frame. Every call that holds the object checks them as part of it. A place onto what
+        /// another hand holds gives that hold with its object added (`TaskPlan.held`). Empty:
+        /// nothing.
+        carries: Vec<batchplan::Obstacle>,
     }
     methods {
         #[new]
@@ -70,6 +75,7 @@ value_class! {
             changes: Option<&Bound<'_, PyDict>>,
         ) -> PyResult<Self> {
             let held = batchplan::Held {
+                carries: vec![],
                 touch_links: vec![],
                 also: vec![],
                 locked: Default::default(),

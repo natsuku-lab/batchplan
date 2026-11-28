@@ -826,6 +826,7 @@ fn grasped(memory: &Memory, id: u32) -> Held {
         shape => panic!("a shape these tests do not hold: {shape:?}"),
     };
     Held {
+        carries: vec![],
         touch_links: vec![],
         also: vec![],
         hand: 0,
@@ -1800,6 +1801,7 @@ fn a_hold_keeps_its_fingers_where_it_closed_them() {
         let at = center.with_z(top_of(&room) - 0.015) - toward * (radius + 0.04);
         let pose = Pose::new(at, down);
         let held = Held {
+            carries: vec![],
             touch_links: vec![],
             also: vec![],
             hand: 0,
@@ -1847,6 +1849,7 @@ fn a_hold_a_restart_brings_back_is_held_and_let_go_as_its_shape() {
     let away = robot.default_q();
     let fresh = memory(&device);
     let held = Held {
+        carries: vec![],
         touch_links: vec![],
         also: vec![],
         hand: 0,
@@ -2631,6 +2634,7 @@ fn a_grasp_of_the_rim_separates_its_own_readings() {
         );
         if let Some(body) = &split.body {
             let held = Held {
+                carries: vec![],
                 touch_links: vec![],
                 also: vec![],
                 hand: 0,
@@ -5109,4 +5113,522 @@ fn a_thing_two_hands_hold_is_each_ones() {
     };
     let named = format!("hand 1, which holds object {the_bowl} already");
     assert!(why.contains(&named), "{why}");
+}
+
+/// A plank 6 by 30 cm and 3 cm thick, held by hand 0 from above near one end, the hand's frame
+/// 2.5 cm over its middle along its z axis, which points into it.
+fn plank() -> Held {
+    Held {
+        carries: vec![],
+        touch_links: vec![],
+        also: vec![],
+        hand: 0,
+        object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.03, 0.15, 0.015)),
+        grasp: Pose::new(
+            Vec3::new(0.0, 0.11, -0.025),
+            Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+        ),
+        locked: HashMap::new(),
+        spheres: SphereOptions::default(),
+    }
+}
+
+/// A 4 cm cube held by hand `hand` from above.
+fn cube_in(hand: usize) -> Held {
+    Held {
+        hand,
+        object: Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.02)),
+        grasp: Pose::new(Vec3::new(0.0, 0.0, -0.01), Quat::IDENTITY),
+        ..plank()
+    }
+}
+
+/// Where the cube rides on the plank, in the plank's frame: on the face the hand holds it by, its
+/// top as the hand holds it, toward the far end.
+const RIDES_AT: Vec3 = Vec3::new(0.0, -0.10, -0.035);
+
+/// [`plank`] carrying `riders`, each a cube at its place in the plank's frame.
+fn plank_carrying(riders: &[Vec3]) -> Held {
+    let cube = cube_in(1).object;
+    let placed = riders
+        .iter()
+        .map(|&at| cube.placed(Pose::new(at, Quat::IDENTITY)));
+    Held {
+        carries: placed.collect(),
+        ..plank()
+    }
+}
+
+/// A memory of nothing seen whose hand 0 holds the plank as object 0 and hand 1 the cube as
+/// object 1, both as holds a restart brings back, then the cube set on the plank.
+fn cube_on_the_plank(device: &Device) -> Memory {
+    let acts = [
+        Act::Picked {
+            id: 0,
+            held: plank(),
+        },
+        Act::Picked {
+            id: 1,
+            held: cube_in(1),
+        },
+        Act::LetGo {
+            id: 1,
+            at: Pose::IDENTITY,
+            on: Some(Under::Held(Box::new(plank_carrying(&[RIDES_AT])))),
+        },
+    ];
+    memory(device)
+        .after(&acts)
+        .expect("the cube rides on the plank")
+}
+
+/// The input error `after` gives, which must name each of `named`.
+fn refused(memory: &Memory, acts: &[Act], named: &[&str]) {
+    let Err(batchplan::Error::Input(why)) = memory.after(acts) else {
+        panic!("{acts:?} are taken");
+    };
+    assert!(named.iter().all(|name| why.contains(name)), "{why}");
+}
+
+/// The cube one hand sets on the plank the other holds rides on it: it is in no hand and among no
+/// objects, the plank's hand holds the hold given, carrying it, and the memory names it as riding
+/// there. A second look, the arm holding the plank with that cube on its far end, which the far
+/// view reads, and a second cube by the hand, which the near view reads, makes no object of either
+/// cube nor of the plank, and the world after it holds no obstacle but the table within either
+/// cube: the mask leaves out what rides with what carries it, and the map holds none of it.
+#[test]
+fn a_thing_set_on_what_a_hand_holds_rides_on_it() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let riding = cube_on_the_plank(&device);
+    let carrying = plank_carrying(&[RIDES_AT]);
+    assert_eq!(riding.held(0), Some((0, &carrying)), "the hold as given");
+    assert!(riding.held(1).is_none() && riding.objects().is_empty());
+    assert_eq!(riding.riders(0), [1]);
+    assert!(riding.riders(1).is_empty());
+
+    // A second cube on the plank by the hand, where the near view reads it.
+    let by_the_hand = Vec3::new(-0.01, 0.06, -0.035);
+    let both = riding.after(&[
+        Act::Picked {
+            id: 2,
+            held: cube_in(1),
+        },
+        Act::LetGo {
+            id: 2,
+            at: Pose::IDENTITY,
+            on: Some(Under::Held(Box::new(plank_carrying(&[
+                RIDES_AT,
+                by_the_hand,
+            ])))),
+        },
+    ]);
+    let both = both.expect("a second cube rides on the plank");
+    // The plank in the hand at the stance over the can, the cubes on it, rendered.
+    let plank_at = robot
+        .ee_pose(&OVER_THE_CAN, 0)
+        .mul_pose(carrying.grasp.inverse());
+    let cubes_at =
+        [RIDES_AT, by_the_hand].map(|at| plank_at.mul_pose(Pose::new(at, Quat::IDENTITY)));
+    let held = |at: Pose, half: Vec3| {
+        common::turned(
+            block(at.position, half, [200, 30, 30]),
+            at.position,
+            at.rotation,
+        )
+    };
+    let mut things = acts_scene(
+        &robot,
+        &OVER_THE_CAN,
+        None,
+        None,
+        Some(held(plank_at, Vec3::new(0.03, 0.15, 0.015))),
+    );
+    things.extend(cubes_at.map(|at| held(at, Vec3::splat(0.02))));
+    let (arm, cubes) = (things.len() - 4, [things.len() - 2, things.len() - 1]);
+    // Points 1 cm apart through each cube.
+    let steps = [-0.02, -0.01, 0.0, 0.01, 0.02];
+    let within = |at: Pose| {
+        let grid = steps.iter().flat_map(|&x| {
+            steps
+                .iter()
+                .flat_map(move |&y| steps.map(|z| Vec3::new(x, y, z)))
+        });
+        grid.map(move |p| at.position + at.rotation * p)
+    };
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let (rendered, after) = second_look(
+            &device,
+            &things,
+            arm,
+            (c, 10 * c as u64 + 5),
+            &OVER_THE_CAN,
+            &both,
+        );
+        // The far view reads the first cube, the near one the second.
+        for (view, &cube) in cubes.iter().enumerate() {
+            let shown = rendered[view]
+                .shows
+                .iter()
+                .filter(|s| **s == Some(cube))
+                .count();
+            assert!(
+                shown > 50,
+                "{camera}: view {view} reads cube {cube} in {shown} pixels"
+            );
+        }
+        let mut wrong = vec![];
+        for &cube in &cubes {
+            if an_object_of(after.kept.scene(), &rendered, cube) {
+                wrong.push(format!("cube {cube} on the plank is an object"));
+            }
+        }
+        if an_object_of(after.kept.scene(), &rendered, arm + 1) {
+            wrong.push("the plank in the hand is an object".to_string());
+        }
+        let planned = after
+            .memory
+            .world(&device, &Step::default())
+            .expect("a world");
+        let laid = planned.of.iter().zip(&planned.world.obstacles);
+        for (of, obstacle) in laid.filter(|(of, _)| **of != Of::Known(0)) {
+            for (&cube, &at) in cubes.iter().zip(&cubes_at) {
+                if within(at).any(|p| obstacle.distance(p).value < 0.0) {
+                    wrong.push(format!("{of:?} comes within cube {cube} on the plank"));
+                }
+            }
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("a_thing_set_on_what_a_hand_holds_rides_on_it", &found);
+}
+
+/// Where the plank is let go on the table, turned 0.3 rad about the vertical, as the hand holds it:
+/// its frame's z axis down, so what rides on it stands on its top.
+fn on_the_table() -> Pose {
+    let as_held = Quat::from_rotation_z(0.3) * Quat::from_rotation_x(std::f32::consts::PI);
+    Pose::new(Vec3::new(0.5, 0.1, 0.015), as_held)
+}
+
+/// The memory with the cube riding on the plank, on a robot with a second hand, and a let-go of
+/// the plank on the table ([`on_the_table`]).
+fn riding() -> (Memory, Pose, Act) {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let at = on_the_table();
+    let let_go = Act::LetGo {
+        id: 0,
+        at,
+        on: None,
+    };
+    (cube_on_the_plank(&device), at, let_go)
+}
+
+/// Let go, the plank sets the cube that rides on it down with it: the cube is among the objects
+/// again under its id, where the plank's pose and its place on it put it, standing on the plank,
+/// and nothing rides any more.
+#[test]
+fn what_rides_is_set_down_with_what_carries_it() {
+    let (riding, at, let_go) = riding();
+    let down = riding.after(&[let_go]).expect("the plank is let go");
+    assert!(down.held(0).is_none() && down.riders(0).is_empty());
+    let ids: Vec<u32> = down.objects().iter().map(|object| object.id).collect();
+    assert_eq!(ids, [0, 1], "the plank, then the cube under its id");
+    let stands = cover(&down.objects()[1].shape).pose();
+    let wanted = at.mul_pose(Pose::new(RIDES_AT, Quat::IDENTITY));
+    assert!(
+        (wanted.position.z - 0.05).abs() < 1e-6,
+        "the cube stands on the plank's top"
+    );
+    assert!(
+        stands.position.distance(wanted.position) < 1e-6
+            && stands.rotation.dot(wanted.rotation).abs() > 1.0 - 1e-6,
+        "the cube stands at {stands:?}, not {wanted:?}"
+    );
+    assert_eq!(
+        down.objects()[1].on,
+        Some(Support::Object(0)),
+        "on the plank"
+    );
+}
+
+/// Lost, the plank loses the cube that rides on it: neither is held or among the objects.
+#[test]
+fn what_rides_is_lost_with_what_carries_it() {
+    let (riding, ..) = riding();
+    let lost = riding
+        .after(&[Act::Lost { id: 0 }])
+        .expect("the plank is lost");
+    assert!(lost.held(0).is_none() && lost.riders(0).is_empty());
+    assert!(lost.objects().is_empty(), "{:?}", lost.objects());
+}
+
+/// The plank said held otherwise, let go where it is and picked as it is held then in one
+/// `after`, carries the cube again under its id, the pick's hold naming it; a pick whose hold
+/// names no rider then, or one where no let-go in the same `after` set the cube down, is refused.
+/// Picked in a later `after`, what stood on it leaves with it, as from any thing picked.
+#[test]
+fn a_hold_said_otherwise_carries_what_rode_on_it() {
+    let (riding, _, let_go) = riding();
+    let carrying = plank_carrying(&[RIDES_AT]);
+    let again = Act::Picked {
+        id: 0,
+        held: carrying.clone(),
+    };
+    let otherwise = riding
+        .after(&[let_go.clone(), again.clone()])
+        .expect("the plank held otherwise");
+    assert_eq!(otherwise.held(0), Some((0, &carrying)));
+    assert_eq!(otherwise.riders(0), [1], "the cube rides again");
+    assert!(otherwise.objects().is_empty());
+    let bare = Act::Picked {
+        id: 0,
+        held: plank(),
+    };
+    refused(
+        &riding,
+        &[let_go.clone(), bare.clone()],
+        &["act 1", "object 0", "carrying 0 things", "knows 1"],
+    );
+    let down = riding.after(&[let_go]).expect("the plank is let go");
+    refused(&down, &[again], &["act 0", "carrying 1 things", "knows 0"]);
+    let picked = down.after(&[bare]).expect("a later pick");
+    assert!(picked.objects().is_empty() && picked.riders(0).is_empty());
+}
+
+/// The cube picked off the plank by the other hand leaves it: that hand holds it, and the plank's
+/// hold no longer names it.
+#[test]
+fn a_rider_picked_comes_off_what_carries_it() {
+    let (riding, ..) = riding();
+    let off = Act::Picked {
+        id: 1,
+        held: cube_in(1),
+    };
+    let taken = riding
+        .after(&[off])
+        .expect("the cube is picked off the plank");
+    assert_eq!(
+        taken.held(0),
+        Some((0, &plank())),
+        "the plank carries nothing"
+    );
+    assert_eq!(taken.held(1), Some((1, &cube_in(1))));
+    assert!(taken.riders(0).is_empty() && taken.objects().is_empty());
+}
+
+/// The cube lost off the plank leaves it, the plank's hold no longer naming it.
+#[test]
+fn a_rider_lost_comes_off_what_carries_it() {
+    let (riding, ..) = riding();
+    let gone = riding
+        .after(&[Act::Lost { id: 1 }])
+        .expect("the cube is lost");
+    assert_eq!(
+        gone.held(0),
+        Some((0, &plank())),
+        "the plank carries nothing"
+    );
+    assert!(gone.held(1).is_none() && gone.riders(0).is_empty() && gone.objects().is_empty());
+}
+
+/// A let-go onto what a hand holds is refused, naming what was given: a hand that holds nothing,
+/// the hand that holds the thing let go, a hold that differs from the memory's in more than
+/// `carries` (naming the field), a `carries` that does not grow by the thing let go alone, and a
+/// thing let go that carries others.
+#[test]
+fn a_let_go_onto_a_hold_must_follow_from_the_memorys() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4", "panda_link6"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let holding = memory(&device)
+        .after(&[
+            Act::Picked {
+                id: 0,
+                held: plank(),
+            },
+            Act::Picked {
+                id: 1,
+                held: cube_in(1),
+            },
+        ])
+        .expect("two holds");
+    let onto = |held: Held| Act::LetGo {
+        id: 1,
+        at: Pose::IDENTITY,
+        on: Some(Under::Held(Box::new(held))),
+    };
+    let carrying = plank_carrying(&[RIDES_AT]);
+    refused(
+        &holding,
+        &[onto(Held {
+            hand: 2,
+            ..carrying.clone()
+        })],
+        &["act 0", "object 1", "hand 2", "holds nothing"],
+    );
+    refused(
+        &holding,
+        &[onto(Held {
+            hand: 1,
+            ..carrying.clone()
+        })],
+        &["act 0", "hand 1", "object 1 itself"],
+    );
+    let turned = Held {
+        grasp: Pose::new(carrying.grasp.position, Quat::IDENTITY),
+        ..carrying.clone()
+    };
+    refused(
+        &holding,
+        &[onto(turned)],
+        &["act 0", "`grasp` differs", "object 0"],
+    );
+    let wider = Held {
+        spheres: SphereOptions {
+            tolerance: 0.01,
+            ..SphereOptions::default()
+        },
+        ..carrying.clone()
+    };
+    refused(&holding, &[onto(wider)], &["`spheres` differs"]);
+    refused(
+        &holding,
+        &[onto(plank_carrying(&[Vec3::NAN]))],
+        &["act 0", "object 1", "no finite pose"],
+    );
+    for riders in [&[][..], &[RIDES_AT, Vec3::ZERO]] {
+        let count = format!("carrying {} things", riders.len());
+        refused(
+            &holding,
+            &[onto(plank_carrying(riders))],
+            &["act 0", &count],
+        );
+    }
+    // The cube, carrying a third hand's, set on the plank.
+    let stacked = holding
+        .after(&[
+            Act::Picked {
+                id: 2,
+                held: cube_in(2),
+            },
+            Act::LetGo {
+                id: 2,
+                at: Pose::IDENTITY,
+                on: Some(Under::Held(Box::new(Held {
+                    carries: vec![cube_in(2).object],
+                    ..cube_in(1)
+                }))),
+            },
+        ])
+        .expect("a cube rides on the cube");
+    assert_eq!(stacked.riders(1), [2]);
+    refused(
+        &stacked,
+        &[onto(carrying)],
+        &["act 0", "object 1", "carries 1 others"],
+    );
+}
+
+/// Two cubes riding on the plank, said held otherwise, must be named where they rode, in order:
+/// in the other order, or one of them 0.5 m off, the pick is refused; with one of them picked off
+/// where the plank was set down, the other alone.
+#[test]
+fn a_hold_said_otherwise_names_its_riders_where_they_rode() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let (first, second) = (RIDES_AT, RIDES_AT + Vec3::Y * 0.06);
+    let two = cube_on_the_plank(&device)
+        .after(&[
+            Act::Picked {
+                id: 2,
+                held: cube_in(1),
+            },
+            Act::LetGo {
+                id: 2,
+                at: Pose::IDENTITY,
+                on: Some(Under::Held(Box::new(plank_carrying(&[first, second])))),
+            },
+        ])
+        .expect("two cubes ride on the plank");
+    assert_eq!(two.riders(0), [1, 2]);
+    let let_go = Act::LetGo {
+        id: 0,
+        at: on_the_table(),
+        on: None,
+    };
+    let again = |riders: &[Vec3]| Act::Picked {
+        id: 0,
+        held: plank_carrying(riders),
+    };
+    for wrong in [[second, first], [first, second + Vec3::X * 0.5]] {
+        refused(
+            &two,
+            &[let_go.clone(), again(&wrong)],
+            &["act 1", "object 0", "carrying 2 things", "knows 2"],
+        );
+    }
+    let both = two.after(&[let_go.clone(), again(&[first, second])]);
+    assert_eq!(both.expect("as they rode").riders(0), [1, 2]);
+    let off = Act::Picked {
+        id: 1,
+        held: cube_in(1),
+    };
+    let one = two.after(&[let_go, off, again(&[second])]);
+    let one = one.expect("the other as it rode");
+    assert_eq!(one.riders(0), [2]);
+    assert_eq!(one.held(1).map(|(id, _)| id), Some(1));
+}
+
+/// A hold a restart brings back may carry: each rider under the next id in turn, an object of its
+/// shape, set down with the plank where it rode, standing on it. A rider that is no box or
+/// cylinder, or at no pose, is refused.
+#[test]
+fn a_hold_a_restart_brings_back_carries_its_riders() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let nothing = memory(&device);
+    let (first, second) = (RIDES_AT, RIDES_AT + Vec3::Y * 0.06);
+    let carrying = plank_carrying(&[first, second]);
+    let back = nothing.after(&[Act::Picked {
+        id: 4,
+        held: carrying.clone(),
+    }]);
+    let back = back.expect("a hold a restart brings back, carrying");
+    assert_eq!(back.riders(0), [5, 6]);
+    assert_eq!(back.next_id(), 7);
+    assert_eq!(back.held(0), Some((4, &carrying)));
+    assert!(back.objects().is_empty());
+    let at = on_the_table();
+    let down = back.after(&[Act::LetGo {
+        id: 4,
+        at,
+        on: None,
+    }]);
+    let down = down.expect("the plank is let go");
+    let ids: Vec<u32> = down.objects().iter().map(|object| object.id).collect();
+    assert_eq!(ids, [4, 5, 6]);
+    for (object, rode) in down.objects()[1..].iter().zip([first, second]) {
+        let wanted = at.mul_pose(Pose::new(rode, Quat::IDENTITY)).position;
+        let stands = cover(&object.shape).pose().position;
+        assert!(stands.distance(wanted) < 1e-6, "{stands} for {wanted}");
+        assert_eq!(object.on, Some(Support::Object(0)), "on the plank");
+    }
+    let ball = Held {
+        carries: vec![Obstacle::sphere(RIDES_AT, 0.02)],
+        ..plank()
+    };
+    refused(
+        &nothing,
+        &[Act::Picked { id: 4, held: ball }],
+        &["act 0", "no box or cylinder"],
+    );
+    refused(
+        &nothing,
+        &[Act::Picked {
+            id: 4,
+            held: plank_carrying(&[Vec3::NAN]),
+        }],
+        &["act 0", "object 4", "no finite pose"],
+    );
 }

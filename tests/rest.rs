@@ -1786,6 +1786,7 @@ fn rests_found_on_what_a_camera_sees_are_set_down_by_place() {
         );
     }
     let held = Held {
+        carries: vec![],
         touch_links: vec![],
         also: vec![],
         locked: Default::default(),
