@@ -5,9 +5,10 @@
 //! joints (a mobile base, a torso), and joints no targeted hand moves stay where the seed has
 //! them.
 
-use crate::error::{Result, ensure_input, input};
+use std::borrow::Cow;
 
 use crate::device::{self, CollisionWeights, Contact, Device, Worlds};
+use crate::error::{Result, ensure_input, input};
 use crate::held::{self, Held};
 use crate::rng::Rng;
 use crate::robot::Robot;
@@ -129,7 +130,9 @@ pub struct IkProblem {
     /// on them: a mobile base placed beside a table while its arms reach.
     pub hold: Vec<usize>,
     /// An object a hand holds, as a pick leaves it: checked as part of the robot, as attaching it
-    /// ([`Held::attachment`]) would check it. `None` holds nothing.
+    /// ([`Held::attachment`]) would check it. `None` holds nothing. Where more hands than one hold
+    /// it ([`Held::also`]), a target for one of them places the others at their grasps, and the
+    /// result's problem has their targets.
     pub holding: Option<Held>,
 }
 
@@ -372,6 +375,8 @@ pub fn solve_ik(
     o: &IkOptions,
 ) -> Result<IkResult> {
     check(device.robot(), worlds, problems, o)?;
+    let placed = hands_placed(device.robot(), problems)?;
+    let problems = placed.as_ref();
     let holds: Vec<Option<&Held>> = problems.iter().map(|p| p.holding.as_ref()).collect();
     let parts = held::by_hold(device, &holds, |on, items| {
         solved(on, worlds, &held::subset(problems, items), o)
@@ -382,6 +387,24 @@ pub fn solve_ik(
         o.seeds,
         parts,
     ))
+}
+
+/// `problems` with a pose for every hand that holds a problem's object together with one given a
+/// pose ([`Held::also`]): where its grasp puts it. Out of line, so that `solve_ik` is the code it
+/// is without hands that hold together, which few calls have.
+#[inline(never)]
+fn hands_placed<'a>(robot: &Robot, problems: &'a [IkProblem]) -> Result<Cow<'a, [IkProblem]>> {
+    let together = |p: &IkProblem| p.holding.as_ref().is_some_and(|held| !held.also.is_empty());
+    if !problems.iter().any(together) {
+        return Ok(Cow::Borrowed(problems));
+    }
+    let mut placed = problems.to_vec();
+    for (i, p) in placed.iter_mut().enumerate() {
+        if let Some(held) = &p.holding {
+            held.place_hands(robot, &mut p.targets, &format!("IK problem {i}"))?;
+        }
+    }
+    Ok(Cow::Owned(placed))
 }
 
 impl IkOptions {

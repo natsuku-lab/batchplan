@@ -131,6 +131,16 @@ def test_maps_and_pairs_cross_both_ways():
         bp.JointLimits(position=[1.0])
 
 
+def test_a_hold_names_the_other_hands_that_hold_it():
+    bar = bp.Obstacle.cuboid((0.0, 0.0, 0.0), (0.015, 0.16, 0.015))
+    left, right = bp.Pose((0.0, 0.12, 0.0)), bp.Pose((0.0, -0.12, 0.0))
+    assert bp.Held(0, bar, left).also == (), "one hand's hold"
+    held = bp.Held(0, bar, left, also=[bp.Grip(1, right)])
+    (grip,) = held.also
+    assert grip.hand == 1 and grip.grasp == right
+    assert held.replace(also=[]).also == ()
+
+
 def test_wrong_inputs_are_input_errors():
     with pytest.raises(bp.InputError, match="3 numbers"):
         bp.Obstacle.sphere((0.0, 0.0), 0.1)

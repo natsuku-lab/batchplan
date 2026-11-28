@@ -20,6 +20,7 @@ const HELD: &str = "held by hand 0";
 /// A 10 cm cube held with the IK frame `inset` from its middle toward the hand.
 fn cube(inset: f32) -> Held {
     Held {
+        also: vec![],
         locked: Default::default(),
         spheres: Default::default(),
         hand: 0,
@@ -31,6 +32,7 @@ fn cube(inset: f32) -> Held {
 /// A 24 cm bar held across the hand, level, by its middle.
 fn bar() -> Held {
     Held {
+        also: vec![],
         locked: Default::default(),
         spheres: Default::default(),
         hand: 0,
@@ -619,6 +621,7 @@ fn a_hold_checks_the_fingers_where_they_closed() {
         .map(|i| balls[i])
         .expect("a ball only the open finger touches");
     let small = Held {
+        also: vec![],
         locked: Default::default(),
         spheres: Default::default(),
         hand: 0,
@@ -756,6 +759,7 @@ fn a_held_plate_passes_a_neighbor_a_few_millimeters_away_with_finer_spheres() {
     };
     let hand = Pose::new(at + Vec3::Z * 0.06, down);
     let plate = |spheres: SphereOptions| Held {
+        also: vec![],
         hand: 0,
         object: cylinder.clone(),
         grasp: Pose::new(hand.position - at, hand.rotation),

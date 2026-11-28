@@ -10,6 +10,7 @@
 //! pricing four fractions of its direction at once and taking the cheapest. Every candidate is
 //! validated by sampling its curve densely; the shortest valid one is the result.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -207,7 +208,10 @@ pub struct PlanProblem {
     /// `goal` must keep them. Every state the path is checked at keeps them.
     pub constraints: Vec<HandConstraint>,
     /// An object a hand holds along the path, as a pick leaves it: checked as part of the robot,
-    /// as attaching it ([`Held::attachment`]) would check it. `None` holds nothing.
+    /// as attaching it ([`Held::attachment`]) would check it. `None` holds nothing. Where more
+    /// hands than one hold it ([`Held::also`]), the path keeps each at its grasp, as under
+    /// `constraints` that pin them, `start` and a configuration `goal` must have them there, and
+    /// a pose goal for one of them places the others.
     pub holding: Option<Held>,
 }
 
@@ -423,7 +427,9 @@ pub fn plan(
         |p| &p.start,
         |p| &mut p.start,
     )?;
-    let problems = corrected.as_ref();
+    let given = corrected.as_ref();
+    let pinned = hands_pinned(robot, given)?;
+    let problems = pinned.as_ref();
     check(robot, worlds, problems, o)?;
     let goals = resolve(device, worlds, problems, o, deadline)?;
     // Problems whose pose goals IK found no way to reach fail before planning.
@@ -440,14 +446,52 @@ pub fn plan(
         (items, part)
     });
     let mut result = PlanResult::gather(problems, 1 + o.seeds, parts.collect());
-    // Keep the pose goals, alongside any corrected starts.
-    result.problems = problems.to_vec();
+    // Keep the pose goals and the constraints as given, alongside any corrected starts.
+    result.problems = given.to_vec();
     for (pi, failure) in goals.failures.into_iter().enumerate() {
         if failure.is_some() {
             result.failures[pi] = failure;
         }
     }
     Ok(result)
+}
+
+/// `problems` with, where more hands than one hold a problem's object ([`Held::also`]), the pins
+/// that keep each at its grasp among its constraints, once the hold and its ends are checked: a
+/// start or a configuration goal with a hand off its grasp, or a pose goal that puts one off it,
+/// is an `Error::Input` of this problem's. Out of line, so that `plan` is the code it is without
+/// hands that hold together, which few calls have.
+#[inline(never)]
+fn hands_pinned<'a>(robot: &Robot, problems: &'a [PlanProblem]) -> Result<Cow<'a, [PlanProblem]>> {
+    let together = |p: &PlanProblem| p.holding.as_ref().is_some_and(|held| !held.also.is_empty());
+    if !problems.iter().any(together) {
+        return Ok(Cow::Borrowed(problems));
+    }
+    let n = robot.dof();
+    let mut pinned = problems.to_vec();
+    for (pi, p) in pinned.iter_mut().enumerate() {
+        let Some(held) = p.holding.as_ref().filter(|held| !held.also.is_empty()) else {
+            continue;
+        };
+        held.check_on(robot, &format!("problem {pi}"))?;
+        // Ends of another length are the checks' to refuse.
+        let ends = [("start", Some(&p.start[..])), ("goal", p.goal.joints())];
+        for (end, q) in ends {
+            if let Some(off) = q
+                .filter(|q| q.len() == n)
+                .and_then(|q| held.off_its_grasps(robot, q))
+            {
+                return Err(crate::error::input!("problem {pi}: at the {end}, {off}"));
+            }
+        }
+        if let Goal::Poses(targets) = &p.goal {
+            held.place_hands(robot, &mut targets.clone(), &format!("problem {pi}"))?;
+        }
+        if let Cow::Owned(constraints) = held::pinned(Some(held), &p.constraints) {
+            p.constraints = constraints;
+        }
+    }
+    Ok(Cow::Owned(pinned))
 }
 
 /// Problems with every goal a configuration, and why those whose pose goals IK found no way to

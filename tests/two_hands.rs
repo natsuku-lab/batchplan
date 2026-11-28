@@ -1,0 +1,1253 @@
+//! One object held by two hands (`Held::also`): every call that holds it keeps both at their
+//! grasps, the object rigid between them, where each hand's fingers may touch it. GPU parts are
+//! skipped when no adapter is available unless `BATCHPLAN_REQUIRE_GPU=1`.
+
+#[path = "../examples/common/mod.rs"]
+mod common;
+
+use std::collections::HashMap;
+use std::f32::consts::FRAC_PI_2;
+
+use batchplan::live::{Follower, FollowerOptions};
+use batchplan::{
+    Device, Error, Goal, Grip, GripperCalibration, HandGrasps, Handover, Held, Hold, IkProblem,
+    JoinOptions, Obstacle, Pick, Place, PlanOptions, PlanProblem, Pose, Release, Robot, Sequence,
+    ShapeGraspOptions, TaskFailure, TaskOptions, TaskPlan, ToolPath, ToolPathOptions, ToolPathStop,
+    Trajectory, World, Worlds,
+};
+use glam::Vec3;
+
+/// A bar 32 cm long, 3 cm thick, held from above by the left hand 12 cm to one side of its
+/// middle and by the right hand 12 cm to the other, each closing across it, turned half a turn
+/// from the other.
+fn bar() -> Held {
+    let grasp = |side: f32| {
+        Pose::new(
+            Vec3::new(0.0, 0.12 * side, 0.0),
+            common::upright(FRAC_PI_2 * side),
+        )
+    };
+    Held {
+        hand: 0,
+        object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.015, 0.16, 0.015)),
+        grasp: grasp(1.0),
+        also: vec![Grip {
+            hand: 1,
+            grasp: grasp(-1.0),
+        }],
+        locked: Default::default(),
+        spheres: Default::default(),
+    }
+}
+
+/// The left hand's pose where the bar lies level with its middle at `at`, turned `yaw` about the
+/// vertical.
+fn left_at(at: Vec3, yaw: f32) -> Pose {
+    common::tray(at, yaw).mul_pose(bar().grasp)
+}
+
+/// How far the right hand is from its grasp of the bar the left hand holds: meters, radians.
+fn off_its_grasp(robot: &Robot, q: &[f32]) -> (f32, f32) {
+    off_grasp(robot, &bar(), q)
+}
+
+/// How far `held`'s other hand is from its grasp of what its hand holds: meters, radians.
+fn off_grasp(robot: &Robot, held: &Held, q: &[f32]) -> (f32, f32) {
+    let there = robot
+        .ee_pose(q, held.hand)
+        .mul_pose(held.grasp.inverse())
+        .mul_pose(held.also[0].grasp);
+    let other = robot.ee_pose(q, held.also[0].hand);
+    (
+        other.position.distance(there.position),
+        other.rotation.angle_between(there.rotation),
+    )
+}
+
+/// The farthest the right hand strays from its grasp over a path, sampled at 1 kHz once timed.
+fn strays(robot: &Robot, path: &[f32]) -> (f32, f32) {
+    strays_from(robot, &bar(), path)
+}
+
+/// The farthest `held`'s other hand strays from its grasp over a path, sampled at 1 kHz once
+/// timed.
+fn strays_from(robot: &Robot, held: &Held, path: &[f32]) -> (f32, f32) {
+    let trajectory = Trajectory::try_new(robot, path, 1.0).unwrap();
+    trajectory.check(robot).unwrap();
+    let timed = trajectory.sample(1000.0).unwrap();
+    let off = timed.positions.chunks(timed.dof);
+    off.map(|q| off_grasp(robot, held, q))
+        .fold((0.0, 0.0), |(a, b), (c, d)| {
+            (f32::max(a, c), f32::max(b, d))
+        })
+}
+
+/// Both hands on the bar where it lies at `at`, by IK for the left hand's pose alone: the
+/// collision-free solution nearest `seed`.
+fn holding_at(device: &Device, worlds: &Worlds, at: Vec3, seed: &[f32]) -> Vec<f32> {
+    let problem = IkProblem {
+        seed: Some(seed.to_vec()),
+        holding: Some(bar()),
+        ..IkProblem {
+            targets: vec![Some(left_at(at, 0.0)), None],
+            ..IkProblem::new(0, Pose::IDENTITY)
+        }
+    };
+    let solved = batchplan::solve_ik(device, worlds, &[problem], &common::fixture_ik()).unwrap();
+    solved
+        .nearest(0, seed)
+        .expect("the bar is in reach")
+        .to_vec()
+}
+
+fn input<T: std::fmt::Debug>(result: Result<T, Error>, names: &str) {
+    match result {
+        Err(Error::Input(message)) => assert!(message.contains(names), "{message}"),
+        other => panic!("an input error naming {names:?}, got {other:?}"),
+    }
+}
+
+const LOW: Vec3 = Vec3::new(0.3, 0.0, 0.2);
+
+/// IK given the left hand's pose puts the right hand at its grasp, and says where in its
+/// problem, the left hand's pose as given; a pose of its own that keeps its pin is taken as its
+/// grasp, and one that breaks it is refused. The bar may touch both hands: held by the left alone
+/// it collides with the right there.
+#[test]
+fn ik_places_the_other_hand_at_its_grasp() {
+    let robot = common::two_pandas().unwrap();
+    let ready = robot.default_q().to_vec();
+    assert!(
+        off_its_grasp(&robot, &ready).0 > 0.05,
+        "the hands start off the bar, so IK has to place the right one"
+    );
+    for device in common::devices(&robot) {
+        let worlds = device.upload(&[common::tray_scene()]).unwrap();
+        let held = bar();
+        let left = left_at(LOW, 0.0);
+        let right = left
+            .mul_pose(held.grasp.inverse())
+            .mul_pose(held.also[0].grasp);
+        let problem = |second: Option<Pose>| IkProblem {
+            seed: Some(ready.clone()),
+            holding: Some(bar()),
+            ..IkProblem {
+                targets: vec![Some(left), second],
+                ..IkProblem::new(0, Pose::IDENTITY)
+            }
+        };
+        let o = common::fixture_ik();
+        let solved = batchplan::solve_ik(&device, &worlds, &[problem(None)], &o).unwrap();
+        let placed = solved.problems[0].targets[1].expect("the right hand has a pose");
+        assert!(placed.position.distance(right.position) < 1e-6);
+        assert_eq!(solved.problems[0].targets[0], Some(left), "as given");
+        let q = solved.nearest(0, &ready).expect("the bar is in reach");
+        let (away, turned) = off_its_grasp(&robot, q);
+        assert!(
+            away <= 2e-3 && turned <= 0.02,
+            "{}: the right hand is {:.2} mm and {turned:.4} rad off its grasp",
+            device.name(),
+            away * 1e3
+        );
+        // Both hands' links may touch it; with the left alone holding it, the right is in it.
+        let alone = Held {
+            also: vec![],
+            ..bar()
+        };
+        let touches = |held: &Held| {
+            let contacts = device.contacts_holding(&worlds, &[0], q, 0.0, &[Some(held)]);
+            contacts.unwrap().remove(0)
+        };
+        assert!(touches(&held).is_empty(), "{:?}", touches(&held));
+        assert!(
+            !touches(&alone).is_empty(),
+            "held by the left hand alone, the bar collides with the right"
+        );
+        // A pose of its own is measured as its pin measures a configuration: 1.6 mm along each
+        // axis, 2.8 mm away in all, keeps it; 2.5 mm along one axis does not.
+        let off = |by: Vec3| Pose::new(right.position + by, right.rotation);
+        let near = problem(Some(off(Vec3::splat(1.6e-3))));
+        let near = batchplan::solve_ik(&device, &worlds, &[near], &o);
+        assert_eq!(near.unwrap().problems[0].targets[1], Some(placed));
+        let far = problem(Some(off(Vec3::X * 2.5e-3)));
+        let far = batchplan::solve_ik(&device, &worlds, &[far], &o);
+        input(
+            far,
+            "IK problem 0: the pose given hand 1 is off its grasp of the object hand 0 holds",
+        );
+    }
+}
+
+/// Plans holding the bar with both hands, given the left hand's goal pose alone, carry it over a
+/// block: every path, sampled at 1 kHz once timed, keeps the right hand within 2 mm and 0.02 rad
+/// of its grasp, the floors of a pin, and is collision-free with the bar in both hands. The same
+/// ends planned holding nothing pull the hands centimeters apart. The result's problems are as
+/// given, without constraints. A start with the right hand off the bar is refused.
+#[test]
+fn plans_carry_what_two_hands_hold_rigid_between_them() {
+    let robot = common::two_pandas().unwrap();
+    for device in common::devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(&[common::tray_scene()]).unwrap();
+        let start = holding_at(&device, &worlds, LOW, robot.default_q());
+        let beyond = [
+            (Vec3::new(0.62, 0.0, 0.32), 0.0),
+            (Vec3::new(0.62, 0.05, 0.36), 0.3),
+            (Vec3::new(0.6, -0.05, 0.34), -0.3),
+            (Vec3::new(0.65, 0.0, 0.4), 0.15),
+        ];
+        let problems: Vec<PlanProblem> = beyond
+            .iter()
+            .map(|&(at, yaw)| PlanProblem {
+                holding: Some(bar()),
+                ..PlanProblem::new(
+                    0,
+                    start.clone(),
+                    Goal::Poses(vec![Some(left_at(at, yaw)), None]),
+                )
+            })
+            .collect();
+        let o = PlanOptions::default();
+        let result = batchplan::plan(&device, &worlds, &problems, &o).unwrap();
+        assert!(
+            result.solved().count() >= 3,
+            "{name}: {} of {} carries planned: {:?}",
+            result.solved().count(),
+            problems.len(),
+            result.failures
+        );
+        let held = bar();
+        let mut apart = 0;
+        for s in result.solved() {
+            assert!(s.problem.constraints.is_empty());
+            assert!(matches!(&s.problem.goal, Goal::Poses(targets) if targets[1].is_none()));
+            let (away, turned) = strays(&robot, s.solution);
+            assert!(
+                away <= 2e-3 + 1e-5 && turned <= 0.02 + 1e-4,
+                "{name}: carry {} moves the right hand {:.2} mm and {turned:.4} rad off its grasp",
+                s.index,
+                away * 1e3
+            );
+            let timed = Trajectory::try_new(&robot, s.solution, 1.0).unwrap();
+            let timed = timed.sample(1000.0).unwrap();
+            let samples = timed.positions.len() / timed.dof;
+            let contacts = device.contacts_holding(
+                &worlds,
+                &vec![0; samples],
+                &timed.positions,
+                0.0,
+                &vec![Some(&held); samples],
+            );
+            let colliding = contacts.unwrap().iter().filter(|c| !c.is_empty()).count();
+            assert_eq!(colliding, 0, "{name}: carry {} collides", s.index);
+            // The same ends, holding nothing.
+            let n = robot.dof();
+            let goal = s.solution[s.solution.len() - n..].to_vec();
+            let loose = [PlanProblem::new(0, start.clone(), goal)];
+            let loose = batchplan::plan(&device, &worlds, &loose, &o).unwrap();
+            if let Some(path) = loose.best(0)
+                && strays(&robot, path).0 > 0.01
+            {
+                apart += 1;
+            }
+        }
+        assert!(
+            2 * apart > result.solved().count(),
+            "{name}: most carries planned holding nothing should pull the hands apart, not {apart}"
+        );
+        let off = PlanProblem {
+            start: robot.default_q().to_vec(),
+            ..problems[0].clone()
+        };
+        input(
+            batchplan::plan(&device, &worlds, &[off], &o),
+            "at the start, hand 1 is not at its grasp of the object hand 0 holds",
+        );
+        // A goal pose of the right hand's own, 4 mm from its grasp, is the problem's to answer for.
+        let left = left_at(beyond[0].0, beyond[0].1);
+        let right = left
+            .mul_pose(held.grasp.inverse())
+            .mul_pose(held.also[0].grasp);
+        let shifted = Pose::new(right.position + Vec3::X * 4e-3, right.rotation);
+        let apart = PlanProblem {
+            goal: Goal::Poses(vec![Some(left), Some(shifted)]),
+            ..problems[0].clone()
+        };
+        input(
+            batchplan::plan(&device, &worlds, &[problems[0].clone(), apart], &o),
+            "problem 1: the pose given hand 1 is off its grasp of the object hand 0 holds",
+        );
+    }
+}
+
+/// A hold names each other hand once, a hand of the robot's other than its own, at a finite
+/// grasp with a unit rotation: anything else is an input error of the problem that holds so,
+/// from IK and from a plan.
+#[test]
+fn a_hold_another_hand_cannot_share_is_an_input_error() {
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[common::tray_scene()]).unwrap();
+    let start = holding_at(&device, &worlds, LOW, robot.default_q());
+    let second = bar().also[0];
+    let with = |also: Vec<Grip>| Held { also, ..bar() };
+    let scaled = Pose::new(second.grasp.position, second.grasp.rotation * 2.0);
+    let not_finite = Pose::new(Vec3::new(f32::NAN, 0.0, 0.0), second.grasp.rotation);
+    let cases = [
+        (
+            vec![Grip { hand: 2, ..second }],
+            "hand 2 holds the object too",
+        ),
+        (
+            vec![Grip { hand: 0, ..second }],
+            "hand 0 holds the object too",
+        ),
+        (vec![second, second], "hand 1 holds the object too"),
+        (
+            vec![Grip {
+                grasp: scaled,
+                ..second
+            }],
+            "hand 1's grasp of the held object must be finite with a unit rotation",
+        ),
+        (
+            vec![Grip {
+                grasp: not_finite,
+                ..second
+            }],
+            "hand 1's grasp of the held object must be finite with a unit rotation",
+        ),
+    ];
+    // A device that holds something in a hand already cannot take a hold that hand shares.
+    let cube = Held {
+        hand: 1,
+        also: vec![],
+        object: Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.02)),
+        grasp: Pose::IDENTITY,
+        locked: Default::default(),
+        spheres: Default::default(),
+    };
+    let busy = robot.attach(&cube.attachment(&robot).unwrap()).unwrap();
+    let busy = device.with_robot(&busy).unwrap();
+    let ik = IkProblem {
+        seed: Some(start.clone()),
+        holding: Some(bar()),
+        ..IkProblem {
+            targets: vec![Some(left_at(LOW, 0.0)), None],
+            ..IkProblem::new(0, Pose::IDENTITY)
+        }
+    };
+    input(
+        batchplan::solve_ik(&busy, &worlds, &[ik], &common::fixture_ik()),
+        "hand 1 holds the object too, and the robot already has 'held by hand 1'",
+    );
+    for (also, names) in cases {
+        let held = with(also);
+        let ik = IkProblem {
+            seed: Some(start.clone()),
+            holding: Some(held.clone()),
+            ..IkProblem {
+                targets: vec![Some(left_at(LOW, 0.0)), None],
+                ..IkProblem::new(0, Pose::IDENTITY)
+            }
+        };
+        let solved = batchplan::solve_ik(&device, &worlds, &[ik], &common::fixture_ik());
+        input(solved, names);
+        let carry = PlanProblem {
+            holding: Some(held),
+            ..PlanProblem::new(0, start.clone(), start.clone())
+        };
+        let planned = batchplan::plan(&device, &worlds, &[carry], &PlanOptions::default());
+        input(planned, names);
+    }
+}
+
+/// A join's blends keep both hands on what they hold: eight carries that zigzag across the
+/// block's near side, turning the bar each way, joined 30 cm wide. Holding nothing, the blends
+/// pull the right hand a centimeter off the bar (11.9 mm on the M4 Pro); holding it, the joins
+/// still blend, and the right hand keeps its grasp. A blend is checked at the join's resolution,
+/// as a plan's spline is, and between checks it strays past a pin's floors (2 mm, 0.02 rad) by a
+/// hair: at 1 kHz to 2.44 mm and 0.0144 rad on the Ryzen and 1.93 mm on the M4 Pro (2026-11-27),
+/// so the bound here is one and a half floors.
+#[test]
+fn joins_keep_both_hands_on_what_they_hold() {
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[common::tray_scene()]).unwrap();
+    let n = robot.dof();
+    let stops = [
+        (Vec3::new(0.0, 0.15, 0.25), 0.5),
+        (Vec3::new(0.02, -0.15, 0.05), -0.5),
+        (Vec3::new(-0.05, 0.12, 0.3), 0.6),
+        (Vec3::new(0.0, -0.12, 0.1), -0.6),
+        (Vec3::new(0.02, 0.1, 0.2), 0.3),
+        (Vec3::new(-0.04, -0.1, 0.3), -0.4),
+        (Vec3::new(0.0, 0.15, 0.1), 0.5),
+        (Vec3::ZERO, 0.0),
+    ];
+    let mut from = holding_at(&device, &worlds, LOW, robot.default_q());
+    let mut paths = vec![];
+    for (at, yaw) in stops {
+        let carry = PlanProblem {
+            holding: Some(bar()),
+            ..PlanProblem::new(
+                0,
+                from.clone(),
+                Goal::Poses(vec![Some(left_at(LOW + at, yaw)), None]),
+            )
+        };
+        let planned = batchplan::plan(&device, &worlds, &[carry], &PlanOptions::default());
+        let path = planned.unwrap().best(0).expect("the carry plans").to_vec();
+        from = path[path.len() - n..].to_vec();
+        paths.push(path);
+    }
+    // The farthest the right hand strays from its grasp over the joined motion, in meters and
+    // radians, and how many joins blend.
+    let joined = |holding: Option<Held>| {
+        let sequence = Sequence {
+            world: 0,
+            blends: vec![0.3; paths.len() - 1],
+            paths: paths.clone(),
+            constraints: vec![],
+            holding,
+        };
+        let joined = batchplan::join(&device, &worlds, &[sequence], &JoinOptions::default());
+        let joined = joined.unwrap();
+        let off = joined.paths[0].iter().map(|path| strays(&robot, path));
+        let (away, turned) = off.fold((0.0, 0.0), |(a, b), (c, d)| {
+            (f32::max(a, c), f32::max(b, d))
+        });
+        (away, turned, joined.blends[0].iter().flatten().count())
+    };
+    let (free, _, _) = joined(None);
+    assert!(
+        free > 4e-3,
+        "holding nothing, the blends pull the right hand {:.2} mm off the bar: not past its pin",
+        free * 1e3
+    );
+    let (away, turned, blended) = joined(Some(bar()));
+    assert!(
+        away <= 3e-3 && turned <= 0.03,
+        "holding the bar, the right hand strays {:.2} mm and {turned:.4} rad from its grasp",
+        away * 1e3
+    );
+    assert!(blended > 0, "holding the bar, no join blends");
+}
+
+/// A follower holding the bar with both hands keeps them on it as a constraint of its replans: a
+/// trajectory that ends with the right hand off the bar is refused where it would replan.
+#[test]
+fn a_follower_keeps_both_hands_on_what_it_holds() {
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[common::tray_scene()]).unwrap();
+    let start = holding_at(&device, &worlds, LOW, robot.default_q());
+    let away = [PlanProblem::new(0, start, robot.default_q())];
+    let away = batchplan::plan(&device, &worlds, &away, &PlanOptions::default()).unwrap();
+    let path = away.best(0).expect("the hands leave the bar");
+    let trajectory = Trajectory::try_new(&robot, path, 1.0).unwrap();
+    let options = |holding: Option<Held>| FollowerOptions {
+        holding,
+        ..FollowerOptions::default()
+    };
+    assert!(Follower::try_new(&robot, 0, trajectory.clone(), 0.0, options(None)).is_ok());
+    let one_hand = Held {
+        also: vec![],
+        ..bar()
+    };
+    let alone = Follower::try_new(&robot, 0, trajectory.clone(), 0.0, options(Some(one_hand)));
+    assert!(alone.is_ok());
+    let refused = Follower::try_new(&robot, 0, trajectory, 0.0, options(Some(bar())));
+    input(
+        refused.map(|_| ()),
+        "the trajectory's goal breaks the follower's constraints",
+    );
+}
+
+/// Hand `hand`'s straight move from `start` through `waypoints`, holding `holding`.
+fn straight(start: &[f32], hand: usize, waypoints: Vec<Pose>, holding: Option<Held>) -> ToolPath {
+    ToolPath {
+        world: 0,
+        start: start.to_vec(),
+        hand,
+        waypoints,
+        hold: vec![],
+        holding,
+    }
+}
+
+/// A straight move of one hand takes the other along on what both hold: lifting the bar 15 cm
+/// while turning it 0.3 rad, the right hand stays within the path's precisions of its grasp at
+/// every step and within a pin's floors at 1 kHz, whichever hand the path names, where the same
+/// path holding nothing leaves the right hand behind. A plan holding the bar starts where the
+/// move ends. A start with the right hand off the bar is refused.
+#[test]
+fn a_straight_move_takes_the_other_hand_along() {
+    let robot = common::two_pandas().unwrap();
+    for device in common::devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(&[common::tray_scene()]).unwrap();
+        let start = holding_at(&device, &worlds, LOW, robot.default_q());
+        let held = bar();
+        let lifted = left_at(LOW + Vec3::Z * 0.15, 0.3);
+        let right = |left: Pose| {
+            left.mul_pose(held.grasp.inverse())
+                .mul_pose(held.also[0].grasp)
+        };
+        let paths = [
+            straight(&start, 0, vec![lifted], Some(bar())),
+            straight(&start, 1, vec![right(lifted)], Some(bar())),
+            straight(&start, 0, vec![lifted], None),
+        ];
+        let o = Default::default();
+        let followed = batchplan::follow(&device, &worlds, &paths, &o).unwrap();
+        assert_eq!(
+            followed.fraction, [1.0; 3],
+            "{name}: {:?}",
+            followed.stopped
+        );
+        let n = robot.dof();
+        for (k, path) in followed.paths[..2].iter().enumerate() {
+            let (away, turned) = strays(&robot, path);
+            assert!(
+                away <= 2e-3 && turned <= 0.02,
+                "{name}: path {k} moves the right hand {:.2} mm and {turned:.4} rad off its grasp",
+                away * 1e3
+            );
+            let end = &path[path.len() - n..];
+            let up = robot.ee_pose(end, 1).position.z - robot.ee_pose(&start, 1).position.z;
+            assert!(
+                (up - 0.15).abs() < 2e-3,
+                "{name}: the right hand rose {up} m"
+            );
+            let on = PlanProblem {
+                holding: Some(bar()),
+                ..PlanProblem::new(
+                    0,
+                    end.to_vec(),
+                    Goal::Poses(vec![Some(left_at(LOW, 0.0)), None]),
+                )
+            };
+            let planned = batchplan::plan(&device, &worlds, &[on], &PlanOptions::default());
+            assert!(
+                planned.unwrap().best(0).is_some(),
+                "{name}: a carry follows"
+            );
+        }
+        let (left_behind, _) = strays(&robot, &followed.paths[2]);
+        assert!(
+            left_behind > 0.1,
+            "holding nothing, the right hand stays where it was: {left_behind} m"
+        );
+        let off = straight(robot.default_q(), 0, vec![lifted], Some(bar()));
+        input(
+            batchplan::follow(&device, &worlds, &[off], &o),
+            "path 0: at the start, hand 1 is not at its grasp of the object hand 0 holds",
+        );
+    }
+}
+
+/// The other hand's place in the path's hand's frame, and the farthest it moves from `place`
+/// there over a path sampled at 1 kHz once timed: meters, radians.
+fn place_of_the_right(robot: &Robot, q: &[f32]) -> Pose {
+    robot.ee_pose(q, 0).inverse().mul_pose(robot.ee_pose(q, 1))
+}
+
+fn moves_from(robot: &Robot, place: Pose, path: &[f32]) -> (f32, f32) {
+    let trajectory = Trajectory::try_new(robot, path, 1.0).unwrap();
+    let timed = trajectory.sample(1000.0).unwrap();
+    let off = timed.positions.chunks(timed.dof).map(|q| {
+        let now = place_of_the_right(robot, q);
+        (
+            now.position.distance(place.position),
+            now.rotation.angle_between(place.rotation),
+        )
+    });
+    off.fold((0.0, 0.0), |(a, b), (c, d)| {
+        (f32::max(a, c), f32::max(b, d))
+    })
+}
+
+/// A straight move keeps the hands as the start has them. A start that holds the bar to what a
+/// pin allows, the right hand 1.5 mm along two axes from the grasp the hold names, as two IK
+/// solutions leave it, is followed whole at the default precision and at half of it, the right
+/// hand keeping its place in the left's frame to the path's precisions: held to the grasp as
+/// named, 2.1 mm away, it would be off the path before its first step.
+#[test]
+fn a_straight_move_keeps_the_hands_as_the_start_has_them() {
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[common::tray_scene()]).unwrap();
+    let start = holding_at(&device, &worlds, LOW, robot.default_q());
+    let named = bar().also[0];
+    let shifted = Pose::new(
+        named.grasp.position + Vec3::new(1.5e-3, 1.5e-3, 0.0),
+        named.grasp.rotation,
+    );
+    let held = Held {
+        also: vec![Grip {
+            grasp: shifted,
+            ..named
+        }],
+        ..bar()
+    };
+    let place = place_of_the_right(&robot, &start);
+    let lifted = left_at(LOW + Vec3::Z * 0.15, 0.3);
+    for precision in [1e-3, 5e-4] {
+        let o = ToolPathOptions {
+            precision,
+            ..Default::default()
+        };
+        let path = straight(&start, 0, vec![lifted], Some(held.clone()));
+        let followed = batchplan::follow(&device, &worlds, &[path], &o).unwrap();
+        assert_eq!(followed.fraction[0], 1.0, "{:?}", followed.stopped[0]);
+        let (away, turned) = moves_from(&robot, place, &followed.paths[0]);
+        assert!(
+            away <= 1.5 * precision && turned <= 1.5 * o.rotation_precision,
+            "held to {precision} m, the right hand moves {:.3} mm and {turned:.4} rad from its \
+             place at the start",
+            away * 1e3
+        );
+    }
+}
+
+/// A hand that does not hold the object follows no path on joints that move a hand that does: on
+/// two Pandas with a third hand on the left arm's fourth link, a path of the third while the
+/// first two hold the bar is an input error, as it would turn the left arm under the bar; with
+/// the joints it shares held, it is taken, and in one call with a path of a hand that holds the
+/// bar each comes to what it does alone. A place sets down what two hands hold, not three.
+#[test]
+fn a_hand_that_does_not_hold_leaves_those_that_do_alone() {
+    let two = common::two_pandas().unwrap();
+    let on_two = Device::cpu(&two).unwrap();
+    let worlds = on_two.upload(&[common::tray_scene()]).unwrap();
+    let start = holding_at(&on_two, &worlds, LOW, two.default_q());
+    let links = ["left_ee_link", "right_ee_link", "left_panda_link4"];
+    let robot = common::two_pandas_with(&links).unwrap();
+    assert_eq!((robot.hands(), robot.dof()), (3, two.dof()));
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[common::tray_scene()]).unwrap();
+    let elbow = robot.ee_pose(&start, 2);
+    let raised = Pose::new(elbow.position + Vec3::Z * 0.02, elbow.rotation);
+    let path = straight(&start, 2, vec![raised], Some(bar()));
+    input(
+        batchplan::follow(
+            &device,
+            &worlds,
+            std::slice::from_ref(&path),
+            &Default::default(),
+        ),
+        "path 0: hand 2 follows a path on joints that move hand 0",
+    );
+    let still = ToolPath {
+        hold: robot.hand_joints(2),
+        ..path
+    };
+    // It has no joints left to move on. In one call with a path of a hand that holds, each comes
+    // to what it does alone.
+    let lifted = straight(
+        &start,
+        0,
+        vec![left_at(LOW + Vec3::Z * 0.1, 0.0)],
+        Some(bar()),
+    );
+    let o = ToolPathOptions::default();
+    let both = [still.clone(), lifted.clone(), still];
+    let followed = batchplan::follow(&device, &worlds, &both, &o).unwrap();
+    assert_eq!(followed.fraction, [0.0, 1.0, 0.0], "{:?}", followed.stopped);
+    let alone = batchplan::follow(&device, &worlds, &[lifted], &o).unwrap();
+    assert_eq!(followed.paths[1], alone.paths[0]);
+    assert!(followed.paths[0].is_empty() && followed.paths[2].is_empty());
+    let three = Held {
+        also: vec![
+            bar().also[0],
+            Grip {
+                hand: 2,
+                grasp: Pose::IDENTITY,
+            },
+        ],
+        ..bar()
+    };
+    let place = Place::new(0, start, three, [common::tray(LOW, 0.0)]);
+    input(
+        batchplan::place(&device, &worlds, &[place], &Default::default()),
+        "2 other hands hold the object with hand 0",
+    );
+}
+
+/// The other hand is held to the path's precisions between steps too. Turning the left hand half a
+/// radian about its own axis in one step is one joint's motion, which keeps the left hand on its
+/// path, and moves the right hand along an arc 12 cm long, which the joints' straight move from
+/// one end to the other leaves by a third of a millimeter: held to 0.2 mm, the step is halved
+/// until the right hand keeps its grasp, where the same turn holding nothing takes the one step.
+/// With the right arm's joints held it cannot keep up, and the motion stops at the start.
+#[test]
+fn the_other_hand_keeps_its_grasp_between_steps() {
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[common::tray_scene()]).unwrap();
+    let start = holding_at(&device, &worlds, LOW + Vec3::Z * 0.1, robot.default_q());
+    let left = robot.ee_pose(&start, 0);
+    let turned = Pose::new(
+        left.position,
+        left.rotation * glam::Quat::from_rotation_z(0.5),
+    );
+    let coarse = ToolPathOptions {
+        step: 1.0,
+        rotation_step: 1.0,
+        precision: 2e-4,
+        ..Default::default()
+    };
+    let turns = [
+        straight(&start, 0, vec![turned], Some(bar())),
+        straight(&start, 0, vec![turned], None),
+    ];
+    let followed = batchplan::follow(&device, &worlds, &turns, &coarse).unwrap();
+    assert_eq!(followed.fraction, [1.0; 2], "{:?}", followed.stopped);
+    let n = robot.dof();
+    let [together, alone] = [0, 1].map(|k| followed.paths[k].len() / n);
+    assert!(
+        together > alone,
+        "holding the bar the turn takes more steps than the {alone} control points of one, not \
+         {together}"
+    );
+    let (away, turned_off) = strays(&robot, &followed.paths[0]);
+    assert!(
+        away <= 2e-4 && turned_off <= 0.01,
+        "the right hand is {:.3} mm and {turned_off:.4} rad off its grasp",
+        away * 1e3
+    );
+    let [turn, _] = turns;
+    let held_still = ToolPath {
+        hold: robot.hand_joints(1),
+        ..turn
+    };
+    let stopped = batchplan::follow(&device, &worlds, &[held_still], &coarse).unwrap();
+    assert_eq!(stopped.fraction[0], 0.0);
+    assert!(
+        matches!(stopped.stopped[0], Some(ToolPathStop::Unreachable { .. })),
+        "{:?}",
+        stopped.stopped[0]
+    );
+}
+
+/// A handover moves what one hand holds, and refuses what two hold together.
+#[test]
+fn a_handover_refuses_what_two_hands_hold() {
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[common::tray_scene()]).unwrap();
+    let start = holding_at(&device, &worlds, LOW, robot.default_q());
+    let handover = Handover::new(&robot, 0, start, bar(), 1);
+    input(
+        batchplan::handover(&device, &worlds, &[handover], &Default::default()),
+        "hands 0 and 1 hold the object together",
+    );
+}
+
+/// Where the bar lies across the top of the tray scene's block, along y.
+const ON_BLOCK: Vec3 = Vec3::new(0.5, 0.0, 0.265);
+
+/// The tray scene's block, obstacle 0, with the bar lying on it at `ON_BLOCK`, obstacle 1.
+fn bar_on_the_block() -> World {
+    let mut world = common::tray_scene();
+    let lying = bar().object.placed(common::tray(ON_BLOCK, 0.0));
+    world.obstacles.push(lying);
+    world
+}
+
+/// Grasps of the bar on the block from above toward hand `hand`'s end of it (the left's, +y, for
+/// hand 0), as `grasps` holds it toward its ends: the two that close across it, each way round.
+fn from_above(hand: usize) -> Vec<Hold> {
+    let calibration = GripperCalibration::new(0.08, 0.0, HashMap::new());
+    let gripper = common::panda().unwrap().gripper(0, &calibration).unwrap();
+    let options = ShapeGraspOptions {
+        along: 0.75,
+        floor: Some(0.255),
+        ..ShapeGraspOptions::default()
+    };
+    let all = batchplan::grasps(&bar_on_the_block().obstacles[1], &gripper, &options).unwrap();
+    let side = if hand == 0 { 1.0 } else { -1.0 };
+    let mine = all
+        .into_iter()
+        .filter(|g| (g.rotation * Vec3::Z).z < -0.9 && g.position.y * side > 0.0);
+    let mine: Vec<Hold> = mine.map(Hold::from).collect();
+    assert_eq!(mine.len(), 2, "hand {hand}'s end has two grasps from above");
+    mine
+}
+
+/// The left hand picking the bar up off the block with the right, by pairs of their grasps from
+/// above at their ends: each of the left's with each of the right's, the left's second costing 1,
+/// and the right's second costing a half and closing the right fingers on the bar, 3 cm apart, so
+/// that its pairs are a group of their own and touch the bar.
+fn pick_by_two(robot: &Robot) -> Pick {
+    let mut firsts = from_above(0);
+    firsts[1].cost = 1.0;
+    let mut seconds = from_above(1);
+    seconds[1].cost = 0.5;
+    let narrower = ["right_panda_finger_joint1", "right_panda_finger_joint2"];
+    seconds[1].locked = HashMap::from(narrower.map(|j| (j.to_string(), 0.015)));
+    let pairs = firsts
+        .iter()
+        .flat_map(|first| seconds.iter().map(move |second| (first, second)));
+    let (firsts, seconds): (Vec<Hold>, Vec<Hold>) =
+        pairs.map(|(a, b)| (a.clone(), b.clone())).unzip();
+    Pick {
+        also: Some(HandGrasps {
+            hand: 1,
+            grasps: seconds,
+        }),
+        support: vec![0],
+        ..Pick::new(0, robot.default_q(), 1, firsts)
+    }
+}
+
+/// Where the first plan of the pick by two hands leaves the robot, and what it holds.
+fn picked_by_two(device: &Device) -> (Vec<f32>, Held) {
+    let worlds = device.upload(&[bar_on_the_block()]).unwrap();
+    let task = pick_by_two(device.robot());
+    let picked = batchplan::pick(device, &worlds, &[task], &TaskOptions::default()).unwrap();
+    let plans = picked.outcomes[0]
+        .as_ref()
+        .expect("the hands pick the bar up");
+    (plans[0].end().to_vec(), plans[0].held.clone().unwrap())
+}
+
+/// That along `t`, sampled at 1 kHz, hand `second` stays where `t` starts it until hand `first`
+/// is where `t` ends it, and `first` stays there after: each moves on a leg of its own, `first`'s
+/// first. Each moves 5 cm or more.
+fn in_turn(robot: &Robot, t: &Trajectory, [first, second]: [usize; 2], what: &str) {
+    let n = robot.dof();
+    let points = &t.control_points;
+    let (begin, end) = (&points[..n], &points[points.len() - n..]);
+    let waiting = robot.ee_pose(begin, second).position;
+    let done = robot.ee_pose(end, first).position;
+    let timed = t.sample(1000.0).unwrap();
+    for (k, q) in timed.positions.chunks(n).enumerate() {
+        let waits = robot.ee_pose(q, second).position.distance(waiting) < 1e-4;
+        let there = robot.ee_pose(q, first).position.distance(done) < 1e-4;
+        assert!(
+            waits || there,
+            "{what}: at {k} ms hand {first} moves while hand {second} does"
+        );
+    }
+    for hand in [first, second] {
+        let moved = robot.ee_pose(begin, hand).position;
+        let moved = moved.distance(robot.ee_pose(end, hand).position);
+        assert!(moved > 0.05, "{what}: hand {hand} moves {moved} m");
+    }
+}
+
+/// The fastest hand `hand` moves along `t`, sampled at 1 kHz: from the joint velocities, the
+/// hand's positions 5 ms of that motion either side.
+fn fastest(robot: &Robot, t: &Trajectory, hand: usize) -> f32 {
+    let n = robot.dof();
+    let timed = t.sample(1000.0).unwrap();
+    let states = timed.positions.chunks(n).zip(timed.velocities.chunks(n));
+    let h = 0.005;
+    let speeds = states.map(|(q, dq)| {
+        let moved = |by: f32| {
+            let q: Vec<f32> = q.iter().zip(dq).map(|(q, dq)| q + by * dq).collect();
+            robot.ee_pose(&q, hand).position
+        };
+        moved(h).distance(moved(-h)) / (2.0 * h)
+    });
+    speeds.fold(0.0, f32::max)
+}
+
+/// How many of `t`'s states, at 1 kHz, collide holding `held` in world 0 of `worlds`.
+fn colliding(device: &Device, worlds: &Worlds, held: &Held, t: &Trajectory) -> usize {
+    let timed = t.sample(1000.0).unwrap();
+    let samples = timed.positions.len() / timed.dof;
+    let contacts = device.contacts_holding(
+        worlds,
+        &vec![0; samples],
+        &timed.positions,
+        0.0,
+        &vec![Some(held); samples],
+    );
+    contacts.unwrap().iter().filter(|c| !c.is_empty()).count()
+}
+
+/// Two hands pick the bar up off the block, each by grasps of its own at its end, every pair
+/// getting through, those whose right fingers close on the bar too: candidates are the pairs as
+/// given, each costing its two holds' sum and keeping both holds' fingers, and the plans hold the
+/// bar with the right hand at the pair's grasp. Sampled at 1 kHz, the left hand moves in while
+/// the right waits, then the right while the left waits at
+/// its grasp, each under the tool speed, and both end at their grasps; the lift raises the right
+/// hand with the left, within 2 mm and 0.02 rad of its grasp, clear of everything holding the bar.
+/// With a count of plans that will do, the first that many pairs in the given order come back, as
+/// trying every pair gives them.
+#[test]
+fn two_hands_pick_up_the_bar_by_its_ends() {
+    let robot = common::two_pandas().unwrap();
+    let n = robot.dof();
+    let task = pick_by_two(&robot);
+    let (firsts, seconds) = (&task.grasps, &task.also.as_ref().unwrap().grasps);
+    let lying = common::tray(ON_BLOCK, 0.0);
+    let o = TaskOptions::default();
+    for device in common::devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(&[bar_on_the_block()]).unwrap();
+        let lifting = task.lift_world(&bar_on_the_block()).unwrap();
+        let lifting = device.upload(&[lifting]).unwrap();
+        let plans_of = |task: &Pick| {
+            let result = batchplan::pick(&device, &worlds, std::slice::from_ref(task), &o);
+            let mut result = result.unwrap();
+            assert_eq!(
+                result.problems[0].grasps, task.grasps,
+                "{name}: the problem as given"
+            );
+            result.outcomes.remove(0)
+        };
+        let all = plans_of(&task).unwrap_or_else(|failure| panic!("{name}: {failure}"));
+        assert_eq!(all.len(), 4, "{name}: every pair gets through");
+        for plan in &all {
+            let what = format!("{name}: pair {}", plan.candidate);
+            let k = plan.candidate;
+            assert!(k < firsts.len(), "{what}");
+            let held = plan
+                .held
+                .clone()
+                .expect("a pick leaves the hands holding the bar");
+            let mut locked = firsts[k].locked.clone();
+            locked.extend(seconds[k].locked.clone());
+            assert_eq!(
+                (held.hand, held.grasp, &held.locked),
+                (0, firsts[k].pose, &locked),
+                "{what}"
+            );
+            let second = Grip {
+                hand: 1,
+                grasp: seconds[k].pose,
+            };
+            assert_eq!(held.also, [second], "{what}");
+            assert_eq!(plan.cost, firsts[k].cost + seconds[k].cost, "{what}");
+            in_turn(
+                &robot,
+                &plan.approach,
+                [0, 1],
+                &format!("{what}, moving in"),
+            );
+            let points = &plan.approach.control_points;
+            let grasped = &points[points.len() - n..];
+            for (hand, grasp) in [(0, firsts[k].pose), (1, seconds[k].pose)] {
+                let (at, wanted) = (robot.ee_pose(grasped, hand), lying.mul_pose(grasp));
+                assert!(
+                    at.position.distance(wanted.position) < 2e-3
+                        && at.rotation.angle_between(wanted.rotation) < 0.02,
+                    "{what}: hand {hand} at {at:?}, not its grasp {wanted:?}"
+                );
+            }
+            for (kind, t) in [("in", &plan.approach), ("away", &plan.depart)] {
+                for hand in [0, 1] {
+                    let fastest = fastest(&robot, t, hand);
+                    assert!(
+                        fastest <= o.tool_speed * (1.0 + 1e-3),
+                        "{what}: hand {hand} moves {kind} at {fastest} m/s"
+                    );
+                }
+            }
+            let (away, turned) = strays_from(&robot, &held, &plan.depart.control_points);
+            assert!(
+                away <= 2e-3 && turned <= 0.02,
+                "{what}: the lift moves the right hand {:.2} mm and {turned:.4} rad off its grasp",
+                away * 1e3
+            );
+            let height = |q: &[f32]| robot.ee_pose(q, 1).position.z;
+            let rose = height(plan.end()) - height(grasped);
+            assert!(
+                (rose - task.lift.z).abs() < 2e-3,
+                "{what}: the right hand rises {rose} m with the left"
+            );
+            let collides = colliding(&device, &lifting, &held, &plan.depart);
+            assert_eq!(collides, 0, "{what}: the lift collides");
+        }
+        let mut through: Vec<usize> = all.iter().map(|plan| plan.candidate).collect();
+        through.sort_unstable();
+        for enough in [1, 2] {
+            let some = Pick {
+                enough: Some(enough),
+                ..task.clone()
+            };
+            let found = plans_of(&some).unwrap();
+            let first = &through[..enough.min(through.len())];
+            let wanted = all.iter().filter(|plan| first.contains(&plan.candidate));
+            let wanted: Vec<usize> = wanted.map(|plan| plan.candidate).collect();
+            let found: Vec<usize> = found.iter().map(|plan| plan.candidate).collect();
+            assert_eq!(found, wanted, "{name}: {enough} will do");
+        }
+    }
+}
+
+/// A pick by two hands needs another hand of the robot's than its own, with a grasp for each of
+/// the pick's, checked as a pick's own are, and pairs whose holds keep each locked joint at one
+/// value and whose costs add up to a finite one; a place of what two hands hold needs both at
+/// their grasps at its start. Anything else is an input error that names it.
+#[test]
+fn two_hands_refuse_what_they_cannot_share() {
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let worlds = device.upload(&[bar_on_the_block()]).unwrap();
+    let o = TaskOptions::default();
+    let task = pick_by_two(&robot);
+    let second = |change: &dyn Fn(&mut HandGrasps)| {
+        let mut changed = task.clone();
+        change(changed.also.as_mut().unwrap());
+        changed
+    };
+    let finger = |value: f32| HashMap::from([("right_panda_finger_joint1".to_string(), value)]);
+    let mut disagree = task.clone();
+    disagree.grasps[1].locked = finger(0.03);
+    let costly = |hold: &Hold| Hold {
+        cost: f32::MAX,
+        ..hold.clone()
+    };
+    let past_any_cost = Pick {
+        grasps: task.grasps.iter().map(costly).collect(),
+        ..second(&|also| also.grasps = also.grasps.iter().map(costly).collect())
+    };
+    let cases = [
+        (
+            second(&|also| also.hand = 2),
+            "task 0: hand 2 takes hold with hand 0",
+        ),
+        (
+            second(&|also| also.hand = 0),
+            "task 0: hand 0 takes hold with hand 0",
+        ),
+        (
+            second(&|also| also.grasps.truncate(3)),
+            "task 0 has 4 grasps and 3 of the second hand's",
+        ),
+        (
+            second(&|also| also.grasps.clear()),
+            "task 0 has 4 grasps and 0 of the second hand's",
+        ),
+        (
+            second(&|also| also.grasps[1].pose.rotation *= 2.0),
+            "task 0: second hand's grasp 1 must be finite with a unit rotation",
+        ),
+        (
+            second(&|also| also.grasps[0].cost = f32::NAN),
+            "task 0: second hand's grasp 0 must cost a finite amount",
+        ),
+        (
+            second(&|also| also.grasps[0].locked = HashMap::from([("no_joint".into(), 0.0)])),
+            "task 0, second hand's grasp 0",
+        ),
+        (
+            disagree,
+            "task 0: pair 1 locks joint 'right_panda_finger_joint1' at 0.03 by the first hand's \
+             grasp and at 0.015 by the second's",
+        ),
+        (past_any_cost, "task 0: pair 0's grasps cost"),
+    ];
+    for (pick, names) in cases {
+        input(batchplan::pick(&device, &worlds, &[pick], &o), names);
+    }
+    let bare = device.upload(&[common::tray_scene()]).unwrap();
+    let off = Place::new(0, robot.default_q(), bar(), [common::tray(ON_BLOCK, 0.0)]);
+    input(
+        batchplan::place(&device, &bare, &[off], &o),
+        "task 0: at the start, hand 1 is not at its grasp of the object hand 0 holds",
+    );
+}
+
+/// Two hands set down the bar they picked up, 4 cm along the block: the transit and the lower keep
+/// the right hand within 2 mm and 0.02 rad of its grasp at 1 kHz; the left hand backs off 10 cm
+/// along its z axis while the right waits, then the right, its fingers opened only to the bar's
+/// width, touching it; the bar is placed where it was let go
+/// of; and a plan holding nothing starts where the place ends.
+#[test]
+fn two_hands_set_the_bar_down_and_back_off_in_turn() {
+    let robot = common::two_pandas().unwrap();
+    let n = robot.dof();
+    let o = TaskOptions::default();
+    let release = common::tray(ON_BLOCK + Vec3::Y * 0.04, 0.0);
+    for device in common::devices(&robot) {
+        let name = device.name();
+        let (start, held) = picked_by_two(&device);
+        let worlds = device.upload(&[common::tray_scene()]).unwrap();
+        let on_the_bar = ["right_panda_finger_joint1", "right_panda_finger_joint2"];
+        let place = Place {
+            support: vec![0],
+            open: vec![HashMap::from(on_the_bar.map(|j| (j.to_string(), 0.015)))],
+            ..Place::new(0, start.clone(), held.clone(), [release])
+        };
+        let result = batchplan::place(&device, &worlds, std::slice::from_ref(&place), &o).unwrap();
+        let plans = result.outcomes[0].as_ref();
+        let plans = plans.unwrap_or_else(|failure| panic!("{name}: {failure}"));
+        for plan in plans {
+            let transit = plan.transit.as_ref().expect("the place plans its transit");
+            assert_eq!(&transit.control_points[..n], &start[..], "{name}");
+            for (kind, t) in [("transit", transit), ("lower", &plan.approach)] {
+                let (away, turned) = strays_from(&robot, &held, &t.control_points);
+                assert!(
+                    away <= 2e-3 + 1e-5 && turned <= 0.02 + 1e-4,
+                    "{name}: the {kind} moves the right hand {:.2} mm and {turned:.4} rad off its \
+                     grasp",
+                    away * 1e3
+                );
+            }
+            let points = &plan.approach.control_points;
+            let let_go = &points[points.len() - n..];
+            let height = |q: &[f32]| robot.ee_pose(q, 1).position.z;
+            let lowered = height(&points[..n]) - height(let_go);
+            assert!(
+                (lowered - 0.1).abs() < 2e-3,
+                "{name}: the right hand lowers {lowered} m"
+            );
+            assert_eq!(plan.opening, Some(0), "{name}");
+            in_turn(
+                &robot,
+                &plan.depart,
+                [0, 1],
+                &format!("{name}, backing off"),
+            );
+            let grasps = [(0, held.grasp), (1, held.also[0].grasp)];
+            for (hand, grasp) in grasps {
+                let wanted = release.mul_pose(grasp);
+                let back = wanted.position - wanted.rotation * Vec3::Z * place.retreat;
+                let at = robot.ee_pose(plan.end(), hand).position;
+                assert!(
+                    at.distance(back) < 2e-3,
+                    "{name}: hand {hand} backs off to {at}, not {back}"
+                );
+            }
+            let set_down = held.object.placed(release);
+            assert_eq!(plan.placed.as_ref(), Some(&set_down), "{name}");
+            let mut there = common::tray_scene();
+            there.obstacles.push(set_down);
+            let there = device.upload(&[there]).unwrap();
+            let away = [PlanProblem::new(0, plan.end().to_vec(), robot.default_q())];
+            let away = batchplan::plan(&device, &there, &away, &PlanOptions::default()).unwrap();
+            assert!(away.best(0).is_some(), "{name}: {:?}", away.failures);
+        }
+    }
+}
+
+/// Pick, carry and place on one device, each starting where the one before ends: the hands pick
+/// the bar up off the block, a plan holding it carries it up in front of the block, and they set
+/// it down on the block again, the place's transit keeping the right hand at its grasp.
+#[test]
+fn two_hands_pick_carry_and_place_the_bar() {
+    let robot = common::two_pandas().unwrap();
+    let n = robot.dof();
+    let device = Device::cpu(&robot).unwrap();
+    let o = TaskOptions::default();
+    let worlds = device
+        .upload(&[bar_on_the_block(), common::tray_scene()])
+        .unwrap();
+    let picked = batchplan::pick(&device, &worlds, &[pick_by_two(&robot)], &o).unwrap();
+    let picked = &picked.outcomes[0]
+        .as_ref()
+        .expect("the hands pick the bar up")[0];
+    let pick_transit = picked.transit.as_ref().expect("the pick plans its transit");
+    assert_eq!(&pick_transit.control_points[..n], robot.default_q());
+    let held = picked.held.clone().unwrap();
+    let up = common::tray(Vec3::new(0.3, 0.0, 0.45), 0.3).mul_pose(held.grasp);
+    let carry = PlanProblem {
+        holding: Some(held.clone()),
+        ..PlanProblem::new(1, picked.end().to_vec(), Goal::Poses(vec![Some(up), None]))
+    };
+    let carried = batchplan::plan(&device, &worlds, &[carry], &PlanOptions::default()).unwrap();
+    let carried = carried.best(0).expect("the hands carry the bar").to_vec();
+    assert_eq!(&carried[..n], picked.end());
+    let (away, turned) = strays_from(&robot, &held, &carried);
+    assert!(away <= 2e-3 + 1e-5 && turned <= 0.02 + 1e-4);
+    let end = &carried[carried.len() - n..];
+    let releases =
+        [-0.04, 0.0, 0.04].map(|y| Release::from(common::tray(ON_BLOCK + Vec3::Y * y, 0.0)));
+    let place = Place {
+        support: vec![0],
+        ..Place::new(1, end.to_vec(), held.clone(), releases)
+    };
+    let placed = batchplan::place(&device, &worlds, &[place], &o).unwrap();
+    let placed = &placed.outcomes[0]
+        .as_ref()
+        .expect("the hands set the bar down")[0];
+    let transit = placed
+        .transit
+        .as_ref()
+        .expect("the place plans its transit");
+    assert_eq!(&transit.control_points[..n], end);
+    let (away, turned) = strays_from(&robot, &held, &transit.control_points);
+    assert!(
+        away <= 2e-3 + 1e-5 && turned <= 0.02 + 1e-4,
+        "the place's transit moves the right hand {:.2} mm and {turned:.4} rad off its grasp",
+        away * 1e3
+    );
+    let release = releases[placed.candidate].pose;
+    assert_eq!(placed.placed, Some(held.object.placed(release)));
+}
+
+/// What a task's plans come to, to tell two calls' apart: each plan's candidate, cost and
+/// motions' control points.
+fn plans_of(outcome: &Result<Vec<TaskPlan>, TaskFailure>) -> Vec<(usize, f32, Vec<Vec<f32>>)> {
+    let plans = outcome
+        .as_ref()
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let motions = |plan: &TaskPlan| plan.motions().map(|t| t.control_points.clone()).collect();
+    plans
+        .iter()
+        .map(|plan| (plan.candidate, plan.cost, motions(plan)))
+        .collect()
+}
+
+/// One call takes tasks by one hand and by two: a pick of the bar by the left hand alone and one
+/// by both, and places of what each then holds, come to what each comes to in a call of its own.
+/// A place by two hands takes an idle configuration for the joints neither hand moves alone: on
+/// two arms that is none, so one that puts the right arm's joints past their limits changes
+/// nothing.
+#[test]
+fn one_call_takes_tasks_by_one_hand_and_by_two() {
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let o = TaskOptions::default();
+    let worlds = device.upload(&[bar_on_the_block()]).unwrap();
+    let picks = [
+        pick_by_two(&robot),
+        Pick {
+            support: vec![0],
+            ..Pick::new(0, robot.default_q(), 1, from_above(0))
+        },
+    ];
+    let together = batchplan::pick(&device, &worlds, &picks, &o).unwrap();
+    let mut places = vec![];
+    for (task, outcome) in picks.iter().zip(&together.outcomes) {
+        let alone = batchplan::pick(&device, &worlds, std::slice::from_ref(task), &o).unwrap();
+        assert_eq!(plans_of(outcome), plans_of(&alone.outcomes[0]));
+        let first = &outcome.as_ref().unwrap()[0];
+        let held = first.held.clone().expect("a pick holds what it picked up");
+        assert_eq!(held.also.len(), usize::from(task.also.is_some()));
+        places.push(Place {
+            support: vec![0],
+            ..Place::new(
+                0,
+                first.end().to_vec(),
+                held,
+                [common::tray(ON_BLOCK + Vec3::Y * 0.04, 0.0)],
+            )
+        });
+    }
+    let worlds = device.upload(&[common::tray_scene()]).unwrap();
+    let together = batchplan::place(&device, &worlds, &places, &o).unwrap();
+    for (task, outcome) in places.iter().zip(&together.outcomes) {
+        let alone = batchplan::place(&device, &worlds, std::slice::from_ref(task), &o).unwrap();
+        assert_eq!(plans_of(outcome), plans_of(&alone.outcomes[0]));
+    }
+    let mut idle = places[0].start.clone();
+    for j in robot.hand_joints(1) {
+        idle[j] = 100.0;
+    }
+    let idling = Place {
+        idle: Some(idle),
+        ..places[0].clone()
+    };
+    let idled = batchplan::place(&device, &worlds, &[idling], &o).unwrap();
+    assert_eq!(
+        plans_of(&idled.outcomes[0]),
+        plans_of(&together.outcomes[0])
+    );
+}

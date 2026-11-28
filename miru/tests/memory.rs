@@ -826,6 +826,7 @@ fn grasped(memory: &Memory, id: u32) -> Held {
         shape => panic!("a shape these tests do not hold: {shape:?}"),
     };
     Held {
+        also: vec![],
         hand: 0,
         object: at_origin,
         grasp: Pose::new(Vec3::new(0.0, 0.0, -0.02), Quat::IDENTITY),
@@ -1798,6 +1799,7 @@ fn a_hold_keeps_its_fingers_where_it_closed_them() {
         let at = center.with_z(top_of(&room) - 0.015) - toward * (radius + 0.04);
         let pose = Pose::new(at, down);
         let held = Held {
+            also: vec![],
             hand: 0,
             object: Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.005)),
             grasp: Pose::IDENTITY,
@@ -1843,6 +1845,7 @@ fn a_hold_a_restart_brings_back_is_held_and_let_go_as_its_shape() {
     let away = robot.default_q();
     let fresh = memory(&device);
     let held = Held {
+        also: vec![],
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, BOX_HALF),
         grasp: Pose::new(Vec3::new(0.0, 0.0, -0.02), Quat::IDENTITY),
@@ -2625,6 +2628,7 @@ fn a_grasp_of_the_rim_separates_its_own_readings() {
         );
         if let Some(body) = &split.body {
             let held = Held {
+                also: vec![],
                 hand: 0,
                 object: body.shape.placed(Pose::IDENTITY),
                 grasp: body
@@ -4985,4 +4989,120 @@ fn a_fall_into_a_box_in_pieces_is_found_in_every_reading_about_it() {
         };
         assert!(why.contains(value), "{why} names {value}");
     }
+}
+
+/// A thing two hands hold is each one's: a robot with a second hand picks the box up with both,
+/// and the memory gives the hold for either hand, refuses a pick of the bowl into either while
+/// they hold it, refuses a hold that names a hand twice, makes the world a step plans against
+/// from a configuration with the box attached once, and after a
+/// let-go has both hands empty and the box among the objects again. Held by the first hand alone,
+/// the second is free to take the bowl, and with the bowl in it, the box is not taken by both.
+#[test]
+fn a_thing_two_hands_hold_is_each_ones() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let things = acts_scene(&robot, away, Some(BOX), Some(BOWL), None);
+    let rendered = render(&things);
+    let seen = first_look(&device, &things, &rendered, (0, 0), away, 0.0);
+    let [the_box, the_bowl] =
+        [1, 2].map(|thing| id_of(seen.kept.scene(), &rendered, thing).expect("an object"));
+    let alone = grasped(&seen.memory, the_box);
+    let together = Held {
+        also: vec![batchplan::Grip {
+            hand: 1,
+            grasp: Pose::new(Vec3::new(0.0, 0.0, 0.3), Quat::IDENTITY),
+        }],
+        ..alone.clone()
+    };
+    let picked = |held: &Held| Act::Picked {
+        id: the_box,
+        held: held.clone(),
+    };
+    let holding = seen
+        .memory
+        .after(&[picked(&together)])
+        .expect("both hands take it");
+    for hand in [0, 1] {
+        assert_eq!(
+            holding.held(hand),
+            Some((the_box, &together)),
+            "hand {hand}"
+        );
+        let bowl = Held {
+            hand,
+            ..grasped(&seen.memory, the_bowl)
+        };
+        let taken = holding.after(&[Act::Picked {
+            id: the_bowl,
+            held: bowl,
+        }]);
+        let Err(batchplan::Error::Input(why)) = taken else {
+            panic!("hand {hand} takes the bowl while it holds the box");
+        };
+        let named = format!("hand {hand}, which holds object {the_box} already");
+        assert!(why.contains(&named), "{why}");
+    }
+    // A world for a configuration is made for the robot holding what its hands hold: the box,
+    // attached once.
+    let step = Step {
+        at: &[away],
+        ..Step::default()
+    };
+    holding
+        .world(&device, &step)
+        .expect("a world with the box in both hands");
+    // A hold names each hand that holds once.
+    for (also, hand) in [(vec![0], 0), (vec![1, 1], 1)] {
+        let grips = also.into_iter().map(|hand| batchplan::Grip {
+            hand,
+            grasp: together.also[0].grasp,
+        });
+        let twice = Held {
+            also: grips.collect(),
+            ..alone.clone()
+        };
+        let Err(batchplan::Error::Input(why)) = seen.memory.after(&[picked(&twice)]) else {
+            panic!("a hold that names hand {hand} twice is taken");
+        };
+        assert!(why.contains(&format!("into hand {hand} twice")), "{why}");
+    }
+    let at = Pose::new(BOX, Quat::IDENTITY);
+    let let_go = Act::LetGo {
+        id: the_box,
+        at,
+        on: None,
+    };
+    let down = holding.after(&[let_go]).expect("both hands let go");
+    assert!(down.held(0).is_none() && down.held(1).is_none());
+    assert!(down.objects().iter().any(|object| object.id == the_box));
+    // Held by the first hand alone, the second holds nothing.
+    let one = seen
+        .memory
+        .after(&[picked(&alone)])
+        .expect("one hand takes it");
+    assert!(one.held(1).is_none());
+    let bowl = Held {
+        hand: 1,
+        ..grasped(&seen.memory, the_bowl)
+    };
+    let both = one.after(&[Act::Picked {
+        id: the_bowl,
+        held: bowl,
+    }]);
+    let busy = both.expect("the second hand takes the bowl");
+    assert_eq!(busy.held(1).map(|(id, _)| id), Some(the_bowl));
+    let together_after = busy.after(&[Act::LetGo {
+        id: the_box,
+        at,
+        on: None,
+    }]);
+    let taken = together_after
+        .expect("the first hand lets go")
+        .after(&[picked(&together)]);
+    let Err(batchplan::Error::Input(why)) = taken else {
+        panic!("both hands take the box while the second holds the bowl");
+    };
+    let named = format!("hand 1, which holds object {the_bowl} already");
+    assert!(why.contains(&named), "{why}");
 }

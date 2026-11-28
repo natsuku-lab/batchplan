@@ -48,6 +48,7 @@ fn main() -> Result<()> {
         let options = [(64, 0.005), (256, 0.005), (64, 0.002), (64, 0.001)];
         for (budget, tolerance) in options {
             let held = Held {
+                also: vec![],
                 hand: 0,
                 object: round(radius, half, capsule),
                 grasp: Pose::IDENTITY,

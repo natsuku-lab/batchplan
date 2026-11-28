@@ -3851,6 +3851,7 @@ fn a_band_flags_exactly_the_readings_behind_a_thing_of_a_flag() {
     let padding = 0.01;
     // A box 6 by 6 by 16 cm in the hand, a table 30 cm under the hand and a block on it.
     let held = Held {
+        also: vec![],
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.03, 0.03, 0.08)),
         grasp: Pose::new(Vec3::new(0.0, 0.0, -0.04), Quat::IDENTITY),
@@ -4898,6 +4899,7 @@ fn a_mask_leaves_out_what_a_hand_holds() {
     let q = robot.default_q().to_vec();
     // A box 6 by 6 by 16 cm, the hand's frame 4 cm over its middle.
     let held = Held {
+        also: vec![],
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.03, 0.03, 0.08)),
         grasp: Pose::new(Vec3::new(0.0, 0.0, -0.04), Quat::IDENTITY),
@@ -5017,6 +5019,7 @@ fn a_mask_holds_the_fingers_where_a_hold_locks_them() {
         .into();
     let closed = robot.relock(&shut).unwrap();
     let open = Held {
+        also: vec![],
         hand: 0,
         object: Obstacle::sphere(Vec3::ZERO, 0.005),
         grasp: Pose::IDENTITY,

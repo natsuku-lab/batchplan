@@ -163,7 +163,7 @@ fn main() -> Result<(), Error> {
 ```
 
 - **What it bounds.** Each bound is measured from `pose`, in the world. `tilt` is the angle between the hand's z axis and `pose`'s: a cone, which "within 5° of upright" means, rather than a box on roll and pitch, which allows 7.07° at its corners and is singular at a pitch of ±90°. `twist` is how far the hand turns about its z axis once its tilt is taken out (the swing-twist decomposition); a hand tilted half a turn has no such turn, so a bounded twist needs a tilt bound of at most π/2. `position` is how far the hand's origin may be from `pose.position` along each world axis. Infinity leaves an axis of the box free, and π or more an angle. Bounds below what IK solves to (1 mm, 0.01 rad) count as those, so a goal IK solved for the pose keeps a constraint pinned to it.
-- **Relative to another hand.** With `relative_to: Some(other)`, `pose` and the bounds are in that hand's frame and move with it, the box along its axes, as MoveIt's constraints take a link's frame. Two hands holding one tray pin the second hand where it holds it in the first's frame, `HandConstraint { relative_to: Some(0), position: Vec3::ZERO, tilt: 0.0, twist: 0.0, ..HandConstraint::new(1, place) }` with `place` the first hand's pose inverted times the second's at the start, and keep the first upright to carry the tray level. The floors double (2 mm, 0.02 rad): both hands' IK errors add.
+- **Relative to another hand.** With `relative_to: Some(other)`, `pose` and the bounds are in that hand's frame and move with it, the box along its axes, as MoveIt's constraints take a link's frame. Two hands holding one tray pin the second hand where it holds it in the first's frame, `HandConstraint { relative_to: Some(0), position: Vec3::ZERO, tilt: 0.0, twist: 0.0, ..HandConstraint::new(1, place) }` with `place` the first hand's pose inverted times the second's at the start, and keep the first upright to carry the tray level. The floors double (2 mm, 0.02 rad): both hands' IK errors add. A problem that holds the tray with both hands (`Held::also`) keeps this pin by itself, with the tray as a collision body ([holding objects](robots.md#holding-objects)).
 - **The ends.** The start and the goal must keep their constraints; an input error names the bound broken and by how much. `Robot::breach(constraints, q)` runs the same test, to drop IK goals that break them before planning. Take them from one IK branch: on the example's reaches, a start IK placed with the Panda's third joint at its limit, the arm wound the other way round its base, reaches only a few of the goals inside the zone even with 100,000 samples, since unwinding the arm with the gripper upright leaves the zone; from the solution nearest the ready pose, all 53.
 - **How it plans.** As CBiRRT does, by projection. RRT-Connect's extensions and connections walk toward their targets in hops of eight `rrt.resolution` steps (0.25 rad), one SIMD pass each. Each hop is projected back inside the bounds by damped least squares on the bounds it breaks, through the Jacobians of the hand and of the hand it is relative to. Projection lands a little inside (half the bound, up to 1 cm and 2°), so the edges between hops have room to bulge. The straight line comes first, then its projected walk, before any sampling. Shortcuts and smoothing keep the constraints too, and a smoothed waypoint is projected back inside before it is checked. Under a bound below 2 cm or 4°, twice that room, as for a hand pinned in another's frame, straight shortcuts mostly leave it: from a waypoint whose straight shortcuts stop short of the end, shortcutting walks projected toward farther waypoints, the end first, halving a hop whose edge bulges out at its middle, and keeps a walk that arrives shorter.
 - **The guarantee.** Every state a search, a shortcut or a spline is checked at is tested against the bounds as given, in the SIMD lanes beside the collision test, so the returned path keeps them wherever it is checked: at `shortcut.resolution` along searched paths, their splines and optimized seeds (and at least `validate_substeps` per span along a spline). Between those states a path may stray past a bound by a hair.
@@ -222,6 +222,7 @@ fn main() -> Result<(), Error> {
 - **The motion.** A cubic B-spline passes through every configuration and rests at both ends. Where it would stray from the path by more than the precision, as at a sharp turn, or pass a joint limit, as where a joint arrives at its limit and stays, it stops at the configuration there instead. It is checked for collision at the planner's resolution, honouring [allowed contacts](perception.md#allowed-contacts), so an approach can end with the fingers around what they grasp.
 - **How far it got.** A motion that cannot finish goes as far as it can. `fraction` says how much of the path it covers, by its steps, and `stopped` why it ended there: `Unreachable` (beyond reach or joint limits, at a singularity IK cannot step through, or where the joints left by `hold` cannot keep the hand on the path), `Collision`, or `Jump` (configurations either side, but no motion between them keeps the hand on the path, as when IK leaps to another branch). Near a singularity, IK given more `iterations` may instead carry the arm through, swinging the wrist on the way while the hand keeps to the path. Each names the pose it stopped before. `paths` holds the motion that does run, ready for timing.
 - **Timing.** `Trajectory::with_hand_speed` times the motion as fast as the joints' limits allow with the hand under caps on its speed and on how fast it turns ([below](#executable-trajectories)); `Trajectory::try_new` times it by the joints alone.
+- **Held by two hands.** A path whose hand holds its object with other hands (`holding`, a `Held` with `also`) takes them along, the object rigid between them as the start holds it. The start must have every hand at its grasp, to what a pin allows ([two hands](robots.md#holding-objects)); each then keeps the place in the path's hand's frame it has there: at every step it is moved to it, on the joints of its own chain that the path's hand does not move and the path does not `hold`, and between steps and along the spline it keeps within `precision` and `rotation_precision` of it, the step halved until it does. The motion stops where one cannot reach its place (`Unreachable`) or keep to it between steps (`Jump`). Either hand's path will do. A hand that does not hold the object follows no path on joints that move one that does, unless the path holds them: an input error.
 - **Speed.** Paths are searches, run in parallel on the device's threads like plans. One 10 cm move takes 0.042 ms on one of the Ryzen's threads and 0.035 ms on the M4 Pro's; 64 take 0.27 ms on 32 threads and 0.37 ms on 14 ([Benchmarks](benchmarks.md#tool-paths)).
 
 ## Picking up and setting down
@@ -320,7 +321,7 @@ Three pages go further:
 - **A world per step.** A task's `world` is the one the hand grasps or lets go in, and each other step's unless that names its own: `transit_world` for the start and the planned path, `depart_world` for the move away. Each holds the task's obstacles, in the same order, shaped or touched (`World::touch`) otherwise, so a hand that may lean on the bin an object stands in at the grasp plans its way there touching nothing, or around the bin as measured where the grasp sees it as a box. Several ways of allowing a task are several tasks of one call, and the first of them with a plan is the one to run.
 - **Picking one part of a body.** When the world represents a movable object in pieces, give `Pick::object` the index of the part the fingers may touch. Express each grasp in that part's frame. In `Pick::body`, give the shape of the entire body in world coordinates and the indices of the other pieces that move with it. They still block the hand on approach. Once the gripper closes, the returned `Held` uses the body's frame and the departure checks that shape against the remaining world. An enclosing box or cylinder for a hollow body also fills its interior during the lift. Call `pick.lift_world(&departure_world)` to reproduce the departure checks with that hold attached. A failure's contacts name obstacles by their indices before the pieces were removed.
 - **The carried object's sphere fit.** `TaskOptions::held_spheres` controls the cover used during lift and during a turn that carries the object. For a narrow gap, decrease the tolerance: the cover reaches it however many spheres that takes, which the budget does not cap. Keeping `max_overhang: None` leaves the spheres untrimmed. Pass the pick's returned `Held` to the follower and to `place` so they use the same cover.
-- **Other arms.** A pick or place moves its hand's joints alone; the joints only other hands move wait where the start has them. A place's transit can take them elsewhere at the same time (`Place::idle`), as another arm going home while this one carries the object, and they wait there through the moves in and away: IK at the release starts from there.
+- **Other arms.** A pick or place moves its hand's joints alone, or both hands' where two pick up or hold the object ([two hands](#two-hands)); the joints only other hands move wait where the start has them. A place's transit can take them elsewhere at the same time (`Place::idle`), as another arm going home while this one carries the object, and they wait there through the moves in and away: IK at the release starts from there.
 
 ### A program of tasks
 
@@ -358,6 +359,52 @@ let joined = batchplan::join(device, worlds, &sequences, &JoinOptions::default()
 # let _ = joined;
 # Ok(())
 # }
+```
+
+### Two hands
+
+A pick by two hands gives `Pick::also` the second hand and its grasps (`HandGrasps`), in the object's frame as `grasps` are. The two lists go together entry by entry, as long as each other: candidate `k` is the pair of `grasps[k]` and `also.grasps[k]`, its cost the sum of the two holds' and its locked joints both holds' (a joint both name at different values is an input error). Which pairs are worth trying, in what order and at what cost is the caller's to say, as a pair's hold depends on both grasps together: for every combination, write the product, best first, and `enough` takes the first that many pairs in that order. Each hand needs its own end: `ShapeGraspOptions::along` gives grasps toward each end.
+
+1. IK solves both hands at once at the grasp, where each hand's fingers may touch the object.
+2. The move in is the first hand's straight move in while the second waits where its own begins, then the second's while the first waits at its grasp: one trajectory with a rest between. Close both grippers at its end. It is followed backward from the grasp, the second hand backing out first: each hand's leg holds the other's joints still (`ToolPath::hold`).
+3. The lift is the first hand's straight move, the second kept at its grasp ([tool paths](#moving-the-hand-along-a-path)), the object held by both.
+4. The transit holds still only the joints neither hand moves.
+
+The plan's `held` names the second hand in `Held::also`. `place` takes such a `Held` as it is: IK solves both hands where the object is let go of, the transit keeps both at their grasps, and the lower is `held.hand`'s straight move with the other kept at its grasp. Open both grippers at its end. The move away is `held.hand` backing off `retreat` along its z axis while the other waits, then the other backing off along its own, one trajectory with a rest between, and the fingers of both may touch the object where it now stands. The start must have both hands at their grasps. Each hand keeps under `tool_speed` on every straight move.
+
+```rust,no_run
+use batchplan::{Device, Error, HandGrasps, Hold, Pick, Place, Pose, TaskOptions, Worlds};
+
+/// Hands 0 and 1 pick up obstacle 1 of world 0 off obstacle 0, by each of hand 0's grasps with
+/// each of hand 1's, and set it down at `to` in world 1, which lacks it, on its obstacle 0.
+fn together(
+    device: &Device,
+    worlds: &Worlds,
+    start: &[f32],
+    left: &[Hold],
+    right: &[Hold],
+    to: Pose,
+) -> Result<(), Error> {
+    let pairs = left.iter().flat_map(|l| right.iter().map(move |r| (l.clone(), r.clone())));
+    let (firsts, seconds): (Vec<Hold>, Vec<Hold>) = pairs.unzip();
+    let pick = Pick {
+        also: Some(HandGrasps { hand: 1, grasps: seconds }),
+        support: vec![0],
+        ..Pick::new(0, start, 1, firsts)
+    };
+    let o = TaskOptions::default();
+    let Ok(picked) = batchplan::pick(device, worlds, &[pick], &o)?.outcomes.remove(0) else {
+        return Ok(());
+    };
+    let held = picked[0].held.clone().expect("a pick holds what it picked up");
+    let place = Place {
+        support: vec![0],
+        ..Place::new(1, picked[0].end(), held, [to])
+    };
+    let placed = batchplan::place(device, worlds, &[place], &o)?;
+    println!("{} plans set it down", placed.outcomes[0].as_ref().map_or(0, Vec::len));
+    Ok(())
+}
 ```
 
 ### Handing over

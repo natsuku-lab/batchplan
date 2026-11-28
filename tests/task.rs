@@ -435,6 +435,7 @@ fn a_held_object_sits_in_the_hand_as_its_grasp_holds_it() {
     // From above, and from two sides: grasps that are not their own inverse.
     for grasp in [top(), grasp(Vec3::X, Vec3::Y), grasp(-Vec3::Y, Vec3::Z)] {
         let held = Held {
+            also: vec![],
             locked: Default::default(),
             spheres: Default::default(),
             hand: 0,
@@ -951,6 +952,7 @@ fn a_place_names_the_object_it_sets_down_after_its_worlds_obstacles() {
     let world = World::new(vec![scene(vec![]).obstacles[TABLE].clone()]);
     let tall = Vec3::new(HALF.x, HALF.y, 0.06);
     let held = Held {
+        also: vec![],
         locked: Default::default(),
         spheres: Default::default(),
         hand: 0,
@@ -2184,6 +2186,7 @@ fn malformed_tasks_are_input_errors() {
     }
     // A place on a device that already holds the object.
     let held = Held {
+        also: vec![],
         locked: Default::default(),
         spheres: Default::default(),
         hand: 0,
@@ -2658,6 +2661,7 @@ fn as_many_holds_as_fill_a_stack_at_once_are_placed_in_one_call() {
     let places: Vec<Place> = (0..WAYS)
         .map(|k| {
             let held = Held {
+                also: vec![],
                 locked: Default::default(),
                 spheres: Default::default(),
                 hand: 0,
@@ -3145,6 +3149,7 @@ fn a_pick_can_fit_its_carried_cylinder_beside_a_wall() {
 fn the_release_sweep_stops_a_palm_below_the_falling_object() {
     let robot = common::panda().unwrap();
     let held = Held {
+        also: vec![],
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, HALF),
         grasp: grasp(Vec3::Z, Vec3::X),

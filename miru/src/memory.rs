@@ -108,6 +108,13 @@ pub enum Act {
     /// back, is held all the same, and `next_id` rises past it; a let-go of it makes its object of
     /// `Held::object`, a box or a cylinder. An id under `next_id` that no object has is refused,
     /// and so is `u32::MAX`, which no id may rise past.
+    ///
+    /// A hold by more hands than one (`Held::also`) is every one of those hands': none may hold a
+    /// thing already, [`Memory::held`] gives it for each, and a let-go or a loss of the object
+    /// empties them all. To say a held thing is held otherwise (another hand closed on it, one
+    /// let go, it changed hands), let it go where it is and pick it as it is held then, in one
+    /// [`Memory::after`]. A hold the memory never saw as an object, of a shape other than a box
+    /// or a cylinder, has no let-go, and so cannot be told held otherwise: it can only be lost.
     Picked { id: u32, held: Held },
     /// The hand that holds object `id` set it down, its frame (its shape's middle, turned as the
     /// shape was) at `at`: where a place plan's held object lies when it is let go. It is among
@@ -152,7 +159,9 @@ pub struct Memory {
     fixture_parts: Vec<(usize, Obstacle)>,
     /// The objects and the next id, without labels: what the next look takes as `previous`.
     scene: Scene,
-    /// Per hand of the robot, what it holds.
+    /// Per hand of the robot, the hold whose thing is fixed to it (`Held::hand`). A hand in
+    /// another hold's `Held::also` has none of its own and holds through that one
+    /// ([`Memory::holder`]).
     hands: Vec<Option<Holding>>,
     /// The map, shared by the memories made from it until a look fuses another.
     pub(crate) map: Arc<Map>,
@@ -168,8 +177,8 @@ pub struct Memory {
     pub(crate) padding: f32,
 }
 
-/// What one hand holds, and the object it was when it was taken: none for a hold the memory
-/// never saw as an object.
+/// A hold, by one hand or by several (`Held::also`), and the object it was when it was taken:
+/// none for a hold the memory never saw as an object.
 #[derive(Clone, Debug)]
 struct Holding {
     id: u32,
@@ -317,11 +326,21 @@ impl Memory {
         self.scene.next_id
     }
 
-    /// What hand `hand` holds, with the id it had as an object; none where it holds nothing.
+    /// What hand `hand` holds, alone or with other hands (`Held::also`), with the id it had as an
+    /// object; none where it holds nothing.
     #[must_use]
     pub fn held(&self, hand: usize) -> Option<(u32, &Held)> {
-        let holding = self.hands.get(hand)?.as_ref()?;
+        let holding = self.holder(hand)?;
         Some((holding.id, &holding.held))
+    }
+
+    /// The hold hand `hand` has a part in: kept under the hand its thing is fixed to.
+    fn holder(&self, hand: usize) -> Option<&Holding> {
+        let holds = |holding: &&Holding| {
+            let also = &holding.held.also;
+            holding.held.hand == hand || also.iter().any(|grip| grip.hand == hand)
+        };
+        self.hands.iter().flatten().find(holds)
     }
 
     /// The memory after `acts`, in order ([`Act`]): the objects and the hands at once, the map's
@@ -345,16 +364,26 @@ impl Memory {
         match act {
             Act::Picked { id, held } => {
                 let hand = held.hand;
-                ensure_input!(
-                    hand < self.hands.len(),
-                    "act {k} picks object {id} into hand {hand}, of the robot's {}",
-                    self.hands.len()
-                );
-                if let Some(holding) = &self.hands[hand] {
-                    return Err(input!(
-                        "act {k} picks object {id} into hand {hand}, which holds object {} already",
-                        holding.id
-                    ));
+                let also = held.also.iter().map(|grip| grip.hand);
+                let hands: Vec<usize> = std::iter::once(hand).chain(also).collect();
+                for (h, &hand) in hands.iter().enumerate() {
+                    ensure_input!(
+                        hand < self.hands.len(),
+                        "act {k} picks object {id} into hand {hand}, of the robot's {}",
+                        self.hands.len()
+                    );
+                    ensure_input!(
+                        !hands[..h].contains(&hand),
+                        "act {k} picks object {id} into hand {hand} twice: a hold names each hand \
+                         that holds once"
+                    );
+                    if let Some(holding) = self.holder(hand) {
+                        return Err(input!(
+                            "act {k} picks object {id} into hand {hand}, which holds object {} \
+                             already",
+                            holding.id
+                        ));
+                    }
                 }
                 let index = self
                     .scene
