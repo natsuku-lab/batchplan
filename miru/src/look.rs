@@ -11,7 +11,9 @@
 //!    view that lie in different masks ([`Sets`]). A known shape's part is such an object's all
 //!    the same where it lies inside it ([`Told::keep`]). An object that hangs over space a view
 //!    sees is one with what it touches, as a handle is with the front it stands out of
-//!    ([`attach`]).
+//!    ([`attach`]). Then an object that lies on the surface of another's shape, where no view
+//!    shows both, is a face of it only its views see ([`faces`]), as the far side of a bar is to
+//!    a camera beside it.
 //! 4. Each object is fitted a shape and stood on what lies under it ([`Fit`], [`fit::under`]),
 //!    or on the lower thing it touches where the look cannot see under its middle
 //!    ([`attach`]). One that holds a hollow's floor and is square from above is a box open at
@@ -192,7 +194,14 @@ impl Default for LookOptions {
 /// drawer's pulled out, is one object with them, and where it is square from above its shape is
 /// a box open at the top ([`Shape::OpenBox`]): its room reaches as far as a look shows it, a wall
 /// whose inner face no view shows being as thick as what hides the floor before it, and a later
-/// look that sees in makes the wall thinner.
+/// look that sees in makes the wall thinner. Two views that see different faces of one thing,
+/// and no surface of it in common, as cameras on either side of a bar, make one object of it
+/// where what the one view shows lies on the shape the other's readings give, within the
+/// readings' noise and a pixel's footprint. So a thing thinner than that, flat against a face
+/// only one view sees, is taken for that face, unless masks say it is a thing of its own. A
+/// hollow thing's face, as a bowl's or a tray's, is not joined so, for its shape is not its
+/// surface; nor is one whose readings stray off the shape by more than that, as a stereo
+/// camera's between a thing's edge and what lies behind it.
 ///
 /// miru runs no model. A caller whose model needs prompts, points or boxes, looks once without
 /// masks, takes the prompts from that scene's labels, runs its model and looks again, after the
@@ -323,6 +332,22 @@ fn checked(
         let before: Vec<_> = objects.iter().zip(&measured).collect();
         measured = remeasure(&after, &before, previous, threads);
         (objects, labels) = (after, shown);
+    }
+    // What views that see none of a thing show only of its shape's surface is a face of it, where
+    // nothing a view shows joined it.
+    let faced = faces(&mut sets, &told, &objects, &measured, &labels);
+    if !faced.is_empty() {
+        let (after, shown) = told.gather(&mut sets, /* with floors */ false);
+        let before: Vec<_> = objects.iter().zip(&measured).collect();
+        measured = remeasure(&after, &before, previous, threads);
+        (objects, labels) = (after, shown);
+        // What a face was joined to continues what it held on its own.
+        for (set, holds) in faced {
+            let set = sets.find(set);
+            if let Some(object) = objects.iter().position(|readings| readings.set == set) {
+                measured[object].holds = holds;
+            }
+        }
     }
     // What the scene before had as one thing and the robot now divides is one thing still.
     if rejoin(&mut sets, &objects, &measured, &labels, &seen, previous) {
@@ -2184,6 +2209,165 @@ fn same(seen: &[Seen], parts: &[Parts], first: &[usize], sets: &mut Sets, thread
     for (_, part, other) in joins {
         sets.join(part, other);
     }
+}
+
+/// Joins each object that is a face of another the other's views cannot see: the side of a bar
+/// that a camera beside it shows, where a camera across the table sees its top and its other
+/// side. The two views read no surface in common, so [`same`] does not make them one. Says, of
+/// each object a face was joined to, its set and the objects of the scene before it held on its
+/// own ([`Measured::holds`]): what the two continue ([`continues`]), for the face's readings lie
+/// where no earlier look's shape of the thing reached.
+///
+/// An object is such a face of another where no view shows both, for a view that shows both
+/// has told them apart; the other's shape stands for its thing ([`Readings::solid`]), for a
+/// covering box's faces are not its thing's; and the object's readings lie on that shape's
+/// surface, a window's worth or more of them and less than a window's worth off it. A reading is
+/// on it within the root of the sum of the squares of its own slack and the least of the other's
+/// readings', and a pixel's footprint besides, on the surface of those of the other's readings
+/// that set the face it lies against: the shape's faces are fitted to readings off by their
+/// noise, and its edges lie where its outermost readings do, each up to its pixel's footprint
+/// short of the thing's edge. That footprint is a pixel's width at the reading's depth over the
+/// cosine of the angle between its surface and its ray, and the readings that set the face are
+/// those outermost toward the object's middle, within a window's width of the outermost. Of
+/// several such others, the readings do not say which it is a face of, and it joins none. It
+/// joins the one unless a view's masks say the two are two things ([`Sets::join`]).
+///
+/// `objects` are those the sets give, `measured` what each says by itself and `labels` their
+/// pixels.
+fn faces(
+    sets: &mut Sets,
+    told: &Told<'_>,
+    objects: &[Readings],
+    measured: &[Measured],
+    labels: &[Vec<Label>],
+) -> Vec<(usize, Vec<Option<usize>>)> {
+    // Per object, the views that show it: those of its parts that have readings.
+    let index: HashMap<usize, usize> = (objects.iter().enumerate())
+        .map(|(object, readings)| (readings.set, object))
+        .collect();
+    let mut shows = vec![vec![false; told.seen.len()]; objects.len()];
+    for &part in &told.order {
+        let view = told.first.partition_point(|&first| first <= part) - 1;
+        if let Some(&object) = index.get(&sets.find(part)) {
+            shows[object][view] = true;
+        }
+    }
+    // Each object and each other no view shows with it: none, where every view shows all.
+    let pairs: Vec<(usize, usize)> = (0..objects.len())
+        .flat_map(|face| (0..objects.len()).map(move |other| (face, other)))
+        .filter(|&(face, other)| {
+            face != other && !(shows[face].iter().zip(&shows[other])).any(|(a, b)| *a && *b)
+        })
+        .collect();
+    if pairs.is_empty() {
+        return vec![];
+    }
+    // Of each object a face may lie on, the least slack of its readings, and per reading, in its
+    // readings' order, its pixel's footprint on its surface and a window's width.
+    let mut wanted = vec![false; objects.len()];
+    for &(_, other) in &pairs {
+        wanted[other] = true;
+    }
+    let least: Vec<f32> = (objects.iter().zip(&wanted))
+        .map(|(readings, &wanted)| {
+            let slack = readings.slack.iter().copied();
+            if wanted {
+                slack.fold(f32::INFINITY, f32::min)
+            } else {
+                f32::INFINITY
+            }
+        })
+        .collect();
+    let mut widths: Vec<Vec<(f32, f32)>> = vec![vec![]; objects.len()];
+    for (view, ((seen, parts), labels)) in told.seen.iter().zip(told.parts).zip(labels).enumerate()
+    {
+        if !(0..objects.len()).any(|object| wanted[object] && shows[object][view]) {
+            continue;
+        }
+        for (i, label) in labels.iter().enumerate() {
+            if let Label::Object(object) = *label
+                && wanted[object]
+            {
+                let ray = (seen.eye() - seen.points[i]).normalize_or_zero();
+                let facing = parts.normals[i].dot(ray);
+                let footprint = if facing > 0.0 {
+                    seen.spacing(i) / facing
+                } else {
+                    seen.spacing(i)
+                };
+                widths[object].push((footprint, seen.spacing(i) / parts.share[i].sqrt()));
+            }
+        }
+    }
+    let shapes: Vec<Shape> = measured.iter().map(|said| said.fit.shape()).collect();
+    // Whether object `face`'s readings lie on object `other`'s shape, each within its slack, the
+    // other's least and `footprint`.
+    let lies_on = |face: usize, other: usize, footprint: f32| {
+        let readings = &objects[face];
+        let distance = shapes[other].distances();
+        let (mut on, mut off) = (0.0, 0.0);
+        let each = (readings.points.iter().zip(&readings.slack)).zip(&readings.share);
+        for ((point, own), share) in each {
+            if distance(*point).abs() <= own.hypot(least[other]) + footprint {
+                on += share;
+            } else {
+                off += share;
+                if off >= 1.0 {
+                    return false;
+                }
+            }
+        }
+        on >= 1.0
+    };
+    // The footprint of object `other`'s readings that set the face object `face` lies against:
+    // those outermost toward its middle, within a window's width of the outermost.
+    let setting = |face: usize, other: usize| {
+        let points = &objects[face].points;
+        let middle = points.iter().sum::<Vec3>() / points.len() as f32;
+        let toward = shapes[other].obstacle().distance(middle).gradient;
+        let along = |point: &Vec3| point.dot(toward);
+        let outermost = (objects[other].points.iter().map(along)).fold(f32::MIN, f32::max);
+        (objects[other].points.iter().zip(&widths[other]))
+            .filter(|&(point, &(_, window))| along(point) >= outermost - window)
+            .map(|(_, &(footprint, _))| footprint)
+            .fold(0.0, f32::max)
+    };
+    // Per object, the largest footprint of its readings, which no face's exceeds: the faces too
+    // far off even so are left out without finding which of its readings set them.
+    let largest: Vec<f32> = (widths.iter())
+        .map(|widths| {
+            widths
+                .iter()
+                .map(|&(footprint, _)| footprint)
+                .fold(0.0, f32::max)
+        })
+        .collect();
+    let mut solid: Vec<Option<bool>> = vec![None; objects.len()];
+    let mut joins = vec![];
+    for face in 0..objects.len() {
+        let mut faced = None;
+        let others = pairs.iter().filter(|&&(of, _)| of == face);
+        for &(_, other) in others {
+            if !lies_on(face, other, largest[other])
+                || !lies_on(face, other, setting(face, other))
+                || !*solid[other].get_or_insert_with(|| objects[other].solid(&shapes[other]))
+            {
+                continue;
+            }
+            if faced.replace(other).is_some() {
+                faced = None;
+                break;
+            }
+        }
+        joins.extend(faced.map(|other| (face, other)));
+    }
+    let mut joined = vec![];
+    for (face, other) in joins {
+        if sets.join(objects[face].set, objects[other].set) {
+            joined.push((objects[other].set, measured[other].holds.clone()));
+        }
+    }
+    joined
 }
 
 /// Widens the room of each box open at the top among `objects` (the shapes `kept` from the scene
