@@ -28,6 +28,21 @@ def test_placing_sets_the_frame_it_was_made_at():
     np.testing.assert_allclose(moved.pose.position, (0.0, 1.0, 0.0), atol=1e-6)
 
 
+def test_a_rotation_goes_in_and_out_scalar_first():
+    # A quarter turn about z as MuJoCo orders it: w first.
+    s = math.sqrt(0.5)
+    turn = bp.Pose((1.0, 2.0, 3.0), (s, 0.0, 0.0, s), scalar_first=True)
+    assert turn == bp.Pose((1.0, 2.0, 3.0), (0.0, 0.0, s, s))
+    np.testing.assert_allclose(turn.rotation_scalar_first, (s, 0.0, 0.0, s), atol=1e-7)
+    # A turn about x, where the two orders cannot be mistaken for one another.
+    about_x = bp.Pose(rotation=(0.6, 0.8, 0.0, 0.0), scalar_first=True)
+    np.testing.assert_allclose(about_x.rotation, (0.8, 0.0, 0.0, 0.6), atol=1e-7)
+    np.testing.assert_allclose(about_x.rotation_scalar_first, (0.6, 0.8, 0.0, 0.0), atol=1e-7)
+    assert bp.Pose(scalar_first=True) == bp.Pose.IDENTITY
+    with pytest.raises(bp.InputError, match=r"\(w, x, y, z\) needs 4 numbers, got 3"):
+        bp.Pose(rotation=(1.0, 0.0, 0.0), scalar_first=True)
+
+
 def test_poses_compose_and_invert():
     s = math.sqrt(0.5)
     a = bp.Pose((1.0, 0.0, 0.0), (0.0, 0.0, s, s))

@@ -8,6 +8,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+### Added
+
+- Python: a `Pose` takes and gives a rotation scalar first, `(w, x, y, z)`, as MuJoCo orders a
+  quaternion: `bp.Pose(position, rotation, scalar_first=True)` and `pose.rotation_scalar_first`.
+  The guide names `mul_pose`, `inverse` and `is_unit`.
+
 ## [0.13.2] - 2026-11-28
 
 ### Added

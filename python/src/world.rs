@@ -11,7 +11,9 @@ use crate::field::{Field, tuple_field, value_class};
 
 value_class! {
     /// A position and a rotation: a frame relative to another. Rotations are unit quaternions,
-    /// scalar last, `(x, y, z, w)`, as ROS, SciPy and glam order them.
+    /// scalar last, `(x, y, z, w)`, as ROS, SciPy and glam order them. For one ordered scalar
+    /// first, `(w, x, y, z)`, as MuJoCo orders them, pass `scalar_first=True` and read
+    /// `rotation_scalar_first`.
     Pose(batchplan::Pose) {
         /// `(x, y, z)`, in meters.
         position: Vec3,
@@ -19,15 +21,33 @@ value_class! {
         rotation: Quat,
     }
     methods {
+        /// A pose at `position`, turned by `rotation`: `(x, y, z, w)`, or `(w, x, y, z)` with
+        /// `scalar_first=True`. Left out, the origin and no rotation.
         #[new]
-        #[pyo3(signature = (position = None, rotation = None))]
+        #[pyo3(signature = (position = None, rotation = None, *, scalar_first = false))]
         fn new(
             position: Option<&Bound<'_, PyAny>>,
             rotation: Option<&Bound<'_, PyAny>>,
+            scalar_first: bool,
         ) -> PyResult<Self> {
             let position = position.map(Vec3::from_py).transpose()?.unwrap_or(Vec3::ZERO);
-            let rotation = rotation.map(Quat::from_py).transpose()?.unwrap_or(Quat::IDENTITY);
-            Ok(Self(batchplan::Pose::new(position, rotation)))
+            // One given scalar first is read, and named where it is refused, in that order.
+            let given = match (rotation, scalar_first) {
+                (Some(r), true) => {
+                    let q = crate::field::floats_of(r, 4, "a quaternion (w, x, y, z)")?;
+                    Some(Quat::from_xyzw(q[1], q[2], q[3], q[0]))
+                }
+                (Some(r), false) => Some(Quat::from_py(r)?),
+                (None, _) => None,
+            };
+            Ok(Self(batchplan::Pose::new(position, given.unwrap_or(Quat::IDENTITY))))
+        }
+
+        /// The rotation with its scalar first, `(w, x, y, z)`, as MuJoCo orders a quaternion.
+        #[getter]
+        fn rotation_scalar_first<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+            let q = self.0.rotation;
+            Quat::from_xyzw(q.w, q.x, q.y, q.z).to_py(py)
         }
 
         /// No translation, no rotation.
