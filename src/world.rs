@@ -598,7 +598,7 @@ impl Obstacle {
             .placed(middle),
             Self::Sdf { .. } => {
                 // The local grid bounds include the part of its field that extends past its faces.
-                let (lo, hi) = self.placed(Pose::IDENTITY).bounds();
+                let (lo, hi) = self.placed(Pose::IDENTITY).corners();
                 let center = middle.position + middle.rotation * ((hi + lo) * 0.5);
                 Self::cuboid(Vec3::ZERO, (hi - lo) * 0.5 + delta)
                     .placed(Pose::new(center, middle.rotation))
@@ -606,9 +606,36 @@ impl Obstacle {
         }
     }
 
-    /// The corners of the smallest box along the frame's axes that holds the obstacle; a
-    /// distance grid's is that of its points' box, grown by how far the grid reads solid past it.
-    pub(crate) fn bounds(&self) -> (Vec3, Vec3) {
+    /// The smallest box along the frame's axes that holds the obstacle, in the frame its pose is
+    /// in: every point the obstacle holds lies within it. A distance grid's is that of its points'
+    /// box, grown by how far the grid reads solid past it.
+    #[must_use]
+    pub fn bounds(&self) -> Bounds {
+        let (lower_corner, upper_corner) = match *self {
+            // A cylinder reaches across its axis by its radius times what the frame's other two
+            // axes give: one less the axis's own square loses its digits where the cylinder
+            // stands almost along a frame axis, and a rim would stick out of the box.
+            Obstacle::Cylinder {
+                center,
+                rotation,
+                radius,
+                half_height,
+            } => {
+                let r = frame(rotation);
+                let across = (r.x_axis * r.x_axis + r.y_axis * r.y_axis).map(f32::sqrt);
+                let half = r.z_axis.abs() * half_height + across * radius;
+                (center - half, center + half)
+            }
+            _ => self.corners(),
+        };
+        Bounds {
+            lower_corner,
+            upper_corner,
+        }
+    }
+
+    /// [`Obstacle::bounds`]'s corners.
+    pub(crate) fn corners(&self) -> (Vec3, Vec3) {
         let turned = |rotation: Quat, half: Vec3| {
             let r = frame(rotation);
             Mat3::from_cols(r.x_axis.abs(), r.y_axis.abs(), r.z_axis.abs()) * half
@@ -806,6 +833,15 @@ pub(crate) fn capsule_distance(
     let v = lp - Vec3::new(0.0, 0.0, lp.z.clamp(-half_length, half_length));
     let len = v.length();
     (len - radius, r * if len > 1e-9 { v / len } else { Vec3::X })
+}
+
+/// The corners of a box along the frame's axes ([`Obstacle::bounds`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bounds {
+    /// Its least corner, each coordinate the least the box holds (meters).
+    pub lower_corner: Vec3,
+    /// Its greatest corner.
+    pub upper_corner: Vec3,
 }
 
 #[cfg(test)]

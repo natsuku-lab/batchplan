@@ -8,6 +8,21 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+### Added
+
+- `Obstacle::bounds()`: the least box along the frame's axes that holds an obstacle, its corners
+  named (`Bounds { lower_corner, upper_corner }`); a distance grid's grown by how far it reads solid
+  past its faces. In Python, `Obstacle.bounds()` and `Bounds`.
+- miru's `Kept::riding(id)` and `Riding`: what a look read of a thing that rides on what a hand
+  holds (`Under::Held`), which its mask leaves out with what carries it, answered from the look
+  alone. `There` where a window of readings, the measure a look takes a thing by, lies in the
+  rider's place where the hold has it, on its near side or inside it, and on nothing else of the
+  hold, within three of its camera's deviations; else `Gone` where a window lies where their
+  rays left the place, past it by more or onto its carrier where the place is longer along the ray
+  than twice that; else `Unseen`. A thing so much smaller than its shape that the camera reads
+  less than a window of it reads `Gone`. None only for an id that rode on nothing
+  when the look was taken. A look only reports: a caller acts on `Gone` with `Act::Lost`.
+
 ## [0.13.1] - 2026-11-28
 
 ### Added

@@ -130,6 +130,65 @@ Gaps:
   where the hold has it are not the hold's: the look makes what it makes of them, and they are not
   in the surface.
 
+## What rides on a held thing
+
+`tests/memory.rs` renders the plank in hand 0 with a 4 cm cube's shape riding on it, the thing
+there, smaller, slipped or gone, reads them through the three cameras, and holds `Kept::riding`
+and the memory after the look against the truth (`cargo test --release -p batchplan-miru --test
+memory -- rider a_look_answers --nocapture`, which prints the windows of readings in the rider's
+place and past it, counted by the box's own faces, which equal the rule's). Stereo cases are read
+with three draws of the camera's noise each. A look only reports: in every case the memory after
+it still has the rider, and `Act::Lost` of it then takes it off.
+
+| | exact | D435 | D435 and D405 |
+|---|---|---|---|
+| The cube by the hand, in both views: there | holds | holds | holds |
+| A cube 2 mm smaller in its place: there | holds | holds | holds |
+| A cube 4 mm smaller in its place: there | holds | holds | gap (unseen) |
+| A ball 2 cm across in its place: there | holds | gap (gone) | gap (gone) |
+| The cube behind a box nearer each camera: unseen | holds | holds | holds |
+| Slipped 3 mm along the plank: there | holds | holds | holds |
+| A plate 4 mm thick: there and, fell, gone where a camera that reads it allows less, else unseen | holds | holds | holds |
+| The cube by the hand fell: gone | holds | holds | holds |
+| Of two cubes, the one by the hand fell: gone, the other not | holds | holds | holds |
+| The cube fell to the table in view: gone, and a new object there the cube's size | holds | gap (size) | gap (size) |
+| The cube at the far end, which the far view alone reads, fell: gone | holds | gap (unseen) | gap (unseen) |
+| Slipped by its own width, under the arm: gone | holds | holds | holds |
+
+The windows that decide each, per draw (the rule's, which the test's count by the box's own
+faces equals):
+
+| | exact | D435 | D435 and D405 |
+|---|---|---|---|
+| The cube by the hand: in its place | 43.9 | 4.5 to 4.6 | 1.3 to 1.5 |
+| The cube by the hand fell: read through its place | 43.1 | 4.4 | 1.1 to 1.2 |
+| Slipped by its own width: read through its place | 43.0 | 4.3 to 4.4 | 1.1 |
+| The far end fell: read through its place | 14.3 | 0.73 to 0.77 | 0.72 to 0.76 |
+| A cube 2 mm smaller: in its place, through | 36.3, 6.7 | 3.6 to 3.8, 0.3 to 0.4 | 1.06 to 1.11, 0.1 |
+| A cube 4 mm smaller: in its place, through | 28.4, 14.2 | 2.6 to 2.7, 1.2 to 1.3 | 0.73 to 0.79, 0.15 to 0.19 |
+| A ball 2 cm across: in its place, through | 2.1, 41.1 | 0.09 to 0.14, 4.3 | 0.04 to 0.05, 1.04 to 1.06 |
+
+Gaps:
+
+- **A thing much smaller than the shape carried for it** reads gone while it is there, where the
+  camera reads less than a window of it at that range, the look's measure of a thing, and a window
+  of rays through the place around it: the ball 2 cm across in the 4 cm cube's place through the
+  D435, and through the D435 and D405 (`a_rider_smaller_than_its_shape_is_there`). There the cube
+  4 mm smaller lies in under a window and few rays read past it: unseen. A shape a stereo look fits
+  comes out centimetres larger than its thing ("a box" in the truth table), so a small thing whose
+  shape a stereo look gave is the case to expect it in.
+- **A rider's place read too far off.** At the plank's far end only the far view, 0.65 m off,
+  reads the cube's place. Through a D435 there a window is 121 readings, and with the cube gone
+  0.72 to 0.77 of one reads through its place: unseen
+  (`a_rider_one_view_reads_far_off_is_gone_where_a_window_reads_past_it`).
+- **A rider found again through a stereo camera** comes out 4.6 to 4.8 by 8.9 to 9.1 cm on the
+  table, as the look sizes a box through a stereo camera ("a box" in the truth table)
+  (`a_rider_gone_is_found_again_under_a_new_id`).
+
+Untested: riders of two holds at once, a carrier two hands hold (`Held::also`; its riders are
+held against the views where the hand its thing is fixed to has them), riders of the other convex
+shapes (a cylinder, a sphere, a capsule), and a rider seen against the robot's links behind it.
+
 ## Time
 
 `score -- <set> --observe [--threads 1]` times `miru::observe` on each look, on a CPU device of

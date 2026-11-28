@@ -766,7 +766,7 @@ impl RobotMask {
         // Each shape's box, and how far from a shape a point still reaches into it: half a
         // voxel's diagonal.
         let boxes: Vec<(Vec3, Vec3)> = if SHAPES {
-            self.shapes.iter().map(Obstacle::bounds).collect()
+            self.shapes.iter().map(Obstacle::corners).collect()
         } else {
             vec![]
         };
@@ -987,7 +987,7 @@ fn shape_pixels(
     let Intrinsics { fx, fy, cx, cy } = image.intrinsics;
     let (width, height) = (image.width, image.height());
     let to_camera = image.camera.rotation.inverse();
-    let (lo, hi) = shape.bounds();
+    let (lo, hi) = shape.corners();
     let far = (corners(lo, hi, to_camera, image.camera.position).iter())
         .fold(0f32, |far, c| far.max(c.z));
     let (a, b, c) = (margin[2], 1.0 - margin[1], far + margin[0]);
@@ -2322,7 +2322,7 @@ impl OccupancyMap {
             padding.is_finite() && padding >= 0.0,
             "the padding must not be negative, got {padding}"
         );
-        let (lo, hi) = region.bounds();
+        let (lo, hi) = region.corners();
         let voxel = self.grid.voxel;
         // The part's points among the map's, counted from the map's first: possibly before it.
         let first = ((lo - padding - self.grid.origin) / voxel).floor();
@@ -2398,7 +2398,7 @@ impl OccupancyMap {
             margin.is_finite() && margin >= 0.0,
             "the margin must not be negative, got {margin}"
         );
-        let (lo, hi) = shape.bounds();
+        let (lo, hi) = shape.corners();
         for at in (self.grid.among(lo - margin, hi + margin).into_iter()).flat_map(points) {
             let n = self.grid.index(at);
             let l = self.log_odds[n];
@@ -2499,7 +2499,7 @@ impl<'a> Band<'a> {
     ) -> Self {
         let boxes = (held.iter().chain(shapes))
             .map(|thing| {
-                let (lo, hi) = thing.bounds();
+                let (lo, hi) = thing.corners();
                 let scale = (hi - lo).max_element() + lo.abs().max(hi.abs()).max_element();
                 (lo - ROUNDING * scale, hi + ROUNDING * scale, scale)
             })
@@ -2747,7 +2747,7 @@ pub fn on_shapes(
 fn shape_boxes(shapes: &[Obstacle]) -> Vec<(Vec3, Vec3, f32)> {
     (shapes.iter())
         .map(|shape| {
-            let (lo, hi) = shape.bounds();
+            let (lo, hi) = shape.corners();
             let scale = (hi - lo).max_element() + lo.abs().max(hi.abs()).max_element();
             (lo, hi, ROUNDING * scale)
         })
@@ -3003,7 +3003,7 @@ impl OccupancyMap {
             "rasterizing a solid requires an analytic primitive, got a distance grid"
         );
         shape.check().map_err(|e| input!("the shape {e}"))?;
-        let (lo, hi) = shape.bounds();
+        let (lo, hi) = shape.corners();
         let grid = layout(lo, hi, o)?;
         let reach = 0.5 * 3f32.sqrt() * grid.voxel;
         let log_odds = (0..grid.points())
@@ -3569,7 +3569,7 @@ mod tests {
                     }
                     // Its middle anywhere in the map's box grown by the shape's own; one in
                     // eight well past it.
-                    let (lo, hi) = shape.bounds();
+                    let (lo, hi) = shape.corners();
                     let half = 0.5 * (hi - lo);
                     let mut at = |a: usize| rng.range(origin[a] - half[a], top[a] + half[a]);
                     let mut center = Vec3::new(at(0), at(1), at(2));
@@ -3612,7 +3612,7 @@ mod tests {
             }
             // What each shape is, and what it does in the rows the search takes.
             for (shape, d) in shapes.iter().zip(&distances) {
-                let (lo, hi) = shape.bounds();
+                let (lo, hi) = shape.corners();
                 let box_volume = (hi - lo).element_product();
                 let volume = match *shape {
                     Obstacle::Cuboid { half_extents, .. } => 8.0 * half_extents.element_product(),
@@ -3731,7 +3731,7 @@ mod tests {
                 f32::INFINITY,
                 "case {case}: a margin that does not grow"
             );
-            let (lo, hi) = shape.bounds();
+            let (lo, hi) = shape.corners();
             let (lo, hi) = (lo - margin[0], hi + margin[0]);
             let to_camera = image.camera.rotation.inverse();
             let depths_of = (0..8).map(|c| {
@@ -3860,7 +3860,7 @@ mod tests {
             };
             let point = image.point(0, None).expect("the one pixel reads");
             let within = cylinder.distance(point).value <= margin[0];
-            let (_, upper) = cylinder.bounds();
+            let (_, upper) = cylinder.corners();
             short += usize::from(within && point.x > upper.x + margin[0]);
             let mask = RobotMask {
                 on_robot: vec![false],

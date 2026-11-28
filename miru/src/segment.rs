@@ -178,17 +178,12 @@ pub(crate) fn parts(seen: &Seen, masks: &[u32], threads: usize) -> Parts {
     let walker = Walker::new(seen, &joined);
     // The radius of the window the noise asks for at each reading's depth: the least whose size
     // reaches what it needs, or the largest the image holds, where none reaches.
-    let largest = seen.width.min(seen.height).saturating_sub(1).max(1);
-    let sizes: Vec<f32> = (1..largest)
-        .map(|r| (2 * r + 1) as f32 * ((r * (r + 1)) as f32).sqrt())
-        .collect();
+    let windows = Windows::of(seen.width, seen.height);
     let wanted: Vec<usize> = each_pixel(seen, threads, |i| {
         if !seen.reads(i) {
             return 0;
         }
-        let need = WINDOW * seen.sigma(i) / seen.spacing(i);
-        let reaches = sizes.iter().position(|&size| size >= need);
-        reaches.map_or(largest, |below| below + 1)
+        windows.radius(seen.sigma(i), seen.spacing(i))
     });
     let planes = Planes::of(seen, &wanted, noise, threads);
 
@@ -1163,5 +1158,40 @@ fn borders(
         creases,
         touches,
         hidden,
+    }
+}
+
+/// The windows a plane is taken over in an image of `width` by `height` pixels ([`WINDOW`]): per
+/// radius from one, the size it reaches, up to the largest radius the image holds.
+pub(crate) struct Windows {
+    sizes: Vec<f32>,
+    largest: usize,
+}
+
+impl Windows {
+    /// An image's windows.
+    pub(crate) fn of(width: usize, height: usize) -> Windows {
+        let largest = width.min(height).saturating_sub(1).max(1);
+        let sizes = (1..largest)
+            .map(|r| (2 * r + 1) as f32 * ((r * (r + 1)) as f32).sqrt())
+            .collect();
+        Windows { sizes, largest }
+    }
+
+    /// The radius of the window of a reading of deviation `sigma` whose neighbours lie `spacing`
+    /// from it (meters): the least whose size reaches what it needs, or the largest the image
+    /// holds, where none reaches.
+    pub(crate) fn radius(&self, sigma: f32, spacing: f32) -> usize {
+        let need = WINDOW * sigma / spacing;
+        let reaches = self.sizes.iter().position(|&size| size >= need);
+        reaches.map_or(self.largest, |below| below + 1)
+    }
+
+    /// The share such a reading is of its window, as [`parts`] gives each ([`Parts::share`]): one
+    /// over the window's readings. Readings whose shares add up to one fill a window: fewer
+    /// cannot be told from noise.
+    pub(crate) fn share(&self, sigma: f32, spacing: f32) -> f32 {
+        let across = (2 * self.radius(sigma, spacing) + 1) as f32;
+        1.0 / (across * across)
     }
 }

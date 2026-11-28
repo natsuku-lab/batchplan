@@ -5635,3 +5635,106 @@ fn a_fine_surface_hit_keeps_unresolved_occupancy_inherited_from_its_parent() {
         .expect("the former cell now contains newly occupied material");
     assert!(part.occupancy(q).is_some_and(|v| v > 0.5));
 }
+
+/// Each kind of obstacle, turned about an axis off every frame axis and moved off the origin, lies
+/// within its bounds: every point of a lattice 2 mm apart that it holds (a negative distance) lies
+/// between the corners. Each primitive's bounds are the least box that does, to a lattice step.
+/// A grid that reads solid on a face holds points past its box, off its own origin: its bounds
+/// reach that far. A cylinder a hair off a frame axis keeps its rim inside.
+#[test]
+fn an_obstacle_lies_within_its_bounds() {
+    let mut mesh = (vec![], vec![]);
+    add_box(
+        &mut mesh,
+        Vec3::new(-0.04, -0.02, -0.01),
+        Vec3::new(0.04, 0.02, 0.01),
+    );
+    let grid = SdfGrid::from_mesh(&mesh.0, &mesh.1, &SdfOptions::default()).unwrap();
+    let pose = Pose::new(
+        Vec3::new(0.3, -0.2, 0.1),
+        Quat::from_axis_angle(Vec3::new(1.0, 2.0, 3.0).normalize(), 0.7),
+    );
+    let shapes = [
+        Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.05, 0.02, 0.01)),
+        Obstacle::sphere(Vec3::ZERO, 0.03),
+        Obstacle::cylinder(Vec3::ZERO, 0.02, 0.05),
+        Obstacle::capsule(Vec3::ZERO, 0.015, 0.04),
+        Obstacle::from_grid(grid),
+        Obstacle::from_grid(solid_on_a_face()),
+    ];
+    let step = 0.002;
+    for shape in shapes {
+        let shape = shape.placed(pose);
+        // A grid is named, not printed: its values run to thousands.
+        let name = match &shape {
+            Obstacle::Sdf { .. } => "a grid".to_string(),
+            other => format!("{other:?}"),
+        };
+        let bounds = shape.bounds();
+        let (lower, upper) = (bounds.lower_corner, bounds.upper_corner);
+        assert!(lower.cmplt(upper).all(), "{name}: {bounds:?}");
+        // The lattice reaches 2 cm past the bounds, so a point held outside them would be met.
+        let (from, to) = (lower - 0.02, upper + 0.02);
+        let counts = ((to - from) / step).ceil().as_uvec3();
+        let (mut least, mut most) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+        for k in 0..counts.x * counts.y * counts.z {
+            let at = Vec3::new(
+                (k % counts.x) as f32,
+                ((k / counts.x) % counts.y) as f32,
+                (k / (counts.x * counts.y)) as f32,
+            );
+            let p = from + at * step;
+            if shape.distance(p).value < 0.0 {
+                assert!(
+                    p.cmpge(lower).all() && p.cmple(upper).all(),
+                    "{name} holds {p}, outside {bounds:?}"
+                );
+                (least, most) = (least.min(p), most.max(p));
+            }
+        }
+        assert!(least.is_finite(), "{name} holds no point of the lattice");
+        if !matches!(shape, Obstacle::Sdf { .. }) {
+            let slack = (least - lower).max(upper - most).max_element();
+            assert!(slack <= 2.0 * step, "{name}: {bounds:?} is {slack} m loose");
+        }
+    }
+
+    // The grid that reads solid on a face holds points past its own box there.
+    let reaching = Obstacle::from_grid(solid_on_a_face()).placed(pose);
+    let grid = solid_on_a_face();
+    let past = (0..=40).map(|k| grid.lower_corner() - Vec3::X * 0.0005 * k as f32);
+    let held_past = past.filter(|local| {
+        let p = pose.position + pose.rotation * (*local + Vec3::new(0.0, 0.02, 0.02));
+        local.x < grid.lower_corner().x - step && reaching.distance(p).value < 0.0
+    });
+    assert!(held_past.count() > 0, "the grid holds nothing past its box");
+
+    // A wide cylinder a hair off upright: every point just inside its rim lies within its bounds.
+    for tilt in [1e-6f32, 2.36e-4, 1e-3, 2e-2] {
+        let turned = Pose::new(Vec3::ZERO, Quat::from_rotation_x(tilt));
+        let cylinder = Obstacle::cylinder(Vec3::ZERO, 1.0, 0.1).placed(turned);
+        let bounds = cylinder.bounds();
+        for k in 0..360 {
+            let (sin, cos) = (k as f32).to_radians().sin_cos();
+            for end in [-1.0, 1.0] {
+                let rim = Vec3::new(cos, sin, 0.1 * end) * (1.0 - 1e-5);
+                let p = turned.rotation * rim;
+                assert!(cylinder.distance(p).value < 0.0, "the rim point is inside");
+                assert!(
+                    p.cmpge(bounds.lower_corner).all() && p.cmple(bounds.upper_corner).all(),
+                    "tilted {tilt} rad, the cylinder holds {p}, outside {bounds:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A grid 7.5 cm across whose box lies off its own origin and whose values fall along x, solid
+/// (negative) on its lower x face by 1.5 cm, so that it reads solid that far past the face.
+fn solid_on_a_face() -> SdfGrid {
+    let (dims, voxel) = ([16u32, 16, 16], 0.005);
+    let values: Vec<f32> = (0..dims[0] * dims[1] * dims[2])
+        .map(|k| (k % dims[0]) as f32 * voxel - 0.015)
+        .collect();
+    SdfGrid::try_new(dims, voxel, Vec3::new(0.02, 0.03, -0.01), &values).unwrap()
+}

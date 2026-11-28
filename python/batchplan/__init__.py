@@ -8,6 +8,7 @@ whose defaults are a good start.
 
 from batchplan._native import (
     AttachedObject,
+    Bounds,
     CandidateStop,
     CollisionModel,
     CollisionWeights,
@@ -101,6 +102,7 @@ from batchplan._native import (
 
 __all__ = [
     "AttachedObject",
+    "Bounds",
     "CandidateStop",
     "CollisionModel",
     "CollisionWeights",

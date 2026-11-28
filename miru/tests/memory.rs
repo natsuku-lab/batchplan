@@ -23,8 +23,8 @@ use common::{
 use glam::{Mat3, Quat, Vec3};
 use miru::{
     Act, Camera, ClosureEvidence, GripSource, Kept, Label, Look, LookOptions, Memory,
-    MemoryOptions, Noise, Observed, Of, Planned, Scene, Shape, Stance, Step, Support, TurnGrips,
-    TurnGroup, Under, observe,
+    MemoryOptions, Noise, Observed, Of, Planned, Riding, Scene, Shape, Stance, Step, Support,
+    TurnGrips, TurnGroup, Under, observe,
 };
 
 /// The Panda's stance with its fingertips 2.3 cm over the top of the can of
@@ -67,6 +67,12 @@ what_a_held_thing_was_lifted_off_is_not_its_surface | D435+D405 | 20 of the plan
 what_a_held_thing_was_lifted_off_is_not_its_surface | exact at 2 cm | 59 of the plank's 4000 points the box's | as through the D435, the box fitted 9 mm short of its top: 59 of 4,000
 what_falls_into_a_held_tray_lands_inside_it | D435 | nothing falls into the tray | the look gives the tray in four objects (its floor and one wall a box open at the top, each other wall a box of its own), so no one object's readings hold the hollow: standing, its floor's object's own readings (`Kept::surface`) give no fall either, where every reading about the tray (`Kept::surface_about`) gives 3,072
 what_falls_into_a_held_tray_lands_inside_it | D435+D405 | nothing falls into the tray | as through the D435, its floor a box of its own: no fall of the floor's object's readings standing, 3,044 of every reading about it
+a_rider_gone_is_found_again_under_a_new_id | D435 | the cube on the table is 4.6 by 9.1 by 4.5 cm | the cube's place reads gone, and the look finds it on the table under a new id, its middle within the cube, sized as the look sizes a box through a stereo camera, past the noise: `tests/truth.rs`'s \"a box\" comes out 51 and 37 mm larger across
+a_rider_gone_is_found_again_under_a_new_id | D435+D405 | the cube on the table is 4.8 by 8.9 by 4.6 cm | as through the D435
+a_rider_one_view_reads_far_off_is_gone_where_a_window_reads_past_it | D435 | the cube reads Some(Unseen) | the far view alone reads the plank's far end, 0.65 m off, where a D435's window is 121 readings and its allowance 7 mm: 0.73 to 0.77 of a window reads through the cube's place over three draws, too few to tell from noise
+a_rider_one_view_reads_far_off_is_gone_where_a_window_reads_past_it | D435+D405 | the cube reads Some(Unseen) | as through the D435, the far view the same camera: 0.72 to 0.76 of a window
+a_rider_smaller_than_its_shape_is_there | D435 | a ball 2 cm across reads [Some(Gone)] | the limit of the rule: the ball lies in 0.09 to 0.14 of a window of the cube's place over three draws, less than the look takes for a thing at that range, and 4.3 windows read through the place around it: gone while it is there
+a_rider_smaller_than_its_shape_is_there | D435+D405 | a cube 4 mm smaller reads [Some(Unseen)], and a ball 2 cm across reads [Some(Gone)] | the cube 4 mm smaller lies in 0.73 to 0.79 of a window of its place and 0.15 to 0.19 read through it: unseen; the ball lies in 0.04 to 0.05 and 1.04 to 1.06 read through: gone while it is there, as through the D435
 ";
 
 /// The complaint listed for `test` through `camera`, if one is.
@@ -6346,4 +6352,688 @@ fn a_held_things_surface_refuses_what_is_no_hold_of_it() {
             .surface_held(&device, the_box.id, &squashed, &OVER_THE_CAN),
         &[&named, "grasps it at"],
     );
+}
+
+/// The windows a plane is taken over at `depth`, through the tests' pinhole, by a camera stating
+/// `noise`, in readings: `(2r + 1)²` for the least radius `r` whose `(2r + 1)·√(r(r + 1))`
+/// reaches 42.1 deviations of the noise per pixel's footprint there, as `look` sizes them
+/// (`src/segment.rs`, `WINDOW`). Readings that fill one are what a look takes a thing by.
+fn window(noise: Noise, depth: f32) -> f32 {
+    let need = 7.348_469 / 0.174_532_92 * deviation(noise, depth) * common::K.fx / depth;
+    let size = |r: usize| (2 * r + 1) as f32 * ((r * (r + 1)) as f32).sqrt();
+    let largest = common::HEIGHT - 1;
+    let r = (1..largest).find(|&r| size(r) >= need).unwrap_or(largest);
+    ((2 * r + 1) * (2 * r + 1)) as f32
+}
+
+/// Where the ray from `eye` through `p` is inside the box of half sizes `half` at `at`: where it
+/// goes in and where it comes out, as shares of the way to `p`; none where it misses the box.
+fn through(at: Pose, half: Vec3, eye: Vec3, p: Vec3) -> Option<(f32, f32)> {
+    let to_box = at.inverse();
+    let (from, toward) = (
+        to_box.position + to_box.rotation * eye,
+        to_box.rotation * (p - eye),
+    );
+    let (lower, upper) = ((-half - from) / toward, (half - from) / toward);
+    let (near, far) = (
+        lower.min(upper).max_element(),
+        lower.max(upper).min_element(),
+    );
+    (near < far && far > 0.0).then_some((near.max(0.0), far))
+}
+
+/// In windows ([`window`]), what the look kept of the place of the 4 cm cube at `place`, each
+/// camera standing and stating the noise `cameras` gives it, as the rule says (`Kept::riding`)
+/// and found here by the box's own faces: the readings whose rays meet the place, from where they
+/// go in, less three deviations of the noise, to where they come out, plus them, and that lie
+/// farther than that from `apart`, what it lies on; and those past where they come out by more,
+/// or where they come out onto `apart` past more of the place than twice that.
+fn read_at(kept: &Kept, cameras: &Seen, place: Pose, apart: &Obstacle) -> [f32; 2] {
+    let mut read = [0.0; 2];
+    for (v, &(eye, noise)) in cameras.iter().enumerate() {
+        let image = kept.image(v).expect("two views");
+        let points = image.points(None).expect("a sound image");
+        for (i, p) in points.iter().enumerate() {
+            let Some(p) = *p else {
+                continue;
+            };
+            let Some((near, far)) = through(place, Vec3::splat(0.02), eye, p) else {
+                continue;
+            };
+            let z = image.depth[i];
+            let reach = 3.0 * deviation(noise, z);
+            let share = 1.0 / window(noise, z);
+            let on_apart = apart.distance(p).value <= reach;
+            let out = (1.0 - far) * z;
+            let onto = on_apart && out.abs() <= reach && (far - near) * z > 2.0 * reach;
+            if out > reach || onto {
+                read[1] += share;
+            } else if (1.0 - near) * z >= -reach && !on_apart {
+                read[0] += share;
+            }
+        }
+    }
+    read
+}
+
+/// The pose of a 4 cm cube at `at` in the frame of the plank at `plank_at`.
+fn cube_place(plank_at: Pose, at: Vec3) -> Pose {
+    plank_at.mul_pose(Pose::new(at, Quat::IDENTITY))
+}
+
+/// Where a cube rides on the plank by the hand, in the plank's frame: both cameras read it there,
+/// where only the far one reads one at [`RIDES_AT`].
+const BY_THE_HAND: Vec3 = Vec3::new(-0.01, 0.06, -0.035);
+
+/// A memory of nothing seen whose hand 0 holds the plank as object 0, carrying a 4 cm cube at each
+/// of `at` in its frame, objects 1, 2 and on, each held by hand 1 and set on it in turn.
+fn cubes_on_the_plank(device: &Device, at: &[Vec3]) -> Memory {
+    let mut memory = holding_the_plank(device);
+    for (k, _) in at.iter().enumerate() {
+        let id = k as u32 + 1;
+        let acts = [
+            Act::Picked {
+                id,
+                held: cube_in(1),
+            },
+            Act::LetGo {
+                id,
+                at: Pose::IDENTITY,
+                on: Some(Under::Held(Box::new(plank_carrying(&at[..=k])))),
+            },
+        ];
+        memory = memory.after(&acts).expect("the cube rides on the plank");
+    }
+    memory
+}
+
+/// The table, the arm at [`OVER_THE_CAN`] and the plank in hand 0 where [`plank`] holds it, with
+/// a 4 cm cube at `cube` in the plank's frame where one is given, then `more`: things 0, 1, 2 and
+/// 3. Where the plank is.
+fn the_plank_with(robot: &Robot, cube: Option<Vec3>, more: Vec<Thing>) -> (Vec<Thing>, Pose) {
+    let plank_at = robot
+        .ee_pose(&OVER_THE_CAN, 0)
+        .mul_pose(plank().grasp.inverse());
+    let mut things = acts_scene(
+        robot,
+        &OVER_THE_CAN,
+        None,
+        None,
+        Some(placed_block(plank_at, PLANK_HALF)),
+    );
+    let cube = cube.map(|at| plank_at.mul_pose(Pose::new(at, Quat::IDENTITY)));
+    things.extend(cube.map(|at| placed_block(at, Vec3::splat(0.02))));
+    things.extend(more);
+    (things, plank_at)
+}
+
+/// The draws camera set `c` of [`CAMERAS`] reads a scene with for test `k`: one for exact depth,
+/// which draws nothing, and three for each stereo set, so that what holds through a stereo camera
+/// holds for draws other than one.
+fn draws(c: usize, k: u64) -> Vec<(usize, u64)> {
+    let count = if CAMERAS[c].1.is_none() { 1 } else { 3 };
+    (0..count)
+        .map(|draw| (c, 100 * k + 10 * c as u64 + draw))
+        .collect()
+}
+
+/// A cube rides on the plank by the hand ([`BY_THE_HAND`]), in view of both cameras, where the
+/// hold has it: the look reads it there, and it rides on. Through each camera, and for each of its
+/// draws, more than a window of its readings, the measure the rule takes, lie within three
+/// deviations of the noise of its true depth and farther than that from the plank.
+#[test]
+fn a_rider_in_view_is_seen_there() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let riding = cubes_on_the_plank(&device, &[BY_THE_HAND]);
+    let (things, plank_at) = the_plank_with(&robot, Some(BY_THE_HAND), vec![]);
+    let the_plank = placed_box(plank_at, PLANK_HALF);
+    let place = cube_place(plank_at, BY_THE_HAND);
+    let rendered = render(&things);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let mut wrong = vec![];
+        for seed in draws(c, 1) {
+            let (cameras, seen) = looked(&device, &rendered, 1, seed, &OVER_THE_CAN, &riding, None);
+            let [on, past] = read_at(&seen.kept, &cameras, place, &the_plank);
+            eprintln!("{camera} {seed:?}: the cube there in {on:.1} windows, past it in {past:.1}");
+            assert!(on > 1.0, "{camera} {seed:?}: the cube in {on:.1} windows");
+            let read = seen.kept.riding(1);
+            if read != Some(Riding::There) {
+                wrong.push(format!("{seed:?}: the cube reads {read:?}"));
+            }
+            if seen.memory.riders(0) != [1] {
+                wrong.push(format!("{seed:?}: riders {:?}", seen.memory.riders(0)));
+            }
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("a_rider_in_view_is_seen_there", &found);
+}
+
+/// The plank's points of `surface` that lie farther from it than their allowance: what is wrong
+/// with it as the plank's readings where it is at `plank_at`, more than `off_the_box`'s 0.5%.
+fn off_the_plank(surface: &Surface, plank_at: Pose, cameras: &Seen) -> Vec<String> {
+    let solid = placed_box(plank_at, PLANK_HALF);
+    let points = surface.points.iter().zip(&surface.seen_from);
+    let off = points
+        .filter(|&(&p, &from)| solid.distance(p).value.abs() > allowance(cameras, p, from))
+        .count();
+    match surface.points.len() >= 300 && off * 1000 <= surface.points.len() * 5 {
+        true => vec![],
+        false => vec![format!(
+            "{off} of the plank's {} points off it",
+            surface.points.len()
+        )],
+    }
+}
+
+/// The cube that rode on the plank by the hand fell: the scene holds the plank alone. The look,
+/// taken with the hand where it stood and before any act, reads through the cube's place to the
+/// plank past it, `Riding::Gone`, and reports only: the memory after it still has the cube riding.
+/// `Act::Lost` of the cube, in the next `Memory::after` and with no look between, takes it off:
+/// the plank's hand holds the plank as it was before the cube was set on it, nothing rides, and
+/// nothing is an object. The plank's surface at that look is the plank's. Through each camera, and
+/// for each of its draws, less than a window of readings lies in the cube's place, and more than
+/// one where the rays come out of it onto the plank or past it.
+#[test]
+fn a_rider_whose_place_is_seen_empty_is_gone() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let riding = cubes_on_the_plank(&device, &[BY_THE_HAND]);
+    let (things, plank_at) = the_plank_with(&robot, None, vec![]);
+    let rendered = render(&things);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let mut wrong = vec![];
+        for seed in draws(c, 2) {
+            let (cameras, seen) = looked(&device, &rendered, 1, seed, &OVER_THE_CAN, &riding, None);
+            let the_plank = placed_box(plank_at, PLANK_HALF);
+            let place = cube_place(plank_at, BY_THE_HAND);
+            let [on, past] = read_at(&seen.kept, &cameras, place, &the_plank);
+            eprintln!(
+                "{camera} {seed:?}: where the cube was, {on:.1} windows on it, {past:.1} past"
+            );
+            assert!(
+                on < 1.0 && past > 1.0,
+                "{camera} {seed:?}: {on:.1} on, {past:.1} past"
+            );
+            let read = seen.kept.riding(1);
+            if read != Some(Riding::Gone) {
+                wrong.push(format!("{seed:?}: the cube reads {read:?}"));
+            }
+            let carrying = plank_carrying(&[BY_THE_HAND]);
+            if seen.memory.riders(0) != [1] || seen.memory.held(0) != Some((0, &carrying)) {
+                wrong.push(format!("{seed:?}: the look took the cube off"));
+            }
+            let lost = seen.memory.after(&[Act::Lost { id: 1 }]);
+            let memory = lost.expect("a rider can be lost");
+            if !memory.riders(0).is_empty() || memory.held(0) != Some((0, &plank())) {
+                wrong.push(format!(
+                    "{seed:?}: lost, riders {:?}, hand 0 holds {:?}",
+                    memory.riders(0),
+                    memory.held(0)
+                ));
+            }
+            if !memory.objects().is_empty() {
+                wrong.push(format!("{seed:?}: {} objects", memory.objects().len()));
+            }
+            let surface = seen.kept.surface_held(&device, 0, &carrying, &OVER_THE_CAN);
+            let surface = surface.expect("a hold the look saw").expect("its readings");
+            let off = off_the_plank(&surface, plank_at, &cameras);
+            wrong.extend(off.into_iter().map(|why| format!("{seed:?}: {why}")));
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("a_rider_whose_place_is_seen_empty_is_gone", &found);
+}
+
+/// Two cubes ride on the plank, the first by the hand and the second at its far end; the first
+/// fell. The look reads it gone and the other not, and both still ride after it; lost, the first
+/// comes off alone: the hand holds the plank carrying the second, where it rode.
+#[test]
+fn of_two_riders_the_one_gone_is_lost_alone() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let both = cubes_on_the_plank(&device, &[BY_THE_HAND, RIDES_AT]);
+    let (things, _) = the_plank_with(&robot, Some(RIDES_AT), vec![]);
+    let rendered = render(&things);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seed = (c, 10 * c as u64 + 23);
+        let (_, seen) = looked(&device, &rendered, 1, seed, &OVER_THE_CAN, &both, None);
+        let (gone, far) = (seen.kept.riding(1), seen.kept.riding(2));
+        eprintln!("{camera}: the cube that fell {gone:?}, the one at the far end {far:?}");
+        let mut wrong = vec![];
+        if gone != Some(Riding::Gone) || far == Some(Riding::Gone) || far.is_none() {
+            wrong.push(format!(
+                "the cube that fell reads {gone:?}, the other {far:?}"
+            ));
+        }
+        if seen.memory.riders(0) != [1, 2] {
+            wrong.push(format!("the look left riders {:?}", seen.memory.riders(0)));
+        }
+        let carrying = plank_carrying(&[RIDES_AT]);
+        let memory = seen.memory.after(&[Act::Lost { id: 1 }]);
+        let memory = memory.expect("a rider can be lost");
+        if memory.riders(0) != [2] || memory.held(0) != Some((0, &carrying)) {
+            wrong.push(format!(
+                "riders {:?}, hand 0 holds {:?}",
+                memory.riders(0),
+                memory.held(0)
+            ));
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("of_two_riders_the_one_gone_is_lost_alone", &found);
+}
+
+/// The cube that rode on the plank fell onto the table, where both cameras see it, in the look
+/// that reads its place on the plank empty: it reads gone, and the look's scene has it on the
+/// table as a new object, the size of the cube, under an id past the memory's next one before the
+/// look. Lost (`Act::Lost`), no object and no rider has its old id.
+#[test]
+fn a_rider_gone_is_found_again_under_a_new_id() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let riding = cubes_on_the_plank(&device, &[BY_THE_HAND]);
+    let fell_to = Vec3::new(0.45, -0.15, 0.02);
+    let fallen = block(fell_to, Vec3::splat(0.02), [200, 30, 30]);
+    let (things, _) = the_plank_with(&robot, None, vec![fallen]);
+    let rendered = render(&things);
+    for (v, frame) in rendered.iter().enumerate() {
+        let shown = frame.shows.iter().filter(|s| **s == Some(3)).count();
+        assert!(
+            shown > 100,
+            "view {v} shows the fallen cube in {shown} pixels"
+        );
+    }
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seed = (c, 10 * c as u64 + 24);
+        let (cameras, seen) = looked(&device, &rendered, 1, seed, &OVER_THE_CAN, &riding, None);
+        let mut wrong = vec![];
+        // What a stereo camera reads wrong of this scene, said in one complaint.
+        let mut misread = vec![];
+        let read = seen.kept.riding(1);
+        if read != Some(Riding::Gone) {
+            misread.push(format!("the cube reads {read:?}"));
+        }
+        let scene = seen.kept.scene();
+        match holder(scene, &rendered, 3).map(|object| &scene.objects[object]) {
+            None => wrong.push("the cube on the table is no object".to_string()),
+            Some(object) => {
+                let (across, middle, high) = common::sizes(&object.shape);
+                eprintln!(
+                    "{camera}: the fallen cube is object {} at {middle}, {across:?} across and \
+                     {high} high (halves)",
+                    object.id
+                );
+                let inside = Obstacle::cuboid(fell_to, Vec3::splat(0.02)).distance(middle);
+                if object.id < riding.next_id() || inside.value > 0.0 {
+                    wrong.push(format!("the cube on the table is object {object:?}"));
+                }
+                // Its size, each half within the noise and a pixel's width of the cube's.
+                let reach = allowance(&cameras, middle, EYE.min(NEAR));
+                let halves = [across[0], across[1], high];
+                if halves.iter().any(|half| (half - 0.02).abs() > reach) {
+                    misread.push(format!(
+                        "the cube on the table is {:.1} by {:.1} by {:.1} cm",
+                        200.0 * across[0],
+                        200.0 * across[1],
+                        200.0 * high
+                    ));
+                }
+            }
+        }
+        if !misread.is_empty() {
+            wrong.push(misread.join(", and "));
+        }
+        let lost = seen.memory.after(&[Act::Lost { id: 1 }]);
+        let lost = lost.expect("a rider can be lost");
+        if lost.objects().iter().any(|object| object.id == 1) || !lost.riders(0).is_empty() {
+            wrong.push(format!(
+                "lost, riders {:?}, or an object of id 1",
+                lost.riders(0)
+            ));
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("a_rider_gone_is_found_again_under_a_new_id", &found);
+}
+
+/// A box 8 cm across between each camera and the cube that rides on the plank by the hand, a third
+/// of the way from the cube: no camera reads the cube's place, which the views show without the
+/// boxes, so it reads unseen and rides on.
+#[test]
+fn a_rider_hidden_from_every_camera_is_unseen() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let riding = cubes_on_the_plank(&device, &[BY_THE_HAND]);
+    let (open, plank_at) = the_plank_with(&robot, Some(BY_THE_HAND), vec![]);
+    let cube_at = plank_at
+        .mul_pose(Pose::new(BY_THE_HAND, Quat::IDENTITY))
+        .position;
+    let screens = [EYE, NEAR].map(|eye| {
+        let at = cube_at + (eye - cube_at) / 3.0;
+        block(at, Vec3::splat(0.04), [30, 200, 30])
+    });
+    let (things, _) = the_plank_with(&robot, Some(BY_THE_HAND), screens.into());
+    let rendered = render(&things);
+    let unscreened = render(&open);
+    let count = |frames: &[Frame; 2]| {
+        let shown = frames
+            .iter()
+            .map(|frame| frame.shows.iter().filter(|s| **s == Some(3)));
+        shown.map(Iterator::count).sum::<usize>()
+    };
+    let (hidden, shown) = (count(&rendered), count(&unscreened));
+    assert!(
+        hidden == 0 && shown > 300,
+        "the views show the cube in {hidden} pixels, {shown} without the boxes"
+    );
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seed = (c, 10 * c as u64 + 25);
+        let (_, seen) = looked(&device, &rendered, 1, seed, &OVER_THE_CAN, &riding, None);
+        let mut wrong = vec![];
+        let read = seen.kept.riding(1);
+        if read != Some(Riding::Unseen) {
+            wrong.push(format!("the cube reads {read:?}"));
+        }
+        if seen.memory.riders(0) != [1] {
+            wrong.push(format!("riders {:?}", seen.memory.riders(0)));
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("a_rider_hidden_from_every_camera_is_unseen", &found);
+}
+
+/// The cube that rides on the plank by the hand slipped along it, away from the hand: by 3 mm,
+/// past the exact depth's allowance and within the stereo cameras', it is there, most of its top
+/// where the hold has it; by its own width, under the arm where no camera reads it, none of its
+/// readings where the hold has it and its place seen empty, it is gone.
+#[test]
+fn a_rider_slipped_is_there_until_it_slipped_off_its_place() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let riding = cubes_on_the_plank(&device, &[BY_THE_HAND]);
+    let (_, plank_at) = the_plank_with(&robot, None, vec![]);
+    let the_plank = placed_box(plank_at, PLANK_HALF);
+    let place = cube_place(plank_at, BY_THE_HAND);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let mut wrong = vec![];
+        for (slip, then) in [(0.003, Riding::There), (0.04, Riding::Gone)] {
+            let slipped = BY_THE_HAND - Vec3::Y * slip;
+            let (things, _) = the_plank_with(&robot, Some(slipped), vec![]);
+            let rendered = render(&things);
+            for seed in draws(c, 6) {
+                let (cameras, seen) =
+                    looked(&device, &rendered, 1, seed, &OVER_THE_CAN, &riding, None);
+                // Where the hold has the cube: read on it, and read past it.
+                let [on, past] = read_at(&seen.kept, &cameras, place, &the_plank);
+                let read = seen.kept.riding(1);
+                eprintln!(
+                    "{camera} {seed:?}: slipped {slip} m, {on:.1} windows on its place, {past:.1} \
+                     past: {read:?}"
+                );
+                let exercised = match then {
+                    Riding::There => on > 1.0,
+                    _ => on < 1.0 && past > 1.0,
+                };
+                assert!(
+                    exercised,
+                    "{camera} {seed:?}: slipped {slip} m, {on:.1} on, {past:.1} past"
+                );
+                if read != Some(then) {
+                    wrong.push(format!("{seed:?}: slipped {slip} m, it reads {read:?}"));
+                }
+                if seen.memory.riders(0) != [1] {
+                    wrong.push(format!(
+                        "{seed:?}: slipped {slip} m, riders {:?}",
+                        seen.memory.riders(0)
+                    ));
+                }
+            }
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict(
+        "a_rider_slipped_is_there_until_it_slipped_off_its_place",
+        &found,
+    );
+}
+
+/// A look answers for what rode on a hold of the memory it was made with alone: none for the
+/// carrier's id, for an id no thing has, and for a cube on the plank in view where the memory's
+/// hold carries nothing. A look with no cameras sees nothing: every rider unseen, riding on.
+#[test]
+fn a_look_answers_for_what_rode_then() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let riding = cubes_on_the_plank(&device, &[BY_THE_HAND]);
+    let (things, _) = the_plank_with(&robot, Some(BY_THE_HAND), vec![]);
+    let rendered = render(&things);
+    let (_, seen) = looked(&device, &rendered, 1, (0, 27), &OVER_THE_CAN, &riding, None);
+    assert_eq!(seen.kept.riding(1), Some(Riding::There));
+    assert_eq!(seen.kept.riding(0), None, "the carrier rides on nothing");
+    assert_eq!(seen.kept.riding(7), None, "no thing has id 7");
+    let holding = holding_the_plank(&device);
+    let (_, seen) = looked(
+        &device,
+        &rendered,
+        1,
+        (0, 27),
+        &OVER_THE_CAN,
+        &holding,
+        None,
+    );
+    assert_eq!(seen.kept.riding(1), None, "nothing rode on the hold");
+
+    let locked = HashMap::new();
+    let stance = Stance {
+        q: &OVER_THE_CAN,
+        locked: &locked,
+        padding: 0.002,
+    };
+    let blind = observe(&device, &[], &stance, &riding).expect("a look that sees nothing");
+    assert_eq!(blind.kept.riding(1), Some(Riding::Unseen));
+    assert_eq!(blind.memory.riders(0), [1]);
+    assert_eq!(blind.memory.held(0), riding.held(0));
+}
+
+/// The half sizes of a plate 4 cm across and 4 mm thick.
+const PLATE_HALF: Vec3 = Vec3::new(0.02, 0.02, 0.002);
+
+/// A plate ([`PLATE_HALF`]) rides on the plank by the hand, lying on its top, or it fell. Lying
+/// there, it is read there where a camera that reads it states an allowance under its thickness,
+/// as the exact depth and the D435 near do; where every such camera's allowance is more, as the
+/// D435 far and the D405 near state, its readings lie within that of the plank: unseen. Gone, the
+/// plank is read where the rays come out of the plate's place onto it, past more of the place than
+/// twice the allowance where a camera allows less than the plate's thickness, as the rays cross it
+/// at a slant: gone there, and unseen where every camera allows more; never there.
+#[test]
+fn a_rider_thinner_than_the_noise_is_unseen() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let lying = Vec3::new(BY_THE_HAND.x, BY_THE_HAND.y, -PLANK_HALF.z - PLATE_HALF.z);
+    let plate = Obstacle::cuboid(Vec3::ZERO, PLATE_HALF);
+    let carrying = Held {
+        carries: vec![plate.placed(Pose::new(lying, Quat::IDENTITY))],
+        ..plank()
+    };
+    let acts = [
+        Act::Picked {
+            id: 1,
+            held: Held {
+                object: plate,
+                ..cube_in(1)
+            },
+        },
+        Act::LetGo {
+            id: 1,
+            at: Pose::IDENTITY,
+            on: Some(Under::Held(Box::new(carrying))),
+        },
+    ];
+    let riding = holding_the_plank(&device).after(&acts);
+    let riding = riding.expect("the plate rides on the plank");
+    let (_, plank_at) = the_plank_with(&robot, None, vec![]);
+    let plate_at = plank_at.mul_pose(Pose::new(lying, Quat::IDENTITY));
+    let mut things = the_plank_with(&robot, None, vec![]).0;
+    things.push(placed_block(plate_at, PLATE_HALF));
+    let scenes = [
+        render(&things),
+        render(&the_plank_with(&robot, None, vec![]).0),
+    ];
+    let mut found = vec![];
+    let mut decided = [false; 2];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let mut wrong = vec![];
+        for seed in draws(c, 8) {
+            for (rendered, then) in scenes.iter().zip([Riding::There, Riding::Gone]) {
+                let (cameras, seen) =
+                    looked(&device, rendered, 1, seed, &OVER_THE_CAN, &riding, None);
+                // The least allowance of a camera that reads the plate where it lies.
+                let least = (scenes[0].iter().zip(&cameras))
+                    .filter(|(frame, _)| frame.shows.contains(&Some(3)))
+                    .map(|(_, &(eye, noise))| {
+                        3.0 * deviation(noise, eye.distance(plate_at.position))
+                    })
+                    .fold(f32::INFINITY, f32::min);
+                let thick = 2.0 * PLATE_HALF.z;
+                let expected = if thick > least { then } else { Riding::Unseen };
+                decided[usize::from(thick > least)] = true;
+                let read = seen.kept.riding(1);
+                eprintln!(
+                    "{camera} {seed:?}: the plate {then:?} under an allowance of {:.1} mm: {read:?}",
+                    1e3 * least
+                );
+                if read != Some(expected) {
+                    wrong.push(format!("{seed:?}: the plate {then:?} reads {read:?}"));
+                }
+            }
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    assert_eq!(
+        decided, [true; 2],
+        "some camera reads the plate, and some does not"
+    );
+    verdict("a_rider_thinner_than_the_noise_is_unseen", &found);
+}
+
+/// The cube that rode at the plank's far end ([`RIDES_AT`]), which the far view alone reads, fell.
+/// On exact depth the look reads its place empty, 14 windows of readings past it. Through the
+/// D435 far, whose windows there are 121 readings, under one window of them lies past it: unseen,
+/// a gap of the measure, listed in [`GAPS`].
+#[test]
+fn a_rider_one_view_reads_far_off_is_gone_where_a_window_reads_past_it() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let riding = cubes_on_the_plank(&device, &[RIDES_AT]);
+    let (things, plank_at) = the_plank_with(&robot, None, vec![]);
+    let (was, _) = the_plank_with(&robot, Some(RIDES_AT), vec![]);
+    let the_plank = placed_box(plank_at, PLANK_HALF);
+    let place = cube_place(plank_at, RIDES_AT);
+    let (rendered, truth) = (render(&things), render(&was));
+    let near = truth[1].shows.iter().filter(|s| **s == Some(3)).count();
+    assert_eq!(
+        near, 0,
+        "the near view reads the cube's place in {near} pixels"
+    );
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let mut wrong = vec![];
+        for seed in draws(c, 9) {
+            let (cameras, seen) = looked(&device, &rendered, 1, seed, &OVER_THE_CAN, &riding, None);
+            let [on, past] = read_at(&seen.kept, &cameras, place, &the_plank);
+            let read = seen.kept.riding(1);
+            eprintln!("{camera} {seed:?}: {on:.2} windows on its place, {past:.2} past: {read:?}");
+            if read != Some(Riding::Gone) || seen.memory.riders(0) != [1] {
+                wrong.push(format!("{seed:?}: the cube reads {read:?}"));
+            }
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict(
+        "a_rider_one_view_reads_far_off_is_gone_where_a_window_reads_past_it",
+        &found,
+    );
+}
+
+/// What rides on the plank by the hand is smaller than the 4 cm cube's shape the memory has for it,
+/// as a shape a stereo look fits comes out larger than its thing: a cube 2 mm smaller on each side,
+/// one 4 mm smaller, and a ball 2 cm across, each lying on the plank in the middle of the cube's
+/// place. Readings in the place are what only something there gives: each reads there. Through
+/// each camera and each of its draws, more than a window of readings lies in the place.
+#[test]
+fn a_rider_smaller_than_its_shape_is_there() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let riding = cubes_on_the_plank(&device, &[BY_THE_HAND]);
+    let (_, plank_at) = the_plank_with(&robot, None, vec![]);
+    let (the_plank, place) = (
+        placed_box(plank_at, PLANK_HALF),
+        cube_place(plank_at, BY_THE_HAND),
+    );
+    // Lying on the plank's top, in the middle of the cube's place: the plank's frame.
+    let lying = |half: f32| Vec3::new(BY_THE_HAND.x, BY_THE_HAND.y, -PLANK_HALF.z - half);
+    let smaller = |by: f32| {
+        placed_block(
+            plank_at.mul_pose(Pose::new(lying(0.02 - by), Quat::IDENTITY)),
+            Vec3::splat(0.02 - by),
+        )
+    };
+    let ball = || {
+        let at = plank_at.mul_pose(Pose::new(lying(0.01), Quat::IDENTITY));
+        common::ball(at.position, 0.01, [200, 30, 30])
+    };
+    let names = [
+        "a cube 2 mm smaller",
+        "a cube 4 mm smaller",
+        "a ball 2 cm across",
+    ];
+    let thing = |k: usize| match k {
+        0 => smaller(0.002),
+        1 => smaller(0.004),
+        _ => ball(),
+    };
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        // What each thing read that was not there, over the draws, said in one complaint.
+        let mut misread = vec![];
+        for (k, name) in names.iter().enumerate() {
+            let (scene, _) = the_plank_with(&robot, None, vec![thing(k)]);
+            let rendered = render(&scene);
+            let mut reads = vec![];
+            for seed in draws(c, 10) {
+                let (cameras, seen) =
+                    looked(&device, &rendered, 1, seed, &OVER_THE_CAN, &riding, None);
+                let [inside, past] = read_at(&seen.kept, &cameras, place, &the_plank);
+                let read = seen.kept.riding(1);
+                eprintln!(
+                    "{camera} {seed:?}: {name}, {inside:.2} windows in its place, {past:.2} past: {read:?}"
+                );
+                // The larger cube fills a window of the place on every camera; the others as they are.
+                assert!(
+                    k != 0 || inside > 1.0,
+                    "{camera} {seed:?}: {name} in {inside:.2} windows"
+                );
+                if read != Some(Riding::There) && !reads.contains(&read) {
+                    reads.push(read);
+                }
+            }
+            if !reads.is_empty() {
+                misread.push(format!("{name} reads {reads:?}"));
+            }
+        }
+        let wrong = match misread.is_empty() {
+            true => vec![],
+            false => vec![misread.join(", and ")],
+        };
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("a_rider_smaller_than_its_shape_is_there", &found);
 }

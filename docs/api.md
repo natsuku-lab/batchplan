@@ -40,7 +40,7 @@ Guide: [perception.md](perception.md).
 | `World::touch`, `Touch::new(obstacle, links)`, `Touch::held(obstacle, hand)` | Links allowed to touch an obstacle, such as the hand that grasps it ([allowed contacts](perception.md#allowed-contacts)), or what a hand comes to hold, as an object set down on a table ([holding objects](robots.md#holding-objects)). |
 | `World::always_touching(&robot)` | The touches of links that touch an obstacle in every configuration, as a link turning just above the base touches its table. |
 | `World::load(path, &SdfOptions)` | A scene's static geometry from MJCF or OpenUSD (feature `usd`). |
-| `Obstacle::cuboid`, `sphere`, `cylinder`, `capsule` | Axis-aligned shapes. `placed(pose)` moves and turns one, `pose()` returns its frame, `distance(p)` its signed distance and gradient (`Distance`). |
+| `Obstacle::cuboid`, `sphere`, `cylinder`, `capsule` | Axis-aligned shapes. `placed(pose)` moves and turns one, `pose()` returns its frame, `distance(p)` its signed distance and gradient (`Distance`), `bounds()` the least box along the frame's axes that holds it (`Bounds`). |
 | `Obstacle::from_grid(grid)`, `Obstacle::from(grid)` | A distance grid as an obstacle, in the world's frame. |
 | `SdfGrid::from_mesh`, `from_points`, `from_depth`, `try_new` | Distance grids from a closed mesh, surface points, one depth image, or your own values. `lower_corner()`, `upper_corner()` and `distance(p)` read one. |
 | `SdfOptions` | A grid's voxel size and padding. |
