@@ -13,8 +13,8 @@ use std::collections::HashMap;
 
 use batchplan::{
     DepthFilter, DepthImage, Device, Gripper, GripperCalibration, Held, IkOptions, IkProblem,
-    Obstacle, Pose, Robot, RobotMask, Screw, ShapeGraspOptions, SphereOptions, SurfaceGraspOptions,
-    Weighing, World,
+    Obstacle, Pose, RestOptions, RestProblem, Robot, RobotMask, Screw, ShapeGraspOptions,
+    SphereOptions, Surface, SurfaceGraspOptions, Weighing, World,
 };
 use common::{
     CAMERAS, EYE, Frame, MIDDLE, NEAR, Stereo, Thing, arm, block, bowl, can, devices, known,
@@ -62,6 +62,11 @@ a_knob_is_turned_by_its_bar_first | D435+D405 | no bar over the disk resolves | 
 a_box_seen_from_one_side_is_turned_from_above_its_middle | D435+D405 | no grip from above its middle in 1 groups | the box is fitted 14 x 6 cm and not solid, and a reading not the box's, 15 mm past its unseen side and 2 cm over the table, lies in both closing sweeps from above its fitted middle
 a_post_in_the_closing_gap_rules_the_grip_out | D435+D405 | no grip from above its middle | as in `a_box_seen_from_one_side_is_turned_from_above_its_middle`, without the post
 a_shelf_in_the_way_in_rules_the_grip_out | D435+D405 | no grip from above its middle | as in `a_box_seen_from_one_side_is_turned_from_above_its_middle`, without the shelf
+what_a_held_thing_was_lifted_off_is_not_its_surface | D435 | 18 of the plank's 3404 points the box's | the box's readings within the padding of the plank are the hold's at the look, so the look fits the box from what lies under the padding, its top short of the true one by more than the noise reaches, and those of its top's readings that lie farther from that solid stay the plank's: 18 of 3,404; the rests land on the plank's top all the same
+what_a_held_thing_was_lifted_off_is_not_its_surface | D435+D405 | 20 of the plank's 3484 points the box's | as through the D435: 20 of 3,484
+what_a_held_thing_was_lifted_off_is_not_its_surface | exact at 2 cm | 59 of the plank's 4000 points the box's | as through the D435, the box fitted 9 mm short of its top: 59 of 4,000
+what_falls_into_a_held_tray_lands_inside_it | D435 | nothing falls into the tray | the look gives the tray in four objects (its floor and one wall a box open at the top, each other wall a box of its own), so no one object's readings hold the hollow: standing, its floor's object's own readings (`Kept::surface`) give no fall either, where every reading about the tray (`Kept::surface_about`) gives 3,072
+what_falls_into_a_held_tray_lands_inside_it | D435+D405 | nothing falls into the tray | as through the D435, its floor a box of its own: no fall of the floor's object's readings standing, 3,044 of every reading about it
 ";
 
 /// The complaint listed for `test` through `camera`, if one is.
@@ -5630,5 +5635,715 @@ fn a_hold_a_restart_brings_back_carries_its_riders() {
             held: plank_carrying(&[Vec3::NAN]),
         }],
         &["act 0", "object 4", "no finite pose"],
+    );
+}
+
+/// A configuration that carries what hand 0 holds raised and turned from where it stood or was
+/// held: the hand tipped 0.6 rad off pointing down, and turned about it.
+const CARRY: [f32; 7] = [0.3, 0.1, 0.0, -1.9, 0.0, 2.6, 1.2];
+
+/// The half sizes of [`plank`]'s object.
+const PLANK_HALF: Vec3 = Vec3::new(0.03, 0.15, 0.015);
+
+/// A box of half sizes `half` at `at`, coloured as the acts' box.
+fn placed_block(at: Pose, half: Vec3) -> Thing {
+    common::turned(
+        block(at.position, half, [200, 30, 30]),
+        at.position,
+        at.rotation,
+    )
+}
+
+/// A box of half sizes `half` at `at`, as an obstacle.
+fn placed_box(at: Pose, half: Vec3) -> Obstacle {
+    Obstacle::Cuboid {
+        center: at.position,
+        half_extents: half,
+        rotation: at.rotation,
+    }
+}
+
+/// What a camera of a look was: where it stood and the noise it stated.
+type Seen = [(Vec3, Noise); 2];
+
+/// `rendered` read as camera set `c` with the draws of `seed`, then looked at with the arm at `q`
+/// after `memory`, the stance padded by `padding` or, where none, by [`padding`]'s rule: each
+/// camera, and the look.
+fn looked(
+    device: &Device,
+    rendered: &[Frame; 2],
+    arm: usize,
+    (c, seed): (usize, u64),
+    q: &[f32],
+    memory: &Memory,
+    padded: Option<f32>,
+) -> (Seen, Observed) {
+    let (frames, bands) = read(rendered, c, seed);
+    let locked = HashMap::new();
+    let stance = Stance {
+        q,
+        locked: &locked,
+        padding: padded.unwrap_or_else(|| padding(rendered, &frames, arm)),
+    };
+    let cameras = cameras(&frames, bands, 0.0);
+    let seen = observe(device, &cameras, &stance, memory).expect("a look");
+    let at = |k: usize| (frames[k].camera.position, frames[k].noise);
+    ([at(0), at(1)], seen)
+}
+
+/// `cameras` moved by `by`, as a surface moved by it has them.
+fn moved_cameras(cameras: Seen, by: Pose) -> Seen {
+    cameras.map(|(at, noise)| (by.position + by.rotation * at, noise))
+}
+
+/// The outward normal of the face of the box of half sizes `half` at `at` nearest `p`.
+fn face_normal(at: Pose, half: Vec3, p: Vec3) -> Vec3 {
+    let local = at.rotation.inverse() * (p - at.position);
+    let past = local.abs() - half;
+    let axis = match (past.x >= past.y, past.x >= past.z, past.y >= past.z) {
+        (true, true, _) => Vec3::X,
+        (false, _, true) => Vec3::Y,
+        _ => Vec3::Z,
+    };
+    at.rotation * (axis * local.dot(axis).signum())
+}
+
+/// How far from `p`, seen from `from`, a reading may lie off its surface: three deviations of the
+/// noise of the one of `cameras` it was seen from and a pixel's width, at its distance.
+fn allowance(cameras: &Seen, p: Vec3, from: Vec3) -> f32 {
+    let camera = cameras
+        .iter()
+        .min_by(|a, b| a.0.distance(from).total_cmp(&b.0.distance(from)));
+    let (_, noise) = camera.expect("two cameras");
+    let range = p.distance(from);
+    3.0 * deviation(*noise, range) + range / common::K.fx
+}
+
+/// What is wrong with `surface` as readings of the box of half sizes `half` at `at`, by
+/// `cameras`: more of its points past their allowance ([`allowance`]) from the box's faces than
+/// twice the 0.27% of a normal draw that lie past three deviations, and the points' normals, at
+/// the median, more than half of `turned` (radians) from the outward normal of the face each lies
+/// nearest, `turned` being how far the surface was turned from where it was read: normals the
+/// move did not turn lie that far off.
+fn off_the_box(
+    surface: &Surface,
+    at: Pose,
+    half: Vec3,
+    cameras: &Seen,
+    turned: f32,
+) -> Vec<String> {
+    let solid = placed_box(at, half);
+    let points = (surface.points.iter())
+        .zip(&surface.normals)
+        .zip(&surface.seen_from);
+    let (mut off, mut rim, mut angles) = (0, 0, vec![]);
+    for ((&p, &n), &from) in points {
+        if solid.distance(p).value.abs() > allowance(cameras, p, from) {
+            off += 1;
+            // Past an edge of the box, where no face is under or beside it.
+            let local = at.rotation.inverse() * (p - at.position);
+            let outside = local.abs().cmpgt(half).bitmask().count_ones();
+            rim += usize::from(outside >= 2);
+        }
+        if n != Vec3::ZERO {
+            angles.push(face_normal(at, half, p).angle_between(n));
+        }
+    }
+    let mut wrong = vec![];
+    if off * 1000 > surface.points.len() * 5 {
+        wrong.push(format!(
+            "{off} of {} points off the box, {rim} of them past an edge",
+            surface.points.len()
+        ));
+    }
+    let middle = angles.len() / 2;
+    match angles.is_empty() {
+        true => wrong.push("no normals".to_string()),
+        false => {
+            let median = *angles.select_nth_unstable_by(middle, f32::total_cmp).1;
+            if median > 0.5 * turned {
+                wrong.push(format!(
+                    "normals {median:.2} rad off their faces at the median, turned {turned:.2}"
+                ));
+            }
+        }
+    }
+    wrong
+}
+
+/// How many of `surface`'s points lie nearer `other` than `own`: readings of another thing.
+fn nearer(surface: &Surface, own: &Obstacle, other: &Obstacle) -> usize {
+    let points = surface.points.iter();
+    points
+        .filter(|p| other.distance(**p).value < own.distance(**p).value)
+        .count()
+}
+
+/// The height of the highest corner of the box of half sizes `half` at `at`.
+fn highest(at: Pose, half: Vec3) -> f32 {
+    let corners = (0..8).map(|k| {
+        let sign = |bit: usize| if k & bit == 0 { -1.0 } else { 1.0 };
+        at.position + at.rotation * (Vec3::new(sign(1), sign(2), sign(4)) * half)
+    });
+    corners
+        .map(|corner| corner.z)
+        .fold(f32::NEG_INFINITY, f32::max)
+}
+
+/// What is wrong with the rests of a 2 cm cube set down on `surface` near `near`: none, or a
+/// first rest whose bottom is more than 5 mm off `top`.
+fn rests_at(device: &Device, surface: &Surface, near: Vec3, top: f32) -> Option<String> {
+    let small = Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.01));
+    let problem = RestProblem {
+        near: Some(near),
+        ..RestProblem::new(small, 0)
+    };
+    let rests = batchplan::rests_on(
+        device,
+        &[problem],
+        std::slice::from_ref(surface),
+        &RestOptions::default(),
+    );
+    let rests = rests.expect("sound problems").remove(0);
+    match rests.first() {
+        None => Some(format!("nothing rests near {near}")),
+        Some(rest) if (rest.pose.position.z - 0.01 - top).abs() > 0.005 => Some(format!(
+            "the first rest stands at {:.4} m, the top at {top:.4}",
+            rest.pose.position.z - 0.01
+        )),
+        Some(_) => None,
+    }
+}
+
+/// A plank stands on the table, turned, seen in one look; a hold of it from above near one end
+/// carries it to a configuration that raises it and tips its top more than 0.5 rad. Its surface
+/// there (`Kept::surface_held`) is the readings `Kept::surface` flags as the plank's, as many,
+/// on the plank's true faces where the hold carries it, within the camera's allowance, and the
+/// normals out of those faces: moved from where it stood, the frame of the room its shape takes up,
+/// to the hand, the grasp undone. Through a stereo camera the plank is not solid, and is carried
+/// all the same.
+#[test]
+fn a_surface_seen_standing_is_carried_where_a_hold_has_it() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let stood = Pose::new(Vec3::new(0.5, 0.05, 0.015), Quat::from_rotation_z(0.3));
+    let things = vec![table(), placed_block(stood, PLANK_HALF), arm(&robot, away)];
+    let rendered = render(&things);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seed = (c, 10 * c as u64 + 7);
+        let (cameras, seen) = looked(&device, &rendered, 2, seed, away, &memory(&device), None);
+        let mut wrong = vec![];
+        let scene = seen.kept.scene();
+        match holder(scene, &rendered, 1).map(|k| &scene.objects[k]) {
+            None => wrong.push("the plank is no object".to_string()),
+            Some(object) => {
+                let held = common::held_from_above(&object.shape, 0, 0.11);
+                let surface = seen.kept.surface_held(&device, object.id, &held, &CARRY);
+                let surface = surface.expect("a hold of a box").expect("its readings");
+                let flagged = seen.kept.surface(&device, object.id).expect("a surface");
+                let flagged = flagged.expect("readings").object;
+                let flagged = flagged.iter().filter(|o| **o).count();
+                if surface.points.len() != flagged || !surface.object.is_empty() {
+                    wrong.push(format!(
+                        "{} points of {flagged} flagged as the plank's",
+                        surface.points.len()
+                    ));
+                }
+                // The plank where the hold has it at CARRY: its frame at the hand, the grasp
+                // undone, and the true plank in that frame.
+                let by = robot
+                    .ee_pose(&CARRY, 0)
+                    .mul_pose(held.grasp.inverse())
+                    .mul_pose(cover(&object.shape).pose().inverse());
+                let carried = by.mul_pose(stood);
+                // How far the move tips the plank's top, which its normals, most of them, would
+                // be off by had they stayed.
+                let tipped = (carried.rotation * Vec3::Z).angle_between(Vec3::Z);
+                assert!(
+                    carried.position.z > stood.position.z + 0.1 && tipped > 0.5,
+                    "{camera}: CARRY raises the plank and tips it: {carried:?}"
+                );
+                let cameras = moved_cameras(cameras, by);
+                wrong.extend(off_the_box(&surface, carried, PLANK_HALF, &cameras, tipped));
+            }
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict(
+        "a_surface_seen_standing_is_carried_where_a_hold_has_it",
+        &found,
+    );
+}
+
+/// The memory of nothing seen with the plank in hand 0 as [`plank`] holds it, as object 0.
+fn holding_the_plank(device: &Device) -> Memory {
+    let held = Act::Picked {
+        id: 0,
+        held: plank(),
+    };
+    memory(device)
+        .after(&[held])
+        .expect("the plank in the hand")
+}
+
+/// The plank in hand 0 as the memory holds it ([`plank`]), truly `slip` off where the hold says
+/// in the plank's own frame, at [`OVER_THE_CAN`]; looked at once. Its surface at that
+/// configuration lies on the plank's faces where it truly is, and at [`CARRY`] where the hand has
+/// taken it from there: the readings moved with the hand, the hold's grasp not read. Truly 5 mm
+/// farther from the hand than the hold says, the face toward the hand lies 5 mm in from where the
+/// hold has it, as it truly does. A 2 cm cube set down on it rests on its top, near the far end
+/// and wherever else it rests.
+#[test]
+fn a_surface_seen_in_a_hand_moves_with_the_hand() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let held = plank();
+    let holding = holding_the_plank(&device);
+    let look = robot.ee_pose(&OVER_THE_CAN, 0);
+    // How far CARRY turns the hand, which a surface whose normals stayed would be off by there.
+    let turned = robot
+        .ee_pose(&CARRY, 0)
+        .rotation
+        .angle_between(look.rotation);
+    assert!(turned > 0.6, "CARRY turns the hand by {turned} rad");
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let mut wrong = vec![];
+        for slip in [0.0, 0.005] {
+            let truly = look
+                .mul_pose(held.grasp.inverse())
+                .mul_pose(Pose::new(Vec3::Z * slip, Quat::IDENTITY));
+            let plank_at = Some(placed_block(truly, PLANK_HALF));
+            let things = acts_scene(&robot, &OVER_THE_CAN, None, None, plank_at);
+            let arm = things.len() - 2;
+            let rendered = render(&things);
+            let seed = (c, 10 * c as u64 + 3);
+            let (cameras, seen) =
+                looked(&device, &rendered, arm, seed, &OVER_THE_CAN, &holding, None);
+            for q in [OVER_THE_CAN, CARRY] {
+                let surface = seen.kept.surface_held(&device, 0, &held, &q);
+                let surface = surface.expect("a hold the look saw").expect("its readings");
+                let hand = robot.ee_pose(&q, 0).mul_pose(look.inverse());
+                let there = hand.mul_pose(truly);
+                let at = format!("{} mm slipped, at {q:?}", 1e3 * slip);
+                if surface.points.len() < 300 || !surface.object.is_empty() {
+                    wrong.push(format!("{at}: {} points", surface.points.len()));
+                }
+                let cameras = moved_cameras(cameras, hand);
+                let off = off_the_box(&surface, there, PLANK_HALF, &cameras, turned);
+                wrong.extend(off.into_iter().map(|why| format!("{at}: {why}")));
+                // The face toward the hand, in the hold's frame where the hand has it: the
+                // points within it, 5 mm in from its edges.
+                let hold = robot.ee_pose(&q, 0).mul_pose(held.grasp.inverse());
+                let to_hold = hold.inverse();
+                let toward =
+                    (surface.points.iter()).map(|&p| to_hold.rotation * p + to_hold.position);
+                let inside = |p: &Vec3| {
+                    p.x.abs() < PLANK_HALF.x - 0.005
+                        && p.y.abs() < PLANK_HALF.y - 0.005
+                        && p.z < 0.0
+                };
+                let mut heights: Vec<f32> = toward.filter(inside).map(|p| p.z).collect();
+                let middle = heights.len() / 2;
+                let height = match heights.is_empty() {
+                    true => f32::NAN,
+                    false => *heights.select_nth_unstable_by(middle, f32::total_cmp).1,
+                };
+                let face = slip - PLANK_HALF.z;
+                if heights.len() < 100 || (height - face).abs() > 0.0015 {
+                    wrong.push(format!(
+                        "{at}: the face toward the hand at {:.1} mm in {} points, truly at {:.1}",
+                        1e3 * height,
+                        heights.len(),
+                        1e3 * face
+                    ));
+                }
+                let far = there.mul_pose(Pose::new(Vec3::new(0.0, -0.10, 0.0), Quat::IDENTITY));
+                let top = highest(there, PLANK_HALF);
+                if q == OVER_THE_CAN {
+                    // Wherever on it, nothing the camera read off it holds a rest up.
+                    let small = Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.01));
+                    let anywhere = RestProblem::new(small, 0);
+                    let all = batchplan::rests_on(
+                        &device,
+                        &[anywhere],
+                        std::slice::from_ref(&surface),
+                        &RestOptions::default(),
+                    );
+                    let all = all.expect("sound problems").remove(0);
+                    let off = (all.iter())
+                        .filter(|rest| (rest.pose.position.z - 0.01 - top).abs() > 0.005)
+                        .count();
+                    if all.is_empty() || off > 0 {
+                        wrong.push(format!("{at}: {off} of {} rests off the top", all.len()));
+                    }
+                    let rests = rests_at(&device, &surface, far.position, top);
+                    wrong.extend(rests.map(|why| format!("{at}: {why}")));
+                }
+            }
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("a_surface_seen_in_a_hand_moves_with_the_hand", &found);
+}
+
+/// The plank in hand 0 ([`plank`]) and a 4 cm cube held by hand 1 1 cm over the plank's top near
+/// its far end, both in one look. Each hold's surface holds its own thing's readings alone: the
+/// stance's padding reaches from each to readings of the other, and a reading both paddings reach
+/// is neither's. A 2 cm cube set down on the plank near the far end rests on the plank's top,
+/// under the cube held over it.
+#[test]
+fn readings_two_holds_reach_are_neither_holds() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let held = plank();
+    let plank_at = robot
+        .ee_pose(&OVER_THE_CAN, 0)
+        .mul_pose(held.grasp.inverse());
+    let far = Pose::new(Vec3::new(0.0, -0.10, -0.045), Quat::IDENTITY);
+    let cube_at = plank_at.mul_pose(far);
+    let cube = Held {
+        hand: 1,
+        object: Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.02)),
+        grasp: cube_at.inverse().mul_pose(robot.ee_pose(&OVER_THE_CAN, 1)),
+        ..plank()
+    };
+    let both = holding_the_plank(&device).after(&[Act::Picked {
+        id: 1,
+        held: cube.clone(),
+    }]);
+    let both = both.expect("hand 1 holds the cube");
+    let mut things = acts_scene(
+        &robot,
+        &OVER_THE_CAN,
+        None,
+        None,
+        Some(placed_block(plank_at, PLANK_HALF)),
+    );
+    things.push(placed_block(cube_at, Vec3::splat(0.02)));
+    let arm = things.len() - 3;
+    let rendered = render(&things);
+    let (plank_box, cube_box) = (
+        placed_box(plank_at, PLANK_HALF),
+        placed_box(cube_at, Vec3::splat(0.02)),
+    );
+    let top = highest(plank_at, PLANK_HALF);
+    let under = plank_at.mul_pose(Pose::new(Vec3::new(0.0, -0.10, 0.0), Quat::IDENTITY));
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seed = (c, 10 * c as u64 + 11);
+        let (_, seen) = looked(&device, &rendered, arm, seed, &OVER_THE_CAN, &both, None);
+        let mut wrong = vec![];
+        let of_plank = seen.kept.surface_held(&device, 0, &held, &OVER_THE_CAN);
+        let of_plank = of_plank
+            .expect("a hold the look saw")
+            .expect("the plank's readings");
+        let of_cube = seen.kept.surface_held(&device, 1, &cube, &OVER_THE_CAN);
+        let of_cube = of_cube
+            .expect("a hold the look saw")
+            .expect("the cube's readings");
+        let (cube_in_plank, plank_in_cube) = (
+            nearer(&of_plank, &plank_box, &cube_box),
+            nearer(&of_cube, &cube_box, &plank_box),
+        );
+        if cube_in_plank + plank_in_cube > 0 {
+            wrong.push(format!(
+                "{cube_in_plank} of the plank's {} points the cube's, {plank_in_cube} of the \
+                 cube's {} the plank's",
+                of_plank.points.len(),
+                of_cube.points.len()
+            ));
+        }
+        wrong.extend(rests_at(&device, &of_plank, under.position, top));
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("readings_two_holds_reach_are_neither_holds", &found);
+}
+
+/// The plank in hand 0 ([`plank`]) over a box standing under its far end, the box's top 1 cm
+/// under the plank's lowest point, looked at once: at the tests' padding, and on exact depth at a
+/// padding of 2 cm, as far as a real robot's spheres are off its links. The box's top lies within
+/// the padding of the plank, and the look's solid of the box takes it: the plank's surface holds
+/// no reading of the box, and a 2 cm cube set down near the far end rests on the plank's top.
+#[test]
+fn what_a_held_thing_was_lifted_off_is_not_its_surface() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let held = plank();
+    let holding = holding_the_plank(&device);
+    let plank_at = robot
+        .ee_pose(&OVER_THE_CAN, 0)
+        .mul_pose(held.grasp.inverse());
+    let plank_box = placed_box(plank_at, PLANK_HALF);
+    let far = plank_at.mul_pose(Pose::new(Vec3::new(0.0, -0.10, 0.0), Quat::IDENTITY));
+    // A box's lowest corner is as far under its middle as its highest is over it.
+    let lowest = 2.0 * plank_at.position.z - highest(plank_at, PLANK_HALF);
+    let tall = lowest - 0.01;
+    let box_half = Vec3::new(0.03, 0.03, 0.5 * tall);
+    let box_at = Vec3::new(far.position.x, far.position.y, 0.5 * tall);
+    let support = Obstacle::cuboid(box_at, box_half);
+    let mut things = acts_scene(
+        &robot,
+        &OVER_THE_CAN,
+        None,
+        None,
+        Some(placed_block(plank_at, PLANK_HALF)),
+    );
+    things.push(block(box_at, box_half, [30, 30, 200]));
+    let arm = things.len() - 3;
+    let rendered = render(&things);
+    let top = highest(plank_at, PLANK_HALF);
+    let mut found = vec![];
+    let looks = (CAMERAS.iter().enumerate())
+        .map(|(c, (camera, ..))| (*camera, c, None))
+        .chain([("exact at 2 cm", 0, Some(0.02))]);
+    for (camera, c, padded) in looks {
+        let seed = (c, 10 * c as u64 + 13);
+        let (_, seen) = looked(
+            &device,
+            &rendered,
+            arm,
+            seed,
+            &OVER_THE_CAN,
+            &holding,
+            padded,
+        );
+        let mut wrong = vec![];
+        let surface = seen.kept.surface_held(&device, 0, &held, &OVER_THE_CAN);
+        let surface = surface
+            .expect("a hold the look saw")
+            .expect("the plank's readings");
+        let of_the_box = nearer(&surface, &plank_box, &support);
+        if of_the_box > 0 {
+            wrong.push(format!(
+                "{of_the_box} of the plank's {} points the box's",
+                surface.points.len()
+            ));
+        }
+        wrong.extend(rests_at(&device, &surface, far.position, top));
+        found.push((camera, outcome(&wrong)));
+    }
+    verdict(
+        "what_a_held_thing_was_lifted_off_is_not_its_surface",
+        &found,
+    );
+}
+
+/// The thin tray stands on the table, seen in one look; a hold of it by hand 0 has it level at
+/// [`CARRY`], raised and turned about the vertical. On its surface there (`Kept::surface_held`,
+/// the frame of the room its box open at the top takes up), the falls of a 3 cm cube let go
+/// over its middle (`falls_into`) land inside it, on its floor.
+#[test]
+fn what_falls_into_a_held_tray_lands_inside_it() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let away = robot.default_q();
+    let mut things = vec![table()];
+    things.extend(common::thin_tray());
+    things.push(arm(&robot, away));
+    let rendered = render(&things);
+    let hand = robot.ee_pose(&CARRY, 0);
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seed = (c, 10 * c as u64 + 17);
+        let (_, seen) = looked(&device, &rendered, 6, seed, away, &memory(&device), None);
+        let mut wrong = vec![];
+        let scene = seen.kept.scene();
+        match holder(scene, &rendered, 1).map(|k| &scene.objects[k]) {
+            None => wrong.push("the tray's floor is no object".to_string()),
+            Some(object) => {
+                let room = cover(&object.shape);
+                let half = common::sizes(&object.shape);
+                // Level at CARRY, its room's middle under the hand by its half height and 9 cm to
+                // the side, turned 0.4 rad.
+                let level = Pose::new(
+                    hand.position - Vec3::new(0.0, 0.09, 0.0) - Vec3::Z * half.2,
+                    Quat::from_rotation_z(0.4),
+                );
+                let held = Held {
+                    hand: 0,
+                    object: room.placed(Pose::IDENTITY),
+                    grasp: level.inverse().mul_pose(hand),
+                    ..plank()
+                };
+                let surface = seen.kept.surface_held(&device, object.id, &held, &CARRY);
+                let surface = surface.expect("a hold of a box").expect("its readings");
+                // The true tray, its foot's middle, where the hold has it.
+                let tray = level
+                    .mul_pose(room.pose().inverse())
+                    .mul_pose(Pose::new(Vec3::new(0.5, 0.0, 0.0), Quat::IDENTITY));
+                let small = Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.015));
+                let problem = RestProblem {
+                    near: Some(tray.position + Vec3::Z * 0.03),
+                    ..RestProblem::new(small, 0)
+                };
+                let falls =
+                    batchplan::falls_into(&device, &[problem], &[surface], &RestOptions::default());
+                let falls = falls.expect("sound problems").remove(0);
+                if falls.is_empty() {
+                    wrong.push("nothing falls into the tray".to_string());
+                }
+                for fall in falls.iter().take(8) {
+                    let lands = fall.pose.position - Vec3::Z * fall.drop;
+                    let local = tray
+                        .inverse()
+                        .mul_pose(Pose::new(lands, Quat::IDENTITY))
+                        .position;
+                    // Within the walls, on the floor 1 cm up, its middle 1.5 cm over it.
+                    let inside = local.x.abs() < 0.11 - 0.015 && local.y.abs() < 0.11 - 0.015;
+                    if !inside || (local.z - 0.025).abs() > 0.005 {
+                        wrong.push(format!("a fall lands at {local} in the tray's frame"));
+                        break;
+                    }
+                }
+            }
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("what_falls_into_a_held_tray_lands_inside_it", &found);
+}
+
+/// A cube rides on the plank in hand 0 (`cube_on_the_plank`), and a look reads both in the hand.
+/// The plank's surface is the cube's too: points lie on the cube, and a small box set down near
+/// the cube's middle (`rests_on`) rests on the cube's top, not on the plank under it. The cube's
+/// own id has no surface of its own: it is refused, naming the plank.
+#[test]
+fn what_rides_on_a_held_thing_is_part_of_its_surface() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let riding = cube_on_the_plank(&device);
+    let carrying = plank_carrying(&[RIDES_AT]);
+    let plank_at = robot
+        .ee_pose(&OVER_THE_CAN, 0)
+        .mul_pose(carrying.grasp.inverse());
+    let cube_at = plank_at.mul_pose(Pose::new(RIDES_AT, Quat::IDENTITY));
+    let mut things = acts_scene(
+        &robot,
+        &OVER_THE_CAN,
+        None,
+        None,
+        Some(placed_block(plank_at, PLANK_HALF)),
+    );
+    things.push(placed_block(cube_at, Vec3::splat(0.02)));
+    let arm = things.len() - 3;
+    let rendered = render(&things);
+    let cube = placed_box(cube_at, Vec3::splat(0.02));
+    let top = highest(cube_at, Vec3::splat(0.02));
+    let mut found = vec![];
+    for (c, (camera, ..)) in CAMERAS.iter().enumerate() {
+        let seed = (c, 10 * c as u64 + 9);
+        let (_, seen) = looked(&device, &rendered, arm, seed, &OVER_THE_CAN, &riding, None);
+        let mut wrong = vec![];
+        let surface = seen.kept.surface_held(&device, 0, &carrying, &OVER_THE_CAN);
+        let surface = surface.expect("a hold the look saw").expect("its readings");
+        let on_the_cube = (surface.points.iter())
+            .filter(|p| cube.distance(**p).value.abs() < 0.003)
+            .count();
+        if on_the_cube < 50 {
+            wrong.push(format!("{on_the_cube} points on the cube"));
+        }
+        wrong.extend(rests_at(&device, &surface, cube_at.position, top));
+        let rider = seen
+            .kept
+            .surface_held(&device, 1, &cube_in(1), &OVER_THE_CAN);
+        match rider {
+            Err(batchplan::Error::Input(why)) if why.contains("object 1 rides on object 0") => {}
+            other => wrong.push(format!("the rider's own surface is {other:?}")),
+        }
+        found.push((*camera, outcome(&wrong)));
+    }
+    verdict("what_rides_on_a_held_thing_is_part_of_its_surface", &found);
+}
+
+/// A held thing's surface refuses, naming what was given: a hand the robot has not, a
+/// configuration of the wrong length or not finite, a grasp that is no pose, and a hold by another
+/// hand than the one the look saw the thing in. An id the look has not has no surface.
+#[test]
+fn a_held_things_surface_refuses_what_is_no_hold_of_it() {
+    let robot = panda_with_hands(&["ee_link", "panda_link4"]);
+    let device = Device::cpu(&robot).expect("a CPU device");
+    let refused = |result: Result<Option<Surface>, batchplan::Error>, named: &[&str]| {
+        let Err(batchplan::Error::Input(why)) = result else {
+            panic!("taken: {result:?}");
+        };
+        assert!(named.iter().all(|name| why.contains(name)), "{why}");
+    };
+    // The plank in hand 0, looked at there.
+    let held = plank();
+    let truly = robot
+        .ee_pose(&OVER_THE_CAN, 0)
+        .mul_pose(held.grasp.inverse());
+    let things = acts_scene(
+        &robot,
+        &OVER_THE_CAN,
+        None,
+        None,
+        Some(placed_block(truly, PLANK_HALF)),
+    );
+    let rendered = render(&things);
+    let arm = things.len() - 2;
+    let holding = holding_the_plank(&device);
+    let (_, seen) = looked(
+        &device,
+        &rendered,
+        arm,
+        (0, 1),
+        &OVER_THE_CAN,
+        &holding,
+        None,
+    );
+    let kept = &seen.kept;
+    let surface = kept.surface_held(&device, 0, &held, &OVER_THE_CAN);
+    assert!(surface.expect("a hold").is_some());
+    let other = Held {
+        hand: 2,
+        ..held.clone()
+    };
+    refused(
+        kept.surface_held(&device, 0, &other, &OVER_THE_CAN),
+        &["object 0", "hand 2", "2"],
+    );
+    let short = &OVER_THE_CAN[..6];
+    refused(
+        kept.surface_held(&device, 0, &held, short),
+        &["object 0", "7 joints"],
+    );
+    let mut nan = OVER_THE_CAN;
+    nan[3] = f32::NAN;
+    refused(
+        kept.surface_held(&device, 0, &held, &nan),
+        &["object 0", "NaN"],
+    );
+    let in_the_other = Held {
+        hand: 1,
+        ..held.clone()
+    };
+    refused(
+        kept.surface_held(&device, 0, &in_the_other, &OVER_THE_CAN),
+        &["object 0", "hands [0]", "hand 1"],
+    );
+    let none = kept.surface_held(&device, 7, &held, &OVER_THE_CAN);
+    assert!(none.expect("no such id").is_none());
+
+    // A box standing, held at a grasp that is no pose.
+    let things = reaching_over_a_tray(&robot, robot.default_q());
+    let rendered = render(&things);
+    let seen = first_look(&device, &things, &rendered, (0, 2), robot.default_q(), 0.0);
+    let objects = &seen.kept.scene().objects;
+    let the_box = objects
+        .iter()
+        .find(|o| matches!(o.shape, Shape::Cuboid { .. }));
+    let the_box = the_box.expect("the box is a box on exact depth");
+    let squashed = Held {
+        grasp: Pose::new(Vec3::ZERO, Quat::from_xyzw(0.0, 0.0, 0.0, 2.0)),
+        ..held
+    };
+    let named = format!("object {}", the_box.id);
+    refused(
+        seen.kept
+            .surface_held(&device, the_box.id, &squashed, &OVER_THE_CAN),
+        &[&named, "grasps it at"],
     );
 }

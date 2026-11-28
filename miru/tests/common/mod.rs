@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use batchplan::{
-    CollisionModel, DepthImage, Device, Gripper, GripperCalibration, Intrinsics, Obstacle, Pose,
-    Robot, RobotOptions, SdfGrid,
+    CollisionModel, DepthImage, Device, Gripper, GripperCalibration, Held, Intrinsics, Obstacle,
+    Part, Pose, Robot, RobotOptions, SdfGrid, SphereOptions,
 };
 use glam::{Mat3, Quat, Vec2, Vec3};
 use miru::{Noise, Shape, View};
@@ -93,6 +93,75 @@ pub fn panda_with_hands(ee_links: &[&str]) -> Robot {
         ..Default::default()
     };
     Robot::load(asset("franka_panda.urdf"), &options).expect("the Panda")
+}
+
+/// Two of [`panda`] 70 cm apart along y, facing +x, as `left_` and `right_` parts: hands 0 and
+/// 1, each at the single Panda's ready pose with its fingers held open, as the library's
+/// `examples/common/mod.rs` builds them.
+pub fn two_pandas() -> Robot {
+    let asset = |path: &str| format!("{}/../assets/franka/{path}", env!("CARGO_MANIFEST_DIR"));
+    let single = panda();
+    let arm = |prefix: &str, y: f32| Part {
+        path: asset("franka_panda.urdf").into(),
+        prefix: prefix.into(),
+        base: Pose::new(Vec3::new(0.0, y, 0.0), Quat::IDENTITY),
+    };
+    let parts = [arm("left_", 0.35), arm("right_", -0.35)];
+    let spheres = CollisionModel::load(asset("panda_collision.json")).expect("the Panda's spheres");
+    let mut options = RobotOptions {
+        ee_links: vec!["left_ee_link".into(), "right_ee_link".into()],
+        lock_joints: ["left_", "right_"]
+            .iter()
+            .flat_map(|prefix| {
+                let fingers = ["panda_finger_joint1", "panda_finger_joint2"];
+                fingers.map(|joint| (format!("{prefix}{joint}"), 0.04))
+            })
+            .collect(),
+        collision_model: Some(CollisionModel::assemble(&[
+            ("left_", &spheres),
+            ("right_", &spheres),
+        ])),
+        ..Default::default()
+    };
+    // Joints come breadth first, the arms interleaved: each takes its ready pose by name.
+    let names = Robot::assemble(&parts, &options).expect("two Pandas");
+    let ready = (names.joint_names().iter()).map(|name| {
+        let joint = name
+            .trim_start_matches("left_")
+            .trim_start_matches("right_");
+        let k = single.joint_names().iter().position(|j| j == joint);
+        single.default_q()[k.expect("a Panda joint")]
+    });
+    options.default_q = Some(ready.collect());
+    Robot::assemble(&parts, &options).expect("two Pandas")
+}
+
+/// A hold by hand `hand` of the box `shape` from above, `off` along its longer side from its
+/// middle, the hand's frame at the box's middle and its fingers closing across the narrower side:
+/// the box at its own frame's origin, the grasp in that frame.
+pub fn held_from_above(shape: &Shape, hand: usize, off: f32) -> Held {
+    let Shape::Cuboid { half_extents, .. } = *shape else {
+        panic!("a shape these tests do not hold from above: {shape:?}");
+    };
+    let along = match half_extents.x >= half_extents.y {
+        true => Vec3::X,
+        false => Vec3::Y,
+    };
+    let down = Vec3::NEG_Z;
+    let across = down.cross(along);
+    Held {
+        carries: vec![],
+        touch_links: vec![],
+        also: vec![],
+        hand,
+        object: Obstacle::cuboid(Vec3::ZERO, half_extents),
+        grasp: Pose::new(
+            along * off,
+            Quat::from_mat3(&Mat3::from_cols(along, across, down)),
+        ),
+        locked: HashMap::new(),
+        spheres: SphereOptions::default(),
+    }
 }
 
 /// The Panda's finger joints closed, the pads touching: what `GripperCalibration::closed` takes

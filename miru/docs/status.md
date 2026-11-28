@@ -76,6 +76,60 @@ most boxes come out larger than the noise reaches and not solid.
 `tests/truth.rs` lists each gap by row, and `tests/memory.rs` (`GAPS`) each gap of the memory and
 the grips by camera. Both tests fail when a listed gap closes or an unlisted one opens.
 
+## A held thing's surface
+
+`tests/memory.rs` renders a plank 30 by 6 cm and 3 cm thick, a cube and the thin tray, reads
+them through the three cameras, and holds `Kept::surface_held`'s surface of each against where
+the true thing is (`cargo test --release -p batchplan-miru --test memory -- surface_seen
+held_thing two_holds lifted_off falls_into_a_held rides_on_a_held`). The stance is padded by
+three deviations of each camera's noise at the arm's farthest reading: about 2 mm on exact depth,
+2 cm through the stereo cameras. One scene is read on exact depth at 2 cm as well, as far as a
+real robot's spheres are off its links.
+
+| | exact | exact, 2 cm padding | D435 | D435 and D405 |
+|---|---|---|---|---|
+| The plank seen standing, carried by a hold raised and tipped more than 0.5 rad | holds | | holds | holds |
+| The plank seen in the hand, at the look's stance and carried from it | holds | | holds | holds |
+| The same, the plank 5 mm farther from the hand than the hold says | holds | | holds | holds |
+| A cube held by the other hand 1 cm over the plank: neither surface holds the other's readings | holds | | holds | holds |
+| A box under the plank's far end, 1 cm under it: the plank's surface holds none of its readings | holds | gap | gap | gap |
+| A cube riding on the plank: a small box set near it rests on the cube's top | holds | | holds | holds |
+| The tray seen standing, carried level: what falls into it lands inside it | holds | | gap | gap |
+
+A plank's row holds where its points lie within three deviations of the noise of the camera
+that read each and a pixel's width of the plank's true faces, where the hold or the hand has
+them, but for at most twice the 0.27% of a normal draw that lie past three deviations; where
+their normals, at the median, lie within half the turn of the faces' own; and, in the hand,
+where every rest of a 2 cm cube on it stands on its top. Slipped, the face toward the hand lies
+within 1.5 mm of where it truly is, at the median. Through the stereo cameras the points past
+three deviations lie at the camera's depth edges, a centimetre or two off the plank's faces by
+the fingers and beside its sides: a rest's support may take one in, and every rest stands on the
+plank's top all the same.
+
+`tests/batchplan.rs` runs the two flows a program planned from one look takes, on exact depth, on
+the CPU and the GPU: two Pandas pick a plank (or the tray) and a cube by batchplan's `pick` in
+the memory's world, and the plank's surface where hand 0 is to hold it in the air gives rests of
+the cube on its top (the tray's, falls into it), which a place onto it by hand 1
+(`Place::onto`) plans.
+
+Gaps:
+
+- **What a held thing was lifted off.** Readings within the padding of the held thing are the
+  hold's at the look, so the look fits a support under it from what lies past the padding: its
+  top short of the true one by more than the noise. Those of the support's readings that lie
+  farther from that solid than three deviations stay the held thing's. Under the plank, 18 of
+  3,404 points are the box's through the D435, 20 of 3,484 through the D435 and D405, and 59 of
+  4,000 on exact depth at a 2 cm padding (55, 60 and 62 without leaving any out); rests land on
+  the plank's top all the same (`what_a_held_thing_was_lifted_off_is_not_its_surface`).
+- **A thing the look gives in pieces.** Through either stereo camera the look gives the tray in
+  four objects, and no one object's readings hold the hollow: nothing falls into the held tray's
+  surface, as nothing falls into its floor's object's readings standing (`Kept::surface`), where
+  every reading about it (`Kept::surface_about`) gives falls. A hold carries one object's
+  readings (`what_falls_into_a_held_tray_lands_inside_it`).
+- **A slip past the padding.** Readings of the held thing farther than the stance's padding from
+  where the hold has it are not the hold's: the look makes what it makes of them, and they are not
+  in the surface.
+
 ## Time
 
 `score -- <set> --observe [--threads 1]` times `miru::observe` on each look, on a CPU device of

@@ -1067,8 +1067,9 @@ pub struct Observed {
     pub kept: Kept,
 }
 
-/// What one look keeps for later: its scene, whose labels name its objects, and each camera's
-/// filtered depth and the robot's mask, as the look read them.
+/// What one look keeps for later: its scene, whose labels name its objects, each camera's
+/// filtered depth and the robot's mask, as the look read them, and what the hands held, with the
+/// readings the mask gave each hold.
 #[derive(Clone, Debug)]
 pub struct Kept {
     /// Identifies the map fused at this look without extending its lifetime.
@@ -1077,6 +1078,19 @@ pub struct Kept {
     /// Indices of freshly fitted bodies standing on the observed floor of their support.
     pub(crate) floors: Vec<usize>,
     views: Vec<KeptView>,
+    /// Per hold of the memory the look was made with, in the order of its hands.
+    held: Vec<HeldAt>,
+}
+
+/// A hold as a look saw it: the object's id and the ids of what rode on it, each hand of the hold
+/// (the one the object is fixed to first) with where its IK frame was at the look's stance, and
+/// per view, by pixel, the readings of the object and what rode on it ([`held_at`]).
+#[derive(Clone, Debug)]
+struct HeldAt {
+    id: u32,
+    riders: Vec<u32>,
+    hands: Vec<(usize, Pose)>,
+    readings: Vec<Vec<u32>>,
 }
 
 /// One camera's depth as a look read it.
@@ -1240,6 +1254,262 @@ impl Kept {
         }
         Ok(joined)
     }
+
+    /// Object `id`'s readings at this look as the surface of what `held` holds with the robot at
+    /// `q`, for `rests_on` and `falls_into` on what a hand holds as [`Kept::surface`] gives them
+    /// for what stands: every point the object's (`Surface::object` empty), in the world's frame,
+    /// each with the normal of a fingertip's patch about it
+    /// (`SurfaceGraspOptions::default().contact`) and where it was seen from, all moved rigidly to
+    /// where the hold has the object with the robot at `q` (`Surface::moved`). `q` is read only
+    /// through the pose of `held.hand`'s IK frame there (`Robot::ee_pose`): configurations that
+    /// put that hand in one place give one surface, so one serves every start whose holding arm
+    /// is the same.
+    ///
+    /// - **Seen standing**, a label of the look naming it: the readings [`Kept::surface`] flags as
+    ///   its, moved from where it stood to where the hold has it,
+    ///   `ee_pose(q, held.hand) * held.grasp⁻¹ * stood⁻¹`. `stood` is the pose of the room the
+    ///   object's shape takes up, its box or cylinder: the frame a pick of it holds its
+    ///   `Held::object` in, whether [`Memory::world`] gives it as that room, as its one solid, or
+    ///   as the solids of a box open at the top ([`Observed::grip_worlds`]'s picks, and
+    ///   batchplan's of the obstacle).
+    /// - **Seen in a hand**, the memory the look was made with holding it in `held.hand`, alone or
+    ///   with others (`Held::also`): the readings the look's mask gave that hold rather than the
+    ///   robot's links, the object's and those of what rides on it (`Held::carries`), moved with
+    ///   the hand from where it was at the look to where it is at `q`. `held.grasp` is not read:
+    ///   the readings are where the thing was in the hand, slipped or not, as far as the mask's
+    ///   padding (`Stance::padding`) reaches from where the look's hold had it. A reading farther
+    ///   off was the look's to make an object of. Of those within it, a reading that two holds'
+    ///   paddings both reach is neither's, and one that lies within three of the camera's
+    ///   deviations ([`Noise`]) of a known shape or of a solid of one of the look's objects, and
+    ///   farther than that from the hold's own shapes where the look's hold had them, is what the
+    ///   thing was near, as a support it was lifted off, and not the thing's.
+    ///
+    /// None where the look has no reading of it either way: an id the look has not, one it kept
+    /// unseen, or a held thing no camera read. On `device`'s threads, whose robot is the one the
+    /// look was made on. An `Error::Input` names what was given for a hand the robot has not, a
+    /// `q` of the wrong length or not finite, a grasp that is not finite with a unit rotation, an
+    /// object the look saw in other hands than `held.hand`, and an object that rode on what a hand
+    /// held at the look, whose readings are part of that thing's surface.
+    pub fn surface_held(
+        &self,
+        device: &Device,
+        id: u32,
+        held: &Held,
+        q: &[f32],
+    ) -> Result<Option<Surface>> {
+        let robot = device.robot();
+        ensure_input!(
+            held.hand < robot.hands(),
+            "the hold of object {id} is by hand {}, of the robot's {}",
+            held.hand,
+            robot.hands()
+        );
+        ensure_input!(
+            q.len() == robot.dof() && q.iter().all(|value| value.is_finite()),
+            "the configuration that holds object {id} needs a finite value for each of the \
+             robot's {} joints, got {q:?}",
+            robot.dof()
+        );
+        let hand = robot.ee_pose(q, held.hand);
+        if let Some(carrier) = self.held.iter().find(|seen| seen.riders.contains(&id)) {
+            return Err(input!(
+                "object {id} rides on object {}: its readings are part of object {}'s surface",
+                carrier.id,
+                carrier.id
+            ));
+        }
+        if let Some(seen) = self.held.iter().find(|seen| seen.id == id) {
+            let Some(&(_, then)) = seen.hands.iter().find(|(at, _)| *at == held.hand) else {
+                let hands: Vec<usize> = seen.hands.iter().map(|(at, _)| *at).collect();
+                return Err(input!(
+                    "the look saw object {id} in hands {hands:?}, and the hold names hand {}",
+                    held.hand
+                ));
+            };
+            let Some(surface) = self.readings_of(device, &seen.readings)? else {
+                return Ok(None);
+            };
+            return surface.moved(hand.mul_pose(then.inverse())).map(Some);
+        }
+        let Some(object) = self.scene.objects.iter().find(|object| object.id == id) else {
+            return Ok(None);
+        };
+        let stood = object.shape.obstacle().pose();
+        ensure_input!(
+            held.grasp.is_unit(),
+            "the hold of object {id} grasps it at {:?}, which is no finite pose with a unit \
+             rotation",
+            held.grasp
+        );
+        let Some(surface) = self.surface(device, id)? else {
+            return Ok(None);
+        };
+        let by = hand
+            .mul_pose(held.grasp.inverse())
+            .mul_pose(stood.inverse());
+        object_alone(surface).moved(by).map(Some)
+    }
+
+    /// The readings `readings` names in each view, by pixel, as one surface of them alone, each
+    /// with the normal of a fingertip's patch about it among the readings off the rest of the
+    /// view's mask. None where they name none.
+    fn readings_of(&self, device: &Device, readings: &[Vec<u32>]) -> Result<Option<Surface>> {
+        if readings.iter().all(Vec::is_empty) {
+            return Ok(None);
+        }
+        let radius = SurfaceGraspOptions::default().contact;
+        let mut joined: Option<Surface> = None;
+        for (view, pixels) in self.views.iter().zip(readings) {
+            let mut flags = vec![false; view.depth.len()];
+            let mut mask = view.robot.clone();
+            for &i in pixels {
+                flags[i as usize] = true;
+                mask.on_robot[i as usize] = false;
+            }
+            let surface = Surface::from_depth(device, &view.image(), &flags, Some(&mask), radius)?;
+            match &mut joined {
+                Some(joined) => joined.join(surface),
+                None => joined = Some(surface),
+            }
+        }
+        Ok(joined.map(object_alone))
+    }
+}
+
+/// `surface`'s points that are the object's, with their normals and where each was seen from:
+/// every point the object's.
+fn object_alone(surface: Surface) -> Surface {
+    let Surface {
+        points,
+        normals,
+        object,
+        seen_from,
+    } = surface;
+    let keep = |values: Vec<Vec3>| -> Vec<Vec3> {
+        let values = values.into_iter().enumerate();
+        let kept = values.filter(|(k, _)| object.get(*k).copied().unwrap_or(true));
+        kept.map(|(_, value)| value).collect()
+    };
+    Surface {
+        points: keep(points),
+        normals: keep(normals),
+        seen_from: keep(seen_from),
+        object: vec![],
+    }
+}
+
+/// Per hold of `holds`, what [`Kept::surface_held`] reads of it: the hands that held it at stance
+/// `at` of `robot`, with where each one's IK frame was, the ids of what rode on it, and per view
+/// the readings the view's mask (`masks`, of `images`, made with every hold) gave the hold rather
+/// than the robot's links: those a mask with that hold alone flags and one with none does not,
+/// the robot in both with its fingers where every hold locks them, as in the masks. A reading two
+/// holds' masks both flag lies within the padding of each, and is neither's.
+fn held_at(
+    device: &Device,
+    robot: &Robot,
+    at: &Stance<'_>,
+    holds: &[&Holding],
+    images: &[DepthImage<'_>],
+    masks: &[RobotMask],
+) -> Result<Vec<HeldAt>> {
+    if holds.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut links = Cow::Borrowed(robot);
+    for holding in holds {
+        if !holding.held.locked.is_empty() {
+            links = Cow::Owned(links.relock(&holding.held.locked)?);
+        }
+    }
+    device.install(|| {
+        let bare: Vec<RobotMask> = (images.iter())
+            .map(|image| image.robot_mask(&links, at.q, at.padding, &[]))
+            .collect::<Result<_>>()?;
+        let mut held = Vec::with_capacity(holds.len());
+        for holding in holds {
+            let mut readings = Vec::with_capacity(images.len());
+            for ((image, mask), bare) in images.iter().zip(masks).zip(&bare) {
+                // With one hold, the mask made with every hold is that hold's.
+                let alone = match holds.len() {
+                    1 => Cow::Borrowed(mask),
+                    _ => Cow::Owned(image.robot_mask(
+                        &links,
+                        at.q,
+                        at.padding,
+                        std::slice::from_ref(&holding.held),
+                    )?),
+                };
+                let flags = (alone.on_robot.iter()).zip(&bare.on_robot).enumerate();
+                let its = flags.filter(|(_, (with, without))| **with && !**without);
+                readings.push(its.map(|(i, _)| i as u32).collect());
+            }
+            let held_by = holding.held.also.iter().map(|grip| grip.hand);
+            let hands = std::iter::once(holding.held.hand).chain(held_by);
+            held.push(HeldAt {
+                id: holding.id,
+                riders: holding.riders.iter().map(|rider| rider.id).collect(),
+                hands: hands
+                    .map(|hand| (hand, robot.ee_pose(at.q, hand)))
+                    .collect(),
+                readings,
+            });
+        }
+        if held.len() > 1 {
+            for (view, image) in images.iter().enumerate() {
+                let mut holds = vec![0u8; image.depth.len()];
+                for at in &held {
+                    for &i in &at.readings[view] {
+                        holds[i as usize] = holds[i as usize].saturating_add(1);
+                    }
+                }
+                for at in &mut held {
+                    at.readings[view].retain(|&i| holds[i as usize] == 1);
+                }
+            }
+        }
+        Ok(held)
+    })
+}
+
+/// `held`, of `holds`, with the readings of each view of `images` (a camera stating `noises`)
+/// that are what the thing was near left out: those within [`SIGMAS`] deviations of the camera's
+/// noise at their depth of one of `shapes` (the known shapes and the look's objects' solids) and
+/// farther than that from every shape of the hold where the look's hold had it, its object and
+/// what rides on it. A reading the noise says nothing of at its depth is kept.
+fn set_apart(
+    held: &mut [HeldAt],
+    holds: &[&Holding],
+    shapes: &[Obstacle],
+    images: &[DepthImage<'_>],
+    noises: &[Noise],
+) -> Result<()> {
+    if held.is_empty() {
+        return Ok(());
+    }
+    for (view, (image, noise)) in images.iter().zip(noises).enumerate() {
+        let points = image.points(None)?;
+        for (at, holding) in held.iter_mut().zip(holds) {
+            let pose = at.hands[0].1.mul_pose(holding.held.grasp.inverse());
+            let carried = holding.held.carries.iter();
+            let own: Vec<Obstacle> = std::iter::once(holding.held.object.placed(pose))
+                .chain(carried.map(|rider| rider.placed(pose.mul_pose(rider.pose()))))
+                .collect();
+            let nearest = |of: &[Obstacle], p: Vec3| {
+                (of.iter()).fold(f32::INFINITY, |least, shape| {
+                    least.min(shape.distance(p).value)
+                })
+            };
+            at.readings[view].retain(|&i| {
+                let i = i as usize;
+                let (Some(p), Some(sigma)) = (points[i], noise.at_reading(image.depth[i])) else {
+                    return true;
+                };
+                let reach = SIGMAS * sigma;
+                nearest(shapes, p) > reach || nearest(&own, p) <= reach
+            });
+        }
+    }
+    Ok(())
 }
 
 /// One look, after `memory`, through batchplan and [`look`](crate::look()), camera by camera:
@@ -1247,7 +1517,12 @@ impl Kept {
 /// 1. The depth is filtered at the camera's noise (`DepthImage::filtered`, batchplan's
 ///    `DepthFilter` otherwise).
 /// 2. The robot is masked at `at`, its locked joints relocked and holding what the memory's hands
-///    hold (`DepthImage::robot_mask`, at the stance's padding): the view's `robot`.
+///    hold (`DepthImage::robot_mask`, at the stance's padding): the view's `robot`. Where the hands
+///    hold anything, the readings it gives each hold rather than the robot's links are kept for
+///    [`Kept::surface_held`], with where each hand of the hold was: those it flags that a mask of
+///    the robot holding nothing does not, and with more holds than one, of those a mask with that
+///    hold alone flags and no other's does; after the look, those that lie near a known shape or a
+///    solid of its objects and not near the hold's own shapes are left out (`Kept::surface_held`).
 /// 3. [`look`](crate::look()) is given the views, the memory's known shapes and objects, and the
 ///    corners of the map. A camera's noise is raised there by what it is off by, a third of it
 ///    for each of the three deviations a reading may lie from a shape and be on it, as
@@ -1302,6 +1577,7 @@ pub fn observe(
             scene: memory.scene.clone(),
             floors: vec![],
             views: vec![],
+            held: vec![],
         };
         return Ok(Observed {
             memory: memory.clone(),
@@ -1332,6 +1608,8 @@ pub fn observe(
             .map(|image| image.robot_mask(&robot, at.q, at.padding, &holding))
             .collect::<Result<_>>()
     })?;
+    let holds: Vec<&Holding> = memory.hands.iter().flatten().collect();
+    let mut held = held_at(device, &robot, at, &holds, &images, &masks)?;
     let views: Vec<View> = (cameras.iter().zip(&images).zip(&masks))
         .map(|((camera, image), mask)| View {
             image: *image,
@@ -1352,6 +1630,17 @@ pub fn observe(
     };
     let mut floors = Vec::new();
     let scene = look::with_floors(device, &look, &memory.scene, &options, Some(&mut floors))?;
+
+    let near: Vec<Obstacle> = (memory.known.iter().cloned())
+        .chain(
+            scene
+                .objects
+                .iter()
+                .flat_map(|object| object.shape.solids()),
+        )
+        .collect();
+    let noises: Vec<Noise> = cameras.iter().map(raised).collect();
+    set_apart(&mut held, &holds, &near, &images, &noises)?;
 
     let shapes: Vec<Obstacle> = (memory.known.iter().cloned())
         .chain(
@@ -1436,6 +1725,7 @@ pub fn observe(
             floors,
             views,
             map,
+            held,
         },
     })
 }

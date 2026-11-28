@@ -11,12 +11,22 @@
 #[allow(dead_code, reason = "each test file uses part of it")]
 mod common;
 
-use batchplan::{Surface, World};
-use common::{
-    EYE, Frame, MIDDLE, NOISE, arm, block, can, devices, known, looking, panda, table, thin_tray,
+use std::collections::HashMap;
+use std::f32::consts::FRAC_PI_2;
+
+use batchplan::{
+    Device, Held, IkOptions, IkProblem, Obstacle, Pick, PickBody, Place, Pose, RestOptions,
+    RestProblem, Surface, TaskOptions, World, Worlds,
 };
-use glam::Vec3;
-use miru::{Label, Look, LookOptions, Scene};
+use common::{
+    EYE, Frame, MIDDLE, NEAR, NOISE, arm, block, can, devices, held_from_above, known, looking,
+    panda, sizes, table, thin_tray, two_pandas,
+};
+use glam::{Mat3, Quat, Vec3};
+use miru::{
+    Act, Camera, Label, Look, LookOptions, Memory, MemoryOptions, Object, Observed, Of, Planned,
+    Scene, Shape, Stance, Step, observe,
+};
 
 #[test]
 fn a_looks_output_goes_through_batchplans_calls_on_a_robots_device() {
@@ -167,5 +177,420 @@ fn a_looks_output_goes_through_batchplans_calls_on_a_robots_device() {
                 "{name}: things {thing:?} have {points} points"
             );
         }
+    }
+}
+
+/// What two cameras, the far and the near, read of `things` on exact depth, the arms the last
+/// thing: the frames, and the arms' padding, three deviations of the noise at their farthest
+/// reading.
+fn read(things: &[common::Thing]) -> ([Frame; 2], f32) {
+    let frames = [EYE, NEAR].map(|eye| Frame::of(things, looking(eye, MIDDLE)));
+    let arms = things.len() - 1;
+    let farthest = (frames.iter())
+        .flat_map(|frame| {
+            (0..frame.depth.len())
+                .filter(|&i| frame.shows[i] == Some(arms))
+                .map(|i| frame.depth[i])
+        })
+        .fold(0.0, f32::max);
+    (frames, 3.0 * NOISE.quadratic * farthest * farthest)
+}
+
+/// `frames` as the cameras `observe` takes.
+fn cameras(frames: &[Frame; 2]) -> Vec<Camera<'_>> {
+    (frames.iter())
+        .map(|frame| Camera {
+            image: frame.view().image,
+            color: &frame.color,
+            noise: frame.noise,
+            band: 0,
+            off_by: 0.0,
+            masks: &frame.masks,
+        })
+        .collect()
+}
+
+/// The object of `seen`'s look whose shape's middle lies within 2 cm of `middle`.
+fn object_at(seen: &Observed, middle: Vec3) -> &Object {
+    let objects = seen.kept.scene().objects.iter();
+    let mut near = objects.filter(|object| sizes(&object.shape).1.distance(middle) < 0.02);
+    near.next()
+        .unwrap_or_else(|| panic!("an object at {middle}"))
+}
+
+/// What hand `hand` holds after batchplan's pick of obstacle `object` of `worlds`' world 0 from
+/// `start`, by `grasp` in that obstacle's frame, lifting `body` where given off the table, the
+/// world's first obstacle: the hold the library makes of the memory's world.
+fn picked(
+    device: &Device,
+    worlds: &Worlds,
+    start: &[f32],
+    (hand, object, grasp): (usize, usize, Pose),
+    body: Option<PickBody>,
+) -> Held {
+    let pick = Pick {
+        hand,
+        body,
+        support: vec![0],
+        ..Pick::new(0, start, object, [grasp])
+    };
+    let mut picked = batchplan::pick(device, worlds, &[pick], &TaskOptions::default());
+    let plans = picked.as_mut().expect("a sound pick").outcomes.remove(0);
+    let plans = plans.unwrap_or_else(|failure| panic!("hand {hand} picks: {failure}"));
+    plans[0].held.clone().expect("the pick's hold")
+}
+
+/// The configuration nearest the ready pose with each hand at its target, in a world of the
+/// table alone.
+fn holding_at(device: &Device, ready: &[f32], targets: [Pose; 2]) -> Vec<f32> {
+    let table_only = device.upload(&[World::new(vec![known(&table())])]);
+    let table_only = table_only.expect("a world");
+    let problem = IkProblem {
+        seed: Some(ready.to_vec()),
+        targets: targets.map(Some).to_vec(),
+        ..IkProblem::new(0, Pose::IDENTITY)
+    };
+    let solved = batchplan::solve_ik(device, &table_only, &[problem], &IkOptions::default());
+    let solved = solved.expect("a sound problem");
+    solved.nearest(0, ready).expect("both hands reach").to_vec()
+}
+
+/// The indices of the obstacles of `planned` that stand for object `id`.
+fn of_object(planned: &Planned, id: u32) -> Vec<usize> {
+    let of = planned.of.iter().enumerate();
+    of.filter(|(_, of)| **of == Of::Object(id))
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// The flow of a place onto what another hand holds, planned before anything moves, from one
+/// look: two Pandas at their ready pose before a table with a plank and a cube on it, seen by two
+/// cameras. Each is held as batchplan's pick of it in the memory's world holds it: the plank by
+/// hand 0 from above near one end, which is to hold it level in the air, the cube by hand 1 over
+/// it. The plank's surface where hand 0's hold has it there (`Kept::surface_held`) gives the
+/// cube rests on its top face near its far end (`rests_on`); those, as the releases of a place of
+/// the cube onto the plank (`Place::onto`), give a plan in the world the memory gives after both
+/// picks, the plan's hold of the plank carrying the cube. On a CPU device of one thread, of all of
+/// them, and on the GPU's where there is one.
+#[test]
+fn a_place_onto_what_a_hand_holds_is_planned_from_one_look() {
+    let robot = two_pandas();
+    let ready = robot.default_q().to_vec();
+    let (plank_at, plank_half) = (Vec3::new(0.55, 0.15, 0.015), Vec3::new(0.03, 0.15, 0.015));
+    let cube_at = Vec3::new(0.55, -0.15, 0.02);
+    let things = vec![
+        table(),
+        block(plank_at, plank_half, [200, 30, 30]),
+        block(cube_at, Vec3::splat(0.02), [30, 30, 200]),
+        arm(&robot, &ready),
+    ];
+    let (frames, padding) = read(&things);
+    let locked = HashMap::new();
+    let stance = Stance {
+        q: &ready,
+        locked: &locked,
+        padding,
+    };
+    for (name, device) in devices(&robot) {
+        let memory = Memory::try_new(&device, vec![known(&table())], &MemoryOptions::default());
+        let seen = observe(
+            &device,
+            &cameras(&frames),
+            &stance,
+            &memory.expect("a memory"),
+        );
+        let seen = seen.expect("a look");
+        let (plank, cube) = (object_at(&seen, plank_at), object_at(&seen, cube_at));
+        let planned = seen
+            .memory
+            .world(&device, &Step::default())
+            .expect("a world");
+        let worlds = device.upload(std::slice::from_ref(&planned.world));
+        let worlds = worlds.expect("a world");
+        let (plank_parts, cube_parts) =
+            (of_object(&planned, plank.id), of_object(&planned, cube.id));
+        let (&[plank_index], &[cube_index]) = (&plank_parts[..], &cube_parts[..]) else {
+            panic!("{name}: the plank and the cube are a solid each");
+        };
+        let from_above = held_from_above(&plank.shape, 0, 0.11).grasp;
+        let holds_plank = picked(&device, &worlds, &ready, (0, plank_index, from_above), None);
+        let from_above = held_from_above(&cube.shape, 1, 0.0).grasp;
+        let holds_cube = picked(&device, &worlds, &ready, (1, cube_index, from_above), None);
+
+        // Hand 0 holds the plank level 45 cm up between the arms, its length along y and the hand
+        // at its end toward hand 0's arm; hand 1 holds the cube 30 cm to the right and higher.
+        let plank_half = match &holds_plank.object {
+            Obstacle::Cuboid { half_extents, .. } => *half_extents,
+            other => panic!("{name}: the pick holds the plank as {other:?}"),
+        };
+        let lengthwise = match plank_half.x > plank_half.y {
+            true => Quat::from_rotation_z(FRAC_PI_2),
+            false => Quat::IDENTITY,
+        };
+        let in_the_air = Pose::new(Vec3::new(0.35, 0.0, 0.45), lengthwise);
+        let cube_over = Pose::new(Vec3::new(0.35, -0.3, 0.6), Quat::IDENTITY);
+        let start = holding_at(
+            &device,
+            &ready,
+            [
+                in_the_air.mul_pose(holds_plank.grasp),
+                cube_over.mul_pose(holds_cube.grasp),
+            ],
+        );
+
+        let surface = seen
+            .kept
+            .surface_held(&device, plank.id, &holds_plank, &start);
+        let surface = surface
+            .expect("a hold of a box")
+            .expect("the plank's readings");
+        let carried = robot
+            .ee_pose(&start, 0)
+            .mul_pose(holds_plank.grasp.inverse());
+        let toward_the_hand =
+            carried.rotation.inverse() * (robot.ee_pose(&start, 0).position - carried.position);
+        let far_end =
+            carried.position - carried.rotation * (toward_the_hand * Vec3::new(1.0, 1.0, 0.0));
+        let problem = RestProblem {
+            near: Some(far_end),
+            ..RestProblem::new(holds_cube.object.clone(), 0)
+        };
+        let rests = batchplan::rests_on(&device, &[problem], &[surface], &RestOptions::default());
+        let rests = rests.expect("sound problems").remove(0);
+        assert!(!rests.is_empty(), "{name}: nothing rests on the plank");
+        let half = sizes(&cube.shape).2;
+        let top = carried.position.z + plank_half.z;
+        let first = &rests[..rests.len().min(8)];
+        for rest in first {
+            let on = carried.inverse().mul_pose(rest.pose).position;
+            assert!(
+                (rest.pose.position.z - half - top).abs() < 0.003
+                    && on.x.abs() < plank_half.x
+                    && on.y.abs() < plank_half.y,
+                "{name}: a rest at {:?}, off the plank's top at {top}",
+                rest.pose
+            );
+        }
+
+        // The world after both picks: the table and what the map holds that no shape explains.
+        let both = [
+            Act::Picked {
+                id: plank.id,
+                held: holds_plank.clone(),
+            },
+            Act::Picked {
+                id: cube.id,
+                held: holds_cube.clone(),
+            },
+        ];
+        let after = seen.memory.after(&both).expect("both picks");
+        let planned = after.world(&device, &Step::default()).expect("a world");
+        let worlds = device.upload(&[planned.world]).expect("a world");
+        let place = Place {
+            onto: Some(holds_plank.clone()),
+            ..Place::new(0, start.clone(), holds_cube.clone(), first)
+        };
+        let placed = batchplan::place(&device, &worlds, &[place], &TaskOptions::default());
+        let plans = placed.expect("a sound place").outcomes.remove(0);
+        let plans = plans.unwrap_or_else(|failure| panic!("{name}: {failure}"));
+        let carrying = plans[0].held.as_ref().expect("the hold of the plank after");
+        assert_eq!(
+            carrying.carries.len(),
+            1,
+            "{name}: the plank carries the cube"
+        );
+    }
+}
+
+/// The flow of a place into what another hand holds, planned before anything moves, from one
+/// look: two Pandas at their ready pose before a table with the thin tray and a 3 cm cube on it.
+/// Hand 0 picks the tray by its wall toward that arm, the whole tray lifted with it (batchplan's
+/// pick of the wall with the tray as its body), to hold it level in the air; hand 1 picks the
+/// cube, to hold it beside and over it. The tray's surface where hand 0's hold has it there
+/// (`Kept::surface_held`) gives falls of the cube into it toward its far side from hand 0
+/// (`falls_into`), each landing inside it;
+/// those, as the releases of a place of the cube into the tray (`Place::onto`), give a plan in
+/// the world the memory gives after both picks. On exact depth, on a CPU device of one thread,
+/// of all of them, and on the GPU's where there is one.
+#[test]
+fn a_place_into_what_a_hand_holds_is_planned_from_one_look() {
+    let robot = two_pandas();
+    let ready = robot.default_q().to_vec();
+    let cube_at = Vec3::new(0.45, -0.25, 0.015);
+    let mut things = vec![table()];
+    things.extend(thin_tray());
+    things.push(block(cube_at, Vec3::splat(0.015), [30, 30, 200]));
+    things.push(arm(&robot, &ready));
+    let (frames, padding) = read(&things);
+    let locked = HashMap::new();
+    let stance = Stance {
+        q: &ready,
+        locked: &locked,
+        padding,
+    };
+    // Hand 0 closes on the top of the tray's wall toward its arm, across it, from above.
+    let at_the_wall = Pose::new(
+        Vec3::new(0.5, 0.115, 0.04),
+        Quat::from_mat3(&Mat3::from_cols(Vec3::NEG_X, Vec3::Y, Vec3::NEG_Z)),
+    );
+    for (name, device) in devices(&robot) {
+        let memory = Memory::try_new(&device, vec![known(&table())], &MemoryOptions::default());
+        let seen = observe(
+            &device,
+            &cameras(&frames),
+            &stance,
+            &memory.expect("a memory"),
+        );
+        let seen = seen.expect("a look");
+        let tray = object_at(&seen, Vec3::new(0.5, 0.0, 0.03));
+        assert!(
+            matches!(tray.shape, Shape::OpenBox { .. }),
+            "{name}: the tray is a box open at the top on exact depth"
+        );
+        let cube = object_at(&seen, cube_at);
+        let planned = seen
+            .memory
+            .world(&device, &Step::default())
+            .expect("a world");
+        let worlds = device.upload(std::slice::from_ref(&planned.world));
+        let worlds = worlds.expect("a world");
+        let parts = of_object(&planned, tray.id);
+        let obstacles = &planned.world.obstacles;
+        let nearest = |at: Vec3| move |&k: &usize| obstacles[k].distance(at).value;
+        let wall = *parts
+            .iter()
+            .min_by(|a, b| {
+                nearest(at_the_wall.position)(a).total_cmp(&nearest(at_the_wall.position)(b))
+            })
+            .expect("the tray's solids");
+        let body = PickBody {
+            shape: room_of(&tray.shape),
+            other_parts: parts.iter().copied().filter(|&k| k != wall).collect(),
+        };
+        let grasp = obstacles[wall].pose().inverse().mul_pose(at_the_wall);
+        let holds_tray = picked(&device, &worlds, &ready, (0, wall, grasp), Some(body));
+        let &[cube_index] = &of_object(&planned, cube.id)[..] else {
+            panic!("{name}: the cube is one solid");
+        };
+        // Hand 1 closes on the cube's upper half from above, along x, so that it stands narrow
+        // toward hand 0 and its fingertips stay over the tray's rim where it lets go.
+        let cube_room = room_of(&cube.shape).pose();
+        let along_x = Quat::from_mat3(&Mat3::from_cols(Vec3::Y, Vec3::X, Vec3::NEG_Z));
+        let upper = Pose::new(cube_room.position + Vec3::Z * 0.01, along_x);
+        let from_above = cube_room.inverse().mul_pose(upper);
+        let holds_cube = picked(&device, &worlds, &ready, (1, cube_index, from_above), None);
+
+        // Hand 0 holds the tray level 30 cm up, as it stood; hand 1 holds the cube beside it,
+        // higher, as it stood.
+        let room = room_of(&tray.shape).pose();
+        let in_the_air = Pose::new(Vec3::new(0.45, 0.0, 0.3), room.rotation);
+        let cube_over = Pose::new(Vec3::new(0.4, -0.3, 0.5), cube_room.rotation);
+        let start = holding_at(
+            &device,
+            &ready,
+            [
+                in_the_air.mul_pose(holds_tray.grasp),
+                cube_over.mul_pose(holds_cube.grasp),
+            ],
+        );
+
+        let surface = seen
+            .kept
+            .surface_held(&device, tray.id, &holds_tray, &start);
+        let surface = surface
+            .expect("a hold of a box")
+            .expect("the tray's readings");
+        // Where the hold has the tray, and its foot's middle in the true tray.
+        let carried = robot
+            .ee_pose(&start, 0)
+            .mul_pose(holds_tray.grasp.inverse());
+        let foot = carried
+            .mul_pose(room.inverse())
+            .mul_pose(Pose::new(Vec3::new(0.5, 0.0, 0.0), Quat::IDENTITY));
+        // Toward its far side from hand 0, where hand 1 has room beside it.
+        let far_side = foot.position + Vec3::new(0.0, -0.06, 0.03);
+        let problem = RestProblem {
+            near: Some(far_side),
+            rotation: cube_room.rotation,
+            ..RestProblem::new(holds_cube.object.clone(), 0)
+        };
+        let falls = batchplan::falls_into(&device, &[problem], &[surface], &RestOptions::default());
+        let falls = falls.expect("sound problems").remove(0);
+        assert!(!falls.is_empty(), "{name}: nothing falls into the tray");
+        let first = &falls[..falls.len().min(8)];
+        for fall in first {
+            let lands = foot.inverse().mul_pose(Pose::new(
+                fall.pose.position - Vec3::Z * fall.drop,
+                Quat::IDENTITY,
+            ));
+            let local = lands.position;
+            assert!(
+                local.x.abs() < 0.11 - 0.015
+                    && local.y.abs() < 0.11 - 0.015
+                    && (local.z - 0.025).abs() < 0.005,
+                "{name}: a fall lands at {local} in the tray's frame"
+            );
+        }
+
+        let both = [
+            Act::Picked {
+                id: tray.id,
+                held: holds_tray.clone(),
+            },
+            Act::Picked {
+                id: cube.id,
+                held: holds_cube.clone(),
+            },
+        ];
+        let after = seen.memory.after(&both).expect("both picks");
+        let planned = after.world(&device, &Step::default()).expect("a world");
+        let worlds = device.upload(&[planned.world]).expect("a world");
+        let place = Place {
+            onto: Some(holds_tray.clone()),
+            ..Place::new(0, start.clone(), holds_cube.clone(), first)
+        };
+        let placed = batchplan::place(&device, &worlds, &[place], &TaskOptions::default());
+        let plans = placed.expect("a sound place").outcomes.remove(0);
+        let plans = plans.unwrap_or_else(|failure| panic!("{name}: {failure}"));
+        let carrying = plans[0].held.as_ref().expect("the hold of the tray after");
+        assert_eq!(
+            carrying.carries.len(),
+            1,
+            "{name}: the tray carries the cube"
+        );
+    }
+}
+
+/// The room `shape` takes up, as an obstacle: a box open at the top's box, and a box or a
+/// cylinder itself.
+fn room_of(shape: &Shape) -> Obstacle {
+    match *shape {
+        Shape::Cuboid {
+            center,
+            half_extents,
+            rotation,
+        }
+        | Shape::OpenBox {
+            center,
+            half_extents,
+            rotation,
+            ..
+        } => Obstacle::Cuboid {
+            center,
+            half_extents,
+            rotation,
+        },
+        Shape::Cylinder {
+            center,
+            rotation,
+            radius,
+            half_height,
+        } => Obstacle::Cylinder {
+            center,
+            rotation,
+            radius,
+            half_height,
+        },
+        _ => panic!("a shape these tests do not know: {shape:?}"),
     }
 }
