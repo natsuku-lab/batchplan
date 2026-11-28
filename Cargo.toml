@@ -22,14 +22,14 @@ exclude = ["demos", "python"]
 
 # The version of both crates, batchplan and `batchplan-miru`, released together under one tag.
 [workspace.package]
-version = "0.12.0-beta.2"
+version = "0.12.0"
 
 # The math types in both crates' interfaces: one version, so a `Vec3` passes between them.
 [workspace.dependencies]
 glam = { version = "0.33", features = ["serde"] }
 # `batchplan-miru`'s requirement on batchplan names the version above; the release workflow checks
 # that the two match.
-batchplan = { path = ".", version = "0.12.0-beta.2", default-features = false }
+batchplan = { path = ".", version = "0.12.0", default-features = false }
 
 [dependencies]
 anyhow = "1"

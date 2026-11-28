@@ -8,6 +8,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-27
+
 ### Added
 
 - **Breaking:** one object held by two hands. `Held` gains `also`, the other hands that hold it
@@ -733,7 +735,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 Earlier releases have no notes beyond their commits.
 
-[Unreleased]: https://github.com/natsuku-lab/batchplan/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/natsuku-lab/batchplan/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/natsuku-lab/batchplan/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/natsuku-lab/batchplan/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/natsuku-lab/batchplan/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/natsuku-lab/batchplan/compare/v0.8.0...v0.9.0
