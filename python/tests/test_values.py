@@ -16,6 +16,10 @@ def test_rotations_are_scalar_last():
     assert box.distance((0.0, 0.45, 0.0)).value < 0, "the long axis lies along y once turned"
     assert box.distance((0.45, 0.0, 0.0)).value > 0, "and no longer along x"
     np.testing.assert_allclose(box.pose.rotation, (0.0, 0.0, s, s), atol=1e-6)
+    # Its bounds are the box as it lies now: long along y.
+    bounds = box.bounds()
+    np.testing.assert_allclose(bounds.lower_corner, (-0.1, -0.5, -0.1), atol=1e-6)
+    np.testing.assert_allclose(bounds.upper_corner, (0.1, 0.5, 0.1), atol=1e-6)
 
 
 def test_placing_sets_the_frame_it_was_made_at():

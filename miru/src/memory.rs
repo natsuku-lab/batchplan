@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
 use batchplan::{
-    DepthFilter, DepthImage, Device, Held, IkOptions, Intrinsics, Obstacle, Occlusion,
+    Bounds, DepthFilter, DepthImage, Device, Held, IkOptions, Intrinsics, Obstacle, Occlusion,
     OccupancyMap, Pose, Robot, RobotMask, SdfOptions, Surface, SurfaceGraspOptions, Weighing,
     World,
 };
@@ -20,6 +20,8 @@ use glam::Vec3;
 use crate::error::{Result, ensure_input, input};
 use crate::look::{self, Look, LookOptions, Noise, View};
 use crate::scene::{Label, Object, Scene, Shape, Support};
+use crate::segment::Windows;
+use crate::threads;
 use crate::view::SIGMAS;
 
 /// One depth camera's frame, and what is known of the camera: facts, so there is no default.
@@ -147,7 +149,11 @@ pub enum Act {
     /// memory knows, an id no object has and its own id are refused.
     ///
     /// Set on what another hand holds ([`Under::Held`]), it rides on that instead: `at` is not
-    /// read, and the hold carries it as that variant says.
+    /// read, and the hold carries it as that variant says. Each look masks it with what carries it
+    /// and answers the same three for it ([`Kept::riding`]): seen there, its place not seen, its
+    /// place seen and empty. A look only reports, and it rides on through every answer; a rider
+    /// read gone is lost when the caller says so ([`Act::Lost`] of its id), and a look that sees
+    /// the thing elsewhere finds it under a new id.
     ///
     /// What rode on it ([`Memory::riders`]) is set down with it: each among the objects again
     /// under its id, its shape where `at` and its place in the object's frame
@@ -164,7 +170,10 @@ pub enum Act {
     /// The hand that holds object `id` lost it where nothing knows: it dropped, slipped, or was
     /// let go in the air. It is in no hand and among no objects, and the next look finds it under
     /// whatever id it gives. What rode on it is lost with it. A rider's id ([`Memory::riders`])
-    /// is the rider lost alone: what carried it no longer names it.
+    /// is the rider lost alone, as for one a look read gone ([`Riding::Gone`]): in that same
+    /// [`Memory::after`], with no look between, what carried it no longer names it, so
+    /// [`Memory::held`] gives that hand's hold without it in `carries` and [`Memory::riders`] does
+    /// not list it, and a plan made from that hold does not carry it.
     Lost { id: u32 },
     /// Object `id` and what stands on it, in turn, were pushed by `by`: their shapes move with
     /// them, unseen, and the next look keeps their ids where it finds them there. Where one was
@@ -364,8 +373,10 @@ impl Memory {
     /// The ids of what rides on what hand `hand` holds, in the order of its `Held::carries`: each
     /// set on it by a let-go onto that hold ([`Under::Held`]). A rider is in no hand and among no
     /// objects while it rides, and comes back among the objects under its id when what carries it
-    /// is set down ([`Act::LetGo`]). For a caller to tell that an id rides, as to refuse a pick of
-    /// it it does not plan. Empty where the hand holds nothing or nothing rides on it.
+    /// is set down ([`Act::LetGo`]), and leaves when it is picked or lost ([`Act::Picked`],
+    /// [`Act::Lost`]); a look reads whether it is still there ([`Kept::riding`]) and changes none
+    /// of this. For a caller to tell that an id rides, as to refuse a pick of it it does not plan.
+    /// Empty where the hand holds nothing or nothing rides on it.
     #[must_use]
     pub fn riders(&self, hand: usize) -> Vec<u32> {
         let holding = self.holder(hand);
@@ -1069,7 +1080,7 @@ pub struct Observed {
 
 /// What one look keeps for later: its scene, whose labels name its objects, each camera's
 /// filtered depth and the robot's mask, as the look read them, and what the hands held, with the
-/// readings the mask gave each hold.
+/// readings the mask gave each hold and what the look read of what rode on each.
 #[derive(Clone, Debug)]
 pub struct Kept {
     /// Identifies the map fused at this look without extending its lifetime.
@@ -1080,6 +1091,9 @@ pub struct Kept {
     views: Vec<KeptView>,
     /// Per hold of the memory the look was made with, in the order of its hands.
     held: Vec<HeldAt>,
+    /// Per thing that rode on a hold of that memory, in the same order, its id and what the look
+    /// read of it ([`Kept::riding`]).
+    riding: Vec<(u32, Riding)>,
 }
 
 /// A hold as a look saw it: the object's id and the ids of what rode on it, each hand of the hold
@@ -1471,8 +1485,8 @@ fn held_at(
     })
 }
 
-/// `held`, of `holds`, with the readings of each view of `images` (a camera stating `noises`)
-/// that are what the thing was near left out: those within [`SIGMAS`] deviations of the camera's
+/// `held`, of `holds`, with the readings of each view of `images` (their `points`, a camera
+/// stating `noises`) that are what the thing was near left out: those within [`SIGMAS`] deviations of the camera's
 /// noise at their depth of one of `shapes` (the known shapes and the look's objects' solids) and
 /// farther than that from every shape of the hold where the look's hold had it, its object and
 /// what rides on it. A reading the noise says nothing of at its depth is kept.
@@ -1481,13 +1495,11 @@ fn set_apart(
     holds: &[&Holding],
     shapes: &[Obstacle],
     images: &[DepthImage<'_>],
+    points: &[Vec<Option<Vec3>>],
     noises: &[Noise],
-) -> Result<()> {
-    if held.is_empty() {
-        return Ok(());
-    }
-    for (view, (image, noise)) in images.iter().zip(noises).enumerate() {
-        let points = image.points(None)?;
+) {
+    let views = images.iter().zip(points).zip(noises).enumerate();
+    for (view, ((image, points), noise)) in views {
         for (at, holding) in held.iter_mut().zip(holds) {
             let pose = at.hands[0].1.mul_pose(holding.held.grasp.inverse());
             let carried = holding.held.carries.iter();
@@ -1509,7 +1521,6 @@ fn set_apart(
             });
         }
     }
-    Ok(())
 }
 
 /// One look, after `memory`, through batchplan and [`look`](crate::look()), camera by camera:
@@ -1523,6 +1534,8 @@ fn set_apart(
 ///    the robot holding nothing does not, and with more holds than one, of those a mask with that
 ///    hold alone flags and no other's does; after the look, those that lie near a known shape or a
 ///    solid of its objects and not near the hold's own shapes are left out (`Kept::surface_held`).
+///    Each view's readings are held against what rides on each hold where the hold has it
+///    ([`Kept::riding`]); the memory after the look keeps every rider, whatever the look read.
 /// 3. [`look`](crate::look()) is given the views, the memory's known shapes and objects, and the
 ///    corners of the map. A camera's noise is raised there by what it is off by, a third of it
 ///    for each of the three deviations a reading may lie from a shape and be on it, as
@@ -1538,9 +1551,9 @@ fn set_apart(
 ///    where that is more than the stance's padding.
 ///
 /// It runs on `device`'s threads, and reads the device's robot: its joints and its spheres. The
-/// look's corners are the memory's map's. With no cameras it is a look that sees nothing: the memory as it was. A camera
-/// stated with no noise, or one that is negative or no number, is an `Error::Input`, as are
-/// stances and frames batchplan's calls refuse.
+/// look's corners are the memory's map's. With no cameras it is a look that sees nothing: the
+/// memory as it was, every rider unseen. A camera stated with no noise, or one that is negative or
+/// no number, is an `Error::Input`, as are stances and frames batchplan's calls refuse.
 pub fn observe(
     device: &Device,
     cameras: &[Camera<'_>],
@@ -1572,12 +1585,18 @@ pub fn observe(
         false => Cow::Owned(robot.relock(at.locked)?),
     };
     if cameras.is_empty() {
+        let riders = memory
+            .hands
+            .iter()
+            .flatten()
+            .flat_map(|holding| &holding.riders);
         let kept = Kept {
             map: Arc::downgrade(&memory.map),
             scene: memory.scene.clone(),
             floors: vec![],
             views: vec![],
             held: vec![],
+            riding: riders.map(|rider| (rider.id, Riding::Unseen)).collect(),
         };
         return Ok(Observed {
             memory: memory.clone(),
@@ -1610,6 +1629,22 @@ pub fn observe(
     })?;
     let holds: Vec<&Holding> = memory.hands.iter().flatten().collect();
     let mut held = held_at(device, &robot, at, &holds, &images, &masks)?;
+    let noises: Vec<Noise> = cameras.iter().map(raised).collect();
+    // Each reading's point, where a hold's readings are read: its riders' and `set_apart`'s.
+    let points: Vec<Vec<Option<Vec3>>> = match holds.is_empty() {
+        true => vec![],
+        false => (images.iter())
+            .map(|image| image.points(None))
+            .collect::<Result<_>>()?,
+    };
+    let riding: Vec<(u32, Riding)> = device.install(|| {
+        let threads = rayon::current_num_threads();
+        let each = held.iter().zip(&holds);
+        let read = each.map(|(seen, holding)| {
+            read_riders(holding, seen.hands[0].1, &images, &points, &noises, threads)
+        });
+        read.flatten().collect()
+    });
     let views: Vec<View> = (cameras.iter().zip(&images).zip(&masks))
         .map(|((camera, image), mask)| View {
             image: *image,
@@ -1639,8 +1674,7 @@ pub fn observe(
                 .flat_map(|object| object.shape.solids()),
         )
         .collect();
-    let noises: Vec<Noise> = cameras.iter().map(raised).collect();
-    set_apart(&mut held, &holds, &near, &images, &noises)?;
+    set_apart(&mut held, &holds, &near, &images, &points, &noises);
 
     let shapes: Vec<Obstacle> = (memory.known.iter().cloned())
         .chain(
@@ -1726,6 +1760,7 @@ pub fn observe(
             views,
             map,
             held,
+            riding,
         },
     })
 }
@@ -1803,11 +1838,14 @@ pub enum Under {
     /// What hand `held.hand` holds, which holds it as `held` from now on: a place plan's
     /// `TaskPlan::held` after a place onto it (`Place::onto`). The thing let go rides on it
     /// ([`Memory::riders`]): in no hand and among no objects, and [`Memory::held`] gives `held`
-    /// for that hand, as given. Each look's mask leaves it out with what carries it. A let-go of
-    /// what carries it sets it down with that ([`Act::LetGo`]), a loss loses it with that
-    /// ([`Act::Lost`]), and a hold of that said otherwise, a let-go and a pick in one
-    /// [`Memory::after`], carries it again ([`Act::Picked`]); no other act names it, but a pick
-    /// or a loss of the rider itself, which takes it off.
+    /// for that hand, as given. Each look's mask leaves it out with what carries it, and says what
+    /// the look read of it ([`Kept::riding`]); a look changes nothing of it, and one read gone is
+    /// taken off by a loss of its id ([`Act::Lost`]), after which a look that sees the thing
+    /// elsewhere finds it as a new object under a new id. A let-go of what carries it sets it down
+    /// with that ([`Act::LetGo`]), a loss loses it with that ([`Act::Lost`]), and a hold of that
+    /// said otherwise, a let-go and a pick in one [`Memory::after`], carries it again
+    /// ([`Act::Picked`]); no other act names it, but a pick or a loss of the rider itself, which
+    /// takes it off.
     ///
     /// The hold must be the memory's own with the thing added: a plan made before the pick ran
     /// was given the pick's planned hold as its `onto`, and the memory has that hold as it was
@@ -1903,4 +1941,223 @@ impl Kept {
             .zip(&self.scene.labels)
             .map(|(view, labels)| (view.image(), &view.robot, labels.as_slice()))
     }
+}
+
+/// What a look read of a thing that rides on what a hand holds ([`Kept::riding`]): the memory's
+/// three answers for a thing let go ([`Act::LetGo`]), seen there, its place not seen and its place
+/// seen and empty, carried to a thing that rides, which each look's mask leaves out with what
+/// carries it. A look only reports: the memory after it has every rider the memory before it had.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Riding {
+    /// The views read it in its place, where the hold has it.
+    There,
+    /// No view could read its place: outside every image, behind something nearer, or in too few
+    /// readings to tell from noise.
+    Unseen,
+    /// The views read through its place on a window of rays and read nothing in it that a look
+    /// would take for a thing: fewer than a window of readings. A thing smaller than a camera can
+    /// read a window of at that range is not told from none. It still rides in the memory after
+    /// the look; to have the memory lose it, say so with [`Act::Lost`] of its id, which in that
+    /// same [`Memory::after`] takes it off what carries it ([`Memory::held`] gives the hold without
+    /// it, [`Memory::riders`] does not list it) and leaves it in no hand and among no objects, its
+    /// id not given again. A look that sees the thing elsewhere, the same look or a later one,
+    /// finds it as a new object under a new id ([`Memory::next_id`]).
+    Gone,
+}
+
+impl Kept {
+    /// What this look read of rider `id`: a thing that rode on what a hand holds
+    /// ([`Memory::riders`]) in the memory the look was made with. It is answered from the look
+    /// alone, so it can be asked of the look taken right after a hand moved away, before any act.
+    /// None strictly for an id that rode on nothing when the look was taken; every rider of that
+    /// memory has an answer, a look with no cameras answering [`Riding::Unseen`].
+    ///
+    /// Each view's readings are held against the rider's shape where the hold had it at the look:
+    /// the carrier where the IK frame of the hand it is fixed to was, times the grasp's inverse,
+    /// times the rider's place on it (`Held::carries`). Along each reading's ray, the place is
+    /// where the ray is inside the shape, from where it goes in to where it comes out. A reading
+    /// lies within its allowance where it lies within three of its camera's deviations ([`Noise`])
+    /// at its depth, and readings are counted in windows, the measure a look takes a thing by:
+    /// each is the share of the window a plane is taken over at its depth, and fewer than a
+    /// window's worth cannot be told from noise.
+    ///
+    /// - **There** where the readings in its place, from where their rays go in, less the
+    ///   allowance, to where they come out, plus it, and farther than the allowance from the
+    ///   carrier and from each other thing that rides on it, fill a window over the look's views:
+    ///   on its near side, or inside its shape, where only something in the place can be read.
+    /// - **Gone**, failing that, where a window of readings lies where their rays left the place:
+    ///   past where a ray comes out by more than the allowance, or where it comes out onto the
+    ///   carrier or another rider, within the allowance, when the place is longer along that ray
+    ///   than twice the allowance. Then fewer than a window, what a look takes for a thing, lies in
+    ///   the place, and a window of rays read through it: its place seen and empty by the measure
+    ///   the memory's rule for a thing let go takes.
+    /// - **Unseen** otherwise: no ray reached its place, being outside every image or stopped
+    ///   nearer, or too few did.
+    ///
+    /// A place no longer along a ray than twice the allowance, as a thin thing's, decides nothing
+    /// by the carrier read where the ray comes out of it: a thing as thin could lie there. A rider
+    /// slipped on its carrier is there while a window of its readings still lies in its place,
+    /// though the rest of it reads empty, as is a thing smaller than the shape the memory has for
+    /// it; one slipped by its own size, none of its readings in its place, is gone. The limit: a
+    /// thing so much smaller than its shape that the camera reads less than a window of it at that
+    /// range reads gone while it is there. A rider no thicker than the allowance is never read
+    /// there, its readings within that of its carrier. The search along each ray takes the shape
+    /// as convex, as every shape a hold can carry is: a box, a sphere, a cylinder or a capsule
+    /// (batchplan's mask refuses a distance grid carried).
+    #[must_use]
+    pub fn riding(&self, id: u32) -> Option<Riding> {
+        let read = self.riding.iter().find(|(rider, _)| *rider == id);
+        read.map(|&(_, read)| read)
+    }
+}
+
+/// What the look read of each thing that rides on `holding` ([`Kept::riding`]), the IK frame of
+/// the hand its thing is fixed to at `hand`, over `images` and their `points`, each camera stating
+/// `noises`: in the order of its riders. Each image's rows are read on up to `threads` threads.
+fn read_riders(
+    holding: &Holding,
+    hand: Pose,
+    images: &[DepthImage<'_>],
+    points: &[Vec<Option<Vec3>>],
+    noises: &[Noise],
+    threads: usize,
+) -> Vec<(u32, Riding)> {
+    let pose = hand.mul_pose(holding.held.grasp.inverse());
+    let carried = holding.held.carries.iter();
+    let shapes: Vec<Obstacle> = std::iter::once(holding.held.object.placed(pose))
+        .chain(carried.map(|rider| rider.placed(pose.mul_pose(rider.pose()))))
+        .collect();
+    let mut read = Vec::with_capacity(holding.riders.len());
+    for (r, rider) in holding.riders.iter().enumerate() {
+        let shape = &shapes[r + 1];
+        // The carrier and the other riders: a reading on one of them as well is either's.
+        let others: Vec<&Obstacle> = (shapes.iter().enumerate())
+            .filter(|&(k, _)| k != r + 1)
+            .map(|(_, other)| other)
+            .collect();
+        let mut seen = [0.0; 2];
+        let views = images.iter().zip(points).zip(noises);
+        for ((image, points), noise) in views {
+            let [there, gone] = seen_in(shape, &others, image, points, *noise, threads);
+            seen = [seen[0] + there, seen[1] + gone];
+        }
+        let answer = match seen {
+            [there, _] if there >= 1.0 => Riding::There,
+            [_, gone] if gone >= 1.0 => Riding::Gone,
+            _ => Riding::Unseen,
+        };
+        read.push((rider.id, answer));
+    }
+    read
+}
+
+/// How many windows of `image`'s readings (`points`), its camera stating `noise`, lie in the place
+/// of `shape`, and on none of `others`, and how many lie past it ([`Kept::riding`]).
+/// Row by row, on up to `threads` threads, the rows' counts added in their order.
+fn seen_in(
+    shape: &Obstacle,
+    others: &[&Obstacle],
+    image: &DepthImage<'_>,
+    points: &[Option<Vec3>],
+    noise: Noise,
+    threads: usize,
+) -> [f32; 2] {
+    let (width, height) = (image.width, image.depth.len() / image.width);
+    let focal = image.intrinsics.fx.max(image.intrinsics.fy);
+    let windows = Windows::of(width, height);
+    let eye = image.camera.position;
+    let bounds = shape.bounds();
+    // What reading `i` adds to `seen`.
+    let read = |i: usize, seen: &mut [f32; 2]| {
+        let z = image.depth[i];
+        let (Some(p), Some(sigma)) = (points[i], noise.at_reading(z)) else {
+            return;
+        };
+        let reach = SIGMAS * sigma;
+        // Its ray, a step of one along it a step of one in depth. What lies past the reading by
+        // more than its allowance the reading says nothing of.
+        let toward = (p - eye) / z;
+        let Some(range) = through_box(eye, toward, bounds, z + reach) else {
+            return;
+        };
+        let Some((first, last)) = inside(shape, eye, toward, range) else {
+            return;
+        };
+        let share = windows.share(sigma, z / focal);
+        let on_others = others.iter().any(|other| other.distance(p).value <= reach);
+        // Where the ray comes out onto what carries it, past more of the place than the noise
+        // could put two readings of one surface apart.
+        let onto = on_others && (z - last).abs() <= reach && last - first > 2.0 * reach;
+        if z > last + reach || onto {
+            seen[1] += share;
+        } else if !on_others {
+            seen[0] += share;
+        }
+    };
+    let rows = threads::each(threads, height, |row| {
+        let mut seen = [0.0; 2];
+        for i in row * width..(row + 1) * width {
+            read(i, &mut seen);
+        }
+        seen
+    });
+    let mut seen = [0.0; 2];
+    for row in rows {
+        seen = [seen[0] + row[0], seen[1] + row[1]];
+    }
+    seen
+}
+
+/// Where the ray `eye + t * toward` is within `bounds`, for `t` from 0 to `end`: its least and
+/// greatest `t`, none where it misses them there.
+fn through_box(eye: Vec3, toward: Vec3, bounds: Bounds, end: f32) -> Option<(f32, f32)> {
+    let across = toward.recip();
+    let lower = (bounds.lower_corner - eye) * across;
+    let upper = (bounds.upper_corner - eye) * across;
+    let near = lower.min(upper).max_element().max(0.0);
+    let far = lower.max(upper).min_element().min(end);
+    (near < far).then_some((near, far))
+}
+
+/// How many halvings take an interval to a float's resolution of its length: a float's digits.
+const HALVINGS: u32 = f32::MANTISSA_DIGITS;
+
+/// How many cuts to two thirds do as much: the least `n` with `1.5^n >= 2^24`.
+const THIRDS: u32 = 42;
+
+/// Where the ray `eye + t * toward` is inside `shape`, for `t` within `range`: where it goes in
+/// and where it comes out, none where it is outside the shape all along. A convex shape's signed
+/// distance is convex along a line, so cuts to two thirds close in on the ray's deepest point,
+/// then halvings on each side of it find where the surface is, each to a float's resolution of
+/// the range.
+fn inside(shape: &Obstacle, eye: Vec3, toward: Vec3, range: (f32, f32)) -> Option<(f32, f32)> {
+    let (near, far) = range;
+    let depth = |t: f32| shape.distance(eye + t * toward).value;
+    let (mut lo, mut hi) = range;
+    for _ in 0..THIRDS {
+        let (a, b) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+        match depth(a) < depth(b) {
+            true => hi = b,
+            false => lo = a,
+        }
+    }
+    let deepest = 0.5 * (lo + hi);
+    if depth(deepest) >= 0.0 {
+        return None;
+    }
+    let surface = |mut outside: f32, mut inside: f32| {
+        if depth(outside) < 0.0 {
+            return outside;
+        }
+        for _ in 0..HALVINGS {
+            let middle = 0.5 * (outside + inside);
+            match depth(middle) < 0.0 {
+                true => inside = middle,
+                false => outside = middle,
+            }
+        }
+        inside
+    };
+    Some((surface(near, deepest), surface(far, deepest)))
 }

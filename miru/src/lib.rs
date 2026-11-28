@@ -31,6 +31,7 @@
 //! | [`Kept::surface`] | An object's readings, for `grasps_on`, `rests_on` and `falls_into`. |
 //! | [`Kept::surface_about`] | Every reading about a point, for a place into what stands there. |
 //! | [`Kept::surface_held`] | What a hand holds as a surface where a hold has it, to place onto. |
+//! | [`Kept::riding`] | Whether what rides on what a hand holds was seen there, unseen or gone. |
 //! | [`Kept::labels_at`] | Which object a measured point lies on, by camera. |
 //! | [`Observed::grip_worlds`] | Worlds where the fingers may touch a measured part. |
 //! | [`GripWorlds::plan`] | Plans ordered grasps on those worlds, least cost first. |
@@ -126,7 +127,8 @@ pub use grip_plan::{
 };
 pub use look::{Look, LookOptions, Noise, View, look};
 pub use memory::{
-    Act, Camera, Kept, Memory, MemoryOptions, Observed, Of, Planned, Stance, Step, Under, observe,
+    Act, Camera, Kept, Memory, MemoryOptions, Observed, Of, Planned, Riding, Stance, Step, Under,
+    observe,
 };
 pub use scene::{Label, Object, Scene, Shape, Support};
 pub use turn::{GripSource, TurnGrip, TurnGrips, TurnGroup};

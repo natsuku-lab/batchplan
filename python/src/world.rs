@@ -117,6 +117,16 @@ value_class! {
 }
 
 value_class! {
+    /// The corners of a box along the frame's axes that holds an obstacle (`Obstacle.bounds`).
+    Bounds(batchplan::Bounds) {
+        /// Its least corner (meters).
+        lower_corner: Vec3,
+        /// Its greatest corner.
+        upper_corner: Vec3,
+    }
+}
+
+value_class! {
     /// A signed distance to a surface, and its gradient.
     Distance(batchplan::Distance) {
         /// Meters: negative inside.
@@ -184,6 +194,11 @@ impl Obstacle {
     #[getter]
     fn pose(&self) -> Pose {
         Pose(self.0.pose())
+    }
+
+    /// The smallest box along the frame's axes that holds it, in the frame its pose is in.
+    fn bounds(&self) -> Bounds {
+        Bounds(self.0.bounds())
     }
 
     /// The signed distance from point `p` to its surface, and the distance's gradient.

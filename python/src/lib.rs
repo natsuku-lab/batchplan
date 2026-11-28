@@ -21,6 +21,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     error::register(m)?;
     m.add_class::<world::Pose>()?;
     m.add_class::<world::Screw>()?;
+    m.add_class::<world::Bounds>()?;
     m.add_class::<world::Distance>()?;
     m.add_class::<world::Obstacle>()?;
     m.add_class::<world::Touch>()?;

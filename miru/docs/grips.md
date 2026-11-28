@@ -124,6 +124,28 @@ fn onto_the_plank(
 }
 ```
 
+After the place, once the memory is told it (`Act::LetGo` onto the hold, `Under::Held`), a look
+says what it read of the thing that now rides there: `kept.riding(id)`, answered from that look
+alone, so it can be asked of the look taken right after the hand moved away, before any act. A
+look only reports: the memory after it still has the thing riding, whatever it read.
+
+- **`Some(Riding::There)`**: the views read it in its place, where the hold has it.
+- **`Some(Riding::Unseen)`**: no view read its place, which lay outside every image, behind
+  something nearer, or in too few readings to tell from noise. Look again.
+- **`Some(Riding::Gone)`**: the views read through its place on a window of rays and read
+  nothing in it that a look would take for a thing. A thing smaller than a camera can read a
+  window of at that range is not told from none. To have the memory lose it, act
+  `Act::Lost { id }`: in that same `Memory::after`, `seen.memory.held(hand)` gives the hold
+  without it and `riders(hand)` does not list it, so the next plan does not carry it. A look that
+  sees it elsewhere finds it as a new object under a new id.
+- **`None`**: only for an id that rode on nothing in the memory the look was made with.
+
+`riding` counts readings in windows, the measure a look takes a thing by, each within three of
+its camera's deviations: there is a window of readings in the thing's place, on its near side or
+inside it, and on nothing else of the hold; gone, failing that, a window of readings where their
+rays left the place, past it or onto its carrier where the place is longer along the ray than
+twice the allowance ([status](status.md#what-rides-on-a-held-thing)).
+
 ## What the evidence covers
 
 A grip is checked against the latest readings only, and says nothing of what no camera saw. Plan
