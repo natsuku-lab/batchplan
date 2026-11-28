@@ -8,6 +8,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-11-28
+
 ### Added
 
 - `Obstacle::bounds()`: the least box along the frame's axes that holds an obstacle, its corners
@@ -842,7 +844,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 Earlier releases have no notes beyond their commits.
 
-[Unreleased]: https://github.com/natsuku-lab/batchplan/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/natsuku-lab/batchplan/compare/v0.13.2...HEAD
+[0.13.2]: https://github.com/natsuku-lab/batchplan/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/natsuku-lab/batchplan/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/natsuku-lab/batchplan/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/natsuku-lab/batchplan/compare/v0.11.0...v0.12.0
