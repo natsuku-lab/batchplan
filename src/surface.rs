@@ -243,6 +243,32 @@ impl Surface {
         self.points.extend(other.points);
         self.normals.extend(other.normals);
     }
+
+    /// This surface moved rigidly by `by`: every point, normal and place it was seen from, as a
+    /// thing seen where it stood is where a hand has carried it. Each point and place seen from
+    /// is placed by `by` and each normal turned by it; the object's flags stay as they are, and a
+    /// place seen from that is not known stays unknown. A pose that is not finite with a unit
+    /// rotation (`Pose::is_unit`) is an `Error::Input`.
+    pub fn moved(&self, by: Pose) -> Result<Self> {
+        ensure_input!(
+            by.is_unit(),
+            "a surface is moved by a finite pose with a unit rotation, got {by:?}"
+        );
+        let by = by.rigid();
+        let place = |p: &Vec3| by.position + by.rotation * *p;
+        let seen_from = (self.seen_from.iter())
+            .map(|p| match p.is_finite() {
+                true => place(p),
+                false => *p,
+            })
+            .collect();
+        Ok(Surface {
+            points: self.points.iter().map(place).collect(),
+            normals: self.normals.iter().map(|n| by.rotation * *n).collect(),
+            object: self.object.clone(),
+            seen_from,
+        })
+    }
 }
 
 /// The most pixels to either side of a reading its plane is sought among: enough for the

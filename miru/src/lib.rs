@@ -30,6 +30,7 @@
 //! | [`Memory::world`] | The world to plan a [`Step`] against, each obstacle named ([`Of`]). |
 //! | [`Kept::surface`] | An object's readings, for `grasps_on`, `rests_on` and `falls_into`. |
 //! | [`Kept::surface_about`] | Every reading about a point, for a place into what stands there. |
+//! | [`Kept::surface_held`] | What a hand holds as a surface where a hold has it, to place onto. |
 //! | [`Kept::labels_at`] | Which object a measured point lies on, by camera. |
 //! | [`Observed::grip_worlds`] | Worlds where the fingers may touch a measured part. |
 //! | [`GripWorlds::plan`] | Plans ordered grasps on those worlds, least cost first. |

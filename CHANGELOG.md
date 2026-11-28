@@ -8,6 +8,21 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+### Added
+
+- `Surface::moved(by)`: a surface moved rigidly by a pose, its points and where each was seen
+  from placed by it and its normals turned, as a thing seen where it stood is where a hand has
+  carried it. A pose that is not finite with a unit rotation is an input error.
+- miru's `Kept::surface_held(device, id, held, q)`: the surface of what a hand holds, for
+  `rests_on` and `falls_into` onto it (`Place::onto`), in the world's frame where `held` has the
+  object with the robot at `q`. For a thing the look saw standing, its readings carried from the
+  frame of the room its shape takes up, the one a pick holds it in, so a whole program is planned
+  from one look; for one the look saw in that hand, the readings the mask gave the hold, slip and
+  what rides on it included, moved with the hand, less those two holds reach and those of what it
+  was near, as a support it was lifted off. A hand other than the one the look saw it in, and the
+  id of what rides on it, are input errors. `observe` keeps, for each hold of the memory, which
+  readings each view's mask gave it.
+
 ## [0.13.0] - 2026-11-28
 
 ### Added

@@ -1359,6 +1359,123 @@ fn without_a_shell_what_two_cameras_see_between_them_is_grasped_and_what_one_see
     );
 }
 
+/// What [`box_on_a_table`]'s cameras at `near` and `far` read of it, as the depth images give it
+/// with each camera and the scene placed by `frame`: the same images, the robot's frame moved.
+fn box_seen_in(frame: Pose, near: Vec3, far: Vec3) -> Surface {
+    let table = Obstacle::cuboid(Vec3::new(0.0, 0.0, -0.01), Vec3::new(0.5, 0.5, 0.01));
+    let block = Obstacle::cuboid(Vec3::new(0.0, 0.0, 0.025), Vec3::new(0.02, 0.03, 0.025));
+    let mut seen: Option<Surface> = None;
+    for eye in [near, far] {
+        let camera = looking(eye, Vec3::new(0.0, 0.0, 0.025));
+        let depth = render(&[table.clone(), block.clone()], camera);
+        let points = DepthImage {
+            depth: &depth,
+            width: WIDTH,
+            intrinsics: K,
+            camera,
+        }
+        .points(None)
+        .unwrap();
+        let object: Vec<bool> = (points.iter())
+            .map(|p| p.is_some_and(|p| block.distance(p).value < 5e-4 && p.z > 1e-3))
+            .collect();
+        let image = DepthImage {
+            depth: &depth,
+            width: WIDTH,
+            intrinsics: K,
+            camera: frame.mul_pose(camera),
+        };
+        let surface = Surface::from_depth(&device(), &image, &object, None, 0.005).unwrap();
+        match &mut seen {
+            Some(seen) => seen.join(surface),
+            None => seen = Some(surface),
+        }
+    }
+    seen.expect("two cameras")
+}
+
+/// A surface from depth moved by a pose is the surface the same depth images give with the
+/// cameras and the scene placed by it, to rounding: its points, its normals and where each was
+/// seen from move together, and the object's flags stay. Shifted, its grasps are the grasps of the
+/// surface where it was, shifted. Where it was seen from is not known, it stays unknown; a pose
+/// that is no pose is refused, naming it.
+#[test]
+fn a_moved_surface_is_the_one_seen_where_it_was_moved_to() {
+    let (near, far) = (Vec3::new(0.35, 0.0, 0.35), Vec3::new(-0.35, 0.0, 0.35));
+    let by = Pose::new(Vec3::new(0.3, -0.2, 0.1), Quat::from_rotation_z(0.7));
+    let here = box_seen_in(Pose::IDENTITY, near, far);
+    let there = box_seen_in(by, near, far);
+    let moved = here.moved(by).unwrap();
+    assert_eq!(moved.object, here.object);
+    assert_eq!(moved.object, there.object);
+    assert_eq!(moved.points.len(), there.points.len());
+    let mut turned = 0;
+    for k in 0..there.points.len() {
+        let (p, n, from) = (moved.points[k], moved.normals[k], moved.seen_from[k]);
+        assert!(p.distance(there.points[k]) < 1e-5, "point {k}: {p}");
+        assert!(
+            from.distance(there.seen_from[k]) < 1e-5,
+            "point {k}: {from}"
+        );
+        assert!(n.distance(there.normals[k]) < 1e-3, "point {k}: {n}");
+        // The normals that the move turns by more than rounding.
+        turned += usize::from(n.distance(here.normals[k]) > 0.1);
+    }
+    let object = here.object.iter().filter(|&&o| o).count();
+    assert!(
+        object > 1000 && turned * 2 > object,
+        "{turned} of {object} normals turned"
+    );
+    assert!((here.points.iter().zip(&moved.points)).all(|(a, b)| a.distance(*b) > 0.1));
+
+    // `grasps_on` seeds and averages patches in cells fixed in the surface's frame, so only a
+    // shift by whole cells (5 mm here: 80, -40 and 20 of them) keeps the cells' points together,
+    // and gives the shifted grasps, but for those a cell's edge at the surface's border now
+    // splits otherwise.
+    let shift = Pose::new(Vec3::new(0.4, -0.2, 0.1), Quat::IDENTITY);
+    let o = without_shell();
+    let found = grasps(&here, &o);
+    let shifted = grasps(&here.moved(shift).unwrap(), &o);
+    assert!(found.len() > 100, "{} grasps", found.len());
+    assert!(
+        shifted.len() * 100 >= found.len() * 95,
+        "{} of {} grasps shifted",
+        shifted.len(),
+        found.len()
+    );
+    for h in &shifted {
+        let one = found.iter().any(|g| {
+            let wanted = shift.mul_pose(g.pose);
+            let contacts = (h.contacts.iter().zip(g.contacts))
+                .all(|(contact, was)| contact.distance(was + shift.position) < 1e-4);
+            h.pose.position.distance(wanted.position) < 1e-4
+                && h.pose.rotation.angle_between(wanted.rotation) < 2e-3
+                && contacts
+        });
+        assert!(one, "{h:?} is no grasp of the surface shifted");
+    }
+
+    let unknown = Surface {
+        points: vec![Vec3::ZERO],
+        normals: vec![Vec3::Z],
+        object: vec![],
+        seen_from: vec![Vec3::INFINITY],
+    };
+    assert_eq!(unknown.moved(by).unwrap().seen_from, [Vec3::INFINITY]);
+    // A rotation off unit length by what a pose may be is made unit: the normals stay unit, as
+    // the searches require of them.
+    let loose = Pose::new(Vec3::ZERO, Quat::from_rotation_z(0.7) * 1.0009);
+    let turned = here.moved(loose).unwrap();
+    let off = |n: &Vec3| (n.length() - 1.0).abs();
+    let unit = turned.normals.iter().filter(|n| **n != Vec3::ZERO);
+    assert!(unit.map(off).fold(0.0, f32::max) < 1e-5);
+    let squashed = Pose::new(Vec3::ZERO, Quat::from_xyzw(0.0, 0.0, 0.0, 2.0));
+    let Err(Error::Input(why)) = here.moved(squashed) else {
+        panic!("a rotation of length 2 moves a surface");
+    };
+    assert!(why.contains("unit rotation"), "{why}");
+}
+
 /// A bowl as LIBERO's, standing on z = 0: 11 cm across its rim and 5 cm tall, its wall `wall`
 /// thick, flared 26 degrees from upright and rounded at the rim. In its profile (radius, height),
 /// its wall's middle and its bottom's, which it lies within half the wall of.
