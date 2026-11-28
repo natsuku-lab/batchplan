@@ -25,6 +25,21 @@ pub(crate) struct RobotDescription {
     pub(crate) joints: Vec<JointDesc>,
     /// Kinematic loops the tree of joints leaves open.
     pub(crate) loops: Vec<LoopClosure>,
+    /// Named frames fixed to links that are no links themselves (MJCF sites): one becomes a
+    /// link where the robot's options name it as a hand's frame.
+    pub(crate) frames: Vec<FrameDesc>,
+    /// Pairs of links the description says never collide (MJCF `<contact><exclude>`).
+    pub(crate) ignore: Vec<[String; 2]>,
+}
+
+/// A named frame fixed to a link.
+#[derive(Clone, Debug)]
+pub(crate) struct FrameDesc {
+    pub(crate) name: String,
+    /// The link it is fixed to.
+    pub(crate) link: String,
+    /// Its pose in that link's frame.
+    pub(crate) origin: Transform,
 }
 
 /// A point on one link held to a point on another: a kinematic loop a tree cannot express (MJCF
@@ -519,6 +534,8 @@ pub(crate) fn assemble(
         }],
         joints: vec![],
         loops: vec![],
+        frames: vec![],
+        ignore: vec![],
     };
     for (desc, prefix, base) in parts {
         let named = |name: &str| format!("{prefix}{name}");
@@ -554,6 +571,15 @@ pub(crate) fn assemble(
                 links: l.links.map(|link| named(&link)),
                 ..l
             }));
+        out.frames
+            .extend(desc.frames.into_iter().map(|f| FrameDesc {
+                name: named(&f.name),
+                link: named(&f.link),
+                ..f
+            }));
+        let ignored = desc.ignore.into_iter();
+        out.ignore
+            .extend(ignored.map(|pair| pair.map(|link| named(&link))));
     }
     let mut names: Vec<&str> = out.links.iter().map(|l| l.name.as_str()).collect();
     names.sort_unstable();

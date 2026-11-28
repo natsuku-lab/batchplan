@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::constraint::{self, HandConstraint};
 use crate::description::{
-    self, Curve, Geometry, JointDesc, JointType, LinkDesc, RobotDescription, Shape, TriMesh,
+    self, Curve, FrameDesc, Geometry, JointDesc, JointType, LinkDesc, RobotDescription, Shape,
+    TriMesh,
 };
 use crate::error::{self, Error, ensure_input, input};
 use crate::gripper::{Gripper, GripperCalibration};
@@ -144,6 +145,8 @@ pub(crate) struct Link {
 struct LockedLink {
     /// The locked joint: the link's joint, or the joint it mimics.
     joint: String,
+    /// The link's own joint, which follows `joint` where it is another.
+    own: String,
     link: usize,
     /// The link's joint frame before its motion.
     origin: Transform,
@@ -301,9 +304,9 @@ pub struct JointLimits {
 pub struct RobotOptions {
     /// Root of the planned tree; defaults to the description's root link.
     pub base_link: Option<String>,
-    /// IK target frames, one per hand (end effector); defaults to the link with the most actuated
-    /// joints above it. Set it for robots with grippers, and name each hand of a robot with
-    /// several.
+    /// IK target frames, one per hand (end effector): links by name, or an MJCF's named `<site>`s
+    /// on the robot's bodies. Defaults to the link with the most actuated joints above it. Set it
+    /// for robots with grippers, and name each hand of a robot with several.
     pub ee_links: Vec<String>,
     /// Per hand, by its link in `ee_links`: the links it grips with, for a hand whose fingers are
     /// not the links below its palm, as a gripper whose fixed jaw is part of the palm's link
@@ -312,7 +315,9 @@ pub struct RobotOptions {
     pub finger_links: HashMap<String, Vec<String>>,
     /// Defaults to zero for every joint whose limits contain zero, else the middle of its range.
     pub default_q: Option<Vec<f32>>,
-    /// Joints held at a value and removed from planning (mimics of a locked joint follow it).
+    /// Joints held at a value and removed from planning (mimics of a locked joint follow it). A
+    /// joint that follows another is locked through its leader: it may be named with the leader,
+    /// at the value the leader gives it, and is an error named alone or at another value.
     pub lock_joints: HashMap<String, f32>,
     /// Limits by joint name, replacing the description's; mimic joints may be named too. The
     /// scales below apply on top. Planar, ball and floating joints become joints named
@@ -595,6 +600,14 @@ impl Robot {
     }
 
     fn from_description(desc: &RobotDescription, o: &RobotOptions) -> Result<Self> {
+        let framed;
+        let desc = match with_named_frames(desc, o) {
+            Some(with) => {
+                framed = with;
+                &framed
+            }
+            None => desc,
+        };
         let closed;
         let desc = if desc.loops.is_empty() {
             desc
@@ -634,13 +647,26 @@ impl Robot {
             }
             None => {
                 let mut model = robot.fit_collision_model(&o.spheres, &o.sphere_tolerances)?;
-                model.locked_joints = o.lock_joints.iter().map(|(j, v)| (j.clone(), *v)).collect();
+                // The joints that lead: one that follows is where its leader has it.
+                let leads = |joint: &String| robot.locked.iter().any(|l| l.joint == *joint);
+                let led = o.lock_joints.iter().filter(|(joint, _)| leads(joint));
+                model.locked_joints = led.map(|(j, v)| (j.clone(), *v)).collect();
                 model
             }
         };
         if let Some(srdf) = &o.srdf {
             for (a, b) in crate::urdf::srdf_disabled_pairs(srdf)? {
                 model.self_collision_ignore.entry(a).or_default().push(b);
+            }
+        }
+        // Pairs the description rules out, which a model saved with them has already: those
+        // that name no link of the robot's, as a body of the scene, drop out with the model's.
+        for [a, b] in &desc.ignore {
+            let ignored = &mut model.self_collision_ignore;
+            let listed =
+                |a: &String, b: &String| ignored.get(a).is_some_and(|with| with.contains(b));
+            if !listed(a, b) && !listed(b, a) {
+                ignored.entry(a.clone()).or_default().push(b.clone());
             }
         }
         robot.set_collision_model(model)?;
@@ -983,7 +1009,9 @@ impl Robot {
     /// anything, so worlds uploaded stay valid. Joints not named keep their values. A model fitted
     /// with a joint locked found the pairs it ignores at that joint's value alone, so pairs that
     /// meet only at others would go unchecked: for joints that will move, fit the model with them
-    /// free and load with it ([`RobotOptions::collision_model`]). Errors if a joint was not locked,
+    /// free and load with it ([`RobotOptions::collision_model`]). A joint that follows a locked
+    /// one may be named with it, at the value the leader gives it. Errors if a joint was not locked
+    /// (or follows one at another value than its leader gives it),
     /// is moved from where it was locked when the collision model was fitted
     /// ([`CollisionModel::locked_joints`]), or a value is not finite.
     pub fn relock(&self, joints: &HashMap<String, f32>) -> error::Result<Robot> {
@@ -1000,10 +1028,23 @@ impl Robot {
 
     fn check_locks(&self, joints: &HashMap<String, f32>) -> error::Result<()> {
         for (name, &value) in joints {
+            let follows = (self.locked.iter()).find(|l| l.own == *name && l.joint != *name);
             ensure_input!(
-                self.locked.iter().any(|l| l.joint == *name),
+                follows.is_some() || self.locked.iter().any(|l| l.joint == *name),
                 "joint '{name}' was not locked when the robot was loaded"
             );
+            // A joint that follows a locked one may be named with it, where the one leads it.
+            if let Some(held) = follows {
+                let led = joints.get(&held.joint).copied().unwrap_or(held.value);
+                let at = held.curve.value(led);
+                ensure_input!(
+                    follows_at(value, at),
+                    "joint '{name}' follows '{}', which locked at {led} has it at {at}, not \
+                     {value}: name '{}' alone",
+                    held.joint,
+                    held.joint
+                );
+            }
             if let Some(&fitted) = self.collision_model.locked_joints.get(name) {
                 ensure_input!(
                     value == fitted,
@@ -1807,6 +1848,36 @@ impl Robot {
     }
 }
 
+/// Whether `value`, given for a joint that follows another, is where that one has it, to
+/// rounding.
+fn follows_at(value: f32, at: f32) -> bool {
+    (value - at).abs() <= 8.0 * f32::EPSILON * value.abs().max(at.abs()).max(1.0)
+}
+
+/// `desc` with each frame `o` names as a hand's ([`RobotOptions::ee_links`]) made a link fixed
+/// where the frame is, unless a link has its name: none where no frame is named.
+fn with_named_frames(desc: &RobotDescription, o: &RobotOptions) -> Option<RobotDescription> {
+    let is_link = |name: &str| desc.links.iter().any(|l| l.name == name);
+    let named = |f: &&FrameDesc| o.ee_links.contains(&f.name) && !is_link(&f.name);
+    let mut frames = desc.frames.iter().filter(named).peekable();
+    frames.peek()?;
+    let mut out = desc.clone();
+    for frame in frames {
+        out.links.push(LinkDesc {
+            name: frame.name.clone(),
+            ..Default::default()
+        });
+        let joint = format!("{}_site", frame.name);
+        out.joints.push(JointDesc::fixed(
+            &joint,
+            &frame.link,
+            &frame.name,
+            frame.origin,
+        ));
+    }
+    Some(out)
+}
+
 /// `desc` with planar, ball and floating joints written as chains of prismatic and revolute joints
 /// on massless links, so kinematics and both devices see only one-axis joints:
 /// - planar: `<joint>_x` and `<joint>_y` slide in the plane (`_x` along the joint frame's x axis
@@ -1825,6 +1896,8 @@ fn expand_compound_joints(desc: &RobotDescription) -> Result<RobotDescription> {
         links: desc.links.clone(),
         joints: vec![],
         loops: desc.loops.clone(),
+        frames: desc.frames.clone(),
+        ignore: desc.ignore.clone(),
     };
     for j in &desc.joints {
         let ball = |range: f32| {
@@ -2047,6 +2120,25 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
         )
     };
 
+    // A joint that follows another is locked through the one that leads it, and may be named
+    // with it at the value that gives it.
+    for (name, &value) in &o.lock_joints {
+        let (leader, curve) = driver(joint_index[name.as_str()])?;
+        let leading = &desc.joints[leader].name;
+        if leading == name {
+            continue;
+        }
+        let Some(&led) = o.lock_joints.get(leading) else {
+            bail!("cannot lock joint '{name}' alone, which follows '{leading}': lock '{leading}'");
+        };
+        let at = curve.value(led);
+        ensure!(
+            follows_at(value, at),
+            "cannot lock joint '{name}' at {value}: it follows '{leading}', which locked at {led} \
+             has it at {at}; lock '{leading}' alone"
+        );
+    }
+
     // Breadth-first so parents precede children.
     let mut order = vec![];
     let mut queue = VecDeque::from([base.clone()]);
@@ -2138,6 +2230,7 @@ fn kinematics(desc: &RobotDescription, o: &RobotOptions) -> Result<Robot> {
             if let Some(&value) = o.lock_joints.get(&desc.joints[leader].name) {
                 let held = LockedLink {
                     joint: desc.joints[leader].name.clone(),
+                    own: joint.name.clone(),
                     link: links.len(),
                     origin,
                     axis: joint.axis,

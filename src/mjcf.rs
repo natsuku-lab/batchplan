@@ -2,7 +2,8 @@
 //! scene shapes. Covers what kinematics and collision need: `<include>`, `<default>` classes and
 //! `childclass`, the compiler's angle units, mesh directory and Euler sequence, every orientation
 //! form, bodies with several joints, free (`freejoint` or `type="free"`) and ball joints,
-//! `fromto`, and `<equality><joint>` as mimic joints.
+//! `fromto`, `<equality><joint>` as mimic joints, named `<site>`s as frames a hand's frame may be
+//! named by, and `<contact><exclude>` as pairs of links that never collide.
 //!
 //! Body subtrees that contain a joint are the robot; bodies with no joint anywhere below them, and
 //! geoms placed directly in the world body, are the scene. `connect` equalities close kinematic
@@ -17,8 +18,8 @@ use glam::{Mat3, Quat, Vec3};
 use roxmltree::{Document, Node};
 
 use crate::description::{
-    Curve, Geometry, JointDesc, JointType, LinkDesc, LoopClosure, Mimic, Model, RobotDescription,
-    Shape,
+    Curve, FrameDesc, Geometry, JointDesc, JointType, LinkDesc, LoopClosure, Mimic, Model,
+    RobotDescription, Shape,
 };
 use crate::robot::Transform;
 
@@ -303,6 +304,7 @@ pub(crate) fn load(path: &Path) -> Result<Model> {
         }],
         joints: vec![],
         scene: vec![],
+        frames: vec![],
     };
     for world in model.children("worldbody") {
         for g in world.children("geom") {
@@ -370,12 +372,24 @@ pub(crate) fn load(path: &Path) -> Result<Model> {
     for j in &mut out.joints {
         j.actuated = !any_actuator || driven.contains(&j.name.as_str());
     }
+    // Pairs of bodies MuJoCo excludes from contact.
+    let mut ignore = vec![];
+    for contact in model.children("contact") {
+        for exclude in contact.children("exclude") {
+            let (Some(a), Some(b)) = (exclude.attr("body1"), exclude.attr("body2")) else {
+                bail!("contact exclude without body1 and body2");
+            };
+            ignore.push([a.to_string(), b.to_string()]);
+        }
+    }
     let name = model.attr("model").unwrap_or("mjcf").to_string();
     let robot = RobotDescription {
         name,
         links: out.links,
         joints: out.joints,
         loops,
+        frames: out.frames,
+        ignore,
     };
     Ok(Model {
         robot,
@@ -397,6 +411,7 @@ struct Builder<'model> {
     links: Vec<LinkDesc>,
     joints: Vec<JointDesc>,
     scene: Vec<Shape>,
+    frames: Vec<FrameDesc>,
 }
 
 impl Builder<'_> {
@@ -527,6 +542,21 @@ impl Builder<'_> {
                 desc.collision.push(shape);
             }
         }
+        for site in body.children("site") {
+            let a = Attrs(self.defaults.resolve(site, &class)?);
+            let Some(site) = a.get("name") else {
+                continue;
+            };
+            let origin = match a.floats("fromto")? {
+                Some(ends) => segment(&ends)?.0,
+                None => self.compiler.frame(&a)?,
+            };
+            self.frames.push(FrameDesc {
+                name: site.to_string(),
+                link: name.clone(),
+                origin,
+            });
+        }
         for child in body.children("body") {
             self.body(child, &name, Transform::IDENTITY, &class)?;
         }
@@ -570,18 +600,10 @@ impl Builder<'_> {
         let mut origin = self.compiler.frame(&a)?;
         // `fromto` replaces the frame: centered on the segment, z along it.
         let mut half_length = None;
-        if let Some(ft) = a.floats("fromto")? {
-            ensure!(ft.len() == 6, "fromto needs 6 numbers");
-            let (from, to) = (
-                Vec3::new(ft[0], ft[1], ft[2]),
-                Vec3::new(ft[3], ft[4], ft[5]),
-            );
-            let along = to - from;
-            origin = Transform {
-                rot: Mat3::from_quat(Quat::from_rotation_arc(Vec3::Z, along.normalize())),
-                trans: 0.5 * (from + to),
-            };
-            half_length = Some(0.5 * along.length());
+        if let Some(ends) = a.floats("fromto")? {
+            let (frame, half) = segment(&ends)?;
+            origin = frame;
+            half_length = Some(half);
         }
         let geometry = match kind {
             "sphere" => Geometry::Sphere {
@@ -644,6 +666,21 @@ impl Builder<'_> {
         });
         Ok(())
     }
+}
+
+/// The frame of a `fromto` segment, centered on it with z along it, and its half length.
+fn segment(ends: &[f32]) -> Result<(Transform, f32)> {
+    ensure!(ends.len() == 6, "fromto needs 6 numbers");
+    let (from, to) = (
+        Vec3::new(ends[0], ends[1], ends[2]),
+        Vec3::new(ends[3], ends[4], ends[5]),
+    );
+    let along = to - from;
+    let frame = Transform {
+        rot: Mat3::from_quat(Quat::from_rotation_arc(Vec3::Z, along.normalize())),
+        trans: 0.5 * (from + to),
+    };
+    Ok((frame, 0.5 * along.length()))
 }
 
 fn translation(t: Vec3) -> Transform {

@@ -25,6 +25,22 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   item_world, q, weights)`, an `Evaluation` of each configuration's clearances, collision cost
   and gradient under `CollisionWeights`. Configurations go in as `(items, dof)`; a batch of any
   other shape is an `InputError`.
+- MJCF: a named `<site>` on a robot body may be named in `RobotOptions::ee_links` as a hand's
+  frame, as a tool center point; it becomes a link only where it is named.
+- `RobotOptions::lock_joints` and `Robot::relock` take a joint that follows another (a mimic)
+  with the one that leads it, at the value the leader gives it, as both fingers of a coupled
+  gripper. `relock` refused such a name.
+
+### Changed
+
+- **Breaking:** MJCF `<contact><exclude>` pairs of robot bodies are links that never collide,
+  added to the collision model's ignored pairs as an SRDF's are. Before, they were not read, and
+  a start MuJoCo accepts could be refused as a self-collision. A robot whose MJCF has them
+  ignores those pairs from now on, and its fitted model lists them (the Menagerie 2F-85 gains
+  six, its Panda one).
+- **Breaking:** locking a joint that follows another without the one that leads it, or at a value
+  the leader does not give it, is an error that names the leader. Before, the name was accepted
+  and ignored.
 
 ## [0.12.0] - 2026-11-27
 

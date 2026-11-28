@@ -556,8 +556,11 @@ fn relocked_joints_move_their_links_as_a_robot_loaded_there() {
     let message = |joints: HashMap<String, f32>| format!("{}", robot.relock(&joints).unwrap_err());
     let free = message(HashMap::from([("free".into(), 0.1)]));
     assert!(free.contains("'free' was not locked"), "{free}");
+    // A joint that follows a locked one may be named where that one has it, and nowhere else.
     let mimic = message(HashMap::from([("double".into(), 0.1)]));
-    assert!(mimic.contains("'double' was not locked"), "{mimic}");
+    assert!(mimic.contains("'double' follows 'leader'"), "{mimic}");
+    let as_led = robot.relock(&HashMap::from([("double".into(), 0.9)]));
+    assert!(as_led.is_ok(), "{as_led:?}");
     let nan = message(HashMap::from([("leader".into(), f32::NAN)]));
     assert!(nan.contains("not a finite value"), "{nan}");
 }

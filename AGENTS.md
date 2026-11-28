@@ -64,7 +64,7 @@ fn main() -> Result<(), Error> {
 - **Poses** are `Pose { position, rotation }` with [glam](https://docs.rs/glam) types, re-exported as `batchplan::glam`. glam's quaternions are x, y, z, w (`Quat::from_xyzw`), as ROS messages are; MuJoCo and Eigen's constructor are w, x, y, z. Rotations must be unit quaternions.
 - **Frames.** Targets, obstacles and depth-camera poses are all in the robot's frame: its description's root link, or `world` for a robot made with `Robot::assemble`. Transform camera and map data into it first.
 - **Joint order** is `robot.joint_names()`: the actuated joints after locking, numbered breadth first, so two arms' joints interleave. Map a controller's names to it; never assume the description's order. Planar, ball and floating joints become one-axis joints named `<joint>_x`, `_theta` and so on ([robots](docs/robots.md#kinematics)).
-- **Hands** are the IK frames of `RobotOptions::ee_links`, numbered in that order. For a gripper, use a frame between the fingertips, z out of the hand and y along the closing direction: what `grasps` assumes.
+- **Hands** are the IK frames of `RobotOptions::ee_links`, numbered in that order: links by name, or an MJCF's named `<site>`s. For a gripper, use a frame between the fingertips, z out of the hand and y along the closing direction: what `grasps` assumes.
 
 ### Lifecycle
 
