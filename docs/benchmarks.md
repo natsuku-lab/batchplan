@@ -391,6 +391,14 @@ Built in sixteen units, as a dependent crate builds it, three alternating rounds
 branch alone, at a load of 3.5 to 3.8, gave at best 234, 178, 346 and 740 µs. Durations
 (2.1730, 1.0262, 3.5443 and 0.6320 s) are unchanged.
 
+On the M4 Pro, four alternating rounds at a load of 7 to 9 gave at best 208, 149, 307 and 647 µs
+for 0.12.0 with the three merges after it (`cc59e0c`) against 172, 124, 255 and 558 µs, and built
+in sixteen units, at a load of 12 to 19, 208, 151, 314 and 657 µs against 178, 128, 263 and
+549 µs. A plan from a moving start also times each spline it fits once, where a later round of a
+fit used to time the same spline again: 96 Panda replans from halfway along a motion took 0.96 ms
+each against 0.69 ms one at a time, and 26 ms against 10 ms as one batch, on that machine, with the
+same paths (a probe that is not among the examples).
+
 ```bash
 cargo run --release --example timing
 cargo run --release --config 'profile.release.package.batchplan.codegen-units=16' --example timing
