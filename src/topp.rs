@@ -285,7 +285,10 @@ fn timed_map(
     let jmax: Vec<f64> = robot.max_jerk().iter().map(|&j| f64::from(j)).collect();
 
     // Each stage's bounds on u for state x, as lines u = slope x + offset, and the largest x the
-    // velocity and jerk limits and the joints that do not move allow.
+    // velocity and jerk limits and the joints that do not move allow. The stages inside a span
+    // share its third derivative, so each joint's jerk cap is worked out once for them: the last
+    // third derivative it was worked out for, and that cap.
+    let mut jerk_caps = vec![(f64::NAN, f64::INFINITY); n];
     let mut stage_bounds: Vec<Bounds> = (0..=stages)
         .map(|i| {
             let mut b = Bounds {
@@ -300,7 +303,11 @@ fn timed_map(
                 // Jerk's speed term, the path's third derivative times ṡ³, caps ṡ like velocity
                 // does.
                 if third[at] > 1e-9 {
-                    b.cap = b.cap.min((jmax / third[at]).powf(2.0 / 3.0));
+                    let (of, cap) = &mut jerk_caps[j];
+                    if *of != third[at] {
+                        (*of, *cap) = (third[at], (jmax / third[at]).powf(2.0 / 3.0));
+                    }
+                    b.cap = b.cap.min(*cap);
                 }
                 let (a, d, c) = (first[at], second[at], amax);
                 if a.abs() > 1e-9 {
@@ -714,6 +721,11 @@ pub(crate) fn derivatives(
     s
 }
 
+/// What `assess` multiplies the least ratio that matters by to rule out every joint of an order
+/// without dividing: ratios below it stay below that ratio through the roundings of either way of
+/// working them out (a few units of 2^-24).
+const SHY: f32 = 1.0 - 1e-6;
+
 /// Whether the time map `points` at `knot` seconds per span, which starts in a given motion at
 /// path position `from`, keeps every joint's velocity, acceleration and jerk within its limits,
 /// less the margin a map that cannot stretch leaves. The velocity it starts with is not the map's
@@ -835,13 +847,22 @@ fn assess(
                 }
             }
             // The largest ratio of each order over the joints: a larger ratio has the larger root
-            // and the smaller factor, so only an order's largest can set k or the factor.
+            // and the smaller factor, so only an order's largest can set k or the factor. Where
+            // every joint keeps under `SHY` of the floor and of 1 by multiplying, no ratio reaches
+            // either (the margin covers the roundings), so none is divided out.
             let mut most = [0.0f32; 3];
             for order in 0..3 {
                 let relief = if order < eased_orders { relief } else { 1.0 };
                 let (d, limit) = (&out[order * n..][..n], &targets[order * n..][..n]);
+                let under = floor[order].min(1.0) * SHY;
+                let mut over = false;
                 for j in 0..n {
-                    most[order] = most[order].max(d[j].abs() / (limit[j] * relief));
+                    over |= d[j].abs() > under * (limit[j] * relief);
+                }
+                if over {
+                    for j in 0..n {
+                        most[order] = most[order].max(d[j].abs() / (limit[j] * relief));
+                    }
                 }
             }
             for (order, ratio) in most.into_iter().enumerate() {
