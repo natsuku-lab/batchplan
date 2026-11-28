@@ -679,17 +679,12 @@ impl Trajectory {
         let uniform = *tp == linear(points - 3);
         if !uniform && h > 0.0 {
             let mut out = vec![0.0f32; 3 * n];
+            let evenly: Vec<[[f32; 4]; 3]> = (0..=CHECK_SAMPLES)
+                .map(|sample| topp::map_weights(sample as f32 / CHECK_SAMPLES as f32))
+                .collect();
             for m in 0..tp.len() - 3 {
-                for sample in 0..=CHECK_SAMPLES {
-                    topp::derivatives(
-                        cp,
-                        n,
-                        h,
-                        tp,
-                        m,
-                        sample as f32 / CHECK_SAMPLES as f32,
-                        &mut out,
-                    );
+                for weights in &evenly {
+                    topp::derivatives(cp, n, h, tp, m, weights, &mut out);
                     for j in 0..n {
                         for order in 0..3 {
                             let (peak, limit) = (out[order * n + j].abs(), limits[order][j]);

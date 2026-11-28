@@ -677,26 +677,17 @@ fn narrow(lower: (f64, f64), upper: (f64, f64), x: &mut (f64, f64)) -> bool {
     true
 }
 
-/// The path's joint velocities, accelerations and jerks where the time map is at `u` of span `m`,
-/// written to `out` in that order (`[3, n]`), and the path position there.
-#[inline(always)]
-pub(crate) fn derivatives(
-    cp: &[f32],
-    n: usize,
-    knot: f32,
-    points: &[f32],
-    m: usize,
-    u: f32,
-    out: &mut [f32],
-) -> f32 {
-    let weights = [spline::basis(u), spline::basis_d1(u), spline::basis_d2(u)];
-    derivatives_with(cp, n, knot, points, m, &weights, out)
+/// The time map's B-spline weights at `u` of a span and their first and second derivatives, for
+/// [`derivatives`]: the same in every span, so samples at the same `u` share them.
+pub(crate) fn map_weights(u: f32) -> [[f32; 4]; 3] {
+    [spline::basis(u), spline::basis_d1(u), spline::basis_d2(u)]
 }
 
-/// [`derivatives`] with the time map's weights at `u` and their first and second derivatives
-/// given: where `u` is one of a few, the same in every span.
+/// The path's joint velocities, accelerations and jerks where the time map is at the `u` of span
+/// `m` that `weights` were worked out for ([`map_weights`]), written to `out` in that order
+/// (`[3, n]`), and the path position there.
 #[inline(always)]
-fn derivatives_with(
+pub(crate) fn derivatives(
     cp: &[f32],
     n: usize,
     knot: f32,
@@ -813,9 +804,8 @@ fn assess(
     // it is also measured either side of where it crosses the path's knots: acceleration has
     // corners there and jerk jumps, which the even samples read up to 0.35% and 12% under.
     let corners = eased.is_some() && samples == CHECK_SAMPLES;
-    let weights_at = |u: f32| [spline::basis(u), spline::basis_d1(u), spline::basis_d2(u)];
     let evenly: Vec<[[f32; 4]; 3]> = (0..=samples)
-        .map(|sample| weights_at(sample as f32 / samples as f32))
+        .map(|sample| map_weights(sample as f32 / samples as f32))
         .collect();
     for m in 0..points.len() - 3 {
         let along = |u: f32| {
@@ -839,10 +829,10 @@ fn assess(
                     after = middle;
                 }
             }
-            [before, after].map(weights_at)
+            [before, after].map(map_weights)
         });
         for weights in evenly.iter().copied().chain(crossings) {
-            let s = derivatives_with(cp, n, knot, points, m, &weights, &mut out);
+            let s = derivatives(cp, n, knot, points, m, &weights, &mut out);
             let map = |w: [f32; 4]| (0..4).map(|i| w[i] * points[m + i]).sum::<f32>();
             // How much more than `target` the limits are here: from the full ones at a given
             // start to none after the ramp.
