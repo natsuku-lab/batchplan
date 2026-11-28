@@ -370,6 +370,40 @@ Stricter checks also caught between-sample acceleration and jerk overshoots and 
 stops accepted by earlier versions. See the [changelog](../CHANGELOG.md) for behavior changes
 and [replanning](planning.md#starting-from-a-moving-state) for the contract.
 
+## Timing for less work
+
+Timing works out each span's jerk cap once rather than at each of its stages, rules out the
+joints far from their limits by multiplying rather than dividing, and weighs the time map's even
+samples once per check rather than in every span. The trajectories are the same to the bit.
+`examples/timing.rs` (the fastest of five passes per kind, on one thread) against 0.12.0
+(`a45d2fd`), in four alternating rounds on the Ryzen with batchplan built as one codegen unit, at
+a load of 4.8 to 6.9; the best of the rounds, per trajectory:
+
+| | 0.12.0 | Now |
+|---|---:|---:|
+| Planned from rest (438) | 301 µs | 234 µs |
+| The hand's straight moves (121) | 222 µs | 179 µs |
+| Replanned while moving (61) | 463 µs | 346 µs |
+| Stopped a quarter of the way (438) | 954 µs | 744 µs |
+
+Built in sixteen units, as a dependent crate builds it, three alternating rounds at a load of
+1.6 to 2.0 gave 304, 225, 467 and 957 µs against 242, 185, 359 and 753 µs. Five more runs of the
+branch alone, at a load of 3.5 to 3.8, gave at best 234, 178, 346 and 740 µs. Durations
+(2.1730, 1.0262, 3.5443 and 0.6320 s) are unchanged.
+
+On the M4 Pro, four alternating rounds at a load of 7 to 9 gave at best 208, 149, 307 and 647 µs
+for 0.12.0 with the three merges after it (`cc59e0c`) against 172, 124, 255 and 558 µs, and built
+in sixteen units, at a load of 12 to 19, 208, 151, 314 and 657 µs against 178, 128, 263 and
+549 µs. A plan from a moving start also times each spline it fits once, where a later round of a
+fit used to time the same spline again: 96 Panda replans from halfway along a motion took 0.96 ms
+each against 0.69 ms one at a time, and 26 ms against 10 ms as one batch, on that machine, with the
+same paths (a probe that is not among the examples).
+
+```bash
+cargo run --release --example timing
+cargo run --release --config 'profile.release.package.batchplan.codegen-units=16' --example timing
+```
+
 ## Tracking on the SO-101's servos
 
 `examples/so101_tracking.rs` times random motions of the SO-101 in free space under several limits, and `scripts/so101_tracking.py` plays them in MuJoCo through the model of its Feetech STS3215 (7.4 V) servos that [BAM](https://github.com/Rhoban/bam) identified from recorded trajectories (model m6: the firmware's rate-limited P controller, PWM and supply limits, load-dependent friction). It measures the largest gap between the arm and the trajectory while it runs, the median over the motions, any joint. Each motion starts settled under gravity, and every 2 ms step sends that step's target. The stock arm powers these servos from 5 V; BAM identified them at 7.4 V. Gain 16 is what LeRobot sets; 32 is the firmware's default.

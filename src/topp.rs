@@ -285,7 +285,10 @@ fn timed_map(
     let jmax: Vec<f64> = robot.max_jerk().iter().map(|&j| f64::from(j)).collect();
 
     // Each stage's bounds on u for state x, as lines u = slope x + offset, and the largest x the
-    // velocity and jerk limits and the joints that do not move allow.
+    // velocity and jerk limits and the joints that do not move allow. The stages inside a span
+    // share its third derivative, so each joint's jerk cap is worked out once for them: the last
+    // third derivative it was worked out for, and that cap.
+    let mut jerk_caps = vec![(f64::NAN, f64::INFINITY); n];
     let mut stage_bounds: Vec<Bounds> = (0..=stages)
         .map(|i| {
             let mut b = Bounds {
@@ -300,7 +303,11 @@ fn timed_map(
                 // Jerk's speed term, the path's third derivative times ṡ³, caps ṡ like velocity
                 // does.
                 if third[at] > 1e-9 {
-                    b.cap = b.cap.min((jmax / third[at]).powf(2.0 / 3.0));
+                    let (of, cap) = &mut jerk_caps[j];
+                    if *of != third[at] {
+                        (*of, *cap) = (third[at], (jmax / third[at]).powf(2.0 / 3.0));
+                    }
+                    b.cap = b.cap.min(*cap);
                 }
                 let (a, d, c) = (first[at], second[at], amax);
                 if a.abs() > 1e-9 {
@@ -670,8 +677,15 @@ fn narrow(lower: (f64, f64), upper: (f64, f64), x: &mut (f64, f64)) -> bool {
     true
 }
 
-/// The path's joint velocities, accelerations and jerks where the time map is at `u` of span `m`,
-/// written to `out` in that order (`[3, n]`), and the path position there.
+/// The time map's B-spline weights at `u` of a span and their first and second derivatives, for
+/// [`derivatives`]: the same in every span, so samples at the same `u` share them.
+pub(crate) fn map_weights(u: f32) -> [[f32; 4]; 3] {
+    [spline::basis(u), spline::basis_d1(u), spline::basis_d2(u)]
+}
+
+/// The path's joint velocities, accelerations and jerks where the time map is at the `u` of span
+/// `m` that `weights` were worked out for ([`map_weights`]), written to `out` in that order
+/// (`[3, n]`), and the path position there.
 #[inline(always)]
 pub(crate) fn derivatives(
     cp: &[f32],
@@ -679,15 +693,15 @@ pub(crate) fn derivatives(
     knot: f32,
     points: &[f32],
     m: usize,
-    u: f32,
+    weights: &[[f32; 4]; 3],
     out: &mut [f32],
 ) -> f32 {
     let spans = cp.len() / n - 3;
     let at = |w: [f32; 4]| (0..4).map(|i| w[i] * points[m + i]).sum::<f32>();
     let (s, sd, sdd, sddd) = (
-        at(spline::basis(u)),
-        at(spline::basis_d1(u)) / knot,
-        at(spline::basis_d2(u)) / (knot * knot),
+        at(weights[0]),
+        at(weights[1]) / knot,
+        at(weights[2]) / (knot * knot),
         at(BASIS_D3) / (knot * knot * knot),
     );
     let span = (s.max(0.0) as usize).min(spans - 1);
@@ -713,6 +727,11 @@ pub(crate) fn derivatives(
     }
     s
 }
+
+/// What `assess` multiplies the least ratio that matters by to rule out every joint of an order
+/// without dividing: ratios below it stay below that ratio through the roundings of either way of
+/// working them out (a few units of 2^-24).
+const SHY: f32 = 1.0 - 1e-6;
 
 /// Whether the time map `points` at `knot` seconds per span, which starts in a given motion at
 /// path position `from`, keeps every joint's velocity, acceleration and jerk within its limits,
@@ -785,6 +804,9 @@ fn assess(
     // it is also measured either side of where it crosses the path's knots: acceleration has
     // corners there and jerk jumps, which the even samples read up to 0.35% and 12% under.
     let corners = eased.is_some() && samples == CHECK_SAMPLES;
+    let evenly: Vec<[[f32; 4]; 3]> = (0..=samples)
+        .map(|sample| map_weights(sample as f32 / samples as f32))
+        .collect();
     for m in 0..points.len() - 3 {
         let along = |u: f32| {
             let w = spline::basis(u);
@@ -807,11 +829,10 @@ fn assess(
                     after = middle;
                 }
             }
-            [before, after]
+            [before, after].map(map_weights)
         });
-        let evenly = (0..=samples).map(|sample| sample as f32 / samples as f32);
-        for u in evenly.chain(crossings) {
-            let s = derivatives(cp, n, knot, points, m, u, &mut out);
+        for weights in evenly.iter().copied().chain(crossings) {
+            let s = derivatives(cp, n, knot, points, m, &weights, &mut out);
             let map = |w: [f32; 4]| (0..4).map(|i| w[i] * points[m + i]).sum::<f32>();
             // How much more than `target` the limits are here: from the full ones at a given
             // start to none after the ramp.
@@ -821,7 +842,7 @@ fn assess(
             });
             let mut factor = 1.0f32;
             if let Some(hand) = hand {
-                let speed = map(spline::basis_d1(u)).abs() / knot;
+                let speed = map(weights[1]).abs() / knot;
                 let rates = hand.at(s);
                 for (rate, limit) in rates.into_iter().zip(hand.limits) {
                     let ratio = rate * speed / (limit * target * relief);
@@ -835,13 +856,22 @@ fn assess(
                 }
             }
             // The largest ratio of each order over the joints: a larger ratio has the larger root
-            // and the smaller factor, so only an order's largest can set k or the factor.
+            // and the smaller factor, so only an order's largest can set k or the factor. Where
+            // every joint keeps under `SHY` of the floor and of 1 by multiplying, no ratio reaches
+            // either (the margin covers the roundings), so none is divided out.
             let mut most = [0.0f32; 3];
             for order in 0..3 {
                 let relief = if order < eased_orders { relief } else { 1.0 };
                 let (d, limit) = (&out[order * n..][..n], &targets[order * n..][..n]);
+                let under = floor[order].min(1.0) * SHY;
+                let mut over = false;
                 for j in 0..n {
-                    most[order] = most[order].max(d[j].abs() / (limit[j] * relief));
+                    over |= d[j].abs() > under * (limit[j] * relief);
+                }
+                if over {
+                    for j in 0..n {
+                        most[order] = most[order].max(d[j].abs() / (limit[j] * relief));
+                    }
                 }
             }
             for (order, ratio) in most.into_iter().enumerate() {
