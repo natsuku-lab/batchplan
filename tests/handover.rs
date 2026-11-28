@@ -583,3 +583,92 @@ fn transits_clear_the_held_bar_between_the_states_checked() {
         "the transits keep their links {nearest} m apart"
     );
 }
+
+/// What rides on the bar passes to the taker with it: every plan's hold of the bar carries it, in
+/// the bar's frame as the giver's did.
+#[test]
+fn what_rides_on_a_held_thing_is_passed_with_it() {
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let (worlds, start, held) = picked(&device, Vec3::new(0.12, 0.02, 0.02));
+    let cube = Obstacle::cuboid(Vec3::new(0.0, 0.0, 0.03), Vec3::splat(0.01));
+    let carrying = Held {
+        carries: vec![cube],
+        ..held
+    };
+    let task = Handover::new(&robot, 1, start, carrying.clone(), 1);
+    let result = batchplan::handover(&device, &worlds, &[task], &TaskOptions::default());
+    let plans = result.unwrap().outcomes.remove(0);
+    let plans = plans.unwrap_or_else(|f| panic!("{f}"));
+    for plan in &plans {
+        let taken = plan.held.as_ref().expect("the taker holds the bar");
+        assert_eq!(taken.carries, carrying.carries);
+    }
+}
+
+/// What rides on the bar stands on it at the meeting, where no hand may touch it: with a ball
+/// riding where one of the taker's grasps puts a finger, every meeting by that grasp stops, some
+/// against the ball, the obstacle after the bar; by the other grasp the bar is passed.
+#[test]
+fn what_rides_on_a_held_thing_stands_on_it_at_the_meeting() {
+    let robot = common::two_pandas().unwrap();
+    let device = Device::cpu(&robot).unwrap();
+    let (worlds, start, held) = picked(&device, Vec3::new(0.12, 0.02, 0.02));
+    let task = Handover::new(&robot, 1, start, held.clone(), 1);
+    let [one, other] = task.grasps[..] else {
+        panic!("two grasps: {:?}", task.grasps);
+    };
+    // Beside the pad of one of that grasp's fingers, toward its palm from the bar's middle, in
+    // the bar's frame: where the other grasp, from the bar's other side, puts no finger.
+    let finger = |grasp: Pose, side: f32| {
+        grasp
+            .mul_pose(Pose::new(
+                Vec3::new(0.0, 0.045 * side, -0.035),
+                Quat::IDENTITY,
+            ))
+            .position
+    };
+    // Of that grasp's two fingers, the one farther from the other grasp's.
+    let apart = |ball: Vec3| [1.0, -1.0].map(|side| finger(other, side).distance(ball));
+    let nearest = |ball: Vec3| apart(ball).into_iter().fold(f32::INFINITY, f32::min);
+    let ball = [finger(one, 1.0), finger(one, -1.0)]
+        .into_iter()
+        .max_by(|a, b| nearest(*a).total_cmp(&nearest(*b)))
+        .expect("two fingers");
+    assert!(
+        nearest(ball) > 0.05,
+        "the other grasp's fingers are {:?} away",
+        apart(ball)
+    );
+    let carrying = Held {
+        carries: vec![Obstacle::sphere(ball, 0.008)],
+        ..held
+    };
+    let by = |grasp: Pose| Handover {
+        grasps: vec![grasp],
+        held: carrying.clone(),
+        ..task.clone()
+    };
+    let result = batchplan::handover(
+        &device,
+        &worlds,
+        &[by(one), by(other)],
+        &TaskOptions::default(),
+    );
+    let result = result.unwrap();
+    let failure = result.outcomes[0].as_ref();
+    let failure = failure.expect_err("a finger closes where the ball rides");
+    let against = (failure.candidates.iter()).any(|c| {
+        c.step == TaskStep::Reach
+            && (c.contacts.iter())
+                .any(|contact| matches!(contact, Contact::World { obstacle: 2, .. }))
+    });
+    assert!(against, "{failure}");
+    let plans = result.outcomes[1].as_ref();
+    let count = plans.map(Vec::len);
+    assert!(
+        count.is_ok_and(|count| count > 0),
+        "by the other grasp: {:?}",
+        plans.err()
+    );
+}

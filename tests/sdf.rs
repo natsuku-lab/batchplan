@@ -3851,6 +3851,7 @@ fn a_band_flags_exactly_the_readings_behind_a_thing_of_a_flag() {
     let padding = 0.01;
     // A box 6 by 6 by 16 cm in the hand, a table 30 cm under the hand and a block on it.
     let held = Held {
+        carries: vec![],
         touch_links: vec![],
         also: vec![],
         hand: 0,
@@ -4893,13 +4894,15 @@ fn a_camera_the_hand_carries_keeps_what_it_sees_past_the_hand() {
 }
 
 /// What a hand holds is left out as the robot is: its readings are no obstacle and the space it
-/// fills is free, where without it named the box is an obstacle in the hand.
+/// fills is free, where without it named the box is an obstacle in the hand. A ball riding on the
+/// box (`Held::carries`) is left out with it.
 #[test]
 fn a_mask_leaves_out_what_a_hand_holds() {
     let robot = common::panda().unwrap();
     let q = robot.default_q().to_vec();
     // A box 6 by 6 by 16 cm, the hand's frame 4 cm over its middle.
     let held = Held {
+        carries: vec![],
         touch_links: vec![],
         also: vec![],
         hand: 0,
@@ -4996,6 +4999,35 @@ fn a_mask_leaves_out_what_a_hand_holds() {
             assert_eq!(middle.value <= 0.0, solid, "{} in the box", middle.value);
         }
     }
+    // What rides on the box is left out with it: a ball 5 cm across on its far end.
+    let ball = Obstacle::sphere(Vec3::new(0.0, 0.0, 0.105), 0.025);
+    let carrying = Held {
+        carries: vec![ball.clone()],
+        ..held.clone()
+    };
+    let on_it = shape_depth(&image, &ball.placed(pose.mul_pose(ball.pose())));
+    let riding: Vec<f32> = (depth.iter().zip(&on_it)).map(|(d, b)| d.min(*b)).collect();
+    let image = DepthImage {
+        depth: &riding,
+        ..image
+    };
+    let [alone, with] = [&held, &carrying]
+        .map(|held| (image.robot_mask(&robot, &q, padding, std::slice::from_ref(held))).unwrap());
+    let all = image.points(None).unwrap();
+    let mut of_ball = 0;
+    for i in 0..riding.len() {
+        let p = all[i].unwrap();
+        // The ball's readings clear of the box and of the hand.
+        if on_it[i] < depth[i] && object.distance(p).value > padding && !by_robot(p) {
+            of_ball += 1;
+            assert!(
+                with.on_robot[i],
+                "pixel {i} reads the ball riding on the box at {p}"
+            );
+            assert!(!alone.on_robot[i], "pixel {i} at {p}, the box held alone");
+        }
+    }
+    assert!(of_ball > 200, "the camera sees the ball: {of_ball} pixels");
     // A robot that holds the object already, and a hand the robot lacks, are refused.
     let attached = robot.attach(&held.attachment(&robot).unwrap()).unwrap();
     assert!(matches!(
@@ -5021,6 +5053,7 @@ fn a_mask_holds_the_fingers_where_a_hold_locks_them() {
         .into();
     let closed = robot.relock(&shut).unwrap();
     let open = Held {
+        carries: vec![],
         touch_links: vec![],
         also: vec![],
         hand: 0,

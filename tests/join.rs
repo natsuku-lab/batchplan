@@ -381,6 +381,7 @@ fn malformed_sequences_are_input_errors() {
         "a constraint on a hand the robot lacks"
     );
     let ball = |hand: usize| Held {
+        carries: vec![],
         touch_links: vec![],
         also: vec![],
         locked: Default::default(),
@@ -730,6 +731,7 @@ fn a_blend_is_checked_with_what_the_hand_holds() {
     // inside the turn at its height: the motions pass it, the hand passes over it, and the blend
     // the motions join within takes the carried ball through it.
     let held = Held {
+        carries: vec![],
         touch_links: vec![],
         also: vec![],
         locked: Default::default(),

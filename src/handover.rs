@@ -83,7 +83,9 @@ impl Handover {
 /// giver's move away runs from there with the taker's held, as on a robot whose arms share a
 /// torso the other arm must not move. The way to the meeting is planned with the object in the
 /// giver's hand. Run the transit and the approach, close the taker's gripper, open the giver's,
-/// then run the departure. `device` is the robot's without the object.
+/// then run the departure. What rides on the object ([`Held::carries`]) stands on it at the
+/// meeting, where no hand may touch it, and rides on in the taker's hold. `device` is the robot's
+/// without the object.
 pub fn handover(
     device: &Device,
     worlds: &Worlds,
@@ -191,6 +193,8 @@ pub fn handover(
                 w.obstacles.push(t.held.object.placed(meeting));
                 let object = w.obstacles.len() - 1;
                 w.touch.push(Touch::new(object, touching.iter().copied()));
+                // What rides on it stands with it, touched by no hand.
+                w.obstacles.extend(t.held.carried_at(meeting));
                 meetings.push(w);
             }
         }
@@ -247,6 +251,7 @@ pub fn handover(
     let outcomes = task::choose(device, tasks.len(), &candidates, o, |c| {
         let t = &tasks[c.task];
         let held = Held {
+            carries: t.held.carries.clone(),
             touch_links: vec![],
             also: vec![],
             locked: Default::default(),

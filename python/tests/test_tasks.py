@@ -94,6 +94,7 @@ def test_a_picked_box_is_carried_and_set_down(tasks_robot):
         placed = bp.place(device, without, [place]).outcomes[0]
         assert isinstance(placed, tuple) and placed, f"{placed} on {device}"
         np.testing.assert_allclose(placed[0].placed.pose.position, spot.position, atol=2e-3)
+        assert placed[0].carried == (), "nothing rode on the box"
         assert [r.drop for r in place.releases] == [0.0, 0.0], "poses set it down there"
         costly = place.replace(releases=[bp.Release(p, cost=1.0) for p in poses])
         costed = bp.place(device, without, [costly]).outcomes[0]

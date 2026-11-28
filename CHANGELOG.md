@@ -30,6 +30,27 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 - `RobotOptions::lock_joints` and `Robot::relock` take a joint that follows another (a mimic)
   with the one that leads it, at the value the leader gives it, as both fingers of a coupled
   gripper. `relock` refused such a name.
+- **Breaking:** what is set on or into a held thing rides on it. `Held` gains `carries`, shapes
+  placed in the object's frame that every call holding it checks as part of it, each fitted with
+  spheres of its own; a `Held` literal sets `carries: vec![]`, and constructors and pick plans give
+  none. A place onto what another hand holds (`Place::onto`) now gives that hold carrying the
+  object (`TaskPlan::held`), where the plan sets it down in the support's frame, so plans after it
+  carry the object along. A place of a hold that carries sets them down with it: the move away
+  checks the hand against each where it then stands, and `TaskPlan::carried` gives them in the
+  world's frame. A handover passes them on in the taker's hold, and a robot mask
+  (`DepthImage::robot_mask`) leaves them out with the object. A place onto a hold that carries
+  already keeps the new object clear of what rides there: those stand where the start has them,
+  obstacles nothing may touch, and the plan's hold carries both. An object that carries others set
+  on what another hand holds is an input error. In Python, `Held.carries` and `TaskPlan.carried`.
+- **Breaking:** miru's `Under` gains `Held`, a hold as a place onto it gives it: `Act::LetGo` onto
+  it makes the thing let go ride on what that hand holds, in no hand and among no objects, the
+  hand holding the hold given, and each look's mask leaves it out. A let-go of the carrier sets its
+  riders down standing on it under their ids, a loss loses them, a hold said otherwise in one
+  `Memory::after` carries them again (its `carries` as the let-go's, less what was taken off), and
+  a pick or a loss of a rider takes it off. A hold a restart brings back carries its riders under
+  new ids. `Memory::riders` gives a hand's riders' ids. A hold that does not follow from the
+  memory's, a rider at no pose, and a pick whose `carries` the memory cannot name, are input
+  errors.
 
 ### Changed
 

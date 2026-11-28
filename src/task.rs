@@ -360,7 +360,9 @@ pub struct Place {
     /// Every joint that moves a hand that holds it stays where `start` has it through the whole
     /// place, whatever `idle` says of it, so what the object is set on stays where it is: a
     /// torso both arms hang from does not move. None: the object is set on nothing a hand holds.
-    /// A hand of `held` cannot hold it too, and two hands do not set their object on it.
+    /// A hand of `held` cannot hold it too, and two hands do not set their object on it, nor one
+    /// an object that carries others. The plan's [`TaskPlan::held`] is this hold carrying the
+    /// object where it is set down.
     pub onto: Option<Held>,
     /// Where the hands must stay along the transit ([`HandConstraint`]), as a cup carried upright
     /// to where it goes. The start must keep them; a pose whose move in begins where they break
@@ -512,12 +514,22 @@ pub struct TaskPlan {
     pub pull: Option<Box<Trajectory>>,
     /// The straight move away: holding the object after a pick; the giver's after a handover.
     pub depart: Trajectory,
-    /// After a pick, what the hand holds; after a handover, what the taker holds.
+    /// After a pick, what the hand holds; after a handover, what the taker holds. After a place
+    /// onto what another hand holds ([`Place::onto`]), that hold as it is now: its
+    /// [`Held::carries`] with the object appended, where the plan sets it down in the frame of
+    /// what holds it (whose pose is `robot.ee_pose(q, onto.hand).mul_pose(onto.grasp.inverse())`
+    /// where the hand lets go), less the release's drop. Every call after that holds it carries
+    /// the object.
     pub held: Option<Held>,
     /// After a place, the object where it was set down, to add to the world; after a turn, the
     /// object where the turn leaves it, to put in the world in its place, or where it stood where
-    /// it stays ([`Turn::stays`]).
+    /// it stays ([`Turn::stays`]). After a place onto what another hand holds, it rides there
+    /// too ([`TaskPlan::held`]): leave it out of a world for a call that holds that.
     pub placed: Option<Obstacle>,
+    /// After a place of an object that carries others ([`Held::carries`]), each of them where it
+    /// then stands, in the world's frame and in `carries`' order, to add to the world with
+    /// `placed`. Empty for every other plan.
+    pub carried: Vec<Obstacle>,
     /// For a place with a positive fall, the released body as checked during departure.
     /// It encloses the release, the expected landing and the translation between them.
     /// Check the follower against this obstacle with the releasing fingers allowed to touch it.
@@ -575,7 +587,11 @@ pub struct CandidateStop {
     /// at the solution nearest the rest where every one collides holding it (a place), or at the
     /// straight move's next step. Empty for the rest. Obstacles are numbered as in the task's
     /// world; in a place, `world.obstacles.len()` is the object where it is set down, and in a
-    /// handover, the object where it changes hands.
+    /// handover, the object where it changes hands, and what rides on it ([`Held::carries`]) the
+    /// obstacles after that, in its order. In a place onto what another hand holds
+    /// ([`Place::onto`]), what rides on that hold stands in its own place, which nothing may
+    /// touch: from `world.obstacles.len()` where the hand lets go and on the move in, and after
+    /// the object on the move away.
     pub contacts: Vec<Contact>,
     /// At [`TaskStep::Turn`]: how far the hand turned before it stopped (radians, signed as the
     /// task's angle), from the configuration at the grasp that turned it farthest, whose stop
@@ -1169,7 +1185,10 @@ fn picked(
 /// relocked there. A task that says how many plans will do ([`Place::enough`]) tries its releases
 /// in their order until that many have got through. `device` is the robot's without the object;
 /// each task's `held` is attached to it here. What two hands hold ([`Held::also`]) they set down
-/// together ([`Place::held`]), the transit keeping both at their grasps.
+/// together ([`Place::held`]), the transit keeping both at their grasps. What the object carries
+/// ([`Held::carries`]) is set down with it: the move away's world has each where it then stands,
+/// which no hand may touch, and the plan says where ([`TaskPlan::carried`]). A place onto what
+/// another hand holds ([`Place::onto`]) gives that hold carrying the object ([`TaskPlan::held`]).
 pub fn place(
     device: &Device,
     worlds: &Worlds,
@@ -1265,10 +1284,52 @@ pub fn place(
 }
 
 /// What a place's object is set on that other hands hold ([`Place::onto`]), on the device that
-/// holds it: its link there, and the joints that move it.
-struct Onto {
+/// holds it: the hold, its link there, the joints that move it, and where the hold carries others
+/// ([`Held::carries`]), a device holding it without them, for the steps where the object may
+/// touch it.
+struct Onto<'a> {
+    held: &'a Held,
     link: String,
     still: Vec<usize>,
+    bare: Option<Device>,
+}
+
+impl Onto<'_> {
+    /// Where the support's frame is where `robot` stands at `q`.
+    fn support_at(&self, robot: &Robot, q: &[f32]) -> Pose {
+        robot
+            .ee_pose(q, self.held.hand)
+            .mul_pose(self.held.grasp.rigid().inverse())
+    }
+
+    /// The hold after `object`, in the world's frame, is set on it where `robot` lets go at `q`:
+    /// carrying the object too, in its own frame.
+    fn carrying(&self, robot: &Robot, q: &[f32], object: &Obstacle) -> Held {
+        let on = self.support_at(robot, q).inverse();
+        let on = on.mul_pose(object.pose().rigid());
+        let mut held = self.held.clone();
+        held.carries.push(object.placed(on));
+        held
+    }
+
+    /// What rides on the support, in the world's frame, where `robot` stands at `start`: where
+    /// it stays through the place, whose joints that move the support stay at the start.
+    fn riders_at<'b>(
+        &'b self,
+        robot: &'b Robot,
+        start: &'b [f32],
+    ) -> impl Iterator<Item = Obstacle> + 'b {
+        let support = (!self.held.carries.is_empty()).then(|| self.support_at(robot, start));
+        support
+            .into_iter()
+            .flat_map(|support| self.held.carried_at(support))
+    }
+
+    /// The device the object may touch the support on: one holding it without what rides on it,
+    /// which stands in those steps' worlds instead, where it carries anything.
+    fn touched_on<'b>(&'b self, device: &'b Device) -> &'b Device {
+        self.bare.as_ref().unwrap_or(device)
+    }
 }
 
 /// [`place`] for checked tasks: every release of each, or as many as will do
@@ -1278,7 +1339,7 @@ fn tried(
     worlds: &Worlds,
     tasks: &[Place],
     o: &TaskOptions,
-    onto: Option<&Onto>,
+    onto: Option<&Onto<'_>>,
 ) -> Result<Vec<std::result::Result<Vec<TaskPlan>, TaskFailure>>> {
     if tasks.iter().all(|t| t.enough.is_none()) {
         return Ok(placed(device, worlds, tasks, o, onto)?.outcomes);
@@ -1309,7 +1370,7 @@ fn placed(
     worlds: &Worlds,
     tasks: &[Place],
     o: &TaskOptions,
-    onto: Option<&Onto>,
+    onto: Option<&Onto<'_>>,
 ) -> Result<TaskResult<Place>> {
     let robot = device.robot();
     // A device holding each task's object, built in parallel; tasks holding theirs alike share one.
@@ -1372,11 +1433,12 @@ fn placed(
         start(&holders[h], worlds, group, &worlds_of)
     })?;
 
-    // Where the objects arrive they may touch what another hand holds that they are set on:
-    // holders that let them, built once a candidate gets that far.
+    // Where the objects arrive they may touch what another hand holds that they are set on, but
+    // not what rides on that: holders that let them, built once a candidate gets that far, on a
+    // device holding the support without its riders, which stand in the worlds of those steps.
     let touching = match onto {
         Some(onto) if candidates.iter().any(|c| c.stop.is_none()) => {
-            Some(arriving_on(device, &helds, onto)?)
+            Some(arriving_on(onto.touched_on(device), &helds, onto)?)
         }
         _ => None,
     };
@@ -1397,6 +1459,10 @@ fn placed(
                     w.touch
                         .extend(t.support.iter().map(|&s| Touch::new(s, [&link])));
                 }
+                let riding = onto
+                    .into_iter()
+                    .flat_map(|onto| onto.riders_at(robot, &t.start));
+                w.obstacles.extend(riding);
                 w
             })
             .collect()
@@ -1548,9 +1614,21 @@ fn placed(
                 // Where it lies it rests on what it was set on.
                 letting_go.extend(onto.map(|onto| onto.link.as_str()));
                 w.touch.push(Touch::new(object, letting_go));
+                // What rides on it is set down with it, touched by no hand.
+                let riders = t.held.carried_at(release.pose);
+                w.obstacles
+                    .extend(riders.map(|rider| rider.falling(release.drop)));
+                // And what rides on what it was set on, after them.
+                let riding = onto
+                    .into_iter()
+                    .flat_map(|onto| onto.riders_at(robot, &t.start));
+                w.obstacles.extend(riding);
                 w
             })
             .collect();
+        // The hand backs off on the device the object may touch the support on.
+        let device = onto.map_or(device, |onto| onto.touched_on(device));
+        let robot = device.robot();
         let left = device.upload(&left)?;
         // The hand opens to the first of its task's openings with which it is clear there and
         // on its way back: those that open alike are a batch on a robot relocked so, and those
@@ -1639,12 +1717,18 @@ fn placed(
         transit(&holders[h], worlds, group, &constraints, &o.plan)
     })?;
 
+    // Where the object lands: where it is let go, less the drop.
+    let landing = |release: Release| {
+        let mut at = release.pose;
+        at.position.z -= release.drop;
+        at
+    };
     let mut outcomes = choose(device, tasks.len(), &candidates, o, |c| {
         let t = &tasks[c.task];
         let release = t.releases[c.index];
-        let mut at = release.pose;
-        at.position.z -= release.drop;
-        (None, Some(t.held.object.placed(at)), release.cost)
+        let placed = t.held.object.placed(landing(release));
+        let held = onto.map(|onto| onto.carrying(robot, &c.grasped, &placed));
+        (held, Some(placed), release.cost)
     })?;
     for (task, outcome) in tasks.iter().zip(&mut outcomes) {
         if let Ok(plans) = outcome {
@@ -1654,6 +1738,7 @@ fn placed(
                     let released = task.held.object.placed(release.pose);
                     plan.falling = Some(released.falling(release.drop));
                 }
+                plan.carried = task.held.carried_at(landing(release)).collect();
             }
         }
     }
@@ -1676,17 +1761,29 @@ fn onto_held(
     let supports: Vec<Option<&Held>> = tasks.iter().map(|t| t.onto.as_ref()).collect();
     let groups = held::by_hold(device, &supports, |on, set_on| {
         let support = set_on.first().and_then(|&i| supports[i]);
-        let onto = support.map(|held| {
+        let onto = support.map(|held| -> Result<Onto<'_>> {
             let mut still: Vec<usize> = (held.hands())
                 .flat_map(|(hand, _)| robot.hand_joints(hand))
                 .collect();
             still.sort_unstable();
             still.dedup();
-            Onto {
+            // Where it carries others, a device holding it bare, as `on` holds it with them.
+            let bare = Held {
+                carries: vec![],
+                ..held.clone()
+            };
+            let bare = match held.carries.is_empty() {
+                true => None,
+                false => Some(held::holders(device, robot, &[&bare])?.remove(0)),
+            };
+            Ok(Onto {
+                held,
                 link: held::held_link(held.hand),
                 still,
-            }
+                bare,
+            })
         });
+        let onto = onto.transpose()?;
         tried(on, worlds, &held::subset(tasks, set_on), o, onto.as_ref())
     })?;
     let mut outcomes: Vec<_> = tasks.iter().map(|_| None).collect();
@@ -1732,6 +1829,12 @@ fn check_onto(robot: &Robot, worlds: &Worlds, i: usize, t: &Place, onto: &Held) 
         t.held.also.is_empty(),
         "task {i}: an object {} hands hold cannot be set on what another holds (`onto`)",
         t.held.also.len() + 1
+    );
+    ensure_input!(
+        t.held.carries.is_empty(),
+        "task {i}: an object that carries {} others (`carries`) cannot be set on what another \
+         hand holds (`onto`)",
+        t.held.carries.len()
     );
     ensure_input!(
         onto.hands().all(|(hand, _)| hand != t.held.hand),
@@ -2553,6 +2656,7 @@ pub(crate) fn choose(
             depart: capped(&c.depart, c.away_hand(), away_start)?,
             held,
             placed,
+            carried: vec![],
             falling: None,
             opening: c.opening,
             meeting: c.giver.as_ref().map(|g| g.meeting),
@@ -2624,6 +2728,7 @@ fn held(task: &Pick, worlds: &Worlds, index: usize, spheres: SphereOptions) -> H
         grasp: carried(also.grasps[index].pose),
     });
     Held {
+        carries: vec![],
         touch_links: vec![],
         also: also.collect(),
         locked: task.grasps[index].locked.clone(),
@@ -3343,6 +3448,7 @@ fn articulated(
             _ => {
                 let t = &tasks[c.task];
                 let held = Held {
+                    carries: vec![],
                     touch_links: vec![],
                     also: vec![],
                     locked: t.grasps[c.index].locked.clone(),

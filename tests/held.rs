@@ -20,6 +20,7 @@ const HELD: &str = "held by hand 0";
 /// A 10 cm cube held with the IK frame `inset` from its middle toward the hand.
 fn cube(inset: f32) -> Held {
     Held {
+        carries: vec![],
         touch_links: vec![],
         also: vec![],
         locked: Default::default(),
@@ -33,6 +34,7 @@ fn cube(inset: f32) -> Held {
 /// A 24 cm bar held across the hand, level, by its middle.
 fn bar() -> Held {
     Held {
+        carries: vec![],
         touch_links: vec![],
         also: vec![],
         locked: Default::default(),
@@ -534,6 +536,19 @@ fn a_hold_the_device_cannot_take_is_an_input_error_naming_its_problem() {
         ..bar()
     };
     input(plan(&device, &worlds, no_spheres), "spheres");
+    // What rides on it as a distance grid, and as a shape that is no shape.
+    let grid = SdfGrid::try_new([2, 2, 2], 0.1, Vec3::ZERO, &[1.0; 8]).unwrap();
+    let riding_grid = Held {
+        carries: vec![Obstacle::from_grid(grid)],
+        ..bar()
+    };
+    let carried = "what the held object carries, shape 0";
+    input(plan(&device, &worlds, riding_grid), carried);
+    let riding_nothing = Held {
+        carries: vec![Obstacle::sphere(Vec3::ZERO, f32::NAN)],
+        ..bar()
+    };
+    input(plan(&device, &worlds, riding_nothing), carried);
     // A world out of range is named by its problem, however the batch is grouped.
     let ik = [
         IkProblem {
@@ -623,6 +638,7 @@ fn a_hold_checks_the_fingers_where_they_closed() {
         .map(|i| balls[i])
         .expect("a ball only the open finger touches");
     let small = Held {
+        carries: vec![],
         touch_links: vec![],
         also: vec![],
         locked: Default::default(),
@@ -762,6 +778,7 @@ fn a_held_plate_passes_a_neighbor_a_few_millimeters_away_with_finer_spheres() {
     };
     let hand = Pose::new(at + Vec3::Z * 0.06, down);
     let plate = |spheres: SphereOptions| Held {
+        carries: vec![],
         touch_links: vec![],
         also: vec![],
         hand: 0,

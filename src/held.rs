@@ -57,21 +57,36 @@ pub struct Held {
     /// outside them, but for a box, a cylinder or a capsule, which their tiles hold whole within
     /// the smaller of the two unless that is zero, which no tiles keep.
     pub spheres: SphereOptions,
+    /// What rides on the object, set on or into it: each a shape placed in the object's frame.
+    /// Every call that holds the object checks them as part of it, as shapes of its link: what
+    /// may touch the object may touch them, and they touch it and one another freely. Each is
+    /// covered by spheres of its own, by `spheres`, fitted in its own frame. A place onto what
+    /// another hand holds gives that hold with its object added ([`TaskPlan::held`]), and a place
+    /// of this one sets them down with it ([`TaskPlan::carried`]). Empty: nothing.
+    ///
+    /// [`TaskPlan::held`]: crate::TaskPlan::held
+    /// [`TaskPlan::carried`]: crate::TaskPlan::carried
+    pub carries: Vec<Obstacle>,
 }
 
 impl Held {
     /// The object as `robot` holds it, for [`Robot::attach`]: fixed to the hand's IK frame as the
-    /// link `"held by hand {hand}"`, and free to touch the links ([`Robot::hand_links`]) of every
-    /// hand that holds it and its [`Held::touch_links`].
+    /// link `"held by hand {hand}"`, its shapes the object and then what it carries
+    /// ([`Held::carries`]), and free to touch the links ([`Robot::hand_links`]) of every hand that
+    /// holds it and its [`Held::touch_links`]. Attached so, several shapes are fitted with spheres
+    /// together; the calls that hold it fit each shape on its own.
     pub fn attachment(&self, robot: &Robot) -> Result<AttachedObject> {
         let hands = self.hands().map(|(hand, _)| hand);
         if let Some(hand) = hands.clone().find(|&hand| hand >= robot.hands()) {
             return Err(input!("hand {hand} of {}", robot.hands()));
         }
+        let in_hand = self.grasp.rigid().inverse();
+        let mut shapes = vec![self.object.placed(in_hand)];
+        shapes.extend(self.carried_at(in_hand));
         Ok(AttachedObject {
             name: held_link(self.hand),
             link: robot.links[robot.ee_links[self.hand]].name.clone(),
-            shapes: vec![self.object.placed(self.grasp.rigid().inverse())],
+            shapes,
             touch_links: hands
                 .flat_map(|hand| robot.hand_links(hand))
                 .map(String::from)
@@ -79,6 +94,12 @@ impl Held {
                 .collect(),
             spheres: self.spheres,
         })
+    }
+
+    /// What it carries ([`Held::carries`]), in order, with the object's frame at `pose`.
+    pub(crate) fn carried_at(&self, pose: Pose) -> impl Iterator<Item = Obstacle> + '_ {
+        let place = move |rider: &Obstacle| rider.placed(pose.mul_pose(rider.pose().rigid()));
+        self.carries.iter().map(place)
     }
 
     /// Every hand that holds it with its grasp, `hand` first.
@@ -290,6 +311,16 @@ impl Held {
             .placed(Pose::IDENTITY)
             .check()
             .map_err(|e| input!("{what}: the held object: {e}, got {:?}", self.object))?;
+        for (k, rider) in self.carries.iter().enumerate() {
+            ensure_input!(
+                !matches!(rider, Obstacle::Sdf { .. }),
+                "{what}: what the held object carries, shape {k}, is a distance grid, which cannot \
+                 be held"
+            );
+            rider.check().map_err(|e| {
+                input!("{what}: what the held object carries, shape {k}: {e}, got {rider:?}")
+            })?;
+        }
         ensure_input!(
             self.grasp.is_unit(),
             "{what}: the held grasp must be finite with a unit rotation, got {:?}",
@@ -299,9 +330,21 @@ impl Held {
     }
 
     /// `robot` holding the object as [`Held::attachment`] attaches it, with `spheres` fitted to
-    /// the object in its own frame and placed by the grasp, as attaching it would place them.
-    fn holding(&self, robot: &Robot, spheres: &[[f32; 4]]) -> Result<Robot> {
-        let placed = robot::placed_spheres(spheres, self.grasp.rigid().inverse());
+    /// the object in its own frame and placed by the grasp, as attaching it would place them, and
+    /// `riders`, per shape it carries, that shape's spheres in its own frame, placed where it
+    /// rides.
+    fn holding(
+        &self,
+        robot: &Robot,
+        spheres: &[[f32; 4]],
+        riders: &[&[[f32; 4]]],
+    ) -> Result<Robot> {
+        let in_hand = self.grasp.rigid().inverse();
+        let mut placed = robot::placed_spheres(spheres, in_hand);
+        for (rider, spheres) in self.carries.iter().zip(riders) {
+            let at = in_hand.mul_pose(rider.pose().rigid());
+            placed.extend(robot::placed_spheres(spheres, at));
+        }
         if self.locked.is_empty() {
             return robot.attach_with(&self.attachment(robot)?, || Ok(placed));
         }
@@ -479,39 +522,68 @@ impl Fits {
     }
 }
 
-/// Held objects' spheres: each object fitted once, in its own frame, to be placed by each grasp of
-/// it where attaching each would fit them again.
+/// Held objects' spheres: each object, and each shape one carries, fitted once, in its own frame,
+/// to be placed by each grasp of it where attaching each would fit them again.
 pub(crate) struct Fitted {
     /// Per object, its spheres.
     spheres: Vec<Arc<[[f32; 4]]>>,
     /// Per held object, which of them it has.
     object_of: Vec<usize>,
+    /// Per held object that carries others, its index among the held and which of them each
+    /// shape it carries has, in its order; none for those that carry nothing.
+    riders_of: Vec<(usize, Vec<usize>)>,
+}
+
+/// Where `object`, fitted by `options`, is among `objects`: added where it is not.
+fn fitted_as(
+    objects: &mut Vec<(Obstacle, SphereOptions)>,
+    object: Obstacle,
+    options: SphereOptions,
+) -> usize {
+    let fitted_so = |(o, f): &(Obstacle, SphereOptions)| *o == object && *f == options;
+    match objects.iter().position(fitted_so) {
+        Some(k) => k,
+        None => {
+            objects.push((object, options));
+            objects.len() - 1
+        }
+    }
 }
 
 impl Fitted {
-    /// Each object among `helds` as the device keeps it ([`Fits`]), or fitted once, in parallel.
+    /// Each object among `helds`, and each shape one carries, as the device keeps it ([`Fits`]),
+    /// or fitted once, in parallel.
     pub(crate) fn new(device: &Device, robot: &Robot, helds: &[&Held]) -> Result<Self> {
         // Each object at its own origin, as `Held::attachment` places it, with the options it fits
         // by: one object held with two sets of options is fitted twice.
         let mut objects: Vec<(Obstacle, SphereOptions)> = vec![];
         let mut object_of = Vec::with_capacity(helds.len());
-        for held in helds {
-            let object = held.object.placed(Pose::IDENTITY);
+        let mut riders_of = vec![];
+        for (k, held) in helds.iter().enumerate() {
             let options = held.attachment(robot)?.spheres;
-            let fitted_so = |(o, f): &(Obstacle, SphereOptions)| *o == object && *f == options;
-            object_of.push(match objects.iter().position(fitted_so) {
-                Some(k) => k,
-                None => {
-                    objects.push((object, options));
-                    objects.len() - 1
-                }
-            });
+            object_of.push(fitted_as(
+                &mut objects,
+                held.object.placed(Pose::IDENTITY),
+                options,
+            ));
+            if !held.carries.is_empty() {
+                let own = held
+                    .carries
+                    .iter()
+                    .map(|rider| rider.placed(Pose::IDENTITY));
+                let riders = own.map(|rider| fitted_as(&mut objects, rider, options));
+                riders_of.push((k, riders.collect()));
+            }
         }
         let fits = device.fits();
         let spheres = device.in_turns(&mut objects, |_, (object, options)| {
             fits.spheres(object, options)
         })?;
-        Ok(Self { spheres, object_of })
+        Ok(Self {
+            spheres,
+            object_of,
+            riders_of,
+        })
     }
 
     /// A device for `robot` holding `held`, the `k`th of the held objects fitted.
@@ -522,7 +594,11 @@ impl Fitted {
         k: usize,
         held: &Held,
     ) -> Result<Device> {
-        device.with_robot(&held.holding(robot, &self.spheres[self.object_of[k]])?)
+        let riders = self.riders_of.iter().find(|(of, _)| *of == k);
+        let riders = riders.map_or(&[][..], |(_, riders)| &riders[..]);
+        let riders: Vec<&[[f32; 4]]> = riders.iter().map(|&r| &self.spheres[r][..]).collect();
+        let spheres = &self.spheres[self.object_of[k]];
+        device.with_robot(&held.holding(robot, spheres, &riders)?)
     }
 }
 
@@ -615,6 +691,7 @@ mod tests {
         let robot = panda();
         let device = Device::cpu(&robot).unwrap();
         let can = Held {
+            carries: vec![],
             touch_links: vec![],
             also: vec![],
             locked: Default::default(),
@@ -679,6 +756,7 @@ mod tests {
             .iter()
             .flat_map(|object| {
                 grasps.map(|grasp| Held {
+                    carries: vec![],
                     touch_links: vec![],
                     also: vec![],
                     locked: Default::default(),
@@ -709,6 +787,7 @@ mod tests {
         let own = [[0.0, 0.0, 0.03, 0.03], [0.0, 0.0, -0.03, 0.03]];
         let spheres = |rotation: Quat| {
             let held = Held {
+                carries: vec![],
                 touch_links: vec![],
                 also: vec![],
                 locked: Default::default(),
@@ -718,7 +797,7 @@ mod tests {
                 grasp: Pose::new(Vec3::new(0.0, 0.0, 0.28), rotation),
             };
             let attached = robot.attach(&held.attachment(&robot).unwrap()).unwrap();
-            let holding = held.holding(&robot, &own).unwrap();
+            let holding = held.holding(&robot, &own, &[]).unwrap();
             [attached, holding].map(|r| r.collision_model().spheres[&held_link(0)].clone())
         };
         let unit = spheres(turn);
