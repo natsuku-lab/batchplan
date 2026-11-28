@@ -52,7 +52,7 @@ The names are Rust's: `Robot.load`, `Device.upload`, `solve_ik`, `IkResult.best`
 - **Arrays come out read-only.** Configurations, control points `(points, dof)` and per-seed results `(problems, seeds, ...)` are NumPy arrays, `float32` (`bool` for flags such as `success` and `valid`); copy one to change it. Anything array-like goes in. A result builds each array once, so reading `result.q[i]` in a loop costs nothing more.
 - **Rotations are unit quaternions, scalar last:** `(x, y, z, w)`, as ROS, SciPy and glam order them.
 - **A plan's goal is a configuration or poses:** an array, a `Pose` for a one-handed robot, or a `Pose` or `None` per hand, as Rust's `Goal` is. `problem.goal` gives poses back as that tuple.
-- **No-argument accessors are properties:** `robot.dof`, `robot.default_q`, `trajectory.duration`, `device.name`.
+- **No-argument accessors are properties:** `robot.dof`, `robot.default_q`, `robot.collision_model`, `trajectory.duration`, `device.name`. Where the Rust guides write `robot.collision_model()`, Python reads `robot.collision_model`; calling it raises `TypeError`. Calls that do work keep their parentheses: `robot.qualify()`, `device.warmup()`.
 - **Sequences come out as tuples, and maps as read-only views:** `world.obstacles`, `result.failures`, `result.solved()`, `bp.grasps(...)`, a task's plans, `options.lock_joints`.
 - **Failures and contacts are classes per kind,** for `isinstance` or `match`: `bp.PlanFailure.StartCollides(contacts)`, `bp.Contact.World(link, obstacle, distance)`, `bp.ToolPathStop.Collision(at)`.
 
@@ -88,6 +88,37 @@ else:
     # transit=False has no plan.transit: plan.begin is where a way planned apart must end.
 ```
 
+## Qualifying a robot
+
+Before planning with a new robot or a hand-tuned collision model, check its spheres and what its configurations collide with, as [qualifying a robot](robots.md#qualifying-a-robot) explains:
+
+```python
+import batchplan as bp
+
+options = bp.RobotOptions(
+    ee_links=["ee_link"],
+    lock_joints={"panda_finger_joint1": 0.04, "panda_finger_joint2": 0.04},
+    default_q=[0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8],
+    collision_model=bp.CollisionModel.load("assets/franka/panda_collision.json"),
+)
+robot = bp.Robot.load("assets/franka/franka_panda.urdf", options)
+qualification = robot.qualify()  # reads the meshes: about as long as fitting spheres
+for link in qualification.links:
+    print(f"{link.link}: {link.overhang * 1e3:.1f} mm past it, {link.uncovered:.1%} uncovered")
+print(f"the fingertips reach {qualification.tips[0] * 1e3:.1f} mm past the tool frame")
+
+device = bp.Device.cpu(robot)
+scene = bp.World.load("assets/menagerie/franka_emika_panda/scene.xml")  # the floor, not the Panda
+ball = bp.Obstacle.sphere(robot.ee_pose(robot.default_q).position, 0.1)
+worlds = device.upload([scene, scene.replace(obstacles=[*scene.obstacles, ball])])
+q = [robot.default_q, robot.default_q]  # (items, dof): one configuration per item
+free, blocked = device.contacts(worlds, [0, 1], q, 0.0)  # within 0: what collides
+print(free)  # (): nothing
+print(blocked[0])  # the deepest overlap: a link of the hand in the ball, obstacle 1
+```
+
+`device.evaluate(worlds, item_world, q, weights)` gives the same configurations' clearances, collision cost and its gradient as arrays (`Evaluation`).
+
 ## Errors
 
 Every error batchplan reports is a `bp.Error`; each kind of `batchplan::Error` is its own subclass, to catch one or all: `InputError` (what the call was given), `LoadError` (a file), `GpuError`, `ThreadsError`, `UnsafeError` (a trajectory past a limit) and `WriteError`. An argument of the wrong type, an index out of range or a number past what its field holds raises Python's own `TypeError`, `IndexError` or `OverflowError` before batchplan sees it.
@@ -110,4 +141,4 @@ Every call lets go of the interpreter while it works, so other Python threads ru
 
 ## What it binds
 
-Robots (`Robot.load`, `from_urdf`, `assemble` from `Part`s, `attach`, `detach`, `relock`, forward kinematics and spheres, a hand as a `Gripper` from a `GripperCalibration` with `gripper`; `CollisionModel` with `load`, `save`, `to_json`, `from_json` and `assemble`), obstacles and worlds (`World.without`, `always_touching`), devices, IK, planning with hand constraints, timing, tool paths (`follow`), whole tasks (`pick`, `place`, `handover`, `turn` with `Screw`, `pull`, their candidates as `Hold`s and `Release`s or poses, each plan's `cost`, `grasps`, `place_poses`, `handover_poses`, `handover_grasps`) and held objects (`Held`, per problem as `holding`, with a `Grip` for each other hand that holds it too). Not yet: grasps of a surface (`grasps_on`, `Surface`, their options and `Grasp.moment`), rests on one and falls into one (`rests_on`, `falls_into`), training data (`datagen`, the NumPy and LeRobot exports), live motion (`Follower`, `servo`), joining motions (`join`), distance grids and perception, `World.load`, `MeshModel`, `Robot.qualify`, `Robot.breach`, `Device.evaluate` and `Device.contacts`. OpenUSD files need the library's `usd` feature, which these builds leave out.
+Robots (`Robot.load`, `from_urdf`, `assemble` from `Part`s, `attach`, `detach`, `relock`, forward kinematics and spheres, a hand as a `Gripper` from a `GripperCalibration` with `gripper`, `qualify` as a `Qualification` of `LinkQualification`s; `CollisionModel` with `load`, `save`, `to_json`, `from_json` and `assemble`), obstacles and worlds (`World.load` for MJCF scenes with the `SdfOptions` of their meshes' grids, `World.without`, `always_touching`), devices (`Device.contacts` as `Contact`s, `Device.evaluate` as an `Evaluation` under `CollisionWeights`), IK, planning with hand constraints, timing, tool paths (`follow`), whole tasks (`pick`, `place`, `handover`, `turn` with `Screw`, `pull`, their candidates as `Hold`s and `Release`s or poses, each plan's `cost`, `grasps`, `place_poses`, `handover_poses`, `handover_grasps`) and held objects (`Held`, per problem as `holding`, with a `Grip` for each other hand that holds it too). Not yet: grasps of a surface (`grasps_on`, `Surface`, their options and `Grasp.moment`), rests on one and falls into one (`rests_on`, `falls_into`), training data (`datagen`, the NumPy and LeRobot exports), live motion (`Follower`, `servo`), joining motions (`join`), distance grids and perception, `MeshModel`, `Robot.breach` and `Device.contacts_holding`. OpenUSD files need the library's `usd` feature, which these builds leave out.

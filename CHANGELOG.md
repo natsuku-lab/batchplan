@@ -17,6 +17,14 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   from one torso, the torso stays. Before, such a place on a device that held the support stopped
   where the hand lets go, the object against it, or at its move away where the object's own touch
   links named it.
+- Python binds what qualifying a robot needs: `Robot.qualify()`, a `Qualification` with each
+  link's `LinkQualification` (`spheres`, `overhang`, `uncovered`, `gap`, `thickness`) and each
+  hand's `tips`; `World.load(path, options)`, an MJCF scene's static geometry without its robot,
+  with `SdfOptions` for its meshes' distance grids; `Device.contacts(worlds, item_world, q,
+  within)`, each configuration's `Contact`s, nearest first; and `Device.evaluate(worlds,
+  item_world, q, weights)`, an `Evaluation` of each configuration's clearances, collision cost
+  and gradient under `CollisionWeights`. Configurations go in as `(items, dof)`; a batch of any
+  other shape is an `InputError`.
 
 ## [0.12.0] - 2026-11-27
 

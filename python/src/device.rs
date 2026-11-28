@@ -1,4 +1,4 @@
-//! Devices, the worlds uploaded to them, and the contacts they report.
+//! Devices, the worlds uploaded to them, and the contacts and clearances they measure.
 
 use pyo3::exceptions::{PyIndexError, PyTypeError};
 use pyo3::prelude::*;
@@ -7,6 +7,7 @@ use pyo3::types::PyDict;
 use crate::error::OrRaise;
 use crate::field::{self, Field, tuple_field, value_class};
 use crate::robot::Robot;
+use crate::solved::Cached;
 use crate::world::World;
 
 value_class! {
@@ -178,6 +179,64 @@ impl Device {
         py.detach(|| self.device.warmup()).or_raise()
     }
 
+    /// What each configuration comes within `within` meters of, nearest first: per row of `q`,
+    /// `(items, dof)`, in world `item_world[row]`, a tuple of `Contact`s, each a link and an
+    /// obstacle or two links checked against each other. `within=0` lists what collides, to say
+    /// why a start or a goal is in collision. The checks' rules hold: links may touch what the
+    /// world's `touch` lets them, links no joint moves are not checked against the world, and
+    /// pairs the collision model ignores are left out. Both devices list the same, measured on
+    /// the device's CPU threads. Raises `InputError` for a `q` not shaped `(len(item_world),
+    /// dof)` or not finite, a world index past `worlds`, worlds uploaded to another device, or a
+    /// `within` that is not finite.
+    fn contacts<'py>(
+        &self,
+        py: Python<'py>,
+        worlds: &Worlds,
+        item_world: &Bound<'_, PyAny>,
+        q: &Bound<'_, PyAny>,
+        within: f32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let item_world = Vec::<u32>::from_py(item_world)?;
+        let q = field::rows(q, self.device.robot().dof(), "q")?;
+        let contacts = py
+            .detach(|| self.device.contacts(&worlds.0, &item_world, &q, within))
+            .or_raise()?;
+        contacts.to_py(py)
+    }
+
+    /// The collision cost `weights` define, its gradient and the clearances of each row of `q`,
+    /// `(items, dof)`, in world `item_world[row]`. `CollisionWeights()`, the default, weighs
+    /// nothing and measures clearances only. A clearance is exact below its margin and wherever
+    /// it is negative; above the margin it is a lower bound that stays above it, so raise the
+    /// margins to read larger clearances exactly. Raises `InputError` as `contacts` does, and for
+    /// weights that make the cost not a number: a weight that is not finite, a margin that is not
+    /// a number, or an infinite margin with a weight on it.
+    #[pyo3(signature = (worlds, item_world, q, weights = None))]
+    fn evaluate(
+        &self,
+        py: Python<'_>,
+        worlds: &Worlds,
+        item_world: &Bound<'_, PyAny>,
+        q: &Bound<'_, PyAny>,
+        weights: Option<&CollisionWeights>,
+    ) -> PyResult<Evaluation> {
+        let item_world = Vec::<u32>::from_py(item_world)?;
+        let dof = self.device.robot().dof();
+        let q = field::rows(q, dof, "q")?;
+        let weights = weights.map(|w| w.0).unwrap_or_default();
+        let result = py
+            .detach(|| self.device.evaluate(&worlds.0, &item_world, &q, &weights))
+            .or_raise()?;
+        Ok(Evaluation {
+            result,
+            dof,
+            world_clearance: Cached::default(),
+            self_clearance: Cached::default(),
+            cost: Cached::default(),
+            gradient: Cached::default(),
+        })
+    }
+
     /// What runs the batches: the GPU adapter and its API, or the CPU's thread count.
     #[getter]
     fn name(&self) -> String {
@@ -220,5 +279,71 @@ impl Worlds {
 
     fn __repr__(&self) -> String {
         format!("Worlds({} uploaded)", self.0.len())
+    }
+}
+
+/// What `Device.evaluate` measured, per item. Clearances are 1e30 where there is nothing to check:
+/// an empty world, or no pairs of links checked against each other.
+#[pyclass(module = "batchplan", frozen)]
+pub(crate) struct Evaluation {
+    result: batchplan::Evaluation,
+    dof: usize,
+    world_clearance: Cached,
+    self_clearance: Cached,
+    cost: Cached,
+    gradient: Cached,
+}
+
+#[pymethods]
+impl Evaluation {
+    /// Per item: the signed distance from the robot's spheres to the nearest obstacle (meters),
+    /// negative where they overlap.
+    #[getter]
+    fn world_clearance<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.world_clearance
+            .get(py, || self.result.world_clearance.to_py(py))
+    }
+
+    /// Per item: the signed distance between the closest pair of the robot's spheres checked
+    /// against each other (meters), self-collision buffers included.
+    #[getter]
+    fn self_clearance<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.self_clearance
+            .get(py, || self.result.self_clearance.to_py(py))
+    }
+
+    /// Per item: the collision cost the weights define.
+    #[getter]
+    fn cost<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.cost.get(py, || self.result.cost.to_py(py))
+    }
+
+    /// The cost's gradient with respect to each joint, `(items, dof)`.
+    #[getter]
+    fn gradient<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let shape = [self.result.cost.len(), self.dof];
+        self.gradient
+            .get(py, || field::array(py, &self.result.gradient, &shape))
+    }
+
+    /// Whether item `item` clears the world and itself.
+    fn collision_free(&self, item: usize) -> PyResult<bool> {
+        let n = self.result.cost.len();
+        if item >= n {
+            return Err(PyIndexError::new_err(format!("item {item} of {n}")));
+        }
+        Ok(self.result.collision_free(item))
+    }
+
+    fn __len__(&self) -> usize {
+        self.result.cost.len()
+    }
+
+    fn __repr__(&self) -> String {
+        let items = self.result.cost.len();
+        let free = (0..items)
+            .filter(|&i| self.result.collision_free(i))
+            .count();
+        format!("Evaluation({items} items, {free} collision-free)")
     }
 }

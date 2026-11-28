@@ -163,7 +163,7 @@ macro_rules! tuple_field {
 
 pub(crate) use tuple_field;
 
-tuple_field!(usize, String, PathBuf, HashMap<String, f32>);
+tuple_field!(u32, usize, String, PathBuf, HashMap<String, f32>);
 
 /// A read-only array of `values` (`float32`, `bool`), shaped `shape`.
 pub(crate) fn array<'py, T: Element + Copy>(
@@ -203,6 +203,24 @@ pub(crate) fn floats_of(value: &Bound<'_, PyAny>, n: usize, what: &str) -> PyRes
             v.len()
         )))
     }
+}
+
+/// Rows of `width` floats each from any array-like shaped `(rows, width)`, flattened in C order:
+/// an `InputError` naming `what` for any other shape, so a batch given the wrong way round is
+/// refused rather than read across its rows.
+pub(crate) fn rows(value: &Bound<'_, PyAny>, width: usize, what: &str) -> PyResult<Vec<f32>> {
+    // Rows of unequal lengths have no shape.
+    let ragged = |_| InputError::new_err(format!("{what} needs the shape (rows, {width})"));
+    let numpy = value.py().import("numpy")?;
+    let shape = numpy.call_method1("shape", (value,)).map_err(ragged)?;
+    let shape: Vec<usize> = shape.extract()?;
+    // `[]` reads as shape (0,): no rows.
+    if !matches!(shape.as_slice(), [_, w] if *w == width) && shape != [0] {
+        return Err(InputError::new_err(format!(
+            "{what} needs the shape (rows, {width}), got {shape:?}"
+        )));
+    }
+    floats(value)
 }
 
 /// A configuration or other vector: a 1-D array.

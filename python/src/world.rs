@@ -1,5 +1,7 @@
 //! Poses, obstacles and worlds.
 
+use std::path::PathBuf;
+
 use batchplan::glam::{Quat, Vec3};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -125,8 +127,9 @@ value_class! {
     }
 }
 
-/// Something in a world: a box, ball, cylinder or capsule, made axis-aligned at a center. `placed`
-/// sets its frame (center and rotation) to a pose.
+/// Something in a world: a box, ball, cylinder or capsule, made axis-aligned at a center, or a
+/// distance grid, which `World.load` makes of a scene's mesh. `placed` sets its frame (center and
+/// rotation) to a pose.
 #[pyclass(module = "batchplan", frozen)]
 #[derive(Clone)]
 pub(crate) struct Obstacle(pub(crate) batchplan::Obstacle);
@@ -189,7 +192,13 @@ impl Obstacle {
     }
 
     fn __repr__(&self) -> String {
-        format!("{:?}", self.0)
+        match &self.0 {
+            // A grid's values run to millions: its frame says which it is.
+            batchplan::Obstacle::Sdf {
+                center, rotation, ..
+            } => format!("Sdf {{ grid: .., center: {center:?}, rotation: {rotation:?} }}"),
+            other => format!("{other:?}"),
+        }
     }
 }
 
@@ -232,6 +241,25 @@ value_class! {
 }
 
 value_class! {
+    /// How a distance grid is laid out, as `World.load` builds one for each mesh of a scene.
+    SdfOptions(batchplan::SdfOptions) {
+        /// Spacing of the grid points (meters).
+        voxel: f32,
+        /// How far the grid reaches beyond the geometry (meters); beyond it, distances are
+        /// extrapolated. Keep it at least the collision margin plus the robot's largest sphere
+        /// radius.
+        padding: f32,
+    }
+    methods {
+        #[new]
+        #[pyo3(signature = (**changes))]
+        fn new(changes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+            Ok(Self(Self::changed(Default::default(), changes)?))
+        }
+    }
+}
+
+value_class! {
     /// One scene to plan in. Problems name their world by its index in the list uploaded with
     /// `Device.upload`.
     World(batchplan::World) {
@@ -249,6 +277,23 @@ value_class! {
         ) -> PyResult<Self> {
             let obstacles = obstacles.map(Vec::from_py).transpose()?.unwrap_or_default();
             Ok(Self(Self::changed(batchplan::World::new(obstacles), changes)?))
+        }
+
+        /// The static collision geometry of an MJCF scene (`.xml`, `.mjcf`): the geoms of the
+        /// world body and of bodies without joints, in the scene's frame. A robot in the same
+        /// file is left out, so a scene that includes its robot loads as what the robot plans
+        /// around. Planes become slabs below their surface, ellipsoids their bounding boxes, and
+        /// meshes distance grids of their convex hulls, as MuJoCo collides them, laid out by
+        /// `options` (`SdfOptions()` if not given). The world has no touches. Raises `LoadError`
+        /// naming the file where it cannot be read or understood, OpenUSD files among them:
+        /// these builds leave out the library's `usd` feature.
+        #[staticmethod]
+        #[pyo3(signature = (path, options = None))]
+        fn load(py: Python<'_>, path: PathBuf, options: Option<&SdfOptions>) -> PyResult<Self> {
+            let options = options.map(|o| o.0).unwrap_or_default();
+            py.detach(|| batchplan::World::load(path, &options))
+                .or_raise()
+                .map(Self)
         }
 
         /// A copy without obstacle `obstacle`, as a hand picking it up takes it (Rust's

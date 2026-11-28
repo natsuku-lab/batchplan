@@ -24,6 +24,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<world::Distance>()?;
     m.add_class::<world::Obstacle>()?;
     m.add_class::<world::Touch>()?;
+    m.add_class::<world::SdfOptions>()?;
     m.add_class::<world::World>()?;
     m.add_class::<robot::JointLimits>()?;
     m.add_class::<robot::SphereOptions>()?;
@@ -35,9 +36,12 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<robot::RobotOptions>()?;
     m.add_class::<robot::Robot>()?;
     m.add_class::<robot::HandReach>()?;
+    m.add_class::<robot::Qualification>()?;
+    m.add_class::<robot::LinkQualification>()?;
     m.add_class::<device::Contact>()?;
     m.add_class::<device::Device>()?;
     m.add_class::<device::Worlds>()?;
+    m.add_class::<device::Evaluation>()?;
     m.add_class::<solved::Solved>()?;
     ik::register(m)?;
     plan::register(m)?;
