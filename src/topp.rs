@@ -689,12 +689,28 @@ pub(crate) fn derivatives(
     u: f32,
     out: &mut [f32],
 ) -> f32 {
+    let weights = [spline::basis(u), spline::basis_d1(u), spline::basis_d2(u)];
+    derivatives_with(cp, n, knot, points, m, &weights, out)
+}
+
+/// [`derivatives`] with the time map's weights at `u` and their first and second derivatives
+/// given: where `u` is one of a few, the same in every span.
+#[inline(always)]
+fn derivatives_with(
+    cp: &[f32],
+    n: usize,
+    knot: f32,
+    points: &[f32],
+    m: usize,
+    weights: &[[f32; 4]; 3],
+    out: &mut [f32],
+) -> f32 {
     let spans = cp.len() / n - 3;
     let at = |w: [f32; 4]| (0..4).map(|i| w[i] * points[m + i]).sum::<f32>();
     let (s, sd, sdd, sddd) = (
-        at(spline::basis(u)),
-        at(spline::basis_d1(u)) / knot,
-        at(spline::basis_d2(u)) / (knot * knot),
+        at(weights[0]),
+        at(weights[1]) / knot,
+        at(weights[2]) / (knot * knot),
         at(BASIS_D3) / (knot * knot * knot),
     );
     let span = (s.max(0.0) as usize).min(spans - 1);
@@ -797,6 +813,10 @@ fn assess(
     // it is also measured either side of where it crosses the path's knots: acceleration has
     // corners there and jerk jumps, which the even samples read up to 0.35% and 12% under.
     let corners = eased.is_some() && samples == CHECK_SAMPLES;
+    let weights_at = |u: f32| [spline::basis(u), spline::basis_d1(u), spline::basis_d2(u)];
+    let evenly: Vec<[[f32; 4]; 3]> = (0..=samples)
+        .map(|sample| weights_at(sample as f32 / samples as f32))
+        .collect();
     for m in 0..points.len() - 3 {
         let along = |u: f32| {
             let w = spline::basis(u);
@@ -819,11 +839,10 @@ fn assess(
                     after = middle;
                 }
             }
-            [before, after]
+            [before, after].map(weights_at)
         });
-        let evenly = (0..=samples).map(|sample| sample as f32 / samples as f32);
-        for u in evenly.chain(crossings) {
-            let s = derivatives(cp, n, knot, points, m, u, &mut out);
+        for weights in evenly.iter().copied().chain(crossings) {
+            let s = derivatives_with(cp, n, knot, points, m, &weights, &mut out);
             let map = |w: [f32; 4]| (0..4).map(|i| w[i] * points[m + i]).sum::<f32>();
             // How much more than `target` the limits are here: from the full ones at a given
             // start to none after the ramp.
@@ -833,7 +852,7 @@ fn assess(
             });
             let mut factor = 1.0f32;
             if let Some(hand) = hand {
-                let speed = map(spline::basis_d1(u)).abs() / knot;
+                let speed = map(weights[1]).abs() / knot;
                 let rates = hand.at(s);
                 for (rate, limit) in rates.into_iter().zip(hand.limits) {
                     let ratio = rate * speed / (limit * target * relief);
