@@ -8,6 +8,7 @@ use pyo3::types::{PyDict, PyTuple};
 
 use crate::error::{InputError, OrRaise};
 use crate::field::{self, Field, tuple_field, value_class};
+use crate::solved::Cached;
 use crate::world::Pose;
 
 value_class! {
@@ -430,6 +431,101 @@ impl HandReach {
     }
 }
 
+/// How well a robot's collision spheres fit its geometry, from `Robot.qualify`: a robot that loads
+/// may still have spheres unfit to plan with, such as fingers inside spheres too large to grasp
+/// small objects.
+#[pyclass(module = "batchplan", frozen)]
+pub(crate) struct Qualification(batchplan::Qualification, Cached);
+
+#[pymethods]
+impl Qualification {
+    /// Every link with both geometry and spheres, in the robot's order.
+    #[getter]
+    fn links<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.1.get(py, || {
+            let links = self.0.links.iter().cloned().map(LinkQualification);
+            Ok(PyTuple::new(py, links)?.into_any())
+        })
+    }
+
+    /// Per hand: how far its spheres reach past its IK frame along the frame's z axis (meters),
+    /// as `Robot.tip` gives it.
+    #[getter]
+    fn tips<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, self.0.tips.iter().copied().map(field::shortest))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Qualification({} links, tips={:?})",
+            self.0.links.len(),
+            self.0.tips
+        )
+    }
+}
+
+/// How well one link's spheres fit its geometry (`Qualification.links`).
+#[pyclass(module = "batchplan", frozen)]
+pub(crate) struct LinkQualification(batchplan::LinkQualification);
+
+#[pymethods]
+impl LinkQualification {
+    /// The link's name.
+    #[getter]
+    fn link(&self) -> &str {
+        &self.0.link
+    }
+
+    /// How many collision spheres it has.
+    #[getter]
+    fn spheres(&self) -> usize {
+        self.0.spheres
+    }
+
+    /// How far its spheres reach beyond its geometry, at most (meters).
+    #[getter]
+    fn overhang(&self) -> f64 {
+        field::shortest(self.0.overhang)
+    }
+
+    /// The share of its surface outside every sphere, from 0 to 1, on fresh samples: up to about
+    /// 0.02 for fitted spheres, more where a hand-tuned model leaves gaps.
+    #[getter]
+    fn uncovered(&self) -> f64 {
+        field::shortest(self.0.uncovered)
+    }
+
+    /// How far the farthest of that surface lies outside the spheres (meters), 0 where none does:
+    /// how deep an obstacle can reach into the link unseen.
+    #[getter]
+    fn gap(&self) -> f64 {
+        field::shortest(self.0.gap)
+    }
+
+    /// How thick its geometry is where thickest (meters): the largest sphere inside it, across. A
+    /// link thinner than its overhang is mostly sphere.
+    #[getter]
+    fn thickness(&self) -> f64 {
+        field::shortest(self.0.thickness)
+    }
+
+    fn __repr__(&self) -> String {
+        let batchplan::LinkQualification {
+            link,
+            spheres,
+            overhang,
+            uncovered,
+            gap,
+            thickness,
+            ..
+        } = &self.0;
+        format!(
+            "LinkQualification(link={link:?}, spheres={spheres}, overhang={overhang}, \
+             uncovered={uncovered}, gap={gap}, thickness={thickness})"
+        )
+    }
+}
+
 /// A robot's kinematic tree and collision spheres, from URDF or MJCF. Immutable once loaded.
 #[pyclass(module = "batchplan", frozen)]
 pub(crate) struct Robot(pub(crate) batchplan::Robot);
@@ -658,6 +754,16 @@ impl Robot {
     /// the uploaded worlds keep working.
     fn attach(&self, py: Python<'_>, object: &crate::held::AttachedObject) -> PyResult<Self> {
         py.detach(|| self.0.attach(&object.0)).or_raise().map(Self)
+    }
+
+    /// How well the collision spheres fit the robot's geometry, link by link, and how far each
+    /// hand's spheres reach past its IK frame: what to check before planning with a new robot or
+    /// a hand-tuned collision model. Measured against the geometry the spheres are fitted to,
+    /// with `RobotOptions.spheres`' seed. It reads the mesh files, so it takes about as long as
+    /// fitting; raises `LoadError` where a mesh cannot be read.
+    fn qualify(&self, py: Python<'_>) -> PyResult<Qualification> {
+        let qualified = py.detach(|| self.0.qualify()).or_raise()?;
+        Ok(Qualification(qualified, Cached::default()))
     }
 
     /// The robot without the attached object named `name`.
