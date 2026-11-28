@@ -101,7 +101,7 @@ batch of changes rather than for each one.
 - **Two crates, one tag.** batchplan and the perception crate in `miru/` carry one version and
   ship together under one tag. The perception crate's package is `batchplan-miru`, as `miru` was
   taken on crates.io, and its library is still `miru`: code writes `use miru::..`. A dependent
-  names it `miru = { package = "batchplan-miru", version = "0.12" }`.
+  names it `miru = { package = "batchplan-miru", version = "0.13" }`.
 - **Cutting one.**
   1. Set `version` under `[workspace.package]` in `Cargo.toml`, which both crates take, the
      `batchplan` requirement under `[workspace.dependencies]` to the same, and `version` in
