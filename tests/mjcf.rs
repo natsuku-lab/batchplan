@@ -476,3 +476,234 @@ fn nonlinear_joint_equalities_follow_their_polynomial_on_every_device() {
         Err(e) => panic!("no GPU: {e}"),
     }
 }
+
+/// A two-joint arm with two fingers, the right following the left: sites on its forearm (one
+/// placed and turned, one by its default class, one unnamed, one named as its body), a pair of
+/// bodies excluded from contact, and an elbow that folds the fingers back onto the upper arm.
+const EDGES: &str = r#"<mujoco model="edges">
+  <compiler angle="radian"/>
+  <default>
+    <default class="tip"><site pos="0 0 0.1"/></default>
+  </default>
+  <worldbody>
+    <body name="base">
+      <geom type="box" size="0.05 0.05 0.05"/>
+      <body name="upper" pos="0 0 0.1">
+        <joint name="shoulder" type="hinge" axis="0 1 0" range="-2 2"/>
+        <geom type="capsule" fromto="0 0 0 0 0 0.3" size="0.03"/>
+        <body name="fore" pos="0 0 0.3">
+          <joint name="elbow" type="hinge" axis="0 1 0" range="-3.1 3.1"/>
+          <geom type="capsule" fromto="0 0 0 0 0 0.3" size="0.03"/>
+          <site name="tcp" pos="0.02 0 0.35" quat="0.7071068 0 0.7071068 0"/>
+          <site name="tip" class="tip"/>
+          <site pos="1 1 1"/>
+          <site name="fore" pos="0 0 0.5"/>
+          <body name="left" pos="0 0.02 0.3">
+            <joint name="left_slide" type="slide" axis="0 1 0" range="0 0.04"/>
+            <geom type="box" size="0.01 0.005 0.03"/>
+          </body>
+          <body name="right" pos="0 -0.02 0.3">
+            <joint name="right_slide" type="slide" axis="0 -1 0" range="0 0.04"/>
+            <geom type="box" size="0.01 0.005 0.03"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <contact>
+    <exclude body1="upper" body2="left"/>
+  </contact>
+  <equality>
+    <joint joint1="right_slide" joint2="left_slide" polycoef="0 1 0 0 0"/>
+  </equality>
+</mujoco>"#;
+
+fn edges(name: &str, text: &str) -> PathBuf {
+    let path = scratch(name).join("edges.xml");
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+fn load_error(path: &PathBuf, o: &RobotOptions) -> String {
+    match Robot::load(path, o) {
+        Err(batchplan::Error::Load { message, .. }) => message,
+        other => panic!("a load error, got {other:?}"),
+    }
+}
+
+/// A hand's frame may be an MJCF site, by its name: the frame is the site's in its body, placed
+/// and turned as the site is, by its default class where that places it. A site named as a body
+/// leaves the name the body's, a robot that names no site has no link for one, and a name that is
+/// neither is an unknown link.
+#[test]
+fn a_site_names_a_hands_frame() {
+    let path = edges("sites", EDGES);
+    let at = |frame: &str| RobotOptions {
+        ee_links: vec![frame.into()],
+        ..Default::default()
+    };
+    let q = [0.4, -0.7, 0.01];
+    let tcp = Robot::load(&path, &at("tcp")).unwrap();
+    let fore = tcp.link_pose(&q, "fore").expect("the forearm");
+    let site = Pose::new(
+        Vec3::new(0.02, 0.0, 0.35),
+        Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+    );
+    let (hand, wanted) = (tcp.ee_pose(&q, 0), fore.mul_pose(site));
+    assert!(hand.position.distance(wanted.position) < 1e-6, "{hand:?}");
+    assert!(
+        hand.rotation.dot(wanted.rotation).abs() > 1.0 - 1e-6,
+        "{hand:?}"
+    );
+    assert!(
+        fore.rotation.angle_between(hand.rotation) > 1.0,
+        "the site is turned from its body"
+    );
+
+    let tip = Robot::load(&path, &at("tip")).unwrap();
+    let wanted = fore.mul_pose(Pose::new(Vec3::new(0.0, 0.0, 0.1), Quat::IDENTITY));
+    assert!(tip.ee_pose(&q, 0).position.distance(wanted.position) < 1e-6);
+
+    let body = Robot::load(&path, &at("fore")).unwrap();
+    assert!(body.ee_pose(&q, 0).position.distance(fore.position) < 1e-6);
+    assert!(
+        body.link_pose(&q, "tcp").is_none(),
+        "no link for a site not named"
+    );
+    assert_eq!(tcp.joint_names(), body.joint_names());
+
+    let unknown = load_error(&path, &at("wrist"));
+    assert!(unknown.contains("unknown ee_link 'wrist'"), "{unknown}");
+}
+
+/// Bodies an MJCF excludes from contact are links that never collide: folded back, the fingers
+/// are in the upper arm, and the left one, excluded with it, is not reported where the right one
+/// is; without the exclusion both are.
+#[test]
+fn bodies_excluded_from_contact_do_not_collide() {
+    let excluded = Robot::load(edges("excluded", EDGES), &RobotOptions::default()).unwrap();
+    let start = EDGES.find("<contact>").unwrap();
+    let end = EDGES.find("</contact>").unwrap() + "</contact>".len();
+    let all = format!("{}{}", &EDGES[..start], &EDGES[end..]);
+    let checked = Robot::load(edges("checked", &all), &RobotOptions::default()).unwrap();
+    let ignored = &excluded.collision_model().self_collision_ignore;
+    let listed = |a: &str, b: &str| {
+        ignored
+            .get(a)
+            .is_some_and(|with| with.iter().any(|l| l == b))
+    };
+    assert!(
+        listed("upper", "left") || listed("left", "upper"),
+        "{ignored:?}"
+    );
+    let folded = [0.0, 3.1, 0.0];
+    let meeting = |robot: &Robot| -> Vec<[String; 2]> {
+        let device = Device::cpu(robot).unwrap();
+        let worlds = device.upload(&[World::default()]).unwrap();
+        let contacts = device.contacts(&worlds, &[0], &folded, 0.0).unwrap();
+        let pairs = contacts[0].iter().filter_map(|c| match c {
+            batchplan::Contact::SelfCollision { links, .. } => {
+                let mut pair = links.clone();
+                pair.sort();
+                Some(pair)
+            }
+            _ => None,
+        });
+        pairs.collect()
+    };
+    let pair = |a: &str, b: &str| [a.to_string(), b.to_string()];
+    let (without, with) = (meeting(&checked), meeting(&excluded));
+    assert!(without.contains(&pair("left", "upper")), "{without:?}");
+    assert!(without.contains(&pair("right", "upper")), "{without:?}");
+    assert!(!with.contains(&pair("left", "upper")), "{with:?}");
+    assert!(with.contains(&pair("right", "upper")), "{with:?}");
+}
+
+/// A joint that follows another is locked through the one that leads it, and may be named with
+/// it where that one has it, when the robot is loaded and when it is relocked: the robot is the
+/// one the leader alone gives, and a model fitted so records the leader alone. Named alone, or at
+/// a value the leader does not give it, it is
+/// refused, each naming the leader.
+#[test]
+fn a_joint_that_follows_is_locked_with_the_one_that_leads_it() {
+    let path = edges("locks", EDGES);
+    // Fitted with the fingers free, so that they may be relocked.
+    let free = Robot::load(&path, &RobotOptions::default()).unwrap();
+    let locked = |joints: &[(&str, f32)]| RobotOptions {
+        lock_joints: joints.iter().map(|&(j, v)| (j.to_string(), v)).collect(),
+        collision_model: Some(free.collision_model().clone()),
+        ..Default::default()
+    };
+    let both = Robot::load(
+        &path,
+        &locked(&[("left_slide", 0.03), ("right_slide", 0.03)]),
+    )
+    .unwrap();
+    let leader = Robot::load(&path, &locked(&[("left_slide", 0.03)])).unwrap();
+    assert_eq!(both.dof(), 2);
+    let q = [0.3, -0.5];
+    let right = |robot: &Robot| {
+        robot
+            .link_pose(&q, "right")
+            .expect("the right finger")
+            .position
+    };
+    assert_eq!(right(&both), right(&leader));
+
+    let joints = |joints: &[(&str, f32)]| -> HashMap<String, f32> {
+        joints.iter().map(|&(j, v)| (j.to_string(), v)).collect()
+    };
+    let closed = both
+        .relock(&joints(&[("left_slide", 0.01), ("right_slide", 0.01)]))
+        .unwrap();
+    let by_leader = both.relock(&joints(&[("left_slide", 0.01)])).unwrap();
+    assert_eq!(right(&closed), right(&by_leader));
+    assert!(
+        right(&closed).distance(right(&both)) > 0.015,
+        "the finger moved"
+    );
+    // Named alone at where the leader, as locked, has it.
+    both.relock(&joints(&[("right_slide", 0.03)])).unwrap();
+    for off in [
+        joints(&[("right_slide", 0.02)]),
+        joints(&[("left_slide", 0.01), ("right_slide", 0.02)]),
+    ] {
+        match both.relock(&off) {
+            Err(batchplan::Error::Input(why)) => assert!(
+                why.contains("joint 'right_slide' follows 'left_slide'"),
+                "{why}"
+            ),
+            other => panic!("an input error, got {other:?}"),
+        }
+    }
+
+    // A model fitted with both named records the leader alone, so a robot that names the leader
+    // alone loads with it.
+    let named_both = RobotOptions {
+        lock_joints: joints(&[("left_slide", 0.03), ("right_slide", 0.03)]),
+        ..Default::default()
+    };
+    let fitted = Robot::load(&path, &named_both).unwrap();
+    let recorded: Vec<&String> = fitted.collision_model().locked_joints.keys().collect();
+    assert_eq!(recorded, ["left_slide"]);
+    let with_it = RobotOptions {
+        lock_joints: joints(&[("left_slide", 0.03)]),
+        collision_model: Some(fitted.collision_model().clone()),
+        ..Default::default()
+    };
+    Robot::load(&path, &with_it).unwrap();
+
+    let alone = load_error(&path, &locked(&[("right_slide", 0.03)]));
+    assert!(
+        alone.contains("cannot lock joint 'right_slide' alone, which follows 'left_slide'"),
+        "{alone}"
+    );
+    let apart = load_error(
+        &path,
+        &locked(&[("left_slide", 0.03), ("right_slide", 0.02)]),
+    );
+    assert!(
+        apart.contains("cannot lock joint 'right_slide' at 0.02: it follows 'left_slide'"),
+        "{apart}"
+    );
+}

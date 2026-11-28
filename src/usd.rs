@@ -664,6 +664,8 @@ pub(crate) fn load(path: &Path, variants: &[(String, String)]) -> Result<Model> 
             links,
             joints: out_joints,
             loops,
+            frames: vec![],
+            ignore: vec![],
         },
         scene,
     })

@@ -220,9 +220,9 @@ value_class! {
     RobotOptions(batchplan::RobotOptions) {
         /// Root of the planned tree; defaults to the description's root link.
         base_link: Option<String>,
-        /// IK target frames, one per hand (end effector); defaults to the link with the most
-        /// actuated joints above it. Set it for robots with grippers, and name each hand of a robot
-        /// with several.
+        /// IK target frames, one per hand (end effector): links by name, or an MJCF's named
+        /// `<site>`s on the robot's bodies. Defaults to the link with the most actuated joints
+        /// above it. Set it for robots with grippers, and name each hand of a robot with several.
         ee_links: Vec<String>,
         /// Per hand, by its link in `ee_links`: the links it grips with, for a hand whose fingers
         /// are not the links below its palm, as a gripper whose fixed jaw is part of the palm's
@@ -232,6 +232,8 @@ value_class! {
         /// range.
         default_q: Option<Vec<f32>>,
         /// Joints held at a value and removed from planning (mimics of a locked joint follow it).
+        /// A joint that follows another is locked through its leader: it may be named with the
+        /// leader, at the value the leader gives it, and is an error named alone or elsewhere.
         lock_joints: HashMap<String, f32>,
         /// Limits by joint name, replacing the description's; mimic joints may be named too. The
         /// scales below apply on top. Planar, ball and floating joints become joints named

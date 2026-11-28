@@ -112,6 +112,8 @@ pub(crate) fn from_text(
         links,
         joints,
         loops: vec![],
+        frames: vec![],
+        ignore: vec![],
     })
 }
 
