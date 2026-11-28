@@ -1809,6 +1809,12 @@ pub enum Under {
     /// [`Memory::after`], carries it again ([`Act::Picked`]); no other act names it, but a pick
     /// or a loss of the rider itself, which takes it off.
     ///
+    /// The hold must be the memory's own with the thing added: a plan made before the pick ran
+    /// was given the pick's planned hold as its `onto`, and the memory has that hold as it was
+    /// told it once the hand closed, its fingers (`Held::locked`) where they read. Give then the
+    /// memory's hold with the plan's `carries`:
+    /// `Held { carries: plan_held.carries.clone(), ..memory_held.clone() }`.
+    ///
     /// Refused, naming what was given: a hand that holds nothing, the hand that holds the thing
     /// let go, a hold that differs from the memory's in more than `carries` (it names the field),
     /// a `carries` that is not the memory's with the thing let go added last, at a finite pose
