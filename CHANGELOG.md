@@ -8,6 +8,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-11-28
+
 ### Added
 
 - `Surface::moved(by)`: a surface moved rigidly by a pose, its points and where each was seen
@@ -825,7 +827,8 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 Earlier releases have no notes beyond their commits.
 
-[Unreleased]: https://github.com/natsuku-lab/batchplan/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/natsuku-lab/batchplan/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/natsuku-lab/batchplan/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/natsuku-lab/batchplan/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/natsuku-lab/batchplan/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/natsuku-lab/batchplan/compare/v0.10.0...v0.11.0
