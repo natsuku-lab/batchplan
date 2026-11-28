@@ -41,6 +41,13 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 - **Breaking:** locking a joint that follows another without the one that leads it, or at a value
   the leader does not give it, is an error that names the leader. Before, the name was accepted
   and ignored.
+- Faster:
+  - Timing a path takes 20% to 25% less time on the Ryzen, with the same trajectories to the
+    bit: from rest 22%, the hand's straight moves 20%, from a moving start (`Trajectory::moving`)
+    25%, and stops (`Trajectory::stop`) 22% ([runs](docs/benchmarks.md#timing-for-less-work)).
+    `Trajectory::check` weighs its samples the same way.
+  - `plan` from a moving start times each spline it fits once, where its later rounds timed the
+    same splines again, with the same paths.
 
 ## [0.12.0] - 2026-11-27
 
