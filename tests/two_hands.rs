@@ -7,13 +7,14 @@ mod common;
 
 use std::collections::HashMap;
 use std::f32::consts::FRAC_PI_2;
+use std::path::PathBuf;
 
 use batchplan::live::{Follower, FollowerOptions};
 use batchplan::{
     Device, Error, Goal, Grip, GripperCalibration, HandGrasps, Handover, Held, Hold, IkProblem,
     JoinOptions, Obstacle, Pick, Place, PlanOptions, PlanProblem, Pose, Release, Robot, Sequence,
-    ShapeGraspOptions, TaskFailure, TaskOptions, TaskPlan, ToolPath, ToolPathOptions, ToolPathStop,
-    Trajectory, World, Worlds,
+    ShapeGraspOptions, TaskFailure, TaskOptions, TaskPlan, TaskStep, ToolPath, ToolPathOptions,
+    ToolPathStop, Trajectory, World, Worlds,
 };
 use glam::Vec3;
 
@@ -1329,4 +1330,439 @@ fn one_call_takes_tasks_by_one_hand_and_by_two() {
         plans_of(&idled.outcomes[0]),
         plans_of(&together.outcomes[0])
     );
+}
+
+/// A bar the left hand holds alone, by one end.
+fn bar_in_the_left() -> Held {
+    Held {
+        also: vec![],
+        ..bar()
+    }
+}
+
+/// A 4 cm cube the right hand holds from above, its fingers closing across the bar's length.
+fn cube_in_the_right() -> Held {
+    Held {
+        touch_links: vec![],
+        hand: 1,
+        object: Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.02)),
+        grasp: Pose::new(Vec3::ZERO, common::upright(-FRAC_PI_2)),
+        also: vec![],
+        locked: Default::default(),
+        spheres: Default::default(),
+    }
+}
+
+/// Where the left hand holds the bar level in the air, and the cube where it lies on the bar's
+/// far end.
+const BAR_AT: Vec3 = Vec3::new(0.35, 0.0, 0.45);
+
+fn cube_on_the_bar() -> Pose {
+    common::tray(BAR_AT + Vec3::new(0.0, -0.10, 0.035), 0.0)
+}
+
+/// The robot with the left hand at its grasp of the bar where it is held, and the right at its
+/// grasp of the cube at `cube`: the solution nearest the ready pose, holding neither.
+fn each_holding(device: &Device, worlds: &Worlds, cube: Pose) -> Vec<f32> {
+    let robot = device.robot();
+    let problem = IkProblem {
+        seed: Some(robot.default_q().to_vec()),
+        ..IkProblem {
+            targets: (0..robot.hands())
+                .map(|hand| match hand {
+                    0 => Some(common::tray(BAR_AT, 0.0).mul_pose(bar_in_the_left().grasp)),
+                    1 => Some(cube.mul_pose(cube_in_the_right().grasp)),
+                    _ => None,
+                })
+                .collect(),
+            ..IkProblem::new(0, Pose::IDENTITY)
+        }
+    };
+    let solved = batchplan::solve_ik(device, worlds, &[problem], &common::fixture_ik()).unwrap();
+    let nearest = solved.nearest(0, robot.default_q());
+    nearest.expect("both hands reach").to_vec()
+}
+
+/// Whether the joints `joints` stay where `start` has them at every control point of `plan`'s
+/// motions.
+fn stay(plan: &TaskPlan, start: &[f32], joints: &[usize]) -> bool {
+    let n = start.len();
+    plan.motions().into_iter().all(|t| {
+        let mut points = t.control_points.chunks(n);
+        points.all(|q| joints.iter().all(|&j| q[j] == start[j]))
+    })
+}
+
+/// The right hand sets a cube on the far end of a bar the left hand holds in the air
+/// (`Place::onto`), on a device that holds neither. On a device that holds the bar, the same
+/// place without it stops where the hand lets go, the cube against the bar, so the release does
+/// touch it. With it, the plan lowers the cube onto the bar and backs off, the left arm where the
+/// start has it throughout, whatever `idle` says of its joints. The cube may touch the bar only
+/// where it arrives: from below and beyond the bar's end, the transit, sampled at 1 kHz, goes
+/// around the bar holding the cube, and a start with the cube against the bar is refused. From
+/// the plan's end, with the cube in the world where it lies, the right arm goes home past the bar
+/// the left still holds.
+#[test]
+fn a_hand_sets_its_object_on_what_the_other_holds() {
+    let robot = common::two_pandas().unwrap();
+    let o = TaskOptions::default();
+    let (bar, cube) = (bar_in_the_left(), cube_in_the_right());
+    let release = cube_on_the_bar();
+    let left = robot.hand_joints(0);
+    for device in common::devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(&[common::tray_scene()]).unwrap();
+        let above = common::tray(Vec3::new(0.35, -0.3, 0.6), 0.0);
+        let start = each_holding(&device, &worlds, above);
+        let holding_the_bar = robot.attach(&bar.attachment(&robot).unwrap()).unwrap();
+        let holder = device.with_robot(&holding_the_bar).unwrap();
+
+        let unsupported = Place::new(0, start.clone(), cube.clone(), [release]);
+        let stopped = batchplan::place(&holder, &worlds, &[unsupported], &o).unwrap();
+        let failure = stopped.outcomes[0]
+            .as_ref()
+            .expect_err("the cube meets the bar");
+        assert_eq!(failure.at(TaskStep::Reach), 1, "{name}: {failure}");
+        assert!(
+            matches!(
+                failure.candidates[0].why,
+                Some(ToolPathStop::Collision { .. })
+            ),
+            "{name}: {failure}"
+        );
+
+        // An idle configuration counts for no joint that moves the support: not a number there.
+        let idle: Vec<f32> = (0..robot.dof())
+            .map(|j| match left.contains(&j) {
+                true => f32::NAN,
+                false => robot.default_q()[j],
+            })
+            .collect();
+        let place = Place {
+            onto: Some(bar.clone()),
+            idle: Some(idle),
+            ..Place::new(0, start.clone(), cube.clone(), [release])
+        };
+        let result = batchplan::place(&device, &worlds, std::slice::from_ref(&place), &o).unwrap();
+        let plans = result.outcomes[0].as_ref();
+        let plans = plans.unwrap_or_else(|failure| panic!("{name}: {failure}"));
+        for plan in plans {
+            assert!(stay(plan, &start, &left), "{name}: the left arm moves");
+            let transit = plan.transit.as_ref().expect("the place plans its transit");
+            assert_eq!(colliding(&holder, &worlds, &cube, transit), 0, "{name}");
+            let n = robot.dof();
+            let points = &plan.approach.control_points;
+            let let_go = robot.ee_pose(&points[points.len() - n..], 1);
+            let wanted = release.mul_pose(cube.grasp);
+            assert!(
+                let_go.position.distance(wanted.position) < 2e-3,
+                "{name}: the hand lets go at {}, not {}",
+                let_go.position,
+                wanted.position
+            );
+            let set_down = cube.object.placed(release);
+            assert_eq!(plan.placed.as_ref(), Some(&set_down), "{name}");
+            // The cube lies in the world against the bar the left hand still holds.
+            let mut there = common::tray_scene();
+            there.obstacles.push(set_down);
+            there.touch = vec![batchplan::Touch::held(1, 0)];
+            let there = holder.upload(&[there]).unwrap();
+            let home: Vec<f32> = (0..n)
+                .map(|j| match left.contains(&j) {
+                    true => start[j],
+                    false => robot.default_q()[j],
+                })
+                .collect();
+            let away = [PlanProblem::new(0, plan.end().to_vec(), home)];
+            let away = batchplan::plan(&holder, &there, &away, &PlanOptions::default()).unwrap();
+            assert!(away.best(0).is_some(), "{name}: {:?}", away.failures);
+        }
+
+        // From below and beyond the bar's end, the joints' straight way to where the move in
+        // begins takes the cube through the bar.
+        let beyond = common::tray(BAR_AT + Vec3::new(0.0, -0.24, -0.09), 0.0);
+        let beyond = each_holding(&device, &worlds, beyond);
+        let around = Place {
+            onto: Some(bar.clone()),
+            ..Place::new(0, beyond.clone(), cube.clone(), [release])
+        };
+        let result = batchplan::place(&device, &worlds, &[around], &o).unwrap();
+        let plans = result.outcomes[0].as_ref();
+        let plans =
+            plans.unwrap_or_else(|failure| panic!("{name}, from beyond the bar: {failure}"));
+        for plan in plans {
+            let transit = plan.transit.as_ref().expect("the place plans its transit");
+            let n = robot.dof();
+            let begins = &transit.control_points[transit.control_points.len() - n..];
+            let direct: Vec<f32> = (0..=50)
+                .flat_map(|k| {
+                    let ends = beyond.iter().zip(begins);
+                    ends.map(move |(a, b)| a + (b - a) * k as f32 / 50.0)
+                })
+                .collect();
+            let holding = vec![Some(&cube); 51];
+            let met = holder.contacts_holding(&worlds, &[0; 51], &direct, 0.0, &holding);
+            assert!(
+                met.unwrap().iter().any(|contacts| !contacts.is_empty()),
+                "{name}: the straight way is through the bar"
+            );
+            assert_eq!(colliding(&holder, &worlds, &cube, transit), 0, "{name}");
+        }
+
+        let against = each_holding(&device, &worlds, release);
+        let touching = Place {
+            onto: Some(bar.clone()),
+            ..Place::new(0, against, cube.clone(), [release])
+        };
+        let refused = batchplan::place(&device, &worlds, &[touching], &o).unwrap();
+        let failure = refused.outcomes[0]
+            .as_ref()
+            .expect_err("the start collides");
+        assert_eq!(failure.at(TaskStep::Start), 1, "{name}: {failure}");
+    }
+}
+
+/// What an object is set on is what other hands hold, by a hold as good as any: the placing
+/// hand's own, a hand the robot lacks, an object two hands hold, and worlds that let the placing
+/// hand's object touch obstacles by its link are each an input error naming it.
+#[test]
+fn what_an_object_is_set_on_is_another_hands() {
+    let robot = common::two_pandas().unwrap();
+    let device = &common::devices(&robot)[0];
+    let worlds = device.upload(&[common::tray_scene()]).unwrap();
+    let o = TaskOptions::default();
+    let start = each_holding(
+        device,
+        &worlds,
+        common::tray(Vec3::new(0.35, -0.3, 0.6), 0.0),
+    );
+    let onto = |onto: Held, held: Held, start: Vec<f32>| Place {
+        onto: Some(onto),
+        ..Place::new(0, start, held, [cube_on_the_bar()])
+    };
+    let own = onto(cube_in_the_right(), cube_in_the_right(), start.clone());
+    input(
+        batchplan::place(device, &worlds, &[own], &o),
+        "task 0: hand 1 holds the object and what it is set on (`onto`)",
+    );
+    let lacking = Held {
+        hand: 2,
+        ..bar_in_the_left()
+    };
+    let lacking = onto(lacking, cube_in_the_right(), start.clone());
+    input(
+        batchplan::place(device, &worlds, &[lacking], &o),
+        "task 0: what the object is set on (`onto`): holds an object in hand 2 of 2",
+    );
+    let both = holding_at(device, &worlds, LOW, robot.default_q());
+    let by_two = onto(cube_in_the_right(), bar(), both);
+    input(
+        batchplan::place(device, &worlds, &[by_two], &o),
+        "task 0: an object 2 hands hold cannot be set on what another holds (`onto`)",
+    );
+    let mut touched = common::tray_scene();
+    touched.touch = vec![batchplan::Touch::held(0, 1)];
+    let touched = device.upload(&[touched]).unwrap();
+    let named = onto(bar_in_the_left(), cube_in_the_right(), start);
+    input(
+        batchplan::place(device, &touched, &[named], &o),
+        "task 0: these worlds let what hand 1 holds touch obstacles (`Touch::held`)",
+    );
+}
+
+/// A support two hands hold must have both at their grasps at the start: with a third hand on the
+/// left arm named as holding the bar 5 cm from where it is, the place is refused.
+#[test]
+fn a_support_two_hands_hold_starts_with_both_on_it() {
+    let links = ["left_ee_link", "right_ee_link", "left_panda_link7"];
+    let robot = common::two_pandas_with(&links).unwrap();
+    let device = &common::devices(&robot)[0];
+    let worlds = device.upload(&[common::tray_scene()]).unwrap();
+    let start = each_holding(
+        device,
+        &worlds,
+        common::tray(Vec3::new(0.35, -0.3, 0.6), 0.0),
+    );
+    let bar_at = robot
+        .ee_pose(&start, 0)
+        .mul_pose(bar_in_the_left().grasp.inverse());
+    let third = bar_at.inverse().mul_pose(robot.ee_pose(&start, 2));
+    let by = |grasp: Pose| Held {
+        also: vec![Grip { hand: 2, grasp }],
+        ..bar_in_the_left()
+    };
+    let onto = |onto: Held| Place {
+        onto: Some(onto),
+        ..Place::new(0, start.clone(), cube_in_the_right(), [cube_on_the_bar()])
+    };
+    let o = TaskOptions::default();
+    let held = batchplan::place(device, &worlds, &[onto(by(third))], &o).unwrap();
+    assert!(held.outcomes[0].is_ok(), "{:?}", held.outcomes[0]);
+    let off = Pose::new(third.position + Vec3::X * 0.05, third.rotation);
+    input(
+        batchplan::place(device, &worlds, &[onto(by(off))], &o),
+        "task 0: at the start, what the object is set on (`onto`): hand 2 is not at its grasp",
+    );
+}
+
+/// One call takes places onto a held thing beside places onto none, each coming to what it comes
+/// to in a call of its own, in the tasks' order; and a place onto a held thing that says one plan
+/// will do gives the first of its releases to get through.
+#[test]
+fn one_call_sets_objects_on_a_held_thing_and_on_none() {
+    let robot = common::two_pandas().unwrap();
+    let device = &common::devices(&robot)[0];
+    let worlds = device.upload(&[common::tray_scene()]).unwrap();
+    let o = TaskOptions::default();
+    let start = each_holding(
+        device,
+        &worlds,
+        common::tray(Vec3::new(0.35, -0.3, 0.6), 0.0),
+    );
+    let cube = cube_in_the_right();
+    let aside = common::tray(Vec3::new(0.35, -0.35, 0.45), 0.0);
+    let plain = Place::new(0, start.clone(), cube.clone(), [aside]);
+    let further = common::tray(BAR_AT + Vec3::new(0.0, -0.13, 0.035), 0.0);
+    let onto = Place {
+        onto: Some(bar_in_the_left()),
+        ..Place::new(0, start.clone(), cube, [cube_on_the_bar(), further])
+    };
+    let alone = |task: &Place| {
+        let result = batchplan::place(device, &worlds, std::slice::from_ref(task), &o).unwrap();
+        plans_of(&result.outcomes[0])
+    };
+    let nearer = common::tray(Vec3::new(0.3, -0.35, 0.45), 0.0);
+    let other = Place::new(0, start, cube_in_the_right(), [nearer]);
+    assert_ne!(alone(&plain), alone(&other), "the two onto none differ");
+    let tasks = [plain.clone(), onto.clone(), other];
+    let together = batchplan::place(device, &worlds, &tasks, &o).unwrap();
+    for (task, outcome) in tasks.iter().zip(&together.outcomes) {
+        assert_eq!(plans_of(outcome), alone(task));
+    }
+    let every = alone(&onto);
+    assert_eq!(every.len(), 2, "both releases on the bar get through");
+    assert_ne!(alone(&plain), every, "the two tasks differ");
+    let one = Place {
+        enough: Some(1),
+        ..onto
+    };
+    let first = alone(&one);
+    let in_order = every.iter().find(|(candidate, ..)| *candidate == 0);
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        Some(&first[0]),
+        in_order,
+        "the first release in the task's order"
+    );
+}
+
+/// Two Pandas 70 cm apart on a torso that turns about the vertical, loaded from a description
+/// written here: both hands move on the torso's joint.
+fn pandas_on_a_torso() -> Robot {
+    let panda = std::fs::read_to_string(common::asset("franka/franka_panda.urdf")).unwrap();
+    let links = &panda[panda.find("<link").unwrap()..panda.rfind("</robot>").unwrap()];
+    let meshes = common::asset("franka/meshes");
+    let arm = |prefix: &str, y: f32| {
+        let arm = links
+            .replace("name=\"", &format!("name=\"{prefix}"))
+            .replace("link=\"", &format!("link=\"{prefix}"))
+            .replace("filename=\"meshes", &format!("filename=\"{meshes}"));
+        format!(
+            "{arm}<joint name=\"{prefix}mount\" type=\"fixed\"><parent link=\"torso\"/>\
+             <child link=\"{prefix}base_link\"/><origin xyz=\"0 {y} 0\"/></joint>"
+        )
+    };
+    let description = format!(
+        "<robot name=\"pandas_on_a_torso\"><link name=\"world\"/><link name=\"torso\"/>\
+         <joint name=\"torso_joint\" type=\"revolute\"><parent link=\"world\"/>\
+         <child link=\"torso\"/><axis xyz=\"0 0 1\"/>\
+         <limit effort=\"87\" lower=\"-1\" upper=\"1\" velocity=\"1\"/></joint>{}{}</robot>",
+        arm("left_", 0.35),
+        arm("right_", -0.35)
+    );
+    let file = format!("batchplan-pandas-on-a-torso-{}.urdf", std::process::id());
+    let path: PathBuf = std::env::temp_dir().join(file);
+    std::fs::write(&path, description).unwrap();
+    let one = common::panda_options();
+    let spheres = one.collision_model.as_ref().expect("Panda spheres");
+    let locked = ["left_", "right_"].into_iter().flat_map(|prefix| {
+        let fingers = one.lock_joints.iter();
+        fingers.map(move |(joint, value)| (format!("{prefix}{joint}"), *value))
+    });
+    let mut options = batchplan::RobotOptions {
+        ee_links: vec!["left_ee_link".into(), "right_ee_link".into()],
+        lock_joints: locked.collect(),
+        collision_model: Some(batchplan::CollisionModel::assemble(&[
+            ("left_", spheres),
+            ("right_", spheres),
+        ])),
+        ..Default::default()
+    };
+    let ready = one.default_q.as_ref().expect("the Panda's ready pose");
+    let names = Robot::load(&path, &options).unwrap().joint_names().to_vec();
+    let at = |name: &String| match name.rsplit_once("panda_joint") {
+        Some((_, k)) => ready[k.parse::<usize>().unwrap() - 1],
+        None => 0.0,
+    };
+    options.default_q = Some(names.iter().map(at).collect());
+    let robot = Robot::load(&path, &options).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    robot
+}
+
+/// On a robot whose arms hang from one torso, the place's hand moves on a joint that moves what
+/// its object is set on, and that joint stays where the start has it with the supporting arm's:
+/// the bar the left hand holds does not move while the right sets the cube on it, on a transit
+/// searched around a post that stands between the cube and the bar.
+#[test]
+fn what_an_object_is_set_on_stays_where_it_is() {
+    let robot = pandas_on_a_torso();
+    let torso = robot.joint_names().iter().position(|j| j == "torso_joint");
+    let torso = torso.expect("the torso's joint");
+    let (left, right) = (robot.hand_joints(0), robot.hand_joints(1));
+    assert!(
+        left.contains(&torso) && right.contains(&torso),
+        "both hands move on the torso"
+    );
+    let o = TaskOptions::default();
+    let cube = cube_in_the_right();
+    for device in common::devices(&robot) {
+        let name = device.name();
+        let mut scene = common::tray_scene();
+        let post = Obstacle::cuboid(Vec3::new(0.35, -0.22, 0.46), Vec3::new(0.05, 0.01, 0.16));
+        scene.obstacles.push(post);
+        let worlds = device.upload(&[scene]).unwrap();
+        let beyond = common::tray(Vec3::new(0.35, -0.36, 0.5), 0.0);
+        let start = each_holding(&device, &worlds, beyond);
+        let place = Place {
+            onto: Some(bar_in_the_left()),
+            ..Place::new(0, start.clone(), cube.clone(), [cube_on_the_bar()])
+        };
+        let result = batchplan::place(&device, &worlds, &[place], &o).unwrap();
+        let plans = result.outcomes[0].as_ref();
+        let plans = plans.unwrap_or_else(|failure| panic!("{name}: {failure}"));
+        for plan in plans {
+            assert!(
+                stay(plan, &start, &left),
+                "{name}: a joint that moves the left hand moves"
+            );
+            let transit = plan.transit.as_ref().expect("the place plans its transit");
+            let n = robot.dof();
+            // The joints' straight way to where the move in begins is through the post, so the
+            // transit is a searched one.
+            let begins = &transit.control_points[transit.control_points.len() - n..];
+            let direct: Vec<f32> = (0..=50)
+                .flat_map(|k| {
+                    let ends = start.iter().zip(begins);
+                    ends.map(move |(a, b)| a + (b - a) * k as f32 / 50.0)
+                })
+                .collect();
+            let holding = vec![Some(&cube); 51];
+            let met = device.contacts_holding(&worlds, &[0; 51], &direct, 0.0, &holding);
+            assert!(
+                met.unwrap().iter().any(|contacts| !contacts.is_empty()),
+                "{name}: the straight way is through the post"
+            );
+        }
+    }
 }

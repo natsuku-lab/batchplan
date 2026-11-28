@@ -8,6 +8,16 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ## [Unreleased]
 
+### Added
+
+- **Breaking:** a place sets its object on or into what another hand holds. `Place` gains `onto`,
+  that hand's `Held` (a `Place` literal sets `onto: None`; `Place::new` does). The object may
+  touch it where it arrives and where it lies, not on the transit, and every joint that moves a
+  hand that holds it stays where the start has it, so it does not move: on a robot whose arms hang
+  from one torso, the torso stays. Before, such a place on a device that held the support stopped
+  where the hand lets go, the object against it, or at its move away where the object's own touch
+  links named it.
+
 ## [0.12.0] - 2026-11-27
 
 ### Added
