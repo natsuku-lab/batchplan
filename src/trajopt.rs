@@ -1015,11 +1015,12 @@ fn next_fit(
             let mut knots = START_KNOTS.iter().enumerate();
             let follows = knots.any(|(k, &longer)| {
                 continue_motion(robot, &problem.start, goal, m, longer, &mut fit.spline);
-                runs_from_start(
+                runs_from_start_once(
                     robot,
                     problem,
                     &fit.spline,
                     /* thorough */ !stops || k == 0,
+                    &mut fit.timed,
                 )
             });
             if !follows {
@@ -1156,6 +1157,9 @@ struct Fitting<'call> {
     /// The first spline at the current count, the smoothed path spread out, which a repair starts
     /// from.
     first: Vec<f32>,
+    /// Each spline a moving start's fit has timed, with whether that timing was thorough and
+    /// whether the spline runs from the start (`runs_from_start_once`).
+    timed: Vec<(Vec<u32>, bool, bool)>,
 }
 
 impl Fitting<'_> {
@@ -1341,6 +1345,7 @@ impl Search for Planning<'_> {
                         region: self.region.clone(),
                         projector,
                         first: vec![],
+                        timed: vec![],
                     };
                     // Optimization, if any, starts from the smoothed path spread out.
                     fit.spread(self.robot, self.problem);
@@ -1896,6 +1901,28 @@ fn continue_motion(
     }
 }
 
+/// [`runs_from_start`] for a fit's spline, timing each spline once: the fit's later rounds, and its
+/// second path where it matches the first, try the same splines again, and their timing decides the
+/// same. `timed` holds the splines decided so far, as bits.
+fn runs_from_start_once(
+    robot: &Robot,
+    problem: &PlanProblem,
+    spline: &[f32],
+    thorough: bool,
+    timed: &mut Vec<(Vec<u32>, bool, bool)>,
+) -> bool {
+    let bits = || spline.iter().map(|v| v.to_bits());
+    let seen = timed
+        .iter()
+        .find(|(s, t, _)| *t == thorough && s.iter().copied().eq(bits()));
+    if let Some(&(_, _, runs)) = seen {
+        return runs;
+    }
+    let runs = runs_from_start(robot, problem, spline, thorough);
+    timed.push((bits().collect(), thorough, runs));
+    runs
+}
+
 /// Control points on the straight line from `start` to `goal`, or bent through a random via point.
 /// The first three and last three are the start and goal.
 fn seed_path(
@@ -2237,6 +2264,7 @@ mod tests {
             region: None,
             projector: None,
             first: vec![],
+            timed: vec![],
         };
         fit.restart();
         let mut buffer = vec![];
@@ -2311,6 +2339,7 @@ mod tests {
                 region: None,
                 projector: None,
                 first: vec![],
+                timed: vec![],
             };
             let mut counts = vec![fit.at.len()];
             while counts.len() < 8 && fit.grow(&robot, &problem) {
