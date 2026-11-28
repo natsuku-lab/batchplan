@@ -47,6 +47,10 @@ value_class! {
         /// holds it keeps each hand at its grasp: a pose given for one of them places the others,
         /// and every state of a path is checked to.
         also: Vec<batchplan::Grip>,
+        /// Other links of the robot that may touch it, by name, beside those of the hands that
+        /// hold it: a hand that has let go of it and has still to back off, or one that works on
+        /// what another holds (`Robot.hand_links`). Empty: none.
+        touch_links: Vec<String>,
         /// Joints the robot was loaded with locked, at the values they keep while it holds the
         /// object, as `Robot.relock` takes them: the fingers where they closed on it. Empty: as
         /// loaded.
@@ -66,6 +70,7 @@ value_class! {
             changes: Option<&Bound<'_, PyDict>>,
         ) -> PyResult<Self> {
             let held = batchplan::Held {
+                touch_links: vec![],
                 also: vec![],
                 locked: Default::default(),
                 spheres: Default::default(),
@@ -78,7 +83,7 @@ value_class! {
 
         /// The object as `robot` holds it, for `Robot.attach`: fixed to the hand's IK frame as
         /// the link `"held by hand {hand}"`, and free to touch the links (`Robot.hand_links`) of
-        /// every hand that holds it.
+        /// every hand that holds it and its `touch_links`.
         fn attachment(&self, robot: &Robot) -> PyResult<AttachedObject> {
             self.0.attachment(&robot.0).or_raise().map(AttachedObject)
         }

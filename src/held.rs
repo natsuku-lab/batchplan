@@ -36,6 +36,12 @@ pub struct Held {
     /// each to its place in `hand`'s frame. A hand that lets go leaves this list; the object stays
     /// fixed to `hand`.
     pub also: Vec<Grip>,
+    /// Other links of the robot that may touch it, by name, beside those of the hands that hold
+    /// it: the links of a hand that has let go of it and has still to back off, or of one that
+    /// works on what another holds ([`Robot::hand_links`]), or an arm it rests against. Contact
+    /// between them and the object is no collision in any call that holds it; they are not kept
+    /// anywhere. Empty: none.
+    pub touch_links: Vec<String>,
     /// Joints the robot was loaded with locked (`RobotOptions::lock_joints`), at the values they
     /// keep while it holds the object, as [`Robot::relock`] takes them: the fingers where they
     /// closed on it. Every call that holds it checks the robot so; joints not named keep their
@@ -56,7 +62,7 @@ pub struct Held {
 impl Held {
     /// The object as `robot` holds it, for [`Robot::attach`]: fixed to the hand's IK frame as the
     /// link `"held by hand {hand}"`, and free to touch the links ([`Robot::hand_links`]) of every
-    /// hand that holds it.
+    /// hand that holds it and its [`Held::touch_links`].
     pub fn attachment(&self, robot: &Robot) -> Result<AttachedObject> {
         let hands = self.hands().map(|(hand, _)| hand);
         if let Some(hand) = hands.clone().find(|&hand| hand >= robot.hands()) {
@@ -69,6 +75,7 @@ impl Held {
             touch_links: hands
                 .flat_map(|hand| robot.hand_links(hand))
                 .map(String::from)
+                .chain(self.touch_links.iter().cloned())
                 .collect(),
             spheres: self.spheres,
         })
@@ -262,6 +269,13 @@ impl Held {
                  the device that does not hold it",
                 grip.hand
             );
+        }
+        if let Some(unknown) =
+            (self.touch_links.iter()).find(|name| robot.links.iter().all(|l| l.name != **name))
+        {
+            return Err(input!(
+                "{what}: the held object may touch '{unknown}', which is no link of the robot"
+            ));
         }
         check_locked(robot, &self.locked, what)?;
         self.spheres
@@ -601,6 +615,7 @@ mod tests {
         let robot = panda();
         let device = Device::cpu(&robot).unwrap();
         let can = Held {
+            touch_links: vec![],
             also: vec![],
             locked: Default::default(),
             spheres: Default::default(),
@@ -664,6 +679,7 @@ mod tests {
             .iter()
             .flat_map(|object| {
                 grasps.map(|grasp| Held {
+                    touch_links: vec![],
                     also: vec![],
                     locked: Default::default(),
                     spheres: Default::default(),
@@ -693,6 +709,7 @@ mod tests {
         let own = [[0.0, 0.0, 0.03, 0.03], [0.0, 0.0, -0.03, 0.03]];
         let spheres = |rotation: Quat| {
             let held = Held {
+                touch_links: vec![],
                 also: vec![],
                 locked: Default::default(),
                 spheres: Default::default(),

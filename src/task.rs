@@ -2469,6 +2469,7 @@ fn held(task: &Pick, worlds: &Worlds, index: usize, spheres: SphereOptions) -> H
         grasp: carried(also.grasps[index].pose),
     });
     Held {
+        touch_links: vec![],
         also: also.collect(),
         locked: task.grasps[index].locked.clone(),
         hand: task.hand,
@@ -3187,6 +3188,7 @@ fn articulated(
             _ => {
                 let t = &tasks[c.task];
                 let held = Held {
+                    touch_links: vec![],
                     also: vec![],
                     locked: t.grasps[c.index].locked.clone(),
                     hand: t.hand,

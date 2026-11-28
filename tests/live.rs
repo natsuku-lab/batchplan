@@ -819,6 +819,7 @@ fn a_robot_held_far_back_is_followed_from_where_it_is() {
 /// A rod 24 cm long held by one end, pointing out of the hand.
 fn rod() -> Held {
     Held {
+        touch_links: vec![],
         also: vec![],
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.02, 0.02, 0.12)),
