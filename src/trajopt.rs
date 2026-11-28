@@ -2424,4 +2424,80 @@ mod tests {
             gaps[EXACT as usize]
         );
     }
+
+    /// A fit that timed a spline by the timing's first pass alone times it again where it asks for
+    /// the second pass too, which can find a timing the first does not: a UR5e replan from a fast
+    /// start among posts (`a_replan_keeps_the_start_only_the_timings_second_pass_fits`), on the
+    /// spline it plans, which stops at every waypoint.
+    #[test]
+    fn a_fit_times_a_spline_again_for_the_second_pass() {
+        let ur5e = "assets/ur5e/ur_description/urdf/ur5e.urdf";
+        let robot = Robot::load(ur5e, &RobotOptions::default()).unwrap();
+        let motion = StartMotion {
+            velocity: vec![
+                0.057526644,
+                0.38948536,
+                -0.08450991,
+                -0.8712345,
+                -0.8916578,
+                -0.41459402,
+            ],
+            acceleration: vec![0.0; 6],
+        };
+        let start = [
+            -6.0853887, -1.1014895, 0.9422271, -6.1463857, -4.681736, -3.8040044,
+        ];
+        let goal = [
+            -3.190817, -0.8632021, -0.5299742, -0.4094267, -4.2962, -4.6207695,
+        ];
+        let problem = PlanProblem {
+            start_motion: Some(motion),
+            ..PlanProblem::new(0, start.to_vec(), goal.to_vec())
+        };
+        #[rustfmt::skip] // one control point per row
+        let spline = [
+            -6.10306, -1.2211306, 0.9681867, -5.8787622, -4.407839, -3.6766505,
+            -6.0853887, -1.1014895, 0.9422271, -6.1463857, -4.681736, -3.8040044,
+            -6.0677176, -0.9818485, 0.9162676, -6.414009, -4.955633, -3.9313583,
+            -5.865877, -1.0834188, 0.8305819, -5.7113204, -4.685888, -3.8659441,
+            -5.6463656, -1.0653483, 0.7189367, -5.2762547, -4.69004, -3.927884,
+            -5.426854, -1.0472776, 0.6072915, -4.8411894, -4.694192, -3.9898238,
+            -5.426854, -1.0472776, 0.6072915, -4.8411894, -4.694192, -3.9898238,
+            -5.426854, -1.0472776, 0.6072915, -4.8411894, -4.694192, -3.9898238,
+            -5.2073426, -1.0292069, 0.4956463, -4.406124, -4.698344, -4.0517635,
+            -4.9878316, -1.0111363, 0.38400114, -3.9710586, -4.702496, -4.1137037,
+            -4.76832, -0.9930656, 0.2723559, -3.535993, -4.7066483, -4.1756434,
+            -4.76832, -0.9930656, 0.2723559, -3.535993, -4.7066483, -4.1756434,
+            -4.76832, -0.9930656, 0.2723559, -3.535993, -4.7066483, -4.1756434,
+            -4.571132, -0.9768326, 0.1720646, -3.145172, -4.655342, -4.231284,
+            -4.3739443, -0.9605997, 0.07177335, -2.7543514, -4.604036, -4.2869253,
+            -4.1767564, -0.9443668, -0.028517902, -2.3635306, -4.55273, -4.342566,
+            -3.9795685, -0.92813385, -0.12880915, -1.9727099, -4.501424, -4.3982067,
+            -3.9795685, -0.92813385, -0.12880915, -1.9727099, -4.501424, -4.3982067,
+            -3.9795685, -0.92813385, -0.12880915, -1.9727099, -4.501424, -4.3982067,
+            -3.7166512, -0.9064899, -0.26253086, -1.4516153, -4.433016, -4.4723945,
+            -3.4537344, -0.88484603, -0.39625248, -0.93052137, -4.364608, -4.5465817,
+            -3.190817, -0.8632021, -0.5299742, -0.4094267, -4.2962, -4.6207695,
+            -3.190817, -0.8632021, -0.5299742, -0.4094267, -4.2962, -4.6207695,
+            -3.190817, -0.8632021, -0.5299742, -0.4094267, -4.2962, -4.6207695,
+        ];
+        assert!(
+            !runs_from_start(&robot, &problem, &spline, /* thorough */ false),
+            "the first pass times the spline: it does not tell the passes apart"
+        );
+        assert!(
+            runs_from_start(&robot, &problem, &spline, /* thorough */ true),
+            "the second pass does not time the spline"
+        );
+        let mut timed = vec![];
+        assert!(!runs_from_start_once(
+            &robot, &problem, &spline, /* thorough */ false, &mut timed
+        ));
+        assert!(
+            runs_from_start_once(
+                &robot, &problem, &spline, /* thorough */ true, &mut timed
+            ),
+            "the first pass's verdict was kept for the second"
+        );
+    }
 }
