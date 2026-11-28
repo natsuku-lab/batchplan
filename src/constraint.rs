@@ -138,12 +138,16 @@ pub(crate) fn breach(robot: &Robot, constraints: &[HandConstraint], q: &[f32]) -
     if constraints.is_empty() {
         return None;
     }
-    let fk = robot.fk(q);
+    breach_at(robot, constraints, &robot.fk(q))
+}
+
+/// [`breach`] with the hands where `fk` has them: of their links' poses alone.
+pub(crate) fn breach_at(robot: &Robot, constraints: &[HandConstraint], fk: &Fk) -> Option<String> {
     constraints.iter().enumerate().find_map(|(k, c)| {
         let limit = Limit::new(robot, c, /* inset */ false);
-        let placed = limit.placed(&fk);
-        let m = limit.relative(&fk, &placed);
-        let away = limit.away(&fk, &placed).abs() - limit.half;
+        let placed = limit.placed(fk);
+        let m = limit.relative(fk, &placed);
+        let away = limit.away(fk, &placed).abs() - limit.half;
         let tilt = m.m22.clamp(-1.0, 1.0).acos();
         let twist = m.n.atan2(m.d).abs();
         if away.max_element() > 0.0 {

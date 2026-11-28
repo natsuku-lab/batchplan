@@ -136,6 +136,50 @@ fn main() -> Result<(), Error> {
 
 **A held object per problem.** `PlanProblem`, `IkProblem`, `ToolPath` and `Sequence` take `holding: Some(held)`, a `Held` as a pick leaves it (`TaskPlan::held`): the hand, the object in its own frame and the grasp. One call then takes problems holding nothing, different objects, or one object by different grasps, as the candidates a pick leaves each hold it by the grasp that got them through. It groups them by what they hold, runs each group as a batch of its own on a device holding it, in parallel, as `Held::attachment` attaches it (the link `"held by hand {hand}"`), and gives the results in the problems' order, as each group's device alone would. Pass the device without the object: one already holding a `Held` in that hand is an input error. Worlds uploaded to it serve every group, with the held object touching nothing unless a world says what it may touch: `Touch::held(obstacle, hand)` lets what that hand comes to hold touch an obstacle, as the table it is set down on, for one hand in an upload, and problems holding nothing are checked as without it. So objects held by many grasps are set down in one call against one upload, each problem naming the world whose touches fit it. A world uploaded to a device that already holds one in that hand names the held link itself, and serves problems holding in that hand or holding nothing. Each group is a batch of its own, so a GPU call pays its fixed cost once per group. A GPU device builds kernels for the robot holding something in a hand the first time a call holds one there, inside that call and its time budget; kernels are shared by robots of one shape, so warm up a device holding any object in each hand you will hold in, `device.with_robot(&robot.attach(&held.attachment(&robot)?)?)?.warmup()`. A device keeps the spheres it fits to held objects (the latest 64), shared with the devices `with_robot` makes from it: fitting a cylinder or capsule takes milliseconds, and a call holding it would otherwise fit it again. A hold's `locked` (the fingers where they closed) relocks the robot that holds it; to attach a hold yourself, relock at `held.locked` first. A `Follower` carries a hold through a live motion the same way (`FollowerOptions::holding`, [live motion](planning.md#live-motion)). `device.contacts_holding` lists what a configuration touches holding one ([contacts](planning.md#why-a-problem-failed)).
 
+**Held by two hands.** `Held::also` names the other hands that hold the object too, each by its grasp (`Grip { hand, grasp }`, the hand's IK frame in the object's frame), as two arms carry a tray or a pot by its handles. The object stays fixed to `hand`, may touch the links of every hand that holds it, and is rigid between them, which every call that holds it keeps:
+
+- **`solve_ik`:** a target for one of the hands places the others at their grasps, and the result's problem has their targets. A target of its own for another of them must keep its pin (below), and is then taken as its grasp.
+- **`plan`:** every state of the path keeps each hand at its grasp, as under a `HandConstraint` that pins it in `hand`'s frame ([constraints](planning.md#constraints-along-the-path), with a pin's floors: 2 mm along each axis of that frame, 0.02 rad of tilt and of twist). A pose goal for one hand is enough. A start, or a configuration given as the goal, with a hand off its grasp is an input error. The result's problems are as given.
+- **`join` and a `Follower`:** blends and replans keep the hands at their grasps the same way, a blend at the states it is checked at ([the guarantee](planning.md#constraints-along-the-path)): between them it may stray past the pin by a fraction of a millimeter.
+- **`follow`:** a path of one of the hands takes the others along, each kept where the start has it in that hand's frame, at every step and within the path's precisions between ([tool paths](planning.md#moving-the-hand-along-a-path)). The start must have them at their grasps, to what a pin allows, and the motion stops where one cannot keep up.
+- **`pick` and `place`:** two hands pick an object up together by pairs of grasps (`Pick::also`), and set down what they hold together ([two hands](planning.md#two-hands)).
+- **`handover`** passes what one hand holds, and refuses one held by two.
+
+On a GPU, each set of hands that hold together has kernels of its own, built by the first call that holds so: warm up with that hold's own attachment, `device.with_robot(&robot.attach(&held.attachment(&robot)?)?)?.warmup()`.
+
+Carrying it level is one more constraint, on `hand` (`tilt`). A hand that lets go leaves `also`; a hand that closes on what another holds joins it with the grasp it has then: with `object = robot.ee_pose(&q, held.hand).mul_pose(held.grasp.inverse())`, the grasp of hand `h` is `object.inverse().mul_pose(robot.ee_pose(&q, h))`.
+
+```rust,no_run
+use batchplan::glam::Vec3;
+use batchplan::{
+    Device, Error, Goal, Grip, Held, Obstacle, PlanProblem, PlanResult, Pose, Worlds,
+};
+
+/// Carries a bar that hand 0 holds by `left` and hand 1 by `right` to where hand 0 is at `goal`.
+fn carry(
+    device: &Device,
+    worlds: &Worlds,
+    start: &[f32],
+    (left, right): (Pose, Pose),
+    goal: Pose,
+) -> Result<PlanResult, Error> {
+    let bar = Held {
+        hand: 0,
+        object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.015, 0.16, 0.015)),
+        grasp: left,
+        also: vec![Grip { hand: 1, grasp: right }],
+        locked: Default::default(),
+        spheres: Default::default(),
+    };
+    // Hand 0's goal pose alone: hand 1 follows from its grasp, and the path keeps it there.
+    let carry = PlanProblem {
+        holding: Some(bar),
+        ..PlanProblem::new(0, start, Goal::Poses(vec![Some(goal), None]))
+    };
+    batchplan::plan(device, worlds, &[carry], &Default::default())
+}
+```
+
 ## Checking against meshes
 
 Spheres only approximate the links. `MeshModel::try_new(&robot)` loads each link's collision meshes, and `clearance(&worlds, &item_world, &q)` measures a batch of configurations' world and self clearance on the meshes, as MoveIt checks a planning scene with FCL. It runs on the CPU, to check finished trajectories rather than inside planning:

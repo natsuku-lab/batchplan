@@ -13,6 +13,7 @@
 //! from the state it commands would bring the robot too close to an obstacle, and braking each
 //! joint in time to rest within its range.
 
+use std::borrow::Cow;
 use std::f32::consts::{PI, TAU};
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,7 +59,8 @@ pub struct FollowerOptions {
     /// [`Touch::held`](crate::Touch::held). The first tick on a device builds the device that
     /// holds it, which later ticks on that device reuse; a tick on another device builds one for
     /// it. On a GPU that builds kernels too where no call there has held an object in that hand
-    /// yet, as the plan the trajectory came from has.
+    /// yet, as the plan the trajectory came from has. Where more hands than one hold it
+    /// ([`Held::also`]), replans keep each at its grasp, as under `constraints` that pin them.
     pub holding: Option<Held>,
     /// How far a joint of the measured state a tick is given may be from where the trajectory has
     /// it at that tick (radians, or meters for a prismatic joint) before the follower plans again
@@ -277,8 +279,13 @@ impl Follower {
         );
         o.plan.check()?;
         constraint::check(robot, &o.constraints, "the follower")?;
+        let mut o = o;
         if let Some(held) = &o.holding {
             held.check_on(robot, "the follower")?;
+            // Hands that hold it together stay at their grasps, as constraints of the follower's.
+            if let Cow::Owned(pinned) = held::pinned(Some(held), &o.constraints) {
+                o.constraints = pinned;
+            }
         }
         let n = robot.dof();
         let points = &trajectory.control_points;

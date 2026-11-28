@@ -60,6 +60,11 @@ pub fn devices(robot: &Robot) -> Vec<Device> {
 /// Two Pandas 70 cm apart along y, facing +x, as `left_` and `right_` parts: hands 0 and 1, each
 /// at its ready pose with its fingers held open.
 pub fn two_pandas() -> Result<Robot, batchplan::Error> {
+    two_pandas_with(&["left_ee_link", "right_ee_link"])
+}
+
+/// [`two_pandas`] with a hand at each of `ee_links`, as a third on a link of one of the arms.
+pub fn two_pandas_with(ee_links: &[&str]) -> Result<Robot, batchplan::Error> {
     let one = panda_options();
     let arm = |prefix: &str, y: f32| Part {
         path: asset("franka/franka_panda.urdf").into(),
@@ -69,7 +74,7 @@ pub fn two_pandas() -> Result<Robot, batchplan::Error> {
     let parts = [arm("left_", 0.35), arm("right_", -0.35)];
     let spheres = one.collision_model.as_ref().expect("Panda spheres");
     let mut options = RobotOptions {
-        ee_links: vec!["left_ee_link".into(), "right_ee_link".into()],
+        ee_links: ee_links.iter().map(|&link| link.into()).collect(),
         lock_joints: ["left_", "right_"]
             .iter()
             .flat_map(|p| {

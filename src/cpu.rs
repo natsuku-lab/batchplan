@@ -755,6 +755,8 @@ pub(crate) fn contacts(robot: &Robot, world: &CpuWorld, fk: &Fk, within: f32) ->
 }
 
 /// Rotation vector (axis * angle) of `r`. Must stay in sync with `rot_log` in kernels.wgsl.
+/// Pinned into `pose_error`, as `chol6` is into `hand_system`.
+#[inline(always)]
 fn rot_log(r: Mat3) -> (Vec3, f32) {
     let m = |row: usize, col: usize| r.col(col)[row];
     let cos_t = ((m(0, 0) + m(1, 1) + m(2, 2) - 1.0) * 0.5).clamp(-1.0, 1.0);
@@ -779,6 +781,7 @@ fn rot_log(r: Mat3) -> (Vec3, f32) {
 }
 
 /// In-place Cholesky factorization of a 6x6 SPD matrix (row-major, lower triangle used).
+#[inline]
 fn chol6(a: &mut [f32; 36]) {
     for i in 0..6 {
         for j in 0..=i {
@@ -1135,8 +1138,15 @@ impl Reach {
 
     /// Steps `q` toward hand `hand`'s `target` until it is within `o`'s tolerances or
     /// `o.iterations` steps have run, as `ik_step` does without its collision push, moving only
-    /// the joints `moving` marks where it is given. Returns whether it got there.
-    pub(crate) fn reach(
+    /// the joints `moving` marks where it is given. Returns whether it got there. A copy for each
+    /// kind of search that steps with it (`For`), as [`Reach::pose`] and [`Reach::error`] are:
+    /// shared between a path of one hand and one that takes other hands along, they would stay
+    /// out of line of the first, which they are inlined into as its one caller.
+    #[expect(
+        clippy::extra_unused_type_parameters,
+        reason = "`For` names the kind of search the copy is for, and nothing else"
+    )]
+    pub(crate) fn reach<For>(
         &mut self,
         robot: &Robot,
         hand: usize,
@@ -1197,14 +1207,22 @@ impl Reach {
     }
 
     /// Hand `hand`'s pose at `q`.
-    pub(crate) fn pose(&mut self, robot: &Robot, hand: usize, q: &[f32]) -> Pose {
+    #[expect(
+        clippy::extra_unused_type_parameters,
+        reason = "`For` names the kind of search the copy is for, and nothing else"
+    )]
+    pub(crate) fn pose<For>(&mut self, robot: &Robot, hand: usize, q: &[f32]) -> Pose {
         robot.fk_into(q, &mut self.fk);
         let ee = robot.ee_links[hand];
         Pose::new(self.fk.pos[ee], Quat::from_mat3(&self.fk.rot[ee]))
     }
 
     /// How far hand `hand` is from `target` at `q`: meters, and radians.
-    pub(crate) fn error(
+    #[expect(
+        clippy::extra_unused_type_parameters,
+        reason = "`For` names the kind of search the copy is for, and nothing else"
+    )]
+    pub(crate) fn error<For>(
         &mut self,
         robot: &Robot,
         hand: usize,

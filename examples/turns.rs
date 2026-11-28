@@ -381,6 +381,7 @@ fn from_nearest(
                 found_at.push(found.len());
             }
             let held = Held {
+                also: vec![],
                 hand: 0,
                 object: object.placed(Pose::IDENTITY),
                 grasp: thing.grips[g].pose,

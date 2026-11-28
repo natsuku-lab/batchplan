@@ -80,7 +80,7 @@ pub use device::{CollisionWeights, Contact, Device, Evaluation, Worlds};
 pub use error::Error;
 pub use gripper::{Gripper, GripperCalibration};
 pub use handover::{Handover, handover, handover_grasps, handover_poses};
-pub use held::Held;
+pub use held::{Grip, Held};
 pub use ik::{IkFailure, IkOptions, IkProblem, IkResult, solve_ik};
 pub use join::{JoinOptions, JoinResult, Sequence, join};
 pub use live::{
@@ -105,9 +105,9 @@ pub use shortcut::ShortcutOptions;
 pub use spheres::{LinkQualification, Qualification, SphereOptions};
 pub use surface::{Grasp, Surface, SurfaceGraspOptions, grasps_on};
 pub use task::{
-    CandidateStop, Hold, Pick, PickBody, Place, Pull, Release, ShapeGraspOptions, TaskFailure,
-    TaskOptions, TaskPlan, TaskResult, TaskStep, Turn, grasps, pick, place, place_poses, pull,
-    turn,
+    CandidateStop, HandGrasps, Hold, Pick, PickBody, Place, Pull, Release, ShapeGraspOptions,
+    TaskFailure, TaskOptions, TaskPlan, TaskResult, TaskStep, Turn, grasps, pick, place,
+    place_poses, pull, turn,
 };
 pub use timing::{HandSpeed, JointState, Near, Trajectory, time};
 pub use tool_path::{ToolPath, ToolPathOptions, ToolPathResult, ToolPathStop, follow};

@@ -10,6 +10,25 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
 
 ### Added
 
+- **Breaking:** one object held by two hands. `Held` gains `also`, the other hands that hold it
+  too, each by its grasp (`Grip { hand, grasp }`); a `Held` literal sets `also: vec![]` for one
+  hand's hold. The object may touch the links of every hand that holds it, and every call that
+  holds it keeps each at its grasp: `solve_ik` places the other hands from one hand's target,
+  `plan` takes one hand's goal pose and keeps the hands pinned along the path (a start or a
+  configuration goal with a hand off its grasp is an input error), `join`'s blends and a
+  `Follower`'s replans keep them too, and `follow` takes the other hands along a path of one of
+  them. **Breaking:** `Pick` gains `also`, a second hand that picks the object up with the first
+  (`HandGrasps { hand, grasps }`, one grasp per grasp of the pick's, entry by entry, each pair a
+  candidate costing both holds' sum); a `Pick` literal sets `also: None`. The plan's `held` names
+  the second hand, and `place` sets down what two hands hold: both move in and back off one after
+  the other, and the transit, the lift and the lower keep them at their grasps. `handover`
+  refuses what two hands hold. In Python, `Held(hand, object, grasp, also=[Grip(hand, grasp)])`
+  and `Pick(..., also=HandGrasps(hand, grasps))`.
+- miru's `Memory` takes a hold by two hands (`Held::also`) as each hand's: `Memory::held` gives it
+  for either, a pick into either is refused while they hold it, and a let-go or a loss empties
+  both. To say a held thing is held otherwise, let it go where it is and pick it as it is held
+  then, in one `Memory::after`.
+
 - **Breaking:** a task's candidates carry their own data and a cost. A pick's, a turn's and a
   pull's grasps are `Hold`s: the hand's `pose` in the object's frame, the fingers' `locked` values
   and a `cost`. `Hold::locked` replaces `Pick::locked`, so one pick takes grasps at different

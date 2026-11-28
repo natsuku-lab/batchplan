@@ -103,6 +103,7 @@ pub fn handover(
     for (i, t) in tasks.iter().enumerate() {
         task::check_task(robot, worlds, i, &steps(t), &t.start, t.to)?;
         t.held.check(robot, worlds, &format!("task {i}"))?;
+        t.held.check_one_hand(&format!("task {i}"))?;
         ensure_input!(
             t.to != t.held.hand,
             "task {i}: hand {} takes what it holds already",
@@ -246,6 +247,7 @@ pub fn handover(
     let outcomes = task::choose(device, tasks.len(), &candidates, o, |c| {
         let t = &tasks[c.task];
         let held = Held {
+            also: vec![],
             locked: Default::default(),
             spheres: t.held.spheres,
             hand: t.to,

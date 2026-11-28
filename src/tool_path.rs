@@ -2,7 +2,8 @@
 //! their rotations, followed from a start configuration by inverse kinematics a few millimeters at
 //! a time, as MoveIt's Cartesian paths are. Each path is a search (`edges`): it steps along on one
 //! of the device's threads, fits a spline through its steps, and asks for the spline to be checked
-//! for collision, cutting it back to where it collides.
+//! for collision, cutting it back to where it collides. Where the hand holds an object with other
+//! hands ([`Held::also`]), each step takes them along, kept at their grasps (`Partners`).
 
 use glam::{Mat3, Quat, Vec3};
 
@@ -24,7 +25,8 @@ pub struct ToolPath {
     pub world: u32,
     /// Where the robot starts; the path starts at the hand's pose there.
     pub start: Vec<f32>,
-    /// The hand that follows the path. Only the joints that move it move.
+    /// The hand that follows the path. Only the joints that move it move, and those that keep
+    /// other hands on what it holds with them (`holding`).
     pub hand: usize,
     /// Poses the hand passes through after its start, in the robot's frame.
     pub waypoints: Vec<Pose>,
@@ -34,7 +36,13 @@ pub struct ToolPath {
     /// path, its motion stops there.
     pub hold: Vec<usize>,
     /// An object a hand holds, as a pick leaves it: checked as part of the robot, as attaching it
-    /// ([`Held::attachment`]) would check it. `None` holds nothing.
+    /// ([`Held::attachment`]) would check it. `None` holds nothing. Where `hand` holds it with
+    /// other hands ([`Held::also`]), they move with it, the object rigid between them: `start`
+    /// must have each at its grasp, to what a pin allows, and each keeps the place in `hand`'s
+    /// frame it has there, at every step and along the motion within the path's precisions, on
+    /// the joints of its own chain that `hand` does not move. The motion stops where one cannot
+    /// keep up. A hand that does not hold it follows no path on joints that move one that does,
+    /// unless the path holds them.
     pub holding: Option<Held>,
 }
 
@@ -134,7 +142,8 @@ impl ToolPathResult {
 pub enum ToolPathStop {
     /// No configuration near the last one reaches this pose: it lies beyond the arm's reach or
     /// its joint limits, at a singularity the arm cannot step through, or where the joints a path
-    /// holds ([`ToolPath::hold`]) leave too few to keep the hand on it.
+    /// holds ([`ToolPath::hold`]) leave too few to keep the hand on it; or another hand that
+    /// holds the object with it ([`ToolPath::holding`]) cannot reach its place there.
     Unreachable {
         /// The pose it stops before.
         at: Pose,
@@ -146,7 +155,8 @@ pub enum ToolPathStop {
     },
     /// Configurations reach the poses on either side of this one, but the joints would jump
     /// between them, as a wrist spins half a turn at a singularity: no motion between them keeps
-    /// the hand within the precision of the path.
+    /// the hand within the precision of the path, or another hand that holds the object with it
+    /// within that of its place.
     Jump {
         /// The pose it stops before.
         at: Pose,
@@ -244,23 +254,63 @@ fn check(robot: &Robot, worlds: &Worlds, paths: &[ToolPath], o: &ToolPathOptions
         );
         if let Some(held) = &p.holding {
             held.check(robot, worlds, &format!("path {i}"))?;
+            held.check_moved_by(robot, p.hand, &p.hold, &format!("path {i}"))?;
+            if let Some(off) = held.off_its_grasps(robot, &p.start) {
+                return Err(crate::error::input!("path {i}: at the start, {off}"));
+            }
         }
     }
     Ok(())
 }
 
-/// [`follow`] for `paths`, checked, holding what `device` holds.
-fn followed(
+/// [`follow`] for `paths`, checked, holding what `device` holds. A path whose hand holds its
+/// object with other hands has a search of another kind ([`Others`]): a call of one kind is one
+/// batch, and one of both a batch of each.
+pub(crate) fn followed(
     device: &Device,
     worlds: &Worlds,
     paths: &[ToolPath],
     o: &ToolPathOptions,
 ) -> Result<ToolPathResult> {
     let robot = device.robot();
+    let together = |path: &ToolPath| {
+        let held = path.holding.as_ref();
+        held.is_some_and(|held| held.partners(path.hand).next().is_some())
+    };
+    let with_others = |path| Partners::of(robot, path);
+    if !paths.iter().any(together) {
+        return searched(device, worlds, paths, o, |_| ());
+    }
+    if paths.iter().all(together) {
+        return searched(device, worlds, paths, o, with_others);
+    }
+    let (holding, alone): (Vec<usize>, Vec<usize>) =
+        (0..paths.len()).partition(|&i| together(&paths[i]));
+    let lone = searched(device, worlds, &held::subset(paths, &alone), o, |_| ())?;
+    let held = searched(
+        device,
+        worlds,
+        &held::subset(paths, &holding),
+        o,
+        with_others,
+    )?;
+    let parts = vec![(alone, lone), (holding, held)];
+    Ok(ToolPathResult::gather(paths, parts))
+}
+
+/// [`followed`] for paths of one kind, `others` giving each its search's.
+fn searched<'a, O: Others>(
+    device: &'a Device,
+    worlds: &Worlds,
+    paths: &'a [ToolPath],
+    o: &'a ToolPathOptions,
+    others: impl Fn(&'a ToolPath) -> O + Copy + Send,
+) -> Result<ToolPathResult> {
+    let robot = device.robot();
     let n = robot.dof();
     let mut searches: Vec<_> = paths
         .iter()
-        .map(|path| Deferred::new(None, move || Follow::new(robot, path, o)))
+        .map(|path| Deferred::new(None, move || Follow::new(robot, path, o, others(path))))
         .collect();
     let mut running: Vec<&mut dyn Search> =
         searches.iter_mut().map(|s| s as &mut dyn Search).collect();
@@ -352,6 +402,9 @@ impl Point {
     /// How far `pose` strays from the path between `self` and `to`, from the point of it `pose`
     /// is nearest and from the path's rotation there (meters, radians). Nearest weighs position
     /// and rotation each by its precision, so a step that mostly turns is placed by its turn.
+    /// Pinned into each kind of search (`Others`), as [`points`] is: shared by two, x86 builds
+    /// left them out of line of the search of one hand, which had them inline as their one caller.
+    #[inline(always)]
     fn deviation(&self, to: &Point, pose: &Pose, o: &ToolPathOptions) -> [f32; 2] {
         let span = to.position - self.position;
         let turn = self.rotation.angle_between(to.rotation);
@@ -397,8 +450,8 @@ enum Stage {
     Done,
 }
 
-/// One path's search.
-struct Follow<'a> {
+/// One path's search, with what it does for the other hands that hold its hand's object (`O`).
+struct Follow<'a, O> {
     robot: &'a Robot,
     o: &'a ToolPathOptions,
     world: u32,
@@ -443,10 +496,11 @@ struct Follow<'a> {
     rhs: Vec<f32>,
     scratch: Vec<f32>,
     solved: Vec<f32>,
+    others: O,
 }
 
-impl<'a> Follow<'a> {
-    fn new(robot: &'a Robot, path: &ToolPath, o: &'a ToolPathOptions) -> Self {
+impl<'a, O: Others> Follow<'a, O> {
+    fn new(robot: &'a Robot, path: &ToolPath, o: &'a ToolPathOptions, others: O) -> Self {
         let points = points(robot.ee_pose(&path.start, path.hand), &path.waypoints, o);
         Self {
             robot,
@@ -483,6 +537,7 @@ impl<'a> Follow<'a> {
             rhs: vec![],
             scratch: vec![],
             solved: vec![],
+            others,
         }
     }
 
@@ -533,13 +588,19 @@ impl<'a> Follow<'a> {
             while let Some(&(to, splits)) = self.pending.last() {
                 let k = self.reached.len() - 1;
                 self.next.copy_from_slice(&self.q[k * n..(k + 1) * n]);
-                let reached = self.reach.reach(
+                let reached = self.reach.reach::<O>(
                     self.robot,
                     self.hand,
                     &to.target(),
                     &mut self.next,
                     &self.ik,
                     self.free.as_deref(),
+                ) && self.others.reach(
+                    self.robot,
+                    &mut self.reach,
+                    self.hand,
+                    &mut self.next,
+                    &self.ik,
                 );
                 if !reached {
                     self.stop = Some(ToolPathStop::Unreachable { at: to.pose() });
@@ -553,8 +614,16 @@ impl<'a> Follow<'a> {
                 let halfway = Point::between(&from, &to, 0.5);
                 let [position, rotation] =
                     self.reach
-                        .error(self.robot, self.hand, &halfway.target(), &self.between);
-                let on_path = position <= self.o.precision && rotation <= self.o.rotation_precision;
+                        .error::<O>(self.robot, self.hand, &halfway.target(), &self.between);
+                let on_path = position <= self.o.precision
+                    && rotation <= self.o.rotation_precision
+                    && self.others.kept(
+                        self.robot,
+                        &mut self.reach,
+                        self.hand,
+                        &self.between,
+                        self.o,
+                    );
                 if on_path {
                     self.pending.pop();
                     self.q.extend_from_slice(&self.next);
@@ -692,10 +761,19 @@ impl<'a> Follow<'a> {
             for s in 1..PRECISION_SAMPLES {
                 let u = s as f32 / PRECISION_SAMPLES as f32;
                 spline::blend(&self.control, n, span, spline::basis(u), &mut self.between);
-                let pose = self.reach.pose(self.robot, self.hand, &self.between);
+                let pose = self.reach.pose::<O>(self.robot, self.hand, &self.between);
                 let [position, rotation] =
                     self.reached[k].deviation(&self.reached[k + 1], &pose, self.o);
-                if position <= self.o.precision && rotation <= self.o.rotation_precision {
+                if position <= self.o.precision
+                    && rotation <= self.o.rotation_precision
+                    && self.others.kept(
+                        self.robot,
+                        &mut self.reach,
+                        self.hand,
+                        &self.between,
+                        self.o,
+                    )
+                {
                     continue;
                 }
                 let ends = if u <= 0.5 { [k, k + 1] } else { [k + 1, k] };
@@ -731,6 +809,7 @@ fn solve_one_four_one(d: &mut [f32], scratch: &mut Vec<f32>) {
 
 /// The path's poses a step apart, from `start` through each waypoint. A path that does not move the
 /// hand is its start alone.
+#[inline(always)]
 fn points(start: Pose, waypoints: &[Pose], o: &ToolPathOptions) -> Vec<Point> {
     let poses: Vec<Pose> = std::iter::once(start)
         .chain(waypoints.iter().copied())
@@ -760,7 +839,7 @@ fn points(start: Pose, waypoints: &[Pose], o: &ToolPathOptions) -> Vec<Point> {
     points
 }
 
-impl Search for Follow<'_> {
+impl<O: Others> Search for Follow<'_, O> {
     fn request(&mut self, buffer: &mut Vec<f32>) -> Option<EdgeQuery> {
         if self.stage == Stage::Steps {
             if self.points.len() > 1 {
@@ -830,5 +909,127 @@ impl Search for Follow<'_> {
         // The configurations before the span of the first sample that may collide.
         self.truncate(self.spans[at(answer).0] + 1);
         self.stage = Stage::Spline;
+    }
+}
+
+/// What a path's search does for the other hands that hold its hand's object ([`Held::also`]):
+/// nothing for a path whose hand holds alone or holds nothing (`()`), and [`Partners`] for the
+/// rest. Each kind is compiled into a search of its own, so a path of one hand is followed by the
+/// code that follows it without this.
+trait Others: Send {
+    /// Steps `q`, which has hand `hand` where its path does, on to where each other hand keeps
+    /// its grasp. Whether each got there.
+    fn reach(
+        &self,
+        robot: &Robot,
+        reach: &mut Reach,
+        hand: usize,
+        q: &mut [f32],
+        ik: &IkOptions,
+    ) -> bool;
+
+    /// Whether each other hand keeps its grasp at `q`, within the path's precisions.
+    fn kept(
+        &self,
+        robot: &Robot,
+        reach: &mut Reach,
+        hand: usize,
+        q: &[f32],
+        o: &ToolPathOptions,
+    ) -> bool;
+}
+
+impl Others for () {
+    #[inline(always)]
+    fn reach(&self, _: &Robot, _: &mut Reach, _: usize, _: &mut [f32], _: &IkOptions) -> bool {
+        true
+    }
+
+    #[inline(always)]
+    fn kept(&self, _: &Robot, _: &mut Reach, _: usize, _: &[f32], _: &ToolPathOptions) -> bool {
+        true
+    }
+}
+
+/// The other hands that hold the object a path's hand holds.
+struct Partners(Vec<Partner>);
+
+/// One of them: its place in the path's hand's frame, as the start has it, and the joints it
+/// keeps it on, those of its own chain that neither the path's hand nor a hand before it moves
+/// and that the path does not hold.
+struct Partner {
+    hand: usize,
+    place: Pose,
+    moving: Vec<bool>,
+}
+
+impl Partners {
+    fn of(robot: &Robot, path: &ToolPath) -> Self {
+        let held = path.holding.as_ref();
+        let holding = held.into_iter().flat_map(|held| held.partners(path.hand));
+        let mut taken = robot.hand_joints(path.hand);
+        taken.extend_from_slice(&path.hold);
+        // Each keeps the place the start has it at, which is its grasp to what a pin allows
+        // (`check`, or the IK that solved both hands there): held to its grasp as given, a start
+        // a millimeter off would stray past the path's precision before its first step.
+        let from = robot.ee_pose(&path.start, path.hand).inverse();
+        let mut partners = vec![];
+        for (hand, _) in holding {
+            let place = from.mul_pose(robot.ee_pose(&path.start, hand));
+            let own = robot.hand_joints(hand);
+            let moving = (0..robot.dof())
+                .map(|j| own.contains(&j) && !taken.contains(&j))
+                .collect();
+            taken.extend(own);
+            partners.push(Partner {
+                hand,
+                place,
+                moving,
+            });
+        }
+        Self(partners)
+    }
+
+    /// Where `partner` keeps its grasp with hand `hand` where `q` has it.
+    fn target(
+        robot: &Robot,
+        reach: &mut Reach,
+        hand: usize,
+        partner: &Partner,
+        q: &[f32],
+    ) -> (Vec3, Mat3) {
+        let there = reach.pose::<Self>(robot, hand, q).mul_pose(partner.place);
+        (there.position, Mat3::from_quat(there.rotation))
+    }
+}
+
+impl Others for Partners {
+    fn reach(
+        &self,
+        robot: &Robot,
+        reach: &mut Reach,
+        hand: usize,
+        q: &mut [f32],
+        ik: &IkOptions,
+    ) -> bool {
+        self.0.iter().all(|partner| {
+            let target = Self::target(robot, reach, hand, partner, q);
+            reach.reach::<Self>(robot, partner.hand, &target, q, ik, Some(&partner.moving))
+        })
+    }
+
+    fn kept(
+        &self,
+        robot: &Robot,
+        reach: &mut Reach,
+        hand: usize,
+        q: &[f32],
+        o: &ToolPathOptions,
+    ) -> bool {
+        self.0.iter().all(|partner| {
+            let target = Self::target(robot, reach, hand, partner, q);
+            let [position, rotation] = reach.error::<Self>(robot, partner.hand, &target, q);
+            position <= o.precision && rotation <= o.rotation_precision
+        })
     }
 }

@@ -233,6 +233,7 @@ fn pose_goals_keep_what_the_hand_holds() {
     let worlds = device.upload(&[World::default()]).unwrap();
     let start = robot.default_q().to_vec();
     let rod = Held {
+        also: vec![],
         locked: Default::default(),
         spheres: Default::default(),
         hand: 0,

@@ -1,27 +1,41 @@
 //! A hand holding an object ([`Held`]), for every call that solves, plans or follows with one: each
 //! object fitted with spheres once, a device holding it on the same hardware, and a call's items
-//! grouped by what they hold, a batch for each.
+//! grouped by what they hold, a batch for each. Hands that hold one object together
+//! ([`Held::also`]) keep their places on it: the constraints that say so ([`pinned`]) and the
+//! poses that follow from one hand's ([`Held::place_hands`]) are made here, for each such call.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use glam::{Mat3, Vec3};
+
+use crate::constraint::{self, HandConstraint};
 use crate::device::{Device, Worlds};
 use crate::error::{Result, ensure_input, input};
-use crate::robot::{self, AttachedObject, Robot};
+use crate::robot::{self, AttachedObject, Fk, Robot};
 use crate::spheres::SphereOptions;
 use crate::types::Pose;
 use crate::world::Obstacle;
 
-/// An object a hand holds.
+/// An object a hand holds, or several hands together.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Held {
-    /// The hand holding it.
+    /// The hand holding it: with several, the one whose frame the object is fixed to.
     pub hand: usize,
     /// Its shape in its own frame: centered at the origin, unrotated.
     pub object: Obstacle,
     /// The hand's IK frame in the object's frame: the grasp that holds it.
     pub grasp: Pose,
+    /// Other hands that hold it too, each by its grasp, as two hands carry a tray: none, `hand`
+    /// holds it alone. The object is rigid between the hands that hold it. It may touch the links
+    /// of each ([`Robot::hand_links`]), and every call that holds it keeps each hand at its grasp:
+    /// a pose given for one of them places the others ([`IkProblem::targets`](crate::IkProblem),
+    /// [`Goal::Poses`](crate::Goal)), a configuration given (a start, a goal) must have them
+    /// there, and every state of a path is checked to, as under a [`HandConstraint`] that pins
+    /// each to its place in `hand`'s frame. A hand that lets go leaves this list; the object stays
+    /// fixed to `hand`.
+    pub also: Vec<Grip>,
     /// Joints the robot was loaded with locked (`RobotOptions::lock_joints`), at the values they
     /// keep while it holds the object, as [`Robot::relock`] takes them: the fingers where they
     /// closed on it. Every call that holds it checks the robot so; joints not named keep their
@@ -41,25 +55,153 @@ pub struct Held {
 
 impl Held {
     /// The object as `robot` holds it, for [`Robot::attach`]: fixed to the hand's IK frame as the
-    /// link `"held by hand {hand}"`, and free to touch the hand's links ([`Robot::hand_links`]).
+    /// link `"held by hand {hand}"`, and free to touch the links ([`Robot::hand_links`]) of every
+    /// hand that holds it.
     pub fn attachment(&self, robot: &Robot) -> Result<AttachedObject> {
-        ensure_input!(
-            self.hand < robot.hands(),
-            "hand {} of {}",
-            self.hand,
-            robot.hands()
-        );
+        let hands = self.hands().map(|(hand, _)| hand);
+        if let Some(hand) = hands.clone().find(|&hand| hand >= robot.hands()) {
+            return Err(input!("hand {hand} of {}", robot.hands()));
+        }
         Ok(AttachedObject {
             name: held_link(self.hand),
             link: robot.links[robot.ee_links[self.hand]].name.clone(),
             shapes: vec![self.object.placed(self.grasp.rigid().inverse())],
-            touch_links: robot
-                .hand_links(self.hand)
-                .into_iter()
+            touch_links: hands
+                .flat_map(|hand| robot.hand_links(hand))
                 .map(String::from)
                 .collect(),
             spheres: self.spheres,
         })
+    }
+
+    /// Every hand that holds it with its grasp, `hand` first.
+    fn hands(&self) -> impl Iterator<Item = (usize, Pose)> + Clone + '_ {
+        let also = self.also.iter().map(|grip| (grip.hand, grip.grasp));
+        std::iter::once((self.hand, self.grasp)).chain(also)
+    }
+
+    /// The other hands that hold it with hand `hand`, each with its place in that hand's frame,
+    /// as their grasps put them: none where `hand` does not hold it, or holds it alone.
+    pub(crate) fn partners(&self, hand: usize) -> impl Iterator<Item = (usize, Pose)> + '_ {
+        let own = self.hands().find(|&(holder, _)| holder == hand);
+        own.into_iter().flat_map(move |(_, grasp)| {
+            let to_object = grasp.rigid().inverse();
+            let others = self.hands().filter(move |&(other, _)| other != hand);
+            others.map(move |(other, grasp)| (other, to_object.mul_pose(grasp.rigid())))
+        })
+    }
+
+    /// Where each other hand that holds it stays in `hand`'s frame, pinned at its grasp.
+    fn pins(&self) -> impl Iterator<Item = HandConstraint> + '_ {
+        self.partners(self.hand)
+            .map(|(hand, place)| HandConstraint {
+                relative_to: Some(self.hand),
+                position: Vec3::ZERO,
+                tilt: 0.0,
+                twist: 0.0,
+                ..HandConstraint::new(hand, place)
+            })
+    }
+
+    /// An `Error::Input` where hands hold it together and hand `hand`, which is none of them,
+    /// would follow a path on joints that move one of them, but for those the path holds
+    /// (`hold`): it would pull them off their grasps. For `what`.
+    pub(crate) fn check_moved_by(
+        &self,
+        robot: &Robot,
+        hand: usize,
+        hold: &[usize],
+        what: &str,
+    ) -> Result<()> {
+        if self.also.is_empty() || self.hands().any(|(holder, _)| holder == hand) {
+            return Ok(());
+        }
+        let moved = robot.hand_joints(hand);
+        let moves = |holder: usize| {
+            let own = robot.hand_joints(holder);
+            own.iter().any(|j| moved.contains(j) && !hold.contains(j))
+        };
+        if let Some((holder, _)) = self.hands().find(|&(holder, _)| moves(holder)) {
+            return Err(input!(
+                "{what}: hand {hand} follows a path on joints that move hand {holder}, which \
+                 holds an object with another hand: follow with one of the hands that hold it, \
+                 or hold those joints"
+            ));
+        }
+        Ok(())
+    }
+
+    /// An `Error::Input` where more hands than one hold it, for `what`, which moves one hand's.
+    pub(crate) fn check_one_hand(&self, what: &str) -> Result<()> {
+        ensure_input!(
+            self.also.is_empty(),
+            "{what}: hands {} and {} hold the object together, and this call moves what one hand \
+             holds",
+            self.hand,
+            self.also.first().map_or(self.hand, |grip| grip.hand)
+        );
+        Ok(())
+    }
+
+    /// Why `q` does not hold it, if it does not: which of the other hands is off its grasp where
+    /// `hand` is at its own, and by how much. None for one hand's hold.
+    pub(crate) fn off_its_grasps(&self, robot: &Robot, q: &[f32]) -> Option<String> {
+        self.pins().find_map(|pin| {
+            let off = constraint::breach(robot, &[pin], q)?;
+            Some(format!(
+                "hand {} is not at its grasp of the object hand {} holds: {off}",
+                pin.hand, self.hand
+            ))
+        })
+    }
+
+    /// Places the hands that hold it in `targets` (a pose or none per hand of `robot`), for
+    /// `what`: from the first of them given a pose, which stays as given, the others are where
+    /// their grasps put them. An `Error::Input` where one given a pose of its own breaks its pin
+    /// ([`Held::also`]), as a configuration with the hands there would; nothing where none has a
+    /// pose, or one hand holds it. The hold is one `robot` can take ([`Held::check_on`]).
+    pub(crate) fn place_hands(
+        &self,
+        robot: &Robot,
+        targets: &mut [Option<Pose>],
+        what: &str,
+    ) -> Result<()> {
+        if self.also.is_empty() {
+            return Ok(());
+        }
+        let given = self.hands().find_map(|(hand, grasp)| {
+            let target = targets.get(hand).copied().flatten()?;
+            Some((hand, target.rigid().mul_pose(grasp.rigid().inverse())))
+        });
+        let Some((first, object)) = given else {
+            return Ok(());
+        };
+        // The hands as given, and those not given where their grasps put them.
+        let mut fk = Fk::new(robot.links.len());
+        for (hand, grasp) in self.hands() {
+            let given = targets.get(hand).copied().flatten();
+            let at = given.map_or_else(|| object.mul_pose(grasp.rigid()), Pose::rigid);
+            let link = robot.ee_links[hand];
+            (fk.pos[link], fk.rot[link]) = (at.position, Mat3::from_quat(at.rotation));
+        }
+        let off = self.pins().find_map(|pin| {
+            let off = constraint::breach_at(robot, &[pin], &fk)?;
+            Some((pin.hand, off))
+        });
+        if let Some((hand, off)) = off {
+            return Err(input!(
+                "{what}: the pose given hand {hand} is off its grasp of the object hand {} holds \
+                 ({off}): give one of the hands that hold it a pose, or poses that keep their \
+                 grasps",
+                self.hand
+            ));
+        }
+        for (hand, grasp) in self.hands().filter(|&(hand, _)| hand != first) {
+            if let Some(target) = targets.get_mut(hand) {
+                *target = Some(object.mul_pose(grasp.rigid()));
+            }
+        }
+        Ok(())
     }
 
     /// Whether `robot`, which must not hold one in that hand already, can hold it in `worlds`: an
@@ -95,6 +237,32 @@ impl Held {
             robot.links.iter().all(|l| l.name != link),
             "{what}: the robot already has '{link}': pass the device that does not hold it"
         );
+        for (k, grip) in self.also.iter().enumerate() {
+            ensure_input!(
+                grip.hand < robot.hands()
+                    && grip.hand != self.hand
+                    && self.also[..k].iter().all(|other| other.hand != grip.hand),
+                "{what}: hand {} holds the object too, which must be another of the robot's {} \
+                 hands than hand {}, named once",
+                grip.hand,
+                robot.hands(),
+                self.hand
+            );
+            ensure_input!(
+                grip.grasp.is_unit(),
+                "{what}: hand {}'s grasp of the held object must be finite with a unit rotation, \
+                 got {:?}",
+                grip.hand,
+                grip.grasp
+            );
+            let holds = held_link(grip.hand);
+            ensure_input!(
+                robot.links.iter().all(|l| l.name != holds),
+                "{what}: hand {} holds the object too, and the robot already has '{holds}': pass \
+                 the device that does not hold it",
+                grip.hand
+            );
+        }
         check_locked(robot, &self.locked, what)?;
         self.spheres
             .check()
@@ -344,6 +512,29 @@ impl Fitted {
     }
 }
 
+/// `constraints` with, where more hands than one hold `holding`, the pins that keep each at its
+/// grasp ([`Held::also`]), but for those `constraints` state already.
+pub(crate) fn pinned<'a>(
+    holding: Option<&Held>,
+    constraints: &'a [HandConstraint],
+) -> Cow<'a, [HandConstraint]> {
+    let pins = holding.into_iter().flat_map(Held::pins);
+    let mut pins = pins.filter(|pin| !constraints.contains(pin)).peekable();
+    if pins.peek().is_none() {
+        return Cow::Borrowed(constraints);
+    }
+    Cow::Owned(constraints.iter().copied().chain(pins).collect())
+}
+
+/// Another hand's hold of an object a hand holds ([`Held::also`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grip {
+    /// The hand.
+    pub hand: usize,
+    /// Its IK frame in the object's frame: the grasp it holds the object by.
+    pub grasp: Pose,
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -410,6 +601,7 @@ mod tests {
         let robot = panda();
         let device = Device::cpu(&robot).unwrap();
         let can = Held {
+            also: vec![],
             locked: Default::default(),
             spheres: Default::default(),
             hand: 0,
@@ -472,6 +664,7 @@ mod tests {
             .iter()
             .flat_map(|object| {
                 grasps.map(|grasp| Held {
+                    also: vec![],
                     locked: Default::default(),
                     spheres: Default::default(),
                     hand: 0,
@@ -500,6 +693,7 @@ mod tests {
         let own = [[0.0, 0.0, 0.03, 0.03], [0.0, 0.0, -0.03, 0.03]];
         let spheres = |rotation: Quat| {
             let held = Held {
+                also: vec![],
                 locked: Default::default(),
                 spheres: Default::default(),
                 hand: 0,

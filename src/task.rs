@@ -36,7 +36,7 @@ use crate::device::{Contact, Device, Worlds};
 use crate::edges::{self, Deferred, EdgeQuery, Search, Wanted};
 use crate::error::{Result, ensure_input, input};
 use crate::gripper::Gripper;
-use crate::held::{self, Fitted, Held};
+use crate::held::{self, Fitted, Grip, Held};
 use crate::ik::{self, IkFailure, IkOptions, IkProblem, IkResult};
 use crate::robot::Robot;
 use crate::spheres::SphereOptions;
@@ -160,6 +160,17 @@ pub struct Pick {
     /// center and rotation), the fingers' locks and a cost; any one will do. [`grasps`] proposes
     /// poses for a box, ball, cylinder or capsule, [`Hold::new`] holds a grasp of a surface.
     pub grasps: Vec<Hold>,
+    /// A second hand that takes hold of the object with `hand`, by grasps of its own in the
+    /// same frame as `grasps`: none, `hand` picks it up alone. The two lists go together entry
+    /// by entry, as long as each other: candidate `k` is the pair of `grasps[k]` and
+    /// `also.grasps[k]`, its cost the sum of the two and its locked joints both holds' (a joint
+    /// both name at different values is refused). Which pairs to try, in what order, is the
+    /// caller's: `enough` takes the first that many in that order. IK solves both hands at once
+    /// at the grasp, where each hand's fingers may touch the object. The move in is `hand`'s
+    /// straight move in, the second waiting where its own begins, then the second's, `hand`
+    /// waiting at its grasp, with a rest between; the lift is `hand`'s, the second kept at its
+    /// grasp ([`ToolPath::holding`]), and [`TaskPlan::held`] names it in [`Held::also`].
+    pub also: Option<HandGrasps>,
     /// How far back along its own z axis the hand begins to move in to a grasp (meters).
     pub approach: f32,
     /// Where the hand takes the object once it holds it, in the world's frame (meters).
@@ -272,6 +283,7 @@ impl Pick {
             object,
             body: None,
             grasps: grasps.into_iter().map(Into::into).collect(),
+            also: None,
             approach: 0.1,
             lift: Vec3::Z * 0.1,
             support: vec![],
@@ -302,9 +314,14 @@ pub struct Place {
     /// Where the joints only other hands move go on the transit, as a configuration of which only
     /// those joints count: another arm going home while this one carries the object to where it
     /// goes. They wait there through the moves in and away. None keeps them where `start` has
-    /// them.
+    /// them. Where two hands hold the object, only the joints neither moves count.
     pub idle: Option<Vec<f32>>,
-    /// What the hand holds, and how: a pick's [`TaskPlan::held`].
+    /// What the hand holds, and how: a pick's [`TaskPlan::held`]. Where another hand holds it
+    /// too ([`Held::also`], one other), the start has both at their grasps, IK solves both at
+    /// once where the object is let go of, and the move in is `held.hand`'s straight move with
+    /// the other kept at its grasp ([`ToolPath::holding`]); both grippers open at its end, and
+    /// the move away is `held.hand` backing off `retreat` along its z axis while the other
+    /// waits, then the other backing off along its own, with a rest between.
     pub held: Held,
     /// Where to let go of the object, each its pose, how far it drops from there and a cost; any
     /// one will do. [`place_poses`] gives an object's symmetric turns at one spot,
@@ -465,15 +482,18 @@ const STEPS: [TaskStep; 6] = [
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct TaskPlan {
-    /// The candidate: its index among the task's grasps or releases.
+    /// The candidate: its index among the task's grasps or releases (for a pick by two hands,
+    /// its pairs, [`Pick::also`]).
     pub candidate: usize,
-    /// Its hold's or release's cost ([`Hold::cost`], [`Release::cost`]); 0 for a handover's.
+    /// Its hold's or release's cost ([`Hold::cost`], [`Release::cost`]), the sum of a pair's; 0
+    /// for a handover's.
     pub cost: f32,
     /// The planned path from the start to where the move in begins; none for a task that leaves
     /// its transit out.
     pub transit: Option<Trajectory>,
     /// The straight move in. The gripper closes (pick, turn, pull) or opens (place) at its end; in
-    /// a handover the taker's closes, then the giver's opens.
+    /// a handover the taker's closes, then the giver's opens. Two hands that pick up an object
+    /// together move in one after the other, and both grippers close at its end.
     pub approach: Trajectory,
     /// After a [`turn`], the hand turning the object, the fingers closed on it, from where the
     /// move in ends to where the move away starts. Open the gripper after it. None for the rest.
@@ -659,7 +679,8 @@ pub struct TaskResult<T> {
 /// fingers ([`Robot::finger_links`], or the hand's links if it has none) may touch the object, and
 /// the move in runs backward from there. The move away holds the object, which may touch what it
 /// rests on. Run the transit and the approach, close the gripper, then run the departure holding
-/// the object ([`Held::attachment`], on the robot relocked at [`Held::locked`]).
+/// the object ([`Held::attachment`], on the robot relocked at [`Held::locked`]). A pick by two
+/// hands ([`Pick::also`]) tries pairs of grasps, both hands' fingers free to touch the object.
 pub fn pick(
     device: &Device,
     worlds: &Worlds,
@@ -667,6 +688,9 @@ pub fn pick(
     o: &TaskOptions,
 ) -> Result<TaskResult<Pick>> {
     let tasks = checked_picks(device, worlds, tasks, o)?;
+    if tasks.iter().any(|t| t.also.is_some()) {
+        return by_pairs(device, worlds, &tasks, o);
+    }
     by_grasps(device, worlds, &tasks, o, picked)
 }
 
@@ -902,6 +926,9 @@ fn check_picks(robot: &Robot, worlds: &Worlds, tasks: &[Pick], o: &TaskOptions) 
         );
         check_support(i, world, &t.support, Some(t.object))?;
         check_tries(robot, i, t, &mut checked)?;
+        if let Some(also) = &t.also {
+            check_second(robot, i, t.hand, t.grasps.len(), also, &mut checked)?;
+        }
     }
     Ok(())
 }
@@ -976,14 +1003,12 @@ fn picked(
                 Pose::new(at.position + task.lift, at.rotation),
             ];
             let steps = Steps::of_pick(task);
-            candidates.push(Candidate::new(
-                t,
-                index,
-                &steps,
-                task.hand,
-                &task.start,
-                poses,
-            ));
+            let mut c = Candidate::new(t, index, &steps, task.hand, &task.start, poses);
+            if task.also.is_some() {
+                let held = held(task, worlds, index, o.held_spheres);
+                c.partner = Some(Partner::picking(robot, task, held, object, index));
+            }
+            candidates.push(c);
         }
     }
 
@@ -1005,11 +1030,15 @@ fn picked(
             .iter()
             .map(|t| {
                 let mut w = worlds[t.world as usize].clone();
-                let links = match t.body {
-                    Some(_) => robot.finger_links(t.hand),
-                    None => fingers(robot, t.hand),
+                let links = |hand: usize| match t.body {
+                    Some(_) => robot.finger_links(hand),
+                    None => fingers(robot, hand),
                 };
-                w.touch.push(Touch::new(t.object, links));
+                let mut touching = links(t.hand);
+                if let Some(also) = &t.also {
+                    touching.extend(links(also.hand));
+                }
+                w.touch.push(Touch::new(t.object, touching));
                 w
             })
             .collect();
@@ -1129,7 +1158,8 @@ fn picked(
 /// ([`TaskPlan::opening`]): open the gripper that far, and follow the departure on the robot
 /// relocked there. A task that says how many plans will do ([`Place::enough`]) tries its releases
 /// in their order until that many have got through. `device` is the robot's without the object;
-/// each task's `held` is attached to it here.
+/// each task's `held` is attached to it here. What two hands hold ([`Held::also`]) they set down
+/// together ([`Place::held`]), the transit keeping both at their grasps.
 pub fn place(
     device: &Device,
     worlds: &Worlds,
@@ -1162,11 +1192,13 @@ pub fn place(
                 let (lo, hi) = robot.bounds(j);
                 idle[j].is_finite() && idle[j] >= lo && idle[j] <= hi
             };
-            if let Some(j) = robot
-                .idle_joints(t.held.hand)
-                .into_iter()
-                .find(|&j| !within(j))
-            {
+            // The joints the idle configuration counts for: those no hand that holds the object
+            // moves.
+            let also: Vec<usize> = (t.held.also.iter())
+                .flat_map(|grip| robot.hand_joints(grip.hand))
+                .collect();
+            let mut waiting = robot.idle_joints(t.held.hand).into_iter();
+            if let Some(j) = waiting.find(|j| !also.contains(j) && !within(*j)) {
                 return Err(input!(
                     "task {i}: idle joint {j} at {}, outside its limits",
                     idle[j]
@@ -1174,6 +1206,9 @@ pub fn place(
             }
         }
         t.held.check(robot, worlds, &format!("task {i}"))?;
+        if !t.held.also.is_empty() {
+            check_two_hands(robot, i, t)?;
+        }
         check_poses(i, "release", t.releases.iter().map(|r| &r.pose))?;
         let mut drops = t.releases.iter().enumerate();
         if let Some((k, r)) = drops.find(|(_, r)| !(r.drop.is_finite() && r.drop >= 0.0)) {
@@ -1266,8 +1301,15 @@ fn placed(
             let hand = task.held.hand;
             let steps = Steps::of_place(task);
             let mut c = Candidate::new(t, index, &steps, hand, &task.start, poses);
+            if !task.held.also.is_empty() {
+                c.partner = Some(Partner::placing(robot, task, release.pose));
+            }
             if let Some(idle) = &task.idle {
-                for j in robot.idle_joints(hand) {
+                let waiting = match &c.partner {
+                    Some(partner) => partner.idle.clone(),
+                    None => robot.idle_joints(hand),
+                };
+                for j in waiting {
                     c.rest[j] = idle[j];
                 }
             }
@@ -1443,8 +1485,11 @@ fn placed(
                 let released = t.held.object.placed(release.pose);
                 w.obstacles.push(released.falling(release.drop));
                 let object = w.obstacles.len() - 1;
-                w.touch
-                    .push(Touch::new(object, fingers(robot, t.held.hand)));
+                let mut letting_go = fingers(robot, t.held.hand);
+                for grip in &t.held.also {
+                    letting_go.extend(fingers(robot, grip.hand));
+                }
+                w.touch.push(Touch::new(object, letting_go));
                 w
             })
             .collect();
@@ -1461,8 +1506,12 @@ fn placed(
         // Only a stop that is the fingers' own can end otherwise at another opening: out of
         // reach, a jump and what the arm or the palm meets are the same at each.
         let of_fingers = |c: &Candidate| {
-            let fingers = fingers(robot, c.hand);
-            let theirs = |link: &String| fingers.contains(&link.as_str());
+            // Of either hand of two that let go together.
+            let mut letting_go = fingers(robot, c.hand);
+            if let Some(partner) = &c.partner {
+                letting_go.extend(fingers(robot, partner.hand));
+            }
+            let theirs = |link: &String| letting_go.contains(&link.as_str());
             let collided = matches!(c.stop, Some(ToolPathStop::Collision { .. }));
             collided
                 && c.contacts.iter().all(|contact| match contact {
@@ -1517,13 +1566,17 @@ fn placed(
         }
     }
 
-    // From the start, holding the object.
+    // From the start, holding the object, every hand that holds it kept at its grasp.
     let mut going = by_holder(
         live(&mut candidates, TaskStep::Transit),
         &holder_of,
         &holders,
     );
-    let constraints: Vec<&[HandConstraint]> = tasks.iter().map(|t| &t.constraints[..]).collect();
+    let pinned: Vec<Cow<'_, [HandConstraint]>> = tasks
+        .iter()
+        .map(|t| held::pinned(Some(&t.held), &t.constraints))
+        .collect();
+    let constraints: Vec<&[HandConstraint]> = pinned.iter().map(|c| &c[..]).collect();
     device.in_turns(&mut going, |h, group| {
         transit(&holders[h], worlds, group, &constraints, &o.plan)
     })?;
@@ -1857,6 +1910,8 @@ pub(crate) struct Candidate {
     /// there; it moves away, the joints the other hand moves held on each straight move, and the
     /// object's pose where it changes hands.
     pub(crate) giver: Option<Giver>,
+    /// In a pick or a place by two hands: the second hand.
+    partner: Option<Partner>,
 }
 
 /// What a handover's candidate asks of the hand that gives the object.
@@ -1902,6 +1957,7 @@ impl Candidate {
             depart: vec![],
             transit: vec![],
             giver: None,
+            partner: None,
         }
     }
 
@@ -1932,6 +1988,7 @@ impl Candidate {
             depart: vec![],
             transit: vec![],
             giver: None,
+            partner: None,
         }
     }
 
@@ -2050,8 +2107,9 @@ fn solve(
         .map(|(k, c)| IkProblem {
             world: worlds_of(k, c),
             targets: (0..hands)
-                .map(|h| match &c.giver {
-                    Some(giver) if giver.hand == h => Some(giver.at),
+                .map(|h| match (&c.giver, &c.partner) {
+                    (Some(giver), _) if giver.hand == h => Some(giver.at),
+                    (_, Some(partner)) if partner.hand == h => Some(partner.at),
                     _ => (h == c.hand).then_some(c.poses[1]),
                 })
                 .collect(),
@@ -2189,6 +2247,9 @@ pub(crate) fn straight(
     if live.is_empty() {
         return Ok(());
     }
+    if live.iter().any(|c| c.partner.is_some()) {
+        return by_two_hands(device, worlds, live, worlds_of, leg, o);
+    }
     let n = device.robot().dof();
     let paths: Vec<ToolPath> = live
         .iter()
@@ -2215,9 +2276,7 @@ pub(crate) fn straight(
     let result = tool_path::follow(device, worlds, &paths, &o.tool_path)?;
     for (i, c) in live.iter_mut().enumerate() {
         let path = &result.paths[i];
-        let fraction = result.fraction[i];
-        let blocked = matches!(result.stopped[i], Some(ToolPathStop::Collision { .. }));
-        if (fraction == 1.0 || blocked && fraction >= o.min_fraction) && !path.is_empty() {
+        if covers(&result, i, o) {
             match leg {
                 Leg::In => c.approach = path.chunks(n).rev().flatten().copied().collect(),
                 Leg::Away => c.depart.clone_from(path),
@@ -2261,9 +2320,10 @@ pub(crate) fn transit(
         .iter()
         .map(|&k| {
             let c = &live[k];
-            let idle = match &c.giver {
-                Some(giver) => giver.idle.clone(),
-                None => robot.idle_joints(c.hand),
+            let idle = match (&c.giver, &c.partner) {
+                (Some(giver), _) => giver.idle.clone(),
+                (_, Some(partner)) => partner.idle.clone(),
+                _ => robot.idle_joints(c.hand),
             };
             PlanProblem {
                 hold: idle
@@ -2316,6 +2376,14 @@ pub(crate) fn choose(
         let n = robot.dof();
         // The move in ends at the grasp or release, and the move away starts there.
         let (in_end, away_start) = (&c.approach[c.approach.len() - n..], &c.depart[..n]);
+        // A second hand is held under the cap on its own move too.
+        let capped = |path: &[f32], hand: usize, q: &[f32]| match &c.partner {
+            None => Trajectory::with_hand_speed(robot, path, &[speed(hand, q)]),
+            Some(partner) => {
+                let caps = [speed(hand, q), speed(partner.hand, q)];
+                Trajectory::with_hand_speed(robot, path, &caps)
+            }
+        };
         let (held, placed, cost) = leaves(c);
         Ok(TaskPlan {
             candidate: c.index,
@@ -2324,14 +2392,10 @@ pub(crate) fn choose(
                 true => Some(Trajectory::try_new(robot, &c.transit, 1.0)?),
                 false => None,
             },
-            approach: Trajectory::with_hand_speed(robot, &c.approach, &[speed(c.hand, in_end)])?,
+            approach: capped(&c.approach, c.hand, in_end)?,
             turn: None,
             pull: None,
-            depart: Trajectory::with_hand_speed(
-                robot,
-                &c.depart,
-                &[speed(c.away_hand(), away_start)],
-            )?,
+            depart: capped(&c.depart, c.away_hand(), away_start)?,
             held,
             placed,
             falling: None,
@@ -2385,25 +2449,31 @@ pub(crate) fn fingers(robot: &Robot, hand: usize) -> Vec<&str> {
     }
 }
 
-/// What `task`'s grasp `index` leaves the hand holding.
+/// What `task`'s grasp `index` leaves the hand holding, with the second hand of a pick by two at
+/// its grasp of the pair.
 fn held(task: &Pick, worlds: &Worlds, index: usize, spheres: SphereOptions) -> Held {
     let part = &worlds[task.world as usize].obstacles[task.object];
-    let (shape, grasp) = match &task.body {
-        Some(body) => (
-            &body.shape,
-            body.shape.pose().rigid().inverse().mul_pose(
-                part.pose()
-                    .rigid()
-                    .mul_pose(task.grasps[index].pose.rigid()),
-            ),
-        ),
-        None => (part, task.grasps[index].pose),
+    // A grasp of the part as one of what is carried.
+    let carried = |grasp: Pose| match &task.body {
+        Some(body) => body
+            .shape
+            .pose()
+            .rigid()
+            .inverse()
+            .mul_pose(part.pose().rigid().mul_pose(grasp.rigid())),
+        None => grasp,
     };
+    let shape = task.body.as_ref().map_or(part, |body| &body.shape);
+    let also = task.also.iter().map(|also| Grip {
+        hand: also.hand,
+        grasp: carried(also.grasps[index].pose),
+    });
     Held {
+        also: also.collect(),
         locked: task.grasps[index].locked.clone(),
         hand: task.hand,
         object: shape.placed(Pose::IDENTITY),
-        grasp,
+        grasp: carried(task.grasps[index].pose),
         spheres,
     }
 }
@@ -3117,6 +3187,7 @@ fn articulated(
             _ => {
                 let t = &tasks[c.task];
                 let held = Held {
+                    also: vec![],
                     locked: t.grasps[c.index].locked.clone(),
                     hand: t.hand,
                     object: worlds[t.steps.world as usize].obstacles[t.object]
@@ -3312,9 +3383,15 @@ impl Gripping for Pick {
         self.enough
     }
 
+    /// The second hand's grasps of a pick by two are subset alike, a pair each.
     fn by(&self, grasps: &[usize]) -> Self {
+        let some = |all: &[Hold]| -> Vec<Hold> { grasps.iter().map(|&g| all[g].clone()).collect() };
         Pick {
-            grasps: grasps.iter().map(|&g| self.grasps[g].clone()).collect(),
+            grasps: some(&self.grasps),
+            also: self.also.as_ref().map(|also| HandGrasps {
+                hand: also.hand,
+                grasps: some(&also.grasps),
+            }),
             ..self.clone()
         }
     }
@@ -3352,4 +3429,359 @@ impl Gripping for Pull {
             ..self.clone()
         }
     }
+}
+
+/// A second hand's grasps of what a pick's hand picks up ([`Pick::also`]).
+#[derive(Clone, Debug)]
+pub struct HandGrasps {
+    /// The hand: another of the robot's than the pick's.
+    pub hand: usize,
+    /// Its ways of holding the object, as [`Pick::grasps`] are, in the same frame: one for each
+    /// of them, entry by entry, each the second hand's hold of that pair.
+    pub grasps: Vec<Hold>,
+}
+
+/// What a candidate of a pick or a place by two hands asks of the second hand.
+struct Partner {
+    hand: usize,
+    /// Its IK frame's pose at the grasp or release.
+    at: Pose,
+    /// Where its own straight move begins (a pick's move in) or ends (a place's move away).
+    off: Pose,
+    /// The joints held still on the first hand's own straight move (the second's) and on the
+    /// second's (the first's).
+    hold_first: Vec<usize>,
+    hold_second: Vec<usize>,
+    /// The joints neither hand moves, which wait where the start has them through the transit.
+    idle: Vec<usize>,
+    /// What both hands hold, and the straight move on which they hold it: the first hand's, the
+    /// second kept at its grasp. On the other, each hand moves on its own in turn.
+    held: Held,
+    holding: Leg,
+}
+
+impl Partner {
+    /// The second hand of pair `index` of `task`, whose object's pose is `object`, as both hands
+    /// hold it once they lift it (`held`): at its grasp, its own move in beginning the task's
+    /// approach back along its z axis.
+    #[inline(never)]
+    fn picking(robot: &Robot, task: &Pick, held: Held, object: Pose, index: usize) -> Self {
+        let also = task
+            .also
+            .as_ref()
+            .expect("a pick by two hands has a second hand");
+        let at = object.mul_pose(also.grasps[index].pose.rigid());
+        let off = behind(at, task.approach);
+        Self::new(robot, task.hand, also.hand, [at, off], held, Leg::Away)
+    }
+
+    /// The other hand that holds `task`'s object (checked one, [`check_two_hands`]) where the
+    /// object is let go of at `release`: at its grasp there, its own move away ending the task's
+    /// retreat back along its z axis.
+    #[inline(never)]
+    fn placing(robot: &Robot, task: &Place, release: Pose) -> Self {
+        let other = task.held.also[0];
+        let at = release.mul_pose(other.grasp);
+        let off = behind(at, task.retreat);
+        Self::new(
+            robot,
+            task.held.hand,
+            other.hand,
+            [at, off],
+            task.held.clone(),
+            Leg::In,
+        )
+    }
+
+    /// Hand `hand` holding with hand `first`, at `at` and moving to or from `off`.
+    fn new(
+        robot: &Robot,
+        first: usize,
+        hand: usize,
+        [at, off]: [Pose; 2],
+        held: Held,
+        holding: Leg,
+    ) -> Self {
+        let (firsts, seconds) = (robot.hand_joints(first), robot.hand_joints(hand));
+        let idle = robot
+            .idle_joints(first)
+            .into_iter()
+            .filter(|j| !seconds.contains(j))
+            .collect();
+        Self {
+            hand,
+            at,
+            off,
+            hold_first: seconds,
+            hold_second: firsts,
+            idle,
+            held,
+            holding,
+        }
+    }
+
+    /// Whether both hands hold the object on `leg`.
+    fn holds_on(&self, leg: Leg) -> bool {
+        matches!(
+            (self.holding, leg),
+            (Leg::In, Leg::In) | (Leg::Away, Leg::Away)
+        )
+    }
+}
+
+/// [`pick`] for checked tasks of which some are by two hands: each of those with its pairs'
+/// locked joints and costs folded into its grasps ([`paired`]), the result's problems the tasks
+/// as given.
+#[inline(never)]
+fn by_pairs(
+    device: &Device,
+    worlds: &Worlds,
+    tasks: &[Pick],
+    o: &TaskOptions,
+) -> Result<TaskResult<Pick>> {
+    let paired: Vec<Pick> = tasks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| paired(i, t))
+        .collect::<Result<_>>()?;
+    let result = by_grasps(device, worlds, &paired, o, picked)?;
+    Ok(TaskResult {
+        problems: tasks.to_vec(),
+        outcomes: result.outcomes,
+    })
+}
+
+/// Task `i` as [`by_grasps`] tries it: each grasp with the locked joints of its pair's two holds
+/// and the sum of their costs, the second hand's holds as they are. A task by one hand as it is.
+fn paired(i: usize, t: &Pick) -> Result<Pick> {
+    let Some(also) = &t.also else {
+        return Ok(t.clone());
+    };
+    let mut grasps = Vec::with_capacity(t.grasps.len());
+    for (k, (first, second)) in t.grasps.iter().zip(&also.grasps).enumerate() {
+        let mut locked = first.locked.clone();
+        for (joint, &value) in &second.locked {
+            if let Some(was) = locked.insert(joint.clone(), value)
+                && was != value
+            {
+                return Err(input!(
+                    "task {i}: pair {k} locks joint '{joint}' at {was} by the first hand's grasp \
+                     and at {value} by the second's; a pair keeps each locked joint at one value"
+                ));
+            }
+        }
+        let cost = first.cost + second.cost;
+        ensure_input!(
+            cost.is_finite(),
+            "task {i}: pair {k}'s grasps cost {} and {}, which add up past a finite cost",
+            first.cost,
+            second.cost
+        );
+        grasps.push(Hold {
+            pose: first.pose,
+            locked,
+            cost,
+        });
+    }
+    Ok(Pick {
+        grasps,
+        ..t.clone()
+    })
+}
+
+/// That task `i`'s second hand (`also`) is another of `robot`'s hands than `hand`, and holds by
+/// a grasp for each of the task's `grasps`, as [`check_tries`] checks a task's: each set of locked
+/// joints' values checked once among those in `checked`.
+#[inline(never)]
+fn check_second<'a>(
+    robot: &Robot,
+    i: usize,
+    hand: usize,
+    grasps: usize,
+    also: &'a HandGrasps,
+    checked: &mut Vec<&'a HashMap<String, f32>>,
+) -> Result<()> {
+    ensure_input!(
+        also.hand < robot.hands() && also.hand != hand,
+        "task {i}: hand {} takes hold with hand {hand}, and must be another of the robot's {} \
+         hands",
+        also.hand,
+        robot.hands()
+    );
+    ensure_input!(
+        also.grasps.len() == grasps,
+        "task {i} has {grasps} grasps and {} of the second hand's; they go together entry by \
+         entry, a pair each",
+        also.grasps.len()
+    );
+    let what = "second hand's grasp";
+    check_poses(i, what, also.grasps.iter().map(|h| &h.pose))?;
+    check_costs(i, what, also.grasps.iter().map(|h| h.cost))?;
+    for (s, hold) in also.grasps.iter().enumerate() {
+        if !checked.contains(&&hold.locked) {
+            held::check_locked(robot, &hold.locked, &format!("task {i}, {what} {s}"))?;
+            checked.push(&hold.locked);
+        }
+    }
+    Ok(())
+}
+
+/// That task `i`'s object, which other hands hold too, is held by one other, and that its start
+/// has both at their grasps.
+#[inline(never)]
+fn check_two_hands(robot: &Robot, i: usize, t: &Place) -> Result<()> {
+    ensure_input!(
+        t.held.also.len() == 1,
+        "task {i}: {} other hands hold the object with hand {}, and a place sets down what two \
+         hold",
+        t.held.also.len(),
+        t.held.hand
+    );
+    if let Some(off) = t.held.off_its_grasps(robot, &t.start) {
+        return Err(input!("task {i}: at the start, {off}"));
+    }
+    Ok(())
+}
+
+/// Whether straight move `i` of `result` is one a candidate may make: all of it, or at least
+/// `o.min_fraction` where an obstacle stops it.
+fn covers(result: &ToolPathResult, i: usize, o: &TaskOptions) -> bool {
+    let fraction = result.fraction[i];
+    let blocked = matches!(result.stopped[i], Some(ToolPathStop::Collision { .. }));
+    (fraction == 1.0 || blocked && fraction >= o.min_fraction) && !result.paths[i].is_empty()
+}
+
+/// [`straight`] for candidates of which some move with a second hand ([`Partner`]). On the leg
+/// both hands hold the object on, the first hand moves with the second kept at its grasp
+/// ([`ToolPath::holding`], on `device`, which holds it). On the other, each hand moves on its
+/// own, the other's joints held, one after the other: in to the grasp or release, the first hand
+/// and then the second, followed backward from there, the second first; away from it, the first
+/// and then the second. The two make one path with a rest between, where they meet.
+#[inline(never)]
+fn by_two_hands(
+    device: &Device,
+    worlds: &Worlds,
+    live: &mut [&mut Candidate],
+    worlds_of: &dyn Fn(usize, &Candidate) -> u32,
+    leg: Leg,
+    o: &TaskOptions,
+) -> Result<()> {
+    let n = device.robot().dof();
+    // Each candidate with its world: by one hand, holding with two, or two hands in turn.
+    let (mut alone, mut holding, mut in_turn) = (vec![], vec![], vec![]);
+    for (k, c) in live.iter_mut().enumerate() {
+        let world = worlds_of(k, c);
+        match &c.partner {
+            None => alone.push((world, &mut **c)),
+            Some(partner) if partner.holds_on(leg) => holding.push((world, &mut **c)),
+            Some(_) => in_turn.push((world, &mut **c)),
+        }
+    }
+    let goal = |c: &Candidate| match leg {
+        Leg::In => c.poses[0],
+        Leg::Away => c.poses[2],
+    };
+    let reversed = |path: &[f32]| -> Vec<f32> { path.chunks(n).rev().flatten().copied().collect() };
+    if !alone.is_empty() {
+        let (in_worlds, mut alone): (Vec<u32>, Vec<&mut Candidate>) = alone.into_iter().unzip();
+        let in_its = |k: usize, _: &Candidate| in_worlds[k];
+        straight(device, worlds, &mut alone, &in_its, leg, o)?;
+    }
+    if !holding.is_empty() {
+        let paths: Vec<ToolPath> = holding
+            .iter()
+            .map(|(world, c)| ToolPath {
+                world: *world,
+                start: c.grasped.clone(),
+                hand: c.hand,
+                waypoints: vec![goal(c)],
+                hold: vec![],
+                holding: c.partner.as_ref().map(|partner| partner.held.clone()),
+            })
+            .collect();
+        let mut result = tool_path::followed(device, worlds, &paths, &o.tool_path)?;
+        for (i, (_, c)) in holding.into_iter().enumerate() {
+            if covers(&result, i, o) {
+                let path = std::mem::take(&mut result.paths[i]);
+                match leg {
+                    Leg::In => c.approach = reversed(&path),
+                    Leg::Away => c.depart = path,
+                }
+                c.passed += 1;
+            } else {
+                c.stop = result.stopped[i];
+                c.contacts = std::mem::take(&mut result.contacts[i]);
+            }
+        }
+    }
+    if in_turn.is_empty() {
+        return Ok(());
+    }
+    // Each hand's move in the order they run from the grasp or release: its hand, where it goes
+    // and the joints it holds.
+    let moves = |c: &Candidate, round: usize| {
+        let partner = c.partner.as_ref().expect("two hands in turn have a second");
+        match (leg, round) {
+            (Leg::In, 0) | (Leg::Away, 1) => {
+                (partner.hand, partner.off, partner.hold_second.clone())
+            }
+            _ => (c.hand, goal(c), partner.hold_first.clone()),
+        }
+    };
+    let mut earlier: Vec<Vec<f32>> = vec![vec![]; in_turn.len()];
+    let mut going: Vec<usize> = (0..in_turn.len()).collect();
+    for round in 0..2 {
+        let paths: Vec<ToolPath> = going
+            .iter()
+            .map(|&k| {
+                let (world, c) = &in_turn[k];
+                let (hand, to, hold) = moves(c, round);
+                let start = match round {
+                    0 => c.grasped.clone(),
+                    _ => earlier[k][earlier[k].len() - n..].to_vec(),
+                };
+                ToolPath {
+                    world: *world,
+                    start,
+                    hand,
+                    waypoints: vec![to],
+                    hold,
+                    holding: None,
+                }
+            })
+            .collect();
+        let mut result = tool_path::follow(device, worlds, &paths, &o.tool_path)?;
+        let mut next = vec![];
+        for (i, &k) in going.iter().enumerate() {
+            let c = &mut *in_turn[k].1;
+            if !covers(&result, i, o) {
+                c.stop = result.stopped[i];
+                c.contacts = std::mem::take(&mut result.contacts[i]);
+                continue;
+            }
+            let path = std::mem::take(&mut result.paths[i]);
+            if round == 0 {
+                earlier[k] = path;
+                next.push(k);
+                continue;
+            }
+            // They meet where the first ends and the second starts, three control points each.
+            let first = &earlier[k];
+            match leg {
+                Leg::In => {
+                    let mut path = reversed(&path);
+                    path.extend_from_slice(&reversed(first)[3 * n..]);
+                    c.approach = path;
+                }
+                Leg::Away => {
+                    let mut joined = first.clone();
+                    joined.extend_from_slice(&path[3 * n..]);
+                    c.depart = joined;
+                }
+            }
+            c.passed += 1;
+        }
+        going = next;
+    }
+    Ok(())
 }

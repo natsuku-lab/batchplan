@@ -1036,6 +1036,7 @@ pub fn handover(
         .map(|e| {
             let t = &tasks[e.task];
             let held = Held {
+                also: vec![],
                 locked: Default::default(),
                 spheres: Default::default(),
                 hand: t.to,

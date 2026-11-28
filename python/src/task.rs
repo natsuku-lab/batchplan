@@ -169,6 +169,24 @@ value_class! {
 tuple_field!(batchplan::Hold, batchplan::Release);
 
 value_class! {
+    /// A second hand's grasps of what a pick's hand picks up (`Pick.also`).
+    HandGrasps(batchplan::HandGrasps) {
+        /// The hand: another of the robot's than the pick's.
+        hand: usize,
+        /// Its ways of holding the object (`Hold`s, or poses held with the fingers as loaded),
+        /// as `Pick.grasps` are, in the same frame: one for each of them, entry by entry.
+        grasps: Vec<batchplan::Hold>,
+    }
+    methods {
+        #[new]
+        fn new(hand: usize, grasps: &Bound<'_, PyAny>) -> PyResult<Self> {
+            let grasps = Vec::<batchplan::Hold>::from_py(grasps)?;
+            Ok(Self(batchplan::HandGrasps { hand, grasps }))
+        }
+    }
+}
+
+value_class! {
     /// A hand picking up one obstacle of its world.
     Pick(batchplan::Pick) {
         /// The world's index in the batch: the one the hand grasps and moves in in, and every
@@ -196,6 +214,12 @@ value_class! {
         /// in the object's frame (its center and rotation); any one will do. `grasps` proposes
         /// poses for a box, ball, cylinder or capsule.
         grasps: Vec<batchplan::Hold>,
+        /// A second hand that takes hold of the object with `hand`, by grasps of its own in the
+        /// same frame (`HandGrasps`): `None`, `hand` picks it up alone. The two lists go together
+        /// entry by entry, candidate `k` the pair of `grasps[k]` and `also.grasps[k]`, its cost
+        /// the sum and its locked joints both holds'; `held` names the second hand in
+        /// `Held.also`.
+        also: Option<batchplan::HandGrasps>,
         /// How far back along its own z axis the hand begins to move in to a grasp (meters).
         approach: f32,
         /// Where the hand takes the object once it holds it, in the world's frame (meters).
@@ -262,9 +286,13 @@ value_class! {
         transit: bool,
         /// Where the joints only other hands move go on the transit, as a configuration of which
         /// only those joints count: another arm going home while this one carries the object.
-        /// `None` keeps them where `start` has them.
+        /// `None` keeps them where `start` has them. Where two hands hold the object, only the
+        /// joints neither moves count.
         idle: Option<Vec<f32>>,
-        /// What the hand holds, and how: a pick's `TaskPlan.held`.
+        /// What the hand holds, and how: a pick's `TaskPlan.held`. Where another hand holds it
+        /// too (`Held.also`, one other), the start has both at their grasps and they set it down
+        /// together: the lower keeps the other at its grasp, both grippers open, and each hand
+        /// backs off in turn.
         held: batchplan::Held,
         /// Where to let go of the object (`Release`s, or poses to set it down at); any one will
         /// do. `place_poses` gives an object's symmetric turns at one spot.
@@ -1002,6 +1030,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TaskOptions>()?;
     m.add_class::<Hold>()?;
     m.add_class::<Release>()?;
+    m.add_class::<HandGrasps>()?;
     m.add_class::<Pick>()?;
     m.add_class::<PickBody>()?;
     m.add_class::<Place>()?;

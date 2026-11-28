@@ -49,7 +49,9 @@ pub struct Sequence {
     pub constraints: Vec<HandConstraint>,
     /// An object a hand holds through the sequence, as a pick leaves it: every blend is checked
     /// with it, as attaching it ([`Held::attachment`]) to the robot relocked at its
-    /// [`Held::locked`] would check it. `None` holds nothing.
+    /// [`Held::locked`] would check it. `None` holds nothing. Where more hands than one hold it
+    /// ([`Held::also`]), every blend keeps each at its grasp, as under `constraints` that pin
+    /// them.
     pub holding: Option<Held>,
 }
 
@@ -250,6 +252,7 @@ struct Joining<'a> {
 impl<'a> Joining<'a> {
     fn new(robot: &'a Robot, sequence: &'a Sequence, o: &JoinOptions) -> Self {
         let n = robot.dof();
+        let constraints = held::pinned(sequence.holding.as_ref(), &sequence.constraints);
         let last = sequence.paths.len() - 1;
         let radii = &sequence.blends[..];
         // The blend radius of the join before motion `k` and of the one after it, 0 where there is
@@ -349,8 +352,7 @@ impl<'a> Joining<'a> {
             samples: 0,
             starts: vec![],
             blends: vec![],
-            region: (!sequence.constraints.is_empty())
-                .then(|| Arc::new(Region::new(robot, &sequence.constraints))),
+            region: (!constraints.is_empty()).then(|| Arc::new(Region::new(robot, &constraints))),
         };
         joining.candidates = joining.blends_at(0);
         joining

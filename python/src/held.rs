@@ -12,15 +12,41 @@ use crate::robot::Robot;
 use crate::world::{Obstacle, Pose};
 
 value_class! {
-    /// An object a hand holds: `TaskPlan.held` after a pick, and what `PlanProblem.holding`,
-    /// `IkProblem.holding` and `ToolPath.holding` take.
+    /// Another hand's hold of an object a hand holds (`Held.also`).
+    Grip(batchplan::Grip) {
+        /// The hand.
+        hand: usize,
+        /// Its IK frame in the object's frame: the grasp it holds the object by.
+        grasp: batchplan::Pose,
+    }
+    methods {
+        #[new]
+        fn new(hand: usize, grasp: &Pose) -> Self {
+            Self(batchplan::Grip {
+                hand,
+                grasp: grasp.0,
+            })
+        }
+    }
+}
+
+tuple_field!(batchplan::Grip);
+
+value_class! {
+    /// An object a hand holds, or several hands together: `TaskPlan.held` after a pick, and what
+    /// `PlanProblem.holding`, `IkProblem.holding` and `ToolPath.holding` take.
     Held(batchplan::Held) {
-        /// The hand holding it.
+        /// The hand holding it: with several, the one whose frame the object is fixed to.
         hand: usize,
         /// Its shape in its own frame: centered at the origin, unrotated.
         object: batchplan::Obstacle,
         /// The hand's IK frame in the object's frame: the grasp that holds it.
         grasp: batchplan::Pose,
+        /// Other hands that hold it too, each by its grasp, as two hands carry a tray: none,
+        /// `hand` holds it alone. The object may touch the links of each, and every call that
+        /// holds it keeps each hand at its grasp: a pose given for one of them places the others,
+        /// and every state of a path is checked to.
+        also: Vec<batchplan::Grip>,
         /// Joints the robot was loaded with locked, at the values they keep while it holds the
         /// object, as `Robot.relock` takes them: the fingers where they closed on it. Empty: as
         /// loaded.
@@ -40,6 +66,7 @@ value_class! {
             changes: Option<&Bound<'_, PyDict>>,
         ) -> PyResult<Self> {
             let held = batchplan::Held {
+                also: vec![],
                 locked: Default::default(),
                 spheres: Default::default(),
                 hand,
@@ -50,8 +77,8 @@ value_class! {
         }
 
         /// The object as `robot` holds it, for `Robot.attach`: fixed to the hand's IK frame as
-        /// the link `"held by hand {hand}"`, and free to touch the hand's links
-        /// (`Robot.hand_links`).
+        /// the link `"held by hand {hand}"`, and free to touch the links (`Robot.hand_links`) of
+        /// every hand that holds it.
         fn attachment(&self, robot: &Robot) -> PyResult<AttachedObject> {
             self.0.attachment(&robot.0).or_raise().map(AttachedObject)
         }
@@ -138,6 +165,7 @@ tuple_field!(batchplan::HandConstraint, batchplan::Pose);
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Held>()?;
+    m.add_class::<Grip>()?;
     m.add_class::<AttachedObject>()?;
     m.add_class::<HandConstraint>()?;
     Ok(())
