@@ -28,6 +28,7 @@ fn bar() -> Held {
         )
     };
     Held {
+        touch_links: vec![],
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, Vec3::new(0.015, 0.16, 0.015)),
         grasp: grasp(1.0),
@@ -320,6 +321,7 @@ fn a_hold_another_hand_cannot_share_is_an_input_error() {
     ];
     // A device that holds something in a hand already cannot take a hold that hand shares.
     let cube = Held {
+        touch_links: vec![],
         hand: 1,
         also: vec![],
         object: Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.02)),
@@ -673,6 +675,83 @@ fn a_hand_that_does_not_hold_leaves_those_that_do_alone() {
         batchplan::place(&device, &worlds, &[place], &Default::default()),
         "2 other hands hold the object with hand 0",
     );
+}
+
+/// A hand that has let go of what the other still holds backs off it: with both hands at the
+/// bar, the left holding it alone, the right hand's straight move back and its plan away stop
+/// where they start, its hand against the held bar; with the right hand's links among those the
+/// bar may touch (`Held::touch_links`), both go through, and the links are let touch it, not
+/// kept at it. A link the robot lacks is an input error that names it and its problem.
+#[test]
+fn a_hand_that_let_go_backs_off_what_the_other_holds() {
+    let robot = common::two_pandas().unwrap();
+    for device in common::devices(&robot) {
+        let name = device.name();
+        let worlds = device.upload(&[common::tray_scene()]).unwrap();
+        let start = holding_at(&device, &worlds, LOW, robot.default_q());
+        let alone = Held {
+            also: vec![],
+            ..bar()
+        };
+        let touching = Held {
+            touch_links: robot.hand_links(1).into_iter().map(String::from).collect(),
+            ..alone.clone()
+        };
+        let at = robot.ee_pose(&start, 1);
+        let back = Pose::new(at.position - at.rotation * Vec3::Z * 0.1, at.rotation);
+        let off = |held: &Held| straight(&start, 1, vec![back], Some(held.clone()));
+        let o = ToolPathOptions::default();
+        let followed = batchplan::follow(&device, &worlds, &[off(&alone), off(&touching)], &o);
+        let followed = followed.unwrap();
+        assert!(
+            matches!(followed.stopped[0], Some(ToolPathStop::Collision { .. })),
+            "{name}: the hand that let go is against the held bar: {:?}",
+            followed.stopped[0]
+        );
+        assert_eq!(
+            followed.fraction,
+            [0.0, 1.0],
+            "{name}: {:?}",
+            followed.stopped
+        );
+        // The left hand, which holds the bar, has not moved, and the right ends 10 cm back.
+        let n = robot.dof();
+        let end = &followed.paths[1][followed.paths[1].len() - n..];
+        assert!(
+            robot
+                .ee_pose(end, 0)
+                .position
+                .distance(robot.ee_pose(&start, 0).position)
+                < 1e-6
+        );
+        assert!((robot.ee_pose(end, 1).position.distance(at.position) - 0.1).abs() < 2e-3);
+        // A plan from there, the right arm going home while the left holds still.
+        let home: Vec<f32> = (0..n)
+            .map(|j| match robot.hand_joints(1).contains(&j) {
+                true => robot.default_q()[j],
+                false => start[j],
+            })
+            .collect();
+        let away = |held: &Held| PlanProblem {
+            holding: Some(held.clone()),
+            ..PlanProblem::new(0, start.clone(), home.clone())
+        };
+        let plans = [away(&alone), away(&touching)];
+        let planned = batchplan::plan(&device, &worlds, &plans, &PlanOptions::default()).unwrap();
+        assert!(
+            planned.best(0).is_none() && planned.best(1).is_some(),
+            "{name}: {:?}",
+            planned.failures
+        );
+        let unknown = Held {
+            touch_links: vec!["right_panda_elbow".into()],
+            ..alone.clone()
+        };
+        input(
+            batchplan::follow(&device, &worlds, &[off(&alone), off(&unknown)], &o),
+            "path 1: the held object may touch 'right_panda_elbow', which is no link of the robot",
+        );
+    }
 }
 
 /// The other hand is held to the path's precisions between steps too. Turning the left hand half a

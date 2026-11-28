@@ -826,6 +826,7 @@ fn grasped(memory: &Memory, id: u32) -> Held {
         shape => panic!("a shape these tests do not hold: {shape:?}"),
     };
     Held {
+        touch_links: vec![],
         also: vec![],
         hand: 0,
         object: at_origin,
@@ -1799,6 +1800,7 @@ fn a_hold_keeps_its_fingers_where_it_closed_them() {
         let at = center.with_z(top_of(&room) - 0.015) - toward * (radius + 0.04);
         let pose = Pose::new(at, down);
         let held = Held {
+            touch_links: vec![],
             also: vec![],
             hand: 0,
             object: Obstacle::cuboid(Vec3::ZERO, Vec3::splat(0.005)),
@@ -1845,6 +1847,7 @@ fn a_hold_a_restart_brings_back_is_held_and_let_go_as_its_shape() {
     let away = robot.default_q();
     let fresh = memory(&device);
     let held = Held {
+        touch_links: vec![],
         also: vec![],
         hand: 0,
         object: Obstacle::cuboid(Vec3::ZERO, BOX_HALF),
@@ -2628,6 +2631,7 @@ fn a_grasp_of_the_rim_separates_its_own_readings() {
         );
         if let Some(body) = &split.body {
             let held = Held {
+                touch_links: vec![],
                 also: vec![],
                 hand: 0,
                 object: body.shape.placed(Pose::IDENTITY),

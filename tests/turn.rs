@@ -397,6 +397,7 @@ fn a_long_turn_the_nearest_configuration_cannot_make_is_made_by_another() {
         .collect();
     // The knob held as the grasp holds it, in the world without it, touching the table.
     let held = Held {
+        touch_links: vec![],
         also: vec![],
         hand: 0,
         object: bar.placed(Pose::IDENTITY),

@@ -247,6 +247,7 @@ pub fn handover(
     let outcomes = task::choose(device, tasks.len(), &candidates, o, |c| {
         let t = &tasks[c.task];
         let held = Held {
+            touch_links: vec![],
             also: vec![],
             locked: Default::default(),
             spheres: t.held.spheres,

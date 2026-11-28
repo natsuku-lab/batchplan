@@ -398,6 +398,7 @@ fn every_task_corrects_its_start_and_preserves_the_start_collision_failure() {
         radius: 0.01,
     };
     let held = Held {
+        touch_links: vec![],
         also: vec![],
         hand: 0,
         object: object.clone(),

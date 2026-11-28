@@ -24,6 +24,12 @@ version (0.9 → 0.10) may break the interface, and a patch (0.9.0 → 0.9.1) br
   the other, and the transit, the lift and the lower keep them at their grasps. `handover`
   refuses what two hands hold. In Python, `Held(hand, object, grasp, also=[Grip(hand, grasp)])`
   and `Pick(..., also=HandGrasps(hand, grasps))`.
+- **Breaking:** `Held` gains `touch_links`, other links of the robot that may touch what is held,
+  by name, beside those of the hands that hold it; a `Held` literal sets `touch_links: vec![]`.
+  A hand that has let go of what another still holds backs off with its links there
+  (`robot.hand_links(hand)`, as `String`s), and a hand that works on a held object touches it
+  the same way. A name that is no link of the robot is an input error. In Python,
+  `Held(..., touch_links=[...])`.
 - miru's `Memory` takes a hold by two hands (`Held::also`) as each hand's: `Memory::held` gives it
   for either, a pick into either is refused while they hold it, and a let-go or a loss empties
   both. To say a held thing is held otherwise, let it go where it is and pick it as it is held

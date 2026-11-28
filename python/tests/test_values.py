@@ -139,6 +139,9 @@ def test_a_hold_names_the_other_hands_that_hold_it():
     (grip,) = held.also
     assert grip.hand == 1 and grip.grasp == right
     assert held.replace(also=[]).also == ()
+    assert held.touch_links == (), "none but the hands that hold it"
+    touching = held.replace(touch_links=["right_panda_hand"])
+    assert touching.touch_links == ("right_panda_hand",)
 
 
 def test_wrong_inputs_are_input_errors():
